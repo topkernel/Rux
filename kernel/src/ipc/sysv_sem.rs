@@ -17,6 +17,22 @@ const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
 // UAPI Structures
 // ============================================================================
 
+/// struct seminfo — returned by IPC_INFO / SEM_INFO
+/// Must match Linux's include/uapi/linux/sem.h. Total: 40 bytes.
+#[repr(C)]
+pub struct SemInfoUapi {
+    pub semmap: i32,  // +0
+    pub semmni: i32,  // +4
+    pub semmns: i32,  // +8
+    pub semmnu: i32,  // +12
+    pub semmsl: i32,  // +16
+    pub semopm: i32,  // +20
+    pub semume: i32,  // +24
+    pub semusz: i32,  // +28
+    pub semvmx: i32,  // +32
+    pub semaem: i32,  // +36
+}
+
 /// struct semid64_ds — returned by IPC_STAT, IPC_SET
 /// Must match asm-generic/sembuf.h for RV64. Total: 88 bytes.
 #[repr(C)]
@@ -47,8 +63,10 @@ pub struct SemBuf {
 struct SemEntry {
     /// Current semaphore value.
     value: AtomicI32,
-    /// Number of processes waiting for this semaphore.
+    /// Number of processes waiting for value to increase (sem_op < 0).
     ncnt: AtomicUsize,
+    /// Number of processes waiting for value to become zero (sem_op == 0).
+    zcnt: AtomicUsize,
 }
 
 /// Semaphore set (the IPC object).
@@ -84,6 +102,7 @@ impl SemArray {
             sems.push(SemEntry {
                 value: AtomicI32::new(0),
                 ncnt: AtomicUsize::new(0),
+                zcnt: AtomicUsize::new(0),
             });
         }
         Self {
@@ -216,13 +235,13 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
             };
             let mut slots = SEM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
-                // Read new mode from sem_perm.offset(20) which is the mode field
-                // SAFETY: buf_ptr was access_ok-validated for size_of::<SemidDsUapi>() (88 bytes) above;
-                // offset 20 is within the sem_perm IPC_perm layout for the mode field.
-                let new_mode = unsafe {
-                    core::ptr::read_volatile(buf_ptr.add(20) as *const u16)
-                };
-                entry.inner.perm.update_mode(new_mode);
+                // Read uid/gid/mode from user-supplied sem_perm.
+                // SAFETY: buf_ptr was access_ok-validated for 88 bytes;
+                // offsets 4, 8, 20 are within the first 48-byte ipc_perm.
+                let new_uid = unsafe { core::ptr::read_volatile(buf_ptr.add(4) as *const u32) };
+                let new_gid = unsafe { core::ptr::read_volatile(buf_ptr.add(8) as *const u32) };
+                let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u32) };
+                entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
             0
@@ -231,25 +250,22 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
             if semnum < 0 {
                 return -errno::EINVAL as u64;
             }
-            let val_ptr = arg as *mut i32;
-            if val_ptr.is_null() || !access_ok(val_ptr as usize, 4) {
-                return -errno::EFAULT as u64;
-            }
+            // Permission check: requires read permission
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as u64,
+            };
             let slots = SEM_IDS.slots.lock();
-            if let Some(ref entry) = slots[idx] {
+            if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
                     return -errno::EINVAL as u64;
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
-                    let val = sems[snum].value.load(Ordering::Relaxed);
-                    // SAFETY: val_ptr was null-checked and access_ok-validated for 4 bytes above;
-                    // writing a valid i32 semaphore value to a userspace pointer.
-                    unsafe { core::ptr::write_volatile(val_ptr, val) };
-                    return val as u64;
+                    return sems[snum].value.load(Ordering::Relaxed) as u64;
                 }
             }
-            return -errno::EINVAL as u64;
+            -errno::EINVAL as u64
         }
         SETVAL => {
             if semnum < 0 {
@@ -343,7 +359,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                     return sems[snum].ncnt.load(Ordering::Relaxed) as u64;
                 }
             }
-            return -errno::EINVAL as u64;
+            -errno::EINVAL as u64
         }
         GETZCNT => {
             if semnum < 0 {
@@ -356,60 +372,87 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                     return -errno::EINVAL as u64;
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
-                    let val = sems[snum].value.load(Ordering::Relaxed);
-                    return if val == 0 { 1 } else { 0 };
+                    return sems[snum].zcnt.load(Ordering::Relaxed) as u64;
                 }
             }
-            return -errno::EINVAL as u64;
+            -errno::EINVAL as u64
         }
         IPC_INFO => {
-            // struct seminfo — 16 fields, each unsigned long (8 bytes) = 128 bytes
-            let buf_ptr = arg as *mut u8;
-            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 128) {
+            // struct seminfo — 10 int fields = 40 bytes
+            let buf_ptr = arg as *mut SemInfoUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemInfoUapi>()) {
                 return -errno::EFAULT as u64;
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated for 128 bytes above;
-            // zeroing the entire buffer is within bounds.
-            unsafe { core::ptr::write_bytes(buf_ptr, 0, 128) };
-            // seminfo fields: semmni, semmns, semmni, semmns, semvmx, semvmn, semmsl, semopm, semume, semusz, semvmx, semvmn, semmsl, semopm, semume, semusz
-            // Write semmni (used entries) at offset 0
-            // SAFETY: buf_ptr was access_ok-validated for 128 bytes; offset 0 is within bounds.
-            unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, SEM_IDS.count() as u64) };
-            // Write semmns (max semaphores across all sets) at offset 8
-            // SAFETY: buf_ptr + 8 is within the 128-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, 256 * 256u64) };
-            // Write semvmx at offset 16
-            // SAFETY: buf_ptr + 16 is within the 128-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(16) as *mut u64, 32767u64) };
-            return SEM_IDS.count() as u64;
+            let info = SemInfoUapi {
+                semmap: 0,
+                semmni: 256,
+                semmns: 256 * 256,
+                semmnu: 0,
+                semmsl: 256,
+                semopm: 500,
+                semume: 0,
+                semusz: 0,
+                semvmx: 32767,
+                semaem: 16384,
+            };
+            // SAFETY: buf_ptr was null-checked and access_ok-validated above.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &info as *const SemInfoUapi as *const u8,
+                    core::mem::size_of::<SemInfoUapi>(),
+                );
+            }
+            // Return: index of highest used entry
+            let mut max_idx: usize = 0;
+            {
+                let slots = SEM_IDS.slots.lock();
+                for (i, entry) in slots.iter().enumerate().rev() {
+                    if entry.is_some() {
+                        max_idx = i + 1;
+                        break;
+                    }
+                }
+            }
+            max_idx as u64
         }
         18 => {
-            // SEM_INFO — like IPC_INFO but returns current usage, not limits
-            // Same struct seminfo layout (128 bytes)
-            let buf_ptr = arg as *mut u8;
-            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 128) {
+            // SEM_INFO — like IPC_INFO but returns current usage
+            let buf_ptr = arg as *mut SemInfoUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemInfoUapi>()) {
                 return -errno::EFAULT as u64;
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated for 128 bytes above;
-            // zeroing the entire buffer is within bounds.
-            unsafe { core::ptr::write_bytes(buf_ptr, 0, 128) };
-            // semusz (used sets) at offset 0
-            // SAFETY: buf_ptr was access_ok-validated for 128 bytes; offset 0 is within bounds.
-            unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, SEM_IDS.count() as u64) };
-            // semaem (active semaphores, used entries) at offset 1*8
-            let mut total_sems: u64 = 0;
+            let mut total_sems: usize = 0;
             {
                 let slots = SEM_IDS.slots.lock();
                 for entry in slots.iter() {
                     if let Some(ref e) = entry {
                         if !e.deleted {
-                            total_sems += e.inner.nsems() as u64;
+                            total_sems += e.inner.nsems();
                         }
                     }
                 }
             }
-            // SAFETY: buf_ptr + 8 is within the 128-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, total_sems) };
+            let info = SemInfoUapi {
+                semmap: 0,
+                semmni: SEM_IDS.count() as i32,
+                semmns: total_sems as i32,
+                semmnu: 0,
+                semmsl: 256,
+                semopm: 500,
+                semume: 0,
+                semusz: SEM_IDS.count() as i32,
+                semvmx: 32767,
+                semaem: total_sems as i32,
+            };
+            // SAFETY: buf_ptr was null-checked and access_ok-validated above.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &info as *const SemInfoUapi as *const u8,
+                    core::mem::size_of::<SemInfoUapi>(),
+                );
+            }
             // Return: index of highest used entry + 1
             let mut max_idx: usize = 0;
             {
@@ -515,16 +558,30 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
                                 }
                             }
 
-                            // Block on the semaphore set's wait queue
                             let current = match crate::sched::current() {
                                 Some(t) => t,
                                 None => return -errno::ESRCH as u64,
                             };
+
+                            // Block on the semaphore set's wait queue.
+                            // Increment ncnt/zcnt for the blocking semaphore
+                            // so GETNCNT/GETZCNT return accurate counts.
                             {
                                 let slots = SEM_IDS.slots.lock();
                                 if let Some(ref entry) = slots[idx] {
                                     if entry.deleted {
                                         return -errno::EIDRM as u64;
+                                    }
+                                    // Increment waiter count for the blocking semaphore.
+                                    if let Some(ref sems) = *entry.inner.sems.lock() {
+                                        let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                        if block_sem < sems.len() {
+                                            if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                sems[block_sem].ncnt.fetch_add(1, Ordering::Relaxed);
+                                            } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                sems[block_sem].zcnt.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
                                     }
                                     let wq_entry = crate::process::wait::WaitQueueEntry::new(
                                         current as *mut _, false,
@@ -547,10 +604,20 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
 
                             crate::sched::schedule();
 
-                            // Clean up wait queue entry after wakeup
+                            // Decrement ncnt/zcnt after wakeup (we're no longer waiting).
                             {
                                 let slots = SEM_IDS.slots.lock();
                                 if let Some(ref entry) = slots[idx] {
+                                    if let Some(ref sems) = *entry.inner.sems.lock() {
+                                        let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                        if block_sem < sems.len() {
+                                            if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                sems[block_sem].ncnt.fetch_sub(1, Ordering::Relaxed);
+                                            } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                sems[block_sem].zcnt.fetch_sub(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
                                     entry.inner.wq.remove(current as *mut _);
                                 }
                             }

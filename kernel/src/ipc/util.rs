@@ -133,10 +133,13 @@ impl KernIpcPerm {
         }
     }
 
-    /// Update mode from IPC_SET
-    pub fn update_mode(&mut self, new_mode: u16) {
-        // Only lower 9 bits (rwx for owner/group/other) and sticky bit can be changed
-        self.mode = (new_mode & 0o777) | (self.mode & !0o777);
+    /// Update uid/gid/mode from IPC_SET.
+    /// Matches Linux's `ipc_update_perm()`: updates uid, gid, and replaces
+    /// the lower 9 permission bits while preserving upper bits.
+    pub fn update_from_set(&mut self, new_uid: u32, new_gid: u32, new_mode: u32) {
+        self.uid = new_uid;
+        self.gid = new_gid;
+        self.mode = (self.mode & !0o777u16) | (new_mode as u16 & 0o777);
     }
 
     /// Set creator uid/gid (only allowed by root)
@@ -184,7 +187,7 @@ pub struct IpcObjectEntry<T> {
 pub struct IpcIds<T> {
     pub slots: Spinlock<[Option<alloc::boxed::Box<IpcObjectEntry<T>>>; IPC_IDS_MAX]>,
     next_seq: AtomicU32,
-    count: AtomicUsize,
+    pub(crate) count: AtomicUsize,
 }
 
 impl<T> IpcIds<T> {

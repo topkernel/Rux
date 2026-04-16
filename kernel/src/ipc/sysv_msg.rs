@@ -17,6 +17,20 @@ const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
 // UAPI Structures
 // ============================================================================
 
+/// struct msginfo — returned by IPC_INFO / MSG_INFO
+/// Must match Linux's include/uapi/linux/msg.h. Total: 30 bytes.
+#[repr(C)]
+pub struct MsgInfoUapi {
+    pub msgpool: i32,  // +0  pool pages
+    pub msgmap: i32,   // +4  pool entries
+    pub msgmax: i32,   // +8  max message size
+    pub msgmnb: i32,   // +12 max bytes on queue
+    pub msgmni: i32,   // +16 max queues
+    pub msgssz: i32,   // +20 message segment size
+    pub msgtql: i32,   // +24 max messages system-wide
+    pub msgseg: u16,   // +28 number of segments
+}
+
 /// struct msqid64_ds — returned by IPC_STAT, IPC_SET
 /// Must match asm-generic/msgbuf.h for RV64. Total: 120 bytes.
 #[repr(C)]
@@ -222,13 +236,16 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
             };
             let mut slots = MSG_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
-                // SAFETY: buf_ptr was access_ok-validated for size_of::<MsqidDsUapi>() (120 bytes) above;
-                // offset 20 is within the msg_perm IPC_perm layout for the mode field.
-                let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u16) };
-                entry.inner.perm.update_mode(new_mode);
-                // SAFETY: buf_ptr was access_ok-validated for 120 bytes; offset 72 is within bounds
-                // (msg_perm=48 + stime=8 + rtime=8 + ctime=8 = 72, the msg_qbytes field).
-                let new_qbytes = unsafe { core::ptr::read_volatile(buf_ptr.add(72) as *const u64) };
+                // Read uid/gid/mode from user-supplied msg_perm.
+                // SAFETY: buf_ptr was access_ok-validated for 120 bytes;
+                // offsets 4, 8, 20 are within the first 48-byte ipc_perm.
+                let new_uid = unsafe { core::ptr::read_volatile(buf_ptr.add(4) as *const u32) };
+                let new_gid = unsafe { core::ptr::read_volatile(buf_ptr.add(8) as *const u32) };
+                let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u32) };
+                entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
+                // msg_qbytes at offset 88 (msg_perm=48 + stime=8 + rtime=8 + ctime=8 + cbytes=8 + qnum=8)
+                // SAFETY: buf_ptr was access_ok-validated for 120 bytes; offset 88 is within bounds.
+                let new_qbytes = unsafe { core::ptr::read_volatile(buf_ptr.add(88) as *const u64) };
                 if new_qbytes > 0 {
                     entry.inner.qbytes.store(new_qbytes as usize, Ordering::Relaxed);
                 }
@@ -237,60 +254,78 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
             0
         }
         IPC_INFO => {
-            // struct msginfo — returned in the buffer
-            // Fields: msgpool, msgmap, msgmax, msgmnb, msgmni, msgssz, msgtql, msgseg
-            // Each unsigned long (8 bytes on RV64) = 64 bytes total
-            let buf_ptr = buf as *mut u8;
-            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 64) {
+            // struct msginfo — 7 int + 1 unsigned short = 30 bytes
+            let buf_ptr = buf as *mut MsgInfoUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<MsgInfoUapi>()) {
                 return -errno::EFAULT as u64;
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated for 64 bytes above;
-            // zeroing the entire buffer is within bounds.
-            unsafe { core::ptr::write_bytes(buf_ptr, 0, 64) };
-            // msgmax (max message size) at offset 0*8
-            // SAFETY: buf_ptr was access_ok-validated for 64 bytes; offset 0 is within bounds.
-            unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, 8192u64) };
-            // msgmnb (max bytes on queue) at offset 1*8
-            // SAFETY: buf_ptr + 8 is within the 64-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, 16384u64) };
-            // msgmni (max queues) at offset 2*8
-            // SAFETY: buf_ptr + 16 is within the 64-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(16) as *mut u64, 256u64) };
-            // msgssz (message segment size) at offset 3*8
-            // SAFETY: buf_ptr + 24 is within the 64-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(24) as *mut u64, 16u64) };
-            // msgtql (max messages system-wide) at offset 4*8
-            // SAFETY: buf_ptr + 32 is within the 64-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(32) as *mut u64, 65536u64) };
-            MSG_IDS.count() as u64
+            let info = MsgInfoUapi {
+                msgpool: 0,
+                msgmap: 0,
+                msgmax: 8192,
+                msgmnb: 16384,
+                msgmni: 256,
+                msgssz: 16,
+                msgtql: 65536,
+                msgseg: 0xffff,
+            };
+            // SAFETY: buf_ptr was null-checked and access_ok-validated above.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &info as *const MsgInfoUapi as *const u8,
+                    core::mem::size_of::<MsgInfoUapi>(),
+                );
+            }
+            // Return: index of highest used entry
+            let mut max_idx: usize = 0;
+            {
+                let slots = MSG_IDS.slots.lock();
+                for (i, entry) in slots.iter().enumerate().rev() {
+                    if entry.is_some() {
+                        max_idx = i + 1;
+                        break;
+                    }
+                }
+            }
+            max_idx as u64
         }
         12 => {
-            // MSG_INFO — like IPC_INFO but returns current usage, not limits
-            // Same struct msginfo layout (64 bytes)
-            let buf_ptr = buf as *mut u8;
-            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 64) {
+            // MSG_INFO — like IPC_INFO but returns current usage
+            let buf_ptr = buf as *mut MsgInfoUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<MsgInfoUapi>()) {
                 return -errno::EFAULT as u64;
             }
-            // SAFETY: buf_ptr was null-checked and access_ok-validated for 64 bytes above;
-            // zeroing the entire buffer is within bounds.
-            unsafe { core::ptr::write_bytes(buf_ptr, 0, 64) };
-            // msgpool (used queues) at offset 0
-            // SAFETY: buf_ptr was access_ok-validated for 64 bytes; offset 0 is within bounds.
-            unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, MSG_IDS.count() as u64) };
-            // msgmap (used headers) at offset 1*8 — sum of all queue lengths
-            let mut total_msgs: u64 = 0;
+            // Count total messages across all queues
+            let mut total_msgs: usize = 0;
             {
                 let slots = MSG_IDS.slots.lock();
                 for entry in slots.iter() {
                     if let Some(ref e) = entry {
                         if !e.deleted {
-                            total_msgs += e.inner.qnum.load(Ordering::Relaxed) as u64;
+                            total_msgs += e.inner.qnum.load(Ordering::Relaxed);
                         }
                     }
                 }
             }
-            // SAFETY: buf_ptr + 8 is within the 64-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, total_msgs) };
+            let info = MsgInfoUapi {
+                msgpool: MSG_IDS.count() as i32,
+                msgmap: total_msgs as i32,
+                msgmax: 8192,
+                msgmnb: 16384,
+                msgmni: 256,
+                msgssz: 16,
+                msgtql: 65536,
+                msgseg: 0xffff,
+            };
+            // SAFETY: buf_ptr was null-checked and access_ok-validated above.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &info as *const MsgInfoUapi as *const u8,
+                    core::mem::size_of::<MsgInfoUapi>(),
+                );
+            }
             // Return: index of highest used entry + 1
             let mut max_idx: usize = 0;
             {

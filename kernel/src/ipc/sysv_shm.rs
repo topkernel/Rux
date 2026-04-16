@@ -298,9 +298,11 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
             let mut slots = SHM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
                 // SAFETY: buf_ptr was access_ok-validated for size_of::<ShmidDsUapi>() (112 bytes) above;
-                // offset 20 is within the shm_perm IPC_perm layout for the mode field.
-                let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u16) };
-                entry.inner.perm.update_mode(new_mode);
+                // offsets 4 (uid), 8 (gid), 20 (mode) are within the ipc_perm layout.
+                let new_uid = unsafe { core::ptr::read_volatile(buf_ptr.add(4) as *const u32) };
+                let new_gid = unsafe { core::ptr::read_volatile(buf_ptr.add(8) as *const u32) };
+                let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u32) };
+                entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
                 entry.inner.shm_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
             0
@@ -644,19 +646,31 @@ pub fn sys_shmdt(args: [u64; 6]) -> u64 {
 
 /// Detach a shared memory segment (called from exit_mmap).
 /// Decrements nattch and frees the segment if marked_destroy && nattch == 0.
+///
+/// The nattch check and deletion marking are done under the same lock hold
+/// to prevent a race where another thread attaches between dropping the lock
+/// and calling remove/free_slot.
 pub fn shm_detach_vma(shmid: i32) {
     let idx = match SHM_IDS.find(shmid) {
         Some(i) => i,
         None => return,
     };
-    let slots = SHM_IDS.slots.lock();
-    if let Some(ref entry) = slots[idx] {
-        let old_nattch = entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
-        if old_nattch == 1 && entry.inner.marked_destroy.load(Ordering::Relaxed) != 0 {
-            drop(slots);
-            let _ = SHM_IDS.remove(shmid);
-            SHM_IDS.free_slot(shmid);
+    let mut should_free = false;
+    {
+        let mut slots = SHM_IDS.slots.lock();
+        if let Some(ref mut entry) = slots[idx] {
+            let old_nattch = entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+            if old_nattch == 1 && entry.inner.marked_destroy.load(Ordering::Relaxed) != 0 {
+                // Mark deleted while still holding lock — prevents new attaches.
+                entry.deleted = true;
+                SHM_IDS.count.fetch_sub(1, Ordering::Relaxed);
+                should_free = true;
+            }
         }
+    }
+    // Slot lock released. Safe to free the slot now — no new attaches possible.
+    if should_free {
+        SHM_IDS.free_slot(shmid);
     }
 }
 

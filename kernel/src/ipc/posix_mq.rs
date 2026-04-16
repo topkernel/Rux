@@ -388,7 +388,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
 
         if (messages.len() as i64) < max_msgs {
             // Space available — insert message (sorted by priority)
-            let insert_pos = messages.iter().position(|m| m.priority > msg_prio)
+            let insert_pos = messages.iter().position(|m| m.priority < msg_prio)
                 .unwrap_or(messages.len());
             messages.insert(insert_pos, MqMsg { priority: msg_prio, data });
             mq.attr.lock().mq_curmsgs += 1;

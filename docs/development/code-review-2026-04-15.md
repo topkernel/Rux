@@ -46,20 +46,22 @@
 **Linux**: Stores SUM in thread_info and restores it via `switch_to()`.
 **Fix**: Added `csrc sstatus, t1` (clear SUM) before `csrs` (conditional set) in `__switch_to` assembly.
 
-### [H] [BUG] F1-02: Heap-allocated PtRegs in fork never freed
+### [H] [BUG] F1-02: Heap-allocated PtRegs in fork never freed — **FIXED**
 **File**: `arch/riscv64/process.rs`
 **Description**: Fork allocates PtRegs on the heap but never frees it. Inconsistent with stack-based `current_task_pt_regs()`.
 **Linux**: Stores pt_regs on the kernel stack, not the heap.
+**Fix**: `clear_fork_child()` no longer zeros fork_pt_regs pointer; `release_task()` frees heap PtRegs via `dealloc()`. Applied 2026-04-16.
 
 ### [M] [BUG] F1-03: COW race — parent PTE modified without PTE-level locking during fork
 **File**: `arch/riscv64/mm/mm_ops.rs`
 **Description**: During fork, parent PTE is read and modified without holding PTE lock, racing with concurrent page faults.
 **Linux**: Uses `ptep_get_and_clear()` / `ptep_set_wrprotect()` under PTL.
 
-### [M] [BUG] F1-04: strncpy_from_user lacks exception table entries
+### [M] [BUG] F1-04: strncpy_from_user lacks exception table entries — **FIXED**
 **File**: `arch/riscv64/uaccess.rs`
 **Description**: User memory reads have no exception table entries. Page fault during read causes unrecoverable kernel panic.
 **Linux**: Uses `__get_user()` with `extable` entries for fault-safe user access.
+**Fix**: Replaced raw `read_volatile` + SUM bit with `get_user()` (backed by assembly exception-table implementation). Applied 2026-04-16.
 
 ### [M] [BUG] F1-05: Premature COW with refcount=1, violating INV-COW-2
 **File**: `arch/riscv64/mm/page_fault.rs`
@@ -93,10 +95,11 @@
 **Linux**: `include/uapi/asm-generic/signal.h`.
 **Fix**: Swapped to `SS_ONSTACK=1, SS_DISABLE=2`. Applied 2026-04-16.
 
-### [H] [BUG] F2-04: Timer lock order inversion deadlock
+### [H] [BUG] F2-04: Timer lock order inversion deadlock — **FIXED**
 **File**: `timer.rs:87-94 vs 147-151`
 **Description**: `add_timer` locks TIMERS then ACTIONS; `del_timer` locks ACTIONS then TIMERS. Classic ABBA deadlock.
 **Linux**: Uses `hrtimer` with per-CPU bases and proper lock ordering.
+**Fix**: Changed `del_timer()` lock order to TIMERS→ACTIONS, matching `add_timer`/softirq handler. Applied 2026-04-16.
 
 ---
 
@@ -231,20 +234,23 @@
 **Linux**: Uses wake_q to defer wakeups outside the hash bucket lock.
 **Fix**: futex_wake() collects task pointers in a local array, releases bucket lock, then wakes tasks. futex_cleanup() drops each bucket lock before proceeding to next bucket; final wake_up() outside all locks.
 
-### [M] [BUG] F6-04: Lost-wakeup in condvar wait()
+### [M] [BUG] F6-04: Lost-wakeup in condvar wait() — **FIXED**
 **File**: `condvar.rs:95-128`
 **Description**: Mutex unlocked before waitqueue add + state set. Concurrent signal() can miss waiter.
 **Linux**: Uses prepare_to_wait()/finish_wait() which atomically adds and sets state.
+**Fix**: Reordered `wait()`/`wait_interruptible()` to add waitqueue + set INTERRUPTIBLE before `mutex.unlock()`. Applied 2026-04-16.
 
-### [M] [BUG] F6-05: val2=0 breaks FUTEX_CMP_REQUEUE (pthread_cond_broadcast)
+### [M] [BUG] F6-05: val2=0 breaks FUTEX_CMP_REQUEUE (pthread_cond_broadcast) — **FIXED**
 **File**: `futex.rs:486-495`
 **Description**: sys_futex_handler hardcodes val2=0, so REQUEUE always requeues 0 waiters.
 **Linux**: Passes val2 as nr_requeue for REQUEUE ops.
+**Fix**: Implemented `futex_requeue()` with proper wake + requeue-to-uaddr2 semantics. Uses `_timeout` as nr_requeue per futex ABI. Applied 2026-04-16.
 
-### [M] [BUG] F6-06: synchronize_rcu() busy-spins, deadlocks on UP
+### [M] [BUG] F6-06: synchronize_rcu() busy-spins, deadlocks on UP — **FIXED**
 **File**: `rcu.rs:169-194`
 **Description**: On UP, if called from only running task, no other task can produce quiescent state.
 **Linux**: tiny RCU synchronize_rcu() just increments gp_seq and returns on UP.
+**Fix**: Replaced `spin_loop()` with `schedule()` to yield CPU and allow other tasks to produce quiescent states. Applied 2026-04-16.
 
 ---
 
@@ -560,44 +566,53 @@
 
 ## Batch 12: IPC (6 files, ~3,317 lines)
 
-### [H] [BUG] F12-01: IPC_INFO msginfo struct layout completely wrong
+### [H] [BUG] F12-01: IPC_INFO msginfo struct layout completely wrong — **FIXED**
 **File**: `ipc/sysv_msg.rs:239-264`
 **Description**: Writes 128 bytes of u64 fields. Linux `struct msginfo` uses `int` fields = 30 bytes.
 **Linux**: `include/uapi/linux/msg.h`.
+**Fix**: Added `MsgInfoUapi` struct (7 i32 + 1 u16 = 30 bytes), rewrote IPC_INFO and MSG_INFO handlers. Applied 2026-04-16.
 
-### [H] [BUG] F12-02: IPC_INFO seminfo struct layout completely wrong
+### [H] [BUG] F12-02: IPC_INFO seminfo struct layout completely wrong — **FIXED**
 **File**: `ipc/sysv_sem.rs:365-424`
 **Description**: Same as F12-01. 128 bytes u64 vs 40 bytes int.
 **Linux**: `include/uapi/linux/sem.h`.
+**Fix**: Added `SemInfoUapi` struct (10 i32 = 40 bytes), rewrote IPC_INFO and SEM_INFO handlers. Applied 2026-04-16.
 
-### [H] [BUG] F12-03: IPC_SET reads msg_qbytes from wrong offset
+### [H] [BUG] F12-03: IPC_SET reads msg_qbytes from wrong offset — **FIXED**
 **File**: `ipc/sysv_msg.rs:231`
 **Description**: Offset 72 is `__msg_cbytes`, not `msg_qbytes` (offset 88).
+**Fix**: Changed IPC_SET msg_qbytes read from offset 72 to offset 88. Applied 2026-04-16.
 
-### [H] [BUG] F12-04: GETVAL treats unused arg as pointer — always returns EFAULT
+### [H] [BUG] F12-04: GETVAL treats unused arg as pointer — always returns EFAULT — **FIXED**
 **File**: `ipc/sysv_sem.rs:230-253`
 **Description**: Linux GETVAL simply returns semval as syscall return value.
+**Fix**: GETVAL now returns semaphore value directly as syscall return value, no pointer write. Applied 2026-04-16.
 
-### [H] [BUG] F12-05: POSIX MQ priority ordering is inverted
+### [H] [BUG] F12-05: POSIX MQ priority ordering is inverted — **FIXED**
 **File**: `ipc/posix_mq.rs:391-393`
 **Description**: Insertion maintains ascending order, `remove(0)` returns lowest priority. POSIX requires highest priority first.
 **Linux**: `ipc/mqueue.c` stores with highest priority first.
+**Fix**: Changed comparison from `m.priority > msg_prio` to `m.priority < msg_prio` for descending order. Applied 2026-04-16.
 
-### [H] [BUG] F12-06: GETNCNT always returns 0 (ncnt never incremented)
+### [H] [BUG] F12-06: GETNCNT always returns 0 (ncnt never incremented) — **FIXED**
 **File**: `ipc/sysv_sem.rs:342-346`
 **Description**: `ncnt` initialized to 0 and never modified anywhere.
+**Fix**: Blocking path in sys_semtimedop now increments/decrements ncnt based on blocking sem_op sign. Applied 2026-04-16.
 
-### [H] [BUG] F12-07: GETZCNT returns wrong value
+### [H] [BUG] F12-07: GETZCNT returns wrong value — **FIXED**
 **File**: `ipc/sysv_sem.rs:348-364`
 **Description**: Returns `1 if val == 0 else 0`. Should return count of processes waiting for semaphore to become zero.
+**Fix**: Added `zcnt: AtomicUsize` to SemEntry. Blocking path increments/decrements zcnt when waiting for val==0. GETZCNT returns zcnt. Applied 2026-04-16.
 
-### [M] [BUG] F12-08: IPC_SET does not update uid/gid
+### [M] [BUG] F12-08: IPC_SET does not update uid/gid — **FIXED**
 **File**: `ipc/sysv_msg.rs, sysv_sem.rs, sysv_shm.rs`
 **Description**: Only updates mode. Linux `ipc_update_perm()` also updates uid and gid.
+**Fix**: Replaced `update_mode()` with `update_from_set(new_uid, new_gid, new_mode)` matching Linux `ipc_update_perm()`. All three IPC types now read uid/gid/mode from userspace. Applied 2026-04-16.
 
-### [M] [BUG] F12-09: shm_detach_vma race between nattch check and slot free
+### [M] [BUG] F12-09: shm_detach_vma race between nattch check and slot free — **FIXED**
 **File**: `ipc/sysv_shm.rs:647-661`
 **Description**: Drops spinlock before calling remove(), another thread could attach in between.
+**Fix**: Now marks `entry.deleted = true` and decrements `SHM_IDS.count` while still holding slots lock, preventing race. Applied 2026-04-16.
 
 ---
 
@@ -757,15 +772,20 @@
 17. **F4-01/02**: ~~vruntime calculation incorrect (missing NICE_0_LOAD factor + overflow)~~ **FIXED**
 18. **F6-01/02**: ~~Semaphore non-atomic operation and lost-wakeup~~ **FIXED**
 19. **F6-03**: ~~Futex bucket lock held during Task::wake_up~~ **FIXED**
+20. **F2-04**: ~~Timer lock order inversion~~ **FIXED**
+21. **F6-04**: ~~Condvar lost-wakeup~~ **FIXED**
+22. **F6-05**: ~~FUTEX_CMP_REQUEUE val2=0~~ **FIXED**
+23. **F6-06**: ~~synchronize_rcu UP deadlock~~ **FIXED**
 
 **Memory Management**:
 20. **F1-01**: ~~SUM bit leak on context switch~~ **FIXED**
-21. **F3-05**: ~~Execute-only mapping mapped to Perm::None~~ **FIXED**
-22. **F3-06**: ~~PER_CPU_PAGES hardcoded 4 elements~~ **FIXED**
-23. **F3-07**: ~~Slab loop underflow when objects_per_slab==0~~ **FIXED**
-24. **F3-03**: free_pages() only updates leader — **BY DESIGN** (Zone handles it)
-25. **F3-04**: BuddyAllocator remove_from_free_list — **BY DESIGN** (legacy, Zone handles it)
-19. **F1-01**: SUM bit leak
+21. **F1-02**: ~~Heap-allocated PtRegs leak in fork~~ **FIXED**
+22. **F1-04**: ~~strncpy_from_user lacks exception table~~ **FIXED**
+23. **F3-05**: ~~Execute-only mapping mapped to Perm::None~~ **FIXED**
+24. **F3-06**: ~~PER_CPU_PAGES hardcoded 4 elements~~ **FIXED**
+25. **F3-07**: ~~Slab loop underflow when objects_per_slab==0~~ **FIXED**
+26. **F3-03**: free_pages() only updates leader — **BY DESIGN** (Zone handles it)
+27. **F3-04**: BuddyAllocator remove_from_free_list — **BY DESIGN** (legacy, Zone handles it)
 
 ### Medium (Fix by Subsystem)
 
