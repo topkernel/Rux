@@ -349,7 +349,7 @@ impl VirtIOBlkDevice {
         }
 
         // Phase 1: Set up and submit request (under queue lock)
-        let (used_ring_ptr, prev_used, header_ptr, header_layout, resp_ptr, resp_layout) = {
+        let (used_ring_ptr, prev_used, submitted_desc_id, queue_sz, header_ptr, header_layout, resp_ptr, resp_layout) = {
             // Get VirtQueue (irqsafe: IRQ handler also takes this lock)
             let mut queue_guard = self.virtqueue.lock_irqsave();
             let queue = match queue_guard.as_mut() {
@@ -452,12 +452,12 @@ impl VirtIOBlkDevice {
                 resp_desc_idx,
                 resp_phys_addr,
                 core::mem::size_of::<VirtIOBlkResp>() as u32,
-                0,  // Last descriptor
+                VIRTQ_DESC_F_WRITE,  // Device writes status byte
                 0,
             );
 
-            // Snapshot expected used index BEFORE submit (under queue lock)
-            let prev = get_mmio_expected_used_idx();
+            // Snapshot actual used ring index for per-desc matching
+            let prev = queue.get_used();
 
             // Submit to available ring
             queue.submit(header_desc_idx);
@@ -465,24 +465,27 @@ impl VirtIOBlkDevice {
             // Notify device
             queue.notify();
 
-            // Advance expected used index AFTER submit (under queue lock)
+            // Keep global counter in sync for async pending slot tracking
             increment_mmio_expected_used_idx();
 
             let used_ptr = queue.used_ring_ptr();
+            let q_size = queue.queue_size;
 
-            (used_ptr, prev, header_ptr, header_layout, resp_ptr, resp_layout)
+            (used_ptr, prev, header_desc_idx as u32, q_size, header_ptr, header_layout, resp_ptr, resp_layout)
         };
         // queue_guard dropped here — VirtQueue spinlock released
 
-        // Phase 2: Wait for completion (interrupt-driven, releases BKL during sleep)
-        let used = queue::VirtQueue::wait_for_used_interruptible(
+        // Phase 2: Wait for THIS descriptor's completion (interrupt-driven)
+        let completed = queue::VirtQueue::wait_for_desc_completion(
             used_ring_ptr,
             &VIRTIO_BLK_WAIT_QUEUE,
             prev_used,
+            submitted_desc_id,
+            queue_sz,
         );
 
         // Phase 3: Check response
-        if used == prev_used {
+        if !completed {
             // Timeout — device did not update used ring
             // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
@@ -513,7 +516,7 @@ impl VirtIOBlkDevice {
         }
 
         // Phase 1: Set up and submit request (under queue lock)
-        let (used_ring_ptr, prev_used, header_ptr, header_layout, resp_ptr, resp_layout) = {
+        let (used_ring_ptr, prev_used, submitted_desc_id, queue_sz, header_ptr, header_layout, resp_ptr, resp_layout) = {
             // Get VirtQueue (irqsafe: IRQ handler also takes this lock)
             let mut queue_guard = self.virtqueue.lock_irqsave();
             let queue = queue_guard.as_mut().ok_or(-5)?;
@@ -608,8 +611,8 @@ impl VirtIOBlkDevice {
                 0,
             );
 
-            // Snapshot expected used index BEFORE submit (under queue lock)
-            let prev = get_mmio_expected_used_idx();
+            // Snapshot actual used ring index for per-desc matching
+            let prev = queue.get_used();
 
             // Submit to available ring
             queue.submit(header_desc_idx);
@@ -617,24 +620,27 @@ impl VirtIOBlkDevice {
             // Notify device
             queue.notify();
 
-            // Advance expected used index AFTER submit (under queue lock)
+            // Keep global counter in sync for async pending slot tracking
             increment_mmio_expected_used_idx();
 
             let used_ptr = queue.used_ring_ptr();
+            let q_size = queue.queue_size;
 
-            (used_ptr, prev, header_ptr, header_layout, resp_ptr, resp_layout)
+            (used_ptr, prev, header_desc_idx as u32, q_size, header_ptr, header_layout, resp_ptr, resp_layout)
         };
         // queue_guard dropped here — VirtQueue spinlock released
 
-        // Phase 2: Wait for completion (interrupt-driven, releases BKL during sleep)
-        let used = queue::VirtQueue::wait_for_used_interruptible(
+        // Phase 2: Wait for THIS descriptor's completion (interrupt-driven)
+        let completed = queue::VirtQueue::wait_for_desc_completion(
             used_ring_ptr,
             &VIRTIO_BLK_WAIT_QUEUE,
             prev_used,
+            submitted_desc_id,
+            queue_sz,
         );
 
         // Phase 3: Check response
-        if used == prev_used {
+        if !completed {
             // Timeout — device did not update used ring
             // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {

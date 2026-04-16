@@ -404,6 +404,111 @@ impl VirtQueue {
         }
     }
 
+    /// Wait for a specific descriptor to appear in the used ring.
+    ///
+    /// Unlike `wait_for_used_interruptible` which returns when ANY new entry
+    /// appears, this function scans the used ring for the entry matching
+    /// `expected_desc_id` and only returns when that specific request has
+    /// been completed by the device. This is necessary when multiple requests
+    /// may be in flight concurrently on the same VirtQueue.
+    ///
+    /// # Safety
+    /// - `used_ring` must point to a valid VirtIO used ring
+    /// - `wait_queue` must be the correct wait queue for this device's interrupt
+    pub fn wait_for_desc_completion(
+        used_ring: *const UsedRing,
+        wait_queue: &crate::process::wait::WaitQueueHead,
+        start_idx: u16,
+        expected_desc_id: u32,
+        queue_size: u16,
+    ) -> bool {
+        if used_ring.is_null() || queue_size == 0 {
+            return false;
+        }
+
+        // Detect early boot phase (same logic as wait_for_used_interruptible)
+        let is_early_boot = match crate::sched::current() {
+            Some(task) if task.pid() != 0 => false,
+            _ => true,
+        };
+
+        let max_iterations = if is_early_boot { 1_000_000 } else { 5000 };
+
+        for _iteration in 0..max_iterations {
+            // Read the current used ring index
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+            let used_idx = unsafe {
+                let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                core::ptr::read_volatile(used_idx_ptr)
+            };
+
+            // Scan all new entries since start_idx looking for our descriptor
+            let mut scan_idx = start_idx;
+            while scan_idx != used_idx {
+                let ring_slot = scan_idx as usize % queue_size as usize;
+                // SAFETY: UsedRing is [flags:u16, idx:u16, ring:UsedElem[]];
+                // offset 4 + ring_slot * 8 is within the allocated ring.
+                let entry_id = unsafe {
+                    let elem_ptr = (used_ring as usize + 4 + ring_slot * 8) as *const u32;
+                    core::ptr::read_volatile(elem_ptr)
+                };
+                if entry_id == expected_desc_id {
+                    return true;  // Our descriptor was completed
+                }
+                scan_idx = scan_idx.wrapping_add(1);
+            }
+
+            // Early boot: pure spin-poll
+            if is_early_boot {
+                core::hint::spin_loop();
+                continue;
+            }
+
+            // Normal path: check scheduler availability
+            let current = match crate::sched::current() {
+                Some(task) if task.pid() != 0 => task,
+                _ => {
+                    core::hint::spin_loop();
+                    continue;
+                }
+            };
+
+            // Fast re-check after adding to wait queue (same lost-wakeup
+            // protection pattern as wait_for_used_interruptible)
+            let entry = crate::process::wait::WaitQueueEntry::new(current, false);
+            wait_queue.add(entry);
+
+            for _ in 0..256 {
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                let used_idx2 = unsafe {
+                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                    core::ptr::read_volatile(used_idx_ptr)
+                };
+                // Re-scan for our descriptor
+                let mut si = start_idx;
+                while si != used_idx2 {
+                    let ring_slot = si as usize % queue_size as usize;
+                    let eid = unsafe {
+                        let elem_ptr = (used_ring as usize + 4 + ring_slot * 8) as *const u32;
+                        core::ptr::read_volatile(elem_ptr)
+                    };
+                    if eid == expected_desc_id {
+                        wait_queue.remove(current);
+                        return true;
+                    }
+                    si = si.wrapping_add(1);
+                }
+                core::hint::spin_loop();
+            }
+
+            // Sleep until woken by interrupt
+            crate::sched::schedule();
+            wait_queue.remove(current);
+        }
+
+        false  // Timeout
+    }
+
     /// Add descriptor chain to queue and notify device
     pub fn submit(&mut self, head_idx: u16) {
         // SAFETY: avail points to the available ring in our allocation; the ring

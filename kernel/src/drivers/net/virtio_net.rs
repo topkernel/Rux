@@ -135,21 +135,24 @@ impl VirtIONetDevice {
         // SAFETY: base_addr points to valid VirtIO MMIO registers; all register
         // offsets follow the VirtIO MMIO device specification.
         unsafe {
-            // VirtIO MMIO register offsets
+            // VirtIO MMIO register offsets (Modern v2 spec)
             const MAGIC_VALUE: u64 = 0x00;
             const VERSION: u64 = 0x04;
             const DEVICE_ID: u64 = 0x08;
             const VENDOR: u64 = 0x0C;
-            const DEVICE_FEATURES: u64 = 0x14;
+            const DEVICE_FEATURES: u64 = 0x10;
             const QUEUE_SEL: u64 = 0x30;
             const QUEUE_NUM_MAX: u64 = 0x34;
             const QUEUE_NUM: u64 = 0x38;
-            const QUEUE_READY: u64 = 0x3C;
-            const QUEUE_NOTIFY: u64 = 0x40;
-            const STATUS: u64 = 0x50;
-            const QUEUE_DESC: u64 = 0xA0;
-            const QUEUE_DRIVER: u64 = 0xA8;
-            const QUEUE_DEVICE: u64 = 0xB0;
+            const QUEUE_READY: u64 = 0x44;
+            const QUEUE_NOTIFY: u64 = 0x50;
+            const STATUS: u64 = 0x70;
+            const QUEUE_DESC_LO: u64 = 0x80;
+            const QUEUE_DESC_HI: u64 = 0x84;
+            const QUEUE_DRIVER_LO: u64 = 0x90;
+            const QUEUE_DRIVER_HI: u64 = 0x94;
+            const QUEUE_DEVICE_LO: u64 = 0xA0;
+            const QUEUE_DEVICE_HI: u64 = 0xA4;
 
             // Verify magic number
             let magic = core::ptr::read_volatile((self.base_addr + MAGIC_VALUE) as *const u32);
@@ -222,10 +225,16 @@ impl VirtIONetDevice {
                 };
             }
 
-            // Set queue addresses
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC) as *mut u64, desc_ptr as u64);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER) as *mut u64, 0);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE) as *mut u64, 0);
+            // Set queue addresses (convert virtual to physical, write lo/hi separately)
+            let desc_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(desc_ptr as u64)
+            ).0;
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (desc_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (desc_phys >> 32) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, 0);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, 0);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, 0);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, 0);
 
             // Set queue count
             core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
@@ -271,10 +280,16 @@ impl VirtIONetDevice {
                 };
             }
 
-            // Set queue addresses
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC) as *mut u64, desc_ptr_rx as u64);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER) as *mut u64, 0);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE) as *mut u64, 0);
+            // Set queue addresses (convert virtual to physical, write lo/hi separately)
+            let desc_phys_rx = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(desc_ptr_rx as u64)
+            ).0;
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (desc_phys_rx & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (desc_phys_rx >> 32) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, 0);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, 0);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, 0);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, 0);
 
             // Set queue count
             core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
@@ -379,19 +394,25 @@ impl VirtIONetDevice {
             None => return -5,  // EIO
         };
 
-        // Set packet header descriptor
+        // Set packet header descriptor (use physical address for DMA)
+        let hdr_phys = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(hdr_ptr as u64)
+        ).0;
         queue.set_desc(
             header_desc_idx,
-            hdr_ptr as u64,
+            hdr_phys,
             core::mem::size_of::<VirtIONetHdr>() as u32,
             VIRTQ_DESC_F_NEXT,
             data_desc_idx,
         );
 
-        // Set data descriptor
+        // Set data descriptor (use physical address for DMA)
+        let data_phys = crate::arch::riscv64::mm::virt_to_phys(
+            crate::arch::riscv64::mm::VirtAddr::new(skb.data as u64)
+        ).0;
         queue.set_desc(
             data_desc_idx,
-            skb.data as u64,
+            data_phys,
             skb.len,
             0,  // Last descriptor
             0,

@@ -611,6 +611,8 @@ impl TcpSocket {
             0, // ACK number is 0
             0x0002, // SYN flag
             self.rcv_wnd,
+            self.local_ip.to_be(),
+            self.remote_ip.to_be(),
         )?;
 
         // Send to IP layer
@@ -631,6 +633,8 @@ impl TcpSocket {
             self.rcv_nxt,
             0x0012, // SYN + ACK flags
             self.rcv_wnd,
+            self.local_ip.to_be(),
+            self.remote_ip.to_be(),
         )?;
 
         crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
@@ -650,6 +654,8 @@ impl TcpSocket {
             self.rcv_nxt,
             0x0010, // ACK flag
             self.rcv_wnd,
+            self.local_ip.to_be(),
+            self.remote_ip.to_be(),
         )?;
 
         crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
@@ -672,6 +678,8 @@ impl TcpSocket {
             self.rcv_nxt,
             0x0011, // FIN + ACK flags
             self.rcv_wnd,
+            self.local_ip.to_be(),
+            self.remote_ip.to_be(),
         )?;
 
         crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
@@ -822,7 +830,7 @@ impl TcpSocket {
     fn handle_syn_recv(&mut self, tcp_hdr: &TcpHdr) -> Result<(), ()> {
         // Record client's initial sequence number
         let client_isn = tcp_hdr.seq;
-        self.remote_ip = 0; // remote_ip is set by caller before handle_packet()
+        // remote_ip is already set by caller before handle_packet()
         self.remote_port = TcpPort::from_be(tcp_hdr.source);
 
         // Initialize our sequence number from connection 4-tuple
@@ -1160,6 +1168,8 @@ impl TcpSocket {
             self.rcv_nxt,
             0x0018, // PSH + ACK
             self.rcv_wnd,
+            self.local_ip.to_be(),
+            self.remote_ip.to_be(),
         )?;
 
         // Send to IP layer
@@ -1827,8 +1837,10 @@ pub fn tcp_checksum(shdr: u32, dhdr: u32, thdr: &TcpHdr, data: &[u8]) -> u16 {
 /// - `dest`: Destination port
 /// - `seq`: Sequence number
 /// - `ack_seq`: Acknowledgment number
-/// - `data`: Data
 /// - `flags`: Flag bits
+/// - `window`: Window size
+/// - `src_ip`: Source IP address (network byte order)
+/// - `dest_ip`: Destination IP address (network byte order)
 ///
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
@@ -1840,6 +1852,8 @@ pub fn tcp_build_packet(
     ack_seq: TcpAck,
     flags: u16,
     window: u16,
+    src_ip: u32,
+    dest_ip: u32,
 ) -> Result<(), ()> {
     // Allocate space for TCP header
     let ptr = skb.skb_push(TCP_MIN_HLEN as u32).ok_or(())?;
@@ -1875,6 +1889,12 @@ pub fn tcp_build_packet(
 
         // Urgent pointer
         tcp_hdr.urg_ptr = 0;
+
+        // Compute TCP checksum (RFC 793)
+        let data_ptr = ptr.add(TCP_MIN_HLEN);
+        let data_len = (skb.len as usize).saturating_sub(TCP_MIN_HLEN);
+        let data_slice = core::slice::from_raw_parts(data_ptr as *const u8, data_len);
+        tcp_hdr.check = tcp_checksum(src_ip, dest_ip, tcp_hdr, data_slice);
     }
 
     Ok(())
@@ -1969,6 +1989,8 @@ fn tcp_send_reset(src_ip: u32, dest_ip: u32, tcp_hdr: &TcpHdr) -> Result<(), ()>
         rst_ack,
         0x0014, // RST + ACK
         TCP_MAX_WINDOW,
+        dest_ip.to_be(),
+        src_ip.to_be(),
     )?;
 
     crate::net::ipv4::ipv4_send(skb, src_ip, 6);

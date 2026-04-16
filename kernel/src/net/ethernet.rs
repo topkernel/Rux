@@ -297,9 +297,8 @@ fn get_device_mac() -> Option<[u8; 6]> {
 
 /// Send packet to network device
 fn transmit_to_device(skb: SkBuff) -> i32 {
-    if let Some(_device) = crate::drivers::net::virtio_net::get_device() {
-        skb.free();
-        return 0;
+    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+        return device.xmit(skb);
     }
 
     crate::drivers::net::loopback::loopback_send(skb);

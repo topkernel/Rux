@@ -419,7 +419,7 @@
 **Linux**: `struct tcphdr` uses C bitfields for precise wire layout control.
 **Fix**: Split `flags_win: u16` into `flags: u8, window: u16` and update all accessor methods. Applied 2026-04-15.
 
-### [H] [BUG] F10-02: TCP checksum never computed in transmitted packets
+### [H] [BUG] F10-02: TCP checksum never computed in transmitted packets **[FIXED]**
 **File**: `net/tcp.rs:1847-1878`
 **Description**: In `tcp_build_packet`, checksum set to 0 and never computed. RFC 793 mandates TCP checksum.
 **Linux**: `tcp_v4_send_check()` computes checksum for every outgoing segment.
@@ -433,12 +433,12 @@
 **Description**: Malicious or corrupted packets can claim larger tot_len than actual data.
 **Linux**: `ip_rcv()` calls `skb_trim(skb, ntohs(iph->tot_len))`.
 
-### [H] [BUG] F10-05: transmit_to_device frees skb without sending when virtio device present
+### [H] [BUG] F10-05: transmit_to_device frees skb without sending when virtio device present **[FIXED]**
 **File**: `net/ethernet.rs:299-307`
 **Description**: When virtio device detected, calls `skb.free()` and returns success without transmitting.
 **Linux**: Calls `dev_queue_xmit(skb)`.
 
-### [H] [BUG] F10-06: handle_syn_recv sets remote_ip to 0
+### [H] [BUG] F10-06: handle_syn_recv sets remote_ip to 0 **[FIXED]**
 **File**: `net/tcp.rs:823`
 **Description**: Destroys remote IP set by caller. Subsequent sends addressed to 0.0.0.0.
 **Linux**: Copies peer address from listening socket.
@@ -619,7 +619,7 @@
 **File**: `drivers/virtio/mod.rs:266-267`
 **Description**: MMIO read uses plain dereference instead of `read_volatile`. Compiler could optimize out or reorder.
 
-### [H] [BUG] F14-02: VirtIO Block read path response descriptor missing VIRTQ_DESC_F_WRITE
+### [H] [BUG] F14-02: VirtIO Block read path response descriptor missing VIRTQ_DESC_F_WRITE **[FIXED]**
 **File**: `drivers/virtio/mod.rs:451-457`
 **Description**: flags=0 instead of 2. Device may not write response buffer correctly.
 **Linux**: Always sets response as writable scatterlist element.
@@ -628,7 +628,7 @@
 **File**: `drivers/gpu/virtio_gpu.rs:624-674`
 **Description**: Bypasses allocator, only one GPU command can be in-flight at a time.
 
-### [H] [BUG] F14-04: VirtIO Net TX uses virtual addresses instead of physical for DMA
+### [H] [BUG] F14-04: VirtIO Net TX uses virtual addresses instead of physical for DMA **[FIXED]**
 **File**: `drivers/net/virtio_net.rs:385-398`
 **Description**: All other VirtIO drivers correctly use `virt_to_phys()`. DMA reads/writes to wrong physical addresses.
 **Linux**: Uses `dma_map_single()`.
@@ -642,10 +642,15 @@
 **Description**: Read-modify-write not atomic. Other harts could modify same word concurrently on multi-hart systems.
 **Linux**: Uses `raw_spin_lock_irqsave()` or atomic `__set_bit()`.
 
-### [H] [BUG] F14-07: VirtIO Net MMIO register offsets all wrong
+### [H] [BUG] F14-07: VirtIO Net MMIO register offsets all wrong **[FIXED]**
 **File**: `drivers/net/virtio_net.rs:149`
 **Description**: STATUS at 0x50 instead of 0x70. Driver writes status values to wrong registers.
 **Linux**: `include/uapi/linux/virtio_mmio.h`.
+
+### [H] [BUG] F14-07b: VirtIO Block sync completion race — wrong request detected under concurrent I/O **[FIXED]**
+**File**: `drivers/virtio/mod.rs:459-482`, `drivers/virtio/queue.rs`
+**Description**: Sync `read_block`/`write_block` used a global `mmio_expected_used_idx` counter for completion detection. When multiple I/O requests were in flight on different CPUs, one request's completion could falsely satisfy another's wait condition, returning stale data. This caused probabilistic `ls` output containing ELF binary garbage. Fixed by using per-descriptor completion matching via `wait_for_desc_completion()` which scans the VirtIO used ring for the specific descriptor ID. Also keeps the global counter increment to avoid async pending-slot collisions.
+**Linux**: Per-request completion tracking via individual `virtqueue` callbacks or interrupt context.
 
 ### [M] [BUG] F14-08: EVIOCGPROP ioctl value conflicts with EVIOCGID
 **File**: `drivers/input/evdev.rs:31`
