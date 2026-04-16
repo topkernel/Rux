@@ -280,7 +280,8 @@ pub fn jbd2_journal_commit_transaction(
 
     // Phase 4: Update journal state
     journal.j_head.store(current_journal_block, core::sync::atomic::Ordering::SeqCst);
-    journal.j_free.fetch_sub(total_journal_blocks as u64, core::sync::atomic::Ordering::SeqCst);
+    // Note: j_free was already decremented during handle reservation (add_reserved_credits),
+    // do NOT decrement again here or journal appears full prematurely.
     journal.j_commit_sequence.store(tid, core::sync::atomic::Ordering::SeqCst);
     journal.j_tail_sequence.store(tid, core::sync::atomic::Ordering::SeqCst);
 

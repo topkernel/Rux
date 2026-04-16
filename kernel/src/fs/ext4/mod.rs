@@ -1442,16 +1442,20 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                             header.eh_entries as usize
                         );
                         for ext in entries {
-                            let ext_start = ext.start_block();
+                            let logical_start = ext.ee_block as u64;
+                            let phys_start = ext.start_block();
                             let ext_len = ext.length() as u64;
-                            // Free blocks that are entirely beyond new_blocks
-                            if ext_start >= new_blocks {
+                            // Free blocks that are entirely beyond new_blocks.
+                            // Use logical block numbers (ee_block) for comparison
+                            // against new_blocks (derived from file size), but
+                            // free physical blocks (start_block) on the device.
+                            if logical_start >= new_blocks {
                                 for j in 0..ext_len {
-                                    let _ = allocator.free_block(ext_start + j);
+                                    let _ = allocator.free_block(phys_start + j);
                                 }
-                            } else if ext_start + ext_len > new_blocks {
-                                for j in new_blocks - ext_start..ext_len {
-                                    let _ = allocator.free_block(ext_start + j);
+                            } else if logical_start + ext_len > new_blocks {
+                                for j in new_blocks - logical_start..ext_len {
+                                    let _ = allocator.free_block(phys_start + j);
                                 }
                             }
                         }

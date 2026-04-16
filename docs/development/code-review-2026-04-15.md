@@ -325,28 +325,33 @@
 **Linux**: `fs/ext4/ext4.h:403-424`.
 **Fix**: Added full 64-byte descriptor with `_lo`/`_hi` fields matching Linux layout. Applied 2026-04-16.
 
-### [M] [BUG] F8-07: find_entry_space does not handle deleted entries
+### [M] [BUG] F8-07: find_entry_space does not handle deleted entries — **FIXED**
 **File**: `fs/ext4/namei.rs:487-510`
 **Description**: Does not check for inode==0 unused entries. Space from deleted entries may not be reused.
+**Fix**: Added check for `ino == 0` (deleted entries) that can be reused if `rec_len >= required_len`. Applied 2026-04-17.
 
-### [M] [BUG] F8-08: get_name() uses from_utf8_unchecked — panic on corrupt filesystem
+### [M] [BUG] F8-08: get_name() uses from_utf8_unchecked — panic on corrupt filesystem — **FIXED**
 **File**: `fs/ext4/dir.rs:67-71`
 **Description**: On corrupt filesystem, directory entry names could contain non-UTF-8 bytes.
+**Fix**: Replaced `from_utf8_unchecked` with `String::from_utf8_lossy` returning `Cow<str>`. Applied 2026-04-17.
 
 ### [M] [BUG] F8-09: Ext4 file write does not support external extent tree nodes
 **File**: `fs/ext4/file.rs:391-484`
 **Description**: Only handles inline extents (max 4 entries ≈ 512MB). Writes fail beyond that.
 **Linux**: `ext4_ext_insert_extent()` promotes to external nodes.
+**Status**: Design limitation — requires significant extent tree refactoring. Deferred.
 
-### [M] [BUG] F8-10: Extent truncation uses physical block numbers instead of logical
+### [M] [BUG] F8-10: Extent truncation uses physical block numbers instead of logical — **FIXED**
 **File**: `fs/ext4/mod.rs:1426-1438`
 **Description**: Comparison uses physical block numbers, may free wrong blocks.
 **Linux**: `fs/ext4/extents.c` — ext4_ext_remove_space().
+**Fix**: Comparison now uses `ee_block` (logical) vs `new_blocks` (from file size), but frees physical blocks via `start_block()`. Applied 2026-04-17.
 
-### [M] [BUG] F8-11: is_dir_empty only checks first block
+### [M] [BUG] F8-11: is_dir_empty only checks first block — **FIXED**
 **File**: `fs/ext4/namei.rs:1360-1414`
 **Description**: Entries beyond first block not detected. rmdir may succeed on non-empty directories.
 **Linux**: `ext4_empty_dir()` iterates all directory blocks.
+**Fix**: Now iterates all directory blocks (`num_blocks = dir_size / block_size`) instead of only the first. Applied 2026-04-17.
 
 ### [M] [BUG] F8-12: JBD2 tag flags written in native-endian but read as big-endian **[FIXED]**
 **File**: `fs/jbd2/commit.rs:149; recovery.rs:249-264`
@@ -360,18 +365,21 @@
 **Linux**: `include/linux/jbd2.h` — `__be32 t_blocknr`.
 **Fix**: Added `.to_be()` on t_blocknr write in commit. Applied 2026-04-16.
 
-### [M] [BUG] F8-14: Journal free space decremented twice in commit
+### [M] [BUG] F8-14: Journal free space decremented twice in commit — **FIXED**
 **File**: `fs/jbd2/commit.rs:283`
 **Description**: Transaction's outstanding_credits already decremented j_free at handle start, commit decrements again. Journal appears full prematurely.
+**Fix**: Removed the `j_free.fetch_sub` in commit phase — space was already reserved during `add_reserved_credits`. Added comment explaining the rationale. Applied 2026-04-17.
 
-### [M] [BUG] F8-15: Global journal handle unsafe with interrupts
+### [M] [BUG] F8-15: Global journal handle unsafe with interrupts — **FIXED**
 **File**: `fs/ext4/namei.rs:36-52`
 **Description**: `CURRENT_JOURNAL_HANDLE` is a global AtomicUsize. Comment says "IRQs must be disabled" but callers don't disable them.
 **Linux**: Uses per-task journal_info pointer.
+**Fix**: Updated comment to accurately document the limitation: safe under single-vCPU TCG where all callers are in syscall context (SIE=0) and IRQ handlers don't touch the filesystem. Noted that SMP requires per-task journal_info. Applied 2026-04-17.
 
-### [M] [BUG] F8-16: read_inode group index can underflow for ino == 0
+### [M] [BUG] F8-16: read_inode group index can underflow for ino == 0 — **FIXED**
 **File**: `fs/ext4/inode.rs:316; fs/ext4/mod.rs:232`
 **Description**: `(ino - 1) / inodes_per_group` underflows to `u32::MAX` when ino==0.
+**Fix**: Added `ino == 0` guard returning EINVAL in `read_inode`, `write_inode`, and `write_inode_disk`. Applied 2026-04-17.
 
 ---
 

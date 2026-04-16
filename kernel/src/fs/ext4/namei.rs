@@ -28,11 +28,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Global slot for the current journal handle.
 /// When a journal transaction is active, this stores a pointer to the Handle.
-/// Single-core: no synchronization needed beyond the atomic itself.
 ///
-/// SAFETY: Interrupts must be disabled between set_current_handle and
-/// clear_current_handle. All callers already disable IRQs before setting
-/// the handle and re-enable after clearing.
+/// LIMITATION: This is a global static, not per-task. Safe under current
+/// single-vCPU TCG execution (no true concurrency), and all callers are
+/// in syscall context (SIE=0) where IRQ handlers never touch the filesystem.
+/// For SMP, this must be moved to a per-task field (Linux uses
+/// task_struct::journal_info).
 static CURRENT_JOURNAL_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
 /// Set the current journal handle for this thread of execution
@@ -484,6 +485,9 @@ pub fn ext4_add_entry(
 }
 
 /// Find space for new entry in directory block
+///
+/// Checks both free space within existing entries and deleted entries
+/// (inode==0) that can be reused.
 fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Option<usize> {
     let mut offset = 0;
     let required_len = ((8 + name_len + 3) & !3) as u16; // Align to 4 bytes
@@ -495,12 +499,27 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
             break;
         }
 
-        let name_len_entry = block_data[offset + 6] as usize;
-        let used_len = ((8 + name_len_entry + 3) & !3) as u16;
+        // Check if this is a deleted/unused entry (inode == 0)
+        let ino = u32::from_le_bytes([
+            block_data[offset],
+            block_data[offset + 1],
+            block_data[offset + 2],
+            block_data[offset + 3],
+        ]);
 
-        // Check if there's space in this entry
-        if rec_len >= used_len + required_len {
-            return Some(offset);
+        if ino == 0 {
+            // Deleted entry — can reuse if large enough
+            if rec_len >= required_len {
+                return Some(offset);
+            }
+        } else {
+            let name_len_entry = block_data[offset + 6] as usize;
+            let used_len = ((8 + name_len_entry + 3) & !3) as u16;
+
+            // Check if there's space in this entry
+            if rec_len >= used_len + required_len {
+                return Some(offset);
+            }
         }
 
         offset += rec_len as usize;
@@ -1365,49 +1384,52 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
         return Ok(true);
     }
 
-    // Read first block
-    let block_nr = get_dir_block_nr(fs, inode, 0)?;
-    if block_nr == 0 {
-        return Ok(true);
-    }
+    let num_blocks = (dir_size + block_size - 1) / block_size;
 
-    let block_data = unsafe {
-        read_block_to_vec(fs.device, block_nr, block_size)?
-    };
-
-    // Check entries - skip "." and ".."
-    let mut offset = 0;
-    let mut entry_count = 0;
-
-    while offset + 8 <= block_size {
-        let ino = u32::from_le_bytes([
-            block_data[offset],
-            block_data[offset + 1],
-            block_data[offset + 2],
-            block_data[offset + 3],
-        ]);
-
-        if ino == 0 {
-            break;
+    // Iterate ALL directory blocks, not just the first
+    for block_idx in 0..num_blocks {
+        let block_nr = get_dir_block_nr(fs, inode, block_idx as u64)?;
+        if block_nr == 0 {
+            continue;
         }
 
-        let rec_len = u16::from_le_bytes([
-            block_data[offset + 4],
-            block_data[offset + 5],
-        ]);
+        let block_data = unsafe {
+            read_block_to_vec(fs.device, block_nr, block_size)?
+        };
 
-        if rec_len == 0 {
-            break;
+        let mut offset = 0;
+        let mut entry_count = 0;
+
+        while offset + 8 <= block_size {
+            let ino = u32::from_le_bytes([
+                block_data[offset],
+                block_data[offset + 1],
+                block_data[offset + 2],
+                block_data[offset + 3],
+            ]);
+
+            if ino == 0 {
+                break;
+            }
+
+            let rec_len = u16::from_le_bytes([
+                block_data[offset + 4],
+                block_data[offset + 5],
+            ]);
+
+            if rec_len == 0 {
+                break;
+            }
+
+            entry_count += 1;
+
+            // More than 2 entries means not empty (".", "..", and others)
+            if entry_count > 2 {
+                return Ok(false);
+            }
+
+            offset += rec_len as usize;
         }
-
-        entry_count += 1;
-
-        // More than 2 entries means not empty (".", "..", and others)
-        if entry_count > 2 {
-            return Ok(false);
-        }
-
-        offset += rec_len as usize;
     }
 
     Ok(true)

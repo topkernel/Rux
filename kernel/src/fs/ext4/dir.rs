@@ -64,11 +64,12 @@ impl Ext4DirEntry {
     }
 
     /// Get filename
-    pub fn get_name(&self) -> &str {
-        // SAFETY: name is populated from on-disk dir entry; name_len is verified during from_bytes
-        unsafe {
-            core::str::from_utf8_unchecked(&self.name[..self.name_len as usize])
-        }
+    ///
+    /// Returns the name as a string slice. On-disk names from corrupt
+    /// filesystems may contain non-UTF-8 bytes; in that case the invalid
+    /// bytes are replaced with the Unicode replacement character.
+    pub fn get_name(&self) -> alloc::borrow::Cow<'_, str> {
+        alloc::string::String::from_utf8_lossy(&self.name[..self.name_len as usize])
     }
 
     /// Check if directory

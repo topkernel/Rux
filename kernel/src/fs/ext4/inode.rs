@@ -308,6 +308,11 @@ pub fn read_inode(
 ) -> Result<Ext4InodeOnDisk, i32> {
     use crate::fs::bio;
 
+    // ino == 0 is invalid (would underflow in group/index calculation)
+    if ino == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
     // Calculate block group and inode table index
     let group = (ino - 1) / fs.inodes_per_group;
     let index = (ino - 1) % fs.inodes_per_group;
@@ -388,6 +393,10 @@ pub fn write_inode(
     inode: &Ext4Inode,
 ) -> Result<(), i32> {
     use crate::fs::bio;
+
+    if ino == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
 
     // Calculate block group and inode table index
     let group = (ino - 1) / fs.inodes_per_group;
@@ -485,6 +494,10 @@ pub fn write_inode_disk(
     inode: &Ext4InodeOnDisk,
 ) -> Result<(), i32> {
     use crate::fs::bio;
+
+    if ino == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
 
     // Calculate block group and inode table index
     let group = (ino - 1) / fs.inodes_per_group;
