@@ -275,17 +275,20 @@
 **Linux**: `include/uapi/linux/kdev_t.h`: `MKDEV(major, minor) = ((major) << 20) | (minor)`.
 **Fix**: Changed to `MKDEV = (major << 20) | minor` with 12-bit major + 20-bit minor. Applied 2026-04-16.
 
-### [M] [BUG] F7-02: Devfs inode uses bare Arc pointer — potential use-after-free
+### [M] [BUG] F7-02: Devfs inode uses bare Arc pointer — potential use-after-free — **FIXED**
 **File**: `fs/devfs/mod.rs:421`
 **Description**: `inode.private_data` stores raw pointer from `Arc::as_ptr()`. If DevfsEntry is dropped, pointer dangles.
+**Fix**: Changed to `Arc::clone(&child).into_raw()` which properly increments the refcount, keeping the DevfsEntry alive independently of the BTreeMap entry. Applied 2026-04-17.
 
-### [M] [BUG] F7-03: Pipe buffer wrap-around handling incorrect
+### [M] [BUG] F7-03: Pipe buffer wrap-around handling incorrect — **FIXED**
 **File**: `fs/pipe.rs`
 **Description**: When write position nears buffer end, ring handling is incorrect.
+**Fix**: `read()` now calculates total available bytes across wrap-around (`size - read_pos + write_pos`) instead of only the first segment. Write was already correct (modulo indexing). Applied 2026-04-17.
 
-### [M] [BUG] F7-04: Block cache TOCTOU initialization race
+### [M] [BUG] F7-04: Block cache TOCTOU initialization race — **FIXED**
 **File**: `fs/buffer.rs`
 **Description**: Check-then-initialize of block cache without lock protection can cause duplicate initialization.
+**Fix**: Replaced CAS-based init with double-checked locking using a Spinlock. Ensures `BLOCK_CACHE` write is visible before `CACHE_INIT` is set. Applied 2026-04-17.
 
 ---
 

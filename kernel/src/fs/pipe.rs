@@ -51,7 +51,9 @@ impl PipeBuffer {
         }
     }
 
-    /// Read data
+    /// Read data from ring buffer
+    ///
+    /// Handles wrap-around: data may span [read_pos..size) and [0..write_pos).
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
@@ -60,13 +62,13 @@ impl PipeBuffer {
             return 0; // Buffer empty
         }
 
-        let available = if write_pos > read_pos {
+        let total_available = if write_pos > read_pos {
             write_pos - read_pos
         } else {
-            self.size - read_pos
+            self.size - read_pos + write_pos
         };
 
-        let to_read = core::cmp::min(available, buf.len());
+        let to_read = core::cmp::min(total_available, buf.len());
 
         for i in 0..to_read {
             buf[i] = self.data[(read_pos + i) % self.size];
@@ -76,12 +78,14 @@ impl PipeBuffer {
         to_read
     }
 
-    /// Write data
+    /// Write data to ring buffer
+    ///
+    /// Handles wrap-around: write may span [write_pos..size) and [0..gap).
     pub fn write(&mut self, buf: &[u8]) -> usize {
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
 
-        // Calculate available space
+        // Calculate available space (keep one slot empty to distinguish full from empty)
         let available = if write_pos >= read_pos {
             self.size - (write_pos - read_pos) - 1
         } else {

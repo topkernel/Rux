@@ -418,7 +418,11 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
     let ino = devfs_ino_hash(name_str);
     let mut inode = Inode::new(ino, mode);
     inode.ops = Some(&DEVFS_INODE_OPS);
-    inode.private_data = Some(Arc::as_ptr(&child) as *mut u8);
+    // Clone the Arc and convert to raw pointer to keep the DevfsEntry alive
+    // independently of the BTreeMap entry. The refcount is incremented by
+    // clone() and preserved by into_raw() (which doesn't decrement).
+    let child_arc = Arc::clone(&child);
+    inode.private_data = Some(Arc::into_raw(child_arc) as *mut u8);
     Ok(alloc::sync::Arc::new(inode))
 }
 

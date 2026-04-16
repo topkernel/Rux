@@ -649,30 +649,24 @@ use core::sync::atomic::AtomicBool;
 
 static CACHE_INIT: AtomicBool = AtomicBool::new(false);
 static mut BLOCK_CACHE: Option<BlockCache> = None;
+static CACHE_INIT_LOCK: Spinlock<()> = Spinlock::new(());
 
 fn get_block_cache() -> &'static BlockCache {
+    // Double-checked locking: fast path checks without lock,
+    // slow path acquires lock then re-checks before initializing.
     if !CACHE_INIT.load(Ordering::Acquire) {
-        // Create cache:
-        // - 64 hash buckets
-        // - 1024 max entries (4MB for 4KB blocks)
-        // - 4KB block size
-        let cache = BlockCache::new(64, 1024, 4096);
-        if CACHE_INIT.compare_exchange(
-            false,
-            true,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ).is_ok() {
-            // SAFETY: we won the CAS, so no other CPU can write BLOCK_CACHE concurrently.
+        let _guard = CACHE_INIT_LOCK.lock();
+        if !CACHE_INIT.load(Ordering::Acquire) {
+            let cache = BlockCache::new(64, 1024, 4096);
+            // SAFETY: we hold the lock and CACHE_INIT is false, so no other
+            // CPU can access BLOCK_CACHE concurrently.
             unsafe { BLOCK_CACHE = Some(cache); }
-        }
-        // CAS loser: spin until winner finishes writing BLOCK_CACHE
-        while !CACHE_INIT.load(Ordering::Acquire) {
-            core::hint::spin_loop();
+            // Release ordering ensures BLOCK_CACHE write is visible before
+            // CACHE_INIT becomes true.
+            CACHE_INIT.store(true, Ordering::Release);
         }
     }
-    // SAFETY: CACHE_INIT is true, and the winner stored BLOCK_CACHE before setting CACHE_INIT.
-    // The Option<BlockCache> is never modified after initialization.
+    // SAFETY: CACHE_INIT is true, BLOCK_CACHE was written before the store.
     unsafe { BLOCK_CACHE.as_ref().unwrap_unchecked() }
 }
 
