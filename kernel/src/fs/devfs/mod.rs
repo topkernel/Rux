@@ -436,7 +436,7 @@ unsafe fn devfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     stat.st_nlink = 1;
     stat.st_uid = 0;
     stat.st_gid = 0;
-    stat.st_rdev = ((entry.devno.major as u64) << 32) | (entry.devno.minor as u64);
+    stat.st_rdev = entry.devno.to_u64();
     stat.st_size = 0;
     stat.st_blocks = 0;
     stat.st_blksize = 4096;

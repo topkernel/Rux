@@ -170,9 +170,9 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         118 => sched::sys_sched_setparam(args),// sched_setparam
         119 => sched::sys_sched_setscheduler(args), // sched_setscheduler
         120 => sched::sys_sched_getscheduler(args), // sched_getscheduler
-        121 => sched::sys_sched_getaffinity(args), // sched_getaffinity
-        122 => sched::sys_sched_getparam(args),// sched_getparam
-        123 => sched::sys_sched_setaffinity(args), // sched_setaffinity
+        121 => sched::sys_sched_getparam(args),    // sched_getparam
+        122 => sched::sys_sched_setaffinity(args), // sched_setaffinity
+        123 => sched::sys_sched_getaffinity(args), // sched_getaffinity
         124 => sched::sys_sched_yield(args),   // sched_yield
         125 => sched::sys_sched_get_priority_max(args), // sched_get_priority_max
         126 => sched::sys_sched_get_priority_min(args), // sched_get_priority_min

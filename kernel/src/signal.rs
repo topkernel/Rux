@@ -528,15 +528,22 @@ pub mod si_code {
 
 /// RISC-V sigcontext structure
 ///
+/// Layout matches `struct sigcontext` from `arch/riscv/include/uapi/asm/sigcontext.h`.
+/// The sc_regs field maps to `struct user_regs_struct` (32 u64 values):
+///   [0]=pc, [1]=ra, [2]=sp, [3]=gp, [4]=tp, [5]=t0, ..., [31]=t6
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone)]
 pub struct SigContext {
-    /// General-purpose registers x1-x31 (ra, sp, gp, tp, t0-t6, s0-s11, a0-a7)
-    pub regs: [u64; 31],
-    /// Program counter (sepc)
-    pub pc: u64,
-    /// sstatus CSR
-    pub status: u64,
+    /// General-purpose registers: [pc, ra, sp, gp, tp, t0-t6, s0-s11, a0-a7] (32 entries)
+    pub sc_regs: [u64; 32],
+    /// sstatus CSR (kernel-internal, not part of Linux UAPI)
+    pub sc_status: u64,
+}
+
+impl Default for SigContext {
+    fn default() -> Self {
+        Self { sc_regs: [0u64; 32], sc_status: 0 }
+    }
 }
 
 impl SigContext {
@@ -547,50 +554,51 @@ impl SigContext {
 
 /// User context - register state saved during signal handling
 ///
-/// RISC-V specific version
+/// Layout matches `struct ucontext` from `arch/riscv/include/uapi/asm/ucontext.h`:
+///   uc_flags, uc_link, uc_stack, uc_sigmask, __unused, uc_mcontext
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct UContext {
-    /// Signal mask
-    pub uc_sigmask: u64,
-    /// Reserved field
+    /// Flags
     pub uc_flags: u64,
     /// Link to next ucontext (for swapcontext)
     pub uc_link: u64,
-    /// Signal stack
+    /// Signal stack (stack_t layout: ss_sp, ss_flags, ss_size)
     pub uc_stack: SignalStack,
+    /// Signal mask (sigset_t = 1 × u64 on RV64 with 64 signals)
+    pub uc_sigmask: u64,
+    /// Padding: 1024/8 - sizeof(sigset_t) = 128 - 8 = 120 bytes
+    __unused: [u8; 120],
     /// Signal context (RISC-V registers)
     pub uc_mcontext: SigContext,
-    /// Reserved space (alignment and future expansion)
-    pub uc_reserved: [u64; 4],
 }
 
 impl UContext {
     /// Create new user context
     pub fn new() -> Self {
         Self {
-            uc_sigmask: 0,
             uc_flags: 0,
             uc_link: 0,
             uc_stack: SignalStack::new(),
+            uc_sigmask: 0,
+            __unused: [0u8; 120],
             uc_mcontext: SigContext::new(),
-            uc_reserved: [0; 4],
         }
     }
 }
 
-/// Signal stack - alternate signal handling stack
+/// Signal stack (stack_t / struct sigaltstack)
 ///
-/// Used for sigaltstack syscall
+/// Layout matches Linux: ss_sp, ss_flags, ss_size
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SignalStack {
     /// Stack start address
     pub ss_sp: u64,
+    /// Stack flags
+    pub ss_flags: i32,
     /// Stack size
     pub ss_size: u64,
-    /// Stack flags
-    pub ss_flags: u32,
 }
 
 impl SignalStack {
@@ -598,28 +606,28 @@ impl SignalStack {
     pub fn new() -> Self {
         Self {
             ss_sp: 0,
-            ss_size: 0,
             ss_flags: 0,
+            ss_size: 0,
         }
     }
 
     /// Check if disabled
     pub fn is_disabled(&self) -> bool {
-        (self.ss_flags & crate::signal::ss_flags::SS_DISABLE) != 0
+        (self.ss_flags as u32 & crate::signal::ss_flags::SS_DISABLE) != 0
     }
 
     /// Check if on stack
     pub fn is_on_stack(&self) -> bool {
-        (self.ss_flags & crate::signal::ss_flags::SS_ONSTACK) != 0
+        (self.ss_flags as u32 & crate::signal::ss_flags::SS_ONSTACK) != 0
     }
 }
 
 /// Signal stack flags
 pub mod ss_flags {
     /// Disable signal stack
-    pub const SS_DISABLE: u32 = 0x00000001;
-    /// Signal handler is using this stack
-    pub const SS_ONSTACK: u32 = 0x00000002;
+    pub const SS_ONSTACK: u32 = 0x00000001;
+    /// Disable signal stack
+    pub const SS_DISABLE: u32 = 0x00000002;
     /// Auto-disable flag
     pub const SS_AUTODISABLE: u32 = 0x00000004;
 }
@@ -814,44 +822,44 @@ unsafe fn setup_frame(
     };
 
     // Save current PtRegs to signal frame (for sigreturn restore)
-    // RISC-V SigContext saves x1-x31 and pc
-    // regs[0] = ra (x1), regs[1] = sp (x2), ... regs[30] = t6 (x31)
-
-    // Save registers from PtRegs to sigcontext
-    frame.uc.uc_mcontext.regs[0] = regs.ra;   // x1 (ra)
-    frame.uc.uc_mcontext.regs[1] = regs.sp;   // x2 (sp)
-    frame.uc.uc_mcontext.regs[2] = regs.gp;   // x3 (gp)
-    frame.uc.uc_mcontext.regs[3] = regs.tp;   // x4 (tp)
-    frame.uc.uc_mcontext.regs[4] = regs.t0;   // x5 (t0)
-    frame.uc.uc_mcontext.regs[5] = regs.t1;   // x6 (t1)
-    frame.uc.uc_mcontext.regs[6] = regs.t2;   // x7 (t2)
-    frame.uc.uc_mcontext.regs[7] = regs.s0;   // x8 (s0/fp)
-    frame.uc.uc_mcontext.regs[8] = regs.s1;   // x9 (s1)
-    frame.uc.uc_mcontext.regs[9] = regs.a0;   // x10 (a0)
-    frame.uc.uc_mcontext.regs[10] = regs.a1;  // x11 (a1)
-    frame.uc.uc_mcontext.regs[11] = regs.a2;  // x12 (a2)
-    frame.uc.uc_mcontext.regs[12] = regs.a3;  // x13 (a3)
-    frame.uc.uc_mcontext.regs[13] = regs.a4;  // x14 (a4)
-    frame.uc.uc_mcontext.regs[14] = regs.a5;  // x15 (a5)
-    frame.uc.uc_mcontext.regs[15] = regs.a6;  // x16 (a6)
-    frame.uc.uc_mcontext.regs[16] = regs.a7;  // x17 (a7)
-    frame.uc.uc_mcontext.regs[17] = regs.s2;  // x18 (s2)
-    frame.uc.uc_mcontext.regs[18] = regs.s3;  // x19 (s3)
-    frame.uc.uc_mcontext.regs[19] = regs.s4;  // x20 (s4)
-    frame.uc.uc_mcontext.regs[20] = regs.s5;  // x21 (s5)
-    frame.uc.uc_mcontext.regs[21] = regs.s6;  // x22 (s6)
-    frame.uc.uc_mcontext.regs[22] = regs.s7;  // x23 (s7)
-    frame.uc.uc_mcontext.regs[23] = regs.s8;  // x24 (s8)
-    frame.uc.uc_mcontext.regs[24] = regs.s9;  // x25 (s9)
-    frame.uc.uc_mcontext.regs[25] = regs.s10; // x26 (s10)
-    frame.uc.uc_mcontext.regs[26] = regs.s11; // x27 (s11)
-    frame.uc.uc_mcontext.regs[27] = regs.t3;  // x28 (t3)
-    frame.uc.uc_mcontext.regs[28] = regs.t4;  // x29 (t4)
-    frame.uc.uc_mcontext.regs[29] = regs.t5;  // x30 (t5)
-    frame.uc.uc_mcontext.regs[30] = regs.t6;  // x31 (t6)
+    // sc_regs layout matches Linux user_regs_struct:
+    //   [0]=pc, [1]=ra(x1), [2]=sp(x2), ..., [31]=t6(x31)
 
     // Save PC
-    frame.uc.uc_mcontext.pc = regs.epc;
+    frame.uc.uc_mcontext.sc_regs[0] = regs.epc;
+
+    // Save registers from PtRegs to sigcontext (x1-x31 → sc_regs[1..32])
+    frame.uc.uc_mcontext.sc_regs[1] = regs.ra;   // x1 (ra)
+    frame.uc.uc_mcontext.sc_regs[2] = regs.sp;   // x2 (sp)
+    frame.uc.uc_mcontext.sc_regs[3] = regs.gp;   // x3 (gp)
+    frame.uc.uc_mcontext.sc_regs[4] = regs.tp;   // x4 (tp)
+    frame.uc.uc_mcontext.sc_regs[5] = regs.t0;   // x5 (t0)
+    frame.uc.uc_mcontext.sc_regs[6] = regs.t1;   // x6 (t1)
+    frame.uc.uc_mcontext.sc_regs[7] = regs.t2;   // x7 (t2)
+    frame.uc.uc_mcontext.sc_regs[8] = regs.s0;   // x8 (s0/fp)
+    frame.uc.uc_mcontext.sc_regs[9] = regs.s1;   // x9 (s1)
+    frame.uc.uc_mcontext.sc_regs[10] = regs.a0;  // x10 (a0)
+    frame.uc.uc_mcontext.sc_regs[11] = regs.a1;  // x11 (a1)
+    frame.uc.uc_mcontext.sc_regs[12] = regs.a2;  // x12 (a2)
+    frame.uc.uc_mcontext.sc_regs[13] = regs.a3;  // x13 (a3)
+    frame.uc.uc_mcontext.sc_regs[14] = regs.a4;  // x14 (a4)
+    frame.uc.uc_mcontext.sc_regs[15] = regs.a5;  // x15 (a5)
+    frame.uc.uc_mcontext.sc_regs[16] = regs.a6;  // x16 (a6)
+    frame.uc.uc_mcontext.sc_regs[17] = regs.a7;  // x17 (a7)
+    frame.uc.uc_mcontext.sc_regs[18] = regs.s2;  // x18 (s2)
+    frame.uc.uc_mcontext.sc_regs[19] = regs.s3;  // x19 (s3)
+    frame.uc.uc_mcontext.sc_regs[20] = regs.s4;  // x20 (s4)
+    frame.uc.uc_mcontext.sc_regs[21] = regs.s5;  // x21 (s5)
+    frame.uc.uc_mcontext.sc_regs[22] = regs.s6;  // x22 (s6)
+    frame.uc.uc_mcontext.sc_regs[23] = regs.s7;  // x23 (s7)
+    frame.uc.uc_mcontext.sc_regs[24] = regs.s8;  // x24 (s8)
+    frame.uc.uc_mcontext.sc_regs[25] = regs.s9;  // x25 (s9)
+    frame.uc.uc_mcontext.sc_regs[26] = regs.s10; // x26 (s10)
+    frame.uc.uc_mcontext.sc_regs[27] = regs.s11; // x27 (s11)
+    frame.uc.uc_mcontext.sc_regs[28] = regs.t3;  // x28 (t3)
+    frame.uc.uc_mcontext.sc_regs[29] = regs.t4;  // x29 (t4)
+    frame.uc.uc_mcontext.sc_regs[30] = regs.t5;  // x30 (t5)
+    frame.uc.uc_mcontext.sc_regs[31] = regs.t6;  // x31 (t6)
 
     // SA_RESTART / EINTR handling:
     // If SA_RESTART is set and we are returning from a syscall (a7 holds
@@ -860,13 +868,13 @@ unsafe fn setup_frame(
     // If SA_RESTART is not set, set saved a0 to -EINTR.
     let is_syscall = regs.a7 > 0 && regs.a7 < 300;
     if action.sa_flags.bits() & SigFlags::SA_RESTART != 0 && is_syscall {
-        frame.uc.uc_mcontext.pc = regs.epc - 4;
+        frame.uc.uc_mcontext.sc_regs[0] = regs.epc - 4;
     } else {
-        frame.uc.uc_mcontext.regs[9] = (-(crate::errno::constants::EINTR as i64)) as u64;
+        frame.uc.uc_mcontext.sc_regs[10] = (-(crate::errno::constants::EINTR as i64)) as u64;
     }
 
     // Save sstatus
-    frame.uc.uc_mcontext.status = regs.status;
+    frame.uc.uc_mcontext.sc_status = regs.status;
 
     // Save signal mask
     // If SA_NODEFER is not set, block this signal during handler execution.
@@ -951,46 +959,46 @@ pub unsafe fn restore_sigcontext(
     let regs = &mut *regs;
 
     // Restore registers from signal frame's uc_mcontext (RISC-V)
-    // SigContext.regs saves x1-x31
+    // sc_regs layout: [0]=pc, [1]=ra(x1), [2]=sp(x2), ..., [31]=t6(x31)
 
-    // Restore all general-purpose registers
-    regs.ra = frame.uc.uc_mcontext.regs[0];   // x1 (ra)
-    regs.sp = frame.uc.uc_mcontext.regs[1];   // x2 (sp)
-    regs.gp = frame.uc.uc_mcontext.regs[2];   // x3 (gp)
-    regs.tp = frame.uc.uc_mcontext.regs[3];   // x4 (tp)
-    regs.t0 = frame.uc.uc_mcontext.regs[4];   // x5 (t0)
-    regs.t1 = frame.uc.uc_mcontext.regs[5];   // x6 (t1)
-    regs.t2 = frame.uc.uc_mcontext.regs[6];   // x7 (t2)
-    regs.s0 = frame.uc.uc_mcontext.regs[7];   // x8 (s0/fp)
-    regs.s1 = frame.uc.uc_mcontext.regs[8];   // x9 (s1)
-    regs.a0 = frame.uc.uc_mcontext.regs[9];   // x10 (a0)
-    regs.a1 = frame.uc.uc_mcontext.regs[10];  // x11 (a1)
-    regs.a2 = frame.uc.uc_mcontext.regs[11];  // x12 (a2)
-    regs.a3 = frame.uc.uc_mcontext.regs[12];  // x13 (a3)
-    regs.a4 = frame.uc.uc_mcontext.regs[13];  // x14 (a4)
-    regs.a5 = frame.uc.uc_mcontext.regs[14];  // x15 (a5)
-    regs.a6 = frame.uc.uc_mcontext.regs[15];  // x16 (a6)
-    regs.a7 = frame.uc.uc_mcontext.regs[16];  // x17 (a7)
-    regs.s2 = frame.uc.uc_mcontext.regs[17];  // x18 (s2)
-    regs.s3 = frame.uc.uc_mcontext.regs[18];  // x19 (s3)
-    regs.s4 = frame.uc.uc_mcontext.regs[19];  // x20 (s4)
-    regs.s5 = frame.uc.uc_mcontext.regs[20];  // x21 (s5)
-    regs.s6 = frame.uc.uc_mcontext.regs[21];  // x22 (s6)
-    regs.s7 = frame.uc.uc_mcontext.regs[22];  // x23 (s7)
-    regs.s8 = frame.uc.uc_mcontext.regs[23];  // x24 (s8)
-    regs.s9 = frame.uc.uc_mcontext.regs[24];  // x25 (s9)
-    regs.s10 = frame.uc.uc_mcontext.regs[25]; // x26 (s10)
-    regs.s11 = frame.uc.uc_mcontext.regs[26]; // x27 (s11)
-    regs.t3 = frame.uc.uc_mcontext.regs[27];  // x28 (t3)
-    regs.t4 = frame.uc.uc_mcontext.regs[28];  // x29 (t4)
-    regs.t5 = frame.uc.uc_mcontext.regs[29];  // x30 (t5)
-    regs.t6 = frame.uc.uc_mcontext.regs[30];  // x31 (t6)
+    // Restore PC (program counter)
+    regs.epc = frame.uc.uc_mcontext.sc_regs[0];
 
-    // Restore PC (program counter) - return to position before signal interrupt
-    regs.epc = frame.uc.uc_mcontext.pc;
+    // Restore all general-purpose registers (x1-x31 → sc_regs[1..32])
+    regs.ra = frame.uc.uc_mcontext.sc_regs[1];   // x1 (ra)
+    regs.sp = frame.uc.uc_mcontext.sc_regs[2];   // x2 (sp)
+    regs.gp = frame.uc.uc_mcontext.sc_regs[3];   // x3 (gp)
+    regs.tp = frame.uc.uc_mcontext.sc_regs[4];   // x4 (tp)
+    regs.t0 = frame.uc.uc_mcontext.sc_regs[5];   // x5 (t0)
+    regs.t1 = frame.uc.uc_mcontext.sc_regs[6];   // x6 (t1)
+    regs.t2 = frame.uc.uc_mcontext.sc_regs[7];   // x7 (t2)
+    regs.s0 = frame.uc.uc_mcontext.sc_regs[8];   // x8 (s0/fp)
+    regs.s1 = frame.uc.uc_mcontext.sc_regs[9];   // x9 (s1)
+    regs.a0 = frame.uc.uc_mcontext.sc_regs[10];  // x10 (a0)
+    regs.a1 = frame.uc.uc_mcontext.sc_regs[11];  // x11 (a1)
+    regs.a2 = frame.uc.uc_mcontext.sc_regs[12];  // x12 (a2)
+    regs.a3 = frame.uc.uc_mcontext.sc_regs[13];  // x13 (a3)
+    regs.a4 = frame.uc.uc_mcontext.sc_regs[14];  // x14 (a4)
+    regs.a5 = frame.uc.uc_mcontext.sc_regs[15];  // x15 (a5)
+    regs.a6 = frame.uc.uc_mcontext.sc_regs[16];  // x16 (a6)
+    regs.a7 = frame.uc.uc_mcontext.sc_regs[17];  // x17 (a7)
+    regs.s2 = frame.uc.uc_mcontext.sc_regs[18];  // x18 (s2)
+    regs.s3 = frame.uc.uc_mcontext.sc_regs[19];  // x19 (s3)
+    regs.s4 = frame.uc.uc_mcontext.sc_regs[20];  // x20 (s4)
+    regs.s5 = frame.uc.uc_mcontext.sc_regs[21];  // x21 (s5)
+    regs.s6 = frame.uc.uc_mcontext.sc_regs[22];  // x22 (s6)
+    regs.s7 = frame.uc.uc_mcontext.sc_regs[23];  // x23 (s7)
+    regs.s8 = frame.uc.uc_mcontext.sc_regs[24];  // x24 (s8)
+    regs.s9 = frame.uc.uc_mcontext.sc_regs[25];  // x25 (s9)
+    regs.s10 = frame.uc.uc_mcontext.sc_regs[26]; // x26 (s10)
+    regs.s11 = frame.uc.uc_mcontext.sc_regs[27]; // x27 (s11)
+    regs.t3 = frame.uc.uc_mcontext.sc_regs[28];  // x28 (t3)
+    regs.t4 = frame.uc.uc_mcontext.sc_regs[29];  // x29 (t4)
+    regs.t5 = frame.uc.uc_mcontext.sc_regs[30];  // x30 (t5)
+    regs.t6 = frame.uc.uc_mcontext.sc_regs[31];  // x31 (t6)
 
     // Restore sstatus
-    regs.status = frame.uc.uc_mcontext.status;
+    regs.status = frame.uc.uc_mcontext.sc_status;
 
     // Restore signal mask
     (*task).sigmask = frame.uc.uc_sigmask;
@@ -1013,8 +1021,8 @@ pub mod frame_offsets {
     pub const UCONTEXT_OFFSET: usize = 32 + core::mem::size_of::<super::SigInfo>();
 
     /// uc_mcontext offset in UContext
-    /// uc_sigmask(8) + uc_flags(8) + uc_link(8) + uc_stack(24)
-    pub const MCONTEXT_OFFSET: usize = 8 + 8 + 8 + core::mem::size_of::<super::SignalStack>();
+    /// uc_flags(8) + uc_link(8) + uc_stack(24) + uc_sigmask(8) + __unused(120)
+    pub const MCONTEXT_OFFSET: usize = 8 + 8 + core::mem::size_of::<super::SignalStack>() + 8 + 120;
 }
 
 /// Handle default signal action

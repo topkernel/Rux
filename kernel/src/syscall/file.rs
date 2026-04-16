@@ -142,7 +142,7 @@ pub fn sys_close(args: SyscallArgs) -> u64 {
     unsafe {
         match close_file_fd(fd) {
             Ok(()) => 0,
-            Err(e) => e as u32 as u64,
+            Err(e) => (e as i64) as u64,
         }
     }
 }

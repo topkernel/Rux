@@ -15,23 +15,28 @@ pub struct DevNo {
     pub minor: u32,
 }
 
+/// Number of bits used for minor device number (Linux: MINORBITS = 20)
+const DEV_MINOR_BITS: u32 = 20;
+/// Mask for minor device number
+const DEV_MINOR_MASK: u64 = (1u64 << DEV_MINOR_BITS) - 1;
+
 impl DevNo {
     /// Create new device number
     pub const fn new(major: u32, minor: u32) -> Self {
         Self { major, minor }
     }
 
-    /// Convert from u64
+    /// Convert from u64 (Linux kernel internal dev_t format)
     pub const fn from_u64(v: u64) -> Self {
         Self {
-            major: (v >> 32) as u32,
-            minor: v as u32,
+            major: (v >> DEV_MINOR_BITS) as u32,
+            minor: (v & DEV_MINOR_MASK) as u32,
         }
     }
 
-    /// Convert to u64
+    /// Convert to u64 (Linux kernel internal dev_t format)
     pub const fn to_u64(&self) -> u64 {
-        ((self.major as u64) << 32) | (self.minor as u64)
+        ((self.major as u64) << DEV_MINOR_BITS) | (self.minor as u64 & DEV_MINOR_MASK)
     }
 }
 

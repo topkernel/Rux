@@ -74,20 +74,23 @@
 
 ## Batch 2: Kernel Core (12 files, ~6,340 lines)
 
-### [H] [BUG] F2-01: UContext field order mismatch with Linux RISC-V UAPI
+### [H] [BUG] F2-01: UContext field order mismatch with Linux RISC-V UAPI **[FIXED]**
 **File**: `signal.rs:553`
 **Description**: Field order doesn't match musl expectations. Linux: `uc_flags, uc_link, uc_stack, uc_sigmask, padding, uc_mcontext`. Rux: `uc_sigmask, uc_flags, uc_link, uc_stack, uc_mcontext`. Breaks musl sigreturn.
 **Linux**: Strict UAPI layout in `arch/riscv/include/uapi/asm/ucontext.h`.
+**Fix**: Reordered UContext fields and SignalStack (ss_sp, ss_flags, ss_size) to match Linux UAPI. Applied 2026-04-16.
 
-### [H] [BUG] F2-02: SigContext register array layout incompatible with musl
+### [H] [BUG] F2-02: SigContext register array layout incompatible with musl **[FIXED]**
 **File**: `signal.rs:533`
 **Description**: Linux stores 32 registers as `pc, ra, sp, ...` (32 entries). Rux stores 31 registers (excluding x0) with `pc` in separate field, array starting from `ra`. Incompatible with musl.
 **Linux**: `struct sigcontext` has `gregs[32]` starting from `pc`.
+**Fix**: Changed to `sc_regs: [u64; 32]` with pc at [0], x1-x31 at [1..32]. Updated save/restore code. Applied 2026-04-16.
 
-### [H] [BUG] F2-03: SS_DISABLE/SS_ONSTACK values swapped
+### [H] [BUG] F2-03: SS_DISABLE/SS_ONSTACK values swapped **[FIXED]**
 **File**: `signal.rs:618-624`
 **Description**: Rux: `SS_DISABLE=1, SS_ONSTACK=2`. Linux: `SS_ONSTACK=1, SS_DISABLE=2`. Breaks `sigaltstack()`.
 **Linux**: `include/uapi/asm-generic/signal.h`.
+**Fix**: Swapped to `SS_ONSTACK=1, SS_DISABLE=2`. Applied 2026-04-16.
 
 ### [H] [BUG] F2-04: Timer lock order inversion deadlock
 **File**: `timer.rs:87-94 vs 147-151`
@@ -235,10 +238,11 @@
 
 ## Batch 7: Filesystem Core (22 files, ~7,500 lines)
 
-### [H] [BUG] F7-01: DevNo encoding uses (major<<32)|minor instead of Linux's (major<<20)|minor
+### [H] [BUG] F7-01: DevNo encoding uses (major<<32)|minor instead of Linux's (major<<20)|minor **[FIXED]**
 **File**: `fs/dev_t.rs`
 **Description**: Device number encoding incompatible with Linux ABI. Linux uses `(major << 20) | minor` (12-bit major + 20-bit minor), Rux uses `(major << 32) | minor`.
 **Linux**: `include/uapi/linux/kdev_t.h`: `MKDEV(major, minor) = ((major) << 20) | (minor)`.
+**Fix**: Changed to `MKDEV = (major << 20) | minor` with 12-bit major + 20-bit minor. Applied 2026-04-16.
 
 ### [M] [BUG] F7-02: Devfs inode uses bare Arc pointer — potential use-after-free
 **File**: `fs/devfs/mod.rs:421`
@@ -467,29 +471,37 @@
 
 ## Batch 11: Syscalls (11 files, ~12,879 lines)
 
-### [H] [BUG] F11-01: Syscall dispatch NR 121/122/123 mismatched with Linux ABI
+### [H] [BUG] F11-01: Syscall dispatch NR 121/122/123 mismatched with Linux ABI **[FIXED]**
 **File**: `syscall/dispatch.rs:173-175`
 **Description**: 121 maps to sched_getaffinity (should be sched_getparam). All sched affinity queries and sched_getparam calls fail.
 **Linux**: `include/uapi/asm-generic/unistd.h` lines 331-344.
+**Fix**: Corrected mapping: 121=getparam, 122=setaffinity, 123=getaffinity. Applied 2026-04-16.
 
-### [H] [BUG] F11-02: sys_close errno conversion truncates negative error codes
+### [H] [BUG] F11-02: sys_close errno conversion truncates negative error codes **[FIXED]**
 **File**: `syscall/file.rs:145`
 **Description**: `e as u32 as u64` zero-extends instead of sign-extending. Userspace interprets error as success.
+**Fix**: Changed to `(e as i64) as u64` for proper sign extension. Applied 2026-04-16.
 
-### [H] [BUG] F11-03: sys_mmap silently forces PROT_READ|PROT_WRITE for MAP_ANONYMOUS
+### [H] [BUG] F11-03: sys_mmap silently forces PROT_READ|PROT_WRITE for MAP_ANONYMOUS **[FIXED]**
 **File**: `syscall/memory.rs:208-211`
 **Description**: Violates POSIX. PROT_NONE anonymous mappings should be valid.
 **Linux**: `mm/mmap.c` — do_mmap() respects exact prot flags.
+**Fix**: Removed PROT_READ|PROT_WRITE override for MAP_ANONYMOUS. Applied 2026-04-16.
 
-### [H] [BUG] F11-04: sys_mmap error returns are positive errno values
+### [H] [BUG] F11-04: sys_mmap error returns are positive errno values **[FALSE POSITIVE]**
 **File**: `syscall/memory.rs:294-299`
 **Description**: Returns 12 (ENOMEM) instead of -12. Userspace interprets as success.
+**Note**: mmap_error constants are already negative i64, so `as u64` correctly sign-extends. Not a bug.
 
-### [H] [BUG] F11-05: sys_munmap error returns are positive errno values
-**File**: `syscall/memory.rs:471-476`
-**Description**: Same as F11-04.
+### [H] [BUG] F11-05: sys_munmap error returns are positive errno values **[FALSE POSITIVE]**
+**File**: `syscall/memory.rs:294-299`
+**Description**: Returns 12 (ENOMEM) instead of -12. Userspace interprets as success.
+**Note**: mmap_error constants are already negative i64. Not a bug.
 
-### [H] [BUG] F11-06: sys_mmap EINVAL error return is positive
+### [H] [BUG] F11-06: sys_mmap EINVAL error return is positive **[FALSE POSITIVE]**
+**File**: `syscall/memory.rs:157-158`
+**Description**: Returns 22 (EINVAL) instead of -22.
+**Note**: mmap_error::EINVAL is -22i64, so `as u64` produces correct negative return. Not a bug.
 **File**: `syscall/memory.rs:157-158`
 **Description**: Returns 22 (EINVAL) instead of -22.
 
@@ -695,11 +707,11 @@
 ### High (Fix Soon)
 
 **ABI Compatibility (affects userspace compatibility)**:
-3. **F2-01/F2-02**: UContext/SigContext layout incompatible with musl
-4. **F2-03**: SS_DISABLE/SS_ONSTACK values swapped
-5. **F7-01**: DevNo encoding incompatible with Linux ABI
-6. **F11-01**: Syscall numbers 121/122/123 mapped incorrectly
-7. **F11-02~06**: Multiple syscalls return positive errno instead of negative
+3. ~~**F2-01/F2-02**: UContext/SigContext layout incompatible with musl~~ **[FIXED]**
+4. ~~**F2-03**: SS_DISABLE/SS_ONSTACK values swapped~~ **[FIXED]**
+5. ~~**F7-01**: DevNo encoding incompatible with Linux ABI~~ **[FIXED]**
+6. ~~**F11-01**: Syscall numbers 121/122/123 mapped incorrectly~~ **[FIXED]**
+7. **F11-02**: ~~sys_close errno sign extension~~ **[FIXED]** | **F11-03**: ~~mmap PROT override~~ **[FIXED]** | F11-04~06: **[FALSE POSITIVE]**
 
 **Data Integrity (potential data corruption)**:
 8. **F8-01~06**: Ext4 on-disk struct layout mismatches (>4GB file corruption)

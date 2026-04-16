@@ -203,26 +203,18 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
             // Check if address space exists
             match current_task.address_space_mut() {
                 Some(address_space) => {
-                    // For MAP_ANONYMOUS mapping, implicitly add PROT_WRITE
-                    // Because anonymous mapping always needs to be writable (for storing data)
-                    let effective_prot = if map_flags & map::MAP_ANONYMOUS != 0 {
-                        prot_flags | prot::PROT_READ | prot::PROT_WRITE
-                    } else {
-                        prot_flags
-                    };
-
                     // Parse protection flags
-                    let perm = if effective_prot & prot::PROT_EXEC != 0 {
-                        if effective_prot & prot::PROT_WRITE != 0 {
+                    let perm = if prot_flags & prot::PROT_EXEC != 0 {
+                        if prot_flags & prot::PROT_WRITE != 0 {
                             Perm::ReadWriteExec
-                        } else if effective_prot & prot::PROT_READ != 0 {
+                        } else if prot_flags & prot::PROT_READ != 0 {
                             Perm::ReadWriteExec  // Simplified: read+exec
                         } else {
                             Perm::ReadWriteExec  // Simplified: exec only
                         }
-                    } else if effective_prot & prot::PROT_WRITE != 0 {
+                    } else if prot_flags & prot::PROT_WRITE != 0 {
                         Perm::ReadWrite
-                    } else if effective_prot & prot::PROT_READ != 0 {
+                    } else if prot_flags & prot::PROT_READ != 0 {
                         Perm::Read
                     } else {
                         Perm::None

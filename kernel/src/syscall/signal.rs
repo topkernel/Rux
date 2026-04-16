@@ -311,7 +311,7 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
             }
 
             // Validate new stack size
-            if (new_ss.ss_flags & ss_flags::SS_DISABLE) == 0 {
+            if (new_ss.ss_flags as u32 & ss_flags::SS_DISABLE) == 0 {
                 if new_ss.ss_size < crate::signal::MINSIGSTKSZ as u64 {
                     return -errno::EINVAL as u64;  // Stack too small
                 }
