@@ -145,8 +145,8 @@ pub fn jbd2_journal_commit_transaction(
             let (blocknr, _) = dirty_buffers[buf_idx + i];
             let is_last = (i == tags_this_block - 1) && (buf_idx + i == num_buffers - 1);
             let tag = journal_block_tag_t {
-                t_blocknr: blocknr as u32,
-                t_flags: if is_last { JBD2_FLAG_LAST_TAG as u16 } else { 0 },
+                t_blocknr: (blocknr as u32).to_be(),
+                t_flags: if is_last { (JBD2_FLAG_LAST_TAG as u16).to_be() } else { 0 },
                 ..Default::default()
             };
             // SAFETY: tag is a stack-local journal_block_tag_t; #[repr(C)] struct reinterpreted as bytes.

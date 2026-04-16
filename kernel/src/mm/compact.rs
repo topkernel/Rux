@@ -390,8 +390,8 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize) {
             );
             let old_pte = (*table0).get(vpn0);
 
-            // Update PPN bits, preserve all flags (R/W/X/U/D/A/G)
-            let new_pte_bits = (old_pte.bits() & !(0x00FFFFFFFFFFFFFF)) | (new_ppn << 10);
+            // Update PPN bits (bits [53:10]), preserve flags (bits [9:0]) and reserved (bits [63:54])
+            let new_pte_bits = (old_pte.bits() & !(0x00FFFFFFFFFFFC00u64)) | (new_ppn << 10);
             (*table0).set(
                 vpn0,
                 crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(new_pte_bits),

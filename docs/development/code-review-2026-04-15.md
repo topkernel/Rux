@@ -101,10 +101,11 @@
 
 ## Batch 3: Memory Management (25 files, ~9,546 lines)
 
-### [H] [BUG] F3-01: PTE PPN mask incorrect — corrupts target PFN during page migration
+### [H] [BUG] F3-01: PTE PPN mask incorrect — corrupts target PFN during page migration **[FIXED]**
 **File**: `compact.rs:394`
 **Description**: PPN bitmask uses `0x00FFFFFFFFFFFFFF` (40-bit) instead of correct Sv39 44-bit mask (bits [53:10]).
 **Linux**: Uses `pfn << _PAGE_PFN_SHIFT` with proper pgtable macros.
+**Fix**: Changed mask to `0x00FFFFFFFFFFFC00` to correctly clear only PPN bits [53:10] while preserving flags [9:0]. Applied 2026-04-16.
 
 ### [H] [BUG] F3-02: Comment claims refcount is 0 after try_to_unmap, but it's not
 **File**: `compact.rs:313`
@@ -260,33 +261,39 @@
 
 ## Batch 8: Ext4 + JBD2 (18 files, ~6,600 lines)
 
-### [H] [BUG] F8-01: Ext4InodeOnDisk struct layout mismatches Linux ext4_inode
+### [H] [BUG] F8-01: Ext4InodeOnDisk struct layout mismatches Linux ext4_inode **[FIXED]**
 **File**: `fs/ext4/inode.rs:15-74`
 **Description**: Field layout after `i_block[15]` is wrong. `osd2` union and `i_size_high` at incorrect offsets. Files > 4GB will have corrupted sizes.
 **Linux**: `fs/ext4/ext4.h:804-863`.
+**Fix**: Removed extra `i_file_acl_high`/`i_dir_acl`/`i_dir_acl_high`/`i_faddr` fields; added correct `i_size_high` at offset 0x6C. Applied 2026-04-16.
 
-### [H] [BUG] F8-02: s_log_frag_size should be s_log_cluster_size
+### [H] [BUG] F8-02: s_log_frag_size should be s_log_cluster_size **[FIXED]**
 **File**: `fs/ext4/superblock.rs:29`
 **Description**: Incorrect field name, affects large filesystems using clusters.
+**Fix**: Renamed to `s_log_cluster_size`. Applied 2026-04-16.
 
-### [H] [BUG] F8-03: Superblock blocks_count read as 32-bit only
+### [H] [BUG] F8-03: Superblock blocks_count read as 32-bit only **[FIXED]**
 **File**: `fs/ext4/mod.rs:163`
 **Description**: When INCOMPAT_64BIT is set, should use 64-bit value from `s_blocks_count_lo + s_blocks_count_hi`.
 **Linux**: `fs/ext4/ext4.h:3372-3375` (`ext4_blocks_count()` helper).
+**Fix**: Added 64-bit path using `(lo as u64) | ((hi as u64) << 32)` when INCOMPAT_64BIT. Applied 2026-04-16.
 
-### [H] [BUG] F8-04: Ext4Inode.from_disk truncates size to 32 bits
+### [H] [BUG] F8-04: Ext4Inode.from_disk truncates size to 32 bits **[FIXED]**
 **File**: `fs/ext4/inode.rs:143`
 **Description**: Only uses 32-bit `i_size`. Linux uses `i_size_lo | (i_size_high << 32)`. Files > 4GB report wrong size.
+**Fix**: Changed to `(i_size as u64) | ((i_size_high as u64) << 32)`. Applied 2026-04-16.
 
-### [H] [BUG] F8-05: write_inode stores high 32 bits in wrong field
+### [H] [BUG] F8-05: write_inode stores high 32 bits in wrong field **[FIXED]**
 **File**: `fs/ext4/inode.rs:436`
 **Description**: High 32 bits stored in `i_dir_acl` (wrong offset) instead of Linux's `i_size_high`.
 **Linux**: `fs/ext4/inode.c` — ext4_do_update_inode().
+**Fix**: Changed to write `i_size_high` instead of `i_dir_acl`. Applied 2026-04-16.
 
-### [H] [BUG] F8-06: Ext4GroupDesc only stores 32-bit descriptors (no 64-bit support)
+### [H] [BUG] F8-06: Ext4GroupDesc only stores 32-bit descriptors (no 64-bit support) **[FIXED]**
 **File**: `fs/ext4/superblock.rs:234-259`
 **Description**: Missing 64-bit extension fields. Block groups beyond 2^32 blocks will fail.
 **Linux**: `fs/ext4/ext4.h:403-424`.
+**Fix**: Added full 64-byte descriptor with `_lo`/`_hi` fields matching Linux layout. Applied 2026-04-16.
 
 ### [M] [BUG] F8-07: find_entry_space does not handle deleted entries
 **File**: `fs/ext4/namei.rs:487-510`
@@ -311,15 +318,17 @@
 **Description**: Entries beyond first block not detected. rmdir may succeed on non-empty directories.
 **Linux**: `ext4_empty_dir()` iterates all directory blocks.
 
-### [M] [BUG] F8-12: JBD2 tag flags written in native-endian but read as big-endian
+### [M] [BUG] F8-12: JBD2 tag flags written in native-endian but read as big-endian **[FIXED]**
 **File**: `fs/jbd2/commit.rs:149; recovery.rs:249-264`
 **Description**: LAST_TAG detection fails during recovery.
 **Linux**: All journal structures use `__be32`/`__be16`.
+**Fix**: Added `.to_be()` on t_flags write in commit. Applied 2026-04-16.
 
-### [M] [BUG] F8-13: JBD2 blocknr written in native-endian but read as big-endian
+### [M] [BUG] F8-13: JBD2 blocknr written in native-endian but read as big-endian **[FIXED]**
 **File**: `fs/jbd2/commit.rs:147; recovery.rs:263`
 **Description**: Block numbers byte-swapped during recovery, replaying to wrong blocks.
 **Linux**: `include/linux/jbd2.h` — `__be32 t_blocknr`.
+**Fix**: Added `.to_be()` on t_blocknr write in commit. Applied 2026-04-16.
 
 ### [M] [BUG] F8-14: Journal free space decremented twice in commit
 **File**: `fs/jbd2/commit.rs:283`
@@ -714,9 +723,9 @@
 7. **F11-02**: ~~sys_close errno sign extension~~ **[FIXED]** | **F11-03**: ~~mmap PROT override~~ **[FIXED]** | F11-04~06: **[FALSE POSITIVE]**
 
 **Data Integrity (potential data corruption)**:
-8. **F8-01~06**: Ext4 on-disk struct layout mismatches (>4GB file corruption)
-9. **F8-12/13**: JBD2 tag field endianness mismatch (recovery writes wrong blocks)
-10. **F3-01**: PTE PPN mask incorrect
+8. ~~**F8-01~06**: Ext4 on-disk struct layout mismatches~~ **[FIXED]**
+9. ~~**F8-12/13**: JBD2 tag field endianness mismatch~~ **[FIXED]**
+10. ~~**F3-01**: PTE PPN mask incorrect~~ **[FIXED]**
 
 **Networking**:
 11. **F10-02**: TCP checksum never computed

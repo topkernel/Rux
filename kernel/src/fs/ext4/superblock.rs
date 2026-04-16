@@ -24,8 +24,8 @@ pub struct Ext4SuperBlockOnDisk {
     pub s_first_data_block: u32,
     /// block size (log2)
     pub s_log_block_size: u32,
-    /// fragment size (log2)
-    pub s_log_frag_size: u32,
+    /// cluster size (log2)
+    pub s_log_cluster_size: u32,
     /// blocks per group
     pub s_blocks_per_group: u32,
     /// fragments per group
@@ -232,30 +232,53 @@ pub struct Ext4SuperBlockInfo {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Ext4GroupDesc {
-    /// block bitmap block number
-    pub bg_block_bitmap: u32,
-    /// inode bitmap block number
-    pub bg_inode_bitmap: u32,
-    /// inode table start block number
-    pub bg_inode_table: u32,
-    /// free block count
-    pub bg_free_blocks_count: u16,
-    /// free inode count
-    pub bg_free_inodes_count: u16,
-    /// used directory count
-    pub bg_used_dirs_count: u16,
+    /// block bitmap block number (low)
+    pub bg_block_bitmap_lo: u32,
+    /// inode bitmap block number (low)
+    pub bg_inode_bitmap_lo: u32,
+    /// inode table start block number (low)
+    pub bg_inode_table_lo: u32,
+    /// free block count (low)
+    pub bg_free_blocks_count_lo: u16,
+    /// free inode count (low)
+    pub bg_free_inodes_count_lo: u16,
+    /// used directory count (low)
+    pub bg_used_dirs_count_lo: u16,
     /// flags
     pub bg_flags: u16,
-    /// exclude bitmap snapshot
+    /// exclude bitmap snapshot (low)
     pub bg_exclude_bitmap_lo: u32,
-    /// block bitmap checksum
+    /// block bitmap checksum (low)
     pub bg_block_bitmap_csum_lo: u16,
-    /// inode bitmap checksum
+    /// inode bitmap checksum (low)
     pub bg_inode_bitmap_csum_lo: u16,
-    /// itable unused
+    /// itable unused (low)
     pub bg_itable_unused_lo: u16,
     /// checksum
     pub bg_checksum: u16,
+    // --- 64-bit extension fields (present when INCOMPAT_64BIT) ---
+    /// block bitmap block number (high)
+    pub bg_block_bitmap_hi: u32,
+    /// inode bitmap block number (high)
+    pub bg_inode_bitmap_hi: u32,
+    /// inode table start block number (high)
+    pub bg_inode_table_hi: u32,
+    /// free block count (high)
+    pub bg_free_blocks_count_hi: u16,
+    /// free inode count (high)
+    pub bg_free_inodes_count_hi: u16,
+    /// used directory count (high)
+    pub bg_used_dirs_count_hi: u16,
+    /// itable unused (high)
+    pub bg_itable_unused_hi: u16,
+    /// exclude bitmap block (high)
+    pub bg_exclude_bitmap_hi: u32,
+    /// block bitmap checksum (high)
+    pub bg_block_bitmap_csum_hi: u16,
+    /// inode bitmap checksum (high)
+    pub bg_inode_bitmap_csum_hi: u16,
+    /// reserved
+    pub bg_reserved: u32,
 }
 
 impl Default for Ext4GroupDesc {

@@ -8,8 +8,8 @@
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 
-/// Byte offset of `bg_free_blocks_count` within ext4 group descriptor (32-bit desc):
-/// bg_block_bitmap(u32) + bg_inode_bitmap(u32) + bg_inode_table(u32) = 12
+/// Byte offset of `bg_free_blocks_count_lo` within ext4 group descriptor (32-bit desc):
+/// bg_block_bitmap_lo(u32) + bg_inode_bitmap_lo(u32) + bg_inode_table_lo(u32) = 12
 const BG_FREE_BLOCKS_OFF: usize = 12;
 
 /// Byte offset of `s_free_blocks_count` within ext4 superblock:
@@ -102,7 +102,7 @@ impl<'a> BlockAllocator<'a> {
         let (free_blocks, block_bitmap_block) = {
             let group_descs = self.fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
-            (group_desc.bg_free_blocks_count, group_desc.bg_block_bitmap as u64)
+            (group_desc.bg_free_blocks_count_lo, group_desc.bg_block_bitmap_lo as u64)
         };
 
         if free_blocks == 0 || block_bitmap_block == 0 {
@@ -134,8 +134,8 @@ impl<'a> BlockAllocator<'a> {
             // Update in-memory group descriptor
             {
                 let mut group_descs = self.fs.group_descs.lock();
-                group_descs[group_idx as usize].bg_free_blocks_count =
-                    group_descs[group_idx as usize].bg_free_blocks_count.saturating_sub(1);
+                group_descs[group_idx as usize].bg_free_blocks_count_lo =
+                    group_descs[group_idx as usize].bg_free_blocks_count_lo.saturating_sub(1);
             }
 
             // Update on-disk group descriptor and superblock
@@ -163,7 +163,7 @@ impl<'a> BlockAllocator<'a> {
         let (free_blocks, block_bitmap_block) = {
             let group_descs = self.fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
-            (group_desc.bg_free_blocks_count, group_desc.bg_block_bitmap as u64)
+            (group_desc.bg_free_blocks_count_lo, group_desc.bg_block_bitmap_lo as u64)
         };
 
         let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
@@ -178,8 +178,8 @@ impl<'a> BlockAllocator<'a> {
 
             {
                 let mut group_descs = self.fs.group_descs.lock();
-                group_descs[group_idx as usize].bg_free_blocks_count =
-                    group_descs[group_idx as usize].bg_free_blocks_count.saturating_add(1);
+                group_descs[group_idx as usize].bg_free_blocks_count_lo =
+                    group_descs[group_idx as usize].bg_free_blocks_count_lo.saturating_add(1);
             }
 
             self.update_group_desc_free_blocks(group_idx, free_blocks + 1)?;
@@ -339,7 +339,7 @@ pub fn alloc_block_with_prealloc(
         let (free_blocks, block_bitmap_block) = {
             let group_descs = fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
-            (group_desc.bg_free_blocks_count, group_desc.bg_block_bitmap as u64)
+            (group_desc.bg_free_blocks_count_lo, group_desc.bg_block_bitmap_lo as u64)
         };
 
         // Don't preallocate if the group is nearly full
@@ -391,8 +391,8 @@ pub fn alloc_block_with_prealloc(
                         let extra = (prealloc_total - 1) as u16;
                         {
                             let mut group_descs = fs.group_descs.lock();
-                            group_descs[group_idx as usize].bg_free_blocks_count =
-                                group_descs[group_idx as usize].bg_free_blocks_count.saturating_sub(extra);
+                            group_descs[group_idx as usize].bg_free_blocks_count_lo =
+                                group_descs[group_idx as usize].bg_free_blocks_count_lo.saturating_sub(extra);
                         }
                         let new_free = free_blocks.saturating_sub(extra);
                         let _ = allocator.update_group_desc_free_blocks(group_idx, new_free);
@@ -451,7 +451,7 @@ impl<'a> InodeAllocator<'a> {
             let (free_inodes, inode_bitmap_block) = {
                 let group_descs = self.fs.group_descs.lock();
                 let group_desc = &group_descs[group_idx as usize];
-                (group_desc.bg_free_inodes_count, group_desc.bg_inode_bitmap as u64)
+                (group_desc.bg_free_inodes_count_lo, group_desc.bg_inode_bitmap_lo as u64)
             };
 
             // Check if there are free inodes
@@ -511,7 +511,7 @@ impl<'a> InodeAllocator<'a> {
         let (free_inodes, inode_bitmap_block) = {
             let group_descs = self.fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
-            (group_desc.bg_free_inodes_count, group_desc.bg_inode_bitmap as u64)
+            (group_desc.bg_free_inodes_count_lo, group_desc.bg_inode_bitmap_lo as u64)
         };
 
         // Read inode bitmap
@@ -603,14 +603,14 @@ impl<'a> InodeAllocator<'a> {
         let desc_block = group_desc_start_block + (group_idx / desc_per_block);
         let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
 
-        // SAFETY: desc_offset + 14 is within the block (bg_free_inodes_count field);
+        // SAFETY: desc_offset + 14 is within the block (bg_free_inodes_count_lo field);
         // volatile write ensures the store is not optimized away.
         unsafe {
             let bh = bio::bread(self.fs.device, desc_block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
             let data = &mut (*bh).b_data;
-            // Update free inode count (bg_free_inodes_count offset in Ext4GroupDesc)
+            // Update free inode count (bg_free_inodes_count_lo offset in Ext4GroupDesc)
             let free_inodes_ptr = data.as_mut_ptr().add(desc_offset + 14) as *mut u16;
             free_inodes_ptr.write_volatile(free_inodes);
 

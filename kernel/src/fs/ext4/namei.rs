@@ -137,7 +137,7 @@ pub fn get_group_free_inodes(fs: &Ext4FileSystem, group: u32) -> Result<u32, i32
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
-    Ok(group_descs[group as usize].bg_free_inodes_count as u32)
+    Ok(group_descs[group as usize].bg_free_inodes_count_lo as u32)
 }
 
 /// Allocate a new inode
@@ -164,7 +164,7 @@ pub fn ext4_new_inode(
     // Get group descriptor
     let inode_bitmap_block = {
         let group_descs = fs.group_descs.lock();
-        group_descs[group as usize].bg_inode_bitmap
+        group_descs[group as usize].bg_inode_bitmap_lo
     };
     let bitmap_data = unsafe {
         read_block_to_vec(fs.device, inode_bitmap_block as u64, fs.block_size as usize)?
@@ -269,11 +269,11 @@ fn update_group_descriptor_inodes(fs: &Ext4FileSystem, group: u32, delta: i32) -
         }
 
         if delta < 0 {
-            group_descs[group as usize].bg_free_inodes_count =
-                group_descs[group as usize].bg_free_inodes_count.saturating_sub((-delta) as u16);
+            group_descs[group as usize].bg_free_inodes_count_lo =
+                group_descs[group as usize].bg_free_inodes_count_lo.saturating_sub((-delta) as u16);
         } else {
-            group_descs[group as usize].bg_free_inodes_count =
-                group_descs[group as usize].bg_free_inodes_count.saturating_add(delta as u16);
+            group_descs[group as usize].bg_free_inodes_count_lo =
+                group_descs[group as usize].bg_free_inodes_count_lo.saturating_add(delta as u16);
         }
     }
 
@@ -1425,7 +1425,7 @@ fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
         if group as usize >= group_descs.len() {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
-        group_descs[group as usize].bg_inode_bitmap
+        group_descs[group as usize].bg_inode_bitmap_lo
     };
 
     // Read bitmap

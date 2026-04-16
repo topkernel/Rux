@@ -107,8 +107,8 @@ impl Ext4FileSystem {
     /// Get mutable access to group descriptor free blocks count
     pub fn dec_group_free_blocks(&self, group: usize) {
         let mut descs = self.group_descs.lock();
-        if group < descs.len() && descs[group].bg_free_blocks_count > 0 {
-            descs[group].bg_free_blocks_count -= 1;
+        if group < descs.len() && descs[group].bg_free_blocks_count_lo > 0 {
+            descs[group].bg_free_blocks_count_lo -= 1;
         }
     }
 
@@ -116,7 +116,7 @@ impl Ext4FileSystem {
     pub fn inc_group_free_blocks(&self, group: usize) {
         let mut descs = self.group_descs.lock();
         if group < descs.len() {
-            descs[group].bg_free_blocks_count = descs[group].bg_free_blocks_count.saturating_add(1);
+            descs[group].bg_free_blocks_count_lo = descs[group].bg_free_blocks_count_lo.saturating_add(1);
         }
     }
 
@@ -160,7 +160,13 @@ impl Ext4FileSystem {
             let block_size_bits = (12 + ext4_sb.s_log_block_size) as u8;
             let blocks_per_group = ext4_sb.s_blocks_per_group;
             let inodes_per_group = ext4_sb.s_inodes_per_group;
-            let total_blocks = ext4_sb.s_blocks_count;
+            // Compute 64-bit block count: if INCOMPAT_64BIT is set, use hi+lo; otherwise lo only
+            let is_64bit = (ext4_sb.s_feature_incompat & 0x80) != 0;
+            let total_blocks = if is_64bit {
+                (ext4_sb.s_blocks_count as u64) | ((ext4_sb.s_blocks_count_hi as u64) << 32)
+            } else {
+                ext4_sb.s_blocks_count as u64
+            };
             let total_inodes = ext4_sb.s_inodes_count;
             let group_count = ((total_blocks as u64) + (blocks_per_group as u64) - 1) /
                 (blocks_per_group as u64);
@@ -200,9 +206,21 @@ impl Ext4FileSystem {
             // Update filesystem information
             self.sb_info = Some(Box::new(superblock::Ext4SuperBlockInfo {
                 s_inodes_count: ext4_sb.s_inodes_count,
-                s_blocks_count: ext4_sb.s_blocks_count as u64,
-                s_r_blocks_count: ext4_sb.s_r_blocks_count as u64,
-                s_free_blocks_count: ext4_sb.s_free_blocks_count as u64,
+                s_blocks_count: if is_64bit {
+                    (ext4_sb.s_blocks_count as u64) | ((ext4_sb.s_blocks_count_hi as u64) << 32)
+                } else {
+                    ext4_sb.s_blocks_count as u64
+                },
+                s_r_blocks_count: if is_64bit {
+                    (ext4_sb.s_r_blocks_count as u64) | ((ext4_sb.s_r_blocks_count_hi as u64) << 32)
+                } else {
+                    ext4_sb.s_r_blocks_count as u64
+                },
+                s_free_blocks_count: if is_64bit {
+                    (ext4_sb.s_free_blocks_count as u64) | ((ext4_sb.s_free_blocks_count_hi as u64) << 32)
+                } else {
+                    ext4_sb.s_free_blocks_count as u64
+                },
                 s_free_inodes_count: ext4_sb.s_free_inodes_count,
                 s_first_data_block: ext4_sb.s_first_data_block,
                 s_log_block_size: ext4_sb.s_log_block_size,
@@ -242,7 +260,7 @@ impl Ext4FileSystem {
         };
 
         // Calculate inode block number
-        let inode_table_start = gd.bg_inode_table;
+        let inode_table_start = gd.bg_inode_table_lo;
         let inodes_per_block = self.block_size / (self.inode_size as u32);
         let inode_block = inode_table_start + (index / inodes_per_block);
         let inode_offset = ((index % inodes_per_block) * (self.inode_size as u32)) as usize;
