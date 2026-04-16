@@ -752,20 +752,23 @@
 
 ## Batch 15: Security/DFX/IO_uring (13 files, ~2,480 lines)
 
-### [H] [BUG] F15-01: io_uring read/write file position TOCTOU race
+### [H] [BUG] F15-01: io_uring read/write file position TOCTOU race **[FIXED]**
 **File**: `io_uring/mod.rs:546-556`
 **Description**: Concurrent operations between `get_pos()` + `do_read()` + `set_pos()` can change position. do_read may also internally advance pos, causing double advancement.
 **Linux**: Uses `kiocb` with `ki_pos`; pread doesn't change f_pos.
+**Fix**: For `use_file_pos`: removed manual `get_pos`/`set_pos` — `read_fn`/`write_fn` already advance `file.pos` internally (old code double-counted). For explicit offset (pread/pwrite): save/restore `file.pos` around the operation so file position is unchanged. Applied 2026-04-17.
 
-### [H] [BUG] F15-02: Signal permission check incomplete — missing UID cross-checks
+### [H] [BUG] F15-02: Signal permission check incomplete — missing UID cross-checks **[FIXED]**
 **File**: `security/mod.rs:59-75`
 **Description**: Missing `cred.euid == target.suid` comparison. Linux has 4 comparisons, Rux only 3.
 **Linux**: `kernel/signal.c:kill_ok_by_cred()`.
+**Fix**: Aligned with Linux `kill_ok_by_cred()`: 4 comparisons of caller's (euid, uid) against target's (suid, uid). Applied 2026-04-17.
 
-### [H] [BUG] F15-03: io_uring CLOSE can close the ring fd itself
+### [H] [BUG] F15-03: io_uring CLOSE can close the ring fd itself **[FIXED]**
 **File**: `io_uring/mod.rs:643-649`
 **Description**: No validation that fd is not the io_uring ring fd. Closing ring fd causes use-after-free.
 **Linux**: Uses separate fixed-file table and validates fd.
+**Fix**: `io_uring_op_close` now checks if the target file's ops match `IO_URING_OPS` and returns EINVAL to prevent closing the ring fd. Applied 2026-04-17.
 
 ---
 

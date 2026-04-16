@@ -52,18 +52,22 @@ pub fn has_capability(cred: &crate::process::task::Cred, cap: u32) -> bool {
 
 /// Check if the current task can send a signal to the target task.
 ///
-/// Returns true if:
-/// - Same UID (euid/uid match), or
-/// - CAP_KILL is set in current task's effective capabilities.
+/// Returns true if the caller's (e)uid matches the target's (s)uid, or
+/// CAP_KILL is held.  Matches Linux `kill_ok_by_cred()` in
+/// `kernel/signal.c`.
 #[inline]
 pub fn can_send_signal(target_cred: &crate::process::task::Cred) -> bool {
     match crate::sched::current() {
         Some(task) => {
             let cred = task.cred();
-            // Same UID check
-            if cred.euid == target_cred.euid
+            // Linux: uid_eq(cred->euid, tcred->suid) ||
+            //        uid_eq(cred->euid, tcred->uid)  ||
+            //        uid_eq(cred->uid,  tcred->suid) ||
+            //        uid_eq(cred->uid,  tcred->uid)
+            if cred.euid == target_cred.suid
+                || cred.euid == target_cred.uid
+                || cred.uid == target_cred.suid
                 || cred.uid == target_cred.uid
-                || cred.suid == target_cred.uid
             {
                 return true;
             }

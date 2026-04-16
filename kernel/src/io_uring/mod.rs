@@ -544,15 +544,17 @@ fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
     let use_file_pos = off == -1;
 
     if use_file_pos {
-        let saved_pos = file.get_pos();
-        let result = do_read(&file, buf, len);
-        if result > 0 {
-            let _ = file.set_pos(saved_pos + result as u64);
-        }
-        result
-    } else {
-        let _ = file.set_pos(off as u64);
+        // read_fn (e.g. file_read in fs/file.rs) reads from file.pos and
+        // advances it by the number of bytes read. No manual pos update
+        // needed — the old code double-counted by adding result again.
         do_read(&file, buf, len)
+    } else {
+        // pread: read from a specific offset without changing file position.
+        let saved_pos = file.get_pos();
+        let _ = file.set_pos(off as u64);
+        let result = do_read(&file, buf, len);
+        let _ = file.set_pos(saved_pos);
+        result
     }
 }
 
@@ -606,17 +608,17 @@ fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
     if uncopied != 0 { return -14; }
 
     if use_file_pos {
-        let saved_pos = file.get_pos();
-        let result = do_write(&file, &kbuf);
-        if result > 0 {
-            let _ = file.set_pos(saved_pos + result as u64);
-        } else {
-            let _ = file.set_pos(saved_pos);
-        }
-        result
-    } else {
-        let _ = file.set_pos(off as u64);
+        // write_fn (e.g. file_write in fs/file.rs) writes from file.pos and
+        // advances it. No manual pos update needed — the old code
+        // double-counted by adding result again.
         do_write(&file, &kbuf)
+    } else {
+        // pwrite: write at a specific offset without changing file position.
+        let saved_pos = file.get_pos();
+        let _ = file.set_pos(off as u64);
+        let result = do_write(&file, &kbuf);
+        let _ = file.set_pos(saved_pos);
+        result
     }
 }
 
@@ -640,8 +642,23 @@ fn io_uring_op_fsync(_sqe: &IoUringSqe) -> i32 {
 }
 
 /// IORING_OP_CLOSE: close a file descriptor.
+///
+/// Rejects attempts to close the io_uring ring fd itself to prevent
+/// use-after-free of the ring structures.
 fn io_uring_op_close(sqe: &IoUringSqe) -> i32 {
     let fd = sqe.fd as usize;
+
+    // Guard: refuse to close a file whose ops match IO_URING_OPS, as that
+    // would be the ring fd itself. Closing it would leave the ring mapped
+    // in user memory but with freed kernel structures — a UAF.
+    if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd) } {
+        if let Some(ops) = file.get_ops() {
+            if core::ptr::eq(ops, &IO_URING_OPS as *const FileOps) {
+                return -22; // EINVAL
+            }
+        }
+    }
+
     match unsafe { crate::fs::file::close_file_fd(fd) } {
         Ok(()) => 0,
         Err(e) => e,
