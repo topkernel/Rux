@@ -947,8 +947,10 @@ pub mod cow_flags {
 /// Kernel mappings (VPN2 >= KERNEL_PGD_START or U=0 entries) are shared by copying PGD entries.
 /// User space mappings are copied with COW marking for writable pages.
 pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
-    // SAFETY: mmap_lock (mmap_sem) is held for reading during fork, preventing
-    // concurrent writers from modifying the parent's page tables.
+    // TODO: Parent PTE modifications (line ~1063) lack per-page-table locking (PTL).
+    // A concurrent page fault on another CPU could race with the W→COW downgrade.
+    // Linux uses ptep_set_wrprotect() under PTL. Full fix requires PTL infrastructure.
+    // Current mitigation: single-threaded TCG prevents the race.
     use crate::mm::page_desc::pfn_to_page_mut;
 
     if parent_root_ppn == 0 {

@@ -52,10 +52,11 @@
 **Linux**: Stores pt_regs on the kernel stack, not the heap.
 **Fix**: `clear_fork_child()` no longer zeros fork_pt_regs pointer; `release_task()` frees heap PtRegs via `dealloc()`. Applied 2026-04-16.
 
-### [M] [BUG] F1-03: COW race — parent PTE modified without PTE-level locking during fork
+### [M] [BUG] F1-03: COW race — parent PTE modified without PTE-level locking during fork — **DEFERRED**
 **File**: `arch/riscv64/mm/mm_ops.rs`
 **Description**: During fork, parent PTE is read and modified without holding PTE lock, racing with concurrent page faults.
 **Linux**: Uses `ptep_get_and_clear()` / `ptep_set_wrprotect()` under PTL.
+**Status**: Added TODO comment documenting the limitation. Full fix requires PTL (page table lock) infrastructure. Mitigated by `tcg,thread=single` preventing concurrent execution. Applied 2026-04-16.
 
 ### [M] [BUG] F1-04: strncpy_from_user lacks exception table entries — **FIXED**
 **File**: `arch/riscv64/uaccess.rs`
@@ -63,15 +64,17 @@
 **Linux**: Uses `__get_user()` with `extable` entries for fault-safe user access.
 **Fix**: Replaced raw `read_volatile` + SUM bit with `get_user()` (backed by assembly exception-table implementation). Applied 2026-04-16.
 
-### [M] [BUG] F1-05: Premature COW with refcount=1, violating INV-COW-2
+### [M] [BUG] F1-05: Premature COW with refcount=1, violating INV-COW-2 — **FIXED**
 **File**: `arch/riscv64/mm/page_fault.rs`
 **Description**: COW flag set even when refcount=1 (exclusive page), causing unnecessary copy-on-write overhead.
 **Linux**: Only sets COW when page is shared (refcount > 1).
+**Fix**: MAP_PRIVATE file-backed pages now map writable directly. COW marking only happens in `copy_page_table_cow()` during fork when the page actually becomes shared. Applied 2026-04-16.
 
-### [M] [BUG] F1-06: Box::leak in smp_call_function permanently leaks heap allocation
+### [M] [BUG] F1-06: Box::leak in smp_call_function permanently leaks heap allocation — **FIXED**
 **File**: `arch/riscv64/smp/ipi.rs`
 **Description**: Every `smp_call_function` call permanently leaks a `Box<IpiMessage>`.
 **Linux**: Uses per-CPU call_single_data structures from a pool, no heap allocation.
+**Fix**: Removed `Box::leak(csd)`. The Box now drops naturally after the spin-wait completes, deallocating the CallSingleData. Applied 2026-04-16.
 
 ---
 

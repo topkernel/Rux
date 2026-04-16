@@ -262,11 +262,10 @@ pub fn smp_call_function(target: usize, func: fn(*mut core::ffi::c_void), info: 
         core::hint::spin_loop();
     }
 
-    // csd dropped here — but we leaked it into the queue above.
-    // The CallFunction handler must set done=true AND unlink before we return.
-    // Since we spin-wait, the handler has already finished.
-    // Leak the Box to prevent double-free — the handler already ran the callback.
-    Box::leak(csd);
+    // csd_flush_queue() has already run the callback, set done=true,
+    // and detached the queue. The csd.list pointers may still reference
+    // other nodes in the detached list, but ListHead has no Drop impl,
+    // so dropping the Box simply deallocates the CallSingleData.
 }
 
 /// Drain the per-CPU CSD queue (called by CallFunction IPI handler).

@@ -418,21 +418,11 @@ pub fn handle_mm_fault(
         pte_flags |= PageTableEntry::R;
     }
     if vma_flags.is_writable() {
-        // MAP_PRIVATE file-backed pages: use COW instead of writable
-        // When written to, the COW fault handler will copy the page
-        if vma_type == VmaType::FileBacked && vma_flags.is_private() {
-            pte_flags |= crate::arch::riscv64::mm::cow_flags::COW;
-            // Mark page as COW in page descriptor
-            use crate::mm::page_desc::pfn_to_page_mut;
-            let cow_page = pfn_to_page_mut((phys_addr.bits() >> crate::arch::riscv64::mm::PAGE_SHIFT) as usize);
-            if !cow_page.is_null() {
-                // SAFETY: cow_page is checked for null. This page was just allocated
-                // and is not yet shared, so exclusive access is guaranteed.
-                unsafe { (*cow_page).set_flag(crate::mm::page_desc::PageFlag::Cow); }
-            }
-        } else {
-            pte_flags |= PageTableEntry::W;
-        }
+        // MAP_PRIVATE file-backed pages: map writable directly.
+        // The page was just allocated and is exclusive (refcount=1), so no COW
+        // is needed. COW marking only happens in copy_page_table_cow() during
+        // fork when the page actually becomes shared (refcount >= 2).
+        pte_flags |= PageTableEntry::W;
     }
     if vma_flags.is_executable() {
         pte_flags |= PageTableEntry::X;
