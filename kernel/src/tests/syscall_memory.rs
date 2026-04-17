@@ -44,7 +44,7 @@ fn test_sys_brk() {
     let result = sys_brk([0, 0, 0, 0, 0, 0]);
 
     if result != 0 {
-        let original_brk = result;
+        let original_brk = result as u64;
 
         // Verify return value is a valid address (non-zero)
         test_pass("sys_brk returns current brk");
@@ -54,7 +54,7 @@ fn test_sys_brk() {
         let new_brk = original_brk + 4096;
         let result2 = sys_brk([new_brk, 0, 0, 0, 0, 0]);
 
-        if result2 >= new_brk {
+        if result2 >= new_brk as i64 {
             test_pass("sys_brk can increase heap");
 
             // Verify newly allocated memory is writable
@@ -117,11 +117,10 @@ fn test_sys_mmap() {
 
     // Check return value
     // Success returns mapped address, failure returns negative error code
-    let result_signed = result as i64;
-    if result_signed > 0 {
+    if result > 0 {
         test_pass("sys_mmap anonymous mapping");
 
-        let mapped_addr = result;
+        let mapped_addr = result as u64;
 
         // Verify mapped memory is readable/writable
         unsafe {
@@ -159,11 +158,11 @@ fn test_sys_mmap() {
         if unmap_result == 0 {
             test_pass("sys_munmap succeeds");
         } else {
-            test_fail("sys_munmap", &alloc::format!("failed with {}", unmap_result as i64));
+            test_fail("sys_munmap", &alloc::format!("failed with {}", unmap_result));
         }
     } else {
         // mmap may fail due to test environment limitations
-        let err = -result_signed;
+        let err = -result;
         if err > 0 {
             test_skip("sys_mmap anonymous", "memory allocation not available");
         } else {
@@ -178,7 +177,7 @@ fn test_sys_mmap() {
         (MAP_PRIVATE | MAP_ANONYMOUS) as u64,
         (-1i64 as u64), 0
     ]);
-    let result_zero_signed = result_zero as i64;
+    let result_zero_signed = result_zero;
     if result_zero_signed < 0 {
         test_pass("sys_mmap rejects zero length");
     } else {
@@ -215,11 +214,10 @@ fn test_sys_mprotect() {
         (-1i64 as u64), 0
     ]);
 
-    let mmap_signed = mmap_result as i64;
-    if mmap_signed > 0 {
+    if mmap_result > 0 {
         // Try to change protection to read-only
         let protect_result = sys_mprotect([
-            mmap_result, 4096, PROT_READ as u64, 0, 0, 0
+            mmap_result as u64, 4096, PROT_READ as u64, 0, 0, 0
         ]);
 
         if protect_result == 0 {
@@ -233,7 +231,7 @@ fn test_sys_mprotect() {
         }
 
         // Cleanup
-        let _ = sys_munmap([mmap_result, 4096, 0, 0, 0, 0]);
+        let _ = sys_munmap([mmap_result as u64, 4096, 0, 0, 0, 0]);
     } else {
         test_skip("sys_mprotect test", "no memory to test on");
     }

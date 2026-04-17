@@ -133,12 +133,13 @@ impl DlRunQueue {
         unsafe {
             let t = &*task;
             let dl = t.dl_entity();
-            let deadline = dl.deadline.load(Ordering::Acquire);
 
-            // Find and remove task
+            // Find and remove task by pointer only. Do NOT match on deadline
+            // because the deadline may have been updated between enqueue and
+            // dequeue, causing the search to miss the entry.
             let mut found_key = None;
             for (&key, &ptr) in self.tasks.iter() {
-                if ptr == task && key.deadline == deadline {
+                if ptr == task {
                     found_key = Some(key);
                     break;
                 }

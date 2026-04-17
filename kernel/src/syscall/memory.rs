@@ -26,7 +26,7 @@ use crate::arch::riscv64::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageT
 /// - If expansion fails, return current value (no change)
 ///
 /// - RISC-V: 214
-pub fn sys_brk(args: [u64; 6]) -> u64 {
+pub fn sys_brk(args: [u64; 6]) -> i64 {
     use crate::sched;
     use crate::mm::page::PAGE_SIZE;
     use crate::arch::riscv64::mm::{alloc_and_map_user_memory, PageTableEntry};
@@ -51,7 +51,7 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
                 current_task.set_brk(default_brk);
 
                 if new_brk == 0 {
-                    return default_brk;
+                    return default_brk as i64;
                 }
             }
 
@@ -60,7 +60,7 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
 
             // If new_brk is 0, return current brk
             if new_brk == 0 {
-                return current_brk;
+                return current_brk as i64;
             }
 
             // Allow shrinking heap
@@ -80,7 +80,7 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
                 }
 
                 current_task.set_brk(new_brk);
-                return new_brk;
+                return new_brk as i64;
             }
 
             // Expand heap: need to map new memory pages
@@ -95,7 +95,7 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
                     let root_ppn = if let Some(addr_space) = current_task.address_space() {
                         addr_space.root_ppn()
                     } else {
-                        return current_brk;
+                        return current_brk as i64;
                     };
 
                     // Map new heap pages
@@ -110,18 +110,18 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
                     unsafe {
                         let result = alloc_and_map_user_memory(root_ppn, current_page_start, size, pte_flags);
                         if result.is_none() {
-                            return current_brk;
+                            return current_brk as i64;
                         }
                     }
                 }
 
                 current_task.set_brk(new_brk);
-                new_brk
+                new_brk as i64
             } else {
-                current_brk
+                current_brk as i64
             }
         }
-        None => -12_i64 as u64  // ENOMEM
+        None => -12_i64  // ENOMEM
     }
 }
 /// sys_mmap - Create memory mapping
@@ -139,7 +139,7 @@ pub fn sys_brk(args: [u64; 6]) -> u64 {
 /// Returns mapped starting address on success, negative error code on failure
 ///
 /// - RISC-V: 222
-pub fn sys_mmap(args: [u64; 6]) -> u64 {
+pub fn sys_mmap(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
@@ -154,20 +154,20 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
 
     // length of 0 is invalid per POSIX
     if length == 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     let actual_length = length;
 
     // Check protection flags
     if prot_flags & !prot::PROT_MASK != 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Check mapping type (must specify MAP_SHARED or MAP_PRIVATE)
     let map_type = map_flags & map::MAP_TYPE_MASK;
     if map_type != map::MAP_SHARED && map_type != map::MAP_PRIVATE {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Check if framebuffer device mapping (fd >= 1000 indicates device file)
@@ -184,8 +184,8 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
                 let io_uring_ops = core::ptr::addr_of!(crate::io_uring::IO_URING_OPS);
                 if core::ptr::eq(ops as *const _, io_uring_ops as *const _) {
                     match crate::io_uring::io_uring_mmap_handler(fd, addr, actual_length, offset, prot_flags) {
-                        Ok(mapped) => return mapped as u64,
-                        Err(e) => return -(e as i64) as u64,
+                        Ok(mapped) => return mapped as i64,
+                        Err(e) => return -(e as i64),
                     }
                 }
             }
@@ -194,7 +194,7 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
 
     // Non-anonymous mapping without file descriptor
     if (map_flags & map::MAP_ANONYMOUS == 0) && fd < 0 {
-        return mmap_error::EBADF as u64;
+        return mmap_error::EBADF;
     }
 
     // Get current process
@@ -279,7 +279,7 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
                                 }
                             }
 
-                            mapped_addr.as_usize() as u64
+                            mapped_addr.as_usize() as i64
                         },
                         Err(e) => {
                             let err = match e {
@@ -288,17 +288,17 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
                                 crate::mm::pagemap::MapError::AlreadyMapped => mmap_error::ENOMEM,
                                 crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
                             };
-                            err as u64
+                            err
                         }
                     }
                 }
                 None => {
-                    mmap_error::ENOMEM as u64
+                    mmap_error::ENOMEM
                 }
             }
         }
         None => {
-            mmap_error::ENOMEM as u64
+            mmap_error::ENOMEM
         }
     }
 }
@@ -312,7 +312,7 @@ pub fn sys_mmap(args: [u64; 6]) -> u64 {
 ///
 /// # Returns
 /// Returns mapped virtual address on success, negative error code on failure
-fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u64 {
+fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::arch::riscv64::mm::PageTableEntry;
     use crate::mm::vma::{Vma, VmaFlags};
@@ -320,18 +320,18 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     // Get framebuffer info
     let fb_info = match crate::drivers::gpu::get_framebuffer_info() {
         Some(info) => info,
-        None => return -6_i64 as u64,  // ENXIO
+        None => return -6_i64,  // ENXIO
     };
 
     // Check requested length
     if length == 0 || length > fb_info.size as usize {
-        return -22_i64 as u64;  // EINVAL
+        return -22_i64;  // EINVAL
     }
 
     // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
-        None => return -12_i64 as u64,  // ENOMEM
+        None => return -12_i64,  // ENOMEM
     };
 
     // Calculate mapping virtual address
@@ -358,7 +358,7 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
     // Get current process address space
     let addr_space = match current_task.address_space() {
         Some(aspace) => aspace,
-        None => return -12_i64 as u64,  // ENOMEM
+        None => return -12_i64,  // ENOMEM
     };
 
     // Register VMA (device mapping)
@@ -375,7 +375,7 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
 
     // Add VMA to address space
     if addr_space.vma_write().add(vma).is_err() {
-        return -12_i64 as u64;  // ENOMEM
+        return -12_i64;  // ENOMEM
     }
 
     // Get user page table PPN
@@ -420,7 +420,7 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
         core::arch::asm!("sfence.vma");
     }
 
-    vaddr_aligned as u64
+    vaddr_aligned as i64
 }
 /// sys_munmap - Unmap memory
 ///
@@ -433,7 +433,7 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> u6
 /// Returns 0 on success, negative error code on failure
 ///
 /// - RISC-V: 215
-pub fn sys_munmap(args: [u64; 6]) -> u64 {
+pub fn sys_munmap(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
     use crate::arch::riscv64::mm::mmap_error;
 
@@ -442,12 +442,12 @@ pub fn sys_munmap(args: [u64; 6]) -> u64 {
 
     // Validate arguments
     if length == 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Check address alignment
     if addr % 4096 != 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Get current process
@@ -465,14 +465,14 @@ pub fn sys_munmap(args: [u64; 6]) -> u64 {
                                 crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
                                 _ => mmap_error::ENOMEM,
                             };
-                            err as u64
+                            err
                         }
                     }
                 }
-                None => mmap_error::ENOMEM as u64,
+                None => mmap_error::ENOMEM,
             }
         }
-        None => mmap_error::ENOMEM as u64,
+        None => mmap_error::ENOMEM,
     }
 }
 /// sys_mprotect - Change protection of memory region
@@ -490,7 +490,7 @@ pub fn sys_munmap(args: [u64; 6]) -> u64 {
 ///
 /// # Description
 /// mprotect is used to change protection attributes of existing memory mapping
-pub fn sys_mprotect(args: [u64; 6]) -> u64 {
+pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     use crate::arch::riscv64::mm::{PageTableEntry, PAGE_SIZE, PAGE_SHIFT, PageTable, VirtAddr};
 
     let addr = args[0] as usize;
@@ -499,12 +499,12 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
 
     // Validate arguments
     if length == 0 {
-        return -22_i64 as u64;  // EINVAL
+        return -22_i64;  // EINVAL
     }
 
     // Address must be page aligned
     if addr % PAGE_SIZE as usize != 0 {
-        return -22_i64 as u64;  // EINVAL
+        return -22_i64;  // EINVAL
     }
 
     // Get current process
@@ -514,7 +514,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
             let root_ppn = if let Some(addr_space) = current_task.address_space() {
                 addr_space.root_ppn()
             } else {
-                return -12_i64 as u64;  // ENOMEM
+                return -12_i64;  // ENOMEM
             };
 
             // Calculate new PTE flags
@@ -600,7 +600,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
 
             0
         }
-        None => -12_i64 as u64  // ENOMEM
+        None => -12_i64  // ENOMEM
     }
 }
 /// sys_msync - Synchronize memory mapping to file
@@ -618,7 +618,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> u64 {
 ///
 /// # Description
 /// msync writes changes from file mapping back to disk
-pub fn sys_msync(args: [u64; 6]) -> u64 {
+pub fn sys_msync(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::arch::riscv64::mm::mmap_error;
 
@@ -633,22 +633,22 @@ pub fn sys_msync(args: [u64; 6]) -> u64 {
 
     // Validate flags
     if flags & !(MS_ASYNC | MS_SYNC | MS_INVALIDATE) != 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Cannot set both ASYNC and SYNC
     if (flags & MS_ASYNC != 0) && (flags & MS_SYNC != 0) {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Validate arguments
     if length == 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Address must be page aligned
     if addr % PAGE_SIZE != 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Align length
@@ -657,12 +657,12 @@ pub fn sys_msync(args: [u64; 6]) -> u64 {
     // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
-        None => return mmap_error::ENOMEM as u64,
+        None => return mmap_error::ENOMEM,
     };
 
     let address_space = match current_task.address_space() {
         Some(aspace) => aspace,
-        None => return mmap_error::ENOMEM as u64,
+        None => return mmap_error::ENOMEM,
     };
 
     // 1. Validate that address range is covered by VMA
@@ -680,7 +680,7 @@ pub fn sys_msync(args: [u64; 6]) -> u64 {
                 }
                 None => {
                     // Address not in any VMA
-                    return mmap_error::ENOMEM as u64;
+                    return mmap_error::ENOMEM;
                 }
             }
         }
@@ -755,7 +755,7 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
 ///
 /// # Description
 /// mremap expands or shrinks existing memory mapping
-pub fn sys_mremap(args: [u64; 6]) -> u64 {
+pub fn sys_mremap(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
@@ -773,12 +773,12 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
 
     // Validate old_addr page alignment
     if old_addr % PAGE_SIZE != 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Validate new_addr page alignment (if specified)
     if (flags & MREMAP_FIXED) != 0 && new_addr_arg % PAGE_SIZE != 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Align sizes
@@ -788,12 +788,12 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
     // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
-        None => return mmap_error::ENOMEM as u64,
+        None => return mmap_error::ENOMEM,
     };
 
     let address_space = match current_task.address_space_mut() {
         Some(aspace) => aspace,
-        None => return mmap_error::ENOMEM as u64,
+        None => return mmap_error::ENOMEM,
     };
 
     // 1. Find VMA covering old_addr
@@ -806,17 +806,17 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
 
     let (vma_start, vma_end, vma_flags, vma_type) = match vma_info {
         Some(info) => info,
-        None => return mmap_error::EFAULT as u64,  // Address not mapped
+        None => return mmap_error::EFAULT,  // Address not mapped
     };
 
     // Validate old_addr is VMA start address
     if vma_start.as_usize() != old_addr {
-        return mmap_error::EFAULT as u64;
+        return mmap_error::EFAULT;
     }
 
     // Validate old_size is within VMA range
     if old_addr + old_size_aligned > vma_end.as_usize() {
-        return mmap_error::EFAULT as u64;
+        return mmap_error::EFAULT;
     }
 
     // 2. Decide operation type based on new_size
@@ -845,7 +845,7 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
                     }
                     // Unmap old mapping
                     let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
-                    new_addr.as_usize() as u64
+                    new_addr.as_usize() as i64
                 }
                 Err(e) => {
                     let err = match e {
@@ -854,12 +854,12 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
                         crate::mm::pagemap::MapError::AlreadyMapped => mmap_error::ENOMEM,
                         crate::mm::pagemap::MapError::NotMapped => mmap_error::EINVAL,
                     };
-                    err as u64
+                    err
                 }
             }
         } else {
             // No operation needed
-            old_addr as u64
+            old_addr as i64
         }
     } else if new_size_aligned < old_size_aligned {
         // SHRINK: shrink mapping
@@ -868,8 +868,8 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
         let unmap_size = old_size_aligned - new_size_aligned;
 
         match address_space.munmap(VirtAddr::new(unmap_start), unmap_size) {
-            Ok(()) => old_addr as u64,
-            Err(_) => mmap_error::ENOMEM as u64,
+            Ok(()) => old_addr as i64,
+            Err(_) => mmap_error::ENOMEM,
         }
     } else {
         // EXPAND: expand mapping
@@ -897,8 +897,8 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
                 perm,
                 map::MAP_FIXED,  // Force at this address
             ) {
-                Ok(_) => old_addr as u64,
-                Err(_) => mmap_error::ENOMEM as u64,
+                Ok(_) => old_addr as i64,
+                Err(_) => mmap_error::ENOMEM,
             }
         } else if (flags & MREMAP_MAYMOVE) != 0 {
             // Can move: find new location
@@ -927,13 +927,13 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
                     }
                     // Unmap old mapping
                     let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
-                    new_mapping_addr.as_usize() as u64
+                    new_mapping_addr.as_usize() as i64
                 }
-                Err(_) => mmap_error::ENOMEM as u64,
+                Err(_) => mmap_error::ENOMEM,
             }
         } else {
             // Cannot expand in place and moving not allowed
-            mmap_error::ENOMEM as u64
+            mmap_error::ENOMEM
         }
     }
 }
@@ -952,7 +952,7 @@ pub fn sys_mremap(args: [u64; 6]) -> u64 {
 ///
 /// # Description
 /// madvise allows application to give advice to kernel about how to use memory
-pub fn sys_madvise(args: [u64; 6]) -> u64 {
+pub fn sys_madvise(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::arch::riscv64::mm::mmap_error;
 
@@ -980,12 +980,12 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
 
     // Validate arguments
     if length == 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Address must be page aligned
     if addr % PAGE_SIZE != 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Validate advice type
@@ -997,7 +997,7 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
             // Valid advice
         }
         _ => {
-            return mmap_error::EINVAL as u64;
+            return mmap_error::EINVAL;
         }
     }
 
@@ -1007,12 +1007,12 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
     // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
-        None => return mmap_error::ENOMEM as u64,
+        None => return mmap_error::ENOMEM,
     };
 
     let address_space = match current_task.address_space_mut() {
         Some(aspace) => aspace,
-        None => return mmap_error::ENOMEM as u64,
+        None => return mmap_error::ENOMEM,
     };
 
     // 1. Validate that address range is covered by VMA
@@ -1023,7 +1023,7 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
 
         // Check if starting address has VMA
         if vma_mgr.find(start).is_none() {
-            return mmap_error::ENOMEM as u64;
+            return mmap_error::ENOMEM;
         }
 
         // For MADV_DONTNEED and MADV_REMOVE, need entire range to be in VMA
@@ -1036,7 +1036,7 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
                         check_addr = vma.end().as_usize();
                     }
                     None => {
-                        return mmap_error::ENOMEM as u64;
+                        return mmap_error::ENOMEM;
                     }
                 }
             }
@@ -1056,7 +1056,7 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
             // MADV_REMOVE: Completely free mapping (equivalent to munmap)
             match address_space.munmap(VirtAddr::new(addr), length_aligned) {
                 Ok(()) => 0,
-                Err(_) => mmap_error::ENOMEM as u64,
+                Err(_) => mmap_error::ENOMEM,
             }
         }
         MADV_WILLNEED => {
@@ -1088,7 +1088,7 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
         }
         _ => {
             // Should not reach here since validated earlier
-            mmap_error::EINVAL as u64
+            mmap_error::EINVAL
         }
     }
 }
@@ -1108,7 +1108,7 @@ pub fn sys_madvise(args: [u64; 6]) -> u64 {
 /// # Description
 /// mincore returns a vector indicating which pages are in memory
 /// Lowest bit of each byte in vec indicates if corresponding page is in memory
-pub fn sys_mincore(args: [u64; 6]) -> u64 {
+pub fn sys_mincore(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::arch::riscv64::mm::{PageTableEntry, PageTable, mmap_error};
 
@@ -1118,17 +1118,17 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
 
     // Validate arguments
     if length == 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Address must be page aligned
     if addr % PAGE_SIZE != 0 {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Validate vec pointer
     if vec_ptr.is_null() {
-        return mmap_error::EINVAL as u64;
+        return mmap_error::EINVAL;
     }
 
     // Calculate needed page count
@@ -1137,19 +1137,19 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
 
     // Validate user pointer
     if !crate::arch::riscv64::uaccess::access_ok(vec_ptr as usize, page_count) {
-        return mmap_error::EFAULT as u64;
+        return mmap_error::EFAULT;
     }
 
 
     // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
-        None => return mmap_error::ENOMEM as u64,
+        None => return mmap_error::ENOMEM,
     };
 
     let address_space = match current_task.address_space() {
         Some(aspace) => aspace,
-        None => return mmap_error::ENOMEM as u64,
+        None => return mmap_error::ENOMEM,
     };
 
     // 1. Validate that address range is covered by VMA
@@ -1165,7 +1165,7 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
                 }
                 None => {
                     // Address not in any VMA
-                    return mmap_error::ENOMEM as u64;
+                    return mmap_error::ENOMEM;
                 }
             }
         }
@@ -1234,7 +1234,7 @@ pub fn sys_mincore(args: [u64; 6]) -> u64 {
 ///
 /// # Description
 /// mlock locks memory, preventing it from being swapped out
-pub fn sys_mlock(args: [u64; 6]) -> u64 {
+pub fn sys_mlock(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
 
     let addr = args[0] as usize;
@@ -1243,12 +1243,12 @@ pub fn sys_mlock(args: [u64; 6]) -> u64 {
 
     // Validate arguments
     if length == 0 {
-        return -22_i64 as u64;  // EINVAL
+        return -22_i64;  // EINVAL
     }
 
     // Address must be page aligned
     if addr % crate::mm::page::PAGE_SIZE != 0 {
-        return -22_i64 as u64;  // EINVAL
+        return -22_i64;  // EINVAL
     }
 
     // Simplified implementation:
@@ -1276,7 +1276,7 @@ pub fn sys_mlock(args: [u64; 6]) -> u64 {
 ///
 /// # Description
 /// munlock unlocks previously locked memory
-pub fn sys_munlock(args: [u64; 6]) -> u64 {
+pub fn sys_munlock(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
 
     let addr = args[0] as usize;
@@ -1285,12 +1285,12 @@ pub fn sys_munlock(args: [u64; 6]) -> u64 {
 
     // Validate arguments
     if length == 0 {
-        return -22_i64 as u64;  // EINVAL
+        return -22_i64;  // EINVAL
     }
 
     // Address must be page aligned
     if addr % crate::mm::page::PAGE_SIZE != 0 {
-        return -22_i64 as u64;  // EINVAL
+        return -22_i64;  // EINVAL
     }
 
     // Simplified implementation:
@@ -1304,28 +1304,28 @@ pub fn sys_munlock(args: [u64; 6]) -> u64 {
 }
 
 /// sys_mlockall - Lock all process memory (NR 230)
-pub fn sys_mlockall(args: [u64; 6]) -> u64 {
+pub fn sys_mlockall(args: [u64; 6]) -> i64 {
     let _flags = args[0] as u32;
     // Simplified: no swap support, all memory is always "locked"
     0
 }
 
 /// sys_munlockall - Unlock all process memory (NR 231)
-pub fn sys_munlockall(_args: [u64; 6]) -> u64 {
+pub fn sys_munlockall(_args: [u64; 6]) -> i64 {
     0
 }
 
 /// sys_mlock2 - Lock memory with flags (NR 284)
-pub fn sys_mlock2(args: [u64; 6]) -> u64 {
+pub fn sys_mlock2(args: [u64; 6]) -> i64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
     let _flags = args[2] as u32;
 
     if length == 0 {
-        return -22_i64 as u64;  // EINVAL
+        return -22_i64;  // EINVAL
     }
     if addr % crate::mm::page::PAGE_SIZE != 0 {
-        return -22_i64 as u64;
+        return -22_i64;
     }
     0
 }
@@ -1334,7 +1334,7 @@ pub fn sys_mlock2(args: [u64; 6]) -> u64 {
 ///
 /// On a single-node RISC-V system, all memory policies are effectively MPOL_DEFAULT.
 /// Validate arguments and return success.
-pub fn sys_mbind(args: [u64; 6]) -> u64 {
+pub fn sys_mbind(args: [u64; 6]) -> i64 {
     let _start = args[0] as usize;
     let _len = args[1] as usize;
     let _mode = args[2] as i32;
@@ -1345,7 +1345,7 @@ pub fn sys_mbind(args: [u64; 6]) -> u64 {
     // Validate nodemask pointer if provided
     if !_nodemask_ptr.is_null() && _maxnode > 0 {
         if !crate::arch::riscv64::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
-            return -errno::EFAULT as u64;
+            return -errno::EFAULT as i64;
         }
     }
 
@@ -1356,7 +1356,7 @@ pub fn sys_mbind(args: [u64; 6]) -> u64 {
 /// sys_get_mempolicy - Get memory policy (NR 236)
 ///
 /// On a single-node system, return MPOL_DEFAULT (0) with all nodes in nodemask.
-pub fn sys_get_mempolicy(args: [u64; 6]) -> u64 {
+pub fn sys_get_mempolicy(args: [u64; 6]) -> i64 {
     let mode_ptr = args[0] as *mut i32;
     let nodemask_ptr = args[1] as *mut usize;
     let maxnode = args[2] as usize;
@@ -1364,10 +1364,10 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> u64 {
     let _flags = args[4] as u32;
 
     if mode_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
     if !crate::arch::riscv64::uaccess::access_ok(mode_ptr as usize, 4) {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
     // SAFETY: mode_ptr validated with access_ok(4); writes a u32 value.
@@ -1379,7 +1379,7 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> u64 {
     // Fill nodemask with all nodes
     if !nodemask_ptr.is_null() && maxnode > 0 {
         if !crate::arch::riscv64::uaccess::access_ok(nodemask_ptr as usize, (maxnode + 7) / 8) {
-            return -errno::EFAULT as u64;
+            return -errno::EFAULT as i64;
         }
         let nwords = (maxnode + core::mem::size_of::<usize>() * 8 - 1) / (core::mem::size_of::<usize>() * 8);
         // SAFETY: nodemask_ptr validated with access_ok; nwords bounded by maxnode.
@@ -1394,14 +1394,14 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> u64 {
 }
 
 /// sys_set_mempolicy - Set process memory policy (NR 237)
-pub fn sys_set_mempolicy(args: [u64; 6]) -> u64 {
+pub fn sys_set_mempolicy(args: [u64; 6]) -> i64 {
     let _mode = args[0] as i32;
     let _nodemask_ptr = args[1] as *const usize;
     let _maxnode = args[2] as usize;
 
     if !_nodemask_ptr.is_null() && _maxnode > 0 {
         if !crate::arch::riscv64::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
-            return -errno::EFAULT as u64;
+            return -errno::EFAULT as i64;
         }
     }
 
@@ -1412,7 +1412,7 @@ pub fn sys_set_mempolicy(args: [u64; 6]) -> u64 {
 /// sys_migrate_pages - Migrate pages to another node (NR 238)
 ///
 /// On a single-node system, no migration needed.
-pub fn sys_migrate_pages(args: [u64; 6]) -> u64 {
+pub fn sys_migrate_pages(args: [u64; 6]) -> i64 {
     let _pid = args[0] as u32;
     let _maxnode = args[1] as usize;
     let _old_nodes_ptr = args[2] as *const usize;
@@ -1423,7 +1423,7 @@ pub fn sys_migrate_pages(args: [u64; 6]) -> u64 {
 }
 
 /// sys_move_pages - Move pages to another node (NR 239)
-pub fn sys_move_pages(args: [u64; 6]) -> u64 {
+pub fn sys_move_pages(args: [u64; 6]) -> i64 {
     let _pid = args[0] as u32;
     let _count = args[1] as usize;
     let _pages_ptr = args[2] as *const usize;
@@ -1435,16 +1435,16 @@ pub fn sys_move_pages(args: [u64; 6]) -> u64 {
     // Fill status array with -ENOENT (page not present) if provided
     if !_status_ptr.is_null() && _count > 0 {
         if !crate::arch::riscv64::uaccess::access_ok(_status_ptr as usize, _count * 4) {
-            return -errno::EFAULT as u64;
+            return -errno::EFAULT as i64;
         }
     }
-    _count as u64
+    _count as i64
 }
 
 /// sys_pkey_mprotect - Protect memory with protection key (NR 288)
 ///
 /// RISC-V does not have memory protection keys. Delegate to mprotect.
-pub fn sys_pkey_mprotect(args: [u64; 6]) -> u64 {
+pub fn sys_pkey_mprotect(args: [u64; 6]) -> i64 {
     let addr = args[0] as usize;
     let len = args[1] as usize;
     let prot = args[2] as u32;
@@ -1455,20 +1455,20 @@ pub fn sys_pkey_mprotect(args: [u64; 6]) -> u64 {
 }
 
 /// sys_pkey_alloc - Allocate protection key (NR 289)
-pub fn sys_pkey_alloc(_args: [u64; 6]) -> u64 {
+pub fn sys_pkey_alloc(_args: [u64; 6]) -> i64 {
     // No pkey hardware on RISC-V
-    -errno::ENOSYS as u64
+    -errno::ENOSYS as i64
 }
 
 /// sys_pkey_free - Free protection key (NR 290)
-pub fn sys_pkey_free(args: [u64; 6]) -> u64 {
+pub fn sys_pkey_free(args: [u64; 6]) -> i64 {
     let _pkey = args[0] as i32;
     // No pkey hardware on RISC-V
-    -errno::EINVAL as u64
+    -errno::EINVAL as i64
 }
 
 /// sys_fadvise64 - Predeclare file access pattern (NR 223)
-pub fn sys_fadvise64(args: [u64; 6]) -> u64 {
+pub fn sys_fadvise64(args: [u64; 6]) -> i64 {
     let _fd = args[0] as i32;
     let _offset = args[1] as i64;
     let _len = args[2] as i64;
@@ -1478,38 +1478,38 @@ pub fn sys_fadvise64(args: [u64; 6]) -> u64 {
 }
 
 /// sys_remap_file_pages - Remap file pages (NR 234, deprecated)
-pub fn sys_remap_file_pages(_args: [u64; 6]) -> u64 {
+pub fn sys_remap_file_pages(_args: [u64; 6]) -> i64 {
     0 // Deprecated, return success
 }
 
 /// Linux AIO syscalls (NR 0-4) - all stubs
-pub fn sys_io_setup(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_io_setup(_args: [u64; 6]) -> i64 {
+    -errno::ENOSYS as i64
 }
 
-pub fn sys_io_destroy(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_io_destroy(_args: [u64; 6]) -> i64 {
+    -errno::ENOSYS as i64
 }
 
-pub fn sys_io_submit(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_io_submit(_args: [u64; 6]) -> i64 {
+    -errno::ENOSYS as i64
 }
 
-pub fn sys_io_cancel(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_io_cancel(_args: [u64; 6]) -> i64 {
+    -errno::ENOSYS as i64
 }
 
-pub fn sys_io_getevents(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_io_getevents(_args: [u64; 6]) -> i64 {
+    -errno::ENOSYS as i64
 }
 
 /// sys_io_pgetevents - Async I/O get events v2 (NR 292)
-pub fn sys_io_pgetevents(_args: [u64; 6]) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_io_pgetevents(_args: [u64; 6]) -> i64 {
+    -errno::ENOSYS as i64
 }
 
 /// sys_set_mempolicy_home_node - Set home node for memory policy (NR 450)
-pub fn sys_set_mempolicy_home_node(_args: [u64; 6]) -> u64 {
+pub fn sys_set_mempolicy_home_node(_args: [u64; 6]) -> i64 {
     // Single-node system: nothing to do
     0
 }

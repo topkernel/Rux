@@ -17,60 +17,16 @@ use super::*;
 ///
 /// # Returns
 /// Returns file descriptor on success, negative error code on failure
-pub fn sys_socket(args: SyscallArgs) -> u64 {
+pub fn sys_socket(args: SyscallArgs) -> i64 {
     let domain = args[0] as i32;
     let type_ = args[1] as i32;
     let protocol = args[2] as i32;
 
-    // Try using new socket layer
+    // Delegate to the VFS-based socket layer which properly allocates
+    // a process file descriptor and registers the socket in the fd table.
     match crate::net::socket::sys_socket_create(domain, type_, protocol) {
-        Ok(fd) => return fd as u64,
-        Err(e) => {
-            // If new socket layer fails, fallback to old implementation
-            // But only fallback on specific errors
-            if e != -97 && e != -94 && e != -22 {
-                // Not a parameter error, socket layer may be uninitialized
-                // Fallback to old implementation
-            } else {
-                return e as u64;
-            }
-        }
-    }
-
-    // Old implementation (fallback)
-    // Currently only support AF_INET (IPv4)
-    if domain != 2 {
-        return -errno::EAFNOSUPPORT as u64;
-    }
-
-    match type_ {
-        1 => {
-            // SOCK_STREAM (TCP)
-            if protocol != 0 && protocol != 6 {
-                return -errno::EINVAL as u64;
-            }
-
-            use crate::net::tcp;
-            match tcp::tcp_socket_alloc() {
-                Ok(fd) => fd as u64,
-                Err(e) => e as u64
-            }
-        }
-        2 => {
-            // SOCK_DGRAM (UDP)
-            if protocol != 0 && protocol != 17 {
-                return -errno::EINVAL as u64;
-            }
-
-            use crate::net::udp;
-            match udp::udp_socket_alloc() {
-                Ok(fd) => fd as u64,
-                Err(e) => e as u64
-            }
-        }
-        _ => {
-            -errno::ESOCKTNOSUPPORT as u64
-        }
+        Ok(fd) => fd as i64,
+        Err(e) => e as i64,
     }
 }
 
@@ -83,19 +39,19 @@ pub fn sys_socket(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_bind(args: SyscallArgs) -> u64 {
+pub fn sys_bind(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let addr_ptr = args[1] as *const u8;
     let _addrlen = args[2] as u32;
 
     // Check address pointer validity
     if addr_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Validate user pointer
     if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read sockaddr_in structure (simplified implementation)
@@ -113,12 +69,12 @@ pub fn sys_bind(args: SyscallArgs) -> u64 {
 
     // Permission check: privileged ports (< 1024) require CAP_NET_BIND_SERVICE
     if sin_port < 1024 && !crate::security::capable(crate::security::CAP_NET_BIND_SERVICE) {
-        return -errno::EACCES as u64;
+        return -(errno::EACCES as i64);
     }
 
     // Currently only support AF_INET
     if sin_family != 2 {
-        return -errno::EAFNOSUPPORT as u64;
+        return -(errno::EAFNOSUPPORT as i64);
     }
 
     // TODO: Need a way to determine if fd is TCP or UDP socket
@@ -127,15 +83,15 @@ pub fn sys_bind(args: SyscallArgs) -> u64 {
 
     // Try TCP first
     if let Some(_socket) = tcp::tcp_socket_get(fd) {
-        return tcp::tcp_bind(fd, sin_port) as u64;
+        return tcp::tcp_bind(fd, sin_port) as i64;
     }
 
     // Then try UDP
     if let Some(_socket) = udp::udp_socket_get(fd) {
-        return udp::udp_bind(fd, sin_port) as u64;
+        return udp::udp_bind(fd, sin_port) as i64;
     }
 
-    -errno::EBADF as u64
+    -(errno::EBADF as i64)
 }
 
 /// sys_listen - Listen on socket
@@ -146,16 +102,16 @@ pub fn sys_bind(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_listen(args: SyscallArgs) -> u64 {
+pub fn sys_listen(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let backlog = args[1] as i32;
 
     use crate::net::tcp;
 
     if let Some(_socket) = tcp::tcp_socket_get(fd) {
-        tcp::tcp_listen(fd, backlog as u32) as u64
+        tcp::tcp_listen(fd, backlog as u32) as i64
     } else {
-        -errno::EBADF as u64
+        -(errno::EBADF as i64)
     }
 }
 
@@ -168,7 +124,7 @@ pub fn sys_listen(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns new socket file descriptor on success, negative error code on failure
-pub fn sys_accept(args: SyscallArgs) -> u64 {
+pub fn sys_accept(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let _addr_ptr = args[1] as *mut u8;
     let _addrlen_ptr = args[2] as *mut u32;
@@ -176,8 +132,8 @@ pub fn sys_accept(args: SyscallArgs) -> u64 {
     use crate::net::tcp;
 
     match tcp::tcp_socket_get(fd) {
-        Some(_socket) => tcp::tcp_accept(fd) as u64,
-        None => -errno::EBADF as u64
+        Some(_socket) => tcp::tcp_accept(fd) as i64,
+        None => -(errno::EBADF as i64)
     }
 }
 
@@ -190,19 +146,19 @@ pub fn sys_accept(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_connect(args: SyscallArgs) -> u64 {
+pub fn sys_connect(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let addr_ptr = args[1] as *const u8;
     let _addrlen = args[2] as u32;
 
     // Check address pointer validity
     if addr_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Validate user pointer
     if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read sockaddr_in structure
@@ -215,14 +171,14 @@ pub fn sys_connect(args: SyscallArgs) -> u64 {
 
     // Currently only support AF_INET
     if sin_family != 2 {
-        return -errno::EAFNOSUPPORT as u64;
+        return -(errno::EAFNOSUPPORT as i64);
     }
 
     use crate::net::tcp;
 
     match tcp::tcp_socket_get(fd) {
-        Some(_socket) => tcp::tcp_connect(fd, sin_addr, sin_port) as u64,
-        None => -errno::EBADF as u64
+        Some(_socket) => tcp::tcp_connect(fd, sin_addr, sin_port) as i64,
+        None => -(errno::EBADF as i64)
     }
 }
 
@@ -238,7 +194,7 @@ pub fn sys_connect(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns number of bytes sent on success, negative error code on failure
-pub fn sys_sendto(args: SyscallArgs) -> u64 {
+pub fn sys_sendto(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let buf_ptr = args[1] as *const u8;
     let len = args[2] as usize;
@@ -248,12 +204,12 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
 
     // Check buffer pointer validity
     if buf_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Validate user buffer pointer
     if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, len) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     if len == 0 {
@@ -262,7 +218,7 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
 
     // Validate optional address pointer
     if !addr_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Get socket
@@ -274,15 +230,15 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
             if let Some(_) = crate::net::tcp::tcp_socket_get(fd as i32) {
                 // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
                 let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
-                return data.len() as u64;  // Simplified implementation
+                return data.len() as i64;  // Simplified implementation
             }
             // Then try UDP
             if let Some(_) = crate::net::udp::udp_socket_get(fd as i32) {
                 // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
                 let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
-                return crate::net::udp::udp_send(fd as i32, data) as u64;
+                return crate::net::udp::udp_send(fd as i32, data) as i64;
             }
-            return -errno::EBADF as u64;
+            return -(errno::EBADF as i64);
         }
     };
 
@@ -306,8 +262,8 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
 
     // Send data
     match socket.send(data, dest_addr) {
-        Ok(bytes_sent) => bytes_sent as u64,
-        Err(e) => e as u64,
+        Ok(bytes_sent) => bytes_sent as i64,
+        Err(e) => e as i64,
     }
 }
 
@@ -317,25 +273,25 @@ pub fn sys_sendto(args: SyscallArgs) -> u64 {
 /// - args[0]: fd - socket file descriptor
 /// - args[1]: addr - pointer to sockaddr (output)
 /// - args[2]: addrlen - pointer to address length (input/output)
-pub fn sys_getsockname(args: SyscallArgs) -> u64 {
+pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let addr_ptr = args[1] as *mut u8;
     let addrlen_ptr = args[2] as *mut u32;
 
     if addr_ptr.is_null() || addrlen_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // SAFETY: addrlen_ptr validated with access_ok(4); reading 4-byte u32.
     let addrlen = unsafe { core::ptr::read_volatile(addrlen_ptr) } as usize;
     if addrlen < 16 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Try new socket layer first
@@ -372,25 +328,25 @@ pub fn sys_getsockname(args: SyscallArgs) -> u64 {
 /// - args[0]: fd - socket file descriptor
 /// - args[1]: addr - pointer to sockaddr (output)
 /// - args[2]: addrlen - pointer to address length (input/output)
-pub fn sys_getpeername(args: SyscallArgs) -> u64 {
+pub fn sys_getpeername(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let addr_ptr = args[1] as *mut u8;
     let addrlen_ptr = args[2] as *mut u32;
 
     if addr_ptr.is_null() || addrlen_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // SAFETY: addrlen_ptr validated with access_ok; reading 4-byte u32.
     let addrlen = unsafe { core::ptr::read_volatile(addrlen_ptr) } as usize;
     if addrlen < 16 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Try new socket layer
@@ -409,14 +365,14 @@ pub fn sys_getpeername(args: SyscallArgs) -> u64 {
             }
             return 0;
         }
-        return -errno::ENOTCONN as u64;
+        return -(errno::ENOTCONN as i64);
     }
 
     // Old layer fallback
     if let Some(_) = crate::net::tcp::tcp_socket_get(fd as i32) {
-        return -errno::ENOTCONN as u64;
+        return -(errno::ENOTCONN as i64);
     }
-    -errno::ENOTSOCK as u64
+    -(errno::ENOTSOCK as i64)
 }
 
 /// sys_setsockopt - Set socket options
@@ -427,7 +383,7 @@ pub fn sys_getpeername(args: SyscallArgs) -> u64 {
 /// - args[2]: optname - option name
 /// - args[3]: optval - option value
 /// - args[4]: optlen - option length
-pub fn sys_setsockopt(args: SyscallArgs) -> u64 {
+pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let level = args[1] as i32;
     let optname = args[2] as i32;
@@ -475,7 +431,7 @@ pub fn sys_setsockopt(args: SyscallArgs) -> u64 {
 
     if !optval.is_null() && optlen > 0 {
         if !crate::arch::riscv64::uaccess::access_ok(optval as usize, optlen as usize) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
     }
 
@@ -484,7 +440,7 @@ pub fn sys_setsockopt(args: SyscallArgs) -> u64 {
         || crate::net::tcp::tcp_socket_get(fd as i32).is_some()
         || crate::net::udp::udp_socket_get(fd as i32).is_some();
     if !is_socket {
-        return -errno::ENOTSOCK as u64;
+        return -(errno::ENOTSOCK as i64);
     }
 
     match level {
@@ -495,7 +451,7 @@ pub fn sys_setsockopt(args: SyscallArgs) -> u64 {
             | SO_SNDLOWAT | SO_PRIORITY | SO_LINGER | SO_RCVTIMEO
             | SO_SNDTIMEO => 0, // Accept and ignore
             SO_TYPE | SO_ERROR | SO_PEERCRED => {
-                return -errno::ENOPROTOOPT as u64; // Read-only options
+                return -(errno::ENOPROTOOPT as i64); // Read-only options
             }
             _ => 0, // Accept unknown options silently
         },
@@ -520,7 +476,7 @@ pub fn sys_setsockopt(args: SyscallArgs) -> u64 {
 /// - args[2]: optname - option name
 /// - args[3]: optval - option value (output)
 /// - args[4]: optlen - option length (input/output)
-pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
+pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let level = args[1] as i32;
     let optname = args[2] as i32;
@@ -555,18 +511,18 @@ pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
     const IP_TTL: i32 = 2;
 
     if optval.is_null() || optlen_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(optlen_ptr as usize, 4) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     // SAFETY: optlen_ptr validated with access_ok; reading 4-byte u32.
     let optlen = unsafe { core::ptr::read_volatile(optlen_ptr) } as usize;
     if optlen == 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(optval as usize, optlen) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Validate fd is a socket
@@ -575,7 +531,7 @@ pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
         || crate::net::tcp::tcp_socket_get(fd as i32).is_some()
         || crate::net::udp::udp_socket_get(fd as i32).is_some();
     if !is_socket {
-        return -errno::ENOTSOCK as u64;
+        return -(errno::ENOTSOCK as i64);
     }
 
     // SAFETY: optval and optlen_ptr validated with access_ok; writes stay within
@@ -677,7 +633,7 @@ pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
                     core::ptr::write_volatile(optlen_ptr, write_len as u32);
                 }
                 _ => {
-                    return -errno::ENOPROTOOPT as u64;
+                    return -(errno::ENOPROTOOPT as i64);
                 }
             },
             IPPROTO_TCP => match optname {
@@ -697,7 +653,7 @@ pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
                     core::ptr::write_volatile(optlen_ptr, write_len as u32);
                 }
                 _ => {
-                    return -errno::ENOPROTOOPT as u64;
+                    return -(errno::ENOPROTOOPT as i64);
                 }
             },
             IPPROTO_IP => match optname {
@@ -722,11 +678,11 @@ pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
                     core::ptr::write_volatile(optlen_ptr, write_len as u32);
                 }
                 _ => {
-                    return -errno::ENOPROTOOPT as u64;
+                    return -(errno::ENOPROTOOPT as i64);
                 }
             },
             _ => {
-                return -errno::ENOPROTOOPT as u64;
+                return -(errno::ENOPROTOOPT as i64);
             }
         }
     }
@@ -738,12 +694,12 @@ pub fn sys_getsockopt(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: fd - socket file descriptor
 /// - args[1]: how - SHUT_RD (0), SHUT_WR (1), SHUT_RDWR (2)
-pub fn sys_shutdown(args: SyscallArgs) -> u64 {
+pub fn sys_shutdown(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let how = args[1] as i32;
 
     if how < 0 || how > 2 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     if let Some(socket) = crate::net::socket::get_socket(fd) {
@@ -765,7 +721,7 @@ pub fn sys_shutdown(args: SyscallArgs) -> u64 {
         return 0; // Accept and ignore
     }
 
-    -errno::ENOTSOCK as u64
+    -(errno::ENOTSOCK as i64)
 }
 
 /// sys_sendmsg - Send message through socket
@@ -774,16 +730,16 @@ pub fn sys_shutdown(args: SyscallArgs) -> u64 {
 /// - args[0]: fd - socket file descriptor
 /// - args[1]: msg - pointer to msghdr
 /// - args[2]: flags - flags
-pub fn sys_sendmsg(args: SyscallArgs) -> u64 {
+pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msg_ptr = args[1] as *const u8;
     let _flags = args[2] as i32;
 
     if msg_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(msg_ptr as usize, 64) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read msg_name (sa_family) and msg_iov (iovec) from msghdr
@@ -807,7 +763,7 @@ pub fn sys_sendmsg(args: SyscallArgs) -> u64 {
         let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
         if iov_len > 0 {
             if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
             buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
@@ -822,11 +778,11 @@ pub fn sys_sendmsg(args: SyscallArgs) -> u64 {
     // Get socket and send
     if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
         match socket.send(&buf, None) {
-            Ok(n) => n as u64,
-            Err(e) => e as u64,
+            Ok(n) => n as i64,
+            Err(e) => e as i64,
         }
     } else {
-        -errno::EBADF as u64
+        -(errno::EBADF as i64)
     }
 }
 
@@ -836,16 +792,16 @@ pub fn sys_sendmsg(args: SyscallArgs) -> u64 {
 /// - args[0]: fd - socket file descriptor
 /// - args[1]: msg - pointer to msghdr
 /// - args[2]: flags - flags
-pub fn sys_recvmsg(args: SyscallArgs) -> u64 {
+pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msg_ptr = args[1] as *mut u8;
     let _flags = args[2] as i32;
 
     if msg_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(msg_ptr as usize, 64) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read iovec from msghdr
@@ -862,7 +818,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> u64 {
         let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
         let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
         if iov_len > 0 && !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         total_buf_len += iov_len;
     }
@@ -898,12 +854,12 @@ pub fn sys_recvmsg(args: SyscallArgs) -> u64 {
                         offset += copy_len;
                     }
                 }
-                bytes_read as u64
+                bytes_read as i64
             }
-            Err(e) => e as u64,
+            Err(e) => e as i64,
         }
     } else {
-        -errno::EBADF as u64
+        -(errno::EBADF as i64)
     }
 }
 
@@ -914,28 +870,28 @@ pub fn sys_recvmsg(args: SyscallArgs) -> u64 {
 /// - args[1]: type - socket type
 /// - args[2]: protocol - protocol
 /// - args[3]: sv - pointer to int[2] for fds
-pub fn sys_socketpair(args: SyscallArgs) -> u64 {
+pub fn sys_socketpair(args: SyscallArgs) -> i64 {
     let domain = args[0] as i32;
     let _type_ = args[1] as i32;
     let _protocol = args[2] as i32;
     let sv = args[3] as *mut i32;
 
     if sv.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(sv as usize, 8) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Only AF_UNIX (1) is supported for socketpair
     if domain != 1 {
-        return -errno::EAFNOSUPPORT as u64;
+        return -(errno::EAFNOSUPPORT as i64);
     }
 
     // TODO: implement AF_UNIX socketpair with connected socket pair
     // For now, return -EOPNOTSUPP to indicate the feature is not yet available
     // This is better than -ENOSYS which prevents libc fallback
-    -errno::EOPNOTSUPP as u64
+    -(errno::EOPNOTSUPP as i64)
 }
 
 /// sys_sendmmsg - Send multiple messages (NR 269)
@@ -948,17 +904,17 @@ pub fn sys_socketpair(args: SyscallArgs) -> u64 {
 ///
 /// struct mmsghdr { struct msghdr msg; unsigned int len; }
 /// struct msghdr is 56 bytes on 64-bit; mmsghdr = 60 bytes
-pub fn sys_sendmmsg(args: SyscallArgs) -> u64 {
+pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msgvec = args[1] as *const u8;
     let vlen = args[2] as u32;
     let _flags = args[3] as i32;
 
     if msgvec.is_null() || vlen == 0 {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(msgvec as usize, vlen as usize * 64) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
@@ -981,7 +937,7 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> u64 {
                 let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
                 if iov_len > 0 {
                     if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
-                        return total_sent as u64; // Return partial success
+                        return total_sent as i64; // Return partial success
                     }
                     // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
                     buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
@@ -999,10 +955,10 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> u64 {
             }
             total_sent += 1;
         }
-        return total_sent as u64;
+        return total_sent as i64;
     }
 
-    -errno::EBADF as u64
+    -(errno::EBADF as i64)
 }
 
 /// sys_recvmmsg - Receive multiple messages (NR 243)
@@ -1013,7 +969,7 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> u64 {
 /// - args[2]: vlen - number of messages
 /// - args[3]: flags - flags
 /// - args[4]: timeout - pointer to timespec
-pub fn sys_recvmmsg(args: SyscallArgs) -> u64 {
+pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msgvec = args[1] as *mut u8;
     let vlen = args[2] as u32;
@@ -1021,10 +977,10 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> u64 {
     let _timeout = args[4] as *const u8;
 
     if msgvec.is_null() || vlen == 0 {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(msgvec as usize, vlen as usize * 64) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
@@ -1043,7 +999,7 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> u64 {
                 let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
                 let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
                 if iov_len > 0 && !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
-                    return total_recv as u64;
+                    return total_recv as i64;
                 }
                 total_buf_len += iov_len;
             }
@@ -1087,10 +1043,10 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> u64 {
                 Err(_) => break,
             }
         }
-        return total_recv as u64;
+        return total_recv as i64;
     }
 
-    -errno::EBADF as u64
+    -(errno::EBADF as i64)
 }
 
 /// sys_accept4 - Accept connection (with flags)
@@ -1100,7 +1056,7 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> u64 {
 /// - args[1]: addr - pointer to sockaddr (output)
 /// - args[2]: addrlen - pointer to address length (input/output)
 /// - args[3]: flags - SOCK_CLOEXEC, SOCK_NONBLOCK
-pub fn sys_accept4(args: SyscallArgs) -> u64 {
+pub fn sys_accept4(args: SyscallArgs) -> i64 {
     let _flags = args[3] as i32;
     // TODO: handle SOCK_CLOEXEC/SOCK_NONBLOCK flags
     sys_accept(args)
@@ -1118,7 +1074,7 @@ pub fn sys_accept4(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns number of bytes received on success, negative error code on failure
-pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
+pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let buf_ptr = args[1] as *mut u8;
     let len = args[2] as usize;
@@ -1128,20 +1084,20 @@ pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
 
     // Check buffer pointer validity
     if buf_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Validate user buffer pointer
     if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, len) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Validate optional address pointers
     if !addr_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !addrlen_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     if len == 0 {
@@ -1158,17 +1114,17 @@ pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
                 // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
                 let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
                 return match tcp_sock.recv(buf, len) {
-                    Ok(n) => n as u64,
-                    Err(_) => -errno::EAGAIN as u64,
+                    Ok(n) => n as i64,
+                    Err(_) => -(errno::EAGAIN as i64),
                 };
             }
             // Then try UDP
             if let Some(_) = crate::net::udp::udp_socket_get(fd as i32) {
                 // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
                 let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
-                return crate::net::udp::udp_recv(fd as i32, buf, len) as u64;
+                return crate::net::udp::udp_recv(fd as i32, buf, len) as i64;
             }
-            return -errno::EBADF as u64;
+            return -(errno::EBADF as i64);
         }
     };
 
@@ -1194,8 +1150,8 @@ pub fn sys_recvfrom(args: SyscallArgs) -> u64 {
                     }
                 }
             }
-            bytes_read as u64
+            bytes_read as i64
         }
-        Err(e) => e as u64,
+        Err(e) => e as i64,
     }
 }

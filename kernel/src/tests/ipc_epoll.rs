@@ -111,7 +111,7 @@ fn test_epoll_ctl_operations() {
 fn test_epoll_create() {
     // Test creating epoll instance
     let epfd = sys_epoll_create1([0, 0, 0, 0, 0, 0]); // flags=0
-    if (epfd as i64) >= 0 {
+    if epfd >= 0 {
         test_pass("sys_epoll_create1 returns valid fd");
 
         // fd should be reasonable
@@ -127,23 +127,23 @@ fn test_epoll_create() {
             Err(_) => test_fail("sys_epoll_create1 close", "close failed"),
         }
     } else {
-        test_skip("sys_epoll_create1", &alloc::format!("returned {}", epfd as i64));
+        test_skip("sys_epoll_create1", &alloc::format!("returned {}", epfd));
     }
 
     // Test creating with O_CLOEXEC flag
     let epfd = sys_epoll_create1([0x80000, 0, 0, 0, 0, 0]); // O_CLOEXEC
-    if (epfd as i64) >= 0 {
+    if epfd >= 0 {
         test_pass("sys_epoll_create1 O_CLOEXEC");
         let _ = file_close(epfd as usize);
     } else {
-        test_skip("sys_epoll_create1 O_CLOEXEC", &alloc::format!("returned {}", epfd as i64));
+        test_skip("sys_epoll_create1 O_CLOEXEC", &alloc::format!("returned {}", epfd));
     }
 }
 
 fn test_epoll_ctl_wait() {
     // Create epoll instance
     let epfd = sys_epoll_create1([0, 0, 0, 0, 0, 0]);
-    if (epfd as i64) < 0 {
+    if epfd < 0 {
         test_skip("sys_epoll_ctl", "epoll_create1 failed");
         return;
     }
@@ -153,23 +153,23 @@ fn test_epoll_ctl_wait() {
         events: epoll_events::EPOLLIN,
         data: 42,
     };
-    let result = sys_epoll_ctl([epfd, epoll_ctl_ops::EPOLL_CTL_ADD as u64, epfd, &event as *const EPollEvent as u64, 0, 0]);
+    let result = sys_epoll_ctl([epfd as u64, epoll_ctl_ops::EPOLL_CTL_ADD as u64, epfd as u64, &event as *const EPollEvent as u64, 0, 0]);
     if result == 0 {
         test_pass("sys_epoll_ctl ADD succeeds");
     } else {
-        test_skip("sys_epoll_ctl ADD", &alloc::format!("returned {}", result as i64));
+        test_skip("sys_epoll_ctl ADD", &alloc::format!("returned {}", result));
     }
 
     // Test EPOLL_CTL_DEL
-    let result = sys_epoll_ctl([epfd, epoll_ctl_ops::EPOLL_CTL_DEL as u64, epfd, 0, 0, 0]);
+    let result = sys_epoll_ctl([epfd as u64, epoll_ctl_ops::EPOLL_CTL_DEL as u64, epfd as u64, 0, 0, 0]);
     if result == 0 {
         test_pass("sys_epoll_ctl DEL succeeds");
     } else {
-        test_skip("sys_epoll_ctl DEL", &alloc::format!("returned {}", result as i64));
+        test_skip("sys_epoll_ctl DEL", &alloc::format!("returned {}", result));
     }
 
     // Test EPOLL_CTL_MOD (modify non-existent fd)
-    let result = sys_epoll_ctl([epfd, epoll_ctl_ops::EPOLL_CTL_MOD as u64, 9999, &event as *const EPollEvent as u64, 0, 0]);
+    let result = sys_epoll_ctl([epfd as u64, epoll_ctl_ops::EPOLL_CTL_MOD as u64, 9999, &event as *const EPollEvent as u64, 0, 0]);
     if result == 0 {
         test_pass("sys_epoll_ctl MOD succeeds (stub)");
     } else {
@@ -178,13 +178,13 @@ fn test_epoll_ctl_wait() {
 
     // Test epoll_wait with timeout=0 (should return 0 immediately)
     let mut events = [EPollEvent { events: 0, data: 0 }; 4];
-    let result = sys_epoll_pwait([epfd, events.as_mut_ptr() as u64, 4, 0, 0, 0]);
+    let result = sys_epoll_pwait([epfd as u64, events.as_mut_ptr() as u64, 4, 0, 0, 0]);
     if result == 0 {
         test_pass("sys_epoll_wait timeout=0 returns 0");
-    } else if (result as i64) > 0 {
+    } else if result > 0 {
         test_pass("sys_epoll_wait returns events");
     } else {
-        test_skip("sys_epoll_wait", &alloc::format!("returned {}", result as i64));
+        test_skip("sys_epoll_wait", &alloc::format!("returned {}", result));
     }
 
     // Cleanup

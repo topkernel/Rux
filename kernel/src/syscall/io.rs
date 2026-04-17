@@ -59,7 +59,7 @@ pub fn tty_set_lflag(lflag: u32) {
 ///
 /// # Returns
 /// Returns number of bytes read on success, negative error code on failure
-pub fn sys_read(args: SyscallArgs) -> u64 {
+pub fn sys_read(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *mut u8;
@@ -67,7 +67,7 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
 
     // Check if buffer address is in valid user space using access_ok
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
     // Check if count is reasonable
@@ -90,14 +90,14 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
                         result as usize,
                     );
                     if uncopied > 0 {
-                        return -errno::EFAULT as u64;
+                        return -errno::EFAULT as i64;
                     }
-                    result as u64
+                    result as i64
                 } else {
-                    result as u32 as u64
+                    result as i32 as i64
                 }
             }
-            None => -errno::EBADF as u64
+            None => -errno::EBADF as i64
         }
     }
 }
@@ -114,7 +114,7 @@ pub fn sys_read(args: SyscallArgs) -> u64 {
 /// Number of bytes read on success, negative errno on failure
 ///
 /// - RISC-V: 67
-pub fn sys_pread64(args: SyscallArgs) -> u64 {
+pub fn sys_pread64(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *mut u8;
@@ -123,11 +123,11 @@ pub fn sys_pread64(args: SyscallArgs) -> u64 {
 
     // Validate offset
     if offset < 0 {
-        return -errno::EINVAL as u64;
+        return -errno::EINVAL as i64;
     }
     // Check buffer accessibility
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
     if count == 0 {
         return 0;
@@ -152,14 +152,14 @@ pub fn sys_pread64(args: SyscallArgs) -> u64 {
                         result as usize,
                     );
                     if uncopied > 0 {
-                        return -errno::EFAULT as u64;
+                        return -errno::EFAULT as i64;
                     }
-                    result as u64
+                    result as i64
                 } else {
-                    result as u32 as u64
+                    result as i32 as i64
                 }
             }
-            None => -errno::EBADF as u64
+            None => -errno::EBADF as i64
         }
     }
 }
@@ -173,7 +173,7 @@ pub fn sys_pread64(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns number of bytes written on success, negative error code on failure
-pub fn sys_write(args: SyscallArgs) -> u64 {
+pub fn sys_write(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *const u8;
@@ -181,7 +181,7 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
 
     // Check if buffer address is in valid user space using access_ok
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
     // Check if count is reasonable
@@ -222,7 +222,7 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
                         if uncopied > 0 {
                             // Failed to copy some bytes
                             if total_written == 0 {
-                                return -errno::EFAULT as u64;
+                                return -errno::EFAULT as i64;
                             }
                             break;
                         }
@@ -240,7 +240,7 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
                         user_ptr = user_ptr.add(to_copy);
                     }
 
-                    return total_written as u64;
+                    return total_written as i64;
                 }
 
                 // Regular file or redirected output
@@ -252,16 +252,16 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
                     count,
                 );
                 if uncopied > 0 {
-                    return -errno::EFAULT as u64;
+                    return -errno::EFAULT as i64;
                 }
                 let result = file.write(kernel_buf.as_ptr(), count);
                 if result < 0 {
-                    result as u32 as u64
+                    result as i32 as i64
                 } else {
-                    result as u64
+                    result as i64
                 }
             }
-            None => -errno::EBADF as u64,
+            None => -errno::EBADF as i64,
         }
     }
 }
@@ -275,7 +275,7 @@ pub fn sys_write(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns total bytes written on success, negative error code on failure
-pub fn sys_writev(args: SyscallArgs) -> u64 {
+pub fn sys_writev(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let iov_ptr = args[1] as *const Iovec;
     let iovcnt = args[2] as usize;
@@ -283,7 +283,7 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
     // Check iovec array pointer using access_ok
     let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
     if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
     let mut total_written: isize = 0;
@@ -303,7 +303,7 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
             );
 
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
 
             let base = iov.iov_base as usize;
@@ -320,8 +320,7 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
                 let write_args = [fd as u64, iov.iov_base as u64, len as u64, 0, 0, 0];
                 let result = sys_write(write_args);
 
-                let result_i64 = result as i64;
-                if result_i64 < 0 {
+                if result < 0 {
                     if total_written == 0 {
                         return result;
                     }
@@ -329,16 +328,16 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
                 }
                 total_written += result as isize;
             } else if len > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
         }
     }
 
     if !has_valid_iov && iovcnt > 0 {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
-    total_written as u64
+    total_written as i64
 }
 
 /// sys_readv - Read data into multiple buffers
@@ -350,7 +349,7 @@ pub fn sys_writev(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns total bytes read on success, negative error code on failure
-pub fn sys_readv(args: SyscallArgs) -> u64 {
+pub fn sys_readv(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let iov_ptr = args[1] as *const Iovec;
     let iovcnt = args[2] as usize;
@@ -358,7 +357,7 @@ pub fn sys_readv(args: SyscallArgs) -> u64 {
     // Check iovec array pointer using access_ok
     let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
     if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
     let mut total_read: isize = 0;
@@ -378,7 +377,7 @@ pub fn sys_readv(args: SyscallArgs) -> u64 {
             );
 
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
 
             let base = iov.iov_base as usize;
@@ -395,8 +394,7 @@ pub fn sys_readv(args: SyscallArgs) -> u64 {
                 let read_args = [fd as u64, iov.iov_base as u64, len as u64, 0, 0, 0];
                 let result = sys_read(read_args);
 
-                let result_i64 = result as i64;
-                if result_i64 < 0 {
+                if result < 0 {
                     if total_read == 0 {
                         return result;
                     }
@@ -407,20 +405,20 @@ pub fn sys_readv(args: SyscallArgs) -> u64 {
                     break; // EOF
                 }
             } else if len > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
         }
     }
 
     if !has_valid_iov && iovcnt > 0 {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
-    total_read as u64
+    total_read as i64
 }
 
 /// sys_dup - Duplicate file descriptor
-pub fn sys_dup(args: SyscallArgs) -> u64 {
+pub fn sys_dup(args: SyscallArgs) -> i64 {
     let oldfd = args[0] as usize;
 
     // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
@@ -428,17 +426,17 @@ pub fn sys_dup(args: SyscallArgs) -> u64 {
         match crate::sched::get_current_fdtable() {
             Some(fdtable) => {
                 match fdtable.dup_fd(oldfd) {
-                    Some(newfd) => newfd as u64,
-                    None => -errno::EBADF as i64 as u64,
+                    Some(newfd) => newfd as i64,
+                    None => -errno::EBADF as i64,
                 }
             }
-            None => -errno::EBADF as i64 as u64,
+            None => -errno::EBADF as i64,
         }
     }
 }
 
 /// sys_dup2 - Duplicate file descriptor to specified number
-pub fn sys_dup2(args: SyscallArgs) -> u64 {
+pub fn sys_dup2(args: SyscallArgs) -> i64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;
 
@@ -447,30 +445,30 @@ pub fn sys_dup2(args: SyscallArgs) -> u64 {
         match crate::sched::get_current_fdtable() {
             Some(fdtable) => {
                 match fdtable.dup2_fd(oldfd, newfd) {
-                    Some(fd) => fd as u64,
-                    None => -errno::EBADF as i64 as u64,
+                    Some(fd) => fd as i64,
+                    None => -errno::EBADF as i64,
                 }
             }
-            None => -errno::EBADF as i64 as u64,
+            None => -errno::EBADF as i64,
         }
     }
 }
 
 /// sys_dup3 - Duplicate file descriptor to specified number with flags
 /// Syscall number: 24
-pub fn sys_dup3(args: SyscallArgs) -> u64 {
+pub fn sys_dup3(args: SyscallArgs) -> i64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;
     let flags = args[2] as u32;
 
     // dup3 returns EINVAL if oldfd == newfd (unlike dup2)
     if oldfd == newfd {
-        return -errno::EINVAL as u64;
+        return -errno::EINVAL as i64;
     }
 
     // Only O_CLOEXEC is valid for dup3
     if flags & !(crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
-        return -errno::EINVAL as u64;
+        return -errno::EINVAL as i64;
     }
 
     // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
@@ -485,30 +483,30 @@ pub fn sys_dup3(args: SyscallArgs) -> u64 {
                                 file.set_cloexec(true);
                             }
                         }
-                        fd as u64
+                        fd as i64
                     }
-                    None => -errno::EBADF as i64 as u64,
+                    None => -errno::EBADF as i64,
                 }
             }
-            None => -errno::EBADF as i64 as u64,
+            None => -errno::EBADF as i64,
         }
     }
 }
 
 /// sys_fcntl - File control
-pub fn sys_fcntl(args: SyscallArgs) -> u64 {
+pub fn sys_fcntl(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let cmd = args[1] as usize;
     let arg = args[2] as usize;
 
     match crate::fs::vfs::file_fcntl(fd, cmd, arg) {
-        Ok(result) => result as u64,
-        Err(errno) => errno as u64,
+        Ok(result) => result as i64,
+        Err(errno) => errno as i64,
     }
 }
 
 /// sys_ioctl - IO control
-pub fn sys_ioctl(args: SyscallArgs) -> u64 {
+pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let request = args[1] as u32;
     let arg = args[2] as usize;
@@ -516,7 +514,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
     // Special handling for framebuffer device (fd >= 1000 is device file)
     if fd >= 1000 {
         let result = crate::drivers::gpu::fbdev_ioctl(request, arg) as i64;
-        return result as u64;
+        return result as i64;
     }
 
     // TTY ioctl commands
@@ -524,11 +522,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
         // TCGETS - Get terminal attributes (0x5401)
         0x5401 => {
             if arg == 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             // Check address validity (termios struct ~60 bytes)
             if !crate::arch::riscv64::uaccess::access_ok(arg, 60) {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             // Fill termios structure with current settings
             let lflag = tty_get_lflag();
@@ -569,18 +567,18 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 )
             };
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             0
         }
         // TCSETS, TCSETSW, TCSETSF - Set terminal attributes
         0x5402 | 0x5403 | 0x5404 => {
             if arg == 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             // Check address validity
             if !crate::arch::riscv64::uaccess::access_ok(arg, 60) {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             // Read termios structure from user space using copy_from_user
             let mut termios_buf = [0u8; 60];
@@ -593,7 +591,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 )
             };
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             // Read c_lflag from buffer and update global state
             // SAFETY: termios_buf is a stack-allocated buffer; offset 3 reads a u32 at byte 12.
@@ -607,10 +605,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
         // TIOCGPGRP - Get foreground process group (0x540F)
         0x540F => {
             if arg == 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             if !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             let pgid = TTY_FG_PGRP.load(Ordering::Relaxed);
             let pgid_bytes = (pgid as u32).to_le_bytes();
@@ -623,17 +621,17 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 )
             };
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             0
         }
         // TIOCSPGRP - Set foreground process group (0x5410)
         0x5410 => {
             if arg == 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             if !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             let mut pgid_bytes = [0u8; 4];
             // SAFETY: arg validated with access_ok(4); copy_from_user safely reads from user.
@@ -645,7 +643,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 )
             };
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             let pgid = u32::from_le_bytes(pgid_bytes);
             TTY_FG_PGRP.store(pgid, Ordering::Release);
@@ -654,11 +652,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
         // TIOCGWINSZ - Get window size (0x5413)
         0x5413 => {
             if arg == 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             // Check address validity (winsize struct 8 bytes)
             if !crate::arch::riscv64::uaccess::access_ok(arg, 8) {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
 
             // Build winsize structure in kernel buffer first
@@ -679,7 +677,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 )
             };
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             0
         }
@@ -690,11 +688,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
         // FIONREAD - Get readable byte count (0x541B)
         0x541B => {
             if arg == 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             // Check address validity
             if !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             // Build result in kernel buffer and copy to user space
             let result_buf: [u8; 4] = [0, 0, 0, 0];  // Return 0 bytes available
@@ -707,7 +705,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
                 )
             };
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             0
         }
@@ -721,14 +719,14 @@ pub fn sys_ioctl(args: SyscallArgs) -> u64 {
             if fd >= 0 && fd <= 2 {
                 0
             } else {
-                -errno::ENOTTY as u64
+                -errno::ENOTTY as i64
             }
         }
     }
 }
 
 /// sys_flock - File lock (simplified implementation)
-pub fn sys_flock(_args: SyscallArgs) -> u64 {
+pub fn sys_flock(_args: SyscallArgs) -> i64 {
     // Simplified implementation: always return success
     0
 }
@@ -745,7 +743,7 @@ pub fn sys_flock(_args: SyscallArgs) -> u64 {
 /// Number of bytes written on success, negative errno on failure
 ///
 /// - RISC-V: 68
-pub fn sys_pwrite64(args: SyscallArgs) -> u64 {
+pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *const u8;
@@ -754,11 +752,11 @@ pub fn sys_pwrite64(args: SyscallArgs) -> u64 {
 
     // Validate offset
     if offset < 0 {
-        return -errno::EINVAL as u64;
+        return -errno::EINVAL as i64;
     }
     // Check buffer accessibility
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
     if count == 0 {
         return 0;
@@ -779,19 +777,19 @@ pub fn sys_pwrite64(args: SyscallArgs) -> u64 {
                 );
                 if uncopied > 0 {
                     file.set_pos(saved_pos);
-                    return -errno::EFAULT as u64;
+                    return -errno::EFAULT as i64;
                 }
                 let result = file.write(kernel_buf.as_ptr(), count);
 
                 file.set_pos(saved_pos);
 
                 if result < 0 {
-                    result as u32 as u64
+                    result as i32 as i64
                 } else {
-                    result as u64
+                    result as i64
                 }
             }
-            None => -errno::EBADF as u64
+            None => -errno::EBADF as i64
         }
     }
 }
@@ -799,7 +797,7 @@ pub fn sys_pwrite64(args: SyscallArgs) -> u64 {
 /// sys_preadv - Read from file descriptor at a given offset into multiple buffers
 ///
 /// - RISC-V: 69
-pub fn sys_preadv(args: SyscallArgs) -> u64 {
+pub fn sys_preadv(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let iov_ptr = args[1] as *const Iovec;
     let iovcnt = args[2] as usize;
@@ -809,11 +807,11 @@ pub fn sys_preadv(args: SyscallArgs) -> u64 {
 
     let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
     if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
     if offset > i64::MAX as u128 {
-        return -errno::EINVAL as u64;
+        return -errno::EINVAL as i64;
     }
 
     let mut total_read: isize = 0;
@@ -830,7 +828,7 @@ pub fn sys_preadv(args: SyscallArgs) -> u64 {
                 core::mem::size_of::<Iovec>()
             );
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
 
             let base = iov.iov_base as usize;
@@ -840,29 +838,28 @@ pub fn sys_preadv(args: SyscallArgs) -> u64 {
                 has_valid_iov = true;
                 let pread_args = [fd as u64, iov.iov_base as u64, len as u64, offset as u64, 0, 0];
                 let result = sys_pread64(pread_args);
-                let result_i64 = result as i64;
-                if result_i64 < 0 {
+                if result < 0 {
                     if total_read == 0 { return result; }
                     break;
                 }
                 total_read += result as isize;
             } else if len > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
         }
     }
 
     if !has_valid_iov && iovcnt > 0 {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
-    total_read as u64
+    total_read as i64
 }
 
 /// sys_pwritev - Write to file descriptor at a given offset from multiple buffers
 ///
 /// - RISC-V: 70
-pub fn sys_pwritev(args: SyscallArgs) -> u64 {
+pub fn sys_pwritev(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let iov_ptr = args[1] as *const Iovec;
     let iovcnt = args[2] as usize;
@@ -872,11 +869,11 @@ pub fn sys_pwritev(args: SyscallArgs) -> u64 {
 
     let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
     if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
     if offset > i64::MAX as u128 {
-        return -errno::EINVAL as u64;
+        return -errno::EINVAL as i64;
     }
 
     let mut total_written: isize = 0;
@@ -893,7 +890,7 @@ pub fn sys_pwritev(args: SyscallArgs) -> u64 {
                 core::mem::size_of::<Iovec>()
             );
             if uncopied > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
 
             let base = iov.iov_base as usize;
@@ -903,44 +900,43 @@ pub fn sys_pwritev(args: SyscallArgs) -> u64 {
                 has_valid_iov = true;
                 let pwrite_args = [fd as u64, iov.iov_base as u64, len as u64, offset as u64, 0, 0];
                 let result = sys_pwrite64(pwrite_args);
-                let result_i64 = result as i64;
-                if result_i64 < 0 {
+                if result < 0 {
                     if total_written == 0 { return result; }
                     break;
                 }
                 total_written += result as isize;
             } else if len > 0 {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
         }
     }
 
     if !has_valid_iov && iovcnt > 0 {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
-    total_written as u64
+    total_written as i64
 }
 
 /// sys_pipe2 - Create pipe with flags
-pub fn sys_pipe2(args: SyscallArgs) -> u64 {
+pub fn sys_pipe2(args: SyscallArgs) -> i64 {
     let pipefd = args[0] as *mut i32;
     let flags = args[1] as u32;
 
     // Check pointer using access_ok
     if pipefd.is_null() {
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
     if !crate::arch::riscv64::uaccess::access_ok(pipefd as usize, 8) {  // 2 * sizeof(int)
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
 
     // Only O_CLOEXEC and O_NONBLOCK are valid for pipe2
     const VALID_FLAGS: u32 = crate::fs::file::FileFlags::O_CLOEXEC
         | crate::fs::file::FileFlags::O_NONBLOCK;
     if flags & !VALID_FLAGS != 0 {
-        return -errno::EINVAL as u64;
+        return -errno::EINVAL as i64;
     }
 
     // Create pipe
@@ -961,29 +957,29 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
     // Get current process fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EMFILE as u64,
+        None => return -errno::EMFILE as i64,
     };
 
     // Allocate file descriptors
     let read_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
-        None => return -errno::EMFILE as u64,
+        None => return -errno::EMFILE as i64,
     };
 
     let write_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
-        None => return -errno::EMFILE as u64,
+        None => return -errno::EMFILE as i64,
     };
 
     // Install files to fdtable
     if fdtable.install_fd(read_fd, read_file.clone()).is_err() {
-        return -errno::EMFILE as u64;
+        return -errno::EMFILE as i64;
     }
     if fdtable.install_fd(write_fd, write_file.clone()).is_err() {
         // Close read_fd on write_fd install failure
         drop(read_file);
         fdtable.close_fd(read_fd as usize);
-        return -errno::EMFILE as u64;
+        return -errno::EMFILE as i64;
     }
 
     // Set close-on-exec if O_CLOEXEC is set
@@ -1004,7 +1000,7 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
     if uncopied != 0 {
         fdtable.close_fd(read_fd as usize);
         fdtable.close_fd(write_fd as usize);
-        return -errno::EFAULT as u64;
+        return -errno::EFAULT as i64;
     }
     0
 }
@@ -1018,7 +1014,7 @@ pub fn sys_pipe2(args: SyscallArgs) -> u64 {
 /// - args[3]: off_out - pointer to offset (NULL = use current)
 /// - args[4]: len - number of bytes to transfer
 /// - args[5]: flags - SPLICE_F_MOVE, SPLICE_F_NONBLOCK, etc.
-pub fn sys_splice(args: SyscallArgs) -> u64 {
+pub fn sys_splice(args: SyscallArgs) -> i64 {
     let fd_in = args[0] as i32;
     let off_in = args[1] as *mut i64;
     let fd_out = args[2] as i32;
@@ -1033,23 +1029,23 @@ pub fn sys_splice(args: SyscallArgs) -> u64 {
     unsafe {
         let in_file = match get_file_fd(fd_in as usize) {
             Some(f) => f,
-            None => return -errno::EBADF as u64,
+            None => return -errno::EBADF as i64,
         };
         let out_file = match get_file_fd(fd_out as usize) {
             Some(f) => f,
-            None => return -errno::EBADF as u64,
+            None => return -errno::EBADF as i64,
         };
 
         // Save positions if offset pointers provided
         if !off_in.is_null() {
             if !crate::arch::riscv64::uaccess::access_ok(off_in as usize, 8) {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             in_file.set_pos(*off_in as u64);
         }
         if !off_out.is_null() {
             if !crate::arch::riscv64::uaccess::access_ok(off_out as usize, 8) {
-                return -errno::EFAULT as u64;
+                return -errno::EFAULT as i64;
             }
             out_file.set_pos(*off_out as u64);
         }
@@ -1065,7 +1061,7 @@ pub fn sys_splice(args: SyscallArgs) -> u64 {
             let mut written = 0usize;
             while written < n as usize {
                 let w = out_file.write(buf.as_ptr().add(written), (n as usize) - written);
-                if w <= 0 { return total as u64; }
+                if w <= 0 { return total as i64; }
                 written += w as usize;
             }
             total += written;
@@ -1076,7 +1072,7 @@ pub fn sys_splice(args: SyscallArgs) -> u64 {
         if !off_in.is_null() { *off_in = in_file.get_pos() as i64; }
         if !off_out.is_null() { *off_out = out_file.get_pos() as i64; }
 
-        total as u64
+        total as i64
     }
 }
 
@@ -1087,9 +1083,9 @@ pub fn sys_splice(args: SyscallArgs) -> u64 {
 /// - args[1]: fd_out - output pipe fd
 /// - args[2]: len - number of bytes to copy
 /// - args[3]: flags - unused
-pub fn sys_tee(_args: SyscallArgs) -> u64 {
+pub fn sys_tee(_args: SyscallArgs) -> i64 {
     // TODO: requires pipe buffer management
-    -errno::ENOSYS as u64
+    -errno::ENOSYS as i64
 }
 
 /// sys_vmsplice - Map user pages into a pipe
@@ -1099,9 +1095,9 @@ pub fn sys_tee(_args: SyscallArgs) -> u64 {
 /// - args[1]: iov - pointer to iovec array
 /// - args[2]: nr_segs - number of iovec entries
 /// - args[3]: flags - SPLICE_F_GIFT, etc.
-pub fn sys_vmsplice(_args: SyscallArgs) -> u64 {
+pub fn sys_vmsplice(_args: SyscallArgs) -> i64 {
     // TODO: requires pipe buffer and page mapping
-    -errno::ENOSYS as u64
+    -errno::ENOSYS as i64
 }
 
 /// sys_sendfile - Transfer data between file descriptors
@@ -1116,7 +1112,7 @@ pub fn sys_vmsplice(_args: SyscallArgs) -> u64 {
 /// Number of bytes transferred on success, negative error code on failure
 ///
 /// - RISC-V: 40
-pub fn sys_sendfile(args: SyscallArgs) -> u64 {
+pub fn sys_sendfile(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let out_fd = args[0] as usize;
     let in_fd = args[1] as usize;
@@ -1131,7 +1127,7 @@ pub fn sys_sendfile(args: SyscallArgs) -> u64 {
     // Validate offset pointer
     if !offset_ptr.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(offset_ptr as usize, core::mem::size_of::<i64>()) {
-            return -errno::EFAULT as u64;
+            return -errno::EFAULT as i64;
         }
     }
 
@@ -1139,11 +1135,11 @@ pub fn sys_sendfile(args: SyscallArgs) -> u64 {
     unsafe {
         let in_file = match get_file_fd(in_fd) {
             Some(f) => f,
-            None => return -errno::EBADF as u64,
+            None => return -errno::EBADF as i64,
         };
         let out_file = match get_file_fd(out_fd) {
             Some(f) => f,
-            None => return -errno::EBADF as u64,
+            None => return -errno::EBADF as i64,
         };
 
         // Save/restore input file position if offset is used
@@ -1177,7 +1173,7 @@ pub fn sys_sendfile(args: SyscallArgs) -> u64 {
             while written < n_read as usize {
                 let n_write = out_file.write(tmp_buf.as_ptr().add(written), (n_read as usize) - written);
                 if n_write <= 0 {
-                    return total_transferred as u64;
+                    return total_transferred as i64;
                 }
                 written += n_write as usize;
             }
@@ -1192,6 +1188,6 @@ pub fn sys_sendfile(args: SyscallArgs) -> u64 {
             in_file.set_pos(original_pos as u64);
         }
 
-        total_transferred as u64
+        total_transferred as i64
     }
 }

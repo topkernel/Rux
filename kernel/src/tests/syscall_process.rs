@@ -52,7 +52,7 @@ fn test_sys_getpid() {
     test_assert_eq!(pid1, pid2, "sys_getpid returns consistent pid across calls");
 
     // sys_getpid result should match process::current_pid()
-    let raw_pid = process::current_pid() as u64;
+    let raw_pid = process::current_pid() as i64;
     test_assert_eq!(pid, raw_pid, "sys_getpid matches process::current_pid()");
 
     // sys_getppid: returns the parent PID
@@ -66,7 +66,7 @@ fn test_sys_getpid() {
     test_assert_eq!(ppid1, ppid2, "sys_getppid returns consistent ppid across calls");
 
     // getppid should match process::current_ppid()
-    let raw_ppid = process::current_ppid() as u64;
+    let raw_ppid = process::current_ppid() as i64;
     test_assert_eq!(ppid, raw_ppid, "sys_getppid matches process::current_ppid()");
 }
 
@@ -149,14 +149,13 @@ fn test_sys_wait4() {
     }
 
     // Call wait4 with WNOHANG and no children: should return ECHILD (-10)
-    // Note: kernel returns error as `e as u32 as u64`, so compare via i32
     let ret = sys_wait4([0, 0, 1, 0, 0, 0]); // pid=0, wstatus=NULL, options=WNOHANG
-    test_assert!((ret as i32) == -errno::ECHILD, "sys_wait4 with no children returns -ECHILD",
+    test_assert!(ret == -(errno::ECHILD as i64), "sys_wait4 with no children returns -ECHILD",
         &alloc::format!("got {:#x}", ret));
 
     // Call wait4 with a specific PID and WNOHANG: same ECHILD
     let ret2 = sys_wait4([1, 0, 1, 0, 0, 0]); // pid=1, wstatus=NULL, options=WNOHANG
-    test_assert!((ret2 as i32) == -errno::ECHILD, "sys_wait4 pid=1 with no children returns -ECHILD",
+    test_assert!(ret2 == -(errno::ECHILD as i64), "sys_wait4 pid=1 with no children returns -ECHILD",
         &alloc::format!("got {:#x}", ret2));
 }
 
@@ -176,12 +175,12 @@ fn test_sys_kill() {
     // kill(pid, 0) checks if process exists. kill(99999, 0) should return -ESRCH
     // since PID 99999 does not exist.
     let ret = sys_kill([99999, 0, 0, 0, 0, 0]);
-    let expected_esrch = (-errno::ESRCH) as u64;
+    let expected_esrch = -(errno::ESRCH as i64);
     test_assert_eq!(ret, expected_esrch, "sys_kill(99999, 0) returns -ESRCH for nonexistent pid");
 
     // kill with invalid signal (>64) should return -EINVAL
     let ret_bad_sig = sys_kill([1, 100, 0, 0, 0, 0]);
-    let expected_einval = (-errno::EINVAL) as u64;
+    let expected_einval = -(errno::EINVAL as i64);
     test_assert_eq!(ret_bad_sig, expected_einval, "sys_kill with sig=100 returns -EINVAL");
 
     // kill with negative signal should return -EINVAL
@@ -190,7 +189,7 @@ fn test_sys_kill() {
 
     // kill(pid, 0) for the current process should succeed (returns 0)
     let my_pid = sys_getpid([0; 6]);
-    let ret_null_sig = sys_kill([my_pid, 0, 0, 0, 0, 0]);
+    let ret_null_sig = sys_kill([my_pid as u64, 0, 0, 0, 0, 0]);
     test_assert_eq!(ret_null_sig, 0, "sys_kill(my_pid, 0) returns 0 for current process");
 
     // kill(0, 0) sends signal 0 to all processes in caller's process group
@@ -227,7 +226,7 @@ fn test_sys_uname() {
 
     // sys_uname with NULL pointer should return -EFAULT
     let ret_null = sys_uname([0, 0, 0, 0, 0, 0]);
-    let expected_efault = (-errno::EFAULT) as u64;
+    let expected_efault = -(errno::EFAULT as i64);
     test_assert_eq!(ret_null, expected_efault, "sys_uname with NULL pointer returns -EFAULT");
 }
 
@@ -270,7 +269,7 @@ fn test_sys_ids() {
     // After dropping root, setuid(0) may return -EPERM
     // This is expected behavior -- test that it returns the right error
     if ret_restore != 0 {
-        let expected_eperm = (-errno::EPERM) as u64;
+        let expected_eperm = -(errno::EPERM as i64);
         test_assert_eq!(ret_restore, expected_eperm,
             "sys_setuid(0) returns -EPERM after dropping root privileges");
         // Restore to root is not possible, set back to 1000 explicitly
@@ -293,7 +292,7 @@ fn test_sys_ids() {
         // (Unprivileged setgid to real or saved gid)
         test_assert_eq!(ret_setgid, 0, "sys_setgid(0) succeeds (gid==0)");
     } else {
-        let expected_eperm = (-errno::EPERM) as u64;
+        let expected_eperm = -(errno::EPERM as i64);
         test_assert_eq!(ret_setgid, expected_eperm,
             "sys_setgid(0) returns -EPERM without root");
         let _ = sys_setgid([gid_before, 0, 0, 0, 0, 0]);
@@ -305,7 +304,7 @@ fn test_sys_ids() {
 
     // getgroups with negative size should return -EINVAL
     let ret_bad_groups = sys_getgroups([(-1i32) as u64, 0, 0, 0, 0, 0]);
-    let expected_einval = (-errno::EINVAL) as u64;
+    let expected_einval = -(errno::EINVAL as i64);
     test_assert_eq!(ret_bad_groups, expected_einval, "sys_getgroups with negative size returns -EINVAL");
 
     // setgroups: as root, should succeed (stub returns 0)
@@ -314,7 +313,7 @@ fn test_sys_ids() {
     if euid_now == 0 {
         test_assert_eq!(ret_setgroups, 0, "sys_setgroups(0, NULL) succeeds as root (stub)");
     } else {
-        let expected_eperm = (-errno::EPERM) as u64;
+        let expected_eperm = -(errno::EPERM as i64);
         test_assert_eq!(ret_setgroups, expected_eperm,
             "sys_setgroups returns -EPERM without root");
     }

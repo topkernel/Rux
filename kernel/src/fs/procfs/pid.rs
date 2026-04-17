@@ -28,6 +28,7 @@ impl SumGuard {
             core::arch::asm!(
                 "li t6, 0x40000",
                 "csrs sstatus, t6",
+                out("t6") _,
                 options(nomem, nostack)
             );
         }
@@ -42,6 +43,7 @@ impl Drop for SumGuard {
             core::arch::asm!(
                 "li t6, 0x40000",
                 "csrc sstatus, t6",
+                out("t6") _,
                 options(nomem, nostack)
             );
         }

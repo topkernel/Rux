@@ -62,8 +62,7 @@ fn alloc_user_page() -> u64 {
         !0u64,                // fd = -1
         0,                    // offset
     ]);
-    let signed = addr as i64;
-    if signed > 0 {
+    if addr > 0 {
         addr
     } else {
         0
@@ -121,7 +120,7 @@ fn test_sys_gettimeofday() {
             test_fail("sys_gettimeofday", "time went backwards");
         }
     } else {
-        test_fail("sys_gettimeofday interface exists", &alloc::format!("returned {}", ret as i64));
+        test_fail("sys_gettimeofday interface exists", &alloc::format!("returned {}", ret));
     }
 
     // Cleanup
@@ -204,7 +203,7 @@ fn test_sys_clock_gettime() {
             }
         }
     } else {
-        test_fail("sys_clock_gettime interface exists", &alloc::format!("returned {}", ret as i64));
+        test_fail("sys_clock_gettime interface exists", &alloc::format!("returned {}", ret));
     }
 
     // Test CLOCK_REALTIME as well
@@ -244,7 +243,7 @@ fn test_sys_nanosleep() {
     if ret == 0 {
         test_pass("sys_nanosleep interface exists");
     } else {
-        test_fail("sys_nanosleep interface exists", &alloc::format!("returned {}", ret as i64));
+        test_fail("sys_nanosleep interface exists", &alloc::format!("returned {}", ret));
     }
 
     // Test 2: Zero-duration sleep handling
@@ -307,7 +306,7 @@ fn test_sys_clock_getres() {
             test_fail("sys_clock_getres", "tv_nsec out of range");
         }
     } else {
-        test_fail("sys_clock_getres interface exists", &alloc::format!("returned {}", ret as i64));
+        test_fail("sys_clock_getres interface exists", &alloc::format!("returned {}", ret));
     }
 
     // Cleanup

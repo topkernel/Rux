@@ -74,9 +74,9 @@ fn test_poll_syscall() {
     // Should return 0 (timeout) or negative error
     if result == 0 {
         test_pass("sys_poll no fds returns 0");
-    } else if (result as i64) < 0 {
+    } else if result < 0 {
         // May return error for null fds pointer
-        test_skip("sys_poll no fds", &alloc::format!("returned {}", result as i64));
+        test_skip("sys_poll no fds", &alloc::format!("returned {}", result));
     } else {
         test_fail("sys_poll no fds", &alloc::format!("unexpected result {}", result));
     }
@@ -108,7 +108,7 @@ fn test_poll_syscall() {
     if result > 0 || result == 0 {
         test_pass("sys_poll stdin poll");
     } else {
-        test_skip("sys_poll stdin", &alloc::format!("returned {}", result as i64));
+        test_skip("sys_poll stdin", &alloc::format!("returned {}", result));
     }
 }
 
@@ -122,8 +122,8 @@ fn test_ppoll_syscall() {
     let result = sys_ppoll([0, 0, &timeout as *const u64 as u64, 0, 0, 0]);
     if result == 0 {
         test_pass("sys_ppoll zero timeout returns 0");
-    } else if (result as i64) < 0 {
-        test_skip("sys_ppoll zero timeout", &alloc::format!("returned {}", result as i64));
+    } else if result < 0 {
+        test_skip("sys_ppoll zero timeout", &alloc::format!("returned {}", result));
     } else {
         test_pass("sys_ppoll zero timeout returns ready fds");
     }
@@ -138,7 +138,7 @@ fn test_ppoll_syscall() {
     if result >= 0 {
         test_pass("sys_ppoll stdin with timeout");
     } else {
-        test_skip("sys_ppoll stdin", &alloc::format!("returned {}", result as i64));
+        test_skip("sys_ppoll stdin", &alloc::format!("returned {}", result));
     }
 }
 

@@ -170,7 +170,7 @@ fn test_sys_rt_sigaction() {
 
     // Test: invalid sigsetsize should return -EINVAL
     let ret = sys_rt_sigaction([2, 0, 0, 0, 0, 0]);
-    let einval = (-errno::EINVAL) as u64;
+    let einval = -(errno::EINVAL as i64);
     test_assert_eq!(ret, einval, "sys_rt_sigaction invalid sigsetsize");
 
     // Test: invalid signal number (0) should return -EINVAL
@@ -192,7 +192,7 @@ fn test_sys_rt_sigaction() {
     // Test: query SIGUSR1 action with null act_ptr and null oldact_ptr
     // May return -EINVAL if process has no signal_struct in test context
     let ret = sys_rt_sigaction([10, 0, 0, 8, 0, 0]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_rt_sigaction query SIGUSR1 (null act)",
+    test_assert!(ret == 0 || ret < 0, "sys_rt_sigaction query SIGUSR1 (null act)",
         &alloc::format!("got {:#x}", ret));
 
     // Test: set SIGUSR2 to SIG_IGN
@@ -206,7 +206,7 @@ fn test_sys_rt_sigaction() {
         8,                                              // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0,
+    test_assert!(ret == 0 || ret < 0,
         "sys_rt_sigaction set SIGUSR2 to SIG_IGN",
         &alloc::format!("got {:#x}", ret));
 
@@ -219,7 +219,7 @@ fn test_sys_rt_sigaction() {
         8,                                              // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0,
+    test_assert!(ret == 0 || ret < 0,
         "sys_rt_sigaction restore SIGUSR2 to default",
         &alloc::format!("got {:#x}", ret));
 }
@@ -246,7 +246,7 @@ fn test_sys_rt_sigprocmask() {
 
     // Test: invalid sigsetsize should return -EINVAL
     let ret = sys_rt_sigprocmask([0, 0, 0, 0, 0, 0]);
-    let einval = (-errno::EINVAL) as u64;
+    let einval = -(errno::EINVAL as i64);
     test_assert_eq!(ret, einval, "sys_rt_sigprocmask invalid sigsetsize 0");
 
     let ret = sys_rt_sigprocmask([0, 0, 0, 4, 0, 0]);
@@ -280,7 +280,7 @@ fn test_sys_rt_sigprocmask() {
         8,                                          // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_rt_sigprocmask query old mask",
+    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask query old mask",
         &alloc::format!("got {:#x}", ret));
 
     // Test: block SIGUSR1 (signal 10), mask bit = 1u64 << 9
@@ -295,7 +295,7 @@ fn test_sys_rt_sigprocmask() {
         8,                                           // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_rt_sigprocmask block SIGUSR1",
+    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask block SIGUSR1",
         &alloc::format!("got {:#x}", ret));
 
     // Cannot verify mask from kernel context (access_ok rejects kernel ptr)
@@ -311,7 +311,7 @@ fn test_sys_rt_sigprocmask() {
         8,                                            // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_rt_sigprocmask unblock SIGUSR1",
+    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask unblock SIGUSR1",
         &alloc::format!("got {:#x}", ret));
 
     test_skip("sys_rt_sigprocmask verify SIGUSR1 unblocked",
@@ -327,7 +327,7 @@ fn test_sys_rt_sigprocmask() {
         8,                                            // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_rt_sigprocmask SETMASK clear all",
+    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask SETMASK clear all",
         &alloc::format!("got {:#x}", ret));
 
     // Test: SIG_SETMASK to block multiple signals at once
@@ -340,7 +340,7 @@ fn test_sys_rt_sigprocmask() {
         8,                                            // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_rt_sigprocmask SETMASK block multiple",
+    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask SETMASK block multiple",
         &alloc::format!("got {:#x}", ret));
 
     test_skip("sys_rt_sigprocmask verify both signals blocked",
@@ -360,7 +360,7 @@ fn test_sys_rt_sigprocmask() {
 fn test_sys_kill() {
     // Test tkill: invalid signal (>64) should return -EINVAL
     let current_pid = process::current_pid();
-    let einval = (-errno::EINVAL) as u64;
+    let einval = -(errno::EINVAL as i64);
     let ret = sys_tkill([current_pid as u64, 65, 0, 0, 0, 0]);
     test_assert_eq!(ret, einval, "sys_tkill invalid signal 65");
 
@@ -373,7 +373,7 @@ fn test_sys_kill() {
     test_assert_eq!(ret, 0, "sys_tkill signal 0 on self");
 
     // Test tkill: nonexistent PID with signal 0 should return -ESRCH
-    let esrch = (-errno::ESRCH) as u64;
+    let esrch = -(errno::ESRCH as i64);
     let ret = sys_tkill([99999, 0, 0, 0, 0, 0]);
     test_assert_eq!(ret, esrch, "sys_tkill nonexistent pid");
 
@@ -389,12 +389,12 @@ fn test_signal_handling() {
 
     // Test: invalid sigsetsize should return -EINVAL
     let ret = sys_sigpending([0, 0, 0, 0, 0, 0]);
-    let einval = (-errno::EINVAL) as u64;
+    let einval = -(errno::EINVAL as i64);
     test_assert_eq!(ret, einval, "sys_sigpending invalid sigsetsize 0");
 
     // Test: null set_ptr should return -EFAULT
     let ret = sys_sigpending([0, 8, 0, 0, 0, 0]);
-    let efault = (-errno::EFAULT) as u64;
+    let efault = -(errno::EFAULT as i64);
     test_assert_eq!(ret, efault, "sys_sigpending null set_ptr");
 
     // Test: query pending signals
@@ -405,7 +405,7 @@ fn test_signal_handling() {
         8,                                    // sigsetsize
         0, 0, 0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_sigpending query pending",
+    test_assert!(ret == 0 || ret < 0, "sys_sigpending query pending",
         &alloc::format!("got {:#x}", ret));
 
     // Test: sigpending returns pending & ~blocked
@@ -424,7 +424,7 @@ fn test_signal_handling() {
         8,
         0, 0, 0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_sigpending with blocked signal",
+    test_assert!(ret == 0 || ret < 0, "sys_sigpending with blocked signal",
         &alloc::format!("got {:#x}", ret));
     // Cannot verify pending_set contents (access_ok rejected kernel ptr)
     test_skip("sys_sigpending verify excludes blocked signal",
@@ -467,7 +467,7 @@ fn test_signal_handling() {
         &mut old_ss as *mut _ as u64,               // old_ss (kernel ptr)
         0, 0, 0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_sigaltstack get old stack",
+    test_assert!(ret == 0 || ret < 0, "sys_sigaltstack get old stack",
         &alloc::format!("got {:#x}", ret));
 
     // Test: set SS_DISABLE on sigaltstack
@@ -482,7 +482,7 @@ fn test_signal_handling() {
         0,                                          // old_ss (null)
         0, 0, 0, 0,
     ]);
-    test_assert!(ret == 0 || (ret as i64) < 0, "sys_sigaltstack SS_DISABLE",
+    test_assert!(ret == 0 || ret < 0, "sys_sigaltstack SS_DISABLE",
         &alloc::format!("got {:#x}", ret));
 
     // Cannot verify sigaltstack state from kernel context

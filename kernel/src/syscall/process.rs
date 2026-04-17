@@ -22,7 +22,7 @@ use crate::process::exec::do_execve_elf;
 ///
 /// # Returns
 /// Returns child process PID in parent, 0 in child, negative error code on failure
-pub fn sys_clone(args: SyscallArgs) -> u64 {
+pub fn sys_clone(args: SyscallArgs) -> i64 {
     use crate::process::fork::{do_clone, CloneArgs};
 
     let flags = args[0];
@@ -40,8 +40,8 @@ pub fn sys_clone(args: SyscallArgs) -> u64 {
     };
 
     match do_clone(clone_args) {
-        Some(pid) => pid as u64,
-        None => -errno::ENOMEM as u64,
+        Some(pid) => pid as i64,
+        None => -(errno::ENOMEM as i64),
     }
 }
 
@@ -394,33 +394,33 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
 ///
 /// # Returns
 /// Does not return on success, negative error code on failure
-pub fn sys_execve(args: SyscallArgs) -> u64 {
+pub fn sys_execve(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[0] as *const u8;
     let argv_ptr = args[1] as *const *const u8;
     let envp_ptr = args[2] as *const *const u8;
 
     // Check path pointer
     if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read pathname from user space safely
     let mut kernel_buf = [0u8; 256];
     let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
         Ok(s) => s,
-        Err(e) => return e as u64,
+        Err(e) => return e as i64,
     };
 
     let pathname_str = match core::str::from_utf8(pathname) {
         Ok(s) => s,
-        Err(_) => return -errno::EINVAL as u64,
+        Err(_) => return -(errno::EINVAL as i64),
     };
 
     // Copy argv and envp from user space
     let argv = copy_argv_from_user(argv_ptr);
     let envp = copy_envp_from_user(envp_ptr);
 
-    do_execve(pathname_str, &argv, &envp, 0)
+    do_execve(pathname_str, &argv, &envp, 0) as i64
 }
 
 /// sys_exit - Exit process
@@ -430,7 +430,7 @@ pub fn sys_execve(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Does not return
-pub fn sys_exit(args: SyscallArgs) -> u64 {
+pub fn sys_exit(args: SyscallArgs) -> i64 {
     let status = args[0] as i32;
     crate::process::exit::do_exit(status);
     0 // unreachable
@@ -446,7 +446,7 @@ pub fn sys_exit(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns child process PID on success, negative error code on failure
-pub fn sys_wait4(args: SyscallArgs) -> u64 {
+pub fn sys_wait4(args: SyscallArgs) -> i64 {
     let pid = args[0] as i32;
     let wstatus = args[1] as *mut i32;
     let options = args[2] as i32;
@@ -454,7 +454,7 @@ pub fn sys_wait4(args: SyscallArgs) -> u64 {
 
     // Validate wstatus pointer
     if !wstatus.is_null() && !crate::arch::riscv64::uaccess::access_ok(wstatus as usize, 4) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // WNOHANG: If no child process has exited, return 0 immediately
@@ -463,18 +463,18 @@ pub fn sys_wait4(args: SyscallArgs) -> u64 {
     if options & WNOHANG != 0 {
         // WNOHANG mode: non-blocking check
         match crate::process::exit::do_wait_nonblock(pid, wstatus) {
-            Ok(child_pid) => child_pid as u64,
+            Ok(child_pid) => child_pid as i64,
             Err(e) if e == -11 => 0,  // EAGAIN -> return 0 means no child process exited
-            Err(e) => e as u32 as u64,
+            Err(e) => e as i32 as i64,
         }
     } else {
         // Blocking wait for child process to exit
         let result = match crate::process::exit::do_wait(pid, wstatus, options) {
             Ok(child_pid) => {
-                child_pid as u64
+                child_pid as i64
             }
             Err(e) => {
-                e as u32 as u64
+                e as i32 as i64
             }
         };
         result
@@ -491,7 +491,7 @@ pub fn sys_wait4(args: SyscallArgs) -> u64 {
 /// - rusage: ignored
 ///
 /// Returns: 0 on success, negative errno on error
-pub fn sys_waitid(args: SyscallArgs) -> u64 {
+pub fn sys_waitid(args: SyscallArgs) -> i64 {
     let idtype = args[0] as i32;
     let id = args[1] as i32;
     let infop = args[2] as *mut u8;
@@ -500,28 +500,28 @@ pub fn sys_waitid(args: SyscallArgs) -> u64 {
 
     // Validate idtype
     if idtype < 0 || idtype > 2 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Validate infop pointer
     if infop.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(infop as usize, 128) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     match crate::process::exit::do_waitid(idtype, id, infop, options) {
         Ok(()) => 0,
-        Err(e) => e as u32 as u64,
+        Err(e) => e as i32 as i64,
     }
 }
 
 /// sys_getpid - Get process ID
-pub fn sys_getpid(_args: SyscallArgs) -> u64 {
+pub fn sys_getpid(_args: SyscallArgs) -> i64 {
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is guaranteed valid and non-null by sched::current().
-        unsafe { (*current).pid() as u64 }
+        unsafe { (*current).pid() as i64 }
     } else {
         0
     }
@@ -531,27 +531,27 @@ pub fn sys_getpid(_args: SyscallArgs) -> u64 {
 ///
 /// In single-threaded processes, tid == pid.
 /// RISC-V syscall number: 178
-pub fn sys_gettid(_args: SyscallArgs) -> u64 {
+pub fn sys_gettid(_args: SyscallArgs) -> i64 {
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is guaranteed valid and non-null by sched::current().
-        unsafe { (*current).pid() as u64 }
+        unsafe { (*current).pid() as i64 }
     } else {
         0
     }
 }
 
 /// sys_getppid - Get parent process ID
-pub fn sys_getppid(_args: SyscallArgs) -> u64 {
-    crate::process::current_ppid() as u64
+pub fn sys_getppid(_args: SyscallArgs) -> i64 {
+    crate::process::current_ppid() as i64
 }
 
 /// sys_kill - Send signal
-pub fn sys_kill(args: SyscallArgs) -> u64 {
+pub fn sys_kill(args: SyscallArgs) -> i64 {
     let pid = args[0] as i32;
     let sig = args[1] as i32;
 
     if sig < 0 || sig > 64 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     if pid == 0 {
@@ -559,7 +559,7 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
         let pgid = match crate::sched::current() {
             // SAFETY: task pointer from sched::current() is valid when Some.
             Some(t) => unsafe { (*t).pgid() },
-            None => return -errno::ESRCH as u64,
+            None => return -(errno::ESRCH as i64),
         };
         // SAFETY: for_each_task provides valid task pointers; pgid/sig checks guard usage.
         crate::sched::for_each_task(|task| unsafe {
@@ -588,13 +588,13 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
     unsafe {
         let target = crate::sched::find_task_by_pid(pid as u32);
         if target.is_null() {
-            return -errno::ESRCH as u64;
+            return -(errno::ESRCH as i64);
         }
 
         if sig > 0 {
             let target_task = &*target;
             if !crate::security::can_send_signal(target_task.cred()) {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             }
             let _ = crate::signal::send_signal(pid as u32, sig);
         }
@@ -604,19 +604,19 @@ pub fn sys_kill(args: SyscallArgs) -> u64 {
 }
 
 /// sys_set_tid_address - Set TID address
-pub fn sys_set_tid_address(args: SyscallArgs) -> u64 {
+pub fn sys_set_tid_address(args: SyscallArgs) -> i64 {
     let tidptr = args[0] as *mut i32;
 
     // Validate tidptr pointer
     if !tidptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(tidptr as usize, 4) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is a valid task pointer from sched::current().
         unsafe {
             (*current).set_clear_child_tid(tidptr);
-            return (*current).pid() as u64;
+            return (*current).pid() as i64;
         }
     }
 
@@ -624,13 +624,13 @@ pub fn sys_set_tid_address(args: SyscallArgs) -> u64 {
 }
 
 /// sys_set_robust_list - Set robust list
-pub fn sys_set_robust_list(_args: SyscallArgs) -> u64 {
+pub fn sys_set_robust_list(_args: SyscallArgs) -> i64 {
     // Simplified implementation
     0
 }
 
 /// sys_uname - Get system information
-pub fn sys_uname(args: SyscallArgs) -> u64 {
+pub fn sys_uname(args: SyscallArgs) -> i64 {
     #[repr(C)]
     struct Utsname {
         sysname: [u8; 65],
@@ -644,12 +644,12 @@ pub fn sys_uname(args: SyscallArgs) -> u64 {
     let buf = args[0] as *mut Utsname;
 
     if buf.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Validate user pointer
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, core::mem::size_of::<Utsname>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Build Utsname on stack, then copy to user with copy_to_user
@@ -699,7 +699,7 @@ pub fn sys_uname(args: SyscallArgs) -> u64 {
             core::mem::size_of::<Utsname>(),
         );
         if remaining != 0 {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
     }
 
@@ -707,36 +707,36 @@ pub fn sys_uname(args: SyscallArgs) -> u64 {
 }
 
 /// sys_getuid - Get user ID
-pub fn sys_getuid(_args: SyscallArgs) -> u64 {
+pub fn sys_getuid(_args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
-        task.cred().uid as u64
+        task.cred().uid as i64
     } else {
         0
     }
 }
 
 /// sys_getgid - Get group ID
-pub fn sys_getgid(_args: SyscallArgs) -> u64 {
+pub fn sys_getgid(_args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
-        task.cred().gid as u64
+        task.cred().gid as i64
     } else {
         0
     }
 }
 
 /// sys_geteuid - Get effective user ID
-pub fn sys_geteuid(_args: SyscallArgs) -> u64 {
+pub fn sys_geteuid(_args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
-        task.cred().euid as u64
+        task.cred().euid as i64
     } else {
         0
     }
 }
 
 /// sys_getegid - Get effective group ID
-pub fn sys_getegid(_args: SyscallArgs) -> u64 {
+pub fn sys_getegid(_args: SyscallArgs) -> i64 {
     if let Some(task) = crate::sched::current() {
-        task.cred().egid as u64
+        task.cred().egid as i64
     } else {
         0
     }
@@ -746,7 +746,7 @@ pub fn sys_getegid(_args: SyscallArgs) -> u64 {
 ///
 /// # Arguments
 /// - args[0]: uid - user ID to set
-pub fn sys_setuid(args: SyscallArgs) -> u64 {
+pub fn sys_setuid(args: SyscallArgs) -> i64 {
     let uid = args[0] as u32;
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
@@ -764,12 +764,12 @@ pub fn sys_setuid(args: SyscallArgs) -> u64 {
                 cred.euid = uid;
                 cred.fsuid = uid;
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             }
         }
         0
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -777,7 +777,7 @@ pub fn sys_setuid(args: SyscallArgs) -> u64 {
 ///
 /// # Arguments
 /// - args[0]: gid - group ID to set
-pub fn sys_setgid(args: SyscallArgs) -> u64 {
+pub fn sys_setgid(args: SyscallArgs) -> i64 {
     let gid = args[0] as u32;
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred_mut() returns
@@ -795,12 +795,12 @@ pub fn sys_setgid(args: SyscallArgs) -> u64 {
                 cred.egid = gid;
                 cred.fsgid = gid;
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             }
         }
         0
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -809,7 +809,7 @@ pub fn sys_setgid(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: ruid - real user ID (-1 to leave unchanged)
 /// - args[1]: euid - effective user ID (-1 to leave unchanged)
-pub fn sys_setreuid(args: SyscallArgs) -> u64 {
+pub fn sys_setreuid(args: SyscallArgs) -> i64 {
     let ruid = args[0] as i32;
     let euid = args[1] as i32;
     if let Some(task) = crate::sched::current() {
@@ -827,7 +827,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> u64 {
             } else if crate::security::capable(crate::security::CAP_SETUID) || ruid as u32 == old_ruid || ruid as u32 == old_euid || ruid as u32 == old_suid {
                 ruid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             // Determine new euid
@@ -836,7 +836,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> u64 {
             } else if crate::security::capable(crate::security::CAP_SETUID) || euid as u32 == old_ruid || euid as u32 == old_euid || euid as u32 == old_suid {
                 euid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             cred.uid = new_ruid;
@@ -848,7 +848,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> u64 {
         }
         0
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -857,7 +857,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: rgid - real group ID (-1 to leave unchanged)
 /// - args[1]: egid - effective group ID (-1 to leave unchanged)
-pub fn sys_setregid(args: SyscallArgs) -> u64 {
+pub fn sys_setregid(args: SyscallArgs) -> i64 {
     let rgid = args[0] as i32;
     let egid = args[1] as i32;
     if let Some(task) = crate::sched::current() {
@@ -875,7 +875,7 @@ pub fn sys_setregid(args: SyscallArgs) -> u64 {
             } else if crate::security::capable(crate::security::CAP_SETGID) || rgid as u32 == old_rgid || rgid as u32 == old_egid || rgid as u32 == old_sgid {
                 rgid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             // Determine new egid
@@ -884,7 +884,7 @@ pub fn sys_setregid(args: SyscallArgs) -> u64 {
             } else if crate::security::capable(crate::security::CAP_SETGID) || egid as u32 == old_rgid || egid as u32 == old_egid || egid as u32 == old_sgid {
                 egid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             cred.gid = new_rgid;
@@ -896,7 +896,7 @@ pub fn sys_setregid(args: SyscallArgs) -> u64 {
         }
         0
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -906,7 +906,7 @@ pub fn sys_setregid(args: SyscallArgs) -> u64 {
 /// - args[0]: ruid - real user ID (-1 to leave unchanged)
 /// - args[1]: euid - effective user ID (-1 to leave unchanged)
 /// - args[2]: suid - saved user ID (-1 to leave unchanged)
-pub fn sys_setresuid(args: SyscallArgs) -> u64 {
+pub fn sys_setresuid(args: SyscallArgs) -> i64 {
     let ruid = args[0] as i32;
     let euid = args[1] as i32;
     let suid = args[2] as i32;
@@ -926,7 +926,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> u64 {
             {
                 ruid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             // Determine new euid
@@ -939,7 +939,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> u64 {
             {
                 euid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             // Determine new suid
@@ -952,7 +952,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> u64 {
             {
                 suid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             cred.uid = new_ruid;
@@ -962,7 +962,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> u64 {
         }
         0
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -972,7 +972,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> u64 {
 /// - args[0]: ruid - pointer to store real user ID
 /// - args[1]: euid - pointer to store effective user ID
 /// - args[2]: suid - pointer to store saved user ID
-pub fn sys_getresuid(args: SyscallArgs) -> u64 {
+pub fn sys_getresuid(args: SyscallArgs) -> i64 {
     let ruid_ptr = args[0] as *mut u32;
     let euid_ptr = args[1] as *mut u32;
     let suid_ptr = args[2] as *mut u32;
@@ -984,26 +984,26 @@ pub fn sys_getresuid(args: SyscallArgs) -> u64 {
         unsafe {
             if !ruid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(ruid_ptr as usize, 4) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 core::ptr::write_volatile(ruid_ptr, cred.uid);
             }
             if !euid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(euid_ptr as usize, 4) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 core::ptr::write_volatile(euid_ptr, cred.euid);
             }
             if !suid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(suid_ptr as usize, 4) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 core::ptr::write_volatile(suid_ptr, cred.suid);
             }
         }
         0
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -1013,7 +1013,7 @@ pub fn sys_getresuid(args: SyscallArgs) -> u64 {
 /// - args[0]: rgid - real group ID (-1 to leave unchanged)
 /// - args[1]: egid - effective group ID (-1 to leave unchanged)
 /// - args[2]: sgid - saved group ID (-1 to leave unchanged)
-pub fn sys_setresgid(args: SyscallArgs) -> u64 {
+pub fn sys_setresgid(args: SyscallArgs) -> i64 {
     let rgid = args[0] as i32;
     let egid = args[1] as i32;
     let sgid = args[2] as i32;
@@ -1033,7 +1033,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> u64 {
             {
                 rgid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             // Determine new egid
@@ -1046,7 +1046,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> u64 {
             {
                 egid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             // Determine new sgid
@@ -1059,7 +1059,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> u64 {
             {
                 sgid as u32
             } else {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             };
 
             cred.gid = new_rgid;
@@ -1069,7 +1069,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> u64 {
         }
         0
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -1079,7 +1079,7 @@ pub fn sys_setresgid(args: SyscallArgs) -> u64 {
 /// - args[0]: rgid - pointer to store real group ID
 /// - args[1]: egid - pointer to store effective group ID
 /// - args[2]: sgid - pointer to store saved group ID
-pub fn sys_getresgid(args: SyscallArgs) -> u64 {
+pub fn sys_getresgid(args: SyscallArgs) -> i64 {
     let rgid_ptr = args[0] as *mut u32;
     let egid_ptr = args[1] as *mut u32;
     let sgid_ptr = args[2] as *mut u32;
@@ -1091,26 +1091,26 @@ pub fn sys_getresgid(args: SyscallArgs) -> u64 {
         unsafe {
             if !rgid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(rgid_ptr as usize, 4) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 core::ptr::write_volatile(rgid_ptr, cred.gid);
             }
             if !egid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(egid_ptr as usize, 4) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 core::ptr::write_volatile(egid_ptr, cred.egid);
             }
             if !sgid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(sgid_ptr as usize, 4) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 core::ptr::write_volatile(sgid_ptr, cred.sgid);
             }
         }
         0
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -1122,7 +1122,7 @@ pub fn sys_getresgid(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Number of groups on success, negative error on failure
-pub fn sys_getgroups(args: SyscallArgs) -> u64 {
+pub fn sys_getgroups(args: SyscallArgs) -> i64 {
     let size = args[0] as i32;
     let list_ptr = args[1] as *mut u32;
 
@@ -1131,7 +1131,7 @@ pub fn sys_getgroups(args: SyscallArgs) -> u64 {
         return 0;
     }
     if size < 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // No supplementary groups to return
@@ -1143,10 +1143,10 @@ pub fn sys_getgroups(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: size - number of groups
 /// - args[1]: list - pointer to group ID array
-pub fn sys_setgroups(args: SyscallArgs) -> u64 {
+pub fn sys_setgroups(args: SyscallArgs) -> i64 {
     // Only CAP_SETGID can set supplementary groups
     if !crate::security::capable(crate::security::CAP_SETGID) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
     // TODO: implement supplementary group storage
     0
@@ -1157,13 +1157,13 @@ pub fn sys_setgroups(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: pid - process ID (0 = current)
 /// - args[1]: pgid - process group ID (0 = pid)
-pub fn sys_setpgid(args: SyscallArgs) -> u64 {
+pub fn sys_setpgid(args: SyscallArgs) -> i64 {
     let target_pid = args[0] as i32;
     let pgid = args[1] as i32;
 
     let current = match crate::sched::current() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     // SAFETY: current is a valid task pointer from sched::current().
@@ -1198,17 +1198,17 @@ pub fn sys_setpgid(args: SyscallArgs) -> u64 {
         // SAFETY: find_task_by_pid returns valid pointer when non-null.
         let target = unsafe { crate::sched::find_task_by_pid(target_pid as u32) };
         if target.is_null() {
-            return -errno::ESRCH as u64;
+            return -(errno::ESRCH as i64);
         }
         // SAFETY: target is validated non-null; current is valid from sched::current().
         unsafe {
             // Target must be a child of current process
             if (*target).ppid() != current_pid {
-                return -errno::ESRCH as u64;
+                return -(errno::ESRCH as i64);
             }
             // Target must be in same session
             if (*target).sid() != (*current).sid() {
-                return -errno::EPERM as u64;
+                return -(errno::EPERM as i64);
             }
             (*target).set_pgid(pgid as u32);
         }
@@ -1221,34 +1221,34 @@ pub fn sys_setpgid(args: SyscallArgs) -> u64 {
 ///
 /// # Arguments
 /// - args[0]: pid - process ID (0 = current)
-pub fn sys_getpgid(args: SyscallArgs) -> u64 {
+pub fn sys_getpgid(args: SyscallArgs) -> i64 {
     let pid = args[0] as i32;
 
     if pid == 0 {
         if let Some(task) = crate::sched::current() {
             // SAFETY: task pointer from sched::current() is valid.
-            return unsafe { (*task).pgid() as u64 };
+            return unsafe { (*task).pgid() as i64 };
         }
-        return -errno::ESRCH as u64;
+        return -(errno::ESRCH as i64);
     }
 
     // SAFETY: find_task_by_pid returns valid pointer when non-null.
     let target = unsafe { crate::sched::find_task_by_pid(pid as u32) };
     if target.is_null() {
-        return -errno::ESRCH as u64;
+        return -(errno::ESRCH as i64);
     }
     // SAFETY: target validated non-null above.
-    unsafe { (*target).pgid() as u64 }
+    unsafe { (*target).pgid() as i64 }
 }
 
 /// sys_setsid - Create a new session
 ///
 /// # Returns
 /// New session ID on success, negative error on failure
-pub fn sys_setsid(_args: SyscallArgs) -> u64 {
+pub fn sys_setsid(_args: SyscallArgs) -> i64 {
     let current = match crate::sched::current() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     // SAFETY: current is a valid, non-null task pointer from sched::current().
@@ -1257,14 +1257,14 @@ pub fn sys_setsid(_args: SyscallArgs) -> u64 {
 
         // Process must not be a process group leader
         if (*current).pgid() == pid {
-            return -errno::EPERM as u64;
+            return -(errno::EPERM as i64);
         }
 
         // Create new session and process group
         (*current).set_sid(pid);
         (*current).set_pgid(pid);
 
-        pid as u64
+        pid as i64
     }
 }
 
@@ -1272,28 +1272,28 @@ pub fn sys_setsid(_args: SyscallArgs) -> u64 {
 ///
 /// # Arguments
 /// - args[0]: pid - process ID (0 = current)
-pub fn sys_getsid(args: SyscallArgs) -> u64 {
+pub fn sys_getsid(args: SyscallArgs) -> i64 {
     let pid = args[0] as i32;
 
     if pid == 0 {
         if let Some(task) = crate::sched::current() {
             // SAFETY: task pointer from sched::current() is valid.
-            return unsafe { (*task).sid() as u64 };
+            return unsafe { (*task).sid() as i64 };
         }
-        return -errno::ESRCH as u64;
+        return -(errno::ESRCH as i64);
     }
 
     // SAFETY: find_task_by_pid returns valid pointer when non-null.
     let target = unsafe { crate::sched::find_task_by_pid(pid as u32) };
     if target.is_null() {
-        return -errno::ESRCH as u64;
+        return -(errno::ESRCH as i64);
     }
     // SAFETY: target validated non-null above.
-    unsafe { (*target).sid() as u64 }
+    unsafe { (*target).sid() as i64 }
 }
 
 /// sys_prlimit64 - Get/set resource limits
-pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
+pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
     let _pid = args[0] as i32;
     let resource = args[1] as i32;
     let new_rlim = args[2] as *const u8;
@@ -1301,19 +1301,19 @@ pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
 
     // Validate pointers
     if !new_rlim.is_null() && !crate::arch::riscv64::uaccess::access_ok(new_rlim as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !old_rlim.is_null() && !crate::arch::riscv64::uaccess::access_ok(old_rlim as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Only support querying
     if !new_rlim.is_null() {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
 
     if old_rlim.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // RLIMIT_NOFILE = 7
@@ -1330,18 +1330,18 @@ pub fn sys_prlimit64(args: SyscallArgs) -> u64 {
             )
         };
         if uncopied != 0 {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         return 0;
     }
 
-    -errno::EINVAL as u64
+    -(errno::EINVAL as i64)
 }
 
 /// sys_prctl - manipulate process attributes
 ///
 /// Arguments: (option, arg2, arg3, arg4, arg5)
-pub fn sys_prctl(args: SyscallArgs) -> u64 {
+pub fn sys_prctl(args: SyscallArgs) -> i64 {
     use crate::arch::riscv64::uaccess::{copy_to_user, strncpy_from_user};
 
     let option = args[0] as i32;
@@ -1352,7 +1352,7 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
 
     let current = match crate::sched::current() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     match option {
@@ -1360,7 +1360,7 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             // PR_SET_PDEATHSIG
             let sig = arg2 as i32;
             if sig < 0 || sig > 64 {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
             // SAFETY: current is a valid task pointer from sched::current().
             unsafe { (*current).pdeath_signal = sig as u32; }
@@ -1370,10 +1370,10 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             // PR_GET_PDEATHSIG
             let ptr = arg2 as *mut u32;
             if ptr.is_null() {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 4) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             // SAFETY: ptr validated with access_ok; current is valid.
             unsafe {
@@ -1384,13 +1384,13 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
         3 => {
             // PR_GET_DUMPABLE
             // SAFETY: current is a valid task pointer.
-            unsafe { (*current).dumpable as u64 }
+            unsafe { (*current).dumpable as i64 }
         }
         4 => {
             // PR_SET_DUMPABLE
             let val = arg2 as u32;
             if val > 1 {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
             // SAFETY: current is a valid task pointer.
             unsafe { (*current).dumpable = val; }
@@ -1400,13 +1400,13 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             // PR_SET_NAME
             let ptr = arg2 as *const u8;
             if ptr.is_null() {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let mut buf = [0u8; 16];
             match strncpy_from_user(ptr, 16, &mut buf) {
                 // SAFETY: current is valid; buf contains safely copied user data.
                 Ok(_) => unsafe { (*current).set_comm(&buf); },
-                Err(_) => return -errno::EFAULT as u64,
+                Err(_) => return -(errno::EFAULT as i64),
             }
             0
         }
@@ -1414,10 +1414,10 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             // PR_GET_NAME
             let ptr = arg2 as *mut u8;
             if ptr.is_null() {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 16) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             // SAFETY: ptr validated with access_ok; current is valid; comm() returns a
             // reference to a fixed-size internal buffer of 16 bytes.
@@ -1443,13 +1443,13 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
             // SAFETY: current is a valid task pointer; signal field is an Option.
             unsafe {
                 if let Some(ref sig) = (*current).signal {
-                    sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as u64
+                    sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as i64
                 } else {
                     0
                 }
             }
         }
-        _ => -errno::EINVAL as u64,
+        _ => -(errno::EINVAL as i64),
     }
 }
 
@@ -1459,27 +1459,35 @@ pub fn sys_prctl(args: SyscallArgs) -> u64 {
 /// - args[0]: tgid - thread group ID
 /// - args[1]: tid - thread ID
 /// - args[2]: sig - signal number
-pub fn sys_tgkill(args: SyscallArgs) -> u64 {
+pub fn sys_tgkill(args: SyscallArgs) -> i64 {
     let _tgid = args[0] as i32;
     let tid = args[1] as u32;
     let sig = args[2] as i32;
 
-    if sig > 0 {
-        // SAFETY: find_task_by_pid returns valid pointer when non-null; we check null.
-        let target = unsafe { crate::sched::find_task_by_pid(tid) };
-        if target.is_null() {
-            return -errno::ESRCH as u64;
-        }
-        // SAFETY: target validated non-null above.
-        let target_task = unsafe { &*target };
-        if !crate::security::can_send_signal(target_task.cred()) {
-            return -errno::EPERM as u64;
-        }
+    if sig < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Validate target exists and caller has permission, even for sig==0.
+    // SAFETY: find_task_by_pid returns valid pointer when non-null; we check null.
+    let target = unsafe { crate::sched::find_task_by_pid(tid) };
+    if target.is_null() {
+        return -(errno::ESRCH as i64);
+    }
+    // SAFETY: target validated non-null above.
+    let target_task = unsafe { &*target };
+    if !crate::security::can_send_signal(target_task.cred()) {
+        return -(errno::EPERM as i64);
+    }
+
+    // sig==0: just a permission check, don't actually send a signal.
+    if sig == 0 {
+        return 0;
     }
 
     crate::signal::send_signal(tid, sig)
         .map(|_| 0)
-        .unwrap_or(-errno::EINVAL as u64)
+        .unwrap_or(-(errno::EINVAL as i64))
 }
 
 /// sys_rt_sigqueueinfo - send signal with data
@@ -1489,39 +1497,39 @@ pub fn sys_tgkill(args: SyscallArgs) -> u64 {
 /// - args[1]: tid - thread ID
 /// - args[2]: sig - signal number
 /// - args[3]: uinfo - siginfo_t pointer (user)
-pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> u64 {
+pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
     let _tgid = args[0] as i32;
     let tid = args[1] as u32;
     let sig = args[2] as i32;
     let uinfo = args[3] as *const u8;
 
     if sig < 0 || sig > 64 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if uinfo.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     if sig > 0 {
         // SAFETY: find_task_by_pid returns valid pointer when non-null; we check null.
         let target = unsafe { crate::sched::find_task_by_pid(tid) };
         if target.is_null() {
-            return -errno::ESRCH as u64;
+            return -(errno::ESRCH as i64);
         }
         // SAFETY: target validated non-null above.
         let target_task = unsafe { &*target };
         if !crate::security::can_send_signal(target_task.cred()) {
-            return -errno::EPERM as u64;
+            return -(errno::EPERM as i64);
         }
     }
 
     // Send the signal (without siginfo data — simplified)
     crate::signal::send_signal(tid, sig)
         .map(|_| 0)
-        .unwrap_or(-errno::EINVAL as u64)
+        .unwrap_or(-(errno::EINVAL as i64))
 }
 
 /// sys_rt_sigtimedwait - synchronously wait for signals
@@ -1531,26 +1539,26 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> u64 {
 /// - args[1]: uinfo - siginfo_t pointer (user output)
 /// - args[2]: uts - timeout timespec pointer (user, NULL = block forever)
 /// - args[3]: sigsetsize - size of signal mask
-pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> u64 {
+pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
     let uthese = args[0] as *const u64;
     let uinfo = args[1] as *mut u8;
     let uts = args[2] as *const u8;
     let sigsetsize = args[3] as usize;
 
     if uthese.is_null() || uinfo.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if sigsetsize < 8 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(uthese as usize, sigsetsize) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !uts.is_null() && !crate::arch::riscv64::uaccess::access_ok(uts as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Check for already pending signals
@@ -1565,10 +1573,10 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> u64 {
             let ts_sec = unsafe { *((uts) as *const i64) };
             let ts_nsec = unsafe { *((uts.add(8)) as *const i64) };
             if ts_sec == 0 && ts_nsec == 0 {
-                return -errno::EAGAIN as u64;
+                return -(errno::EAGAIN as i64);
             }
         }
-        return -errno::EINTR as u64;
+        return -(errno::EINTR as i64);
     }
 
     // Find first pending signal that's in the set
@@ -1581,11 +1589,11 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> u64 {
                 // si_signo at offset 0
                 core::ptr::write_volatile(uinfo as *mut i32, (i + 1) as i32);
             }
-            return (i + 1) as u64;
+            return (i + 1) as i64;
         }
     }
 
-    -errno::EINTR as u64
+    -(errno::EINTR as i64)
 }
 
 /// sys_getcpu - get CPU number and node
@@ -1594,7 +1602,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> u64 {
 /// - args[0]: cpuset_ptr - CPU set pointer
 /// - args[1]: node_ptr - NUMA node pointer
 /// - args[2]: cache_ptr - cache ID pointer
-pub fn sys_getcpu(args: SyscallArgs) -> u64 {
+pub fn sys_getcpu(args: SyscallArgs) -> i64 {
     use crate::arch::riscv64::smp::cpu_id;
 
     let cpuset_ptr = args[0] as *mut u32;
@@ -1605,7 +1613,7 @@ pub fn sys_getcpu(args: SyscallArgs) -> u64 {
         // SAFETY: cpuset_ptr validated with access_ok; writing 4 x u32 = 16 bytes.
         unsafe {
             if !crate::arch::riscv64::uaccess::access_ok(cpuset_ptr as usize, 16) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             core::ptr::write_volatile(cpuset_ptr, 1u32 << cpu_id());
             core::ptr::write_volatile(cpuset_ptr.add(1), 0u32);
@@ -1617,7 +1625,7 @@ pub fn sys_getcpu(args: SyscallArgs) -> u64 {
         // SAFETY: node_ptr validated with access_ok; writing 4 x u32 = 16 bytes.
         unsafe {
             if !crate::arch::riscv64::uaccess::access_ok(node_ptr as usize, 16) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             core::ptr::write_volatile(node_ptr, 0u32);
             core::ptr::write_volatile(node_ptr.add(1), 0u32);
@@ -1636,7 +1644,7 @@ pub fn sys_getcpu(args: SyscallArgs) -> u64 {
 /// - args[2]: argv - argument vector pointer
 /// - args[3]: envp - environment pointer
 /// - args[4]: flags - AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, etc.
-pub fn sys_execveat(args: SyscallArgs) -> u64 {
+pub fn sys_execveat(args: SyscallArgs) -> i64 {
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let argv_ptr = args[2] as *const *const u8;
@@ -1644,25 +1652,25 @@ pub fn sys_execveat(args: SyscallArgs) -> u64 {
     let _flags = args[4] as i32;
 
     if pathname_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     let path = match crate::syscall::file::resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
-        Err(e) => return e,
+        Err(e) => return e as i64,
     };
 
     let argv = copy_argv_from_user(argv_ptr);
     let envp = copy_envp_from_user(envp_ptr);
 
-    do_execve(&path, &argv, &envp, 0)
+    do_execve(&path, &argv, &envp, 0) as i64
 }
 
 /// sys_setfsuid - Set filesystem user ID
 ///
 /// # Arguments
 /// - args[0]: fsuid - filesystem user ID
-pub fn sys_setfsuid(args: SyscallArgs) -> u64 {
+pub fn sys_setfsuid(args: SyscallArgs) -> i64 {
     let fsuid = args[0] as u32;
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred()/cred_mut()
@@ -1675,10 +1683,10 @@ pub fn sys_setfsuid(args: SyscallArgs) -> u64 {
             } else if fsuid == cred.uid || fsuid == cred.euid || fsuid == cred.suid {
                 cred.fsuid = fsuid;
             }
-            old_fsuid as u64
+            old_fsuid as i64
         }
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -1686,7 +1694,7 @@ pub fn sys_setfsuid(args: SyscallArgs) -> u64 {
 ///
 /// # Arguments
 /// - args[0]: fsgid - filesystem group ID
-pub fn sys_setfsgid(args: SyscallArgs) -> u64 {
+pub fn sys_setfsgid(args: SyscallArgs) -> i64 {
     let fsgid = args[0] as u32;
     if let Some(task) = crate::sched::current() {
         // SAFETY: task pointer from sched::current() is valid; cred()/cred_mut()
@@ -1699,10 +1707,10 @@ pub fn sys_setfsgid(args: SyscallArgs) -> u64 {
             } else if fsgid == cred.gid || fsgid == cred.egid || fsgid == cred.sgid {
                 cred.fsgid = fsgid;
             }
-            old_fsgid as u64
+            old_fsgid as i64
         }
     } else {
-        -errno::ESRCH as u64
+        -(errno::ESRCH as i64)
     }
 }
 
@@ -1713,31 +1721,31 @@ pub fn sys_setfsgid(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Clock ticks since system boot on success
-pub fn sys_times(args: SyscallArgs) -> u64 {
+pub fn sys_times(args: SyscallArgs) -> i64 {
     let buf_ptr = args[0] as *mut u64;
     if !buf_ptr.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 32) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // struct tms: tms_utime, tms_stime, tms_cutime, tms_cstime (all clock_t = i64)
         // SAFETY: buf_ptr validated with access_ok; writing 32 bytes to user space.
         unsafe { core::ptr::write_bytes(buf_ptr, 0, 32); }
     }
     // Return clock ticks since boot (simplified: use jiffies)
-    crate::drivers::timer::get_jiffies() as u64
+    crate::drivers::timer::get_jiffies() as i64
 }
 
 /// sys_sysinfo - Get system information
 ///
 /// # Arguments
 /// - args[0]: info - pointer to struct sysinfo
-pub fn sys_sysinfo(args: SyscallArgs) -> u64 {
+pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
     let info_ptr = args[0] as *mut u8;
     if info_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(info_ptr as usize, 112) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     // struct sysinfo: 112 bytes, fill with available info
     // SAFETY: info_ptr validated with access_ok above; all writes are within the
@@ -1779,7 +1787,7 @@ pub fn sys_sysinfo(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: cmd - MEMBARRIER_CMD_QUERY, MEMBARRIER_CMD_GLOBAL, etc.
 /// - args[1]: flags - 0 or MEMBARRIER_FLAG_SYNC_CORE
-pub fn sys_membarrier(args: SyscallArgs) -> u64 {
+pub fn sys_membarrier(args: SyscallArgs) -> i64 {
     let cmd = args[0] as i32;
     let _flags = args[1] as u32;
 
@@ -1790,70 +1798,70 @@ pub fn sys_membarrier(args: SyscallArgs) -> u64 {
     match cmd {
         MEMBARRIER_CMD_QUERY => {
             // Report which commands are supported
-            MEMBARRIER_CMD_GLOBAL as u64 | MEMBARRIER_CMD_GLOBAL_EXPEDITED as u64
+            MEMBARRIER_CMD_GLOBAL as i64 | MEMBARRIER_CMD_GLOBAL_EXPEDITED as i64
         }
         MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED => {
             // Full memory barrier
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             0
         }
-        _ => -errno::EINVAL as u64,
+        _ => -(errno::EINVAL as i64),
     }
 }
 
 /// sys_userfaultfd - Create userfaultfd file descriptor
-pub fn sys_userfaultfd(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_userfaultfd(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_kcmp - Compare two processes
-pub fn sys_kcmp(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_kcmp(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_finit_module - Load kernel module from file descriptor
-pub fn sys_finit_module(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_finit_module(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_init_module - Load kernel module
-pub fn sys_init_module(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_init_module(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_delete_module - Unload kernel module
-pub fn sys_delete_module(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_delete_module(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_kexec_load - Load new kernel for reboot
-pub fn sys_kexec_load(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_kexec_load(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_process_vm_readv - Read from another process memory
-pub fn sys_process_vm_readv(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_process_vm_readv(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_process_vm_writev - Write to another process memory
-pub fn sys_process_vm_writev(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_process_vm_writev(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_perf_event_open - Open performance event
-pub fn sys_perf_event_open(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_perf_event_open(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_seccomp - Operate on seccomp state
-pub fn sys_seccomp(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_seccomp(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_bpf - BPF system call
-pub fn sys_bpf(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_bpf(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_capget - Get capabilities for a process
@@ -1861,7 +1869,7 @@ pub fn sys_bpf(_args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: hdr_ptr - pointer to __user_cap_header_struct { version: u32, pid: i32 }
 /// - args[1]: data_ptr - pointer to __user_cap_data_struct array(s)
-pub fn sys_capget(args: SyscallArgs) -> u64 {
+pub fn sys_capget(args: SyscallArgs) -> i64 {
     use crate::arch::riscv64::uaccess::{copy_from_user, copy_to_user};
 
     const _LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;
@@ -1873,11 +1881,11 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
 
     // Both pointers are required
     if hdr_ptr == 0 || data_ptr == 0 {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     // Header is 8 bytes: version (u32) + pid (i32)
     if !crate::arch::riscv64::uaccess::access_ok(hdr_ptr, 8) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read header
@@ -1885,7 +1893,7 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
     // SAFETY: hdr_ptr validated with access_ok; copy_from_user safely copies from user space.
     unsafe {
         if copy_from_user(hdr.as_mut_ptr() as *mut u8, hdr_ptr as *const u8, 8) != 0 {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
     }
     let version = hdr[0];
@@ -1895,13 +1903,13 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
     let target = if pid == 0 {
         match crate::sched::current() {
             Some(t) => t,
-            None => return -errno::ESRCH as u64,
+            None => return -(errno::ESRCH as i64),
         }
     } else {
         // SAFETY: find_task_by_pid returns valid pointer when non-null.
         let ptr = unsafe { crate::sched::find_task_by_pid(pid as u32) };
         if ptr.is_null() {
-            return -errno::ESRCH as u64;
+            return -(errno::ESRCH as i64);
         }
         // SAFETY: ptr validated non-null above.
         unsafe { &*ptr }
@@ -1922,13 +1930,13 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
             unsafe {
                 copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
             }
-            return -errno::EINVAL as u64;
+            return -(errno::EINVAL as i64);
         }
     }
 
     let data_size = data_count * 3 * 4; // each entry is 3 u32s
     if !crate::arch::riscv64::uaccess::access_ok(data_ptr, data_size) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Build the data array: [effective_lo, permitted_lo, inheritable_lo, effective_hi, permitted_hi, inheritable_hi]
@@ -1944,7 +1952,7 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
     // SAFETY: data_ptr validated with access_ok; copy_to_user handles user writes.
     unsafe {
         if copy_to_user(data_ptr as *mut u8, data.as_mut_ptr() as *const u8, data_size) != 0 {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
     }
 
@@ -1956,7 +1964,7 @@ pub fn sys_capget(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: hdr_ptr - pointer to __user_cap_header_struct { version: u32, pid: i32 }
 /// - args[1]: data_ptr - pointer to __user_cap_data_struct array(s)
-pub fn sys_capset(args: SyscallArgs) -> u64 {
+pub fn sys_capset(args: SyscallArgs) -> i64 {
     use crate::arch::riscv64::uaccess::copy_from_user;
     use crate::security::capability::Cap;
 
@@ -1968,10 +1976,10 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
     let data_ptr = args[1] as usize;
 
     if hdr_ptr == 0 || data_ptr == 0 {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(hdr_ptr, 8) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read header
@@ -1979,7 +1987,7 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
     // SAFETY: hdr_ptr validated with access_ok; copy_from_user safely copies from user space.
     unsafe {
         if copy_from_user(hdr.as_mut_ptr() as *mut u8, hdr_ptr as *const u8, 8) != 0 {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
     }
     let version = hdr[0];
@@ -1991,11 +1999,11 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
         _LINUX_CAPABILITY_VERSION_1 => data_count = 1,
         _LINUX_CAPABILITY_VERSION_2 => data_count = 2,
         _LINUX_CAPABILITY_VERSION_3 => data_count = 2,
-        _ => return -errno::EINVAL as u64,
+        _ => return -(errno::EINVAL as i64),
     }
     let data_size = data_count * 3 * 4;
     if !crate::arch::riscv64::uaccess::access_ok(data_ptr, data_size) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read data from userspace
@@ -2003,7 +2011,7 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
     // SAFETY: data_ptr validated with access_ok; copy_from_user safely copies from user space.
     unsafe {
         if copy_from_user(data.as_mut_ptr() as *mut u8, data_ptr as *const u8, data_size) != 0 {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
     }
 
@@ -2015,7 +2023,7 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
     // capset can only operate on the current process
     let current = match crate::sched::current() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     // Permission checks:
@@ -2024,13 +2032,13 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
     // 3. new effective must be a subset of new permitted
     let cred = current.cred();
     if !new_permitted.is_subset_of(cred.cap_permitted) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
     if !new_inheritable.is_subset_of(cred.cap_permitted) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
     if !new_effective.is_subset_of(new_permitted) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
 
     // Apply changes (bounding set is not modified by capset)
@@ -2046,15 +2054,15 @@ pub fn sys_capset(args: SyscallArgs) -> u64 {
 }
 
 /// sys_personality - Set process execution domain
-pub fn sys_personality(args: SyscallArgs) -> u64 {
+pub fn sys_personality(args: SyscallArgs) -> i64 {
     let _persona = args[0] as u64;
     // Return current personality (0 = PER_LINUX)
     0
 }
 
 /// sys_pivot_root - Change root filesystem (NR 41)
-pub fn sys_pivot_root(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_pivot_root(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_setns - reassociate thread with a namespace
@@ -2062,9 +2070,9 @@ pub fn sys_pivot_root(_args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: fd - namespace file descriptor
 /// - args[1]: nstype - namespace type
-pub fn sys_setns(_args: SyscallArgs) -> u64 {
+pub fn sys_setns(_args: SyscallArgs) -> i64 {
     // TODO: implement namespace support
-    -errno::ENOSYS as u64
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_getrlimit - Get resource limits (deprecated, use prlimit64)
@@ -2072,22 +2080,22 @@ pub fn sys_setns(_args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: resource - resource type (RLIMIT_*)
 /// - args[1]: rlim - pointer to struct rlimit
-pub fn sys_getrlimit(args: SyscallArgs) -> u64 {
+pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
     let resource = args[0] as u32;
     let rlim_ptr = args[1] as *mut u64;
 
     if rlim_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(rlim_ptr as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // struct rlimit { rlim_cur: u64, rlim_max: u64 }
     const RLIMIT_NOFILE: u32 = 7;
     let (cur, max) = match resource {
         RLIMIT_NOFILE => (1024u64, 1024 * 1024),
-        _ => return -errno::EINVAL as u64,
+        _ => return -(errno::EINVAL as i64),
     };
 
     // SAFETY: rlim_ptr validated with access_ok above; writes two u64 values.
@@ -2103,15 +2111,15 @@ pub fn sys_getrlimit(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: resource - resource type (RLIMIT_*)
 /// - args[1]: rlim - pointer to struct rlimit
-pub fn sys_setrlimit(args: SyscallArgs) -> u64 {
+pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
     let resource = args[0] as u32;
     let rlim_ptr = args[1] as *const u64;
 
     if rlim_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(rlim_ptr as usize, 16) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // SAFETY: rlim_ptr validated with access_ok; reads two u64 values.
@@ -2134,7 +2142,7 @@ pub fn sys_setrlimit(args: SyscallArgs) -> u64 {
     const RLIMIT_RTTIME: u32 = 15;
 
     if rlim_cur > rlim_max {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Only root can raise hard limits
@@ -2157,7 +2165,7 @@ pub fn sys_setrlimit(args: SyscallArgs) -> u64 {
             // Silently accept — no per-task storage yet
             0
         }
-        _ => -errno::EINVAL as u64,
+        _ => -(errno::EINVAL as i64),
     }
 }
 
@@ -2166,15 +2174,15 @@ pub fn sys_setrlimit(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: who - RUSAGE_SELF (0), RUSAGE_CHILDREN (-1)
 /// - args[1]: rusage - pointer to struct rusage
-pub fn sys_getrusage(args: SyscallArgs) -> u64 {
+pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     let _who = args[0] as i32;
     let rusage_ptr = args[1] as *mut u8;
 
     if rusage_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(rusage_ptr as usize, 136) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Fill rusage with zeros (no resource tracking yet)
@@ -2190,20 +2198,20 @@ pub fn sys_getrusage(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: name - pointer to hostname string
 /// - args[1]: len - hostname length
-pub fn sys_sethostname(args: SyscallArgs) -> u64 {
+pub fn sys_sethostname(args: SyscallArgs) -> i64 {
     let name_ptr = args[0] as *const u8;
     let len = args[1] as usize;
 
     // CAP_SYS_ADMIN required to set hostname
     if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
 
     if name_ptr.is_null() || len == 0 || len > 65 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(name_ptr as usize, len) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // TODO: implement hostname storage
@@ -2215,20 +2223,20 @@ pub fn sys_sethostname(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: name - pointer to domain name string
 /// - args[1]: len - domain name length
-pub fn sys_setdomainname(args: SyscallArgs) -> u64 {
+pub fn sys_setdomainname(args: SyscallArgs) -> i64 {
     let name_ptr = args[0] as *const u8;
     let len = args[1] as usize;
 
     // CAP_SYS_ADMIN required to set domain name
     if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
 
     if name_ptr.is_null() || len == 0 || len > 65 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(name_ptr as usize, len) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // TODO: implement domain name storage
@@ -2241,7 +2249,7 @@ pub fn sys_setdomainname(args: SyscallArgs) -> u64 {
 /// - args[0]: magic1 - magic number (LINUX_REBOOT_MAGIC1 = 0xfee1dead)
 /// - args[1]: magic2 - magic number (LINUX_REBOOT_MAGIC2 or MAGIC2C)
 /// - args[2]: cmd - reboot command
-pub fn sys_reboot(args: SyscallArgs) -> u64 {
+pub fn sys_reboot(args: SyscallArgs) -> i64 {
     let magic1 = args[0] as u32;
     let magic2 = args[1] as u32;
     let cmd = args[2] as u32;
@@ -2256,11 +2264,11 @@ pub fn sys_reboot(args: SyscallArgs) -> u64 {
 
     // CAP_SYS_BOOT required to reboot
     if !crate::security::capable(crate::security::CAP_SYS_BOOT) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
 
     if magic1 != LINUX_REBOOT_MAGIC1 || (magic2 != LINUX_REBOOT_MAGIC2 && magic2 != LINUX_REBOOT_MAGIC2C) {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     match cmd {
@@ -2294,7 +2302,7 @@ pub fn sys_reboot(args: SyscallArgs) -> u64 {
             }
             loop {}
         }
-        _ => return -errno::EINVAL as u64,
+        _ => return -(errno::EINVAL as i64),
     }
 
     0 // unreachable
@@ -2304,16 +2312,16 @@ pub fn sys_reboot(args: SyscallArgs) -> u64 {
 ///
 /// # Arguments
 /// - args[0]: flags - CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, etc.
-pub fn sys_unshare(_args: SyscallArgs) -> u64 {
+pub fn sys_unshare(_args: SyscallArgs) -> i64 {
     // TODO: implement namespace support
-    -errno::ENOSYS as u64
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_syncfs - Sync filesystem of a file descriptor
 ///
 /// # Arguments
 /// - args[0]: fd - file descriptor
-pub fn sys_syncfs(_args: SyscallArgs) -> u64 {
+pub fn sys_syncfs(_args: SyscallArgs) -> i64 {
     // Flush all buffer cache (simplified: sync everything)
     let _ = crate::fs::bio::sync_buffers();
     0
@@ -2324,11 +2332,11 @@ pub fn sys_syncfs(_args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: name - file name (can be NULL)
 /// - args[1]: flags - MFD_CLOEXEC, MFD_ALLOW_SEALING
-pub fn sys_memfd_create(args: SyscallArgs) -> u64 {
+pub fn sys_memfd_create(args: SyscallArgs) -> i64 {
     let _name_ptr = args[0] as *const u8;
     let _flags = args[1] as u32;
     // TODO: implement memfd_create
-    -errno::ENOSYS as u64
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_ioprio_set - Set I/O scheduling priority
@@ -2337,7 +2345,7 @@ pub fn sys_memfd_create(args: SyscallArgs) -> u64 {
 /// - args[0]: which - PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
 /// - args[1]: who - target PID/PGID/UID (0 = current)
 /// - args[2]: ioprio - I/O priority class + value
-pub fn sys_ioprio_set(args: SyscallArgs) -> u64 {
+pub fn sys_ioprio_set(args: SyscallArgs) -> i64 {
     let _which = args[0] as i32;
     let _who = args[1] as i32;
     let ioprio = args[2] as i32;
@@ -2348,13 +2356,13 @@ pub fn sys_ioprio_set(args: SyscallArgs) -> u64 {
 
     // IOPRIO_CLASS_NONE = 0, IOPRIO_CLASS_RT = 1, IOPRIO_CLASS_BE = 2, IOPRIO_CLASS_IDLE = 3
     if class > 3 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // CAP_SYS_NICE required to set RT or idle class
     if class == 1 || class == 3 {
         if !crate::security::capable(crate::security::CAP_SYS_NICE) {
-            return -errno::EPERM as u64;
+            return -(errno::EPERM as i64);
         }
     }
 
@@ -2367,7 +2375,7 @@ pub fn sys_ioprio_set(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: which - PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
 /// - args[1]: who - target PID/PGID/UID (0 = current)
-pub fn sys_ioprio_get(args: SyscallArgs) -> u64 {
+pub fn sys_ioprio_get(args: SyscallArgs) -> i64 {
     let _which = args[0] as i32;
     let _who = args[1] as i32;
     // Default I/O priority: IOPRIO_PRIO_VALUE(IO_PRIO_CLASS_BE, 0) = 0
@@ -2381,7 +2389,7 @@ pub fn sys_ioprio_get(args: SyscallArgs) -> u64 {
 /// - args[1]: special - path to filesystem
 /// - args[2]: id - user/group ID
 /// - args[3]: addr - pointer to dqblk structure
-pub fn sys_quotactl(args: SyscallArgs) -> u64 {
+pub fn sys_quotactl(args: SyscallArgs) -> i64 {
     let cmd = args[0] as u32;
     let _special = args[1] as *const u8;
     let _id = args[2] as u32;
@@ -2396,7 +2404,7 @@ pub fn sys_quotactl(args: SyscallArgs) -> u64 {
             // Return -ENOTSUP to indicate no quota format
             if !addr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 4) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 // SAFETY: addr validated with access_ok; writing 4 bytes.
                 unsafe { core::ptr::write_volatile(addr as *mut i32, -1); }
@@ -2407,14 +2415,14 @@ pub fn sys_quotactl(args: SyscallArgs) -> u64 {
         0x8000 => {
             if !addr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 16) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 // SAFETY: addr validated with access_ok; writing 16 bytes of zeros.
                 unsafe { core::ptr::write_bytes(addr, 0, 16); }
             }
             0
         }
-        _ => -errno::ENOSYS as u64,
+        _ => -(errno::ENOSYS as i64),
     }
 }
 
@@ -2425,9 +2433,9 @@ pub fn sys_quotactl(args: SyscallArgs) -> u64 {
 /// - args[1]: pid - tracee PID
 /// - args[2]: addr - address
 /// - args[3]: data - data
-pub fn sys_ptrace(_args: SyscallArgs) -> u64 {
+pub fn sys_ptrace(_args: SyscallArgs) -> i64 {
     // TODO: implement ptrace (complex - debugger support)
-    -errno::ENOSYS as u64
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_riscv_hwprobe - Probe RISC-V hardware features
@@ -2437,7 +2445,7 @@ pub fn sys_ptrace(_args: SyscallArgs) -> u64 {
 /// - args[1]: count - number of pairs
 /// - args[2]: cpu_count - pointer to CPU count (or NULL)
 /// - args[3]: cpus - pointer to CPU set (or NULL)
-pub fn sys_riscv_hwprobe(args: SyscallArgs) -> u64 {
+pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
     let pairs_ptr = args[0] as *mut u64;
     let count = args[1] as usize;
     let _cpu_count_ptr = args[2] as *mut u32;
@@ -2447,7 +2455,7 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> u64 {
         return 0;
     }
     if !crate::arch::riscv64::uaccess::access_ok(pairs_ptr as usize, count.saturating_mul(16)) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // struct riscv_hwprobe_pair { key, value }
@@ -2484,7 +2492,7 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> u64 {
         }
     }
 
-    count as u64
+    count as i64
 }
 
 /// sys_riscv_flush_icache - Flush instruction cache
@@ -2493,7 +2501,7 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> u64 {
 /// - args[0]: start - start address
 /// - args[1]: size - size in bytes
 /// - args[2]: flags - SYS_RISCV_FLUSH_ICACHE_ALL
-pub fn sys_riscv_flush_icache(args: SyscallArgs) -> u64 {
+pub fn sys_riscv_flush_icache(args: SyscallArgs) -> i64 {
     let _start = args[0] as usize;
     let _size = args[1] as usize;
     let flags = args[2] as u32;
@@ -2518,8 +2526,8 @@ pub fn sys_riscv_flush_icache(args: SyscallArgs) -> u64 {
 // ============================================================================
 
 /// sys_kexec_file_load - Load new kernel from file descriptor (NR 294)
-pub fn sys_kexec_file_load(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_kexec_file_load(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 // ============================================================================
@@ -2527,43 +2535,43 @@ pub fn sys_kexec_file_load(_args: SyscallArgs) -> u64 {
 // ============================================================================
 
 /// sys_pidfd_send_signal - Send signal to process via pidfd (NR 424)
-pub fn sys_pidfd_send_signal(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_pidfd_send_signal(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_io_uring_setup - Setup io_uring instance (NR 425)
-pub fn sys_io_uring_setup(args: SyscallArgs) -> u64 {
-    crate::io_uring::sys_io_uring_setup(args)
+pub fn sys_io_uring_setup(args: SyscallArgs) -> i64 {
+    crate::io_uring::sys_io_uring_setup(args) as i64
 }
 
 /// sys_io_uring_enter - Enter io_uring (NR 426)
-pub fn sys_io_uring_enter(args: SyscallArgs) -> u64 {
-    crate::io_uring::sys_io_uring_enter(args)
+pub fn sys_io_uring_enter(args: SyscallArgs) -> i64 {
+    crate::io_uring::sys_io_uring_enter(args) as i64
 }
 
 /// sys_io_uring_register - Register io_uring buffers/files (NR 427)
-pub fn sys_io_uring_register(args: SyscallArgs) -> u64 {
-    crate::io_uring::sys_io_uring_register(args)
+pub fn sys_io_uring_register(args: SyscallArgs) -> i64 {
+    crate::io_uring::sys_io_uring_register(args) as i64
 }
 
 /// sys_clone3 - Create child process (extended) (NR 435)
-pub fn sys_clone3(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_clone3(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_close_range - Close file descriptors in range (NR 436)
-pub fn sys_close_range(args: SyscallArgs) -> u64 {
+pub fn sys_close_range(args: SyscallArgs) -> i64 {
     let fd = args[0] as u32;
     let max_fd = args[1] as u32;
     let _flags = args[2] as u32;
 
     if fd > max_fd {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     let mut closed = 0u32;
@@ -2574,21 +2582,21 @@ pub fn sys_close_range(args: SyscallArgs) -> u64 {
             closed += 1;
         }
     }
-    closed as u64
+    closed as i64
 }
 
 /// sys_pidfd_open - Get pidfd for process (NR 434)
-pub fn sys_pidfd_open(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_pidfd_open(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_pidfd_getfd - Get file descriptor from process via pidfd (NR 438)
-pub fn sys_pidfd_getfd(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_pidfd_getfd(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_faccessat2 - Check file access permissions (extended) (NR 439)
-pub fn sys_faccessat2(args: SyscallArgs) -> u64 {
+pub fn sys_faccessat2(args: SyscallArgs) -> i64 {
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let mode = args[2] as i32;
@@ -2599,16 +2607,16 @@ pub fn sys_faccessat2(args: SyscallArgs) -> u64 {
 }
 
 /// sys_process_madvise - Advise kernel about process memory (NR 440)
-pub fn sys_process_madvise(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_process_madvise(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_memfd_secret - Create anonymous memory file (secret) (NR 447)
-pub fn sys_memfd_secret(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_memfd_secret(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_process_mrelease - Release process memory (NR 448)
-pub fn sys_process_mrelease(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_process_mrelease(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }

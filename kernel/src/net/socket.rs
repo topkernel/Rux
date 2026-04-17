@@ -393,28 +393,32 @@ fn socket_write(file: &File, buf: &[u8]) -> isize {
 }
 
 fn socket_close(file: &File) -> i32 {
-    // SAFETY: private_data was set during socket creation.
+    // SAFETY: private_data was set during socket creation from Arc::into_raw.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return 0,
     };
-    // SAFETY: ptr is a valid Arc<Socket> pointer.
-    let socket = unsafe { &*(ptr as *const Socket) };
 
-    socket.close();
+    // Reconstruct the Arc that was leaked via into_raw so it can be properly
+    // dropped.  This consumes the raw pointer, so we must clear private_data
+    // first to prevent a second reconstruction.
+    // SAFETY: ptr was created by Arc::into_raw(Arc::clone(&socket)) in
+    // sys_socket_create, so it is a valid Arc with a +1 strong count.
+    unsafe { *file.private_data.get() = None; }
+    let socket_arc = unsafe { Arc::from_raw(ptr as *const Socket) };
 
-    // Free from SOCKET_TABLE to drop the owning Arc.
+    socket_arc.close();
+
+    // Free from SOCKET_TABLE to drop the table's Arc.
     // SAFETY: table_slot was set during sys_socket_create; SOCKET_TABLE is
     // protected by Spinlock.
-    if let Some(idx) = *socket.table_slot.lock() {
+    if let Some(idx) = *socket_arc.table_slot.lock() {
         unsafe {
             SOCKET_TABLE.lock().free(idx);
         }
     }
 
-    // Clear private_data to prevent use-after-free.
-    unsafe { *file.private_data.get() = None; }
-
+    // socket_arc drops here, releasing the private_data reference.
     0
 }
 

@@ -130,25 +130,25 @@ static MSG_IDS: IpcIds<MsgQueue> = IpcIds::new();
 // ============================================================================
 
 /// sys_msgget — Create or find a message queue (NR 186)
-pub fn sys_msgget(args: [u64; 6]) -> u64 {
+pub fn sys_msgget(args: [u64; 6]) -> i64 {
     let key = args[0] as i32;
     let msgflg = args[1] as i32;
 
     match MSG_IDS.alloc(MsgQueue::new(key, (msgflg & 0o777) as u16), key, msgflg) {
-        Ok((id, _)) => id as u64,
-        Err(e) => e as u64,
+        Ok((id, _)) => id as i64,
+        Err(e) => e as i64,
     }
 }
 
 /// sys_msgctl — Message queue control operations (NR 187)
-pub fn sys_msgctl(args: [u64; 6]) -> u64 {
+pub fn sys_msgctl(args: [u64; 6]) -> i64 {
     let msqid = args[0] as i32;
     let cmd = args[1] as i32;
     let buf = args[2];
 
     let idx = match MSG_IDS.find(msqid) {
         Some(i) => i,
-        None => return -errno::EINVAL as u64,
+        None => return -(errno::EINVAL as i64),
     };
 
     match cmd {
@@ -166,7 +166,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
                         None => false,
                     };
                     if !allowed {
-                        return -errno::EPERM as u64;
+                        return -(errno::EPERM as i64);
                     }
                 }
             }
@@ -185,7 +185,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
         IPC_STAT => {
             let buf_ptr = buf as *mut MsqidDsUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<MsqidDsUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let mut ds = MsqidDsUapi {
                 msg_perm: IpcPermUapi::default(),
@@ -228,11 +228,11 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
         IPC_SET => {
             let buf_ptr = buf as *const u8;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<MsqidDsUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let idx2 = match MSG_IDS.find_with_perms(msqid, 0o6) {
                 Ok(i) => i,
-                Err(e) => return e as u64,
+                Err(e) => return e as i64,
             };
             let mut slots = MSG_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
@@ -257,7 +257,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
             // struct msginfo — 7 int + 1 unsigned short = 30 bytes
             let buf_ptr = buf as *mut MsgInfoUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<MsgInfoUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let info = MsgInfoUapi {
                 msgpool: 0,
@@ -288,13 +288,13 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
                     }
                 }
             }
-            max_idx as u64
+            max_idx as i64
         }
         12 => {
             // MSG_INFO — like IPC_INFO but returns current usage
             let buf_ptr = buf as *mut MsgInfoUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<MsgInfoUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             // Count total messages across all queues
             let mut total_msgs: usize = 0;
@@ -337,39 +337,39 @@ pub fn sys_msgctl(args: [u64; 6]) -> u64 {
                     }
                 }
             }
-            max_idx as u64
+            max_idx as i64
         }
-        _ => -errno::EINVAL as u64,
+        _ => -(errno::EINVAL as i64),
     }
 }
 
 /// sys_msgsnd — Send a message to a queue (NR 189)
-pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
+pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
     let msqid = args[0] as i32;
     let msgp = args[1] as *const u8;
     let msgsz = args[2] as usize;
     let msgflg = args[3] as i32;
 
     if msgp.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     // Message size must be >= 0
     if msgsz > 8192 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // SAFETY: msgp was null-checked above; reading 8 bytes for mtype from the
     // start of the userspace message buffer (msgsz > 0 implies at least 8 bytes exist).
     let mtype = unsafe { core::ptr::read_volatile(msgp as *const i64) };
     if mtype <= 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // SAFETY: msgp was null-checked above; adding 8 skips the mtype header.
     // data_ptr is then access_ok-validated below before copy_from_user.
     let data_ptr = unsafe { msgp.add(8) };
     if !access_ok(data_ptr as usize, msgsz) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     let mut data = alloc::vec::Vec::with_capacity(msgsz);
     data.resize(msgsz, 0);
@@ -381,7 +381,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
 
     let idx = match MSG_IDS.find_with_perms(msqid, 0o2) {
         Ok(i) => i,
-        Err(e) => return e as u64,
+        Err(e) => return e as i64,
     };
 
     let nowait = (msgflg & IPC_NOWAIT) != 0;
@@ -410,21 +410,21 @@ pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
                         return 0;
                     }
                 } else {
-                    return -errno::EIDRM as u64;
+                    return -(errno::EIDRM as i64);
                 }
             } else {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
         }
 
         // No space
         if nowait {
-            return -errno::EAGAIN as u64;
+            return -(errno::EAGAIN as i64);
         }
 
         // Check for signals
         if crate::signal::signal_pending() {
-            return -errno::EINTR as u64;
+            return -(errno::EINTR as i64);
         }
 
         // Block on wq_send
@@ -432,11 +432,11 @@ pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
             let slots = MSG_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
                 if entry.deleted {
-                    return -errno::EIDRM as u64;
+                    return -(errno::EIDRM as i64);
                 }
                 let current = match crate::sched::current() {
                     Some(t) => t,
-                    None => return -errno::ESRCH as u64,
+                    None => return -(errno::ESRCH as i64),
                 };
                 let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
                 entry.inner.wq_send.add(wq_entry);
@@ -466,7 +466,7 @@ pub fn sys_msgsnd(args: [u64; 6]) -> u64 {
         }
     }
 }
-pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
+pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
     let msqid = args[0] as i32;
     let msgp = args[1] as *mut u8;
     let msgsz = args[2] as usize;
@@ -474,15 +474,15 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
     let msgflg = args[4] as i32;
 
     if msgp.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !access_ok(msgp as usize, msgsz + 8) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     let idx = match MSG_IDS.find_with_perms(msqid, 0o4) {
         Ok(i) => i,
-        Err(e) => return e as u64,
+        Err(e) => return e as i64,
     };
 
     let nowait = (msgflg & IPC_NOWAIT) != 0;
@@ -492,7 +492,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
 
     // MSG_COPY requires msgtyp == 0 (receive from position msgtyp)
     if msg_copy && msgtyp != 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     loop {
@@ -501,7 +501,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
             let slots = MSG_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
                 if entry.deleted {
-                    return -errno::EIDRM as u64;
+                    return -(errno::EIDRM as i64);
                 }
                 let mut messages = entry.inner.messages.lock();
                 let match_idx = find_msg_match(&messages, msgtyp, msgflg);
@@ -518,7 +518,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                         }
                         let msg_len = msg.data.len();
                         if msg_len > msgsz {
-                            return -errno::E2BIG as u64;
+                            return -(errno::E2BIG as i64);
                         }
                         // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
                         // msg_len <= msgsz, so the copy is within bounds.
@@ -530,7 +530,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                             );
                         }
                         // Do NOT update stats, do NOT wake senders
-                        return msg_len as u64;
+                        return msg_len as i64;
                     }
 
                     // Normal destructive read
@@ -544,7 +544,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                     None
                 }
             } else {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
         };
 
@@ -570,7 +570,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                         entry.inner.cbytes.fetch_add(msg_len, Ordering::Relaxed);
                         entry.inner.qnum.fetch_add(1, Ordering::Relaxed);
                     }
-                    return -errno::E2BIG as u64;
+                    return -(errno::E2BIG as i64);
                 }
             } else {
                 msg.data.len()
@@ -591,16 +591,16 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
                     entry.inner.wq_send.wake_up_all();
                 }
             }
-            return copy_len as u64;
+            return copy_len as i64;
         }
 
         // No matching message
         if nowait {
-            return -errno::ENOMSG as u64;
+            return -(errno::ENOMSG as i64);
         }
 
         if crate::signal::signal_pending() {
-            return -errno::EINTR as u64;
+            return -(errno::EINTR as i64);
         }
 
         // Block on wq_recv
@@ -608,11 +608,11 @@ pub fn sys_msgrcv(args: [u64; 6]) -> u64 {
             let slots = MSG_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
                 if entry.deleted {
-                    return -errno::EIDRM as u64;
+                    return -(errno::EIDRM as i64);
                 }
                 let current = match crate::sched::current() {
                     Some(t) => t,
-                    None => return -errno::ESRCH as u64,
+                    None => return -(errno::ESRCH as i64),
                 };
                 let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
                 entry.inner.wq_recv.add(wq_entry);

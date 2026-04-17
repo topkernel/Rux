@@ -21,7 +21,7 @@ use super::*;
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
+pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
     let how = args[0] as i32;
     let set_ptr = args[1] as *const u64;  // SigSet is u64
     let oldset_ptr = args[2] as *mut u64;
@@ -29,7 +29,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
 
     // Validate sigsetsize
     if sigsetsize != 8 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Validate how parameter
@@ -38,22 +38,22 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
         && how != sigprocmask_how::SIG_UNBLOCK
         && how != sigprocmask_how::SIG_SETMASK
     {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Validate pointer alignment (u64 requires 8-byte alignment)
     if !set_ptr.is_null() && (set_ptr as usize) % 8 != 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if !oldset_ptr.is_null() && (oldset_ptr as usize) % 8 != 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Read new signal mask
     let new_mask = if !set_ptr.is_null() {
         // Validate user pointer
         if !crate::arch::riscv64::uaccess::access_ok(set_ptr as usize, 8) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // SAFETY: set_ptr validated with access_ok(8); reads one u64.
         unsafe { *set_ptr }
@@ -64,7 +64,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
     // Get current process
     let current = match crate::sched::current() {
         Some(c) => c as *const _ as *mut crate::process::task::Task,
-        None => return -errno::EPERM as u64,
+        None => return -(errno::EPERM as i64),
     };
 
     // Get current signal mask
@@ -98,7 +98,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
     if !oldset_ptr.is_null() {
         // Validate user pointer
         if !crate::arch::riscv64::uaccess::access_ok(oldset_ptr as usize, 8) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // SAFETY: oldset_ptr validated with access_ok(8); writes one u64.
         unsafe {
@@ -119,7 +119,7 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
+pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
     use crate::signal::{SigAction, Signal};
 
     let signum = args[0] as i32;
@@ -129,23 +129,23 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
 
     // Validate sigsetsize
     if sigsetsize != 8 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Validate signal number
     if signum < 1 || signum > 64 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // SIGKILL and SIGSTOP cannot be caught or ignored
     if signum == Signal::SIGKILL as i32 || signum == Signal::SIGSTOP as i32 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Get current process
     let current = match crate::sched::current() {
         Some(c) => c as *const _ as *mut crate::process::task::Task,
-        None => return -errno::EPERM as u64,
+        None => return -(errno::EPERM as i64),
     };
 
     // SAFETY: current is the running task's Task pointer from sched::current();
@@ -153,7 +153,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
     unsafe {
         let signal_struct = (*current).signal.as_mut();
         if signal_struct.is_none() {
-            return -errno::EINVAL as u64;
+            return -(errno::EINVAL as i64);
         }
         let sig_struct = signal_struct.unwrap();
 
@@ -161,7 +161,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
         if !oldact_ptr.is_null() {
             // Validate user pointer
             if !crate::arch::riscv64::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigAction>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             if let Some(old_action) = sig_struct.get_action(signum) {
                 *oldact_ptr = old_action;
@@ -174,12 +174,12 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
         if !act_ptr.is_null() {
             // Validate user pointer
             if !crate::arch::riscv64::uaccess::access_ok(act_ptr as usize, core::mem::size_of::<SigAction>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let new_action = *act_ptr;
             match sig_struct.set_action(signum, new_action) {
                 Ok(_) => 0,  // Success
-                Err(_) => -errno::EINVAL as u64,
+                Err(_) => -(errno::EINVAL as i64),
             }
         } else {
             0  // Success (just query)
@@ -196,11 +196,11 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns system call return value before signal interruption
-pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> u64 {
+pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> i64 {
     // Get current process
     let current = match crate::sched::current() {
         Some(c) => c as *const _ as *mut crate::process::task::Task,
-        None => return -errno::EPERM as u64,
+        None => return -(errno::EPERM as i64),
     };
 
     // SAFETY: current is the running task's Task pointer; sigframe_addr was set by
@@ -216,7 +216,7 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> u64
         // Return original return value saved in signal frame
         // Usually the value returned from interrupted system call (a0 = x10)
         // Note: restore_sigcontext has already restored regs, so just return regs.a0
-        regs.a0
+        regs.a0 as i64
     }
 }
 
@@ -228,28 +228,28 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> u64
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_sigpending(args: SyscallArgs) -> u64 {
+pub fn sys_sigpending(args: SyscallArgs) -> i64 {
     let set_ptr = args[0] as *mut u64;
     let sigsetsize = args[1] as usize;
 
     // Validate sigsetsize
     if sigsetsize != 8 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     if set_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Validate user pointer
     if !crate::arch::riscv64::uaccess::access_ok(set_ptr as usize, 8) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Get current process
     let current = match crate::sched::current() {
         Some(c) => c as *const _ as *mut crate::process::task::Task,
-        None => return -errno::EPERM as u64,
+        None => return -(errno::EPERM as i64),
     };
 
     // SAFETY: current is the running task's Task pointer; set_ptr validated with access_ok(8).
@@ -273,7 +273,7 @@ pub fn sys_sigpending(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
+pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
     use crate::signal::{SignalStack, ss_flags};
 
     let ss_ptr = args[0] as *const SignalStack;
@@ -282,7 +282,7 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
     // Get current process
     let current = match crate::sched::current() {
         Some(c) => c as *const _ as *mut crate::process::task::Task,
-        None => return -errno::EPERM as u64,
+        None => return -(errno::EPERM as i64),
     };
 
     // SAFETY: current is the running task's Task pointer; ss_ptr/old_ss_ptr validated
@@ -292,7 +292,7 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
         if !old_ss_ptr.is_null() {
             // Validate user pointer
             if !crate::arch::riscv64::uaccess::access_ok(old_ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             *old_ss_ptr = (*current).sigstack;
         }
@@ -301,19 +301,19 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
         if !ss_ptr.is_null() {
             // Validate user pointer
             if !crate::arch::riscv64::uaccess::access_ok(ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let new_ss = *ss_ptr;
 
             // Check if currently executing on signal stack
             if (*current).sigstack.is_on_stack() {
-                return -errno::EBUSY as u64;  // Signal stack in use
+                return -(errno::EBUSY as i64);  // Signal stack in use
             }
 
             // Validate new stack size
             if (new_ss.ss_flags as u32 & ss_flags::SS_DISABLE) == 0 {
                 if new_ss.ss_size < crate::signal::MINSIGSTKSZ as u64 {
-                    return -errno::EINVAL as u64;  // Stack too small
+                    return -(errno::EINVAL as i64);  // Stack too small
                 }
             }
 
@@ -330,27 +330,27 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> u64 {
 /// - args[0]: fd - existing signalfd (or -1 to create new)
 /// - args[1]: mask - pointer to signal mask
 /// - args[2]: flags - SFD_CLOEXEC, SFD_NONBLOCK
-pub fn sys_signalfd4(args: SyscallArgs) -> u64 {
+pub fn sys_signalfd4(args: SyscallArgs) -> i64 {
     let _fd = args[0] as i32;
     let mask_ptr = args[1] as *const u64;
     let _flags = args[2] as i32;
 
     if mask_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, 8) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // signalfd requires full signal fd infrastructure
-    -errno::ENOSYS as u64
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_restart_syscall - Restart a system call after interruption
 ///
 /// This syscall is used internally by the kernel to restart
 /// interrupted system calls. Userspace should not call it directly.
-pub fn sys_restart_syscall(_args: SyscallArgs) -> u64 {
+pub fn sys_restart_syscall(_args: SyscallArgs) -> i64 {
     0
 }
 
@@ -359,18 +359,18 @@ pub fn sys_restart_syscall(_args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: mask - pointer to signal mask (u64)
 /// - args[1]: sigsetsize - size of signal set (must be 8)
-pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
+pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
     let mask_ptr = args[0] as *const u64;
     let sigsetsize = args[1] as usize;
 
     if sigsetsize != 8 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if mask_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, 8) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // SAFETY: mask_ptr validated with access_ok(8); reads one u64.
@@ -378,7 +378,7 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
 
     let current = match crate::sched::current() {
         Some(c) => c as *const _ as *mut crate::process::task::Task,
-        None => return -errno::EPERM as u64,
+        None => return -(errno::EPERM as i64),
     };
 
     // SAFETY: current is the running task's Task pointer from sched::current().
@@ -399,7 +399,7 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
             if pending & !blocked != 0 {
                 // Signal pending, restore old mask and return
                 (*current).sigmask = old_mask;
-                return -errno::EINTR as u64;
+                return -(errno::EINTR as i64);
             }
             // Set state BEFORE re-checking to close the race window.
             // If a signal arrives here, the signal delivery path will see
@@ -416,7 +416,7 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
                     crate::process::task::TaskState::RUNNING
                 ));
                 (*current).sigmask = old_mask;
-                return -errno::EINTR as u64;
+                return -(errno::EINTR as i64);
             }
             crate::sched::schedule();
         }
@@ -431,13 +431,13 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_tkill(args: SyscallArgs) -> u64 {
+pub fn sys_tkill(args: SyscallArgs) -> i64 {
     let tid = args[0] as u32;
     let sig = args[1] as i32;
 
     // Validate signal number
     if sig < 0 || sig > 64 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Signal 0 is for permission checking only
@@ -446,7 +446,7 @@ pub fn sys_tkill(args: SyscallArgs) -> u64 {
         // SAFETY: find_task_by_pid returns null if tid not found; result checked below.
         let task = unsafe { crate::sched::find_task_by_pid(tid) };
         if task.is_null() {
-            return -errno::ESRCH as u64;
+            return -(errno::ESRCH as i64);
         }
         return 0;
     }
@@ -455,12 +455,12 @@ pub fn sys_tkill(args: SyscallArgs) -> u64 {
     // SAFETY: find_task_by_pid returns null if tid not found; result checked below.
     let task = unsafe { crate::sched::find_task_by_pid(tid) };
     if task.is_null() {
-        return -errno::ESRCH as u64;
+        return -(errno::ESRCH as i64);
     }
 
     // Send signal using the existing send_signal function
     match crate::signal::send_signal(tid, sig) {
         Ok(()) => 0,
-        Err(e) => -e as u64,
+        Err(e) => -(e as i64),
     }
 }

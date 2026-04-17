@@ -138,23 +138,23 @@ static SEM_IDS: IpcIds<SemArray> = IpcIds::new();
 // ============================================================================
 
 /// sys_semget — Create or find a semaphore set (NR 190)
-pub fn sys_semget(args: [u64; 6]) -> u64 {
+pub fn sys_semget(args: [u64; 6]) -> i64 {
     let key = args[0] as i32;
     let nsems = args[1] as usize;
     let semflg = args[2] as i32;
 
     if nsems == 0 || nsems > 256 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     match SEM_IDS.alloc(SemArray::new(nsems, key, (semflg & 0o777) as u16), key, semflg) {
-        Ok((id, _)) => id as u64,
-        Err(e) => e as u64,
+        Ok((id, _)) => id as i64,
+        Err(e) => e as i64,
     }
 }
 
 /// sys_semctl — Semaphore control operations (NR 191)
-pub fn sys_semctl(args: [u64; 6]) -> u64 {
+pub fn sys_semctl(args: [u64; 6]) -> i64 {
     let semid = args[0] as i32;
     let semnum = args[1] as i32;
     let cmd = args[2] as i32;
@@ -162,7 +162,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
 
     let idx = match SEM_IDS.find(semid) {
         Some(i) => i,
-        None => return -errno::EINVAL as u64,
+        None => return -(errno::EINVAL as i64),
     };
 
     match cmd {
@@ -180,7 +180,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                         None => false,
                     };
                     if !allowed {
-                        return -errno::EPERM as u64;
+                        return -(errno::EPERM as i64);
                     }
                 }
             }
@@ -198,7 +198,7 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
         IPC_STAT => {
             let buf_ptr = arg as *mut SemidDsUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let mut ds = SemidDsUapi {
                 sem_perm: IpcPermUapi::default(),
@@ -227,11 +227,11 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
         IPC_SET => {
             let buf_ptr = arg as *const u8;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let idx2 = match SEM_IDS.find_with_perms(semid, 0o6) {
                 Ok(i) => i,
-                Err(e) => return e as u64,
+                Err(e) => return e as i64,
             };
             let mut slots = SEM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
@@ -248,39 +248,39 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
         }
         GETVAL => {
             if semnum < 0 {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
             // Permission check: requires read permission
             let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
                 Ok(i) => i,
-                Err(e) => return e as u64,
+                Err(e) => return e as i64,
             };
             let slots = SEM_IDS.slots.lock();
             if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    return -errno::EINVAL as u64;
+                    return -(errno::EINVAL as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
-                    return sems[snum].value.load(Ordering::Relaxed) as u64;
+                    return sems[snum].value.load(Ordering::Relaxed) as i64;
                 }
             }
-            -errno::EINVAL as u64
+            -(errno::EINVAL as i64)
         }
         SETVAL => {
             if semnum < 0 {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
             let val = arg as i32;
             let idx2 = match SEM_IDS.find_with_perms(semid, 0o6) {
                 Ok(i) => i,
-                Err(e) => return e as u64,
+                Err(e) => return e as i64,
             };
             let mut slots = SEM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    return -errno::EINVAL as u64;
+                    return -(errno::EINVAL as i64);
                 }
                 if let Some(ref mut sems) = *entry.inner.sems.lock() {
                     sems[snum].value.store(val, Ordering::Relaxed);
@@ -292,13 +292,13 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
         GETALL => {
             let array_ptr = arg as *mut i32;
             if array_ptr.is_null() {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let slots = SEM_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
                 let nsems = entry.inner.nsems();
                 if !access_ok(array_ptr as usize, nsems * 4) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     for i in 0..nsems {
@@ -314,17 +314,17 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
         SETALL => {
             let array_ptr = arg as *const i32;
             if array_ptr.is_null() {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let idx2 = match SEM_IDS.find_with_perms(semid, 0o6) {
                 Ok(i) => i,
-                Err(e) => return e as u64,
+                Err(e) => return e as i64,
             };
             let mut slots = SEM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
                 let nsems = entry.inner.nsems();
                 if !access_ok(array_ptr as usize, nsems * 4) {
-                    return -errno::EFAULT as u64;
+                    return -(errno::EFAULT as i64);
                 }
                 if let Some(ref mut sems) = *entry.inner.sems.lock() {
                     for i in 0..nsems {
@@ -341,47 +341,47 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
         GETPID => {
             let slots = SEM_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
-                return entry.inner.sem_padid.load(Ordering::Relaxed) as u64;
+                return entry.inner.sem_padid.load(Ordering::Relaxed) as i64;
             }
-            return -errno::EINVAL as u64;
+            return -(errno::EINVAL as i64);
         }
         GETNCNT => {
             if semnum < 0 {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
             let slots = SEM_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    return -errno::EINVAL as u64;
+                    return -(errno::EINVAL as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
-                    return sems[snum].ncnt.load(Ordering::Relaxed) as u64;
+                    return sems[snum].ncnt.load(Ordering::Relaxed) as i64;
                 }
             }
-            -errno::EINVAL as u64
+            -(errno::EINVAL as i64)
         }
         GETZCNT => {
             if semnum < 0 {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
             let slots = SEM_IDS.slots.lock();
             if let Some(ref entry) = slots[idx] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    return -errno::EINVAL as u64;
+                    return -(errno::EINVAL as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
-                    return sems[snum].zcnt.load(Ordering::Relaxed) as u64;
+                    return sems[snum].zcnt.load(Ordering::Relaxed) as i64;
                 }
             }
-            -errno::EINVAL as u64
+            -(errno::EINVAL as i64)
         }
         IPC_INFO => {
             // struct seminfo — 10 int fields = 40 bytes
             let buf_ptr = arg as *mut SemInfoUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemInfoUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let info = SemInfoUapi {
                 semmap: 0,
@@ -414,13 +414,13 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                     }
                 }
             }
-            max_idx as u64
+            max_idx as i64
         }
         18 => {
             // SEM_INFO — like IPC_INFO but returns current usage
             let buf_ptr = arg as *mut SemInfoUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemInfoUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let mut total_sems: usize = 0;
             {
@@ -464,37 +464,37 @@ pub fn sys_semctl(args: [u64; 6]) -> u64 {
                     }
                 }
             }
-            max_idx as u64
+            max_idx as i64
         }
-        _ => return -errno::EINVAL as u64,
+        _ => return -(errno::EINVAL as i64),
     }
 }
 
 /// sys_semtimedop — Semaphore operations with timeout (NR 192)
-pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
+pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     let semid = args[0] as i32;
     let sops_ptr = args[1] as *const SemBuf;
     let nsops = args[2] as usize;
     let timeout_ptr = args[3] as *const u8;
 
     if nsops == 0 || nsops > 500 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if sops_ptr.is_null() || !access_ok(sops_ptr as usize, nsops * core::mem::size_of::<SemBuf>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Compute deadline
     let deadline = if !timeout_ptr.is_null() {
         if !access_ok(timeout_ptr as usize, 16) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
         // casting to two consecutive i64 values (sec + nsec) is within bounds.
         let ts_sec = unsafe { *(timeout_ptr as *const i64) };
         let ts_nsec = unsafe { *((timeout_ptr as *const i64).add(1)) };
         if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
-            return -errno::EINVAL as u64;
+            return -(errno::EINVAL as i64);
         }
         let timeout_jiffies = (ts_sec as u64) * crate::drivers::timer::HZ as u64
             + (ts_nsec as u64) * crate::drivers::timer::HZ as u64 / 1_000_000_000;
@@ -514,7 +514,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
     // Find semaphore set with alter permission check
     let idx = match SEM_IDS.find_with_perms(semid, 0o2) {
         Ok(i) => i,
-        Err(e) => return e as u64,
+        Err(e) => return e as i64,
     };
 
     // Get nsems and validate sem_num for all operations
@@ -523,13 +523,13 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
         let slots = SEM_IDS.slots.lock();
         nsems_in_set = match slots[idx] {
             Some(ref entry) => entry.inner.nsems(),
-            None => return -errno::EINVAL as u64,
+            None => return -(errno::EINVAL as i64),
         };
     }
 
     for sop in &sops {
         if sop.sem_num as usize >= nsems_in_set {
-            return -errno::EINVAL as u64;
+            return -(errno::EINVAL as i64);
         }
     }
 
@@ -544,23 +544,23 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
                     // Blocking needed
                     let blocking_idx = find_blocking_op(idx, &sops);
                     match blocking_idx {
-                        None => return -errno::EAGAIN as u64,
+                        None => return -(errno::EAGAIN as i64),
                         Some(_) => {
                             // Check for signals
                             if crate::signal::signal_pending() {
-                                return -errno::EINTR as u64;
+                                return -(errno::EINTR as i64);
                             }
 
                             // Check timeout
                             if let Some(dl) = deadline {
                                 if crate::drivers::timer::get_jiffies() >= dl {
-                                    return -errno::ETIMEDOUT as u64;
+                                    return -(errno::ETIMEDOUT as i64);
                                 }
                             }
 
                             let current = match crate::sched::current() {
                                 Some(t) => t,
-                                None => return -errno::ESRCH as u64,
+                                None => return -(errno::ESRCH as i64),
                             };
 
                             // Block on the semaphore set's wait queue.
@@ -570,7 +570,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
                                 let slots = SEM_IDS.slots.lock();
                                 if let Some(ref entry) = slots[idx] {
                                     if entry.deleted {
-                                        return -errno::EIDRM as u64;
+                                        return -(errno::EIDRM as i64);
                                     }
                                     // Increment waiter count for the blocking semaphore.
                                     if let Some(ref sems) = *entry.inner.sems.lock() {
@@ -626,7 +626,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> u64 {
                         }
                     }
                 } else {
-                    return e as u64;
+                    return e as i64;
                 }
             }
         }
@@ -776,6 +776,6 @@ pub fn sem_undo_exit(task: *mut crate::process::Task) {
 
 /// sys_semop — Semaphore operations (NR 193)
 /// Delegates to sys_semtimedop with NULL timeout.
-pub fn sys_semop(args: [u64; 6]) -> u64 {
+pub fn sys_semop(args: [u64; 6]) -> i64 {
     sys_semtimedop(args)
 }

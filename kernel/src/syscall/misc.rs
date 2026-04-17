@@ -98,7 +98,7 @@ static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps {
 ///
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
-pub fn sys_poll(args: SyscallArgs) -> u64 {
+pub fn sys_poll(args: SyscallArgs) -> i64 {
     use poll_events::*;
 
     let fds_ptr = args[0] as *mut PollFd;
@@ -107,24 +107,24 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
 
     // Check pointer validity
     if fds_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Check if fds_ptr is in valid user space
     let fds_size = core::mem::size_of::<PollFd>() * nfds;
     if !crate::arch::riscv64::uaccess::access_ok(fds_ptr as usize, fds_size) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Check nfds range
     if nfds == 0 || nfds > 1024 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Get current process fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     // Poll loop with timeout support
@@ -193,7 +193,7 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
         }
 
         if ready_count > 0 {
-            return ready_count as u64;
+            return ready_count as i64;
         }
 
         // No fd ready - check timeout
@@ -212,7 +212,7 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
 
         // Check for pending signals
         if crate::signal::signal_pending() {
-            return -errno::EINTR as u64;
+            return -(errno::EINTR as i64);
         }
 
         // Yield CPU and retry
@@ -230,7 +230,7 @@ pub fn sys_poll(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
-pub fn sys_ppoll(args: SyscallArgs) -> u64 {
+pub fn sys_ppoll(args: SyscallArgs) -> i64 {
     // ppoll has same pollfd checking logic as poll, but reads timeout from timespec
     let timeout_ptr = args[2] as *const u64;
 
@@ -273,7 +273,7 @@ pub fn sys_ppoll(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
-pub fn sys_pselect6(args: SyscallArgs) -> u64 {
+pub fn sys_pselect6(args: SyscallArgs) -> i64 {
     use poll_events::*;
 
     let nfds = args[0] as i32;
@@ -285,26 +285,26 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
 
     // Validate nfds range
     if nfds < 0 || nfds > FD_SETSIZE {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Check pointer validity
     let fdset_size = core::mem::size_of::<FdSet>();
     if !readfds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(readfds_ptr as usize, fdset_size) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !writefds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(writefds_ptr as usize, fdset_size) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !exceptfds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(exceptfds_ptr as usize, fdset_size) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !timeout_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, core::mem::size_of::<TimeVal>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     if readfds_ptr.is_null() && writefds_ptr.is_null() && exceptfds_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Snapshot original fd_sets
@@ -334,7 +334,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
 
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     // Busy-wait loop with timeout (matching sys_poll pattern)
@@ -425,7 +425,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
                 if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
                 if !exceptfds_ptr.is_null() { *exceptfds_ptr = result_exceptfds; }
             }
-            return ready_count as u64;
+            return ready_count as i64;
         }
 
         // No fd ready — check timeout
@@ -454,7 +454,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
 
         // Check for pending signals
         if crate::signal::signal_pending() {
-            return -errno::EINTR as u64;
+            return -(errno::EINTR as i64);
         }
 
         crate::sched::yield_cpu();
@@ -472,7 +472,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
-pub fn sys_select(args: SyscallArgs) -> u64 {
+pub fn sys_select(args: SyscallArgs) -> i64 {
     // select is a special case of pselect6 with sigmask as null
     sys_pselect6([args[0], args[1], args[2], args[3], args[4], 0])
 }
@@ -484,12 +484,12 @@ pub fn sys_select(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns epoll file descriptor on success, negative error code on failure
-pub fn sys_epoll_create(args: SyscallArgs) -> u64 {
+pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
     let _size = args[0] as i32;
 
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     let epoll = alloc::boxed::Box::new(EpollFile {
@@ -510,18 +510,18 @@ pub fn sys_epoll_create(args: SyscallArgs) -> u64 {
             unsafe {
                 let _ = alloc::boxed::Box::from_raw(epoll_ptr as *mut EpollFile);
             }
-            return -errno::EMFILE as u64;
+            return -(errno::EMFILE as i64);
         }
     };
 
     match fdtable.install_fd(epoll_fd, file) {
-        Ok(()) => epoll_fd as u64,
+        Ok(()) => epoll_fd as i64,
         Err(()) => {
             // SAFETY: epoll_ptr was created via Box::into_raw above; reclaim to free.
             unsafe {
                 let _ = alloc::boxed::Box::from_raw(epoll_ptr as *mut EpollFile);
             }
-            -errno::ENOMEM as u64
+            -(errno::ENOMEM as i64)
         }
     }
 }
@@ -533,7 +533,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns epoll file descriptor on success, negative error code on failure
-pub fn sys_epoll_create1(args: SyscallArgs) -> u64 {
+pub fn sys_epoll_create1(args: SyscallArgs) -> i64 {
     // Simplified implementation: ignore flags
     // O_CLOEXEC (0x80000) and other flags not currently supported
     sys_epoll_create(args)
@@ -549,7 +549,7 @@ pub fn sys_epoll_create1(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
+pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     use epoll_ctl_ops::*;
 
     let epfd = args[0] as i32;
@@ -558,32 +558,32 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
     let event_ptr = args[3] as *const EPollEvent;
 
     if epfd < 0 || fd < 0 {
-        return -errno::EBADF as u64;
+        return -(errno::EBADF as i64);
     }
     if op != EPOLL_CTL_ADD && op != EPOLL_CTL_DEL && op != EPOLL_CTL_MOD {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) && event_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !event_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(event_ptr as usize, core::mem::size_of::<EPollEvent>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     let ep_file = match fdtable.get_file(epfd as usize) {
         Some(f) => f,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let epoll_ptr = match unsafe { *ep_file.private_data.get() } {
         Some(ptr) => ptr as *mut EpollFile,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
     // SAFETY: epoll_ptr came from Box::into_raw in sys_epoll_create; valid and unique.
     let epoll = unsafe { &mut *epoll_ptr };
@@ -594,7 +594,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
             let event = unsafe { *event_ptr };
             let mut entries = epoll.entries.lock();
             if entries.iter().any(|e| e.fd == fd) {
-                return -errno::EEXIST as u64;
+                return -(errno::EEXIST as i64);
             }
             entries.push(EpollEntry {
                 fd,
@@ -607,7 +607,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
             if let Some(pos) = entries.iter().position(|e| e.fd == fd) {
                 entries.remove(pos);
             } else {
-                return -errno::ENOENT as u64;
+                return -(errno::ENOENT as i64);
             }
         }
         EPOLL_CTL_MOD => {
@@ -618,10 +618,10 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
                 entry.events = event.events;
                 entry.data = event.data;
             } else {
-                return -errno::ENOENT as u64;
+                return -(errno::ENOENT as i64);
             }
         }
-        _ => return -errno::EINVAL as u64,
+        _ => return -(errno::EINVAL as i64),
     }
 
     0
@@ -637,7 +637,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns number of ready events on success, 0 on timeout, negative error code on failure
-pub fn sys_epoll_wait(args: SyscallArgs) -> u64 {
+pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
     use epoll_events::*;
     use poll_events::*;
 
@@ -647,28 +647,28 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> u64 {
     let timeout_ms = args[3] as i32;
 
     if epfd < 0 || events_ptr.is_null() || maxevents <= 0 || maxevents > 1024 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     let events_size = core::mem::size_of::<EPollEvent>() * (maxevents as usize);
     if !crate::arch::riscv64::uaccess::access_ok(events_ptr as usize, events_size) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     let ep_file = match fdtable.get_file(epfd as usize) {
         Some(f) => f,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let epoll_ptr = match unsafe { *ep_file.private_data.get() } {
         Some(ptr) => ptr as *mut EpollFile,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
     // SAFETY: epoll_ptr came from Box::into_raw in sys_epoll_create; valid and unique.
     let epoll = unsafe { &mut *epoll_ptr };
@@ -733,7 +733,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> u64 {
                     *events_ptr.add(i) = ready_events[i];
                 }
             }
-            return count as u64;
+            return count as i64;
         }
 
         // Check timeout
@@ -748,7 +748,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> u64 {
         }
 
         if crate::signal::signal_pending() {
-            return -errno::EINTR as u64;
+            return -(errno::EINTR as i64);
         }
 
         crate::sched::yield_cpu();
@@ -766,7 +766,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns number of ready events on success, 0 on timeout, negative error code on failure
-pub fn sys_epoll_pwait(args: SyscallArgs) -> u64 {
+pub fn sys_epoll_pwait(args: SyscallArgs) -> i64 {
     // Simplified implementation: ignore signal mask
     sys_epoll_wait([args[0], args[1], args[2], args[3], 0, 0])
 }
@@ -1042,7 +1042,7 @@ static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
 };
 
 /// sys_eventfd - Create eventfd object (legacy, no flags)
-pub fn sys_eventfd(args: SyscallArgs) -> u64 {
+pub fn sys_eventfd(args: SyscallArgs) -> i64 {
     sys_eventfd2([args[0], 0, 0, 0, 0, 0])
 }
 
@@ -1054,7 +1054,7 @@ pub fn sys_eventfd(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns eventfd file descriptor on success, negative error code on failure
-pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
+pub fn sys_eventfd2(args: SyscallArgs) -> i64 {
     let initval = args[0] as u64;
     let flags = args[1] as u32;
 
@@ -1063,12 +1063,12 @@ pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
     const EFD_NONBLOCK: u32 = 0x800;
     const VALID_FLAGS: u32 = EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE;
     if flags & !VALID_FLAGS != 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     // Create EventFd
@@ -1091,7 +1091,7 @@ pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
             // Reclaim EventFd
             // SAFETY: efd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(efd_ptr as *mut EventFd); }
-            return -errno::EMFILE as u64;
+            return -(errno::EMFILE as i64);
         }
     };
 
@@ -1101,11 +1101,11 @@ pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
     }
 
     match fdtable.install_fd(fd, file) {
-        Ok(()) => fd as u64,
+        Ok(()) => fd as i64,
         Err(_) => {
             // SAFETY: efd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(efd_ptr as *mut EventFd); }
-            -errno::EMFILE as u64
+            -(errno::EMFILE as i64)
         }
     }
 }
@@ -1114,11 +1114,11 @@ pub fn sys_eventfd2(args: SyscallArgs) -> u64 {
 ///
 /// # Arguments
 /// - args[0]: flags - IN_CLOEXEC, IN_NONBLOCK
-pub fn sys_inotify_init1(args: SyscallArgs) -> u64 {
+pub fn sys_inotify_init1(args: SyscallArgs) -> i64 {
     let _flags = args[0] as i32;
     // inotify requires full filesystem monitoring infrastructure
     // Return -EMFILE to indicate resource limit rather than ENOSYS
-    -errno::EMFILE as u64
+    -(errno::EMFILE as i64)
 }
 
 /// sys_inotify_add_watch - Add watch to inotify instance
@@ -1127,8 +1127,8 @@ pub fn sys_inotify_init1(args: SyscallArgs) -> u64 {
 /// - args[0]: fd - inotify file descriptor
 /// - args[1]: pathname - path to watch
 /// - args[2]: mask - event mask
-pub fn sys_inotify_add_watch(_args: SyscallArgs) -> u64 {
-    -errno::EBADF as u64
+pub fn sys_inotify_add_watch(_args: SyscallArgs) -> i64 {
+    -(errno::EBADF as i64)
 }
 
 /// sys_inotify_rm_watch - Remove watch from inotify instance
@@ -1136,8 +1136,8 @@ pub fn sys_inotify_add_watch(_args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: fd - inotify file descriptor
 /// - args[1]: wd - watch descriptor
-pub fn sys_inotify_rm_watch(_args: SyscallArgs) -> u64 {
-    -errno::EBADF as u64
+pub fn sys_inotify_rm_watch(_args: SyscallArgs) -> i64 {
+    -(errno::EBADF as i64)
 }
 
 /// sys_timerfd_create - Create timer file descriptor
@@ -1145,25 +1145,25 @@ pub fn sys_inotify_rm_watch(_args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: clockid - clock ID (CLOCK_REALTIME=0, CLOCK_MONOTONIC=1)
 /// - args[1]: flags - TFD_CLOEXEC, TFD_NONBLOCK
-pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
+pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
     let clockid = args[0] as i32;
     let flags = args[1] as i32;
 
     // Only CLOCK_REALTIME and CLOCK_MONOTONIC supported
     if clockid != 0 && clockid != 1 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Validate flags
     const TFD_CLOEXEC: i32 = 0x80000;
     const TFD_NONBLOCK: i32 = 0x800;
     if flags & !(TFD_CLOEXEC | TFD_NONBLOCK) != 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EMFILE as u64,
+        None => return -(errno::EMFILE as i64),
     };
 
     // Create TimerFd
@@ -1185,7 +1185,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
         None => {
             // SAFETY: tfd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(tfd_ptr as *mut TimerFd); }
-            return -errno::EMFILE as u64;
+            return -(errno::EMFILE as i64);
         }
     };
 
@@ -1194,11 +1194,11 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
     }
 
     match fdtable.install_fd(fd, file) {
-        Ok(()) => fd as u64,
+        Ok(()) => fd as i64,
         Err(_) => {
             // SAFETY: tfd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(tfd_ptr as *mut TimerFd); }
-            -errno::EMFILE as u64
+            -(errno::EMFILE as i64)
         }
     }
 }
@@ -1210,30 +1210,30 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> u64 {
 /// - args[1]: flags - TFD_TIMER_ABSTIME
 /// - args[2]: new_value - new timer settings (struct itimerspec, 32 bytes)
 /// - args[3]: old_value - old timer settings (output)
-pub fn sys_timerfd_settime(args: SyscallArgs) -> u64 {
+pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let flags = args[1] as i32;
     let new_value = args[2] as *const u64;
     let old_value = args[3] as *mut u64;
 
     if new_value.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Validate fd and get file
     // SAFETY: fd is a valid timerfd file descriptor from timerfd_create.
     let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(f) => f,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
     // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and unique.
     let tfd = unsafe { &mut *(ptr as *mut TimerFd) };
@@ -1241,7 +1241,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> u64 {
     // Write old_value (current settings)
     if !old_value.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         timerfd_write_olds(tfd, old_value);
     }
@@ -1313,27 +1313,27 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: fd - timerfd file descriptor
 /// - args[1]: curr_value - current timer settings (output, 32 bytes)
-pub fn sys_timerfd_gettime(args: SyscallArgs) -> u64 {
+pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let curr_value = args[1] as *mut u64;
 
     if curr_value.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // SAFETY: fd is a valid timerfd file descriptor from timerfd_create.
     let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(f) => f,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
     // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and properly aligned.
     let tfd = unsafe { &*(ptr as *const TimerFd) };
@@ -1351,13 +1351,13 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns number of bytes written on success, negative error code on failure
-pub fn sys_getrandom(args: SyscallArgs) -> u64 {
+pub fn sys_getrandom(args: SyscallArgs) -> i64 {
     let buf_ptr = args[0] as *mut u8;
     let buflen = args[1] as usize;
     let _flags = args[2] as u32;
 
     if buf_ptr.is_null() {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     if buflen == 0 {
@@ -1366,7 +1366,7 @@ pub fn sys_getrandom(args: SyscallArgs) -> u64 {
 
     // Validate user space pointer
     if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, buflen) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Use simple pseudo-random number generator
@@ -1385,5 +1385,5 @@ pub fn sys_getrandom(args: SyscallArgs) -> u64 {
         }
     }
 
-    buflen as u64
+    buflen as i64
 }

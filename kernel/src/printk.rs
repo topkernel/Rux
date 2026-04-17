@@ -293,7 +293,7 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
 /// - args[0]: type - syslog action type (0-10)
 /// - args[1]: bufp - user buffer pointer (for read actions)
 /// - args[2]: len - buffer length (for read actions); reused as level for type 8
-pub fn sys_syslog(args: [u64; 6]) -> u64 {
+pub fn sys_syslog(args: [u64; 6]) -> i64 {
     let action = args[0] as i32;
     let bufp = args[1] as *mut u8;
     let len = args[2] as usize;
@@ -333,7 +333,7 @@ pub fn sys_syslog(args: [u64; 6]) -> u64 {
         8 => {
             let new_level = args[2] as u8;
             if new_level > loglevel::KERN_DEBUG {
-                return (-crate::syscall::errno::EINVAL) as u64;
+                return -(crate::syscall::errno::EINVAL as i64);
             }
             CONSOLE_LOGLEVEL.store(new_level, Ordering::Relaxed);
             0
@@ -344,13 +344,13 @@ pub fn sys_syslog(args: [u64; 6]) -> u64 {
             let rb = RING_BUFFER.lock_irqsave();
             let unread = rb.next_seq.saturating_sub(rb.read_seq);
             // Approximate: assume each record is ~128 bytes average
-            (unread * 128) as u64
+            (unread * 128) as i64
         }
 
         // Return total buffer size
-        10 => (RING_BUFFER_CAPACITY * RECORD_TEXT_SIZE) as u64,
+        10 => (RING_BUFFER_CAPACITY * RECORD_TEXT_SIZE) as i64,
 
-        _ => (-crate::syscall::errno::EINVAL) as u64,
+        _ => -(crate::syscall::errno::EINVAL as i64),
     }
 }
 
@@ -578,12 +578,12 @@ fn format_record_header(buf: &mut [u8; MAX_HEADER_LEN], level: u8, pid: u32, cpu
 }
 
 /// Read records sequentially from where the last read left off.
-fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> u64 {
+fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
     if maxlen == 0 || bufp.is_null() {
-        return (-crate::syscall::errno::EINVAL) as u64;
+        return -(crate::syscall::errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(bufp as usize, maxlen) {
-        return (-crate::syscall::errno::EFAULT) as u64;
+        return -(crate::syscall::errno::EFAULT as i64);
     }
 
     let mut rb = RING_BUFFER.lock_irqsave();
@@ -632,16 +632,16 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> u64 {
     // Advance read cursor
     rb.read_seq = next_seq;
 
-    offset as u64
+    offset as i64
 }
 
 /// Read all records from the ring buffer, oldest first.
-fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> u64 {
+fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
     if maxlen == 0 || bufp.is_null() {
-        return (-crate::syscall::errno::EINVAL) as u64;
+        return -(crate::syscall::errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(bufp as usize, maxlen) {
-        return (-crate::syscall::errno::EFAULT) as u64;
+        return -(crate::syscall::errno::EFAULT as i64);
     }
 
     let mut rb = RING_BUFFER.lock_irqsave();
@@ -699,7 +699,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> u64 {
         rb.next_seq = 0;
     }
 
-    offset as u64
+    offset as i64
 }
 
 /// Clear the ring buffer.

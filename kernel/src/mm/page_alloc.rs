@@ -125,9 +125,14 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
     let addr = alloc_page(gfp_flags);
     if addr != 0 {
         // SAFETY: addr is a valid physical address just allocated by alloc_page.
+        // phys_to_virt converts it to the corresponding virtual address in the
+        // kernel linear mapping region, which is safe to write to.
         // Writing PAGE_SIZE bytes is within the allocated page.
+        let virt = crate::arch::riscv64::mm::phys_to_virt(
+            crate::arch::riscv64::mm::PhysAddr::new(addr as u64),
+        );
         unsafe {
-            core::ptr::write_bytes(addr as *mut u8, 0, PAGE_SIZE);
+            core::ptr::write_bytes(virt.0 as *mut u8, 0, PAGE_SIZE);
         }
     }
     addr

@@ -57,12 +57,7 @@ fn test_wait4_no_child() -> i64 {
         let mut status: i32 = 0;
         let args = [(-1i32) as u64, &mut status as *mut i32 as u64, 0, 0, 0, 0];
         let result = syscall::sys_wait4(args);
-        let result_u32 = result as u32;
-        if result_u32 & 0x80000000 != 0 {
-            result_u32 as i32 as i64
-        } else {
-            result as i64
-        }
+        result
     }
 }
 
@@ -73,12 +68,7 @@ fn test_wait4_wnohang_no_child() -> i64 {
         const WNOHANG: i32 = 0x00000001;
         let args = [(-1i32) as u64, &mut status as *mut i32 as u64, WNOHANG as u64, 0, 0, 0];
         let result = syscall::sys_wait4(args);
-        let result_u32 = result as u32;
-        if result_u32 & 0x80000000 != 0 {
-            result_u32 as i32 as i64
-        } else {
-            result as i64
-        }
+        result
     }
 }
 
@@ -93,11 +83,6 @@ fn test_wait4_wnohang_after_fork() -> i64 {
         const WNOHANG: i32 = 0x00000001;
         let args = [child_pid as u64, &mut status as *mut i32 as u64, WNOHANG as u64, 0, 0, 0];
         let result = syscall::sys_wait4(args);
-        let result_u32 = result as u32;
-        if result_u32 & 0x80000000 != 0 {
-            result_u32 as i32 as i64
-        } else {
-            result as i64
-        }
+        result
     }
 }

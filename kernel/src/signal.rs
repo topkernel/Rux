@@ -935,8 +935,8 @@ unsafe fn setup_frame(
     // Set signal handler arguments (RISC-V calling convention: a0-a7)
     // int sigaction_handler(int sig, siginfo_t *info, void *uc)
     regs.a0 = sig as u64;                      // a0 = sig
-    regs.a1 = frame_addr + 32;                 // a1 = &info
-    regs.a2 = frame_addr + 32 + core::mem::size_of::<SigInfo>() as u64;  // a2 = &uc
+    regs.a1 = frame_addr + core::mem::offset_of!(SignalFrame, info) as u64;  // a1 = &info
+    regs.a2 = frame_addr + core::mem::offset_of!(SignalFrame, uc) as u64;    // a2 = &uc
 
     // Set return address to signal handler
     regs.epc = action.sa_handler as u64;

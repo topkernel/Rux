@@ -193,7 +193,7 @@ fn mq_parse_name(name_ptr: *const u8) -> Result<alloc::vec::Vec<u8>, i32> {
 // ============================================================================
 
 /// sys_mq_open — Open or create a message queue (NR 180)
-pub fn sys_mq_open(args: [u64; 6]) -> u64 {
+pub fn sys_mq_open(args: [u64; 6]) -> i64 {
     let name_ptr = args[0] as *const u8;
     let oflag = args[1] as i32;
     let mode = args[2] as u32;
@@ -201,7 +201,7 @@ pub fn sys_mq_open(args: [u64; 6]) -> u64 {
 
     let name = match mq_parse_name(name_ptr) {
         Ok(n) => n,
-        Err(e) => return e as u64,
+        Err(e) => return e as i64,
     };
 
     // Check for close-on-exec
@@ -210,7 +210,7 @@ pub fn sys_mq_open(args: [u64; 6]) -> u64 {
     // Read optional attributes
     let attr = if !attr_ptr.is_null() && (oflag & O_CREAT_MQ as i32) != 0 {
         if !access_ok(attr_ptr as usize, core::mem::size_of::<MqAttr>()) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // SAFETY: attr_ptr was null-checked and access_ok-validated above;
         // MqAttr is #[repr(C)] and size_of matches the expected layout.
@@ -225,57 +225,57 @@ pub fn sys_mq_open(args: [u64; 6]) -> u64 {
     // Find existing queue
     if let Some((_idx, mq)) = mq_find_by_name(&name) {
         if excl {
-            return -errno::EEXIST as u64;
+            return -(errno::EEXIST as i64);
         }
         // Check read/write permission
         let can_read = ((oflag & 3) != 1) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o4);
         let can_write = ((oflag & 3) != 0) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2);
 
         if !can_read && !can_write {
-            return -errno::EACCES as u64;
+            return -(errno::EACCES as i64);
         }
 
         // Allocate a file descriptor
         let fd = match allocate_mq_fd() {
             Some(f) => f,
-            None => return -errno::EMFILE as u64,
+            None => return -(errno::EMFILE as i64),
         };
 
         mq.refcount.fetch_add(1, Ordering::Relaxed);
         store_mq_fd(fd as usize, mq);
-        return fd as u64;
+        return fd as i64;
     }
 
     // Queue not found
     if !creating {
-        return -errno::ENOENT as u64;
+        return -(errno::ENOENT as i64);
     }
 
     // Create new queue
     let mq = PosixMq::new(&name, mode as u16, attr.as_ref());
     let idx = match mq_alloc(mq) {
         Some(i) => i,
-        None => return -errno::ENOSPC as u64,
+        None => return -(errno::ENOSPC as i64),
     };
 
     let mq = MQ_TABLE.lock()[idx].as_ref().unwrap().clone();
 
     let fd = match allocate_mq_fd() {
         Some(f) => f,
-        None => return -errno::EMFILE as u64,
+        None => return -(errno::EMFILE as i64),
     };
 
     store_mq_fd(fd as usize, mq);
-    fd as u64
+    fd as i64
 }
 
 /// sys_mq_unlink — Remove a message queue (NR 181)
-pub fn sys_mq_unlink(args: [u64; 6]) -> u64 {
+pub fn sys_mq_unlink(args: [u64; 6]) -> i64 {
     let name_ptr = args[0] as *const u8;
 
     let name = match mq_parse_name(name_ptr) {
         Ok(n) => n,
-        Err(e) => return e as u64,
+        Err(e) => return e as i64,
     };
 
     let mut table = MQ_TABLE.lock();
@@ -291,7 +291,7 @@ pub fn sys_mq_unlink(args: [u64; 6]) -> u64 {
             }
         }
     }
-    -errno::ENOENT as u64
+    -(errno::ENOENT as i64)
 }
 
 /// Parse a timespec timeout pointer into a jiffies deadline.
@@ -317,7 +317,7 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Option<u64> {
 }
 
 /// sys_mq_timedsend — Send a message to a message queue (NR 182)
-pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
+pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
     let mqdes = args[0] as i32;
     let msg_ptr = args[1] as *const u8;
     let msg_len = args[2] as usize;
@@ -325,17 +325,17 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
     let timeout_ptr = args[4] as *const u8;
 
     if msg_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Get the MQ from the fd
     let mq = match get_mq_fd(mqdes as usize) {
         Some(m) => m,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     if mq.is_unlinked() && mq.refcount.load(Ordering::Relaxed) <= 1 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Check message size (acquire messages first, then attr — consistent lock ordering)
@@ -343,22 +343,22 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
         let messages = mq.messages.lock();
         let attr = mq.attr.lock();
         if msg_len > attr.mq_msgsize as usize {
-            return -errno::EMSGSIZE as u64;
+            return -(errno::EMSGSIZE as i64);
         }
     }
 
     // Check permission
     if !ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2) {
-        return -errno::EACCES as u64;
+        return -(errno::EACCES as i64);
     }
 
     if msg_prio >= 32768 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Copy message data
     if !access_ok(msg_ptr as usize, msg_len) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     let mut data = alloc::vec::Vec::with_capacity(msg_len);
     data.resize(msg_len, 0);
@@ -410,23 +410,23 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
 
         // Queue full — check exit conditions while holding lock
         if nonblock {
-            return -errno::EAGAIN as u64;
+            return -(errno::EAGAIN as i64);
         }
 
         if crate::signal::signal_pending() {
-            return -errno::EINTR as u64;
+            return -(errno::EINTR as i64);
         }
 
         if let Some(dl) = deadline {
             if crate::drivers::timer::get_jiffies() >= dl {
-                return -errno::ETIMEDOUT as u64;
+                return -(errno::ETIMEDOUT as i64);
             }
         }
 
         // Add to wait queue WHILE holding messages lock — prevents lost wakeup
         let current = match crate::sched::current() {
             Some(t) => t,
-            None => return -errno::ESRCH as u64,
+            None => return -(errno::ESRCH as i64),
         };
         let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
         mq.wq_send.add(wq_entry);
@@ -451,7 +451,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> u64 {
 }
 
 /// sys_mq_timedreceive — Receive a message from a message queue (NR 183)
-pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
+pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
     let mqdes = args[0] as i32;
     let msg_ptr = args[1] as *mut u8;
     let msg_len = args[2] as usize;
@@ -459,22 +459,22 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
     let timeout_ptr = args[4] as *const u8;
 
     if msg_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Get the MQ from the fd
     let mq = match get_mq_fd(mqdes as usize) {
         Some(m) => m,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     if mq.is_unlinked() && mq.refcount.load(Ordering::Relaxed) <= 1 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Check permission
     if !ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o4) {
-        return -errno::EACCES as u64;
+        return -(errno::EACCES as i64);
     }
 
     // Parse timeout
@@ -509,7 +509,7 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
                 messages.insert(0, msg);
                 mq.attr.lock().mq_curmsgs += 1;
                 mq.cbytes.fetch_add(copy_len as i32, Ordering::Relaxed);
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             // SAFETY: msg_ptr was access_ok-validated for copy_len bytes above;
             // msg.data.as_ptr() is valid for msg.data.len() bytes (>= copy_len).
@@ -522,28 +522,28 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> u64 {
                 unsafe { core::ptr::write_volatile(prio_ptr, msg.priority) };
             }
 
-            return copy_len as u64;
+            return copy_len as i64;
         }
 
         // Queue empty — check exit conditions while holding lock
         if nonblock {
-            return -errno::EAGAIN as u64;
+            return -(errno::EAGAIN as i64);
         }
 
         if crate::signal::signal_pending() {
-            return -errno::EINTR as u64;
+            return -(errno::EINTR as i64);
         }
 
         if let Some(dl) = deadline {
             if crate::drivers::timer::get_jiffies() >= dl {
-                return -errno::ETIMEDOUT as u64;
+                return -(errno::ETIMEDOUT as i64);
             }
         }
 
         // Add to wait queue WHILE holding messages lock — prevents lost wakeup
         let current = match crate::sched::current() {
             Some(t) => t,
-            None => return -errno::ESRCH as u64,
+            None => return -(errno::ESRCH as i64),
         };
         let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
         mq.wq_recv.add(wq_entry);
@@ -582,18 +582,18 @@ struct SigEvent {
 }
 
 /// sys_mq_notify — Register for notification when message arrives (NR 184)
-pub fn sys_mq_notify(args: [u64; 6]) -> u64 {
+pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
     let mqdes = args[0] as i32;
     let sevp = args[1] as *const SigEvent;
 
     // Get the MQ from the fd
     let mq = match get_mq_fd(mqdes as usize) {
         Some(m) => m,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     if mq.is_unlinked() && mq.refcount.load(Ordering::Relaxed) <= 1 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Deregister if sevp is NULL or SIGEV_NONE
@@ -603,7 +603,7 @@ pub fn sys_mq_notify(args: [u64; 6]) -> u64 {
     }
 
     if !access_ok(sevp as usize, core::mem::size_of::<SigEvent>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // SAFETY: sevp was access_ok-validated for size_of::<SigEvent>() above;
@@ -622,18 +622,18 @@ pub fn sys_mq_notify(args: [u64; 6]) -> u64 {
         if old_pid != 0 && old_pid != pid {
             // Another process already registered — per POSIX, this is EBUSY
             mq.notify_pid.store(old_pid, Ordering::Relaxed);
-            return -errno::EBUSY as u64;
+            return -(errno::EBUSY as i64);
         }
         mq.notify_signo.store(sev.sigev_signo, Ordering::Relaxed);
         return 0;
     }
 
     // SIGEV_THREAD not supported
-    -errno::ENOSYS as u64
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_mq_getsetattr — Get/set message queue attributes (NR 185)
-pub fn sys_mq_getsetattr(args: [u64; 6]) -> u64 {
+pub fn sys_mq_getsetattr(args: [u64; 6]) -> i64 {
     let mqdes = args[0] as i32;
     let attr_ptr = args[1] as *mut MqAttr;
     let newattr_ptr = args[2] as *const MqAttr;
@@ -641,13 +641,13 @@ pub fn sys_mq_getsetattr(args: [u64; 6]) -> u64 {
     // Get the MQ from the fd
     let mq = match get_mq_fd(mqdes as usize) {
         Some(m) => m,
-        None => return -errno::EBADF as u64,
+        None => return -(errno::EBADF as i64),
     };
 
     // Set new attributes (only mq_flags can be changed)
     if !newattr_ptr.is_null() {
         if !access_ok(newattr_ptr as usize, core::mem::size_of::<MqAttr>()) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // SAFETY: newattr_ptr was access_ok-validated for size_of::<MqAttr>() above;
         // MqAttr is #[repr(C)] and the dereference is within validated bounds.
@@ -659,7 +659,7 @@ pub fn sys_mq_getsetattr(args: [u64; 6]) -> u64 {
     // Get current attributes
     if !attr_ptr.is_null() {
         if !access_ok(attr_ptr as usize, core::mem::size_of::<MqAttr>()) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         let attr = *mq.attr.lock();
         // SAFETY: attr_ptr was access_ok-validated for size_of::<MqAttr>() above;

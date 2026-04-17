@@ -98,16 +98,10 @@ impl ConditionVariable {
             None => return,
         };
 
-        // 1. Add to wait queue and set INTERRUPTIBLE BEFORE unlocking mutex.
-        //    This prevents a lost-wakeup race: if signal() fires between
-        //    unlock() and add(), the waiter would miss the wakeup.
-        let entry = crate::process::wait::WaitQueueEntry::new(current, false);
-        self.wait.add(entry);
-
-        unsafe {
-            (*current).set_state(crate::process::task::TaskState::new(
-                crate::process::task::TaskState::INTERRUPTIBLE));
-        }
+        // 1. Atomically add to wait queue AND set INTERRUPTIBLE under the
+        //    waitqueue lock, preventing the lost-wakeup race where signal()
+        //    fires between unlock() and add()/set_state().
+        self.wait.prepare_to_wait(current, false, true);
 
         // 2. Release mutex — any concurrent signal() will now see us in the
         //    waitqueue and wake us up.
@@ -117,8 +111,8 @@ impl ConditionVariable {
         crate::arch::riscv64::cpu::restore_irq(true);
         crate::sched::schedule();
 
-        // 4. After wakeup, state is RUNNING (set by enqueue_task_locked)
-        self.wait.remove(current);
+        // 4. After wakeup, finish_wait restores RUNNING and removes entry.
+        self.wait.finish_wait(current);
 
         // 5. Re-acquire mutex
         mutex.lock();
@@ -145,16 +139,10 @@ impl ConditionVariable {
             None => return Ok(()),
         };
 
-        // 1. Add to wait queue and set INTERRUPTIBLE BEFORE unlocking mutex.
-        //    This prevents a lost-wakeup race: if signal() fires between
-        //    unlock() and add(), the waiter would miss the wakeup.
-        let entry = crate::process::wait::WaitQueueEntry::new(current, false);
-        self.wait.add(entry);
-
-        unsafe {
-            (*current).set_state(crate::process::task::TaskState::new(
-                crate::process::task::TaskState::INTERRUPTIBLE));
-        }
+        // 1. Atomically add to wait queue AND set INTERRUPTIBLE under the
+        //    waitqueue lock, preventing the lost-wakeup race where signal()
+        //    fires between unlock() and add()/set_state().
+        self.wait.prepare_to_wait(current, false, true);
 
         // 2. Release mutex — any concurrent signal() will now see us in the
         //    waitqueue and wake us up.
@@ -164,8 +152,8 @@ impl ConditionVariable {
         crate::arch::riscv64::cpu::restore_irq(true);
         crate::sched::schedule();
 
-        // 4. After wakeup, state is RUNNING (set by enqueue_task_locked)
-        self.wait.remove(current);
+        // 4. After wakeup, finish_wait restores RUNNING and removes entry.
+        self.wait.finish_wait(current);
 
         // Check for signal interruption
         if crate::signal::signal_pending() {

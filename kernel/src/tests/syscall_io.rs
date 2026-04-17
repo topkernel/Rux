@@ -252,7 +252,7 @@ fn test_sys_ioctl() {
 
     // ---- Test: ioctl unrecognized command on fd > 2 returns -ENOTTY ----
     const ENOTTY: i64 = 25;
-    let ret = sys_ioctl([10, 0x1234, 0, 0, 0, 0]) as i64;
+    let ret = sys_ioctl([10, 0x1234, 0, 0, 0, 0]);
     if ret == -(ENOTTY as i64) {
         test_pass("sys_ioctl unrecognized cmd fd>2 returns -ENOTTY");
     } else {
@@ -261,7 +261,7 @@ fn test_sys_ioctl() {
 
     // ---- Test: ioctl TIOCGWINSZ with null arg returns -EFAULT ----
     const EFAULT: i64 = 14;
-    let ret = sys_ioctl([0, TIOCGWINSZ as u64, 0, 0, 0, 0]) as i64;
+    let ret = sys_ioctl([0, TIOCGWINSZ as u64, 0, 0, 0, 0]);
     if ret == -(EFAULT as i64) {
         test_pass("sys_ioctl TIOCGWINSZ null arg returns -EFAULT");
     } else {
@@ -270,7 +270,7 @@ fn test_sys_ioctl() {
 
     // ---- Test: ioctl TIOCGWINSZ with buffer (kernel-space ptr rejected by access_ok) ----
     let mut winsize_buf = [0u8; 8];
-    let ret = sys_ioctl([0, TIOCGWINSZ as u64, winsize_buf.as_mut_ptr() as u64, 0, 0, 0]) as i64;
+    let ret = sys_ioctl([0, TIOCGWINSZ as u64, winsize_buf.as_mut_ptr() as u64, 0, 0, 0]);
     if ret == -(EFAULT as i64) {
         test_pass("sys_ioctl TIOCGWINSZ kernel ptr returns -EFAULT");
     } else {
@@ -289,7 +289,7 @@ fn test_sys_ioctl() {
     }
 
     // ---- Test: ioctl FIONREAD with null arg returns -EFAULT ----
-    let ret = sys_ioctl([0, FIONREAD as u64, 0, 0, 0, 0]) as i64;
+    let ret = sys_ioctl([0, FIONREAD as u64, 0, 0, 0, 0]);
     if ret == -(EFAULT as i64) {
         test_pass("sys_ioctl FIONREAD null arg returns -EFAULT");
     } else {
@@ -306,7 +306,7 @@ fn test_sys_pipe2() {
 
     // ---- Test: pipe2 with null pointer returns -EFAULT ----
     const EFAULT: i64 = 14;
-    let ret = sys_pipe2([0, 0, 0, 0, 0, 0]) as i64;
+    let ret = sys_pipe2([0, 0, 0, 0, 0, 0]);
     if ret == -(EFAULT as i64) {
         test_pass("sys_pipe2 null ptr returns -EFAULT");
     } else {
@@ -315,7 +315,7 @@ fn test_sys_pipe2() {
 
     // ---- Test: pipe2 with kernel-space pointer returns -EFAULT (access_ok rejects kernel addrs) ----
     let mut pipefd: [i32; 2] = [-1, -1];
-    let ret = sys_pipe2([pipefd.as_mut_ptr() as u64, 0, 0, 0, 0, 0]) as i64;
+    let ret = sys_pipe2([pipefd.as_mut_ptr() as u64, 0, 0, 0, 0, 0]);
     if ret == -(EFAULT as i64) {
         test_pass("sys_pipe2 kernel ptr returns -EFAULT");
     } else if ret == 0 {
@@ -339,7 +339,7 @@ fn test_sys_pipe2() {
     // ---- Test: pipe2 with invalid flags returns -EINVAL ----
     let mut pipefd2: [i32; 2] = [-1, -1];
     const EINVAL: i64 = 22;
-    let ret = sys_pipe2([pipefd2.as_mut_ptr() as u64, 0x100, 0, 0, 0, 0]) as i64;
+    let ret = sys_pipe2([pipefd2.as_mut_ptr() as u64, 0x100, 0, 0, 0, 0]);
     // With invalid flags, should return -EINVAL regardless of pointer validity
     if ret == -(EINVAL as i64) {
         test_pass("sys_pipe2 invalid flags returns -EINVAL");
@@ -357,7 +357,7 @@ fn test_sys_dup() {
     const EBADF: i64 = 9;
 
     // ---- Test: sys_dup with invalid fd returns -EBADF ----
-    let ret = sys_dup([9999, 0, 0, 0, 0, 0]) as i64;
+    let ret = sys_dup([9999, 0, 0, 0, 0, 0]);
     if ret == -(EBADF as i64) {
         test_pass("sys_dup invalid fd returns -EBADF");
     } else {
@@ -369,7 +369,7 @@ fn test_sys_dup() {
     if ret >= 3 {
         test_pass("sys_dup stdin returns valid fd");
         // The new fd should be > 2 (since 0,1,2 are taken by stdin/stdout/stderr)
-    } else if ret as i64 == -(EBADF as i64) {
+    } else if ret == -(EBADF as i64) {
         // May fail if no fdtable context
         test_skip("sys_dup stdin", "no fdtable context");
     } else {
@@ -377,7 +377,7 @@ fn test_sys_dup() {
     }
 
     // ---- Test: sys_dup2 with invalid oldfd returns -EBADF ----
-    let ret = sys_dup2([9999, 10, 0, 0, 0, 0]) as i64;
+    let ret = sys_dup2([9999, 10, 0, 0, 0, 0]);
     if ret == -(EBADF as i64) {
         test_pass("sys_dup2 invalid oldfd returns -EBADF");
     } else {
@@ -388,7 +388,7 @@ fn test_sys_dup() {
     let ret = sys_dup2([0, 10, 0, 0, 0, 0]);
     if ret == 10 {
         test_pass("sys_dup2 returns target fd");
-    } else if ret as i64 == -(EBADF as i64) {
+    } else if ret == -(EBADF as i64) {
         test_skip("sys_dup2 fd0->fd10", "no fdtable context");
     } else {
         test_fail("sys_dup2 fd0->fd10", &alloc::format!("expected 10, got {}", ret));
@@ -425,10 +425,10 @@ fn test_sys_dup() {
 
                 // Close the duplicated fd
                 let _ = file_close(new_fd);
-            } else if ret as i64 == -(EBADF as i64) {
+            } else if ret == -(EBADF as i64) {
                 test_skip("sys_dup file", "no fdtable context");
             } else {
-                test_fail("sys_dup file", &alloc::format!("unexpected error: {}", ret as i64));
+                test_fail("sys_dup file", &alloc::format!("unexpected error: {}", ret));
             }
 
             let _ = file_close(fd);
@@ -443,7 +443,7 @@ fn test_sys_dup() {
         Ok(fd) => {
             let target_fd = 20u64;
             let ret = sys_dup2([fd as u64, target_fd, 0, 0, 0, 0]);
-            if ret == target_fd {
+            if ret == target_fd as i64 {
                 test_pass("sys_dup2 file returns target fd");
 
                 // Verify the target fd can read
@@ -464,7 +464,7 @@ fn test_sys_dup() {
 
                 // Close the duplicated fd
                 let _ = file_close(target_fd as usize);
-            } else if ret as i64 == -(EBADF as i64) {
+            } else if ret == -(EBADF as i64) {
                 test_skip("sys_dup2 file", "no fdtable context");
             } else {
                 test_fail("sys_dup2 file", &alloc::format!("expected {}, got {}", target_fd, ret));

@@ -26,8 +26,8 @@ fn syscall_get_arguments(regs: &PtRegs) -> SyscallArgs {
 
 /// Set system call return value
 #[inline]
-fn syscall_set_return_value(regs: &mut PtRegs, value: u64) {
-    regs.a0 = value;
+fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
+    regs.a0 = value as u64;
 }
 
 /// System call entry function
@@ -41,7 +41,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         crate::process::current_pid(), syscall_no, args[0], args[1], args[2]);
 
     // Dispatch based on system call number (sorted by number)
-    let result: u64 = match syscall_no as u32 {
+    let result: i64 = match syscall_no as u32 {
         // ==================== Linux AIO (NR 0-4) ====================
         0 => memory::sys_io_setup(args),       // io_setup
         1 => memory::sys_io_destroy(args),     // io_destroy
@@ -426,7 +426,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         _ => {
             crate::println!("syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x})",
                 syscall_no, args[0], args[1], args[2]);
-            (-errno::ENOSYS) as u64
+            -(errno::ENOSYS as i64)
         }
     };
 
@@ -434,5 +434,5 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
 
     crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
         crate::process::current_pid(), syscall_no, result,
-        if (result as i64) < 0 { "error" } else { "ok" });
+        if result < 0 { "error" } else { "ok" });
 }

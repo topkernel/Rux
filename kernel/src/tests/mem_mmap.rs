@@ -35,7 +35,7 @@ pub fn test_mmap_syscalls() {
     // Test 4: sys_mmap anonymous mapping
     // Note: mmap may fail in test context (no user VMA setup)
     let addr = sys_mmap([0, 4096, 0x3, 0x22, !0u64, 0]); // PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, fd=-1
-    let addr_valid = addr > 0 && (addr as i64) > 0 && addr != !0u64;
+    let addr_valid = addr > 0 && addr != -1;
     if addr_valid {
         test_pass("sys_mmap anonymous returns valid address");
     } else {
@@ -44,7 +44,7 @@ pub fn test_mmap_syscalls() {
 
     // Test 5: sys_mmap zero length
     let addr5 = sys_mmap([0, 0, 0x3, 0x22, !0u64, 0]);
-    let addr5_valid = addr5 > 0 && (addr5 as i64) > 0 && addr5 != !0u64;
+    let addr5_valid = addr5 > 0 && addr5 != -1;
     if addr5_valid {
         test_pass("sys_mmap zero length returns valid address");
     } else {
@@ -53,7 +53,7 @@ pub fn test_mmap_syscalls() {
 
     // Test 6: sys_munmap (use addr from Test 4 if valid)
     if addr_valid {
-        let result = sys_munmap([addr, 4096, 0, 0, 0, 0]);
+        let result = sys_munmap([addr as u64, 4096, 0, 0, 0, 0]);
         test_assert!(result == 0, "sys_munmap succeeds");
     } else {
         test_skip("sys_munmap", "no valid address to unmap");
@@ -61,12 +61,12 @@ pub fn test_mmap_syscalls() {
 
     // Test 7: sys_mprotect
     let addr7 = sys_mmap([0, 4096, 0x3, 0x22, !0u64, 0]);
-    let addr7_valid = addr7 > 0 && (addr7 as i64) > 0 && addr7 != !0u64;
+    let addr7_valid = addr7 > 0 && addr7 != -1;
     if addr7_valid {
-        let result = sys_mprotect([addr7, 4096, 0x1, 0, 0, 0]); // PROT_READ only
+        let result = sys_mprotect([addr7 as u64, 4096, 0x1, 0, 0, 0]); // PROT_READ only
         test_assert!(result == 0, "sys_mprotect read-only succeeds");
         // Clean up
-        let _ = sys_munmap([addr7, 4096, 0, 0, 0, 0]);
+        let _ = sys_munmap([addr7 as u64, 4096, 0, 0, 0, 0]);
     } else {
         test_skip("sys_mprotect", "no valid address to protect");
     }
@@ -74,7 +74,7 @@ pub fn test_mmap_syscalls() {
     // Test 8: sys_mprotect invalid address
     let result = sys_mprotect([0xDEAD, 4096, 0x3, 0, 0, 0]);
     // Should return error (ENOMEM or EINVAL)
-    test_assert!(result as i64 != 0, "sys_mprotect invalid address returns error");
+    test_assert!(result != 0, "sys_mprotect invalid address returns error");
 
     // Test 9: Multiple mmap calls return different addresses
     let a1 = sys_mmap([0, 4096, 0x3, 0x22, !0u64, 0]);

@@ -37,7 +37,7 @@ pub fn test_syscall_network() {
 fn test_sys_socket() {
     // socket syscall via SyscallArgs
     let fd = sys_socket([2, 1, 6, 0, 0, 0]); // AF_INET, SOCK_STREAM, IPPROTO_TCP
-    if (fd as i64) >= 0 {
+    if fd >= 0 {
         test_pass("sys_socket TCP via SyscallArgs");
         let _ = file_close(fd as usize);
     } else {
@@ -79,7 +79,7 @@ fn test_sys_socket() {
 
     // Invalid address family
     let fd = sys_socket([999, 1, 6, 0, 0, 0]);
-    if (fd as i64) < 0 {
+    if fd < 0 {
         test_pass("sys_socket rejects invalid family");
     } else {
         test_fail("sys_socket invalid family", "should have failed");
@@ -88,7 +88,7 @@ fn test_sys_socket() {
 
     // Invalid socket type
     let fd = sys_socket([2, 999, 0, 0, 0, 0]);
-    if (fd as i64) < 0 {
+    if fd < 0 {
         test_pass("sys_socket rejects invalid type");
     } else {
         test_fail("sys_socket invalid type", "should have failed");
@@ -118,7 +118,7 @@ fn test_sys_server() {
             if result == 0 {
                 test_pass("sys_bind TCP socket");
             } else {
-                test_skip("sys_bind", &alloc::format!("returned {}", result as i64));
+                test_skip("sys_bind", &alloc::format!("returned {}", result));
             }
 
             // Test listen on bound socket
@@ -126,12 +126,12 @@ fn test_sys_server() {
             if result == 0 {
                 test_pass("sys_listen on bound socket");
             } else {
-                test_skip("sys_listen", &alloc::format!("returned {}", result as i64));
+                test_skip("sys_listen", &alloc::format!("returned {}", result));
             }
 
             // Test accept (no incoming connection, should block or fail)
             let result = sys_accept([fd as u64, 0, 0, 0, 0, 0]);
-            if (result as i64) >= 0 {
+            if result >= 0 {
                 test_pass("sys_accept returns fd");
                 let _ = file_close(result as usize);
             } else {
@@ -176,9 +176,9 @@ fn test_sys_server() {
 
     // Test bind with null address pointer → should return -EFAULT
     let fd = sys_socket([2, 1, 6, 0, 0, 0]);
-    if (fd as i64) >= 0 {
-        let result = sys_bind([fd, 0, 16, 0, 0, 0]); // null addr
-        if (result as i64) < 0 {
+    if fd >= 0 {
+        let result = sys_bind([fd as u64, 0, 16, 0, 0, 0]); // null addr
+        if result < 0 {
             test_pass("sys_bind null addr rejected");
         } else {
             test_fail("sys_bind null addr", "should have failed");
@@ -213,7 +213,7 @@ fn test_sys_client() {
 
             // Test connect with null address → -EFAULT
             let result = sys_connect([fd as u64, 0, 16, 0, 0, 0]);
-            if (result as i64) < 0 {
+            if result < 0 {
                 test_pass("sys_connect null addr rejected");
             } else {
                 test_fail("sys_connect null addr", "should have failed");
@@ -240,15 +240,15 @@ fn test_sys_client() {
 
             // Test sendto
             let result = sys_sendto([fd as u64, data.as_ptr() as u64, data.len() as u64, 0, addr_ptr as u64, 16]);
-            if (result as i64) >= 0 {
+            if result >= 0 {
                 test_pass("sys_sendto sent bytes");
             } else {
-                test_skip("sys_sendto", &alloc::format!("returned {}", result as i64));
+                test_skip("sys_sendto", &alloc::format!("returned {}", result));
             }
 
             // Test sendto with null buf → -EFAULT
             let result = sys_sendto([fd as u64, 0, 10, 0, addr_ptr as u64, 16]);
-            if (result as i64) < 0 {
+            if result < 0 {
                 test_pass("sys_sendto null buf rejected");
             } else {
                 test_fail("sys_sendto null buf", "should have failed");
@@ -265,7 +265,7 @@ fn test_sys_client() {
             // Test recvfrom
             let mut buf = [0u8; 64];
             let result = sys_recvfrom([fd as u64, buf.as_mut_ptr() as u64, 64, 0, 0, 0]);
-            if (result as i64) >= 0 {
+            if result >= 0 {
                 test_pass("sys_recvfrom returns");
             } else {
                 test_skip("sys_recvfrom", "no data available");
@@ -273,7 +273,7 @@ fn test_sys_client() {
 
             // Test recvfrom with null buf → -EFAULT
             let result = sys_recvfrom([fd as u64, 0, 64, 0, 0, 0]);
-            if (result as i64) < 0 {
+            if result < 0 {
                 test_pass("sys_recvfrom null buf rejected");
             } else {
                 test_fail("sys_recvfrom null buf", "should have failed");

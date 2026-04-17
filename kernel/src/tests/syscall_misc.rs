@@ -76,22 +76,22 @@ fn test_sys_prlimit64() {
 
     // Test: unsupported resource returns error (may be -EFAULT or -EINVAL depending on access_ok order)
     let ret = sys_prlimit64([0, RLIMIT_CPU as u64, 0, 0, 0, 0]);
-    test_assert!((ret as i64) < 0, "sys_prlimit64 unsupported resource returns error",
+    test_assert!(ret < 0, "sys_prlimit64 unsupported resource returns error",
         &alloc::format!("got {:#x}", ret));
 
     let ret = sys_prlimit64([0, RLIMIT_AS as u64, 0, 0, 0, 0]);
-    test_assert!((ret as i64) < 0, "sys_prlimit64 RLIMIT_AS returns error",
+    test_assert!(ret < 0, "sys_prlimit64 RLIMIT_AS returns error",
         &alloc::format!("got {:#x}", ret));
 
     // Test: null old_rlim returns -EFAULT
     let ret = sys_prlimit64([0, RLIMIT_NOFILE as u64, 0, 0, 0, 0]);
-    let expected = -errno::EFAULT as u64;
+    let expected = -(errno::EFAULT as i64);
     test_assert!(ret == expected, "sys_prlimit64 null old_rlim returns -EFAULT",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
     // Test: setting a limit returns -EPERM (only querying supported)
     let ret = sys_prlimit64([0, RLIMIT_NOFILE as u64, 1, 0, 0, 0]);
-    let expected = -errno::EPERM as u64;
+    let expected = -(errno::EPERM as i64);
     test_assert!(ret == expected, "sys_prlimit64 set limit returns -EPERM",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
@@ -115,7 +115,7 @@ fn test_sys_getrandom() {
 
     // Test: null buffer returns -EINVAL
     let ret = sys_getrandom([0, 16, 0, 0, 0, 0]);
-    let expected = -errno::EINVAL as u64;
+    let expected = -(errno::EINVAL as i64);
     test_assert!(ret == expected, "sys_getrandom null buf returns -EINVAL",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
@@ -127,7 +127,7 @@ fn test_sys_getrandom() {
     // Test: valid buffer (kernel pointer will fail access_ok, returns -EFAULT)
     let buf = [0u8; 32];
     let ret = sys_getrandom([buf.as_ptr() as u64, 32, 0, 0, 0, 0]);
-    let expected = -errno::EFAULT as u64;
+    let expected = -(errno::EFAULT as i64);
     test_assert!(ret == expected, "sys_getrandom kernel pointer returns -EFAULT",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
@@ -158,7 +158,7 @@ fn test_sys_select() {
 
     // Test: pselect6 with null fdsets returns -EFAULT
     let ret = sys_pselect6([0, 0, 0, 0, 0, 0]);
-    let expected = -errno::EFAULT as u64;
+    let expected = -(errno::EFAULT as i64);
     test_assert!(ret == expected, "sys_pselect6 all null fdsets returns -EFAULT",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
@@ -167,7 +167,7 @@ fn test_sys_select() {
     readfds.set(0);
     let readfds_ptr = &readfds as *const FdSet as u64;
     let ret = sys_pselect6([(-1i32) as u64, readfds_ptr, 0, 0, 0, 0]);
-    let expected = -errno::EINVAL as u64;
+    let expected = -(errno::EINVAL as i64);
     test_assert!(ret == expected, "sys_pselect6 negative nfds returns -EINVAL",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
@@ -178,7 +178,7 @@ fn test_sys_select() {
 
     // Test: pselect6 with valid nfds but kernel-space pointer (access_ok fails)
     let ret = sys_pselect6([1, readfds_ptr, 0, 0, 0, 0]);
-    let expected_fault = -errno::EFAULT as u64;
+    let expected_fault = -(errno::EFAULT as i64);
     test_assert!(ret == expected_fault, "sys_pselect6 kernel pointer returns -EFAULT",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected_fault));
 
@@ -205,12 +205,12 @@ fn test_sys_eventfd() {
     // Test: sys_eventfd creates valid fd
     let fd = sys_eventfd([0, 0, 0, 0, 0, 0]);
     test_assert!(fd >= 0, "sys_eventfd(0) returns valid fd",
-        &alloc::format!("got {:#x}", fd));
+        &alloc::format!("got {:#x}", fd as i64));
 
     // Test: sys_eventfd with non-zero initval
     let fd2 = sys_eventfd([42, 0, 0, 0, 0, 0]);
     test_assert!(fd2 >= 0, "sys_eventfd(42) returns valid fd",
-        &alloc::format!("got {:#x}", fd2));
+        &alloc::format!("got {:#x}", fd2 as i64));
 
     // Test: two eventfd fds should be different
     if fd >= 0 && fd2 >= 0 {
@@ -226,27 +226,27 @@ fn test_sys_eventfd() {
     // Test: sys_eventfd2 creates valid fd
     let fd3 = sys_eventfd2([0, 0, 0, 0, 0, 0]);
     test_assert!(fd3 >= 0, "sys_eventfd2(0, 0) returns valid fd",
-        &alloc::format!("got {:#x}", fd3));
+        &alloc::format!("got {:#x}", fd3 as i64));
 
     // Test: sys_eventfd2 with EFD_NONBLOCK
     let fd4 = sys_eventfd2([0, EFD_NONBLOCK as u64, 0, 0, 0, 0]);
     test_assert!(fd4 >= 0, "sys_eventfd2(0, EFD_NONBLOCK) returns valid fd",
-        &alloc::format!("got {:#x}", fd4));
+        &alloc::format!("got {:#x}", fd4 as i64));
 
     // Test: sys_eventfd2 with EFD_SEMAPHORE
     let fd5 = sys_eventfd2([0, EFD_SEMAPHORE as u64, 0, 0, 0, 0]);
     test_assert!(fd5 >= 0, "sys_eventfd2(0, EFD_SEMAPHORE) returns valid fd",
-        &alloc::format!("got {:#x}", fd5));
+        &alloc::format!("got {:#x}", fd5 as i64));
 
     // Test: sys_eventfd2 with EFD_CLOEXEC
     let fd6 = sys_eventfd2([0, EFD_CLOEXEC as u64, 0, 0, 0, 0]);
     test_assert!(fd6 >= 0, "sys_eventfd2(0, EFD_CLOEXEC) returns valid fd",
-        &alloc::format!("got {:#x}", fd6));
+        &alloc::format!("got {:#x}", fd6 as i64));
 
     // Test: sys_eventfd2 with combined flags
     let fd7 = sys_eventfd2([0, (EFD_CLOEXEC | EFD_NONBLOCK) as u64, 0, 0, 0, 0]);
     test_assert!(fd7 >= 0, "sys_eventfd2(0, EFD_CLOEXEC|EFD_NONBLOCK) returns valid fd",
-        &alloc::format!("got {:#x}", fd7));
+        &alloc::format!("got {:#x}", fd7 as i64));
 
     // Test: eventfd 64-bit counter concept
     // Max value is 0xFFFFFFFFFFFFFFFE (kernel enforces on read/write)
@@ -291,12 +291,12 @@ fn test_sys_epoll() {
     // Test: sys_epoll_create1 returns valid fd
     let epfd = sys_epoll_create1([0, 0, 0, 0, 0, 0]);
     test_assert!(epfd >= 0, "sys_epoll_create1(0) returns valid fd",
-        &alloc::format!("got {:#x}", epfd));
+        &alloc::format!("got {:#x}", epfd as i64));
 
     // Test: sys_epoll_create1 with EPOLL_CLOEXEC
     let epfd2 = sys_epoll_create1([EPOLL_CLOEXEC as u64, 0, 0, 0, 0, 0]);
     test_assert!(epfd2 >= 0, "sys_epoll_create1(EPOLL_CLOEXEC) returns valid fd",
-        &alloc::format!("got {:#x}", epfd2));
+        &alloc::format!("got {:#x}", epfd2 as i64));
 
     // Test: two epoll fds should be different
     if epfd >= 0 && epfd2 >= 0 {
@@ -311,45 +311,45 @@ fn test_sys_epoll() {
 
     // Test: epoll_ctl ADD (stub always returns 0)
     if epfd >= 0 {
-        let ret = sys_epoll_ctl([epfd, epoll_ctl_ops::EPOLL_CTL_ADD as u64, 0, 0, 0, 0]);
+        let ret = sys_epoll_ctl([epfd as u64, epoll_ctl_ops::EPOLL_CTL_ADD as u64, 0, 0, 0, 0]);
         test_pass("sys_epoll_ctl ADD called");
-        test_assert!(ret == 0 || (ret as i64) < 0, "sys_epoll_ctl ADD returns value",
+        test_assert!(ret == 0 || ret < 0, "sys_epoll_ctl ADD returns value",
             &alloc::format!("got {:#x}", ret));
     }
 
     // Test: epoll_ctl MOD (stub always returns 0)
     if epfd >= 0 {
-        let ret = sys_epoll_ctl([epfd, epoll_ctl_ops::EPOLL_CTL_MOD as u64, 0, 0, 0, 0]);
+        let ret = sys_epoll_ctl([epfd as u64, epoll_ctl_ops::EPOLL_CTL_MOD as u64, 0, 0, 0, 0]);
         test_pass("sys_epoll_ctl MOD called");
-        test_assert!(ret == 0 || (ret as i64) < 0, "sys_epoll_ctl MOD returns value",
+        test_assert!(ret == 0 || ret < 0, "sys_epoll_ctl MOD returns value",
             &alloc::format!("got {:#x}", ret));
     }
 
     // Test: epoll_ctl DEL (stub always returns 0)
     if epfd >= 0 {
-        let ret = sys_epoll_ctl([epfd, epoll_ctl_ops::EPOLL_CTL_DEL as u64, 0, 0, 0, 0]);
+        let ret = sys_epoll_ctl([epfd as u64, epoll_ctl_ops::EPOLL_CTL_DEL as u64, 0, 0, 0, 0]);
         test_pass("sys_epoll_ctl DEL called");
-        test_assert!(ret == 0 || (ret as i64) < 0, "sys_epoll_ctl DEL returns value",
+        test_assert!(ret == 0 || ret < 0, "sys_epoll_ctl DEL returns value",
             &alloc::format!("got {:#x}", ret));
     }
 
     // Test: epoll_ctl with invalid op (stub may not validate)
     if epfd >= 0 {
-        let ret = sys_epoll_ctl([epfd, 99, 0, 0, 0, 0]);
+        let ret = sys_epoll_ctl([epfd as u64, 99, 0, 0, 0, 0]);
         test_pass("sys_epoll_ctl invalid op called");
-        test_assert!(ret == 0 || (ret as i64) < 0, "sys_epoll_ctl invalid op returns value",
+        test_assert!(ret == 0 || ret < 0, "sys_epoll_ctl invalid op returns value",
             &alloc::format!("got {:#x}", ret));
     }
 
     // Test: epoll_ctl with negative epfd returns -EBADF
     let ret = sys_epoll_ctl([(-1i32) as u64, epoll_ctl_ops::EPOLL_CTL_ADD as u64, 0, 0, 0, 0]);
-    let expected = -errno::EBADF as u64;
+    let expected = -(errno::EBADF as i64);
     test_assert!(ret == expected, "sys_epoll_ctl negative epfd returns -EBADF",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
     // Test: epoll_ctl with negative fd returns -EBADF
     if epfd >= 0 {
-        let ret = sys_epoll_ctl([epfd, epoll_ctl_ops::EPOLL_CTL_ADD as u64,
+        let ret = sys_epoll_ctl([epfd as u64, epoll_ctl_ops::EPOLL_CTL_ADD as u64,
             (-1i32) as u64, 0, 0, 0]);
         test_assert!(ret == expected, "sys_epoll_ctl negative fd returns -EBADF",
             &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
@@ -357,8 +357,8 @@ fn test_sys_epoll() {
 
     // Test: epoll_pwait with null events_ptr returns error
     if epfd >= 0 {
-        let ret = sys_epoll_pwait([epfd, 0, 1, 0, 0, 0]);
-        test_assert!((ret as i64) < 0 || ret == 0, "sys_epoll_pwait null events returns error",
+        let ret = sys_epoll_pwait([epfd as u64, 0, 1, 0, 0, 0]);
+        test_assert!(ret < 0 || ret == 0, "sys_epoll_pwait null events returns error",
             &alloc::format!("got {:#x}", ret));
     }
 
@@ -366,8 +366,8 @@ fn test_sys_epoll() {
     if epfd >= 0 {
         let event = EPollEvent { events: 0, data: 0 };
         let event_ptr = &event as *const EPollEvent as u64;
-        let ret = sys_epoll_pwait([epfd, event_ptr, 0, 0, 0, 0]);
-        test_assert!((ret as i64) < 0 || ret == 0, "sys_epoll_pwait maxevents=0 returns value",
+        let ret = sys_epoll_pwait([epfd as u64, event_ptr, 0, 0, 0, 0]);
+        test_assert!(ret < 0 || ret == 0, "sys_epoll_pwait maxevents=0 returns value",
             &alloc::format!("got {:#x}", ret));
     }
 
@@ -404,19 +404,19 @@ fn test_sys_poll() {
 
     // Test: sys_poll with null fds_ptr returns -EFAULT
     let ret = sys_poll([0, 1, 0, 0, 0, 0]);
-    let expected = -errno::EFAULT as u64;
+    let expected = -(errno::EFAULT as i64);
     test_assert!(ret == expected, "sys_poll null fds returns -EFAULT",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
     // Test: sys_poll with nfds=0 returns error (access_ok runs first)
     let fds = [PollFd { fd: 0, events: poll_events::POLLIN, revents: 0 }];
     let ret = sys_poll([fds.as_ptr() as u64, 0, 0, 0, 0, 0]);
-    test_assert!((ret as i64) < 0 || ret == 0, "sys_poll nfds=0 returns value",
+    test_assert!(ret < 0 || ret == 0, "sys_poll nfds=0 returns value",
         &alloc::format!("got {:#x}", ret));
 
     // Test: sys_poll with kernel-space pointer returns -EFAULT (fails access_ok)
     let ret = sys_poll([fds.as_ptr() as u64, 1, 0, 0, 0, 0]);
-    let expected = -errno::EFAULT as u64;
+    let expected = -(errno::EFAULT as i64);
     test_assert!(ret == expected, "sys_poll kernel ptr returns -EFAULT",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
@@ -426,7 +426,7 @@ fn test_sys_poll() {
 
     // Test: ppoll delegates to sys_poll (same validation)
     let ret = sys_ppoll([0, 1, 0, 0, 0, 0]);
-    let expected = -errno::EFAULT as u64;
+    let expected = -(errno::EFAULT as i64);
     test_assert!(ret == expected, "sys_ppoll null fds returns -EFAULT",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 }

@@ -53,7 +53,7 @@ pub fn test_cow() {
 
     // Test 3: Verify process existence (kill pid 0)
     if pid > 0 {
-        let result = sys_kill([pid, 0, 0, 0, 0, 0]);
+        let result = sys_kill([pid as u64, 0, 0, 0, 0, 0]);
         if result == 0 {
             test_pass("COW process exists (kill pid 0)");
         } else {

@@ -28,7 +28,7 @@ struct TimespecForGettime {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_gettimeofday(args: SyscallArgs) -> u64 {
+pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
     let tv_ptr = args[0] as *mut TimeVal;
     let _tz_ptr = args[1] as *mut u8;  // timezone is deprecated
 
@@ -38,7 +38,7 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> u64 {
 
     // Check if tv_ptr is in valid user space
     if !crate::arch::riscv64::uaccess::access_ok(tv_ptr as usize, core::mem::size_of::<TimeVal>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Get time from RISC-V timer
@@ -65,17 +65,17 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_clock_gettime(args: SyscallArgs) -> u64 {
+pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
     let clk_id = args[0] as u32;
     let tp_ptr = args[1] as *mut TimespecForGettime;
 
     if tp_ptr.is_null() {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Check if tp_ptr is in valid user space
     if !crate::arch::riscv64::uaccess::access_ok(tp_ptr as usize, core::mem::size_of::<TimespecForGettime>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Currently only support REALTIME and MONOTONIC
@@ -106,7 +106,7 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> u64 {
         }
         _ => {
             // Unsupported clock type
-            -errno::EINVAL as u64
+            -(errno::EINVAL as i64)
         }
     }
 }
@@ -127,7 +127,7 @@ pub struct Timespec {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_nanosleep(args: SyscallArgs) -> u64 {
+pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
     use crate::drivers::timer;
     use crate::process;
 
@@ -136,17 +136,17 @@ pub fn sys_nanosleep(args: SyscallArgs) -> u64 {
 
     // Check request pointer validity
     if req_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Check if req_ptr is in valid user space
     if !crate::arch::riscv64::uaccess::access_ok(req_ptr as usize, core::mem::size_of::<Timespec>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Check rem_ptr if provided
     if !rem_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(rem_ptr as usize, core::mem::size_of::<Timespec>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // SAFETY: req_ptr validated with access_ok; reads Timespec (two i64 fields).
@@ -155,7 +155,7 @@ pub fn sys_nanosleep(args: SyscallArgs) -> u64 {
 }
 
 /// Internal nanosleep implementation shared by sys_nanosleep and sys_clock_nanosleep
-fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
+fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     use crate::drivers::timer;
     use crate::process;
 
@@ -181,7 +181,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
     let my_pid = if let Some(current) = crate::sched::current() {
         unsafe { (*current).pid() }
     } else {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     };
 
     // Register a one-shot timer to wake us up at the target time.
@@ -221,7 +221,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
                 }
             }
 
-            return -errno::EINTR as u64;
+            return -(errno::EINTR as i64);
         }
 
         // Use Task::sleep() to enter interruptible sleep
@@ -240,22 +240,22 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_clock_settime(args: SyscallArgs) -> u64 {
+pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
     let clk_id = args[0] as u32;
     let _tp_ptr = args[1] as *const TimespecForGettime;
 
     // CAP_SYS_TIME required to set time
     if !crate::security::capable(crate::security::CAP_SYS_TIME) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
 
     // Only CLOCK_REALTIME can be set
     if clk_id != CLOCK_REALTIME {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // TODO: actually implement clock setting via timer hardware
-    -errno::ENOSYS as u64
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_clock_getres - Get clock resolution
@@ -266,7 +266,7 @@ pub fn sys_clock_settime(args: SyscallArgs) -> u64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
+pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
     let _clk_id = args[0] as i32;
     let res = args[1] as *mut u64;
 
@@ -274,7 +274,7 @@ pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
     if !res.is_null() {
         // Check if res is in valid user space
         if !crate::arch::riscv64::uaccess::access_ok(res as usize, 16) {  // 2 * sizeof(u64)
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // SAFETY: res validated with access_ok(16); writes two u64 values (tv_sec=0, tv_nsec=1).
         unsafe {
@@ -292,24 +292,24 @@ pub fn sys_clock_getres(args: SyscallArgs) -> u64 {
 /// # Arguments
 /// - args[0]: which - timer type (ITIMER_REAL=0, ITIMER_VIRTUAL=1, ITIMER_PROF=2)
 /// - args[1]: curr_value - pointer to struct itimerval (output)
-pub fn sys_getitimer(args: SyscallArgs) -> u64 {
+pub fn sys_getitimer(args: SyscallArgs) -> i64 {
     let which = args[0] as i32;
     let curr_value = args[1] as *mut u64;
 
     if curr_value.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     if which < 0 || which > 2 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     let task = match crate::process::current_task() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     // struct itimerval { struct timeval it_interval, it_value }
@@ -356,19 +356,19 @@ pub fn sys_getitimer(args: SyscallArgs) -> u64 {
 /// - args[0]: which - timer type (ITIMER_REAL=0, ITIMER_VIRTUAL=1, ITIMER_PROF=2)
 /// - args[1]: new_value - pointer to struct itimerval
 /// - args[2]: old_value - pointer to struct itimerval (output, may be NULL)
-pub fn sys_setitimer(args: SyscallArgs) -> u64 {
+pub fn sys_setitimer(args: SyscallArgs) -> i64 {
     let which = args[0] as i32;
     let new_value = args[1] as *const u64;
     let old_value = args[2] as *mut u64;
 
     if which < 0 || which > 2 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Write old_value (disarm current timer first)
     if !old_value.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // Get old timer state and write it as zeros (disarmed)
         // SAFETY: old_value validated with access_ok(32); writes 32 zero bytes.
@@ -384,7 +384,7 @@ pub fn sys_setitimer(args: SyscallArgs) -> u64 {
     }
 
     if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read struct itimerval
@@ -480,7 +480,7 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-pub fn sys_clock_nanosleep(args: SyscallArgs) -> u64 {
+pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
     let _clk_id = args[0] as i32;
     let _flags = args[1] as i32;
     let rqtp = args[2] as *const Timespec;
@@ -488,17 +488,17 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> u64 {
 
     // Validate request pointer
     if rqtp.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Check if rqtp is in valid user space
     if !crate::arch::riscv64::uaccess::access_ok(rqtp as usize, core::mem::size_of::<Timespec>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Check rmtp if provided
     if !rmtp.is_null() && !crate::arch::riscv64::uaccess::access_ok(rmtp as usize, core::mem::size_of::<Timespec>()) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Read requested sleep time
@@ -511,21 +511,21 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> u64 {
 /// sys_timer_create - Create POSIX interval timer (NR 107)
 ///
 /// Creates a per-process POSIX timer. The timer ID is returned via timerid_ptr.
-pub fn sys_timer_create(args: SyscallArgs) -> u64 {
+pub fn sys_timer_create(args: SyscallArgs) -> i64 {
     let clockid = args[0] as i32;
     let sigevent_ptr = args[1] as *const u8;
     let timerid_ptr = args[2] as *mut i32;
 
     if timerid_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(timerid_ptr as usize, 4) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // Only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) supported
     if clockid != 0 && clockid != 1 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Parse sigevent for signal notification
@@ -534,7 +534,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> u64 {
 
     if !sigevent_ptr.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(sigevent_ptr as usize, 64) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // struct sigevent { sigval sigev_value, int sigev_signo, int sigev_notify, ... }
         // SAFETY: sigevent_ptr validated with access_ok(64); reads i32 fields at known offsets.
@@ -552,7 +552,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> u64 {
 
     let task = match crate::process::current_task() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     // Allocate timer ID (per-process)
@@ -585,22 +585,22 @@ pub fn sys_timer_create(args: SyscallArgs) -> u64 {
 /// - args[1]: flags - TIMER_ABSTIME (1) for absolute time
 /// - args[2]: new_value - new timer settings (struct itimerspec, 32 bytes)
 /// - args[3]: old_value - old timer settings (output)
-pub fn sys_timer_settime(args: SyscallArgs) -> u64 {
+pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     let timerid = args[0] as i32;
     let flags = args[1] as i32;
     let new_value = args[2] as *const u64;
     let old_value = args[3] as *mut u64;
 
     if new_value.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     let task = match crate::process::current_task() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     // Find timer by user ID (1-indexed)
@@ -609,7 +609,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> u64 {
     // Write old_value as disarmed
     if !old_value.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // SAFETY: old_value validated with access_ok(32); writes 32 zero bytes.
         unsafe { core::ptr::write_bytes(old_value, 0, 32); }
@@ -629,7 +629,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> u64 {
 
     let mut timers = task.posix_timers.lock();
     if idx >= timers.len() {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     let timer = &mut timers[idx];
@@ -684,27 +684,27 @@ pub fn sys_timer_settime(args: SyscallArgs) -> u64 {
 }
 
 /// sys_timer_gettime - Get timer value (NR 108)
-pub fn sys_timer_gettime(args: SyscallArgs) -> u64 {
+pub fn sys_timer_gettime(args: SyscallArgs) -> i64 {
     let timerid = args[0] as i32;
     let curr_value = args[1] as *mut u64;
 
     if curr_value.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     let task = match crate::process::current_task() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     let idx = (timerid as usize).saturating_sub(1);
     let timers = task.posix_timers.lock();
 
     if idx >= timers.len() {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     let timer = &timers[idx];
@@ -748,38 +748,38 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> u64 {
 }
 
 /// sys_timer_getoverrun - Get timer overrun count (NR 109)
-pub fn sys_timer_getoverrun(args: SyscallArgs) -> u64 {
+pub fn sys_timer_getoverrun(args: SyscallArgs) -> i64 {
     let timerid = args[0] as i32;
 
     let task = match crate::process::current_task() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     let idx = (timerid as usize).saturating_sub(1);
     let timers = task.posix_timers.lock();
 
     if idx >= timers.len() {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
-    timers[idx].overrun_count as u64
+    timers[idx].overrun_count as i64
 }
 
 /// sys_timer_delete - Delete POSIX timer (NR 111)
-pub fn sys_timer_delete(args: SyscallArgs) -> u64 {
+pub fn sys_timer_delete(args: SyscallArgs) -> i64 {
     let timerid = args[0] as i32;
 
     let task = match crate::process::current_task() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
 
     let idx = (timerid as usize).saturating_sub(1);
 
     let mut timers = task.posix_timers.lock();
     if idx >= timers.len() {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     // Disarm kernel timer
@@ -793,33 +793,33 @@ pub fn sys_timer_delete(args: SyscallArgs) -> u64 {
 }
 
 /// sys_settimeofday - Set wall-clock time (NR 170)
-pub fn sys_settimeofday(args: SyscallArgs) -> u64 {
+pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
     let _tv_ptr = args[0] as *const u8;
     let _tz_ptr = args[1] as *const u8;
     // CAP_SYS_TIME required to set time
     if !crate::security::capable(crate::security::CAP_SYS_TIME) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
     // TODO: implement time setting via timer hardware
-    -errno::ENOSYS as u64
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_adjtimex - Adjust system clock (NR 171)
 ///
 /// struct timex is 128 bytes on 64-bit. We fill it as "clock synchronized".
-pub fn sys_adjtimex(args: SyscallArgs) -> u64 {
+pub fn sys_adjtimex(args: SyscallArgs) -> i64 {
     // Permission check: require CAP_SYS_TIME
     if !crate::security::capable(crate::security::CAP_SYS_TIME) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
 
     let buf_ptr = args[0] as *mut u8;
 
     if buf_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 128) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // TIME_OK = 0: clock is synchronized
@@ -834,20 +834,20 @@ pub fn sys_adjtimex(args: SyscallArgs) -> u64 {
 }
 
 /// sys_clock_adjtime - Adjust per-ClockID (NR 266)
-pub fn sys_clock_adjtime(args: SyscallArgs) -> u64 {
+pub fn sys_clock_adjtime(args: SyscallArgs) -> i64 {
     // Permission check: require CAP_SYS_TIME
     if !crate::security::capable(crate::security::CAP_SYS_TIME) {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
 
     let _clk_id = args[0] as i32;
     let buf_ptr = args[1] as *mut u8;
 
     if buf_ptr.is_null() {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 128) {
-        return -errno::EFAULT as u64;
+        return -(errno::EFAULT as i64);
     }
 
     // TIME_OK = 0: return as synchronized
@@ -860,47 +860,47 @@ pub fn sys_clock_adjtime(args: SyscallArgs) -> u64 {
 }
 
 /// sys_fanotify_init - Initialize fanotify (NR 262)
-pub fn sys_fanotify_init(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_fanotify_init(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_fanotify_mark - Add/remove fanotify mark (NR 263)
-pub fn sys_fanotify_mark(_args: SyscallArgs) -> u64 {
-    -errno::ENOSYS as u64
+pub fn sys_fanotify_mark(_args: SyscallArgs) -> i64 {
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_lookup_dcookie - Lookup directory cookie (NR 18)
-pub fn sys_lookup_dcookie(_args: SyscallArgs) -> u64 {
+pub fn sys_lookup_dcookie(_args: SyscallArgs) -> i64 {
     // No dcookie support — return -EINVAL per convention
-    -errno::EINVAL as u64
+    -(errno::EINVAL as i64)
 }
 
 /// sys_nfsservctl - NFS service control (NR 42, deprecated)
-pub fn sys_nfsservctl(_args: SyscallArgs) -> u64 {
+pub fn sys_nfsservctl(_args: SyscallArgs) -> i64 {
     // Deprecated syscall, removed from kernel
-    -errno::ENOSYS as u64
+    -(errno::ENOSYS as i64)
 }
 
 /// sys_get_robust_list - Get robust futex list (NR 100)
-pub fn sys_get_robust_list(args: SyscallArgs) -> u64 {
+pub fn sys_get_robust_list(args: SyscallArgs) -> i64 {
     let pid = args[0] as i32;
     let head_ptr = args[1] as *mut u64;
     let len_ptr = args[2] as *mut u32;
 
     if pid != 0 && pid as u32 != crate::process::current_pid() {
-        return -errno::EPERM as u64;
+        return -(errno::EPERM as i64);
     }
 
     if !head_ptr.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(head_ptr as usize, 8) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // SAFETY: head_ptr validated with access_ok(8); writes one u64.
         unsafe { core::ptr::write_volatile(head_ptr, 0); }
     }
     if !len_ptr.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(len_ptr as usize, 4) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
         // SAFETY: len_ptr validated with access_ok(4); writes sizeof(struct robust_list_head).
         unsafe { core::ptr::write_volatile(len_ptr, 24); } // sizeof(struct robust_list_head) on 64-bit
@@ -909,7 +909,7 @@ pub fn sys_get_robust_list(args: SyscallArgs) -> u64 {
 }
 
 /// sys_rseq - Register restartable sequence (NR 293)
-pub fn sys_rseq(args: SyscallArgs) -> u64 {
+pub fn sys_rseq(args: SyscallArgs) -> i64 {
     let rseq_ptr = args[0] as *const u32;
     let rseq_len = args[1] as u32;
     let flags = args[2] as i32;
@@ -918,17 +918,17 @@ pub fn sys_rseq(args: SyscallArgs) -> u64 {
     const RSEQ_FLAG_UNREGISTER: i32 = 1;
 
     if rseq_len != 32 && rseq_len != 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if rseq_ptr.is_null() && (flags & RSEQ_FLAG_UNREGISTER) == 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
     if !rseq_ptr.is_null() {
         if rseq_ptr.align_offset(32) != 0 {
-            return -errno::EINVAL as u64;
+            return -(errno::EINVAL as i64);
         }
         if !crate::arch::riscv64::uaccess::access_ok(rseq_ptr as usize, rseq_len as usize) {
-            return -errno::EFAULT as u64;
+            return -(errno::EFAULT as i64);
         }
     }
 
@@ -945,102 +945,102 @@ pub fn sys_rseq(args: SyscallArgs) -> u64 {
 // ============================================================================
 
 /// sys_clock_gettime64 - 64-bit clock_gettime (NR 403)
-pub fn sys_clock_gettime64(args: SyscallArgs) -> u64 {
+pub fn sys_clock_gettime64(args: SyscallArgs) -> i64 {
     // On 64-bit, delegate to clock_gettime
     sys_clock_gettime(args)
 }
 
 /// sys_clock_settime64 - 64-bit clock_settime (NR 404)
-pub fn sys_clock_settime64(args: SyscallArgs) -> u64 {
+pub fn sys_clock_settime64(args: SyscallArgs) -> i64 {
     sys_clock_settime(args)
 }
 
 /// sys_clock_adjtime64 - 64-bit clock_adjtime (NR 405)
-pub fn sys_clock_adjtime64(args: SyscallArgs) -> u64 {
+pub fn sys_clock_adjtime64(args: SyscallArgs) -> i64 {
     sys_clock_adjtime(args)
 }
 
 /// sys_clock_getres_time64 - 64-bit clock_getres (NR 406)
-pub fn sys_clock_getres_time64(args: SyscallArgs) -> u64 {
+pub fn sys_clock_getres_time64(args: SyscallArgs) -> i64 {
     sys_clock_getres(args)
 }
 
 /// sys_clock_nanosleep_time64 - 64-bit clock_nanosleep (NR 407)
-pub fn sys_clock_nanosleep_time64(args: SyscallArgs) -> u64 {
+pub fn sys_clock_nanosleep_time64(args: SyscallArgs) -> i64 {
     sys_clock_nanosleep(args)
 }
 
 /// sys_timer_gettime64 - 64-bit timer_gettime (NR 408)
-pub fn sys_timer_gettime64(args: SyscallArgs) -> u64 {
+pub fn sys_timer_gettime64(args: SyscallArgs) -> i64 {
     sys_timer_gettime(args)
 }
 
 /// sys_timer_settime64 - 64-bit timer_settime (NR 409)
-pub fn sys_timer_settime64(args: SyscallArgs) -> u64 {
+pub fn sys_timer_settime64(args: SyscallArgs) -> i64 {
     sys_timer_settime(args)
 }
 
 /// sys_timerfd_gettime64 - 64-bit timerfd_gettime (NR 410)
-pub fn sys_timerfd_gettime64(args: SyscallArgs) -> u64 {
+pub fn sys_timerfd_gettime64(args: SyscallArgs) -> i64 {
     crate::syscall::misc::sys_timerfd_gettime(args)
 }
 
 /// sys_timerfd_settime64 - 64-bit timerfd_settime (NR 411)
-pub fn sys_timerfd_settime64(args: SyscallArgs) -> u64 {
+pub fn sys_timerfd_settime64(args: SyscallArgs) -> i64 {
     crate::syscall::misc::sys_timerfd_settime(args)
 }
 
 /// sys_utimensat_time64 - 64-bit utimensat (NR 412)
-pub fn sys_utimensat_time64(args: SyscallArgs) -> u64 {
+pub fn sys_utimensat_time64(args: SyscallArgs) -> i64 {
     crate::syscall::file::sys_futimesat(args)
 }
 
 /// sys_pselect6_time64 - 64-bit pselect6 (NR 413)
-pub fn sys_pselect6_time64(args: SyscallArgs) -> u64 {
+pub fn sys_pselect6_time64(args: SyscallArgs) -> i64 {
     crate::syscall::misc::sys_pselect6(args)
 }
 
 /// sys_ppoll_time64 - 64-bit ppoll (NR 414)
-pub fn sys_ppoll_time64(args: SyscallArgs) -> u64 {
+pub fn sys_ppoll_time64(args: SyscallArgs) -> i64 {
     crate::syscall::misc::sys_ppoll(args)
 }
 
 /// sys_io_pgetevents_time64 - 64-bit io_pgetevents (NR 416)
-pub fn sys_io_pgetevents_time64(args: SyscallArgs) -> u64 {
+pub fn sys_io_pgetevents_time64(args: SyscallArgs) -> i64 {
     crate::syscall::memory::sys_io_pgetevents(args)
 }
 
 /// sys_recvmmsg_time64 - 64-bit recvmmsg (NR 417)
-pub fn sys_recvmmsg_time64(args: SyscallArgs) -> u64 {
+pub fn sys_recvmmsg_time64(args: SyscallArgs) -> i64 {
     crate::syscall::network::sys_recvmmsg(args)
 }
 
 /// sys_mq_timedsend_time64 - 64-bit mq_timedsend (NR 418)
-pub fn sys_mq_timedsend_time64(args: SyscallArgs) -> u64 {
+pub fn sys_mq_timedsend_time64(args: SyscallArgs) -> i64 {
     crate::ipc::posix_mq::sys_mq_timedsend(args)
 }
 
 /// sys_mq_timedreceive_time64 - 64-bit mq_timedreceive (NR 419)
-pub fn sys_mq_timedreceive_time64(args: SyscallArgs) -> u64 {
+pub fn sys_mq_timedreceive_time64(args: SyscallArgs) -> i64 {
     crate::ipc::posix_mq::sys_mq_timedreceive(args)
 }
 
 /// sys_semtimedop_time64 - 64-bit semtimedop (NR 420)
-pub fn sys_semtimedop_time64(args: SyscallArgs) -> u64 {
+pub fn sys_semtimedop_time64(args: SyscallArgs) -> i64 {
     crate::ipc::sysv_sem::sys_semtimedop(args)
 }
 
 /// sys_rt_sigtimedwait_time64 - 64-bit rt_sigtimedwait (NR 421)
-pub fn sys_rt_sigtimedwait_time64(args: SyscallArgs) -> u64 {
+pub fn sys_rt_sigtimedwait_time64(args: SyscallArgs) -> i64 {
     crate::syscall::process::sys_rt_sigtimedwait(args)
 }
 
 /// sys_futex_time64 - 64-bit futex (NR 422)
-pub fn sys_futex_time64(args: SyscallArgs) -> u64 {
+pub fn sys_futex_time64(args: SyscallArgs) -> i64 {
     crate::syscall::sched::sys_futex(args)
 }
 
 /// sys_sched_rr_get_interval_time64 - 64-bit sched_rr_get_interval (NR 423)
-pub fn sys_sched_rr_get_interval_time64(args: SyscallArgs) -> u64 {
+pub fn sys_sched_rr_get_interval_time64(args: SyscallArgs) -> i64 {
     crate::syscall::sched::sys_sched_rr_get_interval(args)
 }

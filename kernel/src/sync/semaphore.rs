@@ -99,10 +99,9 @@ impl Semaphore {
             self.wait.prepare_to_wait(current, false, false);
 
             // Re-check after prepare_to_wait (state is now UNINTERRUPTIBLE).
-            // If count went positive, undo our initial decrement and exit.
+            // If count went positive, our initial decrement is balanced — return.
             if self.count.load(Ordering::Acquire) > 0 {
                 self.wait.finish_wait(current);
-                // Our initial fetch_sub is now balanced by this positive count.
                 return;
             }
 
@@ -113,17 +112,10 @@ impl Semaphore {
             // Woken up — finish_wait restores RUNNING and removes from queue.
             self.wait.finish_wait(current);
 
-            // Try to acquire again; the waker already incremented count for us.
-            // Try a simple load first (fast path after wakeup).
-            let cur = self.count.load(Ordering::Acquire);
-            if cur > 0 {
-                // Try to take one count. Use CAS to avoid over-decrementing
-                // if another waiter also sees count > 0.
-                match self.count.compare_exchange(cur, cur - 1, Ordering::Acquire, Ordering::Acquire) {
-                    Ok(_) => return,
-                    Err(_) => continue,
-                }
-            }
+            // Our initial fetch_sub(1) already reserved a slot.  The up() that
+            // woke us incremented count by one, so the count is now correct.
+            // No need to re-acquire — just return.
+            return;
         }
     }
 
@@ -193,13 +185,16 @@ impl Semaphore {
 
             self.wait.finish_wait(current);
 
-            let cur = self.count.load(Ordering::Acquire);
-            if cur > 0 {
-                match self.count.compare_exchange(cur, cur - 1, Ordering::Acquire, Ordering::Acquire) {
-                    Ok(_) => return Ok(()),
-                    Err(_) => continue,
-                }
+            // Check if woken by signal rather than up().
+            if crate::signal::signal_pending() {
+                // Interrupted — undo our initial fetch_sub.
+                self.count.fetch_add(1, Ordering::Release);
+                return Err(());
             }
+
+            // Woken by up(): our initial fetch_sub already reserved a slot.
+            // The up() that woke us incremented count, so it is correct.
+            return Ok(());
         }
     }
 

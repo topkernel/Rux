@@ -72,7 +72,7 @@ fn test_priority() {
     // In test context (idle task), may not have a valid process
     if prio == 20 {
         test_pass("getpriority current process returns 20 (nice=0)");
-    } else if (prio as i64) < 0 {
+    } else if prio < 0 {
         test_skip("getpriority current", "no valid process context");
     } else {
         // Some other nice value is also valid
@@ -82,11 +82,11 @@ fn test_priority() {
     // getpriority with invalid which value (PRIO_PGRP not supported)
     let result = sys_getpriority([PRIO_PGRP as u64, 0, 0, 0, 0, 0]);
     // Should return -EINVAL
-    test_assert!(result as i64 == -22, "getpriority PRIO_PGRP returns -EINVAL");
+    test_assert!(result == -22, "getpriority PRIO_PGRP returns -EINVAL");
 
     // getpriority with invalid which value (PRIO_USER not supported)
     let result = sys_getpriority([PRIO_USER as u64, 0, 0, 0, 0, 0]);
-    test_assert!(result as i64 == -22, "getpriority PRIO_USER returns -EINVAL");
+    test_assert!(result == -22, "getpriority PRIO_USER returns -EINVAL");
 
     // setpriority for current process (which=PRIO_PROCESS, who=0, prio=5)
     let result = sys_setpriority([PRIO_PROCESS as u64, 0, 5, 0, 0, 0]);
@@ -96,7 +96,7 @@ fn test_priority() {
         let new_prio = sys_getpriority([PRIO_PROCESS as u64, 0, 0, 0, 0, 0]);
         if new_prio == 25 {
             test_pass("getpriority reflects setpriority(5) → 25");
-        } else if (new_prio as i64) < 0 {
+        } else if new_prio < 0 {
             test_skip("getpriority verify", "no process context");
         } else {
             test_fail("getpriority after set", &alloc::format!("expected 25, got {}", new_prio));
@@ -109,7 +109,7 @@ fn test_priority() {
 
     // setpriority with invalid which value
     let result = sys_setpriority([PRIO_PGRP as u64, 0, 0, 0, 0, 0]);
-    test_assert!(result as i64 == -22, "setpriority PRIO_PGRP returns -EINVAL");
+    test_assert!(result == -22, "setpriority PRIO_PGRP returns -EINVAL");
 
     // setpriority clamps nice value
     // setpriority with nice=-100 should clamp to MIN_NICE=-20
@@ -119,7 +119,7 @@ fn test_priority() {
         if prio == 0 {
             // nice=-20 → prio = -20+20 = 0
             test_pass("setpriority clamps to MIN_NICE");
-        } else if (prio as i64) < 0 {
+        } else if prio < 0 {
             test_skip("setpriority clamp verify", "no process context");
         } else {
             test_fail("setpriority MIN_NICE", &alloc::format!("expected prio=0, got {}", prio));
@@ -136,7 +136,7 @@ fn test_priority() {
         if prio == 39 {
             // nice=19 → prio = 19+20 = 39
             test_pass("setpriority clamps to MAX_NICE");
-        } else if (prio as i64) < 0 {
+        } else if prio < 0 {
             test_skip("setpriority MAX clamp", "no process context");
         } else {
             test_fail("setpriority MAX_NICE", &alloc::format!("expected prio=39, got {}", prio));
@@ -148,11 +148,11 @@ fn test_priority() {
 
     // setpriority for nonexistent PID (99999)
     let result = sys_setpriority([PRIO_PROCESS as u64, 99999, 0, 0, 0, 0]);
-    test_assert!(result as i64 == -3, "setpriority nonexistent PID returns -ESRCH");
+    test_assert!(result == -3, "setpriority nonexistent PID returns -ESRCH");
 
     // getpriority for nonexistent PID (99999)
     let result = sys_getpriority([PRIO_PROCESS as u64, 99999, 0, 0, 0, 0]);
-    test_assert!(result as i64 == -3, "getpriority nonexistent PID returns -ESRCH");
+    test_assert!(result == -3, "getpriority nonexistent PID returns -ESRCH");
 }
 
 fn test_sched_policy() {

@@ -132,6 +132,12 @@ impl RtRunQueue {
                 return;
             }
 
+            // Guard against double-enqueue: if the task is already on a
+            // runqueue, skip the insertion to avoid list corruption.
+            if t.rt_entity().is_on_rq() {
+                return;
+            }
+
             // Add to priority list
             if head {
                 // Add to front of list (for preempted tasks)

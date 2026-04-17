@@ -41,7 +41,7 @@ pub fn test_execve() {
     let result = sys_kill([pid as u64, 0, 0, 0, 0, 0]);
     if result == 0 {
         test_pass("execve process existence check (kill pid 0)");
-    } else if (result as i64) == -3 {
+    } else if result == -3 {
         test_skip("execve process check", "no valid process context");
     } else {
         test_fail("execve process check", &alloc::format!("unexpected result: {}", result));

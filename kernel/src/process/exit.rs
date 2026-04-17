@@ -530,13 +530,14 @@ pub fn do_waitid(
                 {
                     result_child = Some(child_ptr);
                     let raw_exit = child.exit_code();
+                    let mut was_killed = false;
                     if raw_exit >= 0 {
                         result_code = raw_exit as i32;
-                        result_kind = 0; // exited
                     } else {
                         result_code = (-raw_exit) as i32;
-                        result_kind = 0; // killed
+                        was_killed = true;
                     }
+                    result_kind = if was_killed { 3 } else { 0 };
                 }
                 // Check for stopped — only if WSTOPPED
                 else if options & WSTOPPED != 0
@@ -566,19 +567,19 @@ pub fn do_waitid(
                 let (si_code, si_status) = if result_kind == 1 {
                     // Stopped
                     (CLD_STOPPED, result_code)
-                } else if result_code >= 0 {
-                    // Normal exit
-                    (CLD_EXITED, result_code)
-                } else {
+                } else if result_kind == 3 {
                     // Killed by signal
                     (CLD_KILLED, result_code)
+                } else {
+                    // Normal exit
+                    (CLD_EXITED, result_code)
                 };
 
                 // Write siginfo to user
                 write_siginfo(infop, si_code, child_pid, child_uid, si_status);
 
                 // Reap zombie unless WNOWAIT
-                if result_kind == 0 && options & WNOWAIT == 0 {
+                if (result_kind == 0 || result_kind == 3) && options & WNOWAIT == 0 {
                     release_task(child_ptr);
                 }
 

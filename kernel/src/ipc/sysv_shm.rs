@@ -184,7 +184,7 @@ fn find_free_shm_addr(size: usize) -> Option<VirtAddr> {
 // ============================================================================
 
 /// sys_shmget — Allocate or find a shared memory segment (NR 194)
-pub fn sys_shmget(args: [u64; 6]) -> u64 {
+pub fn sys_shmget(args: [u64; 6]) -> i64 {
     let key = args[0] as i32;
     let size = args[1] as u64;
     let shmflg = args[2] as i32;
@@ -194,24 +194,24 @@ pub fn sys_shmget(args: [u64; 6]) -> u64 {
 
     let segment = match ShmSegment::new(key, size, (shmflg & 0o777) as u16) {
         Some(s) => s,
-        None => return -errno::ENOMEM as u64,
+        None => return -(errno::ENOMEM as i64),
     };
 
     match SHM_IDS.alloc(segment, key, shmflg) {
-        Ok((id, _)) => id as u64,
-        Err(e) => e as u64,
+        Ok((id, _)) => id as i64,
+        Err(e) => e as i64,
     }
 }
 
 /// sys_shmctl — Shared memory control operations (NR 195)
-pub fn sys_shmctl(args: [u64; 6]) -> u64 {
+pub fn sys_shmctl(args: [u64; 6]) -> i64 {
     let shmid = args[0] as i32;
     let cmd = args[1] as i32;
     let buf = args[2];
 
     let idx = match SHM_IDS.find(shmid) {
         Some(i) => i,
-        None => return -errno::EINVAL as u64,
+        None => return -(errno::EINVAL as i64),
     };
 
     match cmd {
@@ -229,7 +229,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
                         None => false,
                     };
                     if !allowed {
-                        return -errno::EPERM as u64;
+                        return -(errno::EPERM as i64);
                     }
                 }
             }
@@ -248,7 +248,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
         IPC_STAT => {
             let buf_ptr = buf as *mut ShmidDsUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let mut ds = ShmidDsUapi {
                 shm_perm: IpcPermUapi::default(),
@@ -289,11 +289,11 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
         IPC_SET => {
             let buf_ptr = buf as *const u8;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             let idx2 = match SHM_IDS.find_with_perms(shmid, 0o6) {
                 Ok(i) => i,
-                Err(e) => return e as u64,
+                Err(e) => return e as i64,
             };
             let mut slots = SHM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
@@ -310,7 +310,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
         IPC_INFO => {
             let buf_ptr = buf as *mut u8;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 48) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for 48 bytes above;
             // zeroing the entire buffer is within bounds.
@@ -325,7 +325,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
             unsafe { core::ptr::write_volatile(buf_ptr.add(24) as *mut u64, 4096u64) };
             // SAFETY: buf_ptr + 32 is within the 48-byte access_ok-validated range.
             unsafe { core::ptr::write_volatile(buf_ptr.add(32) as *mut u64, 256 * 256u64) };
-            SHM_IDS.count() as u64
+            SHM_IDS.count() as i64
         }
         11 => 0, // SHM_LOCK — no-op
         12 => 0, // SHM_UNLOCK — no-op
@@ -334,10 +334,10 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
             let raw_idx = shmid as usize;
             let buf_ptr = buf as *mut ShmidDsUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             if raw_idx >= 256 {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
             let mut ds = ShmidDsUapi {
                 shm_perm: IpcPermUapi::default(),
@@ -356,7 +356,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
                 let slots = SHM_IDS.slots.lock();
                 if let Some(ref entry) = slots[raw_idx] {
                     if entry.deleted {
-                        return -errno::EINVAL as u64;
+                        return -(errno::EINVAL as i64);
                     }
                     ds.shm_perm = entry.inner.perm.to_uapi();
                     ds.shm_segsz = entry.inner.segsz;
@@ -368,7 +368,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
                     ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
                     result_id = super::util::ipc_build_id(raw_idx, entry.inner.perm.seq);
                 } else {
-                    return -errno::EINVAL as u64;
+                    return -(errno::EINVAL as i64);
                 }
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for size_of::<ShmidDsUapi>() above;
@@ -380,14 +380,14 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
                     core::mem::size_of::<ShmidDsUapi>(),
                 );
             }
-            result_id as u64
+            result_id as i64
         }
         14 => {
             // SHM_INFO — returns struct shm_info (current usage)
             // struct shm_info: 8 fields × 8 bytes = 64 bytes on RV64
             let buf_ptr = buf as *mut u8;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, 64) {
-                return -errno::EFAULT as u64;
+                return -(errno::EFAULT as i64);
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for 64 bytes above;
             // zeroing the entire buffer is within bounds.
@@ -424,14 +424,14 @@ pub fn sys_shmctl(args: [u64; 6]) -> u64 {
                     }
                 }
             }
-            max_idx as u64
+            max_idx as i64
         }
-        _ => -errno::EINVAL as u64,
+        _ => -(errno::EINVAL as i64),
     }
 }
 
 /// sys_shmat — Attach shared memory segment (NR 196)
-pub fn sys_shmat(args: [u64; 6]) -> u64 {
+pub fn sys_shmat(args: [u64; 6]) -> i64 {
     let shmid = args[0] as i32;
     let shmaddr = args[1] as usize;
     let shmflg = args[2] as i32;
@@ -440,7 +440,7 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
 
     let idx = match SHM_IDS.find_with_perms(shmid, if shm_readonly { 0o4 } else { 0o6 }) {
         Ok(i) => i,
-        Err(e) => return e as u64,
+        Err(e) => return e as i64,
     };
 
     // Get segment info
@@ -449,11 +449,11 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
         let slots = SHM_IDS.slots.lock();
         if let Some(ref entry) = slots[idx] {
             if entry.deleted {
-                return -errno::EIDRM as u64;
+                return -(errno::EIDRM as i64);
             }
             segsz = entry.inner.segsz;
         } else {
-            return -errno::EINVAL as u64;
+            return -(errno::EINVAL as i64);
         }
     }
 
@@ -465,7 +465,7 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
             if (shmflg & 0o20000) != 0 { // SHM_RND
                 shmaddr & !PAGE_MASK
             } else {
-                return -errno::EINVAL as u64;
+                return -(errno::EINVAL as i64);
             }
         } else {
             shmaddr
@@ -473,17 +473,17 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
     } else {
         match find_free_shm_addr(size_aligned) {
             Some(a) => a.as_usize(),
-            None => return -errno::ENOMEM as u64,
+            None => return -(errno::ENOMEM as i64),
         }
     };
 
     let current = match crate::sched::current() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
     let addr_space = match current.address_space() {
         Some(as_) => as_,
-        None => return -errno::ENOMEM as u64,
+        None => return -(errno::ENOMEM as i64),
     };
 
     let root_ppn = addr_space.root_ppn();
@@ -493,7 +493,7 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
         let slots = SHM_IDS.slots.lock();
         if let Some(ref entry) = slots[idx] {
             if entry.deleted {
-                return -errno::EIDRM as u64;
+                return -(errno::EIDRM as i64);
             }
             let pages_lock = entry.inner.pages.lock();
             if let Some(ref shm_pages) = *pages_lock {
@@ -520,7 +520,7 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
                                     rollback_size,
                                 );
                             }
-                            return -errno::ENOMEM as u64;
+                            return -(errno::ENOMEM as i64);
                         }
                     };
                     // SAFETY: attach_addr + i*PAGE_SIZE is page-aligned and within the
@@ -536,10 +536,10 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
                     }
                 }
             } else {
-                return -errno::EIDRM as u64;
+                return -(errno::EIDRM as i64);
             }
         } else {
-            return -errno::EINVAL as u64;
+            return -(errno::EINVAL as i64);
         }
     }
 
@@ -560,7 +560,7 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
 
     if addr_space.add_vma(vma).is_err() {
         let _ = addr_space.munmap(VirtAddr::new(attach_addr), size_aligned);
-        return -errno::ENOMEM as u64;
+        return -(errno::ENOMEM as i64);
     }
 
     // Update segment metadata
@@ -578,24 +578,24 @@ pub fn sys_shmat(args: [u64; 6]) -> u64 {
     // required after modifying page table entries for the mapping to take effect.
     unsafe { core::arch::asm!("sfence.vma"); }
 
-    attach_addr as u64
+    attach_addr as i64
 }
 
 /// sys_shmdt — Detach shared memory segment (NR 197)
-pub fn sys_shmdt(args: [u64; 6]) -> u64 {
+pub fn sys_shmdt(args: [u64; 6]) -> i64 {
     let shmaddr = args[0] as usize;
 
     if shmaddr == 0 {
-        return -errno::EINVAL as u64;
+        return -(errno::EINVAL as i64);
     }
 
     let current = match crate::sched::current() {
         Some(t) => t,
-        None => return -errno::ESRCH as u64,
+        None => return -(errno::ESRCH as i64),
     };
     let addr_space = match current.address_space() {
         Some(as_) => as_,
-        None => return -errno::EINVAL as u64,
+        None => return -(errno::EINVAL as i64),
     };
 
     // Find the VMA at shmaddr and get shm_id
@@ -605,10 +605,10 @@ pub fn sys_shmdt(args: [u64; 6]) -> u64 {
         let vma_mgr = addr_space.vma_read();
         let vma = match vma_mgr.find(VirtAddr::new(shmaddr)) {
             Some(v) => v,
-            None => return -errno::EINVAL as u64,
+            None => return -(errno::EINVAL as i64),
         };
         if vma.vma_type() != VmaType::SharedMemory {
-            return -errno::EINVAL as u64;
+            return -(errno::EINVAL as i64);
         }
         shm_id = vma.file_fd();
         vma_size = vma.end().as_usize() - vma.start().as_usize();
