@@ -261,7 +261,7 @@ pub mod task_flags {
 pub type Pid = u32;
 
 /// Process credentials.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct Cred {
     pub uid: u32,
@@ -272,6 +272,8 @@ pub struct Cred {
     pub sgid: u32,
     pub fsuid: u32,
     pub fsgid: u32,
+    /// Supplementary group IDs
+    pub groups: alloc::vec::Vec<u32>,
     // Capability sets (POSIX.1e)
     pub cap_inheritable: crate::security::capability::Cap,
     pub cap_permitted:   crate::security::capability::Cap,
@@ -283,12 +285,13 @@ pub struct Cred {
 impl Cred {
     /// Create credential for init (PID 0) / kernel threads.
     /// All capabilities are granted (root-equivalent).
-    pub const fn new_init() -> Self {
+    pub fn new_init() -> Self {
         Self {
             uid: 0, gid: 0,
             euid: 0, egid: 0,
             suid: 0, sgid: 0,
             fsuid: 0, fsgid: 0,
+            groups: alloc::vec::Vec::new(),
             cap_inheritable: crate::security::capability::Cap::EMPTY,
             cap_permitted:   crate::security::capability::Cap::FULL,
             cap_effective:   crate::security::capability::Cap::FULL,
@@ -298,18 +301,27 @@ impl Cred {
     }
 
     /// Create credential with no capabilities (for user processes).
-    pub const fn new_user(uid: u32, gid: u32) -> Self {
+    pub fn new_user(uid: u32, gid: u32) -> Self {
         Self {
             uid, gid,
             euid: uid, egid: gid,
             suid: uid, sgid: gid,
             fsuid: uid, fsgid: gid,
+            groups: alloc::vec::Vec::new(),
             cap_inheritable: crate::security::capability::Cap::EMPTY,
             cap_permitted:   crate::security::capability::Cap::EMPTY,
             cap_effective:   crate::security::capability::Cap::EMPTY,
             cap_bounding:    crate::security::capability::Cap::FULL,
             cap_ambient:     crate::security::capability::Cap::EMPTY,
         }
+    }
+
+    /// Check if a gid matches egid or any supplementary group
+    pub fn in_group(&self, gid: u32) -> bool {
+        if self.egid == gid {
+            return true;
+        }
+        self.groups.iter().any(|&g| g == gid)
     }
 }
 

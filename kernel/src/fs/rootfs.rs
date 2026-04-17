@@ -1079,7 +1079,7 @@ impl RootFSSuperBlock {
             match current.find_child(component_bytes) {
                 Some(child) => {
                     // If it's a symbolic link, follow it
-                    if child.is_symlink() && i < components.len() - 1 {
+                    if child.is_symlink() {
                         // Follow symbolic link
                         let target = self.follow_link_internal(&child, depth)?;
                         // Continue lookup from symbolic link target

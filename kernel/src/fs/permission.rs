@@ -42,8 +42,8 @@ pub fn generic_permission(
     if cred.euid == inode_uid {
         // Owner permission bits (bits 8-6)
         ((mode >> 6) & 0o7) & mask == mask
-    } else if cred.egid == inode_gid {
-        // Group permission bits (bits 5-3)
+    } else if cred.in_group(inode_gid) {
+        // Group permission bits (bits 5-3) — checks egid + supplementary groups
         ((mode >> 3) & 0o7) & mask == mask
     } else {
         // Other permission bits (bits 2-0)

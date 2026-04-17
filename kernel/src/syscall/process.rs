@@ -1093,16 +1093,37 @@ pub fn sys_getgroups(args: SyscallArgs) -> i64 {
     let size = args[0] as i32;
     let list_ptr = args[1] as *mut u32;
 
-    // Currently no supplementary groups, return 0
+    let task = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+
+    let ngroups = task.cred().groups.len();
+
     if size == 0 {
-        return 0;
+        return ngroups as i64;
     }
     if size < 0 {
         return -(errno::EINVAL as i64);
     }
+    if (size as usize) < ngroups {
+        return -(errno::EINVAL as i64);
+    }
 
-    // No supplementary groups to return
-    0
+    // Copy group list to userspace using copy_to_user
+    if ngroups > 0 {
+        let groups = &task.cred().groups;
+        let bytes = ngroups * core::mem::size_of::<u32>();
+        unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(
+                list_ptr as *mut u8,
+                groups.as_ptr() as *const u8,
+                bytes,
+            );
+        }
+    }
+
+    ngroups as i64
 }
 
 /// sys_setgroups - Set supplementary group IDs
@@ -1111,11 +1132,39 @@ pub fn sys_getgroups(args: SyscallArgs) -> i64 {
 /// - args[0]: size - number of groups
 /// - args[1]: list - pointer to group ID array
 pub fn sys_setgroups(args: SyscallArgs) -> i64 {
+    let size = args[0] as i32;
+    let list_ptr = args[1] as *const u32;
+
     // Only CAP_SETGID can set supplementary groups
     if !crate::security::capable(crate::security::CAP_SETGID) {
         return -(errno::EPERM as i64);
     }
-    // TODO: implement supplementary group storage
+
+    if size < 0 || (size as usize) > 65536 {
+        return -(errno::EINVAL as i64);
+    }
+    if size == 0 {
+        // Clear supplementary groups
+        return 0;  // No groups to set (groups already empty)
+    }
+
+    // Validate user pointer
+    if !crate::arch::riscv64::uaccess::access_ok(list_ptr as usize, (size as usize) * 4) {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Read group IDs from userspace
+    let mut groups = alloc::vec::Vec::with_capacity(size as usize);
+    unsafe {
+        let src = core::slice::from_raw_parts(list_ptr, size as usize);
+        groups.extend_from_slice(src);
+    }
+
+    // Store in task credentials
+    if let Some(task) = crate::sched::current() {
+        task.cred_mut().groups = groups;
+    }
+
     0
 }
 

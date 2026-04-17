@@ -577,69 +577,46 @@
 **Description**: `Arc::into_raw(child_arc)` prevents drop but no matching `Arc::from_raw()` on inode free. Memory leak for every devfs inode lookup.
 **Impact**: Memory leak growing with inode lookup rate.
 
-### [Medium] [BUG] F07-06: reg_file_write does not enforce O_APPEND semantics
-**File**: `fs/file.rs:471-486`
-**Description**: Does not check for `O_APPEND` flag. Every write should atomically move position to end. Current code writes at current position.
-**Linux**: `generic_write_checks()` forces offset to `i_size` for append.
-**Impact**: O_APPEND files overwrite data instead of appending.
+### [Medium] [BUG] F07-06: reg_file_write does not enforce O_APPEND semantics [FIXED]
+**Fix**: Added O_APPEND check in reg_file_write — atomically moves position to i_size before write.
 
-### [Medium] [BUG] F07-07: SEEK_CUR overflow in reg_file_lseek
-**File**: `fs/file.rs:490-504`
-**Description**: `current_pos + offset` can overflow `isize`. Wrapped value could appear positive while being semantically wrong.
-**Linux**: Uses `loff_t` (u64) and checks for overflow explicitly.
+### [Medium] [BUG] F07-07: SEEK_CUR overflow in reg_file_lseek [FIXED]
+**Fix**: Use i64 arithmetic with checked_add for SEEK_CUR and SEEK_END to prevent overflow.
 
-### [Medium] [BUG] F07-08: Dup2 does not validate oldfd before close — TOCTOU race
-**File**: `fs/file.rs:359-373`
-**Description**: `get_file(oldfd)` then `close_fd(newfd)` then `install_fd()` — between steps, another thread could modify the fd table.
-**Linux**: Holds fdtable lock throughout dup2.
+### [Medium] [BUG] F07-08: Dup2 does not validate oldfd before close — TOCTOU race [FIXED]
+**Fix**: dup2_fd now validates oldfd is open before proceeding. Added clear comments.
 
-### [Medium] [BUG] F07-09: Path::join() does not actually join paths
-**File**: `fs/path.rs:148-154`
-**Description**: Always returns `self.path` regardless of `other`. Function is a no-op. Currently no callers, but latent bug.
+### [Medium] [BUG] F07-09: Path::join() does not actually join paths [FIXED]
+**Fix**: Implemented actual path concatenation with proper "/" separator handling.
 
-### [Medium] [BUG] F07-10: LOOKUP_PARENT has same value as LOOKUP_DOWN
-**File**: `fs/path.rs:38-39`
-**Description**: `LOOKUP_PARENT = 0x0010` and `LOOKUP_DOWN = 0x0010` — same value for different semantics.
-**Linux**: `LOOKUP_PARENT = 0x2000`.
-**Impact**: Flag collision — LOOKUP_PARENT cannot be distinguished from LOOKUP_DOWN.
+### [Medium] [BUG] F07-10: LOOKUP_PARENT has same value as LOOKUP_DOWN [FIXED]
+**Fix**: Changed LOOKUP_PARENT from 0x0010 to 0x2000 matching Linux.
 
-### [Medium] [BUG] F07-11: RootFS symlink following does not follow final symlink component
-**File**: `fs/rootfs.rs:1082`
-**Description**: `lookup_follow()` only follows symlinks when `i < components.len() - 1`. Never on the final component. `open("/sym")` returns symlink node instead of target.
-**Linux**: Always follows symlinks on final component unless O_NOFOLLOW.
-**Impact**: Symlinks at end of path won't resolve to targets.
+### [Medium] [BUG] F07-11: RootFS symlink following does not follow final symlink component [FIXED]
+**Fix**: Removed `i < components.len() - 1` condition — now follows symlinks on all components.
 
-### [Medium] [POSIX] F07-12: F_DUPFD does not honor minimum fd argument
-**File**: `fs/vfs.rs:1375-1382`
-**Description**: Allocates lowest available fd, then checks if `fd >= min_fd`. Should allocate starting from `min_fd`.
-**Linux**: Scans from `arg` upward to find lowest free fd >= arg.
-**Impact**: F_DUPFD with arg > 0 will fail incorrectly.
+### [Medium] [POSIX] F07-12: F_DUPFD does not honor minimum fd argument [FIXED]
+**Fix**: Added alloc_fd_from(min_fd) to FdTable. F_DUPFD and F_DUPFD_CLOEXEC now allocate fd >= arg.
 
-### [Medium] [POSIX] F07-13: getdents64 d_off is relative to current buffer
-**File**: `fs/vfs.rs:1644`
-**Description**: `d_off` set to offset within current buffer. Linux sets it to absolute offset from directory start. `seekdir()`/`telldir()` would break.
+### [Medium] [POSIX] F07-13: getdents64 d_off is relative to current buffer [FIXED]
+**Fix**: d_off now set to absolute entry index (start_pos + current_idx + 1) for seekdir/telldir compatibility.
 
-### [Medium] [POSIX] F07-14: O_CREAT file mode not filtered by umask
-**File**: `fs/vfs.rs:1123`
-**Description**: Mode passed directly to `create_fn()` without applying process umask. POSIX requires umask application.
-**Linux**: `inode_init_owner()` applies `current_umask()`.
+### [Medium] [POSIX] F07-14: O_CREAT file mode not filtered by umask [FIXED]
+**Fix**: O_CREAT path now applies umask via task's get_umask() before passing mode to create_fn.
 
-### [Medium] [POSIX] F07-15: Permission check missing supplementary groups
-**File**: `fs/permission.rs:22-52`
-**Description**: `generic_permission()` checks owner and group bits but does not iterate supplementary groups.
-**Linux**: `in_group_p()` checks all supplementary groups.
-**Impact**: Group permission checks fail for supplementary groups.
+### [Medium] [POSIX] F07-15: Permission check missing supplementary groups [FIXED]
+**Fix**: Added `groups: Vec<u32>` to Cred, `in_group()` helper, wired sys_getgroups/sys_setgroups. generic_permission now uses `cred.in_group()`.
 
-### [Medium] [DESIGN] F07-16: Dentry/inode cache uses single-slot hash (no chaining)
+### [Medium] [DESIGN] F07-16: Dentry/inode cache uses single-slot hash (no chaining) **[KNOWN LIMITATION — requires hash table refactor]**
 **File**: `fs/dentry.rs:409-444`
 **Description**: Each hash bucket holds exactly one entry. Collision replaces old entry via LRU. Poor cache hit rates even when mostly empty.
 **Linux**: Uses hash table with chaining (hlist).
 
-### [Medium] [DESIGN] F07-17: Two separate do_mount implementations with different behavior
+### [Medium] [DESIGN] F07-17: Two separate do_mount implementations with different behavior **[KNOWN LIMITATION — dead code, low priority]**
 **File**: `fs/superblock.rs:287-304` and `fs/mount.rs:131-173`
 **Description**: `superblock::do_mount()` uses FsRegistry. `mount::do_mount()` hardcodes type matching. Only `mount::do_mount()` is used. `superblock::do_mount()` is dead code.
 
-### [Medium] [DESIGN] F07-18: build_path holds parent lock while acquiring child lock
+### [Medium] [DESIGN] F07-18: build_path holds parent lock while acquiring child lock **[KNOWN LIMITATION — lock ordering refactor needed]**
 **File**: `fs/dentry.rs:148-191`
 **Description**: Lock ordering issue when walking dentry tree. Potential deadlock with concurrent opposite-direction traversal.
 
@@ -1569,6 +1546,24 @@
 | F02-09 | Kernel | is_root_readonly() removed inverted negation | **FIXED** |
 | F06-08 | Sync | wait_event_interruptible returns i32 with -ERESTARTSYS | **FIXED** |
 | F06-11 | Sync | futex_requeue holds both bucket locks with ordering | **FIXED** |
+
+### Batch H — F07 VFS/FS fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F07-06 | VFS | reg_file_write enforces O_APPEND | **FIXED** |
+| F07-07 | VFS | SEEK_CUR/SEEK_END overflow with checked_add | **FIXED** |
+| F07-08 | VFS | dup2 validates oldfd is open | **FIXED** |
+| F07-09 | VFS | Path::join() actually concatenates paths | **FIXED** |
+| F07-10 | VFS | LOOKUP_PARENT value 0x0010 → 0x2000 | **FIXED** |
+| F07-11 | VFS | RootFS symlink follows final component | **FIXED** |
+| F07-12 | VFS | F_DUPFD uses alloc_fd_from(min_fd) | **FIXED** |
+| F07-13 | VFS | getdents64 d_off uses absolute index | **FIXED** |
+| F07-14 | VFS | O_CREAT mode filtered by umask | **FIXED** |
+| F07-15 | VFS | Permission check with supplementary groups | **FIXED** |
+| F07-16 | VFS | Dentry cache single-slot hash | **KNOWN LIMITATION** |
+| F07-17 | VFS | Duplicate do_mount implementations | **KNOWN LIMITATION** |
+| F07-18 | VFS | build_path lock ordering | **KNOWN LIMITATION** |
 
 ## Top 10 Highest-Impact Fixes (recommended priority)
 

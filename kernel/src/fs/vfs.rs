@@ -1120,7 +1120,14 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 let new_inode = {
                     let create_fn = ops.create
                         .ok_or(errno::Errno::PermissionDenied.as_neg_i32())?;
-                    create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(mode))?
+                    // Apply umask to mode (POSIX requirement)
+                    let effective_mode = if let Some(task) = crate::sched::current() {
+                        unsafe { (*task).get_umask() }
+                    } else {
+                        0o022
+                    };
+                    let filtered_mode = mode & !effective_mode;
+                    create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(filtered_mode))?
                 };
                 // Cache new dentry (replace stale/negative dentry)
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
@@ -1371,17 +1378,13 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
 
-                // Allocate new file descriptor (>= arg)
-                let min_fd = arg;
-                let new_fd = match get_file_fd_install(old_file) {
-                    Some(fd) if fd >= min_fd => fd,
-                    Some(_fd) => {
-                        // TODO: Implement fd redirection to support F_DUPFD's arg parameter
-                        // Current simplified implementation: return allocated fd directly
-                        return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
-                    }
-                    None => return Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
-                };
+                // Allocate new file descriptor >= arg
+                let fdtable = crate::sched::get_current_fdtable()
+                    .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+                let new_fd = fdtable.alloc_fd_from(arg)
+                    .ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())?;
+                fdtable.install_fd(new_fd, old_file)
+                    .map_err(|_| errno::Errno::TooManyOpenFiles.as_neg_i32())?;
 
                 Ok(new_fd)
             }
@@ -1394,15 +1397,13 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
 
-                // Allocate new file descriptor (>= arg)
-                let min_fd = arg;
-                let new_fd = match get_file_fd_install(old_file) {
-                    Some(fd) if fd >= min_fd => fd,
-                    Some(_fd) => {
-                        return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
-                    }
-                    None => return Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
-                };
+                // Allocate new file descriptor >= arg
+                let fdtable = crate::sched::get_current_fdtable()
+                    .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+                let new_fd = fdtable.alloc_fd_from(arg)
+                    .ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())?;
+                fdtable.install_fd(new_fd, old_file)
+                    .map_err(|_| errno::Errno::TooManyOpenFiles.as_neg_i32())?;
 
                 // Set close-on-exec flag on the new fd
                 if let Some(new_file) = get_file_fd(new_fd) {
@@ -1641,7 +1642,8 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 
             let buf_offset = bytes_written;
             buf[buf_offset..buf_offset + 8].copy_from_slice(&entry.ino.to_le_bytes());
-            let d_off = (bytes_written + dirent_size) as u64;
+            // d_off: absolute offset from directory start (for seekdir/telldir)
+            let d_off = (start_pos + current_idx + 1) as u64;
             buf[buf_offset + 8..buf_offset + 16].copy_from_slice(&d_off.to_le_bytes());
             buf[buf_offset + 16..buf_offset + 18].copy_from_slice(&(dirent_size as u16).to_le_bytes());
             buf[buf_offset + 18] = entry.file_type;

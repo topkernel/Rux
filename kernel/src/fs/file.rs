@@ -270,14 +270,28 @@ impl FdTable {
 
     /// Allocate file descriptor
     pub fn alloc_fd(&self) -> Option<usize> {
-        let mut entry = self.entry.lock_irqsave();
-        let mut next = entry.next_fd;
+        self.alloc_fd_from(0)
+    }
 
-        for i in 0..1024 {
-            let fd = (next + i) % 1024;
+    /// Allocate file descriptor >= min_fd
+    pub fn alloc_fd_from(&self, min_fd: usize) -> Option<usize> {
+        let mut entry = self.entry.lock_irqsave();
+        let start = if min_fd > entry.next_fd { min_fd } else { entry.next_fd };
+
+        // Search from start to 1024
+        for fd in start..1024 {
             if entry.fds[fd].is_none() {
                 entry.next_fd = (fd + 1) % 1024;
                 return Some(fd);
+            }
+        }
+        // Wrap around: search from min_fd to start (if start > min_fd due to next_fd)
+        if start > min_fd {
+            for fd in min_fd..start {
+                if entry.fds[fd].is_none() {
+                    entry.next_fd = (fd + 1) % 1024;
+                    return Some(fd);
+                }
             }
         }
 
@@ -351,18 +365,25 @@ impl FdTable {
     }
 
     /// Duplicate file descriptor to specific number (dup2)
+    /// Validates oldfd is open before any operation.
     pub fn dup2_fd(&self, oldfd: usize, newfd: usize) -> Option<usize> {
         if oldfd >= 1024 || newfd >= 1024 {
             return None;
         }
 
         if oldfd == newfd {
+            // dup2(f, f) must return f if f is valid open fd, else EBADF
             self.get_file(oldfd)?;
             return Some(newfd);
         }
 
+        // Get the file to duplicate (validates oldfd is open)
         let file = self.get_file(oldfd)?;
+
+        // Close newfd if open (ignore error — newfd may not be open)
         let _ = self.close_fd(newfd);
+
+        // Install file at newfd
         self.install_fd(newfd, file).ok()?;
         Some(newfd)
     }
@@ -465,8 +486,14 @@ fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
 
 fn reg_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(ref inode) = unsafe { &*file.inode.get() } {
-        // Get current file position
-        let offset = file.get_pos() as usize;
+        // O_APPEND: atomically move position to end before every write
+        let offset = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
+            let end = inode.get_size();
+            file.set_pos(end);
+            end as usize
+        } else {
+            file.get_pos() as usize
+        };
 
         // Write data to inode (buf.length handles automatically)
         let bytes_written = inode.write_data(offset, buf);
@@ -482,19 +509,25 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
 
 fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     // SEEK_SET = 0, SEEK_CUR = 1, SEEK_END = 2
-    let current_pos = file.get_pos() as isize;
+    let current_pos = file.get_pos() as i64;
 
     // Get file size
     let file_size = if let Some(ref inode) = unsafe { &*file.inode.get() } {
-        inode.get_size() as isize
+        inode.get_size() as i64
     } else {
         return -9  // EBADF
     };
 
     let new_pos = match whence {
-        0 => offset,              // SEEK_SET
-        1 => current_pos + offset, // SEEK_CUR
-        2 => file_size + offset,   // SEEK_END
+        0 => offset as i64,                                           // SEEK_SET
+        1 => match current_pos.checked_add(offset as i64) {           // SEEK_CUR
+            Some(v) => v,
+            None => return -22,  // EOVERFLOW
+        },
+        2 => match file_size.checked_add(offset as i64) {             // SEEK_END
+            Some(v) => v,
+            None => return -22,  // EOVERFLOW
+        },
         _ => return -22,           // EINVAL - invalid whence
     };
 
@@ -503,7 +536,7 @@ fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     }
 
     file.set_pos(new_pos as u64);
-    new_pos
+    new_pos as isize
 }
 
 fn reg_file_close(_file: &File) -> i32 {

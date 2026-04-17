@@ -35,7 +35,7 @@ pub mod namei_flags {
     pub const LOOKUP_RCU: u32 = 0x0080;  // RCU mode lookup
     pub const LOOKUP_NO_SYMLINKS: u32 = 0x0100;  // Don't follow symbolic links
     pub const LOOKUP_NO_RECURSE: u32 = 0x0200;  // Don't recurse
-    pub const LOOKUP_PARENT: u32 = 0x0010;  // Only find parent directory
+    pub const LOOKUP_PARENT: u32 = 0x2000;  // Only find parent directory
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -145,11 +145,17 @@ impl<'a> Path<'a> {
     }
 
     /// Append path
-    pub fn join(&self, other: &str) -> Path<'a> {
-        if self.path.ends_with('/') || other.starts_with('/') {
-            Path::new(self.path)
+    pub fn join(&self, other: &str) -> alloc::string::String {
+        if other.is_empty() {
+            return alloc::string::String::from(self.path);
+        }
+        if other.starts_with('/') {
+            return alloc::string::String::from(other);
+        }
+        if self.path.ends_with('/') {
+            alloc::format!("{}{}", self.path, other)
         } else {
-            Path::new(self.path)
+            alloc::format!("{}/{}", self.path, other)
         }
     }
 }
