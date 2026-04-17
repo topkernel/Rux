@@ -123,8 +123,14 @@ fn find_block_in_extent_tree(
 
     if header.eh_depth == 0 {
         // Leaf node: search for extent in i_block array
+        // Validate eh_entries: each entry is 12 bytes; after the 12-byte header,
+        // at most (60 - 12) / 12 = 4 entries fit in i_block.
+        let max_entries = (60 - core::mem::size_of::<Ext4ExtentHeader>()) / core::mem::size_of::<Ext4Extent>();
+        if header.eh_entries as usize > max_entries {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
         // SAFETY: offset by header size (12 bytes) stays within the 60-byte i_block array;
-        // eh_entries is bounded by eh_max which fits in the remaining space.
+        // eh_entries was validated above against max_entries.
         let entries = unsafe {
             core::slice::from_raw_parts(
                 (data.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>()) as *const Ext4Extent,

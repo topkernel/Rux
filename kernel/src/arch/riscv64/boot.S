@@ -245,16 +245,15 @@ _start:
     la t0, KERNEL_MAP
     sub t0, t0, t1               // physical address of KERNEL_MAP
     li t2, KERNEL_VIRT
-    sd t2, 0(t0)                 // virt_addr
+    sd t2, 0(t0)                 // virt_addr (offset 0)
     li t2, KERNEL_PHYS
-    sd t2, 8(t0)                 // phys_addr
+    sd t2, 16(t0)                // phys_addr (offset 16)
     // va_kernel_pa_offset = KERNEL_VIRT - KERNEL_PHYS (offset 40 = field 5)
-    sub t2, t2, t2               // t2 = 0 (temporary)
     li t2, KERNEL_VIRT
     li t3, 1025
     slli t3, t3, 21              // t3 = 0x80200000
     sub t2, t2, t3               // t2 = va_kernel_pa_offset = KERNEL_VIRT - KERNEL_PHYS
-    sd t2, 40(t0)                // va_kernel_pa_offset
+    sd t2, 40(t0)                // va_kernel_pa_offset (offset 40)
     // size and offset will be filled by Rust code
 
     // ========================================================================
@@ -445,13 +444,15 @@ bss_clear_done:
 dtb_pointer:
     .dword 0
 
-// KERNEL_MAP structure
+// KERNEL_MAP structure — field order MUST match Rust KernelMapping in
+// arch/riscv64/mm/memory_layout.rs: virt_addr, virt_offset, phys_addr, size,
+// va_pa_offset, va_kernel_pa_offset, page_offset.
 .global KERNEL_MAP
 KERNEL_MAP:
     .dword 0               // virt_addr
+    .dword 0               // virt_offset
     .dword 0               // phys_addr
     .dword 0               // size
-    .dword 0               // virt_offset
     .dword 0               // va_pa_offset
     .dword 0               // va_kernel_pa_offset
     .dword 0               // page_offset

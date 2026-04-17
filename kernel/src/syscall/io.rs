@@ -801,9 +801,9 @@ pub fn sys_preadv(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let iov_ptr = args[1] as *const Iovec;
     let iovcnt = args[2] as usize;
-    let offset_l = args[3] as u64;
-    let offset_h = args[4] as u64;
-    let offset = ((offset_h as u128) << 64) | (offset_l as u128);
+    // On riscv64 the offset is a single 64-bit register (arg[3]).
+    // arg[4] is unused garbage — do NOT combine it into a 128-bit offset.
+    let offset = args[3] as u64 as u128;
 
     let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
     if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {
@@ -863,9 +863,9 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let iov_ptr = args[1] as *const Iovec;
     let iovcnt = args[2] as usize;
-    let offset_l = args[3] as u64;
-    let offset_h = args[4] as u64;
-    let offset = ((offset_h as u128) << 64) | (offset_l as u128);
+    // On riscv64 the offset is a single 64-bit register (arg[3]).
+    // arg[4] is unused garbage — do NOT combine it into a 128-bit offset.
+    let offset = args[3] as u64 as u128;
 
     let iov_size = core::mem::size_of::<Iovec>() * iovcnt;
     if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, iov_size) {

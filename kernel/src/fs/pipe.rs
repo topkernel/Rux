@@ -262,6 +262,17 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 let entry = crate::process::wait::WaitQueueEntry::new(current, false);
                 pipe.read_queue().add(entry);
 
+                // Set INTERRUPTIBLE before schedule to avoid busy-wait
+                // SAFETY: current is a valid raw pointer from sched::current();
+                // set_state is safe to call on the current task before schedule().
+                unsafe {
+                    (*current).set_state(
+                        crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::INTERRUPTIBLE,
+                        ),
+                    );
+                }
+
                 // Yield CPU
                 crate::sched::schedule();
 

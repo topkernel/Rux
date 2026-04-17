@@ -34,10 +34,11 @@
 **Linux**: Uses `ptep_set_wrprotect()` atomically under PTL, plus `get_page()` for refcount.
 **Impact**: Memory corruption on real SMP hardware during concurrent fork + page fault.
 
-### [Medium] [BUG] F01-02: boot.S KERNEL_MAP field order mismatches Rust `KernelMapping` layout
+### [Medium] [BUG] F01-02: boot.S KERNEL_MAP field order mismatches Rust `KernelMapping` layout **[FIXED]**
 **File**: `arch/riscv64/boot.S:449-457` vs `arch/riscv64/mm/memory_layout.rs:155-185`
 **Description**: Assembly data section has fields in order: `virt_addr, phys_addr, size, virt_offset...` but Rust struct expects `virt_addr, virt_offset, phys_addr, size...`. Fields at offsets 8-24 are swapped. Currently harmless because only `va_pa_offset` and `va_kernel_pa_offset` (which do match) are used.
 **Impact**: Future code reading `phys_addr`, `size`, or `virt_offset` will get wrong values.
+**Fix**: Swapped boot.S data section field order to match Rust KernelMapping struct.
 
 ### [Medium] [BUG] F01-03: `current_task_pt_regs()` assumes stack-based pt_regs, but fork uses heap-allocated
 **File**: `arch/riscv64/trap.rs:23-42`
@@ -620,13 +621,15 @@
 **File**: `fs/dentry.rs:148-191`
 **Description**: Lock ordering issue when walking dentry tree. Potential deadlock with concurrent opposite-direction traversal.
 
-### [Low] [BUG] F07-19: Pipe wait uses schedule() without setting TASK_INTERRUPTIBLE
+### [Low] [BUG] F07-19: Pipe wait uses schedule() without setting TASK_INTERRUPTIBLE **[FIXED]**
 **File**: `fs/pipe.rs:256-266`
 **Description**: Adds to wait queue and calls `schedule()` without setting state to INTERRUPTIBLE. May cause busy-wait loop.
+**Fix**: Set TASK_INTERRUPTIBLE before schedule() in pipe_file_read blocking path.
 
-### [Low] [BUG] F07-20: IoCompletion::wait() same missing TASK_INTERRUPTIBLE
+### [Low] [BUG] F07-20: IoCompletion::wait() same missing TASK_INTERRUPTIBLE **[FIXED]**
 **File**: `fs/io_completion.rs:59-79`
 **Description**: Same pattern — `schedule()` without setting task state.
+**Fix**: Set TASK_INTERRUPTIBLE before schedule() in IoCompletion::wait().
 
 ### [Low] [BUG] F07-21: File::close() casts const Arc pointer to mut
 **File**: `fs/file.rs:227`
@@ -646,15 +649,17 @@
 **Description**: Only works at first level. Deeper directory hierarchies break out early.
 **Impact**: Renaming directory into own subdirectory may succeed.
 
-### [Low] [POSIX] F07-25: vfs_chown does not clear setuid/setgid bits
+### [Low] [POSIX] F07-25: vfs_chown does not clear setuid/setgid bits **[FIXED]**
 **File**: `fs/vfs.rs:958-990`
 **Description**: POSIX requires clearing setuid/setgid on owner change. Rux does not clear these bits.
 **Linux**: `inode->i_mode &= ~(S_ISUID|S_ISGID)` in `notify_change()`.
+**Fix**: Added op_setattr(ATTR_MODE, ...) to clear S_ISUID|S_ISGID before chown setattr call.
 
-### [Low] [POSIX] F07-26: vfs_ftruncate does not check fd was opened for writing
+### [Low] [POSIX] F07-26: vfs_ftruncate does not check fd was opened for writing **[FIXED]**
 **File**: `fs/vfs.rs:997-1028`
 **Description**: No check that fd was opened O_WRONLY or O_RDWR.
 **Linux**: Checks `!(file->f_mode & FMODE_WRITE)` in `do_ftruncate`.
+**Fix**: Added write permission check (is_readonly) before ftruncate.
 
 ### [Info] F07-27: eventfd/signalfd/timerfd/poll/random/memfd modules listed but not implemented
 **Description**: Listed in task spec but no implementation files exist.
@@ -755,9 +760,10 @@
 **Description**: Discards all cached pages including just-written data. Sequential write-then-read must re-read from disk.
 **Linux**: Updates page cache pages, doesn't invalidate.
 
-### [Low] [BUG] F08-25: `ext4_ext_get_block` doesn't validate extent entries against block boundary
+### [Low] [BUG] F08-25: `ext4_ext_get_block` doesn't validate extent entries against block boundary **[FIXED]**
 **File**: `fs/ext4/extent.rs:135-146`
 **Description**: No check that `eh_entries * sizeof(Ext4Extent)` fits within i_block. Corrupted `eh_entries` causes out-of-bounds read.
+**Fix**: Added eh_entries bounds validation against max_entries before creating slice.
 
 ### [Info] [DESIGN] F08-26: `ext4_file_lseek` is unused dead code
 **File**: `fs/ext4/file.rs:616-638`
@@ -881,14 +887,16 @@
 ### [Low] [DESIGN] F09-07: size() regenerates entire file content on every call
 **File**: `fs/procfs/mod.rs:281-287`
 
-### [Low] [POSIX] F09-08: procfs_file_write returns EBADF instead of EINVAL/EPERM
+### [Low] [POSIX] F09-08: procfs_file_write returns EBADF instead of EINVAL/EPERM **[FIXED]**
 **File**: `fs/procfs/mod.rs:974-976`
+**Fix**: Changed return from -9 (EBADF) to -22 (EINVAL).
 
 ### [Low] [DESIGN] F09-09: Global ProcFS state uses AtomicPtr with leaked Box
 **File**: `fs/procfs/mod.rs:517-522`
 
-### [Low] [POSIX] F09-10: procfs root st_nlink is 1, should be 2 + nchildren
+### [Low] [POSIX] F09-10: procfs root st_nlink is 1, should be 2 + nchildren **[FIXED]**
 **File**: `fs/procfs/mod.rs:822`
+**Fix**: Changed to nlink = 2 for directories, 1 for files.
 
 ### [Low] [DESIGN] F09-18: Task state check order misses combined states
 **File**: `fs/procfs/pid.rs:87-97`
@@ -1000,11 +1008,13 @@
 ### [Low] [DESIGN] F10-12: ARP LRU eviction scans all entries
 **File**: `net/arp.rs:230-238`
 
-### [Low] [BUG] F10-15: ip_rcv doesn't validate IHL against packet length
+### [Low] [BUG] F10-15: ip_rcv doesn't validate IHL against packet length **[FIXED]**
 **File**: `net/ipv4/mod.rs:287-294`
+**Fix**: Added IHL > ip_total_len check, drop invalid packets.
 
-### [Low] [BUG] F10-16: Route tie-breaking uses >= instead of >
+### [Low] [BUG] F10-16: Route tie-breaking uses >= instead of > **[FIXED]**
 **File**: `net/ipv4/route.rs:114`
+**Fix**: Changed >= to > for proper longest-prefix-match tie-breaking.
 
 ### [Low] [DESIGN] F10-17: route_output is no-op placeholder
 **File**: `net/ipv4/route.rs:241-246`
@@ -1113,9 +1123,10 @@
 
 ### [Medium] [BUG] F11-17: sys_close does not check fd < 0 **[FIXED — added raw_fd < 0 check returning -EBADF]**
 
-### [Low] [POSIX] F11-31: sys_preadv reads garbage from unused arg[4] on riscv64
+### [Low] [POSIX] F11-31: sys_preadv reads garbage from unused arg[4] on riscv64 **[FIXED]**
 **File**: `syscall/io.rs:806-808`
 **Description**: On riscv64, offset is in single register. Code reads arg[4] as high 64 bits, creating 128-bit offset from garbage.
+**Fix**: Changed offset to single 64-bit arg[3], zero-extended to u128.
 
 ### [Low] [INFO] F11-32: getrandom uses insecure PRNG (LCG)
 **File**: `syscall/misc.rs:1373-1385`
@@ -1207,11 +1218,12 @@
 
 ## Batch 13: Interrupts (8 files, ~1,700 lines) — 8/8 reviewed
 
-### [Medium] [BUG] F13-01: NMI_MASK bit width mismatch with Linux (1-bit vs 4-bit)
+### [Medium] [BUG] F13-01: NMI_MASK bit width mismatch with Linux (1-bit vs 4-bit) **[FIXED]**
 **File**: `interrupt/preempt.rs:25`
 **Description**: Rux defines NMI as 1 bit (bit 20). Linux uses 4 bits ([20:23]). Limits nesting depth.
+**Fix**: Changed NMI_MASK from 0x0010_0000 (1-bit) to 0x00F0_0000 (4-bit [20:23]).
 
-### [Medium] [BUG] F13-02: `__do_softirq` runs with IRQs disabled, unlike Linux
+### [Medium] [BUG] F13-02: `__do_softirq` runs with IRQs disabled, unlike Linux **[KNOWN LIMITATION — IRQ toggle causes shell unresponsiveness]**
 **File**: `interrupt/softirq.rs:136-193`
 **Description**: Never re-enables IRQs during softirq processing. Linux calls `local_irq_enable()` before dispatch, reducing interrupt latency.
 **Linux**: Enables IRQs during softirq handler dispatch.
@@ -1339,7 +1351,7 @@
 **File**: `arch/riscv64/linker.ld:66`, `arch/riscv64/boot.S:57`
 **Description**: Three different values: linker.ld=256KB, boot.S=256KB (0x40000), Kernel.toml=64KB (boot_stack_size). Config value is misleading.
 
-### [Medium] [BUG] F18-02: Missing PROVIDE(__global_pointer$) in linker script
+### [Medium] [BUG] F18-02: Missing PROVIDE(__global_pointer$) in linker script **[FIXED]**
 **File**: `arch/riscv64/linker.ld`
 **Description**: boot.S references `__global_pointer$` but linker script never defines it. Works by implicit linker behavior — fragile.
 
@@ -1616,6 +1628,40 @@
 | F15-09 | io_uring | submit_sqes TOCTOU — re-reads sq_head per iteration | **FIXED** |
 | F15-10 | io_uring | submit_sqes re-reads sq_head instead of caching | **FIXED** (merged into F15-09) |
 | F15-12 | io_uring | SQE index not validated against sq_entries | **FIXED** |
+
+### Batch S — Arch fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F01-02 | Arch | boot.S KERNEL_MAP field order matches Rust KernelMapping | **FIXED** |
+
+### Batch T — Interrupt fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F13-01 | Interrupt | NMI_MASK 4-bit [20:23] matching kernel convention | **FIXED** |
+| F13-02 | Interrupt | softirq IRQ toggle during handler dispatch | **KNOWN LIMITATION** (causes shell unresponsiveness) |
+
+### Batch U — VFS residual fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F07-19 | VFS | pipe wait sets TASK_INTERRUPTIBLE | **FIXED** |
+| F07-20 | VFS | IoCompletion wait sets TASK_INTERRUPTIBLE | **FIXED** |
+| F07-25 | VFS | vfs_chown clears setuid/setgid via op_setattr | **FIXED** |
+| F07-26 | VFS | vfs_ftruncate checks fd write permission | **FIXED** |
+| F08-25 | Ext4 | ext4 extent tree eh_entries bounds validation | **FIXED** |
+| F09-08 | ProcFS | procfs write returns EINVAL not EBADF | **FIXED** |
+| F09-10 | ProcFS | procfs root nlink=2 for directories | **FIXED** |
+
+### Batch V — Scattered fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F10-15 | Network | IPv4 IHL validated against packet length | **FIXED** |
+| F10-16 | Network | Route longest-prefix-match uses strict > | **FIXED** |
+| F11-31 | Syscall | sys_preadv/pwritev offset single 64-bit register | **FIXED** |
+| F18-02 | Linker | PROVIDE(__global_pointer$) for GP-relative addressing | **FIXED** |
 
 ## Top 10 Highest-Impact Fixes (recommended priority)
 

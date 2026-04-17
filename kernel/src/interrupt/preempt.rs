@@ -21,8 +21,8 @@ pub const PREEMPT_MASK: i32 = 0x0000_00FF;
 pub const SOFTIRQ_MASK: i32 = 0x0000_FF00;
 /// Hard IRQ mask (bits [16:19])
 pub const HARDIRQ_MASK: i32 = 0x000F_0000;
-/// NMI mask (bit [20])
-pub const NMI_MASK: i32 = 0x0010_0000;
+/// NMI mask (bits [20:23], matching Linux's 4-bit NMI field)
+pub const NMI_MASK: i32 = 0x00F0_0000;
 /// Preempt active flag (bit [26])
 pub const PREEMPT_ACTIVE: i32 = 0x0400_0000;
 

@@ -111,7 +111,7 @@ impl RouteTable {
 
         for entry in self.entries.iter() {
             if let Some(route) = entry {
-                if route.matches(dst) && route.mask >= best_mask {
+                if route.matches(dst) && route.mask > best_mask {
                     best_match = Some(*route);
                     best_mask = route.mask;
                 }

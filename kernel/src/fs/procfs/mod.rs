@@ -825,7 +825,7 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     // and can cause slab allocator issues in stat context.
     // Use a cached/approximate size instead.
     stat.st_size = node.cached_size.load(Ordering::Relaxed) as i64;
-    stat.st_nlink = 1;
+    stat.st_nlink = if node.is_dir() { 2 } else { 1 };
     stat.st_uid = 0;
     stat.st_gid = 0;
     stat.st_rdev = 0;
@@ -978,7 +978,7 @@ fn procfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 /// ProcFS file write operation (read-only)
 fn procfs_file_write(_file: &crate::fs::File, _buf: &[u8]) -> isize {
-    -9  // EBADF
+    -22 // EINVAL — procfs is read-only, not a bad file descriptor
 }
 
 /// ProcFS file lseek operation

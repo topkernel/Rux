@@ -49,6 +49,7 @@ SECTIONS
 		*(.data .data.*)
 		*(.sdata .sdata.*)
 	}
+	PROVIDE(__global_pointer$ = . + 0x800);
 	_edata = .;
 
 	. = ALIGN(4096);

@@ -985,6 +985,13 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32) -> Result<(), i32> {
         gid
     };
 
+    // POSIX: clear setuid/setgid bits on owner change (per Linux notify_change)
+    let mode = inode.mode.bits();
+    if uid != u32::MAX || gid != u32::MAX {
+        let new_mode = mode & !(0o4000u32 | 0o2000u32); // clear S_ISUID | S_ISGID
+        let _ = inode.op_setattr(setattr_attr::ATTR_MODE, new_mode as u64, 0);
+    }
+
     let result = inode.op_setattr(setattr_attr::ATTR_UID_GID, actual_uid as u64, actual_gid as u64);
     if result == 0 { Ok(()) } else { Err(result) }
 }
@@ -1036,6 +1043,12 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     // SAFETY: get_file_fd returns a valid Arc<File> for the given fd
     let file = unsafe { get_file_fd(fd) }
         .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+
+    // Linux: check that fd was opened for writing (FMODE_WRITE)
+    let file_flags = file.flags();
+    if file_flags.is_readonly() {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
 
     // Get inode from file
     // SAFETY: file.inode is an UnsafeCell<Option<Arc<Inode>>>; accessing under current task's fd table lock

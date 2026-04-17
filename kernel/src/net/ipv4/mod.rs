@@ -290,6 +290,10 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
     // Advance skb past IP header so upper layers see only the transport payload
     let ihl = ip_hdr.version_ihl & 0x0F;
     let hdr_len = (ihl as usize) * 4;
+    // Validate IHL against packet length (per Linux ip_rcv)
+    if hdr_len > ip_total_len as usize {
+        return Ok(());
+    }
     // SAFETY: ihl >= 5 was validated by IpHdr::from_bytes above; skb.data + hdr_len
     // is within the skb's valid data range.
     unsafe {
