@@ -715,10 +715,9 @@ impl CfsRunQueue {
             return SCHED_MIN_GRANULARITY_NS;
         }
 
-        // Rearrange to (period / total_weight) * weight to avoid overflow.
-        // This loses some precision from integer truncation but produces the
-        // correct order of magnitude and never exceeds sched_period.
-        let slice = sched_period / load_weight * se.load.weight;
+        // Multiply first, then divide to avoid integer truncation to 0.
+        // This matches Linux's approach (period * weight / total_weight).
+        let slice = (sched_period as u128 * se.load.weight as u128 / load_weight as u128) as u64;
 
         // Ensure not less than minimum granularity
         slice.max(SCHED_MIN_GRANULARITY_NS)

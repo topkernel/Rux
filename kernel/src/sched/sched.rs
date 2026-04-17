@@ -930,23 +930,27 @@ pub fn dequeue_task(task: &Task) {
 
     let mut grq_guard = grq().lock_irqsave();
 
-    match policy {
+    let actually_dequeued = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
             grq_guard.rt_rq.dequeue(task_ptr);
+            true // RT dequeue always succeeds (no bool return)
         }
         SchedPolicy::Deadline => {
             grq_guard.dl_rq.dequeue(task_ptr);
+            true
         }
         SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-            grq_guard.cfs_rq.dequeue(task_ptr);
+            grq_guard.cfs_rq.dequeue(task_ptr)
         }
-    }
+    };
 
-    grq_guard.nr_running.fetch_update(
-        core::sync::atomic::Ordering::SeqCst,
-        core::sync::atomic::Ordering::SeqCst,
-        |v| v.checked_sub(1),
-    );
+    if actually_dequeued {
+        grq_guard.nr_running.fetch_update(
+            core::sync::atomic::Ordering::SeqCst,
+            core::sync::atomic::Ordering::SeqCst,
+            |v| v.checked_sub(1),
+        );
+    }
 }
 
 // ==================== Scheduler Tick ====================
@@ -1019,6 +1023,10 @@ pub fn scheduler_tick() {
                 let remaining = rt_entity.dec_time_slice();
                 if remaining == 0 {
                     rt_entity.reset_time_slice();
+                    // Ensure task state is RUNNING before re-enqueue,
+                    // otherwise a concurrently set INTERRUPTIBLE state would
+                    // place a sleeping task on the runqueue.
+                    unsafe { (*current).set_state(TaskState::new(TaskState::RUNNING)); }
                     let mut grq_guard = grq().lock_irqsave();
                     grq_guard.rt_rq.enqueue(current, false);
                     set_need_resched(); // Set before dropping lock to prevent lost wake-up

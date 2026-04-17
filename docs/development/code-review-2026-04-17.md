@@ -301,26 +301,26 @@
 **Linux**: `task_tick_fair()` runs for all CFS-class tasks including SCHED_IDLE.
 **Impact**: SCHED_IDLE task can starve all other CFS tasks.
 
-### [Medium] [BUG] F04-05: sched_slice integer division truncates unfairly for low-weight tasks
+### [Medium] [BUG] F04-05: sched_slice integer division truncates unfairly for low-weight tasks **[FIXED — multiply before divide using u128 to avoid truncation]**
 **File**: `sched/fair.rs:721`
 **Description**: `sched_period / load_weight * se.load.weight` — integer division truncates to 0 when `sched_period < load_weight`. Always falls back to `SCHED_MIN_GRANULARITY_NS`, losing proportional distribution.
 **Linux**: Uses `__calc_delta()` with `(period * weight * inv_weight) >> 32` to avoid truncation.
 
-### [Medium] [BUG] F04-06: DL pick_next_cpu hardcoded 64-entry stack buffer
+### [Medium] [BUG] F04-06: DL pick_next_cpu hardcoded 64-entry stack buffer **[KNOWN LIMITATION — 64 entries sufficient for practical DL task counts, stale comment fixed]**
 **File**: `sched/deadline.rs:212`
 **Description**: Fixed-size stack array of 64 entries. If more than 64 DL tasks have CPU affinity restrictions, overflow path silently skips tasks. In practice DL task counts are small.
 
-### [Medium] [BUG] F04-07: DL replenish_runtime does not advance deadline — CBS incomplete
+### [Medium] [BUG] F04-07: DL replenish_runtime does not advance deadline — CBS incomplete **[FIXED — advances deadline to now + period on replenishment]**
 **File**: `sched/deadline.rs:345-349`
 **Description**: Only refills runtime budget. CBS requires deadline also postponed to `now + period` when replenished. Throttled tasks may retain stale deadlines.
 **Linux**: `replenish_dl_entity()` advances both deadline and runtime with multi-period catching-up.
 
-### [Medium] [BUG] F04-08: nr_running decremented even when dequeue fails
+### [Medium] [BUG] F04-08: nr_running decremented even when dequeue fails **[FIXED — only decrements when CFS dequeue returns true]**
 **File**: `sched/sched.rs:927-949`
 **Description**: `dequeue_task()` always attempts `fetch_update` to decrement `nr_running` even if class-specific dequeue returned `false`. `checked_sub(1)` prevents underflow but count becomes inaccurate.
 **Impact**: Idle fast-path may incorrectly skip scheduling when tasks are runnable.
 
-### [Medium] [BUG] F04-09: RR tick re-enqueues task without setting RUNNING state
+### [Medium] [BUG] F04-09: RR tick re-enqueues task without setting RUNNING state **[FIXED — sets state to RUNNING before re-enqueue]**
 **File**: `sched/sched.rs:1019-1020`
 **Description**: RR tick handler enqueues current task when timeslice expires, but doesn't set state to RUNNING. If another thread set state to INTERRUPTIBLE between tick and enqueue, a sleeping task goes on the runqueue.
 
@@ -1565,6 +1565,16 @@
 | F03-12 | MM | lru_move_to_tail acquires lock once for del+add | **FIXED** |
 | F03-13 | MM | MemBlock add_reserved correct total_size on merge | **FIXED** |
 | F03-14 | MM | try_to_unmap/with_swap refactored to shared inner function | **FIXED** |
+
+### Batch L — F04 Scheduler fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F04-05 | Sched | sched_slice multiply-before-divide with u128 | **FIXED** |
+| F04-06 | Sched | DL pick_next_cpu 64-entry buffer (stale comment fixed) | **KNOWN LIMITATION** |
+| F04-07 | Sched | DL replenish_runtime advances deadline (now + period) | **FIXED** |
+| F04-08 | Sched | nr_running only decrements on successful dequeue | **FIXED** |
+| F04-09 | Sched | RR tick sets RUNNING state before re-enqueue | **FIXED** |
 
 ## Top 10 Highest-Impact Fixes (recommended priority)
 

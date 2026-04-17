@@ -254,7 +254,7 @@ impl DlRunQueue {
                 skipped[skip_count] = (key, task);
                 skip_count += 1;
             } else {
-                // More than 16 skipped DL tasks (very unlikely) — just re-insert
+                // More than 64 skipped DL tasks (very unlikely) — just re-insert
                 self.tasks.insert(key, task);
                 break;
             }
@@ -342,10 +342,17 @@ impl SchedDlEntity {
         self.deadline.store(new_deadline, Ordering::Release);
     }
 
-    /// Replenish runtime (called at start of period)
+    /// Replenish runtime and advance deadline (CBS replenishment)
+    ///
+    /// Called when a DL task wakes up or its period expires. Refills the
+    /// runtime budget and advances the deadline to `now + period`.
     pub fn replenish_runtime(&self) {
         let runtime = self.dl_runtime.load(Ordering::Acquire) as i64;
         self.runtime.store(runtime, Ordering::Release);
+        // Advance deadline: now + period (CBS requirement)
+        let now = crate::sched::fair::sched_clock();
+        let period = self.dl_period.load(Ordering::Acquire);
+        self.deadline.store(now + period, Ordering::Release);
         self.dl_throttled.store(false, Ordering::Release);
     }
 
