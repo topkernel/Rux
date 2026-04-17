@@ -203,16 +203,17 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     // spin-wait can detect us and proceed.
     mark_cpu_started(hart_id);
 
-    // Set up trap handling early so WFI below can actually wake on timer.
-    // Without this, sie=0 and sstatus.SIE=0, so WFI never resumes in QEMU.
+    // Set up trap handling and enable timer interrupts.
+    // Following the Linux model, tp was set to the idle task pointer by
+    // boot.S before entering this function.  This means current() is valid
+    // and the trap handler can safely access the task_struct.
     crate::arch::riscv64::trap::init();
-
     crate::arch::riscv64::trap::enable_timer_interrupt();
 
-    // Spin until boot CPU has finished ALL single-CPU initialization
-    // (devfs mknod, evdev, init ELF loading, etc.).
+    // Wait for boot CPU to finish ALL single-CPU initialization.
+    // WFI yields the CPU in QEMU tcg single-threaded mode.
     while !is_boot_complete() {
-        core::hint::spin_loop();
+        unsafe { crate::arch::riscv64::cpu::wfi(); }
     }
 
     // Boot CPU has finished init — safe to call kmalloc now.

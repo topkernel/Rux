@@ -400,9 +400,26 @@ secondary_start:
     // Set sscratch = 0 (kernel mode indicator)
     csrw sscratch, zero
 
-    // a0 = hartid (still in tp)
-    mv a0, tp
-    // Jump to Rust secondary CPU entry
+    // Linux-style: load tp from pre-created idle task pointer array.
+    // sched::init() pre-creates idle tasks for ALL CPUs and stores
+    // pointers in __secondary_idle_tasks[].  Loading tp here (before
+    // any C code or interrupt enable) makes current() valid from the
+    // very first instruction of secondary_cpu_entry.
+    la t0, __secondary_idle_tasks
+    // tp currently holds hartid — use it as index (hartid * 8)
+    slli t1, tp, 3
+    add t0, t0, t1
+    ld  t1, 0(t0)              // t1 = idle task pointer for this hart
+    // If not yet populated (should not happen), fall back to hartid
+    bnez t1, .Ltp_loaded
+    mv  t1, tp
+.Ltp_loaded:
+    // Save hartid for secondary_cpu_entry argument
+    mv  a0, tp
+    // Set tp to idle task pointer
+    mv  tp, t1
+
+    // Jump to Rust secondary CPU entry (a0 = hartid, tp = idle task)
     la t0, secondary_cpu_entry
     jr t0
 

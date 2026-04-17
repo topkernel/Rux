@@ -165,7 +165,12 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
         // On RISC-V, when WFI is interrupted, sepc points to WFI itself.
         // After sret, the CPU would re-execute WFI, causing the idle loop
         // to never advance past WFI. Advancing epc by 4 skips WFI.
-        if !regs_ref.user_mode() && regs_ref.epc % 4 == 0 {
+        //
+        // Safety: epc must be in the mapped kernel text region (SV39 canonical
+        // upper half) before dereferencing.  During early SMP boot, sepc may
+        // contain an unmapped physical address, which would trigger a nested
+        // page fault and kernel panic.
+        if !regs_ref.user_mode() && regs_ref.epc % 4 == 0 && (regs_ref.epc >> 48) == 0xffff {
             const WFI_INSN: u32 = 0x10500073;
             let insn = core::ptr::read_volatile(regs_ref.epc as *const u32);
             if insn == WFI_INSN {
@@ -253,6 +258,14 @@ fn handle_timer_interrupt(_regs: &mut PtRegs, cpu: usize) {
 
     // Re-arm timer: set stimecmp to a future deadline.
     crate::drivers::timer::set_next_trigger();
+
+    // Skip scheduler/schedule logic during early SMP boot (tp = hart_id,
+    // no current task).  scheduler_tick() may call wake_up_process() which
+    // interacts with the runqueue; schedule() with null current returns
+    // early but the intermediate state can be inconsistent.
+    if crate::sched::current().is_none() {
+        return;
+    }
 
     // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();

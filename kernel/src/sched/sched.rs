@@ -372,6 +372,12 @@ static mut IDLE_TASK_STORAGES: [core::mem::MaybeUninit<Task>; MAX_CPUS] = [
     core::mem::MaybeUninit::uninit(),
 ];
 
+/// Per-CPU idle task pointers, accessed by boot.S to set tp on secondary CPUs.
+/// Written once by sched::init() on the boot CPU, read by secondary_start in
+/// assembly before any C code runs.  0 means not yet initialized.
+#[no_mangle]
+static mut __secondary_idle_tasks: [usize; MAX_CPUS] = [0; MAX_CPUS];
+
 // ==================== Reschedule Flags ====================
 
 #[inline]
@@ -506,25 +512,18 @@ pub fn init_secondary(cpu_id: usize) {
         return;
     }
 
-    init_per_cpu_rq(cpu_id);
-
-    // SAFETY: cpu_id is bounds-checked; IDLE_TASK_STORAGES[cpu_id] is a per-CPU
-    // MaybeUninit<Task> only written during secondary CPU init; Task::new_idle_at
-    // initializes the Task in-place before any pointer dereferences.
+    // tp was already set to the idle task pointer by boot.S (loaded from
+    // __secondary_idle_tasks).  Just register with the per-CPU state.
     unsafe {
-        let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
-        Task::new_idle_at(idle_ptr);
+        let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_ptr() as *mut Task;
 
-        crate::process::pid_hash::pid_hash_insert(idle_ptr);
-
-        if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
-            (*idle_ptr).thread_mut().sp = stack_top as u64;
-        }
-
-        (*idle_ptr).set_ti_cpu(cpu_id as i32);
+        // Verify tp matches the pre-created idle task
+        let current_tp: usize;
+        core::arch::asm!("mv {}, tp", out(reg) current_tp);
+        debug_assert_eq!(current_tp, idle_ptr as usize,
+            "init_secondary: tp mismatch! tp={:#x}, expected={:#x}", current_tp, idle_ptr as usize);
 
         core::arch::asm!("csrw sscratch, zero");
-        core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
 
         let pcpu = cpu_state_mut(cpu_id);
         pcpu.idle = idle_ptr;
@@ -533,37 +532,49 @@ pub fn init_secondary(cpu_id: usize) {
 }
 
 pub fn init() {
-    let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    let boot_cpu = crate::arch::cpu_id() as u64 as usize;
 
-    if cpu_id >= MAX_CPUS {
-        println!("sched: init: invalid cpu_id {}", cpu_id);
+    if boot_cpu >= MAX_CPUS {
+        println!("sched: init: invalid cpu_id {}", boot_cpu);
         return;
     }
 
-    init_per_cpu_rq(cpu_id);
+    // Pre-create idle tasks for ALL CPUs (Linux model).
+    // This must happen before start_secondaries() so that boot.S can
+    // load tp from __secondary_idle_tasks before any C code runs on
+    // secondary harts, allowing safe early interrupt enable.
+    for cpu in 0..MAX_CPUS {
+        init_per_cpu_rq(cpu);
 
-    // SAFETY: cpu_id is bounds-checked above; IDLE_TASK_STORAGES[cpu_id] is a
-    // per-CPU MaybeUninit<Task> only written during boot init.
-    unsafe {
-        let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_mut_ptr();
-        Task::new_idle_at(idle_ptr);
+        // SAFETY: cpu is bounds-checked (loop 0..MAX_CPUS);
+        // IDLE_TASK_STORAGES[cpu] is a per-CPU MaybeUninit<Task>
+        // only written once during init.
+        unsafe {
+            let idle_ptr = IDLE_TASK_STORAGES[cpu].as_mut_ptr();
+            Task::new_idle_at(idle_ptr);
 
-        crate::process::pid_hash::pid_hash_insert(idle_ptr);
+            crate::process::pid_hash::pid_hash_insert(idle_ptr);
 
-        if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
-            (*idle_ptr).thread_mut().sp = stack_top as u64;
-        } else {
-            println!("sched: failed to allocate kernel stack for idle task");
+            if let Some(stack_top) = (*idle_ptr).alloc_kernel_stack() {
+                (*idle_ptr).thread_mut().sp = stack_top as u64;
+            } else {
+                println!("sched: failed to allocate kernel stack for idle task cpu {}", cpu);
+            }
+
+            (*idle_ptr).set_ti_cpu(cpu as i32);
+
+            // Store pointer for assembly secondary_start
+            __secondary_idle_tasks[cpu] = idle_ptr as usize;
+
+            if cpu == boot_cpu {
+                core::arch::asm!("csrw sscratch, zero");
+                core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
+
+                let pcpu = cpu_state_mut(cpu);
+                pcpu.idle = idle_ptr;
+                pcpu.current = idle_ptr;
+            }
         }
-
-        (*idle_ptr).set_ti_cpu(cpu_id as i32);
-
-        core::arch::asm!("csrw sscratch, zero");
-        core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
-
-        let pcpu = cpu_state_mut(cpu_id);
-        pcpu.idle = idle_ptr;
-        pcpu.current = idle_ptr;
     }
 }
 
