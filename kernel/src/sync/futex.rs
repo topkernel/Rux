@@ -518,8 +518,10 @@ pub fn futex_requeue(
     let mut requeue_list: [Option<usize>; 32] = [None; 32];
     let mut requeue_count = 0usize;
 
-    // Phase 1: Lock source bucket, collect entries to wake/requeue.
-    {
+    // Lock both buckets to prevent requeued entries from being in limbo.
+    // Use address ordering (lower index first) to avoid ABBA deadlock.
+    if bucket1 == bucket2 {
+        // Same bucket — lock once.
         let mut head1 = HASH_HEADS[bucket1].lock_irqsave();
 
         let mut prev: Option<usize> = None;
@@ -540,21 +542,17 @@ pub fn futex_requeue(
                 continue;
             }
 
-            // This waiter is on uaddr. Decide: wake or requeue?
             if woken < nr_wake {
-                // Wake this waiter.
                 let task = {
                     let slot = WAITER_POOL[idx].lock_irqsave();
                     slot.as_ref().map(|w| w.task).unwrap_or(core::ptr::null_mut())
                 };
-                // Unlink from chain.
                 if prev.is_none() {
                     *head1 = next;
                 } else if let Some(p) = prev {
                     let mut ps = WAITER_POOL[p].lock_irqsave();
                     if let Some(ref mut pw) = *ps { pw.next = next; }
                 }
-                // Mark woken so futex_wait knows it was explicitly woken.
                 {
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot { w.woken = true; }
@@ -571,52 +569,118 @@ pub fn futex_requeue(
             } else if requeue_count < requeue_list.len()
                 && (requeue_count as i32) < nr_requeue
             {
-                // Requeue this waiter to uaddr2.
-                // Unlink from source chain.
-                if prev.is_none() {
-                    *head1 = next;
-                } else if let Some(p) = prev {
-                    let mut ps = WAITER_POOL[p].lock_irqsave();
-                    if let Some(ref mut pw) = *ps { pw.next = next; }
-                }
-                // Update key to destination (next will be set on insertion).
+                // Same bucket — just update the key, stay in chain.
                 {
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot {
                         w.key = key2;
-                        w.next = None;
                     }
                 }
                 requeue_list[requeue_count] = Some(idx);
                 requeue_count += 1;
                 ret += 1;
+                prev = Some(idx);
                 cur = next;
             } else {
-                // Both limits reached — stop processing.
                 break;
             }
         }
-    }
-    // bucket1 lock released.
+    } else {
+        // Different buckets — lock both with deadlock-avoidance ordering.
+        let (lo, hi) = if bucket1 < bucket2 {
+            (bucket1, bucket2)
+        } else {
+            (bucket2, bucket1)
+        };
 
-    // Phase 2: Wake collected tasks outside the lock.
+        let mut guard_lo = HASH_HEADS[lo].lock_irqsave();
+        let mut guard_hi = HASH_HEADS[hi].lock_irqsave();
+
+        // Get references to the actual heads we need.
+        let (head1_ref, head2_ref) = if bucket1 < bucket2 {
+            (&mut *guard_lo, &mut *guard_hi)
+        } else {
+            (&mut *guard_hi, &mut *guard_lo)
+        };
+
+        let mut prev: Option<usize> = None;
+        let mut cur = *head1_ref;
+
+        while let Some(idx) = cur {
+            let (matches, next) = {
+                let slot = WAITER_POOL[idx].lock_irqsave();
+                match *slot {
+                    Some(ref w) => (w.key.matches(&key1), w.next),
+                    None => break,
+                }
+            };
+
+            if !matches {
+                prev = Some(idx);
+                cur = next;
+                continue;
+            }
+
+            if woken < nr_wake {
+                let task = {
+                    let slot = WAITER_POOL[idx].lock_irqsave();
+                    slot.as_ref().map(|w| w.task).unwrap_or(core::ptr::null_mut())
+                };
+                if prev.is_none() {
+                    *head1_ref = next;
+                } else if let Some(p) = prev {
+                    let mut ps = WAITER_POOL[p].lock_irqsave();
+                    if let Some(ref mut pw) = *ps { pw.next = next; }
+                }
+                {
+                    let mut slot = WAITER_POOL[idx].lock_irqsave();
+                    if let Some(ref mut w) = *slot { w.woken = true; }
+                }
+                free_waiter(idx);
+
+                if !task.is_null() && wake_count < wake_list.len() {
+                    wake_list[wake_count] = Some(task);
+                    wake_count += 1;
+                }
+                woken += 1;
+                ret += 1;
+                cur = next;
+            } else if requeue_count < requeue_list.len()
+                && (requeue_count as i32) < nr_requeue
+            {
+                // Unlink from source chain.
+                if prev.is_none() {
+                    *head1_ref = next;
+                } else if let Some(p) = prev {
+                    let mut ps = WAITER_POOL[p].lock_irqsave();
+                    if let Some(ref mut pw) = *ps { pw.next = next; }
+                }
+                // Update key and insert into destination chain immediately.
+                {
+                    let mut slot = WAITER_POOL[idx].lock_irqsave();
+                    if let Some(ref mut w) = *slot {
+                        w.key = key2;
+                        w.next = *head2_ref;
+                    }
+                }
+                *head2_ref = Some(idx);
+
+                requeue_list[requeue_count] = Some(idx);
+                requeue_count += 1;
+                ret += 1;
+                cur = next;
+            } else {
+                break;
+            }
+        }
+        drop(guard_lo);
+        drop(guard_hi);
+    }
+
+    // Wake collected tasks outside the lock.
     for i in 0..wake_count {
         if let Some(task) = wake_list[i] {
             Task::wake_up(task);
-        }
-    }
-
-    // Phase 3: Insert requeued entries into destination bucket.
-    if requeue_count > 0 {
-        let mut head2 = HASH_HEADS[bucket2].lock_irqsave();
-        for i in 0..requeue_count {
-            if let Some(idx) = requeue_list[i] {
-                let mut slot = WAITER_POOL[idx].lock_irqsave();
-                if let Some(ref mut w) = *slot {
-                    w.next = *head2;
-                }
-                *head2 = Some(idx);
-            }
         }
     }
 

@@ -283,6 +283,9 @@ macro_rules! wait_event {
     }};
 }
 
+/// Wait for a condition to become true, interruptible by signals.
+///
+/// Returns 0 on success (condition met), or -ERESTARTSYS if interrupted by a signal.
 #[macro_export]
 macro_rules! wait_event_interruptible {
     ($wq_head:expr, $condition:expr) => {{
@@ -290,17 +293,17 @@ macro_rules! wait_event_interruptible {
         let _ret = loop {
             // Check condition first (fast path, no locking needed)
             if $condition {
-                break true;
+                break 0i32;
             }
 
             // Check for pending signals
             if crate::signal::signal_pending() {
-                break false;
+                break -512i32; // -ERESTARTSYS
             }
 
             let current = match crate::sched::current() {
                 Some(task) => task,
-                None => break true,
+                None => break 0i32,
             };
 
             // Atomically add to wait queue AND set INTERRUPTIBLE (under lock).
@@ -313,7 +316,13 @@ macro_rules! wait_event_interruptible {
             if $condition {
                 // Condition met — restore RUNNING and remove from queue
                 wq_head.finish_wait(current);
-                break true;
+                break 0i32;
+            }
+
+            // Re-check signals after prepare_to_wait
+            if crate::signal::signal_pending() {
+                wq_head.finish_wait(current);
+                break -512i32; // -ERESTARTSYS
             }
 
             // Enable interrupts before schedule(). We're in syscall context

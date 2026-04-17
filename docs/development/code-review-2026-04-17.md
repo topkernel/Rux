@@ -93,32 +93,38 @@
 **Linux**: `include/uapi/asm-generic/signal.h` defines all 1-31.
 **Impact**: POSIX signals 23-31 have wrong default behavior (ignored instead of terminate/stop).
 
-### [Medium] [ABI] F02-04: SigInfo struct is 20 bytes but Linux siginfo_t is 128 bytes
+### [Medium] [ABI] F02-04: SigInfo struct is 20 bytes but Linux siginfo_t is 128 bytes [FIXED]
+**Fix**: Expanded `SigInfo` to 128 bytes matching Linux siginfo_t layout with union payload.
 **File**: `signal.rs:496-509`
 **Description**: Rux `SigInfo` has `{si_signo, si_code, si_pid, si_uid, si_status}` = 20 bytes. Missing `si_errno` field. Linux `siginfo_t` is 128 bytes. musl expects 128 bytes — handler reads past actual data.
 **Impact**: SA_SIGINFO handlers reading past first two fields get garbage or fault.
 
-### [Medium] [ABI] F02-05: SigContext missing floating-point state
+### [Medium] [ABI] F02-05: SigContext missing floating-point state [FIXED]
+**Fix**: Added `sc_fpregs: [u64; 32]` and `sc_fcsr: u64` to SigContext.
 **File**: `signal.rs:558-565`
 **Description**: Rux `SigContext` has only integer registers (264 bytes). Linux `struct sigcontext` includes FPU state (~784 bytes total). FP registers not saved/restored across signal handlers.
 **Linux**: `struct sigcontext` includes `sc_fpregs` union for FPU state.
 **Impact**: Any program using floating-point (including printf %f) gets corrupted FP registers after signal handler.
 
-### [Medium] [POSIX] F02-06: SA_RESTART logic incorrect — applies to saved PC, not syscall restart
+### [Medium] [POSIX] F02-06: SA_RESTART logic incorrect — applies to saved PC, not syscall restart [FIXED]
+**Fix**: Now checks for ERESTARTSYS/ERESTARTNOHAND in a0 instead of blindly rewinding PC.
 **File**: `signal.rs:893-898`
 **Description**: Checks `SA_RESTART` and rewinds PC by 4. Linux's mechanism decides restart based on internal return codes (`-ERESTARTSYS`), then checks `SA_RESTART` to convert restart to `-EINTR`.
 **Impact**: Syscalls interrupted by signals behave differently than Linux.
 
-### [Medium] [POSIX] F02-07: SIGTTOU/SIGTTIN default action is "ignore" but POSIX says "stop"
+### [Medium] [POSIX] F02-07: SIGTTOU/SIGTTIN default action is "ignore" but POSIX says "stop" [FIXED]
+**Fix**: Moved SIGTTIN(21)/SIGTTOU(22) to stop group (same as SIGSTOP).
 **File**: `signal.rs:1059`
 **Description**: SIGTTIN(21) and SIGTTOU(22) handled as "ignore" in same case as SIGCHLD. POSIX default is "stop" (same as SIGSTOP).
 **Impact**: Background terminal I/O won't stop the process as expected.
 
-### [Medium] [BUG] F02-08: Persistent log timestamp conversion incorrect
+### [Medium] [BUG] F02-08: Persistent log timestamp conversion incorrect [FIXED]
+**Fix**: Changed `timestamp / 1000` to `timestamp / 10` for correct microsecond conversion at 10MHz.
 **File**: `printk.rs:1120`
 **Description**: `timestamp / 1000` but TIMER_FREQ=10MHz, so correct conversion to microseconds is `timestamp / 10`. Timestamps are off by 100x. (Persistent logging currently disabled.)
 
-### [Medium] [BUG] F02-09: is_root_readonly() returns inverted result
+### [Medium] [BUG] F02-09: is_root_readonly() returns inverted result [FIXED]
+**Fix**: Removed `!` negation, now correctly returns `has_param("ro")`.
 **File**: `cmdline.rs:528-531`
 **Description**: Returns `!has_param("ro")` — returns `true` when root is NOT readonly. Function unused outside tests.
 
@@ -497,12 +503,14 @@
 **File**: `sync/semaphore.rs:160-204`
 **Description**: Same issue as F06-02 applies to `down_interruptible()`. Post-wakeup CAS loop has identical failure mode.
 
-### [Medium] [BUG] F06-08: wait_event_interruptible returns bool, no -ERESTARTSYS
+### [Medium] [BUG] F06-08: wait_event_interruptible returns bool, no -ERESTARTSYS [FIXED]
+**Fix**: Macro now returns `i32` (0 on success, -512/-ERESTARTSYS on signal). Updated callers.
 **File**: `process/wait.rs:278-323`
 **Description**: Returns `true`/`false` instead of `0`/`-ERESTARTSYS`. Callers must manually translate. Risk of silent success on signal.
 **Linux**: Returns `-ERESTARTSYS` on signal, 0 on success.
 
-### [Medium] [BUG] F06-11: futex_requeue doesn't hold bucket2 lock, waiter leak window
+### [Medium] [BUG] F06-11: futex_requeue doesn't hold bucket2 lock, waiter leak window [FIXED]
+**Fix**: Hold both bucket locks simultaneously with deadlock-avoidance ordering (lower index first). Requeued entries are unlinked from bucket1 and immediately inserted into bucket2 under both locks, eliminating the limbo window. Same-bucket case handled separately with single lock.
 **File**: `sync/futex.rs:609-621`
 **Description**: Between Phase 1 (unlink from bucket1) and Phase 3 (insert into bucket2), requeued entries are in limbo. If `futex_cleanup` runs for waiting task, entry is orphaned, leaking waiter slot.
 **Linux**: Holds both hash bucket locks via `double_lock_hb()`.
@@ -1553,6 +1561,14 @@
 | F11-16 | Syscall | Negative return truncation in io.rs (`as u32 as u64`) | **FIXED** (i64 refactor) |
 | F06-03 | Sync | down_interruptible shares same deadlock as down() | **FIXED** |
 | F06-16 | Sync | Condvar wait_interruptible() same lost-wakeup race | **FIXED** |
+| F02-04 | Signal | SigInfo 20 bytes should be 128 | **FIXED** |
+| F02-05 | Signal | SigContext missing floating-point state | **FIXED** |
+| F02-06 | Signal | SA_RESTART checks ERESTARTSYS instead of blindly rewinding PC | **FIXED** |
+| F02-07 | Signal | SIGTTIN/SIGTTOU default changed to stop (POSIX) | **FIXED** |
+| F02-08 | Kernel | Log timestamp / 1000 → / 10 for correct us conversion | **FIXED** |
+| F02-09 | Kernel | is_root_readonly() removed inverted negation | **FIXED** |
+| F06-08 | Sync | wait_event_interruptible returns i32 with -ERESTARTSYS | **FIXED** |
+| F06-11 | Sync | futex_requeue holds both bucket locks with ordering | **FIXED** |
 
 ## Top 10 Highest-Impact Fixes (recommended priority)
 
@@ -1560,9 +1576,9 @@
 2. ~~**F06-02**: Semaphore deadlock — woken waiter sleeps forever~~ **FIXED**
 3. ~~**F06-15**: Condvar lost-wakeup — deadlock under concurrent signal/wait~~ **FIXED**
 4. **F10-21**: TCP checksum byte order error — peers reject our packets
-5. **F08-04/05**: ext4 dir entry inode==0 break — files disappear, rmdir deletes non-empty dirs
-6. **F05-11**: AT_RANDOM hardcoded — stack canary identical across all processes
+5. ~~**F08-04/05**: ext4 dir entry inode==0 break — files disappear, rmdir deletes non-empty dirs~~ **FIXED**
+6. ~~**F05-11**: AT_RANDOM hardcoded — stack canary identical across all processes~~ **FIXED**
 7. ~~**F02-01**: SignalFrame uc pointer off by 4 — SA_SIGINFO handlers read corrupted ucontext~~ **FIXED**
-8. **F07-03**: Pipe double-free — kernel panic on pipe close
+8. ~~**F07-03**: Pipe double-free — kernel panic on pipe close~~ **FIXED**
 9. ~~**F09-11**: SumGuard t6 clobber — potential data corruption~~ **FIXED**
 10. **F10-11**: ARP byte order mismatch — all outbound traffic uses broadcast MAC

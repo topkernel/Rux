@@ -67,9 +67,9 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
             // 1. The UART IRQ handler (when it works), or
             // 2. The scheduler_tick polling hook (temporary workaround)
             let wq = console::read_waitq();
-            let interrupted = !crate::wait_event_interruptible!(wq, console::uart_has_data());
+            let ret = crate::wait_event_interruptible!(wq, console::uart_has_data());
 
-            if interrupted {
+            if ret != 0 {
                 if bytes_read > 0 {
                     return bytes_read as isize;
                 }

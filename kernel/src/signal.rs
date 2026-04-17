@@ -511,19 +511,31 @@ impl Clone for SignalStruct {
 
 /// Signal info structure
 ///
+/// Signal info structure (siginfo_t), 128 bytes matching Linux ABI.
+///
+/// Layout on RISC-V (little-endian):
+///   [0..4]   si_signo   i32
+///   [4..8]   si_errno   i32  (always 0 for kernel-generated)
+///   [8..12]  si_code    i32
+///   [12..16] _pad0      i32
+///   [16..24] _sifields._kill.si_pid   i32 (+ padding)
+///   [24..32] _sifields._kill.si_uid   u32 (+ padding)
+///   [32..128] remaining union/padding  96 bytes
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SigInfo {
-    /// Signal number
     pub si_signo: i32,
-    /// Signal code
+    pub si_errno: i32,
     pub si_code: i32,
-    /// Sending process PID
-    pub si_pid: u32,
-    /// Sending process UID
+    _pad0: i32,
+    // _sifields union — we use _kill layout (pid + uid) for simplicity.
+    // Other union members share the same offset space.
+    pub si_pid: i32,
+    _pad1: i32,
     pub si_uid: u32,
-    /// Exit status or error value
-    pub si_status: i32,
+    _pad2: u32,
+    // Remaining 88 bytes to reach 128 total.
+    _rest: [u8; 88],
 }
 
 impl SigInfo {
@@ -531,22 +543,24 @@ impl SigInfo {
     pub fn new(signo: i32, code: i32, pid: u32, uid: u32) -> Self {
         Self {
             si_signo: signo,
+            si_errno: 0,
             si_code: code,
-            si_pid: pid,
+            _pad0: 0,
+            si_pid: pid as i32,
+            _pad1: 0,
             si_uid: uid,
-            si_status: 0,
+            _pad2: 0,
+            _rest: [0u8; 88],
         }
     }
 
     /// Create child process exit signal info
     pub fn child(pid: u32, uid: u32, status: i32) -> Self {
-        Self {
-            si_signo: Signal::SIGCHLD as i32,
-            si_code: 1, // CLD_EXITED
-            si_pid: pid,
-            si_uid: uid,
-            si_status: status,
-        }
+        let mut info = Self::new(Signal::SIGCHLD as i32, 1, pid, uid);
+        // si_status is at offset 32 in the _sifields._sigchld union member.
+        // For _kill layout, offset 32 falls into _rest.
+        info._rest[..4].copy_from_slice(&status.to_le_bytes());
+        info
     }
 }
 
@@ -578,13 +592,17 @@ pub mod si_code {
 pub struct SigContext {
     /// General-purpose registers: [pc, ra, sp, gp, tp, t0-t6, s0-s11, a0-a7] (32 entries)
     pub sc_regs: [u64; 32],
-    /// sstatus CSR (kernel-internal, not part of Linux UAPI)
+    /// sstatus CSR
     pub sc_status: u64,
+    /// Floating-point registers f0-f31 (32 entries)
+    pub sc_fpregs: [u64; 32],
+    /// Floating-point control and status register
+    pub sc_fcsr: u64,
 }
 
 impl Default for SigContext {
     fn default() -> Self {
-        Self { sc_regs: [0u64; 32], sc_status: 0 }
+        Self { sc_regs: [0u64; 32], sc_status: 0, sc_fpregs: [0u64; 32], sc_fcsr: 0 }
     }
 }
 
@@ -903,16 +921,24 @@ unsafe fn setup_frame(
     frame.uc.uc_mcontext.sc_regs[30] = regs.t5;  // x30 (t5)
     frame.uc.uc_mcontext.sc_regs[31] = regs.t6;  // x31 (t6)
 
-    // SA_RESTART / EINTR handling:
-    // If SA_RESTART is set and we are returning from a syscall (a7 holds
-    // a valid syscall number), rewind PC by 4 bytes so that sigreturn
-    // restarts the ecall instruction.
-    // If SA_RESTART is not set, set saved a0 to -EINTR.
-    let is_syscall = regs.a7 > 0 && regs.a7 < 300;
-    if action.sa_flags.bits() & SigFlags::SA_RESTART != 0 && is_syscall {
-        frame.uc.uc_mcontext.sc_regs[0] = regs.epc - 4;
-    } else {
-        frame.uc.uc_mcontext.sc_regs[10] = (-(crate::errno::constants::EINTR as i64)) as u64;
+    // Syscall restart handling (Linux approach):
+    // Only intervene when the interrupted syscall returned a restart code
+    // (ERESTARTSYS, ERESTARTNOHAND, etc.). The dispatch layer sets a0 to
+    // these sentinel values; we check for them here.
+    // - If SA_RESTART is set: rewind PC by 4 to re-execute the ecall.
+    // - If SA_RESTART is not set: replace a0 with -EINTR.
+    // If no restart code is present, leave the registers untouched.
+    const ERESTARTSYS: i64 = -512;
+    const ERESTARTNOHAND: i64 = -514;
+    let a0_val = regs.a0 as i64;
+    if a0_val == ERESTARTSYS || a0_val == ERESTARTNOHAND {
+        if action.sa_flags.bits() & SigFlags::SA_RESTART != 0 && a0_val == ERESTARTSYS {
+            // Rewind PC to re-execute the ecall instruction.
+            frame.uc.uc_mcontext.sc_regs[0] = regs.epc - 4;
+        } else {
+            // Convert restart code to -EINTR for userspace.
+            frame.uc.uc_mcontext.sc_regs[10] = (-(crate::errno::constants::EINTR as i64)) as u64;
+        }
     }
 
     // Save sstatus
@@ -1078,22 +1104,17 @@ fn handle_default_signal(sig: i32) {
             // Default ignore
         }
         // SIGCONT(18): wake stopped process
-        18 | 21 | 22 => {
-            // SIGCHLD: child process status changed, default ignore
-            // SIGCONT: continue stopped process
-            // SIGTTIN, SIGTTOU: background terminal I/O, default ignore
-            if sig == 18 {
-                // SIGCONT: wake stopped process
-                if let Some(current) = sched::current() {
-                    if current.state().contains(TaskState::STOPPED) {
-                        current.set_state(TaskState::new(TaskState::RUNNING));
-                        signal_wake_up(current as *const _ as *mut _);
-                    }
+        18 => {
+            // SIGCONT: wake stopped process
+            if let Some(current) = sched::current() {
+                if current.state().contains(TaskState::STOPPED) {
+                    current.set_state(TaskState::new(TaskState::RUNNING));
+                    signal_wake_up(current as *const _ as *mut _);
                 }
             }
         }
-        // Stop process
-        19 | 20 => {
+        // Stop process: SIGSTOP(19), SIGTSTP(20), SIGTTIN(21), SIGTTOU(22)
+        19 | 20 | 21 | 22 => {
             // SIGSTOP, SIGTSTP - stop process
             // SAFETY: current is a valid task pointer from sched::current().
             unsafe {

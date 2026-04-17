@@ -527,7 +527,7 @@ pub fn get_init_program() -> String {
 /// Check if root filesystem is read-only
 pub fn is_root_readonly() -> bool {
     // Default is read-write, unless ro is specified
-    !has_param("ro")
+    has_param("ro")
 }
 
 /// Check if in debug mode

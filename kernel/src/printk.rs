@@ -1117,7 +1117,7 @@ mod persistent_log {
         } else {
             "unk"
         };
-        let timestamp_us = timestamp / 1000;
+        let timestamp_us = timestamp / 10; // cycles to microseconds (10MHz clock)
 
         let mut line_buf = [0u8; 300];
         let mut pos = 0;
