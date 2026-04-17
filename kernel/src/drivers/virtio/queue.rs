@@ -556,22 +556,17 @@ impl VirtQueue {
         let used_idx = self.get_used();
         let avail_idx = self.get_avail();
 
-        // Try to reclaim descriptors that the device has finished with.
-        // We can reclaim all descriptors from (last_avail_base .. used_idx).
-        if used_idx != avail_idx {
-            // The available ring wraps around, so last_avail_base may not be
-            // simply (avail_idx - 3).  Instead, find the base of the last
-            // submitted chain by scanning back from avail_idx.
-            // The simplest safe approach: reclaim everything up to used_idx
-            // but only if used_idx has advanced past our current next_desc.
-            //
-            // Reclaim range: we know the device is done with descriptors
-            // whose id < used_idx (the device has written them to used ring).
-            // So advance next_desc to max(next_desc, used_idx).
-            let used_idx_safe = used_idx;
-            if self.next_desc.load(Ordering::Acquire) < used_idx_safe {
-                self.next_desc.store(used_idx_safe, Ordering::Release);
-            }
+        // Reclaim descriptors that the device has finished with.
+        // The device has consumed up to used_idx; we can safely reuse those.
+        if self.next_desc.load(Ordering::Acquire) < used_idx {
+            self.next_desc.store(used_idx, Ordering::Release);
+        }
+
+        // Check if all descriptors are in flight (avail - used >= queue_size)
+        // Note: indices wrap at u16::MAX, not queue_size.
+        let in_flight = avail_idx.wrapping_sub(used_idx);
+        if in_flight >= self.queue_size {
+            return None;
         }
 
         let idx = self.next_desc.fetch_add(1, Ordering::AcqRel) % self.queue_size;

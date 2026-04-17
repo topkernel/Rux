@@ -168,41 +168,13 @@ pub fn init_network_devices() -> usize {
 /// Initialize all block devices
 ///
 /// # Notes
-/// Probes and initializes VirtIO-Blk devices
+/// Block devices are already initialized by virtio_probe_devices() in init_network_devices().
+/// This function is a no-op to prevent double initialization.
 ///
 /// # Returns
-/// Number of initialized devices
+/// 0 (devices already initialized)
 pub fn init_block_devices() -> usize {
-    let mut device_count = 0;
-
-    // Scan all VirtIO device slots
-    for device_index in 0..VIRTIO_MAX_DEVICES {
-        let base_addr = VIRTIO_MMIO_BASE + (device_index as u64 * VIRTIO_MMIO_SIZE);
-
-        // Quick read magic number
-        let magic = unsafe {
-            let magic_ptr = base_addr as *const u32;
-            core::ptr::read_volatile(magic_ptr)
-        };
-
-        // Check magic number ("virt" = 0x74726976)
-        if magic == 0x74726976 {
-            // Read device ID
-            let device_id = unsafe {
-                let device_id_ptr = (base_addr + 8) as *const u32;
-                core::ptr::read_volatile(device_id_ptr)
-            };
-
-            // Check if block device
-            if device_id == 2 {
-                if init_virtio_blk(base_addr).is_ok() {
-                    device_count += 1;
-                }
-            }
-        }
-    }
-
-    device_count
+    0
 }
 
 /// Initialize PCI block devices

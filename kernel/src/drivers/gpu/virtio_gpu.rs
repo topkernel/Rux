@@ -657,7 +657,7 @@ impl VirtioGpuDevice {
             #[cfg(feature = "riscv64")]
             core::arch::asm!("fence");
 
-            avail.idx = avail.idx.wrapping_add(1);
+            write_volatile(core::ptr::addr_of_mut!(avail.idx), avail.idx.wrapping_add(1));
             fence(Ordering::SeqCst);
 
             // Notify device

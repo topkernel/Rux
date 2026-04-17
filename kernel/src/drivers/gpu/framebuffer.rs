@@ -125,6 +125,10 @@ impl FrameBuffer {
 
     /// Draw a rectangle border
     pub fn blit_rect(&self, x: u32, y: u32, width: u32, height: u32, color: u32, thickness: u32) {
+        // Guard against underflow when thickness > width/height
+        if thickness > width || thickness > height {
+            return;
+        }
         // Top edge
         self.fill_rect(x, y, width, thickness, color);
         // Bottom edge

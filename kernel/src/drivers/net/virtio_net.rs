@@ -9,47 +9,6 @@ use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdTyp
 use crate::net::buffer::SkBuff;
 use crate::sync::spinlock::Spinlock;
 
-/// VirtIO network device register layout
-///
-/// Corresponds to VirtIO network device MMIO registers
-/// VirtIO Legacy MMIO Register Layout
-#[repr(C)]
-pub struct VirtIONetRegs {
-    _padding0: [u8; 0x00],  // 0x00
-    /// Magic number (0x74726976 "virt")
-    pub magic_value: u32,   // 0x00
-    /// Version
-    pub version: u32,        // 0x04
-    /// Device ID (network device = 1)
-    pub device_id: u32,      // 0x08
-    /// Vendor ID
-    pub vendor: u32,         // 0x0C
-    _padding1: [u8; 0x04],  // 0x10-0x13
-    /// Device features
-    pub device_features: u32, // 0x14
-    _padding2: [u8; 0x18],  // 0x18-0x2F
-    /// Queue select
-    pub queue_sel: u32,      // 0x30
-    /// Queue max count
-    pub queue_num_max: u32, // 0x34
-    /// Queue count
-    pub queue_num: u32,      // 0x38
-    /// Queue ready
-    pub queue_ready: u32,    // 0x3C
-    /// Queue notify
-    pub queue_notify: u32,  // 0x40
-    _padding3: [u8; 0x0C],  // 0x44-0x4F
-    /// Driver status
-    pub status: u32,         // 0x50
-    _padding4: [u8; 0x4C],  // 0x54-0x9F
-    /// Queue descriptor table address
-    pub queue_desc: u64,     // 0xA0
-    /// Queue available ring address
-    pub queue_driver: u64,   // 0xA8
-    /// Queue used ring address
-    pub queue_device: u64,   // 0xB0
-}
-
 /// VirtIO network device configuration
 ///
 /// Corresponds to VirtIO network device configuration space
@@ -565,9 +524,14 @@ impl VirtIONetDevice {
                 }
             };
 
-            // Set descriptor
+            // Set descriptor — DMA needs physical address
+            // SAFETY: buf_ptr is a valid kernel virtual address from alloc; virt_to_phys
+            // converts to the corresponding physical address for DMA.
+            let buf_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(buf_ptr as u64)
+            ).0 as u64;
             // VIRTQ_DESC_F_WRITE = 2 means device can write
-            queue.set_desc(desc_idx, buf_ptr as u64, buf_size as u32, 2, 0);
+            queue.set_desc(desc_idx, buf_phys, buf_size as u32, 2, 0);
 
             // Record buffer address
             rx_buffers.push(buf_ptr as u64);

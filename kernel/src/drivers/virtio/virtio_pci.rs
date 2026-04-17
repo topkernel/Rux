@@ -151,14 +151,18 @@ impl VirtIOPCI {
             // Read capability fields
             let bar = self.pci_config.read_config_byte(cap_offset + 4);
 
-            // Read offset and length (little-endian)
-            let offset_lo = self.pci_config.read_config_byte(cap_offset + 8) as u32;
-            let offset_hi = self.pci_config.read_config_byte(cap_offset + 9) as u32;
-            let offset = offset_lo | (offset_hi << 8);
+            // Read offset and length (little-endian, 32-bit fields per VirtIO PCI spec)
+            let b0 = self.pci_config.read_config_byte(cap_offset + 8) as u32;
+            let b1 = self.pci_config.read_config_byte(cap_offset + 9) as u32;
+            let b2 = self.pci_config.read_config_byte(cap_offset + 10) as u32;
+            let b3 = self.pci_config.read_config_byte(cap_offset + 11) as u32;
+            let offset = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 
-            let len_lo = self.pci_config.read_config_byte(cap_offset + 12) as u32;
-            let len_hi = self.pci_config.read_config_byte(cap_offset + 13) as u32;
-            let length = len_lo | (len_hi << 8);
+            let b0 = self.pci_config.read_config_byte(cap_offset + 12) as u32;
+            let b1 = self.pci_config.read_config_byte(cap_offset + 13) as u32;
+            let b2 = self.pci_config.read_config_byte(cap_offset + 14) as u32;
+            let b3 = self.pci_config.read_config_byte(cap_offset + 15) as u32;
+            let length = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 
             if bar >= 6 {
                 // Reserved BAR value
@@ -954,8 +958,8 @@ fn read_block_once(
             None => return Err("No configured VirtQueue found"),
         };
 
-        // Reset descriptor allocator to reuse descriptors
-        virt_queue.reset_desc_allocator();
+        // Reclaim descriptors that the device has finished with
+        virt_queue.reclaim_descs();
 
         // Allocate three descriptors
         let header_desc_idx = match virt_queue.alloc_desc() {
@@ -1160,8 +1164,8 @@ fn write_block_once(
             None => return Err("No configured VirtQueue found"),
         };
 
-        // Reset descriptor allocator to reuse descriptors
-        virt_queue.reset_desc_allocator();
+        // Reclaim descriptors that the device has finished with
+        virt_queue.reclaim_descs();
 
         // Allocate three descriptors
         let header_desc_idx = match virt_queue.alloc_desc() {

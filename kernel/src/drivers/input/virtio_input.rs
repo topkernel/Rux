@@ -366,7 +366,7 @@ impl VirtioInputDevice {
                 let idx = avail.idx as usize;
                 write_volatile(ring_ptr.add(idx % queue_size), i as u16);
                 fence(Ordering::SeqCst);
-                avail.idx = avail.idx.wrapping_add(1);
+                write_volatile(core::ptr::addr_of_mut!(avail.idx), avail.idx.wrapping_add(1));
             }
 
             fence(Ordering::SeqCst);

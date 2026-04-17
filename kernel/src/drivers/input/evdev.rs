@@ -264,10 +264,12 @@ fn poll_virtio_events() {
 pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
     // Compatible with old fd-based approach
     // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev().
+    const EVDEV_KEYBOARD_FD: i32 = 2000;
+    const EVDEV_POINTER_FD: i32 = 2001;
     let device = unsafe {
-        if fd == 2000 {  // EVDEV_KEYBOARD_FD
+        if fd == EVDEV_KEYBOARD_FD {
             EVDEV_KEYBOARD.as_ref()
-        } else if fd == 2001 {  // EVDEV_POINTER_FD
+        } else if fd == EVDEV_POINTER_FD {
             EVDEV_POINTER.as_ref()
         } else {
             return -22; // EINVAL

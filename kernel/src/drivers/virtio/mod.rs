@@ -167,12 +167,18 @@ impl VirtIOBlkDevice {
             // 5. State machine: ACKNOWLEDGE (0x01)
             write_reg!(STATUS_OFFSET, "STATUS", 0x01);
             let status = read_reg!(STATUS_OFFSET, "STATUS");
+            if status & 0x01 == 0 {
+                return Err("Device rejected ACKNOWLEDGE status");
+            }
 
             // 6. State machine: DRIVER (0x02)
             write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02);
             let status = read_reg!(STATUS_OFFSET, "STATUS");
+            if status & 0x02 == 0 {
+                return Err("Device rejected DRIVER status");
+            }
 
-            // Check if reset is needed
+            // Check if device needs reset (NEEDS_RESET bit)
             if status & 0x40 != 0 {
                 write_reg!(STATUS_OFFSET, "STATUS", 0x00);
                 write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02);

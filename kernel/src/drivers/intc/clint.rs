@@ -17,13 +17,17 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sbi;
 
-// IPI counter (one per hart)
-static IPI_COUNT: [AtomicU32; 4] = [
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-];
+// IPI count per hart — must match config::MAX_CPUS
+const NUM_HARTS: usize = crate::config::MAX_CPUS;
+static IPI_COUNT: [AtomicU32; NUM_HARTS] = {
+    let arr: [AtomicU32; NUM_HARTS] = [
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+    ];
+    arr
+};
 
 /// Initialize CLINT driver
 ///
@@ -33,7 +37,7 @@ pub fn init() {
     // SBI system automatically manages CLINT
     // No S-mode software initialization needed
     // Clear IPI counters
-    for hart in 0..4 {
+    for hart in 0..NUM_HARTS {
         IPI_COUNT[hart].store(0, Ordering::Relaxed);
     }
 }
