@@ -576,7 +576,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), random_vaddr);
         offset += 2;
 
-        // AT_EXECFN - executable filename (points to argv[0] string)
+        // AT_EXECFN - executable filename (for init, argv[0] == pathname)
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_EXECFN);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), arg0_vaddr);
         offset += 2;
@@ -586,9 +586,15 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
         offset += 2;
 
-        // Write 16 bytes random number (after auxv)
-        core::ptr::write_volatile(stack_ptr.offset(offset), 0xdeadc0debeefcafeu64);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0x123456789abcdef0u64);
+        // Write 16 bytes random number (after auxv) — time-seeded LCG.
+        let seed = crate::drivers::intc::clint::read_time();
+        let mut state = seed;
+        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        let rand0 = state;
+        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        let rand1 = state;
+        core::ptr::write_volatile(stack_ptr.offset(offset), rand0);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 1), rand1);
     }
 
     // ===== Use fork to set up pt_regs =====

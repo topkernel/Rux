@@ -913,6 +913,29 @@ impl Task {
             core::sync::atomic::AtomicI32::new(0),
         );
 
+        // Initialize fields added after new_idle_at was first written.
+        // These have Drop implementations and must not be left as zeroed memory.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exe_path)) as *mut alloc::boxed::Box<[u8]>,
+            alloc::boxed::Box::from(&b""[..]),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sem_undo)) as *mut Spinlock<alloc::vec::Vec<crate::ipc::util::SemUndoEntry>>,
+            Spinlock::new(alloc::vec::Vec::new()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_ids)) as *mut [core::sync::atomic::AtomicU64; 3],
+            [
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+            ],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,
+            Spinlock::new(alloc::vec::Vec::new()),
+        );
+
         // Initialize children and sibling lists
         let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
         (*children_ptr).init();

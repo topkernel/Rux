@@ -363,19 +363,19 @@
 **Linux**: Linux `wait_task_zombie()` correctly distinguishes `CLD_EXITED` from `CLD_KILLED` by checking `exit_code & 0x7f` (signal field).
 **Impact**: `waitid()` always reports `CLD_EXITED` for signal-killed processes. `si_code` will be `CLD_EXITED (1)` instead of `CLD_KILLED (2)`.
 
-### [High] [BUG] F05-02: `new_idle_at` does not initialize several fields with Drop implementations
+### [High] [BUG] F05-02: `new_idle_at` does not initialize several fields with Drop implementations **[FIXED]**
 **File**: `process/task.rs:716-923`
 **Description**: `new_idle_at` does not initialize `comm`, `exe_path` (`Box<[u8]>`), `sem_undo` (`Spinlock<Vec<...>>`), `itimer_ids`, `posix_timers` (`Spinlock<Vec<...>>`), and `kernel_stack_bottom`. Fields with Drop implementations (`Box`, `Spinlock<Vec>`) will cause UB if idle task is ever dropped.
 **Linux**: Linux uses `INIT_TASK` with all fields explicitly initialized.
 **Impact**: Dormant UB — currently safe because idle tasks are never destroyed.
 
-### [High] [POSIX] F05-11: AT_RANDOM contains deterministic values instead of random bytes
+### [High] [POSIX] F05-11: AT_RANDOM contains deterministic values instead of random bytes **[FIXED]**
 **File**: `process/exec.rs:401-402`
 **Description**: The random bytes for `AT_RANDOM` are hardcoded as `0xdeadc0debeefcafe` and `0x123456789abcdef0`. These are completely deterministic, defeating the purpose of `AT_RANDOM` which provides 16 bytes of entropy for ASLR and security. musl libc uses `AT_RANDOM` to seed its stack canary (`__stack_chk_guard`).
 **Linux**: Linux writes 16 bytes from `get_random_bytes()`.
 **Impact**: All processes share the same stack canary value. Stack buffer overflow attacks become trivial.
 
-### [High] [BUG] F05-12: `AT_EXECFN` points to argv[0] instead of the executable pathname
+### [High] [BUG] F05-12: `AT_EXECFN` points to argv[0] instead of the executable pathname **[FIXED]**
 **File**: `process/exec.rs:387`
 **Description**: `AT_EXECFN` is set to `argv_addrs.first().copied().unwrap_or(0)`, pointing to the first argv string. In Linux, `AT_EXECFN` must point to the executable's pathname string (the file path used in `execve`), not `argv[0]`.
 **Linux**: Linux copies the binary name string to the stack and sets `AT_EXECFN` to it.

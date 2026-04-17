@@ -109,7 +109,8 @@ pub(crate) fn do_execve_elf(
         env_string_space += ((env.len() + 1 + 7) / 8) * 8;
     }
     let phdr_space: usize = ((phsize + 7) / 8) * 8;
-    let total_slots: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots + 2 + (phdr_space + 7) / 8 + (string_space + 7) / 8 + (env_string_space + 7) / 8;
+    let execfn_space: usize = ((pathname.len() + 1 + 7) / 8) * 8;
+    let total_slots: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots + 2 + (phdr_space + 7) / 8 + (string_space + 7) / 8 + (env_string_space + 7) / 8 + (execfn_space + 7) / 8;
     let args_size = (total_slots * 8) as u64;
 
     // Initial stack size: args + 128KB
@@ -275,12 +276,15 @@ pub(crate) fn do_execve_elf(
         env_string_space += ((env.len() + 1 + 7) / 8) * 8;
     }
     let phdr_space: usize = ((phsize + 7) / 8) * 8;
+    // Pathname string for AT_EXECFN (aligned to 8 bytes).
+    let execfn_space: usize = ((pathname.len() + 1 + 7) / 8) * 8;
 
     let random_offset: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots;
     let phdr_offset: usize = random_offset + 2;
     let env_string_offset: usize = phdr_offset + (phdr_space + 7) / 8;
     let string_offset: usize = env_string_offset + (env_string_space + 7) / 8;
-    let total_slots: usize = string_offset + (string_space + 7) / 8;
+    let execfn_string_offset: usize = string_offset + (string_space + 7) / 8;
+    let total_slots: usize = execfn_string_offset + (execfn_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_slots * 8) as u64);
 
     let adjusted_virt_offset = adjusted_stack_top - virt_start;
@@ -296,6 +300,7 @@ pub(crate) fn do_execve_elf(
 
         let phdr_addr = adjusted_stack_top + (phdr_offset * 8) as u64;
         let random_vaddr = adjusted_stack_top + (random_offset * 8) as u64;
+        let execfn_vaddr = adjusted_stack_top + (execfn_string_offset * 8) as u64;
 
         // Copy program header table
         let src_ptr = program_data.as_ptr().add(ehdr.e_phoff as usize);
@@ -344,6 +349,22 @@ pub(crate) fn do_execve_elf(
             current_env_string_offset += ((env.len() + 1 + 7) / 8);
         }
 
+        // Write pathname string for AT_EXECFN
+        {
+            let execfn_pos = execfn_string_offset * 8;
+            let path_bytes = pathname.as_bytes();
+            for (i, &b) in path_bytes.iter().enumerate() {
+                core::ptr::write_volatile(
+                    (stack_ptr as *mut u8).offset((execfn_pos + i) as isize),
+                    b
+                );
+            }
+            core::ptr::write_volatile(
+                (stack_ptr as *mut u8).offset((execfn_pos + path_bytes.len()) as isize),
+                0
+            );
+        }
+
         // argc
         core::ptr::write_volatile(stack_ptr, argc);
         offset += 1;
@@ -384,7 +405,7 @@ pub(crate) fn do_execve_elf(
             (AT_CLKTCK, 100),
             (AT_SECURE, 0),
             (AT_RANDOM, random_vaddr),
-            (AT_EXECFN, argv_addrs.first().copied().unwrap_or(0)),
+            (AT_EXECFN, execfn_vaddr),
         ];
 
         for (typ, val) in auxv {
@@ -397,9 +418,15 @@ pub(crate) fn do_execve_elf(
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
 
-        // Random numbers
-        core::ptr::write_volatile(stack_ptr.offset(offset + 2), 0xdeadc0debeefcafeu64);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 3), 0x123456789abcdef0u64);
+        // Random numbers — use time-seeded LCG instead of hardcoded constants.
+        let seed = crate::drivers::intc::clint::read_time();
+        let mut state = seed;
+        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        let rand0 = state;
+        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        let rand1 = state;
+        core::ptr::write_volatile(stack_ptr.offset(offset + 2), rand0);
+        core::ptr::write_volatile(stack_ptr.offset(offset + 3), rand1);
     }
 
     // Create new address space structure
