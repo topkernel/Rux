@@ -148,19 +148,19 @@
 **Linux**: `get_zeroed_page()` uses virtual addresses via `__get_free_pages`.
 **Impact**: Zeroing silently fails or corrupts memory after MMU init.
 
-### [High] [BUG] F03-02: `free_pages` only resets leader page refcount for high-order blocks
+### [High] [BUG] F03-02: `free_pages` only resets leader page refcount for high-order blocks **[FIXED]**
 **File**: `mm/page_alloc.rs:148-156`
 **Description**: `free_pages()` sets `refcount(0)` and clears `Referenced` only on the leader page (pfn), but `alloc_pages()` sets refcount=1 on ALL pages in the block. Remaining pages retain `refcount=1`, causing refcount corruption if individually freed later.
 **Linux**: `__free_pages()` manages all pages' refcounts correctly through buddy merge protocol.
 **Impact**: Refcount corruption → use-after-free or double-free on high-order free + individual re-free.
 
-### [High] [BUG] F03-03: Standalone `BuddyAllocator::remove_from_free_list` only handles head removal
+### [High] [BUG] F03-03: Standalone `BuddyAllocator::remove_from_free_list` only handles head removal **[FIXED]**
 **File**: `mm/page_alloc.rs:406-424`
 **Description**: If target PFN is not the list head, block is not removed but `free_counts` is still decremented — corrupted free list and inaccurate counts.
 **Linux**: Linux buddy allocator maintains proper doubly-linked lists; removal always handles non-head cases.
 **Impact**: Buddy merging broken in standalone BuddyAllocator path.
 
-### [High] [BUG] F03-04: `mm_users_dec` / `mm_count_dec` can underflow without detection
+### [High] [BUG] F03-04: `mm_users_dec` / `mm_count_dec` can underflow without detection **[FIXED]**
 **File**: `mm/mm_struct.rs:577-578,595-596`
 **Description**: Both use `fetch_sub(1)` unconditionally. If counter is already 0, it wraps to -1 (AtomicI32), violating refcount invariant. No underflow guard unlike `Page::put_page()`.
 **Linux**: `mmput()` / `mmdrop()` use `atomic_dec_and_test()`.

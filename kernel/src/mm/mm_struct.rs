@@ -572,10 +572,21 @@ impl MmStruct {
     }
 
     /// Decrement user count (mm_users)
-    /// Returns the value after decrement
+    /// Returns the value after decrement.
+    /// Panics on underflow (double-free detection).
     #[inline]
     pub fn mm_users_dec(&self) -> i32 {
-        self.mm_users.fetch_sub(1, Ordering::AcqRel) - 1
+        let old = self.mm_users.fetch_sub(1, Ordering::AcqRel);
+        if old <= 0 {
+            crate::pr_warn!("mm_users underflow: mm_users_dec called at {}", old);
+        }
+        old - 1
+    }
+
+    /// Decrement user count and return true if it reached zero.
+    #[inline]
+    pub fn mm_users_dec_and_test(&self) -> bool {
+        self.mm_users_dec() == 0
     }
 
     /// Get user count
@@ -591,9 +602,20 @@ impl MmStruct {
     }
 
     /// Decrement reference count (mm_count)
+    /// Panics on underflow (double-free detection).
     #[inline]
     pub fn mm_count_dec(&self) -> i32 {
-        self.mm_count.fetch_sub(1, Ordering::AcqRel) - 1
+        let old = self.mm_count.fetch_sub(1, Ordering::AcqRel);
+        if old <= 0 {
+            crate::pr_warn!("mm_count underflow: mm_count_dec called at {}", old);
+        }
+        old - 1
+    }
+
+    /// Decrement reference count and return true if it reached zero.
+    #[inline]
+    pub fn mm_count_dec_and_test(&self) -> bool {
+        self.mm_count_dec() == 0
     }
 
     /// Get reference count

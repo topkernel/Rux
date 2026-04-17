@@ -90,13 +90,16 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
                         let zone_ref = unsafe { &mut *zone_ptr };
                         if let Some(pfn) = zone_ref.alloc_pages(order) {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
-                            let page = pfn_to_page_mut(pfn);
-                            if !page.is_null() {
-                                // SAFETY: pfn from zone.alloc_pages is valid.
-                                unsafe {
-                                    (*page).set_refcount(1);
-                                    (*page).set_order(order as u8);
-                                    (*page).set_flag(PageFlag::Referenced);
+                            let page_count = 1usize << order;
+                            for i in 0..page_count {
+                                let page = pfn_to_page_mut(pfn + i);
+                                if !page.is_null() {
+                                    // SAFETY: pfn from zone.alloc_pages is valid.
+                                    unsafe {
+                                        (*page).set_refcount(1);
+                                        (*page).set_order(order as u8);
+                                        (*page).set_flag(PageFlag::Referenced);
+                                    }
                                 }
                             }
                             return pfn_to_phys(pfn);
@@ -150,13 +153,16 @@ pub fn free_pages(addr: usize, order: usize) {
 
     let pfn = phys_to_pfn(addr);
 
-    // Update page descriptor (leader only)
-    let page = pfn_to_page(pfn);
-    if !page.is_null() {
-        // SAFETY: pfn from phys_to_pfn(addr) is within a valid zone.
-        unsafe {
-            (*page).set_refcount(0);
-            (*page).clear_flag(PageFlag::Referenced);
+    // Reset refcount and flags on ALL pages in the block (not just the leader).
+    let page_count = 1usize << order;
+    for i in 0..page_count {
+        let page = pfn_to_page(pfn + i);
+        if !page.is_null() {
+            // SAFETY: pfn from phys_to_pfn(addr) is within a valid zone.
+            unsafe {
+                (*page).set_refcount(0);
+                (*page).clear_flag(PageFlag::Referenced);
+            }
         }
     }
 
@@ -423,6 +429,33 @@ impl BuddyAllocator {
                 }
             };
             self.free_lists[order].store(next, Ordering::Release);
+        } else {
+            // Walk the singly-linked list to find and unlink the target.
+            let mut prev = head;
+            loop {
+                if prev == FREE_LIST_NULL {
+                    break;
+                }
+                let prev_page = pfn_to_page(prev);
+                if prev_page.is_null() {
+                    break;
+                }
+                // SAFETY: prev_page is non-null, lock held.
+                let next = unsafe { (*prev_page).next_free() };
+                if next == pfn {
+                    // Found predecessor; unlink target.
+                    let target_page = pfn_to_page(pfn);
+                    let new_next = if target_page.is_null() {
+                        FREE_LIST_NULL
+                    } else {
+                        // SAFETY: target_page is non-null, lock held.
+                        unsafe { (*target_page).next_free() }
+                    };
+                    unsafe { (*prev_page).set_next_free(new_next); }
+                    break;
+                }
+                prev = next;
+            }
         }
 
         self.free_counts[order].fetch_sub(1, Ordering::Relaxed);
