@@ -15,41 +15,6 @@ use alloc::string::String;
 use alloc::format;
 use alloc::sync::Arc;
 
-/// RAII guard for the SUM (Supervisor User Memory Access) bit in sstatus.
-///
-/// Enables user-memory reads on construction; restores the previous
-/// state on drop, making it panic-safe.
-struct SumGuard(());
-
-impl SumGuard {
-    fn new() -> Self {
-        // SAFETY: single core kernel, no SMP concerns.
-        unsafe {
-            core::arch::asm!(
-                "li t6, 0x40000",
-                "csrs sstatus, t6",
-                out("t6") _,
-                options(nomem, nostack)
-            );
-        }
-        SumGuard(())
-    }
-}
-
-impl Drop for SumGuard {
-    fn drop(&mut self) {
-        // SAFETY: single core kernel, restores the SUM bit cleared.
-        unsafe {
-            core::arch::asm!(
-                "li t6, 0x40000",
-                "csrc sstatus, t6",
-                out("t6") _,
-                options(nomem, nostack)
-            );
-        }
-    }
-}
-
 /// Check if a directory name is a valid PID directory
 ///
 /// PID directories are numeric strings like "1", "123", etc.
@@ -205,16 +170,19 @@ pub fn generate_cmdline(pid: u64) -> Vec<u8> {
 
     let arg_len = arg_end - arg_start;
     let mut result = alloc::vec::Vec::with_capacity(arg_len);
+    unsafe { result.set_len(arg_len); }
 
-    let _guard = SumGuard::new();
-    unsafe {
-        let mut p = arg_start as *const u8;
-        let end = arg_end as *const u8;
-        while p < end {
-            let b = core::ptr::read_volatile(p);
-            result.push(b);
-            p = p.add(1);
-        }
+    // Use copy_from_user for page-fault-safe access (has exception table entries).
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            result.as_mut_ptr(),
+            arg_start as *const u8,
+            arg_len,
+        )
+    };
+    if uncopied > 0 {
+        // Partial copy: truncate to what was actually copied.
+        unsafe { result.set_len(arg_len - uncopied); }
     }
 
     result
@@ -330,16 +298,17 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
 
     let env_len = env_end - env_start;
     let mut result = alloc::vec::Vec::with_capacity(env_len);
+    unsafe { result.set_len(env_len); }
 
-    let _guard = SumGuard::new();
-    unsafe {
-        let mut p = env_start as *const u8;
-        let end = env_end as *const u8;
-        while p < end {
-            let b = core::ptr::read_volatile(p);
-            result.push(b);
-            p = p.add(1);
-        }
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            result.as_mut_ptr(),
+            env_start as *const u8,
+            env_len,
+        )
+    };
+    if uncopied > 0 {
+        unsafe { result.set_len(env_len - uncopied); }
     }
 
     result

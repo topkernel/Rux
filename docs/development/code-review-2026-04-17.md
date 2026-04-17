@@ -824,24 +824,24 @@
 **Description**: Inline assembly uses `t6` (x31) to load SUM bit mask but does NOT list `t6` in clobbers. Compiler may allocate a variable to `t6` before/after asm block and lose its value. Should add `out("t6") _` to asm block.
 **Impact**: Potential data corruption if compiler allocated value to `t6`.
 
-### [High] [BUG] F09-01: Duplicate PID entry in /proc root directory listing
+### [High] [BUG] F09-01: Duplicate PID entry in /proc root directory listing **[FIXED]**
 **File**: `fs/procfs/mod.rs:316-332` and `1135-1146`
 **Description**: `list_children()` adds current process as PID directory entry. Then `procfs_readdir()` adds ALL processes from `pid_hash_collect_all()`. Current process appears twice.
 **Linux**: Lists all PIDs exactly once.
 **Impact**: `ls /proc` shows duplicate entries. `ps` may double-count.
 
-### [High] [BUG] F09-02: /proc lookup returns None for all PID directories
+### [High] [BUG] F09-02: /proc lookup returns None for all PID directories **[FIXED]**
 **File**: `fs/procfs/mod.rs:466-471`
 **Description**: `lookup()` checks `is_pid_dir()` and returns `None` with TODO comment. PID subdirectory lookups always fail via this path.
 **Linux**: `proc_lookup` handles PID directories directly.
 
-### [High] [BUG] F09-28: generate_mountinfo produces hardcoded static output
+### [High] [BUG] F09-28: generate_mountinfo produces hardcoded static output **[FIXED]**
 **File**: `fs/procfs/mounts.rs:47-61`
 **Description**: Returns hardcoded string with three static entries (rootfs, proc, devtmpfs). Does not read actual mount information. Stale if filesystems mounted after boot.
 **Linux**: Generates dynamically from mount namespace.
 **Impact**: `/proc/mountinfo` shows wrong data after additional mounts.
 
-### [High] [POSIX] F09-30: Load average not exponentially decayed — all three values identical
+### [High] [POSIX] F09-30: Load average not exponentially decayed — all three values identical **[FIXED]**
 **File**: `fs/procfs/loadavg.rs:14-17`
 **Description**: Returns `(load, load, load)` — identical 1/5/15 min averages. Linux uses exponential moving averages over 1, 5, 15 minute windows.
 **Linux**: `get_avenrun()` with exponential decay.
@@ -863,7 +863,7 @@
 **File**: `fs/procfs/mod.rs:749-751`
 **Description**: `pid * 1000 + kind` — collisions possible when PIDs > ~1000. Discriminant values fragile.
 
-### [High] [BUG] F09-12: User memory read in generate_cmdline/environ has no page-fault handling
+### [High] [BUG] F09-12: User memory read in generate_cmdline/environ has no page-fault handling **[FIXED]**
 **File**: `fs/procfs/pid.rs:207-218` and `332-342`
 **Description**: Uses `SumGuard` + byte-by-byte `read_volatile` without validating pages mapped. Page fault on freed address space = kernel panic.
 **Linux**: Uses `access_remote_vm()` with proper page fault handling.

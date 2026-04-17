@@ -960,6 +960,9 @@ pub fn scheduler_tick() {
         crate::console::read_waitq().wake_up_one();
     }
 
+    // Update load average (auto-throttled to every 5 seconds).
+    crate::fs::procfs::loadavg::update_load_avg();
+
     let current = this_cpu().current;
     if current.is_null() {
         return;

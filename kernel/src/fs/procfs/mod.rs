@@ -288,13 +288,19 @@ impl ProcFSNode {
 
     /// Find child node
     pub fn find_child(&self, name: &[u8]) -> Option<Arc<ProcFSNode>> {
-        // Check if it's a PID directory request
+        // Check if it's a PID directory request on the root node
         if self.name == b"/" && pid::is_pid_dir(name) {
-            if let Some(_pid) = pid::parse_pid(name) {
-                // Create a virtual PID directory node
-                // This is a dynamic lookup
-                return None;  // TODO: Implement dynamic PID node creation
+            if let Some(pid) = pid::parse_pid(name) {
+                if pid::is_valid_pid(pid) {
+                    // Create a virtual PID directory node
+                    let pid_dir = ProcFSNode::new_dir(
+                        name.to_vec(),
+                        pid,
+                    );
+                    return Some(Arc::new(pid_dir));
+                }
             }
+            return None;
         }
 
         let children = self.children.lock();
@@ -315,20 +321,10 @@ impl ProcFSNode {
     /// List child nodes
     pub fn list_children(&self) -> Vec<(Vec<u8>, ProcFSType, u64)> {
         let children = self.children.lock();
-        let mut result: Vec<(Vec<u8>, ProcFSType, u64)> = children
+        children
             .iter()
             .map(|c| (c.name.clone(), c.node_type, c.ino))
-            .collect();
-
-        // Add dynamic PID directories
-        // TODO: Get actual running process list
-        // For now, just add current process
-        use crate::process::current_pid;
-        let pid = current_pid() as u64;
-        let pid_str = format!("{}", pid);
-        result.push((pid_str.into_bytes(), ProcFSType::Directory, pid));
-
-        result
+            .collect()
     }
 
     /// Increment reference count
@@ -465,8 +461,16 @@ impl ProcFSSuperBlock {
             // Check for PID directory
             let component_bytes = component.as_bytes();
             if pid::is_pid_dir(component_bytes) {
-                // Create virtual PID directory node
-                // For now, return None - TODO: implement
+                if let Some(pid) = pid::parse_pid(component_bytes) {
+                    if pid::is_valid_pid(pid) {
+                        let pid_dir = ProcFSNode::new_dir(
+                            component_bytes.to_vec(),
+                            pid,
+                        );
+                        current = Arc::new(pid_dir);
+                        continue;
+                    }
+                }
                 return None;
             }
 

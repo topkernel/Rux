@@ -44,18 +44,19 @@ pub fn generate_filesystems() -> Vec<u8> {
 }
 
 /// Generate /proc/mountinfo content (detailed mount info)
+///
+/// Format: <id> <parent_id> <major>:<minor> <root> <mount_point> <options> - <fs_type> <source> <fs_options>
 pub fn generate_mountinfo() -> Vec<u8> {
+    let mounts = crate::fs::mount::get_mounts();
     let mut content = String::new();
-
-    // Format: <id> <parent_id> <major>:<minor> <root> <mount_point> <options> - <fs_type> <source> <fs_options>
-    // Root filesystem (id=1, parent=0)
-    content.push_str("1 0 0:0 / / rw - rootfs rootfs rw\n");
-
-    // /proc (id=2, parent=1)
-    content.push_str("2 1 0:3 / /proc rw - proc proc rw\n");
-
-    // /dev (id=3, parent=1)
-    content.push_str("3 1 0:4 / /dev rw - devtmpfs devtmpfs rw\n");
-
+    for (idx, (device, mount_point, fs_type, options)) in mounts.iter().enumerate() {
+        let mount_id = idx + 1;
+        // Root mount has parent 0; all others have parent 1.
+        let parent_id = if *mount_point == "/" { 0 } else { 1 };
+        content.push_str(&format!(
+            "{} {} 0:0 / {} {} - {} {} {}\n",
+            mount_id, parent_id, mount_point, options, fs_type, device, options
+        ));
+    }
     content.into_bytes()
 }
