@@ -253,6 +253,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     zombie_child = Some(child_ptr);
                 } else if options & WUNTRACED != 0
                     && child.state() == TaskState::new(TaskState::STOPPED)
+                    && !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
                 {
                     stopped_child = Some(child_ptr);
                 }
@@ -306,6 +307,9 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                         core::mem::size_of::<i32>()
                     );
                 }
+
+                // Mark this stop event as reported (only report once)
+                child.stop_reported.store(true, core::sync::atomic::Ordering::Release);
 
                 // Note: stopped child is NOT reaped, it stays in children list
                 return Ok(child_pid);

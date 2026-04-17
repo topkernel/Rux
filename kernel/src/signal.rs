@@ -1120,6 +1120,7 @@ fn handle_default_signal(sig: i32) {
             unsafe {
                 if let Some(current) = sched::current() {
                     (*current).set_stop_signal(sig);
+                    (*current).stop_reported.store(false, core::sync::atomic::Ordering::Release);
                     (*current).set_state(TaskState::new(TaskState::STOPPED));
                     // Notify parent
                     if let Some(parent_ptr) = (*current).parent_ptr() {

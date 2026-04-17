@@ -387,36 +387,36 @@
 **Linux**: Linux copies the binary name string to the stack and sets `AT_EXECFN` to it.
 **Impact**: musl's dynamic linker uses `AT_EXECFN` to find the executable path. If `argv[0]` differs from the actual path (e.g., busybox symlinks), the linker may fail.
 
-### [Medium] [BUG] F05-03: Type-punned ptr::write uses `Box<T>` instead of `Arc<T>`
+### [Medium] [BUG] F05-03: Type-punned ptr::write uses `Box<T>` instead of `Arc<T>` **[FIXED]**
 **File**: `process/task.rs:830, 840, 844, 1036, 1048, 1052`
 **Description**: Actual field types are `Option<Arc<...>>` but `ptr::write` casts to `*mut Option<Box<...>>`. Works by accident because both have identical 8-byte layout with `None`. Misleading and fragile.
 **Impact**: No runtime bug currently (only `None` is written).
 
-### [Medium] [POSIX] F05-08: `do_wait` with WUNTRACED reports the same stopped child repeatedly
+### [Medium] [POSIX] F05-08: `do_wait` with WUNTRACED reports the same stopped child repeatedly **[FIXED]**
 **File**: `process/exit.rs:252-258`
 **Description**: `do_wait` unconditionally reports any STOPPED child. A stopped child will be reported on every `waitpid(-1, &status, WUNTRACED)` call. POSIX requires `WUNTRACED` only reports a stop event once.
 **Linux**: Uses `task_ptrace` and `jobctl` flags to track reported stops.
 **Impact**: `waitpid` loop returns same child PID repeatedly.
 
-### [Medium] [BUG] F05-13: All ELF segments mapped with RWX permissions
+### [Medium] [BUG] F05-13: All ELF segments mapped with RWX permissions **[FIXED]**
 **File**: `process/exec.rs:135-138`
 **Description**: Initial mapping for ELF segments uses `R|W|X|U|A|D` flags. Actual per-segment permissions are only recorded in VMA metadata. Hardware page table entries retain RWX, defeating W^X.
 **Linux**: Maps each segment with exact permissions from ELF program header.
 **Impact**: Security — data sections executable, code sections writable.
 
-### [Medium] [BUG] F05-14: Resource leak if exec fails after address space allocation
+### [Medium] [BUG] F05-14: Resource leak if exec fails after address space allocation **[FIXED]**
 **File**: `process/exec.rs:132-144`
 **Description**: After `create_user_address_space()` succeeds, any later failure returns error without freeing page tables. Physical pages leaked.
 **Linux**: Cleans up `mm_struct` on failure via `mm_release()` / `mmdrop()`.
 **Impact**: Memory leak on failed execve calls.
 
-### [Medium] [BUG] F05-17: `CLONE_CHILD_SETTID` incorrectly sets `clear_child_tid`
+### [Medium] [BUG] F05-17: `CLONE_CHILD_SETTID` incorrectly sets `clear_child_tid` **[FIXED]**
 **File**: `process/fork.rs:324`
 **Description**: `CLONE_CHILD_SETTID` block calls `set_clear_child_tid()`. Should only write TID to `child_tid`, not set `clear_child_tid`. Setting `clear_child_tid` is exclusively `CLONE_CHILD_CLEARTID`'s job.
 **Linux**: Sets `set_child_tid` and `clear_child_tid` independently.
 **Impact**: Spurious futex wakes in pthread implementations.
 
-### [Medium] [DESIGN] F05-20: `kthread_stop` does not actually wait for thread to exit
+### [Medium] [DESIGN] F05-20: `kthread_stop` does not actually wait for thread to exit **[FIX]**
 **File**: `process/kthread.rs:166-187`
 **Description**: `kthread_stop()` returns 0 immediately. Linux's version blocks until target thread exits via completion variable.
 **Linux**: Uses `wait_for_completion()`.

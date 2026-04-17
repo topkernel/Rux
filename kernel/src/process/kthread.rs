@@ -178,12 +178,21 @@ pub fn kthread_stop(task: &mut Task) -> i32 {
     let task_ptr: *mut Task = task as *mut Task;
     Task::wake_up(task_ptr);
 
-    // In a full implementation we'd wait for the thread to exit here.
-    // For now, just return 0 since we can't easily block under BKL.
-    // The caller can use wait_chldexit or similar mechanism.
     crate::pr_info!("kthread: stop requested for pid={}", pid);
 
-    0
+    // Wait for the thread to reach a terminal state (ZOMBIE or DEAD).
+    // Yield CPU each iteration to avoid busy-spinning.
+    while !task.state().is_dead() {
+        crate::sched::yield_cpu();
+    }
+
+    // Clean up KthreadInfo
+    {
+        let mut map = KTHREAD_MAP.lock();
+        map.remove(&pid);
+    }
+
+    task.exit_code()
 }
 
 /// Bind a kernel thread to a specific CPU.

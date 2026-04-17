@@ -132,11 +132,21 @@ pub(crate) fn do_execve_elf(
     // Create new user address space
     let user_ppn = create_user_address_space().ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
-    // Allocate and map user memory (ELF segments + initial stack)
+    // RAII guard: if anything fails after this point, auto-free the user page tables.
+    struct UserAddrSpaceGuard(u64);
+    impl Drop for UserAddrSpaceGuard {
+        fn drop(&mut self) {
+            // SAFETY: user_ppn was allocated by create_user_address_space;
+            // on error path, free all page tables to avoid physical page leaks.
+            unsafe { crate::arch::riscv64::mm::mmu_init::free_user_page_tables(self.0); }
+        }
+    }
+    let _guard = UserAddrSpaceGuard(user_ppn);
+
+    // Start with RW (no X) — permissions will be tightened per-segment below.
     let flags = PageTableEntry::V | PageTableEntry::U |
                PageTableEntry::R | PageTableEntry::W |
-               PageTableEntry::X | PageTableEntry::A |
-               PageTableEntry::D;
+               PageTableEntry::A | PageTableEntry::D;
 
     // SAFETY: user_ppn is a freshly allocated page table root, virt_start..virt_start+total_size
     // is a valid range, and flags contains valid PTE bits for user pages.
@@ -186,6 +196,61 @@ pub(crate) fn do_execve_elf(
         }
     }
 
+    // Tighten PTE permissions per-segment based on ELF p_flags.
+    // Initial mapping was RW (no X); now set exact R/W/X from program headers.
+    for i in 0..phdr_count {
+        let phdr = unsafe { ehdr.get_program_header(program_data, i) }
+            .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
+
+        if phdr.is_load() && phdr.p_memsz > 0 {
+            let seg_start = phdr.p_vaddr;
+            let seg_end = (seg_start + phdr.p_memsz + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+
+            // Build per-segment PTE flags
+            let mut seg_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A;
+            if phdr.is_readable() { seg_flags |= PageTableEntry::R; }
+            if phdr.is_writable() { seg_flags |= PageTableEntry::W | PageTableEntry::D; }
+            if phdr.is_executable() { seg_flags |= PageTableEntry::X; }
+
+            // Walk page table for each page in the segment and update PTE flags.
+            // SAFETY: We are walking the freshly created user page tables (user_ppn)
+            // and modifying PTE permission bits only — PPN (physical page number) is preserved.
+            let mut vaddr = seg_start;
+            while vaddr < seg_end {
+                let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+                let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+                let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+
+                // SAFETY: user_ppn is a valid page table root allocated above.
+                unsafe {
+                    let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                        user_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
+                    );
+                    let pte2 = (*root_table).get(vpn2);
+                    if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+
+                    let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                        pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                    );
+                    let pte1 = (*table1).get(vpn1);
+                    if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+
+                    let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                        pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                    );
+                    let old_pte = (*table0).get(vpn0);
+                    if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+
+                    // Preserve PPN, replace permission bits
+                    let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
+                    (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                }
+
+                vaddr += PAGE_SIZE as u64;
+            }
+        }
+    }
+
     // Load interpreter (dynamic linker) if present
     let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {
         let interp_base: u64 = INTERP_BASE as u64;  // mmap_start - 16MB
@@ -226,6 +291,54 @@ pub(crate) fn do_execve_elf(
         }.map_err(|_| crate::errno::Errno::ExecFormatError.as_neg_i32())?;
 
         let interp_entry = interp_base + entry_offset;
+
+        // Tighten PTE permissions for interpreter segments.
+        for i in 0..interp_ehdr.e_phnum as usize {
+            if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
+                if phdr.is_load() && phdr.p_memsz > 0 {
+                    let seg_start = interp_base + phdr.p_vaddr - interp_min_vaddr;
+                    let seg_end = (seg_start + phdr.p_memsz + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+
+                    let mut seg_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A;
+                    if phdr.is_readable() { seg_flags |= PageTableEntry::R; }
+                    if phdr.is_writable() { seg_flags |= PageTableEntry::W | PageTableEntry::D; }
+                    if phdr.is_executable() { seg_flags |= PageTableEntry::X; }
+
+                    let mut vaddr = seg_start;
+                    while vaddr < seg_end {
+                        let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+                        let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+                        let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+
+                        // SAFETY: walking the user page tables for interpreter PTE updates.
+                        unsafe {
+                            let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                                user_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
+                            );
+                            let pte2 = (*root_table).get(vpn2);
+                            if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+
+                            let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                                pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                            );
+                            let pte1 = (*table1).get(vpn1);
+                            if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+
+                            let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                                pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                            );
+                            let old_pte = (*table0).get(vpn0);
+                            if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+
+                            let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
+                            (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                        }
+
+                        vaddr += PAGE_SIZE as u64;
+                    }
+                }
+            }
+        }
 
         crate::pr_debug!("execve: loaded interpreter at {:#x}, entry={:#x}, size={:#x}",
             interp_base, interp_entry, interp_size);
@@ -593,5 +706,7 @@ pub(crate) fn do_execve_elf(
         // Note: Do not free PtRegs memory here because trap frame is on stack
     }
 
+    // Success — prevent RAII guard from freeing page tables
+    core::mem::forget(_guard);
     Ok(())
 }

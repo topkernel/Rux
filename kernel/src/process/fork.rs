@@ -320,9 +320,6 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
 
         // === CLONE_CHILD_SETTID: Set TID in child ===
         if args.flags & CLONE_CHILD_SETTID != 0 && !args.child_tid.is_null() {
-            // Set clear_child_tid (will be cleared when child exits)
-            (*task_ptr).set_clear_child_tid(args.child_tid);
-
             // Set TID in child's memory
             // This will be written when child runs
             // Simplified implementation: write directly here

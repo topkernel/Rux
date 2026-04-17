@@ -516,6 +516,9 @@ pub struct Task {
     /// Signal that stopped the process (valid in Stopped state)
     stop_signal: i32,
 
+    /// Whether WUNTRACED stop has already been reported to parent
+    pub stop_reported: core::sync::atomic::AtomicBool,
+
     /// Process name (comm), 16 bytes NUL-terminated
     comm: [u8; 16],
 
@@ -683,6 +686,7 @@ impl Task {
             parent: None,
             exit_code: 0,
             stop_signal: 0,
+            stop_reported: core::sync::atomic::AtomicBool::new(false),
             comm: [0u8; 16],
             pdeath_signal: 0,
             dumpable: 1, // SUID_DUMP_USER (Linux default)
@@ -839,7 +843,7 @@ impl Task {
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<Box<AddressSpace>>,
+            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<alloc::sync::Arc<AddressSpace>>,
             None,
         );
         ptr::write(
@@ -849,11 +853,11 @@ impl Task {
         // Note: thread field already initialized above with ra=cpu_idle_loop;
         // do NOT reinitialize here or the entry point will be zeroed.
         ptr::write(
-            (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<Box<FdTable>>,
+            (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<alloc::sync::Arc<FdTable>>,
             None,
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, signal)) as *mut Option<Box<SignalStruct>>,
+            (ptr as usize + offset_of!(Task, signal)) as *mut Option<alloc::sync::Arc<SignalStruct>>,
             None,
         );
         ptr::write(
@@ -887,6 +891,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, stop_signal)) as *mut i32,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stop_reported)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, pgid)) as *mut u32,
@@ -1068,7 +1076,7 @@ impl Task {
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<Box<AddressSpace>>,
+            (ptr as usize + offset_of!(Task, address_space)) as *mut Option<alloc::sync::Arc<AddressSpace>>,
             None,
         );
         ptr::write(
@@ -1080,11 +1088,11 @@ impl Task {
             crate::arch::riscv64::thread::ThreadStruct::new(),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<Box<FdTable>>,
+            (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<alloc::sync::Arc<FdTable>>,
             None,
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, signal)) as *mut Option<Box<SignalStruct>>,
+            (ptr as usize + offset_of!(Task, signal)) as *mut Option<alloc::sync::Arc<SignalStruct>>,
             None,
         );
         ptr::write(
@@ -1118,6 +1126,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, stop_signal)) as *mut i32,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stop_reported)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, pgid)) as *mut u32,
