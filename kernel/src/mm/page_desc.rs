@@ -201,7 +201,7 @@ pub struct Page {
 }
 
 /// Map count initial offset value (-1 means unmapped)
-const PAGE_MAPCOUNT_BIAS: i32 = -1;
+pub const PAGE_MAPCOUNT_BIAS: i32 = -1;
 
 impl Page {
     /// Create new page descriptor (initialized to free state)

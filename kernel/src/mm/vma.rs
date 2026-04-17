@@ -359,6 +359,11 @@ impl Vma {
             false
         }
     }
+
+    /// Extend end to cover an adjacent VMA (for forward merge in VmaManager::add)
+    pub fn merge_at_end(&mut self, new_end: VirtAddr) {
+        self.end = new_end;
+    }
 }
 
 impl core::fmt::Debug for Vma {
@@ -419,18 +424,45 @@ impl VmaManager {
         // - All VMAs with start address within new VMA range
 
         // Check if previous VMA overlaps
-        // Use range lookup to find largest VMA with start address < new VMA start address
         if let Some((_, prev_vma)) = self.vmas.range(..start).next_back() {
             if prev_vma.end().as_usize() > start.as_usize() {
                 return Err(VmaError::Overlap);
             }
+
+            // Try to merge with previous VMA (same flags, adjacent)
+            if prev_vma.can_merge(&vma) {
+                if let Some(prev) = self.vmas.get_mut(&prev_vma.start()) {
+                    if prev.merge(vma) {
+                        // Merged — update max_end, no count change needed
+                        if prev.end().as_usize() > self.max_end.as_usize() {
+                            self.max_end = prev.end();
+                        }
+                        return Ok(());
+                    }
+                }
+            }
         }
 
         // Check VMAs with start address in new VMA range
-        // These VMAs must overlap with new VMA
-        if let Some((_, next_vma)) = self.vmas.range(start..end).next() {
+        if let Some((_, next_vma)) = self.vmas.range(start..=end).next() {
+            if next_vma.start().as_usize() == end.as_usize() && vma.can_merge(next_vma) {
+                // Merge with next VMA: remove next, extend new vma to cover it
+                let next_end = next_vma.end();
+                let next_start = next_vma.start();
+                let mut merged_vma = vma;
+                merged_vma.merge_at_end(next_end);
+                self.vmas.remove(&next_start);
+                self.vmas.insert(start, merged_vma);
+                self.count.fetch_sub(1, Ordering::Release);
+                if next_end.as_usize() > self.max_end.as_usize() {
+                    self.max_end = next_end;
+                }
+                return Ok(());
+            }
             // If VMA exists with start address in [start, end) range, then overlap
-            return Err(VmaError::Overlap);
+            if next_vma.start().as_usize() < end.as_usize() {
+                return Err(VmaError::Overlap);
+            }
         }
 
         // Update maximum end address

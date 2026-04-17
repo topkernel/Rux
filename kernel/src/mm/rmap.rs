@@ -203,20 +203,34 @@ pub fn page_clear_referenced(page: &Page) {
 /// Used during page reclamation (vmscan) to remove all PTEs mapping
 /// a given physical page so it can be freed back to the zone allocator.
 ///
-/// Approach: task scan — iterate all tasks, check VMAs for the virtual
-/// address stored in `page.index()`, verify the PTE maps the target PFN,
-/// then clear the PTE and flush TLB.
-///
 /// # Returns
 /// Number of PTEs successfully unmapped.
 pub fn try_to_unmap(page: &Page) -> i32 {
+    try_to_unmap_inner(page, 0)
+}
+
+/// Try to unmap a page from all processes, replacing PTEs with a swap entry.
+///
+/// Like `try_to_unmap()` but writes `swap_entry` into each PTE instead of
+/// zeroing it. Used by the swap-out path in vmscan.
+///
+/// # Returns
+/// Number of PTEs successfully replaced with swap entries.
+pub fn try_to_unmap_with_swap(page: &Page, swap_entry: u64) -> i32 {
+    try_to_unmap_inner(page, swap_entry)
+}
+
+/// Shared implementation for try_to_unmap and try_to_unmap_with_swap.
+///
+/// When `swap_entry == 0`, PTEs are zeroed (unmap).
+/// When `swap_entry != 0`, PTEs are replaced with the swap entry (swap-out).
+fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
     if !page_mapped(page) {
         return 0;
     }
 
     if !page.is_anonymous() {
         // File-backed pages: not yet supported (needs address_space walk).
-        // These are typically reclaimed via the page cache shrinker instead.
         return 0;
     }
 
@@ -229,7 +243,6 @@ pub fn try_to_unmap(page: &Page) -> i32 {
 
     let unmapped_count = Cell::new(0i32);
 
-    // Scan all tasks for PTEs mapping this physical page.
     crate::sched::for_each_task(|task_ptr| {
         // SAFETY: for_each_task provides valid task pointers; the task struct
         // is protected by the task list lock inside for_each_task.
@@ -242,21 +255,19 @@ pub fn try_to_unmap(page: &Page) -> i32 {
                 None => return,
             };
 
-            // Quick check: does any anonymous VMA contain target_vaddr?
-            let vma_matches = {
-                let vma_mgr = mm.vma_read();
-                let matches = vma_mgr.iter().any(|vma| {
-                    vma.vma_type() == super::vma::VmaType::Anonymous
-                        && vma.contains(super::page::VirtAddr::new(target_vaddr))
-                });
-                matches
-            };
+            // Hold VMA lock across both the check and page table walk
+            // to prevent concurrent munmap from freeing page tables (fixes F03-07).
+            let vma_mgr = mm.vma_read();
+            let vma_matches = vma_mgr.iter().any(|vma| {
+                vma.vma_type() == super::vma::VmaType::Anonymous
+                    && vma.contains(super::page::VirtAddr::new(target_vaddr))
+            });
 
             if !vma_matches {
                 return;
             }
+            // vma_mgr still held — protects page table walk below
 
-            // Walk the page table at target_vaddr to verify PPN matches.
             let root_ppn = mm.pgd();
             let walk_result = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
                 root_ppn, target_vaddr as u64,
@@ -264,7 +275,6 @@ pub fn try_to_unmap(page: &Page) -> i32 {
 
             if let Some((ppn, _pte_bits)) = walk_result {
                 if ppn as usize == target_pfn {
-                    // Match found — clear the PTE.
                     let vpn2 = ((target_vaddr >> 30) & 0x1FF) as usize;
                     let vpn1 = ((target_vaddr >> 21) & 0x1FF) as usize;
                     let vpn0 = ((target_vaddr >> 12) & 0x1FF) as usize;
@@ -285,110 +295,7 @@ pub fn try_to_unmap(page: &Page) -> i32 {
                         pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
                     );
 
-                    // Zero the PTE
-                    (*table0).set(
-                        vpn0,
-                        crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(0),
-                    );
-
-                    // Flush TLB for this address
-                    core::arch::asm!(
-                        "fence",
-                        "sfence.vma {}, zero",
-                        "fence",
-                        in(reg) target_vaddr,
-                        options(nostack, preserves_flags)
-                    );
-
-                    // Decrement mapcount
-                    page.dec_mapcount();
-                    unmapped_count.set(unmapped_count.get() + 1);
-                }
-            }
-        }
-    });
-
-    unmapped_count.get()
-}
-
-/// Try to unmap a page from all processes, replacing PTEs with a swap entry.
-///
-/// Like `try_to_unmap()` but writes `swap_entry` into each PTE instead of
-/// zeroing it. Used by the swap-out path in vmscan.
-///
-/// # Returns
-/// Number of PTEs successfully replaced with swap entries.
-pub fn try_to_unmap_with_swap(page: &Page, swap_entry: u64) -> i32 {
-    if !page_mapped(page) {
-        return 0;
-    }
-
-    if !page.is_anonymous() {
-        return 0;
-    }
-
-    let target_pfn = super::page_desc::page_to_pfn(page as *const Page);
-    let target_index = page.index();
-    if target_index == 0 {
-        return 0;
-    }
-    let target_vaddr = target_index * (super::PAGE_SIZE as usize);
-
-    let unmapped_count = Cell::new(0i32);
-
-    crate::sched::for_each_task(|task_ptr| {
-        unsafe {
-            let task = &*task_ptr;
-
-            let mm = match task.address_space() {
-                Some(m) => m,
-                None => return,
-            };
-
-            // Quick check: does any anonymous VMA contain target_vaddr?
-            let vma_matches = {
-                let vma_mgr = mm.vma_read();
-                let matches = vma_mgr.iter().any(|vma| {
-                    vma.vma_type() == super::vma::VmaType::Anonymous
-                        && vma.contains(super::page::VirtAddr::new(target_vaddr))
-                });
-                matches
-            };
-
-            if !vma_matches {
-                return;
-            }
-
-            // Walk the page table at target_vaddr to verify PPN matches.
-            let root_ppn = mm.pgd();
-            let walk_result = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
-                root_ppn, target_vaddr as u64,
-            );
-
-            if let Some((ppn, _pte_bits)) = walk_result {
-                if ppn as usize == target_pfn {
-                    // Match found — write swap entry into PTE.
-                    let vpn2 = ((target_vaddr >> 30) & 0x1FF) as usize;
-                    let vpn1 = ((target_vaddr >> 21) & 0x1FF) as usize;
-                    let vpn0 = ((target_vaddr >> 12) & 0x1FF) as usize;
-
-                    let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                        root_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
-                    );
-                    let pte2 = (*root_table).get(vpn2);
-                    if !pte2.is_valid() { return; }
-
-                    let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                        pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
-                    );
-                    let pte1 = (*table1).get(vpn1);
-                    if !pte1.is_valid() { return; }
-
-                    let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                        pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
-                    );
-
-                    // Write swap entry into PTE (V=0, triggers fault on next access)
+                    // Write new PTE value (0 for unmap, swap_entry for swap-out)
                     (*table0).set(
                         vpn0,
                         crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(swap_entry),

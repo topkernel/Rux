@@ -142,11 +142,92 @@ pub fn lru_del_page(page: &Page) {
 }
 
 /// Move a page to the tail of a (possibly different) LRU list.
+///
+/// Acquires the LRU lock once for both the del and add operations,
+/// avoiding the deadlock that would occur if lru_del_page and lru_add_page
+/// each acquired the lock independently.
 pub fn lru_move_to_tail(page: &Page, new_lru: usize) {
+    let node = match unsafe { first_online_node_mut() } {
+        Some(n) => n,
+        None => return,
+    };
+
+    let _guard = node.lru_lock.lock();
+
+    // Remove from current list if already on LRU
     if page.test_flag(PageFlag::Lru) {
-        lru_del_page(page);
+        let pfn = page_to_pfn(page as *const Page);
+
+        // Find and unlink from current list
+        let mut found_list = None;
+        let mut prev_pfn = LRU_NONE;
+
+        for lru in 0..NR_LRU_LISTS {
+            let mut cur = node.lru_heads[lru].load(core::sync::atomic::Ordering::Relaxed);
+            prev_pfn = LRU_NONE;
+
+            while cur != LRU_NONE {
+                if cur == pfn {
+                    found_list = Some(lru);
+                    break;
+                }
+                prev_pfn = cur;
+                cur = {
+                    let p = pfn_to_page_mut(cur);
+                    if p.is_null() { break; }
+                    unsafe { (*p).lru_next() }
+                };
+            }
+            if found_list.is_some() {
+                break;
+            }
+        }
+
+        if let Some(lru) = found_list {
+            let next_pfn = page.lru_next();
+
+            if prev_pfn != LRU_NONE {
+                unsafe {
+                    let prev_page = pfn_to_page_mut(prev_pfn);
+                    if !prev_page.is_null() {
+                        (*prev_page).set_lru_next(next_pfn);
+                    }
+                }
+            } else {
+                node.lru_heads[lru].store(next_pfn, core::sync::atomic::Ordering::Relaxed);
+            }
+
+            if next_pfn == LRU_NONE {
+                node.lru_tails[lru].store(prev_pfn, core::sync::atomic::Ordering::Relaxed);
+            }
+
+            page.set_lru_next(LRU_NONE);
+            page.clear_flag(PageFlag::Lru);
+            node.lru_sizes[lru].fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        }
     }
-    lru_add_page(page, new_lru);
+
+    // Add to new list (still holding the lock)
+    let pfn = page_to_pfn(page as *const Page);
+    page.set_lru_next(LRU_NONE);
+
+    let tail = node.lru_tails[new_lru].load(core::sync::atomic::Ordering::Relaxed);
+
+    if tail != LRU_NONE {
+        unsafe {
+            let tail_page = pfn_to_page_mut(tail);
+            if !tail_page.is_null() {
+                (*tail_page).set_lru_next(pfn);
+            }
+        }
+        node.lru_tails[new_lru].store(pfn, core::sync::atomic::Ordering::Relaxed);
+    } else {
+        node.lru_heads[new_lru].store(pfn, core::sync::atomic::Ordering::Relaxed);
+        node.lru_tails[new_lru].store(pfn, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    page.set_flag(PageFlag::Lru);
+    node.lru_sizes[new_lru].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Move a page from an active LRU list to its inactive counterpart.

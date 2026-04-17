@@ -77,18 +77,19 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
 
                 // High-order allocation failed: try compaction to reduce fragmentation
                 if order > 0 {
-                    // Use raw pointer to avoid aliasing UB: we pass `zone` to
-                    // compact_zone() which may create its own &mut reference.
-                    // After compact_zone returns, we re-borrow through the raw
-                    // pointer only.
+                    // Convert to raw pointer before passing to compact_zone.
+                    // Use raw pointer for the subsequent alloc_pages call too,
+                    // avoiding the aliasing UB of re-creating &mut from a raw
+                    // pointer while the original &mut binding is still live.
                     let zone_ptr: *mut Zone = zone;
                     // SAFETY: zone_ptr is a valid pointer to an initialized zone.
                     let cr = unsafe { super::compact::compact_zone(zone_ptr, order) };
                     if matches!(cr, super::compact::CompactResult::Success) {
                         // SAFETY: compact_zone does not destroy the zone; the
                         // pointer remains valid for the lifetime of the node.
-                        let zone_ref = unsafe { &mut *zone_ptr };
-                        if let Some(pfn) = zone_ref.alloc_pages(order) {
+                        // Using raw pointer method call avoids creating a new &mut.
+                        let pfn = unsafe { (*zone_ptr).alloc_pages(order) };
+                        if let Some(pfn) = pfn {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
                             let page_count = 1usize << order;
                             for i in 0..page_count {

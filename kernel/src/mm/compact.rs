@@ -286,6 +286,9 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
         return false;
     }
 
+    // Save original mapcount — transfer exactly to dst (matches Linux behavior)
+    let saved_mapcount = src.mapcount();
+
     // Step 2: Unmap from all processes
     let unmapped = try_to_unmap(src);
     if unmapped == 0 {
@@ -297,6 +300,15 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
 
     // Step 4: Install new PTEs pointing to dst_pfn
     remap_page(dst, old_vaddr);
+
+    // Step 5: Transfer mapcount from src to dst (exact copy, not per-PTE counting)
+    dst.reset_mapcount();
+    if saved_mapcount > super::page_desc::PAGE_MAPCOUNT_BIAS {
+        let delta = saved_mapcount - super::page_desc::PAGE_MAPCOUNT_BIAS;
+        for _ in 0..delta {
+            dst.add_mapcount();
+        }
+    }
 
     // Step 5: Transfer rmap metadata from src to dst
     let mapping = src.mapping();
@@ -345,10 +357,10 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize) {
             None => return,
         };
 
-        // Hold VMA read lock across both the VMA check and page table walk
+        // Hold VMA write lock across both the VMA check and page table walk
         // to prevent concurrent mmap/munmap from invalidating the page table
-        // structure (fixes H31).
-        let vma_mgr = mm.vma_read();
+        // structure. Write lock needed because we modify PTEs (fixes F03-06).
+        let vma_mgr = mm.vma_write();
         let vma_matches = vma_mgr.iter().any(|vma| {
             vma.vma_type() == super::vma::VmaType::Anonymous
                 && vma.contains(super::page::VirtAddr::new(old_vaddr))
@@ -406,9 +418,6 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize) {
                 in(reg) old_vaddr,
                 options(nostack, preserves_flags)
             );
-
-            // Increment mapcount on the new page
-            dst.add_mapcount();
         }
         // vma_mgr dropped here — lock released after PTE update
     });

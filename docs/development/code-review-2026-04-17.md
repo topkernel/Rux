@@ -172,61 +172,61 @@
 **Linux**: `mmput()` / `mmdrop()` use `atomic_dec_and_test()`.
 **Impact**: Premature page table free → use-after-free of entire address space.
 
-### [Medium] [BUG] F03-05: `migrate_page` may over-count destination mapcount
+### [Medium] [BUG] F03-05: `migrate_page` may over-count destination mapcount **[FIXED — copies mapcount from src to dst directly instead of per-PTE counting]**
 **File**: `mm/compact.rs:273-319`
 **Description**: `remap_page` calls `dst.add_mapcount()` for every task with a matching VMA, even if the page was only mapped once. This may over-increment mapcount.
 **Linux**: `migrate_pages()` copies mapcount exactly from source to destination.
 **Impact**: Inflated mapcount prevents page reclamation.
 
-### [Medium] [BUG] F03-06: `remap_page` scans page tables without holding mmap_lock for write
+### [Medium] [BUG] F03-06: `remap_page` scans page tables without holding mmap_lock for write **[FIXED — uses vma_write() instead of vma_read()]**
 **File**: `mm/compact.rs:335-415`
 **Description**: Walks each task's page table and modifies PTEs while only holding VMA read lock. Another thread could `munmap` the same range concurrently — TOCTOU race.
 **Linux**: `migrate_pages()` holds `mmap_lock` for write during migration.
 **Impact**: PTE writes into freed page tables → memory corruption.
 
-### [Medium] [BUG] F03-07: `try_to_unmap` drops VMA lock before page table walk
+### [Medium] [BUG] F03-07: `try_to_unmap` drops VMA lock before page table walk **[FIXED — holds vma_read() across entire VMA check + PTE walk]**
 **File**: `mm/rmap.rs:248-308`
 **Description**: Acquires `vma_read()` to check if any VMA matches, then drops it before walking the page table. Between VMA check and PTE modification, the VMA could be removed — use-after-free of page table page.
 **Linux**: `try_to_unmap()` holds `mmap_lock` for entire duration.
 **Impact**: Use-after-free of page table pages during reclaim.
 
-### [Medium] [BUG] F03-08: Swap I/O passes physical addresses without `phys_to_virt`
+### [Medium] [BUG] F03-08: Swap I/O passes physical addresses without `phys_to_virt` **[FIXED — uses phys_to_virt() to convert before dereferencing]**
 **File**: `mm/swap.rs:264-271,286-293`
 **Description**: `swap_read_page` / `swap_write_page` convert physical address directly to `&mut [u8]` slice. After MMU is enabled, physical addresses cannot be dereferenced directly.
 **Linux**: Uses `kmap()` / `kunmap()` to get virtual addresses.
 **Impact**: Swap I/O faults or writes to wrong addresses after MMU init.
 
-### [Medium] [DESIGN] F03-09: `VmaManager::add` does not attempt VMA merge with adjacent VMAs
+### [Medium] [DESIGN] F03-09: `VmaManager::add` does not attempt VMA merge with adjacent VMAs **[FIXED — add() now merges with adjacent VMAs having same flags/type]**
 **File**: `mm/vma.rs:412-445`
 **Description**: When adding a new VMA, only checks for overlap — never merges adjacent VMAs with same flags. VMA count grows without bound (e.g., `brk` increments), causing O(n) lookups.
 **Linux**: `vma_merge()` called after every `mmap`.
 **Impact**: Performance degradation over time. POSIX-correct but suboptimal.
 
-### [Medium] [BUG] F03-10: SlabAllocator init writes through `&self` → UB
+### [Medium] [BUG] F03-10: SlabAllocator init writes through `&self` → UB **[FIXED — pages wrapped in UnsafeCell<SlabPages>, init writes via .get()]**
 **File**: `mm/slab.rs:523-531`
 **Description**: Creates `*mut SlabAllocator` from `&SLAB_ALLOCATOR` and writes to it. Violates Rust aliasing model.
 **Linux**: Uses proper locking and initialization ordering.
 **Impact**: Potential miscompilation. Low probability with current compilers.
 
-### [Medium] [BUG] F03-11: `alloc_pages` high-order compaction re-borrows zone via raw pointer
+### [Medium] [BUG] F03-11: `alloc_pages` high-order compaction re-borrows zone via raw pointer **[FIXED — uses raw pointer method call (*ptr).alloc_pages() instead of creating &mut]**
 **File**: `mm/page_alloc.rs:82-104`
 **Description**: Casts `&mut Zone` to `*mut Zone` then re-creates `&mut` from raw pointer to work around aliasing. Still UB if any other reference exists.
 **Linux**: Uses `zonelist` iteration with proper locking.
 **Impact**: Potential UB. Works in practice with current compilers.
 
-### [Medium] [BUG] F03-12: `lru_del_page` may deadlock if called with lru_lock already held
+### [Medium] [BUG] F03-12: `lru_del_page` may deadlock if called with lru_lock already held **[FIXED — lru_move_to_tail acquires lock once for del+add]**
 **File**: `mm/lru.rs:70-142`
 **Description**: `lru_del_page` calls `node.lru_lock.lock()` unconditionally. If called from `lru_move_to_tail` which is called from contexts already holding the lock, Spinlock deadlock.
 **Linux**: LRU operations check whether lock is already held.
 **Impact**: Potential deadlock in LRU operations.
 
-### [Medium] [BUG] F03-13: MemBlock `add_reserved` overcounts overlaps in `total_size`
+### [Medium] [BUG] F03-13: MemBlock `add_reserved` overcounts overlaps in `total_size` **[FIXED — computes net increase (merged_size - old_size) for total_size]**
 **File**: `mm/memblock.rs:186-217`
 **Description**: When merging overlapping reserved regions, `total_size` is not adjusted — only region size updated. `available_memory()` may underestimate.
 **Linux**: Carefully adjusts `total_size` for overlaps during merge.
 **Impact**: Slightly inaccurate available memory reporting.
 
-### [Medium] [BUG] F03-14: `try_to_unmap` and `try_to_unmap_with_swap` duplicate 95% code
+### [Medium] [BUG] F03-14: `try_to_unmap` and `try_to_unmap_with_swap` duplicate 95% code **[FIXED — extracted shared try_to_unmap_inner() with swap_entry parameter]**
 **File**: `mm/rmap.rs:212-415`
 **Description**: Two functions share ~95% identical code. Bugs fixed in one may be missed in the other.
 **Linux**: Uses callback-based walk sharing core logic.
@@ -1550,6 +1550,21 @@
 | F11-37 | Syscall | clock_getres returns 100ns + validates clock ID | **FIXED** |
 | F11-38 | Syscall | clock_getres validates clock ID | **FIXED** (merged into F11-37) |
 | F11-39 | Syscall | nanosleep validates tv_nsec range | **FIXED** |
+
+### Batch K — F03 Memory Management fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F03-05 | MM | migrate_page copies mapcount from src to dst exactly | **FIXED** |
+| F03-06 | MM | remap_page uses vma_write() for PTE modification | **FIXED** |
+| F03-07 | MM | try_to_unmap holds VMA lock across page table walk | **FIXED** |
+| F03-08 | MM | Swap I/O uses phys_to_virt() before dereferencing | **FIXED** |
+| F03-09 | MM | VmaManager::add merges adjacent VMAs | **FIXED** |
+| F03-10 | MM | SlabAllocator pages wrapped in UnsafeCell | **FIXED** |
+| F03-11 | MM | alloc_pages uses raw pointer call for post-compaction alloc | **FIXED** |
+| F03-12 | MM | lru_move_to_tail acquires lock once for del+add | **FIXED** |
+| F03-13 | MM | MemBlock add_reserved correct total_size on merge | **FIXED** |
+| F03-14 | MM | try_to_unmap/with_swap refactored to shared inner function | **FIXED** |
 
 ## Top 10 Highest-Impact Fixes (recommended priority)
 

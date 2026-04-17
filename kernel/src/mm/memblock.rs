@@ -197,9 +197,12 @@ impl MemBlockType {
                 // Merge: extend the existing region
                 let merged_base = base.min(region.base);
                 let merged_end = new_end.max(region_end);
+                let old_size = region.size;
                 region.base = merged_base;
                 region.size = merged_end - merged_base;
-                // Note: total_size adjustment is approximate (may overcount overlaps)
+                // Adjust total_size: add only the net increase from merge
+                let net_increase = region.size.saturating_sub(old_size);
+                self.total_size += net_increase;
                 return Ok(());
             }
         }
