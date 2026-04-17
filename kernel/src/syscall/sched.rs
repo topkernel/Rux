@@ -443,10 +443,17 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
     let size = args[2] as u32;
     let _flags = args[3] as u32;
 
-    if attr_ptr.is_null() || size < 48 {
+    if attr_ptr.is_null() || size == 0 {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, core::mem::size_of::<SchedAttr>()) {
+    // Linux requires size >= the minimum sched_attr (first 48 bytes).
+    if (size as usize) < 48 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Only copy min(user_size, struct_size) bytes, matching Linux ABI.
+    let copy_len = core::cmp::min(size as usize, core::mem::size_of::<SchedAttr>());
+    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, copy_len) {
         return -(errno::EFAULT as i64);
     }
 
@@ -493,7 +500,7 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
         let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
             attr_ptr as *mut u8,
             &attr as *const SchedAttr as *const u8,
-            core::mem::size_of::<SchedAttr>(),
+            copy_len,
         );
         if uncopied != 0 {
             return -(errno::EFAULT as i64);
@@ -698,33 +705,55 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
 ///
 /// # Arguments
 /// - args[0]: pid - process ID (0 = current)
-/// - args[1]: size - size of cpumask
+/// - args[1]: size - size of user cpumask buffer in bytes
 /// - args[2]: mask - pointer to CPU mask (output)
+///
+/// # Returns
+/// Number of bytes written to user buffer on success, negative errno on failure.
+/// (Linux ABI: returns min(kernel_cpumask_bytes, user_size))
 pub fn sys_sched_getaffinity(args: SyscallArgs) -> i64 {
-    let _pid = args[0] as u32;
+    let pid = args[0] as u32;
     let size = args[1] as usize;
-    let mask_ptr = args[2] as *mut usize;
+    let mask_ptr = args[2] as *mut u8;
 
     if mask_ptr.is_null() || size == 0 {
-        return -(errno::EFAULT as i64);
+        return -(errno::EINVAL as i64);
     }
 
-    // Return all CPUs allowed
+    // Compute kernel cpumask size: ceil(MAX_CPUS / 8) rounded up to usize alignment.
     let ncpus = crate::config::MAX_CPUS;
-    let mask_len = core::cmp::min(size, 8); // max 8 usize = 64 CPUs
-    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, mask_len) {
+    let bytes_needed = ((ncpus + 7) / 8 + core::mem::size_of::<usize>() - 1)
+        / core::mem::size_of::<usize>()
+        * core::mem::size_of::<usize>();
+    let ret_len = core::cmp::min(bytes_needed, size);
+
+    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, ret_len) {
         return -(errno::EFAULT as i64);
     }
 
-    // SAFETY: mask_ptr is access_ok-validated for mask_len bytes; writes are within bounds.
+    // Only pid 0 (self) supported for now.
+    if pid != 0 && pid != crate::process::current_pid() {
+        return -(errno::ESRCH as i64);
+    }
+
+    // Build affinity mask: all CPUs allowed.
+    let mut kernel_mask = alloc::vec![0u8; bytes_needed];
+    for cpu in 0..ncpus {
+        kernel_mask[cpu / 8] |= 1 << (cpu % 8);
+    }
+
     unsafe {
-        // Set all CPUs as allowed
-        for i in 0..(mask_len / core::mem::size_of::<usize>()) {
-            core::ptr::write_volatile(mask_ptr.add(i), usize::MAX);
+        let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+            mask_ptr,
+            kernel_mask.as_ptr(),
+            ret_len,
+        );
+        if uncopied != 0 {
+            return -(errno::EFAULT as i64);
         }
     }
 
-    mask_len as i64
+    ret_len as i64
 }
 
 /// sys_sched_get_priority_max - Get max static priority

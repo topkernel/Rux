@@ -1077,7 +1077,7 @@
 **File**: `syscall/io.rs`
 **Description**: Negative return values from syscalls truncated incorrectly, losing error information.
 
-### [Critical] [BUG] F11-21: argv/envp manual SUM bit in process.rs
+### [Critical] [BUG] F11-21: argv/envp manual SUM bit in process.rs **[FIXED]**
 **File**: `syscall/process.rs`
 **Description**: Manual SUM bit manipulation for argv/envp copy without proper safety guards.
 
@@ -1103,7 +1103,7 @@
 **Linux**: `tgkill(2)` with sig=0 returns 0 if process exists and caller has permission.
 **Impact**: POSIX — musl `pthread_kill` with sig=0 (thread liveness checks) gets EINVAL.
 
-### [High] [POSIX] F11-03: sched_getaffinity return value does not match Linux ABI
+### [High] [POSIX] F11-03: sched_getaffinity return value does not match Linux ABI **[FIXED]**
 **File**: `syscall/sched.rs:703-728`
 **Description**: Returns `mask_len as u64` (user-provided size) instead of kernel's cpumask size. Linux returns `min(sizeof(cpumask_t), user_size)`.
 **Impact**: ABI — musl may misinterpret the affinity mask size.
@@ -1114,7 +1114,7 @@
 **Linux**: Returns `(unsigned long) -errno` on error.
 **Impact**: ABI — **all memory allocation error detection broken** for musl binaries. This is the single most impactful finding.
 
-### [High] [POSIX] F11-05: SchedAttr struct layout may not match Linux ABI
+### [High] [POSIX] F11-05: SchedAttr struct layout may not match Linux ABI **[FIXED]**
 **File**: `syscall/sched.rs:173-186`
 **Description**: Rux struct is 48 bytes; Linux's `sched_attr` with util clamp fields is 56 bytes. `sched_util_min/max` silently ignored.
 **Impact**: ABI — newer user-space using util clamp gets values silently dropped.

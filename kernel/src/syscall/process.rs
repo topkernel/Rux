@@ -98,96 +98,63 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
     }
 }
 
-/// Read argv array from user space
+/// Read argv array from user space using fault-safe uaccess helpers.
 fn copy_argv_from_user(argv_ptr: *const *const u8) -> alloc::vec::Vec<alloc::string::String> {
     use alloc::string::String;
     let mut args = alloc::vec::Vec::new();
     if argv_ptr.is_null() {
         return args;
     }
-    // Validate the argv pointer array itself (up to 65 pointers = null terminator)
-    if !crate::arch::riscv64::uaccess::access_ok(argv_ptr as usize, 65 * core::mem::size_of::<*const u8>()) {
-        return args;
-    }
-    // SAFETY: Caller guarantees argv_ptr points to a valid null-terminated user
-    // pointer array. SUM bit is set to permit user memory reads; each string is
-    // bounded to 1024 bytes to avoid overrun.
-    // NOTE: SUM bit is set/cleared around user memory access. An interrupt
-    // between set and clear leaves SUM enabled in the handler. This is
-    // acceptable because interrupt handlers don't access user memory.
-    unsafe {
-        core::arch::asm!(
-            "li t6, 0x40000",
-            "csrs sstatus, t6",
-            options(nomem, nostack)
-        );
-        let mut i = 0usize;
-        loop {
-            if i > 64 { break; }
-            let arg_ptr = core::ptr::read_volatile(argv_ptr.add(i));
-            if arg_ptr.is_null() { break; }
-            let mut len = 0usize;
-            let mut p = arg_ptr;
-            while core::ptr::read_volatile(p) != 0 && len < 1024 {
-                len += 1;
-                p = p.add(1);
-            }
-            let arg_slice = core::slice::from_raw_parts(arg_ptr, len);
-            if let Ok(s) = core::str::from_utf8(arg_slice) {
-                args.push(String::from(s));
-            }
-            i += 1;
+
+    let mut buf = [0u8; 1024];
+    for i in 0..65 {
+        // Read one pointer from the user argv array via get_user (handles SUM + exception table).
+        let arg_ptr = match unsafe { crate::arch::riscv64::uaccess::get_user(argv_ptr.add(i)) } {
+            Some(p) => p,
+            None => break, // fault or end of array
+        };
+        if arg_ptr.is_null() {
+            break;
         }
-        core::arch::asm!(
-            "li t6, 0x40000",
-            "csrc sstatus, t6",
-            options(nomem, nostack)
-        );
+        // Read the null-terminated string via strncpy_from_user (byte-by-byte get_user).
+        match crate::arch::riscv64::uaccess::strncpy_from_user(arg_ptr, 1024, &mut buf) {
+            Ok(slice) => {
+                if let Ok(s) = core::str::from_utf8(slice) {
+                    args.push(String::from(s));
+                }
+            }
+            Err(_) => break, // page fault reading user string
+        }
     }
     args
 }
 
-/// Read envp array from user space
+/// Read envp array from user space using fault-safe uaccess helpers.
 fn copy_envp_from_user(envp_ptr: *const *const u8) -> alloc::vec::Vec<alloc::string::String> {
     use alloc::string::String;
     let mut envs = alloc::vec::Vec::new();
     if envp_ptr.is_null() {
         return envs;
     }
-    // Validate the envp pointer array itself (up to 257 pointers = null terminator)
-    if !crate::arch::riscv64::uaccess::access_ok(envp_ptr as usize, 257 * core::mem::size_of::<*const u8>()) {
-        return envs;
-    }
-    // SAFETY: Same as copy_argv_from_user — envp_ptr is a null-terminated user
-    // pointer array with strings bounded to 4096 bytes each.
-    unsafe {
-        core::arch::asm!(
-            "li t6, 0x40000",
-            "csrs sstatus, t6",
-            options(nomem, nostack)
-        );
-        let mut i = 0usize;
-        loop {
-            if i > 256 { break; }
-            let env_str_ptr = core::ptr::read_volatile(envp_ptr.add(i));
-            if env_str_ptr.is_null() { break; }
-            let mut len = 0usize;
-            let mut p = env_str_ptr;
-            while core::ptr::read_volatile(p) != 0 && len < 4096 {
-                len += 1;
-                p = p.add(1);
-            }
-            let env_slice = core::slice::from_raw_parts(env_str_ptr, len);
-            if let Ok(s) = core::str::from_utf8(env_slice) {
-                envs.push(String::from(s));
-            }
-            i += 1;
+
+    let mut buf = [0u8; 4096];
+    for i in 0..257 {
+        // Read one pointer from the user envp array via get_user (handles SUM + exception table).
+        let env_str_ptr = match unsafe { crate::arch::riscv64::uaccess::get_user(envp_ptr.add(i)) } {
+            Some(p) => p,
+            None => break,
+        };
+        if env_str_ptr.is_null() {
+            break;
         }
-        core::arch::asm!(
-            "li t6, 0x40000",
-            "csrc sstatus, t6",
-            options(nomem, nostack)
-        );
+        match crate::arch::riscv64::uaccess::strncpy_from_user(env_str_ptr, 4096, &mut buf) {
+            Ok(slice) => {
+                if let Ok(s) = core::str::from_utf8(slice) {
+                    envs.push(String::from(s));
+                }
+            }
+            Err(_) => break,
+        }
     }
     envs
 }
