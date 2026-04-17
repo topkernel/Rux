@@ -512,6 +512,16 @@ unsafe fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inod
     Some(entries)
 }
 
+/// DevFS destroy_inode: reclaim the Arc<DevfsEntry> stored in private_data.
+// SAFETY: VFS callback contract; called when the inode's refcount drops to zero.
+unsafe fn devfs_destroy_inode(inode: &mut Inode) {
+    if let Some(ptr) = inode.private_data.take() {
+        // Reconstruct the Arc from the raw pointer and let it drop,
+        // decrementing the DevfsEntry's reference count.
+        let _ = Arc::from_raw(ptr as *const DevfsEntry);
+    }
+}
+
 /// DevFS inode operations table
 pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(devfs_lookup),
@@ -531,6 +541,7 @@ pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     getattr: Some(devfs_getattr),
     setattr: None,
     iget: Some(devfs_iget),
+    destroy_inode: Some(devfs_destroy_inode),
 };
 
 /// Create a VFS inode for the devfs root entry.
@@ -538,6 +549,6 @@ pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
 pub fn create_root_inode(root_entry: &Arc<DevfsEntry>) -> alloc::sync::Arc<Inode> {
     let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o755));
     inode.ops = Some(&DEVFS_INODE_OPS);
-    inode.private_data = Some(Arc::as_ptr(root_entry) as *mut u8);
+    inode.private_data = Some(Arc::into_raw(Arc::clone(root_entry)) as *mut u8);
     alloc::sync::Arc::new(inode)
 }

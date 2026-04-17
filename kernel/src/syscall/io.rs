@@ -944,14 +944,10 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
 
     // Set O_NONBLOCK on both ends if requested
     if (flags & crate::fs::file::FileFlags::O_NONBLOCK) != 0 {
-        // SAFETY: read_file and write_file are freshly created Arcs that have
-        // not been cloned or installed into any fd table, so get_mut succeeds.
-        if let Some(rf) = alloc::sync::Arc::get_mut(&mut read_file) {
-            rf.flags_mut().add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
-        }
-        if let Some(wf) = alloc::sync::Arc::get_mut(&mut write_file) {
-            wf.flags_mut().add_flags(crate::fs::file::FileFlags::O_NONBLOCK);
-        }
+        // Use atomic OR to set O_NONBLOCK — no exclusive access needed.
+        use core::sync::atomic::Ordering;
+        read_file.flags.fetch_or(crate::fs::file::FileFlags::O_NONBLOCK, Ordering::Release);
+        write_file.flags.fetch_or(crate::fs::file::FileFlags::O_NONBLOCK, Ordering::Release);
     }
 
     // Get current process fdtable

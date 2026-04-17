@@ -28,8 +28,8 @@ pub struct Ext4SuperBlockOnDisk {
     pub s_log_cluster_size: u32,
     /// blocks per group
     pub s_blocks_per_group: u32,
-    /// fragments per group
-    pub s_frags_per_group: u32,
+    /// clusters per group
+    pub s_clusters_per_group: u32,
     /// inodes per group
     pub s_inodes_per_group: u32,
     /// mount time

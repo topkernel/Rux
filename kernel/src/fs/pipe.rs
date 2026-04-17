@@ -12,7 +12,6 @@
 //! - Synchronous read/write operations
 
 use alloc::vec::Vec;
-use alloc::boxed::Box;
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::sync::Arc;
@@ -189,11 +188,12 @@ impl Pipe {
 }
 
 pub fn pipe_read(pipe: &Pipe, buf: &mut [u8]) -> isize {
-    if pipe.is_write_closed() && pipe.buffer.lock().available_read() == 0 {
+    let mut guard = pipe.buffer.lock();
+    if pipe.is_write_closed() && guard.available_read() == 0 {
         return 0; // EOF
     }
 
-    let count = pipe.buffer.lock().read(buf);
+    let count = guard.read(buf);
     count as isize
 }
 
@@ -225,20 +225,26 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
         let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
 
         loop {
+            // Acquire lock once, hold across check + IO
+            let mut guard = pipe.buffer.lock();
+
             // Check EOF condition: write end closed and buffer empty
-            if pipe.is_write_closed() && pipe.buffer.lock().available_read() == 0 {
+            if pipe.is_write_closed() && guard.available_read() == 0 {
                 return 0; // EOF
             }
 
             // Try to read data
-            let count = pipe.buffer.lock().read(buf);
+            let count = guard.read(buf);
             if count > 0 {
                 // Read successful, wake up write waiters (space available)
+                drop(guard); // Release lock before waking waiters
                 pipe.write_queue().wake_up_all();
                 return count as isize;
             }
 
-            // Buffer empty
+            // Buffer empty — release lock before blocking
+            drop(guard);
+
             if nonblock {
                 // Non-blocking mode: return EAGAIN
                 return -11_i32 as isize; // EAGAIN
@@ -293,18 +299,25 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
         while total_written < buf.len() {
             let remaining = &buf[total_written..];
 
+            // Acquire lock once for check + IO
+            let mut guard = pipe.buffer.lock();
+
             // Try to write data
-            let count = pipe.buffer.lock().write(remaining);
+            let count = guard.write(remaining);
 
             if count > 0 {
                 // Write successful
                 total_written += count;
+                // Release lock before waking waiters
+                drop(guard);
                 // Wake up read waiters (data available)
                 pipe.read_queue().wake_up_all();
                 continue;
             }
 
-            // Buffer full
+            // Buffer full — release lock before blocking
+            drop(guard);
+
             if nonblock {
                 // Non-blocking mode: return bytes written or EAGAIN
                 if total_written > 0 {
@@ -383,8 +396,10 @@ fn pipe_file_poll(file: &File, events: u16) -> u16 {
 }
 
 fn pipe_file_close(file: &File) -> i32 {
-    if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
-        let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
+    if let Some(pipe_ptr) = unsafe { file.private_data.get().replace(None) } {
+        // Reconstruct the Arc from the raw pointer. This consumes one Arc refcount.
+        // When the last close drops the last Arc, the Pipe is freed.
+        let pipe = unsafe { Arc::from_raw(pipe_ptr as *const Pipe) };
 
         // Check file flags to determine whether to close read or write end
         if file.flags().is_readonly() || file.flags().is_rdwr() {
@@ -397,14 +412,9 @@ fn pipe_file_close(file: &File) -> i32 {
             pipe.close_write();
         }
 
-        // If both ends are closed, free pipe memory
-        if pipe.is_read_closed() && pipe.is_write_closed() {
-            unsafe {
-                // Convert raw pointer back to Box, which will be automatically freed when Box goes out of scope
-                // ...
-                let _ = Box::from_raw(pipe_ptr as *mut Pipe);
-            }
-        }
+        // `pipe` (the Arc) is dropped here, decrementing refcount.
+        // The Pipe itself is freed when the last Arc goes out of scope.
+        drop(pipe);
 
         0  // Success
     } else {
@@ -413,9 +423,9 @@ fn pipe_file_close(file: &File) -> i32 {
 }
 
 pub fn create_pipe() -> (Arc<File>, Arc<File>) {
-    // Create pipe and allocate on heap (use Box::leak to ensure lifetime until manual release)
-    let pipe = Box::new(Pipe::new());
-    let pipe_ptr = Box::leak(pipe) as *mut Pipe as *mut u8;
+    // Create pipe wrapped in Arc so both ends share ownership.
+    // The Pipe is freed when the last Arc drops.
+    let pipe = Arc::new(Pipe::new());
 
     // Pipe file operations
     static PIPE_OPS: FileOps = FileOps {
@@ -426,15 +436,23 @@ pub fn create_pipe() -> (Arc<File>, Arc<File>) {
         poll: Some(pipe_file_poll),
     };
 
+    // Store Arc::into_raw as *mut u8 in private_data.
+    // pipe_file_close reconstructs the Arc with Arc::from_raw to drop one ref.
+    let read_ptr = Arc::into_raw(Arc::clone(&pipe)) as *mut u8;
+    let write_ptr = Arc::into_raw(Arc::clone(&pipe)) as *mut u8;
+
+    // Drop our local reference; ownership is now entirely in the two raw pointers.
+    drop(pipe);
+
     // Create read end file
     let read_file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDONLY)));
     read_file.set_ops(&PIPE_OPS);
-    read_file.set_private_data(pipe_ptr);
+    read_file.set_private_data(read_ptr);
 
     // Create write end file
     let write_file = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
     write_file.set_ops(&PIPE_OPS);
-    write_file.set_private_data(pipe_ptr);
+    write_file.set_private_data(write_ptr);
 
     (read_file, write_file)
 }

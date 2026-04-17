@@ -247,6 +247,13 @@ impl Ext4FileSystem {
 
     /// Read inode
     pub fn read_inode(&self, ino: u32) -> Result<inode::Ext4Inode, i32> {
+        if ino == 0 {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+        if ino > self.total_inodes {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+
         // Calculate block group and inode table index
         let group = (ino - 1) / self.inodes_per_group;
         let index = (ino - 1) % self.inodes_per_group;
@@ -719,7 +726,7 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
 /// Read symbolic link target
 ///
 /// ext4 symbolic link target storage methods:
-/// - Short links (< 60 bytes): stored in inode's block array
+/// - Short links (<= 60 bytes): stored in inode's block array
 /// - Long links: stored in data blocks
 fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<String> {
     let size = inode.get_size() as usize;
@@ -731,7 +738,7 @@ fn read_symlink_target(fs: &Ext4FileSystem, inode: &inode::Ext4Inode) -> Option<
 
     // Short symbolic link: data stored in block array (inline data)
     // ext4 short symbolic link threshold is usually 60 bytes
-    if size < 60 && !inode.has_extent() {
+    if size <= 60 && !inode.has_extent() {
         // Read directly from block array
         let block_data = unsafe {
             core::slice::from_raw_parts(inode.block.as_ptr() as *const u8, 60)
@@ -1534,6 +1541,7 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     getattr: Some(ext4_getattr),
     setattr: Some(ext4_setattr),
     iget: Some(ext4_iget),
+    destroy_inode: None,
 };
 
 /// Ext4 iget: instantiate VFS Inode from (parent, name, ino).

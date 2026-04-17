@@ -1195,7 +1195,7 @@ pub fn create_root_inode() -> alloc::sync::Arc<Inode> {
     };
     let mut inode = Inode::new(root_node.ino, InodeMode::new(InodeMode::S_IFDIR | 0o755));
     inode.ops = Some(&ROOTFS_INODE_OPS);
-    inode.private_data = Some(alloc::sync::Arc::as_ptr(&root_node) as *mut u8);
+    inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&root_node)) as *mut u8);
     alloc::sync::Arc::new(inode)
 }
 
@@ -1255,7 +1255,7 @@ unsafe fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<allo
 
     // Create inode
     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o755));
-    inode.private_data = Some(alloc::sync::Arc::as_ptr(&new_dir) as *mut u8);
+    inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_dir)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
     Ok(alloc::sync::Arc::new(inode))
@@ -1361,7 +1361,7 @@ unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<all
 
     // Create inode
     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o644));
-    inode.private_data = Some(alloc::sync::Arc::as_ptr(&new_file) as *mut u8);
+    inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_file)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
     Ok(alloc::sync::Arc::new(inode))
@@ -1397,7 +1397,7 @@ unsafe fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<allo
 
     // Create inode
     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
-    inode.private_data = Some(alloc::sync::Arc::as_ptr(&new_link) as *mut u8);
+    inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_link)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
     Ok(alloc::sync::Arc::new(inode))
@@ -1690,6 +1690,16 @@ unsafe fn rootfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
     Some(entries)
 }
 
+/// RootFS destroy_inode: reclaim the Arc<RootFSNode> stored in private_data.
+// SAFETY: VFS callback contract; called when the inode's refcount drops to zero.
+unsafe fn rootfs_destroy_inode(inode: &mut Inode) {
+    if let Some(ptr) = inode.private_data.take() {
+        // Reconstruct the Arc from the raw pointer and let it drop,
+        // decrementing the RootFSNode's reference count.
+        let _ = alloc::sync::Arc::from_raw(ptr as *const RootFSNode);
+    }
+}
+
 /// RootFS inode operations table
 pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(rootfs_lookup),
@@ -1709,6 +1719,7 @@ pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
     getattr: Some(rootfs_getattr),
     setattr: None,  // RootFS doesn't support setattr
     iget: Some(rootfs_iget),
+    destroy_inode: Some(rootfs_destroy_inode),
 };
 
 /// RootFS iget: instantiate VFS Inode from (parent, name, ino).
@@ -1733,7 +1744,7 @@ unsafe fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sy
     };
 
     let mut inode = Inode::new(child.ino, mode);
-    inode.private_data = Some(alloc::sync::Arc::as_ptr(&child) as *mut u8);
+    inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&child)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
     Ok(alloc::sync::Arc::new(inode))

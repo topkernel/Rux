@@ -33,7 +33,7 @@ impl Ext4DirEntry {
     /// # Safety
     /// bytes must contain at least 8 bytes; this is verified at runtime.
     // SAFETY: length check prevents OOB; name_len bounds check prevents OOB read
-    pub unsafe fn from_bytes(bytes: &[u8], _block_size: usize) -> Self {
+    pub unsafe fn from_bytes(bytes: &[u8], block_size: usize) -> Self {
         if bytes.len() < Self::MIN_ENTRY_SIZE {
             return Self {
                 inode: 0,
@@ -46,8 +46,15 @@ impl Ext4DirEntry {
 
         let inode = u32::from_le_bytes(*(bytes[0..4].as_ptr() as *const [u8; 4]));
         let rec_len = u16::from_le_bytes(*(bytes[4..6].as_ptr() as *const [u8; 2]));
-        let name_len = bytes[6];
+        let mut name_len = bytes[6];
         let file_type = bytes[7];
+
+        if rec_len < 8 || (rec_len as usize) > block_size {
+            return Self { inode: 0, rec_len: 0, name_len: 0, file_type: 0, name: [0u8; 255] };
+        }
+        if name_len as usize + 8 > rec_len as usize {
+            name_len = 0;
+        }
 
         let mut name = [0u8; 255];
         if name_len as usize + 8 <= bytes.len() {

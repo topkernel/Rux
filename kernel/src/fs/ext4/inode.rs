@@ -313,6 +313,10 @@ pub fn read_inode(
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    if ino > fs.total_inodes {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
     // Calculate block group and inode table index
     let group = (ino - 1) / fs.inodes_per_group;
     let index = (ino - 1) % fs.inodes_per_group;
@@ -395,6 +399,10 @@ pub fn write_inode(
     use crate::fs::bio;
 
     if ino == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    if ino > fs.total_inodes {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
@@ -496,6 +504,10 @@ pub fn write_inode_disk(
     use crate::fs::bio;
 
     if ino == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    if ino > fs.total_inodes {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 

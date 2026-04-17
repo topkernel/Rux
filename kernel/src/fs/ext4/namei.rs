@@ -1164,6 +1164,15 @@ fn find_dir_entry(
         // Search for entry in this block
         let mut offset = 0;
         while offset + 8 <= block_size {
+            let rec_len = u16::from_le_bytes([
+                block_data[offset + 4],
+                block_data[offset + 5],
+            ]);
+
+            if rec_len == 0 {
+                break;
+            }
+
             let ino = u32::from_le_bytes([
                 block_data[offset],
                 block_data[offset + 1],
@@ -1172,16 +1181,8 @@ fn find_dir_entry(
             ]);
 
             if ino == 0 {
-                break;
-            }
-
-            let rec_len = u16::from_le_bytes([
-                block_data[offset + 4],
-                block_data[offset + 5],
-            ]);
-
-            if rec_len == 0 {
-                break;
+                offset += rec_len as usize;
+                continue;
             }
 
             let entry_name_len = block_data[offset + 6] as usize;
@@ -1401,6 +1402,15 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
         let mut entry_count = 0;
 
         while offset + 8 <= block_size {
+            let rec_len = u16::from_le_bytes([
+                block_data[offset + 4],
+                block_data[offset + 5],
+            ]);
+
+            if rec_len == 0 {
+                break;
+            }
+
             let ino = u32::from_le_bytes([
                 block_data[offset],
                 block_data[offset + 1],
@@ -1409,16 +1419,8 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
             ]);
 
             if ino == 0 {
-                break;
-            }
-
-            let rec_len = u16::from_le_bytes([
-                block_data[offset + 4],
-                block_data[offset + 5],
-            ]);
-
-            if rec_len == 0 {
-                break;
+                offset += rec_len as usize;
+                continue;
             }
 
             entry_count += 1;

@@ -1168,4 +1168,5 @@ pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
     getattr: Some(procfs_getattr),
     setattr: None,     // ProcFS is read-only
     iget: Some(procfs_iget),
+    destroy_inode: None,
 };

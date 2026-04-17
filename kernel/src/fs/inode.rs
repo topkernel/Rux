@@ -216,6 +216,12 @@ pub struct INodeOps {
     /// Called by dentry-based path_lookup after op_lookup returns the inode number.
     /// Each filesystem implements this to create a fully populated VFS Inode.
     pub iget: Option<unsafe fn(&Inode, &[u8], Ino) -> Result<Arc<Inode>, i32>>,
+
+    // ==================== Inode Lifecycle ====================
+
+    /// Called when an inode is about to be freed (refcount drops to zero).
+    /// Use this to reclaim private_data (e.g., Arc::from_raw for leaked Arcs).
+    pub destroy_inode: Option<unsafe fn(&mut Inode)>,
 }
 
 /// Inode state

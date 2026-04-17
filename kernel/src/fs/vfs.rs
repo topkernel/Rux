@@ -1754,6 +1754,7 @@ static PROCFS_DIR_OPS: INodeOps = INodeOps {
     getattr: None,
     setattr: None,
     iget: None,
+    destroy_inode: None,
 };
 
 /// Readdir callback for synthetic procfs directories.

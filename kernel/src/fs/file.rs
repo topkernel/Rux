@@ -18,6 +18,7 @@ use alloc::sync::Arc;
 use alloc::boxed::Box;
 use crate::sync::spinlock::Spinlock;
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -91,8 +92,9 @@ pub struct FileOps {
 
 #[repr(C, align(16))]
 pub struct File {
-    /// File flags (interior-mutable for F_SETFL through shared &File)
-    pub flags: UnsafeCell<FileFlags>,
+    /// File flags stored as AtomicU32 for lock-free concurrent access
+    /// (fcntl F_SETFL vs read/write data race fix).
+    pub flags: AtomicU32,
     /// File position
     pub pos: Spinlock<u64>,
     /// Associated inode
@@ -124,7 +126,7 @@ impl File {
     /// Create new file object
     pub fn new(flags: FileFlags) -> Self {
         Self {
-            flags: UnsafeCell::new(flags),
+            flags: AtomicU32::new(flags.bits()),
             pos: Spinlock::new(0),
             inode: UnsafeCell::new(None),
             dentry: UnsafeCell::new(None),
@@ -134,26 +136,19 @@ impl File {
         }
     }
 
-    /// Read file flags (shared reference).
-    /// SAFETY: Callers that also mutate flags must use set_flags() or flags_mut().
-    pub fn flags(&self) -> &FileFlags {
-        // SAFETY: &self guarantees no other &mut reference exists.
-        // Mutation only happens through set_flags() or flags_mut() which
-        // require &mut self or UnsafeCell interior access.
-        unsafe { &*self.flags.get() }
+    /// Read file flags (returns a copy, lock-free via AtomicU32).
+    pub fn flags(&self) -> FileFlags {
+        FileFlags::new(self.flags.load(Ordering::Acquire))
     }
 
-    /// Set file flags (for F_SETFL through shared &File).
-    /// SAFETY: Caller must ensure no concurrent writers.
+    /// Set file flags atomically (for F_SETFL).
     pub fn set_flags(&self, flags: FileFlags) {
-        // SAFETY: Only called from fcntl F_SETFL path which holds exclusive
-        // access (syscall is per-task, no concurrent fcntl on the same fd).
-        unsafe { *self.flags.get() = flags; }
+        self.flags.store(flags.bits(), Ordering::Release);
     }
 
-    /// Get mutable reference to file flags (requires &mut File).
-    pub fn flags_mut(&mut self) -> &mut FileFlags {
-        self.flags.get_mut()
+    /// Load flags bits atomically (convenience for callers that only need the u32).
+    pub fn flags_bits(&self) -> u32 {
+        self.flags.load(Ordering::Acquire)
     }
 
     /// Set inode

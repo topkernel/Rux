@@ -540,31 +540,31 @@
 
 ## Batch 7: FS Core (23 files, ~7,500 lines) — 23/23 reviewed
 
-### [High] [BUG] F07-01: Pipe read/write race condition — buffer lock released between check and read
+### [High] [BUG] F07-01: Pipe read/write race condition — buffer lock released between check and read **[FIXED]**
 **File**: `fs/pipe.rs:191-198`
 **Description**: `pipe_read()` checks `is_write_closed()` and `available_read()` in separate lock acquisitions. Between check and actual read, write end could close or data could be consumed. Same TOCTOU in `pipe_file_read()`.
 **Linux**: Linux holds `pipe_lock` across entire check-then-read sequence.
 **Impact**: Data corruption or missed EOF in multi-threaded pipe scenarios.
 
-### [High] [BUG] F07-02: File::set_flags data race with concurrent reads
+### [High] [BUG] F07-02: File::set_flags data race with concurrent reads **[FIXED]**
 **File**: `fs/file.rs:148-152`
 **Description**: Uses raw `UnsafeCell` write without synchronization. Multiple threads sharing fd table (CLONE_FILES) can race on fcntl F_SETFL.
 **Linux**: Uses `f_lock` spinlock for F_SETFL.
 **Impact**: Data race with shared fd tables — undefined behavior.
 
-### [High] [BUG] F07-03: Pipe double-free — both read and write ends free the same Pipe
+### [High] [BUG] F07-03: Pipe double-free — both read and write ends free the same Pipe **[FIXED]**
 **File**: `fs/pipe.rs:401-406`
 **Description**: Both close paths see `is_read_closed() && is_write_closed()` and both call `Box::from_raw(pipe_ptr)`. No reference counting on the Pipe structure.
 **Linux**: Uses reference counting (`pipe_inode_info` with kref).
 **Impact**: Double-free causing memory corruption or kernel panic.
 
-### [High] [BUG] F07-04: RootFS inode private_data holds raw Arc pointer without keeping Arc alive
+### [High] [BUG] F07-04: RootFS inode private_data holds raw Arc pointer without keeping Arc alive **[FIXED]**
 **File**: `fs/rootfs.rs:1198, 1258, 1364, 1400, 1444, 1736`
 **Description**: `Arc::as_ptr(&root_node)` extracts raw pointer but Arc is dropped when local goes out of scope. `private_data` holds dangling pointer.
 **Linux**: Stores proper reference via `dentry->d_inode`.
 **Impact**: Use-after-free when accessing RootFS inodes through VFS layer.
 
-### [High] [BUG] F07-05: DevFS iget leaks Arc via into_raw with no matching from_raw
+### [High] [BUG] F07-05: DevFS iget leaks Arc via into_raw with no matching from_raw **[FIXED]**
 **File**: `fs/devfs/mod.rs:424-425`
 **Description**: `Arc::into_raw(child_arc)` prevents drop but no matching `Arc::from_raw()` on inode free. Memory leak for every devfs inode lookup.
 **Impact**: Memory leak growing with inode lookup rate.
@@ -682,34 +682,34 @@
 
 ## Batch 8: Ext4 + JBD2 (18 files, ~6,800 lines) — 18/18 reviewed
 
-### [High] [BUG] F08-01: `Ext4SuperBlockOnDisk` field `s_frags_per_group` should be `s_clusters_per_group`
+### [High] [BUG] F08-01: `Ext4SuperBlockOnDisk` field `s_frags_per_group` should be `s_clusters_per_group` **[FIXED]**
 **File**: `fs/ext4/superblock.rs:28`
 **Description**: Field name uses ext2/3 legacy terminology. ext4 uses `s_clusters_per_group`. No runtime impact since field unused.
 
-### [High] [BUG] F08-02: `read_inode` does not check `ino` against filesystem range
+### [High] [BUG] F08-02: `read_inode` does not check `ino` against filesystem range **[FIXED]**
 **File**: `fs/ext4/mod.rs:249-283`
 **Description**: Computes block group from `ino` without validating `ino <= total_inodes`. Out-of-range `ino` causes out-of-bounds read from group descriptor table → kernel crash.
 **Linux**: Validates against `s_inodes_count`.
 **Impact**: Kernel crash with crafted inode number.
 
-### [High] [BUG] F08-03: Fast symlink threshold inconsistency — `< 60` vs `<= 60`
+### [High] [BUG] F08-03: Fast symlink threshold inconsistency — `< 60` vs `<= 60` **[FIXED]**
 **File**: `fs/ext4/mod.rs:734` vs `mod.rs:1378` vs `fs/ext4/inode.rs:186`
 **Description**: One place uses `size < 60`, another `size <= 60`. Ext4 fast symlink threshold is exactly 60 bytes (`EXT4_N_BLOCKS * 4 = 15 * 4`). Strict `< 60` excludes 60-byte symlinks, forcing them into slow path which may read wrong data.
 **Linux**: Uses `<= EXT4_FAST_SYMLINK_MAX_LEN`.
 
-### [High] [BUG] F08-04: `find_dir_entry` breaks on `inode == 0` instead of skipping
+### [High] [BUG] F08-04: `find_dir_entry` breaks on `inode == 0` instead of skipping **[FIXED]**
 **File**: `fs/ext4/namei.rs:1174`
 **Description**: Deleted directory entries (`inode=0`) cause `break` instead of `continue`. Valid entries after deleted ones are never found.
 **Linux**: `ext4_find_entry()` skips `inode == 0` entries.
 **Impact**: Files after deleted entries in directory cannot be found. Data integrity bug.
 
-### [High] [BUG] F08-05: `is_dir_empty` same `inode == 0` break bug
+### [High] [BUG] F08-05: `is_dir_empty` same `inode == 0` break bug **[FIXED]**
 **File**: `fs/ext4/namei.rs:1411`
 **Description**: Same as F08-04. Reports non-empty directory as empty if deleted entries precede valid ones.
 **Linux**: `empty_dir()` skips `inode == 0`.
 **Impact**: `rmdir` may delete non-empty directory → data loss.
 
-### [High] [BUG] F08-06: `Ext4DirEntry::from_bytes` does not validate `rec_len`
+### [High] [BUG] F08-06: `Ext4DirEntry::from_bytes` does not validate `rec_len` **[FIXED]**
 **File**: `fs/ext4/dir.rs:36-64`
 **Description**: Never validates `rec_len` is within remaining block data. Corrupted `rec_len` could cause out-of-bounds read.
 **Linux**: Validates `rec_len >= 8` and `rec_len <= blocksize - offset`.
