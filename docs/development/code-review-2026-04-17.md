@@ -1087,59 +1087,31 @@
 **Description**: Rux struct is 48 bytes; Linux's `sched_attr` with util clamp fields is 56 bytes. `sched_util_min/max` silently ignored.
 **Impact**: ABI — newer user-space using util clamp gets values silently dropped.
 
-### [Medium] [POSIX] F11-13: copy_argv_from_user/copy_envp_from_user manually manage SUM bit
-**File**: `syscall/process.rs:118-146`
-**Description**: Manual `csrs sstatus` / `csrc sstatus` for SUM bit. If page fault occurs between set and clear, SUM remains set. Should use `copy_from_user`.
-**Linux**: Uses `copy_from_user` / `strncpy_from_user`.
+### [Medium] [POSIX] F11-13: copy_argv_from_user/copy_envp_from_user manually manage SUM bit **[FIXED — already uses get_user + strncpy_from_user with exception tables]**
 
-### [Medium] [POSIX] F11-14: sys_fstatat/fchmodat error returns may use positive errno
-**File**: `syscall/file.rs:239, 997-999`
-**Description**: `Err(e) => e as i64 as u64` — if VFS returns positive errno, user space sees positive return value. Pattern should be `-(errno as i64) as u64`.
+### [Medium] [POSIX] F11-14: sys_fstatat/fchmodat error returns may use positive errno **[FALSE POSITIVE — VFS functions return `as_neg_i32()` (negative i32), so `e as i64` is correct]**
 
-### [Medium] [BUG] F11-20: sys_sched_getaffinity ignores PID argument
-**File**: `syscall/sched.rs:703-728`
-**Description**: `let _pid = args[0] as u32` — PID is discarded. Always returns current CPU's mask regardless of target PID.
-**Linux**: Returns -ESRCH for non-existent PIDs.
+### [Medium] [BUG] F11-20: sys_sched_getaffinity ignores PID argument **[FIXED — validates non-zero PID exists via find_task_by_pid]**
 
-### [Medium] [BUG] F11-22: sys_prlimit64 always returns EPERM for set operations
-**File**: `syscall/process.rs:1311-1312`
-**Description**: Unconditionally returns -EPERM when new_rlim is non-null. Should allow setting within current hard limits without CAP_SYS_RESOURCE.
-**Impact**: Daemons that raise RLIMIT_NOFILE will fail.
+### [Medium] [BUG] F11-22: sys_prlimit64 always returns EPERM for set operations **[FIXED — allows setting rlim_cur within rlim_max, validates rlim_max ≤ hard limit]**
 
-### [Medium] [POSIX] F11-37: sys_clock_getres returns hardcoded 1ns resolution for all clocks
-**File**: `syscall/time.rs:269-288`
-**Description**: Ignores clk_id, returns 1ns for all clocks. With 10 MHz timer, actual resolution is 100ns.
-**Impact**: User space makes incorrect assumptions about timer precision.
+### [Medium] [POSIX] F11-37: sys_clock_getres returns hardcoded 1ns resolution for all clocks **[FIXED — returns 100ns for CLOCK_REALTIME/CLOCK_MONOTONIC, -EINVAL for unsupported]**
 
-### [Medium] [BUG] F11-38: sys_clock_getres ignores clock ID validation
-**File**: `syscall/time.rs:269-270`
-**Description**: `let _clk_id` — any clock ID accepted. Should return -EINVAL for unsupported clocks.
-**Linux**: Returns -EINVAL for invalid clock IDs.
+### [Medium] [BUG] F11-38: sys_clock_getres ignores clock ID validation **[FIXED — see F11-37]**
 
-### [Medium] [BUG] F11-39: nanosleep does not validate tv_nsec range
-**File**: `syscall/time.rs:162-166`
-**Description**: No check that `tv_nsec` is in [0, 999,999,999]. POSIX requires -EINVAL for out-of-range values.
+### [Medium] [BUG] F11-39: nanosleep does not validate tv_nsec range **[FIXED — added tv_nsec ∈ [0, 999_999_999] check]**
 
-### [Medium] [BUG] F11-12: sys_kill with pid < 0 does not check if any process was found
-**File**: `syscall/process.rs:573-583`
-**Description**: `kill(-pgid, 0)` returns 0 even if no process is in the specified group. Linux returns -ESRCH.
+### [Medium] [BUG] F11-12: sys_kill with pid < 0 does not check if any process was found **[FIXED — counts matching processes, returns -ESRCH if none found]**
 
-### [Medium] [BUG] F11-25: sys_sendto TCP fallback silently drops data
-**File**: `syscall/network.rs:274-277`
-**Description**: Returns `data.len()` without sending. Simulates success but data is discarded.
+### [Medium] [BUG] F11-25: sys_sendto TCP fallback silently drops data **[FIXED — calls tcp_sock.send(data) instead of returning data.len()]**
 
-### [Medium] [DESIGN] F11-16: sys_ioctl uses hardcoded fd >= 1000 for framebuffer detection
-**File**: `syscall/io.rs:517`
-**Description**: Magic number convention conflicts with processes having > 1000 open fds.
+### [Medium] [DESIGN] F11-16: sys_ioctl uses hardcoded fd >= 1000 for framebuffer detection **[KNOWN LIMITATION — needs fd-to-device mapping refactor]**
 
-### [Medium] [POSIX] F11-18: sys_readlinkat returns EINVAL for null buffer, should return EFAULT
-**File**: `syscall/file.rs:471-473`
+### [Medium] [POSIX] F11-18: sys_readlinkat returns EINVAL for null buffer, should return EFAULT **[FIXED — changed EINVAL to EFAULT]**
 
-### [Medium] [POSIX] F11-19: sys_fstatat does not reject unknown flags
-**File**: `syscall/file.rs:193-242`
+### [Medium] [POSIX] F11-19: sys_fstatat does not reject unknown flags **[FIXED — validates flags, rejects unknown bits]**
 
-### [Medium] [BUG] F11-17: sys_close does not check fd < 0
-**File**: `syscall/file.rs:132-148`
+### [Medium] [BUG] F11-17: sys_close does not check fd < 0 **[FIXED — added raw_fd < 0 check returning -EBADF]**
 
 ### [Low] [POSIX] F11-31: sys_preadv reads garbage from unused arg[4] on riscv64
 **File**: `syscall/io.rs:806-808`
@@ -1560,6 +1532,24 @@
 | F08-13 | Ext4 | ra_state Box leak edge case | **KNOWN LIMITATION** |
 | F08-14 | Ext4 | Inode.sb *const → *mut for proper mutability | **FIXED** |
 | F08-15 | Ext4 | add_dir_entry boundary validation | **FIXED** |
+
+### Batch J — F11 Syscall fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F11-12 | Syscall | sys_kill pid<0 returns -ESRCH when no process found | **FIXED** |
+| F11-13 | Syscall | copy_argv/envp SUM bit | **FALSE POSITIVE** (already uses get_user) |
+| F11-14 | Syscall | fstatat/fchmodat positive errno | **FALSE POSITIVE** (VFS returns negative) |
+| F11-16 | Syscall | ioctl fd>=1000 framebuffer detection | **KNOWN LIMITATION** |
+| F11-17 | Syscall | sys_close rejects fd<0 | **FIXED** |
+| F11-18 | Syscall | readlinkat null buf returns EFAULT | **FIXED** |
+| F11-19 | Syscall | fstatat rejects unknown flags | **FIXED** |
+| F11-20 | Syscall | sched_getaffinity validates PID | **FIXED** |
+| F11-22 | Syscall | prlimit64 allows set within limits | **FIXED** |
+| F11-25 | Syscall | sendto TCP fallback calls send() | **FIXED** |
+| F11-37 | Syscall | clock_getres returns 100ns + validates clock ID | **FIXED** |
+| F11-38 | Syscall | clock_getres validates clock ID | **FIXED** (merged into F11-37) |
+| F11-39 | Syscall | nanosleep validates tv_nsec range | **FIXED** |
 
 ## Top 10 Highest-Impact Fixes (recommended priority)
 

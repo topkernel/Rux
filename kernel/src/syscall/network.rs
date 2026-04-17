@@ -227,10 +227,13 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         None => {
             // Try to find from old socket table
             // Try TCP first
-            if let Some(_) = crate::net::tcp::tcp_socket_get(fd as i32) {
+            if let Some(tcp_sock) = crate::net::tcp::tcp_socket_get(fd as i32) {
                 // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
                 let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
-                return data.len() as i64;  // Simplified implementation
+                return match tcp_sock.send(data) {
+                    Ok(n) => n as i64,
+                    Err(()) => -(errno::EIO as i64),
+                };
             }
             // Then try UDP
             if let Some(_) = crate::net::udp::udp_socket_get(fd as i32) {

@@ -151,6 +151,12 @@ pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
 
     // SAFETY: req_ptr validated with access_ok; reads Timespec (two i64 fields).
     let req = unsafe { *req_ptr };
+
+    // POSIX: tv_nsec must be in [0, 999_999_999]
+    if req.tv_nsec < 0 || req.tv_nsec > 999_999_999 {
+        return -(errno::EINVAL as i64);
+    }
+
     nanosleep_impl(&req, rem_ptr)
 }
 
@@ -267,20 +273,26 @@ pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
-    let _clk_id = args[0] as i32;
+    let clk_id = args[0] as i32;
     let res = args[1] as *mut u64;
 
-    // Simplified implementation: return 1 nanosecond resolution
+    // Validate clock ID — only REALTIME and MONOTONIC supported
+    match clk_id as u32 {
+        CLOCK_REALTIME | CLOCK_MONOTONIC => {}
+        _ => return -(errno::EINVAL as i64),
+    }
+
+    // Return actual timer resolution: 100ns for 10 MHz timer
     if !res.is_null() {
         // Check if res is in valid user space
         if !crate::arch::riscv64::uaccess::access_ok(res as usize, 16) {  // 2 * sizeof(u64)
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: res validated with access_ok(16); writes two u64 values (tv_sec=0, tv_nsec=1).
+        // SAFETY: res validated with access_ok(16); writes two u64 values (tv_sec=0, tv_nsec=100).
         unsafe {
             // timespec structure: tv_sec (8 bytes) + tv_nsec (8 bytes)
             *res = 0;          // tv_sec = 0
-            *(res.offset(1)) = 1;  // tv_nsec = 1
+            *(res.offset(1)) = 100;  // tv_nsec = 100 (100ns for 10MHz timer)
         }
     }
 

@@ -731,9 +731,13 @@ pub fn sys_sched_getaffinity(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Only pid 0 (self) supported for now.
+    // Only pid 0 (self) supported for now; validate non-zero PID exists.
     if pid != 0 && pid != crate::process::current_pid() {
-        return -(errno::ESRCH as i64);
+        // Check if the target PID actually exists
+        let target = unsafe { crate::sched::find_task_by_pid(pid) };
+        if target.is_null() {
+            return -(errno::ESRCH as i64);
+        }
     }
 
     // Build affinity mask: all CPUs allowed.

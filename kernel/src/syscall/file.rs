@@ -130,7 +130,13 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
 
 /// sys_close - Close file descriptor
 pub fn sys_close(args: SyscallArgs) -> i64 {
-    let fd = args[0] as usize;
+    let raw_fd = args[0] as i64;
+
+    // Reject negative fd
+    if raw_fd < 0 {
+        return -(errno::EBADF as i64);
+    }
+    let fd = raw_fd as usize;
 
     // Handle POSIX MQ fds (range 512+)
     if fd >= 512 {
@@ -205,13 +211,21 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // Validate flags: only AT_SYMLINK_NOFOLLOW (0x100) and AT_EMPTY_PATH (0x1000) allowed
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+    if flags & !VALID_FLAGS != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
 
     // AT_SYMLINK_NOFOLLOW: don't follow symlinks (for lstat)
-    let lookup_flags = if flags & 0x100 != 0 { // AT_SYMLINK_NOFOLLOW
+    let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
         crate::fs::vfs::LOOKUP_NOFOLLOW
     } else {
         0
@@ -454,7 +468,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     let bufsize = args[3] as usize;
 
     if buf.is_null() {
-        return -(errno::EINVAL as i64);
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, bufsize) {
         return -(errno::EFAULT as i64);

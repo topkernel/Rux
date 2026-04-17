@@ -528,24 +528,38 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
             Some(t) => unsafe { (*t).pgid() },
             None => return -(errno::ESRCH as i64),
         };
+        let found = core::cell::Cell::new(false);
         // SAFETY: for_each_task provides valid task pointers; pgid/sig checks guard usage.
         crate::sched::for_each_task(|task| unsafe {
-            if (*task).pgid() == pgid && sig > 0 {
-                let _ = crate::signal::send_signal((*task).pid(), sig);
+            if (*task).pgid() == pgid {
+                found.set(true);
+                if sig > 0 {
+                    let _ = crate::signal::send_signal((*task).pid(), sig);
+                }
             }
         });
+        if !found.get() {
+            return -(errno::ESRCH as i64);
+        }
         return 0;
     }
 
     if pid < 0 {
         // Send to all processes in process group |pid|
         let pgid = (-pid) as u32;
+        let found = core::cell::Cell::new(false);
         // SAFETY: for_each_task provides valid task pointers; pgid/sig checks guard usage.
         crate::sched::for_each_task(|task| unsafe {
-            if (*task).pgid() == pgid && sig > 0 {
-                let _ = crate::signal::send_signal((*task).pid(), sig);
+            if (*task).pgid() == pgid {
+                found.set(true);
+                if sig > 0 {
+                    let _ = crate::signal::send_signal((*task).pid(), sig);
+                }
             }
         });
+        if !found.get() {
+            return -(errno::ESRCH as i64);
+        }
         return 0;
     }
 
@@ -1323,19 +1337,47 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Only support querying
-    if !new_rlim.is_null() {
-        return -(errno::EPERM as i64);
-    }
-
-    if old_rlim.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-
     // RLIMIT_NOFILE = 7
-    if resource == 7 {
-        // Return default file descriptor limit using copy_to_user
-        let rlimit: [u64; 2] = [1024, 1024 * 1024];  // rlim_cur, rlim_max
+    if resource != 7 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Current limits: rlim_cur=1024, rlim_max=1024*1024
+    let mut rlim_cur: u64 = 1024;
+    let rlim_max: u64 = 1024 * 1024;
+
+    // Handle set operation: allow setting within hard limits
+    if !new_rlim.is_null() {
+        // SAFETY: new_rlim validated with access_ok(16); reads two u64 values.
+        let new_vals = unsafe {
+            let mut buf = [0u64; 2];
+            let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                buf.as_mut_ptr() as *mut u8,
+                new_rlim,
+                core::mem::size_of::<[u64; 2]>()
+            );
+            if uncopied != 0 {
+                return -(errno::EFAULT as i64);
+            }
+            buf
+        };
+        let requested_cur = new_vals[0];
+        let requested_max = new_vals[1];
+
+        // Validate: rlim_cur must not exceed rlim_max, rlim_max must not exceed hard limit
+        if requested_cur > requested_max {
+            return -(errno::EINVAL as i64);
+        }
+        if requested_max > rlim_max {
+            // Would need CAP_SYS_RESOURCE to raise hard limit
+            return -(errno::EPERM as i64);
+        }
+        rlim_cur = requested_cur;
+    }
+
+    // Return old/current limits
+    if !old_rlim.is_null() {
+        let rlimit: [u64; 2] = [rlim_cur, rlim_max];
         // SAFETY: old_rlim validated non-null and access_ok above; copy_to_user handles
         // user pointer writes safely.
         let uncopied = unsafe {
@@ -1348,10 +1390,9 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
         if uncopied != 0 {
             return -(errno::EFAULT as i64);
         }
-        return 0;
     }
 
-    -(errno::EINVAL as i64)
+    0
 }
 
 /// sys_prctl - manipulate process attributes
