@@ -34,15 +34,22 @@ pub fn is_valid_pid(pid: u64) -> bool {
     current_pid() as u64 == pid || find_task_by_pid(pid as u32).is_some()
 }
 
-/// Parse PID from directory name
+/// Parse PID from directory name.
+/// Rejects leading zeros (except "0" itself) and checks for overflow.
 pub fn parse_pid(name: &[u8]) -> Option<u64> {
     if !is_pid_dir(name) {
+        return None;
+    }
+    // Reject leading zeros (e.g., "01", "00")
+    if name.len() > 1 && name[0] == b'0' {
         return None;
     }
 
     let mut pid: u64 = 0;
     for &c in name {
-        pid = pid * 10 + (c - b'0') as u64;
+        let digit = (c - b'0') as u64;
+        // Check overflow: pid * 10 + digit must not overflow
+        pid = pid.checked_mul(10)?.checked_add(digit)?;
     }
     Some(pid)
 }
@@ -114,8 +121,8 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     content.push_str(&format!("Pid:\t{}\n", pid));
     content.push_str(&format!("PPid:\t{}\n", ppid));
     content.push_str(&format!("TracerPid:\t0\n"));
-    content.push_str(&format!("Uid:\t{}\t{}\t{}\t{}\n", cred.uid, cred.euid, cred.suid, cred.uid));
-    content.push_str(&format!("Gid:\t{}\t{}\t{}\t{}\n", cred.gid, cred.egid, cred.sgid, cred.gid));
+    content.push_str(&format!("Uid:\t{}\t{}\t{}\t{}\n", cred.uid, cred.euid, cred.suid, cred.fsuid));
+    content.push_str(&format!("Gid:\t{}\t{}\t{}\t{}\n", cred.gid, cred.egid, cred.sgid, cred.fsgid));
     content.push_str("FDSize:\t64\n");
     content.push_str("Groups:\t\n");
     content.push_str("VmSize:\t0 kB\n");
@@ -201,32 +208,34 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
         find_task_by_pid(pid as u32)
     };
 
-    let (name, ppid, state_ch) = match task {
+    let (name, ppid, state_ch, vsize_pages, sig_mask, exit_code) = match task {
         Some(t) => {
             let ch = task_state_char(&t) as char;
-            (t.get_exe_path(), t.ppid(), ch)
+            let vsize = t.address_space().map(|mm| mm.total_vm()).unwrap_or(0);
+            let sigmask = t.sigmask;
+            let ec = t.exit_code();
+            (t.get_exe_path(), t.ppid(), ch, vsize, sigmask, ec)
         }
-        None => (b"unknown".as_slice(), 0, 'X'),
+        None => (b"unknown".as_slice(), 0, 'X', 0, 0, 0),
     };
 
     let name_str = core::str::from_utf8(name).unwrap_or("unknown");
 
-    // 52 fields: pid comm state ppid pgrp session tty_nr tpggid flags
-    //            minflt cminflt majflt cmajflt utime stime cutime cstime
-    //            priority nice num_threads itrealvalue starttime vsize rss
-    //            rsslim startcode endcode startstack kstkesp kstkeip signal
-    //            blocked sigignore sigcatch wchan nswap cnswap exit_signal
-    //            processor rt_priority policy delayacct_blkio_ticks
-    //            guest_time cguest_time start_data end_data start_brk
-    //            arg_start arg_end env_start env_end exit_code
+    // Key fields filled: pid(1), comm(2), state(3), ppid(4), pgrp(5), session(6),
+    // vsize(23) in bytes, signal block mask(30), exit_code(52).
+    // Fields 7-22 and 24-29,31-51 remain 0 — filled as accounting infrastructure grows.
+    let vsize_bytes = vsize_pages * 4096;
     let content = format!(
-        "{} ({}) {} {} {} {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        "{} ({}) {} {} {} {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         pid,
         name_str,
         state_ch,
         ppid,
         pid,  // pgrp = pid
         pid,  // session = pid
+        vsize_bytes,
+        sig_mask,
+        exit_code,
     );
     content.into_bytes()
 }
@@ -248,7 +257,11 @@ pub fn generate_exe_link(pid: u64) -> Vec<u8> {
     };
 
     let name_str = core::str::from_utf8(name).unwrap_or("");
-    format!("/{}", name_str).into_bytes()
+    if name_str.starts_with('/') {
+        name.to_vec()
+    } else {
+        format!("/{}", name_str).into_bytes()
+    }
 }
 
 /// Generate /proc/[pid]/cwd symlink target

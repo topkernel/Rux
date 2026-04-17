@@ -815,19 +815,19 @@
 **Linux**: `get_avenrun()` with exponential decay.
 **Impact**: `uptime`, `top`, `htop` show identical load averages — no historical information.
 
-### [Medium] [BUG] F09-03: ref_count fetch_sub returns old value, not new value
+### [Medium] [BUG] F09-03: ref_count fetch_sub returns old value, not new value **[FIXED — documented pre-decrement semantics]**
 **File**: `fs/procfs/mod.rs:340-342`
 **Description**: `put()` returns pre-decrement value. Callers checking `put() == 0` will never trigger. Should check `== 1` for last-reference detection.
 
-### [Medium] [DESIGN] F09-04: list_children adds only current PID, not all processes
+### [Medium] [DESIGN] F09-04: list_children adds only current PID, not all processes **[KNOWN LIMITATION — readdir path uses pid_hash_collect_all, correct for /proc listing]**
 **File**: `fs/procfs/mod.rs:323-329`
 **Description**: Only adds `current_pid()`. Inconsistent with `procfs_readdir` which adds all PIDs.
 
-### [Medium] [BUG] F09-05: procfs_file_close race condition on concurrent access
+### [Medium] [BUG] F09-05: procfs_file_close race condition on concurrent access **[KNOWN LIMITATION — single-core non-preemptible kernel]**
 **File**: `fs/procfs/mod.rs:1004-1015`
 **Description**: Nulls private_data then frees Box. If read/lseek in progress, use-after-free. Safe on single-core non-preemptible.
 
-### [Medium] [DESIGN] F09-06: Inode number collision possible for PID files
+### [Medium] [DESIGN] F09-06: Inode number collision possible for PID files **[FIXED — stride increased from 1000 to 10000]**
 **File**: `fs/procfs/mod.rs:749-751`
 **Description**: `pid * 1000 + kind` — collisions possible when PIDs > ~1000. Discriminant values fragile.
 
@@ -837,44 +837,44 @@
 **Linux**: Uses `access_remote_vm()` with proper page fault handling.
 **Impact**: Reading `/proc/[pid]/cmdline` for concurrently-exiting process can crash kernel.
 
-### [Medium] [POSIX] F09-13: /proc/[pid]/status uses uid instead of fsuid in fourth Uid field
+### [Medium] [POSIX] F09-13: /proc/[pid]/status uses uid instead of fsuid in fourth Uid field **[FIXED]**
 **File**: `fs/procfs/pid.rs:150`
 **Description**: Outputs `uid, euid, suid, uid` — fourth field repeats real UID instead of fsuid.
 **Linux**: Shows `uid, euid, suid, fsuid`.
 
-### [Medium] [POSIX] F09-14: /proc/[pid]/status uses gid instead of fsgid in fourth Gid field
+### [Medium] [POSIX] F09-14: /proc/[pid]/status uses gid instead of fsgid in fourth Gid field **[FIXED]**
 **File**: `fs/procfs/pid.rs:151`
 **Description**: Same as F09-13 for group IDs.
 
-### [Medium] [POSIX] F09-15: /proc/[pid]/stat field values mostly hardcoded to 0
+### [Medium] [POSIX] F09-15: /proc/[pid]/stat field values mostly hardcoded to 0 **[PARTIALLY FIXED — vsize, sigmask, exit_code now filled]**
 **File**: `fs/procfs/pid.rs:244-261`
 **Description**: Format string has ~52 fields but most are zero. `utime`, `stime`, `vsize`, `rss` etc. lack actual accounting data.
 **Linux**: Fills all 52 fields from task struct.
 
-### [Medium] [BUG] F09-16: generate_exe_link prepends "/" even for non-absolute paths
+### [Medium] [BUG] F09-16: generate_exe_link prepends "/" even for non-absolute paths **[FIXED]**
 **File**: `fs/procfs/pid.rs:280-281`
 **Description**: Formats as `format!("/{}", name_str)` producing `/toybox` instead of `/bin/toybox`.
 **Linux**: Points to full absolute path.
 
-### [Medium] [DESIGN] F09-17: parse_pid does not check for leading zeros or overflow
+### [Medium] [DESIGN] F09-17: parse_pid does not check for leading zeros or overflow **[FIXED]**
 **File**: `fs/procfs/pid.rs:71-81`
 **Description**: Accepts "00", "01" as valid PIDs. No length check — multiplication overflow possible.
 
-### [Medium] [POSIX] F09-21: Missing "hart isa:" line from RISC-V cpuinfo format
+### [Medium] [POSIX] F09-21: Missing "hart isa:" line from RISC-V cpuinfo format **[FIXED]**
 **File**: `fs/procfs/cpuinfo.rs:12-40`
 **Description**: Linux RISC-V `/proc/cpuinfo` includes per-hart "hart isa:" line. Rux omits it.
 **Linux**: `cpu.c:367-368` prints ISA string.
 
-### [Medium] [POSIX] F09-23: Idle time set equal to uptime — incorrect
+### [Medium] [POSIX] F09-23: Idle time set equal to uptime — incorrect **[PARTIALLY FIXED — now uptime * ncpus, still no per-CPU idle tracking]**
 **File**: `fs/procfs/uptime.rs:19`
 **Description**: Always shows 100% idle. Should track actual CPU idle time.
 **Linux**: Sums `get_idle_time()` across all CPUs.
 
-### [Medium] [DESIGN] F09-25: MAX_CPUS redefined locally instead of using config::MAX_CPUS
+### [Medium] [DESIGN] F09-25: MAX_CPUS redefined locally instead of using config::MAX_CPUS **[FIXED]**
 **File**: `fs/procfs/interrupts.rs:17`
 **Description**: `const MAX_CPUS: usize = 4` instead of importing from config.
 
-### [Medium] [POSIX] F09-27: /proc/version format differs from Linux format
+### [Medium] [POSIX] F09-27: /proc/version format differs from Linux format **[FIXED]**
 **File**: `fs/procfs/version.rs:16-20`
 **Description**: Third field is KERNEL_VERSION repeated instead of build-time version string.
 

@@ -332,7 +332,9 @@ impl ProcFSNode {
         self.ref_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Decrement reference count
+    /// Decrement reference count.
+    /// Returns the **previous** value (pre-decrement). Callers checking for
+    /// last reference should compare against 1, not 0.
     pub fn put(&self) -> u64 {
         self.ref_count.fetch_sub(1, Ordering::Relaxed)
     }
@@ -750,8 +752,8 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
             _ => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
         };
-        // Use a hash of pid + file kind as inode number
-        let file_ino = pid_val * 1000 + (kind as u64) + 100;
+        // Use pid * stride + kind as inode number. Stride must exceed max kind value.
+        let file_ino = pid_val * 10000 + (kind as u64) + 100;
         return Ok(file_ino);
     }
 

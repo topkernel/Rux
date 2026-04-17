@@ -9,14 +9,13 @@ use alloc::format;
 
 /// Generate /proc/version content
 ///
-/// Format: Rux version <version> (root@riscv64) (rustc <version>) <version>
+/// Format matches Linux: <os> version <release> (<who@arch>) (<compiler>) #<build>
 pub fn generate() -> Vec<u8> {
     use crate::config;
 
-    format!("Rux version {} (root@riscv64) (rustc {}) {}\n",
+    format!("Rux version {} (root@riscv64) (rustc {}) #1 SMP\n",
         config::KERNEL_VERSION,
         option_env!("RUSTC_VERSION").unwrap_or("unknown"),
-        config::KERNEL_VERSION
     ).into_bytes()
 }
 

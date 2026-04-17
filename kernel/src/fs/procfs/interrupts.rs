@@ -13,8 +13,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-/// Maximum number of CPUs
-const MAX_CPUS: usize = 4;
+/// Maximum number of CPUs — must match config::MAX_CPUS
+const MAX_CPUS: usize = crate::config::MAX_CPUS;
 
 // ============================================================================
 // Per-CPU local interrupt counters (RISC-V internal, not via PLIC)

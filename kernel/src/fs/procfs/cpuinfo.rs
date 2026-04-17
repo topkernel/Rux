@@ -22,8 +22,9 @@ pub fn generate() -> Vec<u8> {
 
         content.push_str(&format!("processor\t: {}\n", cpu));
         content.push_str(&format!("hart\t\t: {}\n", cpu));
-        // Use detected ISA string from boot or static
+        // ISA string — matches the format expected by musl and procps
         content.push_str("isa\t\t: rv64imafdc\n");
+        content.push_str(&format!("hart isa\t: rv64imafdc\n"));
         content.push_str("mmu\t\t: sv39\n");
         // mvendorid, marchid, mimpid require M-mode or SBI call
         // For now, show as unavailable

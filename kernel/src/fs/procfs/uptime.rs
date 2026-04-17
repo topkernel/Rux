@@ -15,8 +15,10 @@ pub fn generate() -> Vec<u8> {
     let uptime_secs = get_uptime_seconds();
 
     // Format: uptime idle_time
-    // For simplicity, idle time equals uptime (single CPU system)
-    let content = format!("{:.2} {:.2}\n", uptime_secs, uptime_secs);
+    // TODO: Track actual idle time per CPU. Approximate as uptime * ncpus.
+    let num_cpus = crate::arch::riscv64::smp::num_started_cpus() as f64;
+    let idle_secs = uptime_secs * num_cpus;
+    let content = format!("{:.2} {:.2}\n", uptime_secs, idle_secs);
 
     content.into_bytes()
 }
