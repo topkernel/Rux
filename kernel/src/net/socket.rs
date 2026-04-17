@@ -242,7 +242,16 @@ impl Socket {
                 let udp_fd = self.udp_fd.lock().ok_or(-9)?;
 
                 if let Some((_addr, _port)) = dest_addr {
-                    Ok(buf.len())
+                    if let Some(_socket) = crate::net::udp::udp_socket_get(udp_fd) {
+                        let ret = crate::net::udp::udp_send(udp_fd, buf);
+                        if ret >= 0 {
+                            Ok(ret as usize)
+                        } else {
+                            Err(ret as i32)
+                        }
+                    } else {
+                        Err(-9)
+                    }
                 } else {
                     if let Some(_socket) = crate::net::udp::udp_socket_get(udp_fd) {
                         let ret = crate::net::udp::udp_send(udp_fd, buf);

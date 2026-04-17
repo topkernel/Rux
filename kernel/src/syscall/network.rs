@@ -77,21 +77,18 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
         return -(errno::EAFNOSUPPORT as i64);
     }
 
-    // TODO: Need a way to determine if fd is TCP or UDP socket
-    // Simplified implementation: try both protocols
-    use crate::net::{tcp, udp};
-
-    // Try TCP first
-    if let Some(_socket) = tcp::tcp_socket_get(fd) {
-        return tcp::tcp_bind(fd, sin_port) as i64;
+    // Determine socket type via the VFS socket layer first, then delegate to
+    // the correct protocol table.  This avoids accidentally binding a TCP fd
+    // when the caller created a UDP socket (or vice-versa), because the TCP
+    // and UDP tables use independent fd spaces.
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
+        match socket.bind(0, sin_port) {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        }
+    } else {
+        -(errno::EBADF as i64)
     }
-
-    // Then try UDP
-    if let Some(_socket) = udp::udp_socket_get(fd) {
-        return udp::udp_bind(fd, sin_port) as i64;
-    }
-
-    -(errno::EBADF as i64)
 }
 
 /// sys_listen - Listen on socket

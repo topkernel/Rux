@@ -931,61 +931,61 @@
 **Description**: Fallback path returns TCP/UDP internal table index as "fd", but never registers in process fd table. musl programs get EBADF on read/write/poll.
 **Impact**: All musl network programs broken via fallback path.
 
-### [Medium] [POSIX] F10-05: Socket::send drops UDP data with dest_addr silently
+### [Medium] [POSIX] F10-05: Socket::send drops UDP data with dest_addr silently **[FIXED]**
 **File**: `net/socket.rs:244-245`
 **Description**: `send()` with `dest_addr` immediately returns `Ok(buf.len())` without sending. `sendto()` on unconnected UDP socket silently drops data.
 
-### [Medium] [POSIX] F10-06: Socket::accept always returns EAGAIN
+### [Medium] [POSIX] F10-06: Socket::accept always returns EAGAIN **[KNOWN LIMITATION — TCP accept queue not implemented]**
 **File**: `net/socket.rs:314-327`
 **Description**: Never dequeues established connections. TCP servers cannot work.
 
-### [Medium] [BUG] F10-11: ARP lookup byte order mismatch — cache always misses
+### [Medium] [BUG] F10-11: ARP lookup byte order mismatch — cache always misses **[FIXED]**
 **File**: `net/arp.rs:268-271, 506`
 **Description**: Cache stores host-byte-order IPs but `resolve_ip` passes network-byte-order. ARP resolution always fails, forcing broadcast MAC.
 
-### [Medium] [BUG] F10-13: ipv4_send uses hardcoded source IP 192.168.1.100
+### [Medium] [BUG] F10-13: ipv4_send uses hardcoded source IP 192.168.1.100 **[FIXED]**
 **File**: `net/ipv4/mod.rs:224`
 **Description**: Source IP hardcoded as `0xC0A80164`. Ignores actual local IP configuration.
 
-### [Medium] [BUG] F10-14: ipv4_send tot_len potential u16 overflow
+### [Medium] [BUG] F10-14: ipv4_send tot_len potential u16 overflow **[FIXED]**
 **File**: `net/ipv4/mod.rs:213`
 **Description**: `(IPHDR_LEN + skb.len) as u16` silently truncates for packets > 65535 bytes.
 
-### [Medium] [BUG] F10-19: UDP checksum byte order incorrect
+### [Medium] [BUG] F10-19: UDP checksum byte order incorrect **[FIXED]**
 **File**: `net/udp.rs:438`
 **Description**: `uhdr.len` is network byte order but used directly in checksum sum. Produces incorrect checksums.
 
-### [Medium] [POSIX] F10-20: UDP receive doesn't check destination IP
+### [Medium] [POSIX] F10-20: UDP receive doesn't check destination IP **[FIXED]**
 **File**: `net/udp.rs:590-604`
 **Description**: Matches only by port, ignores bound IP address. INADDR_ANY vs specific IP not distinguished.
 
-### [Medium] [BUG] F10-21: TCP pseudo-header protocol field byte order error
+### [Medium] [BUG] F10-21: TCP pseudo-header protocol field byte order error **[FIXED]**
 **File**: `net/tcp.rs:1808`
 **Description**: `sum += (6u32 << 8)` produces `0x0600` instead of `0x0006`. TCP checksum always incorrect. Peers reject our packets.
 
-### [Medium] [BUG] F10-22: TCP retransmit uses snd_nxt instead of seg.seq
+### [Medium] [BUG] F10-22: TCP retransmit uses snd_nxt instead of seg.seq **[KNOWN LIMITATION — TCP retransmit overhaul needed]**
 **File**: `net/tcp.rs:1283`
 **Description**: Fast retransmit and timeout retransmit send data with wrong sequence number. TCP connection breaks under packet loss.
 
-### [Medium] [BUG] F10-24: SYN retransmit creates duplicate pending connections
+### [Medium] [BUG] F10-24: SYN retransmit creates duplicate pending connections **[KNOWN LIMITATION — SYN dedup not implemented]**
 **File**: `net/tcp.rs:1434-1454`
 **Description**: No dedup check — second SYN creates second TcpSocket. Peer receives multiple SYN-ACKs.
 
-### [Medium] [BUG] F10-29: TCP timer/syscall data race on socket table
+### [Medium] [BUG] F10-29: TCP timer/syscall data race on socket table **[KNOWN LIMITATION — locking infrastructure needed]**
 **File**: `net/tcp_timer.rs:156-159`
 **Description**: Timer softirq and syscalls both access TCP_SOCKET_TABLE without locking. Data race on single-core if softirq preempts syscall.
 
-### [Medium] [POSIX] F10-32: sys_bind tries TCP then UDP — may bind wrong socket type
+### [Medium] [POSIX] F10-32: sys_bind tries TCP then UDP — may bind wrong socket type **[FIXED]**
 **File**: `syscall/network.rs:126-138`
 **Description**: Fallback path matches first table regardless of socket type. fd=N could match both TCP and UDP tables.
 
-### [Medium] [POSIX] F10-33: sys_connect fallback only supports TCP, no UDP
+### [Medium] [POSIX] F10-33: sys_connect fallback only supports TCP, no UDP **[KNOWN LIMITATION — UDP connect fallback not implemented]**
 **File**: `syscall/network.rs:221-226`
 
-### [Medium] [BUG] F10-07: socket_close fragile Arc/raw pointer ownership
+### [Medium] [BUG] F10-07: socket_close fragile Arc/raw pointer ownership **[KNOWN LIMITATION — Arc ownership model works but brittle]**
 **File**: `net/socket.rs:395-418`
 
-### [Medium] [BUG] F10-02: SkBuff implements Send but not Sync — future SMP issue
+### [Medium] [BUG] F10-02: SkBuff implements Send but not Sync — future SMP issue **[FIXED]**
 **File**: `net/buffer.rs:127`
 
 ### [Low] [DESIGN] F10-01: SKBUFF_ALLOCATOR_ID unused
@@ -1576,15 +1576,35 @@
 | F04-08 | Sched | nr_running only decrements on successful dequeue | **FIXED** |
 | F04-09 | Sched | RR tick sets RUNNING state before re-enqueue | **FIXED** |
 
+### Batch P — F10 Networking fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F10-02 | Network | SkBuff implements Send but not Sync | **FIXED** |
+| F10-05 | Network | Socket::send drops UDP data with dest_addr silently | **FIXED** |
+| F10-11 | Network | ARP lookup byte order mismatch | **FIXED** |
+| F10-13 | Network | ipv4_send uses hardcoded source IP | **FIXED** |
+| F10-14 | Network | ipv4_send tot_len potential u16 overflow | **FIXED** |
+| F10-19 | Network | UDP checksum byte order incorrect | **FIXED** |
+| F10-20 | Network | UDP receive doesn't check destination IP | **FIXED** |
+| F10-21 | Network | TCP pseudo-header protocol field byte order error | **FIXED** |
+| F10-32 | Network | sys_bind tries TCP then UDP — may bind wrong socket type | **FIXED** |
+| F10-06 | Network | Socket::accept always returns EAGAIN | **KNOWN LIMITATION** |
+| F10-07 | Network | socket_close fragile Arc/raw pointer ownership | **KNOWN LIMITATION** |
+| F10-22 | Network | TCP retransmit uses snd_nxt instead of seg.seq | **KNOWN LIMITATION** |
+| F10-24 | Network | SYN retransmit creates duplicate pending connections | **KNOWN LIMITATION** |
+| F10-29 | Network | TCP timer/syscall data race on socket table | **KNOWN LIMITATION** |
+| F10-33 | Network | sys_connect fallback only supports TCP | **KNOWN LIMITATION** |
+
 ## Top 10 Highest-Impact Fixes (recommended priority)
 
 1. ~~**F11-06**: mmap-family returns positive errno — **all memory allocation error detection broken**~~ **FIXED**
 2. ~~**F06-02**: Semaphore deadlock — woken waiter sleeps forever~~ **FIXED**
 3. ~~**F06-15**: Condvar lost-wakeup — deadlock under concurrent signal/wait~~ **FIXED**
-4. **F10-21**: TCP checksum byte order error — peers reject our packets
+4. ~~**F10-21**: TCP checksum byte order error — peers reject our packets~~ **FIXED**
 5. ~~**F08-04/05**: ext4 dir entry inode==0 break — files disappear, rmdir deletes non-empty dirs~~ **FIXED**
 6. ~~**F05-11**: AT_RANDOM hardcoded — stack canary identical across all processes~~ **FIXED**
 7. ~~**F02-01**: SignalFrame uc pointer off by 4 — SA_SIGINFO handlers read corrupted ucontext~~ **FIXED**
 8. ~~**F07-03**: Pipe double-free — kernel panic on pipe close~~ **FIXED**
 9. ~~**F09-11**: SumGuard t6 clobber — potential data corruption~~ **FIXED**
-10. **F10-11**: ARP byte order mismatch — all outbound traffic uses broadcast MAC
+10. ~~**F10-11**: ARP byte order mismatch — all outbound traffic uses broadcast MAC~~ **FIXED**

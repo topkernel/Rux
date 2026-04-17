@@ -1805,7 +1805,7 @@ pub fn tcp_checksum(shdr: u32, dhdr: u32, thdr: &TcpHdr, data: &[u8]) -> u16 {
     sum += (dhdr >> 16) & 0xFFFF;
     sum += dhdr & 0xFFFF;
     // Reserved (1 byte) + Protocol (1 byte) + TCP length (2 bytes)
-    sum += (6u32 << 8); // TCP protocol number
+    sum += 6u32; // TCP protocol number (reserved=0, protocol=6)
     let tcp_len = (thdr.header_len() + data.len()) as u16;
     sum += tcp_len as u32;
 

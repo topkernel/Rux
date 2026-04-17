@@ -125,6 +125,7 @@ pub struct SkBuff {
 }
 
 unsafe impl Send for SkBuff {}
+unsafe impl Sync for SkBuff {}
 
 /// SkBuff global allocator ID
 static SKBUFF_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(0);

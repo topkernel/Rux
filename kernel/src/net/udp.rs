@@ -434,7 +434,7 @@ pub fn udp_checksum(shdr: u32, dhdr: u32, uhdr: &UdpHdr, data: &[u8]) -> u16 {
     sum += (dhdr >> 16) & 0xFFFF;
     sum += dhdr & 0xFFFF;
     // Reserved (1 byte) + Protocol (1 byte) + UDP length (2 bytes)
-    sum += (17u32 << 8); // UDP protocol number
+    sum += 17u32; // UDP protocol number (reserved=0, protocol=17)
     sum += uhdr.len as u32;
 
     // UDP header
@@ -583,13 +583,17 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         &[]
     };
 
-    // Find socket bound to destination port
+    // Find socket bound to destination port (and optionally destination IP).
+    // A socket with local_ip == 0 (INADDR_ANY) accepts packets to any local IP;
+    // a socket with a specific local_ip only accepts packets to that IP.
     // SAFETY: UDP_SOCKET_TABLE is a global; iterating under current single-core
     // kernel context ensures no concurrent mutation.
     unsafe {
         for i in 0..UDP_SOCKET_TABLE.count {
             if let Some(ref mut socket) = UDP_SOCKET_TABLE.sockets[i] {
-                if socket.bound && socket.local_port == dest_port {
+                if socket.bound && socket.local_port == dest_port
+                    && (socket.local_ip == 0 || socket.local_ip == dest_ip)
+                {
                     // Put data into socket's receive buffer
                     let packet = UdpPacket {
                         data: alloc::vec::Vec::from(data),

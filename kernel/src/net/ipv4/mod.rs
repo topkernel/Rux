@@ -210,7 +210,11 @@ pub fn ipv4_send(mut skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> 
 
         ip_hdr.tos = 0;
 
-        ip_hdr.tot_len = ((IPHDR_LEN + skb.len as usize) as u16).to_be();
+        let total_len = IPHDR_LEN + skb.len as usize;
+        if total_len > u16::MAX as usize {
+            return Err(()); // Packet too large for IPv4
+        }
+        ip_hdr.tot_len = (total_len as u16).to_be();
 
         ip_hdr.id = 0;
 
@@ -220,7 +224,7 @@ pub fn ipv4_send(mut skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> 
 
         ip_hdr.protocol = protocol;
 
-        ip_hdr.saddr = 0xC0A80164;
+        ip_hdr.saddr = crate::net::arp::get_local_ip().to_be();
 
         ip_hdr.daddr = dest_ip.to_be();
 

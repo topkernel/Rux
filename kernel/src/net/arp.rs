@@ -410,8 +410,8 @@ fn is_local_ip(ip: u32) -> bool {
     ip == local_ip
 }
 
-/// Get local IP address
-fn get_local_ip() -> u32 {
+/// Get local IP address (host byte order)
+pub fn get_local_ip() -> u32 {
     0xC0A80164
 }
 
@@ -503,7 +503,7 @@ fn transmit_arp_packet(skb: SkBuff) {
 /// # Returns
 /// MAC address if found in cache, None otherwise (sends ARP request)
 pub fn resolve_ip(ip: u32) -> Option<[u8; ETH_ALEN]> {
-    if let Some(mac) = arp_lookup(ip.to_be()) {
+    if let Some(mac) = arp_lookup(ip) {
         return Some(mac);
     }
 
