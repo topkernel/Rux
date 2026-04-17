@@ -1148,33 +1148,33 @@
 **Description**: MQ file descriptors stored in separate PID-indexed global table. `close()`, `poll()`, `select()` from musl won't work.
 **Linux**: Uses real file descriptors via anon_inode.
 
-### [Medium] [POSIX] F12-04: semop does not check for negative result values
+### [Medium] [POSIX] F12-04: semop does not check for negative result values **[FIXED]**
 **File**: `ipc/sysv_sem.rs`
 
-### [Medium] [POSIX] F12-07: shmget does not validate size against existing segment
+### [Medium] [POSIX] F12-07: shmget does not validate size against existing segment **[FIXED]**
 **File**: `ipc/sysv_shm.rs`
 
-### [Medium] [POSIX] F12-09: semget does not validate nsems against existing set
+### [Medium] [POSIX] F12-09: semget does not validate nsems against existing set **[FIXED]**
 **File**: `ipc/sysv_sem.rs`
 
-### [Medium] [POSIX] F12-10: msgctl IPC_SET does not check CAP_SYS_RESOURCE for large msg_qbytes
+### [Medium] [POSIX] F12-10: msgctl IPC_SET does not check CAP_SYS_RESOURCE for large msg_qbytes **[FIXED]**
 **File**: `ipc/sysv_msg.rs`
 
-### [Medium] [POSIX] F12-15: IPC_SET uses hardcoded byte offsets instead of struct field access
+### [Medium] [POSIX] F12-15: IPC_SET uses hardcoded byte offsets instead of struct field access **[FIXED]**
 **File**: `ipc/util.rs`
 
-### [Medium] [BUG] F12-24: sys_shmdt TOCTOU race — VMA lock dropped before IPC lock acquired
+### [Medium] [BUG] F12-24: sys_shmdt TOCTOU race — VMA lock dropped before IPC lock acquired **[FIXED]**
 **File**: `ipc/sysv_shm.rs`
 **Description**: Between releasing VMA lock and acquiring IPC lock, VMA could be freed by another thread.
 
-### [Medium] [BUG] F12-25: shm_detach_vma nattch count inconsistency
+### [Medium] [BUG] F12-25: shm_detach_vma nattch count inconsistency **[FIXED]**
 **File**: `ipc/sysv_shm.rs`
 **Description**: Related to F12-24 — nattch count may be inaccurate due to race window.
 
 ### [Medium] [DESIGN] F12-26: IPC_INFO/SHM_INFO use raw byte offsets
 **File**: `ipc/util.rs`, `ipc/sysv_shm.rs`
 
-### [Medium] [POSIX] F12-27: shmctl missing capability checks
+### [Medium] [POSIX] F12-27: shmctl missing capability checks **[FIXED]**
 **File**: `ipc/sysv_shm.rs`
 
 ### [Medium] [DESIGN] F12-16: Multiple IPC_SET operations fragile with hardcoded offsets
@@ -1595,6 +1595,19 @@
 | F10-24 | Network | SYN retransmit creates duplicate pending connections | **KNOWN LIMITATION** |
 | F10-29 | Network | TCP timer/syscall data race on socket table | **KNOWN LIMITATION** |
 | F10-33 | Network | sys_connect fallback only supports TCP | **KNOWN LIMITATION** |
+
+### Batch Q — F12 IPC fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F12-04 | IPC | semop does not check for negative result values | **FIXED** |
+| F12-07 | IPC | shmget does not validate size against existing segment | **FIXED** |
+| F12-09 | IPC | semget does not validate nsems against existing set | **FIXED** |
+| F12-10 | IPC | msgctl IPC_SET CAP_SYS_RESOURCE check for large msg_qbytes | **FIXED** |
+| F12-15 | IPC | IPC_SET uses hardcoded byte offsets instead of struct field access | **FIXED** |
+| F12-24 | IPC | sys_shmdt TOCTOU race | **FIXED** |
+| F12-25 | IPC | shm_detach_vma nattch count inconsistency | **FIXED** |
+| F12-27 | IPC | shmctl missing capability checks | **FIXED** |
 
 ## Top 10 Highest-Impact Fixes (recommended priority)
 

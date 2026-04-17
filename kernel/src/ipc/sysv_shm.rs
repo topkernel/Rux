@@ -192,6 +192,19 @@ pub fn sys_shmget(args: [u64; 6]) -> i64 {
     // Round up size to page boundary
     let size = if size == 0 { 0 } else { ((size + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1)) };
 
+    // Validate size against existing segment (per Linux shmget): if key
+    // already exists, the requested size must not exceed the existing size.
+    if key != 0 {
+        if let Some(existing_idx) = SHM_IDS.find_by_key(key) {
+            let slots = SHM_IDS.slots.lock();
+            if let Some(ref entry) = slots[existing_idx] {
+                if size > entry.inner.segsz {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+        }
+    }
+
     let segment = match ShmSegment::new(key, size, (shmflg & 0o777) as u16) {
         Some(s) => s,
         None => return -(errno::ENOMEM as i64),
@@ -297,11 +310,13 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             };
             let mut slots = SHM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
-                // SAFETY: buf_ptr was access_ok-validated for size_of::<ShmidDsUapi>() (112 bytes) above;
-                // offsets 4 (uid), 8 (gid), 20 (mode) are within the ipc_perm layout.
-                let new_uid = unsafe { core::ptr::read_volatile(buf_ptr.add(4) as *const u32) };
-                let new_gid = unsafe { core::ptr::read_volatile(buf_ptr.add(8) as *const u32) };
-                let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u32) };
+                // Read uid/gid/mode from user-supplied shm_perm via struct field access.
+                // SAFETY: buf_ptr was access_ok-validated for size_of::<ShmidDsUapi>();
+                // reading through a repr(C) struct pointer is well-defined.
+                let ds = unsafe { &*(buf_ptr as *const ShmidDsUapi) };
+                let new_uid = unsafe { core::ptr::read_volatile(&ds.shm_perm.uid) };
+                let new_gid = unsafe { core::ptr::read_volatile(&ds.shm_perm.gid) };
+                let new_mode = unsafe { core::ptr::read_volatile(&ds.shm_perm.mode) };
                 entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
                 entry.inner.shm_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
@@ -327,8 +342,20 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             unsafe { core::ptr::write_volatile(buf_ptr.add(32) as *mut u64, 256 * 256u64) };
             SHM_IDS.count() as i64
         }
-        11 => 0, // SHM_LOCK — no-op
-        12 => 0, // SHM_UNLOCK — no-op
+        11 => {
+            // SHM_LOCK — requires CAP_IPC_LOCK (per Linux)
+            if !crate::security::capable(crate::security::CAP_IPC_LOCK) {
+                return -(errno::EPERM as i64);
+            }
+            0
+        }
+        12 => {
+            // SHM_UNLOCK — requires CAP_IPC_LOCK (per Linux)
+            if !crate::security::capable(crate::security::CAP_IPC_LOCK) {
+                return -(errno::EPERM as i64);
+            }
+            0
+        }
         13 => {
             // SHM_STAT — like IPC_STAT but uses raw kernel index, returns shmid
             let raw_idx = shmid as usize;
@@ -614,26 +641,42 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
         vma_size = vma.end().as_usize() - vma.start().as_usize();
     }
 
+    // Decrement nattch and check for deferred destruction BEFORE munmap,
+    // so the count is accurate when munmap removes the VMA.  This closes
+    // the window where nattch was temporarily too high (F12-25) and the
+    // TOCTOU race between VMA unlock and IPC lock (F12-24).
+    let mut should_free = false;
+    let idx = match SHM_IDS.find(shm_id) {
+        Some(i) => i,
+        None => {
+            // Segment already gone, just unmap
+            let _ = addr_space.munmap(VirtAddr::new(shmaddr), vma_size);
+            return 0;
+        }
+    };
+    {
+        let mut slots = SHM_IDS.slots.lock();
+        if let Some(ref mut entry) = slots[idx] {
+            let old_nattch = entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+            entry.inner.lpid.store(crate::process::current_pid(), Ordering::Relaxed);
+            entry.inner.shm_dtime.store(ipc_current_time(), Ordering::Relaxed);
+
+            // Free segment if marked for destruction and no more attaches.
+            // Mark deleted while still holding lock — prevents new attaches.
+            if old_nattch == 1 && entry.inner.marked_destroy.load(Ordering::Relaxed) != 0 {
+                entry.deleted = true;
+                SHM_IDS.count.fetch_sub(1, Ordering::Relaxed);
+                should_free = true;
+            }
+        }
+    }
+
     // munmap handles both VMA removal and page table unmapping
     let _ = addr_space.munmap(VirtAddr::new(shmaddr), vma_size);
 
-    // Update segment metadata
-    let idx = match SHM_IDS.find(shm_id) {
-        Some(i) => i,
-        None => return 0, // Already gone
-    };
-    let mut slots = SHM_IDS.slots.lock();
-    if let Some(ref mut entry) = slots[idx] {
-        let old_nattch = entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
-        entry.inner.lpid.store(crate::process::current_pid(), Ordering::Relaxed);
-        entry.inner.shm_dtime.store(ipc_current_time(), Ordering::Relaxed);
-
-        // Free segment if marked for destruction and no more attaches
-        if old_nattch == 1 && entry.inner.marked_destroy.load(Ordering::Relaxed) != 0 {
-            drop(slots);
-            let _ = SHM_IDS.remove(shm_id);
-            SHM_IDS.free_slot(shm_id);
-        }
+    // Free slot after munmap (slot lock already released)
+    if should_free {
+        SHM_IDS.free_slot(shm_id);
     }
 
     // Flush TLB

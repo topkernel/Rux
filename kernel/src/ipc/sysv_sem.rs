@@ -152,6 +152,20 @@ pub fn sys_semget(args: [u64; 6]) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // Validate nsems against existing set (per Linux semget): if key already
+    // exists, the requested nsems must not exceed the existing set's nsems.
+    if key != 0 {
+        if let Some(existing_idx) = SEM_IDS.find_by_key(key) {
+            let slots = SEM_IDS.slots.lock();
+            if let Some(ref entry) = slots[existing_idx] {
+                let existing_nsems = entry.inner.nsems();
+                if nsems > existing_nsems {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+        }
+    }
+
     match SEM_IDS.alloc(SemArray::new(nsems, key, (semflg & 0o777) as u16), key, semflg) {
         Ok((id, _)) => id as i64,
         Err(e) => e as i64,
@@ -240,12 +254,13 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             };
             let mut slots = SEM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
-                // Read uid/gid/mode from user-supplied sem_perm.
-                // SAFETY: buf_ptr was access_ok-validated for 88 bytes;
-                // offsets 4, 8, 20 are within the first 48-byte ipc_perm.
-                let new_uid = unsafe { core::ptr::read_volatile(buf_ptr.add(4) as *const u32) };
-                let new_gid = unsafe { core::ptr::read_volatile(buf_ptr.add(8) as *const u32) };
-                let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u32) };
+                // Read uid/gid/mode from user-supplied sem_perm via struct field access.
+                // SAFETY: buf_ptr was access_ok-validated for size_of::<SemidDsUapi>();
+                // reading through a repr(C) struct pointer is well-defined.
+                let ds = unsafe { &*(buf_ptr as *const SemidDsUapi) };
+                let new_uid = unsafe { core::ptr::read_volatile(&ds.sem_perm.uid) };
+                let new_gid = unsafe { core::ptr::read_volatile(&ds.sem_perm.gid) };
+                let new_mode = unsafe { core::ptr::read_volatile(&ds.sem_perm.mode) };
                 entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
@@ -664,6 +679,10 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
 
         // Second pass: verify all operations can succeed
         for (i, &new_val) in new_vals.iter().enumerate() {
+            // Positive op must not exceed SEMVMX (per Linux perform_atomic_semop)
+            if sops[i].sem_op > 0 && new_val > SEMVMX {
+                return Err(-(errno::ERANGE as i32));
+            }
             if sops[i].sem_op < 0 && new_val < 0 {
                 if sops[i].sem_flg & super::IPC_NOWAIT as u16 != 0 {
                     return Err(-errno::EAGAIN);

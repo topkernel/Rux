@@ -201,7 +201,7 @@ impl<T> IpcIds<T> {
 
     /// Find an IPC object by key. Returns slot index or None.
     /// Used for IPC_CREAT lookups.
-    fn find_by_key_locked(&self, key: i32) -> Option<usize>
+    pub fn find_by_key(&self, key: i32) -> Option<usize>
     where T: IpcObject {
         let slots = self.slots.lock();
         for i in 0..IPC_IDS_MAX {

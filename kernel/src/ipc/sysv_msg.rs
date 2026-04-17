@@ -236,17 +236,24 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             };
             let mut slots = MSG_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
-                // Read uid/gid/mode from user-supplied msg_perm.
-                // SAFETY: buf_ptr was access_ok-validated for 120 bytes;
-                // offsets 4, 8, 20 are within the first 48-byte ipc_perm.
-                let new_uid = unsafe { core::ptr::read_volatile(buf_ptr.add(4) as *const u32) };
-                let new_gid = unsafe { core::ptr::read_volatile(buf_ptr.add(8) as *const u32) };
-                let new_mode = unsafe { core::ptr::read_volatile(buf_ptr.add(20) as *const u32) };
+                // Read uid/gid/mode/msg_qbytes from user-supplied msg_perm via struct field access.
+                // SAFETY: buf_ptr was access_ok-validated for size_of::<MsqidDsUapi>();
+                // reading through a repr(C) struct pointer is well-defined.
+                let ds = unsafe { &*(buf_ptr as *const MsqidDsUapi) };
+                let new_uid = unsafe { core::ptr::read_volatile(&ds.msg_perm.uid) };
+                let new_gid = unsafe { core::ptr::read_volatile(&ds.msg_perm.gid) };
+                let new_mode = unsafe { core::ptr::read_volatile(&ds.msg_perm.mode) };
                 entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
-                // msg_qbytes at offset 88 (msg_perm=48 + stime=8 + rtime=8 + ctime=8 + cbytes=8 + qnum=8)
-                // SAFETY: buf_ptr was access_ok-validated for 120 bytes; offset 88 is within bounds.
-                let new_qbytes = unsafe { core::ptr::read_volatile(buf_ptr.add(88) as *const u64) };
+                // Per Linux msgctl IPC_SET: raising msg_qbytes above the system
+                // default (MSGMNB) requires CAP_SYS_RESOURCE.
+                let new_qbytes = unsafe { core::ptr::read_volatile(&ds.msg_qbytes) };
                 if new_qbytes > 0 {
+                    let old_qbytes = entry.inner.qbytes.load(Ordering::Relaxed) as u64;
+                    if new_qbytes > 16384 && new_qbytes > old_qbytes {
+                        if !crate::security::capable(crate::security::CAP_SYS_RESOURCE) {
+                            return -(errno::EPERM as i64);
+                        }
+                    }
                     entry.inner.qbytes.store(new_qbytes as usize, Ordering::Relaxed);
                 }
                 entry.inner.msg_ctime.store(ipc_current_time(), Ordering::Relaxed);
