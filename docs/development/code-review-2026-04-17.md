@@ -1190,20 +1190,20 @@
 
 ## Batch 12: IPC (6 files, ~3,400 lines) — 6/6 reviewed
 
-### [High] [POSIX] F12-02: Semaphore value range not validated against SEMVMX
+### [High] [POSIX] F12-02: Semaphore value range not validated against SEMVMX **[FIXED]**
 **File**: `ipc/sysv_sem.rs`
 **Description**: `semop` does not check SEMVMX overflow. `SEM_UNDO` exit adjustments not bounded to 0..SEMVMX range.
 **Linux**: Validates against `SEMVMX` (32767).
 
-### [High] [POSIX] F12-03: semop SEM_UNDO adjustment not bounded
+### [High] [POSIX] F12-03: semop SEM_UNDO adjustment not bounded **[FIXED]**
 **File**: `ipc/sysv_sem.rs`
 **Description**: SEM_UNDO adjustments on process exit not clamped to valid range.
 
-### [High] [BUG] F12-12: msgsnd reads mtype from user before access_ok validation
+### [High] [BUG] F12-12: msgsnd reads mtype from user before access_ok validation **[FIXED]**
 **File**: `ipc/sysv_msg.rs`
 **Description**: Reads 8-byte mtype from user pointer before validating the pointer. Potential security issue.
 
-### [High] [POSIX] F12-34: POSIX MQ fd not integrated into process fd table
+### [High] [POSIX] F12-34: POSIX MQ fd not integrated into process fd table **[KNOWN LIMITATION — requires fd table refactor]**
 **File**: `ipc/posix_mq.rs`
 **Description**: MQ file descriptors stored in separate PID-indexed global table. `close()`, `poll()`, `select()` from musl won't work.
 **Linux**: Uses real file descriptors via anon_inode.

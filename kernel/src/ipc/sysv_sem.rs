@@ -10,6 +10,11 @@ use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering}
 
 use super::util::*;
 
+/// Maximum semaphore value (Linux SEMVMX).
+const SEMVMX: i32 = 32767;
+/// Maximum semaphore adjustment value for SEM_UNDO (Linux SEMAEM).
+const SEMAEM: i32 = 16384;
+
 // Compile-time verification: IpcPermUapi mode field offset must be 20 bytes
 const _: () = assert!(core::mem::offset_of!(IpcPermUapi, mode) == 20);
 
@@ -272,6 +277,9 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 return -(errno::EINVAL as i64);
             }
             let val = arg as i32;
+            if val < 0 || val > SEMVMX {
+                return -(errno::ERANGE as i64);
+            }
             let idx2 = match SEM_IDS.find_with_perms(semid, 0o6) {
                 Ok(i) => i,
                 Err(e) => return e as i64,
@@ -331,6 +339,9 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                         // SAFETY: array_ptr was access_ok-validated for nsems*4 bytes above;
                         // i is bounded by nsems so add(i) stays within the validated range.
                         let val = unsafe { core::ptr::read_volatile(array_ptr.add(i)) };
+                        if val < 0 || val > SEMVMX {
+                            return -(errno::ERANGE as i64);
+                        }
                         sems[i].value.store(val, Ordering::Relaxed);
                     }
                 }
@@ -668,6 +679,8 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
         }
 
         // Third pass: apply all atomically
+        // Save original values for rollback if SEM_UNDO adjustment exceeds SEMAEM.
+        let orig_vals: alloc::vec::Vec<i32> = sops.iter().map(|s| sems[s.sem_num as usize].value.load(Ordering::Relaxed)).collect();
         for (i, &new_val) in new_vals.iter().enumerate() {
             sems[sops[i].sem_num as usize].value.store(new_val, Ordering::Relaxed);
         }
@@ -681,16 +694,31 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
                     let mut found = false;
                     for entry in undo_table.iter_mut() {
                         if entry.semid == semid && entry.sem_num == sop.sem_num {
-                            entry.adjustment += sop.sem_op as i32;
+                            let new_adj = entry.adjustment.wrapping_add(sop.sem_op as i32);
+                            if new_adj.abs() > SEMAEM {
+                                // Roll back: restore original semaphore values.
+                                for (j, &orig) in orig_vals.iter().enumerate() {
+                                    sems[sops[j].sem_num as usize].value.store(orig, Ordering::Relaxed);
+                                }
+                                return Err(-(errno::ERANGE as i32));
+                            }
+                            entry.adjustment = new_adj;
                             found = true;
                             break;
                         }
                     }
                     if !found {
+                        let adj = sop.sem_op as i32;
+                        if adj.abs() > SEMAEM {
+                            for (j, &orig) in orig_vals.iter().enumerate() {
+                                sems[sops[j].sem_num as usize].value.store(orig, Ordering::Relaxed);
+                            }
+                            return Err(-(errno::ERANGE as i32));
+                        }
                         undo_table.push(super::util::SemUndoEntry {
                             semid,
                             sem_num: sop.sem_num,
-                            adjustment: sop.sem_op as i32,
+                            adjustment: adj,
                         });
                     }
                 }

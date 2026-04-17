@@ -708,6 +708,13 @@ fn ipc_check_permissions_mq(uid: u32, gid: u32, mode: u16, desired: u16) -> bool
 // ============================================================================
 // Per-process MQ fd tracking (PID-keyed global table)
 // ============================================================================
+// TODO (F12-34): MQ fds should be integrated into the per-process fd table
+// (task.fdtable) so that close(), dup2(), poll(), and fork() work correctly.
+// Current limitations:
+// - fork() does not inherit MQ fds (PID-keyed lookup breaks)
+// - close() via regular fd path does not release MQ resources
+// - dup2()/fcntl() cannot operate on MQ fds
+// - fd numbers 512-575 may collide with regular file descriptors
 
 const MQ_FDS_MAX: usize = 64;
 

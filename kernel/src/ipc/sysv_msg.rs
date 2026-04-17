@@ -358,19 +358,19 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // SAFETY: msgp was null-checked above; reading 8 bytes for mtype from the
-    // start of the userspace message buffer (msgsz > 0 implies at least 8 bytes exist).
+    // Validate the full buffer (mtype header + data) before reading anything.
+    if !access_ok(msgp as usize, msgsz + 8) {
+        return -(errno::EFAULT as i64);
+    }
+
+    // SAFETY: msgp was null-checked and access_ok-validated above.
     let mtype = unsafe { core::ptr::read_volatile(msgp as *const i64) };
     if mtype <= 0 {
         return -(errno::EINVAL as i64);
     }
 
-    // SAFETY: msgp was null-checked above; adding 8 skips the mtype header.
-    // data_ptr is then access_ok-validated below before copy_from_user.
+    // SAFETY: msgp + 8 is within the access_ok-validated region.
     let data_ptr = unsafe { msgp.add(8) };
-    if !access_ok(data_ptr as usize, msgsz) {
-        return -(errno::EFAULT as i64);
-    }
     let mut data = alloc::vec::Vec::with_capacity(msgsz);
     data.resize(msgsz, 0);
     // SAFETY: data_ptr was access_ok-validated for msgsz bytes above;
