@@ -1363,13 +1363,13 @@
 
 ## Batch 15: Security/DFX/IO_uring (13 files, ~2,500 lines) — 13/13 reviewed
 
-### [High] [BUG] F15-09: io_uring submit_sqes TOCTOU — re-reads sq_head from shared ring per iteration
+### [High] [BUG] F15-09: io_uring submit_sqes TOCTOU — re-reads sq_head from shared ring per iteration **[FIXED]**
 **File**: `io_uring/mod.rs:471-497`
 **Description**: Each loop iteration re-reads `head` from shared SQ ring via `read_volatile`. Malicious user can modify `sq_ring` head between iterations, causing double-processing or skipping of SQEs.
 **Linux**: Linux reads `sq ring head` once on enter, advances locally, writes back only after all submissions complete.
 **Impact**: Malicious user process can manipulate SQ ring head to cause double submission or skip SQEs.
 
-### [Medium] [BUG] F15-10: io_uring submit_sqes re-reads sq_head from ring instead of caching
+### [Medium] [BUG] F15-10: io_uring submit_sqes re-reads sq_head from ring instead of caching **[FIXED]**
 **File**: `io_uring/mod.rs:471-477`
 **Description**: Same as F15-09 — `head` re-read inside `for` loop allows user-space to modify between iterations.
 
@@ -1377,7 +1377,7 @@
 **File**: `io_uring/mod.rs:418-419`
 **Description**: Requires `length == region.size`. Linux allows `length >= required_size`.
 
-### [Medium] [BUG] F15-12: io_uring SQE index not validated against sq_entries
+### [Medium] [BUG] F15-12: io_uring SQE index not validated against sq_entries **[FIXED]**
 **File**: `io_uring/mod.rs:483-488`
 **Description**: `sqe_idx = array[head & mask]` — no bounds check. Malicious user can set index >= sq_entries, causing out-of-bounds read from sqes region.
 **Linux**: Validates `READ_ONCE(ring->array[i]) < ctx->sq_entries`.
@@ -1608,6 +1608,14 @@
 | F12-24 | IPC | sys_shmdt TOCTOU race | **FIXED** |
 | F12-25 | IPC | shm_detach_vma nattch count inconsistency | **FIXED** |
 | F12-27 | IPC | shmctl missing capability checks | **FIXED** |
+
+### Batch R — F15 io_uring fixes
+
+| ID | Subsystem | Title | Status |
+|----|-----------|-------|--------|
+| F15-09 | io_uring | submit_sqes TOCTOU — re-reads sq_head per iteration | **FIXED** |
+| F15-10 | io_uring | submit_sqes re-reads sq_head instead of caching | **FIXED** (merged into F15-09) |
+| F15-12 | io_uring | SQE index not validated against sq_entries | **FIXED** |
 
 ## Top 10 Highest-Impact Fixes (recommended priority)
 

@@ -466,35 +466,40 @@ pub fn io_uring_mmap_handler(
 fn submit_sqes(ring: &IoUring, to_submit: u32) -> u32 {
     let mut submitted = 0u32;
 
-    for _ in 0..to_submit {
-        // Read sq_head and sq_tail
-        let head = unsafe {
-            core::ptr::read_volatile(ring.sq_ring.kvirt.add(ring.sq_head_off) as *const u32)
-        };
-        let tail = unsafe {
-            core::ptr::read_volatile(ring.sq_ring.kvirt.add(ring.sq_tail_off) as *const u32)
-        };
+    // Read head and tail ONCE (per Linux io_uring_submit_sqes).  A malicious
+    // userspace could modify the shared ring between iterations (TOCTOU),
+    // causing double-processing or skipping of SQEs.  We advance a local
+    // counter and write back only after the loop finishes.
+    let mut head = unsafe {
+        core::ptr::read_volatile(ring.sq_ring.kvirt.add(ring.sq_head_off) as *const u32)
+    };
+    let tail = unsafe {
+        core::ptr::read_volatile(ring.sq_ring.kvirt.add(ring.sq_tail_off) as *const u32)
+    };
 
-        if head == tail { break; }
+    // Cap to actual available SQEs
+    let available = tail.wrapping_sub(head);
+    let batch = core::cmp::min(to_submit, available);
 
+    for _ in 0..batch {
         // Read SQE index from the array
         let array_base = unsafe { ring.sq_ring.kvirt.add(ring.sq_array_off) as *const u32 };
         let sqe_idx = unsafe {
             core::ptr::read_volatile(array_base.add((head & ring.sq_ring_mask) as usize))
         };
 
+        // Validate SQE index against sq_entries (per Linux:
+        // READ_ONCE(ring->array[i]) < ctx->sq_entries).
+        if sqe_idx >= ring.sq_entries {
+            break; // Invalid index — stop processing
+        }
+
         // Read the SQE
         let sqe_ptr = unsafe { ring.sqes.kvirt.add(sqe_idx as usize * 64) as *const IoUringSqe };
         let sqe = unsafe { core::ptr::read_volatile(sqe_ptr) };
 
-        // Advance sq_head
-        let new_head = head.wrapping_add(1);
-        unsafe {
-            core::ptr::write_volatile(
-                ring.sq_ring.kvirt.add(ring.sq_head_off) as *mut u32,
-                new_head,
-            );
-        }
+        // Advance local head
+        head = head.wrapping_add(1);
 
         // Execute operation synchronously
         let res = io_uring_dispatch_op(&sqe);
@@ -503,6 +508,16 @@ fn submit_sqes(ring: &IoUring, to_submit: u32) -> u32 {
         io_uring_post_cqe(ring, sqe.user_data, res, 0);
 
         submitted += 1;
+    }
+
+    // Write back the advanced head only after all submissions are complete
+    if submitted > 0 {
+        unsafe {
+            core::ptr::write_volatile(
+                ring.sq_ring.kvirt.add(ring.sq_head_off) as *mut u32,
+                head,
+            );
+        }
     }
 
     submitted
