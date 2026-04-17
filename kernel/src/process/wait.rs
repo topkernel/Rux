@@ -128,14 +128,17 @@ impl WaitQueueHead {
     /// # Returns
     /// Actual number of processes woken
     pub fn wake_up(&self, _mode: WakeUpHint, nr: usize) -> usize {
-        // Use lock_irqsave: this is called from interrupt handlers
+        // Use lock_irqsave: this is called from interrupt handlers.
+        // Collect task pointers under the lock, then drop the lock before
+        // calling wake_up_process to avoid ABBA deadlock with the GRQ lock
+        // (waitqueue lock -> GRQ lock vs. GRQ lock -> waitqueue interaction).
         let list = self.list.lock_irqsave();
         let mut awakened = 0;
-
-        // Determine max wake count
         let max_wake = if nr == 0 { usize::MAX } else { nr };
 
-        // Wake from list head
+        // Collect tasks to wake while holding the waitqueue lock.
+        let mut wake_list: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+
         for entry in list.iter() {
             if awakened >= max_wake {
                 break;
@@ -144,19 +147,25 @@ impl WaitQueueHead {
             if !entry.is_woken() {
                 entry.set_woken();
 
-                // Actually wake the process by adding it to run queue
                 let task = entry.task();
                 if !task.is_null() {
-                    crate::sched::wake_up_process(task);
+                    wake_list.push(task);
                 }
 
                 awakened += 1;
 
-                // Exclusive mode: only wake one
                 if entry.is_exclusive() {
                     break;
                 }
             }
+        }
+
+        // Drop the waitqueue lock before waking tasks.
+        drop(list);
+
+        // Now safely wake each task outside the waitqueue lock.
+        for task in wake_list {
+            crate::sched::wake_up_process(task);
         }
 
         awakened

@@ -48,6 +48,11 @@ impl RawRwSpinlock {
                 core::hint::spin_loop();
                 continue;
             }
+            // Guard against reader count overflow into writer bit.
+            if (s & READER_MASK) >= READER_MASK {
+                core::hint::spin_loop();
+                continue;
+            }
             if self
                 .state
                 .compare_exchange_weak(s, s + 1, Ordering::Acquire, Ordering::Relaxed)
@@ -64,6 +69,9 @@ impl RawRwSpinlock {
     pub fn try_read(&self) -> bool {
         let s = self.state.load(Ordering::Acquire);
         if s & WRITER_BIT != 0 {
+            return false;
+        }
+        if (s & READER_MASK) >= READER_MASK {
             return false;
         }
         self.state

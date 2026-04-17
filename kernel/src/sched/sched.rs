@@ -974,7 +974,7 @@ pub fn scheduler_tick() {
         let policy = (*current).policy();
 
         match policy {
-            SchedPolicy::Normal | SchedPolicy::Batch => {
+            SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
                 let now = crate::sched::fair::sched_clock();
 
                 // Single GRQ lock acquisition: update vruntime + check
@@ -1036,9 +1036,6 @@ pub fn scheduler_tick() {
                 if !dl_entity.consume_runtime(delta) {
                     set_need_resched();
                 }
-            }
-            SchedPolicy::Idle => {
-                // SCHED_IDLE: treated like fair
             }
         }
     }

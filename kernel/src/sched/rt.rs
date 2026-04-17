@@ -19,8 +19,8 @@ use super::class::{SchedClass, RunQueueRef, ENQUEUE_HEAD};
 /// Maximum RT priority (0-99, lower value = higher priority)
 pub const MAX_RT_PRIO: usize = 100;
 
-/// Default RR time slice in milliseconds
-pub const RR_TIMESLICE_MS: u32 = 100;
+/// Default RR time slice in ticks. 100ms / (1000ms / KERNEL_HZ) = 10 ticks at HZ=100.
+pub const RR_TIMESLICE_TICKS: u32 = (100 * crate::config::KERNEL_HZ) / 1000;
 
 /// RT runqueue
 pub struct RtRunQueue {
@@ -333,7 +333,7 @@ impl SchedRtEntity {
     /// Create a new RT entity
     pub fn new() -> Self {
         Self {
-            time_slice: AtomicU32::new(RR_TIMESLICE_MS),
+            time_slice: AtomicU32::new(RR_TIMESLICE_TICKS),
             on_rq: AtomicBool::new(false),
         }
     }
@@ -377,7 +377,7 @@ impl SchedRtEntity {
     /// Reset time slice to default
     #[inline]
     pub fn reset_time_slice(&self) {
-        self.time_slice.store(RR_TIMESLICE_MS, Ordering::Release);
+        self.time_slice.store(RR_TIMESLICE_TICKS, Ordering::Release);
     }
 }
 
@@ -465,7 +465,7 @@ impl SchedClass for RtSchedClass {
         // SAFETY: task is a valid pointer from the scheduler; null check above.
         unsafe {
             if (*task).policy() == SchedPolicy::Rr {
-                RR_TIMESLICE_MS
+                RR_TIMESLICE_TICKS
             } else {
                 0 // SCHED_FIFO has no time slice
             }

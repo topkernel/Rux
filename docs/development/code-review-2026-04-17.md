@@ -28,7 +28,7 @@
 
 ## Batch 1: Arch/Boot (26 files, ~9,800 lines) — 26/26 reviewed
 
-### [High] [BUG] F01-01: `copy_page_table_cow` modifies parent PTEs without holding page table lock
+### [High] [BUG] F01-01: `copy_page_table_cow` modifies parent PTEs without holding page table lock **[KNOWN LIMITATION — PTL infrastructure needed]**
 **File**: `arch/riscv64/mm/mm_ops.rs:1062-1066`
 **Description**: Fork COW path modifies parent PTEs (W→COW downgrade) without any page table lock. Concurrent page fault on another CPU could race with the PTE modification.
 **Linux**: Uses `ptep_set_wrprotect()` atomically under PTL, plus `get_page()` for refcount.
@@ -81,13 +81,13 @@
 **Linux**: Uses C pointer arithmetic which naturally handles alignment.
 **Impact**: Signal handlers with `SA_SIGINFO` read corrupted `ucontext` — `uc_flags` contains garbage.
 
-### [High] [ABI] F02-02: SigAction sa_flags is u32 but Linux ABI is unsigned long (8 bytes on RV64)
+### [High] [ABI] F02-02: SigAction sa_flags is u32 but Linux ABI is unsigned long (8 bytes on RV64) **[FIXED]**
 **File**: `signal.rs:94-96`
 **Description**: `SigFlags(u32)` makes `sa_flags` 4 bytes. Linux defines `sa_flags` as `unsigned long` = 8 bytes on RV64. When writing `oldact` to userspace, 4 bytes of uninitialized padding accompany the flags. musl reads back 8 bytes and sees garbage in upper 32 bits.
 **Linux**: `struct sigaction` has all fields 8 bytes on RV64.
 **Impact**: musl programs querying `sigaction()` see corrupted `sa_flags`.
 
-### [High] [ABI] F02-03: Signal enum missing signals 23-31 (SIGURG through SIGSYS)
+### [High] [ABI] F02-03: Signal enum missing signals 23-31 (SIGURG through SIGSYS) **[FIXED]**
 **File**: `signal.rs:27-72`
 **Description**: `Signal` enum only defines signals 1-22. Signals 23-31 (SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS) are missing. `handle_default_signal()` has no case for them — they fall through to default ignore instead of terminating the process.
 **Linux**: `include/uapi/asm-generic/signal.h` defines all 1-31.
@@ -283,13 +283,13 @@
 **Linux**: Uses `rbtree` with `RB_CLEAR_NODE` on dequeue, keyed by entity not mutable deadline.
 **Impact**: DL tasks leak from runqueue, cannot be scheduled, admission control poisoned.
 
-### [High] [POSIX] F04-03: SCHED_RR time_slice unit mismatch — 10x longer than specified
+### [High] [POSIX] F04-03: SCHED_RR time_slice unit mismatch — 10x longer than specified **[FIXED]**
 **File**: `sched/rt.rs:329-330`, `sched/sched.rs:1014-1023`
 **Description**: `time_slice` initialized to `RR_TIMESLICE_MS = 100` (milliseconds). `scheduler_tick()` decrements by 1 per tick. With `KERNEL_HZ=100`, each tick = 10ms, so actual timeslice = 100 × 10ms = 1000ms (1 second), not the intended 100ms.
 **Linux**: `RR_TIMESLICE = (100 * HZ / 1000)` = 10 jiffies = 100ms with HZ=100.
 **Impact**: SCHED_RR tasks get 10x longer timeslices than POSIX specifies. Round-robin semantics violated.
 
-### [High] [BUG] F04-04: SCHED_IDLE tasks never preempted by tick
+### [High] [BUG] F04-04: SCHED_IDLE tasks never preempted by tick **[FIXED]**
 **File**: `sched/sched.rs:1037-1039`
 **Description**: When `policy == SchedPolicy::Idle`, tick handler does nothing. CFS preemption check only runs for `Normal | Batch`. A SCHED_IDLE task monopolizes the CPU indefinitely.
 **Linux**: `task_tick_fair()` runs for all CFS-class tasks including SCHED_IDLE.
@@ -481,13 +481,13 @@
 **Description**: Same issue as F06-15. Uses manual `add()` + `set_state()` instead of `prepare_to_wait()`.
 **Fix**: Use `self.wait.prepare_to_wait()` for atomic insertion + state change.
 
-### [High] [BUG] F06-05: RwSpinlock reader count overflow corrupts writer bit
+### [High] [BUG] F06-05: RwSpinlock reader count overflow corrupts writer bit **[FIXED]**
 **File**: `sync/rwlock.rs:44-59`
 **Description**: `compare_exchange_weak(s, s + 1, ...)`. If reader count is `0x7FFFFFFF`, `s + 1 = 0x80000000 = WRITER_BIT`. CAS succeeds, writer bit set without writer. Subsequent writers/readers spin forever.
 **Linux**: Checks for max readers before CAS.
 **Impact**: Theoretical — 2^31 concurrent readers impossible on RISC-V.
 
-### [High] [BUG] F06-07: wake_up() calls wake_up_process() under waitqueue spinlock
+### [High] [BUG] F06-07: wake_up() calls wake_up_process() under waitqueue spinlock **[FIXED]**
 **File**: `process/wait.rs:130-163`
 **Description**: Holds waitqueue lock while calling `wake_up_process()` which acquires GRQ spinlock. Creates lock ordering: waitqueue → GRQ. If any path holds GRQ then waits on waitqueue, deadlock.
 **Linux**: Collects tasks into `wake_q` under lock, then calls `wake_up_q()` outside lock.

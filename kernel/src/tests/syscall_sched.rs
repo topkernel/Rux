@@ -232,7 +232,7 @@ fn test_sched_constants() {
 
     // RT scheduler constants
     test_assert_eq!(rt::MAX_RT_PRIO, 100, "MAX_RT_PRIO == 100");
-    test_assert_eq!(rt::RR_TIMESLICE_MS, 100, "RR_TIMESLICE_MS == 100");
+    test_assert_eq!(rt::RR_TIMESLICE_TICKS, (100 * crate::config::KERNEL_HZ) / 1000, "RR_TIMESLICE_TICKS == 100ms in ticks");
 
     // CFS constants
     test_assert_eq!(fair::NICE_0_LOAD, 1024, "NICE_0_LOAD == 1024");

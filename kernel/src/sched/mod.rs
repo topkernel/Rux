@@ -94,7 +94,7 @@ pub use rt::{
     SchedRtEntity,
     RT_SCHED_CLASS,
     MAX_RT_PRIO,
-    RR_TIMESLICE_MS,
+    RR_TIMESLICE_TICKS,
 };
 
 // Export deadline scheduler types

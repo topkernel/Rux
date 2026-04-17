@@ -69,6 +69,24 @@ pub enum Signal {
     SIGTTIN = 21,
     /// SIGTTOU - Background write
     SIGTTOU = 22,
+    /// SIGURG - Urgent data on socket
+    SIGURG = 23,
+    /// SIGXCPU - CPU time limit exceeded
+    SIGXCPU = 24,
+    /// SIGXFSZ - File size limit exceeded
+    SIGXFSZ = 25,
+    /// SIGVTALRM - Virtual timer expired
+    SIGVTALRM = 26,
+    /// SIGPROF - Profiling timer expired
+    SIGPROF = 27,
+    /// SIGWINCH - Window size change
+    SIGWINCH = 28,
+    /// SIGIO - I/O now possible
+    SIGIO = 29,
+    /// SIGPWR - Power failure
+    SIGPWR = 30,
+    /// SIGSYS - Bad system call
+    SIGSYS = 31,
 }
 
 /// Real-time signal range (32-64)
@@ -93,22 +111,22 @@ pub mod sigprocmask_how {
 /// ...
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq)]
-pub struct SigFlags(u32);
+pub struct SigFlags(u64);
 
 impl SigFlags {
-    pub const SA_NOCLDSTOP: u32 = 0x00000001;  // Don't send SIGCHLD when child stops
-    pub const SA_NOCLDWAIT: u32 = 0x00000002;  // Don't create zombie on child exit
-    pub const SA_SIGINFO: u32 = 0x00000004;    // Provide extra info
-    pub const SA_ONSTACK: u32 = 0x08000000;    // Use alternate stack
-    pub const SA_RESTART: u32 = 0x10000000;    // Restart system call
-    pub const SA_NODEFER: u32 = 0x40000000;    // Don't block self during handler
-    pub const SA_RESETHAND: u32 = 0x80000000;  // Reset to default after handling
+    pub const SA_NOCLDSTOP: u64 = 0x00000001;  // Don't send SIGCHLD when child stops
+    pub const SA_NOCLDWAIT: u64 = 0x00000002;  // Don't create zombie on child exit
+    pub const SA_SIGINFO: u64 = 0x00000004;    // Provide extra info
+    pub const SA_ONSTACK: u64 = 0x08000000;    // Use alternate stack
+    pub const SA_RESTART: u64 = 0x10000000;    // Restart system call
+    pub const SA_NODEFER: u64 = 0x40000000;    // Don't block self during handler
+    pub const SA_RESETHAND: u64 = 0x80000000;  // Reset to default after handling
 
-    pub fn new(flags: u32) -> Self {
+    pub fn new(flags: u64) -> Self {
         Self(flags)
     }
 
-    pub fn bits(&self) -> u32 {
+    pub fn bits(&self) -> u64 {
         self.0
     }
 }
@@ -1055,8 +1073,12 @@ fn handle_default_signal(sig: i32) {
     use crate::sched;
 
     match sig {
-        // Ignore or continue stopped processes
-        17 | 18 | 21 | 22 => {
+        // Ignore by default: SIGCHLD(17), SIGURG(23), SIGWINCH(28)
+        17 | 23 | 28 => {
+            // Default ignore
+        }
+        // SIGCONT(18): wake stopped process
+        18 | 21 | 22 => {
             // SIGCHLD: child process status changed, default ignore
             // SIGCONT: continue stopped process
             // SIGTTIN, SIGTTOU: background terminal I/O, default ignore
@@ -1092,7 +1114,9 @@ fn handle_default_signal(sig: i32) {
         // Terminate process (core dump or direct termination)
         1 | 2 | 3 | 4 | 5 | 6   // SIGHUP | SIGINT | SIGQUIT | SIGILL | SIGTRAP | SIGABRT
         | 7 | 8 | 9 | 11 | 13 | 14 | 15  // SIGBUS | SIGFPE | SIGKILL | SIGSEGV | SIGPIPE | SIGALRM | SIGTERM
-        | 16 | 10 | 12 => {          // SIGSTKFLT | SIGUSR1 | SIGUSR2
+        | 16 | 10 | 12           // SIGSTKFLT | SIGUSR1 | SIGUSR2
+        | 24 | 25 | 26 | 27      // SIGXCPU | SIGXFSZ | SIGVTALRM | SIGPROF
+        | 29 | 30 | 31 => {      // SIGIO | SIGPWR | SIGSYS
             // Call do_exit to properly terminate process
             // This releases mm, fdtable, kernel stack, removes from run queue, etc.
             // Store negative signal number (do_wait encodes as waitpid status)
