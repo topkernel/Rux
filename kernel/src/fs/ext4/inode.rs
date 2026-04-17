@@ -97,6 +97,18 @@ impl Ext4InodeOnDisk {
     pub fn has_extent(&self) -> bool {
         (self.i_flags & 0x80000) != 0
     }
+
+    /// Read l_i_blocks_high from osd2 (first 2 bytes, Linux layout)
+    pub fn blocks_high(&self) -> u16 {
+        u16::from_le_bytes([self.osd2[0], self.osd2[1]])
+    }
+
+    /// Write l_i_blocks_high to osd2
+    pub fn set_blocks_high(&mut self, val: u16) {
+        let bytes = val.to_le_bytes();
+        self.osd2[0] = bytes[0];
+        self.osd2[1] = bytes[1];
+    }
 }
 
 #[repr(C)]
@@ -137,7 +149,7 @@ impl Ext4Inode {
             uid: disk.i_uid,
             gid: disk.i_gid,
             size: (disk.i_size as u64) | ((disk.i_size_high as u64) << 32),
-            blocks: disk.i_blocks as u64,
+            blocks: (disk.i_blocks as u64) | ((disk.blocks_high() as u64) << 32),
             links_count: disk.i_links_count,
             flags: disk.i_flags,
             block: disk.i_block,
@@ -326,7 +338,8 @@ pub fn read_inode(
         if group as usize >= group_descs.len() {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
-        group_descs[group as usize].bg_inode_table_lo as u64
+        let gd = &group_descs[group as usize];
+        (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
     };
 
     let inodes_per_block = fs.block_size / (fs.inode_size as u32);
@@ -415,7 +428,8 @@ pub fn write_inode(
         if group as usize >= group_descs.len() {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
-        group_descs[group as usize].bg_inode_table_lo as u64
+        let gd = &group_descs[group as usize];
+        (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
     };
 
     let inodes_per_block = fs.block_size / (fs.inode_size as u32);
@@ -453,6 +467,7 @@ pub fn write_inode(
     inode_on_disk.i_gid = inode.gid;
     inode_on_disk.i_links_count = inode.links_count;
     inode_on_disk.i_blocks = inode.blocks as u32;
+    inode_on_disk.set_blocks_high((inode.blocks >> 32) as u16);
     inode_on_disk.i_flags = inode.flags;
     inode_on_disk.i_block = inode.block;
     inode_on_disk.i_size_high = (inode.size >> 32) as u32;
@@ -520,7 +535,8 @@ pub fn write_inode_disk(
         if group as usize >= group_descs.len() {
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
-        group_descs[group as usize].bg_inode_table_lo as u64
+        let gd = &group_descs[group as usize];
+        (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
     };
 
     let inodes_per_block = fs.block_size / (fs.inode_size as u32);

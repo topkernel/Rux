@@ -192,12 +192,21 @@ impl Ext4FileSystem {
                 let gd_data = &(*gd_bh).b_data;
                 // Use actual descriptor size for offset calculation
                 let gd_offset = gd_index * desc_size;
-                let gd_ptr = unsafe {
-                    &*(gd_data.as_ptr().add(gd_offset)
-                        as *const superblock::Ext4GroupDesc)
-                };
 
-                group_descs.push(Box::new(*gd_ptr));
+                // Read descriptor safely based on desc_size.
+                // If desc_size < size_of::<Ext4GroupDesc>(), only read what's
+                // available — high 64-bit fields default to zero.
+                let mut gd = superblock::Ext4GroupDesc::default();
+                let copy_len = desc_size.min(core::mem::size_of::<superblock::Ext4GroupDesc>());
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        gd_data.as_ptr().add(gd_offset),
+                        &mut gd as *mut superblock::Ext4GroupDesc as *mut u8,
+                        copy_len,
+                    );
+                }
+
+                group_descs.push(Box::new(gd));
                 bio::brelse(gd_bh);
             }
 
@@ -1159,6 +1168,7 @@ fn add_dir_entry(
 
             // Try to find space in this block
             let mut offset = 0;
+            let mut prev_offset = 0usize;
             let mut prev_rec_len = 0usize;
 
             while offset + 8 < block_size {
@@ -1183,19 +1193,25 @@ fn add_dir_entry(
                     return Ok(());
                 }
 
+                prev_offset = offset;
                 prev_rec_len = rec_len;
                 offset += rec_len;
             }
 
             // Try to add at end of this block
             if offset + entry_size <= block_size {
-                // Update previous entry's rec_len to point to new entry
-                if prev_rec_len > 0 && offset >= prev_rec_len {
-                    let prev_offset = offset - prev_rec_len;
+                // Update previous entry's rec_len to point to new entry.
+                // Only split if prev entry's rec_len actually spans to offset.
+                if prev_offset + prev_rec_len == offset && prev_rec_len > 0 {
                     let prev_name_len = data[prev_offset + 6];
                     let prev_actual_size = ((8 + prev_name_len as usize + 3) / 4) * 4;
-                    if prev_actual_size >= prev_rec_len as usize {
+                    if prev_actual_size >= prev_rec_len {
                         // Previous entry has no spare space; cannot split
+                        bio::brelse(bh);
+                        continue;
+                    }
+                    // Validate no overlap: actual size must leave room for new entry
+                    if offset + entry_size > prev_offset + prev_rec_len {
                         bio::brelse(bh);
                         continue;
                     }
@@ -1521,6 +1537,15 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     }
 }
 
+/// Ext4 destroy_inode: reclaim the Box<Ext4Inode> stored in inode.sb.
+unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
+    if let Some(ptr) = inode.sb {
+        // ptr was created by Box::into_raw(Box::new(ext4_inode.clone()))
+        let _ = alloc::boxed::Box::from_raw(ptr as *mut inode::Ext4Inode);
+        inode.sb = None;
+    }
+}
+
 /// Ext4 inode operations table
 /// Ext4 now supports write operations through namei module
 pub static EXT4_INODE_OPS: INodeOps = INodeOps {
@@ -1541,7 +1566,7 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     getattr: Some(ext4_getattr),
     setattr: Some(ext4_setattr),
     iget: Some(ext4_iget),
-    destroy_inode: None,
+    destroy_inode: Some(ext4_destroy_inode),
 };
 
 /// Ext4 iget: instantiate VFS Inode from (parent, name, ino).
@@ -1779,7 +1804,7 @@ pub fn create_vfs_inode(ino: u32, ext4_inode: &inode::Ext4Inode) -> alloc::sync:
     // Cache a copy of the Ext4Inode in sb field (boxed, leaked pointer)
     // This avoids re-reading from disk on every read/write/stat/lseek
     let ext4_copy = alloc::boxed::Box::new(ext4_inode.clone());
-    inode.sb = Some(Box::into_raw(ext4_copy) as *const u8);
+    inode.sb = Some(Box::into_raw(ext4_copy) as *mut u8);
 
     alloc::sync::Arc::new(inode)
 }

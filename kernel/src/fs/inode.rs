@@ -271,7 +271,7 @@ pub struct Inode {
 
     /// Pointer to superblock (filesystem this inode belongs to)
     /// This is a raw pointer to avoid circular references
-    pub sb: Option<*const u8>,  // Points to SuperBlock
+    pub sb: Option<*mut u8>,  // Points to filesystem-private data (e.g., Ext4Inode)
 
     // ==================== Private Data ====================
 
@@ -316,7 +316,8 @@ impl Inode {
     }
 
     /// Create new inode with superblock
-    pub fn with_superblock(ino: Ino, mode: InodeMode, sb: *const u8) -> Self {
+    /// Create new inode with superblock
+    pub fn with_superblock(ino: Ino, mode: InodeMode, sb: *mut u8) -> Self {
         Self {
             fs_id: 0,
             ino,
