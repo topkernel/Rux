@@ -250,6 +250,12 @@ impl Page {
         self.flags.set(flag);
     }
 
+    /// Clear all flags
+    #[inline]
+    pub fn clear_all_flags(&self) {
+        self.flags.clear_all();
+    }
+
     /// Clear flag
     #[inline]
     pub fn clear_flag(&self, flag: PageFlag) {

@@ -482,9 +482,10 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             // Page handled, re-execute instruction
         }
         MmFaultResult::Segfault => {
-            crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, mode={}",
-                fault_addr, regs.epc, if regs.kernel_mode() { "kernel" } else { "user" });
-            // Terminate user process via do_exit (properly notifies parent)
+            crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, sp={:#x}, pid={}, mode={}",
+                fault_addr, regs.epc, regs.sp,
+                crate::sched::get_current_pid(),
+                if regs.kernel_mode() { "kernel" } else { "user" });
             if regs.user_mode() {
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }

@@ -55,6 +55,13 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
                         if !page.is_null() {
                             // SAFETY: pfn+i from zone.alloc_pages(order) is valid.
                             unsafe {
+                                // Clear stale state from previous use so that
+                                // callers see a clean page descriptor.  Without
+                                // this, mapcount and flags leak across allocation
+                                // cycles (e.g. COW pages freed with non-(-1)
+                                // mapcount are re-issued with the stale value).
+                                (*page).clear_all_flags();
+                                (*page).reset_mapcount();
                                 (*page).set_refcount(1);
                                 (*page).set_flag(PageFlag::Referenced);
                             }
@@ -97,6 +104,8 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
                                 if !page.is_null() {
                                     // SAFETY: pfn from zone.alloc_pages is valid.
                                     unsafe {
+                                        (*page).clear_all_flags();
+                                        (*page).reset_mapcount();
                                         (*page).set_refcount(1);
                                         (*page).set_order(order as u8);
                                         (*page).set_flag(PageFlag::Referenced);

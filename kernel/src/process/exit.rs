@@ -123,6 +123,11 @@ pub fn do_exit(exit_code: i32) -> ! {
         (*current).set_address_space(None);
         (*current).clear_active_mm();
 
+        // Wake vfork parent (if any) — child has dropped the shared address
+        // space, so the parent can safely resume.  This must happen before
+        // ZOMBIE state so that the parent sees the child is still valid.
+        crate::process::task::vfork_wake_parent(current);
+
         // ===== exit_files: Release file descriptor table =====
         (*current).set_fdtable(None);
 

@@ -706,6 +706,15 @@ pub(crate) fn do_execve_elf(
         // Note: Do not free PtRegs memory here because trap frame is on stack
     }
 
+    // Wake vfork parent — child has replaced its address space with a new
+    // program, so the parent can safely resume execution.
+    // SAFETY: task_ptr is the current task, valid throughout execve.  The
+    // vfork_parent field (if set) points to the parent that created this
+    // child via CLONE_VFORK; the parent is blocked in UNINTERRUPTIBLE sleep.
+    unsafe {
+        crate::process::task::vfork_wake_parent(task_ptr);
+    }
+
     // Success — prevent RAII guard from freeing page tables
     core::mem::forget(_guard);
     Ok(())

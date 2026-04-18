@@ -10,7 +10,7 @@
 //! - child's thread.sp points to pt_regs
 //! - child's thread.ra points to ret_from_fork
 
-use crate::process::task::{Task, SchedPolicy, Pid};
+use crate::process::task::{Task, TaskState, SchedPolicy, Pid};
 use crate::fs::FdTable;
 use crate::process::pid::alloc_pid;
 use crate::arch::riscv64::pt_regs::PtRegs;
@@ -379,6 +379,22 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
 
         // Add new task to run queue
         crate::sched::enqueue_task(&mut *task_ptr);
+
+        // Handle CLONE_VFORK: block parent until child execs/exits.
+        // The child shares parent's address space (CLONE_VM is expected
+        // to be set alongside CLONE_VFORK).  The parent sleeps in
+        // UNINTERRUPTIBLE state and is woken by the child's execve or
+        // _exit via vfork_wake_parent().
+        if args.flags & CLONE_VFORK != 0 {
+            (*task_ptr).set_vfork_parent(current_ptr);
+
+            crate::pr_info!("vfork: parent={} blocked, child={}",
+                (*current_ptr).pid(), pid);
+
+            (*current).set_state(TaskState::new(TaskState::UNINTERRUPTIBLE));
+            crate::sched::schedule();
+            // Parent resumes here after child exec'd or exited
+        }
 
         Some(pid)
     }

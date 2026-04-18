@@ -1188,9 +1188,14 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
     asm!("sfence.vma zero, zero");
 
-    // Now safe to release our share of the old page
+    // Now safe to release our share of the old page.
+    // Both refcount and mapcount must be released: the child's PTE no
+    // longer points to the old shared page, so the old page loses one
+    // mapping reference.  Without dec_mapcount the count leaks across
+    // COW cycles and eventually corrupts page reclaim / rmap decisions.
     if !old_page.is_null() {
         (*old_page).put_page();
+        (*old_page).dec_mapcount();
     }
 
     // Set up reverse mapping for the new COW page

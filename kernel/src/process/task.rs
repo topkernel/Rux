@@ -568,6 +568,13 @@ pub struct Task {
     /// Child process exit wakes up parent via this queue
     pub wait_chldexit: crate::process::wait::WaitQueueHead,
 
+    /// vfork parent task pointer
+    ///
+    /// When CLONE_VFORK is used, the child stores the parent's task pointer here.
+    /// The child wakes the parent when it calls execve() or _exit().
+    /// 0 = not a vfork child (or vfork already completed).
+    vfork_parent: core::sync::atomic::AtomicU64,
+
     /// Process heap boundary (brk)
     ///
     /// Points to end address of process heap, managed by sys_brk
@@ -699,6 +706,7 @@ impl Task {
             robust_list_head: ptr::null(),
             robust_list_len: 0,
             wait_chldexit: crate::process::wait::WaitQueueHead::new(),
+            vfork_parent: core::sync::atomic::AtomicU64::new(0),
             brk: core::sync::atomic::AtomicU64::new(0),
             oom_score_adj: core::sync::atomic::AtomicI32::new(0),
             fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
@@ -923,6 +931,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, fs)) as *mut Option<alloc::sync::Arc<crate::fs::FsStruct>>,
             Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, vfork_parent)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, brk)) as *mut core::sync::atomic::AtomicU64,
@@ -1154,6 +1166,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, robust_list_len)) as *mut usize,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, vfork_parent)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, brk)) as *mut core::sync::atomic::AtomicU64,
@@ -1587,6 +1603,39 @@ impl Task {
         self.active_mm = None;
     }
 
+    /// Set vfork parent task pointer (called in do_clone when CLONE_VFORK)
+    pub fn set_vfork_parent(&self, parent: *mut Task) {
+        self.vfork_parent.store(parent as u64, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Clear vfork parent (called after parent is woken)
+    pub fn clear_vfork_parent(&self) {
+        self.vfork_parent.store(0, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Get vfork parent task pointer, if any
+    pub fn vfork_parent_ptr(&self) -> Option<*mut Task> {
+        let val = self.vfork_parent.load(core::sync::atomic::Ordering::Acquire);
+        if val != 0 { Some(val as *mut Task) } else { None }
+    }
+}
+
+/// Wake the vfork parent (if any) of the given task.
+///
+/// Called from execve (after replacing address space) and do_exit (before ZOMBIE).
+/// This completes the vfork contract: parent resumes execution.
+///
+/// # Safety
+/// Caller must ensure `task` is a valid Task pointer and the task's
+/// vfork_parent (if set) points to a valid, still-alive Task.
+pub unsafe fn vfork_wake_parent(task: *mut Task) {
+    if let Some(parent) = (*task).vfork_parent_ptr() {
+        (*task).clear_vfork_parent();
+        crate::sched::wake_up_process(parent);
+    }
+}
+
+impl Task {
     /// Get architecture-specific thread state
     pub fn thread(&self) -> &crate::arch::riscv64::thread::ThreadStruct {
         &self.thread
