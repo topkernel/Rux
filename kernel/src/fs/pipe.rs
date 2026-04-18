@@ -253,31 +253,20 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
             // Blocking mode: use wait queue to wait for data
             // Condition: buffer has data or write end closed
             {
-                // Create wait queue entry
                 let current = match crate::sched::current() {
                     Some(task) => task,
                     None => return 0, // Cannot get current task, return EOF
                 };
 
-                let entry = crate::process::wait::WaitQueueEntry::new(current, false);
-                pipe.read_queue().add(entry);
+                // Use prepare_to_wait to atomically set INTERRUPTIBLE and
+                // add to queue under the same lock.  This prevents the
+                // lost-wakeup race where wake_up_all() fires between add()
+                // and set_state().
+                pipe.read_queue().prepare_to_wait(current, false, true);
 
-                // Set INTERRUPTIBLE before schedule to avoid busy-wait
-                // SAFETY: current is a valid raw pointer from sched::current();
-                // set_state is safe to call on the current task before schedule().
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(
-                            crate::process::task::TaskState::INTERRUPTIBLE,
-                        ),
-                    );
-                }
-
-                // Yield CPU
                 crate::sched::schedule();
 
-                // Remove from wait queue after wakeup
-                pipe.read_queue().remove(current);
+                pipe.read_queue().finish_wait(current);
 
                 // Recheck condition
                 continue;
@@ -340,20 +329,18 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
 
             // Blocking mode: use wait queue to wait for space
             {
-                // Create wait queue entry
                 let current = match crate::sched::current() {
                     Some(task) => task,
                     None => return total_written as isize, // Cannot get current task, return bytes written
                 };
 
-                let entry = crate::process::wait::WaitQueueEntry::new(current, false);
-                pipe.write_queue().add(entry);
+                // Use prepare_to_wait to atomically set INTERRUPTIBLE and
+                // add to queue, preventing lost-wakeup race.
+                pipe.write_queue().prepare_to_wait(current, false, true);
 
-                // Yield CPU
                 crate::sched::schedule();
 
-                // Remove from wait queue after wakeup
-                pipe.write_queue().remove(current);
+                pipe.write_queue().finish_wait(current);
 
                 // Check if read end closed while we were sleeping
                 if pipe.is_read_closed() {

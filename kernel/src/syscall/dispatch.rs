@@ -37,9 +37,6 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let syscall_no = syscall_get_nr(regs);
     let args = syscall_get_arguments(regs);
 
-    crate::pr_debug!("syscall: pid={}, nr={}, args=[{:#x}, {:#x}, {:#x}]",
-        crate::process::current_pid(), syscall_no, args[0], args[1], args[2]);
-
     // Dispatch based on system call number (sorted by number)
     let result: i64 = match syscall_no as u32 {
         // ==================== Linux AIO (NR 0-4) ====================

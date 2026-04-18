@@ -76,7 +76,7 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
     }
 
     // SAFETY: get_file_fd returns valid File or None; kernel_buf is a fresh allocation.
-    unsafe {
+    let ret = unsafe {
         match get_file_fd(fd) {
             Some(file) => {
                 // Use kernel buffer to avoid directly accessing user memory
@@ -90,16 +90,18 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                         result as usize,
                     );
                     if uncopied > 0 {
-                        return -errno::EFAULT as i64;
+                        -errno::EFAULT as i64
+                    } else {
+                        result as i64
                     }
-                    result as i64
                 } else {
                     result as i32 as i64
                 }
             }
             None => -errno::EBADF as i64
         }
-    }
+    };
+    ret
 }
 
 /// sys_pread64 - Read from file descriptor at a given offset

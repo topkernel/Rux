@@ -276,6 +276,18 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         if current_ppn != next_ppn {
             switch_mm(next_ppn);
         }
+    } else {
+        // Next task is a kernel thread or idle task — switch to the
+        // kernel's root page table.  Without this, the idle task would
+        // continue using prev's user page table, which can be freed by
+        // do_exit() dropping the last Arc<AddressSpace> reference.
+        // A TLB miss on the freed page table causes a page fault.
+        let kernel_ppn = super::mm::mmu_init::root_page_table_ppn();
+        let current_satp = get_current_satp();
+        let current_ppn = current_satp & 0xFFFFFFFFFFFFF;
+        if current_ppn != kernel_ppn {
+            switch_mm(kernel_ppn);
+        }
     }
 
     // Step 3: __switch_to() - Switch registers

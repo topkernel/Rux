@@ -186,10 +186,6 @@ pub fn mkdir(path: &str) -> Result<(), ()> {
     // Remove leading /
     let path = path.strip_prefix('/').unwrap_or(path);
 
-    crate::dfx::sbi_debug::sbi_dbg(":mkdir_path=[");
-    crate::dfx::sbi_debug::sbi_dbg(path);
-    crate::dfx::sbi_debug::sbi_dbg("]\n");
-
     if path.is_empty() {
         return Err(());
     }

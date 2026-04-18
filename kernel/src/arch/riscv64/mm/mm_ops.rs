@@ -1089,7 +1089,6 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 /// Handle copy-on-write page fault
 pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
     use crate::mm::page_desc::pfn_to_page_mut;
-    use crate::sched;
 
     let virt_addr = fault_addr.bits();
 
@@ -1156,9 +1155,11 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         return Some(());
     }
 
-    if !old_page.is_null() {
-        (*old_page).put_page();
-    }
+    // NOTE: put_page() on the old page is deferred until AFTER the copy and
+    // PTE update.  Calling it earlier opens a race window on multi-hart
+    // systems (even with TCG thread=single): the child on another hart could
+    // see refcount drop to 1, re-enable W without copying, then exec and free
+    // the page — all before the parent finishes copying from it.
 
     // Allocate new page and copy content
     let new_phys = match alloc_user_phys_page() {
@@ -1172,6 +1173,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     let new_virt = phys_to_virt(PhysAddr::new(new_phys));
     let old_virt = phys_to_virt(PhysAddr::new(old_ppn << PAGE_SHIFT));
 
+    // Copy while old page is still pinned (refcount >= 2)
     core::ptr::copy_nonoverlapping(
         old_virt.bits() as *const u8,
         new_virt.bits() as *mut u8,
@@ -1181,9 +1183,15 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     let flags = (old_bits & (PageTableEntry::V | PageTableEntry::R | PageTableEntry::X | PageTableEntry::U | PageTableEntry::G | PageTableEntry::A | PageTableEntry::D)) | PageTableEntry::W;
     let new_pte = PageTableEntry::from_bits((new_ppn << 10) | flags);
 
+    // Install new PTE before dropping our reference to the old page
     (*table0).set(vpn0, new_pte);
 
     asm!("sfence.vma zero, zero");
+
+    // Now safe to release our share of the old page
+    if !old_page.is_null() {
+        (*old_page).put_page();
+    }
 
     // Set up reverse mapping for the new COW page
     {

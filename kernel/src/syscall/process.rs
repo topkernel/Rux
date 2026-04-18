@@ -437,12 +437,8 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
     } else {
         // Blocking wait for child process to exit
         let result = match crate::process::exit::do_wait(pid, wstatus, options) {
-            Ok(child_pid) => {
-                child_pid as i64
-            }
-            Err(e) => {
-                e as i32 as i64
-            }
+            Ok(child_pid) => child_pid as i64,
+            Err(e) => e as i32 as i64,
         };
         result
     }

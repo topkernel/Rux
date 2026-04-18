@@ -339,8 +339,11 @@ pub fn defer_exit_notify(parent_pid: u32) {
 ///
 /// Must be called AFTER `context_switch` so the exiting task is no longer
 /// running on any CPU when we wake the parent.
-fn process_deferred_exit_notify() {
-    let cpu = arch::cpu_id() as usize;
+/// Process deferred exit notification for a specific CPU.
+/// Called with the CPU that the exiting task was running on (captured
+/// before context_switch), because cpu_id() returns the new task's
+/// CPU after the switch.
+fn process_deferred_exit_notify_cpu(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
@@ -351,15 +354,25 @@ fn process_deferred_exit_notify() {
     // Clear the slot (consume the notification).
     DEFERRED_EXIT_NOTIFY_PID[cpu].store(0, core::sync::atomic::Ordering::Relaxed);
 
-    use crate::signal::Signal;
-    let _ = crate::signal::send_signal(pid as u32, Signal::SIGCHLD as i32);
-
     let parent = crate::process::pid_hash::pid_hash_lookup(pid as u32);
     if !parent.is_null() {
         // SAFETY: parent was obtained from pid_hash_lookup and is a valid Task
         // pointer (PID hash table entries are not freed until release_task).
         unsafe {
-            (*parent).wait_chldexit.wake_up_all();
+            // Migrate parent to the current CPU BEFORE sending signal.
+            // signal_wake_up → Task::wake_up → select_task_rq reads ti_cpu,
+            // so we must set ti_cpu first to ensure the parent is enqueued
+            // on this CPU where the current idle task can pick it up.
+            (*parent).set_ti_cpu(cpu as i32);
+        }
+    }
+
+    use crate::signal::Signal;
+    let _ = crate::signal::send_signal(pid as u32, Signal::SIGCHLD as i32);
+
+    if !parent.is_null() {
+        unsafe {
+            let _woken = (*parent).wait_chldexit.wake_up_all();
         }
     }
 }
@@ -658,8 +671,11 @@ unsafe fn __schedule() {
     // skip the GRQ lock entirely.  This avoids idle CPUs spinning on
     // the lock with IRQs disabled (via lock_irqsave), which would
     // prevent timer ticks from updating the soft-lockup timestamp.
-    if prev_pid == 0 && GlobalRunQueue::grq_nr_running() == 0 {
-        return;
+    if prev_pid == 0 {
+        let nr = GlobalRunQueue::grq_nr_running();
+        if nr == 0 {
+            return;
+        }
     }
 
     // Lock the global RQ
@@ -727,6 +743,13 @@ unsafe fn __schedule() {
         return;
     }
 
+    // Capture the CPU that the exiting task (prev) ran on BEFORE
+    // context_switch.  After context_switch, tp changes to the new task,
+    // so cpu_id() would return the new task's ti_cpu instead of the
+    // exiting task's CPU — causing process_deferred_exit_notify to read
+    // the wrong per-CPU deferred slot.
+    let prev_cpu = cpu_id;
+
     // SAFETY: Runnable tasks cannot be freed while still on a CPU or runqueue.
     // IRQs remain disabled on this CPU, preventing concurrent scheduling.
     if !next.is_null() {
@@ -737,7 +760,7 @@ unsafe fn __schedule() {
     // (prev) is no longer on any CPU, so it is now safe to notify its
     // parent (SIGCHLD + wake_up).  The deferred notification was stored
     // in a per-CPU slot by do_exit → defer_exit_notify().
-    process_deferred_exit_notify();
+    process_deferred_exit_notify_cpu(prev_cpu);
 
     // We must ensure interrupts are enabled so that timer ticks, wake-ups,
     // and I/O completions can be delivered. The previous task's saved IRQ

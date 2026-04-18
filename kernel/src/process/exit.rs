@@ -323,6 +323,26 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // wake_up_process skips the actual wake (task still RUNNING).
                 (*current).wait_chldexit.prepare_to_wait(current, false, true);
 
+                // Recheck for zombie after prepare_to_wait (waker may have
+                // fired between the initial scan and prepare_to_wait).  If
+                // a child is already zombie, finish_wait restores RUNNING
+                // state and we reap it immediately — no schedule() needed.
+                {
+                    let mut found_zombie = false;
+                    (*current).for_each_child(|child_ptr| {
+                        if pid > 0 && (*child_ptr).pid() != pid as u32 {
+                            return;
+                        }
+                        if (*child_ptr).state() == TaskState::new(TaskState::ZOMBIE) {
+                            found_zombie = true;
+                        }
+                    });
+                    if found_zombie {
+                        (*current).wait_chldexit.finish_wait(current);
+                        continue; // re-enter loop to reap zombie
+                    }
+                }
+
                 // Check for pending signals before sleeping
                 use crate::signal;
                 if signal::signal_pending() {

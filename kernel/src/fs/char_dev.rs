@@ -62,10 +62,7 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
                 break;
             }
         } else {
-            // No data available — use wait_event_interruptible! which will
-            // sleep the task. The UART read wait queue is woken by either:
-            // 1. The UART IRQ handler (when it works), or
-            // 2. The scheduler_tick polling hook (temporary workaround)
+            // No data available — sleep
             let wq = console::read_waitq();
             let ret = crate::wait_event_interruptible!(wq, console::uart_has_data());
 

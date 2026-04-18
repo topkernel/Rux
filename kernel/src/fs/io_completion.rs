@@ -70,23 +70,19 @@ impl IoCompletion {
                 }
             };
 
-            let entry = crate::process::wait::WaitQueueEntry::new(current, false);
-            self.wait_queue.add(entry);
+            // Use prepare_to_wait to atomically set INTERRUPTIBLE and
+            // add to queue, preventing lost-wakeup race.
+            self.wait_queue.prepare_to_wait(current, false, true);
 
-            // Set INTERRUPTIBLE before schedule to avoid busy-wait
-            // SAFETY: current is a valid raw pointer from sched::current();
-            // set_state is safe to call on the current task before schedule().
-            unsafe {
-                (*current).set_state(
-                    crate::process::task::TaskState::new(
-                        crate::process::task::TaskState::INTERRUPTIBLE,
-                    ),
-                );
+            // Recheck after setting state (waker may have fired)
+            if self.done.load(Ordering::Acquire) {
+                self.wait_queue.finish_wait(current);
+                return self.status.load(Ordering::Acquire);
             }
 
             crate::sched::schedule();
 
-            self.wait_queue.remove(current);
+            self.wait_queue.finish_wait(current);
         }
     }
 
