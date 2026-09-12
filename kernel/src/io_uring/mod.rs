@@ -178,8 +178,63 @@ pub struct IoUring {
 
     /// eventfd fd for completion notification (-1 = none)
     eventfd_fd: core::sync::atomic::AtomicI32,
+    /// Registered eventfd file reference (holds the file alive across fd
+    /// reuse; the raw fd number above is only used for reporting)
+    eventfd_file: Spinlock<Option<alloc::sync::Arc<File>>>,
+
+    /// Manual reference count: enter/mmap hold a reference while using the
+    /// ring so a concurrent close() cannot free it underneath them. The
+    /// final unref frees the ring regions (see Drop below).
+    refs: core::sync::atomic::AtomicU32,
 
     cq_lock: Spinlock<()>,
+}
+
+impl IoUring {
+    /// Try to acquire a reference; fails if the ring is being destroyed.
+    fn try_ref(&self) -> bool {
+        let mut cur = self.refs.load(core::sync::atomic::Ordering::Acquire);
+        loop {
+            if cur == 0 {
+                return false;
+            }
+            match self.refs.compare_exchange(
+                cur,
+                cur + 1,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(v) => cur = v,
+            }
+        }
+    }
+
+    fn unref(&self) {
+        if self.refs.fetch_sub(1, core::sync::atomic::Ordering::AcqRel) == 1 {
+            // Last reference: free the instance (and its ring regions via Drop).
+            // SAFETY: this instance was created by Box::into_raw (io_uring_create
+            // → into_raw at install) and no other references remain.
+            unsafe { drop(alloc::boxed::Box::from_raw(self as *const IoUring as *mut IoUring)); }
+        }
+    }
+}
+
+impl Drop for IoUring {
+    fn drop(&mut self) {
+        free_ring_region(&self.sq_ring);
+        free_ring_region(&self.cq_ring);
+        free_ring_region(&self.sqes);
+    }
+}
+
+/// Scoped reference to an IoUring: decrements on drop (all exit paths).
+struct RingRef(*const IoUring);
+impl Drop for RingRef {
+    fn drop(&mut self) {
+        // SAFETY: paired with a successful try_ref at construction.
+        unsafe { (*self.0).unref() };
+    }
 }
 
 // ==================== Ring Layout Helpers ====================
@@ -358,6 +413,8 @@ fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUri
         cq_cqes_off: 32,
 
         eventfd_fd: core::sync::atomic::AtomicI32::new(-1),
+        eventfd_file: Spinlock::new(None),
+        refs: core::sync::atomic::AtomicU32::new(1),
         cq_lock: Spinlock::new(()),
     });
 
@@ -368,9 +425,10 @@ fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUri
 
 fn io_uring_close(file: &File) -> i32 {
     if let Some(ptr) = unsafe { *file.private_data.get() } {
-        unsafe {
-            let _ = Box::from_raw(ptr as *mut IoUring);
-        }
+        // Drop our installation reference; concurrent enter/mmap users hold
+        // their own references and the final unref frees the ring regions.
+        // SAFETY: ptr came from Box::into_raw at install time.
+        unsafe { (*(ptr as *const IoUring)).unref(); }
         unsafe { *file.private_data.get() = None; }
     }
     0
@@ -406,7 +464,13 @@ pub fn io_uring_mmap_handler(
 
     let file = unsafe { crate::fs::file::get_file_fd(fd as usize) }.ok_or(-9)?; // EBADF
     let ring_ptr = unsafe { *file.private_data.get() }.ok_or(-9)?;
+    // SAFETY: ring_ptr from private_data of an ops-verified io_uring file;
+    // try_ref pins it against a concurrent close() during the mapping.
     let ring = unsafe { &*(ring_ptr as *const IoUring) };
+    if !ring.try_ref() {
+        return Err(-9); // EBADF: ring being torn down
+    }
+    let _ring_guard = RingRef(ring_ptr as *const IoUring);
 
     let region = match offset & IORING_OFF_MMAP_MASK {
         IORING_OFF_SQ_RING => &ring.sq_ring,
@@ -731,24 +795,22 @@ fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
     }
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
-    // Signal eventfd if registered
-    let efd = ring.eventfd_fd.load(core::sync::atomic::Ordering::Acquire);
-    if efd >= 0 {
-        signal_eventfd(efd as usize);
+    // Signal eventfd if registered (use the pinned file reference, not the
+    // raw fd number — the fd may have been closed and reused in between)
+    if let Some(efile) = ring.eventfd_file.lock().clone() {
+        signal_eventfd_file(&efile);
     }
 }
 
 /// Signal the registered eventfd by writing 1.
-fn signal_eventfd(fd: usize) {
-    if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd) } {
-        let one: [u8; 8] = 1u64.to_le_bytes();
-        let ops = match file.get_ops() {
-            Some(o) => o,
-            None => return,
-        };
-        if let Some(write_fn) = ops.write {
-            let _ = write_fn(&file, &one);
-        }
+fn signal_eventfd_file(file: &alloc::sync::Arc<File>) {
+    let one: [u8; 8] = 1u64.to_le_bytes();
+    let ops = match file.get_ops() {
+        Some(o) => o,
+        None => return,
+    };
+    if let Some(write_fn) = ops.write {
+        let _ = write_fn(file, &one);
     }
 }
 
@@ -867,9 +929,15 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
 
     let ring_ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p as *const IoUring,
-        None => return -(9i64) as u64,
+        None => return -(9i64) as u64, // EBADF
     };
+    // SAFETY: ring_ptr validated above; try_ref pins it against a concurrent
+    // close for the duration of this syscall.
     let ring = unsafe { &*ring_ptr };
+    if !ring.try_ref() {
+        return -(9i64) as u64; // EBADF: ring being torn down
+    }
+    let _ring_guard = RingRef(ring_ptr);
 
     // Submit SQEs
     let submitted = submit_sqes(ring, to_submit);
@@ -905,24 +973,40 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
 
     let ring_ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p as *const IoUring,
-        None => return -(9i64) as u64,
+        None => return -(9i64) as u64, // EBADF
     };
+    // SAFETY: ring_ptr validated above; try_ref pins it against a concurrent
+    // close for the duration of this syscall.
     let ring = unsafe { &*ring_ptr };
+    if !ring.try_ref() {
+        return -(9i64) as u64; // EBADF: ring being torn down
+    }
+    let _ring_guard = RingRef(ring_ptr);
 
     match opcode {
         IORING_REGISTER_EVENTFD => {
             if nr_args != 1 { return -(22i64) as u64; }
             let eventfd_fd = arg as i32;
             if eventfd_fd < 0 { return -(9i64) as u64; }
-            // Validate eventfd exists
-            if unsafe { crate::fs::file::get_file_fd(eventfd_fd as usize) }.is_none() {
-                return -(9i64) as u64;
+            // Hold the actual file reference (immune to fd reuse) and verify
+            // it really is an eventfd — anything else would make completion
+            // notification write garbage into an unrelated file.
+            let efile = match unsafe { crate::fs::file::get_file_fd(eventfd_fd as usize) } {
+                Some(f) => f,
+                None => return -(9i64) as u64,
+            };
+            if !efile.get_ops().is_some_and(|o| core::ptr::eq(
+                o, &crate::syscall::misc::EVENTFD_OPS as *const _,
+            )) {
+                return -(22i64) as u64; // EINVAL
             }
             ring.eventfd_fd.store(eventfd_fd, core::sync::atomic::Ordering::Release);
+            *ring.eventfd_file.lock() = Some(efile);
             0
         }
         IORING_UNREGISTER_EVENTFD => {
             ring.eventfd_fd.store(-1, core::sync::atomic::Ordering::Release);
+            *ring.eventfd_file.lock() = None;
             0
         }
         _ => -(22i64) as u64, // EINVAL

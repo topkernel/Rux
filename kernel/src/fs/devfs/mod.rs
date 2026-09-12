@@ -413,6 +413,7 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
 
     let ino = devfs_ino_hash(name_str);
     let mut inode = Inode::new(ino, mode);
+    inode.fs_id = crate::fs::inode::FS_ID_DEVFS;  // icache isolation (VFS-H8)
     inode.ops = Some(&DEVFS_INODE_OPS);
     // Clone the Arc and convert to raw pointer to keep the DevfsEntry alive
     // independently of the BTreeMap entry. The refcount is incremented by

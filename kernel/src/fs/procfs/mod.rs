@@ -904,6 +904,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
 
         let mut inode = Inode::new(ino, mode);
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;  // icache isolation (VFS-H8)
         inode.ops = Some(&PROCFS_INODE_OPS);
         inode.private_data = Some(raw_ptr);
         return Ok(Arc::new(inode));
@@ -919,6 +920,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             if current_pid() as u64 == pid_val || find_task_by_pid(pid_val as u32).is_some() {
                 let mode = InodeMode::new(InodeMode::S_IFDIR | 0o555);
                 let mut inode = Inode::new(pid_val, mode);
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;  // icache isolation (VFS-H8)
                 inode.ops = Some(&PROCFS_INODE_OPS);
                 // private_data for PID dirs is set lazily when accessed
                 return Ok(Arc::new(inode));
@@ -939,6 +941,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
     };
 
     let mut inode = Inode::new(child.ino, mode);
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;  // icache isolation (VFS-H8)
     inode.ops = Some(&PROCFS_INODE_OPS);
     inode.private_data = Some(Arc::as_ptr(&child) as *mut u8);
     Ok(Arc::new(inode))

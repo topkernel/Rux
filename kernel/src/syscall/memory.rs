@@ -63,8 +63,13 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 return current_brk as i64;
             }
 
-            // Allow shrinking heap
-            if new_brk < current_brk {
+            // Allow shrinking heap — but never below the heap start
+            // (Linux: newbrk < mm->start_brk is ignored). Without this,
+            // brk(small) would munmap the ELF segments and corrupt rmap.
+            let brk_floor = current_task.address_space()
+                .map(|a| a.start_brk() as u64)
+                .unwrap_or(crate::arch::riscv64::mm::user_addr::BRK_DEFAULT as u64);
+            if new_brk < current_brk && new_brk >= brk_floor {
                 // Calculate page range to unmap
                 let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
                 let current_page_end = (current_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
@@ -702,36 +707,58 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
 ///
 /// Used by mremap MOVE operations to preserve data.
 ///
+/// The destination mapping created by `AddressSpace::mmap` is lazy (VMA
+/// registered, no PTEs — pages normally appear via faults), so a plain walk
+/// of the destination finds nothing. Instead, this eagerly allocates a
+/// destination page per source page, maps it with the source's R/W/X
+/// permissions, and copies — mirroring the anonymous fault path's mapping
+/// and rmap bookkeeping.
+///
 /// # Safety
-/// Caller must ensure both old and new ranges are valid, page-aligned, and mapped.
+/// Caller must ensure both old and new ranges are valid, page-aligned, and
+/// the old range is mapped.
 unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize, size: usize) {
     use crate::arch::riscv64::mm::{
-        PAGE_SIZE, PAGE_SHIFT,
-        mmu_init::get_page_table_virt,
-        pagetable::PageTable,
+        PAGE_SIZE, PAGE_SHIFT, PhysAddr, VirtAddr, map_page, phys_to_virt, PageTableEntry,
     };
+    use crate::mm::page_alloc::alloc_page;
+    use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+    use crate::mm::zone::GfpFlags;
 
     let mut offset = 0usize;
     while offset < size {
         let old_virt = (old_addr + offset) as u64;
         let new_virt = (new_addr + offset) as u64;
 
-        // Walk old page table to get physical address
-        if let Some((old_ppn, _)) = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root_ppn, old_virt) {
+        // Walk old page table to get the source physical page
+        if let Some((old_ppn, old_bits)) = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root_ppn, old_virt) {
             let old_phys = old_ppn << PAGE_SHIFT;
-            let old_kvaddr = crate::arch::riscv64::mm::phys_to_virt(
-                crate::arch::riscv64::mm::PhysAddr::new(old_phys)
-            ).bits() as *const u8;
+            let old_kvaddr = phys_to_virt(PhysAddr::new(old_phys)).bits() as *const u8;
 
-            // Walk new page table to get physical address
-            if let Some((new_ppn, _)) = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root_ppn, new_virt) {
-                let new_phys = new_ppn << PAGE_SHIFT;
-                let new_kvaddr = crate::arch::riscv64::mm::phys_to_virt(
-                    crate::arch::riscv64::mm::PhysAddr::new(new_phys)
-                ).bits() as *mut u8;
+            // Eagerly allocate + map the destination page (see comment above)
+            let new_phys = alloc_page(GfpFlags::GFP_KERNEL);
+            if new_phys == 0 {
+                // Out of memory: leave the remainder lazy — the destination
+                // VMA exists, so untouched pages fault in as zero pages.
+                return;
+            }
+            let perms = old_bits & (PageTableEntry::R | PageTableEntry::W | PageTableEntry::X);
+            let pte_flags = PageTableEntry::V | PageTableEntry::U
+                | PageTableEntry::A | PageTableEntry::D | perms;
+            map_page(root_ppn, VirtAddr::new(new_virt), PhysAddr::new(new_phys as u64), pte_flags);
 
-                // Copy page content via linear mapping
-                core::ptr::copy_nonoverlapping(old_kvaddr, new_kvaddr, PAGE_SIZE as usize);
+            let new_kvaddr = phys_to_virt(PhysAddr::new(new_phys as u64)).bits() as *mut u8;
+            // SAFETY: both addresses are kernel linear-mapping views of
+            // distinct physical pages; PAGE_SIZE is the allocation size.
+            core::ptr::copy_nonoverlapping(old_kvaddr, new_kvaddr, PAGE_SIZE as usize);
+
+            // rmap/mapcount bookkeeping, same as the anonymous fault path
+            let page = pfn_to_page_mut(new_phys >> PAGE_SHIFT);
+            if !page.is_null() {
+                // SAFETY: freshly allocated page exclusively owned here.
+                (*page).set_flag(PageFlag::Anonymous);
+                (*page).set_index(new_virt as usize / (PAGE_SIZE as usize));
+                (*page).inc_mapcount();
             }
         }
         offset += PAGE_SIZE as usize;

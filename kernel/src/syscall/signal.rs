@@ -91,6 +91,10 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
         _ => old_mask, // Should not reach here
     };
 
+    // SIGKILL (9) and SIGSTOP (19) can never be blocked (POSIX/Linux):
+    // strip their bits so the process stays killable/stoppable.
+    let result_mask = result_mask & !((1u64 << 8) | (1u64 << 18));
+
     // Update current process signal mask
     // SAFETY: current is the running task's Task pointer from sched::current().
     unsafe {
@@ -396,8 +400,13 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // SAFETY: mask_ptr validated with access_ok(8); reads one u64.
-    let new_mask = unsafe { *mask_ptr };
+    // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+    let new_mask = match unsafe { crate::arch::riscv64::uaccess::get_user(mask_ptr) } {
+        Some(v) => v,
+        None => return -(errno::EFAULT as i64),
+    };
+    // SIGKILL/SIGSTOP can never be blocked, not even via sigsuspend.
+    let new_mask = new_mask & !((1u64 << 8) | (1u64 << 18));
 
     let current = match crate::sched::current() {
         Some(c) => c as *const _ as *mut crate::process::task::Task,
@@ -463,22 +472,23 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // Signal 0 is for permission checking only
-    if sig == 0 {
-        // Just check if process exists
-        // SAFETY: find_task_by_pid returns null if tid not found; result checked below.
-        let task = unsafe { crate::sched::find_task_by_pid(tid) };
-        if task.is_null() {
-            return -(errno::ESRCH as i64);
-        }
-        return 0;
-    }
-
-    // Find target task
+    // Find target task (also needed for the sig==0 permission probe)
     // SAFETY: find_task_by_pid returns null if tid not found; result checked below.
     let task = unsafe { crate::sched::find_task_by_pid(tid) };
     if task.is_null() {
         return -(errno::ESRCH as i64);
+    }
+
+    // Permission check for every signal, including the sig==0 probe
+    // (Linux do_tkill → check_kill_permission).
+    // SAFETY: task is non-null and stable while referenced.
+    if !unsafe { crate::security::can_send_signal((*task).cred()) } {
+        return -(errno::EPERM as i64);
+    }
+
+    // Signal 0 is for permission/existence checking only
+    if sig == 0 {
+        return 0;
     }
 
     // Send signal using the existing send_signal function

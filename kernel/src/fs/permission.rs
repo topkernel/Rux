@@ -50,3 +50,26 @@ pub fn generic_permission(
         (mode & 0o7) & mask == mask
     }
 }
+
+/// Check `mask` (MAY_READ/WRITE/EXEC) against `inode` using the current
+/// task's credentials.
+///
+/// Returns `true` when there is no current task (early boot / kernel-thread
+/// context) so internal lookups keep working.
+pub fn inode_permission(inode: &crate::fs::inode::Inode, mask: u32) -> bool {
+    match crate::sched::current() {
+        Some(task) => {
+            // SAFETY: `task` is the current task pointer from sched::current();
+            // its cred is immutable for the duration of this check.
+            let cred = unsafe { (*task).cred() };
+            generic_permission(
+                inode.mode.bits() as u16,
+                inode.uid.load(core::sync::atomic::Ordering::Relaxed),
+                inode.gid.load(core::sync::atomic::Ordering::Relaxed),
+                mask,
+                cred,
+            )
+        }
+        None => true,
+    }
+}

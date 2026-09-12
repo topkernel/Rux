@@ -264,9 +264,24 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 // and set_state().
                 pipe.read_queue().prepare_to_wait(current, false, true);
 
+                // Re-check the condition AFTER registering: if a writer
+                // filled the buffer between our check and prepare_to_wait,
+                // its wake_up_all() found an empty queue — don't sleep.
+                if pipe.buffer.lock().available_read() > 0 || pipe.is_write_closed() {
+                    pipe.read_queue().finish_wait(current);
+                    continue;
+                }
+
                 crate::sched::schedule();
 
                 pipe.read_queue().finish_wait(current);
+
+                // Blocking pipe reads are interruptible by signals
+                // (including SIGKILL) — without this check the process
+                // could not be killed while blocked on an empty pipe.
+                if crate::signal::signal_pending() {
+                    return -(crate::errno::constants::EINTR) as isize;
+                }
 
                 // Recheck condition
                 continue;
@@ -338,9 +353,26 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 // add to queue, preventing lost-wakeup race.
                 pipe.write_queue().prepare_to_wait(current, false, true);
 
+                // Re-check the condition AFTER registering: if a reader
+                // drained the buffer between our check and prepare_to_wait,
+                // its wake_up_all() found an empty queue — don't sleep.
+                if pipe.buffer.lock().available_write() > 0 || pipe.is_read_closed() {
+                    pipe.write_queue().finish_wait(current);
+                    continue;
+                }
+
                 crate::sched::schedule();
 
                 pipe.write_queue().finish_wait(current);
+
+                // Blocking pipe writes are interruptible by signals; a
+                // partial write returns what was already written.
+                if crate::signal::signal_pending() {
+                    if total_written > 0 {
+                        return total_written as isize;
+                    }
+                    return -(crate::errno::constants::EINTR) as isize;
+                }
 
                 // Check if read end closed while we were sleeping
                 if pipe.is_read_closed() {

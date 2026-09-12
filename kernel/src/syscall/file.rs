@@ -138,9 +138,16 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
     }
     let fd = raw_fd as usize;
 
-    // Handle POSIX MQ fds (range 512+)
+    // POSIX MQ fds live in a side namespace starting at 512. Consult the
+    // process fd table FIRST: an ordinary fd in [512, fdtable_max) must be
+    // closed as a regular file, not hijacked by the MQ namespace.
     if fd >= 512 {
-        return crate::ipc::posix_mq::close_mq_fd(fd as i32) as i64;
+        let in_fdtable = crate::sched::get_current_fdtable()
+            .map(|ft| ft.get_file(fd).is_some())
+            .unwrap_or(false);
+        if !in_fdtable {
+            return crate::ipc::posix_mq::close_mq_fd(fd as i32) as i64;
+        }
     }
 
     use crate::fs::close_file_fd;
@@ -518,7 +525,36 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
         return target.len() as i64;
     }
 
-    -(errno::ENOENT as i64)
+    // Generic path: look up the symlink itself (NOFOLLOW) and read its
+    // target through the filesystem's readlink op.
+    match crate::fs::vfs::path_lookup(&full_path, crate::fs::vfs::LOOKUP_NOFOLLOW) {
+        Ok(vpath) => {
+            let inode = match vpath.inode {
+                Some(i) => i,
+                None => return -(errno::ENOENT as i64),
+            };
+            if !inode.mode.is_symlink() {
+                return -(errno::EINVAL as i64);
+            }
+            let mut target_buf = [0u8; PATH_MAX];
+            let n = inode.op_readlink(&mut target_buf);
+            if n < 0 {
+                return n as i64;
+            }
+            let n = n as usize;
+            if n > target_buf.len() {
+                return -(errno::ENAMETOOLONG as i64);
+            }
+            let copy_len = n.min(bufsize);
+            // SAFETY: buf validated with access_ok(bufsize); copy_len <= bufsize.
+            unsafe {
+                core::ptr::copy_nonoverlapping(target_buf.as_ptr(), buf, copy_len);
+            }
+            // Linux truncates to bufsiz and returns the truncated length
+            copy_len as i64
+        }
+        Err(e) => e as i64,
+    }
 }
 
 /// Resolve path for procfs readlink (handles /proc/self/ -> /proc/{pid}/)
@@ -974,8 +1010,27 @@ pub fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::s
             alloc::string::String::from(pathname_str)
         }
     } else {
-        // TODO: handle dirfd properly
-        alloc::string::String::from(pathname_str)
+        // Relative path resolved against the directory referenced by dirfd.
+        // The fd must exist and be a directory (Linux: EBADF / ENOTDIR).
+        let file = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(dirfd as usize))
+            .ok_or((-errno::EBADF as i64) as u64)?;
+        // SAFETY: file comes from the fd table; inode accessed read-only.
+        let is_dir = unsafe {
+            (*file.inode.get())
+                .as_ref()
+                .map(|i| i.mode.is_directory())
+                .unwrap_or(false)
+        };
+        if !is_dir {
+            return Err((-errno::ENOTDIR as i64) as u64);
+        }
+        let base = file.path();
+        let mut path = alloc::string::String::with_capacity(base.len() + pathname_str.len() + 1);
+        path.push_str(&base);
+        if !path.ends_with('/') { path.push('/'); }
+        path.push_str(pathname_str);
+        path
     };
     Ok(full_path)
 }

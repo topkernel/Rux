@@ -1744,6 +1744,7 @@ unsafe fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sy
     };
 
     let mut inode = Inode::new(child.ino, mode);
+    inode.fs_id = crate::fs::inode::FS_ID_ROOTFS;  // icache isolation (VFS-H8)
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&child)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 

@@ -12,6 +12,12 @@ use super::util::*;
 
 /// Maximum semaphore value (Linux SEMVMX).
 const SEMVMX: i32 = 32767;
+
+/// Sentinel returned by try_apply_semops when the operation set must block.
+/// Deliberately outside the errno range so it can never be confused with a
+/// real error (previously -EINVAL/-22 was used and the caller treated it as
+/// a user-visible error — see review IPC-C1).
+const SEMOP_NEED_BLOCK: i32 = -512;
 /// Maximum semaphore adjustment value for SEM_UNDO (Linux SEMAEM).
 const SEMAEM: i32 = 16384;
 
@@ -566,8 +572,13 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
         match result {
             Ok(()) => return 0,
             Err(e) => {
+                // IPC_NOWAIT and the operation cannot proceed: EAGAIN goes
+                // straight back to userspace (Linux semantics).
                 if e == -errno::EAGAIN {
-                    // Blocking needed
+                    return -(errno::EAGAIN as i64);
+                }
+                if e == SEMOP_NEED_BLOCK {
+                    // Blocking P/Z operation: sleep on the set's wait queue
                     let blocking_idx = find_blocking_op(idx, &sops);
                     match blocking_idx {
                         None => return -(errno::EAGAIN as i64),
@@ -628,7 +639,18 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
                                 }
                             }
 
+                            // Arm a wakeup timer for the deadline so a
+                            // never-satisfied semaphore still returns
+                            // ETIMEDOUT (nothing else would wake us).
+                            let timer_id = deadline
+                                .map(|dl| crate::timer::add_timer_wakeup(
+                                    dl, crate::sched::get_current_pid(),
+                                ))
+                                .unwrap_or(0);
                             crate::sched::schedule();
+                            if timer_id != 0 {
+                                crate::timer::del_timer(timer_id);
+                            }
 
                             // Decrement ncnt/zcnt after wakeup (we're no longer waiting).
                             {
@@ -687,13 +709,13 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
                 if sops[i].sem_flg & super::IPC_NOWAIT as u16 != 0 {
                     return Err(-errno::EAGAIN);
                 }
-                return Err(-22); // Block needed
+                return Err(SEMOP_NEED_BLOCK);
             }
             if sops[i].sem_op == 0 && new_val != 0 {
                 if sops[i].sem_flg & super::IPC_NOWAIT as u16 != 0 {
                     return Err(-errno::EAGAIN);
                 }
-                return Err(-22); // Block needed
+                return Err(SEMOP_NEED_BLOCK);
             }
         }
 

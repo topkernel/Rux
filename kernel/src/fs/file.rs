@@ -188,6 +188,10 @@ impl File {
 
     /// Read file
     pub unsafe fn read(&self, buf: *mut u8, count: usize) -> isize {
+        // f_mode enforcement: read on an O_WRONLY fd is EBADF (Linux)
+        if self.flags().is_writeonly() {
+            return -9; // EBADF
+        }
         if let Some(ops) = *self.ops.get() {
             if let Some(read_fn) = ops.read {
                 let slice = core::slice::from_raw_parts_mut(buf, count);
@@ -199,6 +203,10 @@ impl File {
 
     /// Write file
     pub unsafe fn write(&self, buf: *const u8, count: usize) -> isize {
+        // f_mode enforcement: write on an O_RDONLY fd is EBADF (Linux)
+        if self.flags().is_readonly() {
+            return -9; // EBADF
+        }
         if let Some(ops) = *self.ops.get() {
             if let Some(write_fn) = ops.write {
                 let slice = core::slice::from_raw_parts(buf, count);
@@ -236,6 +244,27 @@ impl File {
     /// Set file position
     pub fn set_pos(&self, new_pos: u64) {
         *self.pos.lock() = new_pos;
+    }
+
+    /// Recover the filesystem path of this file from its dentry.
+    ///
+    /// Returns "anon_inode:[<id>]" style names for dentry-less files
+    /// (pipes, sockets, epoll instances, ...).
+    pub fn path(&self) -> alloc::string::String {
+        // SAFETY: dentry is written once at open time and never mutated
+        // afterwards; read-only access here.
+        let dentry_opt = unsafe { (*self.dentry.get()).clone() };
+        match dentry_opt {
+            Some(dentry) => dentry.build_path(),
+            None => {
+                // SAFETY: inode is written once at open; read-only access.
+                let inode_opt = unsafe { (*self.inode.get()).clone() };
+                match inode_opt {
+                    Some(inode) => alloc::format!("anon_inode:[{}]", inode.ino),
+                    None => alloc::string::String::from("anon_inode"),
+                }
+            }
+        }
     }
 }
 

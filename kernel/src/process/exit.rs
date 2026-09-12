@@ -107,6 +107,12 @@ pub fn do_exit(exit_code: i32) -> ! {
         // Set exit code
         (*current).set_exit_code(exit_code);
 
+        // Drop any in-progress signal frame: a handler that longjmp'd out
+        // left sigframe set, which blocks all further delivery including
+        // SIGKILL (review H15) — clear it so the dying task stays killable.
+        (*current).sigframe = None;
+        (*current).sigframe_addr = 0;
+
         // ===== exit_mm: Release address space =====
         // Iterate VMAs to detach shared memory segments (decrement nattch)
         if let Some(as_ref) = (*current).address_space_arc() {
@@ -117,6 +123,32 @@ pub fn do_exit(exit_code: i32) -> ! {
                     if shmid >= 0 {
                         crate::ipc::sysv_shm::shm_detach_vma(shmid);
                     }
+                }
+            }
+        }
+        // Switch to the kernel root page table BEFORE dropping the last
+        // address-space reference: the Drop frees the user page tables, and
+        // running even one more instruction on the freed root (TLB miss on a
+        // non-global mapping) would fault. Same pattern context_switch uses
+        // when switching to kernel/idle tasks (review ARCH-H4).
+        {
+            let kernel_ppn = crate::arch::riscv64::mm::mmu_init::root_page_table_ppn();
+            let satp: u64;
+            // SAFETY: plain CSR read of the current satp.
+            unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp) };
+            let current_ppn = satp & 0xF_FFFF_FFFF_FFFF;
+            if current_ppn != kernel_ppn {
+                let new_satp = (8u64 << 60) | kernel_ppn;
+                // SAFETY: switching to the kernel root page table; the
+                // kernel linear mapping is present in every address space's
+                // kernel portion and in ROOT_PAGE_TABLE itself.
+                unsafe {
+                    core::arch::asm!(
+                        "csrw satp, {0}",
+                        "sfence.vma zero, zero",
+                        in(reg) new_satp,
+                        options(nostack),
+                    );
                 }
             }
         }

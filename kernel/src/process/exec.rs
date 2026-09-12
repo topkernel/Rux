@@ -31,6 +31,7 @@ pub(crate) fn do_execve_elf(
     ehdr: &crate::fs::elf::Elf64Ehdr,
     pathname: &str,
     interp_data: Option<&[u8]>,
+    secure_exec: bool,
 ) -> Result<(), i32> {
     use crate::arch::riscv64::mm::{
         alloc_and_map_to_user_table, create_user_address_space,
@@ -48,6 +49,10 @@ pub(crate) fn do_execve_elf(
     // 2. Clear sigaltstack
     // 3. Flush pending signals
     // 4. Reset signal mask
+    // 5. Clear any in-progress signal frame — a handler that longjmp'd out
+    //    or is exec'ing from within a handler must not leave the kernel
+    //    thinking a frame is still active (that would block ALL later
+    //    signal delivery, including SIGKILL — review H15).
     // SAFETY: task_ptr is the current task; signal struct may be Arc-shared for threads,
     // but exec replaces the whole process image so this is safe.
     unsafe {
@@ -57,6 +62,8 @@ pub(crate) fn do_execve_elf(
         (*task_ptr).sigstack = crate::signal::SignalStack::new();
         (*task_ptr).pending.clear();
         (*task_ptr).sigmask = 0;
+        (*task_ptr).sigframe = None;
+        (*task_ptr).sigframe_addr = 0;
     }
 
     // Find virtual address range
@@ -515,6 +522,13 @@ pub(crate) fn do_execve_elf(
         offset += 1;
 
         // auxv
+        // AT_UID/AT_EUID/AT_GID/AT_EGID come from the (possibly just
+        // setuid-updated) credentials; AT_SECURE=1 makes musl/glibc scrub
+        // unsafe environment variables on privileged execs.
+        let (at_uid, at_euid, at_gid, at_egid) = unsafe {
+            let cred = (*task_ptr).cred();
+            (cred.uid as u64, cred.euid as u64, cred.gid as u64, cred.egid as u64)
+        };
         let auxv = &[
             (AT_PHDR, phdr_addr),
             (AT_PHENT, phent),
@@ -522,13 +536,13 @@ pub(crate) fn do_execve_elf(
             (AT_PAGESZ, PAGE_SIZE as u64),
             (AT_BASE, at_base),
             (AT_ENTRY, entry),
-            (AT_UID, 0),
-            (AT_EUID, 0),
-            (AT_GID, 0),
-            (AT_EGID, 0),
+            (AT_UID, at_uid),
+            (AT_EUID, at_euid),
+            (AT_GID, at_gid),
+            (AT_EGID, at_egid),
             (AT_HWCAP, 0),
             (AT_CLKTCK, 100),
-            (AT_SECURE, 0),
+            (AT_SECURE, secure_exec as u64),
             (AT_RANDOM, random_vaddr),
             (AT_EXECFN, execfn_vaddr),
         ];

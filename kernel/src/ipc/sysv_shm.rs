@@ -522,6 +522,12 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             if entry.deleted {
                 return -(errno::EIDRM as i64);
             }
+            // Reserve the attachment BEFORE mapping any page, in the same
+            // lock section IPC_RMID uses for its nattch==0 free decision:
+            // otherwise a concurrent RMID can free the pages while we are
+            // still mapping them (review IPC-C4 UAF). Failure paths below
+            // decrement symmetrically.
+            entry.inner.nattch.fetch_add(1, Ordering::Relaxed);
             let pages_lock = entry.inner.pages.lock();
             if let Some(ref shm_pages) = *pages_lock {
                 // Build PTE flags
@@ -547,6 +553,13 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
                                     rollback_size,
                                 );
                             }
+                            // Undo the early nattch reservation
+                            {
+                                let slots = SHM_IDS.slots.lock();
+                                if let Some(ref entry) = slots[idx] {
+                                    entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+                                }
+                            }
                             return -(errno::ENOMEM as i64);
                         }
                     };
@@ -563,6 +576,13 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
                     }
                 }
             } else {
+                // pages already torn down: undo the reservation
+                {
+                    let slots = SHM_IDS.slots.lock();
+                    if let Some(ref entry) = slots[idx] {
+                        entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
                 return -(errno::EIDRM as i64);
             }
         } else {
@@ -587,18 +607,18 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
 
     if addr_space.add_vma(vma).is_err() {
         let _ = addr_space.munmap(VirtAddr::new(attach_addr), size_aligned);
+        // Undo the early nattch reservation
+        {
+            let slots = SHM_IDS.slots.lock();
+            if let Some(ref entry) = slots[idx] {
+                entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
         return -(errno::ENOMEM as i64);
     }
 
-    // Update segment metadata
-    {
-        let slots = SHM_IDS.slots.lock();
-        if let Some(ref entry) = slots[idx] {
-            entry.inner.nattch.fetch_add(1, Ordering::Relaxed);
-            entry.inner.lpid.store(get_current_pid(), Ordering::Relaxed);
-            entry.inner.shm_atime.store(ipc_current_time(), Ordering::Relaxed);
-        }
-    }
+    // Update segment metadata (nattch was already incremented atomically
+    // with the mapping above)
 
     // Flush TLB
     // SAFETY: sfence.vma is a RISC-V privileged instruction valid in S-mode;

@@ -241,6 +241,15 @@ pub enum InodeState {
 ///
 /// Each inode represents an object (file, directory, symlink, etc.) in a filesystem.
 /// Inodes are cached in the inode cache (icache) and can be shared.
+/// Filesystem identity tags for the inode cache: entries from different
+/// filesystems must never collide on (ino, fs_id) — rootfs/procfs/devfs all
+/// use small inode numbers that would otherwise alias each other
+/// (review VFS-H8). ext4 uses its instance pointer, which never equals
+/// these small constants.
+pub const FS_ID_ROOTFS: u64 = 0x525F_4653_0001;
+pub const FS_ID_PROCFS: u64 = 0x5052_4F43_0002;
+pub const FS_ID_DEVFS: u64 = 0x4445_5646_0003;
+
 #[repr(C)]
 pub struct Inode {
     // ==================== Core Fields ====================

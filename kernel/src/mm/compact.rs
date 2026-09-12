@@ -280,14 +280,36 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     let src = &*src_page;
     let dst = &mut *dst_page;
 
-    // Step 1: Save virtual address (stored as VPN in page.index)
-    let old_vaddr = src.index();
-    if old_vaddr == 0 {
+    // Step 1: Recover the virtual address. page.index stores the PAGE NUMBER
+    // (address / PAGE_SIZE, see page_add_anon_rmap / the fault path), not the
+    // raw address — convert before using it as a virtual address.
+    let old_vaddr = src.index() * (super::PAGE_SIZE as usize);
+    if src.index() == 0 {
         return false;
     }
 
     // Save original mapcount — transfer exactly to dst (matches Linux behavior)
     let saved_mapcount = src.mapcount();
+
+    // Save the PTE permission bits BEFORE unmapping: try_to_unmap zeroes the
+    // PTE, so remap_page cannot recover the R/W/X/U flags afterwards, and a
+    // walk of the cleared PTE returns None (which used to silently skip the
+    // remap entirely — see review MM-C2).
+    let saved_flags_cell = core::cell::Cell::new(0xD7u64); // V|R|W|U|A|D fallback
+    crate::sched::for_each_task(|task_ptr| unsafe {
+        if saved_flags_cell.get() != 0xD7 {
+            return;
+        }
+        let task = &*task_ptr;
+        if let Some(mm) = task.address_space() {
+            if let Some((_ppn, bits)) = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                mm.pgd(), old_vaddr as u64,
+            ) {
+                saved_flags_cell.set(bits & 0x3FF);
+            }
+        }
+    });
+    let saved_pte_flags = saved_flags_cell.get();
 
     // Step 2: Unmap from all processes
     let unmapped = try_to_unmap(src);
@@ -299,7 +321,7 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     copy_page_contents(src_pfn, dst_pfn);
 
     // Step 4: Install new PTEs pointing to dst_pfn
-    remap_page(dst, old_vaddr);
+    remap_page(dst, old_vaddr, saved_pte_flags);
 
     // Step 5: Transfer mapcount from src to dst (exact copy, not per-PTE counting)
     dst.reset_mapcount();
@@ -344,7 +366,7 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
 /// # Safety
 /// `dst` must be a valid, initialized page descriptor. `old_vaddr` must
 /// be a virtual address that was previously mapped to the source page.
-unsafe fn remap_page(dst: &Page, old_vaddr: usize) {
+unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
     let new_pfn = page_to_pfn(dst as *const Page);
     let new_ppn = new_pfn as u64;
 
@@ -371,54 +393,51 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize) {
         }
         // vma_mgr still held — protects page table walk below
 
-        // Walk page table to find and update the PTE
+        // Do NOT gate this on PageTableWalker::walk: the PTE was just
+        // cleared by try_to_unmap, so a walk returns None and the remap
+        // would be silently skipped (review MM-C2). The manual walk below
+        // only requires the page-table LEVELS to exist; the leaf entry is
+        // rebuilt from the saved permission bits.
         let root_ppn = mm.pgd();
-        let walk_result = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
-            root_ppn, old_vaddr as u64,
+        let vpn2 = ((old_vaddr >> 30) & 0x1FF) as usize;
+        let vpn1 = ((old_vaddr >> 21) & 0x1FF) as usize;
+        let vpn0 = ((old_vaddr >> 12) & 0x1FF) as usize;
+
+        let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+            root_ppn << super::hugepage::PAGE_SHIFT,
+        );
+        let pte2 = (*root_table).get(vpn2);
+        if !pte2.is_valid() {
+            return;
+        }
+
+        let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+            pte2.ppn() << super::hugepage::PAGE_SHIFT,
+        );
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() {
+            return;
+        }
+
+        let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+            pte1.ppn() << super::hugepage::PAGE_SHIFT,
         );
 
-        if let Some((_ppn, _pte_bits)) = walk_result {
-            let vpn2 = ((old_vaddr >> 30) & 0x1FF) as usize;
-            let vpn1 = ((old_vaddr >> 21) & 0x1FF) as usize;
-            let vpn0 = ((old_vaddr >> 12) & 0x1FF) as usize;
+        // Rebuild the leaf PTE: new ppn + saved permission bits + V.
+        let new_pte_bits = (new_ppn << 10) | (saved_flags & 0x3FF) | 0x1 /* V */;
+        (*table0).set(
+            vpn0,
+            crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(new_pte_bits),
+        );
 
-            let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                root_ppn << super::hugepage::PAGE_SHIFT,
-            );
-            let pte2 = (*root_table).get(vpn2);
-            if !pte2.is_valid() {
-                return;
-            }
-
-            let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                pte2.ppn() << super::hugepage::PAGE_SHIFT,
-            );
-            let pte1 = (*table1).get(vpn1);
-            if !pte1.is_valid() {
-                return;
-            }
-
-            let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                pte1.ppn() << super::hugepage::PAGE_SHIFT,
-            );
-            let old_pte = (*table0).get(vpn0);
-
-            // Update PPN bits (bits [53:10]), preserve flags (bits [9:0]) and reserved (bits [63:54])
-            let new_pte_bits = (old_pte.bits() & !(0x00FFFFFFFFFFFC00u64)) | (new_ppn << 10);
-            (*table0).set(
-                vpn0,
-                crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(new_pte_bits),
-            );
-
-            // Flush TLB for this address
-            core::arch::asm!(
-                "fence",
-                "sfence.vma {}, zero",
-                "fence",
-                in(reg) old_vaddr,
-                options(nostack, preserves_flags)
-            );
-        }
+        // Flush TLB for this address
+        core::arch::asm!(
+            "fence",
+            "sfence.vma {}, zero",
+            "fence",
+            in(reg) old_vaddr,
+            options(nostack, preserves_flags)
+        );
         // vma_mgr dropped here — lock released after PTE update
     });
 }

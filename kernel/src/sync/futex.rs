@@ -112,6 +112,18 @@ fn alloc_waiter() -> Option<usize> {
     for i in 0..WAITER_POOL_SIZE {
         let mut slot = WAITER_POOL[i].lock_irqsave();
         if slot.is_none() {
+            // Reserve INSIDE the critical section: leaving the slot empty
+            // until the caller initializes it let two CPUs hand out the
+            // same index (review IPC-C2). A placeholder (task == null)
+            // makes the slot visibly occupied; chain walkers skip null-task
+            // waiters via the key/task checks below.
+            *slot = Some(Waiter {
+                key: FutexKey::new(0, 0, 0),
+                task: core::ptr::null_mut(),
+                bitset: 0,
+                woken: false,
+                next: None,
+            });
             return Some(i);
         }
     }
@@ -154,9 +166,10 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
     let mut ret = 0i64;
     let mut prev_idx: Option<usize> = None;
     // Collect tasks to wake after releasing the bucket lock, like
-    // kernel/futex/waitwake.c wake_futex() + wake_q_add().
-    let mut wake_list: [Option<*mut Task>; 8] = [None; 8];
-    let mut wake_count = 0usize;
+    // kernel/futex/waitwake.c wake_futex() + wake_q_add(). Dynamically
+    // sized: a fixed 8-entry array silently stranded every waiter past the
+    // 8th (pthread_cond_broadcast) — review IPC-C3.
+    let mut wake_list: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
 
     // Hold the hash bucket lock for the entire traversal so no
     // concurrent futex_wait can insert/remove while we walk.
@@ -202,13 +215,11 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
                 }
             }
 
-            // Free the waiter slot.
-            free_waiter(idx);
-
+            // Do NOT free the waiter slot here: the sleeping task still
+            // inspects it after waking and frees it itself (review IPC-H4).
             // Defer wakeup — collect task pointer, wake after dropping lock.
-            if !woken_task.is_null() && wake_count < wake_list.len() {
-                wake_list[wake_count] = Some(woken_task);
-                wake_count += 1;
+            if !woken_task.is_null() {
+                wake_list.push(woken_task);
             }
 
             ret += 1;
@@ -227,8 +238,8 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
     drop(head);
 
     // Now wake collected tasks outside the bucket lock.
-    for i in 0..wake_count {
-        if let Some(task) = wake_list[i] {
+    for task in wake_list {
+        if !task.is_null() {
             Task::wake_up(task);
         }
     }
@@ -245,6 +256,11 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
 /// futex_wake sees the waiter, the task is already in INTERRUPTIBLE state
 /// so `Task::wake_up()` (which checks `is_sleeping()`) can succeed.
 pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
+    futex_wait_timeout(uaddr, flags, val, bitset, None)
+}
+
+/// FUTEX_WAIT with an optional jiffies deadline (see do_futex).
+pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadline: Option<u64>) -> i64 {
     if bitset == 0 {
         return -EINVAL as i64;
     }
@@ -288,16 +304,17 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
         None => return -ENOMEM as i64,
     };
 
-    // Initialize and insert waiter into hash chain.
+    // Initialize and insert waiter into hash chain (fill the placeholder
+    // reserved by alloc_waiter in place).
     {
         let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
-        *slot = Some(Waiter {
-            key,
-            task: current,
-            bitset,
-            woken: false,
-            next: *head,
-        });
+        if let Some(ref mut w) = *slot {
+            w.key = key;
+            w.task = current;
+            w.bitset = bitset;
+            w.woken = false;
+            w.next = *head;
+        }
     }
 
     // Update chain head.
@@ -320,25 +337,59 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
     drop(head);
 
     // Schedule — yields the CPU.  The task will be re-enqueued by
-    // Task::wake_up() when futex_wake (or a signal) wakes it.
+    // Task::wake_up() when futex_wake (or a signal) wakes it.  Arm a
+    // wakeup timer when a deadline is set: nothing else would wake a
+    // futex that is never signaled (pthread_cond_timedwait would hang).
     crate::arch::riscv64::cpu::restore_irq(true);
+    let timer_id = deadline
+        .map(|dl| crate::timer::add_timer_wakeup(
+            dl, crate::sched::get_current_pid(),
+        ))
+        .unwrap_or(0);
     crate::sched::schedule();
-
-    // Check for signal interruption (EINTR)
-    if crate::signal::signal_pending() {
-        remove_waiter(bucket_idx, waiter_idx);
-        return -crate::syscall::errno::EINTR as i64;
+    if timer_id != 0 {
+        crate::timer::del_timer(timer_id);
     }
 
-    // After waking up, check if we were explicitly woken.
+    // Check for signal interruption (EINTR). Ownership guard: only act on
+    // the slot if it still belongs to us (task pointer matches).
     {
         let slot = WAITER_POOL[waiter_idx].lock_irqsave();
-        if let Some(ref waiter) = *slot {
-            if !waiter.woken {
-                // Not explicitly woken (spurious wakeup or signal).
-                // Remove our waiter from the chain.
+        let mine = slot.as_ref().map(|w| w.task == current).unwrap_or(false);
+        drop(slot);
+        if !mine {
+            // Slot was recycled underneath us (should not happen now that
+            // the waker never frees slots, but stay defensive).
+            return 0;
+        }
+        if crate::signal::signal_pending() {
+            let woken = {
+                let slot = WAITER_POOL[waiter_idx].lock_irqsave();
+                slot.as_ref().map(|w| w.woken).unwrap_or(false)
+            };
+            if !woken {
+                remove_waiter(bucket_idx, waiter_idx);
+                return -crate::syscall::errno::EINTR as i64;
+            }
+        }
+    }
+
+    // After waking up, check if we were explicitly woken. The waiter owns
+    // its slot: unlink paths that did not wake us leave it in the chain
+    // (remove), the waker unlinked it already (just free the slot).
+    {
+        let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
+        let mine = slot.as_ref().map(|w| w.task == current).unwrap_or(false);
+        if mine {
+            let was_woken = slot.as_ref().map(|w| w.woken).unwrap_or(false);
+            if !was_woken {
+                // Not explicitly woken (spurious wakeup): still in the chain.
                 drop(slot);
                 remove_waiter(bucket_idx, waiter_idx);
+            } else {
+                // Woken: the waker unlinked us from the chain and left the
+                // slot for us to free.
+                *slot = None;
             }
         }
     }
@@ -448,8 +499,38 @@ pub fn futex_cleanup(task: *mut Task) {
 const ENOMEM: i32 = 12;
 
 /// FUTEX_WAIT_BITSET implementation
-pub fn futex_wait_bitset(uaddr: usize, flags: u32, val: u32, _timeout: u64, bitset: u32) -> i64 {
-    futex_wait(uaddr, flags, val, bitset)
+pub fn futex_wait_bitset(uaddr: usize, flags: u32, val: u32, _timeout: u64, bitset: u32, deadline: Option<u64>) -> i64 {
+    futex_wait_timeout(uaddr, flags, val, bitset, deadline)
+}
+
+/// Parse the futex ABI `struct timespec *timeout` (raw user pointer) into a
+/// jiffies deadline. NULL and unreadable pointers yield None (= wait forever).
+fn futex_parse_timeout(timeout_ptr: u64) -> Option<u64> {
+    use crate::drivers::timer::{get_jiffies, HZ};
+    if timeout_ptr == 0 {
+        return None;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16) {
+        return None;
+    }
+    let mut buf = [0u8; 16];
+    // SAFETY: access_ok-validated user pointer; exception-table copy.
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            buf.as_mut_ptr(), timeout_ptr as *const u8, 16,
+        )
+    };
+    if uncopied > 0 {
+        return None;
+    }
+    let sec = i64::from_le_bytes(buf[0..8].try_into().unwrap());
+    let nsec = i64::from_le_bytes(buf[8..16].try_into().unwrap());
+    if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+        return None;
+    }
+    let jiffies = (sec as u64).saturating_mul(HZ)
+        .saturating_add((nsec as u64 * HZ) / 1_000_000_000);
+    Some(get_jiffies().saturating_add(jiffies.max(1)))
 }
 
 /// FUTEX_WAKE_BITSET implementation
@@ -522,11 +603,11 @@ pub fn futex_requeue(
     let mut ret = 0i64;
     let mut woken = 0i32;
 
-    // Collect tasks to wake and waiter indices to requeue.
-    let mut wake_list: [Option<*mut Task>; 8] = [None; 8];
-    let mut wake_count = 0usize;
-    let mut requeue_list: [Option<usize>; 32] = [None; 32];
-    let mut requeue_count = 0usize;
+    // Collect tasks to wake and waiter indices to requeue. Dynamically
+    // sized: fixed 8/32-entry arrays silently stranded waiters past their
+    // capacity (pthread_cond_broadcast) — review IPC-C3/M7.
+    let mut wake_list: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+    let mut requeue_list: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
 
     // Lock both buckets to prevent requeued entries from being in limbo.
     // Use address ordering (lower index first) to avoid ABBA deadlock.
@@ -567,17 +648,15 @@ pub fn futex_requeue(
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot { w.woken = true; }
                 }
-                free_waiter(idx);
+                // The woken waiter frees its own slot (see futex_wait).
 
-                if !task.is_null() && wake_count < wake_list.len() {
-                    wake_list[wake_count] = Some(task);
-                    wake_count += 1;
+                if !task.is_null() {
+                    wake_list.push(task);
                 }
                 woken += 1;
                 ret += 1;
                 cur = next;
-            } else if requeue_count < requeue_list.len()
-                && (requeue_count as i32) < nr_requeue
+            } else if (requeue_list.len() as i32) < nr_requeue
             {
                 // Same bucket — just update the key, stay in chain.
                 {
@@ -586,8 +665,7 @@ pub fn futex_requeue(
                         w.key = key2;
                     }
                 }
-                requeue_list[requeue_count] = Some(idx);
-                requeue_count += 1;
+                requeue_list.push(idx);
                 ret += 1;
                 prev = Some(idx);
                 cur = next;
@@ -646,17 +724,15 @@ pub fn futex_requeue(
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot { w.woken = true; }
                 }
-                free_waiter(idx);
+                // The woken waiter frees its own slot (see futex_wait).
 
-                if !task.is_null() && wake_count < wake_list.len() {
-                    wake_list[wake_count] = Some(task);
-                    wake_count += 1;
+                if !task.is_null() {
+                    wake_list.push(task);
                 }
                 woken += 1;
                 ret += 1;
                 cur = next;
-            } else if requeue_count < requeue_list.len()
-                && (requeue_count as i32) < nr_requeue
+            } else if (requeue_list.len() as i32) < nr_requeue
             {
                 // Unlink from source chain.
                 if prev.is_none() {
@@ -675,8 +751,7 @@ pub fn futex_requeue(
                 }
                 *head2_ref = Some(idx);
 
-                requeue_list[requeue_count] = Some(idx);
-                requeue_count += 1;
+                requeue_list.push(idx);
                 ret += 1;
                 cur = next;
             } else {
@@ -688,8 +763,8 @@ pub fn futex_requeue(
     }
 
     // Wake collected tasks outside the lock.
-    for i in 0..wake_count {
-        if let Some(task) = wake_list[i] {
+    for task in wake_list {
+        if !task.is_null() {
             Task::wake_up(task);
         }
     }
@@ -704,13 +779,13 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, v
 
     match cmd {
         FUTEX_WAIT => {
-            futex_wait(uaddr, flags, val, FUTEX_BITSET_MATCH_ANY)
+            futex_wait_timeout(uaddr, flags, val, FUTEX_BITSET_MATCH_ANY, futex_parse_timeout(_timeout))
         }
         FUTEX_WAKE => {
             futex_wake(uaddr, flags, val as i32, FUTEX_BITSET_MATCH_ANY)
         }
         FUTEX_WAIT_BITSET => {
-            futex_wait_bitset(uaddr, flags, val, _timeout, val3)
+            futex_wait_bitset(uaddr, flags, val, _timeout, val3, futex_parse_timeout(_timeout))
         }
         FUTEX_WAKE_BITSET => {
             futex_wake_bitset(uaddr, flags, val as i32, val3)

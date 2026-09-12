@@ -298,6 +298,16 @@ pub fn sys_syslog(args: [u64; 6]) -> i64 {
     let bufp = args[1] as *mut u8;
     let len = args[2] as usize;
 
+    // Permission check (Linux check_syslog_permissions): everything except
+    // the size queries (3/10 with dmesg_restrict=0 semantics) requires
+    // CAP_SYSLOG — otherwise any process could read kernel logs (kernel
+    // address leaks), wipe them, or silence the console.
+    if !matches!(action, 0 | 1 | 10) {
+        if !crate::security::capable(crate::security::CAP_SYSLOG) {
+            return -(crate::syscall::errno::EPERM as i64);
+        }
+    }
+
     match action {
         // Close/Open: no-op, return success
         0 | 1 => 0,

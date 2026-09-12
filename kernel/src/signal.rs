@@ -776,8 +776,22 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
 
         // If a handler is already active (sigframe set up), don't deliver
         // more signals — they would overwrite the current handler's frame.
+        // Stale-frame detection: if the user sp has moved OUT of the frame
+        // built at sigframe_addr, the handler longjmp'd away (POSIX allows
+        // this) — the frame is dead and must not block delivery forever.
         if (*current).sigframe.is_some() {
-            return false;
+            const SIGNAL_FRAME_SIZE_CHECK: u64 = 4096;
+            let frame_addr = (*current).sigframe_addr;
+            let sp = (*regs).sp;
+            let frame_live = frame_addr != 0
+                && sp >= frame_addr
+                && sp < frame_addr.saturating_add(SIGNAL_FRAME_SIZE_CHECK);
+            if frame_live {
+                return false;
+            }
+            // Frame abandoned by the handler — drop it and deliver normally
+            (*current).sigframe = None;
+            (*current).sigframe_addr = 0;
         }
 
         // Check for pending signals (respecting signal mask)
@@ -1230,9 +1244,11 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
 /// Used by the TTY ISIG handler to deliver SIGINT/SIGQUIT/SIGTSTP
 /// to the foreground process group.
 pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
-    // SAFETY: for_each_task provides valid task pointers; sig is caller-validated.
-    crate::sched::for_each_task(|task| unsafe {
-        if (*task).pgid() == pgid {
+    // Broadcast over the PID hash so sleeping tasks receive it too; each
+    // target still goes through the kill permission check (kernel-originated
+    // signals from the TTY layer pass because init runs as root).
+    crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+        if (*task).pgid() == pgid && crate::security::can_send_signal((*task).cred()) {
             let _ = send_signal((*task).pid(), sig);
         }
     });

@@ -369,6 +369,14 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         .collect();
 
     for (ci, component) in components.iter().enumerate() {
+        // DAC: search (x) permission is required on every directory we
+        // traverse through (Linux checks MAY_EXEC per component).
+        if let Some(ref dir_inode) = current.get_inode() {
+            if !crate::fs::permission::inode_permission(dir_inode, crate::fs::permission::MAY_EXEC) {
+                return Err(errno::Errno::PermissionDenied.as_neg_i32());
+            }
+        }
+
         // Skip "." — current directory
         if *component == "." {
             continue;
@@ -459,7 +467,14 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
 
                     // Move to child, follow mount, follow symlink
                     current = follow_mount(d);
-                    current = follow_symlink(current, &components, &mut symlink_depth)?;
+                    // Respect LOOKUP_NOFOLLOW on the final component here as
+                    // well — lstat must not depend on dentry cache state.
+                    let is_last = ci == components.len() - 1;
+                    if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
+                        // Don't follow symlink on the final component
+                    } else {
+                        current = follow_symlink(current, &components, &mut symlink_depth)?;
+                    }
                     continue;
                 }
             }
@@ -868,6 +883,16 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     let parent_inode = parent_vpath.inode.as_ref()
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
+    // Cross-device link is not allowed: source and destination must live on
+    // the same filesystem (compare inode ops tables). Without this, the
+    // parent's link callback would type-confuse a foreign inode.
+    if !core::ptr::eq(
+        src_inode.ops.as_ref().map(|o| *o as *const _).unwrap_or(core::ptr::null()),
+        parent_inode.ops.as_ref().map(|o| *o as *const _).unwrap_or(core::ptr::null()),
+    ) {
+        return Err(errno::Errno::CrossDeviceLink.as_neg_i32());
+    }
+
     check_parent_write_permission(parent_inode)?;
 
     // Get inode operations
@@ -904,6 +929,16 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
     let new_parent = new_parent_vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // Rename across filesystems is not allowed: both parents must share the
+    // same inode ops table, otherwise the rename callback would type-confuse
+    // a foreign parent inode (e.g. rootfs_rename on a procfs inode).
+    if !core::ptr::eq(
+        old_parent.ops.as_ref().map(|o| *o as *const _).unwrap_or(core::ptr::null()),
+        new_parent.ops.as_ref().map(|o| *o as *const _).unwrap_or(core::ptr::null()),
+    ) {
+        return Err(errno::Errno::CrossDeviceLink.as_neg_i32());
+    }
 
     check_parent_write_permission(old_parent)?;
     check_parent_write_permission(new_parent)?;
@@ -1116,18 +1151,26 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
 
         // Step 1: Resolve path through dentry tree
-        let inode = match path_lookup(filename, 0) {
+        let (inode, opened_dentry) = match path_lookup(filename, 0) {
             Ok(vpath) => {
                 if o_excl && o_creat {
                     return Err(errno::Errno::FileExists.as_neg_i32());
                 }
-                vpath.inode.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?
+                let inode = vpath.inode.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+                (inode, vpath.dentry)
             }
             Err(_e) if o_creat => {
                 let (parent_path, child_name) = path_parent_and_name(filename)?;
                 let parent_vpath = path_lookup(&parent_path, 0)?;
                 let parent_inode = parent_vpath.inode
                     .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+                // DAC: creating an entry requires write+search on the parent
+                if !crate::fs::permission::inode_permission(
+                    &parent_inode,
+                    crate::fs::permission::MAY_WRITE | crate::fs::permission::MAY_EXEC,
+                ) {
+                    return Err(errno::Errno::PermissionDenied.as_neg_i32());
+                }
                 let ops = parent_inode.ops.as_ref()
                     .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
                 let new_inode = {
@@ -1143,15 +1186,17 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(filtered_mode))?
                 };
                 // Cache new dentry (replace stale/negative dentry)
+                let mut new_d = None;
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     let name = String::from(child_name.as_str());
                     parent_dentry.remove_child(&name);
                     let d = Arc::new(Dentry::new(name.clone()));
                     d.set_inode(Arc::clone(&new_inode));
                     d.set_parent(parent_dentry.clone());
-                    parent_dentry.add_child(name, d);
+                    parent_dentry.add_child(name, d.clone());
+                    new_d = Some(d);
                 }
-                new_inode
+                (new_inode, new_d)
             }
             Err(e) => return Err(e),
         };
@@ -1161,10 +1206,32 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             return file_opendir(filename, flags | 0o00200000);
         }
 
+        // DAC: check access mode against the target inode (Linux may_open).
+        // O_RDONLY/O_RDWR → MAY_READ; O_WRONLY/O_RDWR/O_TRUNC → MAY_WRITE.
+        {
+            use crate::fs::permission::{inode_permission, MAY_READ, MAY_WRITE};
+            let accmode = flags & FileFlags::O_ACCMODE;
+            let mut mask = 0;
+            if accmode == FileFlags::O_RDONLY || accmode == FileFlags::O_RDWR {
+                mask |= MAY_READ;
+            }
+            if accmode == FileFlags::O_WRONLY || accmode == FileFlags::O_RDWR || o_trunc {
+                mask |= MAY_WRITE;
+            }
+            if mask != 0 && !inode_permission(&inode, mask) {
+                return Err(errno::Errno::PermissionDenied.as_neg_i32());
+            }
+        }
+
         // Create File object
         let file_flags = FileFlags::new(flags);
         let file = Arc::new(File::new(file_flags));
         file.set_inode(Arc::clone(&inode));
+        // Track the dentry so /proc/self/fd and dirfd-relative lookups can
+        // recover the path (fixes File.dentry never being set).
+        if let Some(d) = opened_dentry {
+            file.set_dentry(d);
+        }
 
         // Get FileOps from inode callback
         if let Some(ops) = inode.ops {
@@ -1579,9 +1646,18 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
         return Err(errno::Errno::NotADirectory.as_neg_i32());
     }
 
+    // DAC: listing a directory requires read permission on it
+    if !crate::fs::permission::inode_permission(inode, crate::fs::permission::MAY_READ) {
+        return Err(errno::Errno::PermissionDenied.as_neg_i32());
+    }
+
     let file_flags = FileFlags::new(flags);
     let file = Arc::new(File::new(file_flags));
     file.set_inode(Arc::clone(&inode));
+    // Track the dentry (path recovery for /proc/self/fd, dirfd lookups)
+    if let Some(ref d) = vpath.dentry {
+        file.set_dentry(d.clone());
+    }
 
     // SAFETY: inode.ops callbacks are well-defined; inode Arc is valid in scope
     unsafe {

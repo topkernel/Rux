@@ -714,6 +714,10 @@ pub fn bread_async(
                     let mut lru = unsafe { cache.lru_lock_under_bucket() };
                     BlockCache::move_to_lru_head(&mut lru, entry_ptr);
                     (*entry.bh).get();
+                    // The caller will bread_wait() on its completion; no I/O
+                    // is in flight for a cache hit, so signal it now —
+                    // otherwise the caller sleeps forever (review VFS-H7).
+                    completion.complete(0);
                     return Some(entry.bh);
                 }
                 prev = Some(entry_ptr);
@@ -759,6 +763,9 @@ pub fn bread_async(
                     let mut lru = unsafe { cache.lru_lock_under_bucket() };
                     BlockCache::move_to_lru_head(&mut lru, cp);
                     let _ = Box::from_raw(entry_ptr);
+                    // Note: unlike the Phase-1 hit, our async I/O WAS
+                    // submitted with this completion and will signal it —
+                    // do not complete it here (double-complete).
                     return Some((*cp).bh);
                 }
                 current = (*cp).hash_next;

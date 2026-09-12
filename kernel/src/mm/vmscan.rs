@@ -215,6 +215,16 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 continue;
             }
 
+            // Only reclaim EXCLUSIVELY OWNED pages (refcount == 1): the
+            // swap-out path replaces PTEs with a swap entry and then drops
+            // the page reference — with refcount > 1 (fork COW share) the
+            // put_page() never reaches zero and the old code freed the swap
+            // slot while the installed PTEs still referenced it (slot UAF,
+            // review MM-C3).
+            if p.refcount() != 1 {
+                continue;
+            }
+
             // Skip reserved/locked pages
             if p.is_reserved() || p.is_locked() {
                 continue;
@@ -240,6 +250,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
             if !p.is_anonymous()
                 || !p.test_flag(PageFlag::SwapBacked)
                 || !p.is_mapped()
+                || p.refcount() != 1
                 || p.is_reserved()
                 || p.is_locked()
                 || p.test_flag(PageFlag::Referenced)
@@ -277,12 +288,24 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     free_page(phys);
                     reclaimed += 1;
                 } else {
-                    // Page still referenced (unexpected) — free swap slot
-                    swap::swap_free_slot(swap_type, swap_offset);
+                    // Page still referenced (unexpected with the refcount==1
+                    // precheck): PTEs already hold the swap entry — LEAK the
+                    // slot rather than freeing it under live references.
+                    crate::pr_warn!(
+                        "vmscan: swapped-out page refcount={} (slot leaked)",
+                        refcount
+                    );
                 }
-            } else {
-                // Unmap failed or page still mapped — free the swap slot
+            } else if unmapped == 0 {
+                // No PTE was replaced: the entry was never installed, so the
+                // slot is genuinely unused — free it.
                 swap::swap_free_slot(swap_type, swap_offset);
+            } else {
+                // Partial unmap: at least one PTE now references the swap
+                // entry — freeing the slot would be a UAF. Leak it instead.
+                crate::pr_warn!(
+                    "vmscan: partial unmap during swap-out (slot leaked)"
+                );
             }
         }
     }

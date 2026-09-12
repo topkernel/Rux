@@ -32,7 +32,7 @@ use alloc::string::ToString;
 use crate::sync::spinlock::Spinlock;
 
 use super::PAGE_SIZE;
-use super::page_desc::{pfn_to_page, pfn_to_page_mut};
+use super::page_desc::{pfn_to_page, pfn_to_page_mut, PageFlag};
 
 // ==================== Zone Type Definitions ====================
 
@@ -343,7 +343,35 @@ impl Zone {
             let head = self.free_area[current_order].free_list.load(Ordering::Acquire);
             if head != FREE_LIST_NULL {
                 // Found a block, remove it and split if needed
-                return self.alloc_from_order(current_order, order);
+                let result = self.alloc_from_order(current_order, order);
+                if let Some(pfn) = result {
+                    // Initialize ALL page descriptors of the block while still
+                    // holding the zone lock: leaving refcount=0 (free-looking)
+                    // outside the lock let a concurrent free path treat these
+                    // pages as buddies and corrupt the free lists
+                    // (review MM-H2).
+                    let count = 1usize << order;
+                    for i in 0..count {
+                        let page = pfn_to_page_mut(pfn + i);
+                        if !page.is_null() {
+                            // SAFETY: pfn+i from alloc_from_order is valid; lock held.
+                            unsafe {
+                                (*page).clear_all_flags();
+                                (*page).reset_mapcount();
+                                (*page).set_refcount(1);
+                            }
+                        }
+                    }
+                    let leader = pfn_to_page_mut(pfn);
+                    if !leader.is_null() {
+                        // SAFETY: leader pfn valid; lock held.
+                        unsafe {
+                            (*leader).set_order(order as u8);
+                            (*leader).set_flag(PageFlag::Referenced);
+                        }
+                    }
+                }
+                return result;
             }
         }
 
@@ -409,13 +437,27 @@ impl Zone {
 
         let _guard = self.lock.lock();
 
-        // Update page descriptor
-        let page = pfn_to_page_mut(pfn);
-        if !page.is_null() {
+        // Update page descriptors for the WHOLE block while holding the lock:
+        // resetting them before taking the lock (as the caller used to) left a
+        // window where the pages looked free and a concurrent allocation
+        // could hand them out twice (review MM-H2).
+        let count = 1usize << order;
+        for i in 0..count {
+            let page = pfn_to_page_mut(pfn + i);
+            if !page.is_null() {
+                // SAFETY: pfn+i is within the zone range (pfn < end checked
+                // above and block spans 2^order pages), lock is held.
+                unsafe {
+                    (*page).set_refcount(0);
+                    (*page).clear_flag(PageFlag::Referenced);
+                }
+            }
+        }
+        let leader = pfn_to_page_mut(pfn);
+        if !leader.is_null() {
             // SAFETY: pfn is within zone range (validated above), lock is held.
             unsafe {
-                (*page).set_refcount(0);
-                (*page).set_order(order as u8);
+                (*leader).set_order(order as u8);
             }
         }
 

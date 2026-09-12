@@ -307,8 +307,19 @@ impl MmStruct {
                     if let Some((ppn_val, _)) = PageTableWalker::walk(self.pgd, addr as u64) {
                         use crate::mm::page_desc::pfn_to_page_mut;
                         let page = pfn_to_page_mut(ppn_val as usize);
-                        if !page.is_null() && (*page).is_mapped() {
-                            crate::mm::rmap::page_remove_rmap(&*page);
+                        if !page.is_null() {
+                            if (*page).is_mapped() {
+                                crate::mm::rmap::page_remove_rmap(&*page);
+                            }
+                            // Drop this mapping's reference: the last one
+                            // returns the physical page to the buddy allocator
+                            // (mirrors the exit-path teardown).
+                            let new_ref = (*page).put_page();
+                            if new_ref == 0 {
+                                crate::mm::page_alloc::free_pages(
+                                    (ppn_val as usize) << PAGE_SHIFT, 0,
+                                );
+                            }
                         }
                         self.clear_pte(addr as u64);
                     }
@@ -419,13 +430,23 @@ impl MmStruct {
             let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
 
             if let Some((ppn_val, _pte_bits)) = ppn {
-                // Remove reverse mapping before clearing PTE
+                // Remove reverse mapping before clearing PTE, then drop this
+                // mapping's reference; the last reference frees the page.
                 use crate::mm::page_desc::pfn_to_page_mut;
                 let page = pfn_to_page_mut(ppn_val as usize);
-                if !page.is_null() && unsafe { (*page).is_mapped() } {
-                    // SAFETY: page is non-null (checked above) and points to a valid page
-                    // descriptor for a mapped page in this address space.
-                    crate::mm::rmap::page_remove_rmap(unsafe { &*page });
+                if !page.is_null() {
+                    if unsafe { (*page).is_mapped() } {
+                        // SAFETY: page is non-null (checked above) and points to a valid page
+                        // descriptor for a mapped page in this address space.
+                        crate::mm::rmap::page_remove_rmap(unsafe { &*page });
+                    }
+                    // SAFETY: page descriptor for a page mapped by this address space.
+                    let new_ref = unsafe { (*page).put_page() };
+                    if new_ref == 0 {
+                        crate::mm::page_alloc::free_pages(
+                            (ppn_val as usize) << PAGE_SHIFT, 0,
+                        );
+                    }
                 }
                 // SAFETY: addr is a valid, page-aligned virtual address in this address space,
                 // and its reverse mapping has just been removed above.

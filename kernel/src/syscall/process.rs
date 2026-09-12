@@ -254,8 +254,6 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         argv.to_vec()
     };
 
-    let final_envp: Vec<String> = envp.to_vec();
-
     // Get current process
     let current = match crate::sched::current() {
         Some(c) => c,
@@ -264,8 +262,12 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
 
     // ---- setuid / setgid exec handling ----
     // Check file mode bits for S_ISUID / S_ISGID and update credentials
-    // accordingly.  This must happen after file is verified as valid ELF
-    // but before the actual program image replaces the address space.
+    // accordingly.  The new credentials are committed before the image load
+    // (so AT_UID/auxv see them) but restored verbatim if the load fails: a
+    // half-valid setuid binary must never elevate the *old* image
+    // (review C-02).
+    let mut secure_exec = false;
+    let mut cred_saved: Option<crate::process::task::Cred> = None;
     {
         use crate::fs::stat_file_by_path;
         use crate::security::capability::Cap;
@@ -281,8 +283,8 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             let is_setuid = (file_mode & S_ISUID) != 0;
             let is_setgid = (file_mode & S_ISGID) != 0;
 
-            // SAFETY: current is a valid, non-null task pointer from sched::current().
-            // We hold a reference to the current task, so cred_mut() is safe to call.
+            // SAFETY: current is a valid, non-null task pointer from
+            // sched::current(); cred_mut() gives exclusive cred access.
             unsafe {
                 let cred = (*current).cred_mut();
                 let old_euid = cred.euid;
@@ -323,18 +325,46 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                 }
 
                 if !is_setuid && !is_setgid {
-                    // Normal exec: compute effective caps from ambient
+                    // Normal exec capability transition. Root keeps a full
+                    // permitted+effective set (Linux: euid==0 → pP' |= bset,
+                    // pE' = pP'); non-root computes effective from
+                    // inheritable ∪ ambient.
                     let ambient = cred.cap_inheritable
                         .intersect(cred.cap_bounding)
                         .intersect(cred.cap_permitted);
-                    cred.cap_effective = cred.cap_permitted.intersect(
-                        cred.cap_inheritable.union(ambient)
-                    );
+                    if cred.euid == 0 {
+                        cred.cap_permitted = cred.cap_permitted.union(cred.cap_bounding);
+                        cred.cap_effective = cred.cap_permitted;
+                    } else {
+                        cred.cap_effective = cred.cap_permitted.intersect(
+                            cred.cap_inheritable.union(ambient)
+                        );
+                    }
                     // Clear ambient for non-setuid exec
                     cred.cap_ambient = Cap::EMPTY;
                 }
+
+                // AT_SECURE / secureexec: setuid/setgid exec, processes with
+                // euid != uid, or any exec keeping capabilities — loaders and
+                // libc use it to lock down the environment.
+                secure_exec = is_setuid || is_setgid
+                    || cred.euid != cred.uid
+                    || !cred.cap_effective.is_empty();
+                // Save the pre-exec credentials for rollback on failure.
+                cred_saved = Some(cred.clone());
             }
         }
+    }
+
+    // On secure exec, strip dynamic-loader tunables (LD_PRELOAD,
+    // LD_LIBRARY_PATH, ...) from the environment so they cannot hijack a
+    // privileged binary.
+    let mut final_envp: Vec<String> = envp.to_vec();
+    if secure_exec {
+        final_envp.retain(|e| {
+            let name = e.split('=').next().unwrap_or("");
+            !name.starts_with("LD_")
+        });
     }
 
     // Execute ELF loading
@@ -343,12 +373,24 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     } else {
         phdr_count as usize
     };
-    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref()) {
+    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec) {
         Ok(()) => {
             crate::pr_info!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
             0
         }
-        Err(e) => e as i64 as u64,
+        Err(e) => {
+            // Roll back the credential changes: the old image keeps running.
+            if let Some(saved) = cred_saved {
+                // SAFETY: current task pointer still valid on the error path.
+                unsafe { *(*current).cred_mut() = saved; }
+            }
+            // A vfork parent (if any) is waiting for us to exec or exit; a
+            // failed exec still leaves us running, so wake it now — the
+            // vfork contract ends at exec attempt, success or not.
+            // SAFETY: current task pointer still valid.
+            unsafe { crate::process::task::vfork_wake_parent(current); }
+            e as i64 as u64
+        }
     }
 }
 
@@ -517,44 +559,54 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    if pid == 0 {
-        // Send to all processes in the caller's process group
-        let pgid = match crate::sched::current() {
+    if pid == 0 || pid == -1 || pid < 0 {
+        // Broadcast targets: kill(0) = caller's process group,
+        // kill(-pgid) = that process group, kill(-1) = all processes
+        // except self and PID 1. Permission is checked per target
+        // (Linux check_kill_permission); EPERM is returned when no target
+        // accepted the signal but at least one denied it.
+        let my_pid = match crate::sched::current() {
             // SAFETY: task pointer from sched::current() is valid when Some.
-            Some(t) => unsafe { (*t).pgid() },
+            Some(t) => unsafe { (*t).pid() },
             None => return -(errno::ESRCH as i64),
         };
+        let group_filter: Option<u32> = if pid == 0 {
+            // SAFETY: same current task as above.
+            Some(unsafe { (*crate::sched::current().unwrap()).pgid() })
+        } else if pid == -1 {
+            None
+        } else {
+            Some((-pid) as u32)
+        };
+
         let found = core::cell::Cell::new(false);
-        // SAFETY: for_each_task provides valid task pointers; pgid/sig checks guard usage.
-        crate::sched::for_each_task(|task| unsafe {
-            if (*task).pgid() == pgid {
-                found.set(true);
-                if sig > 0 {
-                    let _ = crate::signal::send_signal((*task).pid(), sig);
+        let denied = core::cell::Cell::new(false);
+        // pid_hash_for_each_task covers sleeping tasks too (unlike the
+        // per-CPU for_each_task which only sees running/idle tasks).
+        crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+            let tp = (*task).pid();
+            if tp == my_pid || tp == 1 {
+                return; // kill(-1) skips self and init
+            }
+            if let Some(g) = group_filter {
+                if (*task).pgid() != g {
+                    return;
+                }
+            }
+            found.set(true);
+            if sig > 0 {
+                if crate::security::can_send_signal((*task).cred()) {
+                    let _ = crate::signal::send_signal(tp, sig);
+                } else {
+                    denied.set(true);
                 }
             }
         });
         if !found.get() {
             return -(errno::ESRCH as i64);
         }
-        return 0;
-    }
-
-    if pid < 0 {
-        // Send to all processes in process group |pid|
-        let pgid = (-pid) as u32;
-        let found = core::cell::Cell::new(false);
-        // SAFETY: for_each_task provides valid task pointers; pgid/sig checks guard usage.
-        crate::sched::for_each_task(|task| unsafe {
-            if (*task).pgid() == pgid {
-                found.set(true);
-                if sig > 0 {
-                    let _ = crate::signal::send_signal((*task).pid(), sig);
-                }
-            }
-        });
-        if !found.get() {
-            return -(errno::ESRCH as i64);
+        if denied.get() && sig > 0 {
+            return -(errno::EPERM as i64);
         }
         return 0;
     }
@@ -743,6 +795,11 @@ pub fn sys_setuid(args: SyscallArgs) -> i64 {
             } else {
                 return -(errno::EPERM as i64);
             }
+            // Leaving euid 0 drops all capabilities (Linux commit_creds).
+            if cred.euid != 0 {
+                cred.cap_effective = crate::security::capability::Cap::EMPTY;
+                cred.cap_permitted = crate::security::capability::Cap::EMPTY;
+            }
         }
         0
     } else {
@@ -821,6 +878,11 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
             cred.fsuid = new_euid;
             if ruid != -1 {
                 cred.suid = new_euid;
+            }
+            // Leaving euid 0 drops all capabilities (Linux commit_creds).
+            if cred.euid != 0 {
+                cred.cap_effective = crate::security::capability::Cap::EMPTY;
+                cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             }
         }
         0
@@ -936,6 +998,11 @@ pub fn sys_setresuid(args: SyscallArgs) -> i64 {
             cred.euid = new_euid;
             cred.suid = new_suid;
             cred.fsuid = new_euid;
+            // Leaving euid 0 drops all capabilities (Linux commit_creds).
+            if cred.euid != 0 {
+                cred.cap_effective = crate::security::capability::Cap::EMPTY;
+                cred.cap_permitted = crate::security::capability::Cap::EMPTY;
+            }
         }
         0
     } else {

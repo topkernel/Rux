@@ -439,9 +439,17 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
             );
         }
 
-        // Release lock, then schedule
+        // Release lock, then schedule. Arm a wakeup timer for the deadline
+        // so an empty queue with no producer still returns ETIMEDOUT (the
+        // old code parsed the deadline but nothing ever woke us).
         drop(messages);
+        let timer_id = deadline
+            .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
+            .unwrap_or(0);
         crate::sched::schedule();
+        if timer_id != 0 {
+            crate::timer::del_timer(timer_id);
+        }
 
         // Re-acquire lock to safely remove from wait queue
         // (wake_up_all iterates the list; we must hold a lock to avoid corruption)
@@ -556,9 +564,17 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
             );
         }
 
-        // Release lock, then schedule
+        // Release lock, then schedule. Arm a wakeup timer for the deadline
+        // so an empty queue with no producer still returns ETIMEDOUT (the
+        // old code parsed the deadline but nothing ever woke us).
         drop(messages);
+        let timer_id = deadline
+            .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
+            .unwrap_or(0);
         crate::sched::schedule();
+        if timer_id != 0 {
+            crate::timer::del_timer(timer_id);
+        }
 
         // Re-acquire lock to safely remove from wait queue
         let _messages = mq.messages.lock();

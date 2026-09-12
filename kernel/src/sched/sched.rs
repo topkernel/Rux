@@ -743,12 +743,12 @@ unsafe fn __schedule() {
         return;
     }
 
-    // Capture the CPU that the exiting task (prev) ran on BEFORE
-    // context_switch.  After context_switch, tp changes to the new task,
-    // so cpu_id() would return the new task's ti_cpu instead of the
-    // exiting task's CPU — causing process_deferred_exit_notify to read
-    // the wrong per-CPU deferred slot.
-    let prev_cpu = cpu_id;
+    // Note: do NOT capture the CPU before context_switch. __schedule's frame
+    // after context_switch belongs to the task being switched IN (coroutine
+    // semantics), so a pre-captured cpu_id would be the CPU where THAT task
+    // was switched out previously — not this CPU. After the switch, tp
+    // points at `next` whose ti_cpu was just set to the hardware CPU by
+    // context_switch, so a fresh cpu_id() read is the exiting task's CPU.
 
     // SAFETY: Runnable tasks cannot be freed while still on a CPU or runqueue.
     // IRQs remain disabled on this CPU, preventing concurrent scheduling.
@@ -759,8 +759,8 @@ unsafe fn __schedule() {
     // After context_switch, the NEW task is running.  The exiting task
     // (prev) is no longer on any CPU, so it is now safe to notify its
     // parent (SIGCHLD + wake_up).  The deferred notification was stored
-    // in a per-CPU slot by do_exit → defer_exit_notify().
-    process_deferred_exit_notify_cpu(prev_cpu);
+    // in a per-CPU slot by do_exit → defer_exit_notify() on THIS CPU.
+    process_deferred_exit_notify_cpu(crate::arch::cpu_id() as usize);
 
     // We must ensure interrupts are enabled so that timer ticks, wake-ups,
     // and I/O completions can be delivered. The previous task's saved IRQ

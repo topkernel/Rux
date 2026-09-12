@@ -377,22 +377,39 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         // Copy credentials from parent
         *(*task_ptr).cred_mut() = (*current_ptr).cred().clone();
 
-        // Add new task to run queue
-        crate::sched::enqueue_task(&mut *task_ptr);
-
         // Handle CLONE_VFORK: block parent until child execs/exits.
         // The child shares parent's address space (CLONE_VM is expected
         // to be set alongside CLONE_VFORK).  The parent sleeps in
         // UNINTERRUPTIBLE state and is woken by the child's execve or
         // _exit via vfork_wake_parent().
-        if args.flags & CLONE_VFORK != 0 {
+        //
+        // Register the vfork linkage BEFORE enqueueing the child: once the
+        // child is runnable another CPU can run it immediately and have it
+        // exec/exit before we finish — vfork_wake_parent must find the
+        // parent pointer already set (review PROC-P02 race 1).
+        let is_vfork = args.flags & CLONE_VFORK != 0;
+        if is_vfork {
             (*task_ptr).set_vfork_parent(current_ptr);
+        }
 
+        // Add new task to run queue
+        crate::sched::enqueue_task(&mut *task_ptr);
+
+        if is_vfork {
             crate::pr_info!("vfork: parent={} blocked, child={}",
                 (*current_ptr).pid(), pid);
 
             (*current).set_state(TaskState::new(TaskState::UNINTERRUPTIBLE));
-            crate::sched::schedule();
+
+            // Re-check AFTER marking ourselves sleeping: if the child already
+            // exec'd/exited above, its wake_up saw us RUNNING and was a
+            // no-op — detect the cleared vfork_parent and skip the sleep
+            // (prepare-to-wait pattern, review PROC-P02 race 2).
+            if (*task_ptr).vfork_parent_ptr().is_none() {
+                (*current).set_state(TaskState::new(TaskState::RUNNING));
+            } else {
+                crate::sched::schedule();
+            }
             // Parent resumes here after child exec'd or exited
         }
 

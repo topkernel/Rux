@@ -45,36 +45,10 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
             if zone.is_initialized() {
                 if let Some(pfn) = zone.alloc_pages(order) {
                     ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
-                    // Update page descriptors for ALL pages in the block.
-                    // The free path (free_user_page_tables) frees each leaf PTE
-                    // page individually as order-0, so every page must have
-                    // refcount=1 to be properly accounted for.
-                    let page_count = 1usize << order;
-                    for i in 0..page_count {
-                        let page = pfn_to_page_mut(pfn + i);
-                        if !page.is_null() {
-                            // SAFETY: pfn+i from zone.alloc_pages(order) is valid.
-                            unsafe {
-                                // Clear stale state from previous use so that
-                                // callers see a clean page descriptor.  Without
-                                // this, mapcount and flags leak across allocation
-                                // cycles (e.g. COW pages freed with non-(-1)
-                                // mapcount are re-issued with the stale value).
-                                (*page).clear_all_flags();
-                                (*page).reset_mapcount();
-                                (*page).set_refcount(1);
-                                (*page).set_flag(PageFlag::Referenced);
-                            }
-                        }
-                    }
-                    // Leader page stores the allocation order for potential
-                    // high-order free in the future.
-                    let leader = pfn_to_page_mut(pfn);
-                    if !leader.is_null() {
-                        unsafe {
-                            (*leader).set_order(order as u8);
-                        }
-                    }
+                    // Page descriptors (refcount/mapcount/flags/order) were
+                    // initialized by zone.alloc_pages INSIDE the zone lock —
+                    // doing it here used to leave a lock-free window where
+                    // the pages still looked free (review MM-H2).
                     return pfn_to_phys(pfn);
                 }
                 // Zone allocator failed — wake kswapd if below low watermark
@@ -98,20 +72,7 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
                         let pfn = unsafe { (*zone_ptr).alloc_pages(order) };
                         if let Some(pfn) = pfn {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
-                            let page_count = 1usize << order;
-                            for i in 0..page_count {
-                                let page = pfn_to_page_mut(pfn + i);
-                                if !page.is_null() {
-                                    // SAFETY: pfn from zone.alloc_pages is valid.
-                                    unsafe {
-                                        (*page).clear_all_flags();
-                                        (*page).reset_mapcount();
-                                        (*page).set_refcount(1);
-                                        (*page).set_order(order as u8);
-                                        (*page).set_flag(PageFlag::Referenced);
-                                    }
-                                }
-                            }
+                            // Descriptors initialized under the zone lock.
                             return pfn_to_phys(pfn);
                         }
                     }
@@ -163,18 +124,10 @@ pub fn free_pages(addr: usize, order: usize) {
 
     let pfn = phys_to_pfn(addr);
 
-    // Reset refcount and flags on ALL pages in the block (not just the leader).
-    let page_count = 1usize << order;
-    for i in 0..page_count {
-        let page = pfn_to_page(pfn + i);
-        if !page.is_null() {
-            // SAFETY: pfn from phys_to_pfn(addr) is within a valid zone.
-            unsafe {
-                (*page).set_refcount(0);
-                (*page).clear_flag(PageFlag::Referenced);
-            }
-        }
-    }
+    // NOTE: descriptor reset (refcount→0 etc.) happens inside zone.free_pages
+    // under the zone lock — resetting here, before the lock, used to expose a
+    // window where the block looked free and could be double-allocated
+    // (review MM-H2).
 
     // Try to free to the Zone system first
     // SAFETY: exclusive node access — caller must ensure no concurrent mutation.

@@ -916,7 +916,7 @@ fn eventfd_close(_file: &crate::fs::File) -> i32 {
 }
 
 /// EventFd file operations
-static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
+pub static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     read: Some(eventfd_read),
     write: Some(eventfd_write),
     lseek: None,
