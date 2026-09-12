@@ -254,6 +254,16 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             let offset = phdr.p_offset as usize;
             let _flags = phdr.p_flags;
 
+            // Reject malformed segments before touching memory: p_offset /
+            // p_filesz / p_vaddr come from the ELF file on disk.
+            if file_size > mem_size
+                || virt_addr < virt_start
+                || virt_addr.saturating_add(mem_size) > virt_end
+                || offset.checked_add(file_size as usize).map_or(true, |end| end > program_data.len())
+            {
+                return Err(ElfError::InvalidSegment);
+            }
+
             // Calculate physical address
             let virt_offset = virt_addr - virt_start;
             let phys_addr = (phys_base + virt_offset) as usize;

@@ -30,6 +30,17 @@ pub fn sys_socket(args: SyscallArgs) -> i64 {
     }
 }
 
+/// Copy a 16-byte sockaddr_in from user memory via the exception-table path
+/// so an unmapped page yields EFAULT instead of a kernel page fault.
+/// Returns None on copy failure.
+fn copy_sockaddr_in_from_user(addr_ptr: *const u8) -> Option<[u8; 16]> {
+    let mut buf = [0u8; 16];
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), addr_ptr, 16)
+    };
+    if uncopied > 0 { None } else { Some(buf) }
+}
+
 /// sys_bind - Bind socket to address
 ///
 /// # Arguments
@@ -61,11 +72,12 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
     //     struct in_addr sin_addr; // 4 bytes
     //     char sin_zero[8];        // 8 bytes
     // };
-
-    // SAFETY: addr_ptr validated with access_ok above; reading fixed sockaddr_in fields.
-    let sin_family = unsafe { u16::from_le_bytes(*(addr_ptr as *const [u8; 2])) };
-    // SAFETY: addr_ptr validated; reading port at offset 2.
-    let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
+    let sockaddr = match copy_sockaddr_in_from_user(addr_ptr) {
+        Some(b) => b,
+        None => return -(errno::EFAULT as i64),
+    };
+    let sin_family = u16::from_le_bytes([sockaddr[0], sockaddr[1]]);
+    let sin_port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
 
     // Permission check: privileged ports (< 1024) require CAP_NET_BIND_SERVICE
     if sin_port < 1024 && !crate::security::capable(crate::security::CAP_NET_BIND_SERVICE) {
@@ -158,13 +170,14 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Read sockaddr_in structure
-    // SAFETY: addr_ptr validated with access_ok; reading fixed sockaddr_in fields.
-    let sin_family = unsafe { u16::from_le_bytes(*(addr_ptr as *const [u8; 2])) };
-    // SAFETY: addr_ptr validated; reading port at offset 2.
-    let sin_port = unsafe { u16::from_be_bytes(*((addr_ptr.add(2)) as *const [u8; 2])) };
-    // SAFETY: addr_ptr validated; reading address at offset 4.
-    let sin_addr = unsafe { u32::from_be_bytes(*((addr_ptr.add(4)) as *const [u8; 4])) };
+    // Read sockaddr_in structure via the exception-table copy path
+    let sockaddr = match copy_sockaddr_in_from_user(addr_ptr) {
+        Some(b) => b,
+        None => return -(errno::EFAULT as i64),
+    };
+    let sin_family = u16::from_le_bytes([sockaddr[0], sockaddr[1]]);
+    let sin_port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
+    let sin_addr = u32::from_be_bytes([sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]]);
 
     // Currently only support AF_INET
     if sin_family != 2 {

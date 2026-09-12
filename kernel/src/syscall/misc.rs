@@ -580,6 +580,13 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
+    // Verify the fd really is an epoll instance before treating its
+    // private_data as *mut EpollFile — a regular file's private_data would
+    // otherwise be type-confused into a kernel pointer.
+    if !ep_file.get_ops().is_some_and(|o| core::ptr::eq(o, &EPOLL_OPS as *const _)) {
+        return -(errno::EINVAL as i64);
+    }
+
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let epoll_ptr = match unsafe { *ep_file.private_data.get() } {
         Some(ptr) => ptr as *mut EpollFile,
@@ -664,6 +671,12 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };
+
+    // Verify the fd really is an epoll instance before treating its
+    // private_data as *mut EpollFile (type-confusion guard).
+    if !ep_file.get_ops().is_some_and(|o| core::ptr::eq(o, &EPOLL_OPS as *const _)) {
+        return -(errno::EINVAL as i64);
+    }
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let epoll_ptr = match unsafe { *ep_file.private_data.get() } {
@@ -1230,6 +1243,12 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
+    // Verify the fd really is a timerfd before treating private_data as
+    // *mut TimerFd (type-confusion guard).
+    if !file.get_ops().is_some_and(|o| core::ptr::eq(o, &TIMERFD_OPS as *const _)) {
+        return -(errno::EINVAL as i64);
+    }
+
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
@@ -1329,6 +1348,12 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
         Some(f) => f,
         None => return -(errno::EBADF as i64),
     };
+
+    // Verify the fd really is a timerfd before treating private_data as
+    // *const TimerFd (type-confusion guard).
+    if !file.get_ops().is_some_and(|o| core::ptr::eq(o, &TIMERFD_OPS as *const _)) {
+        return -(errno::EINVAL as i64);
+    }
 
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {

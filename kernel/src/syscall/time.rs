@@ -399,17 +399,21 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Read struct itimerval
-    // SAFETY: new_value validated with access_ok(32); reads 4 i64 fields at known offsets.
-    let (interval_sec, interval_usec, value_sec, value_usec) = unsafe {
-        let p = new_value as *const i64;
-        (
-            core::ptr::read(p),
-            core::ptr::read(p.add(1)),
-            core::ptr::read(p.add(2)),
-            core::ptr::read(p.add(3)),
+    // Read struct itimerval via the exception-table copy path so an
+    // unmapped user page yields EFAULT instead of a kernel page fault.
+    let mut itimer_bits = [0u8; 32];
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            itimer_bits.as_mut_ptr(),
+            new_value as *const u8,
+            32,
         )
     };
+    if uncopied > 0 {
+        return -(errno::EFAULT as i64);
+    }
+    let rd = |i: usize| i64::from_le_bytes(itimer_bits[i * 8..i * 8 + 8].try_into().unwrap());
+    let (interval_sec, interval_usec, value_sec, value_usec) = (rd(0), rd(1), rd(2), rd(3));
 
     if which == 0 {
         // ITIMER_REAL — arm using kernel timer wheel

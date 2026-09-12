@@ -158,8 +158,31 @@ impl Ext4FileSystem {
             }
             let block_size = 1024 << ext4_sb.s_log_block_size;
             let block_size_bits = (12 + ext4_sb.s_log_block_size) as u8;
+
+            // Validate on-disk geometry before using any of it in divisions
+            // or allocations: a corrupted or malicious superblock must fail
+            // the mount with EIO, never panic (division by zero) or exhaust
+            // the kernel heap with a bogus group table.
+            //
+            // The bio buffer cache is fixed at 4096-byte blocks, so only
+            // 4096-byte filesystems can be mounted correctly; other legal
+            // ext4 geometries would read/write the wrong disk locations.
+            if block_size != 4096 {
+                bio::brelse(sb_bh);
+                return Err(errno::Errno::IOError.as_neg_i32());
+            }
             let blocks_per_group = ext4_sb.s_blocks_per_group;
             let inodes_per_group = ext4_sb.s_inodes_per_group;
+            if blocks_per_group == 0
+                || blocks_per_group as u64 > 8 * block_size as u64
+                || inodes_per_group == 0
+                || ext4_sb.s_inode_size < 128
+                || ext4_sb.s_inode_size as u32 > block_size
+            {
+                bio::brelse(sb_bh);
+                return Err(errno::Errno::IOError.as_neg_i32());
+            }
+
             // Compute 64-bit block count: if INCOMPAT_64BIT is set, use hi+lo; otherwise lo only
             let is_64bit = (ext4_sb.s_feature_incompat & 0x80) != 0;
             let total_blocks = if is_64bit {
@@ -167,6 +190,19 @@ impl Ext4FileSystem {
             } else {
                 ext4_sb.s_blocks_count as u64
             };
+
+            // Bound the block count by the actual device size so a forged
+            // s_blocks_count cannot drive a huge descriptor allocation.
+            let device_blocks = (*self.device).get_capacity()
+                .saturating_mul(512) / block_size as u64;
+            if total_blocks == 0
+                || (device_blocks > 0 && total_blocks > device_blocks)
+                || (device_blocks == 0 && total_blocks > u32::MAX as u64)
+            {
+                bio::brelse(sb_bh);
+                return Err(errno::Errno::IOError.as_neg_i32());
+            }
+
             let total_inodes = ext4_sb.s_inodes_count;
             let group_count = ((total_blocks as u64) + (blocks_per_group as u64) - 1) /
                 (blocks_per_group as u64);
@@ -174,6 +210,10 @@ impl Ext4FileSystem {
             // Get descriptor size - use actual size from superblock if 64-bit feature is enabled
             // Default is 32 bytes, but with 64-bit feature it's 64 bytes
             let desc_size = if ext4_sb.s_desc_size < 32 { 32 } else { ext4_sb.s_desc_size as usize };
+            if desc_size > block_size as usize {
+                bio::brelse(sb_bh);
+                return Err(errno::Errno::IOError.as_neg_i32());
+            }
 
             // Read block group descriptor table
             // Block group descriptor table starts at block (block_size / 1024) + 1

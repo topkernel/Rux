@@ -216,7 +216,13 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 if regs_ref.user_mode() {
                     handle_illegal_instruction(regs_ref);
                 } else {
-                    regs_ref.epc += 4;
+                    // A kernel-mode illegal instruction is always a kernel bug
+                    // (e.g. an M-mode CSR executed in S-mode). Skipping it
+                    // corrupts execution; die loudly instead.
+                    panic!(
+                        "trap: illegal instruction in kernel mode at epc={:#x} badaddr={:#x}",
+                        regs_ref.epc, regs_ref.badaddr
+                    );
                 }
             }
 
@@ -459,7 +465,11 @@ fn handle_breakpoint(regs: &mut PtRegs) {
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
-        regs.epc += 4;
+        // Kernel-mode ebreak is a kernel bug, not something to step over.
+        panic!(
+            "trap: ebreak in kernel mode at epc={:#x}",
+            regs.epc
+        );
     }
 }
 
@@ -529,8 +539,12 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
-        // Skip instruction for kernel-mode unknown exceptions
-        regs.epc += 4;
+        // Kernel-mode unknown exceptions (misaligned access, access fault,
+        // ...) indicate a kernel bug; skipping the instruction corrupts state.
+        panic!(
+            "trap: unknown exception {:?} in kernel mode at epc={:#x} badaddr={:#x}",
+            cause, regs.epc, regs.badaddr
+        );
     }
 }
 

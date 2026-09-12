@@ -129,31 +129,31 @@ fn test_sys_rt_sigaction() {
 
     // sa_flags - verify against kernel constants
     test_assert_eq!(
-        signal::SigFlags::SA_NOCLDSTOP, 0x00000001u32,
+        signal::SigFlags::SA_NOCLDSTOP, 0x00000001u64,
         "sys_rt_sigaction SA_NOCLDSTOP"
     );
     test_assert_eq!(
-        signal::SigFlags::SA_NOCLDWAIT, 0x00000002u32,
+        signal::SigFlags::SA_NOCLDWAIT, 0x00000002u64,
         "sys_rt_sigaction SA_NOCLDWAIT"
     );
     test_assert_eq!(
-        signal::SigFlags::SA_SIGINFO, 0x00000004u32,
+        signal::SigFlags::SA_SIGINFO, 0x00000004u64,
         "sys_rt_sigaction SA_SIGINFO"
     );
     test_assert_eq!(
-        signal::SigFlags::SA_ONSTACK, 0x08000000u32,
+        signal::SigFlags::SA_ONSTACK, 0x08000000u64,
         "sys_rt_sigaction SA_ONSTACK"
     );
     test_assert_eq!(
-        signal::SigFlags::SA_RESTART, 0x10000000u32,
+        signal::SigFlags::SA_RESTART, 0x10000000u64,
         "sys_rt_sigaction SA_RESTART"
     );
     test_assert_eq!(
-        signal::SigFlags::SA_NODEFER, 0x40000000u32,
+        signal::SigFlags::SA_NODEFER, 0x40000000u64,
         "sys_rt_sigaction SA_NODEFER"
     );
     test_assert_eq!(
-        signal::SigFlags::SA_RESETHAND, 0x80000000u32,
+        signal::SigFlags::SA_RESETHAND, 0x80000000u64,
         "sys_rt_sigaction SA_RESETHAND"
     );
 
@@ -475,7 +475,7 @@ fn test_signal_handling() {
     let disable_ss = signal::SignalStack {
         ss_sp: 0,
         ss_size: 0,
-        ss_flags: signal::ss_flags::SS_DISABLE,
+        ss_flags: signal::ss_flags::SS_DISABLE as i32,
     };
     let ret = sys_sigaltstack([
         &disable_ss as *const _ as u64,             // ss (kernel ptr)

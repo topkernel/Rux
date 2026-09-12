@@ -153,8 +153,16 @@ fn find_block_in_extent_tree(
         Ok(0)
     } else {
         // Internal node: read index entries and recurse
-        // SAFETY: same bounds reasoning as the leaf case; indices follow the header
-        // within the same 60-byte i_block array and eh_entries is valid.
+        // Validate eh_entries: index entries are 12 bytes each, exactly like
+        // leaf extents, so at most (60 - 12) / 12 = 4 fit in i_block. eh_max
+        // comes from disk too and cannot be trusted on its own.
+        let max_entries = (60 - core::mem::size_of::<Ext4ExtentHeader>())
+            / core::mem::size_of::<Ext4ExtentIdx>();
+        if header.eh_entries as usize > max_entries {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+        // SAFETY: offset by header size (12 bytes) stays within the 60-byte i_block array;
+        // eh_entries was validated above against max_entries.
         let indices = unsafe {
             core::slice::from_raw_parts(
                 (data.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
@@ -176,7 +184,7 @@ fn find_block_in_extent_tree(
             return Ok(0);
         }
 
-        find_block_in_external_extent(fs, child_block, logical_block)
+        find_block_in_external_extent(fs, child_block, logical_block, depth + 1)
     }
 }
 
@@ -185,7 +193,14 @@ fn find_block_in_external_extent(
     fs: &crate::fs::ext4::Ext4FileSystem,
     block_num: u64,
     logical_block: u64,
+    depth: u32,
 ) -> Result<u64, i32> {
+    // ext4 extent trees are at most 5 levels deep (EXT4_MAX_EXTENT_DEPTH);
+    // a deeper tree means on-disk corruption or a block cycle.
+    if depth > 5 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
     // SAFETY: bio::bread returns a valid buffer_head whose b_data is a properly
     // aligned block-sized byte slice; the subsequent casts to Ext4ExtentHeader,
     // Ext4Extent, and Ext4ExtentIdx are within this buffer and eh_entries is
@@ -202,8 +217,14 @@ fn find_block_in_external_extent(
             return Err(errno::Errno::IOError.as_neg_i32());
         }
 
-        // Validate eh_entries against eh_max and available buffer space
-        if header.eh_entries > header.eh_max {
+        // Validate eh_entries against eh_max, and eh_max itself against the
+        // actual buffer capacity ((block_size - 12) / 12 slots): both fields
+        // come from disk and may be forged on a corrupted image.
+        let max_slots = (fs.block_size as usize - core::mem::size_of::<Ext4ExtentHeader>())
+            / core::mem::size_of::<Ext4Extent>();
+        if header.eh_entries > header.eh_max
+            || header.eh_max as usize > max_slots
+        {
             bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
@@ -252,7 +273,7 @@ fn find_block_in_external_extent(
             }
 
             // Recursive search
-            find_block_in_external_extent(fs, child_block, logical_block)
+            find_block_in_external_extent(fs, child_block, logical_block, depth + 1)
         }
     }
 }

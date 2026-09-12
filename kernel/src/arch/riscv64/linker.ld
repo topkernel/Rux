@@ -37,7 +37,7 @@ SECTIONS
 	. = ALIGN(4096);
 	.rodata : AT(ADDR(.rodata) - VA_OFFSET) { *(.rodata .rodata.*) }
 
-	. = ALIGN(4);
+	. = ALIGN(8);
 	__ex_table_start = .;
 	.ex_table : AT(ADDR(.ex_table) - VA_OFFSET) { *(.ex_table) }
 	__ex_table_end = .;

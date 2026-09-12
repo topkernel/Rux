@@ -545,8 +545,12 @@ impl Page {
 /// - The source page must contain valid data
 /// - The caller must ensure no concurrent writes to either page
 pub unsafe fn copy_page_contents(src_pfn: usize, dst_pfn: usize) {
-    let src = super::zone::pfn_to_phys(src_pfn) as *const u8;
-    let dst = super::zone::pfn_to_phys(dst_pfn) as *mut u8;
+    use crate::arch::riscv64::mm::memory_layout::{phys_to_virt, PhysAddr};
+    // pfn_to_phys yields a physical address; it must go through the linear
+    // mapping (phys_to_virt) before dereference — the raw PA has no mapping
+    // once the MMU is on.
+    let src = phys_to_virt(PhysAddr(super::zone::pfn_to_phys(src_pfn) as u64)).0 as usize as *const u8;
+    let dst = phys_to_virt(PhysAddr(super::zone::pfn_to_phys(dst_pfn) as u64)).0 as usize as *mut u8;
     core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE);
 }
 

@@ -55,8 +55,11 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
         if !crate::arch::riscv64::uaccess::access_ok(set_ptr as usize, 8) {
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: set_ptr validated with access_ok(8); reads one u64.
-        unsafe { *set_ptr }
+        // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+        match unsafe { crate::arch::riscv64::uaccess::get_user(set_ptr) } {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        }
     } else {
         0
     };
@@ -100,9 +103,9 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
         if !crate::arch::riscv64::uaccess::access_ok(oldset_ptr as usize, 8) {
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: oldset_ptr validated with access_ok(8); writes one u64.
-        unsafe {
-            *oldset_ptr = old_mask;
+        // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+        if !unsafe { crate::arch::riscv64::uaccess::put_user(oldset_ptr, old_mask) } {
+            return -(errno::EFAULT as i64);
         }
     }
 
@@ -163,10 +166,18 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             if !crate::arch::riscv64::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigAction>()) {
                 return -(errno::EFAULT as i64);
             }
-            if let Some(old_action) = sig_struct.get_action(signum) {
-                *oldact_ptr = old_action;
-            } else {
-                *oldact_ptr = SigAction::new();
+            // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+            let old_action = sig_struct.get_action(signum).unwrap_or_else(SigAction::new);
+            let src = &old_action as *const SigAction as *const u8;
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    oldact_ptr as *mut u8,
+                    src,
+                    core::mem::size_of::<SigAction>(),
+                )
+            };
+            if uncopied > 0 {
+                return -(errno::EFAULT as i64);
             }
         }
 
@@ -176,7 +187,19 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             if !crate::arch::riscv64::uaccess::access_ok(act_ptr as usize, core::mem::size_of::<SigAction>()) {
                 return -(errno::EFAULT as i64);
             }
-            let new_action = *act_ptr;
+            // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
+            let mut new_action = SigAction::new();
+            let dst = &mut new_action as *mut SigAction as *mut u8;
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    dst,
+                    act_ptr as *const u8,
+                    core::mem::size_of::<SigAction>(),
+                )
+            };
+            if uncopied > 0 {
+                return -(errno::EFAULT as i64);
+            }
             match sig_struct.set_action(signum, new_action) {
                 Ok(_) => 0,  // Success
                 Err(_) => -(errno::EINVAL as i64),

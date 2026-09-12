@@ -9,12 +9,9 @@ use core::arch::asm;
 /// Get current core ID (hart ID)
 #[inline]
 pub fn get_core_id() -> u64 {
-    let hart_id: u64;
-    // SAFETY: mhartid is a read-only machine CSR; reading it via csrrw is always safe.
-    unsafe {
-        core::arch::asm!("csrrw {}, mhartid, zero", out(reg) hart_id, options(nomem, nostack, pure));
-    }
-    hart_id
+    // mhartid is an M-mode CSR and traps when read from S-mode; delegate to
+    // the tp-based implementation instead.
+    super::cpu_id()
 }
 
 /// Get current thread ID

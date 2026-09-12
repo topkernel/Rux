@@ -268,6 +268,11 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // Cap the scratch buffer size: count is user-controlled and the kernel
+    // heap cannot satisfy multi-GB requests (alloc failure would panic).
+    const MAX_GETDENTS_COUNT: usize = 4 * 1024 * 1024;
+    let count = if count > MAX_GETDENTS_COUNT { MAX_GETDENTS_COUNT } else { count };
+
     // Check if dirp is in valid user space
     if !crate::arch::riscv64::uaccess::access_ok(dirp as usize, count) {
         return -(errno::EFAULT as i64);

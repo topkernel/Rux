@@ -544,7 +544,9 @@ fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
 
     let fd = sqe.fd as usize;
     let buf = sqe.addr as usize;
-    let len = sqe.len as usize;
+    // Cap the transfer length: sqe.len is user-controlled (up to 4GB) and the
+    // kernel heap cannot satisfy huge allocations (alloc failure would panic).
+    let len = (sqe.len as usize).min(crate::syscall::io::MAX_RW_COUNT);
     let off = sqe.off as i64;
 
     if len == 0 { return 0; }
@@ -604,7 +606,9 @@ fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
 
     let fd = sqe.fd as usize;
     let buf = sqe.addr as usize;
-    let len = sqe.len as usize;
+    // Cap the transfer length: sqe.len is user-controlled (up to 4GB) and the
+    // kernel heap cannot satisfy huge allocations (alloc failure would panic).
+    let len = (sqe.len as usize).min(crate::syscall::io::MAX_RW_COUNT);
     let off = sqe.off as i64;
 
     if len == 0 { return 0; }
@@ -854,6 +858,13 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
         None => return -(9i64) as u64, // EBADF
     };
 
+    // Verify the fd really is an io_uring instance before treating its
+    // private_data as a ring pointer — any other file type here would be a
+    // type confusion (arbitrary kernel read/write).
+    if !file.get_ops().is_some_and(|o| core::ptr::eq(o, &IO_URING_OPS as *const _)) {
+        return -(9i64) as u64; // EBADF
+    }
+
     let ring_ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p as *const IoUring,
         None => return -(9i64) as u64,
@@ -885,6 +896,12 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
         Some(f) => f,
         None => return -(9i64) as u64, // EBADF
     };
+
+    // Verify the fd really is an io_uring instance (type-confusion guard,
+    // same as sys_io_uring_enter).
+    if !file.get_ops().is_some_and(|o| core::ptr::eq(o, &IO_URING_OPS as *const _)) {
+        return -(9i64) as u64; // EBADF
+    }
 
     let ring_ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p as *const IoUring,

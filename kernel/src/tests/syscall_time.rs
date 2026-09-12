@@ -63,7 +63,7 @@ fn alloc_user_page() -> u64 {
         0,                    // offset
     ]);
     if addr > 0 {
-        addr
+        addr as u64
     } else {
         0
     }

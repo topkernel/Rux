@@ -15,13 +15,10 @@ extern "C" {
 }
 
 pub fn get_core_id() -> u64 {
-    // SAFETY: mhartid is a standard RISC-V CSR that returns the hardware thread ID.
-    // Only valid during early M-mode boot (before entering S-mode).
-    unsafe {
-        let hart_id: u64;
-        core::arch::asm!("csrrw {}, mhartid, zero", out(reg) hart_id);
-        hart_id
-    }
+    // mhartid is an M-mode CSR and traps when read from S-mode. The hart id
+    // lives in tp during early boot and in task.ti_cpu once scheduling starts;
+    // cpu_id() implements that protocol.
+    super::cpu_id()
 }
 
 /// Get device tree pointer

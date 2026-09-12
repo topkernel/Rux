@@ -295,7 +295,7 @@ fn test_sys_ids() {
         let expected_eperm = -(errno::EPERM as i64);
         test_assert_eq!(ret_setgid, expected_eperm,
             "sys_setgid(0) returns -EPERM without root");
-        let _ = sys_setgid([gid_before, 0, 0, 0, 0, 0]);
+        let _ = sys_setgid([gid_before as u64, 0, 0, 0, 0, 0]);
     }
 
     // getgroups(0, NULL) returns number of supplementary groups (0)

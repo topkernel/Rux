@@ -16,6 +16,18 @@ struct Iovec{
     iov_len: usize,
 }
 
+/// Maximum byte count for a single read/write style syscall.
+/// Matches Linux MAX_RW_COUNT (INT_MAX & PAGE_MASK); larger user requests are
+/// truncated instead of driving the kernel heap allocator past its size
+/// (alloc failure would panic the kernel).
+pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
+
+/// Clamp a user-supplied transfer length to MAX_RW_COUNT.
+#[inline]
+pub fn clamp_rw_count(count: usize) -> usize {
+    if count > MAX_RW_COUNT { MAX_RW_COUNT } else { count }
+}
+
 // ============================================================================
 // Terminal (TTY) state
 // ============================================================================
@@ -63,7 +75,7 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *mut u8;
-    let count = args[2] as usize;
+    let count = clamp_rw_count(args[2] as usize);
 
     // Check if buffer address is in valid user space using access_ok
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
@@ -120,7 +132,7 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *mut u8;
-    let count = args[2] as usize;
+    let count = clamp_rw_count(args[2] as usize);
     let offset = args[3] as i64;
 
     // Validate offset
@@ -179,7 +191,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *const u8;
-    let count = args[2] as usize;
+    let count = clamp_rw_count(args[2] as usize);
 
     // Check if buffer address is in valid user space using access_ok
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, count) {
@@ -749,7 +761,7 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *const u8;
-    let count = args[2] as usize;
+    let count = clamp_rw_count(args[2] as usize);
     let offset = args[3] as i64;
 
     // Validate offset

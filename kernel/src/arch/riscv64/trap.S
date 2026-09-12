@@ -181,7 +181,6 @@
 // Per-CPU interrupt stack constants
 .set INTR_STACK_SIZE,    16384   // 16KB per CPU
 .set TASK_STRUCT_THRESHOLD, 0x1000  // tp < this means early boot (tp = hart_id)
-.set KERNEL_STACK_SIZE,  32768   // 32KB per task (matches config::KERNEL_STACK_SIZE)
 
 // ============================================================================
 // trap_entry - Exception/interrupt entry point
@@ -189,9 +188,17 @@
 //
 // sscratch detection:
 //   csrrw tp, sscratch, tp  # swap tp and sscratch
-//   bnez tp, .Lfrom_user    # tp != 0 means from user mode
+//   tp == 0            -> from kernel mode
+//   tp has bit 63 set  -> from user mode (tp = current task pointer)
+//   anything else      -> early boot phase (sscratch not yet initialized)
 //
-// Also supports early boot phase (when sscratch is uninitialized)
+// CRITICAL RULE: no general-purpose register may be clobbered (directly or
+// via macros) before the interrupted register state has been stored into the
+// PtRegs frame. Stack-selection and CSR bookkeeping only use temps AFTER the
+// frame is written. This mirrors Linux handle_exception, which saves all
+// GPRs before any stack bookkeeping. (The previous implementation computed
+// the target stack with t0-t2 first and silently corrupted those registers
+// on every trap — ARCH-C2.)
 //
 trap_entry:
     // Step 1: Atomically swap tp and sscratch
@@ -199,92 +206,39 @@ trap_entry:
     // - From user: sscratch=current, tp=user_tls -> tp becomes current
     csrrw tp, sscratch, tp
 
-    // Step 2: Detect source
-    // tp == 0: from kernel mode (normal case, original sscratch value was 0)
-    // tp != 0: possibly from user mode, or could be early boot phase
+    // Step 2: Detect source WITHOUT touching any temp register.
+    // beqz/bltz only read tp. Bit 63 set = kernel-space pointer = task
+    // struct; small positive values are early-boot hart ids or garbage.
     beqz tp, .Lfrom_kernel
-
-    // tp != 0, check if it's a valid task pointer
-    // Valid kernel SV39 address has bits [63:47] all set (canonical form).
-    // If tp is not a valid kernel address, treat as early boot (tp = hart_id).
-    srli t1, tp, 47
-    li t0, 0x1FFFF
-    bne t1, t0, .Learly_boot
-
-    // tp >= 0x80000000, valid task pointer, from user mode
-    j .Lfrom_user
+    bltz tp, .Lfrom_user
+    j .Learly_boot
 
 // ============================================================================
-// Enter trap from kernel (normal mode)
+// Enter trap from kernel (normal or early boot)
 // ============================================================================
 //
-// tp = 0 (from sscratch swap)
-// sscratch = current task (previously saved tp value)
+// tp = original kernel tp (current task, or hartid during early boot).
+//
+// The full register state is saved on the CURRENT stack before any temp
+// register is used. Kernel-mode sp always points into valid kernel memory
+// (task kernel stack, boot stack, or an already-nested interrupt-stack
+// frame), and frames nest downward, so no stack switch is needed — the same
+// approach Linux takes for traps from kernel mode. This also means nested
+// traps (e.g. a fault inside an interrupt handler) allocate successive
+// frames instead of overwriting the interrupt stack top.
 //
 .Lfrom_kernel:
-    // Restore tp = original value before csrrw swap (from sscratch)
+    // Restore tp = original value before the csrrw swap (from sscratch).
+    // In early boot this is the hart id; no temp register required.
     csrr tp, sscratch
 
-    // Check if tp is a valid task_struct pointer or a hart_id.
-    // Secondary CPUs during WFI loop have tp = hart_id (small value),
-    // not a task_struct pointer.  Trying to read task_struct fields
-    // from a hart_id causes a page fault.
-    li t0, TASK_STRUCT_THRESHOLD
-    bltu tp, t0, .Lfrom_kernel_early
-
-    // Get per-CPU interrupt stack top (needed for .Luse_trap_stack)
-    GET_PER_CPU_INTR_STACK t2
-
-    // on_thread_stack(): Check if sp is on current task's kernel stack.
-    //
-    // task kernel stack: [ti_kernel_sp - KERNEL_STACK_SIZE, ti_kernel_sp)
-    //
-    // If sp is within these bounds, we're on the task's kernel stack
-    // and can safely reuse it. Otherwise (boot stack, IRQ stack, etc.)
-    // switch to the per-CPU interrupt stack.
-    ld t0, TASK_TI_KERNEL_SP(tp)    // t0 = kernel stack top (ti_kernel_sp)
-    beqz t0, .Luse_trap_stack       // No kernel stack → must use IRQ stack
-
-    li t1, KERNEL_STACK_SIZE        // 32768
-    sub t1, t0, t1                  // t1 = kernel stack bottom
-
-    blt sp, t1, .Luse_trap_stack    // sp < bottom → not on task stack
-    bgt sp, t0, .Luse_trap_stack    // sp > top → not on task stack
-
-    // sp is on task kernel stack — reuse it directly
-    j .Lalloc_frame_kernel
-
-.Luse_trap_stack:
-    // CRITICAL: Save original sp BEFORE switching!
-    // We need to save the kernel sp, not the interrupt stack address
-    mv t0, sp                 // t0 = original sp (kernel stack)
-    mv sp, t2                 // sp = interrupt stack top
-
-    // Allocate PtRegs space
+.Lsave_kernel_frame:
+    // Allocate PtRegs on the current stack and save ALL registers first.
     addi sp, sp, -PT_SIZE
 
-    // Save original kernel sp (not the interrupt stack!)
-    sd t0, PT_SP(sp)
-    j .Lsave_kernel_regs
-
-.Lalloc_frame_kernel:
-    // Save original sp (before allocating PtRegs)
-    mv t1, sp
-
-    // Allocate PtRegs space
-    addi sp, sp, -PT_SIZE
-
-    // Save original sp first (needed for kernel trap path)
-    sd t1, PT_SP(sp)
-
-.Lsave_kernel_regs:
-
-    // CRITICAL FIX: Save general purpose registers FIRST
-    // This must be done BEFORE reading CSR, because CSR reading uses t0-t3
-    // as temporary registers, which would corrupt user-space values
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
-    sd x4,  PT_TP(sp)   // Save kernel tp (= current task)
+    sd x4,  PT_TP(sp)   // current task pointer (or hartid during early boot)
     sd x5,  PT_T0(sp)
     sd x6,  PT_T1(sp)
     sd x7,  PT_T2(sp)
@@ -313,8 +267,11 @@ trap_entry:
     sd x30, PT_T5(sp)
     sd x31, PT_T6(sp)
 
-    // NOW read CSR (after all registers are saved)
-    // It's safe to use t0-t3 as temporary registers now
+    // NOW temps are free: record the interrupted sp (frame address + PT_SIZE)
+    addi t0, sp, PT_SIZE
+    sd t0, PT_SP(sp)
+
+    // Save CSRs
     csrr t0, sstatus
     csrr t1, sepc
     csrr t2, stval
@@ -330,24 +287,26 @@ trap_entry:
 // Early boot phase (compatible mode)
 // ============================================================================
 //
-// tp < 0x1000, indicates sscratch uninitialized, still in early boot
-// Use sstatus.SPP for detection
+// Reached only when sscratch holds an unexpected value: a trap in the short
+// boot window before boot.S sets sscratch = 0. Interrupts are still disabled
+// there, so only synchronous exceptions can arrive, and the boot code has no
+// interruptible register state whose loss in PtRegs matters. The sstatus
+// read below clobbers t0 — acceptable only in this dead-defensive window.
 //
 .Learly_boot:
-    // Restore tp (swap caused tp to become original sscratch value)
-    // In early boot phase, tp was originally hart_id, sscratch undefined
-    // We need to restore tp = hart_id
-    // Note: tp is now original sscratch value (could be any value)
-    // But we cannot restore original tp, so use sstatus.SPP for detection
-
     // Use sstatus.SPP to determine source
     csrr t0, sstatus
     andi t0, t0, SR_SPP
-    bnez t0, .Lfrom_kernel_early
+    bnez t0, .Lsave_kernel_frame
 
 // ============================================================================
-// Enter trap from user space (early boot phase)
+// Enter trap from user space (early boot phase) — defensive dead path
 // ============================================================================
+//
+// There is no user mode before the scheduler starts, and sscratch is
+// initialized by then, so this path cannot be reached in practice. Kept as a
+// safety net with the original (temp-clobbering) behavior.
+//
 .Lfrom_user_early:
     // In early boot phase, only CPU 0 is running
     // Save user sp
@@ -365,7 +324,7 @@ trap_entry:
     // Save user tp (hart_id)
     sd tp, PT_TP(sp)
 
-    // CRITICAL FIX: Save general purpose registers FIRST
+    // Save general purpose registers
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
     // tp already saved
@@ -410,115 +369,34 @@ trap_entry:
     j .Lcall_handler
 
 // ============================================================================
-// Enter trap from kernel (early boot phase)
-// ============================================================================
-.Lfrom_kernel_early:
-    // Early boot phase, tp may not be valid task_struct
-    // Get per-CPU interrupt stack (will use CPU 0 during early boot)
-    GET_PER_CPU_INTR_STACK t2
-
-    // Check if already on this CPU's interrupt stack
-    li t1, INTR_STACK_SIZE
-    sub t1, t2, t1          // t1 = stack_bottom
-
-    blt sp, t1, .Luse_trap_stack_early
-    bgt sp, t2, .Luse_trap_stack_early
-    j .Lalloc_frame_kernel_early
-
-.Luse_trap_stack_early:
-    mv sp, t2
-
-.Lalloc_frame_kernel_early:
-    mv t1, sp
-    addi sp, sp, -PT_SIZE
-    sd t1, PT_SP(sp)
-
-    // CRITICAL FIX: Save general purpose registers FIRST
-    sd x1,  PT_RA(sp)
-    sd x3,  PT_GP(sp)
-    sd x4,  PT_TP(sp)   // Save kernel tp (= hart_id)
-    sd x5,  PT_T0(sp)
-    sd x6,  PT_T1(sp)
-    sd x7,  PT_T2(sp)
-    sd x8,  PT_S0(sp)
-    sd x9,  PT_S1(sp)
-    sd x10, PT_A0(sp)
-    sd x11, PT_A1(sp)
-    sd x12, PT_A2(sp)
-    sd x13, PT_A3(sp)
-    sd x14, PT_A4(sp)
-    sd x15, PT_A5(sp)
-    sd x16, PT_A6(sp)
-    sd x17, PT_A7(sp)
-    sd x18, PT_S2(sp)
-    sd x19, PT_S3(sp)
-    sd x20, PT_S4(sp)
-    sd x21, PT_S5(sp)
-    sd x22, PT_S6(sp)
-    sd x23, PT_S7(sp)
-    sd x24, PT_S8(sp)
-    sd x25, PT_S9(sp)
-    sd x26, PT_S10(sp)
-    sd x27, PT_S11(sp)
-    sd x28, PT_T3(sp)
-    sd x29, PT_T4(sp)
-    sd x30, PT_T5(sp)
-    sd x31, PT_T6(sp)
-
-    // NOW read CSR (after all registers are saved)
-    csrr t0, sstatus
-    csrr t1, sepc
-    csrr t2, stval
-    csrr t3, scause
-    sd t0, PT_STATUS(sp)
-    sd t1, PT_EPC(sp)
-    sd t2, PT_BADADDR(sp)
-    sd t3, PT_CAUSE(sp)
-
-    j .Lcall_handler
-
-// ============================================================================
 // Enter trap from user space (normal mode)
 // ============================================================================
 //
-// tp = current task (from sscratch swap)
-// sscratch = user TLS (previous tp value)
+// tp = current task (from sscratch swap; canonical kernel pointer, verified
+// by the bit-63 test in the dispatcher). User sp is live in sp; user tp is
+// in sscratch.
+//
+// The user sp is stashed in task.ti_user_sp so that the stack switch needs
+// no temp register; all GPRs are saved before any temp is used.
 //
 .Lfrom_user:
-    // tp now points to current task_struct (validated by SV39 canonical check above)
+    // Stash user sp (ti_user_sp is a "last user sp" cache: written at exec
+    // time and here; nothing reads it between traps).
+    sd sp, TASK_TI_USER_SP(tp)
 
-    // Save user sp (before switching stack)
-    mv t1, sp
-
-    // Get kernel stack pointer from task_struct
-    // task_struct.ti_kernel_sp at offset 0x08
+    // Switch to the task kernel stack (safe: sp's user value is stashed)
     ld sp, TASK_TI_KERNEL_SP(tp)
-
-    // If ti_kernel_sp is 0 or looks invalid, use dedicated trap stack
+    // No kernel stack (idle task during bringup) — defensive fallback
     beqz sp, .Luse_trap_stack_user
-    // Sanity check: kernel stack should be in upper half (bit 63 set)
-    srli t2, sp, 47
-    li t0, 0x1FFFF
-    bne t2, t0, .Luse_trap_stack_user
 
+.Lfrom_user_frame:
     // Allocate PtRegs space
     addi sp, sp, -PT_SIZE
-    j .Lsave_user_context
 
-.Luse_trap_stack_user:
-    // Use per-CPU interrupt stack
-    GET_PER_CPU_INTR_STACK sp
-    addi sp, sp, -PT_SIZE
-
-.Lsave_user_context:
-    // Save user sp
-    sd t1, PT_SP(sp)
-
-    // CRITICAL FIX: Save ALL general purpose registers FIRST
-    // This must be done BEFORE using any temp register for debug calls
+    // Save ALL general purpose registers FIRST (t0-t2 hold user values)
     sd x1,  PT_RA(sp)
     sd x3,  PT_GP(sp)
-    // tp will be saved later from sscratch
+    // tp will be saved below from sscratch
     sd x5,  PT_T0(sp)
     sd x6,  PT_T1(sp)
     sd x7,  PT_T2(sp)
@@ -548,11 +426,15 @@ trap_entry:
     sd x31, PT_T6(sp)
 
     // NOW it's safe to use temp registers
-    // Save user tp (now in sscratch)
+    // Restore the stashed user sp into PtRegs
+    ld t0, TASK_TI_USER_SP(tp)
+    sd t0, PT_SP(sp)
+
+    // Save user tp (held in sscratch since the entry swap)
     csrr t0, sscratch
     sd t0, PT_TP(sp)
 
-    // Read CSR (safe to use t0-t3 now)
+    // Save CSRs
     csrr t0, sstatus
     csrr t1, sepc
     csrr t2, stval
@@ -570,6 +452,15 @@ trap_entry:
 
     j .Lcall_handler
 
+.Luse_trap_stack_user:
+    // ti_kernel_sp == 0: no task kernel stack. Only tasks that never execute
+    // user code (idle tasks during bringup) can reach a "user-mode" trap in
+    // this state — fork/exec always allocate a kernel stack — so the t0-t2
+    // values clobbered by GET_PER_CPU_INTR_STACK (before they can be saved)
+    // are never observable.
+    GET_PER_CPU_INTR_STACK sp
+    j .Lfrom_user_frame
+
 // ============================================================================
 // Call Rust trap handler
 // ============================================================================
@@ -579,7 +470,8 @@ trap_entry:
     sd t0, PT_ORIG_A0(sp)
 
     // Determine CPU ID from tp and pass as second argument (a1)
-    // tp is restored to task_struct pointer (.Lfrom_kernel) or hart_id (.Lfrom_kernel_early)
+    // tp is the task_struct pointer (.Lfrom_kernel/.Lfrom_user) or a small
+    // hart id value (early-boot paths)
     li t0, TASK_STRUCT_THRESHOLD
     bltu tp, t0, .Lcpu_id_from_tp_early
     // Normal path: tp is task_struct pointer, read ti_cpu

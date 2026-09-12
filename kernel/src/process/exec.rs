@@ -166,6 +166,18 @@ pub(crate) fn do_execve_elf(
             let mem_size = phdr.p_memsz;
             let offset = phdr.p_offset as usize;
 
+            // Validate the segment against the file image and the mapped
+            // range: p_offset/p_filesz/p_vaddr come from the (possibly
+            // attacker-controlled) ELF file; slicing or writing past the
+            // mapped region without these checks panics or corrupts memory.
+            if file_size > mem_size
+                || virt_addr < virt_start
+                || virt_addr.saturating_add(mem_size) > virt_end
+                || offset.checked_add(file_size as usize).map_or(true, |end| end > program_data.len())
+            {
+                return Err(crate::errno::Errno::ExecFormatError.as_neg_i32());
+            }
+
             let virt_offset = virt_addr - virt_start;
             let phys_addr = (phys_base + virt_offset) as usize;
 

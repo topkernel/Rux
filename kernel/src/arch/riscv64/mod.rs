@@ -55,25 +55,10 @@ pub fn init() {
 }
 
 fn print_cpu_info() {
-    // SAFETY: mhartid, mimpid, and marchid are standard machine-mode CSRs readable
-    // via csrrw. These are info-only reads with no side effects.
-    unsafe {
-        // Read mhartid (hardware thread ID)
-        let mhartid: u64;
-        asm!("csrrw {}, mhartid, zero", out(reg) mhartid);
-
-        // Read mimpid (machine implementation ID)
-        let mimpid: u64;
-        asm!("csrrw {}, mimpid, zero", out(reg) mimpid);
-
-        // Read marchid (architecture ID)
-        let marchid: u64;
-        asm!("csrrw {}, marchid, zero", out(reg) marchid);
-
-        println!("arch: mhartid (HART ID) = {}", mhartid);
-        println!("arch: mimpid (Impl ID) = {:#x}", mimpid);
-        println!("arch: marchid (Arch ID) = {:#x}", marchid);
-    }
+    // mhartid/mimpid/marchid are M-mode CSRs and trap when read from S-mode.
+    // There is no reliable S-mode view of the implementation IDs (Linux gets
+    // them from the device tree), so report the boot hart only.
+    println!("arch: boot hart = {}", cpu_id());
 }
 
 pub fn enable_interrupts() {

@@ -31,7 +31,18 @@
 // ============================================================================
 
 // EXTABLE(insn, fixup) - Add exception table entry
-// When instruction at 'insn' causes an exception, jump to 'fixup'
+// When instruction at 'insn' causes an exception, jump to 'fixup'.
+//
+// CRITICAL usage rule (matches Linux's _ASM_EXTABLE): the label referenced
+// by \insn MUST be placed immediately BEFORE the faulting instruction, and
+// the macro invoked immediately AFTER it:
+//
+//     .Lfault_site:
+//         <load/store that may fault>
+//         EXTABLE .Lfault_site, fixup
+//
+// A label defined after the macro binds to the NEXT instruction, and the
+// exception table would cover the wrong instruction.
 .macro EXTABLE insn, fixup
     .pushsection .ex_table, "a"
     .balign 8
@@ -140,12 +151,12 @@ __copy_user_sum_enabled:
 
     // Copy bytes until aligned
 .Lalign_dst_loop:
+.Lalign_dst_load:
     lb      a5, 0(a1)
     EXTABLE .Lalign_dst_load, .Lcopy_exception
-.Lalign_dst_load:
+.Lalign_dst_store:
     sb      a5, 0(a0)
     EXTABLE .Lalign_dst_store, .Lcopy_exception
-.Lalign_dst_store:
     addi    a1, a1, 1
     addi    a0, a0, 1
     bltu    a0, t1, .Lalign_dst_loop
@@ -163,56 +174,56 @@ __copy_user_sum_enabled:
 
 .Lword_copy_loop:
     // Load 8 words
+.Lword_load_0:
     ld      a4, 0(a1)
     EXTABLE .Lword_load_0, .Lcopy_exception
-.Lword_load_0:
+.Lword_load_1:
     ld      a5, 8(a1)
     EXTABLE .Lword_load_1, .Lcopy_exception
-.Lword_load_1:
+.Lword_load_2:
     ld      a6, 16(a1)
     EXTABLE .Lword_load_2, .Lcopy_exception
-.Lword_load_2:
+.Lword_load_3:
     ld      a7, 24(a1)
     EXTABLE .Lword_load_3, .Lcopy_exception
-.Lword_load_3:
+.Lword_load_4:
     ld      t1, 32(a1)
     EXTABLE .Lword_load_4, .Lcopy_exception
-.Lword_load_4:
+.Lword_load_5:
     ld      t2, 40(a1)
     EXTABLE .Lword_load_5, .Lcopy_exception
-.Lword_load_5:
+.Lword_load_6:
     ld      t3, 48(a1)
     EXTABLE .Lword_load_6, .Lcopy_exception
-.Lword_load_6:
+.Lword_load_7:
     ld      t4, 56(a1)
     EXTABLE .Lword_load_7, .Lcopy_exception
-.Lword_load_7:
 
     // Store 8 words
+.Lword_store_0:
     sd      a4, 0(a0)
     EXTABLE .Lword_store_0, .Lcopy_exception
-.Lword_store_0:
+.Lword_store_1:
     sd      a5, 8(a0)
     EXTABLE .Lword_store_1, .Lcopy_exception
-.Lword_store_1:
+.Lword_store_2:
     sd      a6, 16(a0)
     EXTABLE .Lword_store_2, .Lcopy_exception
-.Lword_store_2:
+.Lword_store_3:
     sd      a7, 24(a0)
     EXTABLE .Lword_store_3, .Lcopy_exception
-.Lword_store_3:
+.Lword_store_4:
     sd      t1, 32(a0)
     EXTABLE .Lword_store_4, .Lcopy_exception
-.Lword_store_4:
+.Lword_store_5:
     sd      t2, 40(a0)
     EXTABLE .Lword_store_5, .Lcopy_exception
-.Lword_store_5:
+.Lword_store_6:
     sd      t3, 48(a0)
     EXTABLE .Lword_store_6, .Lcopy_exception
-.Lword_store_6:
+.Lword_store_7:
     sd      t4, 56(a0)
     EXTABLE .Lword_store_7, .Lcopy_exception
-.Lword_store_7:
 
     addi    a0, a0, UNROLL_SIZE
     addi    a1, a1, UNROLL_SIZE
@@ -238,21 +249,21 @@ __copy_user_sum_enabled:
     sub     t4, a5, t3              // t4 = 64 - t3
 
     // Load first word
+.Lshift_load_first:
     ld      a5, 0(a1)
     EXTABLE .Lshift_load_first, .Lcopy_exception
-.Lshift_load_first:
 
 .Lshift_copy_loop:
     srl     a4, a5, t3              // Shift right by prev amount
+.Lshift_load:
     ld      a5, 8(a1)               // Load next word
     EXTABLE .Lshift_load, .Lcopy_exception
-.Lshift_load:
     addi    a1, a1, 8
     sll     a2, a5, t4              // Shift left by complementary amount
     or      a2, a2, a4              // Combine
+.Lshift_store:
     sd      a2, 0(a0)
     EXTABLE .Lshift_store, .Lcopy_exception
-.Lshift_store:
     addi    a0, a0, 8
     bltu    a0, t1, .Lshift_copy_loop
 
@@ -266,12 +277,12 @@ __copy_user_sum_enabled:
     bgeu    a0, t0, .Lcopy_done
 
 .Lbyte_copy_loop:
+.Lbyte_load:
     lb      a5, 0(a1)
     EXTABLE .Lbyte_load, .Lcopy_exception
-.Lbyte_load:
+.Lbyte_store:
     sb      a5, 0(a0)
     EXTABLE .Lbyte_store, .Lcopy_exception
-.Lbyte_store:
     addi    a1, a1, 1
     addi    a0, a0, 1
     bltu    a0, t0, .Lbyte_copy_loop
@@ -317,9 +328,9 @@ __clear_user:
     bltu    a0, t0, .Lclear_align_head
 
 .Lclear_word_loop:
+.Lclear_store:
     sd      zero, 0(a0)
     EXTABLE .Lclear_store, .Lclear_exception
-.Lclear_store:
     addi    a0, a0, 8
     bltu    a0, t1, .Lclear_word_loop
 
@@ -328,9 +339,9 @@ __clear_user:
     j       .Lclear_done
 
 .Lclear_align_head:
+.Lclear_head_store:
     sb      zero, 0(a0)
     EXTABLE .Lclear_head_store, .Lclear_exception
-.Lclear_head_store:
     addi    a0, a0, 1
     bltu    a0, t0, .Lclear_align_head
     j       .Lclear_word_loop
@@ -340,9 +351,9 @@ __clear_user:
     j       .Lclear_done
 
 .Lclear_tail:
+.Lclear_tail_store:
     sb      zero, 0(a0)
     EXTABLE .Lclear_tail_store, .Lclear_exception
-.Lclear_tail_store:
     addi    a0, a0, 1
     bltu    a0, a3, .Lclear_tail
 

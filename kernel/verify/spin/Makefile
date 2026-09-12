@@ -39,7 +39,6 @@ $(REPORT): $(MODELS)
 			continue; \
 		fi; \
 		./pan -a > pan-out.txt 2>&1; \
-		RETCODE=$$?; \
 		cat pan-out.txt >> $@; \
 		echo "" >> $@; \
 		if grep -q "errors: 0" pan-out.txt; then \
@@ -58,7 +57,11 @@ $(REPORT): $(MODELS)
 	echo "PASS: $$PASS  FAIL: $$FAIL  ERROR: $$ERR" >> $@; \
 	echo ""; \
 	echo "Summary: PASS=$$PASS  FAIL=$$FAIL  ERROR=$$ERR"; \
-	echo "Report: $(REPORT)"
+	echo "Report: $(REPORT)"; \
+	if [ $$((FAIL+ERR)) -gt 0 ]; then \
+		echo "spin: $$((FAIL+ERR)) model(s) failed or failed to compile"; \
+		exit 1; \
+	fi
 
 clean:
 	rm -f pan pan.* *.trail *.tmp pan-out.txt $(REPORT)

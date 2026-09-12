@@ -47,6 +47,7 @@ jobs:
 
       - name: Run Kani verification
         run: |
+          set -o pipefail
           cd kernel/verify
           cargo kani 2>&1 | tee kani-output.txt
           # Fail if any harness failed

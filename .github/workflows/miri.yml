@@ -46,6 +46,7 @@ jobs:
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
         run: |
+          set -o pipefail
           cd kernel/verify
           cargo miri test 2>&1 | tee miri-output.txt
           # Fail if any UB detected

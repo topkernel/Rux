@@ -29,10 +29,11 @@ jobs:
 
       - name: Run SPIN verification
         run: |
+          set -o pipefail
           cd kernel/verify/spin
           make 2>&1 | tee spin-output.txt
-          # Fail if any model has errors
-          if grep -q "FAIL:" spin-output.txt; then
+          # Fail if any model has errors (also covered by make exit code)
+          if grep -q "FAIL:" spin-output.txt || grep -q "COMPILE ERROR" spin-output.txt; then
             echo "::error::SPIN detected failing model"
             exit 1
           fi

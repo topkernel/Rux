@@ -585,54 +585,70 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
     if !crate::arch::riscv64::uaccess::access_ok(bufp as usize, maxlen) {
         return -(crate::syscall::errno::EFAULT as i64);
     }
+    // Bound the transfer: maxlen is user-controlled and must never drive an
+    // unbounded heap allocation (alloc failure panics the kernel). Callers
+    // read in chunks, like dmesg(1).
+    const SYSLOG_MAX_READ: usize = 256 * 1024;
+    let maxlen = maxlen.min(SYSLOG_MAX_READ);
+    // Stage into a kernel buffer: writing directly to user memory while
+    // holding the printk spinlock (irqs off) would deadlock/panic on an
+    // unmapped user page.
+    let mut kbuf = alloc::vec![0u8; maxlen];
 
-    let mut rb = RING_BUFFER.lock_irqsave();
-    let read_seq = rb.read_seq;
-    let next_seq = rb.next_seq;
+    let (produced, next_read_seq) = {
+        let mut rb = RING_BUFFER.lock_irqsave();
+        let read_seq = rb.read_seq;
+        let next_seq = rb.next_seq;
 
-    if read_seq >= next_seq {
-        // Nothing new to read
-        return 0;
-    }
+        if read_seq >= next_seq {
+            (0usize, read_seq)
+        } else {
+            let mut offset = 0usize;
+            let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
 
-    let mut offset = 0usize;
-    let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
+            // Iterate through all slots, find records with seq >= read_seq
+            for i in 0..RING_BUFFER_CAPACITY {
+                let record = &rb.records[i];
+                if record.text_len == 0 || record.seq < read_seq {
+                    continue;
+                }
 
-    // Iterate through all slots, find records with seq >= read_seq
-    for i in 0..RING_BUFFER_CAPACITY {
-        let record = &rb.records[i];
-        if record.text_len == 0 || record.seq < read_seq {
-            continue;
-        }
+                // Format: <level>[timestamp] pid(N) cpu(M): text\n
+                let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp, record.pid, record.cpu_id);
+                let text_bytes = &record.text[..record.text_len as usize];
+                let trailing_nl = text_bytes.last() == Some(&b'\n');
+                let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
 
-        // Format: <level>[timestamp] pid(N) cpu(M): text\n
-        let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp, record.pid, record.cpu_id);
-        let text_bytes = &record.text[..record.text_len as usize];
-        let trailing_nl = text_bytes.last() == Some(&b'\n');
-        let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
+                if offset + needed > maxlen {
+                    break;
+                }
 
-        if offset + needed > maxlen {
-            break;
-        }
-
-        // SAFETY: bufp has capacity maxlen and offset + needed <= maxlen; header_buf and
-        // text_bytes are valid stack/buffer slices of exactly header_len/text_bytes.len().
-        unsafe {
-            core::ptr::copy_nonoverlapping(header_buf.as_ptr(), bufp.add(offset), header_len);
-            offset += header_len;
-            core::ptr::copy_nonoverlapping(text_bytes.as_ptr(), bufp.add(offset), text_bytes.len());
-            offset += text_bytes.len();
-            if !trailing_nl {
-                *bufp.add(offset) = b'\n';
-                offset += 1;
+                kbuf[offset..offset + header_len].copy_from_slice(&header_buf[..header_len]);
+                offset += header_len;
+                kbuf[offset..offset + text_bytes.len()].copy_from_slice(text_bytes);
+                offset += text_bytes.len();
+                if !trailing_nl {
+                    kbuf[offset] = b'\n';
+                    offset += 1;
+                }
             }
+
+            (offset, next_seq)
         }
+    };
+
+    if produced > 0 {
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(bufp, kbuf.as_ptr(), produced)
+        };
+        if uncopied > 0 {
+            return -(crate::syscall::errno::EFAULT as i64);
+        }
+        // Advance read cursor only after a successful copy
+        RING_BUFFER.lock_irqsave().read_seq = next_read_seq;
     }
 
-    // Advance read cursor
-    rb.read_seq = next_seq;
-
-    offset as i64
+    produced as i64
 }
 
 /// Read all records from the ring buffer, oldest first.
@@ -643,63 +659,79 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
     if !crate::arch::riscv64::uaccess::access_ok(bufp as usize, maxlen) {
         return -(crate::syscall::errno::EFAULT as i64);
     }
+    // Bound the transfer and stage into a kernel buffer: writing directly to
+    // user memory while holding the printk spinlock (irqs off) would
+    // deadlock/panic on an unmapped user page.
+    const SYSLOG_MAX_READ: usize = 256 * 1024;
+    let maxlen = maxlen.min(SYSLOG_MAX_READ);
+    let mut kbuf = alloc::vec![0u8; maxlen];
 
-    let mut rb = RING_BUFFER.lock_irqsave();
-    let next_seq = rb.next_seq;
+    let produced = {
+        let mut rb = RING_BUFFER.lock_irqsave();
+        let next_seq = rb.next_seq;
 
-    if next_seq == 0 {
-        return 0;
-    }
+        if next_seq == 0 {
+            0usize
+        } else {
+            let mut offset = 0usize;
+            let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
+            let write_idx = rb.write_idx;
 
-    let mut offset = 0usize;
-    let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
-    let write_idx = rb.write_idx;
+            // Read records from oldest to newest.
+            // The oldest record is at write_idx (the slot about to be overwritten).
+            for i in 0..RING_BUFFER_CAPACITY {
+                let idx = (write_idx + i) % RING_BUFFER_CAPACITY;
+                let record = &rb.records[idx];
 
-    // Read records from oldest to newest.
-    // The oldest record is at write_idx (the slot about to be overwritten).
-    for i in 0..RING_BUFFER_CAPACITY {
-        let idx = (write_idx + i) % RING_BUFFER_CAPACITY;
-        let record = &rb.records[idx];
+                // Skip empty/zeroed records
+                if record.text_len == 0 {
+                    continue;
+                }
 
-        // Skip empty/zeroed records
-        if record.text_len == 0 {
-            continue;
-        }
+                // Format: <level>[timestamp] pid(N) cpu(M): text\n
+                let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp, record.pid, record.cpu_id);
+                let text_bytes = &record.text[..record.text_len as usize];
+                let trailing_nl = text_bytes.last() == Some(&b'\n');
+                let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
 
-        // Format: <level>[timestamp] pid(N) cpu(M): text\n
-        let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp, record.pid, record.cpu_id);
-        let text_bytes = &record.text[..record.text_len as usize];
-        let trailing_nl = text_bytes.last() == Some(&b'\n');
-        let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
+                if offset + needed > maxlen {
+                    break;
+                }
 
-        if offset + needed > maxlen {
-            break;
-        }
-
-        // SAFETY: same as above — bufp has capacity maxlen and offset + needed <= maxlen.
-        unsafe {
-            core::ptr::copy_nonoverlapping(header_buf.as_ptr(), bufp.add(offset), header_len);
-            offset += header_len;
-            core::ptr::copy_nonoverlapping(text_bytes.as_ptr(), bufp.add(offset), text_bytes.len());
-            offset += text_bytes.len();
-            if !trailing_nl {
-                *bufp.add(offset) = b'\n';
-                offset += 1;
+                kbuf[offset..offset + header_len].copy_from_slice(&header_buf[..header_len]);
+                offset += header_len;
+                kbuf[offset..offset + text_bytes.len()].copy_from_slice(text_bytes);
+                offset += text_bytes.len();
+                if !trailing_nl {
+                    kbuf[offset] = b'\n';
+                    offset += 1;
+                }
             }
+
+            if clear {
+                // Clear all records
+                for record in rb.records.iter_mut() {
+                    record.text_len = 0;
+                }
+                rb.write_idx = 0;
+                rb.read_seq = 0;
+                rb.next_seq = 0;
+            }
+
+            offset
+        }
+    };
+
+    if produced > 0 {
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(bufp, kbuf.as_ptr(), produced)
+        };
+        if uncopied > 0 {
+            return -(crate::syscall::errno::EFAULT as i64);
         }
     }
 
-    if clear {
-        // Clear all records
-        for record in rb.records.iter_mut() {
-            record.text_len = 0;
-        }
-        rb.write_idx = 0;
-        rb.read_seq = 0;
-        rb.next_seq = 0;
-    }
-
-    offset as i64
+    produced as i64
 }
 
 /// Clear the ring buffer.

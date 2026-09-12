@@ -406,8 +406,17 @@ impl Elf64Ehdr {
         if index >= self.e_phnum as usize {
             return None;
         }
-        let phdr_start = data.as_ptr().add(self.e_phoff as usize) as *const Elf64Phdr;
-        Some(ptr::read_unaligned(phdr_start.add(index)))
+        // Bounds-check the entry against the file image: e_phoff comes from
+        // the (possibly attacker-controlled) ELF header, so it must never be
+        // trusted as a raw pointer offset.
+        let phdr_off = (self.e_phoff as usize)
+            .checked_add(index.checked_mul(size_of::<Elf64Phdr>())?)?;
+        let phdr_end = phdr_off.checked_add(size_of::<Elf64Phdr>())?;
+        if phdr_end > data.len() {
+            return None;
+        }
+        let phdr_start = data.as_ptr().add(phdr_off) as *const Elf64Phdr;
+        Some(ptr::read_unaligned(phdr_start))
     }
 }
 
@@ -668,7 +677,7 @@ impl ElfLoader {
                     let filesz = phdr.p_filesz as usize;
                     let memsz = phdr.p_memsz as usize;
 
-                    if offset + filesz > data.len() {
+                    if !offset.checked_add(filesz).map_or(false, |end| end <= data.len()) {
                         return Err(ElfError::InvalidSegment);
                     }
 

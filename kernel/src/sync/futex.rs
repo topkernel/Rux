@@ -270,9 +270,14 @@ pub fn futex_wait(uaddr: usize, flags: u32, val: u32, bitset: u32) -> i64 {
     let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
 
     // Re-check value under lock (prevents lost wakeup).
-    // SAFETY: uaddr_ptr was validated non-null above; it points to a valid
-    // userspace AtomicU32.  Access is atomic (SeqCst ordering).
-    let uval = unsafe { (*uaddr_ptr).load(Ordering::SeqCst) };
+    // SAFETY: get_user goes through the exception-table copy path; an
+    // unmapped user address yields EFAULT instead of a kernel page fault.
+    let uval = match unsafe {
+        crate::arch::riscv64::uaccess::get_user(uaddr_ptr as *const u32)
+    } {
+        Some(v) => v,
+        None => return -EFAULT as i64,
+    };
     if uval != val {
         return -EAGAIN as i64;
     }
@@ -492,9 +497,14 @@ pub fn futex_requeue(
 
     // For CMP_REQUEUE, verify *uaddr == cmpval
     if is_cmp {
-        // SAFETY: uaddr comes from syscall, points to userspace AtomicU32.
-        let uaddr_ptr = uaddr as *const AtomicU32;
-        let uval = unsafe { (*uaddr_ptr).load(Ordering::SeqCst) };
+        // SAFETY: exception-table protected read; unmapped address → EFAULT.
+        let uaddr_ptr = uaddr as *const u32;
+        let uval = match unsafe {
+            crate::arch::riscv64::uaccess::get_user(uaddr_ptr)
+        } {
+            Some(v) => v,
+            None => return -EFAULT as i64,
+        };
         if uval != cmpval {
             return -EAGAIN as i64;
         }

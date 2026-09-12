@@ -93,18 +93,18 @@ fn test_ipc_perm_operations() {
         seq: 0,
     };
 
-    // update_mode should mask to lower 9 bits
-    perm.update_mode(0o644);
-    test_assert_eq!(perm.mode, 0o644, "update_mode 0o644");
+    // update_from_set replaces the lower 9 permission bits
+    perm.update_from_set(0, 0, 0o644);
+    test_assert_eq!(perm.mode, 0o644, "update_from_set 0o644");
 
     // Setting mode that has extra bits — should be masked
-    perm.update_mode(0o7777);
-    test_assert_eq!(perm.mode, 0o777, "update_mode masks to 9 bits");
+    perm.update_from_set(0, 0, 0o7777);
+    test_assert_eq!(perm.mode, 0o777, "update_from_set masks to 9 bits");
 
     // Setting mode 0 should clear permission bits
     perm.mode = 0o755;
-    perm.update_mode(0o000);
-    test_assert_eq!(perm.mode, 0o000, "update_mode 0o000 clears bits");
+    perm.update_from_set(0, 0, 0o000);
+    test_assert_eq!(perm.mode, 0o000, "update_from_set 0o000 clears bits");
 
     // Test to_uapi conversion
     let perm = KernIpcPerm {

@@ -1781,8 +1781,19 @@ pub fn sys_times(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         // struct tms: tms_utime, tms_stime, tms_cutime, tms_cstime (all clock_t = i64)
-        // SAFETY: buf_ptr validated with access_ok; writing 32 bytes to user space.
-        unsafe { core::ptr::write_bytes(buf_ptr, 0, 32); }
+        // Zeroed buffer written via the exception-table copy path so an
+        // unmapped user page yields EFAULT instead of a kernel page fault.
+        let zeros = [0u8; 32];
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(
+                buf_ptr as *mut u8,
+                zeros.as_ptr(),
+                32,
+            )
+        };
+        if uncopied > 0 {
+            return -(errno::EFAULT as i64);
+        }
     }
     // Return clock ticks since boot (simplified: use jiffies)
     crate::drivers::timer::get_jiffies() as i64
@@ -2523,21 +2534,11 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
         for i in 0..count {
             let key = core::ptr::read_volatile(pairs_ptr.add(i * 2));
             let value = match key {
-                KEY_MVENDORID => {
-                    let mut val: u64;
-                    core::arch::asm!("csrr {}, mvendorid", out(reg) val);
-                    val
-                }
-                KEY_MARCHID => {
-                    let mut val: u64;
-                    core::arch::asm!("csrr {}, marchid", out(reg) val);
-                    val
-                }
-                KEY_IMPID => {
-                    let mut val: u64;
-                    core::arch::asm!("csrr {}, mimpid", out(reg) val);
-                    val
-                }
+                // mvendorid/marchid/mimpid are M-mode CSRs and trap in S-mode;
+                // report 0 ("not implemented") like an SBI-less platform would.
+                KEY_MVENDORID => 0,
+                KEY_MARCHID => 0,
+                KEY_IMPID => 0,
                 KEY_MMU => 1, // sv39
                 _ => u64::MAX,
             };
