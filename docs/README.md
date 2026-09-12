@@ -21,6 +21,11 @@ Welcome to the Rux operating system kernel documentation center!
 - **[Formal Verification](development/formal-verification.md)** - 4-layer verification strategy (proptest + Kani + SPIN + Miri)
 - **[Lock Hierarchy](architecture/lock-ordering.md)** - Kernel lock ordering and nesting rules
 
+### 🔍 Code Review & Fix Tracking
+- **[Code Review 2026-09-12 (3rd round)](development/code-review-2026-09-12.md)** - Full-repo review findings (~440 issues, 34 Critical)
+- **[Fix Plan 2026-09-12](development/fix-plan-2026-09-12.md)** - Wave 1-9 remediation plan with acceptance criteria
+- **[Code Review 2026-04-17 (2nd round)](development/code-review-2026-04-17.md)** - 425 findings, all fixed/deferred
+
 ### 📊 Project Progress
 - **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 51)
 - **[Quick Reference](progress/quickref.md)** - Common commands and API cheat sheet
