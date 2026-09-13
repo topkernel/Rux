@@ -227,8 +227,22 @@ pub fn init_pci_block_devices() -> usize {
                     // Read device features
                     let features = virtio_dev.read_device_features();
 
-                    // Write driver features
-                    virtio_dev.write_driver_features(features);
+                    // Only accept features the driver actually implements.
+                    // EVENT_IDX must NOT be accepted: the avail-ring
+                    // used_event slot is never initialized, so the device
+                    // would read a garbage value and could suppress
+                    // completion notifications indefinitely — the root
+                    // cause of the historical "random timeout" retries
+                    // (review DRIV-H2). INDIRECT/ANY_LAYOUT are unimplemented
+                    // as well.
+                    const F_EVENT_IDX: u32 = 1 << 29;
+                    const F_INDIRECT_DESC: u32 = 1 << 28;
+                    const F_ANY_LAYOUT: u32 = 1 << 27;
+                    let masked = features & !(F_EVENT_IDX | F_INDIRECT_DESC | F_ANY_LAYOUT);
+
+                    // Write driver features (word 0 + VIRTIO_F_VERSION_1 in
+                    // word 1, required for modern-only devices)
+                    virtio_dev.write_driver_features(masked);
 
                     // Set FEATURES_OK
                     virtio_dev.set_status(

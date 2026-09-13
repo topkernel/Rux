@@ -78,9 +78,11 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
     };
     let sin_family = u16::from_le_bytes([sockaddr[0], sockaddr[1]]);
     let sin_port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
+    let sin_addr = u32::from_be_bytes([sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]]);
 
-    // Permission check: privileged ports (< 1024) require CAP_NET_BIND_SERVICE
-    if sin_port < 1024 && !crate::security::capable(crate::security::CAP_NET_BIND_SERVICE) {
+    // Permission check: privileged ports (< 1024) require CAP_NET_BIND_SERVICE.
+    // Port 0 means "assign an ephemeral port" and must NOT be rejected.
+    if sin_port != 0 && sin_port < 1024 && !crate::security::capable(crate::security::CAP_NET_BIND_SERVICE) {
         return -(errno::EACCES as i64);
     }
 
@@ -94,7 +96,7 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
     // when the caller created a UDP socket (or vice-versa), because the TCP
     // and UDP tables use independent fd spaces.
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
-        match socket.bind(0, sin_port) {
+        match socket.bind(sin_addr, sin_port) {
             Ok(()) => 0,
             Err(e) => e as i64,
         }
@@ -112,13 +114,20 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_listen(args: SyscallArgs) -> i64 {
-    let fd = args[0] as i32;
+    let fd = args[0] as usize;
     let backlog = args[1] as i32;
 
-    use crate::net::tcp;
-
-    if let Some(_socket) = tcp::tcp_socket_get(fd) {
-        tcp::tcp_listen(fd, backlog as u32) as i64
+    // Resolve through the per-process fd table (review NET-C3): the old
+    // code indexed the global TCP table with the process fd, so listen()
+    // hit EBADF (or another process's socket) for every real socket.
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
+        if socket.sock_type != crate::net::socket::SocketType::Tcp {
+            return -(errno::EOPNOTSUPP as i64);
+        }
+        match socket.listen(backlog) {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        }
     } else {
         -(errno::EBADF as i64)
     }
@@ -134,15 +143,33 @@ pub fn sys_listen(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns new socket file descriptor on success, negative error code on failure
 pub fn sys_accept(args: SyscallArgs) -> i64 {
-    let fd = args[0] as i32;
+    let fd = args[0] as usize;
     let _addr_ptr = args[1] as *mut u8;
     let _addrlen_ptr = args[2] as *mut u32;
 
-    use crate::net::tcp;
-
-    match tcp::tcp_socket_get(fd) {
-        Some(_socket) => tcp::tcp_accept(fd) as i64,
-        None => -(errno::EBADF as i64)
+    // Resolve through the per-process fd table (review NET-C3). The accept
+    // flow itself is reworked with NET-C4.
+    //
+    // Loopback delivery is backlog-based: drain once from syscall context
+    // so each accept() attempt advances the handshake one step even if the
+    // NetRx softirq has not fired yet (safe now that loopback TX only
+    // queues — no RX re-entry).
+    crate::net::ethernet::ethernet_poll();
+    match crate::net::socket::tcp_proto_fd(fd) {
+        Some(tcp_fd) => {
+            let new_fd = crate::net::tcp::tcp_accept(tcp_fd);
+            if new_fd < 0 {
+                new_fd as i64
+            } else {
+                // tcp_accept returned a protocol-table index; wrap it into a
+                // proper process fd (Socket + File) so the caller can use it.
+                match crate::net::socket::socket_create_accepted(new_fd) {
+                    Ok(fd) => fd as i64,
+                    Err(e) => e as i64,
+                }
+            }
+        }
+        None => -(errno::EBADF as i64),
     }
 }
 
@@ -184,11 +211,15 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
         return -(errno::EAFNOSUPPORT as i64);
     }
 
-    use crate::net::tcp;
-
-    match tcp::tcp_socket_get(fd) {
-        Some(_socket) => tcp::tcp_connect(fd, sin_addr, sin_port) as i64,
-        None => -(errno::EBADF as i64)
+    // Resolve through the per-process fd table — never index the global
+    // protocol tables with a process fd (review NET-C3).
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
+        match socket.connect(sin_addr, sin_port) {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        }
+    } else {
+        -(errno::EBADF as i64)
     }
 }
 
@@ -231,28 +262,13 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Get socket
-    let socket = match crate::net::socket::get_socket(fd) {
+    // Get socket through the per-process fd table (review NET-C3). The old
+    // code first indexed the GLOBAL socket table with the process fd and
+    // then "fell back" to indexing the protocol tables with it — both wrong
+    // namespaces.
+    let socket = match crate::net::socket::get_socket_from_fd(fd) {
         Some(s) => s,
-        None => {
-            // Try to find from old socket table
-            // Try TCP first
-            if let Some(tcp_sock) = crate::net::tcp::tcp_socket_get(fd as i32) {
-                // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
-                let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
-                return match tcp_sock.send(data) {
-                    Ok(n) => n as i64,
-                    Err(()) => -(errno::EIO as i64),
-                };
-            }
-            // Then try UDP
-            if let Some(_) = crate::net::udp::udp_socket_get(fd as i32) {
-                // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
-                let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
-                return crate::net::udp::udp_send(fd as i32, data) as i64;
-            }
-            return -(errno::EBADF as i64);
-        }
+        None => return -(errno::EBADF as i64),
     };
 
     // Read data
@@ -308,7 +324,7 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     }
 
     // Try new socket layer first
-    if let Some(socket) = crate::net::socket::get_socket(fd) {
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
         let local_addr = *socket.local_addr.lock();
         let local_port = *socket.local_port.lock();
         // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; writing sockaddr_in layout.
@@ -363,7 +379,7 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
     }
 
     // Try new socket layer
-    if let Some(socket) = crate::net::socket::get_socket(fd) {
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
         let state = *socket.state.lock();
         if state == crate::net::socket::SocketState::Connected {
             let peer_addr = *socket.remote_addr.lock();
@@ -381,10 +397,6 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
         return -(errno::ENOTCONN as i64);
     }
 
-    // Old layer fallback
-    if let Some(_) = crate::net::tcp::tcp_socket_get(fd as i32) {
-        return -(errno::ENOTCONN as i64);
-    }
     -(errno::ENOTSOCK as i64)
 }
 
@@ -449,9 +461,7 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
     }
 
     // Validate fd is a socket
-    let is_socket = crate::net::socket::get_socket(fd).is_some()
-        || crate::net::tcp::tcp_socket_get(fd as i32).is_some()
-        || crate::net::udp::udp_socket_get(fd as i32).is_some();
+    let is_socket = crate::net::socket::get_socket_from_fd(fd).is_some();
     if !is_socket {
         return -(errno::ENOTSOCK as i64);
     }
@@ -539,11 +549,8 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     }
 
     // Validate fd is a socket
-    let sock = crate::net::socket::get_socket(fd);
-    let is_socket = sock.is_some()
-        || crate::net::tcp::tcp_socket_get(fd as i32).is_some()
-        || crate::net::udp::udp_socket_get(fd as i32).is_some();
-    if !is_socket {
+    let sock = crate::net::socket::get_socket_from_fd(fd);
+    if sock.is_none() {
         return -(errno::ENOTSOCK as i64);
     }
 
@@ -554,15 +561,9 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
             SOL_SOCKET => match optname {
                 SO_TYPE => {
                     // Return SOCK_STREAM or SOCK_DGRAM
-                    let val = if let Some(ref s) = sock {
-                        match s.sock_type {
-                            crate::net::socket::SocketType::Tcp => 1u32,  // SOCK_STREAM
-                            crate::net::socket::SocketType::Udp => 2u32,  // SOCK_DGRAM
-                        }
-                    } else if crate::net::tcp::tcp_socket_get(fd as i32).is_some() {
-                        1u32
-                    } else {
-                        2u32
+                    let val = match sock.as_ref().unwrap().sock_type {
+                        crate::net::socket::SocketType::Tcp => 1u32,  // SOCK_STREAM
+                        crate::net::socket::SocketType::Udp => 2u32,  // SOCK_DGRAM
                     };
                     let write_len = core::cmp::min(optlen, 4);
                     core::ptr::write_bytes(optval, 0, optlen);
@@ -715,23 +716,20 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    if let Some(socket) = crate::net::socket::get_socket(fd) {
-        if how == 0 || how == 2 {
-            // SHUT_RD or SHUT_RDWR: mark receive side
-            *socket.state.lock() = crate::net::socket::SocketState::Closing;
-        }
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
         if how == 1 || how == 2 {
-            // SHUT_WR or SHUT_RDWR: mark send side
+            // SHUT_WR or SHUT_RDWR: send FIN for TCP (review NET-M12 — the
+            // old code only flipped a state bit and never emitted a FIN).
+            if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+                if let Some(tcp_sock) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+                    let _ = tcp_sock.close();
+                }
+            }
             *socket.state.lock() = crate::net::socket::SocketState::Closing;
         }
+        // SHUT_RD alone must NOT block the send side (review NEW): setting
+        // Closing for how==0 broke Socket::send with EPIPE.
         return 0;
-    }
-
-    // Old layer fallback
-    if crate::net::tcp::tcp_socket_get(fd as i32).is_some()
-        || crate::net::udp::udp_socket_get(fd as i32).is_some()
-    {
-        return 0; // Accept and ignore
     }
 
     -(errno::ENOTSOCK as i64)
@@ -789,7 +787,7 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     }
 
     // Get socket and send
-    if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
         match socket.send(&buf, None) {
             Ok(n) => n as i64,
             Err(e) => e as i64,
@@ -844,7 +842,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     let mut buf = alloc::vec![0u8; total_buf_len];
 
     // Get socket and receive
-    if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
         match socket.recv(&mut buf) {
             Ok((bytes_read, _src_addr)) => {
                 // Scatter data back to iovecs
@@ -916,7 +914,7 @@ pub fn sys_socketpair(args: SyscallArgs) -> i64 {
 /// - args[3]: flags - flags
 ///
 /// struct mmsghdr { struct msghdr msg; unsigned int len; }
-/// struct msghdr is 56 bytes on 64-bit; mmsghdr = 60 bytes
+/// struct msghdr is 56 bytes on 64-bit; mmsghdr = 64 bytes (4-byte msg_len + 4 pad)
 pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msgvec = args[1] as *const u8;
@@ -930,12 +928,12 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
         let mut total_sent = 0u32;
         for i in 0..vlen as usize {
             // mmsghdr: msghdr (56 bytes) + msg_len (4 bytes)
             // SAFETY: msgvec validated with access_ok; mm offset within validated range.
-            let mm = unsafe { msgvec.add(i * 60) };
+            let mm = unsafe { msgvec.add(i * 64) };
             // msghdr layout: msg_name(8), msg_namelen(4), msg_iov(8), msg_iovlen(8),
             //                 msg_control(8), msg_controllen(8), msg_flags(4) = 48 bytes
             // SAFETY: mm validated; reading iovec fields at known offsets.
@@ -996,11 +994,11 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    if let Some(socket) = crate::net::socket::get_socket(fd as usize) {
+    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
         let mut total_recv = 0u32;
         for i in 0..vlen as usize {
             // SAFETY: msgvec validated with access_ok; mm offset within validated range.
-            let mm = unsafe { msgvec.add(i * 60) };
+            let mm = unsafe { msgvec.add(i * 64) };
             // SAFETY: mm validated; reading iovec fields at known offsets.
             let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
             let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
@@ -1117,29 +1115,14 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // Get socket
-    let socket = match crate::net::socket::get_socket(fd) {
+    // Get socket through the per-process fd table (review NET-C3)
+    let socket = match crate::net::socket::get_socket_from_fd(fd) {
         Some(s) => s,
-        None => {
-            // Try to find from old socket table
-            // Try TCP first
-            if let Some(tcp_sock) = crate::net::tcp::tcp_socket_get(fd as i32) {
-                // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
-                let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
-                return match tcp_sock.recv(buf, len) {
-                    Ok(n) => n as i64,
-                    Err(_) => -(errno::EAGAIN as i64),
-                };
-            }
-            // Then try UDP
-            if let Some(_) = crate::net::udp::udp_socket_get(fd as i32) {
-                // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
-                let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
-                return crate::net::udp::udp_recv(fd as i32, buf, len) as i64;
-            }
-            return -(errno::EBADF as i64);
-        }
+        None => return -(errno::EBADF as i64),
     };
+
+    // Advance loopback delivery before reading (see sys_accept note).
+    crate::net::ethernet::ethernet_poll();
 
     // Receive data
     // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.

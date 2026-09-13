@@ -802,7 +802,7 @@ impl VirtIOBlkDevice {
             VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT, resp_desc_idx);
         queue.set_desc(resp_desc_idx, resp_phys,
             core::mem::size_of::<VirtIOBlkResp>() as u32,
-            0, 0);
+            VIRTQ_DESC_F_WRITE, 0); // Device writes the status byte (DRIV-H4)
 
         let prev = get_mmio_expected_used_idx();
         queue.submit(header_desc_idx);
@@ -1190,7 +1190,19 @@ pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::Irq
     // SAFETY: VIRTIO_PCI_BLK is initialized before IRQ registration;
     // waking wait queue is safe from IRQ context.
     unsafe {
-        if let Some(_pci_device) = VIRTIO_PCI_BLK.as_ref() {
+        if let Some(pci_device) = VIRTIO_PCI_BLK.as_ref() {
+            // Read ISR status FIRST: per the virtio 1.1 spec the read drops
+            // the device's interrupt line (device-side EOI for level-
+            // triggered INTx). Skipping it caused immediate re-entry
+            // storms once the IRQ line actually fires (review DRIV-H3).
+            // Bit 0 = queue used, bit 1 = configuration change.
+            if pci_device.isr_cfg_bar != 0 {
+                let isr = core::ptr::read_volatile(pci_device.isr_cfg_bar as *const u32);
+                if isr == 0 {
+                    // Not ours — spurious or another device on the shared line.
+                    return crate::interrupt::IrqReturn::None;
+                }
+            }
             VIRTIO_PCI_BLK_WAIT_QUEUE.wake_up_all();
         }
     }

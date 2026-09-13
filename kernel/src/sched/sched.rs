@@ -721,7 +721,6 @@ unsafe fn __schedule() {
                 grq_guard.dl_rq.dequeue(prev);
             }
         }
-        (*prev).set_on_grq(false);
     }
 
     // Re-enqueue prev if still runnable and not idle
@@ -799,7 +798,6 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
     // 2. Deadline — pick earliest-deadline task that can run on this CPU
     if !grq.dl_rq.is_empty() {
         if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id) {
-            (*task).set_on_grq(false);
             return task;
         }
     }
@@ -807,7 +805,6 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
     // 3. RT — pick highest-priority task that can run on this CPU
     if !grq.rt_rq.is_empty() {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id) {
-            (*task).set_on_grq(false);
             return task;
         }
     }
@@ -815,7 +812,6 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
     // 4. CFS — pick min-vruntime task that can run on this CPU
     if !grq.cfs_rq.is_empty() {
         if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id) {
-            (*task).set_on_grq(false);
             grq.cfs_rq.set_curr(task);
             let se = (*task).sched_entity();
             let slice_ns = grq.cfs_rq.sched_slice(se);
@@ -840,12 +836,6 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
     // Set task state to RUNNING
     (*task).set_state(TaskState::new(TaskState::RUNNING));
 
-    // on_grq guard (under the GRQ lock): a second enqueue for a task that
-    // is already queued must not bump nr_running twice (review P12).
-    if (*task).is_on_grq() {
-        return;
-    }
-
     match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
             grq.rt_rq.enqueue(task, false);
@@ -867,7 +857,6 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
         }
     }
 
-    (*task).set_on_grq(true);
     grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
@@ -980,14 +969,6 @@ pub fn dequeue_task(task: &Task) {
 
     let mut grq_guard = grq().lock_irqsave();
 
-    // on_grq guard (P08): dequeue of a task that is not queued (e.g. the
-    // currently-running task, already dequeued at pick time) must be a
-    // no-op — it used to decrement nr_running unconditionally, underflowing
-    // the RT runqueue's internal counter bookkeeping.
-    if !task.is_on_grq() {
-        return;
-    }
-
     let actually_dequeued = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
             grq_guard.rt_rq.dequeue(task_ptr);
@@ -1003,7 +984,6 @@ pub fn dequeue_task(task: &Task) {
     };
 
     if actually_dequeued {
-        task.set_on_grq(false);
         grq_guard.nr_running.fetch_update(
             core::sync::atomic::Ordering::SeqCst,
             core::sync::atomic::Ordering::SeqCst,
@@ -1016,8 +996,27 @@ pub fn dequeue_task(task: &Task) {
 /// while it was transiently marked sleeping — the "prepare-to-wait recheck
 /// decided not to sleep" path calls this before continuing to run, so no
 /// other CPU can pick a task that is already executing (review NEW-C2).
+///
+/// CFS-only and idempotent: cfs_rq.dequeue() checks the entity's own on_rq
+/// flag and is a safe no-op for a task that is not linked. RT/DL are
+/// excluded because their RR rotation legitimately keeps the current task
+/// linked, so "on queue" cannot be distinguished from "running" there.
 pub fn dequeue_if_enqueued(task: &Task) {
-    dequeue_task(task);
+    let task_ptr = task as *const Task as *mut Task;
+    let mut grq_guard = grq().lock_irqsave();
+    let dequeued = match task.policy() {
+        SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+            grq_guard.cfs_rq.dequeue(task_ptr)
+        }
+        _ => false,
+    };
+    if dequeued {
+        grq_guard.nr_running.fetch_update(
+            core::sync::atomic::Ordering::SeqCst,
+            core::sync::atomic::Ordering::SeqCst,
+            |v| v.checked_sub(1),
+        );
+    }
 }
 
 // ==================== Scheduler Tick ====================
@@ -1095,10 +1094,7 @@ pub fn scheduler_tick() {
                     // place a sleeping task on the runqueue.
                     unsafe { (*current).set_state(TaskState::new(TaskState::RUNNING)); }
                     let mut grq_guard = grq().lock_irqsave();
-                    if !(*current).is_on_grq() {
-                        grq_guard.rt_rq.enqueue(current, false);
-                        (*current).set_on_grq(true);
-                    }
+                    grq_guard.rt_rq.enqueue(current, false);
                     set_need_resched(); // Set before dropping lock to prevent lost wake-up
                     drop(grq_guard);
                 }

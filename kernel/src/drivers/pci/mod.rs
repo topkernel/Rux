@@ -400,9 +400,11 @@ pub mod vendor {
 /// VirtIO device IDs (PCI)
 pub mod virtio_device {
     pub const VIRTIO_NET: u16 = 0x1000;
+    pub const VIRTIO_NET_MODERN: u16 = 0x1041;
     pub const VIRTIO_BLK: u16 = 0x1001;
     pub const VIRTIO_BLK_MODERN: u16 = 0x1042;
     pub const VIRTIO_GPU: u16 = 0x1050;
+    pub const VIRTIO_INPUT: u16 = 0x1052;
 }
 
 /// RISC-V PCIe ECAM base address
@@ -421,29 +423,44 @@ pub fn enumerate_virtio_devices() -> usize {
     {
         let mut device_count = 0;
 
-        // RISC-V: Scan PCIe ECAM space
-        const MAX_DEVICES: u8 = 32;
+        // RISC-V: Scan PCIe ECAM space. ECAM layout is
+        //   addr = ECAM | bus << 20 | dev << 15 | fn << 12
+        // so the stride must be 0x8000 (per device) and all 8 functions
+        // of each slot must be probed — the old 0x1000 stride scanned the
+        // FUNCTION bits as device numbers, hiding every device at slot >= 4
+        // and reporting slots 8x too large (review DRIV NEW-1).
+        const MAX_SLOTS: u8 = 32;
+        const FUNCTIONS_PER_SLOT: u64 = 8;
 
-        for device in 0..MAX_DEVICES {
-            let ecam_addr = RISCV_PCIE_ECAM_BASE + (device as u64 * PCIE_ECAM_SIZE);
-            let config = PCIConfig::new(ecam_addr);
+        for slot in 0..MAX_SLOTS {
+            for func in 0..FUNCTIONS_PER_SLOT {
+                let ecam_addr = RISCV_PCIE_ECAM_BASE
+                    + (slot as u64 * 0x8000)
+                    + (func * PCIE_ECAM_SIZE);
+                let config = PCIConfig::new(ecam_addr);
 
-            let vendor_id = config.vendor_id();
-            let device_id = config.device_id();
+                let vendor_id = config.vendor_id();
+                let device_id = config.device_id();
 
-            // Check if device exists
-            if vendor_id == 0xFFFF {
-                continue;
-            }
+                // Check if device exists
+                if vendor_id == 0xFFFF {
+                    continue;
+                }
 
-            // Check if VirtIO device (Red Hat)
-            if vendor_id == vendor::RED_HAT {
-                // Identify VirtIO device type
-                match device_id {
-                    virtio_device::VIRTIO_BLK | virtio_device::VIRTIO_NET => {
-                        device_count += 1;
+                // Check if VirtIO device (Red Hat)
+                if vendor_id == vendor::RED_HAT {
+                    // Identify VirtIO device type
+                    match device_id {
+                        virtio_device::VIRTIO_BLK
+                        | virtio_device::VIRTIO_BLK_MODERN
+                        | virtio_device::VIRTIO_NET
+                        | virtio_device::VIRTIO_NET_MODERN
+                        | virtio_device::VIRTIO_GPU
+                        | virtio_device::VIRTIO_INPUT => {
+                            device_count += 1;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }

@@ -180,7 +180,11 @@ impl VirtIOPCI {
         let pci_config = PCIConfig::new(pci_base);
 
         // Calculate PCI slot number (for IRQ calculation)
-        let pci_slot = ((pci_base - crate::drivers::pci::RISCV_PCIE_ECAM_BASE) / crate::drivers::pci::PCIE_ECAM_SIZE) as u8;
+        // True PCI slot number: ECAM addr bit 15..19. Dividing by the ECAM
+        // function size (0x1000) inflated the slot 8x and fed a wrong IRQ
+        // swizzle (review DRIV NEW-1).
+        let pci_slot =
+            (((pci_base - crate::drivers::pci::RISCV_PCIE_ECAM_BASE) >> 15) & 0x1F) as u8;
 
         // Verify vendor ID and device ID
         let vendor_id = pci_config.vendor_id();
@@ -203,6 +207,11 @@ impl VirtIOPCI {
             }
             virtio_device::VIRTIO_GPU => {
                 // VirtIO GPU device
+            }
+            virtio_device::VIRTIO_NET_MODERN | virtio_device::VIRTIO_INPUT => {
+                // Modern net / input devices (accepted alongside their
+                // transitional IDs; 0x1052 used to be rejected outright,
+                // making /dev/input unproducible — review DRIV NEW-2).
             }
             _ => {
                 if device_id != 0 {
@@ -447,6 +456,11 @@ impl VirtIOPCI {
             // Then write to driver_feature
             let features_ptr = (self.common_cfg_bar + 0x0C) as *mut u32;
             core::ptr::write_volatile(features_ptr, features);
+
+            // Word 1: acknowledge VIRTIO_F_VERSION_1 (bit 32). Modern-only
+            // devices (disable-legacy=on) reject negotiation without it.
+            core::ptr::write_volatile(select_ptr, 1u32);
+            core::ptr::write_volatile(features_ptr, 1u32);
         }
     }
 
@@ -561,8 +575,10 @@ impl VirtIOPCI {
         // Read INT_PIN to determine IRQ offset
         let int_pin = self.pci_config.read_config_byte(0x3D);
 
-        // PCIe IRQ calculation formula (QEMU RISC-V virt platform)
-        let irq = 32 + ((int_pin as u32 + self.pci_slot as u32) % 4);
+        // PCIe IRQ swizzle. INT_PIN is 1-based (INTA=1): slot n, pin p →
+        // IRQ = 32 + ((p - 1 + n) % 4). The old formula forgot the -1, so
+        // the line was off by one for every device (review DRIV-H3).
+        let irq = 32 + (((int_pin as u32).saturating_sub(1) + self.pci_slot as u32) % 4);
 
         // Register handler via IRQ framework (unmasks automatically)
         crate::interrupt::request_irq(
