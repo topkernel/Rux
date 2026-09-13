@@ -22,6 +22,12 @@ struct Iovec{
 /// (alloc failure would panic the kernel).
 pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
 
+/// Kernel staging chunk for read/write syscalls. Bounded so a huge user
+/// count can never ask the allocator for more than the kernel heap holds —
+/// MAX_RW_COUNT (2GB) still exceeded the 32MB heap and panicked the kernel
+/// on `read(fd, buf, 0x4000_0000)` (review SYSA-C1 fix in Wave 2R).
+pub const RW_CHUNK: usize = 64 * 1024;
+
 /// Clamp a user-supplied transfer length to MAX_RW_COUNT.
 #[inline]
 pub fn clamp_rw_count(count: usize) -> usize {
@@ -91,24 +97,46 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
     let ret = unsafe {
         match get_file_fd(fd) {
             Some(file) => {
-                // Use kernel buffer to avoid directly accessing user memory
-                let mut kernel_buf = alloc::vec![0u8; count];
-                let result = file.read(kernel_buf.as_mut_ptr(), count);
-                if result > 0 {
-                    // Copy data back to user space
+                // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
+                // a huge count can never OOM the kernel heap. A short chunk
+                // (EOF / pipe drained) ends the loop and returns what we
+                // have — pipe reads still return as soon as data exists
+                // (pipe capacity 16KB < RW_CHUNK).
+                let mut kernel_buf = alloc::vec![0u8; count.min(RW_CHUNK)];
+                let mut total: usize = 0;
+                let mut user_ptr = buf;
+                let mut remaining = count;
+                loop {
+                    let chunk = remaining.min(RW_CHUNK);
+                    if chunk == 0 {
+                        break;
+                    }
+                    let result = file.read(kernel_buf.as_mut_ptr(), chunk);
+                    if result < 0 {
+                        return if total > 0 { total as i64 } else { result as i32 as i64 };
+                    }
+                    if result == 0 {
+                        break;
+                    }
+                    let n = result as usize;
+                    // SAFETY: user_ptr stays within the access_ok-validated
+                    // [buf, buf+count) window; exception-table copy.
                     let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
-                        buf,
+                        user_ptr,
                         kernel_buf.as_ptr(),
-                        result as usize,
+                        n,
                     );
                     if uncopied > 0 {
-                        -errno::EFAULT as i64
-                    } else {
-                        result as i64
+                        return if total > 0 { total as i64 } else { -errno::EFAULT as i64 };
                     }
-                } else {
-                    result as i32 as i64
+                    total += n;
+                    remaining -= n;
+                    user_ptr = user_ptr.add(n);
+                    if n < chunk {
+                        break; // short read: EOF or nothing more available now
+                    }
                 }
+                total as i64
             }
             None => -errno::EBADF as i64
         }
@@ -154,23 +182,52 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                 let saved_pos = file.get_pos();
                 file.set_pos(offset as u64);
 
-                let mut kernel_buf = alloc::vec![0u8; count];
-                let result = file.read(kernel_buf.as_mut_ptr(), count);
+                // Chunked (SYSA-C1): bounded staging buffer, sequential
+                // position advance; short read ends the loop.
+                let mut kernel_buf = alloc::vec![0u8; count.min(RW_CHUNK)];
+                let mut total: usize = 0;
+                let mut err: i32 = 0;
+                let mut user_ptr = buf;
+                let mut remaining = count;
+                loop {
+                    let chunk = remaining.min(RW_CHUNK);
+                    if chunk == 0 {
+                        break;
+                    }
+                    let result = file.read(kernel_buf.as_mut_ptr(), chunk);
+                    if result <= 0 {
+                        if result < 0 && total == 0 {
+                            err = result as i32;
+                        }
+                        break;
+                    }
+                    let n = result as usize;
+                    // SAFETY: within the validated [buf, buf+count) window.
+                    let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                        user_ptr,
+                        kernel_buf.as_ptr(),
+                        n,
+                    );
+                    if uncopied > 0 {
+                        if total == 0 {
+                            err = -errno::EFAULT as i32;
+                        }
+                        break;
+                    }
+                    total += n;
+                    remaining -= n;
+                    user_ptr = user_ptr.add(n);
+                    if n < chunk {
+                        break;
+                    }
+                }
 
                 file.set_pos(saved_pos);
 
-                if result > 0 {
-                    let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
-                        buf,
-                        kernel_buf.as_ptr(),
-                        result as usize,
-                    );
-                    if uncopied > 0 {
-                        return -errno::EFAULT as i64;
-                    }
-                    result as i64
+                if total > 0 {
+                    total as i64
                 } else {
-                    result as i32 as i64
+                    err as i64
                 }
             }
             None => -errno::EBADF as i64
@@ -258,21 +315,50 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 }
 
                 // Regular file or redirected output
-                // Copy user data to kernel buffer first
-                let mut kernel_buf = alloc::vec![0u8; count];
-                let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
-                    kernel_buf.as_mut_ptr(),
-                    buf,
-                    count,
-                );
-                if uncopied > 0 {
-                    return -errno::EFAULT as i64;
+                // Chunked write (SYSA-C1): bounded staging buffer so a huge
+                // count cannot OOM the kernel heap; a partial chunk write
+                // ends the loop and returns what was accepted (POSIX
+                // partial-write semantics).
+                let mut kernel_buf = alloc::vec![0u8; count.min(RW_CHUNK)];
+                let mut total: usize = 0;
+                let mut user_ptr = buf;
+                let mut remaining = count;
+                let mut first_err: i32 = 0;
+                loop {
+                    let chunk = remaining.min(RW_CHUNK);
+                    if chunk == 0 {
+                        break;
+                    }
+                    let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                        kernel_buf.as_mut_ptr(),
+                        user_ptr,
+                        chunk,
+                    );
+                    if uncopied > 0 {
+                        if total == 0 {
+                            return -errno::EFAULT as i64;
+                        }
+                        break;
+                    }
+                    let result = file.write(kernel_buf.as_ptr(), chunk);
+                    if result <= 0 {
+                        if result < 0 && total == 0 {
+                            first_err = result as i32;
+                        }
+                        break;
+                    }
+                    let n = result as usize;
+                    total += n;
+                    remaining -= n;
+                    user_ptr = user_ptr.add(n);
+                    if n < chunk {
+                        break; // short write: destination full / non-blocking
+                    }
                 }
-                let result = file.write(kernel_buf.as_ptr(), count);
-                if result < 0 {
-                    result as i32 as i64
+                if total > 0 {
+                    total as i64
                 } else {
-                    result as i64
+                    first_err as i64
                 }
             }
             None => -errno::EBADF as i64,
@@ -783,24 +869,51 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
                 let saved_pos = file.get_pos();
                 file.set_pos(offset as u64);
 
-                let mut kernel_buf = alloc::vec![0u8; count];
-                let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
-                    kernel_buf.as_mut_ptr(),
-                    buf,
-                    count,
-                );
-                if uncopied > 0 {
-                    file.set_pos(saved_pos);
-                    return -errno::EFAULT as i64;
+                // Chunked (SYSA-C1): bounded staging, sequential position
+                // advance; partial chunk write ends the loop.
+                let mut kernel_buf = alloc::vec![0u8; count.min(RW_CHUNK)];
+                let mut total: usize = 0;
+                let mut err: i32 = 0;
+                let mut user_ptr = buf;
+                let mut remaining = count;
+                loop {
+                    let chunk = remaining.min(RW_CHUNK);
+                    if chunk == 0 {
+                        break;
+                    }
+                    let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                        kernel_buf.as_mut_ptr(),
+                        user_ptr,
+                        chunk,
+                    );
+                    if uncopied > 0 {
+                        if total == 0 {
+                            err = -errno::EFAULT as i32;
+                        }
+                        break;
+                    }
+                    let result = file.write(kernel_buf.as_ptr(), chunk);
+                    if result <= 0 {
+                        if result < 0 && total == 0 {
+                            err = result as i32;
+                        }
+                        break;
+                    }
+                    let n = result as usize;
+                    total += n;
+                    remaining -= n;
+                    user_ptr = user_ptr.add(n);
+                    if n < chunk {
+                        break;
+                    }
                 }
-                let result = file.write(kernel_buf.as_ptr(), count);
 
                 file.set_pos(saved_pos);
 
-                if result < 0 {
-                    result as i32 as i64
+                if total > 0 {
+                    total as i64
                 } else {
-                    result as i64
+                    err as i64
                 }
             }
             None => -errno::EBADF as i64

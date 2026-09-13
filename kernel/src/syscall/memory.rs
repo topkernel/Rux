@@ -150,7 +150,7 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     use crate::mm::pagemap::Perm;
     use crate::arch::riscv64::mm::{prot, map, mmap_error};
 
-    let addr = args[0] as usize;
+    let mut addr = args[0] as usize;
     let length = args[1] as usize;
     let prot_flags = args[2] as u32;
     let map_flags = args[3] as u32;
@@ -175,6 +175,24 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
+    // User-address-space limit. The user root page table shares the kernel
+    // PGD entries (copy_kernel_mappings), so a fixed mapping at or above
+    // USER_END would walk into the shared kernel L1/L0 tables and replace
+    // kernel PTEs with user-accessible ones — a direct privilege hole.
+    let user_end = crate::arch::riscv64::mm::user_addr::USER_END;
+    let out_of_user_range = addr
+        .checked_add(actual_length)
+        .map_or(true, |end| end > user_end);
+    if out_of_user_range {
+        if map_flags & map::MAP_FIXED != 0 {
+            return mmap_error::EINVAL;
+        }
+        if addr != 0 {
+            // Out-of-range hint: ignore it and let the kernel choose.
+            addr = 0;
+        }
+    }
+
     // Check if framebuffer device mapping (fd >= 1000 indicates device file)
     if fd >= 1000 {
         let result = sys_mmap_framebuffer(addr, actual_length, prot_flags, map_flags);
@@ -188,7 +206,9 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
             if let Some(ops) = file.get_ops() {
                 let io_uring_ops = core::ptr::addr_of!(crate::io_uring::IO_URING_OPS);
                 if core::ptr::eq(ops as *const _, io_uring_ops as *const _) {
-                    match crate::io_uring::io_uring_mmap_handler(fd, addr, actual_length, offset, prot_flags) {
+                    // Pass the already-verified file — re-fetching by fd
+                    // inside the handler would be a TOCTOU type confusion.
+                    match crate::io_uring::io_uring_mmap_handler(&file, addr, actual_length, offset, prot_flags) {
                         Ok(mapped) => return mapped as i64,
                         Err(e) => return -(e as i64),
                     }

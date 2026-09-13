@@ -76,8 +76,24 @@ impl ShmPages {
 
 impl Drop for ShmPages {
     fn drop(&mut self) {
+        // Drop the owner's per-page reference. Attachments hold their own
+        // reference per mapping (taken in sys_shmdt's attach loop), so a
+        // page still mapped by any process survives until its last unmap's
+        // put_page frees it (review 2R.6 — raw free_pages here used to
+        // hand buddy pages that were still mapped).
         for p in &self.pages {
-            free_pages(*p, 0);
+            let page = crate::mm::pfn_to_page_mut(
+                crate::mm::phys_to_pfn(*p),
+            );
+            let freed_by_us = if page.is_null() {
+                true
+            } else {
+                // SAFETY: descriptor exists for this in-RAM page.
+                unsafe { (*page).put_page() == 0 }
+            };
+            if freed_by_us {
+                free_pages(*p, 0);
+            }
         }
     }
 }
@@ -246,12 +262,21 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                     }
                 }
             }
-            let slots = SHM_IDS.slots.lock();
-            if let Some(ref entry) = slots[idx] {
+            let mut slots = SHM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx] {
+                // IPC_RMID removes the key immediately: later shmget(key)/
+                // shmat must fail with EINVAL/EIDRM even while existing
+                // attachments keep their mappings (IPC-H9).
+                entry.deleted = true;
                 if entry.inner.nattch.load(Ordering::Relaxed) > 0 {
                     entry.inner.marked_destroy.store(1, Ordering::Relaxed);
                     return 0;
                 }
+                // Free decision taken under the same lock sys_shmdt's attach
+                // path uses for its deleted check + nattch reservation:
+                // without this, a concurrent shmat in the gap between our
+                // check and free_slot() could attach to a segment we are
+                // about to free (review IPC-C4 residual).
             }
             drop(slots);
             let _ = SHM_IDS.remove(shmid);
@@ -573,6 +598,17 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
                             MmPhysAddr::new(phys as u64),
                             pte_flags,
                         );
+                        // The new PTE references the segment page: take a
+                        // per-attachment reference so shmdt/exit's put_page
+                        // cannot free a page the segment still owns
+                        // (review 2R.6). Segments free their pages only
+                        // when every attachment is gone.
+                        let page = crate::mm::pfn_to_page_mut(
+                            crate::mm::phys_to_pfn(phys),
+                        );
+                        if !page.is_null() {
+                            (*page).get_page();
+                        }
                     }
                 }
             } else {
@@ -666,7 +702,9 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
     // the window where nattch was temporarily too high (F12-25) and the
     // TOCTOU race between VMA unlock and IPC lock (F12-24).
     let mut should_free = false;
-    let idx = match SHM_IDS.find(shm_id) {
+    // RMID'd segments are marked deleted immediately; the last detach must
+    // still find them to decrement nattch and perform the deferred free.
+    let idx = match SHM_IDS.find_including_deleted(shm_id) {
         Some(i) => i,
         None => {
             // Segment already gone, just unmap
@@ -714,7 +752,9 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
 /// to prevent a race where another thread attaches between dropping the lock
 /// and calling remove/free_slot.
 pub fn shm_detach_vma(shmid: i32) {
-    let idx = match SHM_IDS.find(shmid) {
+    // find_including_deleted: the segment may already be RMID-marked; the
+    // last detach must still find it to run the deferred free.
+    let idx = match SHM_IDS.find_including_deleted(shmid) {
         Some(i) => i,
         None => return,
     };
@@ -740,7 +780,10 @@ pub fn shm_detach_vma(shmid: i32) {
 /// Attach a shared memory segment (called from fork).
 /// Increments nattch for the inherited attachment.
 pub fn shm_attach_vma(shmid: i32) {
-    let idx = match SHM_IDS.find(shmid) {
+    // find_including_deleted: a fork of a process holding an attachment to
+    // an RMID-marked segment must still bump nattch (the child's later
+    // detach will decrement it).
+    let idx = match SHM_IDS.find_including_deleted(shmid) {
         Some(i) => i,
         None => return,
     };

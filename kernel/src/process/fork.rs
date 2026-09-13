@@ -407,6 +407,11 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             // (prepare-to-wait pattern, review PROC-P02 race 2).
             if (*task_ptr).vfork_parent_ptr().is_none() {
                 (*current).set_state(TaskState::new(TaskState::RUNNING));
+                // A wake_up() racing the window above may have enqueued us
+                // on the run queue while we are in fact still executing —
+                // take ourselves back off before continuing, or a second
+                // CPU could pick and run this very task (review NEW-C2).
+                crate::sched::dequeue_if_enqueued(&*current);
             } else {
                 crate::sched::schedule();
             }

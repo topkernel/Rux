@@ -385,6 +385,13 @@ pub struct Task {
     /// CPU affinity mask — bit i set = CPU i allowed
     cpus_allowed: core::sync::atomic::AtomicU32,
 
+    /// On the global run queue. Maintained under the GRQ lock by
+    /// sched::enqueue_task_locked / dequeue_task / dequeue_if_enqueued.
+    /// Lets a task that transiently marked itself sleeping and was racingly
+    /// enqueued by wake_up() take itself back off the queue when its
+    /// prepare-to-wait recheck decides not to sleep (review NEW-C2).
+    on_grq: core::sync::atomic::AtomicBool,
+
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
     ti_a0: core::sync::atomic::AtomicU64,
     ti_a1: core::sync::atomic::AtomicU64,
@@ -656,6 +663,7 @@ impl Task {
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
             cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
+            on_grq: core::sync::atomic::AtomicBool::new(false),
             ti_a0: core::sync::atomic::AtomicU64::new(0),
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
@@ -1341,6 +1349,18 @@ impl Task {
     #[inline]
     pub fn pid(&self) -> Pid {
         self.pid
+    }
+
+    /// Whether the task is currently linked on the global run queue
+    /// (maintained under the GRQ lock by the scheduler).
+    #[inline]
+    pub fn is_on_grq(&self) -> bool {
+        self.on_grq.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_on_grq(&self, on: bool) {
+        self.on_grq.store(on, core::sync::atomic::Ordering::Release);
     }
 
     /// Preemptive scheduling support

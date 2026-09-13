@@ -776,16 +776,18 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
 
         // If a handler is already active (sigframe set up), don't deliver
         // more signals — they would overwrite the current handler's frame.
-        // Stale-frame detection: if the user sp has moved OUT of the frame
-        // built at sigframe_addr, the handler longjmp'd away (POSIX allows
-        // this) — the frame is dead and must not block delivery forever.
+        // Stale-frame detection: the signal frame sits at the TOP of the
+        // region the handler runs in (stack grows down), so while the
+        // handler executes sp <= frame_addr. A longjmp/siglongjmp out of
+        // the handler lands on an OLDER frame, i.e. ABOVE our frame — only
+        // then is the frame abandoned (review 2R.8: the old condition
+        // required sp >= frame_addr, which is never true while the handler
+        // runs, so the gate never held and nested delivery clobbered the
+        // kernel's sigframe backup).
         if (*current).sigframe.is_some() {
-            const SIGNAL_FRAME_SIZE_CHECK: u64 = 4096;
             let frame_addr = (*current).sigframe_addr;
             let sp = (*regs).sp;
-            let frame_live = frame_addr != 0
-                && sp >= frame_addr
-                && sp < frame_addr.saturating_add(SIGNAL_FRAME_SIZE_CHECK);
+            let frame_live = frame_addr != 0 && sp <= frame_addr;
             if frame_live {
                 return false;
             }

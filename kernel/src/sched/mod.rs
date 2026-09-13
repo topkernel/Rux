@@ -35,6 +35,7 @@ pub use sched::{
     free_task_slot,
     enqueue_task,
     dequeue_task,
+    dequeue_if_enqueued,
     init,
     schedule,
     cpu_rq,

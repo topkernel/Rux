@@ -287,6 +287,9 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             // sched::current(); cred_mut() gives exclusive cred access.
             unsafe {
                 let cred = (*current).cred_mut();
+                // Snapshot BEFORE any mutation — the rollback path must
+                // restore the pre-exec credentials, not the elevated ones.
+                cred_saved = Some(cred.clone());
                 let old_euid = cred.euid;
                 let old_egid = cred.egid;
 
@@ -350,8 +353,6 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                 secure_exec = is_setuid || is_setgid
                     || cred.euid != cred.uid
                     || !cred.cap_effective.is_empty();
-                // Save the pre-exec credentials for rollback on failure.
-                cred_saved = Some(cred.clone());
             }
         }
     }
@@ -384,11 +385,11 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                 // SAFETY: current task pointer still valid on the error path.
                 unsafe { *(*current).cred_mut() = saved; }
             }
-            // A vfork parent (if any) is waiting for us to exec or exit; a
-            // failed exec still leaves us running, so wake it now — the
-            // vfork contract ends at exec attempt, success or not.
-            // SAFETY: current task pointer still valid.
-            unsafe { crate::process::task::vfork_wake_parent(current); }
+            // Do NOT wake a vfork parent here: exec failed means we still
+            // hold the CLONE_VM-shared address space (and typically the
+            // parent's stack). The parent may only run again once we exit;
+            // a well-formed vfork child _exit()s after a failed exec, which
+            // performs the wake (exit path).
             e as i64 as u64
         }
     }

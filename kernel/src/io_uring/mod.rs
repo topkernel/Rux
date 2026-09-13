@@ -303,7 +303,25 @@ fn alloc_ring_region(size: usize) -> Option<RingRegion> {
 
 fn free_ring_region(region: &RingRegion) {
     let order = region.npages.next_power_of_two().trailing_zeros() as usize;
-    free_pages(region.phys, order);
+    // Drop the owner's per-page reference. User mappings hold their own
+    // per-page references (taken at mmap); only free the block when every
+    // page has been unpinned — otherwise a stray mapping's munmap will
+    // release the last reference per page (review 2R.6).
+    let mut still_pinned = false;
+    let base_pfn = crate::mm::phys_to_pfn(region.phys);
+    for i in 0..region.npages {
+        let page = crate::mm::pfn_to_page_mut(base_pfn + i);
+        if !page.is_null() {
+            // SAFETY: page descriptor exists for this in-RAM page.
+            let r = unsafe { (*page).put_page() };
+            if r > 0 {
+                still_pinned = true;
+            }
+        }
+    }
+    if !still_pinned {
+        free_pages(region.phys, order);
+    }
 }
 
 // ==================== Ring Creation ====================
@@ -423,13 +441,34 @@ fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUri
 
 // ==================== FileOps ====================
 
+/// Serializes the private_data lifecycle: close() clears the pointer and
+/// drops the installation reference under this lock, while enter/register/
+/// mmap read the pointer and try_ref under the same lock. The lock lives
+/// outside the IoUring because close's final unref may free the ring.
+static LIFECYCLE_LOCK: Spinlock<()> = Spinlock::new(());
+
+/// Acquire a pinned reference to the ring of an ops-verified io_uring file.
+/// Returns None if the ring is absent or being torn down.
+fn pin_ring(file: &File) -> Option<RingRef> {
+    let _guard = LIFECYCLE_LOCK.lock();
+    let ptr = unsafe { *file.private_data.get() }? as *const IoUring;
+    // SAFETY: ptr was installed by Box::into_raw for an IO_URING_OPS file
+    // and cannot be freed while we hold the lifecycle lock + a reference.
+    let ring = unsafe { &*ptr };
+    if !ring.try_ref() {
+        return None;
+    }
+    Some(RingRef(ptr))
+}
+
 fn io_uring_close(file: &File) -> i32 {
+    let _guard = LIFECYCLE_LOCK.lock();
     if let Some(ptr) = unsafe { *file.private_data.get() } {
-        // Drop our installation reference; concurrent enter/mmap users hold
-        // their own references and the final unref frees the ring regions.
+        // Clear FIRST so no new reference can be acquired, then drop ours;
+        // the final unref (which may free the ring) runs under the lock.
         // SAFETY: ptr came from Box::into_raw at install time.
-        unsafe { (*(ptr as *const IoUring)).unref(); }
         unsafe { *file.private_data.get() = None; }
+        unsafe { (*(ptr as *const IoUring)).unref(); }
     }
     0
 }
@@ -455,21 +494,28 @@ pub static IO_URING_OPS: FileOps = FileOps {
 // ==================== mmap Handler ====================
 
 /// Handle mmap on an io_uring fd — maps ring buffers to userspace.
+/// `file` must already be ops-verified as an io_uring file by the caller
+/// (passing the fd here again would re-fetch it — a TOCTOU type confusion).
 pub fn io_uring_mmap_handler(
-    fd: i32, addr: usize, length: usize, offset: u64, prot: u32,
+    file: &File, addr: usize, length: usize, offset: u64, prot: u32,
 ) -> Result<usize, i32> {
     use crate::arch::riscv64::mm::{PageTableEntry, VirtAddr, PhysAddr, map_page};
     use crate::mm::vma::{Vma, VmaFlags};
     use crate::mm::page::VirtAddr as PageVirtAddr;
 
-    let file = unsafe { crate::fs::file::get_file_fd(fd as usize) }.ok_or(-9)?; // EBADF
     let ring_ptr = unsafe { *file.private_data.get() }.ok_or(-9)?;
-    // SAFETY: ring_ptr from private_data of an ops-verified io_uring file;
-    // try_ref pins it against a concurrent close() during the mapping.
-    let ring = unsafe { &*(ring_ptr as *const IoUring) };
-    if !ring.try_ref() {
-        return Err(-9); // EBADF: ring being torn down
-    }
+    // SAFETY: read + try_ref under the lifecycle lock races close()'s
+    // clear+unref safely; the mapping pins the ring until unmap.
+    let ring = {
+        let _guard = LIFECYCLE_LOCK.lock();
+        let ring = unsafe { &*(ring_ptr as *const IoUring) };
+        if !ring.try_ref() {
+            return Err(-9); // EBADF: ring being torn down
+        }
+        ring
+    };
+    // Hold the pin for the lifetime of this function; the user mapping
+    // itself takes its own per-page reference below.
     let _ring_guard = RingRef(ring_ptr as *const IoUring);
 
     let region = match offset & IORING_OFF_MMAP_MASK {
@@ -493,6 +539,18 @@ pub fn io_uring_mmap_handler(
         addr & !(PAGE_SIZE - 1)
     };
 
+    // Never allow a ring mapping at or above USER_END: map_page has no
+    // address guard and the user root table shares the kernel PGD entries,
+    // so this would overwrite kernel PTEs with user-writable ones
+    // (review NEW-C1 — full privilege escalation).
+    {
+        let user_end = crate::arch::riscv64::mm::user_addr::USER_END;
+        let end = vaddr.checked_add(region.size).ok_or(-22)?;
+        if end > user_end {
+            return Err(-22);
+        }
+    }
+
     unsafe {
         let mut pte_flags = PageTableEntry::V | PageTableEntry::U
             | PageTableEntry::A | PageTableEntry::D;
@@ -503,6 +561,16 @@ pub fn io_uring_mmap_handler(
             let va = vaddr + i * PAGE_SIZE;
             let pa = region.phys + i * PAGE_SIZE;
             map_page(user_ppn, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
+            // The user PTE now references the ring page: take a mapping
+            // reference so munmap's put_page cannot free a page the ring
+            // still owns (Wave-2 regression, review 2R.6). The final free
+            // happens in Drop only when every mapping is gone.
+            let page = crate::mm::pfn_to_page_mut(
+                crate::mm::phys_to_pfn(pa),
+            );
+            if !page.is_null() {
+                (*page).get_page();
+            }
         }
         core::arch::asm!("sfence.vma");
     }
@@ -931,12 +999,16 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
         Some(p) => p as *const IoUring,
         None => return -(9i64) as u64, // EBADF
     };
-    // SAFETY: ring_ptr validated above; try_ref pins it against a concurrent
-    // close for the duration of this syscall.
-    let ring = unsafe { &*ring_ptr };
-    if !ring.try_ref() {
-        return -(9i64) as u64; // EBADF: ring being torn down
-    }
+    // SAFETY: read + try_ref under the lifecycle lock races close()'s
+    // clear+unref safely (review IOU-H1).
+    let ring = {
+        let _guard = LIFECYCLE_LOCK.lock();
+        let ring = unsafe { &*ring_ptr };
+        if !ring.try_ref() {
+            return -(9i64) as u64; // EBADF: ring being torn down
+        }
+        ring
+    };
     let _ring_guard = RingRef(ring_ptr);
 
     // Submit SQEs
@@ -975,12 +1047,16 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
         Some(p) => p as *const IoUring,
         None => return -(9i64) as u64, // EBADF
     };
-    // SAFETY: ring_ptr validated above; try_ref pins it against a concurrent
-    // close for the duration of this syscall.
-    let ring = unsafe { &*ring_ptr };
-    if !ring.try_ref() {
-        return -(9i64) as u64; // EBADF: ring being torn down
-    }
+    // SAFETY: read + try_ref under the lifecycle lock races close()'s
+    // clear+unref safely (review IOU-H1).
+    let ring = {
+        let _guard = LIFECYCLE_LOCK.lock();
+        let ring = unsafe { &*ring_ptr };
+        if !ring.try_ref() {
+            return -(9i64) as u64; // EBADF: ring being torn down
+        }
+        ring
+    };
     let _ring_guard = RingRef(ring_ptr);
 
     match opcode {

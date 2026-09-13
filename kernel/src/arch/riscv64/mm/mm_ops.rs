@@ -259,6 +259,16 @@ impl MmStruct {
             if start.as_usize() < user_addr::USER_START {
                 return Err(MapError::Invalid);
             }
+            // Upper bound: a fixed mapping at or above USER_END would write
+            // leaf PTEs into the kernel-shared L1/L0 tables (user page
+            // tables copy the kernel PGD entries) — reject outright.
+            if start
+                .as_usize()
+                .checked_add(aligned_size)
+                .map_or(true, |e| e > user_addr::USER_END)
+            {
+                return Err(MapError::Invalid);
+            }
             if has_brk_conflict {
                 return Err(MapError::Invalid);
             }

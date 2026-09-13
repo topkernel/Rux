@@ -384,3 +384,63 @@ signal 交付链（H-05/06/07/15、M-01~04）、调度器（P06-P10）、syscall
 - 每个子系统审查均先消化 docs/development/code-review-2026-04-17.md 与 docs/archive/code-review-2026-04-15.md 的 FIXED/KNOWN 条目；KNOWN LIMITATION 仅在后果升级时重报（如 F10 系列被 NET-C1/C2 掩盖、F01-01 的 TLB 广播缺失、F12-34 的 fd≥512 误伤）。
 - 抽验：本轮 Top 发现经源码直接核验（exec.rs:177、io.rs:83、socket.rs:572、ethernet.rs:123 零调用、buffer.rs:149、generic_permission 仅 3 调用点、io_uring enter 无校验、hwprobe M 态 CSR、virtio MMIO 偏移、uaccess.S EXTABLE 标签位置——10/10 属实）；ARCH-C1/C2 另经 readelf/objdump 二进制实证。
 - 发现并撤销的误报 2 项（rt_sigaction 无 sa_restorer 符合 RISC-V ABI；ipc cuid 属主判定与 Linux 一致），已记录避免后续复审重蹈。
+
+---
+
+## 16. 第四轮复查（2026-09-13，Wave 1/2 修复后）
+
+> Method: 12 个并行深度复查（arch、mm、process/sched、syscall×2、VFS、ext4、net、drivers、ipc/sync/interrupt、io_uring/dfx/security、tests/build/CI/docs），逐文件逐行，交叉验证全部调用点；Critical 级发现经主审二次源码核验。
+> 结论：第三轮 ~440 项发现**几乎全部属实**（撤销 4 项误报，见 §16.4）；Wave 1/2 的 36 项修复中 28 项核验通过，**8 项失败或不完整**；另发现 **6 项新 Critical 与 ~25 项新 High**，其中多项为 Wave 2 修复自身引入的回归。
+
+### 16.1 Wave 1/2 修复核验结果（FIX-FAIL 清单）
+
+| ID | 位置 | 失败原因 | 后果 |
+|---|---|---|---|
+| **syscallb-C02** | syscall/process.rs:354 | `cred_saved = Some(cred.clone())` 位于 setuid/caps 变异**之后**，Err 路径恢复的是已提权副本（回滚=空操作） | **本地提权链仍然开放**（半合法 setuid ELF 加载失败 → 旧映像持 euid=0+FULL caps 继续运行） |
+| **SYSA-C1** | syscall/io.rs:95,157,262,786 | MAX_RW_COUNT=2GB 钳制仍远超 32MB 内核堆，`vec![0u8; 256MB]` 分配失败 → alloc_error_handler panic | read/write 大 count 一步击杀内核（Wave 1 目标未达成） |
+| **IOU-H1/H2** | io_uring/mod.rs:426-473 | close 先 unref 后清 private_data（无锁）；mmap 映射不持引用；Drop 无条件 free_pages | enter/mmap/close 并发 UAF；munmap+close 双重释放（`mmap;munmap;close` 三行 100% 复现 buddy 损坏） |
+| **2.25/IPC-H6** | signal.rs:786-791 | sp 离帧检测条件写反（要求 sp∈[frame,frame+4096)，而 handler 执行期 sp 恒 < frame_addr） | 门控形同虚设且引入新崩溃路径：嵌套信号覆盖唯一内核 sigframe 备份 → sigreturn 后 epc 跑飞 |
+| **IPC-H3(futex)** | sync/futex.rs:344-397 | 超时定时器装上了但醒后从不判 deadline，恒返回 0 | futex 超时语义破坏（条件不成立却"成功"） |
+| **IPC-C4** | ipc/sysv_shm.rs:249-259 | RMID 的 nattch==0 判定与释放不在同一临界区，shmat 可在间隙完成 | 物理 UAF 窗口未闭合（shmat 侧已修，RMID 侧没修） |
+| **2.27/VFS-H7** | fs/bio.rs:704-721 | Phase-1 命中不检查 BH_Uptodate：在飞条目被当命中 complete(0) | 把永久挂死变成静默脏读（读到未完成 I/O 的半新数据） |
+| **ARCH-H3** | mm_ops.rs:444 × sysv_shm.rs:570 / io_uring/mod.rs:505 | put_page 对"无记账映射"（shm 段页、io_uring ring 页）成灾：这两类映射从不 get_page/inc_mapcount，但 refcount=1 | **Wave 2 回归**：munmap/shmdt 即释放仍被段/ring 持有的页 → 跨进程 UAF + close 时双重释放 |
+
+其余 28 项（ARCH-C1/C2、EXT4-H2/C1、MM-C1/C2/C3、MM-H2 主路径、2.1-2.10 主体、2.17-2.24、2.28-2.31、1.6 十处、TEST-H6 等）核验通过；ARCH-C1 校验脚本真实有效但未接入 CI（零引用）。
+
+### 16.2 新发现 — Critical（6 项）
+
+1. **[NEW-C1] mmap/io_uring mmap 接受内核地址 → 覆写共享内核页表 = 完整提权**（arch/riscv64/mm/mm_ops.rs:254-265 + io_uring/mod.rs:490-508 + syscall/memory.rs）— MAP_FIXED 固定映射只查下界与对齐、不查 `end <= USER_END`；`map_page` 无任何地址守卫，对 vpn2≥256 直接写进 `copy_kernel_mappings` 复制的**共享内核 L1/L0 表**。用户 `mmap(内核文本地址, MAP_FIXED, PROT_RWX)` 即可把内核代码 PTE 替换为指向自己可控页 → S 态任意代码执行。io_uring mmap 分支同病（已亲手核验）。修复：mmap 全部路径强制用户区间 + map_page 拒绝 vpn2≥256。
+2. **[NEW-C2] wake_up 可把"已置睡眠态但仍在运行"的任务入队 → 同一任务双核并发**（process/task.rs:1309-1333）— vfork 父进程（fork.rs:402-412 复查后跳过 schedule 继续运行）与 do_wait 复查命中僵尸（exit.rs:361-381）都处在此窗口：set_state(睡)→子唤醒入队→父复查决定不睡→父在队列上被另一 CPU pick → 双核同跑一个 Task/内核栈，整机级结构毁坏。Wave 2 把 futex 窗口拉得更宽（drop 桶锁→add_timer（堆分配+两把锁）→schedule）。修复：wake 对 current 任务只置位不入队（Linux ttwu 语义），复查后不睡路径主动出队。
+3. **[NEW-C3] readlink("/proc/N/fd") 数组越界 panic**（syscall/file.rs:599-614）— `parts.len() < 3` 检查后直接索引 `parts[3]`；路径恰 3 段时越界（已亲手核验）。一条 `readlink("/proc/1/fd")` 击杀整机。
+4. **[NEW-C4] TCP 管理器/定时器从未初始化**（net/tcp.rs:1495/1507、tcp_timer.rs:136/143）— `init_tcp_manager`/`init_tcp_timer_manager`/`route_init` 全库零调用；首包即 `panic!("used before init")`，且 Timer softirq 每 tick 对未初始化 MaybeUninit `assume_init_mut()` = UB。Wave 3 第 0 步。
+5. **[NEW-C5] ipv4_send tot_len 多算 20 + TCP 校验和写回缺 to_be**（net/ipv4/mod.rs:202,213、tcp.rs:1917）— push(20) 后又加 IPHDR_LEN；checksum 按本机序写内存。即使修完 NET-C2/H1/H2，**所有出站 IP 包仍 100% 被对端丢弃**。
+6. **[NEW-C6] loopback 同步重入 &mut 别名 UB**（net/loopback.rs:43-57 + ethernet.rs:326-333）— 无 virtio 设备时 xmit 同步回调 ethernet_rcv，TCP 处理中发 ACK 再次进入 `get_tcp_manager()` 取第二个 `&mut` 并对迭代中的 Vec push/remove——验收目标"loopback echo"直接内存破坏。
+
+### 16.3 新发现 — High（25 项，摘要）
+
+- **arch**：ARCH-H1 恶化确认（FPU 不恢复 + FS 门控失效 → 跨任务浮点污染/信息泄漏）。
+- **mm**：compaction remap_page 按 vaddr 过宽重写无关进程 PTE（MM-C2 修复扩大打击面）；Zone::alloc_single_page 绕过 zone 锁（MM-H2 缺口）；mremap FIXED 重叠先毁源后拷贝（静默丢数据）；munmap/MAP_FIXED/mremap 三路跳过 swap entry（解除后可"复活"+slot 泄漏）；handle_cow_fault 无 PTE 锁（并发双重 put_page → UAF）。
+- **process/sched**：deferred-notify 强改运行中任务 ti_cpu（受害 CPU 的 cpu_id()/per-CPU 全错位）；vfork exec 失败也唤醒父（共享地址空间并发）；e_phentsize 未校验（execve 内核 OOB 读，P01 修复残留）；sched_setattr 零权限（无特权可上 RT 饿死整机）。
+- **syscall**：rt_sigaction 结构布局与 RISC-V ABI 错位（内核 24B vs ABI 32B，sa_mask 读到 restorer 指针——**所有 libc 信号语义建立错误布局上**）；setgid-root exec 清空 caps；非 root 可 capset I:=P 跨 exec 全量保留 caps；~40 处 H-13 残余裸解引用（比原估 15 处多）。
+- **VFS**：符号链接解析完全绕过新 DAC（follow_symlink 内部自行走路径，VFS-C1 核心缺口）；procfs/execve 捷径绕过 DAC（exec 连 x 位都不查——配合 setuid 即提权，P26 升级 H）；bio LRU 驱逐两阶段 TOCTOU UAF；bread_async 双检分支释放在飞 DMA 缓冲；子挂载根 dentry 无 parent（*at 全错路）。
+- **ext4**：add_entry 复用恰好填满的已删项时静默丢条目；mkdir/rename 过期父目录快照回写；日志违反 WAL 顺序（崩溃原子性为零）；日志环绕后恢复回放旧事务覆盖新数据。
+- **ipc**：semop 同一集合多操作非累计计算（semop(-1,-1) 只扣 1——比 IPC-C1 更本质）；sem/msg RMID 唤醒→重排→释放竞态（等待者挂死在已释放对象上）；futex_requeue 换桶后幽灵等待者。
+- **drivers**：PCI ECAM 扫描把功能位当设备号（slot 放大 8 倍，第 5 个设备起不可见 + IRQ 公式失效）；virtio-input 0x1052 被 VirtIOPCI::new 拒绝（探测必败，M2 修复前置）；net poll 把 DMA 物理地址当虚拟地址解引用（C2 修好即触发）。
+- **iouring**：mmap TOCTOU 二次取 fd；close/enter 并发 private_data 无锁竞态。
+- **tests/CI**：verify 同步门禁在 HEAD 上失败（17 处 drift，kani/miri CI 必红且证明的是漂移拷贝）。
+
+### 16.4 撤销的误报（4 项 + 2 项部分）
+
+- EXT4-M4（目录项 rec_len 越界 panic）：dir.rs from_bytes 已校验 rec_len∈[8,bs]，现行代码无越界。
+- EXT4-L3（目录尾插 rec_len u16 截断）：挂载已强制 bs=4096，无截断路径。
+- DRIV-L4（GPU 红蓝对调）：format/颜色常量/fbdev 上报三者自洽，无对调。
+- IOU-M9（init 失败静默挂死）：失败路径有 UART 输出。
+- 部分：ARCH-L5（KERNEL_STACK_SIZE 已统一 config，仅 intr-stack 三处手抄 16K 残留）；TEST-H3 的 syscall_time 子项（实有单调性断言）。
+
+### 16.5 对修复计划的影响
+
+1. **新增 Wave 2R（回归热修）**：16.1 的 8 项 FIX-FAIL + 16.2 的 NEW-C1/C3（提权/panic 类）优先于 Wave 3。
+2. **Wave 3 修复顺序修正**：0(init+route_init) → C2+Drop → C1 → H1 → tot_len/checksum-to_be（新增） → C3(24 处) → H2/H3/H4(含客户端 857) → loopback 队列化（新增） → C4 重构 → H5/H6 → M 系列。
+3. **Wave 4 前置捆绑**：4.4 须连带 ECAM slot×8；4.7 须先过 0x1052 ID 关；4.1 须连带"探测顺序先于挂载"+MMIO 32 位 notify。
+4. **Wave 5 并入**：NEW-C2（wake on_cpu 状态机）与 P07/P08/P12 合并为同一调度状态机改造。
+5. Wave 7 ext4 增加 4 项新 H（add_entry 丢条目、mkdir 快照、WAL 顺序、环绕回放）。

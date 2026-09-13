@@ -289,12 +289,15 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // Create temporary buffer
-    let mut buffer = alloc::vec::Vec::with_capacity(count);
-    // SAFETY: Vec was allocated with capacity(count); set_len(count) is valid.
-    unsafe {
-        buffer.set_len(count);
+    // Create temporary buffer. try_reserve makes allocation failure a
+    // clean ENOMEM instead of the allocator panic handler; zero-filling
+    // also stops getdents64 padding bytes from leaking kernel heap data
+    // to userspace (review VFS-M7).
+    let mut buffer: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if buffer.try_reserve_exact(count).is_err() {
+        return -(errno::ENOMEM as i64);
     }
+    buffer.resize(count, 0);
 
     // Call VFS layer
     let result = file_getdents64(fd, &mut buffer, count);
@@ -486,9 +489,10 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    let mut pathbuf = [0u8; PATH_MAX];
-    let pathname = match read_user_path(pathname_ptr, &mut pathbuf) {
-        Ok(s) => s,
+    // Resolve dirfd-relative paths like every other *at() syscall — the
+    // old code ignored dirfd entirely for non-/proc paths.
+    let pathname = match resolve_user_path(dirfd, pathname_ptr) {
+        Ok(p) => p,
         Err(e) => return e as i64,
     };
 
@@ -502,9 +506,12 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
                 return -(errno::ENAMETOOLONG as i64);
             }
 
-            // SAFETY: buf validated with access_ok(bufsize); exe_path.len() < bufsize.
+            // SAFETY: buf validated with access_ok(bufsize); copy_to_user
+            // is exception-table protected (returns uncopied byte count).
             unsafe {
-                core::ptr::copy_nonoverlapping(exe_path.as_ptr(), buf, exe_path.len());
+                if crate::arch::riscv64::uaccess::copy_to_user(buf, exe_path.as_ptr(), exe_path.len()) != 0 {
+                    return -(errno::EFAULT as i64);
+                }
             }
 
             return exe_path.len() as i64;
@@ -512,15 +519,17 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     }
 
     // /proc/[pid]/fd/N - return fd symlink target
-    // Supports both absolute and relative paths
-    let full_path = resolve_proc_readlink_path(dirfd, pathname);
+    // Supports both absolute and relative paths (already dirfd-resolved)
+    let full_path = resolve_proc_readlink_path(dirfd, &pathname);
     if let Some(target) = handle_proc_fd_readlink(&full_path) {
         if target.len() >= bufsize {
             return -(errno::ENAMETOOLONG as i64);
         }
-        // SAFETY: buf validated with access_ok(bufsize); target.len() < bufsize.
+        // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
         unsafe {
-            core::ptr::copy_nonoverlapping(target.as_ptr(), buf, target.len());
+            if crate::arch::riscv64::uaccess::copy_to_user(buf, target.as_ptr(), target.len()) != 0 {
+                return -(errno::EFAULT as i64);
+            }
         }
         return target.len() as i64;
     }
@@ -546,9 +555,11 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
                 return -(errno::ENAMETOOLONG as i64);
             }
             let copy_len = n.min(bufsize);
-            // SAFETY: buf validated with access_ok(bufsize); copy_len <= bufsize.
+            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
             unsafe {
-                core::ptr::copy_nonoverlapping(target_buf.as_ptr(), buf, copy_len);
+                if crate::arch::riscv64::uaccess::copy_to_user(buf, target_buf.as_ptr(), copy_len) != 0 {
+                    return -(errno::EFAULT as i64);
+                }
             }
             // Linux truncates to bufsiz and returns the truncated length
             copy_len as i64
@@ -597,7 +608,9 @@ fn handle_proc_fd_readlink(path: &str) -> Option<alloc::vec::Vec<u8>> {
     let path = path.trim_start_matches('/');
 
     let parts: alloc::vec::Vec<&str> = path.split('/').collect();
-    if parts.len() < 3 {
+    // Need exactly "proc/{pid}/fd/{fd_num}" — len < 4 would make parts[3]
+    // an out-of-bounds index (a bare "/proc/1/fd" used to panic here).
+    if parts.len() != 4 {
         return None;
     }
 

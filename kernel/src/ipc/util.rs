@@ -291,6 +291,27 @@ impl<T> IpcIds<T> {
         None
     }
 
+    /// Look up an IPC object by its ID, including objects already marked
+    /// deleted. Used by teardown paths that must still reach a
+    /// marked-for-destruction object (e.g. SysV shm's last-detach free).
+    pub fn find_including_deleted(&self, id: i32) -> Option<usize>
+    where T: IpcObject {
+        let idx = ipc_id_to_index(id);
+        let expected_seq = ipc_id_seq(id);
+
+        if idx >= IPC_IDS_MAX {
+            return None;
+        }
+
+        let slots = self.slots.lock();
+        if let Some(ref entry) = slots[idx] {
+            if entry.inner.get_perm().seq == expected_seq {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
     /// Look up an IPC object by ID and check read/write permissions.
     pub fn find_with_perms(&self, id: i32, desired_mode: u16) -> Result<usize, i32>
     where T: IpcObject {

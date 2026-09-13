@@ -683,6 +683,34 @@ pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut Buffer
 /// On cache miss: creates a new BufferHead, submits async I/O via
 /// `blkdev::blkdev_read_async`, inserts into cache, and returns the buffer.
 /// The buffer data is **not** valid until `bread_wait()` completes.
+/// Wait for a buffer whose I/O was submitted by ANOTHER caller to settle.
+/// BH_Req is cleared by the owning bread_wait(), so poll it with short
+/// sleeps (1 jiffy each). The buffer cache keeps the entry pinned by the
+/// owner's reference, so `bh` stays valid. In IRQ/early context (no
+/// current task) spin instead of sleeping. Returns 0 when the buffer is
+/// uptodate, -EIO otherwise (review 2R.11).
+unsafe fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
+    let mut slept = 0u32;
+    loop {
+        let state = (*bh).get_state();
+        if !state.test(BufferState::BH_Req) {
+            return if state.test(BufferState::BH_Uptodate) { 0 } else { -5 };
+        }
+        if crate::sched::current().is_some() && slept < 10_000 {
+            let pid = crate::sched::get_current_pid();
+            let dl = crate::drivers::timer::get_jiffies().saturating_add(1);
+            let id = crate::timer::add_timer_wakeup(dl, pid);
+            crate::sched::schedule();
+            if id != 0 {
+                crate::timer::del_timer(id);
+            }
+            slept += 1;
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 pub fn bread_async(
     device: *const blkdev::GenDisk,
     blocknr: u64,
@@ -704,7 +732,23 @@ pub fn bread_async(
             while let Some(entry_ptr) = current {
                 let entry = &*entry_ptr;
                 if entry.key == (device_major, blocknr) {
-                    // Cache hit
+                    let state = (*entry.bh).get_state();
+                    if !state.test(BufferState::BH_Uptodate)
+                        && state.test(BufferState::BH_Req)
+                    {
+                        // In-flight entry owned by another caller: its I/O
+                        // has not landed yet. Completing now would hand out
+                        // stale buffer contents (review 2R.11) — take a
+                        // reference, drop the lock, wait for the owner's
+                        // I/O, then complete.
+                        let bh = entry.bh;
+                        (*bh).get();
+                        drop(bucket);
+                        let status = wait_buffer_io_done(bh);
+                        completion.complete(status);
+                        return Some(bh);
+                    }
+                    // Cache hit (up to date)
                     if prev.is_some() {
                         let prev_entry = &mut *prev.unwrap();
                         prev_entry.hash_next = entry.hash_next;
@@ -756,30 +800,49 @@ pub fn bread_async(
             let mut bucket = cache.buckets[index].lock_irqsave();
 
             // Double-check for duplicate
+            let mut dup_bh: Option<*mut BufferHead> = None;
             let mut current = bucket.head;
             while let Some(cp) = current {
                 if (*cp).key == (device_major, blocknr) {
                     (*(*cp).bh).get();
                     let mut lru = unsafe { cache.lru_lock_under_bucket() };
                     BlockCache::move_to_lru_head(&mut lru, cp);
-                    let _ = Box::from_raw(entry_ptr);
-                    // Note: unlike the Phase-1 hit, our async I/O WAS
-                    // submitted with this completion and will signal it —
-                    // do not complete it here (double-complete).
-                    return Some((*cp).bh);
+                    dup_bh = Some((*cp).bh);
+                    break;
                 }
                 current = (*cp).hash_next;
             }
+            drop(bucket);
 
-            (*entry_ptr).hash_next = bucket.head;
-            bucket.head = Some(entry_ptr);
+            if let Some(existing_bh) = dup_bh {
+                // A concurrent caller inserted the same block first. OUR
+                // redundant I/O (Phase 2) is still going to DMA into the new
+                // bh — free it only after that I/O lands (completion is the
+                // one we passed to blkdev_read_async), then also wait for
+                // the existing buffer to be up to date so the caller never
+                // observes a half-filled cache hit (review 2R.11).
+                let _ = completion.wait();
+                // SAFETY: entry_ptr was created by Box::into_raw above; our
+                // I/O has finished and the entry was never published.
+                let _ = Box::from_raw(entry_ptr);
+                let _ = wait_buffer_io_done(existing_bh);
+                // The caller's bread_wait() sees the completion our I/O
+                // signaled; the winning buffer is settled either way.
+                return Some(existing_bh);
+            }
 
-            let mut lru = unsafe { cache.lru_lock_under_bucket() };
-            BlockCache::move_to_lru_head(&mut lru, entry_ptr);
+            {
+                let mut bucket = cache.buckets[index].lock_irqsave();
+                (*entry_ptr).hash_next = bucket.head;
+                bucket.head = Some(entry_ptr);
+
+                let mut lru = unsafe { cache.lru_lock_under_bucket() };
+                BlockCache::move_to_lru_head(&mut lru, entry_ptr);
+            }
+
+            cache.count.fetch_add(1, Ordering::Release);
+            Some((*entry_ptr).bh)
         }
-
-        cache.count.fetch_add(1, Ordering::Release);
-        Some((*entry_ptr).bh)
     }
 }
 

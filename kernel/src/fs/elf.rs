@@ -362,6 +362,14 @@ impl Elf64Ehdr {
             return None;
         }
 
+        // Program header entry size must be exactly sizeof(Elf64Phdr).
+        // Every phdr copy path multiplies e_phoff arithmetic by this value;
+        // a forged larger value would read past the file end into kernel
+        // memory (review 2R.12).
+        if u16::from_le_bytes([data[54], data[55]]) != size_of::<Elf64Phdr>() as u16 {
+            return None;
+        }
+
         // Check ABI (accept System V and GNU ABI)
         // data[7] = EI_OSABI:
         //   0 = ELFOSABI_NONE/ELFOSABI_SYSV

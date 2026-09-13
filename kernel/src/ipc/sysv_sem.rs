@@ -692,11 +692,20 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
     };
 
     if let Some(ref sems) = *entry.inner.sems.lock() {
-        // First pass: compute all resulting values
+        // Working copy: each op must see the effect of the previous ones on
+        // the same semaphore (Linux perform_atomic_semop). The old code
+        // computed every op from the same pre-op value, so semop(-1,-1) on
+        // value=1 "succeeded" while only decrementing once (review 2R.16).
+        let mut work: alloc::vec::Vec<i32> = (0..sems.len())
+            .map(|i| sems[i].value.load(Ordering::Relaxed))
+            .collect();
+        // First pass: compute all resulting values, accumulated.
         let mut new_vals = alloc::vec::Vec::with_capacity(sops.len());
         for sop in sops {
-            let cur = sems[sop.sem_num as usize].value.load(Ordering::Relaxed);
-            new_vals.push(cur + sop.sem_op as i32);
+            let cur = work[sop.sem_num as usize];
+            let new_val = cur.wrapping_add(sop.sem_op as i32);
+            new_vals.push(new_val);
+            work[sop.sem_num as usize] = new_val;
         }
 
         // Second pass: verify all operations can succeed

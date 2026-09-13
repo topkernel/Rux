@@ -15,7 +15,7 @@ use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 use crate::process::Task;
 use crate::process::task::TaskState;
-use crate::syscall::errno::{EINVAL, EFAULT, EAGAIN, ENOSYS};
+use crate::syscall::errno::{EINVAL, EFAULT, EAGAIN, ENOSYS, ETIMEDOUT};
 
 /// FUTEX opcodes
 pub const FUTEX_WAIT: i32 = 0;
@@ -383,9 +383,18 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         if mine {
             let was_woken = slot.as_ref().map(|w| w.woken).unwrap_or(false);
             if !was_woken {
-                // Not explicitly woken (spurious wakeup): still in the chain.
+                // Not explicitly woken (spurious wakeup or the timeout
+                // timer): still in the chain.
                 drop(slot);
                 remove_waiter(bucket_idx, waiter_idx);
+                // Timeout semantics (review 2R.9): if we were not woken and
+                // the deadline has passed, this is a genuine ETIMEDOUT —
+                // returning success here broke every timed waiter.
+                if let Some(dl) = deadline {
+                    if crate::drivers::timer::get_jiffies() >= dl {
+                        return -ETIMEDOUT as i64;
+                    }
+                }
             } else {
                 // Woken: the waker unlinked us from the chain and left the
                 // slot for us to free.

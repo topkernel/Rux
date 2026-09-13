@@ -376,6 +376,11 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     });
                     if found_zombie {
                         (*current).wait_chldexit.finish_wait(current);
+                        // The exiting child's wake_up() may have raced our
+                        // prepare_to_wait and enqueued us; we are going to
+                        // keep running on this CPU — take ourselves back
+                        // off the queue (review NEW-C2).
+                        crate::sched::dequeue_if_enqueued(&*current);
                         continue; // re-enter loop to reap zombie
                     }
                 }
@@ -384,6 +389,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 use crate::signal;
                 if signal::signal_pending() {
                     (*current).wait_chldexit.finish_wait(current);
+                    crate::sched::dequeue_if_enqueued(&*current);
                     return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
                 }
 
