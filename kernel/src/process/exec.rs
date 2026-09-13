@@ -117,7 +117,9 @@ pub(crate) fn do_execve_elf(
     }
     let phdr_space: usize = ((phsize + 7) / 8) * 8;
     let execfn_space: usize = ((pathname.len() + 1 + 7) / 8) * 8;
-    let total_slots: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots + 2 + (phdr_space + 7) / 8 + (string_space + 7) / 8 + (env_string_space + 7) / 8 + (execfn_space + 7) / 8;
+    // +4 covers the AT_NULL pair AND the 2-slot AT_RANDOM buffer (this
+    // sizing must mirror the writer's layout exactly).
+    let total_slots: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots + 4 + (phdr_space + 7) / 8 + (string_space + 7) / 8 + (env_string_space + 7) / 8 + (execfn_space + 7) / 8;
     let args_size = (total_slots * 8) as u64;
 
     // Initial stack size: args + 128KB
@@ -411,7 +413,11 @@ pub(crate) fn do_execve_elf(
     // Pathname string for AT_EXECFN (aligned to 8 bytes).
     let execfn_space: usize = ((pathname.len() + 1 + 7) / 8) * 8;
 
-    let random_offset: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots;
+    // +2 skips the AT_NULL pair: AT_RANDOM gets its own 16 bytes here.
+    // It used to share the AT_NULL slots (canary always read as zero)
+    // while the two random words were written 16 bytes further on, over
+    // the phdr table copy (review PROC-P05).
+    let random_offset: usize = 1 + argv_count + 1 + envp_count + 1 + auxv_slots + 2;
     let phdr_offset: usize = random_offset + 2;
     let env_string_offset: usize = phdr_offset + (phdr_space + 7) / 8;
     let string_offset: usize = env_string_offset + (env_string_space + 7) / 8;
@@ -430,7 +436,29 @@ pub(crate) fn do_execve_elf(
         let stack_ptr = adjusted_stack_virt_addr as *mut u64;
         let mut offset: isize = 0;
 
-        let phdr_addr = adjusted_stack_top + (phdr_offset * 8) as u64;
+        // Linux semantics: AT_PHDR must point at the phdr table INSIDE the
+        // mapped image (load bias + PT_PHDR.p_vaddr). musl's ld.so computes
+        // the main program's load bias as AT_PHDR - PT_PHDR.p_vaddr; pointing
+        // AT_PHDR at the stack copy made that bias a stack address, so every
+        // PIE relocation landed in garbage and the loader died silently
+        // (found via musl dynlink.c; review PROC-P05). Segments are mapped
+        // at their p_vaddr (bias 0), so the mapped address IS p_vaddr.
+        let mapped_phdr: Option<u64> = {
+            let mut found = None;
+            for i in 0..ehdr.e_phnum as usize {
+                // SAFETY: get_program_header bounds-checks e_phoff/idx against
+                // program_data (Wave 1 central check).
+                if let Some(ph) = unsafe { ehdr.get_program_header(program_data, i) } {
+                    if ph.p_type == crate::fs::elf::ElfPtType::PT_PHDR as u32 {
+                        found = Some(ph.p_vaddr);
+                        break;
+                    }
+                }
+            }
+            found
+        };
+        let phdr_addr = mapped_phdr
+            .unwrap_or(adjusted_stack_top + (phdr_offset * 8) as u64);
         let random_vaddr = adjusted_stack_top + (random_offset * 8) as u64;
         let execfn_vaddr = adjusted_stack_top + (execfn_string_offset * 8) as u64;
 
@@ -557,15 +585,16 @@ pub(crate) fn do_execve_elf(
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
 
-        // Random numbers — use time-seeded LCG instead of hardcoded constants.
+        // 16 random bytes AT AT_RANDOM's address (time-seeded LCG; a real
+        // entropy source is a separate work item).
         let seed = crate::drivers::intc::clint::read_time();
         let mut state = seed;
         state = state.wrapping_mul(1103515245).wrapping_add(12345);
         let rand0 = state;
         state = state.wrapping_mul(1103515245).wrapping_add(12345);
         let rand1 = state;
-        core::ptr::write_volatile(stack_ptr.offset(offset + 2), rand0);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 3), rand1);
+        core::ptr::write_volatile(stack_ptr.offset(random_offset as isize), rand0);
+        core::ptr::write_volatile(stack_ptr.offset(random_offset as isize + 1), rand1);
     }
 
     // Create new address space structure
