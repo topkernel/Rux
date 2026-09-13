@@ -99,18 +99,22 @@ impl UdpSocket {
             local_port: 0,
             remote_port: 0,
             remote_ip: 0,
-            local_ip: 0xC0A80164,
+            // INADDR_ANY: the old hardcoded 192.168.1.100 made the socket
+            // match nothing in a slirp/QEMU environment (review NET-H6).
+            local_ip: 0,
             bound: false,
             connected: false,
             recv_buffer: alloc::collections::VecDeque::new(),
         }
     }
 
-    /// Bind to port
+    /// Bind to local address/port
     ///
     /// # Arguments
+    /// - `ip`: Local IP (0 = INADDR_ANY)
     /// - `port`: Port number
-    pub fn bind(&mut self, port: UdpPort) -> Result<(), ()> {
+    pub fn bind(&mut self, ip: u32, port: UdpPort) -> Result<(), ()> {
+        self.local_ip = ip;
         self.local_port = port;
         self.bound = true;
         Ok(())
@@ -251,19 +255,20 @@ pub fn udp_socket_get(fd: i32) -> Option<&'static mut UdpSocket> {
     }
 }
 
-/// Bind socket to port
+/// Bind socket to local address and port
 ///
 /// # Arguments
-/// - `fd`: Socket file descriptor
+/// - `fd`: Socket file descriptor (UDP protocol-table index)
+/// - `ip`: Local IP address (0 = INADDR_ANY)
 /// - `port`: Port number
 ///
 /// # Returns
 /// 0 on success, error code on failure
-pub fn udp_bind(fd: i32, port: UdpPort) -> i32 {
+pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
     // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
     unsafe {
         if let Some(socket) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
-            match socket.bind(port) {
+            match socket.bind(ip, port) {
                 Ok(()) => 0,
                 Err(()) => -5, // EIO
             }
@@ -312,8 +317,9 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
         return -5; // EIO
     }
 
-    // Send to IP layer
-    match crate::net::ipv4::ipv4_send(skb, dest_ip, 17) { // IPPROTO_UDP = 17
+    // Send to IP layer (source = the socket's bound address; 0 = device)
+    let src_ip = socket.local_ip;
+    match crate::net::ipv4::ipv4_send_src(skb, src_ip, dest_ip, 17) { // IPPROTO_UDP = 17
         Ok(()) => buf.len() as isize,
         Err(_) => -5, // EIO
     }
@@ -352,8 +358,9 @@ pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
         return -5; // EIO
     }
 
-    // Send to IP layer
-    match crate::net::ipv4::ipv4_send(skb, dest_ip, 17) { // IPPROTO_UDP = 17
+    // Send to IP layer (source = the socket's bound address; 0 = device)
+    let src_ip = socket.local_ip;
+    match crate::net::ipv4::ipv4_send_src(skb, src_ip, dest_ip, 17) { // IPPROTO_UDP = 17
         Ok(()) => buf.len() as isize,
         Err(_) => -5, // EIO
     }
@@ -426,21 +433,25 @@ pub fn udp_recvfrom(fd: i32, buf: &mut [u8], _len: usize) -> Result<(isize, u32,
 pub fn udp_checksum(shdr: u32, dhdr: u32, uhdr: &UdpHdr, data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
 
-    // Pseudo header (12 bytes)
+    // Pseudo header (12 bytes). Callers pass network-order values; the
+    // halves and the on-wire header fields must be converted to host word
+    // values before summing (review NET-H3 — raw memory values summed
+    // byte-swapped words, so every inbound checksummed UDP datagram was
+    // dropped).
     // Source IP (4 bytes)
-    sum += (shdr >> 16) & 0xFFFF;
-    sum += shdr & 0xFFFF;
+    sum += u16::from_be((shdr >> 16) as u16) as u32;
+    sum += u16::from_be(shdr as u16) as u32;
     // Destination IP (4 bytes)
-    sum += (dhdr >> 16) & 0xFFFF;
-    sum += dhdr & 0xFFFF;
+    sum += u16::from_be((dhdr >> 16) as u16) as u32;
+    sum += u16::from_be(dhdr as u16) as u32;
     // Reserved (1 byte) + Protocol (1 byte) + UDP length (2 bytes)
     sum += 17u32; // UDP protocol number (reserved=0, protocol=17)
-    sum += uhdr.len as u32;
+    sum += u16::from_be(uhdr.len) as u32;
 
-    // UDP header
-    sum += uhdr.source as u32;
-    sum += uhdr.dest as u32;
-    sum += uhdr.len as u32;
+    // UDP header (wire-byte words)
+    sum += u16::from_be(uhdr.source) as u32;
+    sum += u16::from_be(uhdr.dest) as u32;
+    sum += u16::from_be(uhdr.len) as u32;
     sum += 0; // Checksum field (set to 0 first)
 
     // Data
@@ -560,7 +571,9 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         } else {
             &[]
         };
-        let computed = udp_checksum(src_ip, dest_ip, udp_hdr, data);
+        // udp_checksum expects network-order IPs (matching the TX callers);
+        // udp_rcv receives host-order values from ip_rcv.
+        let computed = udp_checksum(src_ip.to_be(), dest_ip.to_be(), udp_hdr, data);
         if computed != udp_hdr.check() {
             // Checksum mismatch, silently drop packet
             return Ok(());

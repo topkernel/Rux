@@ -28,32 +28,53 @@ static LO_DEVICE_LOCK: Spinlock<()> = Spinlock::new(());
 /// Loopback device (protected by lock)
 static mut LO_DEVICE: Option<NetDevice> = None;
 
+/// Loopback backlog: transmitted packets are queued here and drained by
+/// ethernet_poll() instead of being delivered synchronously. The old
+/// synchronous re-entry (xmit → ethernet_rcv → TCP processing → send ACK →
+/// xmit again while the manager is being iterated) produced two &mut
+/// aliases of the TCP manager — direct memory corruption (review NEW-C6).
+static LO_BACKLOG: Spinlock<alloc::collections::VecDeque<SkBuff>> =
+    Spinlock::new(alloc::collections::VecDeque::new());
+
+/// Bound the backlog so a runaway TX loop cannot exhaust the heap.
+const LO_BACKLOG_MAX: usize = 256;
+
 /// Loopback device transmit function
 ///
 /// # Parameters
 /// - `skb`: Packet to transmit
 ///
 /// # Returns
-/// Always returns 0 (success)
+/// 0 on success, negative error code on failure
 ///
 /// # Notes
-/// The loopback device is special because:
-/// - Transmitted packets are immediately received
-/// - No hardware is involved
+/// The packet is queued and later drained through ethernet_poll() so the
+/// full network stack (Ethernet → IP → transport) processes it outside the
+/// TX call path.
 fn loopback_xmit(skb: SkBuff) -> i32 {
     // Update statistics
     {
         let mut stats = LO_STATS.write();
         stats.tx_packets += 1;
         stats.tx_bytes += skb.len as u64;
-        stats.rx_packets += 1;
-        stats.rx_bytes += skb.len as u64;
     }
 
-    // Deliver the packet directly to the Ethernet receive path so it
-    // traverses the full network stack (IP → transport layer).
-    let _ = crate::net::ethernet::ethernet_rcv(skb);
-
+    let mut backlog = LO_BACKLOG.lock();
+    if backlog.len() >= LO_BACKLOG_MAX {
+        drop(backlog);
+        let mut stats = LO_STATS.write();
+        stats.tx_dropped += 1;
+        // skb's Drop impl releases the buffer.
+        return -105; // ENOBUFS
+    }
+    backlog.push_back(skb);
+    drop(backlog);
+    // Loopback has no IRQ line: raise the NetRx softirq so the next
+    // irq_exit (e.g. the timer tick at HZ=100) or ksoftirqd drains the
+    // backlog through ethernet_poll().
+    crate::interrupt::softirq::raise_softirq(
+        crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
+    );
     0
 }
 
@@ -145,13 +166,16 @@ pub fn loopback_send(skb: SkBuff) -> i32 {
 /// Some(skb) if packet available, otherwise None
 ///
 /// # Notes
-/// Loopback device has no real receive queue
-/// This function currently returns None because loopback transmit handles packets directly
+/// Drains the backlog queued by loopback_xmit. Called from
+/// ethernet_poll() (softirq context), which is the single consumer — this
+/// is what breaks the old synchronous re-entry (review NEW-C6).
 pub fn loopback_poll() -> Option<SkBuff> {
-    // Loopback send and receive are synchronous
-    // Transmitted packets are handled in loopback_xmit
-    // So no packets need to be returned here
-    None
+    let mut backlog = LO_BACKLOG.lock();
+    let skb = backlog.pop_front()?;
+    let mut stats = LO_STATS.write();
+    stats.rx_packets += 1;
+    stats.rx_bytes += skb.len as u64;
+    Some(skb)
 }
 
 #[cfg(test)]
@@ -178,9 +202,13 @@ mod tests {
         // Create test packet
         let skb = SkBuff::alloc(100).unwrap();
 
-        // Send packet
+        // Send packet (queued into the backlog, not delivered inline)
         let result = loopback_send(skb);
         assert_eq!(result, 0);
+
+        // Drain through the poll path (single consumer)
+        let drained = loopback_poll();
+        assert!(drained.is_some());
 
         // Check statistics
         let stats = LO_STATS.read();

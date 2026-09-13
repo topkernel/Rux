@@ -477,6 +477,15 @@ pub struct TcpSocket {
     /// Whether bound
     pub bound: bool,
 
+    // === Server (accept) bookkeeping ===
+    /// For sockets spawned by an inbound SYN: the protocol-table index of
+    /// the LISTEN socket they belong to. accept() matches on this
+    /// (review NET-C4).
+    pub parent_fd: Option<i32>,
+    /// Set once a process fd has been handed out for this connection, so a
+    /// second accept() cannot claim the same connection.
+    pub accepted: bool,
+
     // === Sequence number management ===
     /// Send sequence number (next to send)
     pub snd_nxt: TcpSeq,
@@ -528,9 +537,11 @@ impl TcpSocket {
             local_port: 0,
             remote_port: 0,
             remote_ip: 0,
-            local_ip: 0xC0A80164,
+            local_ip: 0,
             state: TcpState::TCP_CLOSE,
             bound: false,
+            parent_fd: None,
+            accepted: false,
 
             snd_nxt: 0,
             snd_una: 0,
@@ -616,7 +627,7 @@ impl TcpSocket {
         )?;
 
         // Send to IP layer
-        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6); // IPPROTO_TCP = 6
+        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6); // IPPROTO_TCP = 6
 
         Ok(())
     }
@@ -637,7 +648,7 @@ impl TcpSocket {
             self.remote_ip.to_be(),
         )?;
 
-        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
+        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6);
 
         Ok(())
     }
@@ -658,7 +669,7 @@ impl TcpSocket {
             self.remote_ip.to_be(),
         )?;
 
-        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
+        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6);
 
         Ok(())
     }
@@ -682,7 +693,7 @@ impl TcpSocket {
             self.remote_ip.to_be(),
         )?;
 
-        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6);
+        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6);
 
         // FIN consumes one sequence number (RFC 793)
         self.snd_nxt = self.snd_nxt.wrapping_add(1);
@@ -828,8 +839,11 @@ impl TcpSocket {
 
     /// Handle received SYN packet (server)
     fn handle_syn_recv(&mut self, tcp_hdr: &TcpHdr) -> Result<(), ()> {
-        // Record client's initial sequence number
-        let client_isn = tcp_hdr.seq;
+        // Record client's initial sequence number. Sequence numbers are
+        // true values internally — convert once at the boundary (review
+        // NET-H4; the wire value leaked here and desynced rcv_nxt against
+        // every later from_be comparison).
+        let client_isn = TcpSeq::from_be(tcp_hdr.seq);
         // remote_ip is already set by caller before handle_packet()
         self.remote_port = TcpPort::from_be(tcp_hdr.source);
 
@@ -853,8 +867,8 @@ impl TcpSocket {
             return Err(()); // ACK incorrect
         }
 
-        // Record server's initial sequence number
-        let server_isn = tcp_hdr.seq;
+        // Record server's initial sequence number (wire → true value, NET-H4)
+        let server_isn = TcpSeq::from_be(tcp_hdr.seq);
         self.rcv_nxt = server_isn.wrapping_add(1);
 
         // Update send sequence number
@@ -1193,7 +1207,7 @@ impl TcpSocket {
         )?;
 
         // Send to IP layer
-        crate::net::ipv4::ipv4_send(skb, self.remote_ip, 6)?;
+        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6)?;
 
         Ok(())
     }
@@ -1400,10 +1414,19 @@ impl TcpConnectionManager {
         self.listen_sockets.push(socket);
     }
 
-    /// Handle received TCP packet
+    /// Handle received TCP packet.
     ///
-    /// Dispatches to corresponding socket based on destination port and state.
-    /// Returns `Err(())` if no matching connection was found (caller should send RST).
+    /// Single source of truth (review NET-C4): the SOCKET TABLE owns every
+    /// connection — client (connect) and server (SYN-spawned) sockets alike.
+    /// Lookup order:
+    ///   (a) exact 4-tuple match anywhere in the table (skip LISTEN sockets);
+    ///   (b) a SYN for a port with a LISTEN socket spawns a new table slot
+    ///       whose state starts at LISTEN, then runs the state machine once
+    ///       (LISTEN + SYN → handle_syn_recv → SYN-ACK, no pre-set state);
+    ///   (c) no match → Err (caller sends RST).
+    /// The manager-side pending/established lists are no longer part of the
+    /// data path; the sockets stay in their table slots after the handshake,
+    /// so RX lookup, timers and accept() all share one view.
     pub fn handle_tcp_packet(&mut self, skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         // Parse TCP header
         let tcp_hdr = match tcp_parse_packet(skb) {
@@ -1414,76 +1437,89 @@ impl TcpConnectionManager {
         let src_port = TcpPort::from_be(tcp_hdr.source);
         let dest_port = TcpPort::from_be(tcp_hdr.dest);
 
-        // Find matching socket
-        // 1. First check established connections
-        for socket in &mut self.established_connections.iter_mut() {
-            if socket.local_port == dest_port
-                && socket.remote_port == src_port
-                && socket.remote_ip == src_ip
-            {
-                // Found matching connection, handle packet
-                let payload = match tcp_payload_slice(skb, tcp_hdr.header_len()) {
-                    Some(p) => p,
-                    None => return Ok(()),
+        let is_syn = tcp_hdr.syn() && !tcp_hdr.ack();
+        let mut listen_parent: Option<i32> = None;
+
+        // Pass (a) + (b) listener detection in a single table scan.
+        // SAFETY: single-core softirq/syscall serialization for the global
+        // TCP socket table (full locking is review NET-M15).
+        unsafe {
+            let table = &mut TCP_SOCKET_TABLE;
+            for fd in 0..table.count {
+                let socket = match table.sockets[fd].as_mut() {
+                    Some(s) => s,
+                    None => continue,
                 };
-                let _ = socket.handle_packet(tcp_hdr, payload);
-                return Ok(());
+                if socket.state == TcpState::TCP_LISTEN {
+                    if socket.local_port == dest_port {
+                        listen_parent = Some(fd as i32);
+                    }
+                    continue;
+                }
+                if socket.local_port == dest_port
+                    && socket.remote_port == src_port
+                    && socket.remote_ip == src_ip
+                    && (socket.local_ip == dest_ip || socket.local_ip == 0)
+                {
+                    // local_ip == 0 (INADDR_ANY) matches any destination.
+                    // Normalize it so later comparisons are exact.
+                    if socket.local_ip == 0 {
+                        socket.local_ip = dest_ip;
+                    }
+                    let payload = match tcp_payload_slice(skb, tcp_hdr.header_len()) {
+                        Some(p) => p,
+                        None => return Ok(()),
+                    };
+                    let _ = socket.handle_packet(tcp_hdr, payload);
+                    return Ok(());
+                }
             }
-        }
 
-        // 2. Check listening sockets
-        for socket in &mut self.listen_sockets.iter_mut() {
-            if socket.local_port == dest_port && socket.state == TcpState::TCP_LISTEN {
-                // Create new connection
-                let mut new_socket = TcpSocket::new();
-                new_socket.local_port = dest_port;
-                new_socket.local_ip = dest_ip;
-                new_socket.remote_port = src_port;
-                new_socket.remote_ip = src_ip;
-                new_socket.state = TcpState::TCP_SYN_RECV;
+            // Pass (b): inbound SYN for a listening port — spawn a child
+            // connection in its own table slot.
+            if is_syn {
+                if let Some(parent) = listen_parent {
+                    // Backlog cap: bound the number of not-yet-accepted
+                    // children per listener (review NET-M8).
+                    let mut children = 0usize;
+                    for slot in table.sockets.iter().take(table.count) {
+                        if let Some(s) = slot.as_ref() {
+                            if s.parent_fd == Some(parent) && !s.accepted {
+                                children += 1;
+                            }
+                        }
+                    }
+                    if children >= MAX_BACKLOG_PER_LISTEN {
+                        return Ok(()); // drop the SYN
+                    }
 
-                // Handle SYN packet
-                if tcp_hdr.syn() && !tcp_hdr.ack() {
+                    let slot = match table.alloc_slot() {
+                        Ok(s) => s,
+                        Err(_) => return Ok(()),
+                    };
+                    let mut new_socket = TcpSocket::new();
+                    new_socket.local_port = dest_port;
+                    new_socket.local_ip = dest_ip;
+                    new_socket.remote_port = src_port;
+                    new_socket.remote_ip = src_ip;
+                    new_socket.state = TcpState::TCP_LISTEN;
+                    new_socket.parent_fd = Some(parent);
+                    // State machine drives itself from LISTEN: SYN →
+                    // handle_syn_recv → sends SYN-ACK → SYN_RECV.
                     let _ = new_socket.handle_packet(tcp_hdr, &[]);
-
-                    // Add connection to pending queue
-                    self.pending_connections.push(new_socket);
+                    let _ = table.install(slot, new_socket);
+                    return Ok(());
                 }
-                return Ok(());
             }
-        }
-
-        // 3. Check pending connections (SYN_SENT state)
-        let mut idx_to_move: Option<usize> = None;
-        for (idx, socket) in self.pending_connections.iter_mut().enumerate() {
-            if socket.local_port == dest_port
-                && socket.remote_port == src_port
-                && socket.remote_ip == src_ip
-            {
-                let payload = match tcp_payload_slice(skb, tcp_hdr.header_len()) {
-                    Some(p) => p,
-                    None => break,
-                };
-                let _ = socket.handle_packet(tcp_hdr, payload);
-
-                // If connection established, mark to move to established connection list
-                if socket.state == TcpState::TCP_ESTABLISHED {
-                    idx_to_move = Some(idx);
-                }
-                break;
-            }
-        }
-
-        // Move established connection (outside loop)
-        if let Some(idx) = idx_to_move {
-            let socket = self.pending_connections.remove(idx);
-            self.established_connections.push(socket);
         }
 
         // No matching connection found
         Err(())
     }
 }
+
+/// Maximum not-yet-accepted children per listening socket.
+const MAX_BACKLOG_PER_LISTEN: usize = 64;
 
 /// Global TCP connection manager
 static mut TCP_CONNECTION_MANAGER: core::mem::MaybeUninit<TcpConnectionManager> = core::mem::MaybeUninit::<TcpConnectionManager>::uninit();
@@ -1703,6 +1739,33 @@ pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
     }
 }
 
+/// Next ephemeral port for auto-bind on connect (review NET-M6).
+static NEXT_EPHEMERAL_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(32768);
+const EPHEMERAL_PORT_MAX: u16 = 60999;
+
+/// Allocate an unused local port in the ephemeral range.
+fn alloc_ephemeral_port() -> TcpPort {
+    // SAFETY: single-core serialization of the global table (review NET-M15).
+    unsafe {
+        for _ in 0..(EPHEMERAL_PORT_MAX - 32768 + 1) {
+            let port = NEXT_EPHEMERAL_PORT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let port = if port > EPHEMERAL_PORT_MAX { port % EPHEMERAL_PORT_MAX + 1024 } else { port };
+            let in_use = (0..TCP_SOCKET_TABLE.count).any(|i| {
+                TCP_SOCKET_TABLE
+                    .sockets
+                    .get(i)
+                    .and_then(|s| s.as_ref())
+                    .map(|s| s.local_port == port && s.state != TcpState::TCP_CLOSE)
+                    .unwrap_or(false)
+            });
+            if !in_use {
+                return port;
+            }
+        }
+        0
+    }
+}
+
 /// Connect to remote address
 ///
 /// # Arguments
@@ -1716,6 +1779,23 @@ pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
     // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+            // Auto-bind an ephemeral local port when the caller never bound
+            // (old code sent SYN with source port 0, review NET-M6).
+            if socket.local_port == 0 {
+                socket.local_port = alloc_ephemeral_port();
+                socket.bound = true;
+            }
+            // Source address for the connection: loopback for loopback
+            // destinations, the device address otherwise. Without this the
+            // socket keeps local_ip = 0 (ANY) and inbound SYN-ACKs fail the
+            // 4-tuple lookup below (found via the nettest E2E run).
+            if socket.local_ip == 0 {
+                socket.local_ip = if (ip >> 24) == 127 {
+                    0x7F000001
+                } else {
+                    crate::net::arp::get_local_ip()
+                };
+            }
             match socket.connect(ip, port) {
                 Ok(()) => 0,
                 Err(()) => -5, // EIO
@@ -1729,58 +1809,40 @@ pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
 /// Accept connection
 ///
 /// # Arguments
-/// - `fd`: Socket file descriptor (listening socket)
+/// - `fd`: Listening socket index (TCP protocol table)
 ///
 /// # Returns
-/// New socket file descriptor on success, error code on failure
+/// The protocol-table index of an established child connection, or a
+/// negative error code. The connection STAYS in its table slot — only the
+/// `accepted` flag is set; the syscall layer wraps the index into a process
+/// fd (review NET-C4: the old code moved sockets between three manager
+/// lists that RX never looked at, so accept() always returned EAGAIN).
 pub fn tcp_accept(fd: i32) -> i32 {
-    // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
+    // SAFETY: single-core softirq/syscall serialization (review NET-M15).
     unsafe {
-        // Check if listening socket is valid
+        // Validate the listening socket
         let listen_socket = match TCP_SOCKET_TABLE.get(fd as usize) {
             Some(s) => s,
             None => return -9, // EBADF
         };
-
-        // Ensure it's in listening state
         if listen_socket.state != TcpState::TCP_LISTEN {
             return -22; // EINVAL
         }
 
-        let local_port = listen_socket.local_port;
-
-        // Get TCP connection manager
-        let manager = get_tcp_manager();
-
-        // Find established connection (from pending_connections)
-        let established_idx = manager.pending_connections.iter().position(|s| {
-            s.state == TcpState::TCP_ESTABLISHED && s.local_port == local_port
-        });
-
-        match established_idx {
-            Some(idx) => {
-                // Take out established connection
-                let new_socket = manager.pending_connections.remove(idx);
-
-                // Allocate socket fd for new connection
-                let new_fd = match TCP_SOCKET_TABLE.alloc_slot() {
-                    Ok(fd) => fd as i32,
-                    Err(_) => {
-                        // Put back to queue
-                        manager.pending_connections.push(new_socket);
-                        return -24; // EMFILE
-                    }
-                };
-
-                // Put new socket into table
-                if TCP_SOCKET_TABLE.install(new_fd as usize, new_socket).is_err() {
-                    return -5; // EIO
+        // Find an established, not-yet-accepted child of this listener.
+        for i in 0..TCP_SOCKET_TABLE.count {
+            if let Some(socket) = TCP_SOCKET_TABLE.sockets[i].as_mut() {
+                if socket.parent_fd == Some(fd)
+                    && !socket.accepted
+                    && socket.state == TcpState::TCP_ESTABLISHED
+                {
+                    socket.accepted = true;
+                    return i as i32;
                 }
-
-                new_fd
             }
-            None => -11, // EAGAIN (no pending connections)
         }
+
+        -11 // EAGAIN (no completed connections)
     }
 }
 
@@ -1797,13 +1859,17 @@ pub fn tcp_accept(fd: i32) -> i32 {
 pub fn tcp_checksum(shdr: u32, dhdr: u32, thdr: &TcpHdr, data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
 
-    // Pseudo header (12 bytes)
+    // Pseudo header (12 bytes). Callers pass network-order (`.to_be()`)
+    // values; the halves must be converted to host word values so they sum
+    // the same wire-bytes pairing as the header/data words below (review
+    // NET-H2 — the raw shifts summed byte-swapped halves, so every outbound
+    // TCP checksum was wrong).
     // Source IP (4 bytes)
-    sum += (shdr >> 16) & 0xFFFF;
-    sum += shdr & 0xFFFF;
+    sum += u16::from_be((shdr >> 16) as u16) as u32;
+    sum += u16::from_be(shdr as u16) as u32;
     // Destination IP (4 bytes)
-    sum += (dhdr >> 16) & 0xFFFF;
-    sum += dhdr & 0xFFFF;
+    sum += u16::from_be((dhdr >> 16) as u16) as u32;
+    sum += u16::from_be(dhdr as u16) as u32;
     // Reserved (1 byte) + Protocol (1 byte) + TCP length (2 bytes)
     sum += 6u32; // TCP protocol number (reserved=0, protocol=6)
     let tcp_len = (thdr.header_len() + data.len()) as u16;
@@ -1910,11 +1976,13 @@ pub fn tcp_build_packet(
         // Urgent pointer
         tcp_hdr.urg_ptr = 0;
 
-        // Compute TCP checksum (RFC 793)
+        // Compute TCP checksum (RFC 793). The field is big-endian on the
+        // wire — store the network-order value (review NEW: missing .to_be()
+        // byte-swapped every outbound segment's checksum).
         let data_ptr = ptr.add(TCP_MIN_HLEN);
         let data_len = (skb.len as usize).saturating_sub(TCP_MIN_HLEN);
         let data_slice = core::slice::from_raw_parts(data_ptr as *const u8, data_len);
-        tcp_hdr.check = tcp_checksum(src_ip, dest_ip, tcp_hdr, data_slice);
+        tcp_hdr.check = tcp_checksum(src_ip, dest_ip, tcp_hdr, data_slice).to_be();
     }
 
     Ok(())
@@ -2032,17 +2100,21 @@ pub fn tcp_v4_err(
     dest_ip: u32,
     dest_port: u16,
 ) {
-    // Look up matching connection in the TCP manager
-    let manager = get_tcp_manager();
-
-    for socket in manager.established_connections.iter_mut() {
-        if socket.local_port == dest_port
-            && socket.remote_port == src_port
-            && socket.remote_ip == src_ip
-        {
-            // Record soft error — connection should be reset
-            // For destination unreachable, the peer is unreachable
-            match icmp_type {
+    // Look up matching connection in the global socket table (single
+    // source of truth — the manager's established list never held client
+    // connections; review NET-C4/tcp_v4_err).
+    // SAFETY: single-core softirq/syscall serialization (review NET-M15).
+    unsafe {
+        for i in 0..TCP_SOCKET_TABLE.count {
+            let socket = match TCP_SOCKET_TABLE.sockets[i].as_mut() {
+                Some(s) => s,
+                None => continue,
+            };
+            if socket.local_port == dest_port
+                && socket.remote_port == src_port
+                && socket.remote_ip == src_ip
+            {
+                match icmp_type {
                 crate::net::icmp::icmp_type::DEST_UNREACH => {
                     // Abort the connection on host/port unreachable
                     match icmp_code {
@@ -2063,6 +2135,7 @@ pub fn tcp_v4_err(
                 _ => {}
             }
             return;
+            }
         }
     }
 }

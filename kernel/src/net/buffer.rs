@@ -127,6 +127,15 @@ pub struct SkBuff {
 unsafe impl Send for SkBuff {}
 unsafe impl Sync for SkBuff {}
 
+/// SkBuff owns its backing allocation; dropping a buffer that was not
+/// explicitly freed releases it. Every error path that used to leak a
+/// ~1.5KB skb now frees it automatically (review NET-C2 / M1).
+impl Drop for SkBuff {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// SkBuff global allocator ID
 static SKBUFF_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -145,8 +154,13 @@ impl SkBuff {
     /// - headroom is for adding protocol headers (MAC, IP, TCP, etc.)
     pub fn alloc(size: u32) -> Option<Self> {
         const NET_SKBUFF_DATA_ALIGN: usize = 16;
+        // LL_MAX_HEADER: Ethernet(14) + IP(20) + TCP(20) = 54 bytes minimum
+        // of push room; 128 covers options and future tunnels. The old 16
+        // made every tcp_build_packet/ipv4_send skb_push fail outright
+        // (review NET-C2).
+        const NET_SKBUFF_HEADROOM: usize = 128;
 
-        let headroom = NET_SKBUFF_DATA_ALIGN;
+        let headroom = NET_SKBUFF_HEADROOM;
         let data_size = if size == 0 {
             NET_SKBUFF_DATA_ALIGN
         } else {
@@ -188,10 +202,19 @@ impl SkBuff {
     /// Free SkBuff
     ///
     /// # Notes
-    /// Releases allocated memory
-    pub fn free(self) {
+    /// Releases allocated memory. Idempotent: nulling the pointers makes the
+    /// Drop impl (and a later double free) a no-op.
+    pub fn free(mut self) {
+        self.release();
+    }
+
+    /// Release the backing allocation if still held.
+    fn release(&mut self) {
         let size = (self.end as usize).wrapping_sub(self.head as usize);
-        if self.head.is_null() || size == 0 || size > (isize::MAX as usize) {
+        if self.head.is_null() {
+            return;
+        }
+        if size == 0 || size > (isize::MAX as usize) {
             crate::pr_err!("skb free: corrupted buffer head={:p} end={:p} size={}",
                 self.head, self.end, size);
             return;
@@ -205,6 +228,10 @@ impl SkBuff {
                 crate::pr_err!("skb free: invalid layout size={}", size);
             }
         }
+        self.head = core::ptr::null_mut();
+        self.end = core::ptr::null_mut();
+        self.data = core::ptr::null_mut();
+        self.tail = core::ptr::null_mut();
     }
 
     /// Add data at tail

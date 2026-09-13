@@ -56,10 +56,12 @@ impl EthHdr {
         }
     }
 
-    /// Get protocol type
+    /// Get protocol type. Unknown ethertypes map to None at the dispatch
+    /// site — the old `unwrap_or(ETH_P_IP)` mis-parsed VLAN/IPv6 frames as
+    /// IPv4.
     pub fn protocol(&self) -> EthProtocol {
         let proto = u16::from_be(self.h_proto);
-        EthProtocol::from_u16(proto).unwrap_or(EthProtocol::ETH_P_IP)
+        EthProtocol::from_u16(proto).unwrap_or(EthProtocol::ETH_P_8021Q)
     }
 
     /// Check if this is a broadcast frame
@@ -107,7 +109,10 @@ pub fn eth_push_header(skb: &mut SkBuff, dest: [u8; ETH_ALEN], src: [u8; ETH_ALE
         let eth_hdr = &mut *(ptr as *mut EthHdr);
         eth_hdr.h_dest = dest;
         eth_hdr.h_source = src;
-        eth_hdr.h_proto = proto.to_u16();
+        // Wire format is big-endian; the RX side reads with from_be, so the
+        // TX side must convert (review NET-H1 — every outbound frame was
+        // dropped by the peer with the raw little-endian value).
+        eth_hdr.h_proto = proto.to_u16().to_be();
     }
 
     Ok(())
@@ -253,6 +258,21 @@ pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
         None => [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
     };
 
+    // Loopback short-circuit: 127.0.0.0/8 must not go through ARP (there
+    // is no MAC to resolve; broadcasting loopback traffic worked only by
+    // accident of ip_rcv not checking the destination address).
+    if (skb.len as usize) >= crate::net::ipv4::IPHDR_LEN {
+        // SAFETY: skb.data and skb.len describe a valid byte range.
+        let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
+        if let Some(ip_hdr) = crate::net::ipv4::IpHdr::from_bytes(data) {
+            if ip_hdr.version_ihl >> 4 == 4 && (u32::from_be(ip_hdr.daddr) >> 24) == 127 {
+                eth_push_header(&mut skb, [0, 0, 0, 0, 0, 0], src_mac, EthProtocol::ETH_P_IP)?;
+                let _ = crate::drivers::net::loopback::loopback_send(skb);
+                return Ok(());
+            }
+        }
+    }
+
     // Try to resolve destination MAC from the IP header via ARP.
     // Fall back to broadcast if the IP header cannot be parsed or
     // ARP has no entry (the ARP request has been sent and a retry
@@ -357,15 +377,12 @@ pub fn eth_addr_to_string(addr: &[u8; ETH_ALEN]) -> alloc::string::String {
 /// # Notes
 /// Receives packet from network device, parses Ethernet header, dispatches to upper layer protocol
 pub fn ethernet_rcv(mut skb: SkBuff) -> Result<(), ()> {
-    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
-
-    if data.len() < ETH_HLEN {
-        skb.free();
-        return Err(());
-    }
-
-    let eth_hdr = match EthHdr::from_bytes(data) {
+    // Pull the Ethernet header OFF the skb before dispatch: ip_rcv and
+    // arp_rcv expect to start at their own headers. The old code handed
+    // them the frame with the 14-byte Ethernet header still attached, so
+    // every inbound packet was parsed at the wrong offset and silently
+    // dropped (review NET-C1).
+    let eth_hdr = match eth_pull_header(&mut skb) {
         Some(hdr) => hdr,
         None => {
             skb.free();
@@ -383,6 +400,8 @@ pub fn ethernet_rcv(mut skb: SkBuff) -> Result<(), ()> {
             let _ = crate::net::arp::arp_rcv(&skb, eth_hdr);
         }
         _ => {
+            // Unknown ethertype (VLAN, IPv6, ...): drop instead of the old
+            // unwrap_or(ETH_P_IP) fallback that mis-parsed them as IPv4.
         }
     }
 
@@ -396,14 +415,17 @@ pub fn ethernet_rcv(mut skb: SkBuff) -> Result<(), ()> {
 /// # Notes
 /// Gets received packets from network device and processes them
 pub fn ethernet_poll() {
+    // Drain the loopback backlog FIRST: the virtio-net poll path has known
+    // descriptor-handling defects (review DRIV NEW) and must not be able to
+    // block loopback delivery.
+    while let Some(skb) = crate::drivers::net::loopback::loopback_poll() {
+        let _ = ethernet_rcv(skb);
+    }
+
     if let Some(device) = crate::drivers::net::virtio_net::get_device() {
         while let Some(skb) = device.poll() {
             let _ = ethernet_rcv(skb);
         }
-    }
-
-    if let Some(skb) = crate::drivers::net::loopback::loopback_poll() {
-        let _ = ethernet_rcv(skb);
     }
 }
 

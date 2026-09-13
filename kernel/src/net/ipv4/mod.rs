@@ -198,7 +198,11 @@ pub fn ip_pull_header(skb: &mut SkBuff) -> Option<&'static IpHdr> {
 ///
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
-pub fn ipv4_send(mut skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> {
+/// Send with the socket's source address (0 = device address).
+/// Transport layers must pass their bound local_ip — a fixed device
+/// address broke 4-tuple matching for any non-device source (loopback in
+/// particular; found via the nettest E2E run, NET-H5 family).
+pub fn ipv4_send_src(mut skb: SkBuff, src_ip: u32, dest_ip: u32, protocol: u8) -> Result<(), ()> {
     let ip_ptr = skb.skb_push(IPHDR_LEN as u32).ok_or(())?;
 
     // SAFETY: skb_push returned a valid, properly aligned pointer of at least
@@ -210,7 +214,7 @@ pub fn ipv4_send(mut skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> 
 
         ip_hdr.tos = 0;
 
-        let total_len = IPHDR_LEN + skb.len as usize;
+        let total_len = skb.len as usize; // skb_push(IPHDR_LEN) already included it
         if total_len > u16::MAX as usize {
             return Err(()); // Packet too large for IPv4
         }
@@ -224,7 +228,12 @@ pub fn ipv4_send(mut skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> 
 
         ip_hdr.protocol = protocol;
 
-        ip_hdr.saddr = crate::net::arp::get_local_ip().to_be();
+        let src = if src_ip == 0 {
+            crate::net::arp::get_local_ip()
+        } else {
+            src_ip
+        };
+        ip_hdr.saddr = src.to_be();
 
         ip_hdr.daddr = dest_ip.to_be();
 
@@ -301,6 +310,8 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
         skb.len -= hdr_len as u32;
     }
 
+    if ip_hdr.protocol == 6 {
+    }
     match ip_hdr.protocol {
         6 => {
             let _ = crate::net::tcp::tcp_rcv(skb, src_ip, dest_ip);
@@ -335,4 +346,9 @@ mod tests {
         assert_eq!(hdr.version_ihl >> 4, 4);
         assert_eq!(hdr.version_ihl & 0x0F, 5);
     }
+}
+
+/// Convenience wrapper: source = device address.
+pub fn ipv4_send(skb: SkBuff, dest_ip: u32, protocol: u8) -> Result<(), ()> {
+    ipv4_send_src(skb, 0, dest_ip, protocol)
 }

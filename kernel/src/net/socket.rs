@@ -161,7 +161,7 @@ impl Socket {
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
                 let udp_fd = self.udp_fd.lock().ok_or(-9)?;
-                crate::net::udp::udp_bind(udp_fd, port);
+                crate::net::udp::udp_bind(udp_fd, addr, port);
                 Ok(())
             }
         }
@@ -241,9 +241,12 @@ impl Socket {
                 // read only from this single-threaded socket context.
                 let udp_fd = self.udp_fd.lock().ok_or(-9)?;
 
-                if let Some((_addr, _port)) = dest_addr {
-                    if let Some(_socket) = crate::net::udp::udp_socket_get(udp_fd) {
-                        let ret = crate::net::udp::udp_send(udp_fd, buf);
+                if let Some((addr, port)) = dest_addr {
+                    // Explicit destination: use udp_sendto (review NET-M5 —
+                    // both branches used to call udp_send, which requires a
+                    // connected socket and always returned ENOTCONN).
+                    if crate::net::udp::udp_socket_get(udp_fd).is_some() {
+                        let ret = crate::net::udp::udp_sendto(udp_fd, buf, addr, port);
                         if ret >= 0 {
                             Ok(ret as usize)
                         } else {
@@ -253,7 +256,7 @@ impl Socket {
                         Err(-9)
                     }
                 } else {
-                    if let Some(_socket) = crate::net::udp::udp_socket_get(udp_fd) {
+                    if crate::net::udp::udp_socket_get(udp_fd).is_some() {
                         let ret = crate::net::udp::udp_send(udp_fd, buf);
                         if ret >= 0 {
                             Ok(ret as usize)
@@ -574,6 +577,44 @@ pub fn get_socket(fd: usize) -> Option<Arc<Socket>> {
     unsafe { SOCKET_TABLE.lock().get(fd) }
 }
 
+/// Create a process fd for an accepted TCP connection.
+///
+/// `tcp_fd` is the protocol-table index returned by tcp_accept(); the
+/// connection already lives in that slot — this only wraps it into a
+/// Socket + File + process fd (review NET-C4: the old path returned a
+/// protocol index to userspace as if it were an fd).
+pub fn socket_create_accepted(tcp_fd: i32) -> Result<usize, i32> {
+    let socket = Arc::new(Socket::new(SocketType::Tcp));
+    *socket.tcp_fd.lock() = Some(tcp_fd);
+    *socket.state.lock() = SocketState::Connected;
+
+    // Copy the connection's local/remote endpoints for getsockname/peername.
+    if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+        *socket.local_port.lock() = ts.local_port;
+        *socket.local_addr.lock() = ts.local_ip;
+        *socket.remote_port.lock() = ts.remote_port;
+        *socket.remote_addr.lock() = ts.remote_ip;
+    }
+
+    let file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDWR)));
+    file.set_ops(&SOCKET_OPS);
+    file.set_private_data(Arc::into_raw(Arc::clone(&socket)) as *mut u8);
+
+    let fdtable = crate::sched::get_current_fdtable().ok_or(-9)?;
+    let fd = fdtable.alloc_fd().ok_or(-24)?;
+    fdtable.install_fd(fd, file).map_err(|_| -24)?;
+
+    // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
+    let slot = unsafe {
+        SOCKET_TABLE.lock().alloc(socket.clone())
+    };
+    if let Ok(idx) = slot {
+        *socket.table_slot.lock() = Some(idx);
+    }
+
+    Ok(fd)
+}
+
 /// Get socket from file descriptor (via File private_data)
 pub fn get_socket_from_fd(fd: usize) -> Option<Arc<Socket>> {
     let fdtable = crate::sched::get_current_fdtable()?;
@@ -589,6 +630,29 @@ pub fn get_socket_from_fd(fd: usize) -> Option<Arc<Socket>> {
         Arc::increment_strong_count(socket_ptr);
         Some(Arc::from_raw(socket_ptr))
     }
+}
+
+/// Resolve a process fd to its TCP protocol-table index.
+/// The syscall layer must NEVER pass a process fd directly to
+/// tcp_socket_get()/udp_socket_get() — those index global protocol tables
+/// whose slots have no relation to per-process fd numbers (review NET-C3).
+pub fn tcp_proto_fd(fd: usize) -> Option<i32> {
+    let socket = get_socket_from_fd(fd)?;
+    if socket.sock_type != SocketType::Tcp {
+        return None;
+    }
+    let proto = *socket.tcp_fd.lock();
+    proto
+}
+
+/// Resolve a process fd to its UDP protocol-table index.
+pub fn udp_proto_fd(fd: usize) -> Option<i32> {
+    let socket = get_socket_from_fd(fd)?;
+    if socket.sock_type != SocketType::Udp {
+        return None;
+    }
+    let proto = *socket.udp_fd.lock();
+    proto
 }
 
 // ============================================================================

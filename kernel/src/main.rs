@@ -558,6 +558,13 @@ pub extern "C" fn rust_main() -> ! {
             if device_count > 0 {
                 print_status("driver", &format!("virtio-net x{}", device_count), true);
             }
+            // TCP manager, timer and routing table must be live before any
+            // packet can arrive: RX/softirq paths dereference them
+            // unconditionally, and the timer softirq ticks from the first
+            // clock interrupt (review NET NEW-C4 — init was never called).
+            crate::net::tcp::init_tcp_manager();
+            crate::net::tcp_timer::init_tcp_timer_manager();
+            crate::net::ipv4::route::route_init();
         }
 
         // Initialize security subsystem (before scheduler / process creation)
