@@ -354,6 +354,21 @@ impl BlockCache {
         }
     }
 
+    /// Push an entry that is currently UNLINKED onto the LRU head.
+    /// Caller must hold the lru lock.
+    unsafe fn push_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
+        let entry = &mut *entry_ptr;
+        entry.lru_prev = None;
+        entry.lru_next = lru.head;
+        if let Some(head) = lru.head {
+            (*head).lru_prev = Some(entry_ptr);
+        }
+        lru.head = Some(entry_ptr);
+        if lru.tail.is_none() {
+            lru.tail = Some(entry_ptr);
+        }
+    }
+
     /// Unlink entry from LRU list. Caller must hold the lru lock.
     // SAFETY: VFS callback contract; pointers are valid for the scope of this block
     unsafe fn remove_from_lru(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
@@ -421,6 +436,23 @@ impl BlockCache {
         // Box::into_raw and are valid while in the cache; bucket lock is held.
         unsafe {
             let mut bucket = self.buckets[bucket_idx].lock();
+
+            // VFS-H13: between the LRU unlink above and this bucket lock, a
+            // concurrent get() may have found the victim in the hash chain
+            // and pinned it (count 0 -> 1). Freeing it anyway handed that
+            // caller a dangling BufferHead — the SMP use-after-free behind
+            // NEW2's "control transfers to a freed page". get() takes this
+            // same bucket lock to increment, so re-checking here is sound:
+            // if the count is still 0, no one can acquire it anymore once
+            // it leaves the hash chain.
+            if (*(*victim).bh).count() != 0 {
+                // Pinned while we were between the locks: put it back on
+                // the LRU and report "no victim" so the caller retries.
+                drop(bucket);
+                let mut lru = self.lru.lock_irqsave();
+                Self::push_lru_head(&mut lru, victim);
+                return false;
+            }
 
             // Unlink from hash chain
             let mut prev: Option<*mut CacheEntry> = None;

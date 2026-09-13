@@ -444,7 +444,10 @@ signal 交付链（H-05/06/07/15、M-01~04）、调度器（P06-P10）、syscall
 - **波及面**：shell 的一切重定向与管道子命令（mrsh 以 fork+file-actions+exec 实现）即本缺陷的用户可见面——Wave 2 记录的"mrsh 管道 EBADF 遗留缺陷"应即此族。A/B 证实非本轮任何提交引入。
 - **定位到 munmap 追踪**：panic 栈指向 MmStruct::munmap（mm_ops.rs:395 附近），epc 为已释放物理页（伙伴 freelist 指针被当指令执行）——典型 UAF-after-free 经间接调用跳转。
 - **疑似范围**（未最终定罪）：icache Arc 引用与 LRU 逐出的窗口、ext4 全模块无并发防护（EXT4-H10）、fork 的 mm 快照/页表复制与退出释放路径。需要专项排查（nettest 已内置可启用的探针用例，见 test/nettest.c 注释）。
-- **处置**：nettest 的 fork+fs 探针用例默认禁用以保持套件确定性；修复前 shell 重定向/管道视为已知不可用。
+- **处置与进展（2026-09-13 第二轮追查）**：
+  - 已修一个确证的同族缺陷 **VFS-H13**（bio LRU 两阶段驱逐无锁）：Phase1 在 LRU 锁内选定 count==0 受害者摘链后释放锁，Phase2 才拿 bucket 锁摘哈希——间隙内并发 get() 可钉住该条目而 Phase4 仍释放，调用方持悬挂 BufferHead（与"执行已释放页"签名吻合）。现 Phase2 在 bucket 锁内复查 count，非 0 回插 LRU 放弃驱逐。
+  - **新的确定性信号**：当前构建上 fork 子进程的退出码确定性丢失（do_exit 已存 9、控制台标记证实；wait4 读回 0）——同路径 CLONE_VM(vfork) 子进程退出码完好。E1-E4 判别用例已内置（默认禁用）。下一排查方向：fork 子进程 Task/页生命周期（exit_code 读取点、release_task/free_task_slot 与 task slot 复用、fork COW get_page/put_page 对称性审计）。
+  - nettest 的 fork+fs 探针与 E 用例默认禁用以保持套件确定性；修复前 shell 重定向/管道视为已知不可用。
 
 ### 16.5 对修复计划的影响
 
