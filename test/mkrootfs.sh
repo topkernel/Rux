@@ -1,7 +1,12 @@
 #!/bin/bash
-# Create ext4 rootfs image containing mrsh and toybox
+# Create ext4 rootfs image containing mrsh, toybox and the test programs.
+#
+# Population is done via `mkfs.ext4 -d <staging>` (e2fsprogs >= 1.43), so the
+# script needs no root privileges and no loop mounts. Device nodes are not
+# created: the kernel mounts devfs over /dev early in boot, so image-level
+# nodes were never reachable anyway.
 
-set -e
+set -euo pipefail
 
 # Get project root directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,7 +17,11 @@ cd "$PROJECT_ROOT"
 # Configuration
 IMAGE_FILE="$PROJECT_ROOT/test/rootfs.img"
 IMAGE_SIZE="1G"
-MOUNT_POINT="$PROJECT_ROOT/test/rootfs_mnt"
+STAGING=$(mktemp -d /tmp/rux-rootfs.XXXXXX)
+
+# Always remove the staging tree on exit (review TEST-M8: no trap used to
+# leave rootfs_mnt/ and temp files behind on failure).
+trap 'rm -rf "$STAGING"' EXIT
 
 # Tool paths
 MRSH_BINARY="$PROJECT_ROOT/userspace/mrsh/mrsh/mrsh"
@@ -29,53 +38,24 @@ echo "========================================"
 echo "Building ext4 rootfs image"
 echo "========================================"
 
-# Clean up old files
-echo "Cleaning up old files..."
-rm -f "$IMAGE_FILE"
-# If mount point exists and is mounted, unmount first
-if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
-    sudo umount -l "$MOUNT_POINT" 2>/dev/null || true
-fi
-rm -rf "$MOUNT_POINT"
-mkdir -p "$MOUNT_POINT"
-
-# Create image file
-echo "Creating image file: $IMAGE_FILE ($IMAGE_SIZE)"
-dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=1024 2>/dev/null
-
-# Format as ext4
-echo "Formatting as ext4..."
-mkfs.ext4 -F -O ^metadata_csum,^flex_bg "$IMAGE_FILE" > /dev/null 2>&1
-
-# Mount image
-echo "Mounting image to $MOUNT_POINT..."
-sudo mount -o loop "$IMAGE_FILE" "$MOUNT_POINT"
-
 # Create directory structure
-echo "Creating directory structure..."
-sudo mkdir -p "$MOUNT_POINT/bin"
-sudo mkdir -p "$MOUNT_POINT/app"
-sudo mkdir -p "$MOUNT_POINT/test"
-sudo mkdir -p "$MOUNT_POINT/dev"
-sudo mkdir -p "$MOUNT_POINT/etc"
-sudo mkdir -p "$MOUNT_POINT/lib"
+echo "Preparing staging tree: $STAGING"
+mkdir -p "$STAGING/bin" "$STAGING/app" "$STAGING/test" "$STAGING/dev" \
+         "$STAGING/etc" "$STAGING/lib" "$STAGING/proc" "$STAGING/tmp" \
+         "$STAGING/var/log" "$STAGING/sbin"
 
 # Install dynamic linker (ld-musl)
 MUSL_LIB_DIR="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl/lib"
 if [ -f "$MUSL_LIB_DIR/libc.so" ]; then
     echo "Installing dynamic linker to /lib/ld-musl-riscv64.so.1..."
-    sudo cp "$MUSL_LIB_DIR/libc.so" "$MOUNT_POINT/lib/ld-musl-riscv64.so.1"
-    sudo chmod +x "$MOUNT_POINT/lib/ld-musl-riscv64.so.1"
+    cp "$MUSL_LIB_DIR/libc.so" "$STAGING/lib/ld-musl-riscv64.so.1"
+    chmod +x "$STAGING/lib/ld-musl-riscv64.so.1"
 else
     echo "Warning: musl libc.so not found at $MUSL_LIB_DIR/libc.so"
 fi
-sudo mkdir -p "$MOUNT_POINT/proc"
-sudo mkdir -p "$MOUNT_POINT/tmp"
-sudo mkdir -p "$MOUNT_POINT/var"
-sudo mkdir -p "$MOUNT_POINT/var/log"
 
 # Create /etc/mrshrc (sourced by mrsh interactive shells via ENV)
-cat <<'MRSHRC' | sudo tee "$MOUNT_POINT/etc/mrshrc" > /dev/null
+cat <<'MRSHRC' > "$STAGING/etc/mrshrc"
 alias ls='ls --color=auto'
 alias ll='ls -l --color=auto'
 alias help='toybox --help'
@@ -86,8 +66,8 @@ for app in desktop calculator clock vshell; do
     eval "binary=\$$(echo $app | tr '[:lower:]' '[:upper:]')_BINARY"
     if [ -f "$binary" ]; then
         echo "Installing $app to /app/$app..."
-        sudo cp "$binary" "$MOUNT_POINT/app/$app"
-        sudo chmod +x "$MOUNT_POINT/app/$app"
+        cp "$binary" "$STAGING/app/$app"
+        chmod +x "$STAGING/app/$app"
     else
         echo "Warning: $app binary not found at $binary (skipping)"
     fi
@@ -100,36 +80,53 @@ if [ ! -f "$FORK_TEST_BINARY" ]; then
 fi
 if [ -f "$FORK_TEST_BINARY" ]; then
     echo "Installing smoke_test to /test/smoke_test..."
-    sudo cp "$FORK_TEST_BINARY" "$MOUNT_POINT/test/smoke_test"
-    sudo chmod +x "$MOUNT_POINT/test/smoke_test"
+    cp "$FORK_TEST_BINARY" "$STAGING/test/smoke_test"
+    chmod +x "$STAGING/test/smoke_test"
 fi
 
 # Install dynamic linking test program
 DYNAMIC_LINK_TEST="$PROJECT_ROOT/userspace/tests/smoke_test/dynamic_link_test"
 if [ -f "$DYNAMIC_LINK_TEST" ]; then
     echo "Installing dynamic_link_test to /test/dynamic_link_test..."
-    sudo cp "$DYNAMIC_LINK_TEST" "$MOUNT_POINT/test/dynamic_link_test"
-    sudo chmod +x "$MOUNT_POINT/test/dynamic_link_test"
+    cp "$DYNAMIC_LINK_TEST" "$STAGING/test/dynamic_link_test"
+    chmod +x "$STAGING/test/dynamic_link_test"
+fi
+
+# Build + install the loopback network E2E test (freestanding, raw
+# syscalls — no libc, so it only needs the system RISC-V cross-gcc, not
+# the musl SDK). Compiled here so the image always carries a fresh build.
+NETTEST_SRC="$PROJECT_ROOT/test/nettest.c"
+if [ -f "$NETTEST_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing nettest to /test/nettest..."
+    if riscv64-linux-gnu-gcc -nostdlib -nostartfiles -static -O2 -fno-builtin \
+         -o "$STAGING/test/nettest" "$NETTEST_SRC"; then
+        chmod +x "$STAGING/test/nettest"
+    else
+        echo "Warning: nettest failed to compile (skipping)"
+        rm -f "$STAGING/test/nettest"
+    fi
+else
+    echo "Warning: riscv64-linux-gnu-gcc not found, skipping nettest"
 fi
 
 # Copy linux-ltp test suite
 LINUX_LTP_DIR="$PROJECT_ROOT/userspace/linux-ltp/output"
 if [ -d "$LINUX_LTP_DIR/testcases" ]; then
     echo "Installing LTP tests to /test/linux-ltp/..."
-    sudo mkdir -p "$MOUNT_POINT/test/linux-ltp"
-    sudo cp -r "$LINUX_LTP_DIR/"* "$MOUNT_POINT/test/linux-ltp/"
-    sudo chmod -R +x "$MOUNT_POINT/test/linux-ltp/testcases/bin/"* 2>/dev/null || true
-    TEST_COUNT=$(find "$MOUNT_POINT/test/linux-ltp/testcases/bin" -type f 2>/dev/null | wc -l)
+    mkdir -p "$STAGING/test/linux-ltp"
+    cp -r "$LINUX_LTP_DIR/"* "$STAGING/test/linux-ltp/"
+    chmod -R +x "$STAGING/test/linux-ltp/testcases/bin/"* 2>/dev/null || true
+    TEST_COUNT=$(find "$STAGING/test/linux-ltp/testcases/bin" -type f 2>/dev/null | wc -l)
     echo "  Installed $TEST_COUNT test binaries"
 fi
 
 # Install mrsh as /bin/sh (POSIX-compliant shell)
 if [ -f "$MRSH_BINARY" ]; then
     echo "Installing mrsh to /bin/sh..."
-    sudo cp "$MRSH_BINARY" "$MOUNT_POINT/bin/mrsh"
-    sudo chmod +x "$MOUNT_POINT/bin/mrsh"
+    cp "$MRSH_BINARY" "$STAGING/bin/mrsh"
+    chmod +x "$STAGING/bin/mrsh"
     # Force mrsh as /bin/sh (overwriting toybox's sh symlink)
-    sudo ln -sf mrsh "$MOUNT_POINT/bin/sh"
+    ln -sf mrsh "$STAGING/bin/sh"
     echo "  mrsh installed as /bin/sh (POSIX shell)"
 else
     echo "Warning: mrsh binary not found at $MRSH_BINARY (skipping)"
@@ -138,11 +135,8 @@ fi
 # Install toybox (if exists)
 if [ -f "$TOYBOX_BINARY" ]; then
     echo "Installing toybox to /bin/toybox..."
-    sudo cp "$TOYBOX_BINARY" "$MOUNT_POINT/bin/toybox"
-    sudo chmod +x "$MOUNT_POINT/bin/toybox"
-
-    # Create /sbin directory
-    sudo mkdir -p "$MOUNT_POINT/sbin"
+    cp "$TOYBOX_BINARY" "$STAGING/bin/toybox"
+    chmod +x "$STAGING/bin/toybox"
 
     # Create symlinks for all toybox commands in /bin/
     echo "Creating toybox symlinks in /bin/..."
@@ -165,13 +159,13 @@ true truncate ts tsort tty tunctl uclampset ulimit umount uname unicode uniq \
 unix2dos unlink unshare uptime usleep uudecode uuencode uuidgen vmstat w watch \
 wc wget which who whoami xargs xxd yes zcat"
     (
-        cd "$MOUNT_POINT/bin"
+        cd "$STAGING/bin"
         for cmd in $TOYBOX_BIN_COMMANDS; do
             # Force create symlinks for shell commands (sh, bash, toysh)
             case "$cmd" in
                 sh) ;; # sh is provided by mrsh, skip
-                bash|toysh) sudo ln -sf toybox "$cmd" ;;
-                *) [ ! -e "$cmd" ] && sudo ln -sf toybox "$cmd" ;;
+                bash|toysh) ln -sf toybox "$cmd" ;;
+                *) [ ! -e "$cmd" ] && ln -sf toybox "$cmd" ;;
             esac
         done
     )
@@ -183,10 +177,10 @@ i2cdetect i2cdump i2cget i2cset i2ctransfer ifconfig insmod killall5 \
 losetup lsmod mkswap modinfo oneit partprobe poweroff reboot rfkill rmmod \
 swapoff swapon sysctl vconfig watchdog"
     (
-        cd "$MOUNT_POINT/sbin"
+        cd "$STAGING/sbin"
         for cmd in $TOYBOX_SBIN_COMMANDS; do
             if [ ! -e "$cmd" ]; then
-                sudo ln -sf ../bin/toybox "$cmd"
+                ln -sf ../bin/toybox "$cmd"
             fi
         done
     )
@@ -199,69 +193,31 @@ else
     echo "  Run 'make toybox' to build toybox first"
 fi
 
-# Create some basic device nodes (if mknod is available)
-if command -v mknod &> /dev/null; then
-    echo "Creating device nodes..."
-    sudo mknod "$MOUNT_POINT/dev/console" c 5 1 2>/dev/null || true
-    sudo mknod "$MOUNT_POINT/dev/null" c 1 3 2>/dev/null || true
-    sudo mknod "$MOUNT_POINT/dev/zero" c 1 5 2>/dev/null || true
-fi
+# Build the image: mkfs.ext4 -d populates it from the staging tree in one
+# step — no loop mount, no root privileges.
+echo "Creating image $IMAGE_FILE ($IMAGE_SIZE) from staging tree..."
+rm -f "$IMAGE_FILE"
+mkfs.ext4 -q -F -O ^metadata_csum,^flex_bg -d "$STAGING" "$IMAGE_FILE" "$IMAGE_SIZE"
 
-# Display image contents
+# Display image contents summary
 echo ""
 echo "========================================"
-echo "Rootfs contents:"
+echo "Rootfs image created: $IMAGE_FILE"
 echo "========================================"
-sudo find "$MOUNT_POINT" -type f -o -type d | sudo sort | sed 's|'$MOUNT_POINT'||'
-
-# Get file sizes
+debugfs -R "ls -l /test" "$IMAGE_FILE" 2>/dev/null | awk 'NF > 7 {print "  /test/"$8, "("$6" bytes)"}'
 echo ""
-echo "========================================"
-echo "Image statistics:"
-echo "========================================"
-[ -f "$MRSH_BINARY" ] && echo "Mrsh:       $(stat -c%s "$MRSH_BINARY" 2>/dev/null || stat -f%z "$MRSH_BINARY") bytes"
-[ -f "$TOYBOX_BINARY" ] && echo "Toybox:     $(stat -c%s "$TOYBOX_BINARY" 2>/dev/null || stat -f%z "$TOYBOX_BINARY") bytes"
-[ -f "$DESKTOP_BINARY" ] && echo "Desktop:    $(stat -c%s "$DESKTOP_BINARY" 2>/dev/null || stat -f%z "$DESKTOP_BINARY") bytes"
-[ -f "$CALCULATOR_BINARY" ] && echo "Calculator: $(stat -c%s "$CALCULATOR_BINARY" 2>/dev/null || stat -f%z "$CALCULATOR_BINARY") bytes"
-[ -f "$CLOCK_BINARY" ] && echo "Clock:      $(stat -c%s "$CLOCK_BINARY" 2>/dev/null || stat -f%z "$CLOCK_BINARY") bytes"
-echo ""
-echo "Total image size: $(stat -c%s "$IMAGE_FILE" 2>/dev/null || stat -f%z "$IMAGE_FILE") bytes"
+echo "Total image size: $(stat -c%s "$IMAGE_FILE") bytes"
 ls -lh "$IMAGE_FILE"
 
-# Unmount image
-echo ""
-echo "Unmounting image..."
-cd "$PROJECT_ROOT"
-sudo umount "$MOUNT_POINT"
-rmdir "$MOUNT_POINT"
-
-echo ""
-echo "Rootfs image created successfully: $IMAGE_FILE"
 echo ""
 echo "Directory structure:"
-echo "  /bin/          - mrsh, toybox, basic commands"
+echo "  /bin/          - mrsh (as sh), toybox, basic commands"
 echo "  /app/          - GUI applications"
 echo "  /test/         - test programs"
 echo ""
-echo "Available shells:"
-echo "  /bin/sh        - symlink to mrsh"
-echo "  /bin/mrsh      - mrsh (POSIX shell)"
-echo ""
-echo "GUI applications (/app/):"
-echo "  /app/desktop   - Desktop environment"
-echo "  /app/calculator- Calculator"
-echo "  /app/clock     - Clock"
-echo "  /app/vshell    - Visual Shell"
-echo ""
 echo "Test programs (/test/):"
-echo "  /test/smoke_test     - kernel smoke test"
+echo "  /test/smoke_test        - kernel smoke test"
 echo "  /test/dynamic_link_test - dynamic linking test"
-echo "  /test/linux-ltp/     - official LTP tests (if built)"
+echo "  /test/nettest           - loopback network E2E test (UDP/TCP echo)"
+echo "  /test/linux-ltp/        - official LTP tests (if built)"
 echo "    run: /test/linux-ltp/run_quick.sh"
-echo ""
-echo "Toybox commands (via symlinks):"
-echo "  /bin/  - user commands (ls, cat, grep, vi, etc.)"
-echo "  /sbin/ - system commands (mount, ifconfig, halt, etc.)"
-echo ""
-echo "Usage:"
-echo "  make run        - Run with mrsh"
