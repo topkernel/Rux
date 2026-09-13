@@ -446,7 +446,9 @@ signal 交付链（H-05/06/07/15、M-01~04）、调度器（P06-P10）、syscall
 - **疑似范围**（未最终定罪）：icache Arc 引用与 LRU 逐出的窗口、ext4 全模块无并发防护（EXT4-H10）、fork 的 mm 快照/页表复制与退出释放路径。需要专项排查（nettest 已内置可启用的探针用例，见 test/nettest.c 注释）。
 - **处置与进展（2026-09-13 第二轮追查）**：
   - 已修一个确证的同族缺陷 **VFS-H13**（bio LRU 两阶段驱逐无锁）：Phase1 在 LRU 锁内选定 count==0 受害者摘链后释放锁，Phase2 才拿 bucket 锁摘哈希——间隙内并发 get() 可钉住该条目而 Phase4 仍释放，调用方持悬挂 BufferHead（与"执行已释放页"签名吻合）。现 Phase2 在 bucket 锁内复查 count，非 0 回插 LRU 放弃驱逐。
-  - **新的确定性信号**：当前构建上 fork 子进程的退出码确定性丢失（do_exit 已存 9、控制台标记证实；wait4 读回 0）——同路径 CLONE_VM(vfork) 子进程退出码完好。E1-E4 判别用例已内置（默认禁用）。下一排查方向：fork 子进程 Task/页生命周期（exit_code 读取点、release_task/free_task_slot 与 task slot 复用、fork COW get_page/put_page 对称性审计）。
+  - **✅ 已破案并修复（第三个根因，2026-09-13 第三轮追查）**：fork 子进程退出码丢失的机制为——fork 将父进程栈页 COW 降级为只读（W=0，PTE 探针实证），而编译器把局部变量寄存器化，父进程对该页的**首次写发生在内核 copy_to_user（wait4 回写状态）**；异常表把写故障转为"未拷贝字节数"，`do_wait` 用 `let _uncopied` 丢弃 → 状态静默丢失。Linux 对"内核访问用户 COW 页"会做 fault-in 解析后重试，本内核缺失。**修复**：`copy_to_user` 失败后对目标区间做 `fault_in_write`（COW 位→handle_cow_fault；未映射→handle_mm_fault(WRITE)+CowPending 解析），成功则重试一次。该修复同时消除一族"fork 后随机 EFAULT/0 值"类症状（wait4/sigprocmask/getcpu 等一切经 copy_to_user 写用户局部变量的路径）。
+  - 附带验证：vfork+exec 与 vfork+openat+dup3+exec(echo→文件)（即 posix_spawn 完整序列）syscall 级全部通过并纳入 nettest 常规用例。
+  - **仍未解决**：NEW2 主体（mrsh 重定向子进程仍 SIGSEGV——现在退出码如实报告 -11 而非 129；套件 7 次中 4-6 次全过、挂点漂移于 sigtimedwait/udp/入口）。给 ethernet_poll 加轮询互斥的尝试使死锁恶化（3/5）已回退——并发路径需要的是结构性修复（DRIV-M15 virtio SMP 安全 + EXT4-H10），不是外层串行化。下一抓手：mrsh 子进程 SIGSEGV 的 sp=0xe8a00 异常栈指针（dmesg 实证），指向 exec 栈建立或子进程栈切换在特定时序下的坏值。
   - nettest 的 fork+fs 探针与 E 用例默认禁用以保持套件确定性；修复前 shell 重定向/管道视为已知不可用。
 
 ### 16.5 对修复计划的影响

@@ -451,6 +451,60 @@ static int fork_redir_exec_test(void)
     return 0;
 }
 
+static void vf_exec_child(void)
+{
+    static const char *argv4[] = { "true", 0 };
+    sys3(__NR_execve, (s64)"/bin/true\0", (s64)argv4, 0);
+    sys3(93, 99, 0, 0);
+}
+static int vfork_exec_test(void)
+{
+    static unsigned long st4[4096] __attribute__((aligned(16)));
+    unsigned long st = 0;
+    extern long my_clone(void *fn, unsigned long sp, unsigned long fl);
+    puts_("VF-exec\n");
+    long pid = my_clone((void *)vf_exec_child, (unsigned long)(st4 + 4096),
+                        SIGCHLD | CLONE_VM | CLONE_VFORK);
+    if (pid < 0) return 40;
+    sys6(__NR_wait4, pid, (s64)&st, 0, 0, 0, 0);
+    if ((st & 0x7f) != 0 || ((st >> 8) & 0xff) != 0) return 41;
+    puts_("VF-exec-ok\n");
+    return 0;
+}
+
+static void vf_redir_exec_child(void)
+{
+    static const char *argv5[] = { "echo", "VF-REDIR-OK", 0 };
+    s64 fd = sys6(__NR_openat, -100, (s64)"/tmp/vfre\0", O_CREAT | O_WRONLY | O_TRUNC, 0600, 0, 0);
+    if (fd < 0) sys3(93, 90, 0, 0);
+    if (sys6(__NR_dup3, fd, 1, 0, 0, 0, 0) < 0) sys3(93, 91, 0, 0);
+    sys3(__NR_execve, (s64)"/bin/echo\0", (s64)argv5, 0);
+    sys3(93, 92, 0, 0);
+}
+static int vf_redir_exec_test(void)
+{
+    static unsigned long st5[4096] __attribute__((aligned(16)));
+    char buf[16];
+    unsigned long st = 0;
+    extern long my_clone(void *fn, unsigned long sp, unsigned long fl);
+    puts_("VF-re\n");
+    long pid = my_clone((void *)vf_redir_exec_child, (unsigned long)(st5 + 4096),
+                        SIGCHLD | CLONE_VM | CLONE_VFORK);
+    if (pid < 0) return 45;
+    sys6(__NR_wait4, pid, (s64)&st, 0, 0, 0, 0);
+    if ((st & 0x7f) != 0 || ((st >> 8) & 0xff) != 0) return 46;
+    s64 fd = sys6(__NR_openat, -100, (s64)"/tmp/vfre\0", O_RDONLY, 0, 0, 0);
+    if (fd < 0) return 47;
+    s64 nr = sys3(__NR_read, fd, (s64)buf, 12);
+    sys3(__NR_close, fd, 0, 0);
+    sys3(__NR_unlinkat, -100, (s64)"/tmp/vfre\0", 0);
+    if (nr != 12) return 48;
+    for (int i = 0; i < 12; i++)
+        if (buf[i] != "VF-REDIR-OK\n"[i]) return 49;
+    puts_("VF-re-ok\n");
+    return 0;
+}
+
 static int vfork_redir_inner(int use_vfork);
 
 /* raw clone trampoline: my_clone(func, stack_top, flags) — child runs
@@ -578,9 +632,31 @@ static int bisect_variants(void)
     long pid;
 
     puts_("V-forkexit\n");
+    /* COW integrity canary: pattern the parent's own static data right
+     * before forking; verify it right after wait4. If the child's exit
+     * frees pages the parent still maps, the pattern reads back wrong. */
+    static volatile unsigned long canary[512];
+    for (int i = 0; i < 512; i++) canary[i] = 0xA5A50000u | (unsigned long)i;
+    static unsigned long st_static;
     pid = my_clone((void *)child_exit9, (unsigned long)(st_ + 4096), SIGCHLD);
     if (pid < 0) return 55;
-    sys6(__NR_wait4, pid, (s64)&st, 0, 0, 0, 0);
+    st_static = 0x12345678; /* junk marker to detect "never written" */
+    sys6(__NR_wait4, pid, (s64)&st, 0, 0, 0, 0); /* STACK target again */
+    st_static = st;
+    if (st_static == 0x12345678) puts_("ST-NEVERWRITTEN\n");
+    else if (((st_static >> 8) & 0xff) == 9) puts_("ST-STATIC-OK\n");
+    else puts_("ST-STATIC-BAD\n");
+    {
+        int bad = 0;
+        for (int i = 0; i < 512; i++)
+            if (canary[i] != (0xA5A50000u | (unsigned long)i)) bad++;
+        if (bad) { puts_("CANARY-CORRUPT\n"); return 59; }
+        puts_("canary-ok\n");
+    }
+    /* re-read st a second time after a delay: catches pages recycled
+     * between the wait4 copy and the user read */
+    for (volatile int d = 0; d < 100000; d++) {}
+    if (((st >> 8) & 0xff) != 9) { puts_("st2-lost\n"); }
     if (((st >> 8) & 0xff) != 9) {
         puts_("NEW2: fork-exit code lost (see fix plan)\n");
         puts_("fe-st=");
@@ -637,6 +713,10 @@ void _start(void)
      * SMP race. Re-enable when investigating. */
     r = 0; (void)fork_redir_exec_test;
     puts_("forkredir: (disabled, see nettest.c)\n");
+    r = vf_redir_exec_test();
+    if (r != 0) puts_("VF-re: FAIL\n");
+    r = vfork_exec_test();
+    if (r != 0) puts_("VF-exec: FAIL\n");
     r = vfork_test();
     if (r == 0) {
         puts_("vfork: redirect ok\n");

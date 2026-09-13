@@ -116,7 +116,101 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 
     // Delegate to assembly implementation which has exception table entries
     // for fault-safe user memory access.
-    __copy_to_user(to, from, n)
+    let uncopied = __copy_to_user(to, from, n);
+    if uncopied == 0 {
+        return 0;
+    }
+
+    // The copy faulted. A write to a COW-downgraded user page (e.g. a
+    // register-held local on the parent's stack after fork — the parent's
+    // first write to that page may be THIS kernel copy) is resolvable:
+    // fault the range in for write and retry once, like Linux's
+    // fault_in_pages_writeable + copy retry (NEW2 root cause).
+    if fault_in_write(to, n) {
+        let uncopied2 = __copy_to_user(to, from, n);
+        return uncopied2;
+    }
+    uncopied
+}
+
+/// Fault-in a user address range for writing (COW resolution / demand
+/// mapping), best-effort: returns true if at least the first page got
+/// resolved. Only handles resolvable cases; genuinely bad ranges still
+/// return false so callers report EFAULT.
+unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
+    use crate::mm::page::VirtAddr as PageVirtAddr;
+    use crate::arch::riscv64::mm::memory_layout::VirtAddr as ArchVirtAddr;
+
+    let task = match crate::sched::current() {
+        Some(t) => t,
+        None => return false,
+    };
+    let addr_space = match (*task).address_space() {
+        Some(a) => a,
+        None => return false,
+    };
+    let root_ppn = addr_space.root_ppn();
+
+    let first_page = (start as usize) & !0xFFF;
+    let last_page = ((start as usize) + len.saturating_sub(1)) & !0xFFF;
+    let mut resolved_any = false;
+    let mut page = first_page;
+    loop {
+        // Already writable?
+        if let Some((_ppn, bits)) =
+            crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root_ppn, page as u64)
+        {
+            if bits & crate::arch::riscv64::mm::PageTableEntry::W != 0 {
+                resolved_any = true;
+                if page == last_page { break; }
+                page += 0x1000;
+                continue;
+            }
+            // Valid but read-only: COW? (COW software bit 8)
+            if bits & (1 << 8) != 0 {
+                if crate::arch::riscv64::mm::mm_ops::handle_cow_fault(
+                    root_ppn,
+                    ArchVirtAddr::new(page as u64),
+                )
+                .is_some()
+                {
+                    resolved_any = true;
+                }
+            }
+            // Non-COW read-only is a genuine protection fault — give up.
+            if page == last_page { break; }
+            page += 0x1000;
+            continue;
+        }
+
+        // Not present: demand-map through the fault engine (anonymous
+        // write fault / stack growth / file page).
+        match crate::arch::riscv64::mm::page_fault::handle_mm_fault(
+            &addr_space,
+            ArchVirtAddr::new(page as u64),
+            crate::arch::riscv64::mm::page_fault::FaultFlags::WRITE,
+        ) {
+            crate::arch::riscv64::mm::page_fault::MmFaultResult::CowPending => {
+                // handle_cow_fault resolves it
+                if crate::arch::riscv64::mm::mm_ops::handle_cow_fault(
+                    root_ppn,
+                    ArchVirtAddr::new(page as u64),
+                )
+                .is_some()
+                {
+                    resolved_any = true;
+                }
+            }
+            crate::arch::riscv64::mm::page_fault::MmFaultResult::Handled
+            | crate::arch::riscv64::mm::page_fault::MmFaultResult::AlreadyMapped => {
+                resolved_any = true;
+            }
+            _ => {}
+        }
+        if page == last_page { break; }
+        page += 0x1000;
+    }
+    resolved_any
 }
 
 /// Copy data from user space to kernel
