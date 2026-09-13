@@ -12,27 +12,36 @@ use alloc::format;
 /// Format: "<uptime> <idle_time>"
 /// Both values are in seconds with two decimal places.
 pub fn generate() -> Vec<u8> {
-    let uptime_secs = get_uptime_seconds();
+    // Pure integer fixed-point: the kernel runs with sstatus.FS = Off (no
+    // FPU context management yet — review ARCH-H1), so f64 math here
+    // traps as an illegal instruction in kernel mode and used to panic
+    // the whole kernel on `cat /proc/uptime`.
+    const TIMER_FREQ: u64 = 10_000_000;
+    let cycles = read_time_cycles();
 
-    // Format: uptime idle_time
+    // seconds with two decimals, scaled by 100
+    let secs_x100 = cycles / (TIMER_FREQ / 100);
+    let (up_w, up_f) = (secs_x100 / 100, secs_x100 % 100);
+
     // TODO: Track actual idle time per CPU. Approximate as uptime * ncpus.
-    let num_cpus = crate::arch::riscv64::smp::num_started_cpus() as f64;
-    let idle_secs = uptime_secs * num_cpus;
-    let content = format!("{:.2} {:.2}\n", uptime_secs, idle_secs);
+    let ncpus = crate::arch::riscv64::smp::num_started_cpus() as u64;
+    let idle_x100 = secs_x100 * ncpus;
+    let (id_w, id_f) = (idle_x100 / 100, idle_x100 % 100);
 
+    let content = format!("{}.{} {}.{}\n", up_w, up_f, id_w, id_f);
     content.into_bytes()
 }
 
-/// Get system uptime in seconds
+/// Get uptime in seconds (integer, truncated)
 ///
 /// Uses RISC-V timer to calculate uptime.
 /// QEMU virt machine clock frequency is 10 MHz.
-pub fn get_uptime_seconds() -> f64 {
+pub fn get_uptime_secs() -> u64 {
     // QEMU virt machine clock frequency
     const TIMER_FREQ: u64 = 10_000_000;
 
     let cycles = read_time_cycles();
-    cycles as f64 / TIMER_FREQ as f64
+    cycles / TIMER_FREQ
 }
 
 /// Get uptime in milliseconds

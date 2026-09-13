@@ -390,6 +390,20 @@ impl SigPending {
     pub fn get_all(&self) -> u64 {
         self.signal.load(Ordering::Acquire)
     }
+
+    /// Atomically dequeue one specific signal: clears its bitmap bit and
+    /// removes the matching queued SigInfo (if any). Used by
+    /// rt_sigtimedwait/sigwait, which CONSUME the signal instead of
+    /// letting the delivery path run a handler.
+    pub fn remove_one(&self, sig: i32) -> Option<SigInfo> {
+        let bit = 1u64 << ((sig as u32) - 1);
+        self.signal.fetch_and(!bit, Ordering::AcqRel);
+        let mut queue = self.queue.inner.lock();
+        if let Some(pos) = queue.iter().position(|i| i.si_signo == sig) {
+            return queue.remove(pos);
+        }
+        None
+    }
 }
 
 /// Signal handling structure
@@ -535,14 +549,14 @@ pub struct SigInfo {
     pub si_errno: i32,
     pub si_code: i32,
     _pad0: i32,
-    // _sifields union — we use _kill layout (pid + uid) for simplicity.
-    // Other union members share the same offset space.
+    // _sifields union starts at offset 16. _kill layout:
+    //   si_pid @16 (i32), si_uid @20 (u32) — review IPC-M15: si_uid used
+    //   to sit at 24 (one word too far).
     pub si_pid: i32,
-    _pad1: i32,
     pub si_uid: u32,
-    _pad2: u32,
-    // Remaining 88 bytes to reach 128 total.
-    _rest: [u8; 88],
+    // _sigchld continues with si_status @24 (i32) — was written at 32.
+    // Remaining 104 bytes to reach 128 total.
+    _rest: [u8; 104],
 }
 
 impl SigInfo {
@@ -554,18 +568,16 @@ impl SigInfo {
             si_code: code,
             _pad0: 0,
             si_pid: pid as i32,
-            _pad1: 0,
             si_uid: uid,
-            _pad2: 0,
-            _rest: [0u8; 88],
+            _rest: [0u8; 104],
         }
     }
 
     /// Create child process exit signal info
     pub fn child(pid: u32, uid: u32, status: i32) -> Self {
         let mut info = Self::new(Signal::SIGCHLD as i32, 1, pid, uid);
-        // si_status is at offset 32 in the _sifields._sigchld union member.
-        // For _kill layout, offset 32 falls into _rest.
+        // si_status lives at _sifields offset 8 → absolute offset 24
+        // (the start of _rest; review IPC-M15: it used to land at 32).
         info._rest[..4].copy_from_slice(&status.to_le_bytes());
         info
     }
@@ -599,9 +611,10 @@ pub mod si_code {
 pub struct SigContext {
     /// General-purpose registers: [pc, ra, sp, gp, tp, t0-t6, s0-s11, a0-a7] (32 entries)
     pub sc_regs: [u64; 32],
-    /// sstatus CSR
-    pub sc_status: u64,
-    /// Floating-point registers f0-f31 (32 entries)
+    /// Floating-point registers f0-f31, directly after sc_regs — the
+    /// RISC-V uapi sigcontext has NO sstatus field between them; the old
+    /// extra sc_status shifted the FP state 8 bytes off the ABI (review
+    /// M-03). sstatus is stashed in SignalFrame.reserved[3] instead.
     pub sc_fpregs: [u64; 32],
     /// Floating-point control and status register
     pub sc_fcsr: u64,
@@ -609,7 +622,7 @@ pub struct SigContext {
 
 impl Default for SigContext {
     fn default() -> Self {
-        Self { sc_regs: [0u64; 32], sc_status: 0, sc_fpregs: [0u64; 32], sc_fcsr: 0 }
+        Self { sc_regs: [0u64; 32], sc_fpregs: [0u64; 32], sc_fcsr: 0 }
     }
 }
 
@@ -973,16 +986,18 @@ unsafe fn setup_frame(
         }
     }
 
-    // Save sstatus
-    frame.uc.uc_mcontext.sc_status = regs.status;
+    // Save sstatus (kernel-private stash — not part of the user ABI struct)
+    frame.reserved[3] = regs.status;
 
-    // Save signal mask
-    // If SA_NODEFER is not set, block this signal during handler execution.
-    // The original mask is restored by sigreturn.
-    let mut new_sigmask = (*task).sigmask;
+    // Signal mask during handler execution (POSIX): old mask | sa_mask |
+    // the signal itself (unless SA_NODEFER). sa_mask was never merged
+    // before, so handlers ran with their configured block mask ignored
+    // (review M-01). SIGKILL/SIGSTOP stay unblockable.
+    let mut new_sigmask = (*task).sigmask | action.sa_mask;
     if (action.sa_flags.bits() & SigFlags::SA_NODEFER) == 0 {
         new_sigmask |= 1u64 << ((sig as u32) - 1);
     }
+    new_sigmask &= !((1u64 << 8) | (1u64 << 18));
     frame.uc.uc_sigmask = new_sigmask;
     (*task).sigmask = new_sigmask;
 
@@ -1050,10 +1065,26 @@ pub unsafe fn restore_sigcontext(
         return false;
     }
 
-    // Get signal frame from kernel space backup
-    let frame = match (*task).sigframe {
-        Some(f) => f,
-        None => return false,
+    // Read the frame back from USER memory first: the handler (or
+    // swapcontext/longjmp-style code) may have modified the ucontext on
+    // the stack, and those edits must win (review M-04 — the kernel
+    // backup copy used to be authoritative). Fall back to the kernel
+    // backup only when the user copy is unreadable.
+    let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
+    let copied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            &mut user_frame as *mut SignalFrame as *mut u8,
+            frame_addr as *const u8,
+            core::mem::size_of::<SignalFrame>(),
+        )
+    };
+    let frame = if copied == 0 {
+        user_frame
+    } else {
+        match (*task).sigframe {
+            Some(f) => f,
+            None => return false,
+        }
     };
 
     let regs = &mut *regs;
@@ -1097,8 +1128,8 @@ pub unsafe fn restore_sigcontext(
     regs.t5 = frame.uc.uc_mcontext.sc_regs[30];  // x30 (t5)
     regs.t6 = frame.uc.uc_mcontext.sc_regs[31];  // x31 (t6)
 
-    // Restore sstatus
-    regs.status = frame.uc.uc_mcontext.sc_status;
+    // Restore sstatus (kernel-private stash in reserved[3])
+    regs.status = frame.reserved[3];
 
     // Restore signal mask
     (*task).sigmask = frame.uc.uc_sigmask;

@@ -1661,60 +1661,132 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
 /// - args[2]: uts - timeout timespec pointer (user, NULL = block forever)
 /// - args[3]: sigsetsize - size of signal mask
 pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
+    use crate::signal::SigInfo;
+
     let uthese = args[0] as *const u64;
     let uinfo = args[1] as *mut u8;
     let uts = args[2] as *const u8;
     let sigsetsize = args[3] as usize;
 
-    if uthese.is_null() || uinfo.is_null() {
+    if uthese.is_null() {
         return -(errno::EFAULT as i64);
     }
     if sigsetsize < 8 {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(uthese as usize, sigsetsize) {
+    if !crate::arch::riscv64::uaccess::access_ok(uthese as usize, 8) {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128) {
+    if !uinfo.is_null()
+        && !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128)
+    {
         return -(errno::EFAULT as i64);
     }
     if !uts.is_null() && !crate::arch::riscv64::uaccess::access_ok(uts as usize, 16) {
         return -(errno::EFAULT as i64);
     }
 
-    // Check for already pending signals
-    // Read the signal set (first 8 bytes = 64 signals)
-    // SAFETY: uthese validated non-null and access_ok above.
-    let sigset = unsafe { core::ptr::read_volatile(uthese) };
-    let pending = crate::signal::signal_pending();
-    if !pending {
-        // No signal pending — if timeout is zero, return EAGAIN
-        if !uts.is_null() {
-            // SAFETY: uts validated with access_ok above; reading i64 fields at known offsets.
-            let ts_sec = unsafe { *((uts) as *const i64) };
-            let ts_nsec = unsafe { *((uts.add(8)) as *const i64) };
-            if ts_sec == 0 && ts_nsec == 0 {
+    // Signal set to wait for (exception-table copy).
+    // SAFETY: uthere validated non-null + access_ok above.
+    let sigset = match unsafe {
+        crate::arch::riscv64::uaccess::get_user(uthese)
+    } {
+        Some(v) => v,
+        None => return -(errno::EFAULT as i64),
+    };
+    if sigset == 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Optional timeout (timespec {tv_sec, tv_nsec}).
+    let deadline = if !uts.is_null() {
+        let mut ts = [0u8; 16];
+        // SAFETY: uts validated with access_ok above.
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(
+                ts.as_mut_ptr(), uts as *const u8, 16,
+            )
+        };
+        if uncopied > 0 {
+            return -(errno::EFAULT as i64);
+        }
+        let sec = i64::from_le_bytes(ts[0..8].try_into().unwrap());
+        let nsec = i64::from_le_bytes(ts[8..16].try_into().unwrap());
+        if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+            return -(errno::EINVAL as i64);
+        }
+        let hz = crate::drivers::timer::HZ as i64;
+        let jiffies = sec.saturating_mul(hz).saturating_add(nsec.saturating_mul(hz) / 1_000_000_000);
+        Some(crate::drivers::timer::get_jiffies().saturating_add(jiffies.max(1) as u64))
+    } else {
+        None
+    };
+
+    let current = match crate::sched::current() {
+        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        None => return -(errno::EPERM as i64),
+    };
+
+    loop {
+        // Dequeue the lowest-numbered pending signal in the set —
+        // sigtimedwait CONSUMES the signal (no handler runs for it).
+        // SAFETY: current is the running task pointer.
+        let pending = unsafe { (*current).pending.get_all() };
+        let ready = pending & sigset;
+        if ready != 0 {
+            let sig = ready.trailing_zeros() as i32 + 1;
+            // SAFETY: current is the running task pointer.
+            let info = unsafe { (*current).pending.remove_one(sig) }
+                .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_USER, 0, 0));
+            if !uinfo.is_null() {
+                let src = &info as *const SigInfo as *const u8;
+                // SAFETY: uinfo validated access_ok(128); exception-table copy.
+                let uncopied = unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(uinfo, src, 128)
+                };
+                if uncopied > 0 {
+                    return -(errno::EFAULT as i64);
+                }
+            }
+            return sig as i64;
+        }
+
+        // Timeout expired?
+        if let Some(dl) = deadline {
+            if crate::drivers::timer::get_jiffies() >= dl {
                 return -(errno::EAGAIN as i64);
             }
         }
-        return -(errno::EINTR as i64);
-    }
 
-    // Find first pending signal that's in the set
-    for i in 0..64u64 {
-        if (sigset & (1u64 << i)) != 0 {
-            // Fill siginfo_t with the signal number
-            // SAFETY: uinfo validated non-null and access_ok above; writing 128 bytes is safe.
-            unsafe {
-                core::ptr::write_bytes(uinfo, 0, 128);
-                // si_signo at offset 0
-                core::ptr::write_volatile(uinfo as *mut i32, (i + 1) as i32);
+        // Sleep until a signal arrives (send_signal wakes us). A fatal
+        // signal (SIGKILL) terminates the task from the delivery path on
+        // the way out, so the loop cannot hang the process.
+        // SAFETY: current is the running task pointer.
+        unsafe {
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE,
+            ));
+            // Re-check after marking sleeping (lost-wakeup guard).
+            if (*current).pending.get_all() & sigset != 0 {
+                (*current).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
+                continue;
             }
-            return (i + 1) as i64;
+        }
+        // Arm the deadline wakeup BEFORE sleeping: nothing else would wake
+        // a task that only has a timeout pending (same pattern as futex).
+        crate::arch::riscv64::cpu::restore_irq(true);
+        let timer_id = deadline
+            .map(|dl| crate::timer::add_timer_wakeup(
+                dl, crate::sched::get_current_pid(),
+            ))
+            .unwrap_or(0);
+        crate::sched::schedule();
+        if timer_id != 0 {
+            crate::timer::del_timer(timer_id);
         }
     }
-
-    -(errno::EINTR as i64)
 }
 
 /// sys_getcpu - get CPU number and node

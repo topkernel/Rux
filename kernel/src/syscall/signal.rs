@@ -269,7 +269,14 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> i64
 
         // Restore signal context to PtRegs
         if frame_addr != 0 {
-            crate::signal::restore_sigcontext(current, frame_addr, regs);
+            let ok = crate::signal::restore_sigcontext(current, frame_addr, regs);
+            if !ok {
+                // Corrupted/unreadable frame: falling through to ecall+4
+                // would run wild in userspace — force SIGSEGV instead
+                // (review IPC-L).
+                let pid = crate::process::current_pid();
+                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+            }
         }
 
         // Return original return value saved in signal frame

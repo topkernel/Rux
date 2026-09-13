@@ -86,10 +86,12 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
         return -(errno::ESRCH as i64);  // Process does not exist
     }
 
-    // Return nice value + 20 (convert to 1-40 range)
+    // Linux ABI returns 20 - nice (nice -20 → 40, nice 19 → 1). The old
+    // nice + 20 encoding made glibc compute the negated nice value
+    // (review M-12).
     // SAFETY: task is validated non-null above; nice() reads the task's nice field.
     let nice = unsafe { (*task).nice() };
-    (nice + 20) as i64
+    (20 - nice) as i64
 }
 
 /// sys_setpriority - Set process priority

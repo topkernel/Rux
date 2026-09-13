@@ -277,9 +277,64 @@ static int trunc_test(void)
     return 0;
 }
 
+#define __NR_kill 129
+#define __NR_rt_sigaction 134
+#define __NR_rt_sigprocmask 135
+#define __NR_rt_sigtimedwait 137
+#define __NR_getpid 172
+#define SIGUSR2 12
+#define SA_RESTORER 0x04000000
+
+/* ABI + sigwait: rt_sigaction 32-byte layout round-trip, sigtimedwait
+ * consumes a pending blocked signal, zero timeout → EAGAIN */
+static int sig_test(void)
+{
+    /* 1. sigaction set/query round-trip (32-byte user ABI) */
+    u64 act[4] = { 1 /*SIG_IGN*/, SA_RESTORER, 0x1234 /*restorer*/, 0x000000ff /*mask*/ };
+    u64 old[4] = { 0, 0, 0, 0 };
+    s64 ret = sys6(__NR_rt_sigaction, SIGUSR2, (s64)act, (s64)old, 8, 0, 0);
+    if (ret != 0) return 60;
+    /* install again with a different mask; oldact must return the first */
+    u64 act2[4] = { 0 /*SIG_DFL — pending must stick for sigwait*/, 0, 0, 0x0000f000 };
+    ret = sys6(__NR_rt_sigaction, SIGUSR2, (s64)act2, (s64)old, 8, 0, 0);
+    if (ret != 0) return 61;
+    if (old[0] != 1) return 62;            /* handler */
+    if (old[3] != 0x000000ff) return 63;   /* sa_mask at offset 24 (ABI) */
+
+    /* 2. block SIGUSR2, self-send, sigtimedwait must consume it */
+    u64 blk = 1u << (SIGUSR2 - 1);
+    ret = sys6(__NR_rt_sigprocmask, 0 /*SIG_BLOCK*/, (s64)&blk, (s64)&old[0], 8, 0, 0);
+    if (ret != 0) return 64;
+    ret = sys3(__NR_kill, sys3(__NR_getpid, 0, 0, 0), SIGUSR2, 0);
+    if (ret != 0) return 65;
+
+    u64 waitset = blk;
+    u64 ts[2] = { 0, 0 };
+    ret = sys6(__NR_rt_sigtimedwait, (s64)&waitset, 0, (s64)&ts, 8, 0, 0);
+    if (ret != SIGUSR2) return 66;
+
+    /* 3. consumed → zero timeout must be EAGAIN (-11) */
+    ret = sys6(__NR_rt_sigtimedwait, (s64)&waitset, 0, (s64)&ts, 8, 0, 0);
+    if (ret != -11) return 67;
+
+    /* restore ignore + unblock */
+    u64 ign[4] = { 1, 0, 0, 0 };
+    sys6(__NR_rt_sigaction, SIGUSR2, (s64)ign, 0, 8, 0, 0);
+    u64 unblk = ~blk;
+    sys6(__NR_rt_sigprocmask, 1 /*SIG_UNBLOCK*/, (s64)&blk, 0, 8, 0, 0);
+    (void)unblk;
+    return 0;
+}
+
 void _start(void)
 {
-    int r = file_test();
+    int r = sig_test();
+    if (r == 0) {
+        puts_("sig: abi+sigwait ok\n");
+    } else {
+        puts_("sig: FAIL\n");
+    }
+    r = file_test();
     if (r == 0) {
         puts_("file: readback ok\n");
         r = trunc_test();

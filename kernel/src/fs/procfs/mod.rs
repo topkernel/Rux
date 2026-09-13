@@ -57,7 +57,7 @@ pub mod pid;
 pub mod interrupts;
 
 // Re-export uptime functions for other modules
-pub use uptime::get_uptime_seconds;
+pub use uptime::get_uptime_secs;
 pub use uptime::get_uptime_ms;
 
 /// ProcFS magic number

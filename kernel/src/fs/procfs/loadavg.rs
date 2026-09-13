@@ -82,18 +82,26 @@ pub fn update_load_avg() {
     for i in 0..3 {
         let prev = AVENRUN[i].load(Ordering::Relaxed);
         let exp = EXP_FACTOR[i];
-        let new_val = (prev >> 32) * (exp >> 32)
-            + running * (((1u64 << 32) - exp) >> 32);
+        // Fixed-point EMA: (prev*exp)>>32 keeps the full precision — the
+        // old (prev>>32)*(exp>>32) truncated both words to ~0, so the
+        // averages never moved off zero and increments rounded away
+        // (review VFS-M11). The product is computed in u128: with
+        // load > 1.0 (prev > 2^32) a u64 multiply would overflow.
+        let decayed = (((prev as u128) * (exp as u128)) >> 32) as u64;
+        let new_val = decayed + running * ((1u64 << 32) - exp);
         AVENRUN[i].store(new_val, Ordering::Relaxed);
     }
 }
 
-/// Get load average values as (load1, load5, load15) in floating point.
-fn get_load_avg() -> (f64, f64, f64) {
-    let l0 = AVENRUN[0].load(Ordering::Relaxed) as f64 / (1u64 << 32) as f64;
-    let l1 = AVENRUN[1].load(Ordering::Relaxed) as f64 / (1u64 << 32) as f64;
-    let l2 = AVENRUN[2].load(Ordering::Relaxed) as f64 / (1u64 << 32) as f64;
-    (l0, l1, l2)
+/// Render one fixed-point load value as "<whole>.<2 digits>" using pure
+/// integer math. The kernel executes with sstatus.FS = Off (no FPU
+/// context management yet — review ARCH-H1), so any f64 arithmetic here
+/// traps as an illegal instruction in kernel mode; `cat /proc/loadavg`
+/// used to panic the whole kernel.
+fn fmt_load(fixed: u64) -> alloc::string::String {
+    let whole = fixed >> 32;
+    let frac = ((fixed & 0xFFFF_FFFF) * 100) >> 32; // two decimal digits
+    format!("{}.{}", whole, frac)
 }
 
 /// Generate /proc/loadavg content
@@ -113,11 +121,12 @@ pub fn generate() -> Vec<u8> {
         1
     };
 
-    let (load1, load5, load15) = get_load_avg();
-
     let content = format!(
-        "{:.2} {:.2} {:.2} {}/{} {}\n",
-        load1, load5, load15, running, total, last_pid
+        "{} {} {} {}/{} {}\n",
+        fmt_load(AVENRUN[0].load(Ordering::Relaxed)),
+        fmt_load(AVENRUN[1].load(Ordering::Relaxed)),
+        fmt_load(AVENRUN[2].load(Ordering::Relaxed)),
+        running, total, last_pid
     );
 
     content.into_bytes()
