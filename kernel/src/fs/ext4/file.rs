@@ -249,6 +249,14 @@ pub fn ext4_file_write(
         // Get data block number (supports indirect blocks)
         let block_num = match inode.get_data_block(fs, block_index) {
             Ok(0) => {
+                // Extent-mapped file with a hole: allocating into
+                // inode.block[] would overwrite the extent header stored
+                // there (ftruncate-grow then write destroyed the tree —
+                // review EXT4-C4). Extent insertion is not implemented;
+                // fail honestly instead of corrupting the inode.
+                if inode.has_extent() {
+                    return Err(errno::Errno::IOError.as_neg_i32());
+                }
                 // Block not allocated, need to allocate a new one for writing
                 let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
                 let goal_group = (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);

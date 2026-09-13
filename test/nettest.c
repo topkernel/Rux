@@ -11,6 +11,10 @@ typedef unsigned int u32;
 typedef unsigned short u16;
 
 #define __NR_write 64
+#define __NR_read 63
+#define __NR_write 64
+#define __NR_lseek 62
+#define O_TRUNC 0x200
 #define __NR_exit 93
 #define __NR_exit_group 94
 #define __NR_nanosleep 35
@@ -176,9 +180,116 @@ static int tcp_test(void)
     return 19;
 }
 
+#define __NR_openat 56
+#define __NR_close 57
+#define __NR_unlinkat 35
+#define O_CREAT 0x40
+#define O_WRONLY 2
+#define O_RDONLY 0
+
+static int file_test(void)
+{
+    static const char path[] = "/tmp/nettest_f1\0";
+    char msg[16] = "0123456789ABCDEF";
+    char buf[16];
+    s64 fd, nr, pos;
+
+    /* two create+delete cycles first: forces inode-number reuse, which is
+     * what smoke_test's earlier cases set up before its lseek check */
+    for (int i = 0; i < 2; i++) {
+        fd = sys6(__NR_openat, -100, (s64)path, O_CREAT | O_WRONLY | O_TRUNC, 0600, 0, 0);
+        if (fd < 0) return 40;
+        sys3(__NR_write, fd, (s64)msg, 16);
+        sys3(__NR_close, fd, 0, 0);
+        sys3(__NR_unlinkat, -100, (s64)path, 0);
+    }
+
+    fd = sys6(__NR_openat, -100, (s64)path, O_CREAT | O_WRONLY | O_TRUNC, 0600, 0, 0);
+    if (fd < 0) return 41;
+    s64 w = sys3(__NR_write, fd, (s64)msg, 16);
+    sys3(__NR_close, fd, 0, 0);
+    if (w != 16) return 42;
+
+    fd = sys6(__NR_openat, -100, (s64)path, O_RDONLY, 0, 0, 0);
+    if (fd < 0) return 43;
+
+    /* read at offset 6 via seek */
+    pos = sys3(__NR_lseek, fd, 6, 0);
+    if (pos != 6) return 44;
+    for (int i = 0; i < 8; i++) buf[i] = '.';
+    nr = sys3(__NR_read, fd, (s64)buf, 8);
+    sys3(__NR_close, fd, 0, 0);
+    sys3(__NR_unlinkat, -100, (s64)path, 0);
+
+    /* report: n=<nr> data=<8 bytes hex> */
+    puts_("filetest nr=");
+    for (int i = 0; i < 8; i++) {
+        char hex[3];
+        unsigned char c = buf[i];
+        hex[0] = "0123456789abcdef"[c >> 4];
+        hex[1] = "0123456789abcdef"[c & 0xf];
+        hex[2] = 0;
+        puts_(hex);
+    }
+    puts_("\n");
+    if (nr == 8) {
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != msg[6 + i])
+                return 45; /* content mismatch */
+        return 0;
+    }
+    return 46; /* short/failed read */
+}
+
+#define __NR_ftruncate 46
+
+/* truncate-to-8 must keep the first 8 bytes (kernel write/truncate/cache
+ * coherence — used to return stale/zero content after inode churn) */
+static int trunc_test(void)
+{
+    static const char path[] = "/tmp/nettest_t1\0";
+    char msg[16] = "0123456789ABCDEF";
+    char buf[8];
+    s64 fd, nr;
+
+    for (int i = 0; i < 2; i++) {
+        fd = sys6(__NR_openat, -100, (s64)path, O_CREAT | O_WRONLY | O_TRUNC, 0600, 0, 0);
+        if (fd < 0) return 50;
+        sys3(__NR_write, fd, (s64)msg, 16);
+        sys3(__NR_close, fd, 0, 0);
+        sys3(__NR_unlinkat, -100, (s64)path, 0);
+    }
+
+    fd = sys6(__NR_openat, -100, (s64)path, O_CREAT | O_WRONLY | O_TRUNC, 0600, 0, 0);
+    if (fd < 0) return 51;
+    if (sys3(__NR_write, fd, (s64)msg, 16) != 16) return 52;
+    if (sys3(__NR_ftruncate, fd, 8, 0) != 0) return 53;
+    sys3(__NR_close, fd, 0, 0);
+
+    fd = sys6(__NR_openat, -100, (s64)path, O_RDONLY, 0, 0, 0);
+    if (fd < 0) return 54;
+    nr = sys3(__NR_read, fd, (s64)buf, 8);
+    sys3(__NR_close, fd, 0, 0);
+    sys3(__NR_unlinkat, -100, (s64)path, 0);
+    if (nr != 8) return 55;
+    for (int i = 0; i < 8; i++)
+        if (buf[i] != msg[i]) return 56;
+    return 0;
+}
+
 void _start(void)
 {
-    int r = udp_test();
+    int r = file_test();
+    if (r == 0) {
+        puts_("file: readback ok\n");
+        r = trunc_test();
+        if (r == 0)
+            puts_("trunc: readback ok\n");
+    }
+    if (r != 0) {
+        puts_("file/trunc: FAIL\n");
+    }
+    r = udp_test();
     if (r == 0) {
         puts_("udp: echo ok\n");
         r = tcp_test();

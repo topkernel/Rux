@@ -136,7 +136,11 @@ fn test_openat_close_read_write() {
 }
 
 fn test_lseek() {
-    let fd = openat(-100, b"/tmp/smoke_lseek\0".as_ptr(), 0o100 | 0o1000 | 0o1);
+    // O_RDWR: this test reads back through the SAME fd after writing.
+    // With O_WRONLY the kernel (correctly, per POSIX/Linux) fails the
+    // read with EBADF — the old binary passed only because the kernel
+    // did not enforce f_mode on read (VFS-C1 fixed that).
+    let fd = openat(-100, b"/tmp/smoke_lseek\0".as_ptr(), 0o100 | 0o1000 | 0o2);
     if fd < 0 { test_fail(b"lseek", b"create failed"); return; }
 
     let msg = b"0123456789ABCDEF";

@@ -1496,31 +1496,104 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 
                 if ext4_inode.has_extent() {
                     use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
-                    let header = &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader);
-                    if header.eh_magic == EXT4_EXT_MAGIC {
-                        let entries = core::slice::from_raw_parts(
-                            (ext4_inode.block.as_ptr() as *const u8)
-                                .add(core::mem::size_of::<Ext4ExtentHeader>())
-                                as *const Ext4Extent,
-                            header.eh_entries as usize
+                    // Work on a byte copy of i_block so the on-disk extent
+                    // entries can be SHRUNK/removed alongside the physical
+                    // frees. The old code only freed blocks and left the
+                    // stale extents in the inode, so the next allocation
+                    // handed those blocks to another file while this inode
+                    // still mapped them — cross-file data corruption
+                    // (review EXT4-C2).
+                    const ROOT_MAX_ENTRIES: usize = 4; // (60-12)/12
+                    let mut iblock_bytes = [0u8; 60];
+                    // SAFETY: ext4_inode.block is a [u32; 15] = 60 bytes.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            ext4_inode.block.as_ptr() as *const u8,
+                            iblock_bytes.as_mut_ptr(),
+                            60,
                         );
+                    }
+                    let header =
+                        unsafe { &*(iblock_bytes.as_ptr() as *const Ext4ExtentHeader) };
+                    if header.eh_magic == EXT4_EXT_MAGIC && header.eh_depth == 0 {
+                        // Clamp entries to what a root node can hold (the
+                        // raw on-disk value is untrusted here — review
+                        // EXT4-H11 for the other sites).
+                        let n_entries =
+                            core::cmp::min(header.eh_entries as usize, ROOT_MAX_ENTRIES);
+                        // SAFETY: entries follow the 12-byte header within
+                        // the 60-byte i_block; n_entries is clamped above.
+                        let entries = unsafe {
+                            core::slice::from_raw_parts(
+                                iblock_bytes.as_ptr()
+                                    .add(core::mem::size_of::<Ext4ExtentHeader>())
+                                    as *const Ext4Extent,
+                                n_entries,
+                            )
+                        };
+
+                        let mut kept: [(u32, u16, u64); ROOT_MAX_ENTRIES] =
+                            [(0, 0, 0); ROOT_MAX_ENTRIES]; // (ee_block, ee_len, phys)
+                        let mut kept_count = 0usize;
+
                         for ext in entries {
                             let logical_start = ext.ee_block as u64;
                             let phys_start = ext.start_block();
                             let ext_len = ext.length() as u64;
-                            // Free blocks that are entirely beyond new_blocks.
-                            // Use logical block numbers (ee_block) for comparison
-                            // against new_blocks (derived from file size), but
-                            // free physical blocks (start_block) on the device.
+
                             if logical_start >= new_blocks {
+                                // Entirely beyond the new EOF: drop it.
                                 for j in 0..ext_len {
                                     let _ = allocator.free_block(phys_start + j);
                                 }
                             } else if logical_start + ext_len > new_blocks {
-                                for j in new_blocks - logical_start..ext_len {
+                                // Straddles: shrink to the new EOF, free the tail.
+                                let keep_len = new_blocks - logical_start;
+                                for j in keep_len..ext_len {
                                     let _ = allocator.free_block(phys_start + j);
                                 }
+                                kept[kept_count] =
+                                    (ext.ee_block, keep_len as u16, phys_start);
+                                kept_count += 1;
+                            } else {
+                                // Fully below the new EOF: keep as-is.
+                                kept[kept_count] =
+                                    (ext.ee_block, ext.length(), phys_start);
+                                kept_count += 1;
                             }
+                        }
+
+                        // Rebuild the extent array: header + compacted entries.
+                        let new_header = Ext4ExtentHeader {
+                            eh_magic: EXT4_EXT_MAGIC,
+                            eh_entries: kept_count as u16,
+                            eh_max: header.eh_max,
+                            eh_depth: 0,
+                            eh_generation: header.eh_generation,
+                        };
+                        // SAFETY: writing into the 60-byte stack copy at
+                        // bounded offsets (12 + 12*kept_count <= 60).
+                        unsafe {
+                            *(iblock_bytes.as_mut_ptr() as *mut Ext4ExtentHeader) =
+                                new_header;
+                            for (i, &(blk, len, phys)) in kept.iter().take(kept_count).enumerate() {
+                                let dst = (iblock_bytes.as_mut_ptr()
+                                    .add(core::mem::size_of::<Ext4ExtentHeader>()
+                                        + i * core::mem::size_of::<Ext4Extent>()))
+                                    as *mut Ext4Extent;
+                                (*dst).ee_block = blk;
+                                (*dst).ee_len = len;
+                                (*dst).ee_start_hi = (phys >> 32) as u16;
+                                (*dst).ee_start_lo = phys as u32;
+                            }
+                        }
+                        // SAFETY: same-size copy back into the inode field.
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                iblock_bytes.as_ptr(),
+                                ext4_inode.block.as_mut_ptr() as *mut u8,
+                                60,
+                            );
                         }
                     }
                 } else {

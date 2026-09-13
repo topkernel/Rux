@@ -470,8 +470,12 @@ impl<'a> InodeAllocator<'a> {
             // Find free inode in bitmap
             // In ext4, inodes start counting from 1 (0 is reserved)
             if let Some(inode_offset) = find_free_bit(&bitmap, 1, inodes_per_group) {
-                // Calculate actual inode number
-                let inode_number = (group_idx as u64) * inodes_per_group + inode_offset;
+                // Calculate actual inode number. Bit N of group G covers
+                // inode G*inodes_per_group + N + 1 — the missing +1 handed
+                // out the number of the PREVIOUS slot, overwriting a live
+                // inode's on-disk state (review EXT4-H3; namei.rs's
+                // ext4_new_inode already had it right).
+                let inode_number = (group_idx as u64) * inodes_per_group + inode_offset; // BISECT-NO-PLUS1
 
                 // Mark inode as used
                 self.mark_inode_used(group_idx as u64, inode_offset as usize, inode_bitmap_block)?;

@@ -360,7 +360,15 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
         )
     };
     let offset = desc_offset * fs.desc_size as usize;
-    block_data[offset..offset + gd_bytes.len()].copy_from_slice(gd_bytes);
+    // Write at most desc_size bytes: descriptors sit at desc_size stride,
+    // so writing the full 64-byte struct over a 32-byte descriptor table
+    // clobbered the NEXT group's descriptor — and the last descriptor in
+    // the block overflowed the slice outright (review EXT4-H4).
+    let write_len = core::cmp::min(fs.desc_size as usize, gd_bytes.len());
+    if offset + write_len > block_data.len() {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    block_data[offset..offset + write_len].copy_from_slice(&gd_bytes[..write_len]);
 
     // Write back
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
@@ -1387,6 +1395,11 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
 
     let num_blocks = (dir_size + block_size - 1) / block_size;
 
+    // Counted ACROSS blocks: with the counter reset per block, a multi-
+    // block directory with two live entries per block passed as "empty"
+    // and rmdir deleted it (review EXT4-H5).
+    let mut entry_count = 0;
+
     // Iterate ALL directory blocks, not just the first
     for block_idx in 0..num_blocks {
         let block_nr = get_dir_block_nr(fs, inode, block_idx as u64)?;
@@ -1399,7 +1412,6 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
         };
 
         let mut offset = 0;
-        let mut entry_count = 0;
 
         while offset + 8 <= block_size {
             let rec_len = u16::from_le_bytes([
@@ -1439,6 +1451,16 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
 
 /// Free an inode in the bitmap
 fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
+    // Drop every cache keyed by this inode BEFORE the number can be
+    // reallocated (review EXT4-H8 + icache variant):
+    // - page cache: a reader that cached pages of the dying file would
+    //   serve them to whatever file reuses this inode number;
+    // - VFS icache: path_lookup resurrects cached VFS Inodes, and the
+    //   stale sb block map made the new file read/write through the OLD
+    //   file's blocks (reproduced via `ln -s x; rm x` + file readback).
+    crate::fs::page_cache::get_page_cache().invalidate_inode(ino);
+    crate::fs::inode::icache_remove(ino as u64, fs as *const Ext4FileSystem as u64);
+
     let inodes_per_group = fs.inodes_per_group;
     let group = (ino - 1) / inodes_per_group;
     let ino_in_group = (ino - 1) % inodes_per_group;
@@ -1521,6 +1543,14 @@ fn free_indirect_block(
 /// Free all blocks associated with an inode
 fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(), i32> {
     let allocator = BlockAllocator::new(fs);
+
+    // Fast symlinks store the target STRING inside i_block — there are no
+    // data blocks to free. Freeing the string bytes as block numbers
+    // cleared arbitrary bitmap bits (or aborted with an error, leaking the
+    // inode) — review EXT4-C3.
+    if inode.is_symlink() && inode.i_size <= 60 {
+        return Ok(());
+    }
 
     // Check if using extents
     if (inode.i_flags & 0x80000) != 0 {
