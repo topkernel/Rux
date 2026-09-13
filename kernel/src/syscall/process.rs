@@ -1730,28 +1730,41 @@ pub fn sys_getcpu(args: SyscallArgs) -> i64 {
     let node_ptr = args[1] as *mut u32;
     let _cache_ptr = args[2] as *mut u32;
 
+    // Each output pointer is a single `unsigned` (4 bytes). The old code
+    // wrote 16 bytes through each, overflowing user buffers by 12
+    // (review syscallb-H-03); writes go through the exception-table copy.
     if !cpuset_ptr.is_null() {
-        // SAFETY: cpuset_ptr validated with access_ok; writing 4 x u32 = 16 bytes.
-        unsafe {
-            if !crate::arch::riscv64::uaccess::access_ok(cpuset_ptr as usize, 16) {
-                return -(errno::EFAULT as i64);
-            }
-            core::ptr::write_volatile(cpuset_ptr, 1u32 << cpu_id());
-            core::ptr::write_volatile(cpuset_ptr.add(1), 0u32);
-            core::ptr::write_volatile(cpuset_ptr.add(2), 0u32);
-            core::ptr::write_volatile(cpuset_ptr.add(3), 0u32);
+        if !crate::arch::riscv64::uaccess::access_ok(cpuset_ptr as usize, 4) {
+            return -(errno::EFAULT as i64);
+        }
+        let cpu = cpu_id() as u32;
+        // SAFETY: 4-byte validated pointer, exception-table path.
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(
+                cpuset_ptr as *mut u8,
+                &cpu as *const u32 as *const u8,
+                4,
+            )
+        };
+        if uncopied > 0 {
+            return -(errno::EFAULT as i64);
         }
     }
     if !node_ptr.is_null() {
-        // SAFETY: node_ptr validated with access_ok; writing 4 x u32 = 16 bytes.
-        unsafe {
-            if !crate::arch::riscv64::uaccess::access_ok(node_ptr as usize, 16) {
-                return -(errno::EFAULT as i64);
-            }
-            core::ptr::write_volatile(node_ptr, 0u32);
-            core::ptr::write_volatile(node_ptr.add(1), 0u32);
-            core::ptr::write_volatile(node_ptr.add(2), 0u32);
-            core::ptr::write_volatile(node_ptr.add(3), 0u32);
+        if !crate::arch::riscv64::uaccess::access_ok(node_ptr as usize, 4) {
+            return -(errno::EFAULT as i64);
+        }
+        let node = 0u32;
+        // SAFETY: 4-byte validated pointer, exception-table path.
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(
+                node_ptr as *mut u8,
+                &node as *const u32 as *const u8,
+                4,
+            )
+        };
+        if uncopied > 0 {
+            return -(errno::EFAULT as i64);
         }
     }
     0

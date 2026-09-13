@@ -408,6 +408,13 @@ pub struct Task {
     /// Process credentials
     cred: Cred,
 
+    /// sigsuspend contract: the pre-suspend mask to reinstate when the
+    /// waited-for signal is delivered (Linux TIF_RESTORE_SIGMASK
+    /// equivalent — restoring it at EINTR return made the delivery filter
+    /// by the old mask, so the handler never ran; review syscallb-H-06).
+    pub sigmask_restore: u64,
+    pub sigmask_restore_valid: bool,
+
     /// Scheduling policy
     policy: SchedPolicy,
 
@@ -663,6 +670,8 @@ impl Task {
             // task_struct fields
             state,
             pid,
+            sigmask_restore: 0,
+            sigmask_restore_valid: false,
             pid_hash_next: ptr::null_mut(),
             tgid: pid, // Single-threaded process tgid == pid
             cred: Cred::new_init(),

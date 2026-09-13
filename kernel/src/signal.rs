@@ -158,6 +158,10 @@ pub struct SigAction {
     pub sa_flags: SigFlags,
     /// Signal mask
     pub sa_mask: u64,
+    /// sa_restorer from the user ABI layout (round-tripped verbatim; the
+    /// kernel returns through its own in-frame trampoline, so the value is
+    /// unused internally — kept so oldact queries stay faithful).
+    pub sa_restorer: usize,
 }
 
 impl SigAction {
@@ -167,6 +171,7 @@ impl SigAction {
             sa_handler: SigAction::default_handler() as usize,
             sa_flags: SigFlags::new(0),
             sa_mask: 0,
+            sa_restorer: 0,
         }
     }
 
@@ -176,6 +181,7 @@ impl SigAction {
             sa_handler: SigAction::ignore_handler() as usize,
             sa_flags: SigFlags::new(0),
             sa_mask: 0,
+            sa_restorer: 0,
         }
     }
 
@@ -185,6 +191,7 @@ impl SigAction {
             sa_handler: handler as usize,
             sa_flags: flags,
             sa_mask: 0,
+            sa_restorer: 0,
         }
     }
 
@@ -802,6 +809,15 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
             Some(s) => s,
             None => return false,
         };
+
+        // sigsuspend contract: reinstate the pre-suspend mask right before
+        // the handler runs. setup_frame saves THIS (old) mask into the
+        // frame, so sigreturn restores it and the suspended mask is not
+        // leaked past the handler (review syscallb-H-06).
+        if (*current).sigmask_restore_valid {
+            (*current).sigmask = (*current).sigmask_restore;
+            (*current).sigmask_restore_valid = false;
+        }
 
         // Get signal handling action (clone needed data)
         let action = (*current).signal.as_ref()

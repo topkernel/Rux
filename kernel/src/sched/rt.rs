@@ -97,8 +97,9 @@ impl RtRunQueue {
 
     /// Find the highest priority with runnable tasks
     ///
-    /// Returns priority (0-99) or None if empty
-    /// Lower value = higher priority
+    /// Returns the bitmap index (0-99) or None if empty; bit 0 is the
+    /// inverted index for user priority 99, so a LOWER index is a HIGHER
+    /// priority.
     #[inline]
     fn find_highest_prio(&self) -> Option<u32> {
         let word0 = self.bitmap[0].load(Ordering::Acquire);
@@ -126,11 +127,15 @@ impl RtRunQueue {
         // task is not yet in the RT queue and we are adding it under the caller's lock.
         unsafe {
             let t = &mut *task;
-            let prio = t.rt_priority() as usize;
-
-            if prio >= MAX_RT_PRIO {
+            let raw = t.rt_priority() as usize;
+            if raw >= MAX_RT_PRIO {
                 return;
             }
+            // Bitmap index is INVERTED: bit 0 = priority 99 (highest). The
+            // old code stored the raw priority, making lower numbers win —
+            // the opposite of Linux, so `chrt -f 99` was the WEAKEST RT
+            // priority (review PROC-P06).
+            let prio = MAX_RT_PRIO - 1 - raw;
 
             // Guard against double-enqueue: if the task is already on a
             // runqueue, skip the insertion to avoid list corruption.
@@ -180,11 +185,19 @@ impl RtRunQueue {
         // null check above; dequeue removes it from the list.
         unsafe {
             let t = &mut *task;
-            let prio = t.rt_priority() as usize;
-
-            if prio >= MAX_RT_PRIO {
+            // P08: dequeue of a task that is not linked (e.g. the currently
+            // running task, already dequeued at pick time) must be a no-op —
+            // it used to decrement rt_nr_running/rr_nr_running regardless,
+            // underflowing the counters and permanently disabling the idle
+            // fast path.
+            if !t.rt_entity().is_on_rq() {
                 return;
             }
+            let raw = t.rt_priority() as usize;
+            if raw >= MAX_RT_PRIO {
+                return;
+            }
+            let prio = MAX_RT_PRIO - 1 - raw; // same inversion as enqueue
 
             // Remove from list
             t.rt_run_list.del();

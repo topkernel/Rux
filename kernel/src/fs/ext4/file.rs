@@ -173,6 +173,12 @@ fn ext4_file_read_cached(
         let mut bh_ptrs = [core::ptr::null_mut::<bio::BufferHead>(); 4];
         let mut count = 0usize;
 
+        // Record the ACTUAL page index of every submitted I/O: skipped
+        // (already-cached) and sparse pages must not shift the insert
+        // indices. The old code inserted page ra_start+i, so with any skip
+        // in the middle every later page was cached under the WRONG index —
+        // reads then served one file's page as another's (review EXT4-H6).
+        let mut ra_idx: [u64; 4] = [0; 4];
         for i in 0..ra_count {
             if count >= 4 { break; }
             let idx = ra_start + i as u64;
@@ -189,6 +195,7 @@ fn ext4_file_read_cached(
                 if block_nr != 0 {
                     if let Some(bh) = bio::bread_async(fs.device, block_nr, &completions[count]) {
                         bh_ptrs[count] = bh;
+                        ra_idx[count] = idx;
                         count += 1;
                     }
                 }
@@ -200,13 +207,13 @@ fn ext4_file_read_cached(
             for i in 0..count {
                 bio::bread_wait(bh_ptrs[i], &completions[i]);
             }
-            // Insert completed pages into page cache
+            // Insert completed pages into page cache under their own indices
             for i in 0..count {
                 // SAFETY: bread_wait has completed, so bh_ptrs[i] points to a
                 // valid BufferHead with fully populated b_data.
                 unsafe {
                     let data = &(*bh_ptrs[i]).b_data;
-                    cache.insert(ino, ra_start + i as u64,
+                    cache.insert(ino, ra_idx[i],
                         (*bh_ptrs[i]).b_blocknr, data);
                     bio::brelse(bh_ptrs[i]);
                 }

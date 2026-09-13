@@ -992,6 +992,65 @@ pub fn dequeue_task(task: &Task) {
     }
 }
 
+/// Atomically change a task's scheduling policy (and RT priority) with the
+/// proper run-queue migration (review PROC-P07): dequeue from the OLD class
+/// queue, update the fields, enqueue into the NEW class queue — all under
+/// the GRQ lock. Without the migration a task could sit on two class queues
+/// at once (or on none), letting two CPUs pick it simultaneously or
+/// stranding it off-queue forever.
+pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::SchedPolicy, rt_prio: u32) {
+    use crate::process::task::SchedPolicy;
+
+    let is_current = match current() {
+        Some(c) => c as *const Task == task as *const Task,
+        None => false,
+    };
+
+    let mut grq_guard = grq().lock_irqsave();
+    let old_policy = unsafe { (*task).policy() };
+    let was_running = unsafe { (*task).state() } == TaskState::new(TaskState::RUNNING);
+
+    // Dequeue from the old class queue — but only if the task is actually
+    // linked there. The CURRENT task was dequeued when it was picked, and a
+    // blocked task is off-queue already.
+    let linked = !is_current && was_running;
+    if linked {
+        match old_policy {
+            SchedPolicy::Fifo | SchedPolicy::Rr => {
+                grq_guard.rt_rq.dequeue(task);
+            }
+            SchedPolicy::Deadline => {
+                grq_guard.dl_rq.dequeue(task);
+            }
+            SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                grq_guard.cfs_rq.dequeue(task);
+            }
+        }
+    }
+
+    // SAFETY: exclusive access under the GRQ lock.
+    unsafe {
+        (*task).set_rt_priority(rt_prio);
+        (*task).set_policy(new_policy);
+    }
+
+    // Re-enqueue into the new class queue under the same lock.
+    if linked {
+        // SAFETY: GRQ lock is held via grq_guard; enqueue_task_locked
+        // expects the lock to be held.
+        unsafe {
+            enqueue_task_locked(&mut *grq_guard, task);
+        }
+        // Cross-CPU preemption checks mirror enqueue_task.
+        let policy = unsafe { (*task).policy() };
+        if policy == SchedPolicy::Fifo || policy == SchedPolicy::Rr {
+            check_rt_preempt(task, unsafe { (*task).cpus_allowed() });
+        } else if policy == SchedPolicy::Deadline {
+            check_dl_preempt(task, unsafe { (*task).cpus_allowed() });
+        }
+    }
+}
+
 /// Remove `task` from the global run queue if a racing wake_up() enqueued it
 /// while it was transiently marked sleeping — the "prepare-to-wait recheck
 /// decided not to sleep" path calls this before continuing to run, so no

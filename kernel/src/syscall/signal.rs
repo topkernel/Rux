@@ -126,12 +126,25 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
+/// User-space `struct sigaction` on the RISC-V 64 ABI: 32 bytes with
+/// sa_restorer at offset 16 and sa_mask at offset 24. The kernel's
+/// internal SigAction (24 bytes, mask at 16) used to be copied verbatim,
+/// so libc's sa_mask reads landed on the restorer pointer and oldact
+/// wrote the kernel mask into the user sa_restorer field (review 5.4b).
+#[repr(C)]
+struct SigActionUser {
+    sa_handler: usize,
+    sa_flags: u64,
+    sa_restorer: usize,
+    sa_mask: u64,
+}
+
 pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
     use crate::signal::{SigAction, Signal};
 
     let signum = args[0] as i32;
-    let act_ptr = args[1] as *const SigAction;
-    let oldact_ptr = args[2] as *mut SigAction;
+    let act_ptr = args[1] as *const SigActionUser;
+    let oldact_ptr = args[2] as *mut SigActionUser;
     let sigsetsize = args[3] as usize;
 
     // Validate sigsetsize
@@ -164,20 +177,26 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
         }
         let sig_struct = signal_struct.unwrap();
 
-        // Save old signal handling action
+        // Save old signal handling action (converted to the user ABI layout)
         if !oldact_ptr.is_null() {
             // Validate user pointer
-            if !crate::arch::riscv64::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigAction>()) {
+            if !crate::arch::riscv64::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigActionUser>()) {
                 return -(errno::EFAULT as i64);
             }
             // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
             let old_action = sig_struct.get_action(signum).unwrap_or_else(SigAction::new);
-            let src = &old_action as *const SigAction as *const u8;
+            let user_action = SigActionUser {
+                sa_handler: old_action.sa_handler,
+                sa_flags: old_action.sa_flags.bits(),
+                sa_restorer: old_action.sa_restorer,
+                sa_mask: old_action.sa_mask,
+            };
+            let src = &user_action as *const SigActionUser as *const u8;
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     oldact_ptr as *mut u8,
                     src,
-                    core::mem::size_of::<SigAction>(),
+                    core::mem::size_of::<SigActionUser>(),
                 )
             };
             if uncopied > 0 {
@@ -185,25 +204,38 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             }
         }
 
-        // Set new signal handling action
+        // Set new signal handling action (parsed from the user ABI layout)
         if !act_ptr.is_null() {
             // Validate user pointer
-            if !crate::arch::riscv64::uaccess::access_ok(act_ptr as usize, core::mem::size_of::<SigAction>()) {
+            if !crate::arch::riscv64::uaccess::access_ok(act_ptr as usize, core::mem::size_of::<SigActionUser>()) {
                 return -(errno::EFAULT as i64);
             }
             // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
-            let mut new_action = SigAction::new();
-            let dst = &mut new_action as *mut SigAction as *mut u8;
+            let mut user_action = SigActionUser {
+                sa_handler: 0,
+                sa_flags: 0,
+                sa_restorer: 0,
+                sa_mask: 0,
+            };
+            let dst = &mut user_action as *mut SigActionUser as *mut u8;
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_from_user(
                     dst,
                     act_ptr as *const u8,
-                    core::mem::size_of::<SigAction>(),
+                    core::mem::size_of::<SigActionUser>(),
                 )
             };
             if uncopied > 0 {
                 return -(errno::EFAULT as i64);
             }
+            // SIGKILL/SIGSTOP stay uncatchable regardless of sa_mask.
+            let mask = user_action.sa_mask & !((1u64 << 8) | (1u64 << 18));
+            let new_action = SigAction {
+                sa_handler: user_action.sa_handler,
+                sa_flags: crate::signal::SigFlags::new(user_action.sa_flags),
+                sa_mask: mask,
+                sa_restorer: user_action.sa_restorer,
+            };
             match sig_struct.set_action(signum, new_action) {
                 Ok(_) => 0,  // Success
                 Err(_) => -(errno::EINVAL as i64),
@@ -429,8 +461,13 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
             let pending = (*current).pending.get_all();
             let blocked = (*current).sigmask;
             if pending & !blocked != 0 {
-                // Signal pending, restore old mask and return
-                (*current).sigmask = old_mask;
+                // Signal pending. Do NOT restore the old mask here: the
+                // delivery filter on the way back to userspace must see the
+                // SUSPEND mask so the signal is actually delivered; the old
+                // mask is reinstated just before the handler runs (see
+                // check_and_deliver_signals) and again by sigreturn.
+                (*current).sigmask_restore = old_mask;
+                (*current).sigmask_restore_valid = true;
                 return -(errno::EINTR as i64);
             }
             // Set state BEFORE re-checking to close the race window.
@@ -447,7 +484,8 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
                 (*current).set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING
                 ));
-                (*current).sigmask = old_mask;
+                (*current).sigmask_restore = old_mask;
+                (*current).sigmask_restore_valid = true;
                 return -(errno::EINTR as i64);
             }
             crate::sched::schedule();

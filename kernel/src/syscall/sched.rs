@@ -242,34 +242,40 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
         return -(errno::ESRCH as i64);
     }
 
-    // Permission check: real-time policies require CAP_SYS_NICE for other processes
-    if (policy == SCHED_FIFO || policy == SCHED_RR) && target_pid != crate::process::current_pid() {
-        if !crate::security::capable(crate::security::CAP_SYS_NICE) {
-            return -(errno::EPERM as i64);
-        }
+    // Permission check: moving ANY task (including self) ONTO an RT/DL
+    // policy requires CAP_SYS_NICE — self could otherwise lock up every
+    // CPU with SCHED_FIFO (review syscallb-H12/P06).
+    if matches!(policy, SCHED_FIFO | SCHED_RR | SCHED_DEADLINE)
+        && !crate::security::capable(crate::security::CAP_SYS_NICE)
+    {
+        return -(errno::EPERM as i64);
     }
 
-    // Convert policy and apply
-    // SAFETY: task is validated non-null above; we have exclusive access via scheduler lock.
+    // Priority validation (review PROC-P06): RT priorities live in
+    // [1,99]; every other policy requires 0.
+    if matches!(policy, SCHED_FIFO | SCHED_RR) {
+        if !(1..=99).contains(&param.sched_priority) {
+            return -(errno::EINVAL as i64);
+        }
+    } else if param.sched_priority != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Convert and apply with run-queue migration under the GRQ lock
+    // (review PROC-P07).
+    let new_policy = match policy {
+        SCHED_NORMAL => crate::process::task::SchedPolicy::Normal,
+        SCHED_FIFO => crate::process::task::SchedPolicy::Fifo,
+        SCHED_RR => crate::process::task::SchedPolicy::Rr,
+        SCHED_BATCH => crate::process::task::SchedPolicy::Batch,
+        SCHED_IDLE => crate::process::task::SchedPolicy::Idle,
+        SCHED_DEADLINE => crate::process::task::SchedPolicy::Deadline,
+        _ => return -(errno::EINVAL as i64),
+    };
+    // SAFETY: task is validated non-null above; change_task_policy takes
+    // the GRQ lock internally.
     unsafe {
-        let task_ref = &mut *task;
-        let new_policy = match policy {
-            SCHED_NORMAL => crate::process::task::SchedPolicy::Normal,
-            SCHED_FIFO => {
-                // Set RT priority
-                task_ref.set_rt_priority(param.sched_priority as u32);
-                crate::process::task::SchedPolicy::Fifo
-            }
-            SCHED_RR => {
-                task_ref.set_rt_priority(param.sched_priority as u32);
-                crate::process::task::SchedPolicy::Rr
-            }
-            SCHED_BATCH => crate::process::task::SchedPolicy::Batch,
-            SCHED_IDLE => crate::process::task::SchedPolicy::Idle,
-            SCHED_DEADLINE => crate::process::task::SchedPolicy::Deadline,
-            _ => return -(errno::EINVAL as i64),
-        };
-        task_ref.set_policy(new_policy);
+        crate::sched::change_task_policy(task, new_policy, param.sched_priority as u32);
     }
 
     0
