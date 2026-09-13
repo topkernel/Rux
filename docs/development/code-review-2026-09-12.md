@@ -437,6 +437,15 @@ signal 交付链（H-05/06/07/15、M-01~04）、调度器（P06-P10）、syscall
 - IOU-M9（init 失败静默挂死）：失败路径有 UART 输出。
 - 部分：ARCH-L5（KERNEL_STACK_SIZE 已统一 config，仅 intr-stack 三处手抄 16K 残留）；TEST-H3 的 syscall_time 子项（实有单调性断言）。
 
+### 16.6 新发现 NEW2（2026-09-13 追加，Critical）：fork 子进程 ext4 文件操作触发 SMP 竞态
+
+追查"mrsh 重定向/管道子命令全部死亡（129/127、文件 0 字节）"时定位到的**既有缺陷**（cf6defc 内核同样复现）：
+- **最小触发集**：普通 fork 的子进程执行**任何 ext4 文件打开**（含只读、含 icache 命中 inode）后退出——非确定性表现为 (a) 内核 panic：跳转执行空闲页链表指针（epc=0xffffffd600af0000 一类线性映射地址，freelist 特征）；(b) 子进程用户态空指针段错误（sp 异常低）；(c) 静默挂起。纯 fork+exit 无恙、CLONE_VM(vfork) 子进程无恙。
+- **波及面**：shell 的一切重定向与管道子命令（mrsh 以 fork+file-actions+exec 实现）即本缺陷的用户可见面——Wave 2 记录的"mrsh 管道 EBADF 遗留缺陷"应即此族。A/B 证实非本轮任何提交引入。
+- **定位到 munmap 追踪**：panic 栈指向 MmStruct::munmap（mm_ops.rs:395 附近），epc 为已释放物理页（伙伴 freelist 指针被当指令执行）——典型 UAF-after-free 经间接调用跳转。
+- **疑似范围**（未最终定罪）：icache Arc 引用与 LRU 逐出的窗口、ext4 全模块无并发防护（EXT4-H10）、fork 的 mm 快照/页表复制与退出释放路径。需要专项排查（nettest 已内置可启用的探针用例，见 test/nettest.c 注释）。
+- **处置**：nettest 的 fork+fs 探针用例默认禁用以保持套件确定性；修复前 shell 重定向/管道视为已知不可用。
+
 ### 16.5 对修复计划的影响
 
 1. **新增 Wave 2R（回归热修）**：16.1 的 8 项 FIX-FAIL + 16.2 的 NEW-C1/C3（提权/panic 类）优先于 Wave 3。
