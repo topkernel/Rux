@@ -111,6 +111,24 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
             thread.s.fill(0);
         }
 
+        // ===== Inherit the parent's floating-point state (POSIX) =====
+        // Save the parent's LIVE registers into its thread struct first,
+        // then copy the saved image and mark the child CLEAN — the child
+        // must observe the same FP values the parent would have.
+        if let Some(parent_task) = crate::sched::current() {
+            // SAFETY: parent_task is the currently running task.
+            unsafe {
+                (*parent_task).thread_mut().save_fpu();
+                let (pfpu, _) = {
+                    let pt = (*parent_task).thread();
+                    (pt.fpu, pt.fs)
+                };
+                let ct = task.thread_mut();
+                ct.fpu.copy_from_slice(&pfpu);
+                ct.fs = super::super::arch::riscv64::pt_regs::SR_FS_CLEAN as u32;
+            }
+        }
+
         // ===== pt_regs is COPIED from parent =====
         // Copy parent's pt_regs (including s0-s11) to child.
         // The child inherits parent's callee-saved register values.

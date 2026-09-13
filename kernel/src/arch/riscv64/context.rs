@@ -303,5 +303,16 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // calling us, so there is nothing to do here after the switch.
     __switch_to(prev, next);
 
-    // FPU restore — deferred (TODO: lazy restore on first FP trap)
+    // Restore the incoming task's FPU state (review ARCH-H1). tp and the
+    // per-CPU current now refer to `next`; locals above are invalid, so
+    // resolve the task via sched::current(). Without this, every task
+    // inherited whatever FP registers the previous task left in the FPU —
+    // silent numeric corruption across tasks plus cross-task information
+    // leakage.
+    if let Some(cur) = crate::sched::current() {
+        // SAFETY: cur is the task now running on this CPU.
+        unsafe {
+            (*cur).thread_mut().restore_fpu();
+        }
+    }
 }

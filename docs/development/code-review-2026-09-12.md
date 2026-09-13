@@ -418,7 +418,7 @@ signal 交付链（H-05/06/07/15、M-01~04）、调度器（P06-P10）、syscall
 
 ### 16.3 新发现 — High（25 项，摘要）
 
-- **arch**：ARCH-H1 恶化确认（FPU 不恢复 + FS 门控失效 → 跨任务浮点污染/信息泄漏）。
+- **arch**：ARCH-H1 恶化确认（FPU 不恢复 + FS 门控失效 → 跨任务浮点污染/信息泄漏）。〔2026-09-13 已修复：context_switch 切入 restore_fpu、fork 继承父 FP 状态、新任务 fs=INITIAL；nettest 新增 fp 用例端到端验证（修复前首次切换后用户 FP 指令即 SIGILL）〕
 - **mm**：compaction remap_page 按 vaddr 过宽重写无关进程 PTE（MM-C2 修复扩大打击面）；Zone::alloc_single_page 绕过 zone 锁（MM-H2 缺口）；mremap FIXED 重叠先毁源后拷贝（静默丢数据）；munmap/MAP_FIXED/mremap 三路跳过 swap entry（解除后可"复活"+slot 泄漏）；handle_cow_fault 无 PTE 锁（并发双重 put_page → UAF）。
 - **process/sched**：deferred-notify 强改运行中任务 ti_cpu（受害 CPU 的 cpu_id()/per-CPU 全错位）；vfork exec 失败也唤醒父（共享地址空间并发）；e_phentsize 未校验（execve 内核 OOB 读，P01 修复残留）；sched_setattr 零权限（无特权可上 RT 饿死整机）。
 - **syscall**：rt_sigaction 结构布局与 RISC-V ABI 错位（内核 24B vs ABI 32B，sa_mask 读到 restorer 指针——**所有 libc 信号语义建立错误布局上**）；setgid-root exec 清空 caps；非 root 可 capset I:=P 跨 exec 全量保留 caps；~40 处 H-13 残余裸解引用（比原估 15 处多）。

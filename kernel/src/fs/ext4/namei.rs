@@ -1698,8 +1698,11 @@ fn ext4_rename_inner(
         // Clean up the replaced inode
         let mut target_mut = target_inode;
         if target_is_dir {
-            // Decrement new parent's link count (was incremented by mkdir)
-            let mut new_parent = new_dir_inode;
+            // Decrement new parent's link count (was incremented by mkdir).
+            // RE-READ first: ext4_delete_entry above may have updated the
+            // on-disk parent (size/blocks); writing the stale snapshot
+            // would roll that back (review EXT4-H7).
+            let mut new_parent = super::inode::read_inode(fs, new_dir_ino)?;
             if new_parent.i_links_count > 0 {
                 new_parent.i_links_count -= 1;
             }
@@ -1743,10 +1746,20 @@ fn ext4_rename_inner(
     renamed_inode.i_mtime = sec;
     super::inode::write_inode_disk(fs, old_ino, &renamed_inode)?;
 
-    // If renaming a directory, update parent link counts and ".." entry
+    // If renaming a directory, update parent link counts and ".." entry.
+    // Both parents are RE-READ from disk here: ext4_add_entry /
+    // ext4_delete_entry above may have grown the directories (new block,
+    // i_size/i_block updates via write_inode_disk). Writing the snapshots
+    // taken at function entry rolled those updates back — the entry in
+    // the freshly allocated block got unlinked from the inode and the
+    // rename silently lost the file (review EXT4-H7).
     if old_is_dir {
-        let mut old_parent = old_dir_inode;
-        let mut new_parent = new_dir_inode;
+        let mut old_parent = super::inode::read_inode(fs, old_dir_ino)?;
+        let mut new_parent = if old_dir_ino == new_dir_ino {
+            old_parent
+        } else {
+            super::inode::read_inode(fs, new_dir_ino)?
+        };
 
         if old_dir_ino != new_dir_ino {
             // Decrement old parent's link count
@@ -1772,13 +1785,13 @@ fn ext4_rename_inner(
         }
     } else {
         // Update timestamps on parent directories for file rename
-        let mut old_parent = old_dir_inode;
+        let mut old_parent = super::inode::read_inode(fs, old_dir_ino)?;
         old_parent.i_ctime = sec;
         old_parent.i_mtime = sec;
         super::inode::write_inode_disk(fs, old_dir_ino, &old_parent)?;
 
         if old_dir_ino != new_dir_ino {
-            let mut new_parent = new_dir_inode;
+            let mut new_parent = super::inode::read_inode(fs, new_dir_ino)?;
             new_parent.i_ctime = sec;
             new_parent.i_mtime = sec;
             super::inode::write_inode_disk(fs, new_dir_ino, &new_parent)?;

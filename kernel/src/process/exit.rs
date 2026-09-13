@@ -82,6 +82,46 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
 /// 5. exit_notify: Send SIGCHLD to parent, wake parent's wait queue
 /// 6. Release kernel big lock
 /// 7. schedule() (never returns)
+/// Move every child of `dying` to init (PID 1), like Linux
+/// forget_original_parent. Zombie children get a SIGCHLD to init so the
+/// shell's reaper loop can collect them; live children simply change
+/// parent. Runs before `dying` transitions to ZOMBIE and under the
+/// process-tree lock, so no child can observe a dangling parent.
+///
+/// # Safety
+/// `dying` is the currently running task; child pointers come from its
+/// children list and are protected by PROCESS_TREE_LOCK.
+unsafe fn reparent_children_to_init(dying: *mut Task) {
+    use crate::process::task::TaskState;
+
+    // init task (PID 1); falls back to no-op when absent (early boot).
+    // SAFETY: pid 1's Task lives until system shutdown.
+    let init = crate::sched::find_task_by_pid(1);
+    if init.is_null() || init as *const Task == dying as *const Task {
+        return;
+    }
+
+    // Collect children first: add_child mutates the list we walk, and we
+    // must not hold the tree lock while sending signals.
+    let mut moved: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+    (*dying).for_each_child(|child| {
+        moved.push(child as *mut Task);
+    });
+
+    for child in moved {
+        // Unlink from the dying parent's list, then re-link under init.
+        // SAFETY: child is linked in dying's children list (from the walk).
+        (*dying).remove_child(child);
+        // SAFETY: init is a valid Task.
+        (*init).add_child(child);
+        // If the orphan is already a zombie, init must be notified so it
+        // reaps it — otherwise it would sit unreapable forever.
+        if (*child).state() == TaskState::new(TaskState::ZOMBIE) {
+            let _ = crate::signal::send_signal(1, crate::signal::Signal::SIGCHLD as i32);
+        }
+    }
+}
+
 pub fn do_exit(exit_code: i32) -> ! {
     use crate::signal::Signal;
 
@@ -210,6 +250,16 @@ pub fn do_exit(exit_code: i32) -> ! {
 
         // ===== Reverse SEM_UNDO adjustments =====
         crate::ipc::sysv_sem::sem_undo_exit(current);
+
+        // ===== Orphan reparenting (review PROC-P03) =====
+        // Children of a dying task must be re-attached to init (PID 1),
+        // otherwise their parent pointers dangle after our Task slot is
+        // freed (ppid()/for_each_child UAF) and orphaned ZOMBIEs are
+        // never reaped — the PID space leaks monotonically.
+        // SAFETY: process-tree mutations take PROCESS_TREE_LOCK inside.
+        unsafe {
+            reparent_children_to_init(current);
+        }
 
         // Set process state to Zombie
         (*current).set_state(TaskState::new(TaskState::ZOMBIE));

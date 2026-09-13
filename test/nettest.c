@@ -326,9 +326,96 @@ static int sig_test(void)
     return 0;
 }
 
+/* User-mode FPU: with no FPU context save/restore (ARCH-H1), any FP
+ * instruction after the first context switch trapped as illegal and the
+ * process died. nettest runs long after many switches, so simply doing
+ * double arithmetic across a syscall proves FP context now works. */
+static int fp_test(void)
+{
+    volatile double a = 1.5, b = 2.0, c = 0.25;
+    double r = a * b + c;            /* 3.25 */
+    volatile double x = 0.5;
+    x = x * 3.0;                     /* 1.5 */
+    sys3(__NR_getpid, 0, 0, 0);      /* syscall between FP ops */
+    x = x + 1.0;                     /* 2.5 */
+    if (r != 3.25) return 70;
+    if (x != 2.5) return 71;
+    return 0;
+}
+
+#define __NR_mkdirat 34
+#define __NR_renameat 38
+#define __NR_unlinkat 35
+#define AT_REMOVEDIR 0x200
+
+/* Cross-directory rename: write, rename away, read back at the new path,
+ * verify the old path is gone, rename within the same dir too. */
+static int rename_test(void)
+{
+    static const char d1[] = "/tmp/nd1\0";
+    static const char d2[] = "/tmp/nd2\0";
+    static const char f1[] = "/tmp/nd1/f\0";
+    static const char g1[] = "/tmp/nd2/g\0";
+    static const char h1[] = "/tmp/nd2/h\0";
+    char msg[9] = "RENAMED!!";
+    char buf[16];
+    s64 fd, nr;
+
+    sys3(__NR_unlinkat, -100, (s64)d1, AT_REMOVEDIR); /* idempotent cleanup */
+    sys3(__NR_unlinkat, -100, (s64)d2, AT_REMOVEDIR);
+    if (sys6(__NR_mkdirat, -100, (s64)d1, 0755, 0, 0, 0) != 0) return 80;
+    if (sys6(__NR_mkdirat, -100, (s64)d2, 0755, 0, 0, 0) != 0) return 81;
+
+    fd = sys6(__NR_openat, -100, (s64)f1, O_CREAT | O_WRONLY | O_TRUNC, 0600, 0, 0);
+    if (fd < 0) return 82;
+    if (sys3(__NR_write, fd, (s64)msg, 9) != 9) return 83;
+    sys3(__NR_close, fd, 0, 0);
+
+    if (sys6(__NR_renameat, -100, (s64)f1, -100, (s64)g1, 0, 0) != 0) return 84;
+
+    /* old path must be gone */
+    fd = sys6(__NR_openat, -100, (s64)f1, O_RDONLY, 0, 0, 0);
+    if (fd != -2 /*ENOENT*/) return 85;
+
+    /* new path must contain the data */
+    fd = sys6(__NR_openat, -100, (s64)g1, O_RDONLY, 0, 0, 0);
+    if (fd < 0) return 86;
+    nr = sys3(__NR_read, fd, (s64)buf, 9);
+    sys3(__NR_close, fd, 0, 0);
+    if (nr != 9) return 87;
+    for (int i = 0; i < 9; i++)
+        if (buf[i] != msg[i]) return 88;
+
+    /* same-directory rename */
+    if (sys6(__NR_renameat, -100, (s64)g1, -100, (s64)h1, 0, 0) != 0) return 89;
+    fd = sys6(__NR_openat, -100, (s64)h1, O_RDONLY, 0, 0, 0);
+    if (fd < 0) return 90;
+    nr = sys3(__NR_read, fd, (s64)buf, 9);
+    sys3(__NR_close, fd, 0, 0);
+    if (nr != 9) return 91;
+
+    /* cleanup */
+    sys3(__NR_unlinkat, -100, (s64)h1, 0);
+    sys3(__NR_unlinkat, -100, (s64)d1, AT_REMOVEDIR);
+    sys3(__NR_unlinkat, -100, (s64)d2, AT_REMOVEDIR);
+    return 0;
+}
+
 void _start(void)
 {
-    int r = sig_test();
+    int r = rename_test();
+    if (r == 0) {
+        puts_("rename: cross-dir ok\n");
+    } else {
+        puts_("rename: FAIL\n");
+    }
+    r = fp_test();
+    if (r == 0) {
+        puts_("fp: user fpu ok\n");
+    } else {
+        puts_("fp: FAIL\n");
+    }
+    r = sig_test();
     if (r == 0) {
         puts_("sig: abi+sigwait ok\n");
     } else {

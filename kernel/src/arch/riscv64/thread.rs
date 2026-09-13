@@ -14,7 +14,7 @@
 //! - Other architecture-specific state
 
 use core::arch::asm;
-use super::pt_regs::{PtRegs, SR_FS_DIRTY, SR_FS_CLEAN, SR_FS_OFF, SR_FS};
+use super::pt_regs::{PtRegs, SR_FS_DIRTY, SR_FS_CLEAN, SR_FS_INITIAL, SR_FS_OFF, SR_FS};
 
 /// FPU state size (32 64-bit registers)
 const FPU_STATE_SIZE: usize = 32;
@@ -94,7 +94,10 @@ impl ThreadStruct {
             // FPU/Vector state
             fpu: [0; FPU_STATE_SIZE],
             fcsr: 0,
-            fs: SR_FS_OFF as u32,
+            // INITIAL, not OFF: fresh tasks restore a zeroed FPU state on
+            // their first switch-in (review ARCH-H1) — OFF would leave
+            // their first FP instruction trapping as illegal.
+            fs: SR_FS_INITIAL as u32,
             vstate_valid: false,
 
             // Other state
