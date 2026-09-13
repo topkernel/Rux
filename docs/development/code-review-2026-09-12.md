@@ -448,7 +448,11 @@ signal 交付链（H-05/06/07/15、M-01~04）、调度器（P06-P10）、syscall
   - 已修一个确证的同族缺陷 **VFS-H13**（bio LRU 两阶段驱逐无锁）：Phase1 在 LRU 锁内选定 count==0 受害者摘链后释放锁，Phase2 才拿 bucket 锁摘哈希——间隙内并发 get() 可钉住该条目而 Phase4 仍释放，调用方持悬挂 BufferHead（与"执行已释放页"签名吻合）。现 Phase2 在 bucket 锁内复查 count，非 0 回插 LRU 放弃驱逐。
   - **✅ 已破案并修复（第三个根因，2026-09-13 第三轮追查）**：fork 子进程退出码丢失的机制为——fork 将父进程栈页 COW 降级为只读（W=0，PTE 探针实证），而编译器把局部变量寄存器化，父进程对该页的**首次写发生在内核 copy_to_user（wait4 回写状态）**；异常表把写故障转为"未拷贝字节数"，`do_wait` 用 `let _uncopied` 丢弃 → 状态静默丢失。Linux 对"内核访问用户 COW 页"会做 fault-in 解析后重试，本内核缺失。**修复**：`copy_to_user` 失败后对目标区间做 `fault_in_write`（COW 位→handle_cow_fault；未映射→handle_mm_fault(WRITE)+CowPending 解析），成功则重试一次。该修复同时消除一族"fork 后随机 EFAULT/0 值"类症状（wait4/sigprocmask/getcpu 等一切经 copy_to_user 写用户局部变量的路径）。
   - 附带验证：vfork+exec 与 vfork+openat+dup3+exec(echo→文件)（即 posix_spawn 完整序列）syscall 级全部通过并纳入 nettest 常规用例。
-  - **仍未解决**：NEW2 主体（mrsh 重定向子进程仍 SIGSEGV——现在退出码如实报告 -11 而非 129；套件 7 次中 4-6 次全过、挂点漂移于 sigtimedwait/udp/入口）。给 ethernet_poll 加轮询互斥的尝试使死锁恶化（3/5）已回退——并发路径需要的是结构性修复（DRIV-M15 virtio SMP 安全 + EXT4-H10），不是外层串行化。下一抓手：mrsh 子进程 SIGSEGV 的 sp=0xe8a00 异常栈指针（dmesg 实证），指向 exec 栈建立或子进程栈切换在特定时序下的坏值。
+  - **✅ 第四个根因破案并修复（2026-09-14）：mrsh 重定向子进程 SIGSEGV 的完整机制**——反汇编 toybox 崩溃点（epc=0x4ff30）证实为 musl `__init_libc` 的**故意 NULL 写崩溃**：musl 启动时 ppoll 检查 stdio fd 0/1/2，发现 POLLNVAL（fd 不存在）时尝试打开 `/dev/null` 替换，openat 失败即 `sb zero,0(zero)` 自杀。两个内核缺陷串联：
+    1. **FD_CLOEXEC 挂在共享的 File 对象上而非描述符上**：mrsh 以 `open(O_CLOEXEC)`+`dup2(fd,1)` 实现重定向——dup2 复制的是同一个 Arc<File>，cloexec 位跟着泄漏到 fd1 → execve 时 close_cloexec_fds 把 stdio 关掉 → POLLNVAL。POSIX 明确 FD_CLOEXEC 是描述符属性。修复：FdTable 增加每描述符位图（cloexec_bits[16]×u64），全部写点（open/dup3/pipe2/eventfd/timerfd/fcntl F_DUPFD/F_SETFD）迁移到按 fd 设置，dup2 清除新 fd 位，close_cloexec 按位图判定。
+    2. **/dev/null 不存在**：devfs 只有 kmsg/input。修复：注册 nulldev（read=EOF/write=吞掉全部）。
+    验证：`echo X > file; cat file` 端到端输出正确、`2>/dev/null` 不再报错、smoke 15/15、nettest VF-re（posix_spawn 序列）通过。**shell 重定向自 Wave 2 记录的"已知不可用"至此修复。**
+  - **仍未解决**：mrsh 管道（`a | b`）仍挂起；NEW2 偶发竞态（套件挂点在 fork 入口/sigtimedwait 之间漂移，7 次约 4-6 次全过）。下一抓手：管道挂起疑与 cat 阻塞读 stdin 相关（读端永不就绪或写端数据未达）。
   - nettest 的 fork+fs 探针与 E 用例默认禁用以保持套件确定性；修复前 shell 重定向/管道视为已知不可用。
 
 ### 16.5 对修复计划的影响

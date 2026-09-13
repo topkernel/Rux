@@ -1485,36 +1485,31 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 fdtable.install_fd(new_fd, old_file)
                     .map_err(|_| errno::Errno::TooManyOpenFiles.as_neg_i32())?;
 
-                // Set close-on-exec flag on the new fd
-                if let Some(new_file) = get_file_fd(new_fd) {
-                    new_file.set_cloexec(true);
-                }
+                // Set close-on-exec flag on the new fd (per-descriptor)
+                fdtable.set_fd_cloexec(new_fd, true);
 
                 Ok(new_fd)
             }
 
             // F_GETFD: Get close-on-exec flag
             fcntl::F_GETFD => {
-                let file = match get_file_fd(fd) {
-                    Some(f) => f,
-                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
-                };
-
-                let cloexec = file.get_cloexec();
-                Ok(if cloexec { fcntl::FD_CLOEXEC } else { 0 })
+                if get_file_fd(fd).is_none() {
+                    return Err(errno::Errno::BadFileNumber.as_neg_i32());
+                }
+                let ft = crate::sched::get_current_fdtable()
+                    .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+                Ok(if ft.get_fd_cloexec(fd) { fcntl::FD_CLOEXEC } else { 0 })
             }
 
             // F_SETFD: Set close-on-exec flag
             fcntl::F_SETFD => {
-                let file = match get_file_fd(fd) {
-                    Some(f) => f,
-                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
-                };
-
-                // Bit 0 of arg indicates FD_CLOEXEC
-                let cloexec = (arg & fcntl::FD_CLOEXEC) != 0;
-                file.set_cloexec(cloexec);
-
+                if get_file_fd(fd).is_none() {
+                    return Err(errno::Errno::BadFileNumber.as_neg_i32());
+                }
+                let ft = crate::sched::get_current_fdtable()
+                    .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+                // Bit 0 of arg indicates FD_CLOEXEC (per-descriptor)
+                ft.set_fd_cloexec(fd, (arg & fcntl::FD_CLOEXEC) != 0);
                 Ok(0)  // Return 0 on success
             }
 

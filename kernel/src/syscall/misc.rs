@@ -1108,9 +1108,9 @@ pub fn sys_eventfd2(args: SyscallArgs) -> i64 {
         }
     };
 
-    // Handle EFD_CLOEXEC via fcntl
+    // Handle EFD_CLOEXEC via the per-descriptor flag
     if flags & EFD_CLOEXEC != 0 {
-        file.set_cloexec(true);
+        crate::fs::set_cloexec_fd(fd, true);
     }
 
     match fdtable.install_fd(fd, file) {
@@ -1203,7 +1203,7 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
     };
 
     if flags & TFD_CLOEXEC != 0 {
-        file.set_cloexec(true);
+        crate::fs::set_cloexec_fd(fd, true);
     }
 
     match fdtable.install_fd(fd, file) {

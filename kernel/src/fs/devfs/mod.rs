@@ -104,11 +104,46 @@ impl DevfsEntry {
 static DEVFS_ROOT: Spinlock<Option<Arc<DevfsEntry>>> = Spinlock::new(None);
 
 /// Initialize devfs
+/// /dev/null: reads return EOF, writes discard everything. musl's
+/// __init_libc opens /dev/null when a stdio fd is missing (POLLNVAL) and
+/// DELIBERATELY crashes (NULL store) if the open fails — without this
+/// node any process with a closed stdio fd dies at startup.
+fn nulldev_read(_file: &crate::fs::file::File, _buf: &mut [u8]) -> isize {
+    0 // immediate EOF
+}
+
+fn nulldev_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
+    let _ = file;
+    buf.len() as isize // pretend everything was swallowed
+}
+
+static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+    read: Some(nulldev_read),
+    write: Some(nulldev_write),
+    lseek: None,
+    close: None,
+    poll: None,
+};
+
 pub fn init() {
+    // Register /dev/null before creating the tree
+    let _ = registry::register_char_device(crate::fs::dev_t::DEV_NULL, &NULLDEV_OPS);
+
     let mut root = DEVFS_ROOT.lock_irqsave();
 
     // Create root directory
     let root_entry = Arc::new(DevfsEntry::new_dir("dev"));
+
+    // /dev/null node
+    let null_entry = Arc::new(DevfsEntry::new_char_device_with_mode(
+        "null",
+        crate::fs::dev_t::DEV_NULL,
+        0o666 | 0o020000, // S_IFCHR | rw-rw-rw-
+    ));
+    root_entry
+        .children
+        .lock_irqsave()
+        .insert(String::from("null"), null_entry);
 
     // Create /dev/input directory
     let input_dir = Arc::new(DevfsEntry::new_dir("input"));

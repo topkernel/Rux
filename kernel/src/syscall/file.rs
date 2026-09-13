@@ -70,14 +70,7 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         if let Some(pid) = parse_proc_fd_dir_path(&full_path) {
             return match crate::fs::vfs::open_procfs_dir(pid, flags) {
                 Ok(fd) => {
-                    if (flags & O_CLOEXEC) != 0 {
-                        // SAFETY: fd just allocated by open_procfs_dir; get_file_fd returns valid File.
-                        unsafe {
-                            if let Some(file) = crate::fs::get_file_fd(fd) {
-                                file.set_cloexec(true);
-                            }
-                        }
-                    }
+                    if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
                     fd as i64
                 }
                 Err(e) => e as i64,
@@ -91,14 +84,7 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         if let Some(content) = crate::fs::procfs::read_file(&full_path) {
             return match crate::fs::vfs::open_mem_file(content, flags) {
                 Ok(fd) => {
-                    if (flags & O_CLOEXEC) != 0 {
-                        // SAFETY: fd just allocated by open_mem_file; get_file_fd returns valid File.
-                        unsafe {
-                            if let Some(file) = crate::fs::get_file_fd(fd) {
-                                file.set_cloexec(true);
-                            }
-                        }
-                    }
+                    if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
                     fd as i64
                 }
                 Err(e) => e as i64,
@@ -114,14 +100,7 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
 
     match result {
         Ok(fd) => {
-            if (flags & O_CLOEXEC) != 0 {
-                // SAFETY: fd just allocated by file_open/file_opendir; get_file_fd returns valid File.
-                unsafe {
-                    if let Some(file) = crate::fs::get_file_fd(fd) {
-                        file.set_cloexec(true);
-                    }
-                }
-            }
+            if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
             fd as i64
         }
         Err(e) => e as i64,

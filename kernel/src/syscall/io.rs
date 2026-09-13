@@ -577,11 +577,9 @@ pub fn sys_dup3(args: SyscallArgs) -> i64 {
             Some(fdtable) => {
                 match fdtable.dup2_fd(oldfd, newfd) {
                     Some(fd) => {
-                        // Set close-on-exec if O_CLOEXEC is set
+                        // dup3 O_CLOEXEC applies to the NEW descriptor only
                         if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
-                            if let Some(file) = fdtable.get_file(fd) {
-                                file.set_cloexec(true);
-                            }
+                            fdtable.set_fd_cloexec(fd, true);
                         }
                         fd as i64
                     }
@@ -1105,10 +1103,10 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
         return -errno::EMFILE as i64;
     }
 
-    // Set close-on-exec if O_CLOEXEC is set
+    // Set close-on-exec if O_CLOEXEC is set (per-descriptor)
     if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
-        read_file.set_cloexec(true);
-        write_file.set_cloexec(true);
+        fdtable.set_fd_cloexec(read_fd, true);
+        fdtable.set_fd_cloexec(write_fd, true);
     }
 
     // Write fd pair to userspace via copy_to_user (fault-safe)

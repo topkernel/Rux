@@ -275,6 +275,14 @@ impl File {
 /// FdTable entry stored on the heap
 struct FdTableEntry {
     fds: [Option<Arc<File>>; 1024],
+    /// Per-descriptor close-on-exec bits. FD_CLOEXEC belongs to the
+    /// DESCRIPTOR in POSIX, not the underlying description: a file opened
+    /// O_CLOEXEC at fd N and dup2'd to fd M must leave M WITHOUT the flag.
+    /// The old per-File flag leaked O_CLOEXEC through dup2 — musl-based
+    /// shells open redirections O_CLOEXEC, dup2 to stdio, exec, and lost
+    /// their stdio fds (found via musl __init_libc's deliberate NULL-crash
+    /// on POLLNVAL + missing /dev/null).
+    cloexec_bits: [u64; 16], // 1024 bits
     next_fd: usize,
     count: usize,
 }
@@ -290,6 +298,7 @@ impl FdTable {
     pub fn new() -> Self {
         let entry = Box::new(FdTableEntry {
             fds: [const { None }; 1024],
+            cloexec_bits: [0; 16],
             next_fd: 0,
             count: 0,
         });
@@ -414,7 +423,29 @@ impl FdTable {
 
         // Install file at newfd
         self.install_fd(newfd, file).ok()?;
+
+        // dup2 leaves FD_CLOEXEC CLEAR on the new descriptor (POSIX);
+        // dup3(flags & O_CLOEXEC) sets it — callers apply that via
+        // set_fd_cloexec.
+        self.set_fd_cloexec(newfd, false);
         Some(newfd)
+    }
+
+    /// Per-descriptor close-on-exec flag (FD_CLOEXEC).
+    pub fn set_fd_cloexec(&self, fd: usize, on: bool) {
+        if fd >= 1024 { return; }
+        let mut entry = self.entry.lock_irqsave();
+        if on {
+            entry.cloexec_bits[fd / 64] |= 1u64 << (fd % 64);
+        } else {
+            entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
+        }
+    }
+
+    pub fn get_fd_cloexec(&self, fd: usize) -> bool {
+        if fd >= 1024 { return false; }
+        let entry = self.entry.lock_irqsave();
+        entry.cloexec_bits[fd / 64] & (1u64 << (fd % 64)) != 0
     }
 
     /// Close all file descriptors with close-on-exec flag set
@@ -423,7 +454,7 @@ impl FdTable {
         let cloexec_fds: alloc::vec::Vec<usize> = {
             let entry = self.entry.lock_irqsave();
             (0..1024).filter(|&fd| {
-                entry.fds[fd].as_ref().map_or(false, |f| f.get_cloexec())
+                entry.cloexec_bits[fd / 64] & (1u64 << (fd % 64)) != 0
             }).collect()
         };
         for fd in cloexec_fds {
@@ -452,6 +483,15 @@ impl Drop for FdTable {
             }
         }
         // Box will be automatically deallocated
+    }
+}
+
+
+/// Set the per-descriptor FD_CLOEXEC flag (POSIX: the flag belongs to the
+/// descriptor, never the underlying file description).
+pub fn set_cloexec_fd(fd: usize, on: bool) {
+    if let Some(ft) = crate::sched::get_current_fdtable() {
+        ft.set_fd_cloexec(fd, on);
     }
 }
 

@@ -306,8 +306,10 @@ static int sig_test(void)
     puts_("M-s2\n");
     u64 blk = 1u << (SIGUSR2 - 1);
     ret = sys6(__NR_rt_sigprocmask, 0 /*SIG_BLOCK*/, (s64)&blk, (s64)&old[0], 8, 0, 0);
+    puts_("M-s2b\n");
     if (ret != 0) return 64;
     ret = sys3(__NR_kill, sys3(__NR_getpid, 0, 0, 0), SIGUSR2, 0);
+    puts_("M-s2c\n");
     if (ret != 0) return 65;
 
     puts_("M-s3\n");
@@ -478,6 +480,7 @@ static void vf_redir_exec_child(void)
     s64 fd = sys6(__NR_openat, -100, (s64)"/tmp/vfre\0", O_CREAT | O_WRONLY | O_TRUNC, 0600, 0, 0);
     if (fd < 0) sys3(93, 90, 0, 0);
     if (sys6(__NR_dup3, fd, 1, 0, 0, 0, 0) < 0) sys3(93, 91, 0, 0);
+    sys3(__NR_close, fd, 0, 0); /* close original — mirrors shell behavior */
     sys3(__NR_execve, (s64)"/bin/echo\0", (s64)argv5, 0);
     sys3(93, 92, 0, 0);
 }
