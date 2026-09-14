@@ -302,7 +302,7 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
 /// sys_mkdir - Create directory (deprecated, use mkdirat)
 pub fn sys_mkdir(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[0] as *const u8;
-    let _mode = args[1] as u32;
+    let mode = args[1] as u32; // passed through like mkdirat (review SYSA-M1)
 
     let mut buf = [0u8; PATH_MAX];
     let pathname = match read_user_path(pathname_ptr, &mut buf) {
@@ -310,7 +310,7 @@ pub fn sys_mkdir(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::file_mkdir(pathname, 0o755) {
+    match crate::fs::vfs::file_mkdir(pathname, mode) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }

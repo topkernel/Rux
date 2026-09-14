@@ -1222,8 +1222,14 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
     if size == 0 {
-        // Clear supplementary groups
-        return 0;  // No groups to set (groups already empty)
+        // setgroups(0, NULL) CLEARS the supplementary group list (POSIX);
+        // the old code returned success without touching the current set
+        // (review P28).
+        if let Some(t) = crate::sched::current() {
+            // SAFETY: t is the running task; groups lives on its Cred.
+            unsafe { (*t).cred_mut().groups.clear(); }
+        }
+        return 0;
     }
 
     // Validate user pointer

@@ -223,7 +223,9 @@ impl File {
                 return lseek_fn(self, offset, whence);
             }
         }
-        -9  // EBADF
+        // No seek op = unseekable object (pipe, socket, fifo): POSIX says
+        // ESPIPE, not EBADF (review SYSA-M11).
+        -29 // ESPIPE
     }
 
     /// Close file

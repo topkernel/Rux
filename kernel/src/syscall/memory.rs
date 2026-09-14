@@ -595,9 +595,21 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                     let pte0 = (*table0).get(vpn0);
 
                     if pte0.is_valid() {
-                        // Preserve PPN, only update permission flags
+                        // Preserve PPN and any COW software bit (bit 8):
+                        // clearing COW here let two processes that share a
+                        // forked page write straight through after
+                        // mprotect(PROT_WRITE), bypassing the COW copy
+                        // (review MM-H7). Also never raise W on a page
+                        // whose COW bit is set — the write fault path owns
+                        // the copy.
                         let ppn = pte0.ppn();
-                        let new_pte = PageTableEntry::from_bits((ppn << 10) | new_flags);
+                        let cow_bit = pte0.bits() & (1 << 8);
+                        let mut flags = new_flags;
+                        if cow_bit != 0 {
+                            flags |= cow_bit;
+                            flags &= !PageTableEntry::W; // defer W to COW fault
+                        }
+                        let new_pte = PageTableEntry::from_bits((ppn << 10) | flags);
                         (*table0).set(vpn0, new_pte);
                     }
                 }

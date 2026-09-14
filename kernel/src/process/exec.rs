@@ -61,7 +61,9 @@ pub(crate) fn do_execve_elf(
         }
         (*task_ptr).sigstack = crate::signal::SignalStack::new();
         (*task_ptr).pending.clear();
-        (*task_ptr).sigmask = 0;
+        // POSIX: execve PRESERVES the blocked signal mask (only caught
+        // signal dispositions are reset). Clearing it unblocked anything
+        // the program had deliberately blocked before exec (review P15).
         (*task_ptr).sigframe = None;
         (*task_ptr).sigframe_addr = 0;
     }

@@ -498,7 +498,7 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
 /// Returns 0 on success, negative error code on failure
 pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
     let _clk_id = args[0] as i32;
-    let _flags = args[1] as i32;
+    let _flags = args[1] as i32; // bit0 = TIMER_ABSTIME
     let rqtp = args[2] as *const Timespec;
     let rmtp = args[3] as *mut Timespec;
 
@@ -520,6 +520,28 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
     // Read requested sleep time
     // SAFETY: rqtp validated with access_ok; reads Timespec (two i64 fields).
     let req = unsafe { *rqtp };
+
+    // TIMER_ABSTIME: rqtp is an absolute CLOCK_MONOTONIC timestamp — sleep
+    // until then, not for that duration (pthread_cond_timedwait depends on
+    // this; without it every absolute wait slept for decades — review M-16).
+    if _flags & 1 != 0 {
+        // Current monotonic time in ns (same source as clock_gettime).
+        let cycles = crate::drivers::intc::clint::read_time();
+        let freq_hz: u64 = 10_000_000;
+        let now_nanos = (cycles / freq_hz).saturating_mul(1_000_000_000)
+            + ((cycles % freq_hz) * 1_000_000_000 / freq_hz);
+        let target_nanos = (req.tv_sec as u64).saturating_mul(1_000_000_000)
+            .saturating_add(req.tv_nsec.max(0) as u64);
+        if target_nanos <= now_nanos {
+            return 0; // deadline already passed
+        }
+        let rel_nanos = target_nanos - now_nanos;
+        let rel = Timespec {
+            tv_sec: (rel_nanos / 1_000_000_000) as i64,
+            tv_nsec: ((rel_nanos % 1_000_000_000)) as i64,
+        };
+        return nanosleep_impl(&rel, rmtp);
+    }
 
     nanosleep_impl(&req, rmtp)
 }

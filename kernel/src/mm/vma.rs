@@ -344,10 +344,18 @@ impl Vma {
 
     /// Can merge with another VMA?
     pub fn can_merge(&self, other: &Vma) -> bool {
-        // Must be adjacent and have same attributes
+        // Must be adjacent with identical attributes AND backing: merging
+        // two mappings of DIFFERENT files (or different offsets of the
+        // same file) made the merged VMA read every page through the first
+        // mapping's fd/offset — silent cross-file data corruption
+        // (review MM-H1). File-backed VMAs only merge with an exact
+        // fd+offset match; anonymous ones merge freely.
         self.end.as_usize() == other.start.as_usize()
             && self.flags.bits() == other.flags.bits()
             && self.vma_type == other.vma_type
+            && self.file_fd == other.file_fd
+            && self.file_size == other.file_size
+            && self.offset == other.offset
     }
 
     /// Merge with another VMA
