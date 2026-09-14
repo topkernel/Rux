@@ -508,6 +508,74 @@ static int vf_redir_exec_test(void)
     return 0;
 }
 
+/* pipe + two forks + two execs: the exact mrsh pipeline shape */
+static int g_pp[2];
+static void pipe_writer(void)
+{
+    static const char *aw[] = { "echo", "PIPE-OK", 0 };
+    if (sys6(__NR_dup3, g_pp[1], 1, 0, 0, 0, 0) < 0) sys3(93, 60, 0, 0);
+    sys3(__NR_close, g_pp[0], 0, 0);
+    sys3(__NR_close, g_pp[1], 0, 0);
+    sys3(__NR_execve, (s64)"/bin/echo\0", (s64)aw, 0);
+    sys3(93, 61, 0, 0);
+}
+static void pipe_reader(void)
+{
+    char b[32];
+    if (sys6(__NR_dup3, g_pp[0], 0, 0, 0, 0, 0) < 0) sys3(93, 62, 0, 0);
+    sys3(__NR_close, g_pp[0], 0, 0);
+    sys3(__NR_close, g_pp[1], 0, 0);
+    s64 n = sys3(__NR_read, 0, (s64)b, 31);
+    if (n > 0) {
+        sys3(__NR_write, 2, (s64)b, n); /* stderr -> console */
+    }
+    sys3(93, (n == 8) ? 0 : 63, 0, 0);
+}
+static int pipe_test(void)
+{
+    static unsigned long stw[4096] __attribute__((aligned(16)));
+    static unsigned long str_[4096] __attribute__((aligned(16)));
+    unsigned long st = 0;
+    extern long my_clone(void *fn, unsigned long sp, unsigned long fl);
+    puts_("PIPE2\n");
+    if (sys6(__NR_pipe2, (s64)g_pp, 0, 0, 0, 0, 0) != 0) return 50;
+    puts_("P2a\n");
+    long wa = my_clone((void *)pipe_writer, (unsigned long)(stw + 4096), SIGCHLD);
+    if (wa < 0) return 51;
+    puts_("P2b\n");
+    long rb = my_clone((void *)pipe_reader, (unsigned long)(str_ + 4096), SIGCHLD);
+    if (rb < 0) return 52;
+    puts_("P2c\n");
+    sys6(__NR_wait4, wa, (s64)&st, 0, 0, 0, 0);
+    puts_("P2d(wa done)\n");
+    sys6(__NR_wait4, rb, (s64)&st, 0, 0, 0, 0);
+    puts_("P2e\n");
+    sys3(__NR_close, g_pp[0], 0, 0);
+    sys3(__NR_close, g_pp[1], 0, 0);
+    puts_("PIPE2-done\n");
+    return 0;
+}
+
+static void fork_exec_child(void)
+{
+    static const char *a6[] = { "true", 0 };
+    sys3(__NR_execve, (s64)"/bin/true\0", (s64)a6, 0);
+    sys3(93, 69, 0, 0);
+}
+static int fork_exec_test(void)
+{
+    static unsigned long st6[4096] __attribute__((aligned(16)));
+    unsigned long st = 0;
+    extern long my_clone(void *fn, unsigned long sp, unsigned long fl);
+    puts_("FE\n");
+    long pid = my_clone((void *)fork_exec_child, (unsigned long)(st6 + 4096), SIGCHLD);
+    if (pid < 0) return 70;
+    sys6(__NR_wait4, pid, (s64)&st, 0, 0, 0, 0);
+    if ((st & 0x7f) != 0 || ((st >> 8) & 0xff) != 0) { puts_("FE-bad\n"); return 71; }
+    puts_("FE-ok\n");
+    return 0;
+}
+
 static int vfork_redir_inner(int use_vfork);
 
 /* raw clone trampoline: my_clone(func, stack_top, flags) — child runs
@@ -716,6 +784,10 @@ void _start(void)
      * SMP race. Re-enable when investigating. */
     r = 0; (void)fork_redir_exec_test;
     puts_("forkredir: (disabled, see nettest.c)\n");
+    r = fork_exec_test();
+    if (r != 0) puts_("FE: FAIL\n");
+    r = pipe_test();
+    if (r != 0) puts_("PIPE2: FAIL\n");
     r = vf_redir_exec_test();
     if (r != 0) puts_("VF-re: FAIL\n");
     r = vfork_exec_test();

@@ -532,9 +532,11 @@ impl MmStruct {
     pub fn fork(&self) -> Result<MmStruct, MapError> {
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
+        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
         let new_root_ppn = unsafe {
             copy_page_table_cow(self.pgd).ok_or(MapError::OutOfMemory)?
         };
+        drop(_pte_guard);
 
         // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
         // a valid, freshly allocated root page table. space_type and brk are valid by
@@ -835,6 +837,14 @@ pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysA
 }
 
 /// Map user region
+/// Coarse leaf-PTE serialization: copy_page_table_cow (fork) mutates the
+/// PARENT's PTEs while walking them; handle_cow_fault atomically swaps a
+/// parent PTE; exec/exit teardown frees them. With no per-PTE locks, any
+/// two of these racing on the same page produce stale refcounts and
+/// dangling child PTEs — the NEW2 class. One writer at a time.
+pub static PTE_MODIFY_LOCK: crate::sync::spinlock::Spinlock<()> =
+    crate::sync::spinlock::Spinlock::new(());
+
 pub unsafe fn map_user_region(
     user_root_ppn: u64,
     virt_start: u64,
@@ -1119,6 +1129,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
 
 /// Handle copy-on-write page fault
 pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
+    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
     use crate::mm::page_desc::pfn_to_page_mut;
 
     let virt_addr = fault_addr.bits();
