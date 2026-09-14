@@ -84,13 +84,13 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
         wake_pid,
     };
 
-    let mut timers = TIMERS.lock();
+    let mut timers = TIMERS.lock_irqsave();
     if timers.len() >= MAX_TIMERS {
         return 0;
     }
     timers.insert(id, entry);
 
-    let mut actions = ACTIONS.lock();
+    let mut actions = ACTIONS.lock_irqsave();
     actions.insert(id, action);
 
     id
@@ -128,13 +128,13 @@ pub fn add_timer_with_action(
         wake_pid: 0,
     };
 
-    let mut timers = TIMERS.lock();
+    let mut timers = TIMERS.lock_irqsave();
     if timers.len() >= MAX_TIMERS {
         return 0;
     }
     timers.insert(id, entry);
 
-    let mut actions = ACTIONS.lock();
+    let mut actions = ACTIONS.lock_irqsave();
     actions.insert(id, action);
 
     id
@@ -146,9 +146,9 @@ pub fn add_timer_with_action(
 /// `true` if timer was found and removed.
 pub fn del_timer(id: u64) -> bool {
     // Lock order: TIMERS then ACTIONS — matches add_timer / softirq handler
-    let mut timers = TIMERS.lock();
+    let mut timers = TIMERS.lock_irqsave();
     let removed = timers.remove(&id).is_some();
-    let mut actions = ACTIONS.lock();
+    let mut actions = ACTIONS.lock_irqsave();
     actions.remove(&id);
     removed
 }
@@ -157,7 +157,7 @@ pub fn del_timer(id: u64) -> bool {
 ///
 /// If the timer does not exist, does nothing and returns false.
 pub fn mod_timer(id: u64, new_expires: u64) -> bool {
-    let mut timers = TIMERS.lock();
+    let mut timers = TIMERS.lock_irqsave();
     if let Some(entry) = timers.get_mut(&id) {
         entry.expires = new_expires;
         true
@@ -168,7 +168,7 @@ pub fn mod_timer(id: u64, new_expires: u64) -> bool {
 
 /// Check if a timer is currently active.
 pub fn timer_pending(id: u64) -> bool {
-    let timers = TIMERS.lock();
+    let timers = TIMERS.lock_irqsave();
     timers.contains_key(&id)
 }
 
@@ -189,8 +189,8 @@ pub fn timer_softirq_handler(_nr: usize) {
 
     // Collect and process expired timers under locks (H48 fix)
     {
-        let mut timers = TIMERS.lock();
-        let mut actions = ACTIONS.lock();
+        let mut timers = TIMERS.lock_irqsave();
+        let mut actions = ACTIONS.lock_irqsave();
         let mut expired = alloc::vec::Vec::new();
         timers.retain(|&id, entry| {
             if entry.expires <= current {
