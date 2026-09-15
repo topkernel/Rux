@@ -595,6 +595,10 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                     let pte0 = (*table0).get(vpn0);
 
                     if pte0.is_valid() {
+                        // Hold the PTE-modify lock across the leaf rewrite:
+                        // a concurrent fork's copy_page_table_cow walks these
+                        // same PTEs (regression round 5, PTE lock coverage).
+                        let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
                         // Preserve PPN and any COW software bit (bit 8):
                         // clearing COW here let two processes that share a
                         // forked page write straight through after

@@ -431,6 +431,8 @@ impl MmStruct {
 
     /// Unmap physical pages in specified range
     fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
+        // Serialize against fork's table walk and COW faults (PTE lock).
+        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
         let mut addr = start.as_usize();
         let end = addr + size;
 
@@ -852,6 +854,8 @@ pub unsafe fn map_user_region(
     size: u64,
     flags: u64,
 ) {
+    // Serialize against fork's table walk (PTE lock coverage).
+    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
     let virt_end_checked = virt_start.checked_add(size);
     if virt_end_checked.is_none() {
         panic!("map_user_region: virt_start + size overflow");
