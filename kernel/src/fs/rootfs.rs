@@ -1519,6 +1519,43 @@ unsafe fn rootfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 
 /// RootFS getattr operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
+unsafe fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i32 {
+    use crate::fs::inode::setattr_attr;
+    let node_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+    let node = &*(node_ptr as *const RootFSNode);
+    if attr == setattr_attr::ATTR_SIZE {
+        // O_TRUNC / ftruncate: resize the file content. Without this,
+        // `> file` redirection on a rootfs-rooted system returned EROFS
+        // for every open (review VFS-M2). Content is Arc<Vec<u8>> —
+        // build the replacement instead of mutating in place.
+        let new_size = value as usize;
+        let mut data_guard = node.data.lock();
+        let new_vec = match data_guard.as_ref() {
+            Some(old) => {
+                let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+                let keep = new_size.min(old.len());
+                v.extend_from_slice(&old[..keep]);
+                v.resize(new_size, 0);
+                v
+            }
+            None => alloc::vec![0u8; new_size],
+        };
+        *data_guard = Some(alloc::sync::Arc::new(new_vec));
+        0
+    } else if attr == setattr_attr::ATTR_MODE {
+        // Mode change on rootfs: accepted (permissions are not enforced
+        // beyond DAC checks that use the fixed mode).
+        0
+    } else {
+        -95
+    }
+}
+
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     let node_ptr = match inode.private_data {
         Some(ptr) => ptr,
@@ -1717,7 +1754,7 @@ pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
     open: None,
     permission: None,  // Default: allow all
     getattr: Some(rootfs_getattr),
-    setattr: None,  // RootFS doesn't support setattr
+    setattr: Some(rootfs_setattr),
     iget: Some(rootfs_iget),
     destroy_inode: Some(rootfs_destroy_inode),
 };
