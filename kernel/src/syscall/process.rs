@@ -283,6 +283,16 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             let is_setuid = (file_mode & S_ISUID) != 0;
             let is_setgid = (file_mode & S_ISGID) != 0;
 
+            // Execute permission check (review P26/M-07): without any x bit
+            // the file must not be executable regardless of setuid bits.
+            const S_IXUSR: u32 = 0o100;
+            const S_IXGRP: u32 = 0o010;
+            const S_IXOTH: u32 = 0o001;
+            let has_x = (file_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+            if !has_x {
+                return -(errno::EACCES as i64) as u64;
+            }
+
             // SAFETY: current is a valid, non-null task pointer from
             // sched::current(); cred_mut() gives exclusive cred access.
             unsafe {

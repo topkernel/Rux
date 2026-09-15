@@ -1284,7 +1284,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     }
 
     // If value is zero, timer is disarmed
-    let total_nsec = val_sec * 1_000_000_000 + val_nsec;
+    let total_nsec = val_sec.saturating_mul(1_000_000_000).saturating_add(val_nsec); // M-19
     if total_nsec <= 0 {
         return 0;
     }
@@ -1293,7 +1293,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     let value_msecs = (total_nsec / 1_000_000) as u64;
     let value_jiffies = crate::drivers::timer::msecs_to_jiffies(value_msecs).max(1);
 
-    let interval_nsec = int_sec * 1_000_000_000 + int_nsec;
+    let interval_nsec = int_sec.saturating_mul(1_000_000_000).saturating_add(int_nsec); // M-19
     let interval_jiffies = if interval_nsec > 0 {
         let interval_msecs = (interval_nsec / 1_000_000) as u64;
         crate::drivers::timer::msecs_to_jiffies(interval_msecs).max(1)

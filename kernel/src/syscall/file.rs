@@ -1524,6 +1524,12 @@ pub fn sys_fchmod(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let mode = args[1] as u32;
 
+    // Only the permission + setuid/setgid/sticky bits are meaningful for
+    // chmod; unknown bits are EINVAL (review SYSA-M19).
+    if mode & !0o7777 != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {

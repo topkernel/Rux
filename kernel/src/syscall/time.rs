@@ -698,9 +698,25 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     };
 
     let expires = if flags & 1 != 0 {
-        // TIMER_ABSTIME — absolute time (convert from timespec to jiffies)
-        // Approximate: use current jiffies as base + offset
-        crate::drivers::timer::get_jiffies() + value_jiffies
+        // TIMER_ABSTIME: val_sec/val_nsec is an absolute CLOCK_MONOTONIC
+        // timestamp. Convert it to a jiffies deadline directly (10 MHz
+        // CLINT, same source as clock_gettime) — the old code treated it
+        // as relative for both branches (review M-18).
+        let cycles = crate::drivers::intc::clint::read_time();
+        let freq_hz: u64 = 10_000_000;
+        let now_ns = (cycles / freq_hz).saturating_mul(1_000_000_000)
+            + ((cycles % freq_hz) * 1_000_000_000 / freq_hz);
+        let abs_ns = (val_sec.max(0) as u64).saturating_mul(1_000_000_000)
+            .saturating_add(val_nsec.max(0) as u64);
+        let now_j = crate::drivers::timer::get_jiffies();
+        if abs_ns <= now_ns {
+            now_j // already expired: fire at the next tick
+        } else {
+            let rel_ms = (abs_ns - now_ns) / 1_000_000;
+            now_j.saturating_add(
+                crate::drivers::timer::msecs_to_jiffies(rel_ms).max(1)
+            )
+        }
     } else {
         // Relative time
         crate::drivers::timer::get_jiffies() + value_jiffies
