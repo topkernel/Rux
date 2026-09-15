@@ -1471,6 +1471,7 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 /// Handles chmod (ATTR_MODE), chown (ATTR_UID_GID), and ftruncate (ATTR_SIZE)
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
     use crate::fs::inode::setattr_attr;
     use crate::drivers::intc::clint::read_time;
 
@@ -1690,6 +1691,13 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
         inode.sb = None;
     }
 }
+
+/// Coarse per-fs serialization for ext4 (review EXT4-H10 / NEW2):
+/// SMP is enabled but ext4 has no internal concurrency protection
+/// (global journal handle, bitmap RMW, group descriptor lost-update).
+/// One CPU in ext4 at a time until per-inode locking exists.
+pub static EXT4_BIG_LOCK: crate::sync::spinlock::Spinlock<()> =
+    crate::sync::spinlock::Spinlock::new(());
 
 /// Ext4 inode operations table
 /// Ext4 now supports write operations through namei module

@@ -682,6 +682,7 @@ pub fn ext4_sync_file(
 
 /// VFS read wrapper - calls ext4_file_read_cached with page cache and read-ahead
 pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
+    let _ext4_guard = super::EXT4_BIG_LOCK.lock();
     // SAFETY: file.inode.get() returns a valid pointer to Option<Arc<Inode>>;
     // when Some, the Arc and its contents (private_data, sb) are valid for the
     // lifetime of the file. The ext4 filesystem pointer in private_data and the
@@ -726,6 +727,7 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
 
 /// VFS write wrapper - calls ext4_file_write
 pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
+    let _ext4_guard = super::EXT4_BIG_LOCK.lock();
     // SAFETY: file.inode.get() returns a valid pointer to Option<Arc<Inode>>;
     // when Some, the Arc and its contents (private_data, sb) are valid for the
     // lifetime of the file. The ext4 filesystem pointer and cached inode in
