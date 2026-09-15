@@ -464,6 +464,52 @@ signal 交付链（H-05/06/07/15、M-01~04）、调度器（P06-P10）、syscall
   5. mprotect 锁外读 PTE、锁内写过期值：改为**整个 walk+重写+sfence 持有同一 PTE 锁区段**（循环不睡眠，一次性 irqsave 安全）。
   6. MED：FUTEX_WAIT_BITSET/FUTEX_CLOCK_REALTIME 超时按**绝对时间**换算（CLOCK_REALTIME 与 jiffies 同为开机基点，无需偏移；原恒相对——pthread_cond_timedwait 语义破坏）；demand-fault 三处 map_page（匿名/文件/换入）纳入 PTE 锁，且锁覆盖 map→rmap 建立窗口（fork 走查间隙引用不可见问题）；全库 14 处 10MHz 魔数统一 config::TIMER_CLOCK_FREQ_HZ。
   7. ext4 并发补强（本轮前置完成）：7 个 namei 包装器（create/mkdir/symlink/link/unlink/rmdir/rename）持 EXT4_BIG_LOCK；read_vfs/write_vfs/setattr **移除**该锁（preempt-off 自旋锁内经 bread_wait→schedule 睡眠 = 死锁源）。
+
+---
+
+## 17. 第七轮检视（2026-09-16，4 个并行深扫 + GDB 实捕）
+
+> Method：4 个并行 agent（热点回归/调度进程信号 IPC/MM-VFS-网络-驱动/系统调用-测试-CI）全库扫描，Critical 级经主审源码二次核验；主审同步完成 NEW2 的 GDB 实捕（四 CPU 全符号化栈）。共 **5 项 Critical/HIGH 安全类、~20 项 HIGH、~20 项 MED/LOW**。
+
+### 17.1 NEW2 实捕与根因链（GDB，2026-09-16）
+
+四 CPU 全符号栈捕获（soft lockup 触发时）：**CPU2 陷入 trap.rs:524 `MmFaultResult::KernelPanic` 的 wfi 死循环**（内核态缺页后持锁自旋暂停——放大器：任一 CPU 内核态缺页即携锁永停）；CPU0/1 在 scheduler_tick 中自旋等 GRQ+1760 锁；CPU3 在 `pick_next_cpu`（fair.rs:602）**持 GRQ irqsave 锁做 6KB 堆分配**（Vec::with_capacity(256)）。结合 B1（cfs_rq.curr 悬挂 UAF，见 17.2），NEW2 因果链定性：**cfs curr UAF 写入已释放 Task → 堆元数据/邻近结构破坏 → 指针字段被垃圾覆盖（0xaf9000 类）→ 内核态缺页 → wfi 携锁停机 → 全机 DEADLOCK**。EBADF 变体 = 同源堆破坏击中 fdtable。
+
+### 17.2 新发现 — Critical / 高危安全类
+
+| # | 位置 | 问题 | 后果 |
+|---|---|---|---|
+| R7-1 | syscall/memory.rs:526 | **sys_mprotect 无用户区间上界**：vpn() 掩码后 vpn2∈[256,511] 直写共享内核 L1/L0 表，flags 恒含 V\|U → 用户可对内核线性映射加 U\|R\|W（完整提权）或剥除内核段权限（变砖）。sys_munmap/madvise(MADV_REMOVE)/pkey_mprotect 同洞 | 提权/DoS（NEW-C1 类未修完） |
+| R7-2 | sched/fair.rs:662,753 | **cfs_rq.curr 悬挂 UAF**：curr 仅在 clear() 全清时置空；任务退出+被收尸后 curr 残留，update_curr 对已释放 Task 写 sum_exec_runtime/exec_start（每次空闲调度都写） | 堆破坏（NEW2 主根因，见 17.1） |
+| R7-3 | signal.rs:1425 | **STOPPED 任务永不唤醒**：signal_wake_up_state 仅唤醒 is_sleeping()（不含 STOPPED）；SIGSTOP/Ctrl+Z 后 SIGCONT/SIGKILL 均无效 | 不可杀任务/作业控制 DoS |
+| R7-4 | syscall/dispatch.rs:189 | **NR140/141 setpriority/getpriority 接反**：nice(10) 实际执行 getpriority；getpriority 读残留 a2 寄存器并把 nice 设成寄存器垃圾 | 全部 nice/renice 用户受影响 |
+| R7-5 | mm/vma.rs:441-451 | **VmaManager::add 向前合并跳过重叠检查**：prev.can_merge 命中即 return，不查新区间是否吞并后续 VMA → 确定性重叠 VMA（verify 套件 3 红即此） | 静默重叠映射 |
+
+### 17.3 新发现 — HIGH（摘要）
+
+- **bio**：VFS-H13 修复自身竞态——Phase1 摘链与 Phase2 复查间隙，并发 get() 对已摘链条目 move_to_lru_head（tail 丢失）+ Phase2 push_lru_head 双重插入（自环）→ LRU 永久损坏/"all buffers in use"或 UAF。
+- **page_cache**：invalidate_inode 不查 ref_count>0 即释放物理页；ext4 每次写后 invalidate → 并发读者拷贝自已释放页（物理 UAF）。
+- **demand-fault**：already_mapped 判定在 PTE 锁外；CLONE_VM 双线程同址缺页 → 双分配双 map，先到页成孤儿+丢写。
+- **io_uring**：enter/register/mmap 三处 LRU 锁外读 private_data（IOU-H1 修复不完整；pin_ring 是正确写法但成死代码）。
+- **exec 泄漏**：alloc_and_map_* 按 next_power_of_two 取 order，映射仅 ceil(size/PAGE) → 每次 exec 泄 ~48 页/192KB（shell 循环必 OOM）。
+- **fork 失败路径**：do_clone 四个错误出口只 free_task_slot，不 pid_hash_remove/free_pid → 悬挂 PID 哈希项 UAF + PID 泄漏。
+- **EXT4_BIG_LOCK（6R 回归）**：namei 包装器持 preempt-off 自旋锁跨块 I/O，virtio wait_for_desc_completion 256 次自旋后 schedule() → 持锁睡眠；其他 CPU 非抢占自旋 → DEADLOCK 警告（两轮 A/B 均含 5b16568，故 A/B 无法区分）。**本项必须在 NEW2 复测前修掉（噪声源）**。
+- **COW+PROT_NONE 活锁**：mprotect 去 R 保 COW 位 → handle_cow_fault 只补 W 不补 R → 保留编码 PTE 无限缺页循环。
+- **DL 无重入队守卫**：wake_up 检查-入队非原子 × DlRunQueue::enqueue 无条件插入 → 同一任务双核并跑。
+- **GRQ nr_running 单调膨胀**：enqueue 计数与类内 on_rq 守卫不配对、pick/睡眠出队不减 → 空闲快路径永久失效。
+- **sem/msg 丢失唤醒**：条件检查与入等待队列两个临界区无复查（posix_mq 是正确写法）→ 单次 V 后 P 永睡。
+- **NEW-C2 残留 5 处**：do_waitid 信号路径、rt_sigsuspend/sigtimedwait 复查、wait_event 宏复查、ksoftirqd 复查——仍在队任务被二次入队。
+- **sendmsg/recvmsg/sendmmsg/recvmmsg**：iov_len 求和仅 access_ok（≤256GB），vec! 分配 >32MB 堆 → alloc panic（SYSA-C1 同类未覆盖）。
+- **调度器锁内堆分配（GDB 实捕）**：pick_next_cpu 每次 pick 分配 256 元素 Vec 且持 GRQ irqsave 锁 → 分配失败即调度器 panic；锁序隐患。
+- **verify 套件 HEAD 红**：3 红（2 项 R7-5 真缺陷 + 1 陈旧断言 test_adjacent_vmas_no_overlap）。
+
+### 17.4 新发现 — MED/LOW（摘要）
+
+munmap 采集(读锁)/应用(写锁)仍分两段 TOCTOU（4 MED）；mremap/shmat/framebuffer 映射绕 PTE 锁；munmap 拆分破坏 shm nattch 记账（exit 双 detach）；futex_requeue NR456 盲转发（可能无限睡）；futex2 丢 flags/mask；FUTEX_WAIT|CLOCK_REALTIME 应保持相对（6R 修复过度，Linux 仅 WAIT_BITSET 绝对）；mprotect 多 VMA 只改第一个 VMA 标志；rt_sigpending 过滤反了（应 pending&blocked）；termios ICANON=0x100 应为 0x2、c_line/c_cc 布局错位；nettest 判定掩盖（仅 UDP/TCP 门控 PASS）；framebuffer mmap +2 页逃逸 USER_END 检查且无页引用；vmscan/compaction PTE 写绕锁；set_brk 绕 PTE 锁；scheduler_tick RR 分支 IRQ 内强置 RUNNING；pid_hash RCU 读侧提前退出；单 cfs_rq.curr 多 CPU 记账丢失；handle_cow_fault 独占分支不清 Cow 标志；VmaManager count 原子漂移；epoll_create1 丢 CLOEXEC；pipe2 EMFILE 泄 fd；CLOCK_BOOTTIME/MONOTONIC_RAW 未别名；pselect6 tv_sec 溢出；SyscallNo 死枚举与分发表矛盾；FUTEX_WAKE_OP 桩；mkrootfs 静默省略测试件。
+
+### 17.5 已核验干净（不重复修）
+
+do_futex CMD_MASK 位剥离正确；futex2 NR454/455 绝对超时换算正确；PTE_MODIFY_LOCK 无递归/逆序；fdtable cloexec 位图健全；epoll_event riscv64 布局正确（非 x86 打包）；NEW-C3/C4/C5/C6 修复确认在位；timer ABI、sigaction/stat/rusage/uname/statfs/fd_set/getdents64 布局核对无误。
   - nettest 的 fork+fs 探针与 E 用例默认禁用以保持套件确定性；修复前 shell 重定向/管道视为已知不可用。
 
 ### 16.5 对修复计划的影响
