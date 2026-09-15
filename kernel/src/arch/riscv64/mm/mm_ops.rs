@@ -391,8 +391,80 @@ impl MmStruct {
         Err(MapError::OutOfMemory)
     }
 
-    /// munmap system call implementation
+    /// munmap system call implementation — supports partial VMA removal:
+    /// split VMAs at the unmapped boundaries, remove the overlapping parts
+    /// (review ARCH-M3 / SYSA-H1: previously a sub-VMA munmap returned
+    /// EINVAL and a cross-VMA range only removed the first VMA).
     pub fn munmap(&self, addr: PageVirtAddr, size: usize) -> Result<(), MapError> {
+        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+
+        if addr.as_usize() % PAGE_SIZE_USIZE != 0 {
+            return Err(MapError::Invalid);
+        }
+
+        let end_addr = addr.as_usize() + aligned_size;
+
+        // VMA surgery: collect under read lock, then mutate under write lock.
+        // VmaManager::add internally takes vma_write, so we must NOT hold
+        // the write lock when calling it (write-lock recursion = deadlock).
+        let (to_remove, to_add): (Vec<_>, Vec<crate::mm::vma::Vma>) = {
+            let vma_mgr = self.vma_read();
+            let mut rm = Vec::new();
+            let mut add = Vec::new();
+            for vma in vma_mgr.iter() {
+                let vs = vma.start().as_usize();
+                let ve = vma.end().as_usize();
+                if ve <= addr.as_usize() || vs >= end_addr {
+                    continue;
+                }
+                rm.push(vma.start());
+                if vs < addr.as_usize() {
+                    let mut head = Vma::new(
+                        crate::mm::page::VirtAddr::new(vs),
+                        crate::mm::page::VirtAddr::new(addr.as_usize()),
+                        vma.flags(),
+                    );
+                    head.set_type(vma.vma_type());
+                    head.set_file_fd(vma.file_fd());
+                    head.set_file_size(vma.file_size());
+                    head.set_offset(vma.offset());
+                    add.push(head);
+                }
+                if ve > end_addr {
+                    let mut tail = Vma::new(
+                        crate::mm::page::VirtAddr::new(end_addr),
+                        crate::mm::page::VirtAddr::new(ve),
+                        vma.flags(),
+                    );
+                    tail.set_type(vma.vma_type());
+                    tail.set_file_fd(vma.file_fd());
+                    tail.set_file_size(vma.file_size());
+                    tail.set_offset(vma.offset() + (end_addr - vs));
+                    add.push(tail);
+                }
+            }
+            (rm, add)
+        };
+        {
+            let mut vma_mgr = self.vma_write();
+            for start in &to_remove {
+                let _ = vma_mgr.remove(*start);
+            }
+        }
+        for vma in &to_add {
+            let mut vma_mgr = self.vma_write();
+            let _ = vma_mgr.add(vma.clone());
+        }
+
+        self.unmap_pages(addr, aligned_size)?;
+
+        Ok(())
+    }
+
+    /// Legacy munmap body kept for reference — the new implementation above
+    /// replaces it. Previously only whole-VMA removal was supported.
+    #[allow(dead_code)]
+    fn munmap_legacy(&self, addr: PageVirtAddr, size: usize) -> Result<(), MapError> {
         let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
 
         if addr.as_usize() % PAGE_SIZE_USIZE != 0 {
