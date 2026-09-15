@@ -1508,7 +1508,7 @@ fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
 /// * `allocator` - Block allocator
 /// * `blocknr` - Block number of the indirect block
 /// * `depth` - Indirection depth (1=single, 2=double, 3=triple)
-fn free_indirect_block(
+pub(crate) fn free_indirect_block(
     fs: &Ext4FileSystem,
     allocator: &BlockAllocator,
     blocknr: u32,

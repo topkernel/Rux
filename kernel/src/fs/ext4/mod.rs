@@ -315,10 +315,15 @@ impl Ext4FileSystem {
             *group_descs[group as usize]
         };
 
-        // Calculate inode block number
-        let inode_table_start = gd.bg_inode_table_lo;
+        // Calculate inode block number. Bounds-check the offset against
+        // the block: reading a 172-byte on-disk inode at the last slot of
+        // a block must stay inside the buffer (review EXT4-M1).
+        let inode_table_start = gd.bg_inode_table_lo as u64;
         let inodes_per_block = self.block_size / (self.inode_size as u32);
-        let inode_block = inode_table_start + (index / inodes_per_block);
+        if inodes_per_block == 0 {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+        let inode_block = inode_table_start + (index / inodes_per_block) as u64;
         let inode_offset = ((index % inodes_per_block) * (self.inode_size as u32)) as usize;
 
         // Read block containing inode
@@ -326,6 +331,13 @@ impl Ext4FileSystem {
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
         let data = unsafe { &(*bh).b_data };
+
+        // Bounds check: reading a 172-byte on-disk inode at this offset
+        // must stay inside the 4096-byte block (review EXT4-M1).
+        if inode_offset + core::mem::size_of::<inode::Ext4InodeOnDisk>() > data.len() {
+            bio::brelse(bh);
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
 
         // Parse inode
         let ext4_inode = unsafe {
@@ -1485,7 +1497,14 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             ext4_inode.gid = arg2 as u16;
         }
         setattr_attr::ATTR_SIZE => {
-            // arg1 = new size (ftruncate)
+            // arg1 = new size (ftruncate). Upper-bounded to a sane maximum:
+            // the extent code can only address 2^32 blocks so anything
+            // beyond ~16TB is unreachable; u64::MAX used to flow straight
+            // into i_size and wrap later allocations (review EXT4-M3).
+            const MAX_FILE_SIZE: u64 = 1 << 42; // 4 TB
+            if arg1 > MAX_FILE_SIZE {
+                return -(errno::Errno::FileTooLarge.as_neg_i32());
+            }
             let new_size = arg1;
             if new_size < ext4_inode.get_size() {
                 // Truncate: free blocks beyond new_size
@@ -1622,6 +1641,19 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     if new_blocks < 12 + (block_size / 4) as u64 && ext4_inode.block[13] != 0 {
                         let _ = allocator.free_block(ext4_inode.block[13] as u64);
                         ext4_inode.block[13] = 0;
+                    }
+                    // Triple-indirect (block[14]) was never freed here —
+                    // files > 12+1024 blocks leaked their L2 tree on
+                    // truncate below that boundary (review EXT4-M8).
+                    if ext4_inode.block[14] != 0 {
+                        // SAFETY: free_indirect_block walks the tree depth-
+                        // first and frees metadata + data blocks.
+                        unsafe {
+                            crate::fs::ext4::namei::free_indirect_block(
+                                fs, &allocator, ext4_inode.block[14], 3
+                            );
+                        }
+                        ext4_inode.block[14] = 0;
                     }
                 }
                 ext4_inode.blocks = (new_blocks * (block_size / 512)) as u64;
