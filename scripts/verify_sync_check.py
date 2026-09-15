@@ -721,7 +721,7 @@ MAPPINGS = [
         "type": None,  # free functions
         "compare": ["find_entry_space", "add_entry_to_block", "create_initial_entry", "create_dot_entry", "create_dotdot_entry", "find_prev_entry"],
         "skip": [],
-        "skip_diff": ["create_initial_entry", "create_dot_entry", "create_dotdot_entry", "find_entry_space"],
+        "skip_diff": ["create_initial_entry", "create_dot_entry", "create_dotdot_entry"],
         # verify uses local EXT4_FT_DIR constant, kernel uses file_type::EXT4_FT_DIR; kernel has unused _entry_len
     },
     {

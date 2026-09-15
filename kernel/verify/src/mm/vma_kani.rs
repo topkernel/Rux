@@ -94,6 +94,7 @@ impl VmaManager {
                 merged_vma.end = next_end;
                 self.vmas.remove(&next_start);
                 self.vmas.insert(start, merged_vma);
+                self.count.fetch_sub(1, Ordering::Release);
                 if next_end.as_usize() > self.max_end.as_usize() {
                     self.max_end = next_end;
                 }

@@ -23,15 +23,31 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
     while offset + 8 <= block_size {
         let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
 
-        if rec_len == 0 {
+        if rec_len == 0 || rec_len < 8 {
             break;
         }
 
-        let name_len_entry = block_data[offset + 6] as usize;
-        let used_len = ((8 + name_len_entry + 3) & !3) as u16;
+        // Check if this is a deleted/unused entry (inode == 0)
+        let ino = u32::from_le_bytes([
+            block_data[offset],
+            block_data[offset + 1],
+            block_data[offset + 2],
+            block_data[offset + 3],
+        ]);
 
-        if rec_len >= used_len + required_len {
-            return Some(offset);
+        if ino == 0 {
+            // Deleted entry — can reuse if large enough
+            if rec_len >= required_len {
+                return Some(offset);
+            }
+        } else {
+            let name_len_entry = block_data[offset + 6] as usize;
+            let used_len = ((8 + name_len_entry + 3) & !3) as u16;
+
+            // Check if there's space in this entry
+            if rec_len >= used_len + required_len {
+                return Some(offset);
+            }
         }
 
         offset += rec_len as usize;

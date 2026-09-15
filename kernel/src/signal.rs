@@ -397,8 +397,8 @@ impl SigPending {
     /// letting the delivery path run a handler.
     pub fn remove_one(&self, sig: i32) -> Option<SigInfo> {
         let bit = 1u64 << ((sig as u32) - 1);
-        self.signal.fetch_and(!bit, Ordering::AcqRel);
         let mut queue = self.queue.inner.lock();
+        self.signal.fetch_and(!bit, Ordering::AcqRel);
         if let Some(pos) = queue.iter().position(|i| i.si_signo == sig) {
             return queue.remove(pos);
         }
@@ -1145,8 +1145,8 @@ pub unsafe fn restore_sigcontext(
         // SUM is legitimately user-controllable (for crossing), keep it.
         | 0; // return to user mode: SPP=0, interrupts re-enabled by trap exit
 
-    // Restore signal mask
-    (*task).sigmask = frame.uc.uc_sigmask;
+    // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
+    (*task).sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
 
     // Clear signal frame
     (*task).sigframe = None;
