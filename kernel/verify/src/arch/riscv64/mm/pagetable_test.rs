@@ -76,6 +76,13 @@ impl PageTableEntry {
         (self.0 >> 10) & 0x00FFFFFFFFFFFFFF
     }
 
+    pub fn ppn_for_2mb_page(&self) -> u64 {
+        let ppn2 = (self.0 >> 28) & 0x3FFFFFF;
+        let ppn1 = (self.0 >> 19) & 0x1FF;
+        (ppn2 << 9) | ppn1
+    }
+
+
     #[inline]
     pub fn new_table(ppn: u64) -> Self {
         Self((ppn << 10) | Self::V)

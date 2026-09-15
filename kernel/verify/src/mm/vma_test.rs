@@ -171,6 +171,22 @@ impl Vma {
         self.end.as_usize() == other.start.as_usize()
             && self.flags.bits() == other.flags.bits()
             && self.vma_type == other.vma_type
+            && self.file_fd == other.file_fd
+            && self.file_size == other.file_size
+            && self.offset == other.offset
+    }
+
+    pub fn merge(&mut self, other: Vma) -> bool {
+        if self.can_merge(&other) {
+            self.end = other.end;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn merge_at_end(&mut self, new_end: VirtAddr) {
+        self.end = new_end;
     }
 }
 
@@ -216,9 +232,33 @@ impl VmaManager {
             if prev_vma.end().as_usize() > start.as_usize() {
                 return Err(VmaError::Overlap);
             }
+            // Try to merge with previous VMA (same flags, adjacent, MM-H1)
+            if prev_vma.can_merge(&vma) {
+                if let Some(prev) = self.vmas.get_mut(&prev_vma.start()) {
+                    if prev.merge(vma) {
+                        if prev.end().as_usize() > self.max_end.as_usize() {
+                            self.max_end = prev.end();
+                        }
+                        return Ok(());
+                    }
+                }
+            }
         }
 
-        if let Some((_, next_vma)) = self.vmas.range(start..end).next() {
+        if let Some((_, next_vma)) = self.vmas.range(start..=end).next() {
+            if next_vma.start().as_usize() == end.as_usize() && vma.can_merge(next_vma) {
+                let next_end = next_vma.end();
+                let next_start = next_vma.start();
+                let mut merged_vma = vma;
+                merged_vma.merge_at_end(next_end);
+                self.vmas.remove(&next_start);
+                self.vmas.insert(start, merged_vma);
+                self.count.fetch_sub(1, Ordering::Release);
+                if next_end.as_usize() > self.max_end.as_usize() {
+                    self.max_end = next_end;
+                }
+                return Ok(());
+            }
             return Err(VmaError::Overlap);
         }
 

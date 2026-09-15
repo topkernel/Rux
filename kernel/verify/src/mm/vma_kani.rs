@@ -70,12 +70,35 @@ impl VmaManager {
     pub fn add(&mut self, vma: Vma) -> Result<(), VmaError> {
         let start = vma.start();
         let end = vma.end();
-        if let Some((_, prev)) = self.vmas.range(..start).next_back() {
-            if prev.end().as_usize() > start.as_usize() {
+        if let Some((_, prev_vma)) = self.vmas.range(..start).next_back() {
+            if prev_vma.end().as_usize() > start.as_usize() {
                 return Err(VmaError::Overlap);
             }
+            // Merge with previous VMA (same flags, adjacent, MM-H1)
+            if prev_vma.can_merge(&vma) {
+                if let Some(prev) = self.vmas.get_mut(&prev_vma.start()) {
+                    if prev.merge(vma) {
+                        if prev.end().as_usize() > self.max_end.as_usize() {
+                            self.max_end = prev.end();
+                        }
+                        return Ok(());
+                    }
+                }
+            }
         }
-        if let Some((_, next)) = self.vmas.range(start..end).next() {
+        if let Some((_, next_vma)) = self.vmas.range(start..=end).next() {
+            if next_vma.start().as_usize() == end.as_usize() && vma.can_merge(next_vma) {
+                let next_end = next_vma.end();
+                let next_start = next_vma.start();
+                let mut merged_vma = vma;
+                merged_vma.end = next_end;
+                self.vmas.remove(&next_start);
+                self.vmas.insert(start, merged_vma);
+                if next_end.as_usize() > self.max_end.as_usize() {
+                    self.max_end = next_end;
+                }
+                return Ok(());
+            }
             return Err(VmaError::Overlap);
         }
         if end.as_usize() > self.max_end.as_usize() {

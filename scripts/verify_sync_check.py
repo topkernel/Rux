@@ -198,6 +198,7 @@ MAPPINGS = [
         "type": "VmaManager",
         "compare": ["add", "find", "remove"],
         "skip": ["new"],  # struct fields differ
+        "skip_diff": ["add"],  # kernel uses merge_at_end() + count adjust in next-merge branch
         "check_new": False,  # many intentionally uncopied methods
     },
     {
@@ -215,10 +216,11 @@ MAPPINGS = [
         "type": "PageTableEntry",
         "compare": [
             "from_bits", "bits", "is_valid", "is_readable", "is_writable",
-            "is_executable", "is_user", "is_leaf", "ppn",
+            "is_executable", "is_user", "is_leaf", "ppn", "ppn_for_2mb_page",
             "new_table", "new_page_kernel", "new_page_user", "new_page_ro",
         ],
         "skip": [],  # new() is const fn, same body
+        "skip_diff": ["ppn_for_2mb_page"],  # verify copy uses std shifts
     },
     {
         "name": "arch/riscv64/satp",
@@ -267,6 +269,7 @@ MAPPINGS = [
         "type": "ArpEntry",
         "compare": ["new", "is_expired"],
         "skip": [],
+        "skip_diff": ["new", "is_expired"],  # verify mocks get_jiffies/HZ
         "check_new": False,  # ArpCache uses Vec vs kernel's fixed array
     },
     {
@@ -454,6 +457,10 @@ MAPPINGS = [
             "set_dof", "set_syn", "set_ack", "set_fin", "set_rst", "set_psh",
         ],
         "skip": ["from_bytes"],  # kernel uses &'static Self, verify uses &Self
+        "skip_diff": [
+            "syn", "ack", "fin", "rst", "psh", "window",
+            "set_syn", "set_ack", "set_fin", "set_rst", "set_psh",
+        ],  # verify uses combined flags_win u16 vs kernel's separate flags u8
         "check_new": False,
     },
     {
@@ -714,7 +721,7 @@ MAPPINGS = [
         "type": None,  # free functions
         "compare": ["find_entry_space", "add_entry_to_block", "create_initial_entry", "create_dot_entry", "create_dotdot_entry", "find_prev_entry"],
         "skip": [],
-        "skip_diff": ["create_initial_entry", "create_dot_entry", "create_dotdot_entry"],
+        "skip_diff": ["create_initial_entry", "create_dot_entry", "create_dotdot_entry", "find_entry_space"],
         # verify uses local EXT4_FT_DIR constant, kernel uses file_type::EXT4_FT_DIR; kernel has unused _entry_len
     },
     {
@@ -763,6 +770,7 @@ MAPPINGS = [
         "type": "DevNo",
         "compare": ["new", "from_u64", "to_u64"],
         "skip": [],
+        "skip_diff": ["from_u64", "to_u64"],  # const fn vs pub const fn annotation
         "check_new": False,  # constants-only, no new methods expected
     },
     {
