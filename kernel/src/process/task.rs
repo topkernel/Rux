@@ -1334,8 +1334,11 @@ impl Task {
             let old_state = (*task).state();
             let pid = (*task).pid();
 
-            // Only wake if in sleep state
-            if old_state.is_sleeping() {
+            // Wake if sleeping OR stopped (R7-3): stopped tasks were
+            // dequeued when they scheduled away; SIGCONT/SIGKILL reach them
+            // through here — filtering only is_sleeping() made them
+            // permanently unkillable.
+            if old_state.is_sleeping() || old_state.contains(TaskState::STOPPED) {
                 // Select best CPU for this task (wake-affine / least-loaded)
                 let sched_class = crate::sched::class::task_sched_class(&*task);
                 let prev_cpu = (*task).ti_cpu();

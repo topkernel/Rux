@@ -532,6 +532,20 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
         return -22_i64;  // EINVAL
     }
 
+    // R7-1: user-range bound — without it a kernel-range mprotect rewrites
+    // the SHARED kernel page tables with flags that always include V|U
+    // (userspace gains U|R|W on kernel memory = full compromise), or strips
+    // permissions off kernel text (kernel-mode fault → panic).
+    use crate::arch::riscv64::mm::user_addr;
+    if addr < user_addr::USER_START
+        || match addr.checked_add(length) {
+            Some(e) => e > user_addr::USER_END,
+            None => true,
+        }
+    {
+        return -22_i64;  // EINVAL
+    }
+
     // Get current process
     match crate::sched::current() {
         Some(current_task) => {

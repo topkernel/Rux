@@ -437,8 +437,13 @@ impl VmaManager {
                 return Err(VmaError::Overlap);
             }
 
-            // Try to merge with previous VMA (same flags, adjacent)
-            if prev_vma.can_merge(&vma) {
+            // Try to merge with previous VMA (same flags, adjacent).
+            // R7-5: the merge must not swallow a VMA starting inside
+            // [start, end) — can_merge only compares prev and the new vma,
+            // so an enclosed successor (different flags/backing) would be
+            // silently overlapped (verify proptest: 0xf000-0x13000 vs
+            // 0x12000-0x13000).
+            if prev_vma.can_merge(&vma) && !self.has_vma_starting_within(start, end) {
                 if let Some(prev) = self.vmas.get_mut(&prev_vma.start()) {
                     if prev.merge(vma) {
                         // Merged — update max_end, no count change needed
@@ -553,6 +558,12 @@ impl VmaManager {
     /// Get iterator over all VMAs
     pub fn iter(&self) -> impl Iterator<Item = &Vma> {
         self.vmas.values()
+    }
+
+    /// True if any VMA starts within [start, end) — used by add() to
+    /// reject forward merges that would swallow a successor VMA (R7-5).
+    fn has_vma_starting_within(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.vmas.range(start..end).next().is_some()
     }
 
     /// Get VMA count

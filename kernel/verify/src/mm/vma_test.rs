@@ -224,18 +224,35 @@ impl VmaManager {
         }
     }
 
+    fn has_vma_starting_within(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.vmas.range(start..end).next().is_some()
+    }
+
     pub fn add(&mut self, vma: Vma) -> Result<(), VmaError> {
         let start = vma.start();
         let end = vma.end();
 
+        // Optimization 1: Only check potentially overlapping VMAs
+        // Since VMAs are sorted by start address, only need to check:
+        // - Previous VMA (may extend into new VMA range)
+        // - All VMAs with start address within new VMA range
+
+        // Check if previous VMA overlaps
         if let Some((_, prev_vma)) = self.vmas.range(..start).next_back() {
             if prev_vma.end().as_usize() > start.as_usize() {
                 return Err(VmaError::Overlap);
             }
-            // Try to merge with previous VMA (same flags, adjacent, MM-H1)
-            if prev_vma.can_merge(&vma) {
+
+            // Try to merge with previous VMA (same flags, adjacent).
+            // R7-5: the merge must not swallow a VMA starting inside
+            // [start, end) — can_merge only compares prev and the new vma,
+            // so an enclosed successor (different flags/backing) would be
+            // silently overlapped (verify proptest: 0xf000-0x13000 vs
+            // 0x12000-0x13000).
+            if prev_vma.can_merge(&vma) && !self.has_vma_starting_within(start, end) {
                 if let Some(prev) = self.vmas.get_mut(&prev_vma.start()) {
                     if prev.merge(vma) {
+                        // Merged — update max_end, no count change needed
                         if prev.end().as_usize() > self.max_end.as_usize() {
                             self.max_end = prev.end();
                         }
@@ -245,8 +262,10 @@ impl VmaManager {
             }
         }
 
+        // Check VMAs with start address in new VMA range
         if let Some((_, next_vma)) = self.vmas.range(start..=end).next() {
             if next_vma.start().as_usize() == end.as_usize() && vma.can_merge(next_vma) {
+                // Merge with next VMA: remove next, extend new vma to cover it
                 let next_end = next_vma.end();
                 let next_start = next_vma.start();
                 let mut merged_vma = vma;
@@ -259,13 +278,18 @@ impl VmaManager {
                 }
                 return Ok(());
             }
-            return Err(VmaError::Overlap);
+            // If VMA exists with start address in [start, end) range, then overlap
+            if next_vma.start().as_usize() < end.as_usize() {
+                return Err(VmaError::Overlap);
+            }
         }
 
+        // Update maximum end address
         if end.as_usize() > self.max_end.as_usize() {
             self.max_end = end;
         }
 
+        // Insert into BTreeMap
         self.vmas.insert(start, vma);
         self.count.fetch_add(1, Ordering::Release);
         Ok(())
@@ -368,7 +392,9 @@ proptest! {
             VirtAddr::new(aligned_start + 8192),
             VmaFlags::new(),
         )).unwrap();
-        prop_assert_eq!(mgr.count(), 2);
+        // Adjacent same-flag VMAs MERGE (documented behavior since MM-H1):
+        // the invariant is no overlap, not count==2.
+        prop_assert_eq!(mgr.count(), 1);
     }
 
     /// INV-VMA-3: overlapping add is rejected

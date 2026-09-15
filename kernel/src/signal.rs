@@ -1431,8 +1431,11 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
     unsafe {
         let task_state = (*task).state();
 
-        // Only need to wake up if in sleep state
-        if task_state.is_sleeping() {
+        // Wake sleeping tasks, and also STOPPED tasks (R7-3): a stopped
+        // task was dequeued when it scheduled away, so SIGCONT/SIGKILL must
+        // re-enqueue it — otherwise it can never be continued or killed
+        // (job-control DoS: Ctrl+Z then kill -9 does nothing).
+        if task_state.is_sleeping() || task_state.contains(TaskState::STOPPED) {
             // Use Task::wake_up which properly enqueues the task to its CPU's run queue
             crate::process::Task::wake_up(task);
 

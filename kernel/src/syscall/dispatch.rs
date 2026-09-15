@@ -186,8 +186,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         137 => process::sys_rt_sigtimedwait(args), // rt_sigtimedwait
         138 => process::sys_rt_sigqueueinfo(args), // rt_sigqueueinfo
         139 => signal::sys_rt_sigreturn(regs), // rt_sigreturn
-        140 => sched::sys_getpriority(args),   // getpriority
-        141 => sched::sys_setpriority(args),   // setpriority
+        140 => sched::sys_setpriority(args),   // setpriority (R7-4: was swapped)
+        141 => sched::sys_getpriority(args),   // getpriority
         142 => process::sys_reboot(args),      // reboot
         143 => process::sys_setregid(args),    // setregid
         144 => process::sys_setgid(args),      // setgid

@@ -374,6 +374,21 @@ impl MmStruct {
             return Err(MapError::Invalid);
         }
 
+        // R7-1: user-range bound — a kernel-range munmap would walk the
+        // SHARED kernel PGD entries, put_page/rmap kernel page descriptors
+        // and zero shared kernel PTEs (NEW-C1 class; covers sys_munmap and
+        // madvise(MADV_REMOVE), which both funnel through here).
+        {
+            use super::memory_layout::user_addr;
+            let end_checked = match addr.as_usize().checked_add(aligned_size) {
+                Some(e) => e,
+                None => return Err(MapError::Invalid),
+            };
+            if addr.as_usize() < user_addr::USER_START || end_checked > user_addr::USER_END {
+                return Err(MapError::Invalid);
+            }
+        }
+
         let end_addr = addr.as_usize() + aligned_size;
 
         // VMA surgery: collect under read lock, then mutate under write lock.

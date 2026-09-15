@@ -712,7 +712,12 @@ unsafe fn __schedule() {
     if !prev_running && prev_pid != 0 {
         match prev_policy {
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-                grq_guard.cfs_rq.dequeue(prev);
+                let dequeued = grq_guard.cfs_rq.dequeue(prev);
+                // R7-2: final dequeue (exit/block) must release curr — see
+                // matching fix in dequeue_task().
+                if dequeued && grq_guard.cfs_rq.get_curr() == prev {
+                    grq_guard.cfs_rq.set_curr(core::ptr::null_mut());
+                }
             }
             SchedPolicy::Fifo | SchedPolicy::Rr => {
                 grq_guard.rt_rq.dequeue(prev);
@@ -979,7 +984,17 @@ pub fn dequeue_task(task: &Task) {
             true
         }
         SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-            grq_guard.cfs_rq.dequeue(task_ptr)
+            let dequeued = grq_guard.cfs_rq.dequeue(task_ptr);
+            // R7-2: curr must never outlive its task. cfs_rq.curr was only
+            // cleared by clear() (full drain) — after a CFS task exited and
+            // was reaped, update_curr kept writing exec-runtime fields into
+            // the FREED Task on every idle schedule/tick (heap corruption,
+            // NEW2 root-cause chain). Clear it when the curr task leaves
+            // the queue (final dequeue happens on exit).
+            if dequeued && grq_guard.cfs_rq.get_curr() == task_ptr {
+                grq_guard.cfs_rq.set_curr(core::ptr::null_mut());
+            }
+            dequeued
         }
     };
 
