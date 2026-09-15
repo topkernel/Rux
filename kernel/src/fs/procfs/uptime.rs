@@ -16,7 +16,7 @@ pub fn generate() -> Vec<u8> {
     // FPU context management yet — review ARCH-H1), so f64 math here
     // traps as an illegal instruction in kernel mode and used to panic
     // the whole kernel on `cat /proc/uptime`.
-    const TIMER_FREQ: u64 = 10_000_000;
+    const TIMER_FREQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
     let cycles = read_time_cycles();
 
     // seconds with two decimals, scaled by 100
@@ -38,7 +38,7 @@ pub fn generate() -> Vec<u8> {
 /// QEMU virt machine clock frequency is 10 MHz.
 pub fn get_uptime_secs() -> u64 {
     // QEMU virt machine clock frequency
-    const TIMER_FREQ: u64 = 10_000_000;
+    const TIMER_FREQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
 
     let cycles = read_time_cycles();
     cycles / TIMER_FREQ
@@ -46,7 +46,7 @@ pub fn get_uptime_secs() -> u64 {
 
 /// Get uptime in milliseconds
 pub fn get_uptime_ms() -> u64 {
-    const TIMER_FREQ: u64 = 10_000_000;
+    const TIMER_FREQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
     const MS_PER_SEC: u64 = 1000;
 
     let cycles = read_time_cycles();

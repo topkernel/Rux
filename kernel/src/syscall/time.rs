@@ -43,7 +43,7 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
 
     // Get time from RISC-V timer
     let cycles = crate::drivers::intc::clint::read_time();
-    let freq_hz: u64 = 10_000_000;  // 10 MHz
+    let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;  // 10 MHz
 
     let sec = cycles / freq_hz;
     let usec = (cycles % freq_hz) * 1_000_000 / freq_hz;
@@ -83,7 +83,7 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
         CLOCK_REALTIME | CLOCK_MONOTONIC => {
             // Get time from RISC-V timer
             let cycles = crate::drivers::intc::clint::read_time();
-            let freq_hz: u64 = 10_000_000;  // 10 MHz
+            let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;  // 10 MHz
 
             let sec = cycles / freq_hz;
             let nsec = (cycles % freq_hz) * 1_000_000_000 / freq_hz;
@@ -527,7 +527,7 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
     if _flags & 1 != 0 {
         // Current monotonic time in ns (same source as clock_gettime).
         let cycles = crate::drivers::intc::clint::read_time();
-        let freq_hz: u64 = 10_000_000;
+        let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
         let now_nanos = (cycles / freq_hz).saturating_mul(1_000_000_000)
             + ((cycles % freq_hz) * 1_000_000_000 / freq_hz);
         let target_nanos = (req.tv_sec as u64).saturating_mul(1_000_000_000)
@@ -703,7 +703,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         // CLINT, same source as clock_gettime) — the old code treated it
         // as relative for both branches (review M-18).
         let cycles = crate::drivers::intc::clint::read_time();
-        let freq_hz: u64 = 10_000_000;
+        let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
         let now_ns = (cycles / freq_hz).saturating_mul(1_000_000_000)
             + ((cycles % freq_hz) * 1_000_000_000 / freq_hz);
         let abs_ns = (val_sec.max(0) as u64).saturating_mul(1_000_000_000)

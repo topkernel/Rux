@@ -514,7 +514,13 @@ pub fn futex_wait_bitset(uaddr: usize, flags: u32, val: u32, _timeout: u64, bits
 
 /// Parse the futex ABI `struct timespec *timeout` (raw user pointer) into a
 /// jiffies deadline. NULL and unreadable pointers yield None (= wait forever).
-fn futex_parse_timeout(timeout_ptr: u64) -> Option<u64> {
+/// `absolute`: FUTEX_WAIT_BITSET (and FUTEX_WAIT|FUTEX_CLOCK_REALTIME) pass
+/// an absolute timespec; CLOCK_REALTIME here counts from boot (CLINT cycles
+/// / TIMER_CLOCK_FREQ_HZ) and so does jiffies, so the conversion needs no
+/// offset. Plain FUTEX_WAIT passes a relative duration (round 6 MED: was
+/// always relative, so every pthread_cond_timedwait fired instantly or
+/// never).
+fn futex_parse_timeout(timeout_ptr: u64, absolute: bool) -> Option<u64> {
     use crate::drivers::timer::{get_jiffies, HZ};
     if timeout_ptr == 0 {
         return None;
@@ -539,7 +545,13 @@ fn futex_parse_timeout(timeout_ptr: u64) -> Option<u64> {
     }
     let jiffies = (sec as u64).saturating_mul(HZ)
         .saturating_add((nsec as u64 * HZ) / 1_000_000_000);
-    Some(get_jiffies().saturating_add(jiffies.max(1)))
+    if absolute {
+        // Absolute CLOCK_REALTIME value; if already past, the min-1 clamp
+        // arms an immediately-expiring timer → ETIMEDOUT on wake check.
+        Some(jiffies.max(1))
+    } else {
+        Some(get_jiffies().saturating_add(jiffies.max(1)))
+    }
 }
 
 /// FUTEX_WAKE_BITSET implementation
@@ -788,13 +800,16 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, v
 
     match cmd {
         FUTEX_WAIT => {
-            futex_wait_timeout(uaddr, flags, val, FUTEX_BITSET_MATCH_ANY, futex_parse_timeout(_timeout))
+            // FUTEX_CLOCK_REALTIME (bit 8) makes plain WAIT absolute too.
+            let absolute = op & FUTEX_CLOCK_REALTIME != 0;
+            futex_wait_timeout(uaddr, flags, val, FUTEX_BITSET_MATCH_ANY, futex_parse_timeout(_timeout, absolute))
         }
         FUTEX_WAKE => {
             futex_wake(uaddr, flags, val as i32, FUTEX_BITSET_MATCH_ANY)
         }
         FUTEX_WAIT_BITSET => {
-            futex_wait_bitset(uaddr, flags, val, _timeout, val3, futex_parse_timeout(_timeout))
+            // WAIT_BITSET always interprets timeout as absolute time.
+            futex_wait_bitset(uaddr, flags, val, _timeout, val3, futex_parse_timeout(_timeout, true))
         }
         FUTEX_WAKE_BITSET => {
             futex_wake_bitset(uaddr, flags, val as i32, val3)

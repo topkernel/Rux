@@ -178,6 +178,11 @@ fn try_expand_stack(
         pte_flags |= PageTableEntry::X;
     }
 
+    // Map page under the PTE-modify lock and keep it held across the rmap
+    // setup: a concurrent fork's copy_page_table_cow walk landing between
+    // the map and the rmap/refcount update takes a reference the rmap
+    // never sees (round 6 MED — demand-fault PTE lock).
+    let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
     // Map page
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
@@ -211,6 +216,7 @@ fn try_expand_stack(
             }
         }
     }
+    drop(_pte_guard);
 
     MmFaultResult::Handled
 }
@@ -428,6 +434,11 @@ pub fn handle_mm_fault(
         pte_flags |= PageTableEntry::X;
     }
 
+    // Map page under the PTE-modify lock and keep it held across the rmap
+    // setup: a concurrent fork's copy_page_table_cow walk landing between
+    // the map and the rmap/refcount update takes a reference the rmap
+    // never sees (round 6 MED — demand-fault PTE lock).
+    let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
     // Map page
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
@@ -467,6 +478,7 @@ pub fn handle_mm_fault(
             }
         }
     }
+    drop(_pte_guard);
 
     MmFaultResult::Handled
 }
@@ -621,6 +633,9 @@ fn handle_swap_fault(
     // Map the page
     // SAFETY: root_ppn is a valid page table root, phys_addr was just allocated,
     // and pte_flags are built from valid VMA permissions. The page is exclusively owned.
+    // Swap-in map under the PTE-modify lock (round 6 MED). The swap read
+    // finished above, so no I/O happens inside the irqsave section.
+    let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
     unsafe {
         map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags);
 
@@ -651,6 +666,7 @@ fn handle_swap_fault(
             crate::mm::lru::page_add_anon_lru(&*page);
         }
     }
+    drop(_pte_guard);
 
     // Free the swap slot (page is back in memory)
     swap::swap_free_slot(swap_type, swap_offset);

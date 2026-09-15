@@ -1471,7 +1471,6 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 /// Handles chmod (ATTR_MODE), chown (ATTR_UID_GID), and ftruncate (ATTR_SIZE)
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
-    let _ext4_guard = EXT4_BIG_LOCK.lock();
     use crate::fs::inode::setattr_attr;
     use crate::drivers::intc::clint::read_time;
 
@@ -1666,7 +1665,7 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 
     // Update timestamps
     let cycles = read_time();
-    let sec = (cycles / 10_000_000) as u32;
+    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
     ext4_inode.mtime = sec;
     ext4_inode.ctime = sec;
 
@@ -1742,6 +1741,7 @@ unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::syn
 /// Wrapper for ext4_mkdir to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = get_ext4_fs_from_inode(dir)?;
 
     // Call namei's ext4_mkdir
@@ -1781,6 +1781,7 @@ unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
 /// Wrapper for ext4_rmdir to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = match get_ext4_fs_from_inode(dir) {
         Ok(f) => f,
         Err(e) => return e,
@@ -1795,6 +1796,7 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 /// Wrapper for ext4_create to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = get_ext4_fs_from_inode(dir)?;
     let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
 
@@ -1811,6 +1813,7 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
 /// Wrapper for ext4_symlink to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = get_ext4_fs_from_inode(dir)?;
     let new_ino = namei::ext4_symlink(fs, dir.ino as u32, name, target)?;
 
@@ -1827,6 +1830,7 @@ unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Resul
 /// Wrapper for ext4_link to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = match get_ext4_fs_from_inode(dir) {
         Ok(f) => f,
         Err(e) => return e,
@@ -1841,6 +1845,7 @@ unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 /// Wrapper for ext4_unlink to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = match get_ext4_fs_from_inode(dir) {
         Ok(f) => f,
         Err(e) => return e,
@@ -1862,6 +1867,7 @@ unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 /// Wrapper for ext4_rename to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
     let fs = match get_ext4_fs_from_inode(old_dir) {
         Ok(f) => f,
         Err(e) => return e,

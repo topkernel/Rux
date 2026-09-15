@@ -563,6 +563,13 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             let start_page = addr / PAGE_SIZE as usize;
             let num_pages = (length + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
 
+            // Hold the PTE-modify lock across the whole walk + rewrite +
+            // sfence: reading a leaf PTE before taking the lock and writing
+            // it after let a concurrent COW fault's page swap race the
+            // rewrite (stale PPN could resurrect a freed page) — regression
+            // round 6 HIGH. The loop never sleeps, so one irqsave section
+            // for the whole range is safe (fork holds it likewise).
+            let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
             for i in 0..num_pages {
                 let virt = ((start_page + i) * PAGE_SIZE as usize) as u64;
                 // SAFETY: root_ppn is a valid page table root; we traverse 3-level Sv39 page
@@ -595,10 +602,6 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                     let pte0 = (*table0).get(vpn0);
 
                     if pte0.is_valid() {
-                        // Hold the PTE-modify lock across the leaf rewrite:
-                        // a concurrent fork's copy_page_table_cow walks these
-                        // same PTEs (regression round 5, PTE lock coverage).
-                        let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
                         // Preserve PPN and any COW software bit (bit 8):
                         // clearing COW here let two processes that share a
                         // forked page write straight through after
@@ -619,11 +622,13 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                 }
             }
 
-            // Flush TLB after updating PTE permissions
+            // Flush TLB after updating PTE permissions (still under the
+            // PTE lock so no stale entry survives the section).
             // SAFETY: sfence.vma is a valid RISC-V instruction; required after PTE modification.
             unsafe {
                 core::arch::asm!("sfence.vma");
             }
+            drop(_pte_guard);
 
             // Update VMA flags to reflect new permissions
             if let Some(addr_space) = current_task.address_space() {

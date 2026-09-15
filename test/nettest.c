@@ -83,6 +83,19 @@ static void puts_(const char *s)
     sys3(__NR_write, 1, (s64)s, len);
 }
 
+static void puthex_(unsigned long v)
+{
+    static const char hx[] = "0123456789abcdef";
+    char b[18];
+    int i;
+    b[0] = '0'; b[1] = 'x';
+    for (i = 0; i < 16; i++)
+        b[2 + i] = hx[(v >> (60 - 4 * i)) & 0xf];
+    b[18 - 1] = 0;
+    b[17] = '\n';
+    sys3(__NR_write, 1, (s64)b, 18);
+}
+
 static void sock_setup(struct sockaddr_in *sa, u16 port_be, u32 addr_be)
 {
     int i;
@@ -546,9 +559,12 @@ static int pipe_test(void)
     long rb = my_clone((void *)pipe_reader, (unsigned long)(str_ + 4096), SIGCHLD);
     if (rb < 0) return 52;
     puts_("P2c\n");
+    st = 0xdead;
     sys6(__NR_wait4, wa, (s64)&st, 0, 0, 0, 0);
-    puts_("P2d(wa done)\n");
+    puts_("P2d(wa="); puthex_(st);
+    st = 0xdead;
     sys6(__NR_wait4, rb, (s64)&st, 0, 0, 0, 0);
+    puts_("P2d(rb="); puthex_(st);
     puts_("P2e\n");
     sys3(__NR_close, g_pp[0], 0, 0);
     sys3(__NR_close, g_pp[1], 0, 0);

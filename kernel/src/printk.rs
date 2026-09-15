@@ -378,8 +378,8 @@ const SYSLOG_HEADER_LEN: usize = 48;
 ///
 /// Format: `<level>[SSSSSS.MMMMMM] pid(N) cpu(M): `
 fn format_syslog_header(buf: &mut [u8; SYSLOG_HEADER_LEN], level: u8, timestamp: u64, pid: u32, cpu_id: u16) -> usize {
-    let secs = timestamp / 10_000_000;
-    let frac_us = ((timestamp % 10_000_000) * 1_000_000) / 10_000_000;
+    let secs = timestamp / crate::config::TIMER_CLOCK_FREQ_HZ;
+    let frac_us = ((timestamp % crate::config::TIMER_CLOCK_FREQ_HZ) * 1_000_000) / crate::config::TIMER_CLOCK_FREQ_HZ;
     let mut pos = 0;
 
     // "<level>"
@@ -474,11 +474,11 @@ fn format_syslog_header(buf: &mut [u8; SYSLOG_HEADER_LEN], level: u8, timestamp:
 /// Format a record header into a buffer, return bytes written.
 ///
 /// Format: `[SSSSSS.MMMMMMM] level_name: pid(N) cpu(M): `
-/// Timestamp is seconds from boot (cycles / 10_000_000).
+/// Timestamp is seconds from boot (cycles / TIMER_CLOCK_FREQ_HZ).
 fn format_record_header(buf: &mut [u8; MAX_HEADER_LEN], level: u8, pid: u32, cpu_id: u16, timestamp: u64) -> usize {
     // Convert cycles to seconds (TIMER_FREQ = 10MHz)
-    let secs = timestamp / 10_000_000;
-    let frac_us = ((timestamp % 10_000_000) * 1_000_000) / 10_000_000;
+    let secs = timestamp / crate::config::TIMER_CLOCK_FREQ_HZ;
+    let frac_us = ((timestamp % crate::config::TIMER_CLOCK_FREQ_HZ) * 1_000_000) / crate::config::TIMER_CLOCK_FREQ_HZ;
 
     // Level name
     let name: &[u8] = match level {

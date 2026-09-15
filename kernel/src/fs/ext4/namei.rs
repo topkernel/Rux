@@ -1070,7 +1070,7 @@ fn ext4_link_inner(
 
     // Update timestamp
     let cycles = crate::drivers::intc::clint::read_time();
-    let sec = (cycles / 10_000_000) as u32;
+    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
     target_inode.i_ctime = sec;
 
     // Write updated inode back
@@ -1740,7 +1740,7 @@ fn ext4_rename_inner(
 
     // Update timestamp on renamed inode
     let cycles = crate::drivers::intc::clint::read_time();
-    let sec = (cycles / 10_000_000) as u32;
+    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
     let mut renamed_inode = old_inode;
     renamed_inode.i_ctime = sec;
     renamed_inode.i_mtime = sec;

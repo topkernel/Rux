@@ -309,39 +309,11 @@ impl MmStruct {
                 let _ = vma_mgr.remove(vma_start);
             }
 
-            let mut addr = start.as_usize();
-            while addr < start.as_usize() + aligned_size {
-                // SAFETY: self.pgd is a valid root PPN and addr is page-aligned within this
-                // address space. clear_pte is called only after removing any reverse mapping.
-                unsafe {
-                    if let Some((ppn_val, _)) = PageTableWalker::walk(self.pgd, addr as u64) {
-                        use crate::mm::page_desc::pfn_to_page_mut;
-                        let page = pfn_to_page_mut(ppn_val as usize);
-                        if !page.is_null() {
-                            if (*page).is_mapped() {
-                                crate::mm::rmap::page_remove_rmap(&*page);
-                            }
-                            // Drop this mapping's reference: the last one
-                            // returns the physical page to the buddy allocator
-                            // (mirrors the exit-path teardown).
-                            let new_ref = (*page).put_page();
-                            if new_ref == 0 {
-                                crate::mm::page_alloc::free_pages(
-                                    (ppn_val as usize) << PAGE_SHIFT, 0,
-                                );
-                            }
-                        }
-                        self.clear_pte(addr as u64);
-                    }
-                }
-                addr += PAGE_SIZE_USIZE;
-            }
-
-            // SAFETY: sfence.vma is a privileged TLB-flush instruction; safe to call at any time
-            // in supervisor mode to ensure stale mappings are discarded.
-            unsafe {
-                asm!("sfence.vma zero, zero");
-            }
+            // Route through unmap_pages so the teardown (walk, rmap,
+            // refcount, clear_pte, sfence) happens under PTE_MODIFY_LOCK —
+            // the previous inline copy raced fork's table walk (round 6
+            // HIGH: MAP_FIXED PTE teardown bypassed the lock).
+            self.unmap_pages(start, aligned_size)?;
         }
 
         let end = PageVirtAddr::new(start.as_usize() + aligned_size);
@@ -446,14 +418,19 @@ impl MmStruct {
             (rm, add)
         };
         {
+            // Single write-lock pass: remove + re-add atomically (the
+            // old per-fragment locking left a gap where fragments had no
+            // VMA — concurrent faults/forks saw a hole → SIGSEGV/lost
+            // mappings, regression round 6 HIGH). VmaManager::add/ remove
+            // are plain methods on the struct — no internal lock to
+            // recurse into when called through this guard.
             let mut vma_mgr = self.vma_write();
             for start in &to_remove {
                 let _ = vma_mgr.remove(*start);
             }
-        }
-        for vma in &to_add {
-            let mut vma_mgr = self.vma_write();
-            let _ = vma_mgr.add(vma.clone());
+            for vma in &to_add {
+                let _ = vma_mgr.add(vma.clone());
+            }
         }
 
         self.unmap_pages(addr, aligned_size)?;
