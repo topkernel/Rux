@@ -972,6 +972,23 @@ pub unsafe fn alloc_and_map_user_memory(
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
     core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
 
+    // R7-C5: the rounded-up block allocated 2^order pages but the mapping
+    // only covers page_count — the unmapped excess has no PTE, so no
+    // teardown path would ever free it (~192KB leaked per execve; a shell
+    // loop drove the machine to OOM). Free the excess as order-0 pages
+    // right away; buddy coalescing rebuilds larger blocks lazily. The
+    // mapped prefix stays physically contiguous (exec writes via
+    // phys_base + vaddr offset).
+    {
+        let block_pages = 1usize << order;
+        if block_pages > page_count {
+            let base_pfn = phys_addr >> PAGE_SHIFT;
+            for pfn in (base_pfn + page_count)..(base_pfn + block_pages) {
+                crate::mm::page_alloc::free_pages(pfn << PAGE_SHIFT, 0);
+            }
+        }
+    }
+
     Some(phys_addr as u64)
 }
 
@@ -1007,6 +1024,23 @@ pub unsafe fn alloc_and_map_to_kernel_table(
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
     core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
 
+    // R7-C5: the rounded-up block allocated 2^order pages but the mapping
+    // only covers page_count — the unmapped excess has no PTE, so no
+    // teardown path would ever free it (~192KB leaked per execve; a shell
+    // loop drove the machine to OOM). Free the excess as order-0 pages
+    // right away; buddy coalescing rebuilds larger blocks lazily. The
+    // mapped prefix stays physically contiguous (exec writes via
+    // phys_base + vaddr offset).
+    {
+        let block_pages = 1usize << order;
+        if block_pages > page_count {
+            let base_pfn = phys_addr >> PAGE_SHIFT;
+            for pfn in (base_pfn + page_count)..(base_pfn + block_pages) {
+                crate::mm::page_alloc::free_pages(pfn << PAGE_SHIFT, 0);
+            }
+        }
+    }
+
     Some(phys_addr as u64)
 }
 
@@ -1039,6 +1073,23 @@ pub unsafe fn alloc_and_map_to_user_table(
 
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
     core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
+
+    // R7-C5: the rounded-up block allocated 2^order pages but the mapping
+    // only covers page_count — the unmapped excess has no PTE, so no
+    // teardown path would ever free it (~192KB leaked per execve; a shell
+    // loop drove the machine to OOM). Free the excess as order-0 pages
+    // right away; buddy coalescing rebuilds larger blocks lazily. The
+    // mapped prefix stays physically contiguous (exec writes via
+    // phys_base + vaddr offset).
+    {
+        let block_pages = 1usize << order;
+        if block_pages > page_count {
+            let base_pfn = phys_addr >> PAGE_SHIFT;
+            for pfn in (base_pfn + page_count)..(base_pfn + block_pages) {
+                crate::mm::page_alloc::free_pages(pfn << PAGE_SHIFT, 0);
+            }
+        }
+    }
 
     Some(phys_addr as u64)
 }

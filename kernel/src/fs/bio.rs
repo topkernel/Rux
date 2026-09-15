@@ -215,6 +215,10 @@ struct CacheEntry {
     lru_prev: Option<*mut CacheEntry>,
     /// Next entry in LRU list (less recent)
     lru_next: Option<*mut CacheEntry>,
+    /// Eviction in progress (set under the bucket lock before the entry
+    /// leaves the hash chain) — get() must skip such entries so no pin can
+    /// arrive while the victim is being unlinked and freed (R7-C1).
+    evicting: bool,
 }
 
 impl CacheEntry {
@@ -225,6 +229,7 @@ impl CacheEntry {
             hash_next: None,
             lru_prev: None,
             lru_next: None,
+            evicting: false,
         }
     }
 }
@@ -332,6 +337,19 @@ impl BlockCache {
     unsafe fn move_to_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
         let entry = &mut *entry_ptr;
 
+        // R7-C1: an entry unlinked by evict_one Phase 1 (both links None)
+        // but still visible in the hash chain can race here via get().
+        // Unlinking it again would drop lru.tail (lru_next None -> tail =
+        // lru_prev = None) and leave the real tail orphaned — instead treat
+        // it as a fresh insert (same as push_lru_head).
+        if entry.lru_prev.is_none() && entry.lru_next.is_none() && lru.head != Some(entry_ptr) {
+            Self::push_lru_head(lru, entry_ptr);
+            return;
+        }
+        if lru.head == Some(entry_ptr) {
+            return; // already at head
+        }
+
         // Unlink from current position
         if let Some(prev) = entry.lru_prev {
             (*prev).lru_next = entry.lru_next;
@@ -357,6 +375,13 @@ impl BlockCache {
     /// Push an entry that is currently UNLINKED onto the LRU head.
     /// Caller must hold the lru lock.
     unsafe fn push_lru_head(lru: &mut LruState, entry_ptr: *mut CacheEntry) {
+        // R7-C1: idempotent — evict_one Phase 2 re-inserts after a pin
+        // recheck; a concurrent get() may have re-linked the entry at head
+        // already. Pushing again would self-loop (entry.lru_next = head =
+        // entry itself).
+        if lru.head == Some(entry_ptr) {
+            return;
+        }
         let entry = &mut *entry_ptr;
         entry.lru_prev = None;
         entry.lru_next = lru.head;
@@ -393,66 +418,57 @@ impl BlockCache {
     /// both the hash chain and LRU list, then syncs to disk **after**
     /// releasing all locks. Does not hold any bucket lock during I/O.
     fn evict_one(&self) -> bool {
-        // Phase 1: Find a freeable entry (need lru lock to walk LRU)
+        // R7-C1 restructuring (supersedes the VFS-H13 two-phase fix, which
+        // still raced: a get() landing between the LRU unlink and the
+        // bucket lock re-inserted/pinned the victim and Phase 2 then freed
+        // a buffer the caller held — or, with the re-insert guard, freed an
+        // entry still linked in the LRU). New order:
+        //   Phase 1 (LRU lock): PICK a victim (count==0, not already
+        //     evicting) but do not unlink anything.
+        //   Phase 2 (bucket lock): re-verify count==0, set `evicting`,
+        //     unlink from the hash chain. Once the flag is set under this
+        //     lock, get() (which takes the same lock) can no longer pin
+        //     the entry; with count==0 there are no existing holders.
+        //   Phase 3 (LRU lock): unlink from the LRU.
+        //   Phase 4 (no locks): sync if dirty, free.
         let victim = {
             let mut lru = self.lru.lock_irqsave();
             let mut current = lru.tail;
             let mut found = None;
-
             while let Some(entry_ptr) = current {
                 // SAFETY: entry_ptr is a valid raw pointer from the LRU list;
                 // all CacheEntry pointers in the LRU were created by Box::into_raw
                 // and remain valid while in the cache.
                 unsafe {
                     let entry = &*entry_ptr;
-                    if (*entry.bh).count() == 0 {
+                    if !entry.evicting && (*entry.bh).count() == 0 {
                         found = Some(entry_ptr);
                         break;
                     }
                     current = entry.lru_prev;
                 }
             }
-
             match found {
-                Some(entry_ptr) => {
-                    // Remove from LRU
-                    // SAFETY: entry_ptr is a valid CacheEntry pointer from the LRU list;
-                    // remove_from_lru safely unlinks it from the doubly-linked list.
-                    unsafe { Self::remove_from_lru(&mut lru, entry_ptr); }
-                    entry_ptr
-                }
-                None => return false, // all buffers in use
+                Some(entry_ptr) => entry_ptr,
+                None => return false, // all buffers in use (or mid-eviction)
             }
         };
-        // lru lock released here
+        // lru lock released; victim still fully linked — pinnable ONLY
+        // until Phase 2 takes the bucket lock, and the count recheck there
+        // aborts the eviction if a pin arrived in this window.
 
-        // Phase 2: Remove from hash chain (need the victim's bucket lock)
-        // SAFETY: victim is a valid CacheEntry pointer from the LRU list; reading
-        // its key field to determine which hash bucket to lock.
         let victim_key = unsafe { (*victim).key };
         let bucket_idx = self.hash_index(victim_key.0, victim_key.1);
 
-        // SAFETY: all CacheEntry pointers in the hash chain were created by
-        // Box::into_raw and are valid while in the cache; bucket lock is held.
         unsafe {
             let mut bucket = self.buckets[bucket_idx].lock();
-
-            // VFS-H13: between the LRU unlink above and this bucket lock, a
-            // concurrent get() may have found the victim in the hash chain
-            // and pinned it (count 0 -> 1). Freeing it anyway handed that
-            // caller a dangling BufferHead — the SMP use-after-free behind
-            // NEW2's "control transfers to a freed page". get() takes this
-            // same bucket lock to increment, so re-checking here is sound:
-            // if the count is still 0, no one can acquire it anymore once
-            // it leaves the hash chain.
             if (*(*victim).bh).count() != 0 {
-                // Pinned while we were between the locks: put it back on
-                // the LRU and report "no victim" so the caller retries.
-                drop(bucket);
-                let mut lru = self.lru.lock_irqsave();
-                Self::push_lru_head(&mut lru, victim);
+                // Pinned between Phase 1 and Phase 2: leave everything
+                // linked and report "no victim" — the caller retries and
+                // this CPU does not free a buffer someone holds.
                 return false;
             }
+            (*victim).evicting = true;
 
             // Unlink from hash chain
             let mut prev: Option<*mut CacheEntry> = None;
@@ -470,21 +486,22 @@ impl BlockCache {
                 current = (*cp).hash_next;
             }
         }
-        // bucket lock released here
+        // bucket lock released; entry is unpinnable and unhashed
 
-        // Phase 3: Sync if dirty (NO locks held — I/O is safe)
-        // SAFETY: victim is a valid CacheEntry pointer removed from both LRU and
-        // hash chain; its bh field points to a valid BufferHead owned by this entry.
+        {
+            let mut lru = self.lru.lock_irqsave();
+            // SAFETY: victim is a valid CacheEntry pointer picked from the
+            // LRU list in Phase 1; the LRU lock is held.
+            unsafe { Self::remove_from_lru(&mut lru, victim); }
+        }
+
+        // Phase 4: Sync if dirty (NO locks held — I/O is safe)
+        // SAFETY: victim is unhashed, unlinked and unpinnable; its bh field
+        // points to a valid BufferHead owned by this entry.
         unsafe {
             if (*(*victim).bh).is_dirty() {
                 let _ = (*(*victim).bh).sync();
             }
-        }
-
-        // Phase 4: Free the entry
-        // SAFETY: victim was removed from all lists; Box::from_raw reclaims the
-        // CacheEntry (and its BufferHead via CacheEntry::drop).
-        unsafe {
             let _ = Box::from_raw(victim);
         }
         self.count.fetch_sub(1, Ordering::Release);
@@ -507,6 +524,14 @@ impl BlockCache {
 
                 while let Some(entry_ptr) = current {
                     let entry = &*entry_ptr;
+                    if entry.evicting {
+                        // Being evicted: treat as not found — pinning it
+                        // would hand out a buffer that is about to be
+                        // freed (R7-C1 resurrection race).
+                        prev = Some(entry_ptr);
+                        current = entry.hash_next;
+                        continue;
+                    }
                     if entry.key == (device_major, blocknr) {
                         // Found — move to hash chain head
                         if prev.is_some() {

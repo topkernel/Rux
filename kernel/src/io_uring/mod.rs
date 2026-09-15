@@ -503,20 +503,19 @@ pub fn io_uring_mmap_handler(
     use crate::mm::vma::{Vma, VmaFlags};
     use crate::mm::page::VirtAddr as PageVirtAddr;
 
-    let ring_ptr = unsafe { *file.private_data.get() }.ok_or(-9)?;
-    // SAFETY: read + try_ref under the lifecycle lock races close()'s
-    // clear+unref safely; the mapping pins the ring until unmap.
-    let ring = {
+    // R7-C4: read the pointer INSIDE the lock (was read before, deref
+    // after — a concurrent close() could free the ring in between).
+    let (ring, _ring_guard) = {
         let _guard = LIFECYCLE_LOCK.lock();
+        let ring_ptr = unsafe { *file.private_data.get() }.ok_or(-9)?;
+        // SAFETY: under the lifecycle lock, close() cannot clear+free the
+        // ring between the read and try_ref.
         let ring = unsafe { &*(ring_ptr as *const IoUring) };
         if !ring.try_ref() {
             return Err(-9); // EBADF: ring being torn down
         }
-        ring
+        (ring, RingRef(ring_ptr as *const IoUring))
     };
-    // Hold the pin for the lifetime of this function; the user mapping
-    // itself takes its own per-page reference below.
-    let _ring_guard = RingRef(ring_ptr as *const IoUring);
 
     let region = match offset & IORING_OFF_MMAP_MASK {
         IORING_OFF_SQ_RING => &ring.sq_ring,
@@ -995,21 +994,24 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
         return -(9i64) as u64; // EBADF
     }
 
-    let ring_ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p as *const IoUring,
-        None => return -(9i64) as u64, // EBADF
-    };
-    // SAFETY: read + try_ref under the lifecycle lock races close()'s
-    // clear+unref safely (review IOU-H1).
-    let ring = {
+    // R7-C4 (IOU-H1 completion): the private_data pointer must be read
+    // INSIDE the lifecycle lock — reading it before and dereferencing
+    // after let a concurrent close() free the ring in between. Same
+    // discipline as pin_ring().
+    let (ring, _ring_guard) = {
         let _guard = LIFECYCLE_LOCK.lock();
+        let ring_ptr = match unsafe { *file.private_data.get() } {
+            Some(p) => p as *const IoUring,
+            None => return -(9i64) as u64, // EBADF
+        };
+        // SAFETY: under the lifecycle lock, close() cannot clear+free the
+        // ring between the read and try_ref.
         let ring = unsafe { &*ring_ptr };
         if !ring.try_ref() {
             return -(9i64) as u64; // EBADF: ring being torn down
         }
-        ring
+        (ring, RingRef(ring_ptr))
     };
-    let _ring_guard = RingRef(ring_ptr);
 
     // Submit SQEs
     let submitted = submit_sqes(ring, to_submit);
@@ -1043,22 +1045,26 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
         return -(9i64) as u64; // EBADF
     }
 
-    let ring_ptr = match unsafe { *file.private_data.get() } {
-        Some(p) => p as *const IoUring,
-        None => return -(9i64) as u64, // EBADF
-    };
-    // SAFETY: read + try_ref under the lifecycle lock races close()'s
-    // clear+unref safely (review IOU-H1).
-    let ring = {
+    // R7-C4 (IOU-H1 completion): the private_data pointer must be read
+    // INSIDE the lifecycle lock — reading it before and dereferencing
+    // after let a concurrent close() free the ring in between. Same
+    // discipline as pin_ring().
+    let (ring, _ring_guard) = {
         let _guard = LIFECYCLE_LOCK.lock();
+        let ring_ptr = match unsafe { *file.private_data.get() } {
+            Some(p) => p as *const IoUring,
+            None => return -(9i64) as u64, // EBADF
+        };
+        // SAFETY: under the lifecycle lock, close() cannot clear+free the
+        // ring between the read and try_ref.
         let ring = unsafe { &*ring_ptr };
         if !ring.try_ref() {
             return -(9i64) as u64; // EBADF: ring being torn down
         }
-        ring
+        (ring, RingRef(ring_ptr))
     };
-    let _ring_guard = RingRef(ring_ptr);
 
+    
     match opcode {
         IORING_REGISTER_EVENTFD => {
             if nr_args != 1 { return -(22i64) as u64; }

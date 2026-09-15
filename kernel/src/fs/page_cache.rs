@@ -33,8 +33,14 @@ const MAX_CACHED_PAGES: usize = 512;
 struct CachedPage {
     /// Physical frame number (allocated from zone allocator).
     pfn: usize,
-    /// Reference count — pages with ref_count > 0 are not evicted.
+    /// Reference count counting EXTERNAL pins (get..put windows). Pages are
+    /// born at 0 — the cache's own ownership is not counted. (R7-C2: birth
+    /// ref 1 with no matching put pinned every page forever, disabling
+    /// eviction and making invalidate keep stale data.)
     ref_count: AtomicU32,
+    /// Set when invalidate_inode found the page pinned: freed by the final
+    /// put() instead of under the reader's feet.
+    invalidated: bool,
 }
 
 /// Per-inode page cache.
@@ -73,6 +79,11 @@ impl PageCache {
         let cache = self.inodes.lock();
         let inode_cache = cache.get(&ino)?;
         let page = inode_cache.pages.get(&page_index)?;
+        if page.invalidated {
+            // Stale (a write invalidated it while pinned) — serve a miss so
+            // the caller re-reads current data from disk.
+            return None;
+        }
         page.ref_count.fetch_add(1, Ordering::AcqRel);
 
         // Mark page as recently accessed for LRU rotation
@@ -107,10 +118,25 @@ impl PageCache {
             pages: BTreeMap::new(),
         });
 
-        // If already cached, just bump ref
+        // If already cached and fresh, nothing to do. (R7-C2: this used to
+        // bump ref_count with no matching put — a permanent pin leak that
+        // defeated eviction and pinned stale data forever.)
         if let Some(page) = inode_cache.pages.get(&page_index) {
-            page.ref_count.fetch_add(1, Ordering::AcqRel);
-            return;
+            if !page.invalidated {
+                return;
+            }
+            // Invalidated but still pinned by a reader: replace the frame
+            // now — the old frame is freed below via the invalidated flag's
+            // owning path... instead swap directly: the reader's put() will
+            // find the new entry and just decrement harmlessly.
+            let old_pfn = page.pfn;
+            inode_cache.pages.remove(&page_index);
+            let old_desc = pfn_to_page_mut(old_pfn);
+            if !old_desc.is_null() {
+                unsafe { lru::page_remove_lru(&*old_desc); }
+            }
+            release_page_frame(old_pfn);
+            self.total_pages.fetch_sub(1, Ordering::Relaxed);
         }
 
         // Allocate a physical page frame from zone allocator
@@ -147,38 +173,83 @@ impl PageCache {
 
         inode_cache.pages.insert(page_index, CachedPage {
             pfn,
-            ref_count: AtomicU32::new(1),
+            ref_count: AtomicU32::new(0),
+            invalidated: false,
         });
         self.total_pages.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Release a page reference (decrement ref_count).
     pub fn put(&self, ino: u32, page_index: u64) {
-        let cache = self.inodes.lock();
-        if let Some(inode_cache) = cache.get(&ino) {
-            if let Some(page) = inode_cache.pages.get(&page_index) {
-                page.ref_count.fetch_sub(1, Ordering::AcqRel);
+        let mut cache = self.inodes.lock();
+        if let Some(inode_cache) = cache.get_mut(&ino) {
+            if let Some(page) = inode_cache.pages.get_mut(&page_index) {
+                // Floor at 0: a get() miss (invalidated page) never
+                // incremented, so a stale put must not underflow.
+                page.ref_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                    v.checked_sub(1)
+                }).ok();
+                // R7-C2: invalidate_inode left this page in place because a
+                // reader held a pin — now that the pin is gone, free it.
+                if page.ref_count.load(Ordering::Acquire) == 0 && page.invalidated {
+                    let pfn = page.pfn;
+                    inode_cache.pages.remove(&page_index);
+                    let page_desc = pfn_to_page_mut(pfn);
+                    if !page_desc.is_null() {
+                        unsafe { lru::page_remove_lru(&*page_desc); }
+                    }
+                    release_page_frame(pfn);
+                    self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            if inode_cache.pages.is_empty() {
+                cache.remove(&ino);
             }
         }
     }
 
     /// Invalidate all cached pages for a given inode.
     /// Called after writes or truncates to prevent stale data.
+    ///
+    /// R7-C2: pages with an active reader pin (ref_count > 0) are marked
+    /// `invalidated` instead of being freed under the reader's feet —
+    /// the final put() releases them, and get() serves a miss meanwhile
+    /// so no stale data is ever returned.
     pub fn invalidate_inode(&self, ino: u32) {
         let mut cache = self.inodes.lock();
-        if let Some(inode_cache) = cache.remove(&ino) {
-            let count = inode_cache.pages.len();
-            for (_, page) in inode_cache.pages.iter() {
-                // Remove from LRU before freeing
-                let page_desc = pfn_to_page_mut(page.pfn);
-                if !page_desc.is_null() {
-                    unsafe {
-                        lru::page_remove_lru(&*page_desc);
-                    }
+        if let Some(inode_cache) = cache.get_mut(&ino) {
+            let mut freed: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+            for (_, page) in inode_cache.pages.iter_mut() {
+                if page.ref_count.load(Ordering::Acquire) == 0 {
+                    freed.push(page.pfn);
+                    page.invalidated = true; // marker; removed below
+                } else {
+                    page.invalidated = true;
                 }
-                release_page_frame(page.pfn);
             }
-            self.total_pages.fetch_sub(count as u32, Ordering::Relaxed);
+            if !freed.is_empty() {
+                let keys: alloc::vec::Vec<u64> = inode_cache
+                    .pages
+                    .iter()
+                    .filter(|(_, p)| p.ref_count.load(Ordering::Acquire) == 0)
+                    .map(|(k, _)| *k)
+                    .collect();
+                for k in keys {
+                    inode_cache.pages.remove(&k);
+                }
+                let freed_count = freed.len() as u32;
+                for pfn in freed {
+                    let page_desc = pfn_to_page_mut(pfn);
+                    if !page_desc.is_null() {
+                        unsafe { lru::page_remove_lru(&*page_desc); }
+                    }
+                    release_page_frame(pfn);
+                }
+                self.total_pages.fetch_sub(freed_count, Ordering::Relaxed);
+            }
+            if inode_cache.pages.is_empty() {
+                cache.remove(&ino);
+            }
         }
     }
 

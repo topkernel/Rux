@@ -183,6 +183,18 @@ fn try_expand_stack(
     // the map and the rmap/refcount update takes a reference the rmap
     // never sees (round 6 MED — demand-fault PTE lock).
     let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    // R7-C3: re-check under the lock. The already_mapped walk at entry was
+    // lock-free; two threads sharing this mm (CLONE_VM) can both see "not
+    // mapped", both allocate+zero (+read for file VMAs), and the second
+    // map_page would orphan the first page (refcount 1, mapcount 0,
+    // unreclaimable) and silently discard stores landed in it.
+    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }.is_some() {
+        drop(_pte_guard);
+        // Lost the race: free our exclusively-owned fresh page and let the
+        // caller retry — the next entry sees the mapping present.
+        crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+        return MmFaultResult::AlreadyMapped;
+    }
     // Map page
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
@@ -439,6 +451,18 @@ pub fn handle_mm_fault(
     // the map and the rmap/refcount update takes a reference the rmap
     // never sees (round 6 MED — demand-fault PTE lock).
     let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    // R7-C3: re-check under the lock. The already_mapped walk at entry was
+    // lock-free; two threads sharing this mm (CLONE_VM) can both see "not
+    // mapped", both allocate+zero (+read for file VMAs), and the second
+    // map_page would orphan the first page (refcount 1, mapcount 0,
+    // unreclaimable) and silently discard stores landed in it.
+    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }.is_some() {
+        drop(_pte_guard);
+        // Lost the race: free our exclusively-owned fresh page and let the
+        // caller retry — the next entry sees the mapping present.
+        crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+        return MmFaultResult::AlreadyMapped;
+    }
     // Map page
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
@@ -636,6 +660,14 @@ fn handle_swap_fault(
     // Swap-in map under the PTE-modify lock (round 6 MED). The swap read
     // finished above, so no I/O happens inside the irqsave section.
     let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    // R7-C3: re-check under the lock (same double-fault race as the demand
+    // paths). The swap-in page is exclusively owned, so freeing on loss is
+    // safe; the swap slot is freed by the winner.
+    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }.is_some() {
+        drop(_pte_guard);
+        crate::mm::page_alloc::free_page(phys_addr as usize);
+        return MmFaultResult::AlreadyMapped;
+    }
     unsafe {
         map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags);
 
