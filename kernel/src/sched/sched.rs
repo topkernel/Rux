@@ -1008,23 +1008,43 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
 
     let mut grq_guard = grq().lock_irqsave();
     let old_policy = unsafe { (*task).policy() };
-    let was_running = unsafe { (*task).state() } == TaskState::new(TaskState::RUNNING);
 
-    // Dequeue from the old class queue — but only if the task is actually
-    // linked there. The CURRENT task was dequeued when it was picked, and a
-    // blocked task is off-queue already.
-    let linked = !is_current && was_running;
+    // Whether the task is actually linked on a class run queue. The RUNNING
+    // state is NOT sufficient: a task picked by another CPU is dequeued at
+    // pick time — re-enqueueing it lets two CPUs run it simultaneously
+    // (regression round 5, HIGH).
+    let linked = match old_policy {
+        SchedPolicy::Fifo | SchedPolicy::Rr => {
+            unsafe { (*task).rt_entity().is_on_rq() }
+        }
+        SchedPolicy::Deadline => {
+            unsafe { (*task).dl_entity().is_on_rq() }
+        }
+        SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+            unsafe { (*task).sched_entity().is_on_rq() }
+        }
+    };
+
     if linked {
-        match old_policy {
+        let dequeued = match old_policy {
             SchedPolicy::Fifo | SchedPolicy::Rr => {
                 grq_guard.rt_rq.dequeue(task);
+                true
             }
             SchedPolicy::Deadline => {
                 grq_guard.dl_rq.dequeue(task);
+                true
             }
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-                grq_guard.cfs_rq.dequeue(task);
+                grq_guard.cfs_rq.dequeue(task)
             }
+        };
+        if dequeued {
+            grq_guard.nr_running.fetch_update(
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::SeqCst,
+                |v| v.checked_sub(1),
+            );
         }
     }
 

@@ -886,6 +886,14 @@ impl Task {
             0,
         );
         ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask_restore)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask_restore_valid)) as *mut bool,
+            false,
+        );
+        ptr::write(
             (ptr as usize + offset_of!(Task, sigstack)) as *mut crate::signal::SignalStack,
             crate::signal::SignalStack::new(),
         );
@@ -1123,6 +1131,14 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, sigmask)) as *mut u64,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask_restore)) as *mut u64,
+            0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, sigmask_restore_valid)) as *mut bool,
+            false,
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, sigstack)) as *mut crate::signal::SignalStack,

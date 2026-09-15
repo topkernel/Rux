@@ -349,6 +349,10 @@ impl FdTable {
             return Err(());
         }
         entry.fds[fd] = Some(file);
+        // Clear any stale CLOEXEC bit from a previous occupant of this fd
+        // number (regression round 5, MED: closed CLOEXEC fds leaked the
+        // bit to the next file that reused the number).
+        entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
         entry.count += 1;
         Ok(())
     }

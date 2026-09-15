@@ -1774,11 +1774,15 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
             }
         }
 
-        // Sleep until a signal arrives (send_signal wakes us). A fatal
-        // signal (SIGKILL) terminates the task from the delivery path on
-        // the way out, so the loop cannot hang the process.
+        // Any signal OUTSIDE the wait set (including SIGKILL) must also
+        // break the loop so it can be delivered on the way to userspace —
+        // without this check a SIGKILL'd task slept forever in this loop
+        // (regression round 5, HIGH).
         // SAFETY: current is the running task pointer.
         unsafe {
+            if (*current).pending.get_all() & !(*current).sigmask != 0 {
+                return -(errno::EINTR as i64);
+            }
             (*current).set_state(crate::process::task::TaskState::new(
                 crate::process::task::TaskState::INTERRUPTIBLE,
             ));

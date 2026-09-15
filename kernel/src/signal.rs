@@ -1128,8 +1128,22 @@ pub unsafe fn restore_sigcontext(
     regs.t5 = frame.uc.uc_mcontext.sc_regs[30];  // x30 (t5)
     regs.t6 = frame.uc.uc_mcontext.sc_regs[31];  // x31 (t6)
 
-    // Restore sstatus (kernel-private stash in reserved[3])
-    regs.status = frame.reserved[3];
+    // Restore sstatus (kernel-private stash in reserved[3]) — but strip
+    // all privilege-relevant bits: the value came from USER memory (M-04
+    // reads back the user frame), and SPP/SPIE/SIE control whether sret
+    // returns to S or U mode. Rebuilding them from kernel policy (regression
+    // round 5, HIGH: privilege escalation vector).
+    let saved_status = frame.reserved[3];
+    const SSTATUS_SPP: u64 = 1 << 8;
+    const SSTATUS_SPIE: u64 = 1 << 5;
+    const SSTATUS_SIE: u64 = 1 << 2;
+    const SSTATUS_UBE: u64 = 1 << 6;
+    const SSTATUS_MXR: u64 = 1 << 19;
+    const SSTATUS_SUM: u64 = 1 << 18;
+    regs.status = saved_status
+        & !(SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE | SSTATUS_UBE | SSTATUS_MXR)
+        // SUM is legitimately user-controllable (for crossing), keep it.
+        | 0; // return to user mode: SPP=0, interrupts re-enabled by trap exit
 
     // Restore signal mask
     (*task).sigmask = frame.uc.uc_sigmask;

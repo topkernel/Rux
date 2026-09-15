@@ -1503,7 +1503,7 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             // into i_size and wrap later allocations (review EXT4-M3).
             const MAX_FILE_SIZE: u64 = 1 << 42; // 4 TB
             if arg1 > MAX_FILE_SIZE {
-                return -(errno::Errno::FileTooLarge.as_neg_i32());
+                return errno::Errno::FileTooLarge.as_neg_i32();
             }
             let new_size = arg1;
             if new_size < ext4_inode.get_size() {
@@ -1645,14 +1645,14 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     // Triple-indirect (block[14]) was never freed here —
                     // files > 12+1024 blocks leaked their L2 tree on
                     // truncate below that boundary (review EXT4-M8).
-                    if ext4_inode.block[14] != 0 {
-                        // SAFETY: free_indirect_block walks the tree depth-
-                        // first and frees metadata + data blocks.
-                        unsafe {
-                            crate::fs::ext4::namei::free_indirect_block(
-                                fs, &allocator, ext4_inode.block[14], 3
-                            );
-                        }
+                    // Triple-indirect METADATA block: only free the
+                    // tree-pointer itself (data blocks were already freed
+                    // by the per-block loop above); guard on truncating
+                    // below the triple-indirect boundary so in-use trees
+                    // survive (regression round 5, HIGH: double-free).
+                    let p = (block_size / 4) as u64;
+                    if new_blocks < 12 + p + p * p && ext4_inode.block[14] != 0 {
+                        let _ = allocator.free_block(ext4_inode.block[14] as u64);
                         ext4_inode.block[14] = 0;
                     }
                 }

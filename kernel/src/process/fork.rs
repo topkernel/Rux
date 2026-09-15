@@ -265,6 +265,13 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                     if let Some(file) = parent_fdtable.get_file(fd) {
                         // Copy the Arc to the child's fdtable
                         let _ = child_fdtable.install_fd(fd, file);
+                        // FD_CLOEXEC belongs to the descriptor, so the bit
+                        // must be copied too (regression round 5, HIGH: fork
+                        // was dropping all CLOEXEC bits, leaking fds across
+                        // execve in children).
+                        if parent_fdtable.get_fd_cloexec(fd) {
+                            child_fdtable.set_fd_cloexec(fd, true);
+                        }
                     }
                 }
             }
