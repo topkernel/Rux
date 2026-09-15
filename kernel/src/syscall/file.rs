@@ -162,15 +162,23 @@ pub fn sys_fstat(args: SyscallArgs) -> i64 {
     // Call VFS layer file_stat
     match file_stat(fd, &mut stat) {
         Ok(()) => {
-            // Copy stat structure to user space
-            // SAFETY: statbuf validated with access_ok(size_of::<Stat>); writes Stat struct.
-            unsafe {
-                *statbuf = stat;
+            // Exception-table copy (review SYSA-M4: raw dereference panics
+            // on unmapped user pointers).
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    statbuf as *mut u8,
+                    &stat as *const Stat as *const u8,
+                    core::mem::size_of::<Stat>(),
+                )
+            };
+            if uncopied > 0 {
+                -(errno::EFAULT as i64)
+            } else {
+                0
             }
-            0  // Success
         }
         Err(errno) => {
-            -(errno as i64)  // Return negative error code
+            -(errno as i64)
         }
     }
 }
@@ -1488,14 +1496,23 @@ pub fn sys_mknodat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    // Only support regular files and directories for now
+    // Support regular files, directories, and FIFOs (review SYSA-M20 /
+    // VFS-M16: mkfifo was unusable, breaking shell pipeline setup).
     let ftype = mode & 0o170000;
-    if ftype != 0o100000 && ftype != 0o040000 {
-        // TODO: support FIFO (S_IFIFO), block/char devices
-        return -(errno::EINVAL as i64);
-    }
-
-    if ftype == 0o040000 {
+    if ftype == 0o010000 {
+        // FIFO: create a pipe-backed file (the actual pipe semantics are
+        // handled by the VFS open path when both ends connect).
+        match crate::fs::vfs::file_open(&path, 0o100 | 0o200 | 0o1000, mode & 0o777 | 0o010000) {
+            Ok(fd) => {
+                // SAFETY: fd was just opened; close immediately.
+                unsafe { crate::fs::close_file_fd(fd); }
+                0
+            }
+            Err(e) => -(e as i64),
+        }
+    } else if ftype != 0o100000 && ftype != 0o040000 {
+        return -(errno::EINVAL as i64); // block/char devices: TODO (CAP_MKNOD)
+    } else if ftype == 0o040000 {
         // Directory
         match crate::fs::vfs::vfs_mkdir(&path, mode & 0o7777) {
             Ok(_) => 0,
@@ -1951,13 +1968,31 @@ pub fn sys_map_shadow_stack(_args: SyscallArgs) -> i64 {
 
 /// sys_futex_wake - Wake futex (NR 454)
 pub fn sys_futex_wake(args: SyscallArgs) -> i64 {
-    // Delegate to futex with FUTEX_WAKE operation
-    crate::syscall::sched::sys_futex(args)
+    // futex_wake ABI: (uaddr, mask, nr, flags) — translate to old futex's
+    // (uaddr, FUTEX_WAKE, nr, timeout) (review SYSA-M22: was passing raw
+    // args, treating 'mask' as the operation).
+    let futex_args: crate::syscall::SyscallArgs = [
+        args[0],           // uaddr
+        1,                 // FUTEX_WAKE
+        args[2].max(1),    // nr_wake (old futex's val)
+        0,                 // timeout = NULL
+        0, 0,
+    ];
+    crate::syscall::sched::sys_futex(futex_args)
 }
 
 /// sys_futex_wait - Wait on futex (NR 455)
 pub fn sys_futex_wait(args: SyscallArgs) -> i64 {
-    crate::syscall::sched::sys_futex(args)
+    // futex_wait ABI: (uaddr, mask, flags, timeout) — translate to old
+    // futex's (uaddr, FUTEX_WAIT_BITSET, expected, timeout).
+    let futex_args: crate::syscall::SyscallArgs = [
+        args[0],           // uaddr
+        9,                 // FUTEX_WAIT_BITSET
+        0,                 // expected value (old futex checks *uaddr == val)
+        args[3],           // timeout
+        0, 0xFFFFFFFFFFFFFFFF, // bitset = MATCH_ANY
+    ];
+    crate::syscall::sched::sys_futex(futex_args)
 }
 
 /// sys_futex_requeue - Requeue futex (NR 456)
