@@ -454,6 +454,7 @@ signal 交付链（H-05/06/07/15、M-01~04）、调度器（P06-P10）、syscall
     验证：`echo X > file; cat file` 端到端输出正确、`2>/dev/null` 不再报错、smoke 15/15、nettest VF-re（posix_spawn 序列）通过。**shell 重定向自 Wave 2 记录的"已知不可用"至此修复。**
   - **仍未解决（第五轮追查进展）**：mrsh 管道（`a | b`）现确定为**确定性内核 panic**：`echo PP | cat` 在 mrsh 连续 fork 两个子进程时 100% 触发 `Option::unwrap() on None`（btree/navigate.rs:534 = BTreeMap 迭代器 next_unchecked），epc 落在区间迭代内联代码。伴随 DEADLOCK 警告（wait 队列 Vec 锁/TIMERS 锁自旋）。已排除/加固：TIMERS/ACTIONS 全部改 lock_irqsave（timer.rs 10 处，本提交）；fork 大互斥实验（串行化 copy_page_table_cow）无效已回退——非双 fork 并发 COW 降级竞争。剩余嫌疑：某 BTreeMap（CFS/DL 时间线或 VMA 表）存在**不持 GRQ/VMA 锁的访问路径**，或在 IRQ 上下文被无锁触碰。NEW2 偶发竞态（套件挂点漂移）依旧。
   - **第六轮（2026-09-14）**：①nettest 内置非 mrsh 管道复现（PIPE2：pipe2+双 fork+exec echo+读回校验）——套件通过时端到端通过（P2e）；②全局叶 PTE 串行化落地（PTE_MODIFY_LOCK，irqsave，覆盖 fork 降级/COW 换页/exec+exit teardown 三条路径）——A/B 通过率不变（~50% 挂于首个 fork，为 NEW2 另一独立成分），mrsh 管道 panic 仍复现（PTE 竞态非其成因）；③mrsh panic Sepc=console::putchar_no_lock——DEADLOCK 打印期间再 panic，实为打印路径自陷；④mrsh 内部使用 hashtable（BTreeMap 无关）与更大 argv/envp——mrsh 特有路径待查。
+  - **第七轮关键突破（2026-09-14）**：panic 地址 0xffffffd600af9000 经 PAGE_OFFSET（0xffffffd600000000）换算得物理地址 0xaf9000——**低于 DRAM 起点（0x80000000）2GB**，不在任何已分配物理页中（buddy zone free 路径探针证实该页从未经过 zone.free_pages）。这不是"执行已释放页"而是**函数指针值被一个小整数覆盖后的类型混淆调用**：某个内核结构体的 ops/fn-ptr 字段被覆写为 0xaf9000（= 11485440），可能来源为用户态地址、大小字段、或 slab 分配器空闲链表值溢出。修复需要 GDB 断点在 panic 时检查现场结构体。
   - nettest 的 fork+fs 探针与 E 用例默认禁用以保持套件确定性；修复前 shell 重定向/管道视为已知不可用。
 
 ### 16.5 对修复计划的影响
