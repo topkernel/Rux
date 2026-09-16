@@ -1791,6 +1791,8 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
                 (*current).set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING,
                 ));
+                // R8-5 (NEW-C2): undo a concurrent wake enqueue.
+                crate::sched::dequeue_task(&*current);
                 continue;
             }
         }

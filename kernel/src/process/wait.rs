@@ -262,6 +262,10 @@ macro_rules! wait_event {
             // Re-check condition after prepare_to_wait (state is now UNINTERRUPTIBLE)
             if $condition {
                 wq_head.finish_wait(current);
+                // R8-5 (NEW-C2): a concurrent wake between prepare_to_wait
+                // and here may have enqueued us while we never slept — undo
+                // (per-class on_rq guards make it a no-op otherwise).
+                crate::sched::dequeue_task(&*current);
                 break;
             }
 
@@ -316,6 +320,8 @@ macro_rules! wait_event_interruptible {
             if $condition {
                 // Condition met — restore RUNNING and remove from queue
                 wq_head.finish_wait(current);
+                // R8-5 (NEW-C2): undo a concurrent wake enqueue.
+                crate::sched::dequeue_task(&*current);
                 break 0i32;
             }
 

@@ -125,18 +125,12 @@ impl PageCache {
             if !page.invalidated {
                 return;
             }
-            // Invalidated but still pinned by a reader: replace the frame
-            // now — the old frame is freed below via the invalidated flag's
-            // owning path... instead swap directly: the reader's put() will
-            // find the new entry and just decrement harmlessly.
-            let old_pfn = page.pfn;
-            inode_cache.pages.remove(&page_index);
-            let old_desc = pfn_to_page_mut(old_pfn);
-            if !old_desc.is_null() {
-                unsafe { lru::page_remove_lru(&*old_desc); }
-            }
-            release_page_frame(old_pfn);
-            self.total_pages.fetch_sub(1, Ordering::Relaxed);
+            // R8-3: invalidated-but-still-pinned — the final put() owns the
+            // old frame. The previous code freed it HERE regardless of
+            // ref_count, handing the pinned reader a freed physical page
+            // (exactly what invalidate_inode promises not to do). Skip
+            // caching this read; the old entry dies via its refcount.
+            return;
         }
 
         // Allocate a physical page frame from zone allocator

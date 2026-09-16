@@ -96,8 +96,10 @@ impl Semaphore {
         };
 
         // Register + mark UNINTERRUPTIBLE (atomically under the waitqueue
-        // lock — see wait_event_interruptible!).
-        self.wait.prepare_to_wait(current, false, false);
+        // lock — see wait_event_interruptible!). EXCLUSIVE (tail insert,
+        // FIFO): a transient fast-path registrant must not sit ahead of a
+        // real sleeper and steal up()'s single wake token (R8-6).
+        self.wait.prepare_to_wait(current, true, false);
 
         let old = self.count.fetch_sub(1, Ordering::Acquire);
         if old > 0 {

@@ -394,12 +394,11 @@ impl MmStruct {
         // VMA surgery: collect under read lock, then mutate under write lock.
         // VmaManager::add internally takes vma_write, so we must NOT hold
         // the write lock when calling it (write-lock recursion = deadlock).
-        let (to_remove, to_add): (Vec<_>, Vec<crate::mm::vma::Vma>) = {
-            // R7-A4: collect under the WRITE lock too — collecting under
-            // vma_read and applying later under vma_write let a concurrent
-            // same-mm munmap/MAP_FIXED change the VMA set in between, so
-            // stale keys removed whatever VMA started there and dropped
-            // fragments. add/remove are plain methods; one guard is safe.
+        // R8-7: collect AND apply under ONE vma_write guard — two critical
+        // sections let a same-mm mmap/MAP_FIXED install into the gap
+        // (VMA over unmapped PTEs, or stale keys removing a re-created
+        // VMA). add/remove are plain methods; no recursion.
+        {
             let mut vma_mgr = self.vma_write();
             let mut rm = Vec::new();
             let mut add = Vec::new();
@@ -435,17 +434,10 @@ impl MmStruct {
                     add.push(tail);
                 }
             }
-            (rm, add)
-        };
-        {
-            // Apply the plan collected above under the same single-lock
-            // discipline: remove + re-add in one critical section (the old
-            // per-fragment locking left gaps where fragments had no VMA).
-            let mut vma_mgr = self.vma_write();
-            for start in &to_remove {
+            for start in &rm {
                 let _ = vma_mgr.remove(*start);
             }
-            for vma in &to_add {
+            for vma in &add {
                 let _ = vma_mgr.add(vma.clone());
             }
         }

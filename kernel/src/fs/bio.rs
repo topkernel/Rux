@@ -468,6 +468,13 @@ impl BlockCache {
                 // this CPU does not free a buffer someone holds.
                 return false;
             }
+            // R8-2: two CPUs can pick the SAME LRU-tail victim in Phase 1
+            // (it only looks, no unlink). Without this recheck both would
+            // set evicting, both unlink from the LRU (second remove wipes
+            // head/tail) and both free the entry (double Box::from_raw).
+            if (*victim).evicting {
+                return false;
+            }
             (*victim).evicting = true;
 
             // Unlink from hash chain

@@ -720,6 +720,8 @@ pub fn do_waitid(
 
                 if crate::signal::signal_pending() {
                     (*current).wait_chldexit.finish_wait(current);
+                    // R8-5 (NEW-C2): undo the signal's concurrent enqueue.
+                    crate::sched::dequeue_task(&*current);
                     return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
                 }
 

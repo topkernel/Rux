@@ -712,10 +712,9 @@ unsafe fn __schedule() {
     if !prev_running && prev_pid != 0 {
         match prev_policy {
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-                let dequeued = grq_guard.cfs_rq.dequeue(prev);
-                // R7-2: final dequeue (exit/block) must release curr — see
-                // matching fix in dequeue_task().
-                if dequeued && grq_guard.cfs_rq.get_curr() == prev {
+                grq_guard.cfs_rq.dequeue(prev);
+                // R8-1: unconditional — see dequeue_task() fix.
+                if grq_guard.cfs_rq.get_curr() == prev {
                     grq_guard.cfs_rq.set_curr(core::ptr::null_mut());
                 }
             }
@@ -1007,13 +1006,13 @@ pub fn dequeue_task(task: &Task) {
         }
         SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
             let dequeued = grq_guard.cfs_rq.dequeue(task_ptr);
-            // R7-2: curr must never outlive its task. cfs_rq.curr was only
-            // cleared by clear() (full drain) — after a CFS task exited and
-            // was reaped, update_curr kept writing exec-runtime fields into
-            // the FREED Task on every idle schedule/tick (heap corruption,
-            // NEW2 root-cause chain). Clear it when the curr task leaves
-            // the queue (final dequeue happens on exit).
-            if dequeued && grq_guard.cfs_rq.get_curr() == task_ptr {
+            // R8-1: clear curr UNCONDITIONALLY when it matches — the R7-2
+            // version required `dequeued`, but a RUNNING task was already
+            // picked off the tree (dequeue returns false), so the exit path
+            // never fired and update_curr kept writing into the FREED Task
+            // on every idle tick (the corruption engine behind NEW2's
+            // wandering damage).
+            if grq_guard.cfs_rq.get_curr() == task_ptr {
                 grq_guard.cfs_rq.set_curr(core::ptr::null_mut());
             }
             dequeued

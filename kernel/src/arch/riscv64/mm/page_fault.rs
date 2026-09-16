@@ -193,7 +193,10 @@ fn try_expand_stack(
         // Lost the race: free our exclusively-owned fresh page and let the
         // caller retry — the next entry sees the mapping present.
         crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
-        return MmFaultResult::AlreadyMapped;
+        // R8-4: Handled, not AlreadyMapped — the trap handler maps
+        // AlreadyMapped to SIGSEGV for user faults, killing the race loser
+        // instead of re-executing against the winner's mapping.
+        return MmFaultResult::Handled;
     }
     // Map page
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
@@ -461,7 +464,10 @@ pub fn handle_mm_fault(
         // Lost the race: free our exclusively-owned fresh page and let the
         // caller retry — the next entry sees the mapping present.
         crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
-        return MmFaultResult::AlreadyMapped;
+        // R8-4: Handled, not AlreadyMapped — the trap handler maps
+        // AlreadyMapped to SIGSEGV for user faults, killing the race loser
+        // instead of re-executing against the winner's mapping.
+        return MmFaultResult::Handled;
     }
     // Map page
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
@@ -666,7 +672,9 @@ fn handle_swap_fault(
     if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }.is_some() {
         drop(_pte_guard);
         crate::mm::page_alloc::free_page(phys_addr as usize);
-        return MmFaultResult::AlreadyMapped;
+        // R8-4: Handled — see the demand-fault sites (no SIGSEGV for the
+        // race loser).
+        return MmFaultResult::Handled;
     }
     unsafe {
         map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags);

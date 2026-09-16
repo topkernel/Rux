@@ -516,6 +516,34 @@ munmap 采集(读锁)/应用(写锁)仍分两段 TOCTOU（4 MED）；mremap/shma
 - **已回退**：EXT4_BIG_LOCK→Mutex 转换（7B-2 实测 ~50% 启动挂死——信号量互斥路径需独立审计轮；Spinlock 恢复，互斥语义不变，其抢占失速噪声仍为记录在案的 R7-A2 质量问题）。
 - **门禁结果**：smoke 15/15 ×4+（一度 ~50% 挂死后修复）；verify 1088/0；build/build-release 绿。NEW2 家族仍以已知形态出现（~1/3）：VF-re 空 b_data panic（ext4 write_inode 拿到 len=0 的 BufferHead——第八轮首要线索：BufferHead 释放后复用/双 miss 竞争）、M-s3 非法指令 epc=0xffffffd600af4004（线性映射低位物理地址族）、FE 静默挂。**nettest 判定修复后不再掩盖失败。**
 
+---
+
+## 18. 第八轮检视（2026-09-16，NEW2 专项 + 回归复查）
+
+### 18.1 NEW2 根因定罪（专项 agent，全量代码证据）
+
+**机制 1（根因，Critical）：RUNNING 任务在上下文保存前即可被全局 pick —— 双核运行同一任务 + 陈旧内核栈**。`__schedule`（sched.rs:711-767）把 prev 重新入全局树并在 **context_switch 之前解锁 GRQ**；而 prev 的 sp/ra 只在 `__switch_to`（context.rs:83-84 的 sd ra/sp）里保存。窗口内 CPU B 可从全局树 pick 到 prev 并以**上一次换出的陈旧 thread.sp** 恢复执行——同一任务、两个 CPU、一条内核栈：已结束的调用尾被重放（brelse/dealloc 二次执行=双重释放）、两路栈帧互踩（保存的 ra 被小整数覆盖=0xaf4000 非法指令族）、fdtable 被重放路径拆除（EBADF）、调度记账损坏（锁自旋 wedge）。**四个签名一次全解释**；且 len=0 的 b_data 实证为"已释放且被复用"的 BufferHead（slab 释放只涂 2 字节，未复用的 len 仍为 4096）。
+- 放大器：`wait_buffer_io_done`（bio.rs:756）、`wait_for_desc_completion`/`wait_for_used_interruptible`（queue.rs:393/505）均为 **state=RUNNING 的裸 schedule() 轮询**——每次都开窗且 IRQ 唤醒对它们无效。
+- 修复设计（Linux on_cpu 语义）：pick 时置 on_cpu；三类 pick 跳过 on_cpu 任务；`__switch_to` 在保存完 prev 寄存器后（fence rw,rw）清 on_cpu。**首轮实现已验证方向但存在未定位的新生任务路径缺陷（子进程被信号杀死+TIMERS 锁风暴），已回退**——待专项审计（trampoline/clear_fork_child/timer 交互）后重做。
+- 机制 2（Critical）：virtio 同步读超时路径（mod.rs:496-504）在描述符仍在飞时 dealloc header/resp 并返回 Err，而 blkdev 层吞掉错误返回 Ok+零数据 —— 设备对已释放堆块 DMA 4KB（游走破坏）+ 零块被标 Uptodate 入缓存。修复方向：Request 带状态回传 + 超时不释放（登记 pending 由 BH 释放）。
+- 机制 3（High）：全局 CURRENT_JOURNAL_HANDLE（namei.rs:37）跨 CPU 互踩 + 指向已返回栈帧。修复方向：per-task 字段。
+
+### 18.2 回归复查发现（对 7A/7B/7C 自身的 7 项修正，全部已修）
+
+| # | 修正 | 内容 |
+|---|---|---|
+| R8-1 | sched.rs | R7-2 的 curr 清空从未生效：pick 掉的任务 dequeue 返回 false，`dequeued &&` 条件永假——退出路径 curr 残留、update_curr 写已释放 Task 的损坏引擎一直运行。改为无条件清 |
+| R8-2 | bio.rs | 7B-1 重构自身开窗：Phase 1 只看不摘，两 CPU 可选同一尾部 victim，双双通过 count 复查 → 双摘链（head/tail 清空）+ 双 Box::from_raw。Phase 2 增加 evicting 复查 |
+| R8-3 | page_cache.rs | 7B-1 的 insert() invalidated 分支无条件释放旧帧——把 invalidate 承诺不碰的钉住页在 insert 里释放了。改为不缓存直接返回（旧条目由其末次 put 释放） |
+| R8-4 | page_fault.rs | R7-C3 竞争失败方返回 AlreadyMapped，trap 处理器将其映射为 SIGSEGV——竞争失败被杀。改返回 Handled（指令重执行） |
+| R8-5 | wait/signal/process/exit | 7B-2 的 5 处 NEW-C2 出队在噪声期二分中被误删（提交信息与树不符）——全部恢复 |
+| R8-6 | semaphore.rs | down() 注册改为 EXCLUSIVE（尾插 FIFO）——非独占头插让瞬时 fast-path 注册者可偷走 up() 的唯一唤醒令牌 |
+| R8-7 | mm_ops.rs | munmap "单锁" 实为两个临界区（guard 中途 drop）——真合并；首版手术残留重复 vma_write() 自死锁已修 |
+
+### 18.3 门禁
+
+smoke 15/15 ×5（历史最稳）；nettest 判定如实：panic(VF-re 空 b_data) 2/5、wedge 2/5、EBADF 4/5——与机制 1 未闭合一致。第八轮修复提交后 NEW2 残留频率与形态不变，进一步佐证 pick-before-save 窗口为唯一剩余根因。
+
 ### 17.5 已核验干净（不重复修）
 
 do_futex CMD_MASK 位剥离正确；futex2 NR454/455 绝对超时换算正确；PTE_MODIFY_LOCK 无递归/逆序；fdtable cloexec 位图健全；epoll_event riscv64 布局正确（非 x86 打包）；NEW-C3/C4/C5/C6 修复确认在位；timer ABI、sigaction/stat/rusage/uname/statfs/fd_set/getdents64 布局核对无误。
