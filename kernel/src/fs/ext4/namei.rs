@@ -24,31 +24,31 @@ use super::Ext4FileSystem;
 // Current transaction handle (single-core, no concurrency)
 // ============================================================================
 
-use core::sync::atomic::{AtomicUsize, Ordering};
-
-/// Global slot for the current journal handle.
-/// When a journal transaction is active, this stores a pointer to the Handle.
+/// Per-task journal handle (R8-M3, NEW2 mechanism 3): the old GLOBAL slot
+/// stored a pointer to a stack-local handle — on SMP one CPU clobbered
+/// another's pointer, and jbd2_journal_dirty_metadata then raced (or
+/// dereferenced a dead stack frame after the owner returned). The handle
+/// now lives in Task, exactly like Linux task_struct::journal_info.
 ///
-/// LIMITATION: This is a global static, not per-task. Safe under current
-/// single-vCPU TCG execution (no true concurrency), and all callers are
-/// in syscall context (SIE=0) where IRQ handlers never touch the filesystem.
-/// For SMP, this must be moved to a per-task field (Linux uses
-/// task_struct::journal_info).
-static CURRENT_JOURNAL_HANDLE: AtomicUsize = AtomicUsize::new(0);
-
-/// Set the current journal handle for this thread of execution
+/// SAFETY discipline: set/clear bracket the owning syscall on the SAME
+/// task; readers run in the same task's syscall context.
 pub(crate) unsafe fn set_current_handle(handle: *mut crate::fs::jbd2::Handle) {
-    CURRENT_JOURNAL_HANDLE.store(handle as usize, Ordering::SeqCst);
+    if let Some(task) = crate::sched::current() {
+        (*task).journal_handle.set(handle);
+    }
 }
 
 /// Clear the current journal handle
 pub(crate) unsafe fn clear_current_handle() {
-    CURRENT_JOURNAL_HANDLE.store(0, Ordering::SeqCst);
+    if let Some(task) = crate::sched::current() {
+        (*task).journal_handle.set(core::ptr::null_mut());
+    }
 }
 
 /// Get the current journal handle, if any
 pub(crate) unsafe fn get_current_handle() -> Option<*mut crate::fs::jbd2::Handle> {
-    let ptr = CURRENT_JOURNAL_HANDLE.load(Ordering::SeqCst) as *mut crate::fs::jbd2::Handle;
+    let task = crate::sched::current()?;
+    let ptr = (*task).journal_handle.get();
     if ptr.is_null() { None } else { Some(ptr) }
 }
 

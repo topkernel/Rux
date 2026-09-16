@@ -334,15 +334,20 @@ impl VirtIOBlkDevice {
             }
         };
 
-        // Call completion callback
+        // R8-M2: record the device status on the Request itself —
+        // submit_request returns 0 whenever a request_fn exists, so the
+        // caller never saw these errors (blkdev_read copied a zero buffer
+        // and returned success, which bio then cached as BH_Uptodate).
         match result {
             Ok(()) => {
+                req.error.store(0, core::sync::atomic::Ordering::Release);
                 if let Some(end_io) = req.end_io {
                     end_io(req, 0);  // Success
                 }
             }
             Err(err) => {
                 crate::pr_err!("virtio-blk: I/O error: {}", err);
+                req.error.store(err, core::sync::atomic::Ordering::Release);
                 if let Some(end_io) = req.end_io {
                     end_io(req, err);
                 }
@@ -494,13 +499,43 @@ impl VirtIOBlkDevice {
 
         // Phase 3: Check response
         if !completed {
-            // Timeout — device did not update used ring
-            // SAFETY: Both pointers were allocated above and are still valid.
+            // R8-M2 (NEW2 mechanism 2): the descriptors are STILL SUBMITTED
+            // — freeing header/resp here (and the caller later dropping its
+            // data buffer) let the device DMA 4KB into freed, reallocated
+            // memory: the wandering corruption behind fdtable/BufferHead
+            // damage. Drain the used ring for THIS descriptor with a long
+            // bounded spin; if the device truly never completes, LEAK the
+            // header/resp bytes (integrity over a leak) and return EIO.
+            // SAFETY: used_ring_ptr is the MMIO-mapped used ring captured
+            // under the queue lock in Phase 1; read_volatile is the I/O
+            // access pattern the completion path already uses.
+            let mut late = false;
             unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+                // Same ring-scan discipline as wait_for_desc_completion:
+                // UsedRing is [flags:u16, idx:u16, ring:UsedElem[]].
+                for _ in 0..50_000_000u64 {
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                    let used_idx = core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16);
+                    let mut scan = prev_used;
+                    while scan != used_idx {
+                        let slot = scan as usize % queue_sz as usize;
+                        let entry_id = core::ptr::read_volatile((used_ring_ptr as usize + 4 + slot * 8) as *const u32);
+                        if entry_id == submitted_desc_id {
+                            late = true;
+                            break;
+                        }
+                        scan = scan.wrapping_add(1);
+                    }
+                    if late {
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
             }
-            return Err(-5);  // EIO
+            if !late {
+                return Err(-5); // EIO — header/resp deliberately leaked
+            }
+            // Completed late — fall through to the normal status handling.
         }
 
         // SAFETY: resp_ptr was allocated above; device has completed the response.
@@ -649,13 +684,43 @@ impl VirtIOBlkDevice {
 
         // Phase 3: Check response
         if !completed {
-            // Timeout — device did not update used ring
-            // SAFETY: Both pointers were allocated above and are still valid.
+            // R8-M2 (NEW2 mechanism 2): the descriptors are STILL SUBMITTED
+            // — freeing header/resp here (and the caller later dropping its
+            // data buffer) let the device DMA 4KB into freed, reallocated
+            // memory: the wandering corruption behind fdtable/BufferHead
+            // damage. Drain the used ring for THIS descriptor with a long
+            // bounded spin; if the device truly never completes, LEAK the
+            // header/resp bytes (integrity over a leak) and return EIO.
+            // SAFETY: used_ring_ptr is the MMIO-mapped used ring captured
+            // under the queue lock in Phase 1; read_volatile is the I/O
+            // access pattern the completion path already uses.
+            let mut late = false;
             unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+                // Same ring-scan discipline as wait_for_desc_completion:
+                // UsedRing is [flags:u16, idx:u16, ring:UsedElem[]].
+                for _ in 0..50_000_000u64 {
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                    let used_idx = core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16);
+                    let mut scan = prev_used;
+                    while scan != used_idx {
+                        let slot = scan as usize % queue_sz as usize;
+                        let entry_id = core::ptr::read_volatile((used_ring_ptr as usize + 4 + slot * 8) as *const u32);
+                        if entry_id == submitted_desc_id {
+                            late = true;
+                            break;
+                        }
+                        scan = scan.wrapping_add(1);
+                    }
+                    if late {
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
             }
-            return Err(-5);  // EIO
+            if !late {
+                return Err(-5); // EIO — header/resp deliberately leaked
+            }
+            // Completed late — fall through to the normal status handling.
         }
 
         // SAFETY: resp_ptr was allocated above; device has completed the response.

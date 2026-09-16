@@ -385,6 +385,12 @@ pub struct Task {
     /// CPU affinity mask — bit i set = CPU i allowed
     cpus_allowed: core::sync::atomic::AtomicU32,
 
+    /// Per-task journal handle (R8-M3): the ext4 write path used a GLOBAL
+    /// slot holding a pointer to a STACK-LOCAL handle — on SMP one CPU
+    /// clobbered another's pointer and dereferenced a dead stack frame
+    /// after the owner returned (Linux keeps this in task_struct).
+    pub journal_handle: core::cell::Cell<*mut crate::fs::jbd2::Handle>,
+
     /// NEW2 root-cause fix (R8-1b): true from pick time until __switch_to
     /// saves this task's context. A queued task with on_cpu set is not
     /// pickable by OTHER CPUs — the old code let another CPU pick a
@@ -674,6 +680,7 @@ impl Task {
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
             cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
+            journal_handle: core::cell::Cell::new(core::ptr::null_mut()),
             ti_a0: core::sync::atomic::AtomicU64::new(0),
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
@@ -789,6 +796,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
             core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
+            core::cell::Cell::new(core::ptr::null_mut()),
         );
 
         // Use ptr::write and offset_of to safely initialize each field
@@ -1054,6 +1065,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
             core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
+            core::cell::Cell::new(core::ptr::null_mut()),
         );
 
         // Write each field

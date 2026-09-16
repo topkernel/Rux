@@ -125,6 +125,11 @@ pub struct Request {
     pub device: *const GenDisk,
     /// Completion callback
     pub end_io: Option<unsafe fn(&Request, i32)>,
+    /// Final device status (R8-M2): set by the driver before end_io fires.
+    /// submit_request returns 0 whenever a request_fn is registered, so a
+    /// device-side error used to vanish and the caller copied a ZERO
+    /// buffer as success (cached as BH_Uptodate!).
+    pub error: core::sync::atomic::AtomicI32,
     /// Async I/O completion token (set by async submit paths)
     pub completion: Option<*mut core::ffi::c_void>,
 }
@@ -264,11 +269,17 @@ pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<
             device: disk,
             end_io: None,
             completion: None,
+            error: core::sync::atomic::AtomicI32::new(0),
         };
 
         let ret = submit_request(disk, &mut req);
         if ret < 0 {
             return Err(ret);
+        }
+        // R8-M2: device-side errors reach the caller (was swallowed).
+        let dev_err = req.error.load(core::sync::atomic::Ordering::Acquire);
+        if dev_err != 0 {
+            return Err(dev_err);
         }
 
         // Copy data
@@ -289,6 +300,7 @@ pub fn blkdev_write(disk: *const GenDisk, sector: u64, buf: &[u8]) -> Result<usi
             device: disk,
             end_io: None,
             completion: None,
+            error: core::sync::atomic::AtomicI32::new(0),
         };
 
         let ret = submit_request(disk, &mut req);
