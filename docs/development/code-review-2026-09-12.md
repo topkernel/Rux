@@ -550,6 +550,34 @@ munmap 采集(读锁)/应用(写锁)仍分两段 TOCTOU（4 MED）；mremap/shma
 4. 用 GDB 在 do_exit 断点捕获"信号死亡"子进程的 pt_regs（信号号+epc）直接定位。
 配套（机制 2/3，独立可做）：virtio read_block 超时路径不释放在飞描述符 + Request 状态回传；CURRENT_JOURNAL_HANDLE per-task 化。
 
+---
+
+## 19. 第九轮检视（2026-09-17，3 agent：腐蚀专项 + A/B 全库扫描）
+
+### 19.1 定罪：children-list 全零节点 = new_task_at 未初始化 wait_chldexit
+
+Task 由 buddy（页粒度、释放不清零）整页分配；`new_task_at`（task.rs:1031-1284）**从不初始化 `wait_chldexit`（Spinlock<Vec<WaitQueueEntry>> @0x798）**（也不初始化 comm/pdeath_signal/dumpable/ti_a0-2）——每次 fork 拿到的是上一任占用者的字节。do_wait 首次 `prepare_to_wait → Vec::insert(0, entry)` 对垃圾 {ptr,len,cap} 操作 = **野指针 16 字节写 + len×16 字节拷贝**，可命中任意活 Task 的 sibling/children（= 全零/断链节点）；Spinlock 字为垃圾非零值 = 永久自旋（DEADLOCK 面）；deferred notify 按 PID 找到错误新任务再操作其垃圾队列 = 二次放大。**残留 ~1/6 NEW2 家族的本体。**
+配套确认：buddy dealloc 无 double-free 校验（M3，页双主并发的使能器）；fork 三条 unwind 泄漏 16KB 内核栈；free_task_slot 无 Drop 泄漏内部 Vec/Box。
+
+### 19.2 全库扫描发现（A/B agent）
+
+- **[HIGH] 静默挂（FE/P2c）根因**：deferred exit notify 在 __schedule 尾部处理，但下个 pick 若是**新生任务**则 __switch_to 直接 ret 到 ret_from_fork，永不回到 __schedule 尾部——`schedule_tail` 是空占位；槽位被下一次退出覆盖 → 父进程 wait 永睡（B1）。
+- **[HIGH] ZOMBIE→defer_exit_notify 之间被抢占**：timer IRQ 在窗口内 schedule → 退出尾部永不执行 → 通知丢失（A7）。
+- **[HIGH] blkdev_write 仍吞设备错误**（R8-M2a 只改了 read）；PCI virtio handler 从不写 req.error（A1/A2）。
+- **[HIGH] virtio alloc_desc 以链数而非描述符数限流**：queue_size=8、每请求 3 描述符，≥3 并发即描述符混叠——设备完成错误链/双等待者匹配同一 used 项（A3，SMP 下的活跃腐蚀源）。
+- **[HIGH] rmap try_to_unmap 只做本地 sfence**——换出任务在其它 CPU 上继续用 stale TLB 访问已释放页（A9）。
+- **[MED] ext4 file.rs journal_handle 指向 match 臂绑定后立即 move**——M3 修复自身在主写路径上仍有死帧解引用（A4）。
+- **[MED] KERNPANIC 停机是 debug-only**——release 版继续 sret 回故障 epc 无限 fault 风暴（A5）。
+- **[MED] bio get() Phase-3 重复检查把 Phase-1 tripwire 刚拒绝的死 bh 又递出去**（B2）；bread_async 查找无 tripwire/evicting 跳过（B7）。
+- **[MED] do_waitid 缺 prepare_to_wait 后的僵尸复查**（B3）；IPC 唤醒后不校验 seq（RMID+复用可作用于新对象）（B8）；deferred notify 的 parent 指针跨 send_signal 使用（窄 UAF，B9）。
+- **[MED] M2b 不完整**：超时+设备迟到完成时调用方 4KB 数据缓冲仍可能被 DMA（B5）；5000 次迭代预算非时间制 + 50M 自旋可持 EXT4_BIG_LOCK（B6）。
+- **[LOW] termios 拷 60 字节进 52 字节结构（越界 8 字节）；wait_event_interruptible 信号路径缺 R8-5 出队；msg_iovlen 静默钳制；utimensat NR88 假成功；rootfs 组件空数组下溢；trap.S 死偏移常量；KERNPANIC 硬编码偏移。**
+- **已核净**：on_cpu 协议全路径完整（含新生/仍胎/自快路径）；release_task 自旋无死锁（rcu 侧证明）；sem/msg 记账四路径平衡；mprotect/munmap 界在位；页缓存 insert 早退不致循环。
+
+### 19.3 修复批（R9）
+
+M1 补 new_task_at 缺失字段（wait_chldexit 等全量）；schedule_tail 处理 deferred notify；ZOMBIE→defer 区间 preempt_disable；blkdev_write+PCI handler 错误回传；alloc_desc 按描述符数限流；journal_handle 先绑定后设置；KERNPANIC 无条件停机；bio Phase-3/bread_async 死 bh 防护；do_waitid 复查；IPC seq 复验；deferred notify 父指针二次查找；fork 三 unwind 补 free_kernel_stack；buddy dealloc double-free tripwire；termios 52 字节；reap 自旋前开中断；wait_event_interruptible 信号路径出队；rmap 换出加全量 sfence（远程 shootdown 简化为全局冲刷）。
+
 ### 18.3 门禁
 
 smoke 15/15 ×5（历史最稳）；nettest 判定如实：panic(VF-re 空 b_data) 2/5、wedge 2/5、EBADF 4/5——与机制 1 未闭合一致。第八轮修复提交后 NEW2 残留频率与形态不变，进一步佐证 pick-before-save 窗口为唯一剩余根因。
