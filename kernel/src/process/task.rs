@@ -2231,6 +2231,31 @@ impl Task {
     pub unsafe fn add_child(&self, child: *mut Task) {
         let _lock = PROCESS_TREE_LOCK.lock();
 
+        // R9 tripwire: linking an ALREADY-LINKED child double-links it —
+        // one unlink leaves the other parent's list dangling, and the
+        // freed/reused (zeroed) node shows up as the NULL children-walk
+        // fault. Photograph the culprit before it strikes.
+        if let Some(old) = (*child).parent {
+            if old as *const Task != self as *const Task {
+                let msg = b"TREE: DOUBLE add_child old=0x";
+                for &b in msg { unsafe { sbi_rt::legacy::console_putchar(b as usize); } }
+                let mut sh = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((old as usize >> sh) & 0xF) as u8;
+                    unsafe { sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize); }
+                }
+                for &b in b" new=0x" { unsafe { sbi_rt::legacy::console_putchar(b as usize); } }
+                sh = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((self as *const Task as usize >> sh) & 0xF) as u8;
+                    unsafe { sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize); }
+                }
+                unsafe { sbi_rt::legacy::console_putchar(b'\n' as usize); }
+            }
+        }
+
         // Set child's parent
         (*child).parent = Some(self as *const _ as *mut Task);
 

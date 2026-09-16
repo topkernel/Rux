@@ -515,9 +515,84 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             }
         }
         MmFaultResult::KernelPanic => {
-            crate::pr_emerg!("trap: Kernel panic - page fault at {:#x}", fault_addr);
-            crate::pr_emerg!("  epc={:#x}, sp={:#x}", regs.epc, regs.sp);
-            crate::pr_emerg!("  ra={:#x}, s0={:#x}", regs.ra, regs.s0);
+            // R9: print via SBI directly — printk can be wedged on a lock
+            // this CPU holds (that is exactly how the earlier wedges lost
+            // their diagnostics). Then halt.
+            unsafe {
+                let mut put = |b: u8| sbi_rt::legacy::console_putchar(b as usize);
+                for &b in b"trap: KERNPANIC pfault badaddr=0x" { put(b); }
+                for sh in (0..64).step_by(4).rev() {
+                    let n = ((fault_addr >> sh) & 0xF) as u8;
+                    put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+                for &b in b" epc=0x" { put(b); }
+                for sh in (0..64).step_by(4).rev() {
+                    let n = ((regs.epc >> sh) & 0xF) as u8;
+                    put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+                for &b in b" ra=0x" { put(b); }
+                for sh in (0..64).step_by(4).rev() {
+                    let n = ((regs.ra >> sh) & 0xF) as u8;
+                    put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+                for &b in b" sp=0x" { put(b); }
+                for sh in (0..64).step_by(4).rev() {
+                    let n = ((regs.sp >> sh) & 0xF) as u8;
+                    put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+                put(b'\n');
+                // R9: dump the faulting task's children list raw — the
+                // recurring NULL-walk corruption must be photographed at
+                // the instant it faults (other CPUs sanitize the list if
+                // we wait for GDB). Offsets via offset_of!, SBI output.
+                if let Some(task) = crate::sched::current() {
+                    // Offsets from the linked layout (verified against
+                    // disassembly: state=0x48 pid=0x4c children=0x758
+                    // sibling=0x768). Asserted once at compile time where
+                    // visibility allows; these are diagnostic-only reads.
+                    const OFF_STATE: usize = 0x48;
+                    const OFF_PID: usize = 0x4c;
+                    const OFF_CHILDREN: usize = 0x758;
+                    const OFF_SIBLING: usize = 0x768;
+                    let t = (task as *mut crate::process::task::Task) as usize;
+                    let head = (t + OFF_CHILDREN) as *const usize;
+                    let mut pos = unsafe { core::ptr::read_volatile(head) };
+                    let head_v = head as usize;
+                    let mut n = 0u32;
+                    let mut last_node = 0usize;
+                    while pos != head_v && pos != 0 && n < 8 {
+                        let ct = pos - OFF_SIBLING;
+                        let pid = unsafe { core::ptr::read_volatile((ct + OFF_PID) as *const u32) };
+                        let state = unsafe { core::ptr::read_volatile((ct + OFF_STATE) as *const u32) };
+                        for &b in b" child[" { put(b); }
+                        let mut digs = [0u8; 10]; let mut k = 0; let mut v = n;
+                        if v == 0 { digs[0] = b'0'; k = 1; }
+                        while v > 0 { digs[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
+                        while k > 0 { k -= 1; put(digs[k]); }
+                        for &b in b"] pid=0x" { put(b); }
+                        let mut w = pid;
+                        if w == 0 { put(b'0'); }
+                        while w > 0 { digs[k] = b'0' + (w % 10) as u8; k += 1; w /= 10; }
+                        while k > 0 { k -= 1; put(digs[k]); }
+                        for &b in b" state=0x" { put(b); }
+                        let mut w = state;
+                        let mut kk = 0;
+                        if w == 0 { put(b'0'); }
+                        while w > 0 { digs[kk] = b'0' + (w % 10) as u8; kk += 1; w /= 10; }
+                        while kk > 0 { kk -= 1; put(digs[kk]); }
+                        put(b'\n');
+                        last_node = pos;
+                        pos = unsafe { core::ptr::read_volatile(pos as *const usize) };
+                        n += 1;
+                    }
+                    if pos == 0 {
+                        for &b in b" CHILDREN-CORRUPT: node .next==NULL after node=0x" { put(b); }
+                        let mut sh2 = 64;
+                        while sh2 > 0 { sh2 -= 4; let nb = ((last_node >> sh2) & 0xF) as u8; put(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                        put(b'\n');
+                    }
+                }
+            }
             #[cfg(debug_assertions)]
             // SAFETY: wfi halts the hart until an interrupt; safe in a panic halt loop.
             loop {

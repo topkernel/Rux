@@ -540,6 +540,28 @@ impl BlockCache {
                         continue;
                     }
                     if entry.key == (device_major, blocknr) {
+                        // R9 tripwire: hand out only intact buffers. A len-0
+                        // b_data is freed-and-reused memory (BufferHead::new
+                        // always allocates block_size bytes); serving it
+                        // corrupted ext4 metadata handling (inode.rs:563
+                        // slice panic). Report via SBI (safe under any lock)
+                        // and treat as a miss so the caller re-reads.
+                        if unsafe { (*entry.bh).b_data.len() } != self.block_size as usize {
+                            let msg = b"bio: dead bh in chain blk=";
+                            unsafe {
+                                for &b in msg { sbi_rt::legacy::console_putchar(b as usize); }
+                                let mut v = blocknr;
+                                let mut digs = [0u8; 20];
+                                let mut n = 0;
+                                if v == 0 { digs[0] = b'0'; n = 1; }
+                                while v > 0 { digs[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
+                                while n > 0 { n -= 1; sbi_rt::legacy::console_putchar(digs[n] as usize); }
+                                sbi_rt::legacy::console_putchar(b'\n' as usize);
+                            }
+                            prev = Some(entry_ptr);
+                            current = entry.hash_next;
+                            continue;
+                        }
                         // Found — move to hash chain head
                         if prev.is_some() {
                             let prev_entry = &mut *prev.unwrap();

@@ -41,6 +41,19 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
         (*parent).remove_child(task);
     }
 
+    // R9 (NEW2 engine #2): do_exit sets ZOMBIE BEFORE its final schedule(),
+    // so a reaping parent could scan the early ZOMBIE and free this task's
+    // kernel stack and Task while it is STILL EXECUTING its exit tail on
+    // another CPU. The stack/Task would be reused (and zeroed) by the next
+    // fork, and the dying task's remaining stores — including __switch_to's
+    // context save — would land in live objects (the corrupted wait4
+    // statuses, EBADF, zeroed children-list nodes). on_cpu is cleared by
+    // __switch_to exactly when this task's context is saved: wait for that
+    // before freeing. Bounded: the task is on its way out; no locks held.
+    while (*task).on_cpu() {
+        core::hint::spin_loop();
+    }
+
     // Free kernel stack
     (*task).free_kernel_stack();
 

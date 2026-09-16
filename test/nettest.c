@@ -810,9 +810,9 @@ void _start(void)
     r = pipe_test();
     if (r != 0) { puts_("PIPE2: FAIL\n"); acc = acc ? acc : r; }
     r = vf_redir_exec_test();
-    if (r != 0) { puts_("VF-re: FAIL\n"); acc = acc ? acc : r; }
+    if (r != 0) { puts_("VF-re: FAIL code=0x"); puthex_(r); acc = acc ? acc : r; }
     r = vfork_exec_test();
-    if (r != 0) { puts_("VF-exec: FAIL\n"); acc = acc ? acc : r; }
+    if (r != 0) { puts_("VF-exec: FAIL code=0x"); puthex_(r); acc = acc ? acc : r; }
     r = vfork_test();
     if (r == 0) {
         puts_("vfork: redirect ok\n");
