@@ -237,12 +237,16 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
     // issues (bucket lock → scheduler lock).
     drop(head);
 
-    // Now wake collected tasks outside the bucket lock.
+    // R10-1: same discipline as WaitQueueHead::wake_up_all — hold the RCU
+    // read side across the deferred wakes (a sleeper woken by a signal in
+    // this window could be reaped before we deref). wake_up never sleeps.
+    crate::sync::rcu::rcu_read_lock();
     for task in wake_list {
         if !task.is_null() {
             Task::wake_up(task);
         }
     }
+    crate::sync::rcu::rcu_read_unlock();
 
     ret
 }
@@ -783,12 +787,15 @@ pub fn futex_requeue(
         drop(guard_hi);
     }
 
-    // Wake collected tasks outside the lock.
+    // R10-1: hold the RCU read side across the deferred wakes (see
+    // futex_wake above).
+    crate::sync::rcu::rcu_read_lock();
     for task in wake_list {
         if !task.is_null() {
             Task::wake_up(task);
         }
     }
+    crate::sync::rcu::rcu_read_unlock();
 
     ret
 }

@@ -623,7 +623,12 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
     // SAFETY: task_ptr was freshly allocated with Layout::new::<Task>() and is non-null;
     // new_task_at initializes it in-place before use.
     unsafe {
-        Task::new_task_at(task_ptr, pid, SchedPolicy::Normal);
+        if !Task::new_task_at(task_ptr, pid, SchedPolicy::Normal) {
+            // R10-9: stack allocation failed — discard the slot cleanly.
+            crate::process::pid::free_pid(pid);
+            unsafe { alloc::alloc::dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>()); }
+            return None;
+        }
         crate::process::pid_hash::pid_hash_insert(task_ptr);
     }
 

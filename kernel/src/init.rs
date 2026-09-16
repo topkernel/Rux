@@ -112,7 +112,7 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
 
         // Create init task, PID is fixed to 1
         // Note: new_task_at already allocates kernel stack internally
-        Task::new_task_at(task_ptr, 1, SchedPolicy::Normal);
+        let _ = Task::new_task_at(task_ptr, 1, SchedPolicy::Normal); // boot init: 32MB heap, cannot fail meaningfully
 
         (*task_ptr).set_parent(core::ptr::null_mut());
 

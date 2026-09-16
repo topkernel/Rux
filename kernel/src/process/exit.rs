@@ -50,6 +50,10 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // statuses, EBADF, zeroed children-list nodes). on_cpu is cleared by
     // __switch_to exactly when this task's context is saved: wait for that
     // before freeing. Bounded: the task is on its way out; no locks held.
+    // R9-16 (actually landed, round 10): spin with interrupts enabled —
+    // this CPU must keep reporting RCU quiescent states and taking ticks
+    // while waiting (the round-9 commit claimed this but never landed).
+    crate::arch::riscv64::cpu::restore_irq(true);
     while (*task).on_cpu() {
         core::hint::spin_loop();
     }

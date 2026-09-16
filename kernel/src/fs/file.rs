@@ -384,11 +384,21 @@ impl FdTable {
 
         // Call close operation if exists
         if let Some(file) = file_opt {
-            unsafe {
-                let file_ptr = Arc::as_ptr(&file) as *mut File;
-                let ops_ptr = (*file_ptr).ops.get();
-                if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
-                    (*file_ptr).close();
+            // R10-2 (PIPE2 EBADF root cause): release only on the LAST
+            // Arc reference. The File is shared by every dup'd/fork'd
+            // descriptor; running the close op per EVENT let
+            // pipe_file_close STEAL private_data from the File that fd 1
+            // still pointed at after `dup3(w,1); close(w)` — exec'd echo
+            // then wrote to a pipe-less File and got EBADF (same theft in
+            // socket/procfs/epoll close ops). With this check the op fires
+            // when our dropped clone is the final one.
+            if Arc::strong_count(&file) == 1 {
+                unsafe {
+                    let file_ptr = Arc::as_ptr(&file) as *mut File;
+                    let ops_ptr = (*file_ptr).ops.get();
+                    if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
+                        (*file_ptr).close();
+                    }
                 }
             }
         }
@@ -478,11 +488,14 @@ impl Drop for FdTable {
                 let file_opt = core::mem::replace(&mut entry.fds[fd], None);
                 entry.count -= 1;
                 if let Some(file) = file_opt {
-                    unsafe {
-                        let file_ptr = Arc::as_ptr(&file) as *mut File;
-                        let ops_ptr = (*file_ptr).ops.get();
-                        if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
-                            (*file_ptr).close();
+                    // R10-2: last-reference-only release — see close_fd.
+                    if Arc::strong_count(&file) == 1 {
+                        unsafe {
+                            let file_ptr = Arc::as_ptr(&file) as *mut File;
+                            let ops_ptr = (*file_ptr).ops.get();
+                            if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
+                                (*file_ptr).close();
+                            }
                         }
                     }
                 }

@@ -163,7 +163,13 @@ impl WaitQueueHead {
         // Drop the waitqueue lock before waking tasks.
         drop(list);
 
-        // Now safely wake each task outside the waitqueue lock.
+        // R10-1b REVERTED: holding the preempt-count RCU read side across
+        // wake_up_process here correlated with a NEW NULL-fdtable fault
+        // class (4/6 runs) — the wakeup path from timer/exit contexts
+        // interacts badly with preemption being disabled at this point
+        // (grace-period stalls reordering exit vs in-flight fdtable use).
+        // The deferred-wake UAF remains a documented open item (review
+        // §20); the pipe last-ref fix alone held a 3/3 clean gate.
         for task in wake_list {
             crate::sched::wake_up_process(task);
         }

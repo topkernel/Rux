@@ -579,6 +579,25 @@ Task 由 buddy（页粒度、释放不清零）整页分配；`new_task_at`（ta
 M1 补 new_task_at 缺失字段（wait_chldexit 等全量）；schedule_tail 处理 deferred notify；ZOMBIE→defer 区间 preempt_disable；blkdev_write+PCI handler 错误回传；alloc_desc 按描述符数限流；journal_handle 先绑定后设置；KERNPANIC 无条件停机；bio Phase-3/bread_async 死 bh 防护；do_waitid 复查；IPC seq 复验；deferred notify 父指针二次查找；fork 三 unwind 补 free_kernel_stack；buddy dealloc double-free tripwire；termios 52 字节；reap 自旋前开中断；wait_event_interruptible 信号路径出队；rmap 换出加全量 sfence（远程 shootdown 简化为全局冲刷）。
 
 - **R9 门禁结果（8 轮）**：smoke 15/15 ×7（+1×14/15 已知陈旧项）；nettest 全 PASS 4/8；KERNPANIC 1/8（enqueue_task_locked 解引用野指针 0xffffffffdd33e8b8——wake 链上的坏 Task*，待查）；DEADLOCK 1/8；**wait4 状态损坏 0/8（原 ubiquitous）；buddy double-free 探针 0/8**；bio 死 bh 探针触发 3 次且全部被吸收（记录+按 miss 处理，未升级为 panic——防护生效）。
+---
+
+## 20. 第十轮检视与修复（2026-09-17）
+
+### 20.1 PIPE2 EBADF 定罪（原始触发器）——pipe close 按"事件"而非"最后引用"释放
+
+`FdTable::close_fd`/`Drop` 对每次 fd 关闭都调用 `(*file).close()`，但 File 是被所有 dup/fork 描述符共享的 Arc：`dup3(w,1); close(w)` 后 close **偷走共享 File 的 private_data** 并消耗 Pipe 引用 → exec 后 echo 对 fd1 write 得 EBADF（4/4 确定性复现）；socket/procfs/epoll close 同族。修复：仅当 `Arc::strong_count==1`（最后引用）才执行 close 语义。**修后 nettest 6/6 全 PASS、PIPE-OK 6/6、mrsh `echo PP | cat` 与重定向可用——第七轮以来首次。**
+
+### 20.2 其余 R10 修复
+
+wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueue_task_locked 崩）尝试以 RCU 读侧包裹；**共享核心包裹实测引入新崩溃类（4/6）已回退**（专项重做：call_rcu 化 free_task_slot）；virtio 描述符限流修正 off-by-one（in_flight*3+3>queue_size）；alloc_desc 失败路径补 dealloc；msg 循环顶部 seq 复验（R9-11 作用域漏洞）；new_task_at 栈分配失败传播（不再带 sp=0 继续）；R9-16 restore_irq 真正落地；R9-18 全量 sfence 回退（sfence.vma 是 hart-local，全量无意义——远程 shootdown 为已记录开口项）。
+
+### 20.3 门禁与遗留
+
+6/6 nettest 全 PASS；kpanic 4/6 但全部发生在**其后**的 mrsh `echo PP | cat` 阶段，两种形态各 2/6：
+1. **内核控制流跳到用户地址**（epc=0x3869c/ra=0x31938 均为用户地址，SPP=1）——NEW2 原始劫持家族的低频残留在 mrsh fork/exec 路径；
+2. **空对象 +0x30 的 CAS**（compare_exchange 内联，宿主对象为 NULL——mrsh exec 路径上某 File/Inode 链空引用）。
+两者即第十一轮首要目标；开口项：deferred-wake UAF 的 call_rcu 正解、远程 TLB shootdown、TCP 表 static mut 加锁、zone free_pages double-free 探针、msg_iovlen/utimensat 等 LOW。
+
 - **R9 遗留（第十轮输入）**：①PIPE2 EBADF 家族 3/8（无腐蚀伴随——exec/fdtable 路径：dup3 后 exec 的 echo 对 fd1 write 得 EBADF，两级 fork+pipe 场景特有）；②野指针 enqueue 1/8；③M2b 完整版（超时+迟到完成时调用方缓冲所有权）；④virtio 裸 schedule() 轮询改 prepare_to_wait 睡眠（B6 评估：现正确但烧 CPU 且预算迭代制）。
 
 ### 18.3 门禁

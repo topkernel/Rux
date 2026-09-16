@@ -570,7 +570,11 @@ impl VirtQueue {
         // handed out 9 indices over 8 slots and request C overwrote
         // request A's still-submitted header descriptor (wrong chain
         // completed; both waiters matched the same used entry).
-        if in_flight.saturating_mul(3) >= self.queue_size {
+        if in_flight.saturating_mul(3) + 3 > self.queue_size {
+            // R10-3: account for the chain being BUILT — the round-9 guard
+            // only blocked the FOURTH concurrent chain; the third still
+            // wrapped next_desc onto slot 0 and overwrote chain #1's
+            // submitted header descriptor.
             return None;
         }
 

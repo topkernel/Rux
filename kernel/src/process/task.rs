@@ -1060,7 +1060,9 @@ impl Task {
     ///
     /// ptr must be aligned and point to a large enough memory block
     // SAFETY: Caller must provide a valid, aligned pointer to memory large enough for Task.
-    pub unsafe fn new_task_at(ptr: *mut Task, pid: Pid, policy: SchedPolicy) {
+    /// Returns false when the kernel-stack allocation fails (R10-9) —
+    /// the task must then be discarded by the caller.
+    pub unsafe fn new_task_at(ptr: *mut Task, pid: Pid, policy: SchedPolicy) -> bool {
         use crate::console::putchar;
         use core::ptr;
         use core::mem::offset_of;
@@ -1340,11 +1342,16 @@ impl Task {
         // Allocate kernel stack
         let task_ref = &mut *ptr;
         if task_ref.alloc_kernel_stack().is_none() {
+            // R10-9: do NOT continue — the task would context-switch to
+            // sp=0 and kernel_stack_bottom stays uninitialized. Propagate
+            // the failure so alloc_task_slot unwinds.
             const MSG_ERR: &[u8] = b"Task::new_task_at: failed to allocate kernel stack\n";
             for &b in MSG_ERR {
                 putchar(b);
             }
+            return false;
         }
+        return true;
     }
 
     /// Get process state
