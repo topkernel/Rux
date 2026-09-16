@@ -295,6 +295,8 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             } else {
                 (*current_ptr).remove_child(task_ptr);
                 // R7-B3: full unwind — see copy_thread error path above.
+                // R9-13: free the kernel stack too (was leaked).
+                (*task_ptr).free_kernel_stack();
                 crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
                 crate::process::pid::free_pid((*task_ptr).pid());
                 crate::sched::free_task_slot(task_ptr);
@@ -311,6 +313,8 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                     Err(_e) => {
                         (*current_ptr).remove_child(task_ptr);
                         // R7-B3: full unwind — see copy_thread error path.
+                        // R9-13: free the kernel stack too (was leaked).
+                        (*task_ptr).free_kernel_stack();
                         crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
                         crate::process::pid::free_pid((*task_ptr).pid());
                         crate::sched::free_task_slot(task_ptr);
@@ -320,6 +324,8 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             } else {
                 (*current_ptr).remove_child(task_ptr);
                 // R7-B3: full unwind — see copy_thread error path above.
+                // R9-13: free the kernel stack too (was leaked).
+                (*task_ptr).free_kernel_stack();
                 crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
                 crate::process::pid::free_pid((*task_ptr).pid());
                 crate::sched::free_task_slot(task_ptr);

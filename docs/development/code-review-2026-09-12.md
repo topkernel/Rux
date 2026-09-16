@@ -578,6 +578,9 @@ Task 由 buddy（页粒度、释放不清零）整页分配；`new_task_at`（ta
 
 M1 补 new_task_at 缺失字段（wait_chldexit 等全量）；schedule_tail 处理 deferred notify；ZOMBIE→defer 区间 preempt_disable；blkdev_write+PCI handler 错误回传；alloc_desc 按描述符数限流；journal_handle 先绑定后设置；KERNPANIC 无条件停机；bio Phase-3/bread_async 死 bh 防护；do_waitid 复查；IPC seq 复验；deferred notify 父指针二次查找；fork 三 unwind 补 free_kernel_stack；buddy dealloc double-free tripwire；termios 52 字节；reap 自旋前开中断；wait_event_interruptible 信号路径出队；rmap 换出加全量 sfence（远程 shootdown 简化为全局冲刷）。
 
+- **R9 门禁结果（8 轮）**：smoke 15/15 ×7（+1×14/15 已知陈旧项）；nettest 全 PASS 4/8；KERNPANIC 1/8（enqueue_task_locked 解引用野指针 0xffffffffdd33e8b8——wake 链上的坏 Task*，待查）；DEADLOCK 1/8；**wait4 状态损坏 0/8（原 ubiquitous）；buddy double-free 探针 0/8**；bio 死 bh 探针触发 3 次且全部被吸收（记录+按 miss 处理，未升级为 panic——防护生效）。
+- **R9 遗留（第十轮输入）**：①PIPE2 EBADF 家族 3/8（无腐蚀伴随——exec/fdtable 路径：dup3 后 exec 的 echo 对 fd1 write 得 EBADF，两级 fork+pipe 场景特有）；②野指针 enqueue 1/8；③M2b 完整版（超时+迟到完成时调用方缓冲所有权）；④virtio 裸 schedule() 轮询改 prepare_to_wait 睡眠（B6 评估：现正确但烧 CPU 且预算迭代制）。
+
 ### 18.3 门禁
 
 smoke 15/15 ×5（历史最稳）；nettest 判定如实：panic(VF-re 空 b_data) 2/5、wedge 2/5、EBADF 4/5——与机制 1 未闭合一致。第八轮修复提交后 NEW2 残留频率与形态不变，进一步佐证 pick-before-save 窗口为唯一剩余根因。

@@ -338,6 +338,28 @@ impl BuddyAllocator {
             Some(idx) => idx,
             None => return,
         };
+        // R9-14: double-free tripwire. The buddy previously accepted any
+        // free unconditionally — one double free anywhere put a LIVE page
+        // on a free list and the next two allocations shared it (the
+        // "linked Task page wiped by a zeroing allocation" corruption).
+        // Refuse the free and report instead of corrupting the heap.
+        {
+            let meta = self.meta.get(page_idx);
+            if meta.free != 0 || meta.order != order as u8 {
+                let msg = b"buddy: DOUBLE-FREE/HOARD addr=0x";
+                for &b in msg {
+                    sbi_rt::legacy::console_putchar(b as usize);
+                }
+                let mut sh = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((addr >> sh) & 0xF) as u8;
+                    sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
+                }
+                sbi_rt::legacy::console_putchar(b'\n' as usize);
+                return;
+            }
+        }
         let mut current_order = order;
 
         loop {

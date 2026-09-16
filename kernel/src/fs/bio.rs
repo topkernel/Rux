@@ -613,6 +613,13 @@ impl BlockCache {
                 let mut current = bucket.head;
                 while let Some(cp) = current {
                     if (*cp).key == (device_major, blocknr) {
+                        // R9-8: apply the same integrity guard as Phase 1 —
+                        // a dead (freed/reused) duplicate entry must not be
+                        // handed out here after the fresh read.
+                        if unsafe { (*(*cp).bh).b_data.len() } != self.block_size as usize {
+                            current = (*cp).hash_next;
+                            continue;
+                        }
                         (*(*cp).bh).get();
                         let mut lru = unsafe { self.lru_lock_under_bucket() };
                         Self::move_to_lru_head(&mut lru, cp);
@@ -817,6 +824,18 @@ pub fn bread_async(
 
             while let Some(entry_ptr) = current {
                 let entry = &*entry_ptr;
+                // R9-9: same guards as get() — skip entries being evicted
+                // and dead (freed/reused) BufferHeads.
+                if entry.evicting {
+                    prev = Some(entry_ptr);
+                    current = entry.hash_next;
+                    continue;
+                }
+                if unsafe { (*entry.bh).b_data.len() } != cache.block_size as usize {
+                    prev = Some(entry_ptr);
+                    current = entry.hash_next;
+                    continue;
+                }
                 if entry.key == (device_major, blocknr) {
                     let state = (*entry.bh).get_state();
                     if !state.test(BufferState::BH_Uptodate)

@@ -301,12 +301,15 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                         crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(swap_entry),
                     );
 
-                    // Flush TLB for this address
+                    // R9-18: FULL flush — the unmapped task usually runs on
+                    // ANOTHER CPU; a local sfence leaves its stale TLB entry
+                    // pointing at the page vmscan is about to free (silent
+                    // cross-task corruption). Global shootdown until per-mm
+                    // cpumask tracking exists.
                     core::arch::asm!(
                         "fence",
-                        "sfence.vma {}, zero",
+                        "sfence.vma zero, zero",
                         "fence",
-                        in(reg) target_vaddr,
                         options(nostack, preserves_flags)
                     );
 

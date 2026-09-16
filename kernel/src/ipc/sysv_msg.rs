@@ -469,7 +469,9 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
-                    if !entry.deleted {
+                    // R9-11: seq revalidation — the slot may have been
+                    // RMID'd and re-created since our id was captured.
+                    if !entry.deleted && super::util::ipc_id_seq(msqid) == entry.inner.get_perm().seq {
                         let cbytes = entry.inner.cbytes.load(Ordering::Relaxed);
                         let qbytes = entry.inner.qbytes.load(Ordering::Relaxed);
                         if cbytes + msgsz <= qbytes {
@@ -689,7 +691,8 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
-                    if !entry.deleted {
+                    // R9-11: seq revalidation (see sys_msgsnd).
+                    if !entry.deleted && super::util::ipc_id_seq(msqid) == entry.inner.get_perm().seq {
                         let messages = entry.inner.messages.lock();
                         if find_msg_match(&messages, msgtyp, msgflg).is_some() {
                             retry_now = true;

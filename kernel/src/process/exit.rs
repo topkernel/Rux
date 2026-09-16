@@ -274,6 +274,11 @@ pub fn do_exit(exit_code: i32) -> ! {
             reparent_children_to_init(current);
         }
 
+        // R9-3: close the preempt window between ZOMBIE and the deferred
+        // notify — a timer IRQ landing here would schedule() us out with
+        // state != RUNNING, and lines below (the notify arm) would never
+        // run: the parent's only wake source lost.
+        crate::interrupt::preempt::preempt_count_add(1);
         // Set process state to Zombie
         (*current).set_state(TaskState::new(TaskState::ZOMBIE));
 
@@ -291,6 +296,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         if parent_pid != 0 {
             crate::sched::defer_exit_notify(parent_pid);
         }
+        crate::interrupt::preempt::preempt_count_sub(1);
 
         // ===== do_task_dead: Final schedule, never returns =====
         crate::sched::schedule();
@@ -730,6 +736,23 @@ pub fn do_waitid(
 
                 // Atomically add to waitqueue AND set INTERRUPTIBLE.
                 (*current).wait_chldexit.prepare_to_wait(current, false, true);
+
+                // R9-10: re-check for a zombie AFTER registration (do_wait
+                // has this; the child's deferred notify may have fired
+                // while we were still RUNNING, consuming the only wake).
+                {
+                    let mut found_zombie = false;
+                    (*current).for_each_child(|child_ptr| {
+                        if (*child_ptr).state() == TaskState::new(TaskState::ZOMBIE) {
+                            found_zombie = true;
+                        }
+                    });
+                    if found_zombie {
+                        (*current).wait_chldexit.finish_wait(current);
+                        crate::sched::dequeue_if_enqueued(&*current);
+                        continue;
+                    }
+                }
 
                 if crate::signal::signal_pending() {
                     (*current).wait_chldexit.finish_wait(current);

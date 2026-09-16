@@ -593,7 +593,10 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     }
                 }
             }
-            #[cfg(debug_assertions)]
+            // R9-7: unconditional — in release builds the debug-only loop
+            // compiled out and the handler sret'd straight back into the
+            // faulting kernel epc: an unbounded fault/print storm with the
+            // locks still held.
             // SAFETY: wfi halts the hart until an interrupt; safe in a panic halt loop.
             loop {
                 unsafe { core::arch::asm!("wfi") };

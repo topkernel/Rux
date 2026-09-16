@@ -565,7 +565,12 @@ impl VirtQueue {
         // Check if all descriptors are in flight (avail - used >= queue_size)
         // Note: indices wrap at u16::MAX, not queue_size.
         let in_flight = avail_idx.wrapping_sub(used_idx);
-        if in_flight >= self.queue_size {
+        // R9-5: bound by DESCRIPTORS, not chains — each request consumes 3
+        // (header/data/resp); with queue_size 8, three concurrent chains
+        // handed out 9 indices over 8 slots and request C overwrote
+        // request A's still-submitted header descriptor (wrong chain
+        // completed; both waiters matched the same used entry).
+        if in_flight.saturating_mul(3) >= self.queue_size {
             return None;
         }
 

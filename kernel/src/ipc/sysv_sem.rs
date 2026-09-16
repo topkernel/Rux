@@ -725,12 +725,24 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
 /// Try to apply all semop operations atomically.
 /// Returns Ok if all succeed, Err if any would block.
 /// Records SEM_UNDO adjustments in the current task's undo table.
+/// R9-11: true when the slot's seq no longer matches the caller's semid
+/// (the slot was RMID'd and re-created between capture and use).
+fn e_seq_mismatch(entry: &crate::ipc::util::IpcObjectEntry<SemArray>, semid: i32) -> bool {
+    super::util::ipc_id_seq(semid) != entry.inner.perm.seq
+}
+
 fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> {
     let slots = SEM_IDS.slots.lock();
     let entry = match slots[idx] {
         Some(ref e) if !e.deleted => e,
         _ => return Err(-errno::EIDRM),
     };
+    // R9-11: RMID frees the slot immediately; a fresh semget can reoccupy
+    // idx with a NEW seq before a woken waiter's next iteration. Without
+    // this check the waiter applied its ops to a stranger's set.
+    if e_seq_mismatch(entry, semid) {
+        return Err(-errno::EIDRM);
+    }
 
     if let Some(ref sems) = *entry.inner.sems.lock() {
         // Working copy: each op must see the effect of the previous ones on

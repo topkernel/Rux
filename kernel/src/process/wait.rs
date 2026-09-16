@@ -328,6 +328,9 @@ macro_rules! wait_event_interruptible {
             // Re-check signals after prepare_to_wait
             if crate::signal::signal_pending() {
                 wq_head.finish_wait(current);
+                // R9-17: R8-5 discipline for the signal path too — undo a
+                // concurrent wake enqueue before returning.
+                crate::sched::dequeue_task(&*current);
                 break -512i32; // -ERESTARTSYS
             }
 

@@ -750,17 +750,22 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         // data blocks are synced during write, then the inode metadata is
         // committed to the journal with all data already on disk.
         let use_journal = fs.journal.is_some();
-        let mut journal_handle = if use_journal {
-            match super::journal::ext4_journal_start(fs, 4) {
-                Ok(mut h) => {
-                    super::namei::set_current_handle(&mut h);
-                    Some(h)
-                }
-                Err(_) => None,
-            }
+        let mut journal_handle = match if use_journal {
+            super::journal::ext4_journal_start(fs, 4)
         } else {
-            None
+            Err(0)
+        } {
+            Ok(h) => Some(h),
+            Err(_) => None,
         };
+        // R9-6: register the FINAL location of the handle — the old code
+        // stored &mut of the match-arm binding and then MOVED it into
+        // Some(h), leaving Task.journal_handle pointing at a dead stack
+        // slot that later calls reused (the exact dead-frame deref M3 was
+        // meant to remove, in the main write path).
+        if let Some(h) = journal_handle.as_mut() {
+            super::namei::set_current_handle(h);
+        }
 
         // Read ext4 inode from disk (write needs fresh on-disk data)
         let mut ext4_inode = match fs.read_inode(ext4_ino) {

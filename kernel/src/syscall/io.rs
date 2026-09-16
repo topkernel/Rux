@@ -625,14 +625,14 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             // Check address validity (termios struct ~60 bytes)
-            if !crate::arch::riscv64::uaccess::access_ok(arg, 60) {
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 52) {
                 return -errno::EFAULT as i64;
             }
             // Fill termios structure with current settings
             let lflag = tty_get_lflag();
 
             // Build termios structure in kernel buffer first
-            let mut termios_buf = [0u8; 60];
+            let mut termios_buf = [0u8; 52]; // R9-15: asm-generic termios is 52 bytes (4x u32 + c_line + c_cc[32] + pad); 60 overwrote 8 bytes past the user struct
             // SAFETY: termios_buf is a stack-allocated 60-byte buffer; all offsets stay within bounds.
             unsafe {
                 let ptr = termios_buf.as_mut_ptr() as *mut u32;
@@ -665,7 +665,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     arg as *mut u8,
                     termios_buf.as_ptr(),
-                    60
+                    52
                 )
             };
             if uncopied > 0 {
@@ -679,11 +679,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             // Check address validity
-            if !crate::arch::riscv64::uaccess::access_ok(arg, 60) {
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 52) {
                 return -errno::EFAULT as i64;
             }
             // Read termios structure from user space using copy_from_user
-            let mut termios_buf = [0u8; 60];
+            let mut termios_buf = [0u8; 52]; // R9-15: asm-generic termios is 52 bytes (4x u32 + c_line + c_cc[32] + pad); 60 overwrote 8 bytes past the user struct
             // SAFETY: arg validated with access_ok(60); copy_from_user safely reads from user.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_from_user(

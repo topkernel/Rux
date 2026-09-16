@@ -309,6 +309,7 @@ impl VirtIOBlkDevice {
         let device_ptr = match gd.private_data {
             Some(ptr) => ptr as *const VirtIOBlkDevice,
             None => {
+                req.error.store(-5, core::sync::atomic::Ordering::Release);
                 if let Some(end_io) = req.end_io {
                     end_io(req, -5);  // EIO
                 }
@@ -1160,6 +1161,7 @@ unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
     // Check if device is ready (use SeqCst for strongest memory visibility)
     if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::SeqCst) {
         crate::pr_err!("virtio: PCI device not ready");
+        req.error.store(-6, core::sync::atomic::Ordering::Release);
         if let Some(end_io) = req.end_io {
             end_io(req, -6);  // ENXIO
         }
@@ -1171,6 +1173,7 @@ unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
         Some(dev) => dev,
         None => {
             crate::pr_err!("virtio: No PCI device for request");
+            req.error.store(-6, core::sync::atomic::Ordering::Release);
             if let Some(end_io) = req.end_io {
                 end_io(req, -6);  // ENXIO
             }
@@ -1197,11 +1200,15 @@ unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
     // Call completion callback
     match result {
         Ok(()) => {
+            req.error.store(0, core::sync::atomic::Ordering::Release);
             if let Some(end_io) = req.end_io {
                 end_io(req, 0);
             }
         }
         Err(err) => {
+            // R9-4: record the status — blkdev_read/write check it (the
+            // PCI path previously swallowed errors entirely).
+            req.error.store(err, core::sync::atomic::Ordering::Release);
             if let Some(end_io) = req.end_io {
                 end_io(req, err);
             }

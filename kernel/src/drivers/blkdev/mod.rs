@@ -307,6 +307,13 @@ pub fn blkdev_write(disk: *const GenDisk, sector: u64, buf: &[u8]) -> Result<usi
         if ret < 0 {
             return Err(ret);
         }
+        // R9-4: device-side errors reach the caller (read path had this
+        // since R8-M2a; without it a failed write was marked clean by
+        // BufferHead::sync and swap-out silently discarded page data).
+        let dev_err = req.error.load(core::sync::atomic::Ordering::Acquire);
+        if dev_err != 0 {
+            return Err(dev_err);
+        }
 
         Ok(buf.len())
     }

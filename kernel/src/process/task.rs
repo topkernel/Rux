@@ -801,6 +801,38 @@ impl Task {
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
             core::cell::Cell::new(core::ptr::null_mut()),
         );
+        // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
+        // Task pages come from the non-zeroing buddy allocator, so every
+        // fork inherited the previous occupant's bytes. The fatal one is
+        // wait_chldexit (a Spinlock<Vec<..>>): garbage {ptr,len,cap} made
+        // do_wait's first prepare_to_wait do a WILD 16-byte write through
+        // a stale pointer (the zeroed/broken children-list nodes), and a
+        // garbage nonzero lock word spins forever (DEADLOCK faces).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, wait_chldexit)) as *mut crate::process::wait::WaitQueueHead,
+            crate::process::wait::WaitQueueHead::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a0)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a1)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a2)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pdeath_signal)) as *mut i32, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dumpable)) as *mut u32, 1,
+        );
+        {
+            let comm_ptr = (ptr as usize + offset_of!(Task, comm)) as *mut u8;
+            for i in 0..16 {
+                core::ptr::write(comm_ptr.add(i), 0);
+            }
+        }
 
         // Use ptr::write and offset_of to safely initialize each field
         ptr::write(
@@ -1070,6 +1102,38 @@ impl Task {
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
             core::cell::Cell::new(core::ptr::null_mut()),
         );
+        // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
+        // Task pages come from the non-zeroing buddy allocator, so every
+        // fork inherited the previous occupant's bytes. The fatal one is
+        // wait_chldexit (a Spinlock<Vec<..>>): garbage {ptr,len,cap} made
+        // do_wait's first prepare_to_wait do a WILD 16-byte write through
+        // a stale pointer (the zeroed/broken children-list nodes), and a
+        // garbage nonzero lock word spins forever (DEADLOCK faces).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, wait_chldexit)) as *mut crate::process::wait::WaitQueueHead,
+            crate::process::wait::WaitQueueHead::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a0)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a1)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_a2)) as *mut u64, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, pdeath_signal)) as *mut i32, 0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dumpable)) as *mut u32, 1,
+        );
+        {
+            let comm_ptr = (ptr as usize + offset_of!(Task, comm)) as *mut u8;
+            for i in 0..16 {
+                core::ptr::write(comm_ptr.add(i), 0);
+            }
+        }
 
         // Write each field
         ptr::write(

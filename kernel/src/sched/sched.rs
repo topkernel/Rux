@@ -375,9 +375,14 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
     use crate::signal::Signal;
     let _ = crate::signal::send_signal(pid as u32, Signal::SIGCHLD as i32);
 
-    if !parent.is_null() {
+    // R9-12: re-lookup after send_signal — the captured pointer crossed a
+    // signal-delivery call during which the (zombie) parent could have been
+    // reaped and freed on another CPU; operating on the fresh lookup (or
+    // none) closes the narrow UAF.
+    let parent_fresh = crate::process::pid_hash::pid_hash_lookup(pid as u32);
+    if !parent_fresh.is_null() {
         unsafe {
-            let _woken = (*parent).wait_chldexit.wake_up_all();
+            let _woken = (*parent_fresh).wait_chldexit.wake_up_all();
         }
     }
 }
@@ -1262,8 +1267,14 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
 #[no_mangle]
 pub extern "C" fn schedule_tail(_prev: *mut Task) {
-    // Called after context_switch in the new task's context.
-    // Placeholder for per-task post-switch setup (e.g., RCU, tick).
+    // Called after context_switch in the new task's context (ret_from_fork).
+    // R9-2 (HIGH): a newborn never returns into __schedule's tail, so the
+    // per-CPU deferred exit notify stored by the task we replaced would be
+    // skipped — and the next exit on this CPU overwrites the slot, losing
+    // the parent's SIGCHLD forever (silent wait hang in fork+fast-exit
+    // pipelines). Process it here; the slot clear makes this idempotent
+    // with the __schedule tail.
+    process_deferred_exit_notify_cpu(crate::arch::cpu_id() as usize);
 }
 
 // ==================== Utility Functions ====================
