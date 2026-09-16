@@ -540,6 +540,16 @@ munmap 采集(读锁)/应用(写锁)仍分两段 TOCTOU（4 MED）；mremap/shma
 | R8-6 | semaphore.rs | down() 注册改为 EXCLUSIVE（尾插 FIFO）——非独占头插让瞬时 fast-path 注册者可偷走 up() 的唯一唤醒令牌 |
 | R8-7 | mm_ops.rs | munmap "单锁" 实为两个临界区（guard 中途 drop）——真合并；首版手术残留重复 vma_write() 自死锁已修 |
 
+### 18.2b on_cpu 首次实现回退记录与重试要点（给下一轮）
+
+症状：子进程（含 shell exec 的 smoke_test 与 nettest FE/my_clone 裸 clone 子进程）以信号死亡；TIMERS BTreeMap 锁风暴（3 CPU 自旋）；shell prompt 前静默挂。已核对非因：new_task_at 两条 ptr::write 初始化路径均含 ti_on_cpu=false；idle 标记无害；`next==prev` 早退路径已推演安全。
+重试前必查（按序）：
+1. 新生任务首跑路径：copy_thread 设定的 trampoline（ra/sp）到 ret_from_exception 之间是否有**不经过 __switch_to 的换出点**（例如 trampoline 直接 schedule 或经 cpu_idle 路径绕过 context_switch），导致 on_cpu 置位后无人清除 → 永不可 pick → 看门狗/信号风暴。
+2. `mark_picked_on_cpu` 对 `pcpu.idle` 返回值的处理：首版未标记 idle（保守），若标记则在 `next == prev(idle)` 早退路径 idle.on_cpu 残留 1 直到下次真实切换——检查该窗口内 pick 跳过逻辑是否因此误判"无可运行任务"触发 timer 风暴。
+3. CFS pick 的 remove/reinsert 抖动放大：on_cpu 窗口内任务被反复 remove+stash+reinsert（每次 pick O(n)）——把 on_cpu 检查改为**只读跳过**（不 remove，改用游标推进或惰性跳过）可消除风暴。
+4. 用 GDB 在 do_exit 断点捕获"信号死亡"子进程的 pt_regs（信号号+epc）直接定位。
+配套（机制 2/3，独立可做）：virtio read_block 超时路径不释放在飞描述符 + Request 状态回传；CURRENT_JOURNAL_HANDLE per-task 化。
+
 ### 18.3 门禁
 
 smoke 15/15 ×5（历史最稳）；nettest 判定如实：panic(VF-re 空 b_data) 2/5、wedge 2/5、EBADF 4/5——与机制 1 未闭合一致。第八轮修复提交后 NEW2 残留频率与形态不变，进一步佐证 pick-before-save 窗口为唯一剩余根因。
