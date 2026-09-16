@@ -791,9 +791,14 @@ static int bisect_variants(void)
 
 void _start(void)
 {
+    /* R7-D8: every group now gates the verdict — previously only UDP/TCP
+     * did, so file/trunc/rename/sig/vfork failures still printed
+     * "NETTEST PASS" and exited 0. */
+    int acc = 0;
     int r = bisect_variants();
     if (r != 0) {
         puts_("bisect: FAIL\n");
+        acc = acc ? acc : r;
     }
     /* fork+redirect+exec (pipe-based) kept disabled: pipe2 fails when
      * nettest runs as init (c=5); the ext4-file variant exposes the NEW2
@@ -801,30 +806,33 @@ void _start(void)
     r = 0; (void)fork_redir_exec_test;
     puts_("forkredir: (disabled, see nettest.c)\n");
     r = fork_exec_test();
-    if (r != 0) puts_("FE: FAIL\n");
+    if (r != 0) { puts_("FE: FAIL\n"); acc = acc ? acc : r; }
     r = pipe_test();
-    if (r != 0) puts_("PIPE2: FAIL\n");
+    if (r != 0) { puts_("PIPE2: FAIL\n"); acc = acc ? acc : r; }
     r = vf_redir_exec_test();
-    if (r != 0) puts_("VF-re: FAIL\n");
+    if (r != 0) { puts_("VF-re: FAIL\n"); acc = acc ? acc : r; }
     r = vfork_exec_test();
-    if (r != 0) puts_("VF-exec: FAIL\n");
+    if (r != 0) { puts_("VF-exec: FAIL\n"); acc = acc ? acc : r; }
     r = vfork_test();
     if (r == 0) {
         puts_("vfork: redirect ok\n");
     } else {
         puts_("vfork: FAIL\n");
+        acc = acc ? acc : r;
     }
     r = rename_test();
     if (r == 0) {
         puts_("rename: cross-dir ok\n");
     } else {
         puts_("rename: FAIL\n");
+        acc = acc ? acc : r;
     }
     r = fp_test();
     if (r == 0) {
         puts_("fp: user fpu ok\n");
     } else {
         puts_("fp: FAIL\n");
+        acc = acc ? acc : r;
     }
     puts_("M-sig\n");
     r = sig_test();
@@ -833,6 +841,7 @@ void _start(void)
         puts_("sig: abi+sigwait ok\n");
     } else {
         puts_("sig: FAIL\n");
+        acc = acc ? acc : r;
     }
     r = file_test();
     if (r == 0) {
@@ -843,13 +852,14 @@ void _start(void)
     }
     if (r != 0) {
         puts_("file/trunc: FAIL\n");
+        acc = acc ? acc : r;
     }
     r = udp_test();
     if (r == 0) {
         puts_("udp: echo ok\n");
         r = tcp_test();
     }
-    if (r == 0)
+    if (r == 0 && acc == 0)
         puts_("tcp: echo ok\nNETTEST PASS\n");
     else {
         char buf[24];
@@ -864,7 +874,7 @@ void _start(void)
         buf[i] = 0;
         puts_(buf);
     }
-    sys3(__NR_exit_group, r == 0 ? 0 : r, 0, 0);
+    sys3(__NR_exit_group, (r == 0 && acc == 0) ? 0 : (r ? r : acc), 0, 0);
     for (;;)
         ;
 }

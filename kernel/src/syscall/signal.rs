@@ -320,12 +320,14 @@ pub fn sys_sigpending(args: SyscallArgs) -> i64 {
 
     // SAFETY: current is the running task's Task pointer; set_ptr validated with access_ok(8).
     unsafe {
-        // Get pending signals (pending & ~blocked)
         let pending = (*current).pending.get_all();
         let blocked = (*current).sigmask;
-        let deliverable = pending & !blocked;
+        // R7-D6: POSIX/Linux sigpending returns pending AND blocked (the
+        // complement was written before — a blocked-and-pending signal
+        // read as not-pending, breaking sigwait-style polling).
+        let pending_and_blocked = pending & blocked;
 
-        *set_ptr = deliverable;
+        *set_ptr = pending_and_blocked;
     }
 
     0  // Success

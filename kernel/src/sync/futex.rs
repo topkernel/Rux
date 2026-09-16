@@ -800,9 +800,11 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, v
 
     match cmd {
         FUTEX_WAIT => {
-            // FUTEX_CLOCK_REALTIME (bit 8) makes plain WAIT absolute too.
-            let absolute = op & FUTEX_CLOCK_REALTIME != 0;
-            futex_wait_timeout(uaddr, flags, val, FUTEX_BITSET_MATCH_ANY, futex_parse_timeout(_timeout, absolute))
+            // R7-A9: plain FUTEX_WAIT keeps a RELATIVE timeout even with
+            // FUTEX_CLOCK_REALTIME set (Linux futex_init_timeout adds
+            // ktime_get() for cmd == FUTEX_WAIT regardless of the flag);
+            // only WAIT_BITSET interprets it absolutely.
+            futex_wait_timeout(uaddr, flags, val, FUTEX_BITSET_MATCH_ANY, futex_parse_timeout(_timeout, false))
         }
         FUTEX_WAKE => {
             futex_wake(uaddr, flags, val as i32, FUTEX_BITSET_MATCH_ANY)

@@ -395,7 +395,12 @@ impl MmStruct {
         // VmaManager::add internally takes vma_write, so we must NOT hold
         // the write lock when calling it (write-lock recursion = deadlock).
         let (to_remove, to_add): (Vec<_>, Vec<crate::mm::vma::Vma>) = {
-            let vma_mgr = self.vma_read();
+            // R7-A4: collect under the WRITE lock too — collecting under
+            // vma_read and applying later under vma_write let a concurrent
+            // same-mm munmap/MAP_FIXED change the VMA set in between, so
+            // stale keys removed whatever VMA started there and dropped
+            // fragments. add/remove are plain methods; one guard is safe.
+            let mut vma_mgr = self.vma_write();
             let mut rm = Vec::new();
             let mut add = Vec::new();
             for vma in vma_mgr.iter() {
@@ -433,12 +438,9 @@ impl MmStruct {
             (rm, add)
         };
         {
-            // Single write-lock pass: remove + re-add atomically (the
-            // old per-fragment locking left a gap where fragments had no
-            // VMA — concurrent faults/forks saw a hole → SIGSEGV/lost
-            // mappings, regression round 6 HIGH). VmaManager::add/ remove
-            // are plain methods on the struct — no internal lock to
-            // recurse into when called through this guard.
+            // Apply the plan collected above under the same single-lock
+            // discipline: remove + re-add in one critical section (the old
+            // per-fragment locking left gaps where fragments had no VMA).
             let mut vma_mgr = self.vma_write();
             for start in &to_remove {
                 let _ = vma_mgr.remove(*start);
@@ -1304,6 +1306,12 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         let new_pte = PageTableEntry::from_bits(
             (old_bits & !cow_flags::COW) | PageTableEntry::W | PageTableEntry::R
         );
+
+        // R7-C9: the page is exclusively owned now — clear the descriptor
+        // flag too, or stats/invariants see "COW set with refcount 1".
+        if !old_page.is_null() {
+            (*old_page).clear_flag(crate::mm::page_desc::PageFlag::Cow);
+        }
 
         (*table0).set(vpn0, new_pte);
 

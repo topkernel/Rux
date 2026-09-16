@@ -592,6 +592,9 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
                     // newly allocated VMA range; phys is a valid page from get_zeroed_page;
                     // root_ppn is the current process's page table root.
                     unsafe {
+                        // R7-A5: map+refcount under the PTE lock (same
+                        // discipline as the demand-fault paths).
+                        let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
                         map_user_page(
                             root_ppn,
                             MmVirtAddr::new((attach_addr + i * PAGE_SIZE) as u64),
@@ -609,6 +612,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
                         if !page.is_null() {
                             (*page).get_page();
                         }
+                        drop(_pte_guard);
                     }
                 }
             } else {

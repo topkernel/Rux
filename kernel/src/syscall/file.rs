@@ -1964,9 +1964,11 @@ pub fn sys_map_shadow_stack(_args: SyscallArgs) -> i64 {
 /// sys_futex_wake - Wake futex (NR 454)
 pub fn sys_futex_wake(args: SyscallArgs) -> i64 {
     // futex_wake ABI: (uaddr, mask, nr, flags)
+    const FUTEX2_PRIVATE_FLAG_W: u64 = 1;
+    let private = if args[3] & FUTEX2_PRIVATE_FLAG_W != 0 { 128u64 } else { 0 };
     let futex_args: crate::syscall::SyscallArgs = [
         args[0],           // uaddr
-        1,                 // FUTEX_WAKE
+        1 | private,       // FUTEX_WAKE (+ FUTEX_PRIVATE_FLAG)
         args[2],           // nr_wake (0 = no-op, correctly passes through)
         0, 0, 0,
     ];
@@ -1979,9 +1981,15 @@ pub fn sys_futex_wait(args: SyscallArgs) -> i64 {
     // — 5 params. Translate to old futex WAIT_BITSET with proper expected
     // value and timeout (regression round 6 HIGH: was 4-param layout with
     // expected hardcoded 0 and flags-as-timeout).
+    // R7-A8: propagate FUTEX2_PRIVATE_FLAG (bit 0 of flags) as
+    // FUTEX_PRIVATE_FLAG so the futex key scoping matches — without it a
+    // cross-process futex waiter was matchable by any process at the same
+    // numeric address.
+    const FUTEX2_PRIVATE_FLAG: u64 = 1;
+    let private = if args[3] & FUTEX2_PRIVATE_FLAG != 0 { 128u64 } else { 0 };
     let futex_args: crate::syscall::SyscallArgs = [
         args[0],           // uaddr
-        9,                 // FUTEX_WAIT_BITSET
+        9 | private,       // FUTEX_WAIT_BITSET (+ FUTEX_PRIVATE_FLAG)
         args[1],           // expected value (futex word comparison)
         args[4],           // *timeout (5th param)
         0, 0xFFFFFFFFFFFFFFFF, // bitset = MATCH_ANY
@@ -1990,8 +1998,12 @@ pub fn sys_futex_wait(args: SyscallArgs) -> i64 {
 }
 
 /// sys_futex_requeue - Requeue futex (NR 456)
-pub fn sys_futex_requeue(args: SyscallArgs) -> i64 {
-    crate::syscall::sched::sys_futex(args)
+pub fn sys_futex_requeue(_args: SyscallArgs) -> i64 {
+    // R7-A7: futex_requeue ABI is (waiters*, flags, nr_wake, nr_requeue) —
+    // the old blind passthrough decoded it as op=FUTEX_WAIT with
+    // timeout=(nr_requeue as pointer) and could sleep forever. Return
+    // ENOSYS until the waiters-array ABI is implemented.
+    -(crate::syscall::errno::ENOSYS as i64)
 }
 
 /// sys_statmount - Get mount info (NR 457)

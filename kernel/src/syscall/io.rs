@@ -40,7 +40,9 @@ pub fn clamp_rw_count(count: usize) -> usize {
 
 /// Termios local flags ( c_lflag)
 const L_ISIG: u32   = 0x0001;   // Signal handling enabled
-const L_ICANON: u32 = 0x0100;   // Canonical mode
+const L_ICANON: u32 = 0x0002;   // Canonical mode (R7-D7: was 0x0100, which
+                                // is TOSTOP in the asm-generic ABI — libc
+                                // canonical-mode checks misfired)
 const L_ECHO: u32   = 0x0008;   // Echo enabled
 const L_ECHOE: u32  = 0x0010;   // Echo erase
 const L_ECHOK: u32 = 0x0020;   // Echo kill
@@ -642,17 +644,19 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 *ptr.offset(2) = 0x000F | 0x0030 | 0x0080 | 0x0400;
                 // c_lflag: use current settings
                 *ptr.offset(3) = lflag;
-                // c_line
-                *ptr.offset(4) = 0;
-                // c_cc[19] - control characters
-                let cc_ptr = ptr.offset(5) as *mut u8;
-                *cc_ptr.offset(0) = 3;   // VINTR = ^C
-                *cc_ptr.offset(1) = 28;  // VQUIT = ^\
-                *cc_ptr.offset(2) = 127; // VERASE = DEL
-                *cc_ptr.offset(3) = 21;  // VKILL = ^U
-                *cc_ptr.offset(4) = 4;   // VEOF = ^D
-                *cc_ptr.offset(5) = 0;   // VTIME
-                *cc_ptr.offset(6) = 1;   // VMIN
+                // R7-D7: musl (asm-generic) layout is c_line: 1 BYTE at 16,
+                // c_cc[32] at 17 — the old u32-at-16/c_cc-at-20 shifted
+                // every control character 3 slots (VINTR's 3 landed in the
+                // VKILL position).
+                *termios_buf.as_mut_ptr().add(16) = 0; // c_line (cc_t = u8)
+                let cc_ptr = termios_buf.as_mut_ptr().add(17);
+                cc_ptr.add(0).write(3);   // VINTR = ^C
+                cc_ptr.add(1).write(28);  // VQUIT = ^\
+                cc_ptr.add(2).write(127); // VERASE = DEL
+                cc_ptr.add(3).write(21);  // VKILL = ^U
+                cc_ptr.add(4).write(4);   // VEOF = ^D
+                cc_ptr.add(5).write(0);   // VTIME
+                cc_ptr.add(6).write(1);   // VMIN
             }
 
             // Copy to user space with SUM bit properly set

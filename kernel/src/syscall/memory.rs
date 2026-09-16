@@ -374,6 +374,18 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> i6
     let pages_needed = base_pages + 2;
     let aligned_length = pages_needed.checked_mul(PAGE_SIZE).unwrap_or(usize::MAX);
 
+    // R7-C6: the +2 boundary pages extend past the syscall-level USER_END
+    // check that validated the RAW length — without this re-check the last
+    // map_user_page writes land in the kernel-shared PGD region (NEW-C1
+    // class). Reject instead of clamping so callers notice.
+    {
+        use crate::arch::riscv64::mm::user_addr;
+        match vaddr_aligned.checked_add(aligned_length) {
+            Some(end) if end <= user_addr::USER_END => {}
+            _ => return -22_i64, // EINVAL
+        }
+    }
+
     // Convert kernel virtual address to physical address
     // fb_info.addr is kernel heap allocated virtual address, need to convert to physical address
     let fb_virt_addr = crate::arch::riscv64::mm::VirtAddr::new(fb_info.addr as usize as u64);
@@ -426,6 +438,9 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> i6
         // Map each page to user page table
         // Calculate the number of valid physical pages in the framebuffer
         let fb_phys_pages = (fb_info.size as usize + PAGE_SIZE - 1) / PAGE_SIZE;
+        // R7-A5/C6: map under the PTE lock, same as the other leaf-PTE
+        // writers.
+        let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
         for i in 0..pages_needed {
             let va = vaddr_aligned + i * PAGE_SIZE;
             // For pages beyond the framebuffer size, map to the last valid physical page
@@ -440,6 +455,7 @@ fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> i6
                 pte_flags,
             );
         }
+        drop(_pte_guard);
 
         // Flush TLB
         core::arch::asm!("sfence.vma");
@@ -644,17 +660,28 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             }
             drop(_pte_guard);
 
-            // Update VMA flags to reflect new permissions
+            // Update VMA flags to reflect new permissions — for EVERY VMA
+            // overlapping the range (R7-A10: only the VMA containing `addr`
+            // was updated, so later demand faults in sibling VMAs silently
+            // remapped pages with the old permissions).
             if let Some(addr_space) = current_task.address_space() {
                 let mut vma_mgr = addr_space.vma_write();
-                if let Some(vma) = vma_mgr.find_mut(crate::mm::page::VirtAddr::new(addr)) {
-                    let perm_bits = (prot & 0x1 != 0) as u32      // PROT_READ
-                        | ((prot & 0x2 != 0) as u32) << 1         // PROT_WRITE
-                        | ((prot & 0x4 != 0) as u32) << 2;        // PROT_EXEC
-                    // Preserve non-permission flags (SHARED, PRIVATE, GROWS*)
-                    let old_flags = vma.flags().bits();
-                    let new_flags = (old_flags & !(0x7)) | perm_bits;
-                    vma.set_flags(crate::mm::vma::VmaFlags::from_bits(new_flags));
+                let mut starts: alloc::vec::Vec<crate::mm::page::VirtAddr> = alloc::vec::Vec::new();
+                for v in vma_mgr.iter() {
+                    if v.end().as_usize() > addr && v.start().as_usize() < addr + length {
+                        starts.push(v.start());
+                    }
+                }
+                for start in starts {
+                    if let Some(vma) = vma_mgr.find_mut(start) {
+                        let perm_bits = (prot & 0x1 != 0) as u32      // PROT_READ
+                            | ((prot & 0x2 != 0) as u32) << 1         // PROT_WRITE
+                            | ((prot & 0x4 != 0) as u32) << 2;        // PROT_EXEC
+                        // Preserve non-permission flags (SHARED, PRIVATE, GROWS*)
+                        let old_flags = vma.flags().bits();
+                        let new_flags = (old_flags & !(0x7)) | perm_bits;
+                        vma.set_flags(crate::mm::vma::VmaFlags::from_bits(new_flags));
+                    }
                 }
             }
 
@@ -780,6 +807,9 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
     use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
     use crate::mm::zone::GfpFlags;
 
+    // R7-A5: serialize leaf-PTE mutations against fork's table walk and COW
+    // faults — the same discipline as the demand-fault paths.
+    let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
     let mut offset = 0usize;
     while offset < size {
         let old_virt = (old_addr + offset) as u64;
@@ -818,6 +848,7 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
         }
         offset += PAGE_SIZE as usize;
     }
+    drop(_pte_guard);
 }
 
 /// sys_mremap - Remap memory

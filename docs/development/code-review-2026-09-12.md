@@ -507,6 +507,15 @@ signal 交付链（H-05/06/07/15、M-01~04）、调度器（P06-P10）、syscall
 
 munmap 采集(读锁)/应用(写锁)仍分两段 TOCTOU（4 MED）；mremap/shmat/framebuffer 映射绕 PTE 锁；munmap 拆分破坏 shm nattch 记账（exit 双 detach）；futex_requeue NR456 盲转发（可能无限睡）；futex2 丢 flags/mask；FUTEX_WAIT|CLOCK_REALTIME 应保持相对（6R 修复过度，Linux 仅 WAIT_BITSET 绝对）；mprotect 多 VMA 只改第一个 VMA 标志；rt_sigpending 过滤反了（应 pending&blocked）；termios ICANON=0x100 应为 0x2、c_line/c_cc 布局错位；nettest 判定掩盖（仅 UDP/TCP 门控 PASS）；framebuffer mmap +2 页逃逸 USER_END 检查且无页引用；vmscan/compaction PTE 写绕锁；set_brk 绕 PTE 锁；scheduler_tick RR 分支 IRQ 内强置 RUNNING；pid_hash RCU 读侧提前退出；单 cfs_rq.curr 多 CPU 记账丢失；handle_cow_fault 独占分支不清 Cow 标志；VmaManager count 原子漂移；epoll_create1 丢 CLOEXEC；pipe2 EMFILE 泄 fd；CLOCK_BOOTTIME/MONOTONIC_RAW 未别名；pselect6 tv_sec 溢出；SyscallNo 死枚举与分发表矛盾；FUTEX_WAKE_OP 桩；mkrootfs 静默省略测试件。
 
+### 17.5 修复记录（2026-09-16，批次 7A/7B-1/7B-2/7C，提交 5afdec1/fa9ea04/abe6b2c/+7C）
+
+- **7A（5 项关键/高危）**：R7-1 mprotect/munmap/madvise(REMOVE) 用户区间界（NEW-C1 类收口）；R7-2 cfs_rq.curr 出队清空（NEW2 根因链主修复——空闲 tick 对已收尸 Task 的 sum_exec_runtime/exec_start 写入）；R7-3 STOPPED 可唤醒（signal_wake_up_state + wake_up 接受 STOPPED；trap.S 出口复查信号使 SIGKILL 语义成立）；R7-4 NR140/141 分发交换复原（getpriority 曾把寄存器残留值写进 nice）；R7-5 VmaManager::add 前向合并吞并检查（verify 1085/3→1088/0）。
+- **7B-1（I/O 与内存安全）**：bio evict 重构（bucket 锁内 count 复查+evicting 标记+摘哈希，再 LRU 摘链——VFS-H13 两阶段修复的复活竞态闭口；get() 跳过 evicting 条目）；page_cache 引用语义重写（页出生 ref=0（原出生=1 且无配对 put=永久钉死、逐出全废）、insert 不再重复加引用、invalidate 钉住页标记 invalidated 由末次 put 释放、get() 对 invalidated 服务 miss）；demand-fault 三处 PTE 锁内 pte-none 复查（CLONE_VM 双缺页双映射）；io_uring enter/register/mmap 三处 private_data 移入 LIFECYCLE_LOCK 内读取；exec 分配幂次余量页即释放（~192KB/exec 泄漏）。
+- **7B-2（调度/IPC 唤醒正确性）**：do_clone 四错误出口全量回退（pid_hash_remove+free_pid）；handle_cow_fault W 必带 R（PROT_NONE+写 → 保留编码活锁）；DL enqueue 双入队守卫；RT/DL enqueue 返回插入布尔 + grq.nr_running 增减配对（含 pick 侧）；NEW-C2 残留 5 处 no-sleep 复查出队；semop/msgsnd/msgrcv 注册后复查（丢失唤醒）；Semaphore::down() 先注册后减（fetch_sub→prepare_to_wait 窗口丢失唤醒）；sendmsg/recvmsg/mmsg iov 总量 4×RW_CHUNK 封顶；pick_next_cpu 6KB 堆分配改 32 槽栈数组（GDB 实捕的 GRQ 锁内分配）。
+- **7C（MED/LOW 扫尾）**：munmap 采集并入同一 vma_write（TOCTOU）；mremap/shmat/framebuffer 映射纳入 PTE 锁；framebuffer +2 页重新校验 USER_END；futex_requeue NR456→ENOSYS（原盲转发可永久睡眠）；futex2 wait/wake 透传 FUTEX2_PRIVATE_FLAG；FUTEX_WAIT|CLOCK_REALTIME 保持相对（6R 过度修复回退，仅 WAIT_BITSET 绝对）；rt_sigpending 改 pending&blocked（原反）；termios ICANON=0x2、c_line 单字节@16、c_cc@17；nettest 判定门控全部组（原仅 UDP/TCP）；handle_cow_fault 独占分支清 Cow 描述符标志；mprotect 跨 VMA 全部更新标志。
+- **已回退**：EXT4_BIG_LOCK→Mutex 转换（7B-2 实测 ~50% 启动挂死——信号量互斥路径需独立审计轮；Spinlock 恢复，互斥语义不变，其抢占失速噪声仍为记录在案的 R7-A2 质量问题）。
+- **门禁结果**：smoke 15/15 ×4+（一度 ~50% 挂死后修复）；verify 1088/0；build/build-release 绿。NEW2 家族仍以已知形态出现（~1/3）：VF-re 空 b_data panic（ext4 write_inode 拿到 len=0 的 BufferHead——第八轮首要线索：BufferHead 释放后复用/双 miss 竞争）、M-s3 非法指令 epc=0xffffffd600af4004（线性映射低位物理地址族）、FE 静默挂。**nettest 判定修复后不再掩盖失败。**
+
 ### 17.5 已核验干净（不重复修）
 
 do_futex CMD_MASK 位剥离正确；futex2 NR454/455 绝对超时换算正确；PTE_MODIFY_LOCK 无递归/逆序；fdtable cloexec 位图健全；epoll_event riscv64 布局正确（非 x86 打包）；NEW-C3/C4/C5/C6 修复确认在位；timer ABI、sigaction/stat/rusage/uname/statfs/fd_set/getdents64 布局核对无误。
