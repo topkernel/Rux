@@ -1695,6 +1695,14 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 /// SMP is enabled but ext4 has no internal concurrency protection
 /// (global journal handle, bitmap RMW, group descriptor lost-update).
 /// One CPU in ext4 at a time until per-inode locking exists.
+///
+/// R7-A2 (reverted): converting this to a semaphore-backed Mutex caused a
+/// ~50% boot-to-smoke hang (tasks lost wakeups / vanished from the run
+/// queue); the sleeping-Mutex path needs its own audit round before it
+/// can carry this lock. The preemption-stall noise it produces as a
+/// spinlock (namei I/O sleeps under it after its 256-iteration spin
+/// window) remains a documented quality issue, not a correctness one:
+/// mutual exclusion holds either way.
 pub static EXT4_BIG_LOCK: crate::sync::spinlock::Spinlock<()> =
     crate::sync::spinlock::Spinlock::new(());
 

@@ -803,6 +803,12 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
     // 2. Deadline — pick earliest-deadline task that can run on this CPU
     if !grq.dl_rq.is_empty() {
         if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id) {
+            // R7-B5: pick removes the task from the queue — pair the count.
+            grq.nr_running.fetch_update(
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::SeqCst,
+                |v| v.checked_sub(1),
+            );
             return task;
         }
     }
@@ -810,6 +816,11 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
     // 3. RT — pick highest-priority task that can run on this CPU
     if !grq.rt_rq.is_empty() {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id) {
+            grq.nr_running.fetch_update(
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::SeqCst,
+                |v| v.checked_sub(1),
+            );
             return task;
         }
     }
@@ -817,6 +828,11 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
     // 4. CFS — pick min-vruntime task that can run on this CPU
     if !grq.cfs_rq.is_empty() {
         if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id) {
+            grq.nr_running.fetch_update(
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::SeqCst,
+                |v| v.checked_sub(1),
+            );
             grq.cfs_rq.set_curr(task);
             let se = (*task).sched_entity();
             let slice_ns = grq.cfs_rq.sched_slice(se);
@@ -841,28 +857,34 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
     // Set task state to RUNNING
     (*task).set_state(TaskState::new(TaskState::RUNNING));
 
-    match policy {
+    // R7-B5: count only actual insertions. The class enqueues all carry a
+    // double-enqueue guard (on_rq); incrementing nr_running unconditionally
+    // while the guard skipped inflated the counter on every redundant
+    // wake — the idle fast path in __schedule then never triggered again.
+    let inserted = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
-            grq.rt_rq.enqueue(task, false);
+            grq.rt_rq.enqueue(task, false)
         }
         SchedPolicy::Deadline => {
             let now = crate::sched::fair::sched_clock();
             (*task).dl_entity().update_deadline(now);
             (*task).dl_entity().replenish_runtime();
-            grq.dl_rq.enqueue(task);
+            grq.dl_rq.enqueue(task)
         }
         SchedPolicy::Normal | SchedPolicy::Batch => {
-            grq.cfs_rq.enqueue(task);
+            grq.cfs_rq.enqueue(task)
         }
         SchedPolicy::Idle => {
             // SCHED_IDLE uses CFS with low weight
             let se = (*task).sched_entity_mut();
             se.load = crate::sched::fair::LoadWeight::new(crate::sched::fair::WEIGHT_IDLEPRIO);
-            grq.cfs_rq.enqueue(task);
+            grq.cfs_rq.enqueue(task)
         }
-    }
+    };
 
-    grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if inserted {
+        grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Enqueue a task and try to wake an idle CPU.

@@ -230,6 +230,11 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         if copy_thread(&mut *task_ptr, &args, parent_regs).is_none() {
             (*current_ptr).remove_child(task_ptr);
             (*task_ptr).free_kernel_stack();
+            // R7-B3: free_task_slot is a plain dealloc — the task stays in
+            // the PID hash and keeps its PID otherwise; a later kill/wait on
+            // that PID dereferences freed memory (dangling pid_hash UAF).
+            crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
+            crate::process::pid::free_pid((*task_ptr).pid());
             crate::sched::free_task_slot(task_ptr);
             return None;
         }
@@ -289,6 +294,9 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                 (*task_ptr).set_address_space(Some(parent_as));
             } else {
                 (*current_ptr).remove_child(task_ptr);
+                // R7-B3: full unwind — see copy_thread error path above.
+                crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
+                crate::process::pid::free_pid((*task_ptr).pid());
                 crate::sched::free_task_slot(task_ptr);
                 return None;
             }
@@ -302,12 +310,18 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                     }
                     Err(_e) => {
                         (*current_ptr).remove_child(task_ptr);
+                        // R7-B3: full unwind — see copy_thread error path.
+                        crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
+                        crate::process::pid::free_pid((*task_ptr).pid());
                         crate::sched::free_task_slot(task_ptr);
                         return None;
                     }
                 }
             } else {
                 (*current_ptr).remove_child(task_ptr);
+                // R7-B3: full unwind — see copy_thread error path above.
+                crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
+                crate::process::pid::free_pid((*task_ptr).pid());
                 crate::sched::free_task_slot(task_ptr);
                 return None;
             }

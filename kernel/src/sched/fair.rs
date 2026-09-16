@@ -594,12 +594,15 @@ impl CfsRunQueue {
     /// then re-inserts them. CFS task counts are typically reasonable so this
     /// works fine without allocating.
     pub fn pick_next_cpu(&mut self, cpu_id: usize) -> Option<*mut crate::process::Task> {
-        // Heap buffer for skipped entries — tasks that fail CPU affinity
-        // check are stashed and re-inserted after the scan completes.
-        // Uses Vec instead of a large stack array to avoid kernel stack overflow
-        // (pick_next_cpu can be deep in the scheduler call chain).
-        let mut skipped: alloc::vec::Vec<(VruntimeKey, *mut crate::process::Task)> =
-            alloc::vec::Vec::with_capacity(256);
+        // R7-G1 (GDB capture): this was Vec::with_capacity(256) — a 6KB
+        // HEAP allocation on every pick, made while the caller holds the
+        // GRQ irqsave lock (alloc failure there panics the scheduler;
+        // contending the global allocator with IRQs off wedged all CPUs).
+        // A fixed stack array of 32 entries needs no allocator at all;
+        // overflow falls back to re-insert-and-give-up exactly like the
+        // old capacity-overflow path. 32 stack slots of 24 bytes = 768B.
+        let mut skipped: [(VruntimeKey, *mut crate::process::Task); 32] =
+            [(VruntimeKey::new(0, 0), core::ptr::null_mut()); 32];
         let mut skip_count = 0usize;
         let mut result = None;
 
@@ -636,8 +639,8 @@ impl CfsRunQueue {
 
             // Not allowed — remove temporarily and stash
             self.tasks_timeline.remove(&key);
-            if skip_count < skipped.capacity() {
-                skipped.push((key, task));
+            if skip_count < skipped.len() {
+                skipped[skip_count] = (key, task);
                 skip_count += 1;
             } else {
                 // Overflow — re-insert and give up (very unlikely)

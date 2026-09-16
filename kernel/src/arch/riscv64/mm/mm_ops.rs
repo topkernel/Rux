@@ -1295,10 +1295,14 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         1
     };
 
-    // If refcount <= 1, we're the only owner - just enable write
+    // If refcount <= 1, we're the only owner - just enable write.
+    // R7-A3: always include R when setting W — after mprotect(PROT_NONE /
+    // PROT_EXEC-only) on a COW page the PTE has no R, and writing a W-only
+    // leaf produces SV39's reserved encoding (V=1,R=0,W=1): every retry
+    // faults forever instead of raising SIGSEGV (fault-path livelock).
     if refcount <= 1 {
         let new_pte = PageTableEntry::from_bits(
-            (old_bits & !cow_flags::COW) | PageTableEntry::W
+            (old_bits & !cow_flags::COW) | PageTableEntry::W | PageTableEntry::R
         );
 
         (*table0).set(vpn0, new_pte);
@@ -1341,7 +1345,9 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         PAGE_SIZE as usize
     );
 
-    let flags = (old_bits & (PageTableEntry::V | PageTableEntry::R | PageTableEntry::X | PageTableEntry::U | PageTableEntry::G | PageTableEntry::A | PageTableEntry::D)) | PageTableEntry::W;
+    // R7-A3: W requires R (reserved-encoding livelock otherwise — see the
+    // exclusive branch above).
+    let flags = (old_bits & (PageTableEntry::V | PageTableEntry::R | PageTableEntry::X | PageTableEntry::U | PageTableEntry::G | PageTableEntry::A | PageTableEntry::D)) | PageTableEntry::W | PageTableEntry::R;
     let new_pte = PageTableEntry::from_bits((new_ppn << 10) | flags);
 
     // Install new PTE before dropping our reference to the old page

@@ -776,10 +776,23 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
             if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
                 return -(errno::EFAULT as i64);
             }
+            // R7-D4: cap the aggregate iovec length at RW_CHUNK — the
+            // kernel heap is 32MB and `access_ok` only bounds each buffer
+            // by USER_END (256GB); a single iov_len near 2^32 panicked the
+            // kernel in vec allocation (SYSA-C1 class, read/write were
+            // already chunked).
+            const MSG_IOV_MAX_TOTAL: usize = crate::syscall::io::RW_CHUNK.saturating_mul(4);
+            if iov_len > MSG_IOV_MAX_TOTAL {
+                return -(errno::EFAULT as i64);
+            }
+
             // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
             buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
             total_len += iov_len;
         }
+    }
+    if total_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
+        return -(errno::EMSGSIZE as i64);
     }
 
     if total_len == 0 {
@@ -832,6 +845,11 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         total_buf_len += iov_len;
+        // R7-D4: bound the aggregate before the vec allocation (heap is
+        // 32MB; access_ok alone admits iov_len up to 256GB).
+        if total_buf_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
+            return -(errno::EMSGSIZE as i64);
+        }
     }
 
     if total_buf_len == 0 {
@@ -950,6 +968,10 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
                     if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
                         return total_sent as i64; // Return partial success
                     }
+                    // R7-D4: bound the aggregate (see sys_sendmsg).
+                    if iov_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
+                        return total_sent as i64;
+                    }
                     // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
                     buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
                 }
@@ -1013,6 +1035,10 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
                     return total_recv as i64;
                 }
                 total_buf_len += iov_len;
+                // R7-D4: bound the aggregate (see sys_recvmsg).
+                if total_buf_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
+                    return total_recv as i64;
+                }
             }
 
             if total_buf_len == 0 {

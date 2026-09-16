@@ -86,9 +86,20 @@ impl DlRunQueue {
     }
 
     /// Enqueue a task
-    pub fn enqueue(&mut self, task: *mut Task) {
+    /// Returns true if the task was actually inserted (R7-B5).
+    pub fn enqueue(&mut self, task: *mut Task) -> bool {
         if task.is_null() {
-            return;
+            return false;
+        }
+
+        // R7-B4: double-enqueue guard. CFS and RT check their entity's
+        // on_rq before inserting; DL did not — two concurrent wake_ups of
+        // the same sleeping SCHED_DEADLINE task (timer timeout on one CPU +
+        // futex_wake on another) both passed the is_sleeping check and
+        // inserted the Task twice: two CPUs picked it and ran one kernel
+        // stack on two harts.
+        if unsafe { (*task).dl_entity().on_rq.load(Ordering::Acquire) } {
+            return false;
         }
 
         // SAFETY: Caller guarantees `task` points to a valid, live Task that
@@ -120,6 +131,7 @@ impl DlRunQueue {
             // Set on_rq flag
             dl.on_rq.store(true, Ordering::Release);
         }
+        true
     }
 
     /// Dequeue a task

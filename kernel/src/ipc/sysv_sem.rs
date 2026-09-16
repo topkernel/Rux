@@ -639,6 +639,47 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
                                 }
                             }
 
+                            // R7-B6: re-check AFTER registering on the wait
+                            // queue. A V that completed between our failed
+                            // try_apply and the registration already ran
+                            // wake_up_all on an empty queue — that wakeup is
+                            // lost and we would sleep forever. With our
+                            // entry now registered, retrying either succeeds
+                            // (skip the sleep entirely) or any later V wakes
+                            // us through the queue.
+                            match try_apply_semops(idx, &sops, semid) {
+                                Ok(()) => {
+                                    // Undo the waiter registration and return.
+                                    {
+                                        let slots = SEM_IDS.slots.lock();
+                                        if let Some(ref entry) = slots[idx] {
+                                            if let Some(ref sems) = *entry.inner.sems.lock() {
+                                                let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                                if block_sem < sems.len() {
+                                                    if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                        sems[block_sem].ncnt.fetch_sub(1, Ordering::Relaxed);
+                                                    } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                        sems[block_sem].zcnt.fetch_sub(1, Ordering::Relaxed);
+                                                    }
+                                                }
+                                            }
+                                            entry.inner.wq.remove(current as *mut _);
+                                        }
+                                    }
+                                    // Registration block set INTERRUPTIBLE —
+                                    // nobody will wake us (we skip sleeping),
+                                    // so restore RUNNING explicitly.
+                                    (*current).set_state(
+                                        crate::process::task::TaskState::new(
+                                            crate::process::task::TaskState::RUNNING,
+                                        ),
+                                    );
+                                    crate::sched::dequeue_task(&*current);
+                                    return 0;
+                                }
+                                Err(_) => { /* still blocked — sleep below */ }
+                            }
+
                             // Arm a wakeup timer for the deadline so a
                             // never-satisfied semaphore still returns
                             // ETIMEDOUT (nothing else would wake us).

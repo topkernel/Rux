@@ -461,6 +461,50 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
             }
         }
 
+        // R7-B6: re-check space AFTER registering on wq_send — a receiver
+        // that freed space between the space check and the registration
+        // already ran wake_up_all on an empty queue (lost wakeup).
+        {
+            let mut sent = false;
+            {
+                let slots = MSG_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    if !entry.deleted {
+                        let cbytes = entry.inner.cbytes.load(Ordering::Relaxed);
+                        let qbytes = entry.inner.qbytes.load(Ordering::Relaxed);
+                        if cbytes + msgsz <= qbytes {
+                            let mut messages = entry.inner.messages.lock();
+                            messages.push(Msg { mtype, data: core::mem::take(&mut data) });
+                            entry.inner.cbytes.fetch_add(msgsz, Ordering::Relaxed);
+                            entry.inner.qnum.fetch_add(1, Ordering::Relaxed);
+                            entry.inner.msg_stime.store(ipc_current_time(), Ordering::Relaxed);
+                            entry.inner.msg_lspid.store(get_current_pid(), Ordering::Relaxed);
+                            entry.inner.wq_recv.wake_up_all();
+                            sent = true;
+                        }
+                    }
+                }
+            }
+            if sent {
+                let current = crate::sched::current().unwrap();
+                {
+                    let slots = MSG_IDS.slots.lock();
+                    if let Some(ref entry) = slots[idx] {
+                        entry.inner.wq_send.remove(current as *mut _);
+                    }
+                }
+                unsafe {
+                    (*current).set_state(
+                        crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::RUNNING,
+                        ),
+                    );
+                }
+                crate::sched::dequeue_task(&*current);
+                return 0;
+            }
+        }
+
         crate::sched::schedule();
 
         // Clean up wait queue entry after wakeup
@@ -634,6 +678,42 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                         ),
                     );
                 }
+            }
+        }
+
+        // R7-B6: re-check for a matching message AFTER registering on
+        // wq_recv — a sender landing between the match scan and the
+        // registration woke an empty queue (lost wakeup).
+        {
+            let mut retry_now = false;
+            {
+                let slots = MSG_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    if !entry.deleted {
+                        let messages = entry.inner.messages.lock();
+                        if find_msg_match(&messages, msgtyp, msgflg).is_some() {
+                            retry_now = true;
+                        }
+                    }
+                }
+            }
+            if retry_now {
+                let current = crate::sched::current().unwrap();
+                {
+                    let slots = MSG_IDS.slots.lock();
+                    if let Some(ref entry) = slots[idx] {
+                        entry.inner.wq_recv.remove(current as *mut _);
+                    }
+                }
+                unsafe {
+                    (*current).set_state(
+                        crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::RUNNING,
+                        ),
+                    );
+                }
+                crate::sched::dequeue_task(&*current);
+                continue;
             }
         }
 

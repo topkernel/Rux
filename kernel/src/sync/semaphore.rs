@@ -77,46 +77,46 @@ impl Semaphore {
     /// # }
     /// ```
     pub fn down(&self) {
-        // Attempt fast-path acquisition first.
-        let old = self.count.fetch_sub(1, Ordering::Acquire);
-        if old > 0 {
-            return;
-        }
-
-        // Slow path: semaphore not available, need to wait.
-        // Use prepare_to_wait to atomically add to wait queue AND set state,
-        // preventing the lost-wakeup race (see wait_event_interruptible! macro).
-        loop {
-            let current = match crate::sched::current() {
-                Some(task) => task,
-                None => {
-                    // Cannot get current task — undo the decrement and return.
-                    self.count.fetch_add(1, Ordering::Release);
-                    return;
-                }
-            };
-
-            self.wait.prepare_to_wait(current, false, false);
-
-            // Re-check after prepare_to_wait (state is now UNINTERRUPTIBLE).
-            // If count went positive, our initial decrement is balanced — return.
-            if self.count.load(Ordering::Acquire) > 0 {
-                self.wait.finish_wait(current);
+        // R7-B6b: register on the wait queue BEFORE decrementing. The old
+        // order (fetch_sub, then prepare_to_wait) had a lost-wakeup window:
+        // an up() landing between them incremented the count, saw old >= 0
+        // (or an empty queue) and woke NOBODY — our own fetch_sub had
+        // already consumed its +1, so the wake was lost forever and we
+        // slept eternally. Registering first means any up() that pairs
+        // with our decrement finds us on the queue.
+        let current = match crate::sched::current() {
+            Some(task) => task,
+            None => {
+                // No current task (early boot / IRQ context): fall back to
+                // the unconditional decrement — callers in this context
+                // must guarantee the count is available.
+                self.count.fetch_sub(1, Ordering::Acquire);
                 return;
             }
+        };
 
-            // Yield CPU — task removed from runqueue by __schedule()
-            crate::arch::riscv64::cpu::restore_irq(true);
-            crate::sched::schedule();
+        // Register + mark UNINTERRUPTIBLE (atomically under the waitqueue
+        // lock — see wait_event_interruptible!).
+        self.wait.prepare_to_wait(current, false, false);
 
-            // Woken up — finish_wait restores RUNNING and removes from queue.
+        let old = self.count.fetch_sub(1, Ordering::Acquire);
+        if old > 0 {
+            // Acquired on the fast path — unregister and go.
             self.wait.finish_wait(current);
-
-            // Our initial fetch_sub(1) already reserved a slot.  The up() that
-            // woke us incremented count by one, so the count is now correct.
-            // No need to re-acquire — just return.
+            // finish_wait restored RUNNING; a concurrent up() may ALSO have
+            // seen us queued+sleeping and enqueued us (NEW-C2 family) —
+            // undo that (per-class on_rq guards make it a no-op otherwise).
+            crate::sched::dequeue_task(&*current);
             return;
         }
+
+        // Slow path: our decrement is queued; the pairing up() will wake us.
+        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::sched::schedule();
+
+        // Woken up — finish_wait restores RUNNING and removes from queue.
+        // The wake implies an up() paired with our reservation.
+        self.wait.finish_wait(current);
     }
 
     /// P operation (interruptible)

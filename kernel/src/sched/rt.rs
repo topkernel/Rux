@@ -118,9 +118,12 @@ impl RtRunQueue {
     }
 
     /// Enqueue a task
-    pub fn enqueue(&mut self, task: *mut Task, head: bool) {
+    /// Returns true if the task was actually inserted (R7-B5: false when
+    /// the double-enqueue guard skipped it, so the caller keeps
+    /// grq.nr_running balanced).
+    pub fn enqueue(&mut self, task: *mut Task, head: bool) -> bool {
         if task.is_null() {
-            return;
+            return false;
         }
 
         // SAFETY: caller guarantees task is a valid pointer; null check above;
@@ -129,7 +132,7 @@ impl RtRunQueue {
             let t = &mut *task;
             let raw = t.rt_priority() as usize;
             if raw >= MAX_RT_PRIO {
-                return;
+                return false;
             }
             // Bitmap index is INVERTED: bit 0 = priority 99 (highest). The
             // old code stored the raw priority, making lower numbers win —
@@ -140,7 +143,7 @@ impl RtRunQueue {
             // Guard against double-enqueue: if the task is already on a
             // runqueue, skip the insertion to avoid list corruption.
             if t.rt_entity().is_on_rq() {
-                return;
+                return false;
             }
 
             // Add to priority list
@@ -173,6 +176,7 @@ impl RtRunQueue {
             // Set on_rq flag
             t.rt_entity().set_on_rq(true);
         }
+        true
     }
 
     /// Dequeue a task
