@@ -220,7 +220,7 @@ impl DlRunQueue {
     /// Iterates by temporarily removing non-matching entries to inspect
     /// subsequent ones, then putting them back. DL task counts are typically
     /// very small so this is fine.
-    pub fn pick_next_cpu(&mut self, cpu_id: usize) -> Option<*mut Task> {
+    pub fn pick_next_cpu(&mut self, cpu_id: usize, prev: *mut Task) -> Option<*mut Task> {
         // Stash entries that don't match, then re-insert them after.
         let mut skipped: [(DlKey, *mut Task); 64] = [(DlKey { deadline: 0, task_id: 0 }, core::ptr::null_mut()); 64];
         let mut skip_count = 0usize;
@@ -238,7 +238,11 @@ impl DlRunQueue {
 
             // SAFETY: `task` was obtained from self.tasks which only stores
             // valid, live Task pointers inserted by enqueue().
-            let allowed = unsafe { (*task).cpu_allowed(cpu_id) };
+            // R8-1b: skip tasks whose context is not yet saved, except
+            // the switching CPU's own prev (fast path).
+            let allowed = unsafe {
+                (*task).cpu_allowed(cpu_id) && (!(*task).on_cpu() || task == prev)
+            };
             if allowed {
                 // Found a match — remove and return it
                 self.tasks.remove(&key);

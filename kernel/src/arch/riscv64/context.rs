@@ -99,6 +99,15 @@ __switch_to:
     csrr  t0, sstatus
     sd    t0, {thread_sum}(a3)
 
+    # NEW2 root cause fix (R8-1b): prev's full context is now saved — make
+    # it pickable by other CPUs. The release fence guarantees that a CPU
+    # observing on_cpu == 0 also observes the register stores above (its
+    # load of thread.sp will see the values stored here).
+    fence rw, rw
+    li    t0, {task_on_cpu}
+    add   t0, a0, t0
+    sd    zero, 0(t0)
+
     # Restore next's context
     # Restore SUM bit: clear first, then conditionally set.
     # Using only csrs leaks the SUM bit — if prev had SUM=1 and
@@ -145,6 +154,7 @@ __switch_to:
 .size __switch_to, . - __switch_to
 "#,
     task_thread = const core::mem::offset_of!(Task, thread),
+    task_on_cpu = const core::mem::offset_of!(Task, ti_on_cpu),
     thread_ra = const core::mem::offset_of!(crate::arch::riscv64::thread::ThreadStruct, ra),
     thread_sp = const core::mem::offset_of!(crate::arch::riscv64::thread::ThreadStruct, sp),
     thread_s0 = const core::mem::offset_of!(crate::arch::riscv64::thread::ThreadStruct, s),

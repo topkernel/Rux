@@ -732,8 +732,9 @@ unsafe fn __schedule() {
         enqueue_task_locked(&mut *grq_guard, prev);
     }
 
-    // Pick next task
-    let next = pick_next_task(&mut *grq_guard, cpu_id);
+    // Pick next task (R8-1b: prev is passed so the switching CPU may
+    // re-pick itself through the next == prev fast path).
+    let next = pick_next_task(&mut *grq_guard, cpu_id, prev);
 
     // Capture next_pid while we still hold references (before unlock)
     let next_pid = if !next.is_null() { (*next).pid() } else { 0 };
@@ -790,7 +791,7 @@ unsafe fn __schedule() {
 ///
 /// Checks in strict priority order: stop → DL → RT → CFS → idle.
 /// Respects CPU affinity (cpus_allowed).
-unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
+unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Task) -> *mut Task {
     let pcpu = cpu_state(cpu_id);
 
     // 1. Stop task (per-CPU, highest priority)
@@ -801,7 +802,8 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
 
     // 2. Deadline — pick earliest-deadline task that can run on this CPU
     if !grq.dl_rq.is_empty() {
-        if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id) {
+        if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id, prev) {
+            mark_picked_on_cpu(task);
             // R7-B5: pick removes the task from the queue — pair the count.
             grq.nr_running.fetch_update(
                 core::sync::atomic::Ordering::SeqCst,
@@ -814,7 +816,8 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
 
     // 3. RT — pick highest-priority task that can run on this CPU
     if !grq.rt_rq.is_empty() {
-        if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id) {
+        if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id, prev) {
+            mark_picked_on_cpu(task);
             grq.nr_running.fetch_update(
                 core::sync::atomic::Ordering::SeqCst,
                 core::sync::atomic::Ordering::SeqCst,
@@ -826,7 +829,8 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
 
     // 4. CFS — pick min-vruntime task that can run on this CPU
     if !grq.cfs_rq.is_empty() {
-        if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id) {
+        if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id, prev) {
+            mark_picked_on_cpu(task);
             grq.nr_running.fetch_update(
                 core::sync::atomic::Ordering::SeqCst,
                 core::sync::atomic::Ordering::SeqCst,
@@ -843,6 +847,18 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize) -> *mut Task {
 
     // 5. Nothing runnable → idle task
     pcpu.idle
+}
+
+/// Mark a picked task on-CPU (R8-1b). Called under the GRQ lock; __switch_to
+/// clears it after the task's outgoing context is saved. Other CPUs' picks
+/// skip on-CPU tasks, so a RUNNING-but-unsaved task can never be picked
+/// twice — the NEW2 root cause. The idle task is never marked (it is not
+/// on the class queues; clearing a never-set flag is a harmless no-op).
+#[inline]
+unsafe fn mark_picked_on_cpu(task: *mut Task) {
+    if !task.is_null() {
+        (*task).set_on_cpu(true);
+    }
 }
 
 /// Enqueue a task into the global RQ (called with GRQ lock held).

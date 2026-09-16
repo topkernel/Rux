@@ -385,6 +385,16 @@ pub struct Task {
     /// CPU affinity mask — bit i set = CPU i allowed
     cpus_allowed: core::sync::atomic::AtomicU32,
 
+    /// NEW2 root-cause fix (R8-1b): true from pick time until __switch_to
+    /// saves this task's context. A queued task with on_cpu set is not
+    /// pickable by OTHER CPUs — the old code let another CPU pick a
+    /// RUNNING task after __schedule unlocked the GRQ but before
+    /// context_switch saved its sp/ra, resuming it from a STALE stack
+    /// pointer (one task, two CPUs, one kernel stack — NEW2's double
+    /// frees, len-0 BufferHeads, saved-ra corruption, fdtable teardown).
+    /// The CPU switching the task out may still re-pick ITSELF (fast path).
+    pub ti_on_cpu: core::sync::atomic::AtomicBool,
+
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
     ti_a0: core::sync::atomic::AtomicU64,
     ti_a1: core::sync::atomic::AtomicU64,
@@ -663,6 +673,7 @@ impl Task {
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
             cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
+            ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
             ti_a0: core::sync::atomic::AtomicU64::new(0),
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
@@ -774,6 +785,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, cpus_allowed)) as *mut core::sync::atomic::AtomicU32,
             core::sync::atomic::AtomicU32::new(!0u32),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
 
         // Use ptr::write and offset_of to safely initialize each field
@@ -1035,6 +1050,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, cpus_allowed)) as *mut core::sync::atomic::AtomicU32,
             core::sync::atomic::AtomicU32::new(!0u32),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
 
         // Write each field
@@ -1813,6 +1832,19 @@ impl Task {
     #[inline]
     pub fn cpus_allowed(&self) -> u32 {
         self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// R8-1b: on-CPU flag — set at pick time, cleared by __switch_to after
+    /// this task's context is saved. Other CPUs' picks skip on-CPU tasks;
+    /// the CPU switching the task out may re-pick itself (no restore).
+    #[inline]
+    pub fn on_cpu(&self) -> bool {
+        self.ti_on_cpu.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_on_cpu(&self, v: bool) {
+        self.ti_on_cpu.store(v, core::sync::atomic::Ordering::Release);
     }
 
     /// Set CPU affinity mask.

@@ -593,7 +593,7 @@ impl CfsRunQueue {
     /// Temporarily removes non-matching entries to inspect subsequent ones,
     /// then re-inserts them. CFS task counts are typically reasonable so this
     /// works fine without allocating.
-    pub fn pick_next_cpu(&mut self, cpu_id: usize) -> Option<*mut crate::process::Task> {
+    pub fn pick_next_cpu(&mut self, cpu_id: usize, prev: *mut crate::process::Task) -> Option<*mut crate::process::Task> {
         // R7-G1 (GDB capture): this was Vec::with_capacity(256) — a 6KB
         // HEAP allocation on every pick, made while the caller holds the
         // GRQ irqsave lock (alloc failure there panics the scheduler;
@@ -617,7 +617,13 @@ impl CfsRunQueue {
             };
 
             // SAFETY: task is from the BTreeMap, a valid pointer stored during enqueue.
-            let allowed = unsafe { (*task).cpu_allowed(cpu_id) };
+            // R8-1b: skip tasks still marked on-CPU (context not saved —
+            // picking one would resume a STALE thread.sp) UNLESS it is the
+            // switching CPU's own prev, which re-picks itself only via the
+            // next == prev early return (no context restore happens).
+            let allowed = unsafe {
+                (*task).cpu_allowed(cpu_id) && (!(*task).on_cpu() || task == prev)
+            };
             if allowed {
                 // Found a match — remove and return it
                 self.tasks_timeline.remove(&key);

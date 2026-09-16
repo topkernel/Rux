@@ -282,7 +282,7 @@ impl RtRunQueue {
     /// Pick the highest-priority RT task that is allowed to run on `cpu_id`.
     /// Scans from highest (0) to lowest (99) priority using the bitmap directly,
     /// without collecting into a Vec.
-    pub fn pick_next_cpu(&mut self, cpu_id: usize) -> Option<*mut Task> {
+    pub fn pick_next_cpu(&mut self, cpu_id: usize, prev: *mut Task) -> Option<*mut Task> {
         // Iterate bitmap words
         for word_idx in 0..2 {
             let word = self.bitmap[word_idx].load(Ordering::Acquire);
@@ -308,7 +308,13 @@ impl RtRunQueue {
                     };
 
                     // SAFETY: task derived from queue above; cpu_allowed is a simple field read.
-                    let allowed = unsafe { (*task).cpu_allowed(cpu_id) };
+                    // R8-1b: skip tasks whose context is not yet saved (a
+                    // pick would resume a STALE thread.sp — NEW2 root
+                    // cause), except the switching CPU's own prev (fast
+                    // path: next == prev early-returns without a restore).
+                    let allowed = unsafe {
+                        (*task).cpu_allowed(cpu_id) && (!(*task).on_cpu() || task == prev)
+                    };
 
                     // Save next before potential dequeue
                     // SAFETY: pos is a valid ListHead pointer from the queue; next is saved before dequeue mutates the list.
