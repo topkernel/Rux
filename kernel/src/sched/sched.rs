@@ -331,7 +331,16 @@ static DEFERRED_EXIT_NOTIFY_PID: [core::sync::atomic::AtomicI32; MAX_CPUS] = [
 pub fn defer_exit_notify(parent_pid: u32) {
     let cpu = arch::cpu_id() as usize;
     if cpu < MAX_CPUS {
-        DEFERRED_EXIT_NOTIFY_PID[cpu].store(parent_pid as i32, core::sync::atomic::Ordering::Relaxed);
+        // R11-4: single-slot overwrite lost notifications when two tasks
+        // exited on the same CPU before a context switch (echo + cat in a
+        // pipeline) — the parent's SIGCHLD vanished and mrsh's wait hung.
+        // Fire any pending predecessor INLINE (we are in syscall context,
+        // post-preempt-enable; send_signal + wake are safe here) before
+        // taking the slot.
+        let old = DEFERRED_EXIT_NOTIFY_PID[cpu].swap(parent_pid as i32, core::sync::atomic::Ordering::Relaxed);
+        if old > 0 && old as u32 != parent_pid {
+            process_deferred_exit_pid(old as u32);
+        }
     }
 }
 
@@ -343,6 +352,16 @@ pub fn defer_exit_notify(parent_pid: u32) {
 /// Called with the CPU that the exiting task was running on (captured
 /// before context_switch), because cpu_id() returns the new task's
 /// CPU after the switch.
+/// R11-4: deliver a specific pending notify inline (slot chaining).
+fn process_deferred_exit_pid(parent_pid: u32) {
+    use crate::signal::Signal;
+    let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
+    let parent = crate::process::pid_hash::pid_hash_lookup(parent_pid);
+    if !parent.is_null() {
+        let _woken = unsafe { (*parent).wait_chldexit.wake_up_all() };
+    }
+}
+
 fn process_deferred_exit_notify_cpu(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;

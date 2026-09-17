@@ -240,13 +240,17 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
     // R10-1: same discipline as WaitQueueHead::wake_up_all — hold the RCU
     // read side across the deferred wakes (a sleeper woken by a signal in
     // this window could be reaped before we deref). wake_up never sleeps.
-    crate::sync::rcu::rcu_read_lock();
     for task in wake_list {
         if !task.is_null() {
-            Task::wake_up(task);
+            // R11-3: PID-identity revalidation (see wait.rs) — the RCU
+            // wrap variant regressed and was reverted.
+            let pid = unsafe { (*task).pid() };
+            let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
+            if fresh == task {
+                Task::wake_up(task);
+            }
         }
     }
-    crate::sync::rcu::rcu_read_unlock();
 
     ret
 }
@@ -789,13 +793,17 @@ pub fn futex_requeue(
 
     // R10-1: hold the RCU read side across the deferred wakes (see
     // futex_wake above).
-    crate::sync::rcu::rcu_read_lock();
     for task in wake_list {
         if !task.is_null() {
-            Task::wake_up(task);
+            // R11-3: PID-identity revalidation (see wait.rs) — the RCU
+            // wrap variant regressed and was reverted.
+            let pid = unsafe { (*task).pid() };
+            let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
+            if fresh == task {
+                Task::wake_up(task);
+            }
         }
     }
-    crate::sync::rcu::rcu_read_unlock();
 
     ret
 }

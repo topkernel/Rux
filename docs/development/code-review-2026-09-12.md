@@ -592,6 +592,12 @@ M1 补 new_task_at 缺失字段（wait_chldexit 等全量）；schedule_tail 处
 wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueue_task_locked 崩）尝试以 RCU 读侧包裹；**共享核心包裹实测引入新崩溃类（4/6）已回退**（专项重做：call_rcu 化 free_task_slot）；virtio 描述符限流修正 off-by-one（in_flight*3+3>queue_size）；alloc_desc 失败路径补 dealloc；msg 循环顶部 seq 复验（R9-11 作用域漏洞）；new_task_at 栈分配失败传播（不再带 sp=0 继续）；R9-16 restore_irq 真正落地；R9-18 全量 sfence 回退（sfence.vma 是 hart-local，全量无意义——远程 shootdown 为已记录开口项）。
 
 ### 20.3 门禁与遗留
+### 20.4 第十一轮（2026-09-17 续）：S2 定罪 + 四项修复
+
+**S2（空对象 CAS @0x30）定罪**：`evict_one` Phase 2 的哈希链走查**无"未找到即中止"**——被延迟的第二个逐出者在另一 CPU 完整逐出并释放+复用该 victim 后，对已释放内存做 count/evicting 检查、remove_from_lru 写入复用块、`is_dirty()` 对 NULL+0x30 CAS（即 S2 panic）、`Box::from_raw` 二次释放（S1 的堆别名喂料）。反汇编证明 +0x30 宿主只有 BufferHead.b_state 与 Dentry.children，后者全程 Arc 不可空。修复：**在桶锁内以"存在于哈希链"为存活判据**（先走查、未找到即返回；pin 复查移到摘链后、被钉时回插头部中止）。
+S1（内核控制流跳用户地址）：sigreturn/信号帧链全量核验**干净**（SPP/SPIE/SIE 消毒在两条帧路径都在位）——S1 为下游腐蚀：deferred-wake UAF（已收 PID 复验收窄）或 bio 双释放（本轮已闭）。附带修复：`defer_exit_notify` 单槽覆盖改为就地补发（管道双退出丢 SIGCHLD→mrsh 挂）；exec 的 pt_regs 在函数入口一次性捕获（此前 I/O 迁移 CPU 后重读 per-CPU 槽会写坏外任务帧）；wake 唤醒列表按 PID 哈希一致性复验（RCU 包裹方案已证回归并回退）。
+**门禁（8 轮）**：nettest 5/8；KERNPANIC 4/8 但签名收敛为两族：children-list NULL 走查（do_wait 闭包，3 次）与跳用户地址（1 次）；TIMERS 锁楔 2/8（`echo PP|cat` 后）；bio 死 bh 探针 0/8（R11-1 后死条目不再滞留）。**遗留（第十二轮）**：①children-list 归零节点仍有源（怀疑残余 deferred-wake UAF 窗口或未发现的第二个引擎——下一轮应给 free_task_slot 上 call_rcu 并加 poison 标记定位）；②TIMERS 锁楔的持有者（GDB 实捕 + 持有者追踪）；③mrsh 路径 EBADF 复现 1 次（run4，与 nettest PIPE2 修复并存——疑 mrsh 特有 close 序列或瞬态 Arc 计数窗口）。
+
 
 6/6 nettest 全 PASS；kpanic 4/6 但全部发生在**其后**的 mrsh `echo PP | cat` 阶段，两种形态各 2/6：
 1. **内核控制流跳到用户地址**（epc=0x3869c/ra=0x31938 均为用户地址，SPP=1）——NEW2 原始劫持家族的低频残留在 mrsh fork/exec 路径；

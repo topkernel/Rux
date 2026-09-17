@@ -462,24 +462,18 @@ impl BlockCache {
 
         unsafe {
             let mut bucket = self.buckets[bucket_idx].lock();
-            if (*(*victim).bh).count() != 0 {
-                // Pinned between Phase 1 and Phase 2: leave everything
-                // linked and report "no victim" — the caller retries and
-                // this CPU does not free a buffer someone holds.
-                return false;
-            }
-            // R8-2: two CPUs can pick the SAME LRU-tail victim in Phase 1
-            // (it only looks, no unlink). Without this recheck both would
-            // set evicting, both unlink from the LRU (second remove wipes
-            // head/tail) and both free the entry (double Box::from_raw).
-            if (*victim).evicting {
-                return false;
-            }
-            (*victim).evicting = true;
-
-            // Unlink from hash chain
+            // R11-1 (S2 root cause): PRESENCE IS AUTHORITATIVE. Every free
+            // path unlinks from the hash under this same bucket lock, so
+            // "found in chain" is the proof the victim is still alive. The
+            // previous order read count/evicting FIRST — a CPU delayed past
+            // another CPU's full eviction (unhash + free + heap reuse)
+            // then checked flags on freed memory, fell through the walk
+            // that no longer found the victim (no abort!), wrote
+            // remove_from_lru into the reused block, CAS'd b_state on
+            // NULL+0x30 (the observed kernel panic) and double-freed.
             let mut prev: Option<*mut CacheEntry> = None;
             let mut current = bucket.head;
+            let mut present = false;
             while let Some(cp) = current {
                 if cp == victim {
                     if let Some(pp) = prev {
@@ -487,11 +481,27 @@ impl BlockCache {
                     } else {
                         bucket.head = (*cp).hash_next;
                     }
+                    present = true;
                     break;
                 }
                 prev = Some(cp);
                 current = (*cp).hash_next;
             }
+            if !present {
+                // Another CPU already evicted (and possibly freed) this
+                // victim — do not touch it again.
+                return false;
+            }
+            // Alive (presence under the lock): now the pin/flag rechecks
+            // are reads of valid memory.
+            if (*(*victim).bh).count() != 0 {
+                // Pinned between Phase 1 and Phase 2 — but we already
+                // unlinked it! Re-link at the head and abort.
+                (*victim).hash_next = bucket.head;
+                bucket.head = Some(victim);
+                return false;
+            }
+            (*victim).evicting = true;
         }
         // bucket lock released; entry is unpinnable and unhashed
 

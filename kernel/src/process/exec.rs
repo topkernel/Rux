@@ -38,6 +38,18 @@ pub(crate) fn do_execve_elf(
         PAGE_SIZE, PageTableEntry, phys_to_virt, PhysAddr,
     };
 
+    // R11-5: capture the trap frame ONCE, before any blocking I/O below.
+    // current_pt_regs() is a PER-CPU slot holding the frame of the LAST
+    // trap on THIS cpu — exec does bread() -> schedule() and can migrate;
+    // re-reading it at the end wrote {epc,sp,status,...} into whatever
+    // foreign task trapped on the landing CPU. The captured pointer is
+    // this task's own kernel-stack frame and stays valid across migration.
+    let current_regs = {
+        use crate::arch::riscv64::trap::current_pt_regs;
+        use crate::arch::riscv64::pt_regs::PtRegs;
+        current_pt_regs() as *mut PtRegs
+    };
+
     // Close file descriptors with close-on-exec flag
     // SAFETY: task_ptr points to the current task which is valid throughout execve.
     if let Some(fdtable) = unsafe { (*task_ptr).try_fdtable() } {
@@ -733,10 +745,7 @@ pub(crate) fn do_execve_elf(
         // ===== Return to user mode immediately after successful execve =====
         // After execve returns, sret will jump to new program entry
 
-        // Get current trap frame
-        use crate::arch::riscv64::trap::current_pt_regs;
-        use crate::arch::riscv64::pt_regs::PtRegs;
-        let current_regs = current_pt_regs() as *mut PtRegs;
+        // R11-5: use the entry-captured frame (see fn head).
         if current_regs.is_null() {
             // No trap frame, this is the init process case
             // Need to return via ret_from_fork

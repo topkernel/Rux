@@ -170,8 +170,21 @@ impl WaitQueueHead {
         // (grace-period stalls reordering exit vs in-flight fdtable use).
         // The deferred-wake UAF remains a documented open item (review
         // §20); the pipe last-ref fix alone held a 3/3 clean gate.
+        // R11-3 (deferred-wake UAF, S1 feed): the collected raw Task*
+        // can be reaped and freed between collection and here (woken by a
+        // signal, exited, release_task'd). Re-validate liveness by PID
+        // identity — pid_hash_remove runs BEFORE the free, so a task that
+        // still hashes to its own PID is alive. Cheap u32 reads of
+        // possibly-freed (still-mapped, page-granular buddy) memory; a
+        // mismatch skips the wake. (The RCU-wrap variant of this fix
+        // regressed and was reverted; full fix is call_rcu-deferred
+        // free_task_slot.)
         for task in wake_list {
-            crate::sched::wake_up_process(task);
+            let pid = unsafe { (*task).pid() };
+            let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
+            if fresh == task {
+                crate::sched::wake_up_process(task);
+            }
         }
 
         awakened
