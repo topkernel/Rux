@@ -601,6 +601,11 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.11 第十七轮：归零引擎证据锁定 free 侧清白 + A/C/F5 落地与自纠
+
+**agent 结论（工具证据，非推理）**：受害 Task 页**从未被释放**（GDB 事件追踪 insert-only；毒化从未出现=free_task_slot 从未运行于其上）；free 事件环记录每页 2-28 次 order-0 free 全部与分配配对；所有权位图守卫零触发。**双主交接在 alloc 侧或直接野写**——这是最后一步（下一仪器：alloc 侧环+硬件观察点）。归零的"写手"是共享后轮转的最高频 order-0 消费者：**virtio-blk 同步 I/O 每次 2 个整页**（16B header+1B status 各占一页！）、MB 级 Vec 弹跳、new_task_at 占位写（state=0/pid=0 正是"归零子节点"）。
+**落地修复**：C——virtio PCI 同步 I/O header+resp 合并为单次 64B 分配（消灭 2 页/I/O 火龙）；A——堆 buddy meta 全块标记（R9-14 tripwire 的堆侧 OnFreelist 同类洞）；A2——init_block(false) 也清全块（A 初版漏此路径，保留半块内部页 free=1 让 tripwire 吞掉合法 free→泄漏→高压分配失败=create/P2b/rename 偶发——门禁实测自纠）；F5 顺序修正（先写回死 inode 再释放块/inode 号，原顺序写回已释放 inode）；B 所有权拒绝守卫因堆外页位图别名误拒合法 free（r17 门禁回归：pp 2/8+Arc drop 崩）已撤回拒绝保留 mark/unmark。
+**门禁（A2 后 6 轮）**：kpanic 0、wedge 0、**rename FAIL 0/6**（F5 顺序+A2 消除）、nettest 4/6、pp 4/6；run2/3 为启动期残留（栈溢出 task 305 / Arc::clone 内非法指令——归零引擎的启动期形态，alloc 侧交接待第十八轮的 alloc 环+观察点直接命名）。
 ### 20.10 第十六轮：S-R（跳线性映射）定罪 + OnFreelist 权威判据 + 三层复活防御
 
 **S-R 全链定罪（专项 agent，12 轮实测）**：此前地址换算前提就错了——`VA_PA_OFFSET=0xffffffd580000000`，epc 0xffffffd601331000 = **物理 0x81331000，内核堆区间内**；历代 0xaf9000 族 = slab 区间指针。即"跳小整数"实为**跳到复用的堆/slab 分配地址**。机制链：**synchronize_rcu 是结构性空操作**（RCU_GEN 仅由 call_rcu 递增，而 call_rcu 零调用者）→ release_task 的宽限期不覆盖任何在飞读者 → 未钉住的 pid_hash_lookup 返回已释放 Task → 毒化字 0xDEADBEEF 恰好通过 is_sleeping()（bit0=1）→ **死指针入 CFS BTreeMap** → pick 取出 → __switch_to 恢复复用页 +440 偏移处的堆指针为 ra → ret 跳转。12 轮实测 7 崩全为此上游族（children 走查 NULL×3、pid_hash 链走 0x6cb08、Arc<SignalStruct> drop 坏指针、btree navigate 崩）。

@@ -190,6 +190,17 @@ impl BuddyAllocator {
         meta.free = if free { 1 } else { 0 };
         meta.prev = 0;
         meta.next = 0;
+        // R17-A2: keep EVERY page of the block consistent — the split path
+        // calls init_block(.., false) on the retained half; leaving its
+        // interior pages at the previous add's free=1 made the R9-14
+        // tripwire swallow legitimate frees (leak → alloc failures under
+        // fork pressure: create/P2b/rename flakiness).
+        let mark: u8 = if free { 1 } else { 0 };
+        for i in 1..(1usize << order) {
+            let m2 = self.meta.get_mut(page_idx + i);
+            m2.order = order as u8;
+            m2.free = mark;
+        }
     }
 
     /// Add block to free list
@@ -203,6 +214,14 @@ impl BuddyAllocator {
             let meta = self.meta.get_mut(page_idx);
             meta.order = order as u8;
             meta.free = 1;
+        }
+        // R17-A: mark EVERY page of the block — interior pages kept stale
+        // free=0 after merges/splits, letting second frees pass silently
+        // (heap analog of the zone OnFreelist bug).
+        for i in 1..(1usize << order) {
+            let m2 = self.meta.get_mut(page_idx + i);
+            m2.order = order as u8;
+            m2.free = 1;
         }
 
         // Get current free list head
@@ -227,6 +246,15 @@ impl BuddyAllocator {
         // Boundary check
         if order > MAX_ORDER {
             return;  // Cannot handle blocks exceeding maximum order
+        }
+
+        // R17-A: clear the free mark on EVERY page of the block.
+        {
+            let meta = self.meta.get_mut(page_idx);
+            meta.free = 0;
+        }
+        for i in 1..(1usize << order) {
+            self.meta.get_mut(page_idx + i).free = 0;
         }
 
         let prev_idx = self.meta.get(page_idx).prev as usize;
@@ -426,6 +454,14 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         if self.initialized.load(Ordering::Acquire) == 0 {
             return;
         }
+
+        // R17-B withdrawn from the refuse path: the bitmap index aliases
+        // for pages outside the heap's 8192-page window (stacks, page
+        // tables), refusing legitimate frees and bleeding the machine to
+        // the crashes seen in the r17 gate. The bitmap itself proved the
+        // free side clean (never fired while corruption reproduced), so
+        // the guard bought nothing; mark/unmark kept for the alloc-side
+        // hunt next round.
 
         let size = layout.size();
         let align = layout.align();

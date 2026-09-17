@@ -637,6 +637,33 @@ pub fn init() {
 
 // ==================== Task Allocation ====================
 
+/// R17-B: live-Task-page ownership bitmap — any heap free covering a page
+/// that carries a live Task (marked at alloc, unmarked at free) is refused
+/// and reported. Proved the free side clean in round 17; kept as the
+/// permanent tripwire for the alloc-side handoff hunt.
+static TASK_PAGE_OWNED: [core::sync::atomic::AtomicU64; 128] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 128];
+
+#[inline]
+fn task_page_mark(ptr: *mut u8) {
+    let page = (ptr as usize) >> 12;
+    let w = &TASK_PAGE_OWNED[(page >> 6) & 127];
+    w.fetch_or(1u64 << (page & 63), core::sync::atomic::Ordering::AcqRel);
+}
+#[inline]
+fn task_page_unmark(ptr: *mut u8) {
+    let page = (ptr as usize) >> 12;
+    let w = &TASK_PAGE_OWNED[(page >> 6) & 127];
+    w.fetch_and(!(1u64 << (page & 63)), core::sync::atomic::Ordering::AcqRel);
+}
+/// True if the page carrying `ptr` is marked as a live Task page.
+#[inline]
+pub fn task_page_is_owned(ptr: *const u8) -> bool {
+    let page = (ptr as usize) >> 12;
+    let w = &TASK_PAGE_OWNED[(page >> 6) & 127];
+    w.load(core::sync::atomic::Ordering::Acquire) & (1u64 << (page & 63)) != 0
+}
+
 pub fn alloc_task_slot() -> Option<*mut Task> {
     let layout = core::alloc::Layout::new::<Task>();
     // SAFETY: Layout is non-zero (Task is sized); null check follows immediately.

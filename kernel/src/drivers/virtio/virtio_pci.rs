@@ -748,8 +748,7 @@ impl VirtIOPCI {
             // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-            }
+                }
             return Err("VirtIO request timeout");
         }
 
@@ -759,7 +758,6 @@ impl VirtIOPCI {
         // SAFETY: Both pointers were allocated with their respective layouts and are valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
         }
 
         match status.status {
@@ -898,8 +896,7 @@ impl VirtIOPCI {
             // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
-            }
+                }
             return Err("VirtIO write request timeout");
         }
 
@@ -909,7 +906,6 @@ impl VirtIOPCI {
         // SAFETY: Both pointers were allocated with their respective layouts and are valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
         }
 
         match status.status {
@@ -965,7 +961,7 @@ fn read_block_once(
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
 
     // Phase 1: Set up and submit request (under PCI lock)
-    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout) = {
+    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
         let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
 
         // Get configured VirtQueue (mutable reference)
@@ -998,37 +994,27 @@ fn read_block_once(
             sector,
         };
 
-        // Allocate request header buffer
-        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-        let header_ptr: *mut VirtIOBlkReqHeader;
+        // R17-C: ONE allocation carries header (offset 0) + response
+        // (offset 48). Two separate page-granular allocations per I/O was
+        // the system's highest-volume order-0 firehose — every mis-handed
+        // heap page cycled through here within milliseconds (ring-proven
+        // in round 17). 48 keeps the resp cacheline-separate from header.
+        let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
         // SAFETY: Layout is non-zero-sized; null check follows immediately.
+        let io_buf: *mut u8;
         unsafe {
-            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
+            io_buf = alloc::alloc::alloc(io_layout);
         }
-        if header_ptr.is_null() {
+        if io_buf.is_null() {
             return Err("Failed to allocate header");
         }
-        // SAFETY: header_ptr is non-null and properly aligned.
+        let header_layout = io_layout; // dealloc layout for the combined block
+        let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
+        // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
+        let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
+        // SAFETY: header_ptr is non-null and properly aligned (16B).
         unsafe {
             *header_ptr = req_header;
-        }
-
-        // Allocate response buffer
-        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-        let resp_ptr: *mut VirtIOBlkResp;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-        }
-        if resp_ptr.is_null() {
-            // SAFETY: header_ptr was allocated with header_layout and is still valid.
-            unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            }
-            return Err("Failed to allocate response");
-        }
-        // SAFETY: resp_ptr is non-null and properly aligned.
-        unsafe {
             (*resp_ptr).status = 0xFF;  // Initialize to invalid status
         }
 
@@ -1093,7 +1079,7 @@ fn read_block_once(
         // Snapshot used ring pointer for interrupt-driven wait
         let used_ptr = virt_queue.used_ring_ptr();
 
-        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout)
+        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr)
     };
     // PCI lock dropped here — other I/O operations can proceed while we wait
 
@@ -1110,7 +1096,6 @@ fn read_block_once(
         // SAFETY: Both pointers were allocated above and are still valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
         }
         return Err("VirtIO request timeout");
     }
@@ -1118,10 +1103,10 @@ fn read_block_once(
     // SAFETY: resp_ptr was allocated above; device has completed the write.
     let status = unsafe { *resp_ptr };
 
-    // SAFETY: Both pointers were allocated with their respective layouts and are valid.
+    // SAFETY: header_ptr is the base of the single combined R17-C block;
+    // resp lives inside it at +48.
     unsafe {
         alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-        alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
     }
 
     match status.status {
@@ -1171,7 +1156,7 @@ fn write_block_once(
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
 
     // Phase 1: Set up and submit request (under PCI lock)
-    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout) = {
+    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
         let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
 
         // Get configured VirtQueue (mutable reference)
@@ -1204,37 +1189,27 @@ fn write_block_once(
             sector,
         };
 
-        // Allocate request header buffer
-        let header_layout = alloc::alloc::Layout::new::<VirtIOBlkReqHeader>();
-        let header_ptr: *mut VirtIOBlkReqHeader;
+        // R17-C: ONE allocation carries header (offset 0) + response
+        // (offset 48). Two separate page-granular allocations per I/O was
+        // the system's highest-volume order-0 firehose — every mis-handed
+        // heap page cycled through here within milliseconds (ring-proven
+        // in round 17). 48 keeps the resp cacheline-separate from header.
+        let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
         // SAFETY: Layout is non-zero-sized; null check follows immediately.
+        let io_buf: *mut u8;
         unsafe {
-            header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
+            io_buf = alloc::alloc::alloc(io_layout);
         }
-        if header_ptr.is_null() {
+        if io_buf.is_null() {
             return Err("Failed to allocate header");
         }
-        // SAFETY: header_ptr is non-null and properly aligned.
+        let header_layout = io_layout; // dealloc layout for the combined block
+        let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
+        // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
+        let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
+        // SAFETY: header_ptr is non-null and properly aligned (16B).
         unsafe {
             *header_ptr = req_header;
-        }
-
-        // Allocate response buffer
-        let resp_layout = alloc::alloc::Layout::new::<VirtIOBlkResp>();
-        let resp_ptr: *mut VirtIOBlkResp;
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        unsafe {
-            resp_ptr = alloc::alloc::alloc(resp_layout) as *mut VirtIOBlkResp;
-        }
-        if resp_ptr.is_null() {
-            // SAFETY: header_ptr was allocated with header_layout and is still valid.
-            unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            }
-            return Err("Failed to allocate response");
-        }
-        // SAFETY: resp_ptr is non-null and properly aligned.
-        unsafe {
             (*resp_ptr).status = 0xFF;  // Initialize to invalid status
         }
 
@@ -1299,7 +1274,7 @@ fn write_block_once(
         // Snapshot used ring pointer for interrupt-driven wait
         let used_ptr = virt_queue.used_ring_ptr();
 
-        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr, resp_layout)
+        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr)
     };
     // PCI lock dropped here — other I/O operations can proceed while we wait
 
@@ -1316,7 +1291,6 @@ fn write_block_once(
         // SAFETY: Both pointers were allocated above and are still valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
         }
         return Err("VirtIO write request timeout");
     }
@@ -1324,10 +1298,10 @@ fn write_block_once(
     // SAFETY: resp_ptr was allocated above; device has completed the write.
     let status = unsafe { *resp_ptr };
 
-    // SAFETY: Both pointers were allocated with their respective layouts and are valid.
+    // SAFETY: header_ptr is the base of the single combined R17-C block;
+    // resp lives inside it at +48.
     unsafe {
         alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-        alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
     }
 
     match status.status {

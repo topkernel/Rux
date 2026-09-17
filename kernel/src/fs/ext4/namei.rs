@@ -1721,14 +1721,16 @@ fn ext4_rename_inner(
             }
             if target_mut.i_links_count == 0 {
                 target_mut.i_dtime = 1;
-                // R14-8 (F5): free the file's DATA blocks too — mirroring
-                // the dir branch and unlink; without this `mv a b` (b
-                // existing) permanently leaked every block of b in the
-                // bitmap.
+                // R14-8 (F5, order fixed r17): persist the dead inode FIRST
+                // (dtime set), then free blocks and the inode number — the
+                // old order wrote the inode back AFTER freeing it (writing
+                // a recycled inode / resurrecting freed-block pointers).
+            }
+            super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
+            if target_mut.i_links_count == 0 {
                 free_inode_blocks(fs, &target_mut)?;
                 free_inode(fs, target_ino)?;
             }
-            super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
         }
     }
 
