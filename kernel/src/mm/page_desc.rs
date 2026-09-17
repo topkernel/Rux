@@ -72,6 +72,10 @@ pub enum PageFlag {
     Cow = 1 << 14,
     /// Anonymous page (Rux extension)
     Anonymous = 1 << 15,
+    /// Page is currently a free-list LEADER in its zone (R15-6: the
+    /// authoritative linked-state bit — next_free is NOT reliable, it
+    /// survives both power-on-0 and historical-leader residue).
+    OnFreelist = 1 << 16,
 }
 
 /// Page flags collection
@@ -239,6 +243,7 @@ impl Page {
         // ——TDF 探针(next_free!=MAX)把每个首次释放都误报成双重释放
         // (idle 193/nettest 483 次全是误报)。补上重置，判据恢复可靠。
         self.next_free.store(usize::MAX, Ordering::Release);
+        self.flags.clear(PageFlag::OnFreelist);
     }
 
     // ========== Flag operations ==========

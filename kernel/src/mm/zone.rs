@@ -447,7 +447,7 @@ impl Zone {
             let page = pfn_to_page_mut(pfn);
             if !page.is_null() {
                 unsafe {
-                    if (*page).next_free() != usize::MAX {
+                    if (*page).test_flag(PageFlag::OnFreelist) {
                         // R15-4: dump the raw descriptor fields to classify
                         // dirty-next_free vs真 double-free (order tells which:
                         // a linked free block's member carries its split order).
@@ -541,6 +541,7 @@ impl Zone {
             // SAFETY: pfn is from alloc_pages (valid), lock is held.
             unsafe {
                 (*page).set_next_free(head);
+                (*page).set_flag(PageFlag::OnFreelist);
                 (*page).set_order(order as u8);
             }
         }
@@ -562,6 +563,7 @@ impl Zone {
             unsafe {
                 (*page).set_next_free(head);
                 (*page).set_order(order as u8);
+                (*page).set_flag(PageFlag::OnFreelist);
             }
         }
 
@@ -622,6 +624,12 @@ impl Zone {
         }
 
         self.free_area[order].dec_free();
+        // R15-6: the removed page leaves the freelist — clear the
+        // authoritative linked bit.
+        let rp = pfn_to_page_mut(pfn);
+        if !rp.is_null() {
+            unsafe { (*rp).clear_flag(PageFlag::OnFreelist); }
+        }
     }
 
     /// Allocate a single page from the buddy free list (for compaction).
