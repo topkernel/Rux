@@ -925,6 +925,39 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
         return;
     }
 
+    // R15-6 (S-R resurrection guard): refuse to enqueue a FREED Task.
+    // free_task_slot poisons state/pid with 0xDEADBEEF, but the poison
+    // still satisfies is_sleeping() (bit0 of 0xEF is set), so a stale
+    // pid-hash reader (synchronize_rcu is a no-op: RCU_GEN never
+    // advances — only rcu_softirq_handler bumps it and nothing raises
+    // the Rcu vector) can pass the freed page's on_rq==false guard and
+    // insert the dead pointer into tasks_timeline. The next pick then
+    // context-switches onto the reused page and __switch_to's
+    // `ld ra, thread_ra` + `ret` transfers control to whatever
+    // pointer-shaped bytes now occupy that offset — the S-R signature
+    // (kernel illegal instruction at a page-aligned linear-map heap
+    // address). Detect the poison, report, and drop the enqueue.
+    {
+        // free_task_slot poisons state AND pid in one u64 write at +0x48;
+        // a real PID can never equal 0xDEADBEEF, so the pid check alone is
+        // an unambiguous freed-page detector.
+        let pid = (*task).pid();
+        if pid == TASK_POISON {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"ENQ-POISONED-TASK dropped pid=0x";
+            for &b in MSG { putchar(b); }
+            let mut sh = 64;
+            let v = pid as u64;
+            while sh > 0 {
+                sh -= 4;
+                let nb = ((v >> sh) & 0xF) as u8;
+                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            }
+            putchar(b'\n');
+            return;
+        }
+    }
+
     let policy = (*task).policy();
 
     // Set task state to RUNNING

@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.10 第十六轮：S-R（跳线性映射）定罪 + OnFreelist 权威判据 + 三层复活防御
+
+**S-R 全链定罪（专项 agent，12 轮实测）**：此前地址换算前提就错了——`VA_PA_OFFSET=0xffffffd580000000`，epc 0xffffffd601331000 = **物理 0x81331000，内核堆区间内**；历代 0xaf9000 族 = slab 区间指针。即"跳小整数"实为**跳到复用的堆/slab 分配地址**。机制链：**synchronize_rcu 是结构性空操作**（RCU_GEN 仅由 call_rcu 递增，而 call_rcu 零调用者）→ release_task 的宽限期不覆盖任何在飞读者 → 未钉住的 pid_hash_lookup 返回已释放 Task → 毒化字 0xDEADBEEF 恰好通过 is_sleeping()（bit0=1）→ **死指针入 CFS BTreeMap** → pick 取出 → __switch_to 恢复复用页 +440 偏移处的堆指针为 ra → ret 跳转。12 轮实测 7 崩全为此上游族（children 走查 NULL×3、pid_hash 链走 0x6cb08、Arc<SignalStruct> drop 坏指针、btree navigate 崩）。
+**修复（三层防御 + 根因排队）**：send_signal 改钉住查找；Task::wake_up 拒毒化 pid；enqueue_task_locked 拒毒化 pid 并打 ENQ-POISONED-TASK（末线，覆盖一切入队源）。结构性根治（真 RCU 宽限期）被 EXT4_BIG_LOCK 的 preempt-off 睡眠阻塞——先修那些锁再启用。附带发现：KERNPANIC 的"Registers:"块是 memset 伪影（ra 恒为 save_regs+0x26）——agent 的 SR-PROBE 已修真 pt_regs 打印。
+**OnFreelist 权威判据（R15-6/R16）**：next_free 判据三度不可靠（上电 0 / init_free 漏置 / 历史子块 leader 残留——GDB 实捕 init exec 余量释放页 nf=stale）。PageFlag::OnFreelist(1<<16)：add_to_free_list×2 设、remove_from_free_list 清、init_free 清；TDF 换用后 **双重释放=0（4 轮全门禁）**——R14-16/17+F10 修复后 zone 主分配器已净。
+**门禁（8 轮）**：kpanic 2/8（均为 children/NULL+8 族）、wedge 0、nettest 6/8、pp 6/6×（通过轮）、smoke 14-15/15。**遗留（第十七轮）**：children-list 归零引擎（agent harness ~50% 复现）为最后主残留；poweroff -f 拆卸 UAF 一次；RECYCLED-LIVE 分配侧探针因跨 CPU 窗口误报已停用。
 ### 20.9 第十五轮（2026-09-17 续）：TDF 探针两版误报的定罪 + init_free 缺陷
 
 **探针方法论教训（展示推理链）**：R14 的 zone 探针（refcount==0 判双重释放）误报——`Zone::free_pages` 本就在 put_page 归零**之后**调用，首释放时 refcount==0 是常态（868 次/轮全误报）；R15 换判据 `next_free != FREE_LIST_NULL` 仍误报（idle 193/nettest 483）——**根因是 `Page::init_free()` 漏重置 next_free**：描述符内存上电为 0，未进过空闲链表的页 next_free=0 而非 MAX。诊断字段打印（nf=0x0 ord=0）一锤定音。修复：init_free 补 `next_free.store(usize::MAX)`（R15-5）——这也是真实缺陷：脏 next_free 让 remove_from_free_list 走错链。

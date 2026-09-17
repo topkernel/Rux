@@ -1248,58 +1248,79 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
 
-    // SAFETY: pid_hash_lookup returns a valid Task pointer or null; null is checked below.
+    // SAFETY: pid_hash_lookup_pinned returns a valid Task pointer or null;
+    // null is checked below. R15-6: PINNED — synchronize_rcu() is a no-op
+    // (RCU_GEN never advances; only rcu_softirq_handler bumps it and the
+    // Rcu softirq is never raised), so an unpinned lookup could hand back
+    // a Task that release_task() freed and the buddy already reused. The
+    // wake below would then enqueue a dead page into the runqueue
+    // (on_rq on the freed page reads false) — the S-R illegal-instruction
+    // engine. The pin keeps the Task alive until task_put below.
     unsafe {
         // Look up target process via PID hash table
-        let task_ptr = crate::process::pid_hash::pid_hash_lookup(pid);
+        let task_ptr = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
         if task_ptr.is_null() {
             return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32());
         }
 
-        let task = &*task_ptr;
+        let result = send_signal_locked(task_ptr, pid, sig);
 
-        // SIGKILL and SIGSTOP cannot be ignored
-        if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
-            task.pending.add(sig);
+        // Release the pin taken by the lookup above.
+        crate::process::task::Task::task_put(task_ptr);
+        result
+    }
+}
+
+/// Signal-sending core, operating on a PINNED task pointer.
+///
+/// SAFETY: `task_ptr` is pinned (task_refcnt held by the caller); it cannot
+/// be freed for the duration of this call.
+unsafe fn send_signal_locked(task_ptr: *mut crate::process::task::Task, _pid: u32, sig: i32) -> Result<(), i32> {
+    use crate::signal::Signal;
+
+    let task = &*task_ptr;
+
+    // SIGKILL and SIGSTOP cannot be ignored
+    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
+        task.pending.add(sig);
+        signal_wake_up(task_ptr);
+        return Ok(());
+    }
+
+    // Add signal to pending set BEFORE checking mask.
+    // Masked signals stay pending and will be delivered when unmasked.
+    task.pending.add(sig);
+
+    // Idle task has no signal handling
+    let signal_ref: &SignalStruct = match task.signal.as_ref() {
+        Some(s) => s,
+        None => {
             signal_wake_up(task_ptr);
             return Ok(());
         }
+    };
 
-        // Add signal to pending set BEFORE checking mask.
-        // Masked signals stay pending and will be delivered when unmasked.
-        task.pending.add(sig);
+    // Check if signal is masked — still pending, just not delivered now
+    if signal_ref.is_masked(sig) {
+        return Ok(());
+    }
 
-        // Idle task has no signal handling
-        let signal_ref: &SignalStruct = match task.signal.as_ref() {
-            Some(s) => s,
-            None => {
+    // Check signal handling action
+    if let Some(action) = signal_ref.get_action(sig) {
+        match action.action() {
+            SigActionKind::Ignore => {
+                task.pending.remove(sig);
+                return Ok(());
+            }
+            SigActionKind::Default | SigActionKind::Handler => {
                 signal_wake_up(task_ptr);
                 return Ok(());
             }
-        };
-
-        // Check if signal is masked — still pending, just not delivered now
-        if signal_ref.is_masked(sig) {
-            return Ok(());
         }
-
-        // Check signal handling action
-        if let Some(action) = signal_ref.get_action(sig) {
-            match action.action() {
-                SigActionKind::Ignore => {
-                    task.pending.remove(sig);
-                    return Ok(());
-                }
-                SigActionKind::Default | SigActionKind::Handler => {
-                    signal_wake_up(task_ptr);
-                    return Ok(());
-                }
-            }
-        }
-
-        // Process not found or no action matched
-        Err(crate::errno::Errno::NoSuchProcess.as_neg_i32())
     }
+
+    // No action matched
+    Err(crate::errno::Errno::NoSuchProcess.as_neg_i32())
 }
 
 /// Send a signal to all processes in a given process group.

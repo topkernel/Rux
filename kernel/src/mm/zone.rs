@@ -380,6 +380,36 @@ impl Zone {
 
     /// Allocate a block from a specific order level
     fn alloc_from_order(&self, current_order: usize, target_order: usize) -> Option<usize> {
+        // R16-1: alloc-side tripwire — the freed-side TDF can't see a FIRST
+        // erroneous free of a LIVE page (that page isn't on a freelist yet).
+        // If a block handed out by the allocator still looks mapped/referenced,
+        // a live page was recycled. Checked on the leader under the zone lock.
+        {
+            let pg = pfn_to_page(self.free_area[current_order].free_list.load(core::sync::atomic::Ordering::Acquire));
+            if !pg.is_null() {
+                unsafe {
+                    let rc = (*pg).refcount();
+                    let mc = (*pg).mapcount();
+                    if false { // R16-1a disabled: cross-CPU window between remove_from_free_list
+                    // and set_refcount on the OTHER cpu makes head-of-order reads racy;
+                    // the reliable engine detector is the freed-side TDF (0 hits).
+                        use crate::console::putchar;
+                        for &b in b"zone: RECYCLED-LIVE pfn=" { putchar(b); }
+                        let p = self.free_area[current_order].free_list.load(core::sync::atomic::Ordering::Acquire);
+                        let mut v = p; let mut d = [0u8; 12]; let mut k = 0;
+                        while v > 0 { d[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
+                        while k > 0 { k -= 1; putchar(d[k]); }
+                        for &b in b" rc=" { putchar(b); }
+                        let mut vv = rc; if vv < 0 { putchar(b'-'); vv = -vv; }
+                        if vv == 0 { putchar(b'0'); }
+                        let mut dd = [0u8; 12]; let mut kk = 0;
+                        while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                        while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                        putchar(b'\n');
+                    }
+                }
+            }
+        }
         let head = self.free_area[current_order].free_list.load(Ordering::Acquire);
         if head == FREE_LIST_NULL {
             return None;

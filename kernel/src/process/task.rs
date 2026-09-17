@@ -1447,6 +1447,24 @@ impl Task {
             return false;
         }
 
+        // R15-6 (S-R resurrection guard): refuse to touch a FREED Task.
+        // free_task_slot poisons pid with 0xDEADBEEF; without this check a
+        // stale wake (unreliable RCU grace period) would first WRITE
+        // set_state/set_ti_cpu into the freed (possibly reused) page, then
+        // enqueue the dead pointer — the pick then context-switches onto
+        // foreign data (__switch_to rets through a reused thread.ra: the
+        // linear-map illegal-instruction signature). See also the guard in
+        // enqueue_task_locked.
+        {
+            let pid = unsafe { (*task).pid() };
+            if pid == crate::sched::sched::TASK_POISON {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"WAKE-POISONED-TASK dropped\n";
+                for &b in MSG { unsafe { putchar(b); } }
+                return false;
+            }
+        }
+
         // SAFETY: Caller guarantees task points to a valid Task that is not currently
         // running on another CPU (or the scheduler lock prevents concurrent access).
         unsafe {
