@@ -592,6 +592,15 @@ M1 补 new_task_at 缺失字段（wait_chldexit 等全量）；schedule_tail 处
 wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueue_task_locked 崩）尝试以 RCU 读侧包裹；**共享核心包裹实测引入新崩溃类（4/6）已回退**（专项重做：call_rcu 化 free_task_slot）；virtio 描述符限流修正 off-by-one（in_flight*3+3>queue_size）；alloc_desc 失败路径补 dealloc；msg 循环顶部 seq 复验（R9-11 作用域漏洞）；new_task_at 栈分配失败传播（不再带 sp=0 继续）；R9-16 restore_irq 真正落地；R9-18 全量 sfence 回退（sfence.vma 是 hart-local，全量无意义——远程 shootdown 为已记录开口项）。
 
 ### 20.3 门禁与遗留
+### 20.5 第十二轮（2026-09-17 续）：唤醒移回锁内 + 定时器锁减负 + 引用计数化查找
+
+- **R12-1/R12-2**：WaitQueueHead::wake_up 与 futex_wake 的唤醒**移回等待队列/桶锁内**——锁内"未唤醒"条目的存在证明该任务尚未通过 finish_wait（需要同一把锁），因此不可能已退出/被收尸，收集-后唤醒的 UAF 窗口彻底关闭（此前 PID 复验只是收窄）。futex_requeue 因跨两桶保留复验。锁序 queue→GRQ 经审计安全。
+- **R12-3**：timer 软中断的 wake/signal/tfd 递送**移出 TIMERS/ACTIONS 临界区**——原 TIMERS→GRQ 嵌套是 LO_BACKLOG/TIMERS 锁楔的成分。expired 快照先摘除后递送。
+- **R12-4**：free_task_slot 毒化（0xDEADBEEF 写 state/pid）+ 64 槽释放环；KERNPANIC 走查识别 POISONED-FREED-TASK；走查本身修了 `pos < OFF_SIBLING` 的下溢 panic（此前诊断代码自己炸掉现场）。
+- **R12-5**：Task.task_refcnt + pid_hash_lookup_pinned/task_put——跨 CPU 的 timer 唤醒、deferred notify（3 处）改为钉住-用-放；release_task 经 task_put 释放（末次 put 才真正 free）。56 个普通查找调用点（procfs/syscall 短读、本 CPU 不可被收尸方抢占）保持无钉，避免大规模 put 遗漏导致槽泄漏。GDB 实捕确认 enqueue_task_locked 野指针（0xffffffffdd33fa90，freed Task 的 sched_entity 偏移）即此族。
+- **bh 探针空安全**：四处 `(*bh).b_data.len()` 探针补 `bh.is_null()` 前置——探针自己会在 NULL bh 上炸（+0x30 一族的新来源）。
+- **门禁（8 轮）**：**nettest 全 PASS 8/8（历史首次）、DEADLOCK/soft-lockup 0/8（首次）**；mrsh `echo PP | cat` 与重定向可用率 4/8。残留：mrsh 阶段 KERNPANIC ~5/8（GDB 下 0/5 未复现——时序敏感），两签名：①NULL+0x30 的 CAS（BufferHead.b_state @+0x30 疑 NULL bh 的 set_state/is_dirty）②控制流跳用户地址（mrsh 0x3869c，SPP=1）——第十三轮目标。
+
 ### 20.4 第十一轮（2026-09-17 续）：S2 定罪 + 四项修复
 
 **S2（空对象 CAS @0x30）定罪**：`evict_one` Phase 2 的哈希链走查**无"未找到即中止"**——被延迟的第二个逐出者在另一 CPU 完整逐出并释放+复用该 victim 后，对已释放内存做 count/evicting 检查、remove_from_lru 写入复用块、`is_dirty()` 对 NULL+0x30 CAS（即 S2 panic）、`Box::from_raw` 二次释放（S1 的堆别名喂料）。反汇编证明 +0x30 宿主只有 BufferHead.b_state 与 Dentry.children，后者全程 Arc 不可空。修复：**在桶锁内以"存在于哈希链"为存活判据**（先走查、未找到即返回；pin 复查移到摘链后、被钉时回插头部中止）。

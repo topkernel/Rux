@@ -160,32 +160,22 @@ impl WaitQueueHead {
             }
         }
 
-        // Drop the waitqueue lock before waking tasks.
-        drop(list);
-
-        // R10-1b REVERTED: holding the preempt-count RCU read side across
-        // wake_up_process here correlated with a NEW NULL-fdtable fault
-        // class (4/6 runs) — the wakeup path from timer/exit contexts
-        // interacts badly with preemption being disabled at this point
-        // (grace-period stalls reordering exit vs in-flight fdtable use).
-        // The deferred-wake UAF remains a documented open item (review
-        // §20); the pipe last-ref fix alone held a 3/3 clean gate.
-        // R11-3 (deferred-wake UAF, S1 feed): the collected raw Task*
-        // can be reaped and freed between collection and here (woken by a
-        // signal, exited, release_task'd). Re-validate liveness by PID
-        // identity — pid_hash_remove runs BEFORE the free, so a task that
-        // still hashes to its own PID is alive. Cheap u32 reads of
-        // possibly-freed (still-mapped, page-granular buddy) memory; a
-        // mismatch skips the wake. (The RCU-wrap variant of this fix
-        // regressed and was reverted; full fix is call_rcu-deferred
-        // free_task_slot.)
+        // R12-1 (deferred-wake UAF — the definitive fix): wake WHILE STILL
+        // HOLDING the queue lock. A not-yet-woken entry on the queue proves
+        // its task has not passed finish_wait (which needs this same lock),
+        // therefore has not returned to userspace, therefore has not
+        // exited or been reaped — the collected pointer cannot go stale
+        // under us. The old collect-then-drop-then-wake window let a
+        // signal-woken sleeper run, exit and be FREED before our wake —
+        // the wild-pointer enqueue and the S1 jump-to-user corruption.
+        // Lock order queue->GRQ is safe: no GRQ-held path takes a
+        // waitqueue lock (scheduler_tick polls the console queue BEFORE
+        // acquiring the GRQ). The earlier PID-revalidation and reverted
+        // RCU-wrap were interim measures.
         for task in wake_list {
-            let pid = unsafe { (*task).pid() };
-            let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
-            if fresh == task {
-                crate::sched::wake_up_process(task);
-            }
+            crate::sched::wake_up_process(task);
         }
+        drop(list);
 
         awakened
     }

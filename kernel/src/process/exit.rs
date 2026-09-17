@@ -82,8 +82,9 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // Free PID
     crate::process::pid::free_pid((*task).pid());
 
-    // Free Task struct back to kernel heap
-    crate::sched::free_task_slot(task);
+    // Free Task struct back to kernel heap — via task_put (R12-5): any
+    // outstanding lookup pins delay the actual free to their own put.
+    crate::process::task::Task::task_put(task);
 }
 
 /// Process exit

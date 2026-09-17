@@ -233,24 +233,17 @@ pub fn futex_wake(uaddr: usize, flags: u32, nr_wake: i32, bitset: u32) -> i64 {
         }
     }
 
-    // Release bucket lock before waking tasks to avoid lock ordering
-    // issues (bucket lock → scheduler lock).
-    drop(head);
-
-    // R10-1: same discipline as WaitQueueHead::wake_up_all — hold the RCU
-    // read side across the deferred wakes (a sleeper woken by a signal in
-    // this window could be reaped before we deref). wake_up never sleeps.
+    // R12-2: wake WHILE STILL HOLDING the bucket lock — same reasoning as
+    // WaitQueueHead::wake_up (R12-1): the waiter is still linked here, so
+    // it cannot have passed its unlink-under-this-lock and exited. Bucket
+    // -> GRQ order is safe (no GRQ-held path takes a futex bucket). The
+    // old drop-then-wake window was the deferred-wake UAF.
     for task in wake_list {
         if !task.is_null() {
-            // R11-3: PID-identity revalidation (see wait.rs) — the RCU
-            // wrap variant regressed and was reverted.
-            let pid = unsafe { (*task).pid() };
-            let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
-            if fresh == task {
-                Task::wake_up(task);
-            }
+            Task::wake_up(task);
         }
     }
+    drop(head);
 
     ret
 }
@@ -791,12 +784,12 @@ pub fn futex_requeue(
         drop(guard_hi);
     }
 
-    // R10-1: hold the RCU read side across the deferred wakes (see
-    // futex_wake above).
+    // R12-2: the waiters were unlinked from their chains under the bucket
+    // locks in the collecting pass; unlike futex_wake we are already past
+    // those critical sections, so the PID revalidation stays as defense
+    // in depth against the cross-CPU reap window.
     for task in wake_list {
         if !task.is_null() {
-            // R11-3: PID-identity revalidation (see wait.rs) — the RCU
-            // wrap variant regressed and was reverted.
             let pid = unsafe { (*task).pid() };
             let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
             if fresh == task {

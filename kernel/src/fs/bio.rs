@@ -441,7 +441,7 @@ impl BlockCache {
                 // and remain valid while in the cache.
                 unsafe {
                     let entry = &*entry_ptr;
-                    if !entry.evicting && (*entry.bh).count() == 0 {
+                    if !entry.evicting && !entry.bh.is_null() && unsafe { (*entry.bh).count() == 0 } {
                         found = Some(entry_ptr);
                         break;
                     }
@@ -556,7 +556,7 @@ impl BlockCache {
                         // corrupted ext4 metadata handling (inode.rs:563
                         // slice panic). Report via SBI (safe under any lock)
                         // and treat as a miss so the caller re-reads.
-                        if unsafe { (*entry.bh).b_data.len() } != self.block_size as usize {
+                        if unsafe { entry.bh.is_null() || (*entry.bh).b_data.len() != self.block_size as usize } {
                             let msg = b"bio: dead bh in chain blk=";
                             unsafe {
                                 for &b in msg { sbi_rt::legacy::console_putchar(b as usize); }
@@ -626,7 +626,7 @@ impl BlockCache {
                         // R9-8: apply the same integrity guard as Phase 1 —
                         // a dead (freed/reused) duplicate entry must not be
                         // handed out here after the fresh read.
-                        if unsafe { (*(*cp).bh).b_data.len() } != self.block_size as usize {
+                        if unsafe { (*cp).bh.is_null() || (*(*cp).bh).b_data.len() != self.block_size as usize } {
                             current = (*cp).hash_next;
                             continue;
                         }
@@ -841,7 +841,7 @@ pub fn bread_async(
                     current = entry.hash_next;
                     continue;
                 }
-                if unsafe { (*entry.bh).b_data.len() } != cache.block_size as usize {
+                if unsafe { entry.bh.is_null() || (*entry.bh).b_data.len() != cache.block_size as usize } {
                     prev = Some(entry_ptr);
                     current = entry.hash_next;
                     continue;

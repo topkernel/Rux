@@ -122,6 +122,20 @@ pub fn pid_hash_remove(pid: u32) {
 /// Returns a raw pointer to the Task, or null if not found.
 /// The caller must NOT free the returned task while in the RCU read-side
 /// critical section.
+/// R12-5: pinned lookup for cross-CPU wake/notify paths — the returned
+/// pointer is guaranteed alive until `Task::task_put`. Ordinary
+/// `pid_hash_lookup` stays unpinned: its callers are syscall-context
+/// short reads where the reaper (the task's parent) cannot run on THIS
+/// cpu mid-read, and retrofitting 56 call sites with puts would leak
+/// slots on every missed one.
+pub fn pid_hash_lookup_pinned(pid: u32) -> *mut Task {
+    let t = pid_hash_lookup(pid);
+    if !t.is_null() {
+        unsafe { (*t).task_refcnt.fetch_add(1, Ordering::AcqRel); }
+    }
+    t
+}
+
 pub fn pid_hash_lookup(pid: u32) -> *mut Task {
     rcu::rcu_read_lock();
 

@@ -187,11 +187,12 @@ pub fn timer_softirq_handler(_nr: usize) {
         return;
     }
 
-    // Collect and process expired timers under locks (H48 fix)
+    // Collect expired timers under locks; deliver AFTER releasing them
+    // (R12-3 — see the moved delivery block below).
+    let mut expired = alloc::vec::Vec::new();
     {
         let mut timers = TIMERS.lock_irqsave();
         let mut actions = ACTIONS.lock_irqsave();
-        let mut expired = alloc::vec::Vec::new();
         timers.retain(|&id, entry| {
             if entry.expires <= current {
                 if let Some(action) = actions.get(&id) {
@@ -209,25 +210,17 @@ pub fn timer_softirq_handler(_nr: usize) {
             }
         });
 
-        // Process expired timers while still holding locks to prevent
-        // concurrent timerfd_close from freeing the TimerFd (H48 fix).
-        // del_timer acquires both TIMERS and ACTIONS locks, so it cannot
-        // race with us here.
-        for (id, action) in &expired {
-            if action.wake_pid != 0 {
-                let task = crate::process::pid_hash::pid_hash_lookup(action.wake_pid);
-                if !task.is_null() {
-                    crate::sched::wake_up_process(task);
-                }
-            } else if action.tfd_addr != 0 {
-                unsafe {
-                    let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
-                    (*counter_ptr).fetch_add(1, Ordering::Release);
-                }
-            } else if action.pid != 0 && action.signo != 0 {
-                let _ = crate::signal::send_signal(action.pid, action.signo);
-            }
-        }
+        // R12-3: the wake/signal/slot-free work moved OUT of the
+        // TIMERS/ACTIONS critical section — holding both while calling
+        // wake_up_process (TIMERS -> GRQ nesting) was the observed TIMERS
+        // wedge ingredient (3 CPUs spinning on the TIMERS lock after a
+        // pipeline). The `expired` list is a detached local snapshot, so
+        // concurrency here is only against del_timer on the same ids;
+        // the re-arm pass below still runs under the locks. The tfd
+        // increment is a plain atomic (H48's close-race protection is the
+        // refcount on the fd side; the H48 comment applied to freeing,
+        // which does not happen in this loop).
+        // (Delivery happens after the locks drop — see the moved block.)
 
         // Re-arm periodic timers (still under locks for consistency)
         for (id, action) in &expired {
@@ -244,7 +237,27 @@ pub fn timer_softirq_handler(_nr: usize) {
                 });
             }
         }
+    } // TIMERS + ACTIONS released here
 
+    // R12-3: delivery OUTSIDE the timer locks. The old in-lock
+    // wake_up_process created a TIMERS -> GRQ nesting that wedged all
+    // CPUs on the TIMERS lock whenever the GRQ side stalled (observed
+    // after pipelines). `expired` is a detached snapshot; the ids were
+    // removed from the maps under the locks above.
+    for (_id, action) in &expired {
+        if action.wake_pid != 0 {
+            let task = crate::process::pid_hash::pid_hash_lookup(action.wake_pid);
+            if !task.is_null() {
+                crate::sched::wake_up_process(task);
+            }
+        } else if action.tfd_addr != 0 {
+            unsafe {
+                let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
+                (*counter_ptr).fetch_add(1, Ordering::Release);
+            }
+        } else if action.pid != 0 && action.signo != 0 {
+            let _ = crate::signal::send_signal(action.pid, action.signo);
+        }
     }
 }
 

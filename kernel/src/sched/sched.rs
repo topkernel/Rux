@@ -356,9 +356,10 @@ pub fn defer_exit_notify(parent_pid: u32) {
 fn process_deferred_exit_pid(parent_pid: u32) {
     use crate::signal::Signal;
     let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
-    let parent = crate::process::pid_hash::pid_hash_lookup(parent_pid);
+    let parent = crate::process::pid_hash::pid_hash_lookup_pinned(parent_pid);
     if !parent.is_null() {
         let _woken = unsafe { (*parent).wait_chldexit.wake_up_all() };
+        crate::process::task::Task::task_put(parent);
     }
 }
 
@@ -373,7 +374,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
     // Clear the slot (consume the notification).
     DEFERRED_EXIT_NOTIFY_PID[cpu].store(0, core::sync::atomic::Ordering::Relaxed);
 
-    let parent = crate::process::pid_hash::pid_hash_lookup(pid as u32);
+    let parent = crate::process::pid_hash::pid_hash_lookup_pinned(pid as u32);
     if !parent.is_null() {
         // SAFETY: parent was obtained from pid_hash_lookup and is a valid Task
         // pointer (PID hash table entries are not freed until release_task).
@@ -389,6 +390,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
                 (*parent).set_ti_cpu(cpu as i32);
             }
         }
+        crate::process::task::Task::task_put(parent);
     }
 
     use crate::signal::Signal;
@@ -398,11 +400,12 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
     // signal-delivery call during which the (zombie) parent could have been
     // reaped and freed on another CPU; operating on the fresh lookup (or
     // none) closes the narrow UAF.
-    let parent_fresh = crate::process::pid_hash::pid_hash_lookup(pid as u32);
+    let parent_fresh = crate::process::pid_hash::pid_hash_lookup_pinned(pid as u32);
     if !parent_fresh.is_null() {
         unsafe {
             let _woken = (*parent_fresh).wait_chldexit.wake_up_all();
         }
+        crate::process::task::Task::task_put(parent_fresh);
     }
 }
 
@@ -654,14 +657,28 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
     Some(task_ptr)
 }
 
+/// R12-4: recently-freed Task slots (pid at free time) for post-mortems.
+pub static FREED_TASK_RING: [core::sync::atomic::AtomicU32; 64] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 64];
+static FREED_RING_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// R12-4: poison marker written into a freed Task's state/pid words.
+pub const TASK_POISON: u32 = 0xDEAD_BEEF;
+
 pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
-    // SAFETY: task_ptr was allocated by alloc_task_slot with Layout::new::<Task>();
-    // null check above; caller must ensure no other references exist.
+    // R12-4: poison + record before the free — the next "zeroed/garbage
+    // linked child" or wild-pointer wake then shows this exact marker
+    // instead of anonymous zeros, proving (or ruling out) the
+    // freed-while-referenced family at first sight.
     unsafe {
-        alloc::alloc::dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>());
+        let slot = task_ptr as *mut u8;
+        let h = FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
+        FREED_TASK_RING[h].store((*task_ptr).pid(), core::sync::atomic::Ordering::Relaxed);
+        // state(0x48) and pid(0x4c) as one u64 write
+        core::ptr::write_volatile(slot.add(0x48) as *mut u64, TASK_POISON as u64 | ((TASK_POISON as u64) << 32));
+        alloc::alloc::dealloc(slot, core::alloc::Layout::new::<Task>());
     }
 }
 

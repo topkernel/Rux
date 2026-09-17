@@ -385,6 +385,11 @@ pub struct Task {
     /// CPU affinity mask — bit i set = CPU i allowed
     cpus_allowed: core::sync::atomic::AtomicU32,
 
+    /// R12-5: lookup pin count — pid_hash_lookup increments, task_put
+    /// decrements and frees at zero. Closes the lookup->use window that
+    /// fed freed Task pointers into enqueue.
+    pub task_refcnt: core::sync::atomic::AtomicU32,
+
     /// Per-task journal handle (R8-M3): the ext4 write path used a GLOBAL
     /// slot holding a pointer to a STACK-LOCAL handle — on SMP one CPU
     /// clobbered another's pointer and dereferenced a dead stack frame
@@ -681,6 +686,7 @@ impl Task {
             cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
             journal_handle: core::cell::Cell::new(core::ptr::null_mut()),
+            task_refcnt: core::sync::atomic::AtomicU32::new(1),
             ti_a0: core::sync::atomic::AtomicU64::new(0),
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
@@ -800,6 +806,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
             core::cell::Cell::new(core::ptr::null_mut()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, task_refcnt)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(1),
         );
         // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
         // Task pages come from the non-zeroing buddy allocator, so every
@@ -1103,6 +1113,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
             core::cell::Cell::new(core::ptr::null_mut()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, task_refcnt)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(1),
         );
         // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
         // Task pages come from the non-zeroing buddy allocator, so every
@@ -1918,6 +1932,16 @@ impl Task {
     #[inline]
     pub fn cpus_allowed(&self) -> u32 {
         self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// R12-5: drop a lookup pin; the LAST put frees the slot.
+    #[inline]
+    pub fn task_put(task: *mut Task) {
+        if task.is_null() { return; }
+        let prev = unsafe { (*task).task_refcnt.fetch_sub(1, core::sync::atomic::Ordering::AcqRel) };
+        if prev == 1 {
+            crate::sched::free_task_slot(task);
+        }
     }
 
     /// R8-1b: on-CPU flag — set at pick time, cleared by __switch_to after

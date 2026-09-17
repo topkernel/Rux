@@ -560,10 +560,14 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     let head_v = head as usize;
                     let mut n = 0u32;
                     let mut last_node = 0usize;
-                    while pos != head_v && pos != 0 && n < 8 {
+                    while pos != head_v && pos != 0 && pos > OFF_SIBLING && n < 8 {
                         let ct = pos - OFF_SIBLING;
                         let pid = unsafe { core::ptr::read_volatile((ct + OFF_PID) as *const u32) };
                         let state = unsafe { core::ptr::read_volatile((ct + OFF_STATE) as *const u32) };
+                        // R12-4: recognize freed-task poison.
+                        if pid == 0xDEAD_BEEF || state == 0xDEAD_BEEF {
+                            for &b in b" POISONED-FREED-TASK" { put(b); }
+                        }
                         for &b in b" child[" { put(b); }
                         let mut digs = [0u8; 10]; let mut k = 0; let mut v = n;
                         if v == 0 { digs[0] = b'0'; k = 1; }
