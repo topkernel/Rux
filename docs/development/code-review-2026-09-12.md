@@ -601,6 +601,13 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.9 第十五轮（2026-09-17 续）：TDF 探针两版误报的定罪 + init_free 缺陷
+
+**探针方法论教训（展示推理链）**：R14 的 zone 探针（refcount==0 判双重释放）误报——`Zone::free_pages` 本就在 put_page 归零**之后**调用，首释放时 refcount==0 是常态（868 次/轮全误报）；R15 换判据 `next_free != FREE_LIST_NULL` 仍误报（idle 193/nettest 483）——**根因是 `Page::init_free()` 漏重置 next_free**：描述符内存上电为 0，未进过空闲链表的页 next_free=0 而非 MAX。诊断字段打印（nf=0x0 ord=0）一锤定音。修复：init_free 补 `next_free.store(usize::MAX)`（R15-5）——这也是真实缺陷：脏 next_free 让 remove_from_free_list 走错链。
+修复后单跑 nettest TDF=0；**八轮全门禁（smoke+nettest+mrsh 管道）TDF 复现 20-70 次**——另一批真实双重释放由 smoke/管道路径触发（目前未致崩）。第十六轮首要目标：GDB 断点抓 TDF 栈（本轮断点法已验证可行）。
+GDB 已抓到的完整链（idle 场景首例 TDF）：`init exec → alloc_and_map_to_user_table(R7-C5 余量释放) → free_pages`——该例经查为误报（判据错误），但断点+栈的方法成立。R15-2/3/4 探针诊断代码已全部移除，只留修正后的 TDF 单行打印。
+**门禁（8 轮）**：kpanic 0/8（连续两批全零）、wedge 0/8、nettest 6/8、**mrsh 管道+重定向 6/6**、smoke 15/15×4 + 14/15×4（单项 flaky）。
+
 ### 20.8 第十四轮修复批（R14-1..17，全部完成并门禁）
 
 修复：F10（vmscan 只在"自己减到 0"才释放）；F9（Zone::free_pages double-free 计数探针——先拒绝-泄漏版实测每轮 349-2309 次命中导致内存耗尽，改为计数+识别+放行）；HIGH-2（LO_BACKLOG/ARP_CACHE 全部 lock_irqsave）；HIGH-1（irq_exit 内联 softirq 加 !in_softirq 门）；F1（allocator.rs `BISECT-NO-PLUS1` 标记删除、inode 号 +1）；HIGH-5b（close op 决策留 entry 锁内、执行移出锁外——原在锁内执行 socket close 会持锁自旋 virtio 10s）；HIGH-3（TCP 服务端 SYN 消耗序号：send_synack 后 snd_nxt+1、handle_ack_recv 补 snd_una+1）；F5（rename 覆盖文件目标补 free_inode_blocks）；F6（目录迭代器递归改循环）；MED-5（virtio-input used 环 +8→+4）；MED-10（socket 创建失败路径 unwind 槽+Arc）；MED-11（PLIC 使能字 RMW 全局自旋锁）；F22（ext4 已挂载拒重挂 EBUSY）；F7/F18（4 处 10MHz 魔数补统一）；R14-16（**page_cache put() 只在实际减量后释放**——原"看到 0+invalidated 就释放"让同一帧被两次 put 各释放一次 = zone dblfree 流的可定罪源）；R14-17（CachedPage.released 一次性闩）。

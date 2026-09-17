@@ -216,8 +216,42 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 if regs_ref.user_mode() {
                     handle_illegal_instruction(regs_ref);
                 } else {
+                    // SR-PROBE (round 15, temporary): dump the REAL trap frame
+                    // before dying — the panic handler's register dump is a
+                    // save_regs() artifact (memset remnants), not the faulting
+                    // context. ra identifies the indirect branch that jumped
+                    // to the linear-map page.
+                    {
+                        use core::fmt::Write;
+                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        let _ = w.write_str("SR-REGS:\n");
+                        let _ = write!(w, "  epc={:#x} ra={:#x} sp={:#x}\n",
+                            regs_ref.epc, regs_ref.ra, regs_ref.sp);
+                        let _ = write!(w, "  tp={:#x} s0={:#x} s1={:#x} gp={:#x}\n",
+                            regs_ref.tp, regs_ref.s0, regs_ref.s1, regs_ref.gp);
+                        let _ = write!(w, "  a0={:#x} a1={:#x} a2={:#x} a3={:#x}\n",
+                            regs_ref.a0, regs_ref.a1, regs_ref.a2, regs_ref.a3);
+                        let _ = write!(w, "  a4={:#x} a5={:#x} a6={:#x} a7={:#x}\n",
+                            regs_ref.a4, regs_ref.a5, regs_ref.a6, regs_ref.a7);
+                        let _ = write!(w, "  t0={:#x} t1={:#x} t2={:#x} t3={:#x}\n",
+                            regs_ref.t0, regs_ref.t1, regs_ref.t2, regs_ref.t3);
+                        let _ = w.write_str("SR-STACK (ra chain via s0):\n");
+                        let mut fp = regs_ref.s0 as usize;
+                        for _ in 0..12 {
+                            if fp < 0xffffffd600000000 || fp > 0xffffffd700000000 {
+                                break;
+                            }
+                            let next = core::ptr::read_volatile(fp as *const usize);
+                            let ra = core::ptr::read_volatile((fp + 8) as *const usize);
+                            let _ = write!(w, "  fp={:#x} ra={:#x}\n", fp, ra);
+                            if ra < 0xffffffff80000000 || next <= fp {
+                                break;
+                            }
+                            fp = next;
+                        }
+                    }
                     // A kernel-mode illegal instruction is always a kernel bug
-                    // (e.g. an M-mode CSR executed in S-mode). Skipping it
+                    // (e.g., an M-mode CSR executed in S-mode). Skipping it
                     // corrupts execution; die loudly instead.
                     panic!(
                         "trap: illegal instruction in kernel mode at epc={:#x} badaddr={:#x}",

@@ -437,79 +437,42 @@ impl Zone {
 
         let _guard = self.lock.lock();
 
-        // R14-2 (F9): double-free tripwire on the PRIMARY allocator path
-        // (the round-9 guard landed only on the unused heap BuddyAllocator).
-        // An already-free page re-inserted here hands the same PFN to two
-        // future allocations — the NEW2 same-page-two-owners class. Report
-        // and refuse instead of corrupting the zone.
+        // R15-3: TRUE double-free tripwire on the primary allocator path.
+        // A second free is proven by the page STILL BEING LINKED in a
+        // freelist (next_free != sentinel). The round-14 variant tested
+        // refcount==0 — which is true for every legit put_page-driven
+        // FIRST free (Zone::free_pages runs after put_page already hit 0):
+        // 868 false flags per run, all "[not-linked]".
         {
             let page = pfn_to_page_mut(pfn);
             if !page.is_null() {
                 unsafe {
-                    if (*page).refcount() == 0 {
-                        // R14-2a: COUNT + first-N identify, then CONTINUE
-                        // the free (the refuse-and-leak variant exhausted
-                        // memory: 349-2309 hits per nettest run). The
-                        // stream itself is the long-hunted same-PFN-two-
-                        // owners engine — first callers get a ra backtrace
-                        // for identification; the rest just tick the
-                        // counter (serialized by the zone lock).
-                        static HITS: core::sync::atomic::AtomicU32 =
-                            core::sync::atomic::AtomicU32::new(0);
-                        static LAST_RA: core::sync::atomic::AtomicU64 =
-                            core::sync::atomic::AtomicU64::new(0);
-                        let n = HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        let mut caller_ra: usize;
-                        unsafe { core::arch::asm!("mv {}, ra", out(reg) caller_ra, lateout("x1") _, options(nomem, nostack)); }
-                        LAST_RA.store(caller_ra as u64, core::sync::atomic::Ordering::Relaxed);
-                        if n < 0 { // R14: print disabled; counter kept
-                            use crate::console::putchar;
-                            const MSG: &[u8] = b"zone: DOUBLE-FREE#pfn=";
-                            for &b in MSG { putchar(b); }
-                            let mut v = pfn;
-                            let mut digs = [0u8; 12]; let mut k = 0;
-                            if v == 0 { putchar(b'0'); }
-                            while v > 0 { digs[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
-                            while k > 0 { k -= 1; putchar(digs[k]); }
-                            const MSG2: &[u8] = b" ra=0x";
-                            for &b in MSG2 { putchar(b); }
-                            let mut sh = 64;
-                            while sh > 0 {
-                                sh -= 4;
-                                let nb = ((caller_ra >> sh) & 0xF) as u8;
-                                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                            }
-                            putchar(b'\n');
-                        }
+                    if (*page).next_free() != usize::MAX {
+                        // R15-4: dump the raw descriptor fields to classify
+                        // dirty-next_free vs真 double-free (order tells which:
+                        // a linked free block's member carries its split order).
+                        use crate::console::putchar;
+                        const MSG: &[u8] = b"TDF pfn=";
+                        for &b in MSG { putchar(b); }
+                        let mut v = pfn;
+                        let mut digs = [0u8; 12]; let mut k = 0;
+                        if v == 0 { digs[0] = b'0'; k = 1; }
+                        while v > 0 { digs[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
+                        while k > 0 { k -= 1; putchar(digs[k]); }
+                        const M2: &[u8] = b" nf=0x";
+                        for &b in M2 { putchar(b); }
+                        let nf = (*page).next_free();
+                        let mut sh = 64;
+                        while sh > 0 { sh -= 4; let nb = ((nf >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                        const M3: &[u8] = b" ord=";
+                        for &b in M3 { putchar(b); }
+                        let ov = (*page).order();
+                        if ov == 0 { putchar(b'0'); } else { let mut vv = ov as usize; let mut dd = [0u8;4]; let mut kk = 0; while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; } while kk > 0 { kk -= 1; putchar(dd[kk]); } }
+                        putchar(b'\n');
                     }
                 }
             }
         }
-
-        // Update page descriptors for the WHOLE block while holding the lock:
-        // resetting them before taking the lock (as the caller used to) left a
-        // window where the pages looked free and a concurrent allocation
-        // could hand them out twice (review MM-H2).
-        let count = 1usize << order;
-        for i in 0..count {
-            let page = pfn_to_page_mut(pfn + i);
-            if !page.is_null() {
-                // SAFETY: pfn+i is within the zone range (pfn < end checked
-                // above and block spans 2^order pages), lock is held.
-                unsafe {
-                    (*page).set_refcount(0);
-                    (*page).clear_flag(PageFlag::Referenced);
-                }
-            }
-        }
-        let leader = pfn_to_page_mut(pfn);
-        if !leader.is_null() {
-            // SAFETY: pfn is within zone range (validated above), lock is held.
-            unsafe {
-                (*leader).set_order(order as u8);
-            }
-        }
-
         let mut current_pfn = pfn;
         let mut current_order = order;
 

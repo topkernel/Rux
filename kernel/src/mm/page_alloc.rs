@@ -124,50 +124,6 @@ pub fn free_pages(addr: usize, order: usize) {
 
     let pfn = phys_to_pfn(addr);
 
-    // R14-2c: caller-identification probe (the inlined zone tripwire's ra
-    // lands in unrelated code). Log only when the target page already
-    // looks free — same condition as the zone tripwire, but captured at
-    // THIS frame so ra is the true caller.
-    {
-        let pd = crate::mm::page_desc::pfn_to_page_mut(pfn);
-        if !pd.is_null() && unsafe { (*pd).refcount() } == 0 {
-            static N: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if n < 0 { // R14: print disabled — probe's ra/frame capture unreliable; counter kept
-                use crate::console::putchar;
-                let mut ra: usize;
-                unsafe { core::arch::asm!("mv {}, ra", out(reg) ra, lateout("x1") _, options(nomem, nostack)); }
-                // walk one frame: caller's ra is at (s0 of this frame)+8 —
-                // approximate via current s0 chain. Capture s0 first.
-                let s0v: usize;
-                unsafe { core::arch::asm!("mv {}, s0", out(reg) s0v, options(nomem, nostack)); }
-                let mut outer_ra: usize = 0;
-                let mut fp = s0v;
-                for _ in 0..3 {
-                    if fp == 0 { break; }
-                    outer_ra = unsafe { core::ptr::read_volatile((fp + 8) as *const usize) };
-                    if outer_ra >= 0xffffffff80000000usize { break; }
-                    fp = unsafe { core::ptr::read_volatile(fp as *const usize) };
-                }
-                const MSG: &[u8] = b"pgalloc: DBLF pfn=";
-                for &b in MSG { putchar(b); }
-                let mut v = pfn; let mut digs = [0u8; 12]; let mut k = 0;
-                if v == 0 { putchar(b'0'); }
-                while v > 0 { digs[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
-                while k > 0 { k -= 1; putchar(digs[k]); }
-                const MSG2: &[u8] = b" ra=0x";
-                for &b in MSG2 { putchar(b); }
-                let mut sh = 64;
-                while sh > 0 { sh -= 4; let nb = ((ra >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
-                const MSG3: &[u8] = b" outer=0x";
-                for &b in MSG3 { putchar(b); }
-                sh = 64;
-                while sh > 0 { sh -= 4; let nb = ((outer_ra >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
-                putchar(b'\n');
-            }
-        }
-    }
 
     // NOTE: descriptor reset (refcount→0 etc.) happens inside zone.free_pages
     // under the zone lock — resetting here, before the lock, used to expose a

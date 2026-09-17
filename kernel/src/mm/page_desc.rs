@@ -234,6 +234,11 @@ impl Page {
         self.mapping.store(0, Ordering::Release);
         self.index.store(0, Ordering::Release);
         self.lru_next.store(0, Ordering::Release);
+        // R15-5 (探针误报根因): init_free 漏重置 next_free。描述符内存
+        // 上电为 0，未进过空闲链表的页 next_free=0 而非 FREE_LIST_NULL
+        // ——TDF 探针(next_free!=MAX)把每个首次释放都误报成双重释放
+        // (idle 193/nettest 483 次全是误报)。补上重置，判据恢复可靠。
+        self.next_free.store(usize::MAX, Ordering::Release);
     }
 
     // ========== Flag operations ==========

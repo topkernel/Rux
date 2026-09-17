@@ -410,28 +410,6 @@ impl PageCache {
 
 /// Release a physical page frame back to the zone allocator.
 fn release_page_frame(pfn: usize) {
-    // R14-2b: the zone tripwire traced the double-free stream here. Log
-    // pfn + caller for the first hits to identify the releasing path.
-    {
-        static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-        let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 0 { // R14: print disabled; counter kept
-            use crate::console::putchar;
-            let mut ra: usize;
-            unsafe { core::arch::asm!("mv {}, ra", out(reg) ra, lateout("x1") _, options(nomem, nostack)); }
-            const MSG: &[u8] = b"pcache: release pfn=";
-            for &b in MSG { putchar(b); }
-            let mut v = pfn; let mut digs = [0u8; 12]; let mut k = 0;
-            if v == 0 { putchar(b'0'); }
-            while v > 0 { digs[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
-            while k > 0 { k -= 1; putchar(digs[k]); }
-            const MSG2: &[u8] = b" ra=0x";
-            for &b in MSG2 { putchar(b); }
-            let mut sh = 64;
-            while sh > 0 { sh -= 4; let nb = ((ra >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
-            putchar(b'\n');
-        }
-    }
     let phys_addr = pfn_to_phys(pfn);
 
     // Clear page cache metadata
