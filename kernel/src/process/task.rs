@@ -1464,7 +1464,9 @@ impl Task {
                 let target_cpu = sched_class.select_task_rq(task, prev_cpu, 0);
 
                 // Update task's CPU if it changed
-                if target_cpu != prev_cpu {
+                // R13-5: never steer a task that is still executing (on_cpu set
+// until its context is saved) — see the deferred-notify steering fix.
+                if target_cpu != prev_cpu && !(*task).on_cpu() {
                     (*task).set_ti_cpu(target_cpu);
                 }
 
@@ -2019,6 +2021,33 @@ impl Task {
             // SAFETY: kernel_stack was set by alloc_kernel_stack() as bottom + KERNEL_STACK_SIZE,
             // so subtracting KERNEL_STACK_SIZE yields the original allocation base.
             let stack_bottom = unsafe { stack_top.sub(KERNEL_STACK_SIZE) };
+
+            // R13-6: the pop path ZEROES 32KB — a corrupted kernel_stack
+            // field would wipe arbitrary heap pages (linked Task pages
+            // read as pid=0/state=0 afterwards; the zeroed-children-node
+            // family). Validate alignment and heap bounds before pushing;
+            // a bogus value is reported and dropped (leak beats wipe).
+            {
+                use crate::console::putchar;
+                let addr = stack_bottom as usize;
+                let (hs, he) = crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+                let bogus = addr & 0xF != 0
+                    || addr + KERNEL_STACK_SIZE > he
+                    || addr < hs;
+                if bogus {
+                    const MSG: &[u8] = b"stackfree: BOGUS bottom=0x";
+                    for &b in MSG { putchar(b); }
+                    let mut sh = 64;
+                    while sh > 0 {
+                        sh -= 4;
+                        let nb = ((addr >> sh) & 0xF) as u8;
+                        putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                    }
+                    putchar(b'\n');
+                    self.kernel_stack = None;
+                    return;
+                }
+            }
 
             // Return to cache instead of deallocating
             stack_cache_free(stack_bottom);

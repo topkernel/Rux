@@ -371,6 +371,14 @@ impl FdTable {
             return Err(());
         }
 
+        // R13-4: capture the last-reference decision INSIDE the entry
+        // lock. Reading strong_count after the release let a concurrent
+        // get_file clone land between the slot clear and the check — the
+        // count read 2, the close op was skipped forever, and the pipe
+        // EOF was never delivered (hang face). Under the lock the slot is
+        // gone, so any clone racing us is either already counted or will
+        // see the empty slot; count==1 here is stable because the only
+        // remaining holder is the one we are dropping.
         let file_opt = {
             let mut entry = self.entry.lock_irqsave();
             if entry.fds[fd].is_none() {
@@ -378,30 +386,24 @@ impl FdTable {
             }
             let file_opt = core::mem::replace(&mut entry.fds[fd], None);
             entry.count -= 1;
-            file_opt
-        };
-        // Lock released before calling file.close() — avoids lock order issues
-
-        // Call close operation if exists
-        if let Some(file) = file_opt {
             // R10-2 (PIPE2 EBADF root cause): release only on the LAST
-            // Arc reference. The File is shared by every dup'd/fork'd
-            // descriptor; running the close op per EVENT let
+            // Arc reference — running the close op per EVENT let
             // pipe_file_close STEAL private_data from the File that fd 1
-            // still pointed at after `dup3(w,1); close(w)` — exec'd echo
-            // then wrote to a pipe-less File and got EBADF (same theft in
-            // socket/procfs/epoll close ops). With this check the op fires
-            // when our dropped clone is the final one.
-            if Arc::strong_count(&file) == 1 {
-                unsafe {
-                    let file_ptr = Arc::as_ptr(&file) as *mut File;
-                    let ops_ptr = (*file_ptr).ops.get();
-                    if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
-                        (*file_ptr).close();
+            // still pointed at after `dup3(w,1); close(w)` (same theft in
+            // socket/procfs/epoll close ops).
+            if let Some(ref file) = file_opt {
+                if Arc::strong_count(file) == 1 {
+                    unsafe {
+                        let file_ptr = Arc::as_ptr(file) as *mut File;
+                        let ops_ptr = (*file_ptr).ops.get();
+                        if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
+                            (*file_ptr).close();
+                        }
                     }
                 }
             }
-        }
+            file_opt
+        };
 
         Ok(())
     }

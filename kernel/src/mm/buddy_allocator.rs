@@ -131,6 +131,11 @@ unsafe impl Send for BuddyAllocator {}
 unsafe impl Sync for BuddyAllocator {}
 
 impl BuddyAllocator {
+    /// R13-6: current heap virtual range (for allocation-validity checks).
+    pub fn heap_bounds(&self) -> (usize, usize) {
+        (self.heap_start.load(Ordering::Acquire), self.heap_end.load(Ordering::Acquire))
+    }
+
     pub const fn new() -> Self {
         Self {
             magic: AtomicUsize::new(0xDEADBEEF),

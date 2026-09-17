@@ -386,7 +386,19 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
             // queued on another CPU — cpu_id() reads tp→ti_cpu on that CPU,
             // and hijacking it corrupts the victim's per-CPU view
             // (review 2R.15).
-            if (*parent).state().is_sleeping() {
+            // R13-1 (root cause of S-A AND S-B): is_sleeping() is TRUE
+            // during the whole prepare_to_wait -> schedule() window while
+            // the parent is STILL EXECUTING on another CPU. Steering its
+            // ti_cpu then poisons cpu_id() (a tp->ti_cpu FIELD read) for
+            // the rest of its kernel path: the next __schedule resolves
+            // prev from the WRONG per-CPU slot and switches context
+            // against a different task — two tasks, one kernel stack;
+            // zeroed stack locals (the NULL+0x30 CAS) and mixed trap
+            // frames (the jump-to-user-address) both fall out. on_cpu()
+            // is exactly "picked, context not yet saved": true inside
+            // that window (skip), false once genuinely switched out
+            // (safe to steer).
+            if (*parent).state().is_sleeping() && !(*parent).on_cpu() {
                 (*parent).set_ti_cpu(cpu as i32);
             }
         }

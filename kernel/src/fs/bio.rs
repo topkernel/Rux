@@ -919,6 +919,16 @@ pub fn bread_async(
             let mut current = bucket.head;
             while let Some(cp) = current {
                 if (*cp).key == (device_major, blocknr) {
+                    // R13-2: same dead/evicting guards as get() Phase 3.
+                    if (*cp).evicting
+                        || unsafe {
+                            (*cp).bh.is_null()
+                                || (*(*cp).bh).b_data.len() != cache.block_size as usize
+                        }
+                    {
+                        current = (*cp).hash_next;
+                        continue;
+                    }
                     (*(*cp).bh).get();
                     let mut lru = unsafe { cache.lru_lock_under_bucket() };
                     BlockCache::move_to_lru_head(&mut lru, cp);

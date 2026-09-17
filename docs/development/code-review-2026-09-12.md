@@ -592,6 +592,15 @@ M1 补 new_task_at 缺失字段（wait_chldexit 等全量）；schedule_tail 处
 wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueue_task_locked 崩）尝试以 RCU 读侧包裹；**共享核心包裹实测引入新崩溃类（4/6）已回退**（专项重做：call_rcu 化 free_task_slot）；virtio 描述符限流修正 off-by-one（in_flight*3+3>queue_size）；alloc_desc 失败路径补 dealloc；msg 循环顶部 seq 复验（R9-11 作用域漏洞）；new_task_at 栈分配失败传播（不再带 sp=0 继续）；R9-16 restore_irq 真正落地；R9-18 全量 sfence 回退（sfence.vma 是 hart-local，全量无意义——远程 shootdown 为已记录开口项）。
 
 ### 20.3 门禁与遗留
+### 20.6 第十三轮（2026-09-17 续）：ti_cpu steering 窗口 + 五项加固
+
+- **R13-1**：`process_deferred_exit_notify_cpu` 的 ti_cpu steering 补 `!on_cpu()` 守卫——is_sleeping() 在整个 prepare_to_wait→schedule 窗口为真而任务仍在跑，此时写 ti_cpu 毒化 cpu_id()（tp→ti_cpu 字段读）→ 下次 __schedule 从错误 per-CPU 槽取 prev → 对着另一个任务做切换 = **两任务一内核栈**（同时解释 NULL+0x30 栈局部清零与用户帧/内核 SPP 混合的跳用户地址；7-12 轮只修消费者而此 bug 毒化它们依赖的索引）。on_cpu 恰为"已 pick 未保存上下文"。wake_up 内同名 steer 同步加守卫。
+- **R13-2**：bread_async Phase-3 重复扫描补死/evicting 守卫（get() Phase-3 同款）。
+- **R13-3**：timer 递送——wake_pid 改 pinned lookup（最后一条未钉的跨 CPU 唤醒）；tfd 计数递送前在 TIMERS 锁内复验 id 仍缺席（R12-3 把递送移出锁后 H48 的 close-竞态复活）。
+- **R13-4**：close_fd 的 strong_count 判定移入 entry 锁内——锁外读取会漏掉并发 get_file 克隆（读到 2 → 永不触发 close → 管道 EOF 丢失的挂起面）。
+- **R13-6**：free_kernel_stack 校验 bottom 在堆界内且 16 字节对齐后才入缓存——32KB 清零是唯一能整页抹掉已链 Task 的引擎；bogus 值报告并丢弃（泄漏胜于抹除）。探针 8 轮 0 触发（bottom 均合法）——归零源的另一半仍开放。
+- **门禁（8 轮）**：nettest 6/8；三签名维持各 ~2/8（children-list 归零、NULL+0x30 CAS、跳用户地址），其中 1 轮 pp/x 双通过后仍崩。**第十四轮输入**：三签名共用"栈/Task 页被覆写"上游——下一轮应给 Zone::free_pages 补 double-free 探针（R10 发现 #10 未修，物理页侧无守卫）、用 GDB 在 KERNPANIC 时 dump FREED_TASK_RING 与 fault 页的 BlockMeta 归属，直接指认写者。
+
 ### 20.5 第十二轮（2026-09-17 续）：唤醒移回锁内 + 定时器锁减负 + 引用计数化查找
 
 - **R12-1/R12-2**：WaitQueueHead::wake_up 与 futex_wake 的唤醒**移回等待队列/桶锁内**——锁内"未唤醒"条目的存在证明该任务尚未通过 finish_wait（需要同一把锁），因此不可能已退出/被收尸，收集-后唤醒的 UAF 窗口彻底关闭（此前 PID 复验只是收窄）。futex_requeue 因跨两桶保留复验。锁序 queue→GRQ 经审计安全。

@@ -244,16 +244,29 @@ pub fn timer_softirq_handler(_nr: usize) {
     // CPUs on the TIMERS lock whenever the GRQ side stalled (observed
     // after pipelines). `expired` is a detached snapshot; the ids were
     // removed from the maps under the locks above.
-    for (_id, action) in &expired {
+    for (id, action) in &expired {
         if action.wake_pid != 0 {
-            let task = crate::process::pid_hash::pid_hash_lookup(action.wake_pid);
+            // R13-3: pinned (softirq wake racing a concurrent reap) — the
+            // last unpinned cross-CPU wake path.
+            let task = crate::process::pid_hash::pid_hash_lookup_pinned(action.wake_pid);
             if !task.is_null() {
                 crate::sched::wake_up_process(task);
+                crate::process::task::Task::task_put(task);
             }
         } else if action.tfd_addr != 0 {
-            unsafe {
-                let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
-                (*counter_ptr).fetch_add(1, Ordering::Release);
+            // R13-3 (H48 re-closed after R12-3): re-validate under TIMERS
+            // that the id is still absent (not deleted-and-re-added) before
+            // touching the fd's counter — a timerfd_close + free between
+            // snapshot and delivery made this an add on freed memory.
+            let still_ours = {
+                let timers = TIMERS.lock_irqsave();
+                !timers.contains_key(id)
+            };
+            if still_ours {
+                unsafe {
+                    let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
+                    (*counter_ptr).fetch_add(1, Ordering::Release);
+                }
             }
         } else if action.pid != 0 && action.signo != 0 {
             let _ = crate::signal::send_signal(action.pid, action.signo);
