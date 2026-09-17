@@ -592,6 +592,15 @@ M1 补 new_task_at 缺失字段（wait_chldexit 等全量）；schedule_tail 处
 wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueue_task_locked 崩）尝试以 RCU 读侧包裹；**共享核心包裹实测引入新崩溃类（4/6）已回退**（专项重做：call_rcu 化 free_task_slot）；virtio 描述符限流修正 off-by-one（in_flight*3+3>queue_size）；alloc_desc 失败路径补 dealloc；msg 循环顶部 seq 复验（R9-11 作用域漏洞）；new_task_at 栈分配失败传播（不再带 sp=0 继续）；R9-16 restore_irq 真正落地；R9-18 全量 sfence 回退（sfence.vma 是 hart-local，全量无意义——远程 shootdown 为已记录开口项）。
 
 ### 20.3 门禁与遗留
+### 20.7 第十四轮：全库补盲检视（net/drivers/interrupt + mm回收/ext4日志/dfx/security/boot）
+
+> 覆盖审计承认 7-13 轮为签名驱动；本轮两个 agent 把**从未深扫**的子系统全部逐行扫完（每文件 clean/dirty 表见 agent 报告）。共 **16 HIGH / 17 MED / 29 LOW**。
+
+**net/drivers/interrupt（agent 1）**：HIGH-1 irq_exit 内联 softirq 不查 in_softirq（lock_bh 是谎言——持锁者被 IRQ 打断后 handler 自旋自己的锁）；HIGH-2 LO_BACKLOG/ARP_CACHE 纯 lock() 而被 Timer 软中断 10ms 一次命中（同 CPU 永久楔 = DEADLOCK 面新源）；HIGH-3 TCP 服务端握手 SYN 序号从不 +1（accept 后发送窗计算环绕 → 服务器侧永久堵死）；HIGH-4 FIN 从不重传且 FIN_WAIT1/2 无超时（64 槽永久泄漏）；HIGH-5 close_fd 最后引用判定在并发 get_file 克隆下**永久跳过 close op**（管道 EOF 丢失 = 挂起/EBADF 面）且 R13-4 把 op 执行也移进了 entry 锁（socket close → virtio 自旋在锁内+IRQ off）；HIGH-6 UDP_SOCKET_TABLE static-mut 无锁；HIGH-7 TCP 槽被 timer 释放而进程 fd 仍在用（跨连接数据混淆）。MED：virtio-net RX 因 blk 的链限流只剩 2 缓冲、xmit 泄漏 hdr、poll 早退泄漏 RX 缓冲、xmit 超时后释放 DMA 中内存、virtio-input used 环 +8 应为 +4（越界读写 desc 表）、5 处 ECAM slot×8 未跟随、TCP 发送环不扣窗、RST 无序号验证、UDP 接收无界（远程 OOM）、socket 创建错误路径泄漏槽、PLIC 使能字非原子 RMW。LOW×14。
+**mm/ext4/dfx/security（agent 2）**：F1 allocator.rs:478 `BISECT-NO-PLUS1` 标记仍在（EXT4-H3 "修复"只有注释没加 +1——inode 号错位一位）；F2 jbd2 并发 journal_stop 可双提交、start_this_handle 不查 t_state（提交中注册的缓冲**永不入日志**）；F9 Zone::free_pages 仍无 double-free 守卫（主分配器路径！R9-14 只装在没用的 BuddyAllocator 上）；F10 vmscan `put_page()<=0` 仍 free_page（**活的双重释放**——与 F9 组成 NEW2 型同页双主）；F14 swap_init 零调用（整个 swap 路径运行时死路）；F5 rename 覆盖文件目标不释放数据块；F6 目录迭代对删除项递归（50 连续空洞爆 16KB 栈）。MED：compact 迁移源不摘 LRU/目标不加 LRU、remap_page 仍覆盖 COW 子进程页、rmap/compact PTE 写仍绕 PTE_MODIFY_LOCK（§17.4 开口）、mount 重挂 ext4 换 GLOBAL_EXT4_FS。LOW：jbd2 commit 错误路径 bh 泄漏、capset inheritable ⊆ permitted 应为 ⊆ inheritable、ambient 合成而非真字段、3 处 10MHz 魔数漏网、kfree 无对齐校验、kswapd 丢唤醒（已知族）、swap 超容文案与行为相反。**security wave-1/2 修复 13 轮后完好**；boot 序列 NEW-C4 保持。
+
+**修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
+
 ### 20.6 第十三轮（2026-09-17 续）：ti_cpu steering 窗口 + 五项加固
 
 - **R13-1**：`process_deferred_exit_notify_cpu` 的 ti_cpu steering 补 `!on_cpu()` 守卫——is_sleeping() 在整个 prepare_to_wait→schedule 窗口为真而任务仍在跑，此时写 ti_cpu 毒化 cpu_id()（tp→ti_cpu 字段读）→ 下次 __schedule 从错误 per-CPU 槽取 prev → 对着另一个任务做切换 = **两任务一内核栈**（同时解释 NULL+0x30 栈局部清零与用户帧/内核 SPP 混合的跳用户地址；7-12 轮只修消费者而此 bug 毒化它们依赖的索引）。on_cpu 恰为"已 pick 未保存上下文"。wake_up 内同名 steer 同步加守卫。
