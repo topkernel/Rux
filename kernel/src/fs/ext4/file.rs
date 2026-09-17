@@ -335,7 +335,7 @@ pub fn ext4_file_write(
 
     // Update inode timestamp
     let cycles = crate::drivers::intc::clint::read_time();
-    let sec = (cycles / 10_000_000) as u32;
+    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
     inode.mtime = sec;
     inode.ctime = sec;
 

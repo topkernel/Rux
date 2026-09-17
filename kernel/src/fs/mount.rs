@@ -133,6 +133,13 @@ pub fn do_mount(target: &str, fs_type: &str, _flags: u64) -> Result<(), i32> {
 
     match fs_type {
         "ext4" => {
+            // R14-12 (F22): refuse to re-run mount_ext4 on a live
+            // filesystem — a second `mount -t ext4` rebuilt the Ext4,
+            // re-ran journal recovery on a live journal, swapped
+            // GLOBAL_EXT4_FS under open files and leaked the old instance.
+            if crate::fs::ext4::is_mounted() {
+                return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+            }
             let fs = crate::fs::ext4::get_ext4_fs()
                 .ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
             // Mount ext4 if not already mounted

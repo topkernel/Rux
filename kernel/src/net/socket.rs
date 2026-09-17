@@ -552,13 +552,26 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
     // independently of the socket table entry.
     file.set_private_data(Arc::into_raw(Arc::clone(&socket)) as *mut u8);
 
+    // R14-14 (MED-10): unwind the proto slot and the raw Arc reference on
+    // fdtable failures — each error exit used to leak BOTH permanently.
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(t) => t,
-        None => return Err(-9), // EBADF
+        None => {
+            unwind_socket_creation(&file, sock_type, proto_fd);
+            return Err(-9); // EBADF
+        }
     };
-
-    let fd = fdtable.alloc_fd().ok_or(-24)?; // EMFILE
-    fdtable.install_fd(fd, file).map_err(|_| -24)?;
+    let fd = match fdtable.alloc_fd() {
+        Some(f) => f,
+        None => {
+            unwind_socket_creation(&file, sock_type, proto_fd);
+            return Err(-24); // EMFILE
+        }
+    };
+    if fdtable.install_fd(fd, file.clone()).is_err() {
+        unwind_socket_creation(&file, sock_type, proto_fd);
+        return Err(-24);
+    }
 
     // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
     let slot = unsafe {
@@ -569,6 +582,21 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
     }
 
     Ok(fd)
+}
+
+/// R14-14: unwind a failed socket creation — free the protocol slot and
+/// the raw Arc<Socket> reference stashed in the (soon-dropped) File.
+fn unwind_socket_creation(file: &Arc<File>, sock_type: SocketType, proto_fd: i32) {
+    match sock_type {
+        SocketType::Tcp => crate::net::tcp::tcp_socket_free(proto_fd),
+        SocketType::Udp => crate::net::udp::udp_socket_free(proto_fd),
+    }
+    // SAFETY: the Option<*mut u8> in private_data came from Arc::into_raw
+    // above; we are the sole owner (the File is about to drop, no ops ran).
+    let ptr = unsafe { *file.private_data.get() };
+    if let Some(ptr) = ptr {
+        unsafe { drop(Arc::from_raw(ptr as *const Socket)); }
+    }
 }
 
 /// Get socket from file descriptor

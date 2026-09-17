@@ -601,6 +601,13 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.8 第十四轮修复批（R14-1..17，全部完成并门禁）
+
+修复：F10（vmscan 只在"自己减到 0"才释放）；F9（Zone::free_pages double-free 计数探针——先拒绝-泄漏版实测每轮 349-2309 次命中导致内存耗尽，改为计数+识别+放行）；HIGH-2（LO_BACKLOG/ARP_CACHE 全部 lock_irqsave）；HIGH-1（irq_exit 内联 softirq 加 !in_softirq 门）；F1（allocator.rs `BISECT-NO-PLUS1` 标记删除、inode 号 +1）；HIGH-5b（close op 决策留 entry 锁内、执行移出锁外——原在锁内执行 socket close 会持锁自旋 virtio 10s）；HIGH-3（TCP 服务端 SYN 消耗序号：send_synack 后 snd_nxt+1、handle_ack_recv 补 snd_una+1）；F5（rename 覆盖文件目标补 free_inode_blocks）；F6（目录迭代器递归改循环）；MED-5（virtio-input used 环 +8→+4）；MED-10（socket 创建失败路径 unwind 槽+Arc）；MED-11（PLIC 使能字 RMW 全局自旋锁）；F22（ext4 已挂载拒重挂 EBUSY）；F7/F18（4 处 10MHz 魔数补统一）；R14-16（**page_cache put() 只在实际减量后释放**——原"看到 0+invalidated 就释放"让同一帧被两次 put 各释放一次 = zone dblfree 流的可定罪源）；R14-17（CachedPage.released 一次性闩）。
+探针结论：zone dblfree 探针的 ra/栈帧捕获不可靠（内联+叶函数 asm），打印已静默、计数保留；pfn 544551/2/5 落在堆区间的跨分配器语义（heap buddy 从不设 refcount，zone 判据失效）留待下一轮专项。
+**门禁（6+8 轮）**：**kpanic 0/6（末批）**、wedge 0、smoke 15/15 ×4+14/15 ×2、**nettest 5/6 且 pp 5/5**——`echo PP | cat` 管道连续 5 轮通过；run6 为线性映射低位非法指令（0x1313 000 族，1/6）残留。F14（swap_init 接线）因 swap 区与 ext4 尾部重叠（M6）暂缓。
+
+
 ### 20.6 第十三轮（2026-09-17 续）：ti_cpu steering 窗口 + 五项加固
 
 - **R13-1**：`process_deferred_exit_notify_cpu` 的 ti_cpu steering 补 `!on_cpu()` 守卫——is_sleeping() 在整个 prepare_to_wait→schedule 窗口为真而任务仍在跑，此时写 ti_cpu 毒化 cpu_id()（tp→ti_cpu 字段读）→ 下次 __schedule 从错误 per-CPU 槽取 prev → 对着另一个任务做切换 = **两任务一内核栈**（同时解释 NULL+0x30 栈局部清零与用户帧/内核 SPP 混合的跳用户地址；7-12 轮只修消费者而此 bug 毒化它们依赖的索引）。on_cpu 恰为"已 pick 未保存上下文"。wake_up 内同名 steer 同步加守卫。

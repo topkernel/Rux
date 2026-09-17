@@ -59,7 +59,7 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
         stats.tx_bytes += skb.len as u64;
     }
 
-    let mut backlog = LO_BACKLOG.lock();
+    let mut backlog = LO_BACKLOG.lock_irqsave();
     if backlog.len() >= LO_BACKLOG_MAX {
         drop(backlog);
         let mut stats = LO_STATS.write();
@@ -96,7 +96,7 @@ static LOOPBACK_OPS: NetDeviceOps = NetDeviceOps {
 /// # Returns
 /// Device pointer on success, None on failure
 pub fn loopback_init() -> Option<&'static mut NetDevice> {
-    let _lock = LO_DEVICE_LOCK.lock();
+    let _lock = LO_DEVICE_LOCK.lock_irqsave();
     unsafe {
         // Check if already initialized
         if LO_DEVICE.is_some() {
@@ -170,7 +170,7 @@ pub fn loopback_send(skb: SkBuff) -> i32 {
 /// ethernet_poll() (softirq context), which is the single consumer — this
 /// is what breaks the old synchronous re-entry (review NEW-C6).
 pub fn loopback_poll() -> Option<SkBuff> {
-    let mut backlog = LO_BACKLOG.lock();
+    let mut backlog = LO_BACKLOG.lock_irqsave();
     let skb = backlog.pop_front()?;
     let mut stats = LO_STATS.write();
     stats.rx_packets += 1;

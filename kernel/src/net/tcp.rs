@@ -650,6 +650,12 @@ impl TcpSocket {
 
         crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6);
 
+        // R14-7 (HIGH-3): the SYN consumes one sequence number. Without
+        // this, the peer's rcv_nxt (= ISN+1) mismatched every subsequent
+        // server segment, and the first client ACK made in_flight wrap
+        // (usable_window 0) — server-side TX permanently blocked.
+        self.snd_nxt = self.snd_nxt.wrapping_add(1);
+
         Ok(())
     }
 
@@ -886,6 +892,9 @@ impl TcpSocket {
     fn handle_ack_recv(&mut self) -> Result<(), ()> {
         // Check if ACK acknowledges our SYN-ACK
         // Three-way handshake complete, connection established
+        // R14-7: the ACK acknowledges the SYN's sequence number — advance
+        // snd_una in lockstep with send_synack's snd_nxt advance.
+        self.snd_una = self.snd_una.wrapping_add(1);
         self.state = TcpState::TCP_ESTABLISHED;
         Ok(())
     }

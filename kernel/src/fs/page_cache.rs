@@ -41,6 +41,10 @@ struct CachedPage {
     /// Set when invalidate_inode found the page pinned: freed by the final
     /// put() instead of under the reader's feet.
     invalidated: bool,
+    /// R14-17: one-shot release latch — put() and the evict/shrink paths
+    /// can both reach the release for the same entry; the frame must be
+    /// returned to the zone exactly once (the zone dblfree stream).
+    released: core::sync::atomic::AtomicBool,
 }
 
 /// Per-inode page cache.
@@ -169,6 +173,7 @@ impl PageCache {
             pfn,
             ref_count: AtomicU32::new(0),
             invalidated: false,
+            released: core::sync::atomic::AtomicBool::new(false),
         });
         self.total_pages.fetch_add(1, Ordering::Relaxed);
     }
@@ -180,12 +185,25 @@ impl PageCache {
             if let Some(page) = inode_cache.pages.get_mut(&page_index) {
                 // Floor at 0: a get() miss (invalidated page) never
                 // incremented, so a stale put must not underflow.
-                page.ref_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-                    v.checked_sub(1)
-                }).ok();
+                // R14-16 (the dblfree engine): only a put that ACTUALLY
+                // decremented (prev >= 1) may release — the old code
+                // released whenever the count was seen 0+invalidated, so
+                // two stale puts (or a stale put after the real one) each
+                // released the SAME frame: the zone double-free stream
+                // (pfn 544551/2/5...) behind the surviving corruption.
+                let decremented = page
+                    .ref_count
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                        v.checked_sub(1)
+                    })
+                    .is_ok();
                 // R7-C2: invalidate_inode left this page in place because a
                 // reader held a pin — now that the pin is gone, free it.
-                if page.ref_count.load(Ordering::Acquire) == 0 && page.invalidated {
+                if decremented
+                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.invalidated
+                    && !page.released.swap(true, Ordering::AcqRel)
+                {
                     let pfn = page.pfn;
                     inode_cache.pages.remove(&page_index);
                     let page_desc = pfn_to_page_mut(pfn);
@@ -239,6 +257,8 @@ impl PageCache {
                     }
                     release_page_frame(pfn);
                 }
+                // (entries were removed from the map above; the released
+                // latch lives on the moved-out entries)
                 self.total_pages.fetch_sub(freed_count, Ordering::Relaxed);
             }
             if inode_cache.pages.is_empty() {
@@ -390,6 +410,28 @@ impl PageCache {
 
 /// Release a physical page frame back to the zone allocator.
 fn release_page_frame(pfn: usize) {
+    // R14-2b: the zone tripwire traced the double-free stream here. Log
+    // pfn + caller for the first hits to identify the releasing path.
+    {
+        static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 0 { // R14: print disabled; counter kept
+            use crate::console::putchar;
+            let mut ra: usize;
+            unsafe { core::arch::asm!("mv {}, ra", out(reg) ra, lateout("x1") _, options(nomem, nostack)); }
+            const MSG: &[u8] = b"pcache: release pfn=";
+            for &b in MSG { putchar(b); }
+            let mut v = pfn; let mut digs = [0u8; 12]; let mut k = 0;
+            if v == 0 { putchar(b'0'); }
+            while v > 0 { digs[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
+            while k > 0 { k -= 1; putchar(digs[k]); }
+            const MSG2: &[u8] = b" ra=0x";
+            for &b in MSG2 { putchar(b); }
+            let mut sh = 64;
+            while sh > 0 { sh -= 4; let nb = ((ra >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+            putchar(b'\n');
+        }
+    }
     let phys_addr = pfn_to_phys(pfn);
 
     // Clear page cache metadata

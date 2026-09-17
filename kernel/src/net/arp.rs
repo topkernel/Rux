@@ -266,23 +266,23 @@ static ARP_CACHE: Spinlock<ArpCache> = Spinlock::new(ArpCache::new());
 
 /// Look up ARP cache
 pub fn arp_lookup(ip: u32) -> Option<[u8; ETH_ALEN]> {
-    let cache = ARP_CACHE.lock();
+    let cache = ARP_CACHE.lock_irqsave();
     cache.lookup(ip).map(|entry| entry.mac)
 }
 
 /// Update ARP cache
 pub fn arp_update(ip: u32, mac: [u8; ETH_ALEN]) {
-    ARP_CACHE.lock().update(ip, mac);
+    ARP_CACHE.lock_irqsave().update(ip, mac);
 }
 
 /// Remove ARP cache entry
 pub fn arp_remove(ip: u32) {
-    ARP_CACHE.lock().remove(ip);
+    ARP_CACHE.lock_irqsave().remove(ip);
 }
 
 /// Clear ARP cache
 pub fn arp_clear() {
-    ARP_CACHE.lock().clear();
+    ARP_CACHE.lock_irqsave().clear();
 }
 
 /// Build ARP request packet

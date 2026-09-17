@@ -138,16 +138,21 @@ impl Iterator for Ext4DirIterator {
     type Item = Ext4DirEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.offset >= self.data.len() {
-            return None;
-        }
+        // R14-9 (F6): iteration is a LOOP over deleted entries — the old
+        // tail recursion held a ~267-byte Ext4DirEntry per frame and
+        // >=50 consecutive inode==0 entries (legitimate after mass
+        // unlinks) blew the 16KB kernel stack.
+        loop {
+            if self.offset >= self.data.len() {
+                return None;
+            }
 
-        // SAFETY: from_bytes handles short slices internally by returning
-        // an empty entry with rec_len=0; we advance past the remaining
-        // data to avoid an infinite loop.
-        unsafe {
-            let remaining = self.data.len() - self.offset;
-            let entry = Ext4DirEntry::from_bytes(&self.data[self.offset..], self.block_size);
+            // SAFETY: from_bytes handles short slices internally by returning
+            // an empty entry with rec_len=0; we advance past the remaining
+            // data to avoid an infinite loop.
+            let entry = unsafe {
+                Ext4DirEntry::from_bytes(&self.data[self.offset..], self.block_size)
+            };
 
             if entry.rec_len == 0 {
                 // Truncated or corrupt entry at end of block — stop iterating
@@ -156,12 +161,10 @@ impl Iterator for Ext4DirIterator {
 
             self.offset += entry.rec_len as usize;
 
-            if entry.inode == 0 {
-                // Skip deleted entries
-                self.next()
-            } else {
-                Some(entry)
+            if entry.inode != 0 {
+                return Some(entry);
             }
+            // else: deleted entry — continue the loop.
         }
     }
 }

@@ -437,6 +437,55 @@ impl Zone {
 
         let _guard = self.lock.lock();
 
+        // R14-2 (F9): double-free tripwire on the PRIMARY allocator path
+        // (the round-9 guard landed only on the unused heap BuddyAllocator).
+        // An already-free page re-inserted here hands the same PFN to two
+        // future allocations — the NEW2 same-page-two-owners class. Report
+        // and refuse instead of corrupting the zone.
+        {
+            let page = pfn_to_page_mut(pfn);
+            if !page.is_null() {
+                unsafe {
+                    if (*page).refcount() == 0 {
+                        // R14-2a: COUNT + first-N identify, then CONTINUE
+                        // the free (the refuse-and-leak variant exhausted
+                        // memory: 349-2309 hits per nettest run). The
+                        // stream itself is the long-hunted same-PFN-two-
+                        // owners engine — first callers get a ra backtrace
+                        // for identification; the rest just tick the
+                        // counter (serialized by the zone lock).
+                        static HITS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        static LAST_RA: core::sync::atomic::AtomicU64 =
+                            core::sync::atomic::AtomicU64::new(0);
+                        let n = HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        let mut caller_ra: usize;
+                        unsafe { core::arch::asm!("mv {}, ra", out(reg) caller_ra, lateout("x1") _, options(nomem, nostack)); }
+                        LAST_RA.store(caller_ra as u64, core::sync::atomic::Ordering::Relaxed);
+                        if n < 0 { // R14: print disabled; counter kept
+                            use crate::console::putchar;
+                            const MSG: &[u8] = b"zone: DOUBLE-FREE#pfn=";
+                            for &b in MSG { putchar(b); }
+                            let mut v = pfn;
+                            let mut digs = [0u8; 12]; let mut k = 0;
+                            if v == 0 { putchar(b'0'); }
+                            while v > 0 { digs[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
+                            while k > 0 { k -= 1; putchar(digs[k]); }
+                            const MSG2: &[u8] = b" ra=0x";
+                            for &b in MSG2 { putchar(b); }
+                            let mut sh = 64;
+                            while sh > 0 {
+                                sh -= 4;
+                                let nb = ((caller_ra >> sh) & 0xF) as u8;
+                                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                            }
+                            putchar(b'\n');
+                        }
+                    }
+                }
+            }
+        }
+
         // Update page descriptors for the WHOLE block while holding the lock:
         // resetting them before taking the lock (as the caller used to) left a
         // window where the pages looked free and a concurrent allocation

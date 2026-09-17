@@ -388,7 +388,7 @@ impl VirtioInputDevice {
             }
 
             // Get used descriptor (volatile read: device writes via DMA)
-            let used_ring = (queue.used as *const u8).add(8) as *const UsedElem;
+            let used_ring = (queue.used as *const u8).add(4) as *const UsedElem;
             let used_elem = read_volatile(used_ring.add(last_used % queue.queue_size as usize));
 
             let desc_idx = used_elem.id as usize;

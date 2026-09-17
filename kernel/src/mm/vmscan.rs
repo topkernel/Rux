@@ -284,7 +284,12 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
 
                 // Drop reference; free if last holder
                 let refcount = p.put_page();
-                if refcount <= 0 {
+                // R14-1 (F10): free ONLY when WE took it to zero. The old
+                // `<= 0` also freed on underflow (-1) — i.e. when another
+                // CPU had already dropped the last ref and freed the page,
+                // we freed it AGAIN (Zone::free_pages had no guard: same
+                // PFN to two owners — the NEW2 heap-trashing class).
+                if refcount == 0 {
                     free_page(phys);
                     reclaimed += 1;
                 } else {

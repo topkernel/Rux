@@ -475,7 +475,11 @@ impl<'a> InodeAllocator<'a> {
                 // out the number of the PREVIOUS slot, overwriting a live
                 // inode's on-disk state (review EXT4-H3; namei.rs's
                 // ext4_new_inode already had it right).
-                let inode_number = (group_idx as u64) * inodes_per_group + inode_offset; // BISECT-NO-PLUS1
+                // R14-4 (F1): ext4 inode numbers are 1-BASED — bit N of group G is
+                // inode G*ipg + N + 1. The missing +1 made every allocation alias the
+                // PREVIOUS slot while marking bit N (self-consistent but overlapping
+                // live inodes; free_inode cleared the wrong bit too).
+                let inode_number = (group_idx as u64) * inodes_per_group + inode_offset + 1;
 
                 // Mark inode as used
                 self.mark_inode_used(group_idx as u64, inode_offset as usize, inode_bitmap_block)?;

@@ -40,7 +40,7 @@ fn now_ns() -> u64 {
         );
     }
     // Assume 10MHz timebase → 100ns per tick
-    time * 100
+    time * (crate::config::TIMER_CLOCK_FREQ_HZ / 1_000_000) as u64
 }
 
 /// Initialize the softlockup detector.

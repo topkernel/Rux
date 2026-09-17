@@ -134,7 +134,12 @@ pub fn irq_exit() {
     // do_softirq_own_stack() in this state would switch to the same
     // interrupt stack that already holds PtRegs, corrupting the trap
     // frame and crashing the CPU.
-    if !in_irq() && crate::sched::current().is_some() {
+    // R14-6 (HIGH-1): also require !in_softirq() — a task holding a
+    // lock_bh guard (SOFTIRQ_OFFSET set) that takes this IRQ must NOT run
+    // softirq handlers inline at exit: the handler can spin on the very
+    // lock the interrupted holder owns (lock_bh was a lie before). Deferring
+    // to ksoftirqd is always safe.
+    if !in_irq() && !in_softirq() && crate::sched::current().is_some() {
         crate::interrupt::softirq::invoke_softirq();
     }
 }

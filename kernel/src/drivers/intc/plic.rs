@@ -106,6 +106,7 @@ impl Plic {
     /// own enable register set). For SMP where multiple harts share a
     /// context, this needs AMO (`amoadd.w`) or a spinlock.
     pub fn enable_interrupt(&self, hart: usize, irq: usize) {
+        let _rmw = ENABLE_RMW_LOCK.lock();
         self.set_priority(irq, PLIC_PRIORITY_BASE);
         let ctx = s_mode_ctx(hart);
         let word = irq / 32;
@@ -123,6 +124,7 @@ impl Plic {
     }
 
     fn disable_interrupt(&self, hart: usize, irq: usize) {
+        let _rmw = ENABLE_RMW_LOCK.lock();
         let ctx = s_mode_ctx(hart);
         let word = irq / 32;
         let bit = irq % 32;
@@ -178,6 +180,12 @@ impl Plic {
         }
     }
 }
+
+/// R14-15 (MED-11): PLIC enable-word read-modify-writes from different
+/// CPUs lose updates (one IRQ silently left enabled/disabled). All RMW
+/// on enable words goes through this lock.
+static ENABLE_RMW_LOCK: crate::sync::spinlock::Spinlock<()> =
+    crate::sync::spinlock::Spinlock::new(());
 
 static PLIC: Plic = Plic::new(PLIC_BASE, 4);
 

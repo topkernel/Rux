@@ -41,7 +41,7 @@ fn now_ns() -> u64 {
             options(nomem, nostack)
         );
     }
-    time * 100
+    time * (crate::config::TIMER_CLOCK_FREQ_HZ / 1_000_000) as u64
 }
 
 /// Initialize the hung task detector.

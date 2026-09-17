@@ -379,6 +379,15 @@ impl FdTable {
         // gone, so any clone racing us is either already counted or will
         // see the empty slot; count==1 here is stable because the only
         // remaining holder is the one we are dropping.
+        // R14-5: the last-reference DECISION stays inside the entry lock
+        // (a concurrent get_file clone must not slip in between slot-clear
+        // and count read), but the close op EXECUTES after the lock is
+        // dropped — running it under entry.lock_irqsave held socket closes
+        // into a multi-second virtio spin with IRQs off, wedging every fd
+        // operation of every CLONE_FILES thread. Safe to run late: the
+        // slot is gone so no NEW references can appear; our local Arc is
+        // still the last one by construction.
+        let run_close;
         let file_opt = {
             let mut entry = self.entry.lock_irqsave();
             if entry.fds[fd].is_none() {
@@ -389,21 +398,24 @@ impl FdTable {
             // R10-2 (PIPE2 EBADF root cause): release only on the LAST
             // Arc reference — running the close op per EVENT let
             // pipe_file_close STEAL private_data from the File that fd 1
-            // still pointed at after `dup3(w,1); close(w)` (same theft in
-            // socket/procfs/epoll close ops).
-            if let Some(ref file) = file_opt {
-                if Arc::strong_count(file) == 1 {
-                    unsafe {
-                        let file_ptr = Arc::as_ptr(file) as *mut File;
-                        let ops_ptr = (*file_ptr).ops.get();
-                        if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
-                            (*file_ptr).close();
-                        }
+            // still pointed at after `dup3(w,1); close(w)`.
+            run_close = match file_opt {
+                Some(ref file) => Arc::strong_count(file) == 1,
+                None => false,
+            };
+            file_opt
+        };
+        if run_close {
+            if let Some(file) = file_opt {
+                unsafe {
+                    let file_ptr = Arc::as_ptr(&file) as *mut File;
+                    let ops_ptr = (*file_ptr).ops.get();
+                    if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
+                        (*file_ptr).close();
                     }
                 }
             }
-            file_opt
-        };
+        }
 
         Ok(())
     }
