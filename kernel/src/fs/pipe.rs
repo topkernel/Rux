@@ -272,6 +272,15 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                     continue;
                 }
 
+                // R20-FS7: a signal that arrived while we were still RUNNING
+                // (before prepare_to_wait) generated no wakeup; without this
+                // recheck we would sleep on a pending SIGKILL and become
+                // unkillable until a writer arrived.
+                if crate::signal::signal_pending() {
+                    pipe.read_queue().finish_wait(current);
+                    return -(crate::errno::constants::EINTR) as isize;
+                }
+
                 crate::sched::schedule();
 
                 pipe.read_queue().finish_wait(current);
@@ -359,6 +368,15 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 if pipe.buffer.lock().available_write() > 0 || pipe.is_read_closed() {
                     pipe.write_queue().finish_wait(current);
                     continue;
+                }
+
+                // R20-FS7: same pre-schedule signal recheck as the read path.
+                if crate::signal::signal_pending() {
+                    pipe.write_queue().finish_wait(current);
+                    if total_written > 0 {
+                        return total_written as isize;
+                    }
+                    return -(crate::errno::constants::EINTR) as isize;
                 }
 
                 crate::sched::schedule();

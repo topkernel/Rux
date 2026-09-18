@@ -26,7 +26,9 @@ pub fn test_config() {
     test_assert_eq!(KERNEL_HEAP_SIZE, 33554432, "KERNEL_HEAP_SIZE == 32MB");
     test_assert_eq!(PHYS_MEMORY_SIZE, 2147483648, "PHYS_MEMORY_SIZE == 2GB");
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
-    test_assert_eq!(KERNEL_STACK_SIZE, 32768, "KERNEL_STACK_SIZE == 32KB");
+    // R20-5: updated for the r19 kernel-stack fix (32768 -> 65536); the old
+    // assertion contradicted config.rs and failed the in-kernel test suite.
+    test_assert_eq!(KERNEL_STACK_SIZE, 65536, "KERNEL_STACK_SIZE == 64KB");
 
     // Test 5: Scheduler
     test_assert_eq!(KERNEL_HZ, 100, "KERNEL_HZ == 100");

@@ -209,8 +209,9 @@ impl<'a> BlockAllocator<'a> {
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             (*bh).b_data.copy_from_slice(bitmap);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::sync_dirty_buffer(bh)?;
+            let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
+            sync_res?;
             Ok(())
         }
     }
@@ -231,8 +232,9 @@ impl<'a> BlockAllocator<'a> {
             let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(desc_offset + BG_FREE_BLOCKS_OFF) as *mut u16;
             free_blocks_ptr.write_volatile(free_blocks);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::sync_dirty_buffer(bh)?;
+            let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
+            sync_res?;
             Ok(())
         }
     }
@@ -250,8 +252,9 @@ impl<'a> BlockAllocator<'a> {
             let new_count = (current as i64 + delta as i64) as u32;
             free_blocks_ptr.write_volatile(new_count);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::sync_dirty_buffer(bh)?;
+            let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
+            sync_res?;
             Ok(())
         }
     }
@@ -574,9 +577,11 @@ impl<'a> InodeAllocator<'a> {
             data.copy_from_slice(bitmap);
 
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::sync_dirty_buffer(bh)?;
+            let sync_res = bio::sync_dirty_buffer(bh);
 
             bio::brelse(bh);
+
+            sync_res?;
 
             Ok(())
         }
@@ -623,9 +628,11 @@ impl<'a> InodeAllocator<'a> {
             free_inodes_ptr.write_volatile(free_inodes);
 
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::sync_dirty_buffer(bh)?;
+            let sync_res = bio::sync_dirty_buffer(bh);
 
             bio::brelse(bh);
+
+            sync_res?;
 
             Ok(())
         }
@@ -653,9 +660,11 @@ impl<'a> InodeAllocator<'a> {
             free_inodes_ptr.write_volatile(new);
 
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::sync_dirty_buffer(bh)?;
+            let sync_res = bio::sync_dirty_buffer(bh);
 
             bio::brelse(bh);
+
+            sync_res?;
 
             Ok(())
         }

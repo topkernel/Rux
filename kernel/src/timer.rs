@@ -186,6 +186,11 @@ pub fn timer_softirq_handler(_nr: usize) {
     if current == last {
         return;
     }
+    // R20-7: record the processed jiffy so a second softirq within the same
+    // jiffy returns early instead of re-scanning (and re-locking) the timer
+    // maps. This store was missing, so the dedupe above never fired and the
+    // full scan ran on every raise (TIMERS/ACTIONS lock churn).
+    LAST_TICK.store(current, Ordering::Release);
 
     // Collect expired timers under locks; deliver AFTER releasing them
     // (R12-3 — see the moved delivery block below).

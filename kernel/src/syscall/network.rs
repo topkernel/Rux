@@ -765,8 +765,18 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     // struct iovec { iov_base, iov_len }
     let mut total_len = 0usize;
     let mut buf = alloc::vec::Vec::new();
-    // Cap msg_iovlen to prevent i * 16 overflow in pointer arithmetic
-    let msg_iovlen = msg_iovlen.min(1024);
+    // R20-2 (LOW-11): reject oversized iovec arrays instead of silently
+    // clamping — the clamp dropped trailing iovecs, silently truncating
+    // the message. Linux returns EMSGSIZE for msg_iovlen > UIO_MAXIOV.
+    if msg_iovlen > 1024 {
+        return -(errno::EMSGSIZE as i64);
+    }
+    // R20-3: the iovec array itself was dereferenced raw — a kernel or
+    // unmapped-range msg_iov pointer faulted the kernel (no exception
+    // table). Range-check it like every other user pointer.
+    if !crate::arch::riscv64::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
+        return -(errno::EFAULT as i64);
+    }
     for i in 0..msg_iovlen {
         // SAFETY: iovec base/len read from user memory at validated offset; iov_base
         // validated with access_ok before slice creation.
@@ -835,8 +845,15 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
 
     // Calculate total buffer size
     let mut total_buf_len = 0usize;
-    // Cap msg_iovlen to prevent i * 16 overflow in pointer arithmetic
-    let msg_iovlen = msg_iovlen.min(1024);
+    // R20-2 (LOW-11): EMSGSIZE instead of silently dropping trailing
+    // iovecs (Linux UIO_MAXIOV limit).
+    if msg_iovlen > 1024 {
+        return -(errno::EMSGSIZE as i64);
+    }
+    // R20-3: range-check the iovec array before raw deref (see sys_sendmsg).
+    if !crate::arch::riscv64::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
+        return -(errno::EFAULT as i64);
+    }
     for i in 0..msg_iovlen {
         // SAFETY: iovec fields read from user memory at validated offset.
         let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
@@ -862,29 +879,34 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // Get socket and receive
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
         match socket.recv(&mut buf) {
-            Ok((bytes_read, _src_addr)) => {
-                // Scatter data back to iovecs
-                let mut offset = 0usize;
-                for i in 0..msg_iovlen {
-                    if offset >= bytes_read { break; }
-                    // SAFETY: iovec fields at validated user offset; copy_len bounds the write.
-                    let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
-                    let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
-                    let copy_len = core::cmp::min(iov_len, bytes_read - offset);
-                    if copy_len > 0 {
-                        // SAFETY: iov_base validated with access_ok; copy_len bounded by iov_len.
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                buf.as_ptr().add(offset),
-                                iov_base as *mut u8,
-                                copy_len,
-                            );
+                Ok((bytes_read, _src_addr)) => {
+                    // Scatter data back to iovecs
+                    let mut offset = 0usize;
+                    for i in 0..msg_iovlen {
+                        if offset >= bytes_read { break; }
+                        // SAFETY: iovec fields at validated user offset; copy_len bounds the write.
+                        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
+                        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
+                        let copy_len = core::cmp::min(iov_len, bytes_read - offset);
+                        if copy_len > 0 {
+                            // R20-3: exception-table copy — a raw
+                            // copy_nonoverlapping to an unmapped (or
+                            // COW-read-only) user page faulted the kernel.
+                            let uncopied = unsafe {
+                                crate::arch::riscv64::uaccess::copy_to_user(
+                                    iov_base as *mut u8,
+                                    buf.as_ptr().add(offset),
+                                    copy_len,
+                                )
+                            };
+                            if uncopied > 0 {
+                                return if offset > 0 { offset as i64 } else { -(errno::EFAULT as i64) };
+                            }
+                            offset += copy_len;
                         }
-                        offset += copy_len;
                     }
+                    bytes_read as i64
                 }
-                bytes_read as i64
-            }
             Err(e) => e as i64,
         }
     } else {
@@ -957,6 +979,18 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
             // SAFETY: mm validated; reading iovec fields at known offsets.
             let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
             let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
+            // R20-2: bound the iovec count (UIO_MAXIOV) — an unbounded
+            // user u64 here looped the kernel over wild pointers (each
+            // iteration a raw kernel deref of msg_iov_ptr+j*16). Stop the
+            // whole batch, mirroring Linux's -EMSGSIZE on __sys_sendmmsg.
+            if msg_iovlen > 1024 {
+                break;
+            }
+            // R20-3: range-check the iovec array before raw deref (see
+            // sys_sendmsg); return partial success on a bad one.
+            if !crate::arch::riscv64::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
+                return total_sent as i64;
+            }
 
             // Gather data from iovec
             let mut buf = alloc::vec::Vec::new();
@@ -1027,6 +1061,15 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
 
             // Calculate total buffer size
             let mut total_buf_len = 0usize;
+            // R20-2: bound the iovec count (UIO_MAXIOV) — see sys_sendmmsg.
+            if msg_iovlen > 1024 {
+                break;
+            }
+            // R20-3: range-check the iovec array before raw deref (see
+            // sys_sendmsg); return partial success on a bad one.
+            if !crate::arch::riscv64::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
+                return total_recv as i64;
+            }
             for j in 0..msg_iovlen {
                 // SAFETY: iovec fields at validated offset; iov_base validated below.
                 let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
@@ -1057,13 +1100,16 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
                         let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
                         let copy_len = core::cmp::min(iov_len, bytes_read - offset);
                         if copy_len > 0 {
-                            // SAFETY: iov_base validated with access_ok; copy_len bounded by iov_len.
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    buf.as_ptr().add(offset),
+                            // R20-3: exception-table copy — see sys_recvmsg.
+                            let uncopied = unsafe {
+                                crate::arch::riscv64::uaccess::copy_to_user(
                                     iov_base as *mut u8,
+                                    buf.as_ptr().add(offset),
                                     copy_len,
-                                );
+                                )
+                            };
+                            if uncopied > 0 {
+                                return if total_recv > 0 { total_recv as i64 } else { -(errno::EFAULT as i64) };
                             }
                             offset += copy_len;
                         }

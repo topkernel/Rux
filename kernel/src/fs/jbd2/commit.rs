@@ -63,6 +63,18 @@ pub fn jbd2_journal_commit_transaction(
         dirty_buffers = core::mem::take(&mut *bufs);
     }
 
+    // R20-FS6 (F4): create-access entries are tracked with EMPTY data (the
+    // real bytes arrive via dirty_metadata, which replaces the entry). An
+    // empty entry must NOT consume a tag slot: the old code still emitted
+    // its tag while skipping the data block, shifting every subsequent
+    // tag↔journal-block pairing by one — replay then wrote buffer N's data
+    // over the block named by tag N+1. Drop empty entries up front so tags
+    // and data blocks stay 1:1.
+    let dirty_buffers: Vec<(u64, Vec<u8>)> = dirty_buffers
+        .into_iter()
+        .filter(|(_, data)| !data.is_empty())
+        .collect();
+
     if dirty_buffers.is_empty() {
         *commit_transaction.t_state.lock() = TransactionState::Finished;
         return Ok(());
@@ -174,22 +186,21 @@ pub fn jbd2_journal_commit_transaction(
         }
         current_journal_block = wrap_journal_block(current_journal_block, journal_first, journal_last);
 
-        bio::sync_dirty_buffer(bh).map_err(|e| {
+        // R20-FS5 (F3): release the bh BEFORE propagating a sync error — the
+        // old `map_err(..)?` early-return leaked one bh reference per error,
+        // permanently pinning the cache entry.
+        let sync_res = bio::sync_dirty_buffer(bh);
+        bio::brelse(bh);
+        if let Err(e) = sync_res {
             journal.abort(e);
             *commit_transaction.t_state.lock() = TransactionState::Finished;
-            e
-        })?;
-        bio::brelse(bh);
+            return Err(e);
+        }
 
         // --- Write data blocks referenced by this descriptor ---
         for _ in 0..tags_this_block {
             let (blocknr, ref data) = dirty_buffers[buf_idx];
             buf_idx += 1;
-            if data.is_empty() {
-                // No data to write (create access), skip journal data block
-                // but we still consumed a tag slot
-                continue;
-            }
 
             let data_abs_block = blk_offset + current_journal_block;
             // SAFETY: bio::bread returns a valid BufferHead or None (handled by ?).
@@ -216,12 +227,13 @@ pub fn jbd2_journal_commit_transaction(
             }
             current_journal_block = wrap_journal_block(current_journal_block, journal_first, journal_last);
 
-            bio::sync_dirty_buffer(data_bh).map_err(|e| {
+            let sync_res = bio::sync_dirty_buffer(data_bh);
+            bio::brelse(data_bh);
+            if let Err(e) = sync_res {
                 journal.abort(e);
                 *commit_transaction.t_state.lock() = TransactionState::Finished;
-                e
-            })?;
-            bio::brelse(data_bh);
+                return Err(e);
+            }
         }
     }
 
@@ -271,12 +283,13 @@ pub fn jbd2_journal_commit_transaction(
     }
     current_journal_block = wrap_journal_block(current_journal_block, journal_first, journal_last);
 
-    bio::sync_dirty_buffer(commit_bh).map_err(|e| {
+    let sync_res = bio::sync_dirty_buffer(commit_bh);
+    bio::brelse(commit_bh);
+    if let Err(e) = sync_res {
         journal.abort(e);
         *commit_transaction.t_state.lock() = TransactionState::Finished;
-        e
-    })?;
-    bio::brelse(commit_bh);
+        return Err(e);
+    }
 
     // Phase 4: Update journal state
     journal.j_head.store(current_journal_block, core::sync::atomic::Ordering::SeqCst);
@@ -331,7 +344,7 @@ fn write_journal_superblock(
         bh_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
     }
 
-    bio::sync_dirty_buffer(bh)?;
+    let sync_res = bio::sync_dirty_buffer(bh);
     bio::brelse(bh);
-    Ok(())
+    sync_res
 }

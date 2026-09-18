@@ -975,7 +975,11 @@ pub fn bread_async(
 ///
 /// Blocks until the IoCompletion signals done, then marks the buffer
 /// as up-to-date and clears the in-flight flag.
-pub fn bread_wait(bh: *mut BufferHead, completion: &crate::fs::io_completion::IoCompletion) {
+///
+/// R20-FS8: returns the I/O status (0 = success, negative errno on failure)
+/// so callers can refuse to consume/cache data from a failed read. The
+/// buffer stays in the cache marked !Uptodate on error.
+pub fn bread_wait(bh: *mut BufferHead, completion: &crate::fs::io_completion::IoCompletion) -> i32 {
     // SAFETY: bh is a raw pointer returned by bread_async(); it points to a
     // valid BufferHead owned by a CacheEntry in the cache.
     unsafe {
@@ -984,6 +988,7 @@ pub fn bread_wait(bh: *mut BufferHead, completion: &crate::fs::io_completion::Io
             (*bh).set_state_bit(BufferState::BH_Uptodate);
         }
         (*bh).clear_state_bit(BufferState::BH_Req);
+        status
     }
 }
 

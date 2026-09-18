@@ -204,17 +204,22 @@ fn ext4_file_read_cached(
 
         // Wait for all async I/Os to complete
         if count > 0 {
+            // R20-FS8: capture each I/O's status — a failed read must not have
+            // its (garbage) buffer cached as a valid page.
+            let mut status = [0i32; 4];
             for i in 0..count {
-                bio::bread_wait(bh_ptrs[i], &completions[i]);
+                status[i] = bio::bread_wait(bh_ptrs[i], &completions[i]);
             }
             // Insert completed pages into page cache under their own indices
             for i in 0..count {
                 // SAFETY: bread_wait has completed, so bh_ptrs[i] points to a
                 // valid BufferHead with fully populated b_data.
                 unsafe {
-                    let data = &(*bh_ptrs[i]).b_data;
-                    cache.insert(ino, ra_idx[i],
-                        (*bh_ptrs[i]).b_blocknr, data);
+                    if status[i] == 0 {
+                        let data = &(*bh_ptrs[i]).b_data;
+                        cache.insert(ino, ra_idx[i],
+                            (*bh_ptrs[i]).b_blocknr, data);
+                    }
                     bio::brelse(bh_ptrs[i]);
                 }
             }
@@ -283,8 +288,9 @@ pub fn ext4_file_write(
                         *byte = 0;
                     }
                     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                    bio::sync_dirty_buffer(bh)?;
+                    let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
+                    sync_res?;
                 }
 
                 // Update inode block pointer
@@ -319,8 +325,9 @@ pub fn ext4_file_write(
 
             // Mark as dirty
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::sync_dirty_buffer(bh)?;
+            let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
+            sync_res?;
 
             total_written += write_in_block;
             buf_offset += write_in_block;
@@ -374,8 +381,9 @@ pub fn allocate_blocks_for_file(
                     }
 
                     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                    bio::sync_dirty_buffer(bh)?;
+                    let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
+                    sync_res?;
                 }
 
                 // Decide how to store block number based on block index
@@ -429,8 +437,9 @@ fn allocate_blocks_with_extents(
                 *byte = 0;
             }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            bio::sync_dirty_buffer(bh)?;
+            let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
+            sync_res?;
         }
 
         // Update extent tree
@@ -530,8 +539,9 @@ pub fn allocate_indirect_block(
                 }
 
                 (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                bio::sync_dirty_buffer(bh)?;
+                let sync_res = bio::sync_dirty_buffer(bh);
                 bio::brelse(bh);
+                sync_res?;
             }
         }
 
@@ -566,8 +576,9 @@ pub fn allocate_indirect_block(
                     }
 
                     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                    bio::sync_dirty_buffer(bh)?;
+                    let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
+                    sync_res?;
                 }
             }
 
@@ -599,8 +610,9 @@ pub fn allocate_indirect_block(
                     }
 
                     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                    bio::sync_dirty_buffer(bh)?;
+                    let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
+                    sync_res?;
                 }
 
                 // Update double indirect block
@@ -665,11 +677,13 @@ pub fn ext4_sync_file(
             let bh = bio::bread(fs.device, block)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-            if (*bh).is_dirty() {
-                bio::sync_dirty_buffer(bh)?;
-            }
-
+            let sync_res = if (*bh).is_dirty() {
+                bio::sync_dirty_buffer(bh)
+            } else {
+                Ok(())
+            };
             bio::brelse(bh);
+            sync_res?;
         }
     }
 

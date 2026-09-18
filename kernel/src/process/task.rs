@@ -2727,6 +2727,12 @@ pub mod task_offsets {
     pub const TASK_PID: usize = core::mem::offset_of!(Task, pid);
     pub const TASK_THREAD: usize = core::mem::offset_of!(Task, thread);
     pub const TASK_KERNEL_STACK_BOTTOM: usize = core::mem::offset_of!(Task, kernel_stack_bottom);
+    // R20: KERNPANIC children-walk previously hardcoded 0x48/0x4c/0x758/0x768 —
+    // all four drifted by 8 when journal_handle/ti_on_cpu/task_refcnt were
+    // inserted before `state`. Derive them here so the walk can never go
+    // stale again.
+    pub const TASK_CHILDREN: usize = core::mem::offset_of!(Task, children);
+    pub const TASK_SIBLING: usize = core::mem::offset_of!(Task, sibling);
 }
 
 /// Export offset constants

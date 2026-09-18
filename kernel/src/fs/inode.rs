@@ -304,6 +304,23 @@ pub struct Inode {
 unsafe impl Send for Inode {}
 unsafe impl Sync for Inode {}
 
+impl Drop for Inode {
+    fn drop(&mut self) {
+        // R20-FS4: reclaim filesystem-private data when the last Arc<Inode>
+        // goes away. Every filesystem stashed ownership in raw form
+        // (ext4: Box<Ext4Inode> in `sb`; rootfs/devfs: Arc<Node> in
+        // `private_data`) and provided a destroy_inode hook for exactly
+        // this moment — but nothing ever called it, so every finally
+        // dropped inode leaked its Box/Arc reference. The hooks use
+        // Option::take(), so they are idempotent.
+        if let Some(ops) = self.ops {
+            if let Some(destroy_fn) = ops.destroy_inode {
+                unsafe { destroy_fn(self) };
+            }
+        }
+    }
+}
+
 impl Inode {
     /// Create new inode
     pub fn new(ino: Ino, mode: InodeMode) -> Self {

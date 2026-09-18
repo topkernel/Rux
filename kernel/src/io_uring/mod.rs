@@ -716,19 +716,34 @@ fn do_read(file: &Arc<File>, buf: usize, len: usize) -> i32 {
         None => return -22, // EINVAL
     };
 
-    // Use a stack buffer for small reads, heap for large
-    let mut kbuf = alloc::vec![0u8; len];
-    let n = read_fn(file, &mut kbuf);
-    if n <= 0 {
-        return n as i32;
+    // R20-FS9 (SYSA-C1 family, io_uring leftover): stage at most RW_CHUNK at
+    // a time — a single `vec![0u8; len]` with user len up to MAX_RW_COUNT
+    // (2GB) far exceeds the kernel heap and panics on allocation failure.
+    // Matches the chunked staging the syscall read/write paths already use.
+    const RW_CHUNK: usize = crate::syscall::io::RW_CHUNK;
+    let mut kbuf = alloc::vec![0u8; len.min(RW_CHUNK)];
+    let mut total = 0usize;
+
+    while total < len {
+        let chunk = core::cmp::min(len - total, kbuf.len());
+        let n = read_fn(file, &mut kbuf[..chunk]);
+        if n <= 0 {
+            return if total > 0 { total as i32 } else { n as i32 };
+        }
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(
+                (buf + total) as *mut u8,
+                kbuf.as_ptr(),
+                n as usize,
+            )
+        };
+        if uncopied != 0 {
+            return if total > 0 { total as i32 } else { -14 }; // EFAULT
+        }
+        total += n as usize;
     }
 
-    let uncopied = unsafe { crate::arch::riscv64::uaccess::copy_to_user(buf as *mut u8, kbuf.as_ptr(), n as usize) };
-    if uncopied != 0 {
-        return -14; // EFAULT
-    }
-
-    n as i32
+    total as i32
 }
 
 /// IORING_OP_WRITE: write from user buffer to fd.
@@ -752,27 +767,22 @@ fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
 
     let use_file_pos = off == -1;
 
-    // Copy user data to kernel buffer
-    let mut kbuf = alloc::vec![0u8; len];
-    let uncopied = unsafe { crate::arch::riscv64::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf as *const u8, len) };
-    if uncopied != 0 { return -14; }
-
     if use_file_pos {
         // write_fn (e.g. file_write in fs/file.rs) writes from file.pos and
         // advances it. No manual pos update needed — the old code
         // double-counted by adding result again.
-        do_write(&file, &kbuf)
+        do_write(&file, buf, len)
     } else {
         // pwrite: write at a specific offset without changing file position.
         let saved_pos = file.get_pos();
         let _ = file.set_pos(off as u64);
-        let result = do_write(&file, &kbuf);
+        let result = do_write(&file, buf, len);
         let _ = file.set_pos(saved_pos);
         result
     }
 }
 
-fn do_write(file: &Arc<File>, kbuf: &[u8]) -> i32 {
+fn do_write(file: &Arc<File>, buf: usize, len: usize) -> i32 {
     let ops = match file.get_ops() {
         Some(o) => o,
         None => return -9,
@@ -782,7 +792,34 @@ fn do_write(file: &Arc<File>, kbuf: &[u8]) -> i32 {
         None => return -22,
     };
 
-    write_fn(file, kbuf) as i32
+    // R20-FS9: chunked staging, same rationale as do_read.
+    const RW_CHUNK: usize = crate::syscall::io::RW_CHUNK;
+    let mut kbuf = alloc::vec![0u8; len.min(RW_CHUNK)];
+    let mut total = 0usize;
+
+    while total < len {
+        let chunk = core::cmp::min(len - total, kbuf.len());
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(
+                kbuf.as_mut_ptr(),
+                (buf + total) as *const u8,
+                chunk,
+            )
+        };
+        if uncopied != 0 {
+            return if total > 0 { total as i32 } else { -14 }; // EFAULT
+        }
+        let n = write_fn(file, &kbuf[..chunk]);
+        if n <= 0 {
+            return if total > 0 { total as i32 } else { n as i32 };
+        }
+        total += n as usize;
+        if (n as usize) < chunk {
+            break; // short write — stop
+        }
+    }
+
+    total as i32
 }
 
 /// IORING_OP_FSYNC: sync file to disk.

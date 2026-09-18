@@ -103,8 +103,9 @@ unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, b
         let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
     }
 
-    bio::sync_dirty_buffer(bh)?;
+    let sync_res = bio::sync_dirty_buffer(bh);
     bio::brelse(bh);
+    sync_res?;
 
     Ok(())
 }
@@ -318,8 +319,9 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
         ptr.write_volatile((current as i32 + delta) as u32);
 
         (*bh).set_state_bit(BufferState::BH_Dirty);
-        bio::sync_dirty_buffer(bh)?;
+        let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
+        sync_res?;
     }
 
     Ok(())
@@ -811,8 +813,13 @@ fn ext4_mkdir_no_journal(
     // Add entry to parent directory
     ext4_add_entry(fs, dir_ino, name, new_ino, file_type::EXT4_FT_DIR)?;
 
-    // Update parent link count
-    let mut parent = parent_inode;
+    // Update parent link count. RE-READ the parent: ext4_add_entry above may
+    // have grown the directory (new block, i_size/i_block updates written
+    // via write_inode_disk inside add_block_to_inode). Writing the snapshot
+    // taken at function entry rolled those updates back and silently
+    // unlinked the new entry from the inode (EXT4-H7 class; rename got this
+    // fix, mkdir had not).
+    let mut parent = super::inode::read_inode(fs, dir_ino)?;
     parent.i_links_count += 1;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
 
@@ -1287,14 +1294,18 @@ fn ext4_unlink_inner(
     if inode.i_links_count == 0 {
         inode.i_dtime = 1; // TODO: get current time
 
-        // Free data blocks
+        // R20-FS1 (F5 order, same fix rename got in r17): persist the dead
+        // inode FIRST (dtime set), then free blocks and the inode number.
+        // The old order wrote the inode back AFTER free_inode — writing a
+        // recycled inode slot / resurrecting freed-block pointers whenever
+        // the number got reallocated in the window.
+        super::inode::write_inode_disk(fs, entry_ino, &inode)?;
         free_inode_blocks(fs, &inode)?;
-
-        // Free inode (mark in bitmap)
         free_inode(fs, entry_ino)?;
+        return Ok(());
     }
 
-    // Write inode back
+    // Write inode back (link count decrement for surviving links)
     super::inode::write_inode_disk(fs, entry_ino, &inode)?;
 
     Ok(())

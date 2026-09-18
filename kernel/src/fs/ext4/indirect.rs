@@ -204,8 +204,9 @@ pub fn write_indirect_block(
         block_numbers[index] = block_num;
 
         (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-        bio::sync_dirty_buffer(bh)?;
+        let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
+        sync_res?;
         Ok(())
     }
 }

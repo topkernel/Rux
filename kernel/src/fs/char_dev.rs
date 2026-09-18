@@ -80,8 +80,17 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
 
 pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
     let slice = core::slice::from_raw_parts(buf, count);
+    // R20-4 (PIPE2 pp=0 root cause): take the UART lock ONCE for the
+    // whole buffer. The old per-byte putchar let two CPUs interleave at
+    // byte granularity — the nettest PIPE2 reader's `write(2, "PIPE-OK\n")`
+    // raced the parent's P2d status print and the marker got split
+    // ("PIPE-P2d(wa=...)OK"), so the gate grepped 0 hits while the
+    // pipeline itself worked (nettest PASS). One lock acquisition per
+    // write() makes console output atomic per syscall, like Linux's
+    // console_lock-held emit.
+    let uart = console::lock();
     for &b in slice {
-        console::putchar(b);
+        uart.putc(b);
     }
     count as isize
 }

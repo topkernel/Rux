@@ -684,12 +684,15 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             }
             // Read termios structure from user space using copy_from_user
             let mut termios_buf = [0u8; 52]; // R9-15: asm-generic termios is 52 bytes (4x u32 + c_line + c_cc[32] + pad); 60 overwrote 8 bytes past the user struct
-            // SAFETY: arg validated with access_ok(60); copy_from_user safely reads from user.
+            // R20-1: copy exactly 52 — the old 60-byte length overflowed the
+            // 52-byte kernel buffer by 8 bytes (stale length from before the
+            // R9-15 buffer shrink; TCGETS was fixed, TCSETS was not).
+            // SAFETY: arg validated with access_ok(52); copy_from_user safely reads from user.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_from_user(
                     termios_buf.as_mut_ptr(),
                     arg as *const u8,
-                    60
+                    52
                 )
             };
             if uncopied > 0 {

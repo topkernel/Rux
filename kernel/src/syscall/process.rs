@@ -2265,16 +2265,24 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
         None => return -(errno::ESRCH as i64),
     };
 
-    // Permission checks:
+    // Permission checks (Linux capset semantics):
     // 1. new permitted must be a subset of old permitted
-    // 2. new inheritable must be a subset of old permitted
+    // 2. new inheritable must be a subset of old inheritable, unless
+    //    CAP_SETPCAP is held (then it may expand up to the bounding set)
+    //    (F20: the old check was ⊆ old PERMITTED, letting any process grow
+    //    its inheritable set to its full permitted set — those bits then
+    //    survive exec through the ambient synthesis in execve)
     // 3. new effective must be a subset of new permitted
     let cred = current.cred();
     if !new_permitted.is_subset_of(cred.cap_permitted) {
         return -(errno::EPERM as i64);
     }
-    if !new_inheritable.is_subset_of(cred.cap_permitted) {
-        return -(errno::EPERM as i64);
+    if !new_inheritable.is_subset_of(cred.cap_inheritable) {
+        if !cred.cap_effective.has(crate::security::CAP_SETPCAP)
+            || !new_inheritable.is_subset_of(cred.cap_bounding)
+        {
+            return -(errno::EPERM as i64);
+        }
     }
     if !new_effective.is_subset_of(new_permitted) {
         return -(errno::EPERM as i64);

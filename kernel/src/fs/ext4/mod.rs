@@ -1240,8 +1240,9 @@ fn add_dir_entry(
                     let entry_data = &mut data[offset..offset + entry_size];
                     create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
                     (*bh).set_state_bit(bio::BufferState::BH_Dirty);
-                    bio::sync_dirty_buffer(bh)?;
+                    let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
+                    sync_res?;
                     return Ok(());
                 }
 
@@ -1277,8 +1278,9 @@ fn add_dir_entry(
                 create_dir_entry(entry_data, ino, name, file_type, remaining as u16);
 
                 (*bh).set_state_bit(bio::BufferState::BH_Dirty);
-                bio::sync_dirty_buffer(bh)?;
+                let sync_res = bio::sync_dirty_buffer(bh);
                 bio::brelse(bh);
+                sync_res?;
                 return Ok(());
             }
 
@@ -1335,8 +1337,9 @@ fn append_dir_block(
         create_dir_entry(data, ino, name, file_type, block_size as u16);
 
         (*bh).set_state_bit(bio::BufferState::BH_Dirty);
-        bio::sync_dirty_buffer(bh)?;
+        let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
+        sync_res?;
     }
 
     // Update parent directory size

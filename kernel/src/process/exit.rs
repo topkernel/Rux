@@ -745,9 +745,21 @@ pub fn do_waitid(
                 // R9-10: re-check for a zombie AFTER registration (do_wait
                 // has this; the child's deferred notify may have fired
                 // while we were still RUNNING, consuming the only wake).
+                // R20-4: the recheck MUST apply the same idtype/id filter
+                // as the main scan — without it, a zombie sibling that the
+                // filter excludes (e.g. waitid(P_PID, X) while Y is zombie)
+                // keeps setting found_zombie, and the loop takes the
+                // `continue` path forever without ever sleeping: a
+                // kernel-space busy hang.
                 {
                     let mut found_zombie = false;
                     (*current).for_each_child(|child_ptr| {
+                        if idtype == P_PID && (*child_ptr).pid() != id as u32 {
+                            return;
+                        }
+                        if idtype == P_PGID && (*child_ptr).pgid() != id as u32 {
+                            return;
+                        }
                         if (*child_ptr).state() == TaskState::new(TaskState::ZOMBIE) {
                             found_zombie = true;
                         }

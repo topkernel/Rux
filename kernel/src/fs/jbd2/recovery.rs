@@ -234,8 +234,9 @@ fn write_clean_sb(journal: &Arc<Journal>, next_seq: u32) -> Result<(), i32> {
         sb.s_sequence = next_seq.to_be();
         r.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
     }
-    bio::sync_dirty_buffer(sb_bh)?;
+    let sync_res = bio::sync_dirty_buffer(sb_bh);
     bio::brelse(sb_bh);
+    sync_res?;
     journal.j_tail_sequence.store(next_seq, core::sync::atomic::Ordering::SeqCst);
     journal.j_transaction_sequence.store(next_seq, core::sync::atomic::Ordering::SeqCst);
     Ok(())

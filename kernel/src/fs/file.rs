@@ -495,23 +495,34 @@ impl FdTable {
 
 impl Drop for FdTable {
     fn drop(&mut self) {
-        // Close all open files (exclusive &mut self, lock is uncontended)
-        let mut entry = self.entry.lock_irqsave();
-        for fd in 0..1024 {
-            if entry.fds[fd].is_some() {
-                let file_opt = core::mem::replace(&mut entry.fds[fd], None);
-                entry.count -= 1;
-                if let Some(file) = file_opt {
-                    // R10-2: last-reference-only release — see close_fd.
-                    if Arc::strong_count(&file) == 1 {
-                        unsafe {
-                            let file_ptr = Arc::as_ptr(&file) as *mut File;
-                            let ops_ptr = (*file_ptr).ops.get();
-                            if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
-                                (*file_ptr).close();
-                            }
+        // R20-FS3 (R14-5 for Drop): make the last-reference DECISION under the
+        // entry lock but run the close ops AFTER releasing it — the old Drop
+        // ran ops.close (socket close = multi-second virtio spin) with IRQs
+        // off while holding the entry lock, wedging every fd operation of
+        // every CLONE_FILES thread, exactly the hazard R14-5 fixed in
+        // close_fd but never applied here.
+        let mut to_close: alloc::vec::Vec<Arc<File>> = alloc::vec::Vec::new();
+        {
+            let mut entry = self.entry.lock_irqsave();
+            for fd in 0..1024 {
+                if entry.fds[fd].is_some() {
+                    let file_opt = core::mem::replace(&mut entry.fds[fd], None);
+                    entry.count -= 1;
+                    if let Some(file) = file_opt {
+                        // R10-2: last-reference-only release — see close_fd.
+                        if Arc::strong_count(&file) == 1 {
+                            to_close.push(file);
                         }
                     }
+                }
+            }
+        }
+        for file in to_close {
+            unsafe {
+                let file_ptr = Arc::as_ptr(&file) as *mut File;
+                let ops_ptr = (*file_ptr).ops.get();
+                if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
+                    (*file_ptr).close();
                 }
             }
         }

@@ -87,9 +87,9 @@
     // Get CPU ID from task_struct.ti_cpu (offset 0x18)
     // IMPORTANT: Must use lw (4-byte load), NOT ld!
     // ti_cpu is AtomicI32 (4 bytes) at offset 0x18, followed by
-    // state (AtomicU32) at offset 0x1c. Using ld would load both
-    // fields, corrupting the CPU ID with the task state when
-    // state != RUNNING (0), producing a wrong interrupt stack address.
+    // cpus_allowed (AtomicU32) at offset 0x1c. Using ld would load both
+    // fields, corrupting the CPU ID with the affinity mask when it is
+    // nonzero, producing a wrong interrupt stack address.
     li t0, TASK_STRUCT_THRESHOLD
     lw t1, TASK_TI_CPU(tp)
     // Defensive: clamp invalid ti_cpu (negative or >= MAX_CPUS) to CPU 0.
@@ -169,14 +169,18 @@
 // sstatus bits
 .set SR_SPP,      0x100
 
-// Task structure offsets (consistent with task.rs TASK_OFFSETS)
+// Task structure offsets (consistent with task.rs TASK_OFFSETS).
+// NOTE (R20): TASK_STATE/TASK_PID are NOT used by this file — kept in sync
+// with the live layout for reference only. task_refcnt/journal_handle/
+// ti_on_cpu inserted before `state` moved state to 0x50 and pid to 0x54;
+// use task.rs::task_offsets (offset_of!) rather than adding new .set uses.
 .set TASK_TI_FLAGS,      0x00    // ti_flags offset
 .set TASK_TI_PREEMPT,    0x04    // ti_preempt_count offset
 .set TASK_TI_KERNEL_SP,  0x08    // ti_kernel_sp offset
 .set TASK_TI_USER_SP,    0x10    // ti_user_sp offset
-.set TASK_TI_CPU,        0x18    // ti_cpu offset
-.set TASK_STATE,         0x1C    // state offset
-.set TASK_PID,           0x20    // pid offset
+.set TASK_TI_CPU,        0x18    // ti_cpu offset (next field is cpus_allowed, NOT state)
+.set TASK_STATE,         0x50    // state offset (unused here; see task_offsets)
+.set TASK_PID,           0x54    // pid offset   (unused here; see task_offsets)
 
 // Per-CPU interrupt stack constants
 .set INTR_STACK_SIZE,    16384   // 16KB per CPU

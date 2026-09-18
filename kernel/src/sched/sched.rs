@@ -786,7 +786,21 @@ unsafe fn __schedule() {
         || prev_policy == SchedPolicy::Idle
     {
         let now = crate::sched::fair::sched_clock();
-        grq_guard.cfs_rq.update_curr(now);
+        // R20-6: cfs_rq.curr is a SINGLE global slot while several CPUs can
+        // run CFS tasks concurrently — the old unconditional update_curr()
+        // charged the slot's task once per running CPU (double charge) and
+        // never charged the other running tasks at all (frozen vruntime →
+        // permanent leftmost hog). Only the slot owner charges through
+        // update_curr; everyone else charges its own prev directly.
+        if grq_guard.cfs_rq.get_curr() == prev {
+            grq_guard.cfs_rq.update_curr(now);
+        } else {
+            let se = (*prev).sched_entity();
+            let delta = se.update_exec_runtime(now);
+            if delta > 0 {
+                se.update_vruntime(delta);
+            }
+        }
     } else if prev_policy == SchedPolicy::Deadline {
         // Update DL runtime accounting
         let dl = (*prev).dl_entity();
@@ -929,6 +943,11 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
                 |v| v.checked_sub(1),
             );
             grq.cfs_rq.set_curr(task);
+            // R20-6: reset the execution clock at pick. Nothing else resets
+            // exec_start, so after a sleep it still holds the timestamp of
+            // the task's PREVIOUS run — the first update_curr/direct charge
+            // after wakeup billed the entire sleep duration into vruntime.
+            (*task).sched_entity().set_exec_start(crate::sched::fair::sched_clock());
             let se = (*task).sched_entity();
             let slice_ns = grq.cfs_rq.sched_slice(se);
             let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
@@ -1396,7 +1415,18 @@ pub fn scheduler_tick() {
                 // and caused soft lockups when other CPUs held the lock.
                 let should_resched = {
                     let mut grq_guard = grq().lock_irqsave();
-                    grq_guard.cfs_rq.update_curr(now);
+                    // R20-6: see __schedule — only the CPU whose task owns
+                    // the single cfs_rq.curr slot charges through it; every
+                    // CPU charges its own current task exactly once.
+                    if grq_guard.cfs_rq.get_curr() == current {
+                        grq_guard.cfs_rq.update_curr(now);
+                    } else {
+                        let se = (*current).sched_entity();
+                        let delta = se.update_exec_runtime(now);
+                        if delta > 0 {
+                            se.update_vruntime(delta);
+                        }
+                    }
 
                     let curr_vruntime = {
                         let se = (*current).sched_entity();
@@ -1432,14 +1462,26 @@ pub fn scheduler_tick() {
                 let remaining = rt_entity.dec_time_slice();
                 if remaining == 0 {
                     rt_entity.reset_time_slice();
-                    // Ensure task state is RUNNING before re-enqueue,
-                    // otherwise a concurrently set INTERRUPTIBLE state would
-                    // place a sleeping task on the runqueue.
-                    unsafe { (*current).set_state(TaskState::new(TaskState::RUNNING)); }
-                    let mut grq_guard = grq().lock_irqsave();
-                    grq_guard.rt_rq.enqueue(current, false);
-                    set_need_resched(); // Set before dropping lock to prevent lost wake-up
-                    drop(grq_guard);
+                    // R20-1: only rotate a task that is still RUNNING. The
+                    // tick IRQ can land inside two windows where the old
+                    // unconditional set_state(RUNNING)+enqueue corrupted
+                    // state:
+                    //  (a) prepare_to_wait has set INTERRUPTIBLE but
+                    //      schedule() has not run yet — the rotation would
+                    //      resurrect the sleeper onto the runqueue;
+                    //  (b) do_exit has set ZOMBIE (its preempt_disable does
+                    //      NOT block the timer IRQ, only the IRQ-exit
+                    //      preemption point) — the rotation would re-queue
+                    //      an exiting task, letting another CPU pick and
+                    //      resume a zombie.
+                    // current is paused on THIS CPU inside the IRQ, so the
+                    // state read is race-free.
+                    if (*current).state() == TaskState::new(TaskState::RUNNING) {
+                        let mut grq_guard = grq().lock_irqsave();
+                        grq_guard.rt_rq.enqueue(current, false);
+                        set_need_resched(); // Set before dropping lock to prevent lost wake-up
+                        drop(grq_guard);
+                    }
                 }
             }
             SchedPolicy::Fifo => {
@@ -1490,25 +1532,28 @@ pub fn yield_cpu() {
     schedule();
 }
 
-/// Iterate over all tasks via PID hash table.
+/// Iterate over all tasks.
+///
+/// R20-3: iterate the PID hash table. The previous implementation only
+/// walked the per-CPU current+idle pointers, making every caller that
+/// needs "all tasks" blind to sleeping/queued tasks:
+///   - mm/rmap.rs try_to_unmap: stale PTEs in sleeping tasks survived
+///     swap-out/migration (data-corruption family);
+///   - mm/compact.rs migration: sleeping tasks were skipped entirely;
+///   - dfx/hung_task.rs: D-state tasks are by definition not running on
+///     any CPU, so the detector never saw its exact target;
+///   - sysinfo procs count: undercount.
+/// kill(-1) in syscall/process.rs already documented this gap and switched
+/// to pid_hash_for_each_task; these callers went through this wrapper.
+///
+/// `f` runs under the per-bucket lock: a task linked into a bucket cannot
+/// be removed (removal needs the same lock) and therefore cannot be freed
+/// while `f` runs. `f` must not sleep or take a PID-hash bucket lock.
 pub fn for_each_task<F>(f: F)
 where
     F: Fn(*mut Task),
 {
-    // SAFETY: per-CPU current/idle pointers are set during CPU init; null check
-    // before calling f(); f() receives the raw pointer but does not dereference.
-    // Iterate all running CPUs + global RQ tasks
-    unsafe {
-        for cpu in 0..MAX_CPUS {
-            let pcpu = cpu_state(cpu);
-            if !pcpu.current.is_null() {
-                f(pcpu.current);
-            }
-            if !pcpu.idle.is_null() && pcpu.idle != pcpu.current {
-                f(pcpu.idle);
-            }
-        }
-    }
+    crate::process::pid_hash::pid_hash_for_each_task(|t| f(t));
 }
 
 pub fn current() -> Option<&'static mut Task> {
@@ -1598,6 +1643,18 @@ pub fn cpu_idle_loop() -> ! {
         if is_idle {
             grq().mark_idle(cpu_id);
             crate::sync::rcu::rcu_note_context_switch();
+
+            // R20-2: a task may have been enqueued between schedule()'s
+            // nr_running==0 fast-path read and mark_idle — enqueue_task's
+            // find_idle_cpu missed us (the idle bit was not set yet), so no
+            // resched IPI was sent and WFI would sleep until the next timer
+            // tick (up to 10ms of needless latency). Re-check now: the
+            // mark_idle above makes any enqueue after this point visible to
+            // find_idle_cpu, so the check-then-WFI sequence is closed.
+            if GlobalRunQueue::grq_nr_running() > 0 {
+                grq().clear_idle(cpu_id);
+                continue;
+            }
 
             // Poll UART for pending data before entering WFI.
             if crate::console::uart_has_data() {

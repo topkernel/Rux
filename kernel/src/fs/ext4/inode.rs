@@ -495,8 +495,9 @@ pub fn write_inode(
         }
     }
 
-    bio::sync_dirty_buffer(bh)?;
+    let sync_res = bio::sync_dirty_buffer(bh);
     bio::brelse(bh);
+    sync_res?;
 
     Ok(())
 }
@@ -551,9 +552,20 @@ pub fn write_inode_disk(
     // mutable slice of block_size bytes containing the inode table block.
     let data = unsafe { &mut (*bh).b_data };
 
+    // Bounds check (R20-FS2): the 172-byte in-memory inode struct must fit in
+    // the block at the slot offset. With small on-disk inode sizes (e.g. the
+    // legal s_inode_size=128) the LAST slot of a block overruns the buffer
+    // and the slice write below panics — read_inode/write_inode already had
+    // this check; write_inode_disk did not.
+    let inode_size = core::mem::size_of::<Ext4InodeOnDisk>();
+    if in_block_offset + inode_size > data.len() {
+        bio::brelse(bh);
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
     // Write inode to block buffer
     // SAFETY: inode is a reference to an Ext4InodeOnDisk; size_of fits within
-    // the block starting at in_block_offset.
+    // the block starting at in_block_offset (bounds-checked above).
     let inode_bytes = unsafe {
         core::slice::from_raw_parts(
             inode as *const _ as *const u8,
@@ -576,8 +588,9 @@ pub fn write_inode_disk(
         }
     }
 
-    bio::sync_dirty_buffer(bh)?;
+    let sync_res = bio::sync_dirty_buffer(bh);
     bio::brelse(bh);
+    sync_res?;
 
     Ok(())
 }

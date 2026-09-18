@@ -580,14 +580,18 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 // the instant it faults (other CPUs sanitize the list if
                 // we wait for GDB). Offsets via offset_of!, SBI output.
                 if let Some(task) = crate::sched::current() {
-                    // Offsets from the linked layout (verified against
-                    // disassembly: state=0x48 pid=0x4c children=0x758
-                    // sibling=0x768). Asserted once at compile time where
-                    // visibility allows; these are diagnostic-only reads.
-                    const OFF_STATE: usize = 0x48;
-                    const OFF_PID: usize = 0x4c;
-                    const OFF_CHILDREN: usize = 0x758;
-                    const OFF_SIBLING: usize = 0x768;
+                    // Offsets derived from the live Task layout via
+                    // offset_of! (task.rs::task_offsets). The previous
+                    // hardcoded 0x48/0x4c/0x758/0x768 all drifted by +8 when
+                    // journal_handle/ti_on_cpu/task_refcnt were inserted
+                    // before `state` — the walk was reading the wrong fields
+                    // (state=0x50, pid=0x54, children=0x760, sibling=0x770
+                    // at HEAD a6219f8). These are diagnostic-only reads.
+                    use crate::process::task::task_offsets as tsk_off;
+                    const OFF_STATE: usize = tsk_off::TASK_STATE;
+                    const OFF_PID: usize = tsk_off::TASK_PID;
+                    const OFF_CHILDREN: usize = tsk_off::TASK_CHILDREN;
+                    const OFF_SIBLING: usize = tsk_off::TASK_SIBLING;
                     let t = (task as *mut crate::process::task::Task) as usize;
                     let head = (t + OFF_CHILDREN) as *const usize;
                     let mut pos = unsafe { core::ptr::read_volatile(head) };

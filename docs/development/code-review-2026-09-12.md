@@ -601,6 +601,13 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.14 第二十轮：五 agent 全子系统检视（sched/process、mm/arch、fs/ext4、net/drivers/ipc、syscall/signal/tests）——共修 24 项
+
+**sched/process（R20-1..7 已修）**：waitid 僵尸复查缺 idtype 过滤（忙挂）；for_each_task 只看 per-CPU current（rmap/compact/hung_task 全盲——改走 pid_hash）；RR tick 无条件复活睡眠者/僵尸；idle 丢失唤醒窗；cfs_rq.curr 多 CPU 双计费+睡眠计费（vruntime 冻结→永久霸占）；栈断言 32768→65536；LAST_TICK 从未存储。
+**mm/arch（R20-F7 已修，4 项新 HIGH 定罪待修）**：KERNPANIC 子女走查偏移全面陈旧 +8（offset_of! 化+task_offsets 导出）。新定罪：page_remove_rmap 判据 off-by-one（提前清 LRU/真正最后映射不清）；Zone::free_pages 从不重置 refcount（裸 free 调用群永久禁用 buddy 合并）；堆 dealloc 缺块对齐校验；copy_page_table_cow OOM 无回退。
+**fs/ext4（R20-FS1..10 已修）**：unlink 释放顺序（F5 同族遗漏）；write_inode_disk 128B inode 越界 panic；FdTable::Drop 在锁内跑 close（R14-5 未覆盖）；destroy_inode 零调用（VFS inode 无限泄漏）；jbd2 19+3 处 brelse 泄漏；F4 空 tag 数据错位（潜伏）；管道读写信号窗不可杀；bread_wait 丢弃错误（毒化缓存）；io_uring 大 len panic；mkdir 父快照回写。
+**net/drivers/ipc（0 修——报告 23 项待批修）**：TCP/UDP 表 static-mut 无锁（HIGH）、PCI virtio 超时 free+重试覆盖在飞链（HIGH——根文件系统路径！）、FIN 不重传（HIGH）、槽释放 vs fd（HIGH）、SeqLock 软中断自楔（HIGH）……
+**门禁（R20 后 8 轮）**：smoke 15/15×7、nettest 7/8、kpanic 0/8、wedge 0/8、pp 6/7、x 6/6。run5 为 QEMU 镜像锁（非内核）。
 ### 20.13 第十九轮：栈溢出修复验证 + 全绿
 
 Kernel.toml kernel_stack_size 32768→65536。**八轮全门禁：smoke 15/15 ×8、nettest 8/8 全 PASS（历史首次满分）、KERNPANIC 0/8、DEADLOCK 0/8、children 归零 0/8**——第十八轮定罪完全验证。mrsh 管道 pp 6/8（3/5/7/8 轮 pp=0 为静默失败待下一轮查）。
