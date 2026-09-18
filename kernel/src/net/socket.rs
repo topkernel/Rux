@@ -227,6 +227,12 @@ impl Socket {
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
                 let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
+                // R23-3 (send-only, leaf-scoped): the table lock protects
+                // the send_buffer/retrans_queue mutation against the RX
+               // softirq's process_ack on the same socket. NOT taken at
+                // fn entry — recv's TCP branch re-enters tcp_rcv which
+                // already holds it (the R23 gate deadlock).
+                let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
                 if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                     match socket.send(buf) {
                         Ok(len) => Ok(len),

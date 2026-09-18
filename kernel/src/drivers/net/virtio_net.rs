@@ -350,7 +350,11 @@ impl VirtIONetDevice {
         };
         let data_desc_idx = match queue.alloc_desc() {
             Some(idx) => idx,
-            None => return -5,  // EIO
+            None => {
+                // R23-6: hdr leaks on desc exhaustion (R22-6 pattern).
+                unsafe { alloc::alloc::dealloc(hdr_ptr as *mut u8, hdr_layout); }
+                return -5;  // EIO
+            }
         };
 
         // Set packet header descriptor (use physical address for DMA)

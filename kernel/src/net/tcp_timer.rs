@@ -102,32 +102,14 @@ impl TcpTimerManager {
         // Only check established connections or connections being closed
         match socket.state {
             TcpState::TCP_ESTABLISHED
-            | TcpState::TCP_FIN_WAIT1
-            | TcpState::TCP_FIN_WAIT2 => {
-                // R21-N3b: orphaned FIN_WAIT timeout — no local timer runs
-                // once retransmit exhausts; bound it so dead peers cannot
-                // hold slots forever.
-                if socket.timers.fin_wait_since == 0 {
-                    socket.timers.fin_wait_since = now;
-                } else if now - socket.timers.fin_wait_since
-                    > (crate::config::TCP_TIMEWAIT_TIMEOUT_US / 10_000)
-                {
-                    socket.state = TcpState::TCP_CLOSE;
-                }
-                // fall through to the shared retransmit handling below
-                match socket.state {
-                    TcpState::TCP_ESTABLISHED
-                    | TcpState::TCP_FIN_WAIT1
-                    | TcpState::TCP_FIN_WAIT2
-                    | TcpState::TCP_CLOSE_WAIT
-                    | TcpState::TCP_CLOSING
-                    | TcpState::TCP_LAST_ACK => {}
-                    _ => return,
-                }
-            }
             | TcpState::TCP_CLOSE_WAIT
             | TcpState::TCP_CLOSING
             | TcpState::TCP_LAST_ACK => {
+                // R23-2: restored the combined retransmit/delack arm —
+                // the R21-N3b split (ESTABLISHED grouped with FIN_WAIT)
+                // both killed 60s+ live connections via the fin_wait
+                // timeout and (Rust arms do not fall through) silently
+                // deleted RTO retransmission for those states.
                 // Check retransmit timer
                 if socket.timers.retransmit_deadline > 0
                     && now >= socket.timers.retransmit_deadline
@@ -145,6 +127,35 @@ impl TcpTimerManager {
                     && now >= socket.timers.delack_deadline
                 {
                     // Send delayed ACK
+                    let _ = socket.send_ack_public();
+                    socket.timers.delack_deadline = 0;
+                }
+            }
+            TcpState::TCP_FIN_WAIT1 | TcpState::TCP_FIN_WAIT2 => {
+                // R23-1: orphaned half-close timeout — armed ONLY in
+                // FIN_WAIT (never while ESTABLISHED), bounded so dead
+                // peers cannot hold slots forever.
+                if socket.timers.fin_wait_since == 0 {
+                    socket.timers.fin_wait_since = now;
+                } else if now - socket.timers.fin_wait_since
+                    > (crate::config::TCP_TIMEWAIT_TIMEOUT_US / 10_000)
+                {
+                    socket.state = TcpState::TCP_CLOSE;
+                }
+                // Retransmit (the FIN itself — R21-N3) + delack still run.
+                if socket.timers.retransmit_deadline > 0
+                    && now >= socket.timers.retransmit_deadline
+                {
+                    self.retransmits += 1;
+                    socket.retransmit_timer_expired();
+
+                    if socket.state == TcpState::TCP_CLOSE {
+                        self.timeout_closes += 1;
+                    }
+                }
+                if socket.timers.delack_deadline > 0
+                    && now >= socket.timers.delack_deadline
+                {
                     let _ = socket.send_ack_public();
                     socket.timers.delack_deadline = 0;
                 }

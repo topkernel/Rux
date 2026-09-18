@@ -720,7 +720,9 @@ impl TcpSocket {
         // retrans_queue, deadline 0): 64 dead closes exhaust the table.
         self.retrans_queue.push_back(TcpSendSeg {
             seq: fin_seq,
-            len: 0, // zero-length = bare FIN
+            len: 1, // R23-4: FIN consumes one seq — len 1 keeps
+                    // remove_acked_segments' (seg_end - ack <= 0) from
+                    // retiring it on the data-ACK that precedes the FIN-ACK.
             data: alloc::vec::Vec::new(),
             tx_time: crate::drivers::timer::get_jiffies(),
             retries: 0,
@@ -1227,6 +1229,11 @@ impl TcpSocket {
         // Add data
         skb.skb_put_data(data)?;
 
+        // R23-4: a zero-data segment in the retrans queue IS the FIN
+        // (send_fin pushed it with an empty payload) — the retransmitted
+        // copy must carry the FIN bit, not PSH.
+        let is_fin_retrans = data.is_empty();
+
         // Build TCP header (data already added above)
         tcp_build_packet(
             &mut skb,
@@ -1234,7 +1241,7 @@ impl TcpSocket {
             self.remote_port,
             self.snd_nxt,
             self.rcv_nxt,
-            0x0018, // PSH + ACK
+            if is_fin_retrans { 0x0011 } else { 0x0018 }, // FIN+ACK vs PSH+ACK
             self.rcv_wnd,
             self.local_ip.to_be(),
             self.remote_ip.to_be(),
@@ -1747,6 +1754,7 @@ pub fn tcp_socket_get(fd: i32) -> Option<&'static mut TcpSocket> {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
+    let _table_g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
@@ -1769,6 +1777,7 @@ pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
+    let _table_g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
@@ -1788,6 +1797,7 @@ const EPHEMERAL_PORT_MAX: u16 = 60999;
 
 /// Allocate an unused local port in the ephemeral range.
 fn alloc_ephemeral_port() -> TcpPort {
+    // (caller tcp_connect already holds TCP_TABLE_LOCK — no nested take)
     // SAFETY: single-core serialization of the global table (review NET-M15).
     unsafe {
         for _ in 0..(EPHEMERAL_PORT_MAX - 32768 + 1) {
@@ -1819,6 +1829,7 @@ fn alloc_ephemeral_port() -> TcpPort {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
+    let _table_g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {

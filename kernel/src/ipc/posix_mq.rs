@@ -443,6 +443,17 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
         // so an empty queue with no producer still returns ETIMEDOUT (the
         // old code parsed the deadline but nothing ever woke us).
         drop(messages);
+        // R23-5: signal delivered while still RUNNING → no wakeup; recheck
+        // before sleeping (same unkillable window R22-1 closed for SysV).
+        if crate::signal::signal_pending() {
+            if let Some(cur) = crate::sched::current() {
+                (*cur).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
+                crate::sched::dequeue_task(&*cur);
+            }
+            return -4; // EINTR
+        }
         let timer_id = deadline
             .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
             .unwrap_or(0);
@@ -568,6 +579,17 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
         // so an empty queue with no producer still returns ETIMEDOUT (the
         // old code parsed the deadline but nothing ever woke us).
         drop(messages);
+        // R23-5: signal delivered while still RUNNING → no wakeup; recheck
+        // before sleeping (same unkillable window R22-1 closed for SysV).
+        if crate::signal::signal_pending() {
+            if let Some(cur) = crate::sched::current() {
+                (*cur).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
+                crate::sched::dequeue_task(&*cur);
+            }
+            return -4; // EINTR
+        }
         let timer_id = deadline
             .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
             .unwrap_or(0);

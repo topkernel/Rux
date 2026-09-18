@@ -601,6 +601,10 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.17 第二十三轮：R20-R22 修复的回归检视 + 7 项修正
+
+agent B 抓到 R21-N3b 的两处严重回归：①fin_wait arm 误含 ESTABLISHED（60s 活连接被杀）；②拆分 match 臂不落穿（Rust 语义）= ESTABLISHED/FIN_WAIT 的 RTO 重传被整体删除。修复：恢复六状态联合重传/delack 臂 + FIN_WAIT 专用超时臂（仅 FIN_WAIT1/2 计时）。R23-3 TCP_TABLE_LOCK 补齐（bind/listen/connect/alloc/free/rcv/timer/send-叶级）并修两次自楔（accept/v4_err 去锁避免 poll 重入；alloc_ephemeral_port 嵌套获取移除）。R23-4 FIN seg len=1 + 重传带 FIN 位。R23-5 posix_mq 两循环信号复查。R23-6 virtio-net xmit hdr 泄漏。
+**门禁（8 轮）**：**smoke 15/15 ×8、nettest 8/8、pp 8/8、x 8/8、kpanic 0/8、wedge 0/8——全指标满分**。
 ### 20.16 第二十二轮：R20/R21 MED 尾巴七项
 
 R22-1 SysV sem/msg 五个阻塞循环补 schedule 前信号复查（信号在仍 RUNNING 时送达不产生唤醒=不可杀窗口——ksoftirqd 模式推广）；R22-2 ioctl fd>=1000 启发式改 File::path 身份分派（高 fd 被劫持进 fbdev）；R22-3 rmap try_to_unmap + compact remap_page 的叶 PTE 写纳入 PTE_MODIFY_LOCK（§17.4 最后一项关闭——全部叶 PTE 写者现在同锁）；R22-4 TCP recv Ok(0)=EOF 传播 + poll 查协议表 recv_buffer/CLOSE_WAIT→POLLHUP（读循环不再永久自旋）；R22-5 socket_create_accepted 错误路径 unwind（Arc+协议槽钉）；R22-6 virtio MMIO read_block alloc_desc 失败补 dealloc（write_block 已有）。
