@@ -611,10 +611,21 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     let request = args[1] as u32;
     let arg = args[2] as usize;
 
-    // Special handling for framebuffer device (fd >= 1000 is device file)
+    // R22-2: dispatch framebuffer ioctls on the FILE's identity, not the
+    // fd number — FdTable legally allocates 1000-1023, and the old
+    // heuristic hijacked regular ioctls on high fds into fbdev.
     if fd >= 1000 {
-        let result = crate::drivers::gpu::fbdev_ioctl(request, arg) as i64;
-        return result as i64;
+        let is_fbdev = unsafe { crate::fs::file::get_file_fd(fd as usize) }
+            .map(|file| {
+                let p = file.path();
+                p.starts_with("/dev/fb") || p.starts_with("/dev/fb0")
+            })
+            .unwrap_or(false);
+        if is_fbdev {
+            let result = crate::drivers::gpu::fbdev_ioctl(request, arg) as i64;
+            return result as i64;
+        }
+        // fall through to the generic path
     }
 
     // TTY ioctl commands

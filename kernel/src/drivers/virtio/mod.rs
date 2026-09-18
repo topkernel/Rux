@@ -429,18 +429,37 @@ impl VirtIOBlkDevice {
                 crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
             ).0;
 
-            // Allocate three descriptors
+            // Allocate three descriptors — R22-6: dealloc header/resp on
+            // failure (write_block already had this; read_block leaked).
             let header_desc_idx = match queue.alloc_desc() {
                 Some(idx) => idx,
-                None => return Err(-5),
+                None => {
+                    unsafe {
+                        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                        alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+                    }
+                    return Err(-5);
+                }
             };
             let data_desc_idx = match queue.alloc_desc() {
                 Some(idx) => idx,
-                None => return Err(-5),
+                None => {
+                    unsafe {
+                        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                        alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+                    }
+                    return Err(-5);
+                }
             };
             let resp_desc_idx = match queue.alloc_desc() {
                 Some(idx) => idx,
-                None => return Err(-5),
+                None => {
+                    unsafe {
+                        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                        alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+                    }
+                    return Err(-5);
+                }
             };
 
             // Set request header descriptor (read-only, device reads) - use physical address

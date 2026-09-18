@@ -299,12 +299,17 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                         pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
                     );
 
+                    // R22-3 (§17.4 close): leaf-PTE mutation under the
+                    // PTE lock like every other writer (fork-COW/munmap/
+                    // mprotect/fault-map) — was racing them.
+                    let _pte_g = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
                     // Write new PTE value (0 for unmap, swap_entry for swap-out)
                     (*table0).set(
                         vpn0,
                         crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(swap_entry),
                     );
 
+                    drop(_pte_g);
                     // R10-6: sfence.vma is HART-LOCAL — a "global" flush
                     // buys nothing over the per-address one (round-9's
                     // R9-18 was ineffective by ISA semantics). Keep the

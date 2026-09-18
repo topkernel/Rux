@@ -601,6 +601,10 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.16 第二十二轮：R20/R21 MED 尾巴七项
+
+R22-1 SysV sem/msg 五个阻塞循环补 schedule 前信号复查（信号在仍 RUNNING 时送达不产生唤醒=不可杀窗口——ksoftirqd 模式推广）；R22-2 ioctl fd>=1000 启发式改 File::path 身份分派（高 fd 被劫持进 fbdev）；R22-3 rmap try_to_unmap + compact remap_page 的叶 PTE 写纳入 PTE_MODIFY_LOCK（§17.4 最后一项关闭——全部叶 PTE 写者现在同锁）；R22-4 TCP recv Ok(0)=EOF 传播 + poll 查协议表 recv_buffer/CLOSE_WAIT→POLLHUP（读循环不再永久自旋）；R22-5 socket_create_accepted 错误路径 unwind（Arc+协议槽钉）；R22-6 virtio MMIO read_block alloc_desc 失败补 dealloc（write_block 已有）。
+**门禁（8 轮）**：**smoke 15/15 ×8、nettest 8/8 全 PASS、kpanic 0/8、wedge 1（run6 单次 DEADLOCK 行）、pp 7/8、x 8/8**。
 ### 20.15 第二十一轮：R20 未修 HIGH 全部落地（mm 4 + net 5 + syscall agent 5）
 
 **mm**：R21-1 page_remove_rmap 判据改 `== -1`（原 off-by-one：提前清 LRU/最后映射不清）；R21-2 Zone::free_pages 真正重置 refcount（裸 free 调用群永久禁用 buddy 合并的根因）；R21-3 堆 dealloc 块对齐校验；R21-6 swap 读失败释放页。

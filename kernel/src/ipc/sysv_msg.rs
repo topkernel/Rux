@@ -512,6 +512,21 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
             }
         }
 
+        // R22-1: signal delivered while still RUNNING → no wakeup; recheck
+        // or the blocked send/receive is unkillable.
+        if crate::signal::signal_pending() {
+            let cur = crate::sched::current().unwrap();
+            {
+                let slots = MSG_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    entry.inner.wq_send.remove(cur as *mut _);
+                    entry.inner.wq_recv.remove(cur as *mut _);
+                }
+            }
+            (*cur).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
+            crate::sched::dequeue_task(&*cur);
+            return -(errno::EINTR as i64);
+        }
         crate::sched::schedule();
 
         // Clean up wait queue entry after wakeup
@@ -729,6 +744,21 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
             }
         }
 
+        // R22-1: signal delivered while still RUNNING → no wakeup; recheck
+        // or the blocked send/receive is unkillable.
+        if crate::signal::signal_pending() {
+            let cur = crate::sched::current().unwrap();
+            {
+                let slots = MSG_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    entry.inner.wq_send.remove(cur as *mut _);
+                    entry.inner.wq_recv.remove(cur as *mut _);
+                }
+            }
+            (*cur).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
+            crate::sched::dequeue_task(&*cur);
+            return -(errno::EINTR as i64);
+        }
         crate::sched::schedule();
 
         // Clean up wait queue entry after wakeup

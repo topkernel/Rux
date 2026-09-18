@@ -680,6 +680,31 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
                                 Err(_) => { /* still blocked — sleep below */ }
                             }
 
+                            // R22-1: a signal delivered while we were still
+                            // RUNNING generates no wakeup — recheck before
+                            // sleeping or the waiter is unkillable until an
+                            // unrelated V arrives.
+                            if crate::signal::signal_pending() {
+                                {
+                                    let slots = SEM_IDS.slots.lock();
+                                    if let Some(ref entry) = slots[idx] {
+                                        if let Some(ref sems) = *entry.inner.sems.lock() {
+                                            let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                            if block_sem < sems.len() {
+                                                if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                    sems[block_sem].ncnt.fetch_sub(1, Ordering::Relaxed);
+                                                } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                    sems[block_sem].zcnt.fetch_sub(1, Ordering::Relaxed);
+                                                }
+                                            }
+                                        }
+                                        entry.inner.wq.remove(current as *mut _);
+                                    }
+                                }
+                                (*current).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
+                                crate::sched::dequeue_task(&*current);
+                                return -(errno::EINTR as i64);
+                            }
                             // Arm a wakeup timer for the deadline so a
                             // never-satisfied semaphore still returns
                             // ETIMEDOUT (nothing else would wake us).

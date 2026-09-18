@@ -295,6 +295,12 @@ impl Socket {
                         Ok(len) if len > 0 => {
                             return Ok((len, Some((socket.remote_ip, socket.remote_port))));
                         }
+                        // R22-4: zero-length read on a half/RST-closed
+                        // connection is EOF — returning EAGAIN here made
+                        // read() loops spin forever.
+                        Ok(0) => {
+                            return Ok((0, None));
+                        }
                         _ => {}
                     }
                 }
@@ -462,7 +468,25 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
     let socket = unsafe { &*(ptr as *const Socket) };
 
     if events & POLLIN != 0 {
-        if !socket.recv_queue.lock().is_empty() {
+        let mut readable = !socket.recv_queue.lock().is_empty();
+        // R22-4: TCP data lands in the protocol table's recv_buffer, not
+        // recv_queue — poll never reported readable and clients spun.
+        if !readable {
+            if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+                if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+                    readable = !ts.recv_buffer.is_empty();
+                    if !readable
+                        && (ts.state == crate::net::tcp::TcpState::TCP_CLOSE_WAIT
+                            || ts.state == crate::net::tcp::TcpState::TCP_CLOSE)
+                    {
+                        // peer finished: readable-as-EOF + HUP
+                        ready |= 0x0010 /* POLLHUP */;
+                        readable = true;
+                    }
+                }
+            }
+        }
+        if readable {
             ready |= POLLIN | POLLRDNORM;
         }
     }
@@ -647,9 +671,26 @@ pub fn socket_create_accepted(tcp_fd: i32) -> Result<usize, i32> {
     file.set_ops(&SOCKET_OPS);
     file.set_private_data(Arc::into_raw(Arc::clone(&socket)) as *mut u8);
 
-    let fdtable = crate::sched::get_current_fdtable().ok_or(-9)?;
-    let fd = fdtable.alloc_fd().ok_or(-24)?;
-    fdtable.install_fd(fd, file).map_err(|_| -24)?;
+    // R22-5: unwind on fdtable failures — the raw Arc + the protocol-
+    // slot pin (R21-N4) leak on every error exit otherwise.
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(t) => t,
+        None => {
+            unwind_accepted(&file, tcp_fd);
+            return Err(-9);
+        }
+    };
+    let fd = match fdtable.alloc_fd() {
+        Some(f) => f,
+        None => {
+            unwind_accepted(&file, tcp_fd);
+            return Err(-24);
+        }
+    };
+    if fdtable.install_fd(fd, file.clone()).is_err() {
+        unwind_accepted(&file, tcp_fd);
+        return Err(-24);
+    }
 
     // SAFETY: SOCKET_TABLE is a global protected by Spinlock; we hold the lock.
     let slot = unsafe {
@@ -660,6 +701,21 @@ pub fn socket_create_accepted(tcp_fd: i32) -> Result<usize, i32> {
     }
 
     Ok(fd)
+}
+
+/// R22-5: release the raw Arc<Socket> reference and drop the protocol
+/// slot's user pin on a failed accepted-socket fd install.
+fn unwind_accepted(file: &Arc<File>, tcp_fd: i32) {
+    if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+        let prev = ts.user_refs.swap(0, core::sync::atomic::Ordering::AcqRel);
+        if prev <= 1 {
+            crate::net::tcp::tcp_socket_free(tcp_fd);
+        }
+    }
+    let ptr = unsafe { *file.private_data.get() };
+    if let Some(ptr) = ptr {
+        unsafe { drop(Arc::from_raw(ptr as *const Socket)); }
+    }
 }
 
 /// Get socket from file descriptor (via File private_data)
