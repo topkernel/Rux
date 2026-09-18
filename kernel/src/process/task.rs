@@ -64,6 +64,7 @@ impl StackCache {
         if self.head.is_null() {
             return None;
         }
+        // (canary written at the very bottom AFTER zeroing in stack_cache_alloc)
         // SAFETY: head is non-null (checked above), entry points to a valid FreeStackEntry
         // previously pushed via push(), and we hold STACK_CACHE_LOCK.
         unsafe {
@@ -75,6 +76,12 @@ impl StackCache {
     }
 
     /// Push a stack to cache
+    /// R18-2: stack-overflow canary — written below the usable stack at
+    /// cache-pop time, verified at push time. A smashed canary means some
+    /// task's kernel stack ran past its 32KB into the adjacent heap page
+    /// (the suspected zeroing writer).
+    const STACK_CANARY: u64 = 0xCAFE_F00D_DEAD_BEEF;
+
     fn push(&mut self, stack_bottom: *mut u8) {
         if self.count >= Self::MAX_CACHED_STACKS {
             // SAFETY: stack_bottom was allocated by stack_cache_alloc() with the same
@@ -112,6 +119,20 @@ fn stack_cache_alloc() -> *mut u8 {
         // SAFETY: bottom was returned by a previous alloc() and is KERNEL_STACK_SIZE bytes.
         unsafe {
             core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE);
+            // R18-2: place the overflow canary at the very bottom (below
+            // any legitimate frame — the deepest legal sp stays above it).
+            core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY);
+        }
+        return bottom;
+    }
+    // fresh alloc also gets a canary
+    // SAFETY: Layout is valid; null check follows.
+    unsafe {
+        let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
+            .unwrap_or(Layout::new::<[u8; KERNEL_STACK_SIZE]>());
+        let bottom = alloc(layout);
+        if !bottom.is_null() {
+            core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY);
         }
         return bottom;
     }
@@ -121,13 +142,75 @@ fn stack_cache_alloc() -> *mut u8 {
     unsafe {
         let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
             .ok()
-            .unwrap_or_else(|| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
+            .unwrap_or(Layout::new::<[u8; KERNEL_STACK_SIZE]>());
         alloc(layout)
     }
 }
 
 /// Free a kernel stack (with caching)
 fn stack_cache_free(stack_bottom: *mut u8) {
+    // R18-2: verify the canary before returning the stack to the cache —
+    // a smashed value is direct proof the task ran past its stack into
+    // the adjacent heap page.
+    // SAFETY: stack_bottom is a valid stack base from alloc; reading the
+    // first 8 bytes is in bounds.
+    unsafe {
+        let v = core::ptr::read_volatile(stack_bottom as *const u64);
+        if v != StackCache::STACK_CANARY {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"STACK-OVERFLOW canary=0x";
+            for &b in MSG { putchar(b); }
+            let mut sh = 64;
+            while sh > 0 {
+                sh -= 4;
+                let nb = ((v >> sh) & 0xF) as u8;
+                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            }
+            const MB: &[u8] = b" bottom=0x";
+            for &b in MB { putchar(b); }
+            {
+                let a2 = stack_bottom as usize;
+                let mut sh3 = 64;
+                while sh3 > 0 { sh3 -= 4; let nb = ((a2 >> sh3) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+            }
+            const M2: &[u8] = b" pid=";
+            for &b in M2 { putchar(b); }
+            if let Some(t) = crate::sched::current() {
+                let pid = unsafe { (*t).pid() };
+                let mut vv = pid as usize;
+                if vv == 0 { putchar(b'0'); }
+                let mut dd = [0u8; 10]; let mut kk = 0;
+                while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                // frame walk naming the deepest live frames
+                crate::dfx::backtrace::walk_stack_trace(&mut |pc, _fp| {
+                    let _ = pc;
+                });
+            }
+            putchar(b'\n');
+            // Identify the overflower: dump the bottom 256 bytes of the
+            // stack above the canary — return addresses of the deepest
+            // frames survive there.
+            unsafe {
+                const M3: &[u8] = b" tail:";
+                for &b in M3 { putchar(b); }
+                let base = stack_bottom as usize;
+                for off in (8..256).step_by(8) {
+                    let ra = core::ptr::read_volatile((base + off) as *const u64);
+                    if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
+                        putchar(b' ');
+                        let mut sh2 = 64;
+                        while sh2 > 0 {
+                            sh2 -= 4;
+                            let nb = ((ra >> sh2) & 0xF) as u8;
+                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                        }
+                    }
+                }
+                putchar(b'\n');
+            }
+        }
+    }
     let mut cache = STACK_CACHE.lock();
     // SAFETY: stack_bottom was allocated by stack_cache_alloc().
     cache.push(stack_bottom);

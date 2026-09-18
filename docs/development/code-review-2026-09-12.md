@@ -601,6 +601,15 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.12 第十八轮：**children 归零引擎定罪——内核栈溢出**
+
+**证据链（四步闭环）**：
+1. R18-1 alloc 侧双主交接探针（堆 buddy 返回前查 TASK_PAGE_OWNED）**0 触发**——排除分配器双主交接（与 r17 agent"交接在 alloc 侧或野写"二分的第一支）。
+2. R18-2 栈 canary（cache-pop 写 0xCAFEF00DDEADBEEF 于栈底，free 时验证）：**每次 children 归零崩溃 canary 同时破坏**（run1/3/5 canary=1+child=1 完美相关；run2/4/6 canary 5-9 无崩溃=溢出未命中关键数据）。
+3. R18-3 tick 探针（10ms 粒度）：**33-68 次/轮**，pid 恒为 305（nettest 主进程），写入值=栈内指针/内核代码地址/局部变量——标准栈帧数据，即**活调用链真的下探到栈最底 8 字节**。
+4. R18-6 bottom/ks 一致性：同次运行 diff=0x8000 ✓——排除"bottom 字段陈旧导致误检"。
+**结论**：children-list 归零 = **nettest 主进程 32KB 内核栈被吃满，最深帧的序言写入越过栈底进入相邻堆页**——相邻页恰是活 Task 页时 children/sibling/地址空间字段被帧数据覆写（0 值局部变量→"pid=0/state=0"；堆指针→断链）。此前所有"归零源"（堆双释放、Task 复活、交接）都是这个溢出的下游或独立小缺陷。
+**修复方向（第十九轮）**：a) KERNEL_STACK_SIZE 32K→64K（诊断实验早证可行）；b) 定位吃栈链（execve+fork 风暴下探行为）砍帧。探针常驻（exit 检查+tick 首报）。
 ### 20.11 第十七轮：归零引擎证据锁定 free 侧清白 + A/C/F5 落地与自纠
 
 **agent 结论（工具证据，非推理）**：受害 Task 页**从未被释放**（GDB 事件追踪 insert-only；毒化从未出现=free_task_slot 从未运行于其上）；free 事件环记录每页 2-28 次 order-0 free 全部与分配配对；所有权位图守卫零触发。**双主交接在 alloc 侧或直接野写**——这是最后一步（下一仪器：alloc 侧环+硬件观察点）。归零的"写手"是共享后轮转的最高频 order-0 消费者：**virtio-blk 同步 I/O 每次 2 个整页**（16B header+1B status 各占一页！）、MB 级 Vec 弹跳、new_task_at 占位写（state=0/pid=0 正是"归零子节点"）。

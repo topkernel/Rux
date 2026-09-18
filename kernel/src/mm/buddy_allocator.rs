@@ -356,6 +356,35 @@ impl BuddyAllocator {
                 self.init_block(page_idx, order, false);
 
                 let addr = self.page_idx_to_addr(page_idx);
+                // R18-1 (alloc-side handoff probe): if this page is already
+                // marked as a LIVE Task page and this allocation is NOT the
+                // Task allocator itself, the page just received its SECOND
+                // owner — the long-hunted first handoff, named at the
+                // moment it happens. ra identifies the taker.
+                if !crate::sched::sched::IN_TASK_ALLOC.load(core::sync::atomic::Ordering::Acquire)
+                    && crate::sched::sched::task_page_is_owned(addr as *const u8)
+                {
+                    use crate::console::putchar;
+                    const MSG: &[u8] = b"heap: DOUBLE-HANDOFF page=0x";
+                    for &b in MSG { putchar(b); }
+                    let mut sh = 64;
+                    while sh > 0 {
+                        sh -= 4;
+                        let nb = ((addr >> sh) & 0xF) as u8;
+                        putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                    }
+                    const M2: &[u8] = b" ra=0x";
+                    for &b in M2 { putchar(b); }
+                    let mut ra: usize;
+                    unsafe { core::arch::asm!("mv {}, ra", out(reg) ra, lateout("x1") _, options(nomem, nostack)); }
+                    sh = 64;
+                    while sh > 0 {
+                        sh -= 4;
+                        let nb = ((ra >> sh) & 0xF) as u8;
+                        putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                    }
+                    putchar(b'\n');
+                }
                 return addr as *mut u8;
             }
         }

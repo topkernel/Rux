@@ -656,6 +656,11 @@ fn task_page_unmark(ptr: *mut u8) {
     let w = &TASK_PAGE_OWNED[(page >> 6) & 127];
     w.fetch_and(!(1u64 << (page & 63)), core::sync::atomic::Ordering::AcqRel);
 }
+/// Set while alloc_task_slot itself is allocating, so the heap's
+/// alloc-side probe (R18-1) does not flag the legitimate first handoff.
+pub static IN_TASK_ALLOC: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// True if the page carrying `ptr` is marked as a live Task page.
 #[inline]
 pub fn task_page_is_owned(ptr: *const u8) -> bool {
@@ -666,8 +671,10 @@ pub fn task_page_is_owned(ptr: *const u8) -> bool {
 
 pub fn alloc_task_slot() -> Option<*mut Task> {
     let layout = core::alloc::Layout::new::<Task>();
+    IN_TASK_ALLOC.store(true, core::sync::atomic::Ordering::Release);
     // SAFETY: Layout is non-zero (Task is sized); null check follows immediately.
     let task_ptr = unsafe { alloc::alloc::alloc(layout) } as *mut Task;
+    IN_TASK_ALLOC.store(false, core::sync::atomic::Ordering::Release);
     if task_ptr.is_null() {
         return None;
     }
@@ -1281,6 +1288,93 @@ pub fn scheduler_tick() {
 
     // Update load average (auto-throttled to every 5 seconds).
     crate::fs::procfs::loadavg::update_load_avg();
+
+    // R18-3b: full context line for correlation.
+    // R18-3: per-tick canary check — DIAGNOSED (r18): pid 305's call
+    // chain legitimately reaches the stack's deepest 8 bytes; frames spill
+    // into the adjacent heap page (the children-list zeroing engine).
+    // First-hit-only reporting; the fix is stack-size/depth work (r19).
+    if let Some(t) = crate::sched::current() {
+        unsafe {
+            let bottom = (*t).kernel_stack_bottom();
+            if bottom != 0 {
+                let v = core::ptr::read_volatile(bottom as *const u64);
+                static REPORTED: core::sync::atomic::AtomicBool =
+                    core::sync::atomic::AtomicBool::new(false);
+                if v != 0xCAFE_F00D_DEAD_BEEF
+                    && v != 0
+                    && !REPORTED.swap(true, core::sync::atomic::Ordering::AcqRel)
+                {
+                    use crate::console::putchar;
+                    const MSG: &[u8] = b"TICK-CANARY pid=";
+                    for &b in MSG { putchar(b); }
+                    let pid = (*t).pid();
+                    let mut vv = pid as usize;
+                    if vv == 0 { putchar(b'0'); }
+                    let mut dd = [0u8; 10]; let mut kk = 0;
+                    while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                    while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                    const M2: &[u8] = b" v=0x";
+                    for &b in M2 { putchar(b); }
+                    let mut sh = 64;
+                    while sh > 0 { sh -= 4; let nb = ((v >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                    putchar(b'\n');
+                    // R18-6: consistency — bottom vs live kernel_stack.
+                    const M0: &[u8] = b" bottom=0x";
+                    for &b in M0 { putchar(b); }
+                    {
+                        let b2 = bottom;
+                        let mut sh0 = 64;
+                        while sh0 > 0 { sh0 -= 4; let nb = ((b2 >> sh0) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                    }
+                    const M6: &[u8] = b" ks=0x";
+                    for &b in M6 { putchar(b); }
+                    {
+                        let ks = match unsafe { (*t).get_kernel_stack() } { Some(p) => p as usize, None => 0 };
+                        let mut sh = 64;
+                        while sh > 0 { sh -= 4; let nb = ((ks >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                    }
+                    putchar(b'\n');
+                    // R18-5: the interrupted epc — if the smash is fresh,
+                    // the victim was executing in the deep chain RIGHT NOW.
+                    const M5: &[u8] = b" epc=0x";
+                    for &b in M5 { putchar(b); }
+                    {
+                        use crate::arch::riscv64::trap::current_pt_regs;
+                        use crate::arch::riscv64::pt_regs::PtRegs;
+                        let pr = current_pt_regs() as *const PtRegs;
+                        if !pr.is_null() {
+                            let e = unsafe { (*pr).epc };
+                            let mut sh = 64;
+                            while sh > 0 { sh -= 4; let nb = ((e >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                        }
+                    }
+                    putchar(b'\n');
+                    // R18-4: frame count + deepest symbols at smash time.
+                    let mut frames = 0u32;
+                    crate::dfx::backtrace::walk_stack_trace(&mut |pc, _fp| {
+                        frames += 1;
+                        if frames <= 6 {
+                            const M3: &[u8] = b" f=0x";
+                            for &b in M3 { putchar(b); }
+                            let mut sh = 64;
+                            while sh > 0 { sh -= 4; let nb = ((pc >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
+                        }
+                    });
+                    const M4: &[u8] = b" frames=";
+                    for &b in M4 { putchar(b); }
+                    let mut vv = frames;
+                    if vv == 0 { putchar(b'0'); }
+                    let mut dd = [0u8; 6]; let mut kk = 0;
+                    while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                    while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                    putchar(b'\n');
+                    // repair so we report once
+                    core::ptr::write_volatile(bottom as *mut u64, 0xCAFE_F00D_DEAD_BEEF);
+                }
+            }
+        }
+    }
 
     let current = this_cpu().current;
     if current.is_null() {
