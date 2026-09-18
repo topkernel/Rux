@@ -39,7 +39,7 @@ enable_swap = true
 # Swap size (MB) — carved from end of block device
 swap_size_mb = 256
 # Kernel stack size (bytes) - 32KB
-kernel_stack_size = 32768
+kernel_stack_size = 65536
 # Buddy allocator max order
 buddy_max_order = 20
 # Slab cache count

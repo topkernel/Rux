@@ -601,6 +601,9 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.13 第十九轮：栈溢出修复验证 + 全绿
+
+Kernel.toml kernel_stack_size 32768→65536。**八轮全门禁：smoke 15/15 ×8、nettest 8/8 全 PASS（历史首次满分）、KERNPANIC 0/8、DEADLOCK 0/8、children 归零 0/8**——第十八轮定罪完全验证。mrsh 管道 pp 6/8（3/5/7/8 轮 pp=0 为静默失败待下一轮查）。
 ### 20.12 第十八轮：**children 归零引擎定罪——内核栈溢出**
 
 **证据链（四步闭环）**：

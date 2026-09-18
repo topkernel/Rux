@@ -41,7 +41,7 @@ pub const USER_STACK_MAX_SIZE: usize = 8388608;
 pub const USER_HEAP_MAX_SIZE: usize = 134217728;
 
 /// Kernel stack size (bytes)
-pub const KERNEL_STACK_SIZE: usize = 32768;
+pub const KERNEL_STACK_SIZE: usize = 65536;
 
 /// User stack top address
 pub const USER_STACK_TOP: u64 = 0x0000_003f_ffff_f000;
