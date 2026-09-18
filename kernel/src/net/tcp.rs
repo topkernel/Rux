@@ -419,12 +419,16 @@ pub struct TcpTimers {
     pub retransmit_deadline: u64,
     /// Delayed ACK timer deadline (jiffies)
     pub delack_deadline: u64,
+    /// R21-N3b: when FIN_WAIT1/2 was entered (jiffies) — bounds orphaned
+    /// half-closes against dead peers.
+    pub fin_wait_since: u64,
 }
 
 impl TcpTimers {
     pub fn new() -> Self {
         Self {
             retransmit_deadline: 0,
+            fin_wait_since: 0,
             delack_deadline: 0,
         }
     }
@@ -507,6 +511,11 @@ pub struct TcpSocket {
     pub recv_buffer: alloc::collections::VecDeque<u8>,
     /// Retransmit queue (sent but unacknowledged)
     pub retrans_queue: alloc::collections::VecDeque<TcpSendSeg>,
+    /// R21-N4: userspace reference count — the timer/state machine may
+    /// transition to CLOSE (RST, retrans exhaustion) while a process fd
+    /// still wraps this slot; freeing it let alloc() reuse the index and
+    /// the stale fd read/write a stranger's connection.
+    pub user_refs: core::sync::atomic::AtomicU32,
     /// Out-of-order reassembly queue (received but not yet deliverable)
     pub ooo_queue: alloc::collections::VecDeque<TcpOooSeg>,
 
@@ -553,6 +562,7 @@ impl TcpSocket {
             send_buffer: alloc::collections::VecDeque::new(),
             recv_buffer: alloc::collections::VecDeque::new(),
             retrans_queue: alloc::collections::VecDeque::new(),
+            user_refs: core::sync::atomic::AtomicU32::new(0),
             ooo_queue: alloc::collections::VecDeque::new(),
 
             rtt_estimator: TcpRttEstimator::new(),
@@ -702,7 +712,22 @@ impl TcpSocket {
         crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6);
 
         // FIN consumes one sequence number (RFC 793)
+        let fin_seq = self.snd_nxt;
         self.snd_nxt = self.snd_nxt.wrapping_add(1);
+
+        // R21-N3: arm the retransmit machinery for the FIN itself — a lost
+        // FIN (or final ACK) used to leave FIN_WAIT1/2 forever (no seg in
+        // retrans_queue, deadline 0): 64 dead closes exhaust the table.
+        self.retrans_queue.push_back(TcpSendSeg {
+            seq: fin_seq,
+            len: 0, // zero-length = bare FIN
+            data: alloc::vec::Vec::new(),
+            tx_time: crate::drivers::timer::get_jiffies(),
+            retries: 0,
+        });
+        if self.timers.retransmit_deadline == 0 {
+            self.timers.start_retransmit(crate::config::TCP_RTO_DEFAULT_US);
+        }
 
         Ok(())
     }
@@ -1655,6 +1680,13 @@ impl TcpSocketTable {
 /// Global TCP socket table
 static mut TCP_SOCKET_TABLE: TcpSocketTable = TcpSocketTable::new();
 
+/// R21-N1: coarse table lock — the table is mutated concurrently from
+/// syscalls (accept/send/recv/close) and the Timer/NetRx softirqs on a
+/// 4-CPU kernel (the old 'single-core' comments were false). irqsave
+/// because the softirq side can run inline at irq_exit.
+pub static TCP_TABLE_LOCK: crate::sync::spinlock::Spinlock<()> =
+    crate::sync::spinlock::Spinlock::new(());
+
 /// Allocate TCP socket
 ///
 /// # Returns
@@ -1663,6 +1695,7 @@ pub fn tcp_socket_alloc() -> Result<i32, i32> {
     // SAFETY: TCP_SOCKET_TABLE is a global static; no concurrent mutation hazard
     // in current single-core kernel context.
     unsafe {
+        let _g = TCP_TABLE_LOCK.lock_irqsave();
         match TCP_SOCKET_TABLE.alloc() {
             Ok(fd) => Ok(fd as i32),
             Err(_) => Err(-5), // EIO
@@ -1677,6 +1710,7 @@ pub fn tcp_socket_alloc() -> Result<i32, i32> {
 pub fn tcp_socket_free(fd: i32) {
     // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
+        let _g = TCP_TABLE_LOCK.lock_irqsave();
         TCP_SOCKET_TABLE.free(fd as usize);
     }
 }
@@ -2042,6 +2076,9 @@ pub fn tcp_parse_packet(skb: &SkBuff) -> Option<&'static TcpHdr> {
 /// Ok(()) on success, Err(()) on failure
 pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     let manager = get_tcp_manager();
+    // R21-N1: RX path mutates the shared table (states, buffers, slot
+    // frees) — serialized against syscalls and the timer tick.
+    let _table_g = TCP_TABLE_LOCK.lock_irqsave();
 
     match manager.handle_tcp_packet(skb, src_ip, dest_ip) {
         Ok(()) => Ok(()),

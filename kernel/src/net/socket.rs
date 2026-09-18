@@ -353,10 +353,25 @@ impl Socket {
                         // Only free immediately if connection is fully closed.
                         // Otherwise, let the timer tick clean up after TIME_WAIT expires.
                         if socket.state == crate::net::tcp::TcpState::TCP_CLOSE {
-                            crate::net::tcp::tcp_socket_free(tcp_fd);
+                            // R21-N4: drop our pin; free only when the
+                            // timer side already reaped to CLOSE and no
+                            // other fd holds a reference.
+                            let prev = socket
+                                .user_refs
+                                .swap(0, core::sync::atomic::Ordering::AcqRel);
+                            if prev <= 1 {
+                                crate::net::tcp::tcp_socket_free(tcp_fd);
+                            }
+                        } else {
+                            // Still closing (FIN_WAIT etc.) — unpin; the
+                            // timer tick reaps when refs hits 0.
+                            let prev = socket
+                                .user_refs
+                                .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+                            if prev <= 1 {
+                                crate::net::tcp::tcp_socket_free(tcp_fd);
+                            }
                         }
-                    } else {
-                        crate::net::tcp::tcp_socket_free(tcp_fd);
                     }
                 }
             }
@@ -614,6 +629,10 @@ pub fn get_socket(fd: usize) -> Option<Arc<Socket>> {
 pub fn socket_create_accepted(tcp_fd: i32) -> Result<usize, i32> {
     let socket = Arc::new(Socket::new(SocketType::Tcp));
     *socket.tcp_fd.lock() = Some(tcp_fd);
+    // R21-N4: pin the protocol slot against timer-side reaping.
+    if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+        ts.user_refs.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    }
     *socket.state.lock() = SocketState::Connected;
 
     // Copy the connection's local/remote endpoints for getsockname/peername.

@@ -76,7 +76,22 @@ struct EpollFile {
 }
 
 /// Epoll file close callback
-fn epoll_file_close(_file: &crate::fs::File) -> i32 {
+fn epoll_file_close(file: &crate::fs::File) -> i32 {
+    // R20-5: free the boxed EpollFile. The close op only runs on the LAST
+    // Arc reference (close_fd decides under the entry lock), so no
+    // epoll_ctl/epoll_wait can be dereferencing it — every path that
+    // touches private_data holds an fd-table Arc clone. Previously the
+    // Box (and its entries Vec) leaked on every epoll create+close.
+    // SAFETY: private_data is an UnsafeCell; we hold &File for the last
+    // reference, so no concurrent mutable access.
+    if let Some(ptr) = unsafe { *file.private_data.get() } {
+        // SAFETY: ptr came from Box::into_raw in sys_epoll_create and is
+        // uniquely owned by this File.
+        unsafe {
+            let _ = alloc::boxed::Box::from_raw(ptr as *mut EpollFile);
+        }
+        unsafe { *file.private_data.get() = None; }
+    }
     0
 }
 
@@ -910,8 +925,20 @@ fn eventfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     ready
 }
 
-fn eventfd_close(_file: &crate::fs::File) -> i32 {
-    // EventFd is freed when File is dropped (Box in private_data)
+fn eventfd_close(file: &crate::fs::File) -> i32 {
+    // R20-5: free the boxed EventFd — File has no Drop impl and
+    // private_data is a raw pointer, so the old comment ("freed when File
+    // is dropped") was wrong: it leaked on every close. Runs only on the
+    // last Arc reference, so no read/write/poll can be using it.
+    // SAFETY: private_data is an UnsafeCell; we hold &File for the last
+    // reference.
+    if let Some(ptr) = unsafe { *file.private_data.get() } {
+        // SAFETY: ptr came from Box::into_raw in sys_eventfd2.
+        unsafe {
+            let _ = alloc::boxed::Box::from_raw(ptr as *mut EventFd);
+        }
+        unsafe { *file.private_data.get() = None; }
+    }
     0
 }
 
@@ -990,7 +1017,24 @@ fn timerfd_close(file: &crate::fs::File) -> i32 {
         crate::timer::del_timer(tfd.kernel_timer_id);
     }
 
-    // TimerFd is freed when File is dropped (Box in private_data)
+    // R20-5: free the boxed TimerFd — File has no Drop impl, so the old
+    // comment ("freed when File is dropped") was wrong: it leaked. Runs
+    // only on the last Arc reference (see eventfd_close).
+    // Residual race (pre-existing, documented): a timer that expired in
+    // the SAME softirq pass that races this close can deliver one final
+    // fetch_add after the free (timer.rs R12-3 snapshot is delivered
+    // outside the TIMERS lock). The window is one softirq pass (~µs);
+    // before this fix the box leaked on EVERY close, which is strictly
+    // worse.
+    // SAFETY: private_data is an UnsafeCell; we hold &File for the last
+    // reference, so no timerfd_read/settime/gettime can be using it.
+    if let Some(ptr) = unsafe { *file.private_data.get() } {
+        // SAFETY: ptr came from Box::into_raw in sys_timerfd_create.
+        unsafe {
+            let _ = alloc::boxed::Box::from_raw(ptr as *mut TimerFd);
+        }
+        unsafe { *file.private_data.get() = None; }
+    }
     0
 }
 

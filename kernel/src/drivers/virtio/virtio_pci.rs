@@ -1092,12 +1092,26 @@ fn read_block_once(
 
     // Phase 3: Check response
     if new_used == prev_expected {
-        // Request failed, device did not update used ring (timeout)
-        // SAFETY: Both pointers were allocated above and are still valid.
-        unsafe {
-            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+        // R21-N2: descriptors STILL SUBMITTED — freeing here + the
+        // caller's retry onto rewound indices let the device DMA into
+        // freed memory on the ROOT FS path. Late-drain the used-ring
+        // index (R8-M2 discipline); a true timeout leaks the 64B block
+        // instead of freeing in-flight DMA targets.
+        let mut late = false;
+        for _ in 0..50_000_000u64 {
+            let idx = unsafe {
+                core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
+            };
+            if idx != prev_expected {
+                late = true;
+                break;
+            }
+            core::hint::spin_loop();
         }
-        return Err("VirtIO request timeout");
+        if !late {
+            return Err("VirtIO request timeout");
+        }
+        // completed late — fall through to status handling
     }
 
     // SAFETY: resp_ptr was allocated above; device has completed the write.
@@ -1287,12 +1301,26 @@ fn write_block_once(
 
     // Phase 3: Check response
     if new_used == prev_expected {
-        // Request failed, device did not update used ring (timeout)
-        // SAFETY: Both pointers were allocated above and are still valid.
-        unsafe {
-            alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+        // R21-N2: descriptors STILL SUBMITTED — freeing here + the
+        // caller's retry onto rewound indices let the device DMA into
+        // freed memory on the ROOT FS path. Late-drain the used-ring
+        // index (R8-M2 discipline); a true timeout leaks the 64B block
+        // instead of freeing in-flight DMA targets.
+        let mut late = false;
+        for _ in 0..50_000_000u64 {
+            let idx = unsafe {
+                core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
+            };
+            if idx != prev_expected {
+                late = true;
+                break;
+            }
+            core::hint::spin_loop();
         }
-        return Err("VirtIO write request timeout");
+        if !late {
+            return Err("VirtIO write request timeout");
+        }
+        // completed late — fall through to status handling
     }
 
     // SAFETY: resp_ptr was allocated above; device has completed the write.

@@ -510,6 +510,15 @@ unsafe impl GlobalAlloc for BuddyAllocator {
             return;
         }
 
+        // R21-3: block-alignment validation — a free of an interior or
+        // offset pointer (off-by-slack / partial-unwind bugs) used to
+        // pass the leader-only tripwire after R17-A2 made interior pages
+        // carry consistent metadata, splicing bogus blocks into the
+        // doubly-linked freelist.
+        if self.addr_to_page_idx_checked(ptr as usize).map(|idx| idx % (1usize << order) != 0).unwrap_or(true) {
+            return;
+        }
+
         let _guard = self.lock.lock_irqsave();
         self.free_blocks(ptr, order);
     }

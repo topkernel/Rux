@@ -149,12 +149,16 @@ pub fn page_add_file_rmap(page: &Page, mapping: usize, index: usize) {
 pub fn page_remove_rmap(page: &Page) {
     // SAFETY: caller holds page lock (or page is unshared).
     unsafe {
-        // Decrement map count
-        let old_count = page.dec_mapcount();
+        // R21-1: dec_mapcount returns the POST-decrement value; the
+        // convention is -1 (PAGE_MAPCOUNT_BIAS) = unmapped, 0 = one
+        // mapping. The old `== 0` check fired one mapping EARLY (a
+        // fork-COW page lost Anonymous/LRU at 2->1) and never on the true
+        // last unmap (page freed to buddy still LRU-linked).
+        let new_count = page.dec_mapcount();
 
         // If last mapping, clear flags and remove from LRU.
         // Safe now: LRU uses dedicated lru_next field, not mapping/index
-        if old_count == 0 {
+        if new_count == -1 {
             page.clear_flag(super::page_desc::PageFlag::Anonymous);
             page.clear_flag(super::page_desc::PageFlag::SwapBacked);
             super::lru::page_remove_lru(page);

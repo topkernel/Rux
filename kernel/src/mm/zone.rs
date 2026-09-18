@@ -467,6 +467,21 @@ impl Zone {
 
         let _guard = self.lock.lock();
 
+        // R21-2: reset the descriptor — every raw-free caller's comments
+        // claim this happens here, but no store existed: pages landed on
+        // the freelist with refcount==1, is_buddy_free rejected every
+        // merge involving them (order-0 accumulation, INV-REF-2 violation)
+        // and meminfo miscounted them as used.
+        {
+            let page = pfn_to_page_mut(pfn);
+            if !page.is_null() {
+                unsafe {
+                    (*page).set_refcount(0);
+                    (*page).clear_flag(super::page_desc::PageFlag::Referenced);
+                }
+            }
+        }
+
         // R15-3: TRUE double-free tripwire on the primary allocator path.
         // A second free is proven by the page STILL BEING LINKED in a
         // freelist (next_free != sentinel). The round-14 variant tested

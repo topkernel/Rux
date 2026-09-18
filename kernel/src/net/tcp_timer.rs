@@ -74,8 +74,25 @@ impl TcpTimerManager {
             }
         }
 
-        // Free dead sockets outside the iteration
-        for idx in to_free {
+        // Free dead sockets outside the iteration — R21-N4: only when no
+        // userspace fd still wraps the slot (user_refs == 0); otherwise
+        // the slot stays CLOSE-but-allocated for Socket::close to reap
+        // (prevents index reuse under a live fd = cross-connection data
+        // confusion).
+        let freeable: alloc::vec::Vec<usize> = sockets
+            .iter()
+            .enumerate()
+            .filter(|(idx, slot)| {
+                to_free.contains(idx)
+                    && slot
+                        .as_ref()
+                        .map(|sk| sk.user_refs.load(core::sync::atomic::Ordering::Acquire))
+                        .unwrap_or(0) == 0
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+        drop(sockets);
+        for idx in freeable {
             table.free(idx);
         }
     }
@@ -86,7 +103,28 @@ impl TcpTimerManager {
         match socket.state {
             TcpState::TCP_ESTABLISHED
             | TcpState::TCP_FIN_WAIT1
-            | TcpState::TCP_FIN_WAIT2
+            | TcpState::TCP_FIN_WAIT2 => {
+                // R21-N3b: orphaned FIN_WAIT timeout — no local timer runs
+                // once retransmit exhausts; bound it so dead peers cannot
+                // hold slots forever.
+                if socket.timers.fin_wait_since == 0 {
+                    socket.timers.fin_wait_since = now;
+                } else if now - socket.timers.fin_wait_since
+                    > (crate::config::TCP_TIMEWAIT_TIMEOUT_US / 10_000)
+                {
+                    socket.state = TcpState::TCP_CLOSE;
+                }
+                // fall through to the shared retransmit handling below
+                match socket.state {
+                    TcpState::TCP_ESTABLISHED
+                    | TcpState::TCP_FIN_WAIT1
+                    | TcpState::TCP_FIN_WAIT2
+                    | TcpState::TCP_CLOSE_WAIT
+                    | TcpState::TCP_CLOSING
+                    | TcpState::TCP_LAST_ACK => {}
+                    _ => return,
+                }
+            }
             | TcpState::TCP_CLOSE_WAIT
             | TcpState::TCP_CLOSING
             | TcpState::TCP_LAST_ACK => {
@@ -155,7 +193,9 @@ pub fn tcp_timer_tick() {
     // Get TCP socket table
     let table = crate::net::tcp::get_tcp_socket_table();
 
-    // Process timers
+    // Process timers — R21-N1: under the table lock (was racing syscalls
+    // and RX on the 4-CPU kernel).
+    let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
     manager.tick(table);
 }
 

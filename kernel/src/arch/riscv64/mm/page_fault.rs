@@ -643,6 +643,9 @@ fn handle_swap_fault(
     // Read page contents from swap device
     if swap::swap_read_page(swap_type, swap_offset, phys_addr as usize).is_err() {
         crate::println!("swap: failed to read page from swap (type={}, offset={})", swap_type, swap_offset);
+        // R21-6: free the freshly allocated page on the failed read (was a
+        // per-error page leak).
+        crate::mm::page_alloc::free_page(phys_addr as usize);
         return MmFaultResult::OutOfMemory;
     }
 

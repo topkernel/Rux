@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.15 第二十一轮：R20 未修 HIGH 全部落地（mm 4 + net 5 + syscall agent 5）
+
+**mm**：R21-1 page_remove_rmap 判据改 `== -1`（原 off-by-one：提前清 LRU/最后映射不清）；R21-2 Zone::free_pages 真正重置 refcount（裸 free 调用群永久禁用 buddy 合并的根因）；R21-3 堆 dealloc 块对齐校验；R21-6 swap 读失败释放页。
+**net**：R21-N1 TCP_TABLE_LOCK（alloc/free/tcp_rcv/tcp_timer_tick 四入口 irqsave——表在 4 CPU 上被软中断与系统调用并发改）；R21-N2 PCI virtio 超时迟清+泄漏不重试（根 FS 路径 DMA-after-free）；R21-N3 FIN 入 retrans_queue + FIN_WAIT1/2 孤儿超时（64 槽不再永久泄漏）；R21-N4 user_refs 引用计数（timer 只在 refs==0 释放，fd 存活时槽不回收=无跨连接混淆）；N5 SeqLock 写侧 irqsave+guard 携带保存态（软中断同 CPU自楔）。
+**syscall agent（R20 批内已修 5 项）**：TCSETS 60→52 越界；uart_write 每字节锁→整次锁（**PIPE2 pp=0 的根因**——并发写把 PIPE-OK 标记撕开；也解释 smoke 14/15 单项闪烁）；sendmsg/recvmsg 四路径补 iovlen 界/access_ok/copy_to_user/EMSGSIZE；eventfd/timerfd/epoll close 泄漏 Box；capset inheritable ⊆ inheritable。
+**门禁（8 轮）**：smoke 15/15 ×8、nettest 6/8、kpanic 0/8、wedge 0/8、pp 7/8、x 8/8。
 ### 20.14 第二十轮：五 agent 全子系统检视（sched/process、mm/arch、fs/ext4、net/drivers/ipc、syscall/signal/tests）——共修 24 项
 
 **sched/process（R20-1..7 已修）**：waitid 僵尸复查缺 idtype 过滤（忙挂）；for_each_task 只看 per-CPU current（rmap/compact/hung_task 全盲——改走 pid_hash）；RR tick 无条件复活睡眠者/僵尸；idle 丢失唤醒窗；cfs_rq.curr 多 CPU 双计费+睡眠计费（vruntime 冻结→永久霸占）；栈断言 32768→65536；LAST_TICK 从未存储。
