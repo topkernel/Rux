@@ -601,6 +601,10 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.21 第二十八轮：TIMERS 交付改快照法 + TCP_TABLE_LOCK 低频楔（1/6）追查
+
+R28-1：timerfd still_ours 复验改快照（rearmed 集合判定，不再二次取 TIMERS 锁——交付循环与 tick 全扫描临界区竞争消除）。门禁：nettest 8/8、kpanic 0/8、smoke 15/15×8。**残留**：pp 5-6/8 闪烁——TCP_TABLE_LOCK 楔 1/6（nettest TCP echo 之后、mrsh 管道时刻；3-4 CPU 自旋 ra=lock_irqsave；GDB 4 连未复现——低频）。嫌疑（未定罪）：tcp_rcv/timer tick 持锁 → tx → ipv4_send → 非环回路径 virtio xmit 自旋（10s 超时持锁）或 ARP 分支。第二十九轮专项。
+
 ### 20.20 第二十七轮：getchar CAS 环 + 冷启动窗口进一步定界
 
 R27-1：UART RX get() 改 CAS 循环（fork 子进程共享 stdin 是多消费者——旧 load/read/store 丢/重字节）。冷启动首字节实验：CAS 后裸 boot 仍吃首字节（0/4），5s 延迟 3/3、10s 2/2——**窗口在 guest 启动后 ~5s 内**，且命令行完整时管道仍偶发无输出（mrsh posix_spawn 残留竞态，kpanic/wedge=0——cat 或 spawn 链丢失唤醒）。两项均为输入子系统的启动/唤醒时序专项，列入第二十八轮。门禁维持预热（2s）。

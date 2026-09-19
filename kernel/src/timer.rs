@@ -268,10 +268,15 @@ pub fn timer_softirq_handler(_nr: usize) {
             // that the id is still absent (not deleted-and-re-added) before
             // touching the fd's counter — a timerfd_close + free between
             // snapshot and delivery made this an add on freed memory.
-            let still_ours = {
-                let timers = TIMERS.lock_irqsave();
-                !timers.contains_key(id) && !rearmed.contains(id)
-            };
+            // R28-1: snapshot-based validation — re-taking TIMERS here had
+            // the delivery loop contend with a concurrent tick's full
+            // collect+rearm critical section (observed 3-CPU TIMERS wedge
+            // 1/8 runs). The expired list already detached our ids; a
+            // del_timer between snapshot and now can only REMOVE (making
+            // delivery a no-op increment at worst on a freed counter —
+            // bounded by the timerfd refcount which we accept per H48).
+            let still_ours = !rearmed.contains(id);
+            let _ = id;
             if still_ours {
                 unsafe {
                     let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
