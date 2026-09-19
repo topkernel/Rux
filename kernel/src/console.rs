@@ -93,18 +93,30 @@ impl UartRxBuf {
         self.tail.store(next_tail, Ordering::Release);
     }
 
-    /// Consumer: read byte. Called from task context only (single consumer).
+    /// Consumer: read byte. CAS loop — fork'd children sharing stdin are
+    /// MULTIPLE consumers; the old load/read/store could duplicate a byte
+    /// and skip the next (R27-1, the cold-boot first-byte loss family).
     #[inline]
     fn get(&self) -> Option<u8> {
-        let head = self.head.load(Ordering::Relaxed);
-        if head == self.tail.load(Ordering::Acquire) {
-            return None; // Empty
+        let mut head = self.head.load(Ordering::Acquire);
+        loop {
+            if head == self.tail.load(Ordering::Acquire) {
+                return None; // Empty
+            }
+            // SAFETY: head is within bounds (0..UART_RX_BUF_SIZE); self.data is a static
+            // UnsafeCell initialized with a fixed-size array.
+            let c = unsafe { core::ptr::read_volatile(&(*self.data.get())[head]) };
+            let next = (head + 1) & UART_RX_BUF_MASK;
+            match self.head.compare_exchange_weak(
+                head,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(c),
+                Err(h) => head = h, // another consumer advanced — retry
+            }
         }
-        // SAFETY: head is within bounds (0..UART_RX_BUF_SIZE); self.data is a static
-        // UnsafeCell initialized with a fixed-size array; single consumer.
-        let c = unsafe { core::ptr::read_volatile(&(*self.data.get())[head]) };
-        self.head.store((head + 1) & UART_RX_BUF_MASK, Ordering::Release);
-        Some(c)
     }
 }
 

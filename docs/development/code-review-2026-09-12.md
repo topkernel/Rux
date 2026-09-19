@@ -601,6 +601,10 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.20 第二十七轮：getchar CAS 环 + 冷启动窗口进一步定界
+
+R27-1：UART RX get() 改 CAS 循环（fork 子进程共享 stdin 是多消费者——旧 load/read/store 丢/重字节）。冷启动首字节实验：CAS 后裸 boot 仍吃首字节（0/4），5s 延迟 3/3、10s 2/2——**窗口在 guest 启动后 ~5s 内**，且命令行完整时管道仍偶发无输出（mrsh posix_spawn 残留竞态，kpanic/wedge=0——cat 或 spawn 链丢失唤醒）。两项均为输入子系统的启动/唤醒时序专项，列入第二十八轮。门禁维持预热（2s）。
+**门禁（8 轮）**：smoke 15/15 ×8、nettest 7/8、kpanic 0/8、wedge 0/8、pp 5/8（mrsh 管道闪烁）。
 ### 20.19 第二十六轮：compact 慢路径守卫 + 冷启动首字节窗口定界
 
 R26-1：compact find_free_page 两处 `is_free()` 判定补 `!OnFreelist` 排除——合并上行的块成员 refcount==0 但仍在链上，慢路径曾把它当空闲页偷走做迁移目标（同页双主）。
