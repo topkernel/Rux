@@ -176,7 +176,7 @@ unsafe fn find_free_page(cc: &mut CompactControl) -> Option<usize> {
         }
 
         let p = &*page;
-        if p.is_free() && !p.test_flag(PageFlag::Reserved) {
+        if p.is_free() && !p.test_flag(PageFlag::Reserved) && !p.test_flag(PageFlag::OnFreelist) {
             return Some(cc.free_pfn);
         }
     }
@@ -216,7 +216,7 @@ unsafe fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
         let p = &*page;
 
         // Skip free pages
-        if p.is_free() {
+        if p.is_free() && !p.test_flag(PageFlag::OnFreelist) { // R26-1: linked-free members are NOT stealable
             continue;
         }
 

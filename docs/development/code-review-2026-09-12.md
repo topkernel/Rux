@@ -601,6 +601,11 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.19 第二十六轮：compact 慢路径守卫 + 冷启动首字节窗口定界
+
+R26-1：compact find_free_page 两处 `is_free()` 判定补 `!OnFreelist` 排除——合并上行的块成员 refcount==0 但仍在链上，慢路径曾把它当空闲页偷走做迁移目标（同页双主）。
+R26-2 冷启动窗口定界（注入实验）：裸 boot 直接发命令 → 首字符被吃（"cho PP"）→ 命令无效。加 2 秒预热后 100% 通过（3/3）。延迟 3s 同效。窗口 = shell exec 完成前的输入消费竞态（具体消费者待查——嫌疑为 exec 期间 IRQ 唤醒的某次 getchar）。门禁脚本已加预热；内核侧根治（getchar 的 SPSC get() CAS 化，R20 报告 #10）留下轮专项。
+**门禁（8 轮）**：smoke 15/15 ×8、nettest 8/8、**pp 8/8、x 8/8、kpanic 0/8、wedge 0/8——全指标满分**。
 ### 20.18 第二十四/二十五轮：R24 双 agent 检视 + 主审落地 6 项 + agent 自落地 10 项
 
 **R24 agent B（fs/net/ipc）自落地 10 项**：TCP accept 双认领+pin 竞态（锁内扫描+钉住+端点复制）；posix_mq R23-5 的等待队列条目泄漏（UAF 唤醒族）；UDP_TABLE_LOCK 全覆盖（HIGH-6 关闭）；UDP recv_buffer 128KB 预算（MED-9）；UDP poll 可读；virtio-net 首 alloc 泄漏；alloc_desc_chain(chain_len)（MED-1 关闭——RX 恢复 8 缓冲）；poll 早退 RX 回收；io_uring 读侧短读 break；TCP_CLOSE 孤儿清扫（RST 子连接不再泄漏槽）。
