@@ -135,9 +135,9 @@ impl DlRunQueue {
     }
 
     /// Dequeue a task
-    pub fn dequeue(&mut self, task: *mut Task) {
+    pub fn dequeue(&mut self, task: *mut Task) -> bool {
         if task.is_null() {
-            return;
+            return false;
         }
 
         // SAFETY: Caller guarantees `task` points to a valid, live Task that is
@@ -174,6 +174,7 @@ impl DlRunQueue {
                 dl.on_rq.store(false, Ordering::Release);
             }
         }
+        true
     }
 
     /// Pick the task with earliest deadline

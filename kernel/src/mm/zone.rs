@@ -694,6 +694,9 @@ impl Zone {
     /// Unlike `alloc_pages()`, this does not update page descriptor refcount
     /// or flags — the caller is responsible for that.
     pub fn alloc_single_page(&self) -> Option<usize> {
+        // R31-6: serialize like alloc_pages — the sole caller (compaction)
+        // runs at peak zone pressure; the unlocked twin corrupted freelists.
+        let _guard = self.lock.lock();
         self.alloc_from_order(0, 0)
     }
 

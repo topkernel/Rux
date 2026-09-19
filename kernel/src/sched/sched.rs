@@ -1111,7 +1111,7 @@ fn check_rt_preempt(task: *mut Task, cpus_allowed: u32) {
                 return;
             }
             if (r_policy == SchedPolicy::Fifo || r_policy == SchedPolicy::Rr)
-                && (*running).rt_priority() > task_prio
+                && task_prio > (*running).rt_priority()
             {
                 resched_cpu(cpu);
                 return;
@@ -1157,12 +1157,13 @@ pub fn dequeue_task(task: &Task) {
 
     let actually_dequeued = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
-            grq_guard.rt_rq.dequeue(task_ptr);
-            true
+            // R31-5: propagate the real dequeue result — the hardcoded
+            // true decremented nr_running on every no-op (every RT/DL
+            // exit + wait-recheck), leaking the idle fast path.
+            grq_guard.rt_rq.dequeue(task_ptr)
         }
         SchedPolicy::Deadline => {
-            grq_guard.dl_rq.dequeue(task_ptr);
-            true
+            grq_guard.dl_rq.dequeue(task_ptr)
         }
         SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
             let dequeued = grq_guard.cfs_rq.dequeue(task_ptr);
@@ -1532,15 +1533,19 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
 /// load_weight rebalance (bare set_nice made enqueue/dequeue weights
 /// mismatch and wrap the counter).
 pub unsafe fn sched_renice_locked(task: *mut Task, niceval: i32) {
+    // R31-3: actually take the GRQ lock, and gate the load_weight
+    // rebalance on the task being IN THE TREE (picked tasks are off it —
+    // the unconditional adjust permanently shifted the counter for the
+    // common running/sleeping renice target).
+    let _g = grq().lock_irqsave();
     let old_weight = (*task).sched_entity().load.weight;
+    let was_on_rq = (*task).sched_entity().is_on_rq();
     (*task).set_nice(niceval);
     let new_weight = (*task).sched_entity().load.weight;
-    if let crate::process::task::SchedPolicy::Normal = (*task).policy() {
-        if old_weight != new_weight {
-            let g = grq();
-            g.cfs_rq.load_weight.fetch_add(new_weight, core::sync::atomic::Ordering::AcqRel);
-            g.cfs_rq.load_weight.fetch_sub(old_weight, core::sync::atomic::Ordering::AcqRel);
-        }
+    if was_on_rq && old_weight != new_weight {
+        let g = grq();
+        g.cfs_rq.load_weight.fetch_add(new_weight, core::sync::atomic::Ordering::AcqRel);
+        g.cfs_rq.load_weight.fetch_sub(old_weight, core::sync::atomic::Ordering::AcqRel);
     }
 }
 

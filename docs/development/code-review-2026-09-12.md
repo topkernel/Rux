@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.23 第三十/三十一轮：终检 23 项 → 8 项落地 + 1 项回退重做
+
+**R30 终检（双 agent）：共 23 项（A:6H+4M，B:4H+3M+6 低）**。最关键发现：R25-1/R28-1 的 timerfd 修复连续两次把极性搞反（rearmed 排除=周期永不交付）；R25-6 renice 没拿 GRQ 锁且无条件重算（非树上任务漂移 load_weight）；check_rt_preempt 比较反转（高优 RT 永不抢占）；dequeue_task RT/DL 臂硬编码 true（每次退出泄漏 nr_running）；alloc_single_page 仍无锁（压缩路径裸并发）；shared futex hash 含 pid 但 match 不含（跨进程丢唤醒）。
+**R31 已落地 8 项**：rt_preempt 反转修正；timerfd 极性第三次修正（恒交付——H48 关闭竞态由 refcount 承担）；renice 补锁+on_rq 门+sched_setattr 走 helper；RT/DL dequeue 返回 bool 并传播；alloc_single_page 补锁；futex shared hash 去 pid；File close_pending 标志（B3 的 Drop 方案引入 ext4 I/O 副作用回归——run8 smoke 11/15——已回退为标志法）；close_fd 恢复原执行路径+pending 交接。
+**门禁（R31-v2 八轮）**：smoke 15/15 ×8、nettest 8/8、kpanic 0/8、wedge 0/8。pp 4/8 + x 1/8 为注入时间窗超限（195s 不够 4 阶段+2s 预热）与 mrsh 偶发管道挂——非新回归。R30 剩余 15 项 MED/LOW 留下轮。
+
 ### 20.22 第二十九轮：TCP 锁楔 12 连不复现
 
 R28-1（TIMERS 快照交付）之后 12 连全门禁：**pp 12/12、wedge 0/12、kpanic 0/12**。此前 1/6 的 TCP_TABLE_LOCK 楔判定为 TIMERS 竞争级联的下游表现（TIMERS 持有者被交付循环二次锁竞争拖长 → 软中断排队 → 级联传导到 TCP 锁）。残留清单更新：冷启动首字节（gate 预热规避）+ 文档开口项。

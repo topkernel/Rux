@@ -588,7 +588,9 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
 
         // Set nice for normal tasks
         if matches!(new_policy, crate::process::task::SchedPolicy::Normal | crate::process::task::SchedPolicy::Batch) {
-            task_ref.set_nice(attr.sched_nice);
+            // R31-3c: route through the locked renice helper (bare set_nice
+            // raced the CFS accounting).
+            unsafe { crate::sched::sched::sched_renice_locked(task, attr.sched_nice); }
         }
 
         // Set RT priority

@@ -92,6 +92,9 @@ pub struct FileOps {
 
 #[repr(C, align(16))]
 pub struct File {
+    /// R31-B3: set by close_fd when the slot was removed but an in-flight
+    /// syscall still holds a clone — the final dropper runs the close op.
+    pub close_pending: core::sync::atomic::AtomicBool,
     /// File flags stored as AtomicU32 for lock-free concurrent access
     /// (fcntl F_SETFL vs read/write data race fix).
     pub flags: AtomicU32,
@@ -122,6 +125,7 @@ const _: () = {
     assert!(offset % 8 == 0, "inode field is not 8-byte aligned!");
 };
 
+
 impl File {
     /// Create new file object
     pub fn new(flags: FileFlags) -> Self {
@@ -132,6 +136,7 @@ impl File {
             dentry: UnsafeCell::new(None),
             ops: UnsafeCell::new(None),
             private_data: UnsafeCell::new(None),
+            close_pending: core::sync::atomic::AtomicBool::new(false),
             cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
         }
     }
@@ -405,6 +410,9 @@ impl FdTable {
             };
             file_opt
         };
+        // R31-B3 (v2): if we hold the last reference, run the op now; if an
+        // in-flight syscall holds a clone (count was 2), set close_pending
+        // so the FINAL drop runs it — the flag lives on the File itself.
         if run_close {
             if let Some(file) = file_opt {
                 unsafe {
@@ -414,6 +422,13 @@ impl FdTable {
                         (*file_ptr).close();
                     }
                 }
+            }
+        } else if let Some(ref file) = file_opt {
+            // Someone else still holds a reference and we removed the slot:
+            // mark for the final dropper to run the op.
+            unsafe {
+                let file_ptr = Arc::as_ptr(file) as *mut File;
+                (*file_ptr).close_pending.store(true, core::sync::atomic::Ordering::Release);
             }
         }
 
@@ -510,9 +525,8 @@ impl Drop for FdTable {
                     entry.count -= 1;
                     if let Some(file) = file_opt {
                         // R10-2: last-reference-only release — see close_fd.
-                        if Arc::strong_count(&file) == 1 {
-                            to_close.push(file);
-                        }
+                        // R31-B3: Drop for File runs the close op.
+                        let _ = file;
                     }
                 }
             }

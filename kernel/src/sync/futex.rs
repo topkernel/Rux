@@ -138,8 +138,14 @@ fn free_waiter(index: usize) {
 
 /// Calculate futex hash value
 fn futex_hash(key: &FutexKey) -> usize {
-    let hash = key.uaddr.wrapping_add(key.pid as usize);
-    hash % HASH_SIZE
+    // R31-9: shared futexes match on uaddr alone (matches() ignores pid)
+    // — including pid in the hash put the waiter and waker in different
+    // buckets (cross-process lost wakeup over SysV shm / MAP_SHARED).
+    if key.flags & FLAGS_SHARED != 0 {
+        key.uaddr % HASH_SIZE
+    } else {
+        (key.uaddr.wrapping_add(key.pid as usize)) % HASH_SIZE
+    }
 }
 
 /// Wake up waiters on a futex

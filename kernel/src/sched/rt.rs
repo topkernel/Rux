@@ -180,9 +180,9 @@ impl RtRunQueue {
     }
 
     /// Dequeue a task
-    pub fn dequeue(&mut self, task: *mut Task) {
+    pub fn dequeue(&mut self, task: *mut Task) -> bool {
         if task.is_null() {
-            return;
+            return false;
         }
 
         // SAFETY: task was previously enqueued and is still in the RT queue;
@@ -195,11 +195,11 @@ impl RtRunQueue {
             // underflowing the counters and permanently disabling the idle
             // fast path.
             if !t.rt_entity().is_on_rq() {
-                return;
+                return false;
             }
             let raw = t.rt_priority() as usize;
             if raw >= MAX_RT_PRIO {
-                return;
+                return false;
             }
             let prio = MAX_RT_PRIO - 1 - raw; // same inversion as enqueue
 
@@ -230,6 +230,7 @@ impl RtRunQueue {
             // Clear on_rq flag
             t.rt_entity().set_on_rq(false);
         }
+        true
     }
 
     /// Pick the next task to run

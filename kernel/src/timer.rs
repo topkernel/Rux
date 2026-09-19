@@ -268,20 +268,15 @@ pub fn timer_softirq_handler(_nr: usize) {
             // that the id is still absent (not deleted-and-re-added) before
             // touching the fd's counter — a timerfd_close + free between
             // snapshot and delivery made this an add on freed memory.
-            // R28-1: snapshot-based validation — re-taking TIMERS here had
-            // the delivery loop contend with a concurrent tick's full
-            // collect+rearm critical section (observed 3-CPU TIMERS wedge
-            // 1/8 runs). The expired list already detached our ids; a
-            // del_timer between snapshot and now can only REMOVE (making
-            // delivery a no-op increment at worst on a freed counter —
-            // bounded by the timerfd refcount which we accept per H48).
-            let still_ours = !rearmed.contains(id);
-            let _ = id;
-            if still_ours {
-                unsafe {
-                    let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
-                    (*counter_ptr).fetch_add(1, Ordering::Release);
-                }
+            // R31-2 (third and correct form): ALWAYS deliver — both R25-1
+            // and R28-1 accidentally SUPPRESSED periodic timerfd delivery
+            // (rearmed ids were excluded, but rearmed ids are exactly the
+            // periodic ones). The H48 close-race (increment on a freed
+            // counter) is accepted per the timerfd refcount audit.
+            let _ = rearmed;
+            unsafe {
+                let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
+                (*counter_ptr).fetch_add(1, Ordering::Release);
             }
         } else if action.pid != 0 && action.signo != 0 {
             let _ = crate::signal::send_signal(action.pid, action.signo);
