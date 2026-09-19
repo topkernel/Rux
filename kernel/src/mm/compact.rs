@@ -301,7 +301,10 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
             return;
         }
         let task = &*task_ptr;
-        if let Some(mm) = task.address_space() {
+        // R25-2: pin the address space (see rmap.rs note) — this loop had
+        // NO lock at all.
+        if let Some(_mm_arc) = task.address_space_arc() {
+        let mm = _mm_arc.as_ref();
             if let Some((_ppn, bits)) = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
                 mm.pgd(), old_vaddr as u64,
             ) {
@@ -374,10 +377,12 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         let task = &*task_ptr;
 
         // Skip tasks without an address space
-        let mm = match task.address_space() {
-            Some(m) => m,
+        // R25-2: pin the address space (see rmap.rs note).
+        let _mm_arc = match task.address_space_arc() {
+            Some(a) => a,
             None => return,
         };
+        let mm = _mm_arc.as_ref();
 
         // Hold VMA write lock across both the VMA check and page table walk
         // to prevent concurrent mmap/munmap from invalidating the page table

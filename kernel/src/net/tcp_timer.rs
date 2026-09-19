@@ -58,19 +58,10 @@ impl TcpTimerManager {
 
         // Use sockets_mut to get socket array
         let sockets = table.sockets_mut();
-        let mut to_free: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
 
-        for (idx, slot) in sockets.iter_mut().enumerate() {
+        for (_idx, slot) in sockets.iter_mut().enumerate() {
             if let Some(ref mut socket) = slot {
-                let prev_state = socket.state;
                 self.check_socket_timers(socket, now);
-
-                // If timer transitioned socket to TCP_CLOSE, schedule for freeing
-                if prev_state != TcpState::TCP_CLOSE
-                    && socket.state == TcpState::TCP_CLOSE
-                {
-                    to_free.push(idx);
-                }
             }
         }
 
@@ -79,15 +70,27 @@ impl TcpTimerManager {
         // the slot stays CLOSE-but-allocated for Socket::close to reap
         // (prevents index reuse under a live fd = cross-connection data
         // confusion).
+        // R24: sweep unreferenced CLOSE corpses among RX-SPAWNED CHILDREN,
+        // not just the ones this tick transitioned. A SYN-spawned child
+        // that entered TCP_CLOSE outside the timer (peer RST in tcp_rcv, or
+        // LAST_ACK's final ACK) with no fd ever created (never accepted, or
+        // accept's pin failed) was reaped by no one — the 64-slot table
+        // fills one leaked slot per RST'd connection. parent_fd.is_some()
+        // is the discriminator: client/listener sockets (no parent_fd) sit
+        // in TCP_CLOSE while fresh/pre-connect with user_refs==0 — they are
+        // fd-backed and reaped by Socket::close instead; sweeping them
+        // would free live pre-connect sockets.
         let freeable: alloc::vec::Vec<usize> = sockets
             .iter()
             .enumerate()
-            .filter(|(idx, slot)| {
-                to_free.contains(idx)
-                    && slot
-                        .as_ref()
-                        .map(|sk| sk.user_refs.load(core::sync::atomic::Ordering::Acquire))
-                        .unwrap_or(0) == 0
+            .filter(|(_idx, slot)| {
+                slot.as_ref()
+                    .map(|sk| {
+                        sk.state == TcpState::TCP_CLOSE
+                            && sk.parent_fd.is_some()
+                            && sk.user_refs.load(core::sync::atomic::Ordering::Acquire) == 0
+                    })
+                    .unwrap_or(false)
             })
             .map(|(idx, _)| idx)
             .collect();

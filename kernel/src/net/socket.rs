@@ -207,9 +207,9 @@ impl Socket {
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
                 let udp_fd = self.udp_fd.lock().ok_or(-9)?;
-                if let Some(socket) = crate::net::udp::udp_socket_get(udp_fd) {
-                    let _ = socket.connect(addr, port);
-                }
+                // R24 (HIGH-6): go through the locked entry point — the raw
+                // udp_socket_get() &mut raced the NetRx softirq's udp_rcv.
+                let _ = crate::net::udp::udp_connect(udp_fd, addr, port);
                 *self.state.lock() = SocketState::Connected;
                 Ok(())
             }
@@ -251,26 +251,20 @@ impl Socket {
                     // Explicit destination: use udp_sendto (review NET-M5 —
                     // both branches used to call udp_send, which requires a
                     // connected socket and always returned ENOTCONN).
-                    if crate::net::udp::udp_socket_get(udp_fd).is_some() {
-                        let ret = crate::net::udp::udp_sendto(udp_fd, buf, addr, port);
-                        if ret >= 0 {
-                            Ok(ret as usize)
-                        } else {
-                            Err(ret as i32)
-                        }
+                    // R24 (HIGH-6): the raw udp_socket_get() presence probe
+                    // raced the table — udp_sendto already returns EBADF.
+                    let ret = crate::net::udp::udp_sendto(udp_fd, buf, addr, port);
+                    if ret >= 0 {
+                        Ok(ret as usize)
                     } else {
-                        Err(-9)
+                        Err(ret as i32)
                     }
                 } else {
-                    if crate::net::udp::udp_socket_get(udp_fd).is_some() {
-                        let ret = crate::net::udp::udp_send(udp_fd, buf);
-                        if ret >= 0 {
-                            Ok(ret as usize)
-                        } else {
-                            Err(ret as i32)
-                        }
+                    let ret = crate::net::udp::udp_send(udp_fd, buf);
+                    if ret >= 0 {
+                        Ok(ret as usize)
                     } else {
-                        Err(-9)
+                        Err(ret as i32)
                     }
                 }
             }
@@ -296,6 +290,14 @@ impl Socket {
                     return Ok((len, Some((packet.src_addr, packet.src_port))));
                 }
 
+                // R24 (R23-3 completion): recv MUTATES the protocol socket
+                // (recv_buffer pop_front + windowed ACK) and was the last
+                // unlocked writer — it raced tcp_rcv's enqueue_data push on
+                // the same VecDeque. Leaf-scoped like send: nothing below
+                // re-enters tcp_rcv (ethernet_poll runs before Socket::recv
+                // in every syscall caller; TcpSocket::recv's ACK goes to
+                // loopback-queue/virtio-xmit only).
+                let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
                 if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                     match socket.recv(buf, buf.len()) {
                         Ok(len) if len > 0 => {
@@ -360,30 +362,39 @@ impl Socket {
         match self.sock_type {
             SocketType::Tcp => {
                 if let Some(tcp_fd) = *self.tcp_fd.lock() {
-                    if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
-                        socket.close();
-                        // Only free immediately if connection is fully closed.
-                        // Otherwise, let the timer tick clean up after TIME_WAIT expires.
-                        if socket.state == crate::net::tcp::TcpState::TCP_CLOSE {
-                            // R21-N4: drop our pin; free only when the
-                            // timer side already reaped to CLOSE and no
-                            // other fd holds a reference.
-                            let prev = socket
-                                .user_refs
-                                .swap(0, core::sync::atomic::Ordering::AcqRel);
-                            if prev <= 1 {
-                                crate::net::tcp::tcp_socket_free(tcp_fd);
-                            }
-                        } else {
-                            // Still closing (FIN_WAIT etc.) — unpin; the
-                            // timer tick reaps when refs hits 0.
-                            let prev = socket
-                                .user_refs
-                                .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
-                            if prev <= 1 {
-                                crate::net::tcp::tcp_socket_free(tcp_fd);
+                    // R24 (R23-3 completion): close() mutates the protocol
+                    // state machine (send_fin changes state and pushes the
+                    // retrans_queue) — serialize against tcp_rcv/timer_tick
+                    // like every other writer. Same shape as tcp_rcv's own
+                    // send-under-lock. tcp_socket_free takes the lock itself,
+                    // so the actual free happens after we drop ours.
+                    let mut free_now = false;
+                    {
+                        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+                        if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+                            socket.close();
+                            // Only free immediately if connection is fully closed.
+                            // Otherwise, let the timer tick clean up after TIME_WAIT expires.
+                            if socket.state == crate::net::tcp::TcpState::TCP_CLOSE {
+                                // R21-N4: drop our pin; free only when the
+                                // timer side already reaped to CLOSE and no
+                                // other fd holds a reference.
+                                let prev = socket
+                                    .user_refs
+                                    .swap(0, core::sync::atomic::Ordering::AcqRel);
+                                free_now = prev <= 1;
+                            } else {
+                                // Still closing (FIN_WAIT etc.) — unpin; the
+                                // timer tick reaps when refs hits 0.
+                                let prev = socket
+                                    .user_refs
+                                    .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+                                free_now = prev <= 1;
                             }
                         }
+                    }
+                    if free_now {
+                        crate::net::tcp::tcp_socket_free(tcp_fd);
                     }
                 }
             }
@@ -490,6 +501,14 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
                         readable = true;
                     }
                 }
+            }
+        }
+        // R24: R22-4's fix never covered UDP — datagrams also land in the
+        // protocol table (UdpSocket.recv_buffer), so UDP poll was always
+        // not-ready and poll-based readers spun or slept forever.
+        if !readable {
+            if let Some(udp_fd) = *socket.udp_fd.lock() {
+                readable = crate::net::udp::udp_poll_readable(udp_fd);
             }
         }
         if readable {
@@ -659,19 +678,29 @@ pub fn get_socket(fd: usize) -> Option<Arc<Socket>> {
 pub fn socket_create_accepted(tcp_fd: i32) -> Result<usize, i32> {
     let socket = Arc::new(Socket::new(SocketType::Tcp));
     *socket.tcp_fd.lock() = Some(tcp_fd);
-    // R21-N4: pin the protocol slot against timer-side reaping.
-    if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
-        ts.user_refs.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    // R21-N4: pin the protocol slot against timer-side reaping, and copy
+    // the endpoint fields — R24: both under TCP_TABLE_LOCK and revalidated,
+    // closing the window where tcp_accept returned an index, the peer then
+    // RST'd, and the timer freed the slot (user_refs still 0) before we
+    // pinned it — the fd would wrap a freed/reused protocol slot.
+    {
+        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+        match crate::net::tcp::tcp_socket_get(tcp_fd) {
+            Some(ts) if ts.state != crate::net::tcp::TcpState::TCP_CLOSE => {
+                ts.user_refs.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                // Copy the connection's local/remote endpoints for
+                // getsockname/peername.
+                *socket.local_port.lock() = ts.local_port;
+                *socket.local_addr.lock() = ts.local_ip;
+                *socket.remote_port.lock() = ts.remote_port;
+                *socket.remote_addr.lock() = ts.remote_ip;
+            }
+            // Connection died (RST / timeout) between accept and pinning —
+            // abort instead of wrapping a doomed/freed slot.
+            _ => return Err(-103), // ECONNABORTED
+        }
     }
     *socket.state.lock() = SocketState::Connected;
-
-    // Copy the connection's local/remote endpoints for getsockname/peername.
-    if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
-        *socket.local_port.lock() = ts.local_port;
-        *socket.local_addr.lock() = ts.local_ip;
-        *socket.remote_port.lock() = ts.remote_port;
-        *socket.remote_addr.lock() = ts.remote_ip;
-    }
 
     let file = Arc::new(File::new(FileFlags::new(FileFlags::O_RDWR)));
     file.set_ops(&SOCKET_OPS);

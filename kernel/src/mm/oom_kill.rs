@@ -173,6 +173,8 @@ fn select_bad_process(oc: &mut OomControl) {
 /// 2. Kill all processes sharing victim's mm (different thread groups)
 /// 3. Set TIF_MEMDIE on victim (grants memory reserve access)
 fn oom_kill_process(oc: &mut OomControl) {
+
+
     let victim = match oc.chosen {
         Some(t) => t,
         None => return,
@@ -180,6 +182,10 @@ fn oom_kill_process(oc: &mut OomControl) {
 
     unsafe {
         let victim_pid = (*victim).pid();
+        // R25-5: pin the victim — the raw pointer crossed phase boundaries
+        // with no lock; the victim could be reaped on another CPU in
+        // between (gone = already dead, treat as success).
+        let _pin = crate::process::pid_hash::pid_hash_lookup_pinned(victim_pid);
         let victim_name = (*victim).comm();
         let name_str = core::str::from_utf8(
             victim_name.split(|&b| b == 0).next().unwrap_or(b"?"),

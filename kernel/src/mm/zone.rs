@@ -578,6 +578,18 @@ impl Zone {
 
     /// Add block to free list
     fn add_to_free_list(&self, pfn: usize, order: usize) {
+        // R25-4: every page joining a freelist takes refcount 0 — split
+        // buddies previously re-entered with the parent allocation's
+        // refcount==1, permanently disabling merges (INV-BUDDY-1).
+        {
+            let count = 1usize << order;
+            for i in 0..count {
+                let pg = pfn_to_page_mut(pfn + i);
+                if !pg.is_null() {
+                    unsafe { (*pg).set_refcount(0); }
+                }
+            }
+        }
         let head = self.free_area[order].free_list.load(Ordering::Acquire);
 
         // Update Page descriptor's free list pointers

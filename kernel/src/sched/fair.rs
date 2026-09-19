@@ -374,7 +374,7 @@ pub struct CfsRunQueue {
     nr_running: AtomicU64,
 
     /// Total weight
-    load_weight: AtomicU64,
+    pub(crate) load_weight: AtomicU64,
 
     /// Next task ID (for generating unique keys)
     next_task_id: AtomicU64,

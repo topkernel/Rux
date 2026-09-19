@@ -144,9 +144,11 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
     }
 
     // Set nice value
-    // SAFETY: task is validated non-null above; set_nice only writes to task's nice field.
+    // R25-6: renice under the GRQ lock with load_weight rebalance — the
+    // plain write let CFS enqueue/dequeue fetch_add/sub mismatched weights
+    // (load_weight wrapped -> garbage sched_slice) and raced the runqueue.
     unsafe {
-        (*task).set_nice(niceval);
+        crate::sched::sched::sched_renice_locked(task, niceval);
     }
 
     0

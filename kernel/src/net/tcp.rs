@@ -1872,6 +1872,14 @@ pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
 /// fd (review NET-C4: the old code moved sockets between three manager
 /// lists that RX never looked at, so accept() always returned EAGAIN).
 pub fn tcp_accept(fd: i32) -> i32 {
+    // R24 (R23-3 follow-up): the scan+flag must be atomic against the RX
+    // softirq and the timer tick (both mutate the table under
+    // TCP_TABLE_LOCK) AND against a second concurrent accept() on the same
+    // listener — two unlocked scanners both saw accepted==false and both
+    // claimed the same child (two fds over one connection). Safe to lock
+    // here: sys_accept drains ethernet_poll() BEFORE calling this, and
+    // tcp_accept itself never re-enters tcp_rcv.
+    let _table_g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: single-core softirq/syscall serialization (review NET-M15).
     unsafe {
         // Validate the listening socket

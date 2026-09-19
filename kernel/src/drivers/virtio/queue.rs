@@ -551,8 +551,23 @@ impl VirtQueue {
         }
     }
 
-    /// Allocate new descriptor (reclaims from used ring when possible)
+    /// Allocate new descriptor (reclaims from used ring when possible).
+    /// Assumes the chain being built consumes 3 descriptors (the virtio-blk
+    /// header/data/resp layout) — see `alloc_desc_chain`.
     pub fn alloc_desc(&mut self) -> Option<u16> {
+        self.alloc_desc_chain(3)
+    }
+
+    /// Allocate the head descriptor of a chain that will consume
+    /// `chain_len` descriptors in total.
+    ///
+    /// R24 (R14 MED "RX 因 blk 的链限流只剩 2 缓冲"): the in-flight limiter
+    /// was hard-wired to 3 descriptors per chain. virtio-net RX buffers are
+    /// single-descriptor chains, so the RX queue was capped at 2 posted
+    /// buffers (2*3+3 > 8) even though the queue holds 8. Passing the real
+    /// chain length restores the full ring for 1-desc (RX) and 2-desc
+    /// (net TX) users; blk keeps the 3-desc accounting via alloc_desc().
+    pub fn alloc_desc_chain(&mut self, chain_len: u16) -> Option<u16> {
         let used_idx = self.get_used();
         let avail_idx = self.get_avail();
 
@@ -570,7 +585,7 @@ impl VirtQueue {
         // handed out 9 indices over 8 slots and request C overwrote
         // request A's still-submitted header descriptor (wrong chain
         // completed; both waiters matched the same used entry).
-        if in_flight.saturating_mul(3) + 3 > self.queue_size {
+        if in_flight.saturating_mul(chain_len).saturating_add(chain_len) > self.queue_size {
             // R10-3: account for the chain being BUILT — the round-9 guard
             // only blocked the FOURTH concurrent chain; the third still
             // wrapped next_desc onto slot 0 and overwrote chain #1's

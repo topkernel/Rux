@@ -343,12 +343,19 @@ impl VirtIONetDevice {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        // Allocate two descriptors
-        let header_desc_idx = match queue.alloc_desc() {
+        // Allocate two descriptors (chain_len=2: this header+data pair —
+        // R24: passing the real chain length lets the limiter account net
+        // TX chains correctly instead of the blk-shaped 3-desc default)
+        let header_desc_idx = match queue.alloc_desc_chain(2) {
             Some(idx) => idx,
-            None => return -5,  // EIO
+            None => {
+                // R24 (R23-6 completion): the FIRST allocation failure leaked
+                // hdr_ptr too — only the second branch was fixed in R23-6.
+                unsafe { alloc::alloc::dealloc(hdr_ptr as *mut u8, hdr_layout); }
+                return -5;  // EIO
+            }
         };
-        let data_desc_idx = match queue.alloc_desc() {
+        let data_desc_idx = match queue.alloc_desc_chain(2) {
             Some(idx) => idx,
             None => {
                 // R23-6: hdr leaks on desc exhaustion (R22-6 pattern).
@@ -437,13 +444,30 @@ impl VirtIONetDevice {
         *self.rx_last_used.lock_irqsave() = last_used;
 
         let desc_idx = used_elem.id as u16;
-        let desc = queue.get_desc(desc_idx)?;
+        let desc = match queue.get_desc(desc_idx) {
+            Some(d) => d,
+            None => {
+                // R24: bogus descriptor id from the device — the used entry
+                // is consumed, so still account the buffer and refill
+                // (was a bare `?` that lost the slot forever).
+                drop(queue_guard);
+                self.rx_buffers.lock_irqsave().pop();
+                self.refill_rx_buffers();
+                return None;
+            }
+        };
 
         // VirtIO-Net packet structure:
         // - 12 bytes VirtIONetHdr
         // - Followed by Ethernet frame data
         let total_len = used_elem.len as usize;
         if total_len <= core::mem::size_of::<VirtIONetHdr>() {
+            // R24 (R14 MED "poll 早退泄漏 RX 缓冲"): every early return after
+            // this point has consumed a used entry — the buffer must be
+            // recycled or the buffer AND its descriptor are lost forever
+            // (enough of them wedge RX at zero posted buffers).
+            drop(queue_guard);
+            self.recycle_rx_buffer(desc.addr);
             return None; // Data too short
         }
 
@@ -458,15 +482,41 @@ impl VirtIONetDevice {
         let eth_data = &hdr_and_data[core::mem::size_of::<VirtIONetHdr>()..];
 
         // Create SkBuff
-        let mut skb = crate::net::buffer::alloc_skb(pkt_data_len as u32 + 64)?;
-        skb.skb_put_data(eth_data).ok()?;
+        let mut skb = match crate::net::buffer::alloc_skb(pkt_data_len as u32 + 64) {
+            Some(skb) => skb,
+            None => {
+                // R24: recycle on allocation failure (was a leak).
+                drop(queue_guard);
+                self.recycle_rx_buffer(desc.addr);
+                return None;
+            }
+        };
+        if skb.skb_put_data(eth_data).is_err() {
+            // R24: recycle and free the just-allocated skb (was a leak).
+            skb.free();
+            drop(queue_guard);
+            self.recycle_rx_buffer(desc.addr);
+            return None;
+        }
 
         // Update statistics
         let mut stats = self.stats.lock_irqsave();
         stats.rx_packets += 1;
         stats.rx_bytes += pkt_data_len as u64;
 
-        // Free old RX buffer
+        // Free old RX buffer and post a replacement
+        drop(queue_guard);
+        self.recycle_rx_buffer(desc.addr);
+
+        Some(skb)
+    }
+
+    /// R24: recycle one RX buffer — dealloc the DMA buffer (same layout as
+    /// refill_rx_buffers allocates) and post a replacement. Every poll()
+    /// path that consumes a used-ring entry must run this; previously only
+    /// the full-success path did, so any early return permanently lost the
+    /// buffer and its descriptor.
+    fn recycle_rx_buffer(&self, addr: u64) {
         // Use the SAME layout as refill_rx_buffers() allocation:
         //   buf_size = size_of::<VirtIONetHdr>() + mtu + 64, align = 64
         let buf_size = core::mem::size_of::<VirtIONetHdr>() + self.mtu as usize + 64;
@@ -474,20 +524,15 @@ impl VirtIONetDevice {
         // from_size_align cannot fail because buf_size and align are the same constants.
         unsafe {
             if let Ok(layout) = alloc::alloc::Layout::from_size_align(buf_size, 64) {
-                alloc::alloc::dealloc(desc.addr as *mut u8, layout);
+                alloc::alloc::dealloc(addr as *mut u8, layout);
             } else {
                 crate::pr_err!("virtio_net: invalid RX dealloc layout buf_size={}", buf_size);
             }
         }
-
-        // Try to refill RX buffers
-        drop(queue_guard);
         // Pop one entry from rx_buffers to reflect the freed buffer,
         // so refill_rx_buffers() knows to allocate a replacement.
         self.rx_buffers.lock_irqsave().pop();
         self.refill_rx_buffers();
-
-        Some(skb)
     }
 
     /// Refill RX buffers
@@ -518,8 +563,10 @@ impl VirtIONetDevice {
                 continue;
             }
 
-            // Allocate descriptor
-            let desc_idx = match queue.alloc_desc() {
+            // Allocate descriptor (single-descriptor chain — R24 chain
+            // limiter fix: 1-desc RX buffers now fill the whole ring
+            // instead of stopping at 2 under the blk-shaped *3 guard).
+            let desc_idx = match queue.alloc_desc_chain(1) {
                 Some(idx) => idx,
                 None => {
                     // SAFETY: buf_ptr was just allocated with layout; no submit occurred.

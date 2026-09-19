@@ -99,14 +99,28 @@ fn int_to_str(mut n: i32, buf: &mut [u8; 16]) -> &[u8] {
 static mut TEST_COUNT: i32 = 0;
 static mut PASS_COUNT: i32 = 0;
 
+// R24: emit each result line with a SINGLE write() syscall. The R21 uart
+// lock-per-write made each write atomic, but the old helpers composed a
+// line from 2-4 separate writes — a kernel printk landing between them
+// split the line and the gate's line-based grep missed the PASS (the
+// "smoke 14/15 flicker" residual). One write = one atomic console line.
+fn write_line(parts: [&[u8]; 5]) {
+    let mut line = [0u8; 128];
+    let mut n = 0usize;
+    for s in parts.iter() {
+        for i in 0..s.len() { if n < line.len() { line[n] = s[i]; n += 1; } }
+    }
+    sys_write(1, line.as_ptr(), n);
+}
+
 fn test_pass(name: &[u8]) {
     unsafe { TEST_COUNT += 1; PASS_COUNT += 1; }
-    write_msg(b"  [PASS] "); write_msg(name); write_msg(b"\n");
+    write_line([b"  [PASS] ", name, b"", b"", b"\n"]);
 }
 
 fn test_fail(name: &[u8], reason: &[u8]) {
     unsafe { TEST_COUNT += 1; }
-    write_msg(b"  [FAIL] "); write_msg(name); write_msg(b": "); write_msg(reason); write_msg(b"\n");
+    write_line([b"  [FAIL] ", name, b": ", reason, b"\n"]);
 }
 
 // ======== File System ========

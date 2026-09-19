@@ -90,6 +90,8 @@ pub struct UdpSocket {
     pub connected: bool,
     /// Receive buffer
     pub recv_buffer: alloc::collections::VecDeque<UdpPacket>,
+    /// R24 (MED-9): queued payload bytes — pairs with UDP_RCVBUF_BUDGET.
+    pub recv_bytes: usize,
 }
 
 impl UdpSocket {
@@ -105,6 +107,7 @@ impl UdpSocket {
             bound: false,
             connected: false,
             recv_buffer: alloc::collections::VecDeque::new(),
+            recv_bytes: 0,
         }
     }
 
@@ -139,14 +142,24 @@ impl UdpSocket {
         self.connected = false;
     }
 
-    /// Enqueue packet to receive buffer
+    /// Enqueue packet to receive buffer.
+    ///
+    /// R24 (MED-9): drop the datagram once the queued byte budget
+    /// (UDP_RCVBUF_BUDGET) is exhausted — an unbounded queue let a remote
+    /// flooder OOM the kernel heap. Mirrors Linux's sk_rcvbuf drop behavior.
     pub fn enqueue_packet(&mut self, packet: UdpPacket) {
+        if self.recv_bytes + packet.data.len() > UDP_RCVBUF_BUDGET {
+            return; // receive buffer full — drop
+        }
+        self.recv_bytes += packet.data.len();
         self.recv_buffer.push_back(packet);
     }
 
     /// Dequeue packet from receive buffer
     pub fn dequeue_packet(&mut self) -> Option<UdpPacket> {
-        self.recv_buffer.pop_front()
+        let packet = self.recv_buffer.pop_front()?;
+        self.recv_bytes = self.recv_bytes.saturating_sub(packet.data.len());
+        Some(packet)
     }
 }
 
@@ -215,14 +228,27 @@ impl UdpSocketTable {
 /// Global UDP socket table
 static mut UDP_SOCKET_TABLE: UdpSocketTable = UdpSocketTable::new();
 
+/// R24 (HIGH-6, mirroring R21-N1's TCP_TABLE_LOCK): the UDP table is
+/// mutated concurrently from syscalls (socket/bind/connect/close/send/recv)
+/// and the NetRx softirq (udp_rcv) on the 4-CPU kernel. irqsave because the
+/// softirq side can run inline at irq_exit.
+pub static UDP_TABLE_LOCK: crate::sync::spinlock::Spinlock<()> =
+    crate::sync::spinlock::Spinlock::new(());
+
+/// R24 (MED-9): per-socket receive budget — enqueue_packet drops new
+/// datagrams once the queued byte total exceeds this, so a remote flooder
+/// cannot grow recv_buffer without bound (remote OOM).
+pub const UDP_RCVBUF_BUDGET: usize = 128 * 1024;
+
 /// Allocate UDP socket
 ///
 /// # Returns
 /// Socket file descriptor
 pub fn udp_socket_alloc() -> Result<i32, i32> {
-    // SAFETY: UDP_SOCKET_TABLE is a global static; single-core kernel ensures
-    // no concurrent mutation.
+    // SAFETY: UDP_SOCKET_TABLE is a global static accessed under
+    // UDP_TABLE_LOCK (R24).
     unsafe {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
         match UDP_SOCKET_TABLE.alloc() {
             Ok(fd) => Ok(fd as i32),
             Err(_) => Err(-5), // EIO
@@ -237,6 +263,7 @@ pub fn udp_socket_alloc() -> Result<i32, i32> {
 pub fn udp_socket_free(fd: i32) {
     // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
     unsafe {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
         UDP_SOCKET_TABLE.free(fd as usize);
     }
 }
@@ -265,6 +292,9 @@ pub fn udp_socket_get(fd: i32) -> Option<&'static mut UdpSocket> {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
+    // R24 (HIGH-6): table leaf lock — serializes against udp_rcv (NetRx
+    // softirq) and other syscalls touching the same slot.
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
     unsafe {
         if let Some(socket) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
@@ -278,6 +308,22 @@ pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
     }
 }
 
+/// Connect a UDP socket to a remote address (R24: locked entry point used
+/// by the socket layer instead of raw udp_socket_get).
+pub fn udp_connect(fd: i32, ip: u32, port: UdpPort) -> i32 {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
+    unsafe {
+        match UDP_SOCKET_TABLE.get_mut(fd as usize) {
+            Some(socket) => {
+                let _ = socket.connect(ip, port);
+                0
+            }
+            None => -9, // EBADF
+        }
+    }
+}
+
 /// Send UDP packet
 ///
 /// # Arguments
@@ -287,8 +333,12 @@ pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
 /// # Returns
 /// Bytes sent on success, error code on failure
 pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
+    // R24 (HIGH-6): leaf lock — held across the whole send so the &mut into
+    // the table cannot race udp_rcv. No RX re-entry below: virtio xmit only
+    // DMAs, loopback TX only queues.
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
     // Get socket
-    let socket = match udp_socket_get(fd) {
+    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
         Some(s) => s,
         None => return -9, // EBADF
     };
@@ -336,8 +386,10 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
 /// # Returns
 /// Bytes sent on success, error code on failure
 pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
+    // R24 (HIGH-6): leaf lock, same rationale as udp_send.
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
     // Get socket
-    let socket = match udp_socket_get(fd) {
+    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
         Some(s) => s,
         None => return -9, // EBADF
     };
@@ -376,8 +428,10 @@ pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
 /// # Returns
 /// Bytes received on success, error code on failure
 pub fn udp_recv(fd: i32, buf: &mut [u8], _len: usize) -> isize {
+    // R24 (HIGH-6): leaf lock around the dequeue.
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
     // Get socket
-    let socket = match udp_socket_get(fd) {
+    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
         Some(s) => s,
         None => return -9, // EBADF
     };
@@ -403,8 +457,10 @@ pub fn udp_recv(fd: i32, buf: &mut [u8], _len: usize) -> isize {
 /// # Returns
 /// (bytes, source_ip, source_port) on success, error code on failure
 pub fn udp_recvfrom(fd: i32, buf: &mut [u8], _len: usize) -> Result<(isize, u32, u16), isize> {
+    // R24 (HIGH-6): leaf lock around the dequeue.
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
     // Get socket
-    let socket = match udp_socket_get(fd) {
+    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
         Some(s) => s,
         None => return Err(-9), // EBADF
     };
@@ -417,6 +473,20 @@ pub fn udp_recvfrom(fd: i32, buf: &mut [u8], _len: usize) -> Result<(isize, u32,
             Ok((copy_len as isize, packet.src_addr, packet.src_port))
         }
         None => Err(-11), // EAGAIN
+    }
+}
+
+/// Poll: does this UDP socket have a queued datagram? (R24 — completes
+/// R22-4, which taught poll about the TCP protocol-table recv_buffer but
+/// not UDP's; UDP poll never reported POLLIN.)
+pub fn udp_poll_readable(fd: i32) -> bool {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    unsafe {
+        UDP_SOCKET_TABLE
+            .get(fd as usize)
+            .map(|s| !s.recv_buffer.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -599,8 +669,11 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // Find socket bound to destination port (and optionally destination IP).
     // A socket with local_ip == 0 (INADDR_ANY) accepts packets to any local IP;
     // a socket with a specific local_ip only accepts packets to that IP.
-    // SAFETY: UDP_SOCKET_TABLE is a global; iterating under current single-core
-    // kernel context ensures no concurrent mutation.
+    // R24 (HIGH-6): serialize table iteration/enqueue against syscalls
+    // (alloc/free/bind/send/recv) — the NetRx softirq runs concurrently on
+    // the 4-CPU kernel. Leaf lock: nothing below re-enters UDP.
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
     unsafe {
         for i in 0..UDP_SOCKET_TABLE.count {
             if let Some(ref mut socket) = UDP_SOCKET_TABLE.sockets[i] {

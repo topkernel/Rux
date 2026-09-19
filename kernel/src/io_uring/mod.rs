@@ -741,6 +741,14 @@ fn do_read(file: &Arc<File>, buf: usize, len: usize) -> i32 {
             return if total > 0 { total as i32 } else { -14 }; // EFAULT
         }
         total += n as usize;
+        // R24: short chunk means EOF or "nothing more available now" (pipe
+        // drained / socket drained) — sys_read's chunk loop breaks here;
+        // without the break an io_uring read larger than RW_CHUNK from a
+        // pipe blocks for a second fill instead of returning the partial
+        // data (do_write already had the matching short-write break).
+        if (n as usize) < chunk {
+            break;
+        }
     }
 
     total as i32

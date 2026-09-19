@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.18 第二十四/二十五轮：R24 双 agent 检视 + 主审落地 6 项 + agent 自落地 10 项
+
+**R24 agent B（fs/net/ipc）自落地 10 项**：TCP accept 双认领+pin 竞态（锁内扫描+钉住+端点复制）；posix_mq R23-5 的等待队列条目泄漏（UAF 唤醒族）；UDP_TABLE_LOCK 全覆盖（HIGH-6 关闭）；UDP recv_buffer 128KB 预算（MED-9）；UDP poll 可读；virtio-net 首 alloc 泄漏；alloc_desc_chain(chain_len)（MED-1 关闭——RX 恢复 8 缓冲）；poll 早退 RX 回收；io_uring 读侧短读 break；TCP_CLOSE 孤儿清扫（RST 子连接不再泄漏槽）。
+**R24 agent A（sched/mm）报告 11 项**，主审落地 6 项（R25）：R25-1 timerfd 周期到期被 still_ours 吞（rearmed 集合传递）；R25-2 rmap/compact 三处 address_space Arc 钉住（do_exit 的 Drop 不持 VMA 锁即释放页表）；R25-4 zone add_to_free_list 中央 refcount=0（分裂 buddy 落链 refcount=1 的合并顽疾）；R25-5 OOM victim pinned；R25-6 setpriority 走 GRQ 锁 + load_weight 差额重算；报告项 A3（compact 慢路径偷链上页——需 OnFreelist 排除）待下轮。
+**冷启动现象**：裸 boot 直接 `echo PP | cat` 0/3 挂（无 DEADLOCK/kpanic）；先跑 smoke 后管道正常。与 R23 前"首命令吃字符"同族的早期竞态，非本轮回归（809cfbe 基线同样 0/3）。记录为独立开口项。
+**门禁（8 轮）**：smoke 15/15 ×8、nettest 8/8、kpanic 0/8、wedge 0/8（pp 2/8 为冷启动项所致）。
 ### 20.17 第二十三轮：R20-R22 修复的回归检视 + 7 项修正
 
 agent B 抓到 R21-N3b 的两处严重回归：①fin_wait arm 误含 ESTABLISHED（60s 活连接被杀）；②拆分 match 臂不落穿（Rust 语义）= ESTABLISHED/FIN_WAIT 的 RTO 重传被整体删除。修复：恢复六状态联合重传/delack 臂 + FIN_WAIT 专用超时臂（仅 FIN_WAIT1/2 计时）。R23-3 TCP_TABLE_LOCK 补齐（bind/listen/connect/alloc/free/rcv/timer/send-叶级）并修两次自楔（accept/v4_err 去锁避免 poll 重入；alloc_ephemeral_port 嵌套获取移除）。R23-4 FIN seg len=1 + 重传带 FIN 位。R23-5 posix_mq 两循环信号复查。R23-6 virtio-net xmit hdr 泄漏。

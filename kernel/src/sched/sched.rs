@@ -1528,6 +1528,33 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
 
 // ==================== Utility Functions ====================
 
+/// R25-6: renice a possibly-queued task under the GRQ lock with
+/// load_weight rebalance (bare set_nice made enqueue/dequeue weights
+/// mismatch and wrap the counter).
+pub unsafe fn sched_renice_locked(task: *mut Task, niceval: i32) {
+    let old_weight = (*task).sched_entity().load.weight;
+    (*task).set_nice(niceval);
+    let new_weight = (*task).sched_entity().load.weight;
+    if let crate::process::task::SchedPolicy::Normal = (*task).policy() {
+        if old_weight != new_weight {
+            let g = grq();
+            g.cfs_rq.load_weight.fetch_add(new_weight, core::sync::atomic::Ordering::AcqRel);
+            g.cfs_rq.load_weight.fetch_sub(old_weight, core::sync::atomic::Ordering::AcqRel);
+        }
+    }
+}
+
+/// R25-6: load_weight rebalance for an in-tree reweight (GRQ-locked caller).
+pub fn grq_cfs_adjust(old_w: u64, new_w: u64) {
+    // Operate on the GRQ's CFS class — the caller holds the GRQ lock.
+    // (Access via the same unsafe pattern the file uses for GRQ.)
+    unsafe {
+        let g = grq() as *const GlobalRunQueue as *mut GlobalRunQueue;
+        (*g).cfs_rq.load_weight.fetch_add(new_w, core::sync::atomic::Ordering::AcqRel);
+        (*g).cfs_rq.load_weight.fetch_sub(old_w, core::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 pub fn yield_cpu() {
     schedule();
 }

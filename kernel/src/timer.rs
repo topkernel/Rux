@@ -195,6 +195,10 @@ pub fn timer_softirq_handler(_nr: usize) {
     // Collect expired timers under locks; deliver AFTER releasing them
     // (R12-3 — see the moved delivery block below).
     let mut expired = alloc::vec::Vec::new();
+    // R25-1: re-armed periodic ids — collected under the same locks; the
+    // delivery-time close-race guard must not mistake our own re-arm for
+    // a deletion (periodic timerfd expiries were silently dropped).
+    let mut rearmed: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
     {
         let mut timers = TIMERS.lock_irqsave();
         let mut actions = ACTIONS.lock_irqsave();
@@ -230,6 +234,7 @@ pub fn timer_softirq_handler(_nr: usize) {
         // Re-arm periodic timers (still under locks for consistency)
         for (id, action) in &expired {
             if action.interval_jiffies > 0 {
+                rearmed.push(*id);
                 actions.insert(*id, TimerAction {
                     pid: action.pid,
                     signo: action.signo,
@@ -265,7 +270,7 @@ pub fn timer_softirq_handler(_nr: usize) {
             // snapshot and delivery made this an add on freed memory.
             let still_ours = {
                 let timers = TIMERS.lock_irqsave();
-                !timers.contains_key(id)
+                !timers.contains_key(id) && !rearmed.contains(id)
             };
             if still_ours {
                 unsafe {

@@ -254,10 +254,14 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
             let task = &*task_ptr;
 
             // Skip tasks without an address space (kernel threads)
-            let mm = match task.address_space() {
-                Some(m) => m,
+            // R25-2: PIN the address space — do_exit's set_address_space(None)
+            // + Drop(MmStruct) free the page tables without the VMA lock;
+            // a raw borrow raced that free (NEW2-shaped UAF-read).
+            let _mm_arc = match task.address_space_arc() {
+                Some(a) => a,
                 None => return,
             };
+            let mm = _mm_arc.as_ref();
 
             // Hold VMA lock across both the check and page table walk
             // to prevent concurrent munmap from freeing page tables (fixes F03-07).

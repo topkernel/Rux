@@ -445,14 +445,22 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
         drop(messages);
         // R23-5: signal delivered while still RUNNING → no wakeup; recheck
         // before sleeping (same unkillable window R22-1 closed for SysV).
+        // R24: the early return must ALSO remove our wait-queue entry (as
+        // R22-1's SysV fix does) — a leaked entry keeps a raw Task pointer
+        // that a later wake_up_all() dereferences after the task exited
+        // (UAF wake), and entries accumulate on every EINTR retry.
         if crate::signal::signal_pending() {
+            {
+                let _messages = mq.messages.lock();
+                mq.wq_send.remove(current as *mut _);
+            }
             if let Some(cur) = crate::sched::current() {
                 (*cur).set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING,
                 ));
                 crate::sched::dequeue_task(&*cur);
             }
-            return -4; // EINTR
+            return -(errno::EINTR as i64);
         }
         let timer_id = deadline
             .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
@@ -581,14 +589,21 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
         drop(messages);
         // R23-5: signal delivered while still RUNNING → no wakeup; recheck
         // before sleeping (same unkillable window R22-1 closed for SysV).
+        // R24: remove the wait-queue entry before returning — see the
+        // timedsend R24 note (leaked entry = stale Task pointer for later
+        // wake_up_all calls).
         if crate::signal::signal_pending() {
+            {
+                let _messages = mq.messages.lock();
+                mq.wq_recv.remove(current as *mut _);
+            }
             if let Some(cur) = crate::sched::current() {
                 (*cur).set_state(crate::process::task::TaskState::new(
                     crate::process::task::TaskState::RUNNING,
                 ));
                 crate::sched::dequeue_task(&*cur);
             }
-            return -4; // EINTR
+            return -(errno::EINTR as i64);
         }
         let timer_id = deadline
             .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
