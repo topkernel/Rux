@@ -302,7 +302,21 @@ pub fn timer_softirq_handler(_nr: usize) {
             let _ = crate::signal::send_signal(action.pid, action.signo);
         }
     }
+
+    // DFX dfx=periodic: a task snapshot every PERIODIC_DUMP_SECS. Silent
+    // hangs (form-B) trip no watchdog and swallow the UART magic (a wedged
+    // shell stops draining the RX path) — a timed snapshot from the timer
+    // softirq always lands. SBI-direct, no locks held here.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::PeriodicDump)
+        && current.saturating_sub(LAST_PERIODIC_DUMP.load(Ordering::Relaxed)) >= 500
+    {
+        LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
+        crate::dfx::taskdump::dump_all_tasks("periodic");
+    }
 }
+
+/// Jiffies of the last periodic DFX snapshot (dfx=periodic).
+static LAST_PERIODIC_DUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 // ==================== Initialization ====================
 

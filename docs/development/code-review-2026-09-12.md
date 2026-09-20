@@ -601,6 +601,11 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.37 第四十五轮：周期快照 DFX + B 型最终形态锁定（RUNNING + on_rq=0）
+
+**dfx=periodic 运行时开关**（dfx/switches.rs + timer.rs 软中断尾部锁外，5s 周期，SBI 直写）：静默挂起不触发任何 watchdog 且挂起后 shell 停止消费 RX（magic 失效）——定时快照从 timer 软中断必然落地。周期快照会干扰基于提示符的外层检测（误报 timeout），但快照本身完整可靠。
+**B 型最终形态（265 个周期快照的尾帧实锤）**：pid 335 **state=RUNNING、on_rq=0、4 CPU idle**——任务被置 RUNNING 但不在任何类队列。栈与历次捕获同型：`trap_exit → asm_need_resched → schedule` 链——**产生器在 __schedule 的 pick/prev 处理与 need_resched 的交互**（候选：pick 快路径重选后 stale need_resched 再次进 schedule 的路径；prev 重入队与 pick 出队的窗口）。**下一轮（R46）从该栈 + on_rq 语义直接推导产生器并修复——B 型归零即达成最终零发现收口。**
+
 ### 20.36 第四十四轮：A 型定性为模拟器 artifact + B 型残余为真并发 bug
 
 **tcg thread=multi 对比实验（决定性）**：同一二进制，multi 下 8 轮门禁——**A 型死锁零出现**（single 下 ~12-25%）——**A 型（持锁消失、锁漂移、无输出）确证为 QEMU tcg 单线程 vcpu 互斥推进模型的 artifact**：单线程下某 vcpu 持锁窗口与其他 vcpu 的中断/设备模型交织产生的、真实硬件（真并行）与多线程模拟器上不存在的形态。历轮对 A 型的修复（锁内分配、复活链、防御）仍是正确的健壮性提升，但 A 型本身不再是内核缺陷。

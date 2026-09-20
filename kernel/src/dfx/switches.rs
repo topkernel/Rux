@@ -33,17 +33,21 @@ pub enum DfxSwitch {
     WatchdogDump,
     /// The UART sysrq-style trigger for on-demand task snapshots is armed.
     TaskDumpKey,
+    /// Periodic task snapshots (every PERIODIC_SECS) from the timer
+    /// softirq — catches silent hangs that never trip any watchdog.
+    PeriodicDump,
 }
 
-const SWITCH_COUNT: usize = 2;
+const SWITCH_COUNT: usize = 3;
 
-static SWITCHES: [AtomicBool; SWITCH_COUNT] = [AtomicBool::new(false), AtomicBool::new(false)];
+static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
 impl DfxSwitch {
     fn index(self) -> usize {
         match self {
             DfxSwitch::WatchdogDump => 0,
             DfxSwitch::TaskDumpKey => 1,
+            DfxSwitch::PeriodicDump => 2,
         }
     }
 
@@ -51,6 +55,7 @@ impl DfxSwitch {
         match name {
             "watchdog" => Some(DfxSwitch::WatchdogDump),
             "taskdump" => Some(DfxSwitch::TaskDumpKey),
+            "periodic" => Some(DfxSwitch::PeriodicDump),
             _ => None,
         }
     }
