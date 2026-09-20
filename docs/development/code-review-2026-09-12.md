@@ -601,6 +601,15 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.29 第三十五轮：TCP 表锁出锁发射重构 + ARP 队列 + virtio-blk MMIO — 门禁再 8/8
+
+**TcpTxBatch（链 2 根治）**：新增统一"锁内决策/锁外发射"机制（tcp.rs）——每个 TCP_TABLE_LOCK 持有者**取锁前** try_reserve 预留描述符数组+字节 arena（OOM → 干净 ENOMEM 降级，非锁内 panic）；锁内 5 个发送原语（send_syn/synack/ack/fin/tx_segment）只记录 wire-ready 描述符 + memcpy 进预留容量（**锁内零分配、零发包、零自旋**）；出锁后 emit_all 逐段 alloc_skb→build→xmit。7 处发射点全部出锁（tcp_rcv/connect/timer tick×2/Socket send/recv/close/shutdown）；sys_sendto/recvfrom 的用户拷贝移到锁外（try_reserve + copy_from_user）。重入安全与 Socket::close 同论证（loopback 只入队、virtio 直发，不回调本 CPU tcp_rcv）。残留的 recv/send_buffer VecDeque 增长与 retrans 段 owned Vec 均 try_reserve 化（失败优雅降级）——**锁内已无任何不可失败的 panic 分配**。
+**ARP pending 队列**：固定槽位数组（32 总量/每 IP 4/3s 超时/1s 请求间隔），零锁内分配，GC 在 NetRx 软中断锁外释放——首包不再靠广播重试掩盖。
+**virtio-blk MMIO**：feature negotiation（VERSION_1 word1 协商 + FEATURES_OK 验证）+ notify 4 字节写——MMIO 块路径首次符合 spec v2。
+**R35-fix（总控抓的回归）**：sys_sendto 的 dest_addr 解析被误改为裸 from_raw_parts 解引用用户指针（syscall 上下文 SUM=0 → 确定性 KERNPANIC @SockAddrIn::addr）——改回 copy_from_user 异常表拷贝。
+**门禁**：8/8 全绿（smoke 15/15×8、nettest 8/8、pp/x 8/8、kpanic 0、deadlock 0）。
+**遗留**：RX 中断路径单独确认（驱动 agent 额度中断未完成）；TCP 正向数据流量真实 host 验证；RST 后 recv 报 ECONNREFUSED。
+
 ### 20.28 第三十四轮：死锁残余清零 + virtio-net 真实流量打通 — 门禁历史首次 8/8
 
 **锁内堆分配审计（统一起因假说验证成立）**：全局锁序图实测无环（TIMERS→ACTIONS/BUDDY；TCP→LO_BACKLOG/TX_QUEUE/BUDDY/GRQ；waitq→GRQ；UART/GRQ/BUDDY 无出边）。permanent wedge 的真身是三链：

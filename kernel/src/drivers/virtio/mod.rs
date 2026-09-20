@@ -184,16 +184,42 @@ impl VirtIOBlkDevice {
                 write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02);
             }
 
-            // 7. Read device features
-            let _device_features = read_reg!(DEVICE_FEATURES_OFFSET, "DEVICE_FEATURES");
+            // 7. Feature negotiation (R35, modeled on the R34 virtio_net fix):
+            // a modern (v2) MMIO device MUST have VIRTIO_F_VERSION_1 accepted
+            // by the driver. The old code wrote DRIVER_FEATURES=0 through the
+            // reset-default selector (word 0) and never touched
+            // DRIVER_FEATURES_SEL — word 1 stayed 0, so VERSION_1 was never
+            // acked and QEMU marked the device FAILED once FEATURES_OK got
+            // set. Nothing beyond VERSION_1 is implemented (RO/FLUSH/
+            // BLK_SIZE/... all deliberately not accepted).
+            const DEVICE_FEATURES_SEL_OFFSET: u64 = 0x014;
+            const DRIVER_FEATURES_SEL_OFFSET: u64 = 0x024;
 
-            // 9. Feature negotiation (Modern VirtIO)
-            // Write DRIVER_FEATURES register
-            // Set FEATURES_OK bit (indicating feature negotiation complete)
+            // VIRTIO_F_VERSION_1 = bit 32 = word 1, bit 0
+            const F_VERSION_1: u32 = 1 << 0;
+
+            // Read word 1 and require VERSION_1
+            write_reg!(DEVICE_FEATURES_SEL_OFFSET, "DEVICE_FEATURES_SEL", 1);
+            let feats_hi = read_reg!(DEVICE_FEATURES_OFFSET, "DEVICE_FEATURES");
+            if feats_hi & F_VERSION_1 == 0 {
+                return Err("Device does not offer VIRTIO_F_VERSION_1");
+            }
+            write_reg!(DEVICE_FEATURES_SEL_OFFSET, "DEVICE_FEATURES_SEL", 0);
+            let _feats_lo = read_reg!(DEVICE_FEATURES_OFFSET, "DEVICE_FEATURES");
+
+            // Write back: word 0 = 0 (nothing implemented), word 1 = VERSION_1
+            write_reg!(DRIVER_FEATURES_SEL_OFFSET, "DRIVER_FEATURES_SEL", 0);
             write_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES", 0);
+            write_reg!(DRIVER_FEATURES_SEL_OFFSET, "DRIVER_FEATURES_SEL", 1);
+            write_reg!(DRIVER_FEATURES_OFFSET, "DRIVER_FEATURES", F_VERSION_1);
 
-            // 9.5. Set FEATURES_OK bit
+            // 9.5. Set FEATURES_OK bit and verify the device accepted the
+            // negotiated set (a modern device clears the bit on rejection).
             write_reg!(STATUS_OFFSET, "STATUS", 0x01 | 0x02 | 0x08);
+            let status = read_reg!(STATUS_OFFSET, "STATUS");
+            if status & 0x08 == 0 {
+                return Err("Device rejected negotiated features (features_ok cleared)");
+            }
 
             // ========== VirtQueue setup ==========
 
@@ -213,12 +239,17 @@ impl VirtIOBlkDevice {
             write_reg!(QUEUE_NUM_OFFSET, "QUEUE_NUM", self.queue_size as u32);
 
             // 13. Create VirtQueue (allocate vring memory)
-            let virtqueue = match queue::VirtQueue::new(
+            // R35 (W32): virtio-mmio drops any register access whose size
+            // != 4 ("wrong size access" in QEMU) — VirtQueue::new's W16
+            // default made every MMIO blk notify a silent no-op, so I/O
+            // never started. Use with_notify_width like the R34 net driver.
+            let virtqueue = match queue::VirtQueue::with_notify_width(
                 self.queue_size,
                 0,  // queue_index: block device only uses queue 0
                 self.base_addr + 0x50,  // queue_notify
                 self.base_addr + 0x60,  // interrupt_status
                 self.base_addr + 0x64,  // interrupt_ack
+                queue::NotifyWidth::W32,
             ) {
                 Some(vq) => vq,
                 None => return Err("Failed to allocate VirtQueue"),

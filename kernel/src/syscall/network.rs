@@ -271,20 +271,43 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    // Read data
-    // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed.
-    let data = unsafe { core::slice::from_raw_parts(buf_ptr, len) };
+    // R35: copy the user payload into a kernel buffer BEFORE the protocol
+    // path. The old raw `from_raw_parts(buf_ptr, len)` deref ran INSIDE
+    // Socket::send → send_reliable while holding TCP_TABLE_LOCK — user
+    // memory was read (and could take a uaccess exception / page-fault
+    // detour) inside the table critical section. try_reserve_exact makes
+    // an OOM a clean ENOMEM (file.rs convention) instead of the allocator
+    // panic handler.
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve_exact(len).is_err() {
+        return -(errno::ENOMEM as i64);
+    }
+    kbuf.resize(len, 0);
+    // SAFETY: buf_ptr validated with access_ok(len) above.
+    if unsafe { crate::arch::riscv64::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf_ptr, len) } != 0 {
+        return -(errno::EFAULT as i64);
+    }
+    let data = kbuf.as_slice();
 
     // Parse destination address (if provided)
     let dest_addr = if !addr_ptr.is_null() {
-        // SAFETY: addr_ptr validated with access_ok; reading 16 bytes of sockaddr_in.
-        if let Some(sockaddr) = crate::net::socket::SockAddrIn::from_bytes(unsafe {
-            core::slice::from_raw_parts(addr_ptr, 16)
-        }) {
-            Some((sockaddr.addr(), sockaddr.port()))
-        } else {
-            None
+        // R35-fix: parse through the exception-table copy — the old raw
+        // from_raw_parts deref of the USER pointer faulted with SUM=0 in
+        // syscall context (deterministic KERNPANIC at SockAddrIn::addr,
+        // badaddr = the user sockaddr address).
+        let mut saddr = [0u8; 16];
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(
+                saddr.as_mut_ptr(),
+                addr_ptr,
+                16,
+            )
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
         }
+        crate::net::socket::SockAddrIn::from_bytes(&saddr)
+            .map(|sockaddr| (sockaddr.addr(), sockaddr.port()))
     } else {
         None
     };
@@ -725,11 +748,21 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
             // like every other protocol-table writer (tcp_rcv, timer tick,
             // Socket::close); the old unlocked path raced both. Leaf-scoped,
             // no RX re-entry: close() only queues to loopback/virtio xmit.
+            //
+            // R35 (chain-2 fix): the FIN is recorded into a deferred
+            // TcpTxBatch reserved outside the lock and emitted after it
+            // drops — send_fin used to run the virtio completion spin
+            // under TCP_TABLE_LOCK.
             if let Some(tcp_fd) = *socket.tcp_fd.lock() {
-                let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
-                if let Some(tcp_sock) = crate::net::tcp::tcp_socket_get(tcp_fd) {
-                    let _ = tcp_sock.close();
+                let mut tx = crate::net::tcp::TcpTxBatch::new();
+                let _ = tx.reserve(1, 0);
+                {
+                    let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+                    if let Some(tcp_sock) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+                        tcp_sock.close(&mut tx);
+                    }
                 }
+                tx.emit_all();
             }
             *socket.state.lock() = crate::net::socket::SocketState::Closing;
         }
@@ -1211,12 +1244,36 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     // Advance loopback delivery before reading (see sys_accept note).
     crate::net::ethernet::ethernet_poll();
 
-    // Receive data
-    // SAFETY: buf_ptr validated with access_ok; len > 0 guaranteed above.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
+    // R35: receive into a KERNEL buffer and copy to user after the socket
+    // layer returns — the old raw `from_raw_parts_mut(buf_ptr, len)` ran
+    // writes to user memory inside Socket::recv → TcpSocket::recv while
+    // holding TCP_TABLE_LOCK (uaccess exceptions / page-fault detours in
+    // the critical section). Staged at RW_CHUNK like sys_read (SYSA-C1): a
+    // partial return is POSIX-legal for stream sockets, and a huge len
+    // can never OOM the heap. try_reserve_exact turns OOM into ENOMEM.
+    let stage = len.min(crate::syscall::io::RW_CHUNK);
+    let mut kbuf = alloc::vec::Vec::new();
+    if kbuf.try_reserve_exact(stage).is_err() {
+        return -(errno::ENOMEM as i64);
+    }
+    kbuf.resize(stage, 0);
 
-    match socket.recv(buf) {
+    match socket.recv(kbuf.as_mut_slice()) {
         Ok((bytes_read, src_addr)) => {
+            if bytes_read > 0 {
+                // SAFETY: buf_ptr validated with access_ok(len) above;
+                // bytes_read <= stage <= len.
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        buf_ptr,
+                        kbuf.as_ptr(),
+                        bytes_read,
+                    )
+                } != 0
+                {
+                    return -(errno::EFAULT as i64);
+                }
+            }
             // If address pointer is provided, write source address
             if let Some((addr, port)) = src_addr {
                 if !addr_ptr.is_null() && !addrlen_ptr.is_null() {

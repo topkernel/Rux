@@ -14,7 +14,7 @@
 //! Call tcp_timer_tick() in clock interrupt handler to check and process expired timers
 
 use crate::drivers::timer::get_jiffies;
-use crate::net::tcp::{TcpSocket, TcpState, TcpSocketTable};
+use crate::net::tcp::{TcpSocket, TcpState, TcpSocketTable, TcpTxBatch, TCP_SOCKET_TABLE_SIZE, TCP_DEFAULT_MSS};
 
 /// TCP timer constants - from config
 pub const TCP_RTO_MIN_US: u64 = crate::config::TCP_RTO_MIN_US;
@@ -52,7 +52,14 @@ impl TcpTimerManager {
     /// # Note
     /// - This function is called in interrupt context, cannot block
     /// - Must complete quickly
-    pub fn tick(&mut self, table: &mut TcpSocketTable) {
+    ///
+    /// R35 (chain-2 fix): retransmissions / delayed ACKs / SYN re-sends
+    /// are RECORDED into `tx` (memcpy into capacity reserved outside the
+    /// table lock) and emitted by the caller after TCP_TABLE_LOCK drops —
+    /// the tick used to run the virtio TX completion spin (10M+50M
+    /// iterations per packet) inline while holding the table lock,
+    /// serializing every CPU's networking behind one expired timer.
+    pub fn tick(&mut self, table: &mut TcpSocketTable, tx: &mut TcpTxBatch) {
         self.timer_ticks += 1;
         let now = get_jiffies();
 
@@ -61,7 +68,7 @@ impl TcpTimerManager {
 
         for (_idx, slot) in sockets.iter_mut().enumerate() {
             if let Some(ref mut socket) = slot {
-                self.check_socket_timers(socket, now);
+                self.check_socket_timers(socket, now, tx);
             }
         }
 
@@ -112,7 +119,7 @@ impl TcpTimerManager {
     }
 
     /// Check timers for single socket
-    fn check_socket_timers(&mut self, socket: &mut TcpSocket, now: u64) {
+    fn check_socket_timers(&mut self, socket: &mut TcpSocket, now: u64, tx: &mut TcpTxBatch) {
         // Only check established connections or connections being closed
         match socket.state {
             TcpState::TCP_ESTABLISHED
@@ -155,7 +162,7 @@ impl TcpTimerManager {
                     && now >= socket.timers.retransmit_deadline
                 {
                     self.retransmits += 1;
-                    socket.retransmit_timer_expired();
+                    socket.retransmit_timer_expired(tx);
 
                     if socket.state == TcpState::TCP_CLOSE {
                         self.timeout_closes += 1;
@@ -166,8 +173,11 @@ impl TcpTimerManager {
                 if socket.timers.delack_deadline > 0
                     && now >= socket.timers.delack_deadline
                 {
-                    // Send delayed ACK
-                    let _ = socket.send_ack_public();
+                    // Send delayed ACK (R35: recorded into `tx`, emitted
+                    // after the lock drops; deadline cleared regardless,
+                    // preserving the old semantics where a failed
+                    // alloc_skb also cleared it).
+                    let _ = socket.send_ack_public(tx);
                     socket.timers.delack_deadline = 0;
                 }
             }
@@ -186,7 +196,7 @@ impl TcpTimerManager {
                         self.timeout_closes += 1;
                     } else {
                         socket.timers.syn_retries += 1;
-                        let _ = socket.resend_syn();
+                        let _ = socket.resend_syn(tx);
                         // Exponential backoff, capped at TCP_RTO_MAX_US.
                         let shift = core::cmp::min(socket.timers.syn_retries, 6) as u32;
                         let backoff_us = (crate::config::TCP_RTO_DEFAULT_US << shift)
@@ -211,7 +221,7 @@ impl TcpTimerManager {
                     && now >= socket.timers.retransmit_deadline
                 {
                     self.retransmits += 1;
-                    socket.retransmit_timer_expired();
+                    socket.retransmit_timer_expired(tx);
 
                     if socket.state == TcpState::TCP_CLOSE {
                         self.timeout_closes += 1;
@@ -220,7 +230,7 @@ impl TcpTimerManager {
                 if socket.timers.delack_deadline > 0
                     && now >= socket.timers.delack_deadline
                 {
-                    let _ = socket.send_ack_public();
+                    let _ = socket.send_ack_public(tx);
                     socket.timers.delack_deadline = 0;
                 }
             }
@@ -261,6 +271,17 @@ pub fn get_tcp_timer_manager() -> &'static mut TcpTimerManager {
 ///
 /// # Safety
 /// This function modifies global TCP socket table, caller must ensure synchronization
+///
+/// R35 (chain-2 fix): the retransmit/delack/SYN-resend emissions moved OUT
+/// of the TCP_TABLE_LOCK critical section. The tick records wire-ready
+/// segments into a TcpTxBatch whose capacity is reserved BEFORE the lock
+/// (try_reserve — an OOM here is a clean deferral to the next tick, not
+/// the alloc_error_handler panic that parked the CPU in `wfi` holding the
+/// lock, the R34 wedge signature), then emits them after the lock drops.
+/// The whole decision pass stays under the table lock exactly as before
+/// (R21-N1 serialization; the R34 fixed-size sweep array is untouched) —
+/// only the virtio TX spin (10M+50M iterations per packet) left the
+/// critical section.
 pub fn tcp_timer_tick() {
     // Get timer manager
     let manager = get_tcp_timer_manager();
@@ -268,10 +289,30 @@ pub fn tcp_timer_tick() {
     // Get TCP socket table
     let table = crate::net::tcp::get_tcp_socket_table();
 
+    // Size the staging BEFORE the lock from a racy table.count() read:
+    // count only changes under TCP_TABLE_LOCK, so a stale read can only
+    // under-estimate — which degrades to per-segment deferral on the next
+    // tick (retransmit_timer_expired keeps the retry accounting intact),
+    // never to an allocation under the lock. Worst case is bounded by the
+    // table size: 2 descriptors (retrans + delack) and one MSS of payload
+    // per socket.
+    let n = table
+        .count()
+        .min(TCP_SOCKET_TABLE_SIZE);
+    let mut tx = TcpTxBatch::new();
+    let _ = tx.reserve(2 * n + 4, n * TCP_DEFAULT_MSS as usize);
+
     // Process timers — R21-N1: under the table lock (was racing syscalls
     // and RX on the 4-CPU kernel).
-    let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
-    manager.tick(table);
+    {
+        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+        manager.tick(table, &mut tx);
+    }
+
+    // Emit outside the lock — no re-entry hazard: emitted packets go to
+    // the loopback backlog (drained later by ethernet_poll) or straight
+    // to the virtio device, never back into tcp_rcv on this CPU.
+    tx.emit_all();
 }
 
 /// Timer softirq handler — deferred from clock interrupt via `raise_softirq_irqoff(Timer)`.

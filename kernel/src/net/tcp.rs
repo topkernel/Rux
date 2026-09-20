@@ -195,7 +195,12 @@ pub enum TcpState {
 
 /// TCP send segment (for retransmission queue)
 ///
-/// Stores copy of sent but unacknowledged data
+/// Stores copy of sent but unacknowledged data. R35: the `new()` helper
+/// that did `Vec::from(data)` was removed — tx_packets now try_reserve()s
+/// the copy before consuming from the send buffer, so an OOM degrades to
+/// a clean stop with the buffer intact instead of hitting
+/// alloc_error_handler (panic → CPU parked in `wfi` holding
+/// TCP_TABLE_LOCK — the R34 wedge class).
 #[derive(Debug, Clone)]
 pub struct TcpSendSeg {
     /// Starting sequence number
@@ -210,18 +215,6 @@ pub struct TcpSendSeg {
     pub retries: u32,
 }
 
-impl TcpSendSeg {
-    pub fn new(seq: TcpSeq, data: &[u8], tx_time: u64) -> Self {
-        Self {
-            seq,
-            len: data.len(),
-            data: alloc::vec::Vec::from(data),
-            tx_time,
-            retries: 0,
-        }
-    }
-}
-
 /// TCP out-of-order segment (for reassembly queue)
 #[derive(Debug, Clone)]
 pub struct TcpOooSeg {
@@ -229,6 +222,221 @@ pub struct TcpOooSeg {
     pub seq: TcpSeq,
     /// Segment data
     pub data: alloc::vec::Vec<u8>,
+}
+
+// ============================================================================
+// R35: deferred TX staging (chain-2 fix)
+// ============================================================================
+//
+// The TCP state machine used to emit every segment INLINE while holding
+// TCP_TABLE_LOCK (send_ack/send_syn/... → alloc_skb → ipv4_send_src →
+// ethernet_send → virtio xmit). virtio xmit waits for device completion
+// with a VIRTIO_QUEUE_TIMEOUT_US (10M) spin plus a 50M-iteration
+// late-drain loop — seconds per packet under tcg. Every ack / retransmit /
+// data segment therefore serialized ALL CPUs' networking (RX softirq,
+// timer tick, every socket syscall) against one slow TX, while the table
+// lock was held.
+//
+// New discipline — "decide under the lock, emit after the lock":
+//   1. The TCP_TABLE_LOCK holder creates a TcpTxBatch and reserves its
+//      capacity BEFORE taking the lock (try_reserve: an OOM here is a
+//      clean error, not the alloc_error_handler panic that parks the CPU
+//      in `wfi` holding the lock — the R34 wedge signature).
+//   2. The state machine RECORDS wire-ready segments into the batch
+//      (plain field writes + memcpy into already-reserved capacity —
+//      NO allocation can happen, and NO packet is emitted, under the
+//      lock).
+//   3. After the lock drops, `emit_all()` builds the skbs (alloc_skb is
+//      fine here — allocation outside the lock is legal per R34) and
+//      drives ipv4_send_src/virtio xmit.
+//
+// Re-entry safety of the unlocked emit: identical to the Socket::close
+// precedent — emitted packets never re-enter tcp_rcv on this CPU
+// (loopback_send only enqueues to the LO_BACKLOG drained later by
+// ethernet_poll; virtio TX goes to the device), so no recursive
+// TCP_TABLE_LOCK acquisition is possible.
+
+/// One wire-ready TX decision (R35). Addresses/ports in host byte order;
+/// `tcp_build_packet`/`ipv4_send_src` convert at emit time exactly like
+/// the old inline senders did.
+#[derive(Debug, Clone, Copy)]
+pub struct TcpTxDesc {
+    /// Source IP (host order)
+    pub src_ip: u32,
+    /// Destination IP (host order)
+    pub dst_ip: u32,
+    /// Source port (host order)
+    pub src_port: u16,
+    /// Destination port (host order)
+    pub dst_port: u16,
+    /// Sequence number
+    pub seq: TcpSeq,
+    /// Acknowledgment number
+    pub ack: TcpAck,
+    /// TCP flags (SYN 0x02, RST 0x04, PSH 0x08, ACK 0x10, FIN 0x01)
+    pub flags: u16,
+    /// Advertised window
+    pub window: u16,
+    /// Payload offset into the batch arena
+    pub off: usize,
+    /// Payload length
+    pub len: usize,
+}
+
+/// Batch of pending TX segments (R35).
+///
+/// Capacity MUST be reserved (outside TCP_TABLE_LOCK) before the state
+/// machine appends; `push` never allocates — it fails cleanly instead, and
+/// every caller treats that failure as a recoverable drop (peer retransmit
+/// / timer re-fire / next-tick deferral), never a panic under the lock.
+pub struct TcpTxBatch {
+    descs: alloc::vec::Vec<TcpTxDesc>,
+    arena: alloc::vec::Vec<u8>,
+}
+
+impl TcpTxBatch {
+    pub const fn new() -> Self {
+        Self {
+            descs: alloc::vec::Vec::new(),
+            arena: alloc::vec::Vec::new(),
+        }
+    }
+
+    /// Reserve capacity for `ndesc` segments totaling <= `nbytes` of
+    /// payload. MUST run OUTSIDE TCP_TABLE_LOCK. Returns false on OOM
+    /// (caller decides: clean syscall error, or degraded drop-mode).
+    pub fn reserve(&mut self, ndesc: usize, nbytes: usize) -> bool {
+        self.descs.try_reserve_exact(ndesc).is_ok() && self.arena.try_reserve_exact(nbytes).is_ok()
+    }
+
+    /// Record one segment (memcpy into reserved capacity — no allocation,
+    /// safe under TCP_TABLE_LOCK). Returns false when the batch is full
+    /// (sizing was a worst-case bound, so this is a can't-happen guard).
+    pub fn push(
+        &mut self,
+        src_ip: u32,
+        dst_ip: u32,
+        src_port: u16,
+        dst_port: u16,
+        seq: TcpSeq,
+        ack: TcpAck,
+        flags: u16,
+        window: u16,
+        data: &[u8],
+    ) -> bool {
+        if self.descs.len() >= self.descs.capacity()
+            || self.arena.capacity() - self.arena.len() < data.len()
+        {
+            return false;
+        }
+        let off = self.arena.len();
+        // Within reserved capacity: pure memcpy, cannot allocate.
+        self.arena.extend_from_slice(data);
+        self.descs.push(TcpTxDesc {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            flags,
+            window,
+            off,
+            len: data.len(),
+        });
+        true
+    }
+
+    /// Record a header-only segment (SYN/ACK/FIN/RST — no payload).
+    pub fn push_ctl(
+        &mut self,
+        src_ip: u32,
+        dst_ip: u32,
+        src_port: u16,
+        dst_port: u16,
+        seq: TcpSeq,
+        ack: TcpAck,
+        flags: u16,
+        window: u16,
+    ) -> bool {
+        self.push(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, window, &[])
+    }
+
+    /// Remaining descriptor slots.
+    pub fn desc_room(&self) -> usize {
+        self.descs.capacity() - self.descs.len()
+    }
+
+    /// Remaining arena bytes.
+    pub fn arena_room(&self) -> usize {
+        self.arena.capacity() - self.arena.len()
+    }
+
+    /// Append payload bytes straight from the send buffer's drain iterator
+    /// into the reserved arena (tx_packets path: one memcpy, no
+    /// intermediate Vec, no allocation). Caller must have checked
+    /// `arena_room() >= seg_size`. Returns the arena offset of the copy.
+    pub fn arena_extend_drain<I: Iterator<Item = u8>>(&mut self, drain: I) -> usize {
+        let off = self.arena.len();
+        // Within reserved capacity: extend cannot allocate.
+        self.arena.extend(drain);
+        off
+    }
+
+    /// Commit a descriptor for payload placed via `arena_extend_drain`.
+    pub fn commit(&mut self, src_ip: u32, dst_ip: u32, src_port: u16, dst_port: u16,
+                  seq: TcpSeq, ack: TcpAck, flags: u16, window: u16, off: usize, len: usize) {
+        self.descs.push(TcpTxDesc {
+            src_ip, dst_ip, src_port, dst_port, seq, ack, flags, window, off, len,
+        });
+    }
+
+    /// Arena slice for a committed descriptor (retrans-copy source).
+    pub fn arena_slice(&self, off: usize, len: usize) -> &[u8] {
+        &self.arena[off..off + len]
+    }
+
+    /// Emit every pending segment. MUST run OUTSIDE TCP_TABLE_LOCK
+    /// (alloc_skb + ipv4_send_src → virtio xmit may spin on device
+    /// completion — the chain-2 hazard). Individual failures drop that
+    /// segment (TCP recovers via peer retransmit / our timers).
+    pub fn emit_all(&mut self) {
+        for d in self.descs.drain(..) {
+            let data = &self.arena[d.off..d.off + d.len];
+            let mut skb = match crate::net::buffer::alloc_skb(1500) {
+                Some(s) => s,
+                None => continue, // R35: allocation failure outside the lock — drop, no panic
+            };
+            if !data.is_empty() && skb.skb_put_data(data).is_err() {
+                skb.free();
+                continue;
+            }
+            if tcp_build_packet(
+                &mut skb,
+                d.src_port,
+                d.dst_port,
+                d.seq,
+                d.ack,
+                d.flags,
+                d.window,
+                d.src_ip.to_be(),
+                d.dst_ip.to_be(),
+            )
+            .is_err()
+            {
+                skb.free();
+                continue;
+            }
+            let _ = crate::net::ipv4::ipv4_send_src(skb, d.src_ip, d.dst_ip, 6);
+        }
+        self.arena.clear();
+    }
+}
+
+impl Default for TcpTxBatch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// TCP RTT estimator (RFC 6298)
@@ -621,7 +829,9 @@ impl TcpSocket {
     /// # Arguments
     /// - `ip`: IP address
     /// - `port`: Port number
-    pub fn connect(&mut self, ip: u32, port: TcpPort) -> Result<(), ()> {
+    /// - `tx`: R35 deferred-TX batch (SYN is recorded, emitted after the
+    ///   table lock drops — chain-2 fix)
+    pub fn connect(&mut self, ip: u32, port: TcpPort, tx: &mut TcpTxBatch) -> Result<(), ()> {
         self.remote_ip = ip;
         self.remote_port = port;
 
@@ -631,7 +841,7 @@ impl TcpSocket {
         self.rcv_nxt = 0; // Will be obtained from SYN-ACK
 
         // Send SYN packet (first step of three-way handshake)
-        self.send_syn()?;
+        self.send_syn(tx)?;
         self.state = TcpState::TCP_SYN_SENT;
         // R32-N16: arm the retransmit timer so the timer tick can
         // retransmit a lost SYN (bounded by syn_retries). Without this a
@@ -644,35 +854,36 @@ impl TcpSocket {
     /// Re-send the initial SYN (R32-N16, called from the timer tick).
     /// `snd_nxt` still holds the SYN's sequence number in SYN_SENT, so
     /// send_syn() re-emits the identical segment.
-    pub fn resend_syn(&self) -> Result<(), ()> {
-        self.send_syn()
+    pub fn resend_syn(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
+        self.send_syn(tx)
     }
 
     /// Send SYN packet (first step of three-way handshake)
-    fn send_syn(&self) -> Result<(), ()> {
-        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
-
-        tcp_build_packet(
-            &mut skb,
+    ///
+    /// R35: records into `tx` instead of emitting — the virtio TX spin
+    /// must never run under TCP_TABLE_LOCK.
+    fn send_syn(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
+        if tx.push_ctl(
+            self.local_ip,
+            self.remote_ip,
             self.local_port,
             self.remote_port,
             self.snd_nxt,
             0, // ACK number is 0
             0x0002, // SYN flag
             self.rcv_wnd,
-            self.local_ip.to_be(),
-            self.remote_ip.to_be(),
-        )?;
-
-        // Send to IP layer
-        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6); // IPPROTO_TCP = 6
-
-        Ok(())
+        ) {
+            Ok(())
+        } else {
+            // Degraded mode (staging exhausted — sizing makes this a
+            // can't-happen): drop; the SYN retransmit timer re-fires.
+            Err(())
+        }
     }
 
     /// Send SYN-ACK packet (second step of three-way handshake)
-    fn send_synack(&mut self, _ack_seq: TcpSeq) -> Result<(), ()> {
-        self.send_synack_packet()?;
+    fn send_synack(&mut self, _ack_seq: TcpSeq, tx: &mut TcpTxBatch) -> Result<(), ()> {
+        self.send_synack_packet(tx)?;
 
         // R14-7 (HIGH-3): the SYN consumes one sequence number. Without
         // this, the peer's rcv_nxt (= ISN+1) mismatched every subsequent
@@ -686,67 +897,60 @@ impl TcpSocket {
     /// Emit the SYN-ACK segment itself without touching sequence
     /// accounting (R32-N16). Used both by the handshake and by the
     /// SYN_RECV retransmission path — resending must NOT advance snd_nxt.
-    fn send_synack_packet(&self) -> Result<(), ()> {
-        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
-
-        tcp_build_packet(
-            &mut skb,
+    fn send_synack_packet(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
+        if tx.push_ctl(
+            self.local_ip,
+            self.remote_ip,
             self.local_port,
             self.remote_port,
             self.snd_nxt,
             self.rcv_nxt,
             0x0012, // SYN + ACK flags
             self.rcv_wnd,
-            self.local_ip.to_be(),
-            self.remote_ip.to_be(),
-        )?;
-
-        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6);
-
-        Ok(())
+        ) {
+            Ok(())
+        } else {
+            Err(()) // dropped; client re-SYNs and the SYN_RECV arm resends
+        }
     }
 
     /// Send ACK packet (third step of three-way handshake)
-    fn send_ack(&self) -> Result<(), ()> {
-        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
-
-        tcp_build_packet(
-            &mut skb,
+    fn send_ack(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
+        if tx.push_ctl(
+            self.local_ip,
+            self.remote_ip,
             self.local_port,
             self.remote_port,
             self.snd_nxt,
             self.rcv_nxt,
             0x0010, // ACK flag
             self.rcv_wnd,
-            self.local_ip.to_be(),
-            self.remote_ip.to_be(),
-        )?;
-
-        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6);
-
-        Ok(())
+        ) {
+            Ok(())
+        } else {
+            Err(()) // dropped; peer retransmits and we re-ACK
+        }
     }
 
     /// Send FIN+ACK packet
     ///
     /// FIN consumes one sequence number per RFC 793, so snd_nxt is
     /// incremented after sending.
-    fn send_fin(&mut self) -> Result<(), ()> {
-        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
-
-        tcp_build_packet(
-            &mut skb,
+    fn send_fin(&mut self, tx: &mut TcpTxBatch) -> Result<(), ()> {
+        tx.push_ctl(
+            self.local_ip,
+            self.remote_ip,
             self.local_port,
             self.remote_port,
             self.snd_nxt,
             self.rcv_nxt,
             0x0011, // FIN + ACK flags
             self.rcv_wnd,
-            self.local_ip.to_be(),
-            self.remote_ip.to_be(),
-        )?;
-
-        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6);
+        );
+        // R35 note: even when the FIN descriptor is dropped (can't-happen
+        // staging overflow), the sequence accounting below still runs —
+        // the retrans_queue entry keeps the FIN recoverable via the RTO
+        // timer, exactly like a wire-level FIN loss.
 
         // FIN consumes one sequence number (RFC 793)
         let fin_seq = self.snd_nxt;
@@ -755,6 +959,12 @@ impl TcpSocket {
         // R21-N3: arm the retransmit machinery for the FIN itself — a lost
         // FIN (or final ACK) used to leave FIN_WAIT1/2 forever (no seg in
         // retrans_queue, deadline 0): 64 dead closes exhaust the table.
+        // R35: try_reserve first — the deque-chunk growth is an allocation
+        // under the lock; failure skips only the retrans arming (the
+        // FIN_WAIT orphan timeout still bounds the state).
+        if self.retrans_queue.try_reserve(1).is_err() {
+            return Ok(());
+        }
         self.retrans_queue.push_back(TcpSendSeg {
             seq: fin_seq,
             len: 1, // R23-4: FIN consumes one seq — len 1 keeps
@@ -779,12 +989,16 @@ impl TcpSocket {
     }
 
     /// Send ACK packet (public interface, for timers)
-    pub fn send_ack_public(&self) -> Result<(), ()> {
-        self.send_ack()
+    pub fn send_ack_public(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
+        self.send_ack(tx)
     }
 
     /// Handle received TCP packet
-    pub fn handle_packet(&mut self, tcp_hdr: &TcpHdr, data: &[u8]) -> Result<(), ()> {
+    ///
+    /// R35: `tx` receives every outbound segment this packet triggers
+    /// (SYN-ACK/ACK/FIN/retransmit) as deferred descriptors; the caller
+    /// emits them after dropping TCP_TABLE_LOCK.
+    pub fn handle_packet(&mut self, tcp_hdr: &TcpHdr, data: &[u8], tx: &mut TcpTxBatch) -> Result<(), ()> {
         // Global RST handling (RFC 793 §3.9)
         if tcp_hdr.rst() {
             self.handle_rst_recv();
@@ -795,13 +1009,13 @@ impl TcpSocket {
             TcpState::TCP_LISTEN => {
                 // Server: receive SYN packet
                 if tcp_hdr.syn() && !tcp_hdr.ack() {
-                    self.handle_syn_recv(tcp_hdr)?;
+                    self.handle_syn_recv(tcp_hdr, tx)?;
                 }
             }
             TcpState::TCP_SYN_SENT => {
                 // Client: receive SYN-ACK packet
                 if tcp_hdr.syn() && tcp_hdr.ack() {
-                    self.handle_synack_recv(tcp_hdr)?;
+                    self.handle_synack_recv(tcp_hdr, tx)?;
                 }
             }
             TcpState::TCP_SYN_RECV => {
@@ -809,7 +1023,7 @@ impl TcpSocket {
                 // resend it with the SAME sequence number (R32-N16; the
                 // handshake path advances snd_nxt, the resend must not).
                 if tcp_hdr.syn() && !tcp_hdr.ack() {
-                    let _ = self.send_synack_packet();
+                    let _ = self.send_synack_packet(tx);
                 }
                 // Server: receive ACK packet
                 if tcp_hdr.ack() && !tcp_hdr.syn() {
@@ -820,15 +1034,15 @@ impl TcpSocket {
                 // Process ACK first (updates snd_una, cwnd, rtt)
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num);
+                    self.process_ack(ack_num, tx);
                 }
                 // Process data (may accompany FIN)
                 if !data.is_empty() {
-                    self.handle_data_recv(tcp_hdr, data)?;
+                    self.handle_data_recv(tcp_hdr, data, tx)?;
                 }
                 // Process FIN (may accompany data)
                 if tcp_hdr.fin() {
-                    self.handle_fin_recv()?;
+                    self.handle_fin_recv(tx)?;
                 }
             }
             TcpState::TCP_FIN_WAIT1 => {
@@ -836,12 +1050,12 @@ impl TcpSocket {
                 let mut valid_ack = false;
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    valid_ack = self.process_ack(ack_num);
+                    valid_ack = self.process_ack(ack_num, tx);
                 }
                 if tcp_hdr.fin() && valid_ack {
                     // Simultaneous close: FIN+ACK -> TIME_WAIT
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
-                    let _ = self.send_ack();
+                    let _ = self.send_ack(tx);
                     self.state = TcpState::TCP_TIME_WAIT;
                     self.start_timewait_timer();
                 } else if valid_ack {
@@ -849,31 +1063,31 @@ impl TcpSocket {
                     self.state = TcpState::TCP_FIN_WAIT2;
                     // Data and/or FIN may follow
                     if !data.is_empty() {
-                        self.handle_data_recv(tcp_hdr, data)?;
+                        self.handle_data_recv(tcp_hdr, data, tx)?;
                     }
                     if tcp_hdr.fin() {
-                        self.handle_fin_recv()?;
+                        self.handle_fin_recv(tx)?;
                     }
                 } else if tcp_hdr.fin() {
                     // FIN without ACK -> CLOSING
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
-                    let _ = self.send_ack();
+                    let _ = self.send_ack(tx);
                     self.state = TcpState::TCP_CLOSING;
                 } else if !data.is_empty() {
-                    self.handle_data_recv(tcp_hdr, data)?;
+                    self.handle_data_recv(tcp_hdr, data, tx)?;
                 }
             }
             TcpState::TCP_FIN_WAIT2 => {
                 // Waiting for FIN from remote
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num);
+                    self.process_ack(ack_num, tx);
                 }
                 if !data.is_empty() {
-                    self.handle_data_recv(tcp_hdr, data)?;
+                    self.handle_data_recv(tcp_hdr, data, tx)?;
                 }
                 if tcp_hdr.fin() {
-                    self.handle_fin_recv()?;
+                    self.handle_fin_recv(tx)?;
                 }
             }
             TcpState::TCP_TIME_WAIT => {
@@ -881,14 +1095,14 @@ impl TcpSocket {
                 // was lost) — re-ACK it, otherwise the peer exhausts its
                 // FIN retransmissions and aborts the close with an RST.
                 if tcp_hdr.fin() {
-                    let _ = self.send_ack();
+                    let _ = self.send_ack(tx);
                 }
             }
             TcpState::TCP_CLOSING => {
                 // Simultaneous close: waiting for ACK of our FIN
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    if self.process_ack(ack_num) {
+                    if self.process_ack(ack_num, tx) {
                         self.state = TcpState::TCP_TIME_WAIT;
                         self.start_timewait_timer();
                     }
@@ -898,7 +1112,7 @@ impl TcpSocket {
                 // Waiting for ACK of our FIN
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    if self.process_ack(ack_num) {
+                    if self.process_ack(ack_num, tx) {
                         self.state = TcpState::TCP_CLOSE;
                     }
                 }
@@ -907,10 +1121,10 @@ impl TcpSocket {
                 // Remote sent FIN, waiting for application to close
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num);
+                    self.process_ack(ack_num, tx);
                 }
                 if !data.is_empty() {
-                    self.handle_data_recv(tcp_hdr, data)?;
+                    self.handle_data_recv(tcp_hdr, data, tx)?;
                 }
             }
             _ => {
@@ -922,7 +1136,7 @@ impl TcpSocket {
     }
 
     /// Handle received SYN packet (server)
-    fn handle_syn_recv(&mut self, tcp_hdr: &TcpHdr) -> Result<(), ()> {
+    fn handle_syn_recv(&mut self, tcp_hdr: &TcpHdr, tx: &mut TcpTxBatch) -> Result<(), ()> {
         // Record client's initial sequence number. Sequence numbers are
         // true values internally — convert once at the boundary (review
         // NET-H4; the wire value leaked here and desynced rcv_nxt against
@@ -937,14 +1151,14 @@ impl TcpSocket {
         self.rcv_nxt = client_isn.wrapping_add(1);
 
         // Send SYN-ACK (second step of three-way handshake)
-        self.send_synack(self.rcv_nxt)?;
+        self.send_synack(self.rcv_nxt, tx)?;
         self.state = TcpState::TCP_SYN_RECV;
 
         Ok(())
     }
 
     /// Handle received SYN-ACK packet (client)
-    fn handle_synack_recv(&mut self, tcp_hdr: &TcpHdr) -> Result<(), ()> {
+    fn handle_synack_recv(&mut self, tcp_hdr: &TcpHdr, tx: &mut TcpTxBatch) -> Result<(), ()> {
         // Check if ACK acknowledges our SYN
         let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
         if ack_num != self.snd_nxt.wrapping_add(1) {
@@ -960,7 +1174,7 @@ impl TcpSocket {
         self.snd_nxt = self.snd_una;
 
         // Send ACK (third step of three-way handshake)
-        self.send_ack()?;
+        self.send_ack(tx)?;
         self.state = TcpState::TCP_ESTABLISHED;
         // R32-N16: handshake complete — stop the SYN retransmit machinery
         // armed in connect().
@@ -991,7 +1205,7 @@ impl TcpSocket {
     }
 
     /// Handle received data (RFC 793 §3.9 window-based acceptance)
-    fn handle_data_recv(&mut self, tcp_hdr: &TcpHdr, data: &[u8]) -> Result<(), ()> {
+    fn handle_data_recv(&mut self, tcp_hdr: &TcpHdr, data: &[u8], tx: &mut TcpTxBatch) -> Result<(), ()> {
         let seq = TcpSeq::from_be(tcp_hdr.seq);
         let seg_len = data.len() as u32;
         let seg_end = seq.wrapping_add(seg_len);
@@ -1008,7 +1222,7 @@ impl TcpSocket {
 
         // Case 1: segment is entirely before the window → already received, send ACK
         if self.seq_before_or_eq(seg_end, rcv_nxt) {
-            self.send_ack()?;
+            self.send_ack(tx)?;
             return Ok(());
         }
 
@@ -1018,23 +1232,44 @@ impl TcpSocket {
         }
 
         if seq == rcv_nxt {
-            // In-order segment → deliver to receive buffer
-            self.enqueue_data(data);
+            // In-order segment → deliver to receive buffer. R35:
+            // enqueue_data now returns Err on try_reserve failure — do NOT
+            // advance rcv_nxt for data we could not buffer (acking it
+            // would silently drop it; leaving rcv_nxt makes the peer
+            // retransmit once memory is available).
+            if self.enqueue_data(data).is_err() {
+                return Ok(());
+            }
             self.rcv_nxt = seg_end;
 
             // Drain any coalescible segments from the OOO queue
             self.drain_ooo_queue();
 
-            self.send_ack()?;
+            self.send_ack(tx)?;
         } else {
-            // Out-of-order segment within window → buffer and send duplicate ACK
+            // Out-of-order segment within window → buffer and send
+            // duplicate ACK. R35: try_reserve instead of Vec::from — an
+            // allocation failure under the lock used to hit
+            // alloc_error_handler (panic → wfi holding TCP_TABLE_LOCK, the
+            // R34 wedge); dropping an OOO segment is TCP-legal (the peer
+            // retransmits after the dup-ACK).
+            let mut seg_data = alloc::vec::Vec::new();
+            if seg_data.try_reserve_exact(data.len()).is_err()
+                || self.ooo_queue.try_reserve(1).is_err()
+            {
+                // Do not ACK buffered-but-dropped bytes — same rationale
+                // as the in-order arm above. (The ooo_queue deque-chunk
+                // growth is also an under-lock allocation — R35.)
+                return Ok(());
+            }
+            seg_data.extend_from_slice(data);
             self.ooo_queue.push_back(TcpOooSeg {
                 seq,
-                data: alloc::vec::Vec::from(data),
+                data: seg_data,
             });
 
             // Send duplicate ACK to trigger fast retransmit on sender
-            self.send_ack()?;
+            self.send_ack(tx)?;
         }
 
         // Update receive window after buffering
@@ -1062,7 +1297,12 @@ impl TcpSocket {
                 // Trim any already-received prefix
                 let offset = self.rcv_nxt.wrapping_sub(seg.seq) as usize;
                 if offset < seg.data.len() {
-                    self.enqueue_data(&seg.data[offset..]);
+                    // R35: same try_reserve discipline as the in-order
+                    // path — on failure stop draining (rcv_nxt stays put,
+                    // the remaining OOO segs stay queued, peer retransmits).
+                    if self.enqueue_data(&seg.data[offset..]).is_err() {
+                        break;
+                    }
                     self.rcv_nxt = self.rcv_nxt.wrapping_add((seg.data.len() - offset) as u32);
                 }
             } else {
@@ -1072,12 +1312,12 @@ impl TcpSocket {
     }
 
     /// Handle received FIN packet
-    fn handle_fin_recv(&mut self) -> Result<(), ()> {
+    fn handle_fin_recv(&mut self, tx: &mut TcpTxBatch) -> Result<(), ()> {
         // Update receive sequence number (FIN occupies one sequence number)
         self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
 
         // Send ACK
-        self.send_ack()?;
+        self.send_ack(tx)?;
 
         // State transition based on current state
         match self.state {
@@ -1146,18 +1386,21 @@ impl TcpSocket {
     ///
     /// # Arguments
     /// - `data`: Data to send
-    pub fn send(&mut self, data: &[u8]) -> Result<usize, ()> {
+    /// - `tx`: R35 deferred-TX batch (segments emitted after lock drop)
+    pub fn send(&mut self, data: &[u8], tx: &mut TcpTxBatch) -> Result<usize, ()> {
         // Delegate to send_reliable so data goes through congestion control,
         // retransmit queue, and proper window management (fixes H38).
-        self.send_reliable(data)
+        self.send_reliable(data, tx)
     }
 
     /// Receive data
     ///
     /// # Arguments
-    /// - `buf`: Buffer
+    /// - `buf`: Buffer (kernel memory — the syscall layer copies from
+    ///   user OUTSIDE the table lock, R35)
     /// - `len`: Buffer length
-    pub fn recv(&mut self, buf: &mut [u8], _len: usize) -> Result<usize, ()> {
+    /// - `tx`: R35 deferred-TX batch for the window-update ACK
+    pub fn recv(&mut self, buf: &mut [u8], _len: usize, tx: &mut TcpTxBatch) -> Result<usize, ()> {
         // Allow reading in ESTABLISHED and CLOSE_WAIT (peer sent FIN but
         // data may still be buffered). Also FIN_WAIT1/FIN_WAIT2 for half-close.
         match self.state {
@@ -1187,7 +1430,7 @@ impl TcpSocket {
         // Update receive window and notify peer if space freed up
         if read > 0 {
             self.update_rcv_wnd();
-            let _ = self.send_ack();
+            let _ = self.send_ack(tx);
         }
 
         Ok(read)
@@ -1197,24 +1440,37 @@ impl TcpSocket {
     ///
     /// # Arguments
     /// - `data`: Received data
-    pub fn enqueue_data(&mut self, data: &[u8]) {
-        for &byte in data {
-            self.recv_buffer.push_back(byte);
+    ///
+    /// # Returns
+    /// Err(()) when the growth reservation failed (R35): the old per-byte
+    /// `push_back` (and even a single extend) reallocates under
+    /// TCP_TABLE_LOCK — an OOM there hits `alloc_error_handler`, panics,
+    /// and parks the CPU in `wfi` holding the table lock (the R34 wedge
+    /// signature). try_reserve turns that into a clean segment drop; the
+    /// caller leaves rcv_nxt unadvanced so the peer retransmits.
+    pub fn enqueue_data(&mut self, data: &[u8]) -> Result<(), ()> {
+        if self.recv_buffer.try_reserve(data.len()).is_err() {
+            return Err(());
         }
+        // Single extend within reserved capacity: one memcpy, no
+        // allocation (the old loop reallocated per few bytes — up to
+        // log2(len) heap ops per segment under the lock).
+        self.recv_buffer.extend(data.iter().copied());
+        Ok(())
     }
 
     /// Close connection
-    pub fn close(&mut self) {
+    pub fn close(&mut self, tx: &mut TcpTxBatch) {
         match self.state {
             TcpState::TCP_ESTABLISHED => {
                 self.state = TcpState::TCP_FIN_WAIT1;
-                let _ = self.send_fin();
+                let _ = self.send_fin(tx);
             }
             TcpState::TCP_CLOSE_WAIT => {
                 self.state = TcpState::TCP_LAST_ACK;
                 // R32-B8: leaving CLOSE_WAIT — disarm the orphan timeout.
                 self.timers.close_wait_since = 0;
-                let _ = self.send_fin();
+                let _ = self.send_fin(tx);
             }
             _ => {
                 self.state = TcpState::TCP_CLOSE;
@@ -1237,11 +1493,14 @@ impl TcpSocket {
     /// Puts data into send buffer and attempts to send, supports retransmission
     ///
     /// # Arguments
-    /// - `data`: Data to send
+    /// - `data`: Data to send (kernel buffer — R35 copies user data out
+    ///   at the syscall layer, before the table lock)
+    /// - `tx`: R35 deferred-TX batch; segments are recorded here and
+    ///   emitted after TCP_TABLE_LOCK drops
     ///
     /// # Returns
     /// Bytes sent on success, Err(()) on failure
-    pub fn send_reliable(&mut self, data: &[u8]) -> Result<usize, ()> {
+    pub fn send_reliable(&mut self, data: &[u8], tx: &mut TcpTxBatch) -> Result<usize, ()> {
         if self.state != TcpState::TCP_ESTABLISHED {
             return Err(());
         }
@@ -1253,13 +1512,19 @@ impl TcpSocket {
         // R32-N4: cap the accepted prefix (partial write semantics).
         let accept = core::cmp::min(data.len(), Self::TCP_SEND_MAX_CHUNK);
 
-        // Put data into send buffer
-        for &byte in &data[..accept] {
-            self.send_buffer.push_back(byte);
+        // R35: reserve the buffer growth BEFORE the bytes go in — the old
+        // per-byte push_back (and a bare extend) reallocated under
+        // TCP_TABLE_LOCK, an OOM-panic point (R34 wedge class). On
+        // reservation failure return Err (caller surfaces EIO); the data
+        // is NOT accepted, so nothing is lost — the syscall retries.
+        if self.send_buffer.try_reserve(accept).is_err() {
+            return Err(());
         }
+        // One extend within reserved capacity: memcpy only.
+        self.send_buffer.extend(data[..accept].iter().copied());
 
         // Try to send data
-        self.tx_packets()?;
+        self.tx_packets(tx)?;
 
         Ok(accept)
     }
@@ -1267,8 +1532,16 @@ impl TcpSocket {
     /// Send packets (core send logic)
     ///
     /// Takes data from send buffer, builds TCP segments and sends
-    /// Limited by congestion window and receive window
-    pub fn tx_packets(&mut self) -> Result<(), ()> {
+    /// Limited by congestion window and receive window.
+    ///
+    /// R35: segments are copied into the caller's pre-reserved TcpTxBatch
+    /// (memcpy only) and emitted after the lock drops — the old inline
+    /// tx_segment ran the virtio completion spin (10M+50M iterations per
+    /// packet) under TCP_TABLE_LOCK for EVERY mss-sized chunk (up to 180
+    /// per 256KB write). The retrans-queue copy is try_reserve'd FIRST so
+    /// an OOM stops the loop cleanly with the send buffer intact instead
+    /// of panicking under the lock.
+    pub fn tx_packets(&mut self, tx: &mut TcpTxBatch) -> Result<(), ()> {
         // Calculate in-flight data
         let in_flight = self.snd_nxt.wrapping_sub(self.snd_una);
 
@@ -1293,20 +1566,49 @@ impl TcpSocket {
                 break;
             }
 
-            // Extract data
-            let mut seg_data = alloc::vec::Vec::with_capacity(seg_size);
-            for _ in 0..seg_size {
-                if let Some(byte) = self.send_buffer.pop_front() {
-                    seg_data.push(byte);
-                }
+            // R35: all storage checks FIRST — a failed check breaks with
+            // the send buffer and window accounting untouched (the bytes
+            // drain on the next send/ACK-window open).
+            if tx.desc_room() == 0 || tx.arena_room() < seg_size {
+                break;
+            }
+            // Retrans-queue data copy (this one outlives the call — it
+            // must be an owned Vec; try_reserve keeps failure graceful —
+            // as does the retrans_queue's own deque-chunk growth).
+            let mut rdata = alloc::vec::Vec::new();
+            if rdata.try_reserve_exact(seg_size).is_err()
+                || self.retrans_queue.try_reserve(1).is_err()
+            {
+                break;
             }
 
-            // Send TCP segment
-            self.tx_segment(self.snd_nxt, &seg_data)?;
+            // Pop the chunk straight into the staging arena (single
+            // memcpy; reserved capacity — cannot allocate).
+            let off = tx.arena_extend_drain(self.send_buffer.drain(..seg_size));
+            rdata.extend_from_slice(tx.arena_slice(off, seg_size));
+
+            // Record the segment for post-lock emission.
+            tx.commit(
+                self.local_ip,
+                self.remote_ip,
+                self.local_port,
+                self.remote_port,
+                self.snd_nxt,
+                self.rcv_nxt,
+                0x0018, // PSH + ACK
+                self.rcv_wnd,
+                off,
+                seg_size,
+            );
 
             // Add segment to retransmit queue
-            let seg = TcpSendSeg::new(self.snd_nxt, &seg_data, now);
-            self.retrans_queue.push_back(seg);
+            self.retrans_queue.push_back(TcpSendSeg {
+                seq: self.snd_nxt,
+                len: seg_size,
+                data: rdata,
+                tx_time: now,
+                retries: 0,
+            });
 
             // Update sequence number
             self.snd_nxt = self.snd_nxt.wrapping_add(seg_size as u32);
@@ -1328,7 +1630,7 @@ impl TcpSocket {
         Ok(())
     }
 
-    /// Send single TCP segment
+    /// Record a single TCP segment for post-lock emission (R35)
     ///
     /// `seq` is the sequence number of the first byte of `data`. R32-B5:
     /// this is now a parameter instead of implicitly using snd_nxt — the
@@ -1336,47 +1638,42 @@ impl TcpSocket {
     /// whose starting sequence is BELOW snd_nxt once later data has been
     /// transmitted; using snd_nxt there emitted a wrong byte range that
     /// the peer treated as duplicate/invalid data.
-    fn tx_segment(&self, seq: TcpSeq, data: &[u8]) -> Result<(), ()> {
-        let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
-
-        // Add data
-        skb.skb_put_data(data)?;
-
+    fn tx_segment(&self, tx: &mut TcpTxBatch, seq: TcpSeq, data: &[u8]) -> Result<(), ()> {
         // R23-4: a zero-data segment in the retrans queue IS the FIN
         // (send_fin pushed it with an empty payload) — the retransmitted
         // copy must carry the FIN bit, not PSH.
         let is_fin_retrans = data.is_empty();
 
-        // Build TCP header (data already added above)
-        tcp_build_packet(
-            &mut skb,
+        if tx.push(
+            self.local_ip,
+            self.remote_ip,
             self.local_port,
             self.remote_port,
             seq,
             self.rcv_nxt,
             if is_fin_retrans { 0x0011 } else { 0x0018 }, // FIN+ACK vs PSH+ACK
             self.rcv_wnd,
-            self.local_ip.to_be(),
-            self.remote_ip.to_be(),
-        )?;
-
-        // Send to IP layer
-        crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6)?;
-
-        Ok(())
+            data,
+        ) {
+            Ok(())
+        } else {
+            // Degraded (can't-happen staging overflow): skip this copy —
+            // the RTO timer re-fires while the segment stays queued.
+            Err(())
+        }
     }
 
     /// Process ACK acknowledgment
     ///
     /// When ACK is received, update send window, RTT estimate, congestion control
-    pub fn process_ack(&mut self, ack: TcpSeq) -> bool {
+    pub fn process_ack(&mut self, ack: TcpSeq, tx: &mut TcpTxBatch) -> bool {
         // Check ACK sequence number
         if self.seq_before(ack, self.snd_una) {
             // Old ACK, might be duplicate ACK
             self.congestion.on_dup_ack(ack, self.snd_nxt, self.mss);
             if self.congestion.dup_ack_count >= 3 {
                 // Fast retransmit
-                self.fast_retransmit();
+                self.fast_retransmit(tx);
             }
             return false;
         }
@@ -1445,11 +1742,16 @@ impl TcpSocket {
     }
 
     /// Fast retransmit
-    fn fast_retransmit(&mut self) {
+    ///
+    /// R35: records the retransmission into `tx` (memcpy into the
+    /// pre-reserved arena — the old `tx_segment` inline send, and the
+    /// retransmit-timer path's `seg.data.clone()`, both allocated and
+    /// spun on virtio completion under TCP_TABLE_LOCK).
+    fn fast_retransmit(&mut self, tx: &mut TcpTxBatch) {
         if let Some(seg) = self.retrans_queue.front() {
             // Retransmit earliest segment — with ITS starting sequence
             // number, not snd_nxt (R32-B5).
-            let _ = self.tx_segment(seg.seq, &seg.data);
+            let _ = self.tx_segment(tx, seg.seq, &seg.data);
         }
     }
 
@@ -1460,8 +1762,14 @@ impl TcpSocket {
 
     /// Retransmit timer expired handling
     ///
-    /// Called by TCP timer tick
-    pub fn retransmit_timer_expired(&mut self) {
+    /// Called by TCP timer tick. R35: the retransmitted segment is copied
+    /// into `tx` (arena memcpy — zero allocation) instead of `seg.data
+    /// .clone()` (heap) + inline virtio spin, both of which used to run
+    /// under TCP_TABLE_LOCK. Mutation order (retries++ / backoff / timer
+    /// restart) is unchanged so the six-state timer semantics and
+    /// bounded-retry lifetime are preserved bit-for-bit; only the wire
+    /// emission is deferred past the lock.
+    pub fn retransmit_timer_expired(&mut self, tx: &mut TcpTxBatch) {
         // Check retransmit queue
         if self.retrans_queue.is_empty() {
             self.timers.stop_retransmit();
@@ -1470,20 +1778,31 @@ impl TcpSocket {
 
         // First get needed info to avoid borrow conflicts
         let should_close;
-        let data_to_retransmit;
 
         {
             if let Some(seg) = self.retrans_queue.front_mut() {
                 if seg.retries >= TCP_MAX_RETRIES {
                     // Exceeded maximum retransmit count, close connection
                     should_close = true;
-                    data_to_retransmit = None;
                 } else {
                     should_close = false;
-                    // Copy seq + data for retransmission (R32-B5: the
-                    // segment's OWN seq, not snd_nxt — the window may have
-                    // advanced past it since the original transmission).
-                    data_to_retransmit = Some((seg.seq, seg.data.clone()));
+                    // Record the retransmission into the deferred batch
+                    // (R32-B5: the segment's OWN seq, not snd_nxt — the
+                    // window may have advanced past it since the original
+                    // transmission). Failure (can't-happen staging
+                    // overflow) skips only the emission; retries/backoff
+                    // below still run, keeping the bounded lifetime.
+                    let _ = tx.push(
+                        self.local_ip,
+                        self.remote_ip,
+                        self.local_port,
+                        self.remote_port,
+                        seg.seq,
+                        self.rcv_nxt,
+                        if seg.data.is_empty() { 0x0011 } else { 0x0018 }, // R23-4 FIN vs PSH
+                        self.rcv_wnd,
+                        &seg.data,
+                    );
                     // Increment retransmit count
                     seg.retries += 1;
                 }
@@ -1500,11 +1819,6 @@ impl TcpSocket {
 
         // Congestion control: timeout handling
         self.congestion.on_timeout(self.mss);
-
-        // Retransmit
-        if let Some((seq, data)) = data_to_retransmit {
-            let _ = self.tx_segment(seq, &data);
-        }
 
         // RTO exponential backoff
         self.rtt_estimator.backoff();
@@ -1589,7 +1903,11 @@ impl TcpConnectionManager {
     /// The manager-side pending/established lists are no longer part of the
     /// data path; the sockets stay in their table slots after the handshake,
     /// so RX lookup, timers and accept() all share one view.
-    pub fn handle_tcp_packet(&mut self, skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
+    ///
+    /// R35: `tx` collects every segment this packet triggers; the caller
+    /// (tcp_rcv) emits them after dropping TCP_TABLE_LOCK — no virtio TX
+    /// spin under the table lock (chain 2).
+    pub fn handle_tcp_packet(&mut self, skb: &SkBuff, src_ip: u32, dest_ip: u32, tx: &mut TcpTxBatch) -> Result<(), ()> {
         // Parse TCP header
         let tcp_hdr = match tcp_parse_packet(skb) {
             Some(hdr) => hdr,
@@ -1667,7 +1985,7 @@ impl TcpConnectionManager {
                         Some(p) => p,
                         None => return Ok(()),
                     };
-                    let _ = socket.handle_packet(tcp_hdr, payload);
+                    let _ = socket.handle_packet(tcp_hdr, payload, tx);
                     return Ok(());
                 }
             }
@@ -1703,7 +2021,7 @@ impl TcpConnectionManager {
                     new_socket.parent_fd = Some(parent);
                     // State machine drives itself from LISTEN: SYN →
                     // handle_syn_recv → sends SYN-ACK → SYN_RECV.
-                    let _ = new_socket.handle_packet(tcp_hdr, &[]);
+                    let _ = new_socket.handle_packet(tcp_hdr, &[], tx);
                     let _ = table.install(slot, new_socket);
                     return Ok(());
                 }
@@ -1837,6 +2155,15 @@ impl TcpSocketTable {
     /// Get mutable reference to all sockets (for timers)
     pub fn sockets_mut(&mut self) -> &mut [Option<TcpSocket>; TCP_SOCKET_TABLE_SIZE] {
         &mut self.sockets
+    }
+
+    /// Number of allocated slots (high-water mark; slots may be None).
+    /// R35: read WITHOUT the table lock by the timer tick to size its
+    /// deferred-TX staging before locking — a stale read only
+    /// under-estimates capacity, which degrades to per-socket emission
+    /// deferral (next tick), never to an under-lock allocation.
+    pub fn count(&self) -> usize {
+        self.count
     }
 }
 
@@ -2002,35 +2329,48 @@ fn alloc_ephemeral_port() -> TcpPort {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
-    let _table_g = TCP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
-    unsafe {
-        if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
-            // Auto-bind an ephemeral local port when the caller never bound
-            // (old code sent SYN with source port 0, review NET-M6).
-            if socket.local_port == 0 {
-                socket.local_port = alloc_ephemeral_port();
-                socket.bound = true;
-            }
-            // Source address for the connection: loopback for loopback
-            // destinations, the device address otherwise. Without this the
-            // socket keeps local_ip = 0 (ANY) and inbound SYN-ACKs fail the
-            // 4-tuple lookup below (found via the nettest E2E run).
-            if socket.local_ip == 0 {
-                socket.local_ip = if (ip >> 24) == 127 {
-                    0x7F000001
-                } else {
-                    crate::net::arp::get_local_ip()
+    // R35: stage the SYN OUTSIDE the table lock — connect() used to run
+    // send_syn → ipv4_send_src → virtio xmit (10M-iteration completion
+    // spin, seconds under tcg) while holding TCP_TABLE_LOCK, serializing
+    // every CPU's networking behind one connect().
+    let mut tx = TcpTxBatch::new();
+    if !tx.reserve(1, 0) {
+        return -12; // ENOMEM — clean failure, lock never taken
+    }
+    let ret;
+    {
+        let _table_g = TCP_TABLE_LOCK.lock_irqsave();
+        // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
+        unsafe {
+            if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+                // Auto-bind an ephemeral local port when the caller never bound
+                // (old code sent SYN with source port 0, review NET-M6).
+                if socket.local_port == 0 {
+                    socket.local_port = alloc_ephemeral_port();
+                    socket.bound = true;
+                }
+                // Source address for the connection: loopback for loopback
+                // destinations, the device address otherwise. Without this the
+                // socket keeps local_ip = 0 (ANY) and inbound SYN-ACKs fail the
+                // 4-tuple lookup below (found via the nettest E2E run).
+                if socket.local_ip == 0 {
+                    socket.local_ip = if (ip >> 24) == 127 {
+                        0x7F000001
+                    } else {
+                        crate::net::arp::get_local_ip()
+                    };
+                }
+                ret = match socket.connect(ip, port, &mut tx) {
+                    Ok(()) => 0,
+                    Err(()) => -5, // EIO
                 };
+            } else {
+                ret = -5; // EBADF
             }
-            match socket.connect(ip, port) {
-                Ok(()) => 0,
-                Err(()) => -5, // EIO
-            }
-        } else {
-            -5 // EBADF
         }
     }
+    tx.emit_all();
+    ret
 }
 
 /// Accept connection
@@ -2273,32 +2613,52 @@ pub fn tcp_parse_packet(skb: &SkBuff) -> Option<&'static TcpHdr> {
 ///
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
+///
+/// R35 (chain-2 fix): every outbound segment this packet triggers
+/// (SYN-ACK, ACKs, dup-ACKs, fast retransmit, RST) is recorded into a
+/// TcpTxBatch whose capacity is reserved BEFORE the table lock is taken,
+/// and emitted AFTER the lock drops — the ack path used to run
+/// ethernet_send → virtio xmit (a 10M+50M-iteration completion spin,
+/// seconds per packet under tcg) inline under TCP_TABLE_LOCK.
 pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     let manager = get_tcp_manager();
-    // R21-N1: RX path mutates the shared table (states, buffers, slot
-    // frees) — serialized against syscalls and the timer tick.
-    let _table_g = TCP_TABLE_LOCK.lock_irqsave();
 
-    match manager.handle_tcp_packet(skb, src_ip, dest_ip) {
-        Ok(()) => Ok(()),
-        Err(()) => {
-            // No matching connection found — send RST (RFC 793 §3.9)
-            let tcp_hdr = match tcp_parse_packet(skb) {
-                Some(hdr) => hdr,
-                None => return Ok(()),
-            };
-            if !tcp_hdr.rst() && dest_ip != 0xFFFFFFFF {
-                let _ = tcp_send_reset(src_ip, dest_ip, tcp_hdr);
+    // Worst case per inbound packet: SYN-ACK spawn (1) or fast-retrans
+    // data (1 x MSS) + dup/data ACK + FIN ACK (see handle_packet arms) —
+    // 8 descriptor slots and one MSS of arena is a comfortable bound.
+    // Reserve failure (OOM) degrades to segment drops (peer retransmits;
+    // R34: allocation OUTSIDE the lock cannot wedge the kernel).
+    let mut tx = TcpTxBatch::new();
+    let _ = tx.reserve(8, TCP_DEFAULT_MSS as usize);
+
+    {
+        // R21-N1: RX path mutates the shared table (states, buffers, slot
+        // frees) — serialized against syscalls and the timer tick.
+        let _table_g = TCP_TABLE_LOCK.lock_irqsave();
+
+        if let Err(()) = manager.handle_tcp_packet(skb, src_ip, dest_ip, &mut tx) {
+            // No matching connection found — send RST (RFC 793 §3.9).
+            // R35: recorded into `tx` and emitted after the lock drops.
+            if let Some(tcp_hdr) = tcp_parse_packet(skb) {
+                if !tcp_hdr.rst() && dest_ip != 0xFFFFFFFF {
+                    let _ = tcp_send_reset(src_ip, dest_ip, tcp_hdr, &mut tx);
+                }
             }
-            Ok(())
         }
     }
+
+    // No table lock held here: re-entry is impossible (loopback_send only
+    // queues to the backlog drained by a later ethernet_poll; virtio TX
+    // goes straight to the device) — same argument as Socket::close.
+    tx.emit_all();
+
+    Ok(())
 }
 
-/// Send RST in response to segment for non-existing connection
-fn tcp_send_reset(src_ip: u32, dest_ip: u32, tcp_hdr: &TcpHdr) -> Result<(), ()> {
-    let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
-
+/// Record an RST (response to a segment for a non-existing connection)
+/// into the deferred-TX batch (R35 — was an inline alloc_skb + emit under
+/// TCP_TABLE_LOCK).
+fn tcp_send_reset(src_ip: u32, dest_ip: u32, tcp_hdr: &TcpHdr, tx: &mut TcpTxBatch) -> Result<(), ()> {
     // RST sequence number: if ACK is set, seq = ack_seq; otherwise seq = 0
     let rst_seq = if tcp_hdr.ack() {
         TcpSeq::from_be(tcp_hdr.ack_seq)
@@ -2314,20 +2674,26 @@ fn tcp_send_reset(src_ip: u32, dest_ip: u32, tcp_hdr: &TcpHdr) -> Result<(), ()>
         TcpSeq::from_be(tcp_hdr.seq).wrapping_add(seg_len)
     };
 
-    tcp_build_packet(
-        &mut skb,
+    // Source of the RST is the addressed local IP (matches the TCP
+    // pseudo-header the old tcp_build_packet call used; the old
+    // ipv4_send(skb, src_ip, 6) filled the IP source with the DEVICE
+    // address instead — an inconsistency this path inherits fixed, every
+    // other sender already uses the socket's local_ip via ipv4_send_src).
+    let ok = tx.push_ctl(
+        dest_ip,
+        src_ip,
         TcpPort::from_be(tcp_hdr.dest),
         TcpPort::from_be(tcp_hdr.source),
         rst_seq,
         rst_ack,
         0x0014, // RST + ACK
         TCP_MAX_WINDOW,
-        dest_ip.to_be(),
-        src_ip.to_be(),
-    )?;
-
-    crate::net::ipv4::ipv4_send(skb, src_ip, 6);
-    Ok(())
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err(()) // dropped — peer times out / retransmits (recoverable)
+    }
 }
 
 /// Handle ICMP error for a TCP connection (soft error)

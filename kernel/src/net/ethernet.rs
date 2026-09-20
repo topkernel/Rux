@@ -251,33 +251,53 @@ pub fn eth_addr_zero(addr: &mut [u8; ETH_ALEN]) {
 /// Ok(()) on success, Err(()) on failure
 ///
 /// # Notes
-/// Adds Ethernet header and sends to network device
+/// Adds Ethernet header and sends to network device. On an ARP miss the
+/// packet is parked on the bounded per-IP pending queue (R35) and the
+/// ARP request goes out immediately; the packet is flushed unicast when
+/// the reply lands.
 pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
     let src_mac = match get_device_mac() {
         Some(mac) => mac,
         None => [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
     };
 
+    // Parse the IPv4 destination once: the loopback short-circuit and the
+    // ARP resolution below both need it.
     // Loopback short-circuit: 127.0.0.0/8 must not go through ARP (there
     // is no MAC to resolve; broadcasting loopback traffic worked only by
     // accident of ip_rcv not checking the destination address).
-    if (skb.len as usize) >= crate::net::ipv4::IPHDR_LEN {
+    let dest_ip = if (skb.len as usize) >= crate::net::ipv4::IPHDR_LEN {
         // SAFETY: skb.data and skb.len describe a valid byte range.
         let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
-        if let Some(ip_hdr) = crate::net::ipv4::IpHdr::from_bytes(data) {
-            if ip_hdr.version_ihl >> 4 == 4 && (u32::from_be(ip_hdr.daddr) >> 24) == 127 {
-                eth_push_header(&mut skb, [0, 0, 0, 0, 0, 0], src_mac, EthProtocol::ETH_P_IP)?;
-                let _ = crate::drivers::net::loopback::loopback_send(skb);
-                return Ok(());
-            }
+        crate::net::ipv4::IpHdr::from_bytes(data)
+            .filter(|hdr| hdr.version_ihl >> 4 == 4)
+            .map(|hdr| u32::from_be(hdr.daddr))
+    } else {
+        None
+    };
+
+    if let Some(ip) = dest_ip {
+        if ip >> 24 == 127 {
+            eth_push_header(&mut skb, [0, 0, 0, 0, 0, 0], src_mac, EthProtocol::ETH_P_IP)?;
+            let _ = crate::drivers::net::loopback::loopback_send(skb);
+            return Ok(());
         }
     }
 
-    // Try to resolve destination MAC from the IP header via ARP.
-    // Fall back to broadcast if the IP header cannot be parsed or
-    // ARP has no entry (the ARP request has been sent and a retry
-    // may succeed later).
-    let dest_mac = resolve_dest_mac(&skb).unwrap_or(ETH_BROADCAST);
+    // R35: on an ARP miss, park the packet on the bounded per-IP pending
+    // queue and send the ARP request now — the packet follows the reply
+    // as a proper unicast frame. This replaces the old broadcast fallback
+    // that lost the first packet to every new destination and relied on
+    // upper-layer retries to mask it.
+    let dest_mac = match dest_ip {
+        Some(ip) => match crate::net::arp::arp_lookup(ip) {
+            Some(mac) => mac,
+            None => return crate::net::arp::arp_pending_send(ip, skb),
+        },
+        // Not IPv4 (or unparseable): nothing to resolve — keep the legacy
+        // broadcast behavior for these rare frames.
+        None => ETH_BROADCAST,
+    };
 
     eth_push_header(&mut skb, dest_mac, src_mac, EthProtocol::ETH_P_IP)?;
 
@@ -310,29 +330,6 @@ pub fn ethernet_send_to(mut skb: SkBuff, dest_mac: [u8; ETH_ALEN], protocol: Eth
     }
 }
 
-/// Resolve destination MAC address from the IP header in the skb.
-///
-/// Peeks at the IPv4 header to extract `daddr`, then performs ARP
-/// lookup (sending an ARP request if needed).  Returns `None` when
-/// the skb is too short, not IPv4, or ARP has not resolved yet.
-fn resolve_dest_mac(skb: &SkBuff) -> Option<[u8; ETH_ALEN]> {
-    if (skb.len as usize) < crate::net::ipv4::IPHDR_LEN {
-        return None;
-    }
-
-    // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
-    let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
-    let ip_hdr = crate::net::ipv4::IpHdr::from_bytes(data)?;
-
-    // Only handle IPv4
-    if ip_hdr.version_ihl >> 4 != 4 {
-        return None;
-    }
-
-    let dest_ip = u32::from_be(ip_hdr.daddr);
-    crate::net::arp::resolve_ip(dest_ip)
-}
-
 /// Get network device MAC address
 ///
 /// R34: returns the MAC the device actually reports (read from virtio-net
@@ -349,8 +346,9 @@ fn get_device_mac() -> Option<[u8; 6]> {
     None
 }
 
-/// Send packet to network device
-fn transmit_to_device(skb: SkBuff) -> i32 {
+/// Send packet to network device (pub(crate): also used by the ARP
+/// pending-queue flush in arp.rs)
+pub(crate) fn transmit_to_device(skb: SkBuff) -> i32 {
     if let Some(device) = crate::drivers::net::virtio_net::get_device() {
         return device.xmit(skb);
     }
@@ -422,6 +420,10 @@ pub fn ethernet_rcv(mut skb: SkBuff) -> Result<(), ()> {
 /// # Notes
 /// Gets received packets from network device and processes them
 pub fn ethernet_poll() {
+    // R35: drop ARP-parked packets whose resolution timed out (bounded
+    // per pass; frees happen outside the ARP_PENDING lock).
+    crate::net::arp::arp_pending_gc();
+
     // Drain the loopback backlog FIRST: the virtio-net poll path has known
     // descriptor-handling defects (review DRIV NEW) and must not be able to
     // block loopback delivery.

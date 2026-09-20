@@ -237,18 +237,47 @@ impl Socket {
                 let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
                 // R23-3 (send-only, leaf-scoped): the table lock protects
                 // the send_buffer/retrans_queue mutation against the RX
-               // softirq's process_ack on the same socket. NOT taken at
+                // softirq's process_ack on the same socket. NOT taken at
                 // fn entry — recv's TCP branch re-enters tcp_rcv which
                 // already holds it (the R23 gate deadlock).
-                let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
-                if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
-                    match socket.send(buf) {
-                        Ok(len) => Ok(len),
-                        Err(_) => Err(-5), // EIO
-                    }
-                } else {
-                    Err(-9) // EBADF
+                //
+                // R35 (chain-2 fix): tx_packets used to emit every
+                // mss-sized segment INLINE under TCP_TABLE_LOCK (up to 180
+                // virtio completion spins — 10M+50M iterations each — for
+                // one 256KB write). The deferred TcpTxBatch is reserved
+                // HERE, outside the lock (try_reserve: OOM is a clean
+                // ENOMEM, not the under-lock alloc_error_handler panic of
+                // the R34 wedge class), and emitted after the lock drops.
+                //
+                // Sizing: tx_packets drains the send buffer up to the
+                // usable window, which may hold MORE than this call's
+                // accepted prefix (leftovers from earlier sends while the
+                // window was closed) — so stage accept + one full window
+                // (TCP_MAX_WINDOW = 64KB) of payload. With the sys_write
+                // chunking (RW_CHUNK = 64KB) the typical reservation is
+                // ~128KB, freed at the end of the syscall.
+                let accept = core::cmp::min(buf.len(), crate::net::tcp::TcpSocket::TCP_SEND_MAX_CHUNK);
+                let window_slack = crate::net::tcp::TCP_MAX_WINDOW as usize;
+                let stage_bytes = accept + window_slack;
+                let mut tx = crate::net::tcp::TcpTxBatch::new();
+                if !tx.reserve(
+                    stage_bytes / crate::net::tcp::TCP_DEFAULT_MSS as usize + 2,
+                    stage_bytes,
+                ) {
+                    return Err(-12); // ENOMEM — lock never taken
                 }
+                let ret = {
+                    let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+                    match crate::net::tcp::tcp_socket_get(tcp_fd) {
+                        Some(socket) => match socket.send(buf, &mut tx) {
+                            Ok(len) => Ok(len),
+                            Err(_) => Err(-5), // EIO
+                        },
+                        None => Err(-9), // EBADF
+                    }
+                };
+                tx.emit_all();
+                ret
             }
             SocketType::Udp => {
                 // SAFETY: udp_fd is only written once during socket creation and
@@ -317,20 +346,32 @@ impl Socket {
                 // re-enters tcp_rcv (ethernet_poll runs before Socket::recv
                 // in every syscall caller; TcpSocket::recv's ACK goes to
                 // loopback-queue/virtio-xmit only).
-                let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
-                if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
-                    match socket.recv(buf, buf.len()) {
-                        Ok(len) if len > 0 => {
-                            return Ok((len, Some((socket.remote_ip, socket.remote_port))));
-                        }
-                        // R22-4: zero-length read on a half/RST-closed
-                        // connection is EOF — returning EAGAIN here made
-                        // read() loops spin forever.
-                        Ok(0) => {
-                            return Ok((0, None));
-                        }
-                        _ => {}
+                //
+                // R35 (chain-2 fix): the window-update ACK is recorded
+                // into a deferred TcpTxBatch reserved outside the lock and
+                // emitted after it drops — the ACK used to run the virtio
+                // completion spin under TCP_TABLE_LOCK.
+                let mut tx = crate::net::tcp::TcpTxBatch::new();
+                let _ = tx.reserve(1, 0);
+                let result = {
+                    let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+                    match crate::net::tcp::tcp_socket_get(tcp_fd) {
+                        Some(socket) => match socket.recv(buf, buf.len(), &mut tx) {
+                            Ok(len) if len > 0 => {
+                                Some(Ok((len, Some((socket.remote_ip, socket.remote_port)))))
+                            }
+                            // R22-4: zero-length read on a half/RST-closed
+                            // connection is EOF — returning EAGAIN here made
+                            // read() loops spin forever.
+                            Ok(0) => Some(Ok((0, None))),
+                            _ => None,
+                        },
+                        None => None,
                     }
+                };
+                tx.emit_all();
+                if let Some(r) = result {
+                    return r;
                 }
 
                 Err(-11) // EAGAIN
@@ -394,11 +435,18 @@ impl Socket {
                     // like every other writer. Same shape as tcp_rcv's own
                     // send-under-lock. tcp_socket_free takes the lock itself,
                     // so the actual free happens after we drop ours.
+                    //
+                    // R35 (chain-2 fix): the FIN is recorded into a deferred
+                    // TcpTxBatch reserved outside the lock and emitted after
+                    // it drops — send_fin used to run the virtio completion
+                    // spin under TCP_TABLE_LOCK.
                     let mut free_now = false;
+                    let mut tx = crate::net::tcp::TcpTxBatch::new();
+                    let _ = tx.reserve(1, 0);
                     {
                         let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
                         if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
-                            socket.close();
+                            socket.close(&mut tx);
                             // Only free immediately if connection is fully closed.
                             if socket.state == crate::net::tcp::TcpState::TCP_CLOSE {
                                 // R21-N4: drop our pin; free only when the
@@ -435,6 +483,7 @@ impl Socket {
                             }
                         }
                     }
+                    tx.emit_all();
                     if free_now {
                         crate::net::tcp::tcp_socket_free(tcp_fd);
                     }

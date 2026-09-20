@@ -272,6 +272,207 @@ impl ArpCache {
 /// syscall context and softirq/timer context).
 static ARP_CACHE: Spinlock<ArpCache> = Spinlock::new(ArpCache::new());
 
+// ==================== ARP pending queue (R35) ====================
+//
+// ethernet_send used to fall back to a broadcast Ethernet destination
+// when ARP had no entry yet — the first packet to every new destination
+// was lost and papered over by upper-layer retries. Instead, park the
+// packet on a small bounded per-IP queue while the ARP request is
+// outstanding, and flush it (unicast, with the learned MAC) the moment
+// the reply lands. Parked packets older than ARP_PENDING_TIMEOUT_SECS
+// are dropped by the NetRx softirq GC pass.
+//
+// The queue is a fixed-size slot array: no allocation ever happens
+// under the ARP_PENDING lock, and detached skbs are freed/transmitted
+// only after the lock is released (R34 timer.rs discipline — an OOM
+// abort under a spinlock parks the CPU with the lock held).
+
+/// Packets parked per unresolved IP (memory-amplification bound).
+const ARP_PENDING_PER_IP: usize = 4;
+/// Packets parked across all unresolved IPs.
+const ARP_PENDING_TOTAL: usize = 32;
+/// Parked packets older than this are dropped.
+const ARP_PENDING_TIMEOUT_SECS: u64 = 3;
+/// Minimum spacing between ARP requests for the same IP.
+const ARP_REQUEST_INTERVAL_SECS: u64 = 1;
+/// Packets detached per GC pass (frees happen outside the lock).
+const ARP_PENDING_DRAIN: usize = 8;
+
+/// One parked packet awaiting ARP resolution.
+struct ArpPendingSlot {
+    /// Destination IP awaiting resolution (host byte order).
+    ip: u32,
+    /// Jiffies when the packet was parked.
+    queued_at: u64,
+    /// The parked packet.
+    skb: Option<SkBuff>,
+}
+
+/// Fixed-size pending queue (32 slots, per-IP bound enforced on insert).
+struct ArpPendingQueue {
+    slots: [ArpPendingSlot; ARP_PENDING_TOTAL],
+}
+
+impl ArpPendingQueue {
+    const fn new() -> Self {
+        const EMPTY: ArpPendingSlot = ArpPendingSlot { ip: 0, queued_at: 0, skb: None };
+        Self { slots: [EMPTY; ARP_PENDING_TOTAL] }
+    }
+}
+
+/// Global ARP pending queue (Spinlock-protected; accessed from syscall
+/// context on transmit and softirq context on flush/GC).
+static ARP_PENDING: Spinlock<ArpPendingQueue> = Spinlock::new(ArpPendingQueue::new());
+
+/// Park `skb` awaiting ARP resolution of `ip`, sending a rate-limited ARP
+/// request. Replaces the old broadcast fallback in ethernet_send.
+///
+/// Returns Ok(()) when the packet was parked (delivery is deferred until
+/// the reply flushes the queue or the entry times out), Err(()) when the
+/// bounded queue is full and the packet had to be dropped.
+pub fn arp_pending_send(ip: u32, skb: SkBuff) -> Result<(), ()> {
+    let now = get_jiffies();
+    let mut skb = Some(skb);
+    let mut dropped: Option<SkBuff> = None;
+    let mut parked = false;
+    let mut send_request = true;
+
+    {
+        let mut q = ARP_PENDING.lock_irqsave();
+
+        let mut per_ip = 0usize;
+        let mut free_slot: Option<usize> = None;
+        let mut newest_for_ip = 0u64;
+
+        for (i, slot) in q.slots.iter_mut().enumerate() {
+            if slot.skb.is_none() {
+                if free_slot.is_none() {
+                    free_slot = Some(i);
+                }
+                continue;
+            }
+            if now.saturating_sub(slot.queued_at) > ARP_PENDING_TIMEOUT_SECS * HZ {
+                // Timed out: detach one for freeing outside the lock — the
+                // slot is immediately reusable. Remaining expired entries
+                // are reclaimed by the NetRx softirq GC pass.
+                if dropped.is_none() {
+                    dropped = slot.skb.take();
+                    if free_slot.is_none() {
+                        free_slot = Some(i);
+                    }
+                }
+                continue;
+            }
+            if slot.ip == ip {
+                per_ip += 1;
+                if slot.queued_at > newest_for_ip {
+                    newest_for_ip = slot.queued_at;
+                }
+            }
+        }
+
+        if per_ip < ARP_PENDING_PER_IP {
+            if let Some(i) = free_slot {
+                q.slots[i].ip = ip;
+                q.slots[i].queued_at = now;
+                q.slots[i].skb = skb.take();
+                parked = true;
+                // One request per interval per IP: an entry parked less
+                // than ARP_REQUEST_INTERVAL_SECS ago means a request for
+                // this address is already outstanding.
+                send_request =
+                    now.saturating_sub(newest_for_ip) >= ARP_REQUEST_INTERVAL_SECS * HZ;
+            }
+        }
+    } // ARP_PENDING released — no allocation, transmit or free under the lock
+
+    if send_request {
+        let _ = send_arp_request(ip);
+    }
+    if let Some(s) = dropped {
+        s.free();
+    }
+    if let Some(s) = skb {
+        s.free();
+    }
+
+    if parked {
+        Ok(())
+    } else {
+        Err(()) // bounded queue full — packet dropped
+    }
+}
+
+/// Flush parked packets for `ip` through the now-known `mac`.
+///
+/// Called from arp_rcv after the cache learns a mapping: packets are
+/// detached under the lock (bounded by the per-IP cap) and transmitted
+/// after it is released.
+fn arp_flush_pending(ip: u32, mac: [u8; ETH_ALEN]) {
+    let mut drain: [Option<SkBuff>; ARP_PENDING_PER_IP] = [const { None }; ARP_PENDING_PER_IP];
+
+    {
+        let mut q = ARP_PENDING.lock_irqsave();
+        let mut di = 0;
+        for slot in q.slots.iter_mut() {
+            if di == drain.len() {
+                break;
+            }
+            if slot.skb.is_some() && slot.ip == ip {
+                drain[di] = slot.skb.take();
+                di += 1;
+            }
+        }
+    } // ARP_PENDING released — transmit without holding it
+
+    let src_mac = get_local_mac();
+    for skb in drain.into_iter().flatten() {
+        let mut skb = skb;
+        if crate::net::ethernet::eth_push_header(
+            &mut skb,
+            mac,
+            src_mac,
+            crate::net::buffer::EthProtocol::ETH_P_IP,
+        )
+        .is_err()
+        {
+            skb.free();
+            continue;
+        }
+        crate::net::ethernet::transmit_to_device(skb);
+    }
+}
+
+/// Drop timed-out parked packets.
+///
+/// Called from the NetRx softirq (ethernet_poll). Bounded to
+/// ARP_PENDING_DRAIN packets per pass so the frees stay off the stack of
+/// a single softirq run and outside the ARP_PENDING lock.
+pub fn arp_pending_gc() {
+    let mut drain: [Option<SkBuff>; ARP_PENDING_DRAIN] = [const { None }; ARP_PENDING_DRAIN];
+
+    {
+        let mut q = ARP_PENDING.lock_irqsave();
+        let now = get_jiffies();
+        let mut di = 0;
+        for slot in q.slots.iter_mut() {
+            if di == drain.len() {
+                break;
+            }
+            if slot.skb.is_some()
+                && now.saturating_sub(slot.queued_at) > ARP_PENDING_TIMEOUT_SECS * HZ
+            {
+                drain[di] = slot.skb.take();
+                di += 1;
+            }
+        }
+    } // ARP_PENDING released — frees happen here
+
+    for skb in drain.into_iter().flatten() {
+        skb.free();
+    }
+}
+
 /// Look up ARP cache
 pub fn arp_lookup(ip: u32) -> Option<[u8; ETH_ALEN]> {
     let cache = ARP_CACHE.lock_irqsave();
@@ -392,6 +593,10 @@ pub fn arp_rcv(skb: &SkBuff, eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(
     let sender_ip = arp_pkt.sender_ip();
     let sender_mac = arp_pkt.sender_mac();
     arp_update(sender_ip, sender_mac);
+    // R35: a newly-learned mapping may have parked packets — flush them
+    // (unicast, with the learned MAC) instead of relying on upper-layer
+    // retries after the old broadcast-fallback loss.
+    arp_flush_pending(sender_ip, sender_mac);
 
     if arp_pkt.is_request() {
         let target_ip = arp_pkt.target_ip();
@@ -509,7 +714,10 @@ fn transmit_arp_packet(skb: SkBuff) {
 
 /// Resolve IP address to MAC address
 ///
-/// First looks up the ARP cache, sends ARP request if not found
+/// First looks up the ARP cache, sends ARP request if not found.
+/// Callers that own an outbound packet should use `arp_pending_send`
+/// instead — it parks the packet on the pending queue until the reply
+/// arrives rather than losing it.
 ///
 /// # Arguments
 /// - `ip`: Target IP address (host byte order)
