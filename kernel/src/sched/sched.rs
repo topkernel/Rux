@@ -835,13 +835,12 @@ unsafe fn __schedule() {
 
     // Re-enqueue prev if still runnable and not idle
     if prev_running && prev_pid != 0 {
-        // R39: if the insert is refused here (stale on_rq guard divergence),
-        // prev parks RUNNING-but-unlinked — the B-form morphology. The
-        // enqueue now leaves state untouched on refusal, and this call's
-        // result is discarded as before (prev's state was already RUNNING
-        // when we got here), but the divergence is no longer silently
-        // manufactured by this function.
-        enqueue_task_locked(&mut *grq_guard, prev);
+        // R41: prev MUST leave this section linked on a class queue (or be
+        // verifiably already linked) — a refused insert here is the B-form
+        // phantom (RUNNING, unlinked, never picked; see requeue_prev_locked).
+        // The old plain enqueue_task_locked call trusted the class on_rq
+        // guard; a stale-true flag dropped prev permanently.
+        requeue_prev_locked(&mut *grq_guard, prev);
     }
 
     // Pick next task (R8-1b: prev is passed so the switching CPU may
@@ -989,12 +988,120 @@ unsafe fn mark_picked_on_cpu(task: *mut Task) {
     }
 }
 
+/// R41 (stale on_rq defense, shared): after a REFUSED enqueue_task_locked,
+/// find out whether the refusal hid a stale on_rq=true on an UNLINKED task
+/// and heal it. Returns true when the task is linked when this returns —
+/// either it verifiably already was (legitimate refusal: RR tick rotation,
+/// a racing wake, change_task_policy's re-enqueue — a forced insert there
+/// would double-link), or the heal cleared the stale flag and re-inserted
+/// through the normal path.
+///
+/// The R41 audit found every on_rq write point in the tree link/unlink-
+/// paired under the GRQ lock (fair.rs enqueue/dequeue/pick*, rt.rs
+/// enqueue/dequeue, deadline.rs enqueue/dequeue/pick*), so no CURRENT-code
+/// path manufactures a stale on_rq=true — it can only arrive from a pre-R39
+/// legacy state, an out-of-scheduler memory-corruption engine (this
+/// kernel's documented smash families), or a future regression. This
+/// defense makes both wedge morphologies unconstructible regardless of
+/// provenance: the B-form (prev preempted while phantom-flagged → RUNNING,
+/// unlinked, never picked; round-41 capture: pid 359/360 of
+/// `echo PP | cat`, 4 CPUs wfi-idle, stacks frozen in
+/// schedule → __schedule → context_switch) via requeue_prev_locked, and
+/// the A-form twin (wake of a phantom-flagged sleeper refused → the
+/// wait-queue's one-shot wake token silently consumed) via
+/// wake_up_enqueue. The tripwire print turns every incident into a loud,
+/// self-healing event that pins the manufacturer for the follow-up hunt.
+///
+/// Called with the GRQ lock held, only on the refused path.
+unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool {
+    // Re-run the guards that legitimately refuse (freed-page poison,
+    // exiting task) BEFORE any field read below — a freed page cannot be
+    // healed, and the policy/entity reads must not touch it.
+    if (*task).pid() == TASK_POISON || (*task).state().is_dead() {
+        return false;
+    }
+
+    // Check ACTUAL linkage — never trust the flag that just lied.
+    let policy = (*task).policy();
+    let linked = match policy {
+        SchedPolicy::Fifo | SchedPolicy::Rr => grq.rt_rq.is_linked(task),
+        SchedPolicy::Deadline => grq.dl_rq.is_linked(task),
+        SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+            grq.cfs_rq.is_linked(task)
+        }
+    };
+    if linked {
+        return true; // legitimate refusal: already queued exactly once
+    }
+
+    // Stale on_rq=true on an unlinked task — the wedge precursor. Report
+    // (SBI direct write: we hold the GRQ lock — R34 discipline), clear the
+    // stale flag, and re-insert through the normal path.
+    {
+        const MSG: &[u8] = b"R41-STALE-ONRQ healed pid=0x";
+        for &b in MSG {
+            sbi_rt::legacy::console_putchar(b as usize);
+        }
+        let v = (*task).pid() as u64;
+        let mut sh = 64;
+        while sh > 0 {
+            sh -= 4;
+            let nb = ((v >> sh) & 0xF) as u8;
+            sbi_rt::legacy::console_putchar(
+                (if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize,
+            );
+        }
+        sbi_rt::legacy::console_putchar(b'\n' as usize);
+    }
+    match policy {
+        SchedPolicy::Fifo | SchedPolicy::Rr => {
+            (*task).rt_entity().set_on_rq(false);
+        }
+        SchedPolicy::Deadline => {
+            (*task).dl_entity().on_rq.store(
+                false,
+                core::sync::atomic::Ordering::Release,
+            );
+        }
+        SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+            (*task).sched_entity().set_on_rq(false);
+        }
+    }
+    // With the flag cleared the class insert is admitted, and its success
+    // pairs set_state(RUNNING) + grq.nr_running with the actual linkage
+    // (R7-B5 discipline).
+    enqueue_task_locked(grq, task)
+}
+
+/// R41 (B-form phantom — prev re-enqueue): requeue `prev` for its upcoming
+/// switch-out. `prev` is this CPU's current with state==RUNNING; once the
+/// context_switch below stores its context it is on NO cpu, so it MUST be
+/// linked on a class queue when this returns. A plain enqueue_task_locked
+/// call trusted the class on_rq guard — a stale-true flag dropped prev
+/// permanently (RUNNING-but-unlinked, never picked again). On refusal the
+/// shared ensure_linked_locked verifies actual linkage and heals only the
+/// genuine divergence, so legitimately-linked prevs (RR rotation, racing
+/// wake, policy-change re-enqueue) are never double-linked.
+///
+/// Called with the GRQ lock held.
+unsafe fn requeue_prev_locked(grq: &mut GlobalRunQueue, prev: *mut Task) {
+    if enqueue_task_locked(grq, prev) {
+        return; // normal path: fresh insert linked prev (state already RUNNING)
+    }
+    // Refused — verify and heal (no-op skip when prev is already linked).
+    ensure_linked_locked(grq, prev);
+}
+
 /// Enqueue a task into the global RQ (called with GRQ lock held).
 ///
-/// R39: returns whether the task is now linked on a class queue (true also
-/// when the on_rq guard skipped because it was ALREADY linked). False means
-/// the enqueue was refused (freed/exiting task, or an unreachable class
-/// refusal) — the task's state is left untouched in that case.
+/// R39: returns whether the task was actually inserted by this call. False
+/// covers the freed-task poison, the exiting-task guard, AND the class
+/// enqueues' own on_rq double-enqueue guard (rt/fair/dl all return false
+/// when it skips — R7-B5 depends on that to keep grq.nr_running balanced),
+/// which is unreachable for every legitimate caller state. On false the
+/// task's state is left untouched (SLEEPING stays wakeable; a prev that was
+/// already RUNNING stays RUNNING — it is on_cpu, so the divergence is the
+/// pre-existing stale-on_rq form, not manufactured here).
 unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool {
     if task.is_null() {
         return false;
@@ -1196,7 +1303,19 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
         // task SLEEPING — honest and still wakeable — and now also REPORTED
         // to the caller as a failed wake instead of a silent success that
         // consumed the waker's one-shot token while linking nothing.
-        enqueue_task_locked(&mut *grq_guard, task)
+        //
+        // R41 (A-form twin): "still wakeable" is only true if a LATER wake
+        // can succeed — but the refusing guard was the task's own stuck
+        // on_rq=true, which nothing else clears for an unlinked task, so
+        // without the heal below every future wake would also be refused
+        // (the sleeper wedges permanently while the waker's token was
+        // consumed). On refusal, verify actual linkage and heal the stale
+        // flag — the same defense requeue_prev_locked applies to prev.
+        if enqueue_task_locked(&mut *grq_guard, task) {
+            true
+        } else {
+            ensure_linked_locked(&mut *grq_guard, task)
+        }
     }
 }
 

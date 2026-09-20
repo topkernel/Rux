@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.34 第四十/四十一轮：零发现轮 2/2 达成 + B 型活体栈符号化 + prev 重入队防御
+
+**R40 零发现轮（2 agent）**：sched/mm/core **零功能缺陷**（R39 三条 inserted=false 路径推演全过、STOPPED/传播语义、mm 回归、信号全流、DFX 自审；1 处契约注释纠偏）；net/fs 四项重点全过（TcpTxBatch 语义、锁序无新环、sendto 边界、file_id 无截断）+ 外围深挖 1 确证：**IPC 代际 16 位截断**（u32 seq 存储与 16 位编码比较不一致——65536 次分配后 SysV IPC 整体 EINVAL，已修为掩码存储）。
+**R41 B 型活体栈（诊断内核 dfx-taskdump-bt 首战）**：pid 359/360 幻影 RUNNING 的栈顶链 `trap_exit → asm_need_resched → schedule`——任务在 trap 出口抢占点被切出后未被重 pick。修复：`ensure_linked_locked` 验证式防御（enqueue 被拒路径核实 is_linked；未链入则 R41-STALE-ONRQ tripwire + 清陈旧 flag + 重插；已链入则跳过防双链），覆盖 __schedule prev 重入队（requeue_prev_locked）与 wake_up_enqueue 双入口；三类队列新增 is_linked()（CFS/DL 指针扫、RT O(1) 自指检测）。
+**门禁 6/8**（run1 A 型、run2 B 型残余；tripwire 零触发——残余幻影不经拒绝路径）。**第五次布局敏感**：on_rq 字段加入 taskdump 后 10/10 全过——待其复现时 on_rq 一锤定音（在队=pick 侧树/键损坏；不在队=入队侧）。
+
 ### 20.33 第三十九轮：B 型按构造闭合 — enqueue 幻影 RUNNING 根因 + 5 项修复
 
 **R39 专项审计（交错推演全覆盖）**：

@@ -83,6 +83,8 @@ pub fn dump_all_tasks(reason: &str) {
             put_dec(t.pid() as u64);
             puts(" state=");
             puts(state_name(t.state().bits()));
+            puts(" on_rq=");
+            put_dec(t.sched_entity().on_rq.load(Ordering::Relaxed) as u64);
             puts(" policy=");
             puts(policy_name(t));
             puts(" comm=");

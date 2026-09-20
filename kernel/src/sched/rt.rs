@@ -233,6 +233,28 @@ impl RtRunQueue {
         true
     }
 
+    /// R41: whether `task` is ACTUALLY linked on one of the priority
+    /// lists — as opposed to what rt_entity's on_rq flag claims. A task's
+    /// rt_run_list is init()-ed (self-pointing) at Task creation and
+    /// del() re-self-links it on unlink, so a self-pointing or null node
+    /// is provably NOT linked; a linked node's next can never point at
+    /// itself (each node appears at most once per list). Used by
+    /// __schedule's prev requeue to distinguish a legitimately-linked prev
+    /// (RR tick rotation / racing wake) from a stale on_rq=true flag.
+    /// Called with the GRQ lock held; refused-path only.
+    pub fn is_linked(&self, task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+        // SAFETY: task is a valid, null-checked Task pointer; only the
+        // embedded rt_run_list node's link words are read.
+        unsafe {
+            let node = core::ptr::addr_of!((*task).rt_run_list);
+            let next = (*task).rt_run_list.next;
+            !next.is_null() && next != node as *mut ListHead
+        }
+    }
+
     /// Pick the next task to run
     pub fn pick_next(&mut self) -> Option<*mut Task> {
         let prio = self.find_highest_prio()?;

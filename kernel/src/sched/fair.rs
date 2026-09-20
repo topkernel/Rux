@@ -543,6 +543,19 @@ impl CfsRunQueue {
         }
     }
 
+    /// R41: whether `task` is ACTUALLY linked on this queue (scan by
+    /// pointer, mirroring dequeue's lookup) — as opposed to what the
+    /// entity's on_rq flag claims. Used by __schedule's prev requeue to
+    /// distinguish a legitimately-linked prev (racing wake during a
+    /// prepare-to-wait recheck window) from a stale on_rq=true flag.
+    /// Called with the GRQ lock held; only on the enqueue-refused path.
+    pub fn is_linked(&self, task: *mut crate::process::Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+        self.tasks_timeline.iter().any(|(_, &ptr)| ptr == task)
+    }
+
     /// Pick next task to run
     ///
     /// Select task with smallest vruntime

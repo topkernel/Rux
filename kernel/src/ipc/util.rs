@@ -254,11 +254,28 @@ impl<T> IpcIds<T> {
             None => return Err(-28), // ENOSPC
         };
 
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        if seq == 0 {
+        // R40: keep the generation counter inside the 16 bits an IPC ID can
+        // carry. The ID format is (index << 16) | (seq & 0xFFFF) and every
+        // revalidation (find(), the R10-7 loop-top seq checks in
+        // msgsnd/msgrcv/semtimedop) compares the ID's 16-bit seq against
+        // perm.seq — the old full-u32 store meant that once next_seq passed
+        // 0xFFFF (65536 cumulative allocations; alloc+RMID cycles reach this
+        // in a stress loop), every NEWLY created object had an ID whose
+        // encoded seq (e.g. 0 for 65536) that never equaled its stored
+        // perm.seq: msgget/semget/shmget kept succeeding but msgsnd/msgrcv/
+        // semop/msgctl on the returned id all failed EINVAL forever after.
+        // Wrapping at 16 bits (like Linux's bounded seq) keeps id-vs-perm
+        // comparisons stable; a same-(slot,seq) collision needs another
+        // 65536 allocations on the SAME slot after its old object was
+        // removed — the R10-7 revalidation window, not a steady state.
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) & 0xFFFF;
+        let seq = if seq == 0 {
             // seq 0 is reserved, skip to 1
             self.next_seq.store(2, Ordering::Relaxed);
-        }
+            1
+        } else {
+            seq
+        };
 
         obj.get_perm_mut().seq = seq;
 

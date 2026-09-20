@@ -190,6 +190,18 @@ impl DlRunQueue {
         false
     }
 
+    /// R41: whether `task` is ACTUALLY linked on this queue (scan by
+    /// pointer, mirroring dequeue's lookup) — as opposed to what the
+    /// entity's on_rq flag claims. Used by __schedule's prev requeue to
+    /// distinguish a legitimately-linked prev from a stale on_rq=true
+    /// flag. Called with the GRQ lock held; refused-path only.
+    pub fn is_linked(&self, task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+        self.tasks.iter().any(|(_, &ptr)| ptr == task)
+    }
+
     /// Pick the task with earliest deadline
     pub fn pick_next(&mut self) -> Option<*mut Task> {
         if let Some((&_key, &task)) = self.tasks.iter().next() {
