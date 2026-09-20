@@ -601,6 +601,13 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.35 第四十二/四十三轮：SLEEPING-but-linked 丢失唤醒（残余的最简产生器）+ 堆锁 ECALL 排除
+
+**R42 终验发现 1 项 HIGH（已修）**：R39 的 set_state 重排序在"SLEEPING-but-linked 窗口"上破坏了 pre-R39 语义——睡眠者置 SLEEPING（waitqueue/futex 锁下，非 GRQ 锁）到自身 __schedule 摘链之间任务仍在类队列；窗口内 waker 的一次性 token 先耗（wait entry 标 woken/futex 摘链，结果被忽略）→ wake_up_enqueue 因"已在队"拒绝且不置 RUNNING（R41 返回 true 掩盖）→ 睡眠者照常摘链睡去 → **永久挂死**。R41 tripwire 不触发（任务真链入，非 stale flag）。修复：ensure_linked_locked 验证真链入时恢复 set_state(RUNNING)（比 pre-R39 更窄：仅 GRQ 锁下验证链入时翻转）。**这是 R39 以来历轮门禁静默残余的最简可构造产生器。**
+**R43（A 型假说排除）**：堆锁内 R18-1/R9-14 探针的 SBI ECALL（OpenSBI M 态持 console 锁 + 轮询 UART THRE 的双 hart 死等假说）改为 taint 标志（零 ECALL under any lock）。门禁 6/8——A 型仍现，**ECALL 假说排除**。
+**A 型假说矩阵（全部排除或部分解释）**：锁序环（排除，锁序图无环）、锁内分配 panic（R34 修复后仍现）、SBI ECALL/串口背压（R43 排除）、wake 复活（R33 修复后仍现）、prev 重入队幻影（R41 防御 + R42 窗口修复后仍现）。残余特征：持锁 CPU 无 panic 无输出消失、锁漂移（TIMERS/堆/TCP/ROUTE/GRQ）、~12-25% 布局敏感。候选方向（R44+）：QEMU tcg thread=single 的 vcpu 停喂模型、OpenSBI 更深行为、或持锁路径的其余外部交互（virtio MMIO 写在 QEMU 主循环忙时）。
+**循环状态**：R40 零发现 2/2 + R42 发现 1 HIGH——零发现条件未最终达成；A 型为唯一开放问题。
+
 ### 20.34 第四十/四十一轮：零发现轮 2/2 达成 + B 型活体栈符号化 + prev 重入队防御
 
 **R40 零发现轮（2 agent）**：sched/mm/core **零功能缺陷**（R39 三条 inserted=false 路径推演全过、STOPPED/传播语义、mm 回归、信号全流、DFX 自审；1 处契约注释纠偏）；net/fs 四项重点全过（TcpTxBatch 语义、锁序无新环、sendto 边界、file_id 无截断）+ 外围深挖 1 确证：**IPC 代际 16 位截断**（u32 seq 存储与 16 位编码比较不一致——65536 次分配后 SysV IPC 整体 EINVAL，已修为掩码存储）。

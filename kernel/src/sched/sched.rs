@@ -1311,10 +1311,38 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
         // (the sleeper wedges permanently while the waker's token was
         // consumed). On refusal, verify actual linkage and heal the stale
         // flag — the same defense requeue_prev_locked applies to prev.
+        //
+        // R42 (lost wakeup in the sleeper's link-drop window): a `true`
+        // from ensure_linked_locked means the task is LINKED — but this
+        // function's contract is "transitioned AND enqueued", and there is
+        // a fully legitimate, frequently raced producer of exactly this
+        // refusal: the target is between its prepare_to_wait/set_state
+        // (SLEEPING written under the WAITQUEUE/futex-bucket lock, NOT the
+        // GRQ lock) and its own schedule() — still linked on its class
+        // queue (the link is dropped only by its __schedule, under this
+        // same GRQ lock). The waker's one-shot token (wait-queue entry
+        // marked woken, futex waiter unlinked from the chain, semaphore/
+        // pipe token consumed) is spent BEFORE Task::wake_up returns, and
+        // wait-queue/futex wakers ignore the result — so leaving the state
+        // SLEEPING here lets the sleeper's __schedule dequeue it with no
+        // future wake available: a permanent SMP hang (the silent form-A
+        // residual in every gate since R39; the R41 tripwire never fires
+        // because the task is genuinely linked — this is NOT the stale
+        // flag the heal below targets). Flip the state, exactly as the
+        // pre-R39 unconditional set_state did for this window: the
+        // sleeper's schedule() then sees prev_running, stays linked, and
+        // its wait loop re-checks the condition the waker just made true
+        // (a spurious wake simply loops back to sleep). For the heal
+        // branch ensure_linked_locked's re-insert already set RUNNING;
+        // for the poison/dead refusal it returned false and we pass that
+        // through untouched.
         if enqueue_task_locked(&mut *grq_guard, task) {
             true
+        } else if ensure_linked_locked(&mut *grq_guard, task) {
+            (*task).set_state(TaskState::new(TaskState::RUNNING));
+            true
         } else {
-            ensure_linked_locked(&mut *grq_guard, task)
+            false
         }
     }
 }

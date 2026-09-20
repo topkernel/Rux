@@ -369,25 +369,15 @@ impl BuddyAllocator {
                 if !crate::sched::sched::IN_TASK_ALLOC.load(core::sync::atomic::Ordering::Acquire)
                     && crate::sched::sched::task_page_is_owned(addr as *const u8)
                 {
-                    const MSG: &[u8] = b"heap: DOUBLE-HANDOFF page=0x";
-                    for &b in MSG { sbi_rt::legacy::console_putchar(b as usize); }
-                    let mut sh = 64;
-                    while sh > 0 {
-                        sh -= 4;
-                        let nb = ((addr >> sh) & 0xF) as u8;
-                        sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
-                    }
-                    const M2: &[u8] = b" ra=0x";
-                    for &b in M2 { sbi_rt::legacy::console_putchar(b as usize); }
-                    let mut ra: usize;
-                    unsafe { core::arch::asm!("mv {}, ra", out(reg) ra, lateout("x1") _, options(nomem, nostack)); }
-                    sh = 64;
-                    while sh > 0 {
-                        sh -= 4;
-                        let nb = ((ra >> sh) & 0xF) as u8;
-                        sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
-                    }
-                    sbi_rt::legacy::console_putchar(b'\n' as usize);
+                    // R43: record WITHOUT printing. The old SBI ecall ran
+                    // while the BUDDY lock was held; OpenSBI's putchar holds
+                    // the firmware console lock and polls UART THRE — a
+                    // throttled chardev parks the calling hart (and any
+                    // other hart in the firmware) forever, each holding its
+                    // own kernel lock: the A-form wedge signature (no panic,
+                    // no output, migrating lock). Taint only; read via
+                    // /proc or the DFX taskdump later.
+                    crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R18-1 double-handoff
                 }
                 return addr as *mut u8;
             }
@@ -412,17 +402,9 @@ impl BuddyAllocator {
         {
             let meta = self.meta.get(page_idx);
             if meta.free != 0 || meta.order != order as u8 {
-                let msg = b"buddy: DOUBLE-FREE/HOARD addr=0x";
-                for &b in msg {
-                    sbi_rt::legacy::console_putchar(b as usize);
-                }
-                let mut sh = 64;
-                while sh > 0 {
-                    sh -= 4;
-                    let nb = ((addr >> sh) & 0xF) as u8;
-                    sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
-                }
-                sbi_rt::legacy::console_putchar(b'\n' as usize);
+                // R43: taint-only (SBI ecall under the heap lock was an
+                // A-form wedge ingredient — see the R18-1 note above).
+                crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
                 return;
             }
         }
