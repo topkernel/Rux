@@ -601,6 +601,13 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.32 第三十八轮：B 型确定性研究 — RUNNING-but-unscheduled 形态确认 + 栈回溯工具
+
+**icount 确定性捕获链闭环**（test/probe-wedge.py）：icount 下 B 型在特定二进制 100% 复现（第 4 次 `echo PP | cat` 必挂）；探测器按 guest 输出节奏驱动（icount 下等待不改变指令时序），挂起后注入 UART magic `DUMP!` → RX 中断触发 taskdump——**首次拿到 B 型挂起时刻的活体任务快照**。
+**B 型形态确认**：pid 344（mrsh）**state=RUNNING 却不在任何 CPU 上**（4 CPU 全 wfi idle、运行队列空）——**置了 RUNNING 但不在 GRQ**。头号嫌疑：R36 的 pipe/io_completion NEW-C2 撤销（dequeue_task 补偿）在特定时序下误摘仍需运行的任务，或 wake_up 置 RUNNING 与入队之间的窗口。次嫌疑：344 是 mrsh 的 wait4 轮询路径。
+**布局敏感性第四次证实**：任何代码改动（本轮 taskdump 加回溯）都使 B 型在 icount 下消失——时序依赖竞争的标准形态；"改代码→复现消失"的迭代是死路，后续以**剩余嫌疑面代码审计**（NEW-C2 补偿族正确性、wake_up_enqueue 入队完整性）+ 栈回溯工具伏击（任何布局复现即出栈）推进。
+**DFX 增强**：taskdump 每任务打印 thread.sp + 内核栈向下扫描的 6 个代码区返回地址（粗回溯，SBI 直写中断安全）。
+
 ### 20.31 第三十七轮：timer 槽位表重构搁置 + icount 确定性捕获工具（观测者悖论攻破）
 
 **R37 重构（timer.rs 两表合一固定槽位、位图引导、锁内零分配、18 调用点零改动、语义逐 API 保持）技术完成但搁置**：R37 版门禁 5/8（3 死锁）vs R36 基线同期 4/4 + 7/8——差异在门禁自身 ~12-25% 时序波动范围内，收益未证明且回归风险存在。草案留 docs/development/r37-timer-slotted-table-draft.rs，待持有者身份明确后再评估合入。

@@ -26,6 +26,16 @@ fn puts(s: &str) {
     }
 }
 
+fn put_hex(v: u64) {
+    let mut shift = 64;
+    while shift > 0 {
+        shift -= 4;
+        let nibble = (v >> shift) & 0xF;
+        let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+        putc(c);
+    }
+}
+
 fn put_dec(mut v: u64) {
     let mut buf = [0u8; 20];
     let mut n = 0;
@@ -86,6 +96,29 @@ pub fn dump_all_tasks(reason: &str) {
                 }
             }
             putc(b'\n');
+            // R38: coarse stack backtrace — print thread.sp and the first
+            // code-region words scanning down the kernel stack (return
+            // addresses), for wedged-sleeper and RUNNING-but-unscheduled
+            // diagnosis. Guarded to plausible kernel-stack pointers only.
+            let sp = t.thread().sp;
+            if (sp >> 48) == 0xffff && (sp & 7) == 0 && sp > 0x1000 {
+                puts("     sp=");
+                put_hex(sp);
+                let base = sp as *const u64;
+                let mut shown = 0;
+                for k in 0..40 {
+                    // SAFETY: diagnostic read within the task's own kernel
+                    // stack pages (mapped while the Task exists).
+                    let v = unsafe { core::ptr::read_volatile(base.wrapping_sub(k)) };
+                    if v >= 0xffffffff80000000 && v < 0xffffffff80200000 && (v & 1) == 0 {
+                        putc(b' ');
+                        put_hex(v);
+                        shown += 1;
+                        if shown >= 6 { break; }
+                    }
+                }
+                puts("\n");
+            }
         })
     };
     puts("=== ");
