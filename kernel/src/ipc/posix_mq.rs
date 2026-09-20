@@ -473,21 +473,18 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
             }
         }
 
-        // Add to wait queue WHILE holding messages lock — prevents lost wakeup
+        // R39: register + set INTERRUPTIBLE atomically under the WQ's own
+        // lock (prepare_to_wait). The old add()+set_state pair held the
+        // messages lock, but the WAKER takes the WQ lock — a wake landing
+        // between the two calls consumed the one-shot token (entry marked
+        // woken) while Task::wake_up dropped it (target still RUNNING);
+        // with no message-recheck before schedule() the receiver then
+        // blocked forever despite a message being present.
         let current = match crate::sched::current() {
             Some(t) => t,
             None => return -(errno::ESRCH as i64),
         };
-        let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
-        mq.wq_send.add(wq_entry);
-
-        // SAFETY: current is a valid raw pointer from sched::current();
-        // set_state is safe to call on the current task before schedule().
-        unsafe {
-            (*current).set_state(
-                crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
-            );
-        }
+        mq.wq_send.prepare_to_wait(current as *mut _, false, true);
 
         // Release lock, then schedule. Arm a wakeup timer for the deadline
         // so an empty queue with no producer still returns ETIMEDOUT (the
@@ -638,21 +635,13 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
             }
         }
 
-        // Add to wait queue WHILE holding messages lock — prevents lost wakeup
+        // R39: atomic register + INTERRUPTIBLE under the WQ lock — same
+        // lost-wakeup closure as mq_timedsend above.
         let current = match crate::sched::current() {
             Some(t) => t,
             None => return -(errno::ESRCH as i64),
         };
-        let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
-        mq.wq_recv.add(wq_entry);
-
-        // SAFETY: current is a valid raw pointer from sched::current();
-        // set_state is safe to call on the current task before schedule().
-        unsafe {
-            (*current).set_state(
-                crate::process::task::TaskState::new(crate::process::task::TaskState::INTERRUPTIBLE),
-            );
-        }
+        mq.wq_recv.prepare_to_wait(current as *mut _, false, true);
 
         // Release lock, then schedule. Arm a wakeup timer for the deadline
         // so an empty queue with no producer still returns ETIMEDOUT (the

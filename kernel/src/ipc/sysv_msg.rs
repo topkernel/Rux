@@ -457,19 +457,15 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                     Some(t) => t,
                     None => return -(errno::ESRCH as i64),
                 };
-                let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
-                entry.inner.wq_send.add(wq_entry);
-
-                // Set INTERRUPTIBLE while holding lock to prevent lost wakeup
-                // SAFETY: current is a valid raw pointer from sched::current();
-                // set_state is safe to call on the current task before schedule().
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(
-                            crate::process::task::TaskState::INTERRUPTIBLE,
-                        ),
-                    );
-                }
+                // R39: prepare_to_wait registers the entry AND sets
+                // INTERRUPTIBLE atomically under the WQ's own lock. The old
+                // add()+set_state() pair ran under the MSG_IDS slots lock —
+                // but the WAKER takes the WQ lock, not the slots lock, so a
+                // wake landing between the two calls marked our entry woken
+                // and was DROPPED (Task::wake_up saw RUNNING): for an RMID
+                // wake the one-shot token was consumed with the queue going
+                // away, and the sleeper blocked forever (signal-only exit).
+                entry.inner.wq_send.prepare_to_wait(current as *mut _, false, true);
             }
         }
 
@@ -702,19 +698,11 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                     Some(t) => t,
                     None => return -(errno::ESRCH as i64),
                 };
-                let wq_entry = crate::process::wait::WaitQueueEntry::new(current as *mut _, false);
-                entry.inner.wq_recv.add(wq_entry);
-
-                // Set INTERRUPTIBLE while holding lock to prevent lost wakeup
-                // SAFETY: current is a valid raw pointer from sched::current();
-                // set_state is safe to call on the current task before schedule().
-                unsafe {
-                    (*current).set_state(
-                        crate::process::task::TaskState::new(
-                            crate::process::task::TaskState::INTERRUPTIBLE,
-                        ),
-                    );
-                }
+                // R39: atomic register + INTERRUPTIBLE under the WQ lock —
+                // same lost-wakeup closure as sys_msgsnd (see the comment
+                // there; the old add()+set_state pair let a waker consume
+                // the one-shot token while we were still RUNNING).
+                entry.inner.wq_recv.prepare_to_wait(current as *mut _, false, true);
             }
         }
 

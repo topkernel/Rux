@@ -647,22 +647,24 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
                                             }
                                         }
                                     }
-                                    let wq_entry = crate::process::wait::WaitQueueEntry::new(
-                                        current as *mut _, false,
+                                    // R39: register + set INTERRUPTIBLE
+                                    // atomically under the WQ's own lock
+                                    // (prepare_to_wait). The old add()+
+                                    // set_state pair ran under the
+                                    // SEM_IDS slots lock, but the WAKER
+                                    // (V / IPC_RMID) takes the WQ lock — a
+                                    // wake landing between the two calls
+                                    // consumed the one-shot token (entry
+                                    // marked woken) while Task::wake_up
+                                    // dropped it (target still RUNNING);
+                                    // the R7-B6 retry below covers a V's
+                                    // condition but NOT an RMID wake, so
+                                    // the sleeper blocked forever.
+                                    entry.inner.wq.prepare_to_wait(
+                                        current as *mut _,
+                                        false,
+                                        true,
                                     );
-                                    entry.inner.wq.add(wq_entry);
-
-                                    // Set INTERRUPTIBLE while holding lock
-                                    // to prevent lost wakeup
-                                    // SAFETY: current is a valid raw pointer from sched::current();
-                                    // set_state is safe to call on the current task before schedule().
-                                    unsafe {
-                                        (*current).set_state(
-                                            crate::process::task::TaskState::new(
-                                                crate::process::task::TaskState::INTERRUPTIBLE,
-                                            ),
-                                        );
-                                    }
                                 }
                             }
 

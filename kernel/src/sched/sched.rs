@@ -835,6 +835,12 @@ unsafe fn __schedule() {
 
     // Re-enqueue prev if still runnable and not idle
     if prev_running && prev_pid != 0 {
+        // R39: if the insert is refused here (stale on_rq guard divergence),
+        // prev parks RUNNING-but-unlinked — the B-form morphology. The
+        // enqueue now leaves state untouched on refusal, and this call's
+        // result is discarded as before (prev's state was already RUNNING
+        // when we got here), but the divergence is no longer silently
+        // manufactured by this function.
         enqueue_task_locked(&mut *grq_guard, prev);
     }
 
@@ -984,9 +990,14 @@ unsafe fn mark_picked_on_cpu(task: *mut Task) {
 }
 
 /// Enqueue a task into the global RQ (called with GRQ lock held).
-unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
+///
+/// R39: returns whether the task is now linked on a class queue (true also
+/// when the on_rq guard skipped because it was ALREADY linked). False means
+/// the enqueue was refused (freed/exiting task, or an unreachable class
+/// refusal) — the task's state is left untouched in that case.
+unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool {
     if task.is_null() {
-        return;
+        return false;
     }
 
     // R15-6 (S-R resurrection guard): refuse to enqueue a FREED Task.
@@ -1021,7 +1032,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
                 sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
             }
             sbi_rt::legacy::console_putchar(b'\n' as usize);
-            return;
+            return false;
         }
     }
 
@@ -1043,14 +1054,28 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
             // which nests the UART lock inside GRQ).
             const MSG: &[u8] = b"ENQ-DEAD-TASK dropped\n";
             for &b in MSG { sbi_rt::legacy::console_putchar(b as usize); }
-            return;
+            return false;
         }
     }
 
+    // R39 (B-form hardening): write RUNNING only when the task is actually
+    // going to be linked. The old unconditional set_state(RUNNING) ran
+    // BEFORE the class insert; every class insert can silently refuse via
+    // its on_rq double-enqueue guard. For a task whose on_rq flag is
+    // (erroneously or stale-ly) true while it is NOT linked in the tree,
+    // the old order produced EXACTLY the captured B-form morphology —
+    // state=RUNNING, task on no queue and no CPU, never scheduled again
+    // (icount round-38 snapshot: pid 344 mrsh, 4 CPUs wfi-idle, runqueues
+    // empty). With the write moved after the insert decision:
+    //   - every legitimate path is unchanged — all callers reach here with
+    //     state==RUNNING whenever the guard legitimately skips (a linked
+    //     task is always RUNNING: __schedule re-enqueues only prev_running,
+    //     the RR tick rotation gates on RUNNING, fork/kthread tasks are
+    //     freshly inserted, change_task_policy dequeues before re-enqueue);
+    //   - a refused insert now leaves the task SLEEPING (honest, form-A,
+    //     still wakeable) instead of a phantom RUNNING that nothing will
+    //     ever schedule.
     let policy = (*task).policy();
-
-    // Set task state to RUNNING
-    (*task).set_state(TaskState::new(TaskState::RUNNING));
 
     // R7-B5: count only actual insertions. The class enqueues all carry a
     // double-enqueue guard (on_rq); incrementing nr_running unconditionally
@@ -1078,8 +1103,12 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
     };
 
     if inserted {
+        // Linked (or verifiably already linked) — now make the state match
+        // the queue membership (R39 ordering, see above).
+        (*task).set_state(TaskState::new(TaskState::RUNNING));
         grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
+    inserted
 }
 
 /// Enqueue a task and try to wake an idle CPU.
@@ -1100,6 +1129,7 @@ pub fn enqueue_task(task: &'static mut Task) {
     unsafe {
         enqueue_task_locked(&mut *grq_guard, task_ptr);
     }
+    // (fresh fork/init/kthread task: insert always succeeds; result unused)
 
     // Check for cross-CPU preemption (RT/DL)
     let policy = task.policy();
@@ -1161,9 +1191,13 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
             // inside enqueue_task_locked.)
             return false;
         }
-        enqueue_task_locked(&mut *grq_guard, task);
+        // R39: propagate the insert result. A refused insert (only possible
+        // via a guard divergence for a sleeping/STOPPED target) leaves the
+        // task SLEEPING — honest and still wakeable — and now also REPORTED
+        // to the caller as a failed wake instead of a silent success that
+        // consumed the waker's one-shot token while linking nothing.
+        enqueue_task_locked(&mut *grq_guard, task)
     }
-    true
 }
 
 /// Check if a newly-enqueued RT task should preempt a running task on another CPU.
@@ -1229,10 +1263,16 @@ fn check_dl_preempt(task: *mut Task, cpus_allowed: u32) {
 /// Dequeue a task from the global RQ.
 pub fn dequeue_task(task: &Task) {
     let task_ptr = task as *const Task as *mut Task;
-    let policy = task.policy();
 
     let mut grq_guard = grq().lock_irqsave();
 
+    // R39: read the policy UNDER the GRQ lock. The old read raced
+    // change_task_policy (which swaps policy + migrates the class queues
+    // under this same lock): a policy captured before the lock could
+    // address the WRONG class queue — dequeuing nothing from the new class
+    // while believing the compensation succeeded, or worse, no-op'ing the
+    // exit-path dequeue of a task that had just been re-linked elsewhere.
+    let policy = task.policy();
     let actually_dequeued = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
             // R31-5: propagate the real dequeue result — the hardcoded
@@ -1558,7 +1598,19 @@ pub fn scheduler_tick() {
                     // state read is race-free.
                     if (*current).state() == TaskState::new(TaskState::RUNNING) {
                         let mut grq_guard = grq().lock_irqsave();
-                        grq_guard.rt_rq.enqueue(current, false);
+                        // R39: propagate the insert result and pair the
+                        // grq.nr_running count. The rotation links a RUNNING
+                        // task that __schedule will then NOT re-count (its
+                        // on_rq guard skips the insert, so the fetch_add
+                        // there never fires) — every RR rotation leaked one
+                        // count from the atomic, drift that any future
+                        // reader of grq.nr_running would inherit.
+                        if grq_guard.rt_rq.enqueue(current, false) {
+                            grq_guard.nr_running.fetch_add(
+                                1,
+                                core::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
                         set_need_resched(); // Set before dropping lock to prevent lost wake-up
                         drop(grq_guard);
                     }

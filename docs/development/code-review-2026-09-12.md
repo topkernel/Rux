@@ -601,6 +601,20 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.33 第三十九轮：B 型按构造闭合 — enqueue 幻影 RUNNING 根因 + 5 项修复
+
+**R39 专项审计（交错推演全覆盖）**：
+- **NEW-C2 补偿误摘——排除**（反证成立）：全部 24 处补偿点含任意指令边界抢占的完整推演——每处 dequeue 作用于执行中任务，RUNNING+离队对执行中任务正确，下一次 __schedule 必然重入队；双重摘除在 GRQ 锁全序下不可构造。
+- **B 型唯一产生器锁定**：`enqueue_task_locked` 的**无条件先置 RUNNING 后类插入**——类插入经 on_rq 守卫静默拒绝时（陈旧 on_rq=true），任务幻影 RUNNING：不在任何队列、不在任何 CPU、无人再调度——**与 icount 活体快照（pid 344 RUNNING + 空 GRQ + 4 CPU wfi）精确形态匹配**。
+**修复（5 项）**：
+1. set_state(RUNNING) 移到插入决策之后（仅 inserted==true 才写；被拒时诚实保持 SLEEPING 可再唤醒）；4 个调用点全部核验行为等价。
+2. wake_up_enqueue 传播插入结果（拒绝不再谎报成功）。
+3. dequeue_task 的 policy() 读取移入 GRQ 锁内（与 change_task_policy 竞态会摘错类队列）。
+4. RR tick 轮转配对 nr_running 计数（原每次轮转泄漏 1）。
+5. sysv_msg/sem/posix_mq 共 5 处 add()+set_state 非原子 → 原子 prepare_to_wait（一次性唤醒令牌在 RUNNING 时被消费 → RMID/空 mq 收端永睡，form-A 确证）。
+**门禁 7/8**：B 型 8 轮零复现（闭合确认）；run8 A 型死锁（锁漂移至 GRQ，~12% 残余）。taskdump 栈回溯 feature 化（dfx-taskdump-bt，默认关——其代码曾使堆锁死锁率升到 50%，违反 DFX 零开销原则）。
+**A 型残余（唯一未解）**：持锁者消失无 panic 无消息，锁在 TIMERS/堆/TCP/ROUTE/GRQ 间漂移——R40 用 owner feature + 栈回溯 feature 的组合构建伏击。
+
 ### 20.32 第三十八轮：B 型确定性研究 — RUNNING-but-unscheduled 形态确认 + 栈回溯工具
 
 **icount 确定性捕获链闭环**（test/probe-wedge.py）：icount 下 B 型在特定二进制 100% 复现（第 4 次 `echo PP | cat` 必挂）；探测器按 guest 输出节奏驱动（icount 下等待不改变指令时序），挂起后注入 UART magic `DUMP!` → RX 中断触发 taskdump——**首次拿到 B 型挂起时刻的活体任务快照**。
