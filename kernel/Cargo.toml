@@ -29,6 +29,10 @@ unit-test = []  # Enable unit tests (only used during testing)
 # Zero-cost when off; enabled when hunting lock deadlocks
 # (see test/hunt-wedge.sh and docs/guides/debugging.md).
 dfx-lock-owner = []
+# DFX: per-task stack backtrace lines in taskdump (read_volatile scan).
+# Off by default: the extra code shifts layout and measurably widens the
+# heap-lock race window; enable only when a wedge is being hunted.
+dfx-taskdump-bt = []
 
 [[bin]]
 name = "rux"
