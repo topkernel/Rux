@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.31 第三十七轮：timer 槽位表重构搁置 + icount 确定性捕获工具（观测者悖论攻破）
+
+**R37 重构（timer.rs 两表合一固定槽位、位图引导、锁内零分配、18 调用点零改动、语义逐 API 保持）技术完成但搁置**：R37 版门禁 5/8（3 死锁）vs R36 基线同期 4/4 + 7/8——差异在门禁自身 ~12-25% 时序波动范围内，收益未证明且回归风险存在。草案留 docs/development/r37-timer-slotted-table-draft.rs，待持有者身份明确后再评估合入。
+**锁漂移确证**：残余死锁的锁形态随修复迁移（TIMERS→堆锁→ROUTE_TABLE）——持有者死于与具体锁无关的路径：不 panic（putchar_no_lock 直写 THR 无 THRE 轮询，panic 消息不可能被吞/背压）、不打印、不在任何 CPU 上（icount 现场：cpu2 等锁、cpu0/1 存活于中断处理、cpu3 内核取指 fault）——**持锁被调度走/持锁死循环**是剩余假设。
+**icount 确定性捕获（R38 标准武器）**：`-icount shift=2` 使时序按指令数确定推进，monitor 不再影响复现——首轮即捕获完整 4-CPU 现场（此前 owner/monitor/FIFO 一切观测手段都掩盖复现）。工具入库 test/（hunt-wedge.sh 的确定性模式）。dump 栈提取的 $sp 展开问题待修。
+
 ### 20.30 第三十六轮：零发现验证轮 — 1/4 零发现 + 7 项确证（3 HIGH）
 
 四个复审 agent（net / fs+ipc / sched+mm / core+drivers）对 R32-R35 改动面对抗验证：
