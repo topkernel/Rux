@@ -47,7 +47,7 @@ This is the **highest guiding principle** for Rux kernel development. All design
   - ❌ ARM64 (aarch64) - Removed, not maintained
   - ❌ x86_64 - Not implemented
 - **Goal**: Linux-compatible operating system kernel
-- **Phase**: Phase 36 completed (filesystem refactoring complete)
+- **Phase**: Phase 52 (process exit race & defensive checks) — see `docs/progress/roadmap.md`
 
 ## Key Files
 
@@ -97,16 +97,16 @@ make test
 - **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
 - **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status
 - **[Project Structure](docs/architecture/structure.md)** - Source code organization
-- **[Test Report](docs/tests/unit-test-report.md)** - 203 test cases detailed analysis
+- **[Test Report](docs/test/unit-test-report.md)** - Kernel unit test cases detailed analysis
 - **[Design Principles](docs/architecture/design.md)** - POSIX compatibility and Linux ABI alignment
 
 ### Architecture Documentation
 
 - **[RISC-V Architecture](docs/architecture/riscv64.md)** - RV64GC support details
 - **[Boot Process](docs/architecture/boot.md)** - From OpenSBI to kernel boot
-- **[Changelog](docs/development/changelog.md)** - Version history and update records
+- **[Changelog](docs/progress/changelog.md)** - Version history and update records
 
 ### Development Guides
 
 - **[Development Workflow](docs/guides/development.md)** - Contributing code and development standards
-- **[User Programs](docs/development/user-programs.md)** - ELF loading and execve
+- **[User Programs](docs/archive/user-programs.md)** - ELF loading and execve (archived)

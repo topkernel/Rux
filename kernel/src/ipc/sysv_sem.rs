@@ -221,6 +221,13 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             0
         }
         IPC_STAT => {
+            // R32 (NEW-4): Linux requires S_IRUGO for IPC_STAT — the old
+            // path used the initial perm-free find() and leaked the set's
+            // metadata (perm/uid/gid/ctime) to any caller.
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
             let buf_ptr = arg as *mut SemidDsUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>()) {
                 return -(errno::EFAULT as i64);
@@ -235,7 +242,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             };
             {
                 let slots = SEM_IDS.slots.lock();
-                if let Some(ref entry) = slots[idx] {
+                if let Some(ref entry) = slots[idx2] {
                     ds.sem_perm = entry.inner.perm.to_uapi();
                     ds.sem_otime = entry.inner.sem_otime.load(Ordering::Relaxed);
                     ds.sem_ctime = entry.inner.sem_ctime.load(Ordering::Relaxed);
@@ -319,12 +326,17 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             0
         }
         GETALL => {
+            // R32 (NEW-4): Linux requires S_IRUGO for GETALL — was missing.
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
             let array_ptr = arg as *mut i32;
             if array_ptr.is_null() {
                 return -(errno::EFAULT as i64);
             }
             let slots = SEM_IDS.slots.lock();
-            if let Some(ref entry) = slots[idx] {
+            if let Some(ref entry) = slots[idx2] {
                 let nsems = entry.inner.nsems();
                 if !access_ok(array_ptr as usize, nsems * 4) {
                     return -(errno::EFAULT as i64);
@@ -371,8 +383,13 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             0
         }
         GETPID => {
+            // R32 (NEW-4): Linux requires S_IRUGO for GETPID — was missing.
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
             let slots = SEM_IDS.slots.lock();
-            if let Some(ref entry) = slots[idx] {
+            if let Some(ref entry) = slots[idx2] {
                 return entry.inner.sem_padid.load(Ordering::Relaxed) as i64;
             }
             return -(errno::EINVAL as i64);
@@ -381,8 +398,13 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if semnum < 0 {
                 return -(errno::EINVAL as i64);
             }
+            // R32 (NEW-4): Linux requires S_IRUGO for GETNCNT — was missing.
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
             let slots = SEM_IDS.slots.lock();
-            if let Some(ref entry) = slots[idx] {
+            if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
                     return -(errno::EINVAL as i64);
@@ -397,8 +419,13 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if semnum < 0 {
                 return -(errno::EINVAL as i64);
             }
+            // R32 (NEW-4): Linux requires S_IRUGO for GETZCNT — was missing.
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
             let slots = SEM_IDS.slots.lock();
-            if let Some(ref entry) = slots[idx] {
+            if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
                     return -(errno::EINVAL as i64);
@@ -713,6 +740,34 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
                                     dl, crate::sched::get_current_pid(),
                                 ))
                                 .unwrap_or(0);
+                            // R32 (NEW-3 twin): timer pool exhausted — a
+                            // timed semop would sleep forever without the
+                            // deadline timer. Unregister and fail instead.
+                            if deadline.is_some() && timer_id == 0 {
+                                {
+                                    let slots = SEM_IDS.slots.lock();
+                                    if let Some(ref entry) = slots[idx] {
+                                        if let Some(ref sems) = *entry.inner.sems.lock() {
+                                            let block_sem = sops[blocking_idx.unwrap()].sem_num as usize;
+                                            if block_sem < sems.len() {
+                                                if sops[blocking_idx.unwrap()].sem_op < 0 {
+                                                    sems[block_sem].ncnt.fetch_sub(1, Ordering::Relaxed);
+                                                } else if sops[blocking_idx.unwrap()].sem_op == 0 {
+                                                    sems[block_sem].zcnt.fetch_sub(1, Ordering::Relaxed);
+                                                }
+                                            }
+                                        }
+                                        entry.inner.wq.remove(current as *mut _);
+                                    }
+                                }
+                                (*current).set_state(
+                                    crate::process::task::TaskState::new(
+                                        crate::process::task::TaskState::RUNNING,
+                                    ),
+                                );
+                                crate::sched::dequeue_task(&*current);
+                                return -(errno::ENOMEM as i64);
+                            }
                             crate::sched::schedule();
                             if timer_id != 0 {
                                 crate::timer::del_timer(timer_id);

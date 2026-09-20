@@ -371,14 +371,33 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
         return -(errno::ESRCH as i64);
     }
 
-    // Set RT priority if RT task
-    // SAFETY: task is validated non-null above; we have exclusive access via scheduler lock.
-    unsafe {
-        let task_ref = &mut *task;
-        let policy = task_ref.policy();
-        if matches!(policy, crate::process::task::SchedPolicy::Fifo | crate::process::task::SchedPolicy::Rr) {
-            task_ref.set_rt_priority(param.sched_priority as u32);
+    // R32-F4b: this used to write rt_priority directly. rt_rq keys its
+    // per-priority lists AND its bitmap by rt_priority, so mutating the
+    // field of a linked task made the next dequeue compute the WRONG prio
+    // index — it cleared another priority's bitmap bit and left
+    // highest_prio stale (phantom runnable priorities / lost tasks). It
+    // also skipped the CAP_SYS_NICE gate and the [1,99] range check that
+    // sys_sched_setscheduler enforces. Route through change_task_policy()
+    // (dequeue + field update + re-enqueue under the GRQ lock) and mirror
+    // the setscheduler validation.
+    // SAFETY: task is validated non-null above; policy() reads the task's field.
+    let policy = unsafe { (*task).policy() };
+    if matches!(policy, crate::process::task::SchedPolicy::Fifo | crate::process::task::SchedPolicy::Rr) {
+        // RT parameter changes require CAP_SYS_NICE, mirroring the RT
+        // policy-switch check in sys_sched_setscheduler.
+        if !crate::security::capable(crate::security::CAP_SYS_NICE) {
+            return -(errno::EPERM as i64);
         }
+        // Priority validation (review PROC-P06): RT priorities live in [1,99].
+        if !(1..=99).contains(&param.sched_priority) {
+            return -(errno::EINVAL as i64);
+        }
+        // change_task_policy takes the GRQ lock internally and
+        // re-positions the task in the RT priority lists.
+        crate::sched::change_task_policy(task, policy, param.sched_priority as u32);
+    } else if param.sched_priority != 0 {
+        // Non-RT policies must carry priority 0 (review PROC-P06).
+        return -(errno::EINVAL as i64);
     }
 
     0
@@ -570,39 +589,89 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
         return -(errno::ESRCH as i64);
     }
 
-    // SAFETY: task is validated non-null above; we have exclusive access via scheduler lock.
-    unsafe {
-        let task_ref = &mut *task;
+    // R32-F4: this used to write policy/priority/DL fields directly. That
+    // bypassed change_task_policy()'s class-queue migration under the GRQ
+    // lock — a queued CFS task stayed linked on cfs_rq while claiming Fifo,
+    // so __schedule's rt_rq dequeue was a no-op and the task was stranded
+    // off every class queue (unrunnable) — and skipped BOTH the
+    // CAP_SYS_NICE gate and the parameter validation that
+    // sys_sched_setscheduler enforces: any task could self-promote to
+    // SCHED_FIFO 99 and starve every CPU, or program nonsense DL params
+    // (runtime 0 throttles the task forever). Mirror the validated
+    // setscheduler path exactly.
+    let policy = attr.sched_policy as i32;
+    if !matches!(policy, SCHED_NORMAL | SCHED_FIFO | SCHED_RR | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE) {
+        return -(errno::EINVAL as i64);
+    }
 
-        // Set policy
-        let new_policy = match attr.sched_policy as i32 {
-            SCHED_NORMAL => crate::process::task::SchedPolicy::Normal,
-            SCHED_FIFO => crate::process::task::SchedPolicy::Fifo,
-            SCHED_RR => crate::process::task::SchedPolicy::Rr,
-            SCHED_BATCH => crate::process::task::SchedPolicy::Batch,
-            SCHED_IDLE => crate::process::task::SchedPolicy::Idle,
-            SCHED_DEADLINE => crate::process::task::SchedPolicy::Deadline,
-            _ => return -(errno::EINVAL as i64),
-        };
-        task_ref.set_policy(new_policy);
+    // Permission check: moving ANY task (including self) ONTO an RT/DL
+    // policy requires CAP_SYS_NICE — mirrors sys_sched_setscheduler
+    // (review syscallb-H12/P06).
+    if matches!(policy, SCHED_FIFO | SCHED_RR | SCHED_DEADLINE)
+        && !crate::security::capable(crate::security::CAP_SYS_NICE)
+    {
+        return -(errno::EPERM as i64);
+    }
 
-        // Set nice for normal tasks
-        if matches!(new_policy, crate::process::task::SchedPolicy::Normal | crate::process::task::SchedPolicy::Batch) {
-            // R31-3c: route through the locked renice helper (bare set_nice
-            // raced the CFS accounting).
-            unsafe { crate::sched::sched::sched_renice_locked(task, attr.sched_nice); }
+    // Priority validation (review PROC-P06): RT priorities live in
+    // [1,99]; every other policy requires 0.
+    if matches!(policy, SCHED_FIFO | SCHED_RR) {
+        if !(1..=99).contains(&(attr.sched_priority as i32)) {
+            return -(errno::EINVAL as i64);
         }
+    } else if attr.sched_priority != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
-        // Set RT priority
-        if matches!(new_policy, crate::process::task::SchedPolicy::Fifo | crate::process::task::SchedPolicy::Rr) {
-            task_ref.set_rt_priority(attr.sched_priority);
-        }
+    // Deadline admission (Linux: 0 < runtime <= deadline <= period, with
+    // period == 0 meaning period = deadline). runtime 0 permanently
+    // throttles the task; runtime > deadline breaks the CBS
+    // replenishment invariant.
+    let dl_period = if policy == SCHED_DEADLINE && attr.sched_period == 0 {
+        attr.sched_deadline
+    } else {
+        attr.sched_period
+    };
+    if policy == SCHED_DEADLINE
+        && (attr.sched_runtime == 0
+            || attr.sched_deadline == 0
+            || attr.sched_runtime > attr.sched_deadline
+            || attr.sched_deadline > dl_period)
+    {
+        return -(errno::EINVAL as i64);
+    }
 
-        // Set deadline parameters
-        if new_policy == crate::process::task::SchedPolicy::Deadline {
-            let dl = task_ref.dl_entity_mut();
-            dl.dl_runtime.store(attr.sched_runtime, core::sync::atomic::Ordering::Release);
-            dl.dl_period.store(attr.sched_period, core::sync::atomic::Ordering::Release);
+    let new_policy = match policy {
+        SCHED_NORMAL => crate::process::task::SchedPolicy::Normal,
+        SCHED_FIFO => crate::process::task::SchedPolicy::Fifo,
+        SCHED_RR => crate::process::task::SchedPolicy::Rr,
+        SCHED_BATCH => crate::process::task::SchedPolicy::Batch,
+        SCHED_IDLE => crate::process::task::SchedPolicy::Idle,
+        SCHED_DEADLINE => crate::process::task::SchedPolicy::Deadline,
+        _ => return -(errno::EINVAL as i64),
+    };
+
+    // SAFETY: task is validated non-null above. Program the DL parameters
+    // BEFORE the policy switch so change_task_policy's re-enqueue
+    // (update_deadline + replenish_runtime) already sees them; they are
+    // inert while the task is not on the Deadline policy.
+    if new_policy == crate::process::task::SchedPolicy::Deadline {
+        let dl = unsafe { (*task).dl_entity_mut() };
+        dl.dl_runtime.store(attr.sched_runtime, core::sync::atomic::Ordering::Release);
+        dl.dl_period.store(dl_period, core::sync::atomic::Ordering::Release);
+    }
+
+    // Apply the policy switch with run-queue migration under the GRQ lock
+    // (review PROC-P07). change_task_policy takes the GRQ lock internally.
+    crate::sched::change_task_policy(task, new_policy, attr.sched_priority);
+
+    // Set nice for normal tasks: route through the locked renice helper
+    // (R31-3c: bare set_nice raced the CFS accounting).
+    if matches!(new_policy, crate::process::task::SchedPolicy::Normal | crate::process::task::SchedPolicy::Batch) {
+        // SAFETY: task is validated non-null above; sched_renice_locked
+        // takes the GRQ lock internally.
+        unsafe {
+            crate::sched::sched::sched_renice_locked(task, attr.sched_nice.clamp(MIN_NICE, MAX_NICE));
         }
     }
 

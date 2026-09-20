@@ -1,6 +1,11 @@
 # Rux Kernel Configuration System Guide
 
-**Last Updated**: 2026-04-09
+**Last Updated**: 2026-09-20
+
+> Note: this guide covers the most commonly used keys. `Kernel.toml`
+> contains additional sections (`[mount]`, `[filesystem]`, `[process]`,
+> `[sync]`, `[graphics]`) not documented here — see the comments in
+> `Kernel.toml` itself.
 
 ## Overview
 
@@ -19,7 +24,7 @@ version = "0.1.0"     # Version number
 default_platform = "riscv64"  # Target platform (default and only supported)
 
 [memory]
-kernel_heap_size = 16         # Kernel heap size (MB)
+kernel_heap_size = 32         # Kernel heap size (MB)
 physical_memory = 2048        # Physical memory (MB)
 page_size = 4096              # Page size
 
@@ -90,7 +95,7 @@ sudo yum install newt
 |-----------|------|---------|-------------|
 | `default_platform` | string | "riscv64" | Target platform |
 | `enable_riscv64` | bool | true | Enable RISC-V 64-bit support |
-| `enable_aarch64` | bool | true | Enable ARM 64-bit support (removed) |
+| `enable_aarch64` | bool | false | Enable ARM 64-bit support (removed, keep false) |
 | `enable_x86_64` | bool | false | Enable x86 64-bit support (not implemented) |
 
 **Note**: Currently only RISC-V 64-bit platform is fully supported and enabled by default.
@@ -99,11 +104,11 @@ sudo yum install newt
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `kernel_heap_size` | integer | 16 | Kernel heap size (MB) |
+| `kernel_heap_size` | integer | 32 | Kernel heap size (MB) |
 | `physical_memory` | integer | 2048 | Physical memory size (MB) |
 | `page_size` | integer | 4096 | Page size (bytes) |
 | `user_stack_size` | integer | 8 | User stack size (MB) |
-| `max_page_tables` | integer | 256 | Maximum page table count |
+| `max_page_tables` | integer | 1024 | Maximum page table count |
 
 ### 4. SMP (Multi-core Support)
 
@@ -180,11 +185,20 @@ File system features:
 | `early_debug` | bool | true | Enable early debug output |
 | `self_test` | bool | false | Enable self-test |
 
-### 10. Debug
+### 10. Debug / Printk
 
+Debug output is under `[debug]`; printk ring buffer, tracing and log level
+live in the separate `[printk]` section of `Kernel.toml`:
+
+`[debug]`:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `debug_output` | bool | true | Enable debug output |
+
+`[printk]`:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `ring_buffer_size` | integer | 1048576 | Printk ring buffer size (bytes) |
 | `profiling` | bool | false | Enable profiling |
 | `memory_trace` | bool | false | Enable memory tracing |
 | `irq_trace` | bool | false | Enable interrupt tracing |
@@ -254,10 +268,8 @@ cargo build --package rux --features riscv64
 
 ### 4. Run Kernel
 ```bash
-# Use test script
+# Use the run script (console mode)
 make run
-# Or
-./test/quick_test.sh
 ```
 
 ## Configuration Examples

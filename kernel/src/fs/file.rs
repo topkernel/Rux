@@ -275,6 +275,29 @@ impl File {
     }
 }
 
+// R31-B3 (v2 completion): the close op deferred by close_fd's close_pending
+// flag runs HERE, in the final dropper's context.  This is NOT the reverted
+// v1 behavior ("close on every Drop"): the flag is only set when close_fd
+// already removed every fd-table slot for this file while a clone was still
+// in flight (a syscall-local Arc or an io_uring pinned file), so ordinary
+// drops — failed opens, intermediate clones, table teardown that ran the op
+// itself — all see `false` and execute nothing.  Those in-flight clones are
+// only ever released in task context (syscall exit / register / ring close),
+// never in IRQ context, so ext4/jbd2 side effects of the deferred close stay
+// out of arbitrary contexts.  Without this hook the flag was set but never
+// consumed and the close op leaked (pipe EOF never delivered, epoll Box and
+// mem-file Box never freed).
+impl Drop for File {
+    fn drop(&mut self) {
+        if self.close_pending.load(Ordering::Acquire) {
+            // SAFETY: we own the File exclusively (refcount reached 0) and
+            // close_fd already committed this close; ops.close was installed
+            // at open time and never mutated afterwards.
+            unsafe { self.close(); }
+        }
+    }
+}
+
 // ============================================================================
 // FdTable - Using Box allocation
 // ============================================================================
@@ -417,6 +440,13 @@ impl FdTable {
             if let Some(file) = file_opt {
                 unsafe {
                     let file_ptr = Arc::as_ptr(&file) as *mut File;
+                    // Clear any close_pending left behind by an earlier
+                    // close of a dup'd slot: count==2 back then meant "another
+                    // fd still holds this file", not an in-flight clone, and
+                    // we run the op right here — a stale flag would make the
+                    // final Drop run the op a SECOND time (dup2 + close of
+                    // both fds double-closed pipes/epoll).
+                    (*file_ptr).close_pending.store(false, Ordering::Release);
                     let ops_ptr = (*file_ptr).ops.get();
                     if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
                         (*file_ptr).close();
@@ -525,8 +555,21 @@ impl Drop for FdTable {
                     entry.count -= 1;
                     if let Some(file) = file_opt {
                         // R10-2: last-reference-only release — see close_fd.
-                        // R31-B3: Drop for File runs the close op.
-                        let _ = file;
+                        // R31-B3 (v2 completion): dup'd files live in several
+                        // slots of the SAME table, so a count>1 here means a
+                        // syscall-local clone is still outstanding — defer to
+                        // the final dropper via close_pending exactly like
+                        // close_fd does.  (The v1 "let _ = file;" erasure
+                        // skipped the close op entirely: process exit never
+                        // closed pipes, so readers never saw EOF.)
+                        if Arc::strong_count(&file) == 1 {
+                            to_close.push(file);
+                        } else {
+                            unsafe {
+                                let file_ptr = Arc::as_ptr(&file) as *mut File;
+                                (*file_ptr).close_pending.store(true, Ordering::Release);
+                            }
+                        }
                     }
                 }
             }
@@ -534,6 +577,9 @@ impl Drop for FdTable {
         for file in to_close {
             unsafe {
                 let file_ptr = Arc::as_ptr(&file) as *mut File;
+                // Clear a possibly-stale deferred flag before running the op
+                // ourselves — same double-close hazard as close_fd.
+                (*file_ptr).close_pending.store(false, Ordering::Release);
                 let ops_ptr = (*file_ptr).ops.get();
                 if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
                     (*file_ptr).close();

@@ -12,12 +12,15 @@ typedef unsigned short u16;
 
 #define __NR_write 64
 #define __NR_read 63
-#define __NR_write 64
 #define __NR_lseek 62
 #define O_TRUNC 0x200
 #define __NR_exit 93
 #define __NR_exit_group 94
-#define __NR_nanosleep 35
+/* RISC-V (asm-generic) numbering: nanosleep is 101; NR 35 is unlinkat.
+ * This was previously misdefined as 35, which made msleep() call
+ * unlinkat(ts, NULL, 0) and return immediately (EFAULT) — every retry
+ * loop busy-spun instead of sleeping. */
+#define __NR_nanosleep 101
 #define __NR_socket 198
 #define __NR_bind 200
 #define __NR_listen 201
@@ -862,13 +865,16 @@ void _start(void)
     if (r == 0 && acc == 0)
         puts_("tcp: echo ok\nNETTEST PASS\n");
     else {
+        /* report the first failing group's code (r==0 means the failure
+         * was in an earlier group recorded in acc) */
+        int code = r ? (int)r : acc;
         char buf[24];
         puts_("NETTEST FAIL code=");
         int i = 0;
-        if (r < 0) { buf[i++] = '-'; r = -r; }
+        if (code < 0) { buf[i++] = '-'; code = -code; }
         char tmp[12];
         int n = 0;
-        do { tmp[n++] = '0' + (r % 10); r /= 10; } while (r);
+        do { tmp[n++] = '0' + (code % 10); code /= 10; } while (code);
         while (n) buf[i++] = tmp[--n];
         buf[i++] = '\n';
         buf[i] = 0;

@@ -136,6 +136,20 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
         // reaps it — otherwise it would sit unreapable forever.
         if (*child).state() == TaskState::new(TaskState::ZOMBIE) {
             let _ = crate::signal::send_signal(1, crate::signal::Signal::SIGCHLD as i32);
+            // init's default SIGCHLD disposition is SIG_IGN, so the signal
+            // path neither pends nor wakes anything. Wake init's child-exit
+            // wait queue directly (same queue the deferred exit-notify path
+            // uses) or a blocked wait4 in init never re-checks its children
+            // and the orphaned zombie leaks.
+            let init_pinned = crate::process::pid_hash::pid_hash_lookup_pinned(1);
+            if !init_pinned.is_null() {
+                // SAFETY: init_pinned is pinned (refcount held); Task lives
+                // until system shutdown.
+                unsafe {
+                    let _ = (*init_pinned).wait_chldexit.wake_up_all();
+                }
+                crate::process::task::Task::task_put(init_pinned);
+            }
         }
     }
 }

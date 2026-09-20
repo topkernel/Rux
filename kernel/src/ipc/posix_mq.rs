@@ -103,8 +103,13 @@ impl PosixMq {
             cbytes: AtomicI32::new(0),
             attr: Spinlock::new(MqAttr {
                 mq_flags: 0,
-                mq_maxmsg: if mq_attr.mq_maxmsg > 0 { mq_attr.mq_maxmsg } else { 10 },
-                mq_msgsize: if mq_attr.mq_msgsize > 0 { mq_attr.mq_msgsize } else { 8192 },
+                // R32 (NEW-9): cap user-supplied attributes. mq_msgsize
+                // bounds the per-message Vec allocation in mq_timedsend,
+                // so an attacker-sized value (GBs) walked straight into
+                // the 32MB kernel heap (R7-D4/SYSA-C1 class). Limits
+                // mirror Linux RLIMIT_MSGQUEUE ballparks.
+                mq_maxmsg: if mq_attr.mq_maxmsg > 0 { mq_attr.mq_maxmsg.min(1024) } else { 10 },
+                mq_msgsize: if mq_attr.mq_msgsize > 0 { mq_attr.mq_msgsize.min(1024 * 1024) } else { 8192 },
                 mq_curmsgs: 0,
                 __reserved: [0; 4],
             }),
@@ -168,16 +173,24 @@ fn mq_parse_name(name_ptr: *const u8) -> Result<alloc::vec::Vec<u8>, i32> {
     if name_ptr.is_null() || !access_ok(name_ptr as usize, 256) {
         return Err(-errno::EFAULT);
     }
-    // Read name byte by byte, max 256 chars
-    let mut name = alloc::vec::Vec::with_capacity(64);
-    for i in 0..256 {
-        // SAFETY: name_ptr was null-checked above; we read up to 256 bytes until
-        // a NUL terminator, staying within a reasonable bound for a queue name.
-        let b = unsafe { core::ptr::read_volatile(name_ptr.add(i)) };
-        if b == 0 {
-            break;
-        }
-        name.push(b);
+    // R32 (NEW-5): copy the whole 256-byte window through the
+    // exception-table path. The old per-byte read_volatile had no
+    // exception entry: a name that ran into an unmapped page before its
+    // NUL terminator faulted the kernel (R20-3 class).
+    let mut raw = [0u8; 256];
+    // SAFETY: name_ptr was null-checked and access_ok-validated for 256
+    // bytes above; raw is a 256-byte stack buffer.
+    let uncopied = unsafe { copy_from_user(raw.as_mut_ptr(), name_ptr, 256) };
+    let copied = 256 - uncopied;
+    if copied == 0 {
+        return Err(-errno::EFAULT);
+    }
+    let name: alloc::vec::Vec<u8> = raw[..copied].iter().copied().take_while(|&b| b != 0).collect();
+    // No NUL within the readable region and the rest is unreadable: the
+    // name is unterminated and would silently truncate to a DIFFERENT
+    // (possibly valid) queue name — report EFAULT instead.
+    if uncopied > 0 && name.len() == copied {
+        return Err(-errno::EFAULT);
     }
     if name.is_empty() || name[0] != b'/' {
         return Err(-errno::EINVAL);
@@ -236,13 +249,17 @@ pub fn sys_mq_open(args: [u64; 6]) -> i64 {
         }
 
         // Allocate a file descriptor
-        let fd = match allocate_mq_fd() {
+        // R32 (NEW-6): allocate + store in ONE critical section. The old
+        // allocate_mq_fd()/store_mq_fd() pair only "reserved" a slot by
+        // leaving it None, so two concurrent mq_open calls could draw the
+        // SAME fd number; the second store overwrote the first, leaking a
+        // refcount and breaking the first caller's fd.
+        let fd = match allocate_and_store_mq_fd(mq.clone()) {
             Some(f) => f,
             None => return -(errno::EMFILE as i64),
         };
 
         mq.refcount.fetch_add(1, Ordering::Relaxed);
-        store_mq_fd(fd as usize, mq);
         return fd as i64;
     }
 
@@ -260,12 +277,17 @@ pub fn sys_mq_open(args: [u64; 6]) -> i64 {
 
     let mq = MQ_TABLE.lock()[idx].as_ref().unwrap().clone();
 
-    let fd = match allocate_mq_fd() {
+    let fd = match allocate_and_store_mq_fd(mq.clone()) {
         Some(f) => f,
-        None => return -(errno::EMFILE as i64),
+        None => {
+            // R32 (NEW-6): no fd available — remove the queue we just
+            // created instead of leaking it in MQ_TABLE forever (it had
+            // refcount 1 with no fd that could ever release it).
+            let mut table = MQ_TABLE.lock();
+            let _dropped = table[idx].take();
+            return -(errno::EMFILE as i64);
+        }
     };
-
-    store_mq_fd(fd as usize, mq);
     fd as i64
 }
 
@@ -465,6 +487,19 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
         let timer_id = deadline
             .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
             .unwrap_or(0);
+        // R32 (NEW-3 twin): timer pool exhausted — a timed send would sleep
+        // forever on a full queue. Remove the wait entry and fail instead.
+        if deadline.is_some() && timer_id == 0 {
+            {
+                let _messages = mq.messages.lock();
+                mq.wq_send.remove(current as *mut _);
+            }
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::RUNNING,
+            ));
+            crate::sched::dequeue_task(&*current);
+            return -(errno::ENOMEM as i64);
+        }
         crate::sched::schedule();
         if timer_id != 0 {
             crate::timer::del_timer(timer_id);
@@ -522,7 +557,15 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
             // Got a message — update stats while holding lock
             let msg = messages.remove(0);
             mq.attr.lock().mq_curmsgs -= 1;
-            let copy_len = if msg.data.len() > msg_len { msg_len } else { msg.data.len() };
+            // R32 (NEW-10): POSIX mq_receive must fail with EMSGSIZE when
+            // the user buffer is smaller than the message — the old silent
+            // truncation destroyed message data.
+            if msg.data.len() > msg_len {
+                messages.insert(0, msg);
+                mq.attr.lock().mq_curmsgs += 1;
+                return -(errno::EMSGSIZE as i64);
+            }
+            let copy_len = msg.data.len();
             mq.cbytes.fetch_sub(copy_len as i32, Ordering::Relaxed);
             mq.rtime.store(ipc_current_time(), Ordering::Relaxed);
             drop(messages);
@@ -608,6 +651,19 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
         let timer_id = deadline
             .map(|dl| crate::timer::add_timer_wakeup(dl, crate::sched::get_current_pid()))
             .unwrap_or(0);
+        // R32 (NEW-3 twin): timer pool exhausted — a timed receive would
+        // sleep forever on an empty queue. Remove the wait entry and fail.
+        if deadline.is_some() && timer_id == 0 {
+            {
+                let _messages = mq.messages.lock();
+                mq.wq_recv.remove(current as *mut _);
+            }
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::RUNNING,
+            ));
+            crate::sched::dequeue_task(&*current);
+            return -(errno::ENOMEM as i64);
+        }
         crate::sched::schedule();
         if timer_id != 0 {
             crate::timer::del_timer(timer_id);
@@ -779,26 +835,18 @@ struct MqFdSlot {
 static MQ_FD_TABLE: Spinlock<[Option<MqFdSlot>; MQ_FDS_MAX]> =
     Spinlock::new([const { None }; MQ_FDS_MAX]);
 
-/// Allocate a file descriptor number for a POSIX MQ.
-fn allocate_mq_fd() -> Option<i32> {
-    let table = MQ_FD_TABLE.lock();
+/// Allocate a file descriptor number for a POSIX MQ and store the queue
+/// reference in one critical section (see R32 NEW-6 note in sys_mq_open).
+fn allocate_and_store_mq_fd(mq: alloc::sync::Arc<PosixMq>) -> Option<i32> {
+    let pid = crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0);
+    let mut table = MQ_FD_TABLE.lock();
     for i in 0..MQ_FDS_MAX {
         if table[i].is_none() {
+            table[i] = Some(MqFdSlot { pid, mq });
             return Some((512 + i) as i32);
         }
     }
     None
-}
-
-/// Store a MQ reference at the given fd slot.
-fn store_mq_fd(fd: usize, mq: alloc::sync::Arc<PosixMq>) {
-    let idx = fd - 512;
-    if idx >= MQ_FDS_MAX {
-        return;
-    }
-    let pid = crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0);
-    let mut table = MQ_FD_TABLE.lock();
-    table[idx] = Some(MqFdSlot { pid, mq });
 }
 
 /// Get the MQ reference at the given fd slot for the current process.
@@ -849,12 +897,22 @@ pub fn mq_fds_cleanup(task: *mut crate::process::Task) {
 
     // Phase 2: Decrement refcounts and free unlinked+last-ref queues.
     for mq in to_free.iter() {
+        // R32 (NEW-7): the exiting process may have been the notifier —
+        // clear the registration so a dead PID does not eat the next
+        // message's notification.
+        if mq.notify_pid.load(Ordering::Relaxed) == pid as i32 {
+            mq.notify_pid.store(0, Ordering::Relaxed);
+        }
         let prev = mq.refcount.fetch_sub(1, Ordering::Relaxed);
         if prev == 1 && mq.is_unlinked() {
             let mut global = MQ_TABLE.lock();
             for gslot in global.iter_mut() {
                 if let Some(ref g) = *gslot {
-                    if g.is_unlinked() && g.name == mq.name {
+                    // R32 (NEW-8): match by Arc identity, not by name —
+                    // after unlink a NEW queue with the same name may
+                    // already occupy the table, and the old name match
+                    // freed the WRONG (still-live) queue.
+                    if g.is_unlinked() && alloc::sync::Arc::ptr_eq(g, mq) {
                         *gslot = None;
                         break;
                     }
@@ -878,8 +936,13 @@ pub fn close_mq_fd(fd: i32) -> i32 {
     let mut table = MQ_FD_TABLE.lock();
     match table[idx].take() {
         Some(slot) if slot.pid == pid => {
-            // Clear notification if this process was the notifier
-            let _ = slot.mq.notify_pid.swap(0, Ordering::Relaxed);
+            // R32 (NEW-7): only clear a notification registered by THIS
+            // process — the old unconditional swap(0) also killed another
+            // process's mq_notify registration when an unrelated fd of
+            // the same queue closed.
+            if slot.mq.notify_pid.load(Ordering::Relaxed) == pid as i32 {
+                slot.mq.notify_pid.store(0, Ordering::Relaxed);
+            }
             // Decrement refcount
             let prev = slot.mq.refcount.fetch_sub(1, Ordering::Relaxed);
             // If unlinked and last reference, free from global table
@@ -888,7 +951,10 @@ pub fn close_mq_fd(fd: i32) -> i32 {
                 let mut global = MQ_TABLE.lock();
                 for gslot in global.iter_mut() {
                     if let Some(ref g) = *gslot {
-                        if g.is_unlinked() && g.name == slot.mq.name {
+                        // R32 (NEW-8): Arc identity, not name — see the
+                        // mq_fds_cleanup note (a re-created same-name
+                        // queue was freed by mistake).
+                        if g.is_unlinked() && alloc::sync::Arc::ptr_eq(g, &slot.mq) {
                             *gslot = None;
                             break;
                         }

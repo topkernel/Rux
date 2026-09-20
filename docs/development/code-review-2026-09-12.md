@@ -601,6 +601,47 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.26 A 型死锁根因破案 + DFX 特性沉淀
+
+**hunt-wedge 第一轮捕获 A 型完整现场**（DFX 特性首战：owner 诊断 + dfx=watchdog 任务快照 + QEMU monitor dump 三件套同时工作）：
+- guest：`DEADLOCK lock=TCP_TABLE_LOCK holder=2`；任务快照显示 pid 331/332（echo/cat）RUNNING 但无 CPU 可用——纯锁死锁，非睡眠挂起。
+- monitor：cpu2（holder）pc=trap_entry、sepc=trap_handler 序言 `sd a1,-0x4f8(s0)`（0x800ff4ce）、**scause=0xf store fault、stval=0xffffffd600c16e78（内核堆区）**——**cpu2 进入 trap 时 sp 已指向堆地址**：trap 序言在坏 sp 上压栈即 fault，嵌套异常处理静默卡死（panic 路径同样在坏栈 fault），TCP 锁被带进坟墓；cpu0/1/3 从 wfi 醒来的 timer tick 全部等锁。
+- **结论：切到了内核栈已释放/未映射的任务**——任务生命周期竞态（栈释放与 pid_hash 摘除顺序 / 运行队列残留）在 nettest 重压下的产物。
+- **已修**：fork.rs 五处 unwind 的 free_kernel_stack 全部改为 pid_hash_remove 之后（hash 残留窗口内并发 kill/wake 可找到已释放栈的任务）。release_task 本身顺序正确（hash 先摘 + on_cpu 等待 + pinned put）。
+- **R33 继续**：运行队列残留死任务（dequeue 与 free 竞态、wake_up 对 ZOMBIE 的处理）为下一嫌疑；B 型（管道静默挂起、CPU idle）另案。
+
+**DFX 特性沉淀（按指令：作为特性保留、可开关、平时零开销）**：
+- 编译期 feature `dfx-lock-owner`（Cargo.toml）：锁持有者跟踪（每锁对 2 次原子 store），关闭时零开销；死锁告警打印 holder=<cpu>。
+- 运行时开关 `dfx=watchdog,taskdump`（boot 参数，kernel/src/dfx/switches.rs）：watchdog=死锁告警后自动全任务快照（SBI 直写不依赖 printk）；taskdump=预留按需触发。
+- `kernel/src/dfx/taskdump.rs`：全任务状态快照（pid/state/policy/comm）。
+- `test/hunt-wedge.sh`：自动构建诊断内核、双触发条件（A 型 DEADLOCK / B 型管道静默 30s）、QEMU monitor 抓每 CPU 寄存器/栈/反汇编、固化当轮 kernel.elf 供 addr2line。文档见 docs/guides/debugging.md。
+
+### 20.25 第三十二轮补（R32b）：门禁死锁追击 + drivers/arch 补盲
+
+**门禁发现两个真 bug**：
+1. **M-sig 挂死（run2，rc=124）**：nettest 的 rt_sigtimedwait 在 timer 池满（add_timer_wakeup→0）时以 INTERRUPTIBLE 状态 schedule() 且无唤醒者 = 永久挂。R32 ipc agent 修 futex/sem/mq 五处时漏了第六处。修复：timer 注册失败恢复 RUNNING 纯让出循环轮询（NEW-3 同构）。修后 12 轮门禁 M-sig 全过。
+2. **TCP_TABLE_LOCK 三 CPU 死锁（run6，echo PP | cat 阶段，~12% 复现）**：nm 精确符号化 0xffffffff803f98c4 = net::tcp::TCP_TABLE_LOCK（.bss 尾部）。为抓持有者给 RawSpinlock 加 owner 诊断字段（lock 记 hart+1，unlock 先清；deadlock_warn 打印 holder）。drivers agent 同期发现旧 virtio-net MMIO 队列配置完全无效（desc 表地址写错、avail/used 硬编码 0——TX 队列从未注册给设备）+ xmit 完成快照竞态（submit 后取快照必超时，10M 自旋持 tx_queue 锁）——timer tick 持 TCP 锁重传进无效设备的长自旋是持有者卡死的主嫌疑。owner 版门禁前 4 轮全绿，待 5-8。
+
+**drivers/arch 补盲 agent（9 项，4 HIGH）**：virtio-net MMIO 队列地址从未注册（HIGH，网卡整体静默失效——测试走 loopback 未暴露）；RX 把 DMA 物理地址当内核指针解引用+dealloc（HIGH）；xmit 快照竞态+超时释放 DMA 中缓冲（HIGH，改 R8-M2 late-drain + mem::forget）；virtio-blk MMIO 队列寄存器偏移错用 PCI 布局（HIGH，根文件系统回退路径从必然失效改为 spec v2）；notify 的 csrci sie,9 位掩码无效（MED，9=0b01001 清的是 WPRI 位）；alloc_and_map_* 先映射后清零信息泄漏窗口（MED，先清零后装 PTE）；set_brk 叶 PTE 写游离于 PTE_MODIFY_LOCK 之外（MED，入锁+锁内复检）；set_queue_vector 写错寄存器（LOW）；PCI read/write_block resp 泄漏（LOW）。bio 全路径复审无新问题。
+**文档/用户态 agent（额度中断，遗留已核）**：nettest.c 的 __NR_nanosleep 35→101（真 RISC-V 编号，旧值让 msleep 误调 unlinkat 忙转）；FAIL 码报首个失败组；README/指南/架构文档数据更新到当前状态（60 文件 995 单测、157 Kani 证明、344 syscall 等）。
+**fork/exec/wait 人工走查**：无新缺陷（unwind 五处配对完整、argv 65×1KB 上限有界、sigsuspend state-first、vfork 双竞争防护在位）。
+
+### 20.24 第三十二轮：六子系统并行（fs/mm/sched/net/ipc/核心）— R30 遗留 15 项全清 + 33 项新发现
+
+六个 agent 并行检视，总控逐文件复核 diff，cargo check 0 error。
+
+**R30 遗留全清**：F7 rmap TOCTOU（锁下重读叶 PTE 验 ppn，mm）；F8 OOM pin（chosen_pid 防复用误杀 + task_put 归还泄漏的引用 + mm 全部 Arc 固定，mm）；F4 sched_setattr/setparam 双绕过（完整镜像 setscheduler 校验 + change_task_policy 迁移；setparam 裸改 rt_priority 清错 bitmap 位，sched）；F10 down_interruptible（真缺陷是"先 fetch_sub 后注册"丢令牌窗口，重写为 down() 同构，sched）；B4 symlink DAC（follow_symlink 补逐组件 MAY_EXEC，fs）；B5 重传 seq（tx_segment 增参，三调用点全改，net）；B6 sys_shutdown 补表锁（loopback 只入 backlog 无 RX 重入，已验证 NEW-C6 断言，net/ipc）；B7 FIN_WAIT 孤儿（orphaned 标志 + sweep 条件扩展，net）；B8 CLOSE_WAIT 孤儿（close_wait_since 60s 超时回收 + accept 接受 CLOSE_WAIT 子连接，net）；B9 epoll fd 重用（file_id 身份绑定 + 同号 rebind，不 pin Arc 保管道关闭语义，ipc）；B10 TFD_ABSTIME（绝对 jiffies 直通，过去期限下次 softirq 即到，ipc）；B11 recv_wnd u32 后再收窄，net）；B12 accept 槽重用（pass(a) 跳尸体 + 纯 SYN 命中垂死即复位重扫 + 握手 ACK 序号校验防陈旧 ACK 伪建立，net）。
+
+**核心子系统新修 8 项（4 HIGH 信号族）**：do_signal 无 handler 路径回卷 epc 转换 -512/-514 哨兵（此前 default-ignore 信号打断可中断睡眠会把 ERESTARTSYS 原样 sret 给用户态）；SIG_IGN 独立分支不再落终止表错杀；send_signal_locked 重构为 prepare_signal 语义（Ignore 置位前丢弃消瞬态位，无共享结构补 pending——唤醒却不可见）；restore_sigcontext 强制 SPIE（用户可控帧防单核关中断 hog）；getchar unwrap→if let（多消费者竞争 panic）；伪造 rt_sigreturn→SIGSEGV；nanosleep timer 池满改 RUNNABLE 轮询；孤儿僵尸移交 init 补 wait_chldexit 唤醒（init 的 SIGCHLD 是 Ignore，纯信号永不唤醒）。
+
+**fs 新修**：close_pending 闭环（条件 Drop for File 仅标志真才执行——与被回退 v1 的本质区别；close_fd/FdTable::drop 执行前清标志防 dup 双关闭；FdTable::drop 恢复退出关闭）；O_NOFOLLOW 透传 + ELOOP；uart_read count==0 越界。
+**sched 新修**：DL pick 重置 exec_start（睡一次即被 CBS 节流）；dl_rq.dequeue on_rq 守卫；change_task_policy bool 传播。
+**net 新修**：拥塞窗口 usable_window 循环内递减；send_reliable 256KB 部分写上限（用户态可触发堆耗尽 panic）；SYN/SYN-ACK 重传（指数退避 + TCP_MAX_RETRIES 转 CLOSE，此前丢 SYN 即永久挂起）；bind 端口冲突 EADDRINUSE（TCP/UDP）+ 错误码传播；shutdown 后 Closing 态可读；poll/unwind 持表锁；TIME_WAIT 重 ACK 对端重传 FIN。
+**ipc 新修 11 项**：epoll_create1 CLOEXEC+flags 校验；futex/sem/mq 定时等待 timer 池满回退 ENOMEM（×5 处，防永久睡眠）；SysV IPC_STAT 族权限（×7）；mq 名 copy_from_user 防跨页 panic；mq fd 单临界段防重号 + EMFILE 回收；notify 仅清本人注册；队列释放 Arc 身份匹配（防同名误杀活队列）；mq_msgsize clamp；mq 收 EMSGSIZE 放回；msgrcv E2BIG 原位 insert；epoll_pwait2 timespec 指针误当毫秒。
+**mm 新修**：free_pages TDF 检出后 leak-not-corrupt 早退。
+
+**留 R33 专项**：裸 Task::sleep 丢失唤醒窗口（核心 agent 系统性发现——wake_up 只对 is_sleeping 生效，"条件检查后、set_state 前"窗口丢唤醒；wait.rs 已用 prepare_to_wait 关闭，nanosleep/bio 等仍裸用）；timer 软 irq 持双锁堆分配（架构债）；SHUT_RD 读侧语义；UDP 未 bind 源端口 0。
+
 ### 20.23 第三十/三十一轮：终检 23 项 → 8 项落地 + 1 项回退重做
 
 **R30 终检（双 agent）：共 23 项（A:6H+4M，B:4H+3M+6 低）**。最关键发现：R25-1/R28-1 的 timerfd 修复连续两次把极性搞反（rearmed 排除=周期永不交付）；R25-6 renice 没拿 GRQ 锁且无条件重算（非树上任务漂移 load_weight）；check_rt_preempt 比较反转（高优 RT 永不抢占）；dequeue_task RT/DL 臂硬编码 true（每次退出泄漏 nr_running）；alloc_single_page 仍无锁（压缩路径裸并发）；shared futex hash 含 pid 但 match 不含（跨进程丢唤醒）。

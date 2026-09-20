@@ -374,8 +374,15 @@ pub fn getchar() -> Option<u8> {
         let head = UART_RX_BUF.head.load(Ordering::Relaxed);
         let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
         if head != tail {
-            let c = UART_RX_BUF.get().unwrap();
-            return process_input(c);
+            // R32-2: the emptiness check above is only a hint — another
+            // consumer (fork'd child sharing stdin, the reason get() is a
+            // CAS loop) can drain the byte between the check and the CAS.
+            // get() then legitimately returns None; unwrap()'ing it was a
+            // kernel panic on userspace input racing. Fall through to the
+            // hardware poll instead.
+            if let Some(c) = UART_RX_BUF.get() {
+                return process_input(c);
+            }
         }
 
         // Fall back to hardware polling (for early boot or if IRQ not enabled)

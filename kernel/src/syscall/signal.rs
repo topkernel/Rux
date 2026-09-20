@@ -267,16 +267,18 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> i64
     unsafe {
         let frame_addr = (*current).sigframe_addr;
 
-        // Restore signal context to PtRegs
-        if frame_addr != 0 {
-            let ok = crate::signal::restore_sigcontext(current, frame_addr, regs);
-            if !ok {
-                // Corrupted/unreadable frame: falling through to ecall+4
-                // would run wild in userspace — force SIGSEGV instead
-                // (review IPC-L).
-                let pid = crate::process::current_pid();
-                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
-            }
+        // A zero frame address means rt_sigreturn was invoked without an
+        // active signal frame (forged/direct ecall). Treat it exactly like
+        // a corrupt frame (review IPC-L): force SIGSEGV instead of falling
+        // through to ecall+4 with whatever registers the caller passed.
+        let ok = if frame_addr != 0 {
+            crate::signal::restore_sigcontext(current, frame_addr, regs)
+        } else {
+            false
+        };
+        if !ok {
+            let pid = crate::process::current_pid();
+            let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
         }
 
         // Return original return value saved in signal frame

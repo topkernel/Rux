@@ -135,16 +135,28 @@ impl DlRunQueue {
     }
 
     /// Dequeue a task
+    ///
+    /// Returns true only if the task was actually linked on this queue
+    /// (R32-DL2, mirroring rt.rs P08): a dequeue of a task that is not
+    /// linked (e.g. the currently running task, already dequeued at pick
+    /// time) must report false so callers keep grq.nr_running balanced.
     pub fn dequeue(&mut self, task: *mut Task) -> bool {
         if task.is_null() {
             return false;
         }
 
-        // SAFETY: Caller guarantees `task` points to a valid, live Task that is
-        // currently on this runqueue (precondition for dequeue).
+        // SAFETY: Caller guarantees `task` points to a valid, live Task.
         unsafe {
             let t = &*task;
             let dl = t.dl_entity();
+
+            // P08-mirror: a task that is not linked must be a no-op. The
+            // old unconditional `true` lied to dequeue_task() /
+            // change_task_policy() — every no-op exit of an RT/DL waiter's
+            // cleanup path decremented grq.nr_running, drifting the count.
+            if !dl.on_rq.load(Ordering::Acquire) {
+                return false;
+            }
 
             // Find and remove task by pointer only. Do NOT match on deadline
             // because the deadline may have been updated between enqueue and
@@ -172,9 +184,10 @@ impl DlRunQueue {
 
                 // Clear on_rq flag
                 dl.on_rq.store(false, Ordering::Release);
+                return true;
             }
         }
-        true
+        false
     }
 
     /// Pick the task with earliest deadline

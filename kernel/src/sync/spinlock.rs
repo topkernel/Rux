@@ -49,18 +49,52 @@
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
+#[cfg(feature = "dfx-lock-owner")]
+use core::sync::atomic::AtomicUsize;
 
 // ==================== RawSpinlock (TAS) ====================
 
 pub struct RawSpinlock {
     locked: AtomicU32,
+    /// Deadlock diagnostics: holder's hart id + 1 (0 = free).  Written
+    /// AFTER acquiring / cleared BEFORE releasing, so a concurrent reader
+    /// may briefly see a stale value — fine for the watchdog print, which
+    /// only needs "who held it when everything wedged".
+    #[cfg(feature = "dfx-lock-owner")]
+    owner: AtomicUsize,
 }
 
 impl RawSpinlock {
     #[inline]
     pub const fn new() -> Self {
-        Self { locked: AtomicU32::new(0) }
+        Self {
+            locked: AtomicU32::new(0),
+            #[cfg(feature = "dfx-lock-owner")]
+            owner: AtomicUsize::new(0),
+        }
     }
+
+    /// Record the holder (dfx-lock-owner feature only).
+    #[inline]
+    #[cfg(feature = "dfx-lock-owner")]
+    fn record_owner(&self) {
+        self.owner.store(crate::arch::riscv64::smp::cpu_id() + 1, Ordering::Relaxed);
+    }
+
+    /// Clear the holder (dfx-lock-owner feature only).
+    #[inline]
+    #[cfg(feature = "dfx-lock-owner")]
+    fn clear_owner(&self) {
+        self.owner.store(0, Ordering::Relaxed);
+    }
+
+    #[inline]
+    #[cfg(not(feature = "dfx-lock-owner"))]
+    fn record_owner(&self) {}
+
+    #[inline]
+    #[cfg(not(feature = "dfx-lock-owner"))]
+    fn clear_owner(&self) {}
 
     /// Spinlock deadlock threshold (iterations before warning).
     /// On SMP with QEMU emulation, brief contention is normal — PLIC IRQ
@@ -82,6 +116,9 @@ impl RawSpinlock {
             }
             core::hint::spin_loop();
         }
+        // Diagnostics: record the holder AFTER the acquire (a spinner's
+        // watchdog may read a stale 0 in the tiny window — acceptable).
+        self.record_owner();
     }
 
     /// Print deadlock warning via SBI (works even with interrupts disabled).
@@ -123,16 +160,49 @@ impl RawSpinlock {
             unsafe { sbi_rt::legacy::console_putchar(c as usize); }
         }
 
+        // Holder identity: owner = hart+1 (0 = free / mid-handoff).
+        #[cfg(feature = "dfx-lock-owner")]
+        {
+            let msg4 = b" holder=";
+            for &b in msg4 {
+                unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+            }
+            // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
+            let holder = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
+            if holder == 0 {
+                let msg5 = b"switching";
+                for &b in msg5 {
+                    unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+                }
+            } else {
+                let h = holder - 1;
+                if h < 10 {
+                    unsafe { sbi_rt::legacy::console_putchar(b'0' as usize + h as usize); }
+                }
+            }
+        }
+
         unsafe { sbi_rt::legacy::console_putchar(b'\n' as usize); }
+
+        // dfx=watchdog: follow the warning with a full task-state snapshot
+        // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WatchdogDump) {
+            crate::dfx::taskdump::dump_all_tasks("deadlock-watchdog");
+        }
     }
 
     #[inline]
     pub fn try_lock(&self) -> bool {
-        self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok()
+        let ok = self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok();
+        if ok {
+            self.record_owner();
+        }
+        ok
     }
 
     #[inline]
     pub fn unlock(&self) {
+        self.clear_owner();
         self.locked.store(0, Ordering::Release);
     }
 
@@ -143,6 +213,7 @@ impl RawSpinlock {
 
     #[inline]
     pub unsafe fn reset(&mut self) {
+        self.clear_owner();
         self.locked.store(0, Ordering::Release);
     }
 }

@@ -231,10 +231,18 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
         }
 
         // Use Task::sleep() to enter interruptible sleep
-        // Note: This will trigger scheduling, continue checking time after waking up
-        process::Task::sleep(crate::process::task::TaskState::new(
-            crate::process::task::TaskState::INTERRUPTIBLE
-        ));
+        // Note: This will trigger scheduling, continue checking time after waking
+        if timer_id != 0 {
+            process::Task::sleep(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE
+            ));
+        } else {
+            // Timer registration failed (timer table full): an
+            // INTERRUPTIBLE sleep would have NO waker — the task would
+            // block forever (until a signal). Stay runnable and yield so
+            // the loop keeps re-checking jiffies.
+            crate::sched::schedule();
+        }
     }
 }
 

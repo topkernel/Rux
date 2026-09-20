@@ -33,12 +33,15 @@ pub mod hexdump;
 pub mod softlockup;
 pub mod hung_task;
 pub mod sbi_debug;
+pub mod switches;
+pub mod taskdump;
 
 /// Initialize the DFX subsystem.
 ///
 /// Called during kernel boot after `sched::init()`.
 /// Starts the softlockup detector and hung task detector.
 pub fn init() {
+    switches::init_from_cmdline();
     softlockup::init();
     // hung_task detector is deferred — it requires kthread infrastructure
     // that may not be fully ready during early boot. Enable after testing.

@@ -1898,8 +1898,41 @@ pub fn sys_fspick(_args: SyscallArgs) -> i64 {
 
 /// sys_epoll_pwait2 - epoll_wait with sigmask (NR 441)
 pub fn sys_epoll_pwait2(args: SyscallArgs) -> i64 {
-    // Delegate to epoll_pwait, ignoring extra timeout pointer
-    crate::syscall::misc::sys_epoll_pwait(args)
+    // R32 (NEW-12): epoll_pwait2 passes the timeout as a struct timespec
+    // POINTER in args[3] (sigmask is args[4]). The old delegation fed that
+    // pointer VALUE into epoll_wait's i32-milliseconds argument, so every
+    // non-NULL timeout produced a garbage wait (usually negative =
+    // "infinite") and a NULL timeout returned immediately instead of
+    // blocking forever.
+    let timeout_ptr = args[3] as *const u8;
+    let timeout_ms: i32 = if timeout_ptr.is_null() {
+        -1 // NULL timeout = block indefinitely
+    } else {
+        if !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16) {
+            return -(errno::EFAULT as i64);
+        }
+        let mut buf = [0u8; 16];
+        // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
+        // buf is a 16-byte stack buffer (exception-table copy).
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), timeout_ptr, 16)
+        };
+        if uncopied > 0 {
+            return -(errno::EFAULT as i64);
+        }
+        let sec = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let nsec = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        if sec == 0 && nsec == 0 {
+            0 // zero timeout = poll once and return
+        } else {
+            // Convert to milliseconds, cap at i32 max (very long = infinite
+            // for our purposes — same policy as sys_ppoll).
+            let total_ms = sec.saturating_mul(1000).saturating_add(nsec / 1_000_000);
+            if total_ms > i32::MAX as u64 { -1 } else { total_ms as i32 }
+        }
+    };
+    // sigmask (args[4]) intentionally ignored, matching sys_epoll_pwait.
+    crate::syscall::misc::sys_epoll_wait([args[0], args[1], args[2], timeout_ms as u64, 0, 0])
 }
 
 /// sys_mount_setattr - Change mount attributes (NR 442)

@@ -720,7 +720,13 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
         if how == 1 || how == 2 {
             // SHUT_WR or SHUT_RDWR: send FIN for TCP (review NET-M12 — the
             // old code only flipped a state bit and never emitted a FIN).
+            // R32-B6: the close mutates connection state (and pushes the
+            // FIN onto the retransmit queue) — it MUST hold TCP_TABLE_LOCK
+            // like every other protocol-table writer (tcp_rcv, timer tick,
+            // Socket::close); the old unlocked path raced both. Leaf-scoped,
+            // no RX re-entry: close() only queues to loopback/virtio xmit.
             if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+                let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
                 if let Some(tcp_sock) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                     let _ = tcp_sock.close();
                 }
@@ -791,18 +797,22 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
             // by USER_END (256GB); a single iov_len near 2^32 panicked the
             // kernel in vec allocation (SYSA-C1 class, read/write were
             // already chunked).
+            // R32-B2: the check must run INSIDE the loop against the
+            // running total. The old per-iov-only check (plus a post-loop
+            // aggregate check) let the loop first gather up to
+            // msg_iovlen × 256KB into `buf` before rejecting — the very
+            // over-allocation R7-D4 was meant to stop. This subsumes the
+            // single-iov case (total_len starts at 0) and returns the
+            // Linux error (EMSGSIZE, not EFAULT) for an oversized message.
             const MSG_IOV_MAX_TOTAL: usize = crate::syscall::io::RW_CHUNK.saturating_mul(4);
-            if iov_len > MSG_IOV_MAX_TOTAL {
-                return -(errno::EFAULT as i64);
+            if total_len.saturating_add(iov_len) > MSG_IOV_MAX_TOTAL {
+                return -(errno::EMSGSIZE as i64);
             }
 
             // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
             buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
             total_len += iov_len;
         }
-    }
-    if total_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
-        return -(errno::EMSGSIZE as i64);
     }
 
     if total_len == 0 {
@@ -994,6 +1004,7 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
 
             // Gather data from iovec
             let mut buf = alloc::vec::Vec::new();
+            let mut total_len = 0usize;
             for j in 0..msg_iovlen {
                 // SAFETY: iovec fields at validated offset; iov_base validated below.
                 let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
@@ -1003,11 +1014,15 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
                         return total_sent as i64; // Return partial success
                     }
                     // R7-D4: bound the aggregate (see sys_sendmsg).
-                    if iov_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
+                    // R32-B2: check the RUNNING total inside the loop — the
+                    // old per-iov-only check let each message gather up to
+                    // 1024 × 256KB before sending (heap over-allocation).
+                    if total_len.saturating_add(iov_len) > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
                         return total_sent as i64;
                     }
                     // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
                     buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
+                    total_len += iov_len;
                 }
             }
 

@@ -561,6 +561,20 @@ fn follow_symlink(
 
     let mut current = base;
     for component in target_components.iter() {
+        // DAC (B4): resolving a symlink body walks directories the caller
+        // never named.  Linux checks search (MAY_EXEC) permission on every
+        // directory traversed during symlink expansion, exactly like the
+        // path_lookup main loop above; without this, a world-readable
+        // symlink pointing into a 0700 directory bypassed the traversal
+        // check entirely (open /link succeeded where open /dir/file got
+        // EACCES).  Nested symlinks re-enter follow_symlink and hit the
+        // same check on their own walks.
+        if let Some(ref dir_inode) = current.get_inode() {
+            if !crate::fs::permission::inode_permission(dir_inode, crate::fs::permission::MAY_EXEC) {
+                return Err(errno::Errno::PermissionDenied.as_neg_i32());
+            }
+        }
+
         if *component == ".." {
             let parent_opt = current.parent.lock().clone();
             match parent_opt {
@@ -1151,12 +1165,24 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
 
         // Step 1: Resolve path through dentry tree
-        let (inode, opened_dentry) = match path_lookup(filename, 0) {
+        // O_NOFOLLOW (POSIX): refuse to follow a symlink FINAL component —
+        // privileged callers rely on this against symlink tricks, and the
+        // flag was previously accepted and silently ignored (the link was
+        // followed anyway).
+        let lookup_flags = if flags & FileFlags::O_NOFOLLOW != 0 {
+            LOOKUP_NOFOLLOW
+        } else {
+            0
+        };
+        let (inode, opened_dentry) = match path_lookup(filename, lookup_flags) {
             Ok(vpath) => {
                 if o_excl && o_creat {
                     return Err(errno::Errno::FileExists.as_neg_i32());
                 }
                 let inode = vpath.inode.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+                if flags & FileFlags::O_NOFOLLOW != 0 && inode.mode.is_symlink() {
+                    return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32()); // ELOOP
+                }
                 (inode, vpath.dentry)
             }
             Err(_e) if o_creat => {

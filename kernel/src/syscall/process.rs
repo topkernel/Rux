@@ -1804,6 +1804,21 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
                 dl, crate::sched::get_current_pid(),
             ))
             .unwrap_or(0);
+        // R32 (NEW-3, sixth site — the futex/sem/mq fix missed this one):
+        // pool exhausted → timer_id == 0. Sleeping now would hang forever
+        // with no waker — the awaited signal may ALSO be gone (an Ignore
+        // disposition discards it in send_signal_locked before it pends),
+        // so neither the timer nor signal delivery can wake the task.
+        // Undo the INTERRUPTIBLE marking and yield as RUNNABLE instead;
+        // the loop re-checks pending and the deadline every pass.
+        if deadline.is_some() && timer_id == 0 {
+            // SAFETY: current is the running task pointer.
+            unsafe {
+                (*current).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
+            }
+        }
         crate::sched::schedule();
         if timer_id != 0 {
             crate::timer::del_timer(timer_id);

@@ -198,17 +198,23 @@ impl VirtQueue {
 
     /// Notify device of new request
     pub fn notify(&self) {
-        // Disable interrupts during MMIO operations
+        // Disable external interrupts during MMIO operations.
+        // NOTE: SEIE is bit 9 of sie — beyond csrci's 5-bit immediate. The
+        // old "csrci sie, 9" wrote mask 0b01001 (bits 0 and 3, both WPRI)
+        // and masked nothing; use a register-based csrc with the real mask.
         #[cfg(feature = "riscv64")]
         let sie_backup: u64;
         #[cfg(feature = "riscv64")]
-        // SAFETY: reading and clearing SEIE in the sie CSR is valid on S-mode RISC-V.
+        // SAFETY: reading sie and clearing SEIE (bit 9) via a register-based
+        // csrc is valid in S-mode; the mask register is a scratch local.
         unsafe {
-            // Read current sie and disable external interrupts
             core::arch::asm!(
                 "csrr {sie}, sie",
-                "csrci sie, 9",  // Clear SEIE (bit 9) - disable external interrupts
+                "li {mask}, {seie}",
+                "csrc sie, {mask}",
                 sie = out(reg) sie_backup,
+                mask = out(reg) _,
+                seie = const 1 << 9,
             );
         }
 

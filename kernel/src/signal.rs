@@ -845,8 +845,23 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
                     // Setup failed, execute default action
                     handle_default_signal(sig);
                 }
+            } else if action.action() == SigActionKind::Ignore {
+                // SIG_IGN disposition: nothing to execute. Do NOT fall
+                // through to handle_default_signal — its terminate list
+                // would kill a process that explicitly ignores the signal
+                // (reachable when rt_sigaction races the queued signal).
+                // No handler frame is built, so convert any syscall
+                // restart sentinel here instead of leaking it to userspace.
+                restart_syscall_no_handler(regs);
             } else {
-                // Execute default action
+                // Execute default action. No handler frame is built here,
+                // and only setup_frame converts syscall restart sentinels
+                // — so a default-ignore signal (SIGCHLD/SIGURG/SIGWINCH/
+                // SIGCONT) interrupting a wait_event_interruptible loop
+                // returned the raw -ERESTARTSYS (-512) to userspace as a
+                // bogus errno. Linux's do_signal() restarts the syscall
+                // on this no-handler path; mirror it.
+                restart_syscall_no_handler(regs);
                 handle_default_signal(sig);
             }
         }
@@ -863,6 +878,42 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
         }
 
         true
+    }
+}
+
+/// Syscall restart for signal delivery without a handler (Linux pattern).
+///
+/// `setup_frame` converts -ERESTARTSYS/-ERESTARTNOHAND only when a handler
+/// frame is built. When the disposition is Default/Ignore nothing did the
+/// conversion, and the sentinel set by wait_event_interruptible (wait.rs
+/// breaks with -512) leaked to userspace verbatim as a bogus errno.
+///
+/// Mirrors Linux arch/riscv do_signal()'s "restart the system call — no
+/// handlers present" path: rewind epc to the ecall and restore orig_a0 so
+/// the syscall re-executes transparently.
+///
+/// # Safety
+/// `regs` is the current task's live PtRegs (from the trap path).
+unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) {
+    use crate::arch::riscv64::pt_regs::Cause;
+    const ERESTARTSYS: i64 = -512;
+    const ERESTARTNOHAND: i64 = -514;
+    let regs = &mut *regs;
+
+    // Only syscall frames (cause still EcallUser at trap exit) carry a
+    // restart sentinel in a0; interrupt/page-fault frames hold user data
+    // that may coincidentally equal -512.
+    if Cause::from_cause(regs.cause) != Cause::EcallUser {
+        return;
+    }
+    let a0 = regs.a0 as i64;
+    if a0 == ERESTARTSYS || a0 == ERESTARTNOHAND {
+        // ecall is a 4-byte instruction (there is no compressed encoding),
+        // and handle_syscall advanced epc by exactly 4 on this path.
+        if regs.epc >= 4 {
+            regs.epc -= 4;
+            regs.a0 = regs.orig_a0;
+        }
     }
 }
 
@@ -1143,7 +1194,13 @@ pub unsafe fn restore_sigcontext(
     regs.status = saved_status
         & !(SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE | SSTATUS_UBE | SSTATUS_MXR)
         // SUM is legitimately user-controllable (for crossing), keep it.
-        | 0; // return to user mode: SPP=0, interrupts re-enabled by trap exit
+        // SPIE must be FORCED, not merely stripped: M-04 reads the frame
+        // back from USER memory, so a handler that zeroed the ucontext
+        // would leave SPIE=0 — trap exit restores that sstatus and sret
+        // clears SIE, returning to user with interrupts disabled: no
+        // timer ticks, no preemption, one wedged CPU (user-triggerable).
+        // Kernel policy: return to user always runs with SIE=1.
+        | SSTATUS_SPIE;
 
     // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
     (*task).sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
@@ -1295,32 +1352,37 @@ unsafe fn send_signal_locked(task_ptr: *mut crate::process::task::Task, _pid: u3
     let signal_ref: &SignalStruct = match task.signal.as_ref() {
         Some(s) => s,
         None => {
+            task.pending.add(sig);
             signal_wake_up(task_ptr);
             return Ok(());
         }
     };
+
+    // Linux prepare_signal(): a SIG_IGN disposition discards the signal
+    // BEFORE it is marked pending. The old add-then-remove left a
+    // transient pending bit that wait_event_interruptible polls could
+    // observe — the waiter then returned -ERESTARTSYS for a signal that
+    // vanished before delivery, leaking the raw -512 sentinel to
+    // userspace as a bogus errno.
+    if let Some(action) = signal_ref.get_action(sig) {
+        if action.action() == SigActionKind::Ignore {
+            return Ok(());
+        }
+    }
+
+    // Add signal to pending set BEFORE checking mask.
+    // Masked signals stay pending and will be delivered when unmasked.
+    task.pending.add(sig);
 
     // Check if signal is masked — still pending, just not delivered now
     if signal_ref.is_masked(sig) {
         return Ok(());
     }
 
-    // Check signal handling action
-    if let Some(action) = signal_ref.get_action(sig) {
-        match action.action() {
-            SigActionKind::Ignore => {
-                task.pending.remove(sig);
-                return Ok(());
-            }
-            SigActionKind::Default | SigActionKind::Handler => {
-                signal_wake_up(task_ptr);
-                return Ok(());
-            }
-        }
-    }
-
-    // No action matched
-    Err(crate::errno::Errno::NoSuchProcess.as_neg_i32())
+    // Default or Handler disposition — wake the target so an
+    // interruptible sleeper reaches the delivery point.
+    signal_wake_up(task_ptr);
+    Ok(())
 }
 
 /// Send a signal to all processes in a given process group.

@@ -183,29 +183,45 @@ impl MmStruct {
                         return Err(MapError::OutOfMemory);
                     }
                     let flags = perm_to_flags(Perm::ReadWrite, self.space_type());
-                    // SAFETY: self.pgd is a valid root PPN, addr is page-aligned in the heap
-                    // region, and phys_addr is a freshly allocated exclusive page.
-                    unsafe {
-                        map_page(
-                            self.pgd,
-                            VirtAddr::new(addr as u64),
-                            PhysAddr::new(phys_addr as u64),
-                            flags,
-                        );
-                    }
-                    // Set up reverse mapping for heap page
-                    {
-                        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
-                        let page = pfn_to_page_mut(phys_addr / (PAGE_SIZE as usize));
-                        if !page.is_null() {
-                            // SAFETY: phys_addr is freshly allocated and exclusively owned; the null
-                            // check ensures page is valid before dereference.
-                            unsafe {
-                                (*page).set_flag(PageFlag::Anonymous);
-                                (*page).set_index(addr / (PAGE_SIZE as usize));
-                                (*page).inc_mapcount();
+                    // Serialize the leaf-PTE write + rmap setup against a
+                    // concurrent fork()/COW walk on this mm — brk was the
+                    // one leaf-PTE writer left outside PTE_MODIFY_LOCK
+                    // (same protocol as the demand-fault paths in
+                    // page_fault.rs).
+                    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+                    // Re-check under the lock: a racing thread of this mm
+                    // (CLONE_VM) may have mapped this address between the
+                    // walk above and here; mapping again would orphan the
+                    // winner's page.
+                    if unsafe { PageTableWalker::walk(self.pgd, addr as u64) }.is_some() {
+                        drop(_pte_guard);
+                        crate::mm::page_alloc::free_page(phys_addr);
+                    } else {
+                        // SAFETY: self.pgd is a valid root PPN, addr is page-aligned in the heap
+                        // region, and phys_addr is a freshly allocated exclusive page.
+                        unsafe {
+                            map_page(
+                                self.pgd,
+                                VirtAddr::new(addr as u64),
+                                PhysAddr::new(phys_addr as u64),
+                                flags,
+                            );
+                        }
+                        // Set up reverse mapping for heap page
+                        {
+                            use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+                            let page = pfn_to_page_mut(phys_addr / (PAGE_SIZE as usize));
+                            if !page.is_null() {
+                                // SAFETY: phys_addr is freshly allocated and exclusively owned; the null
+                                // check ensures page is valid before dereference.
+                                unsafe {
+                                    (*page).set_flag(PageFlag::Anonymous);
+                                    (*page).set_index(addr / (PAGE_SIZE as usize));
+                                    (*page).inc_mapcount();
+                                }
                             }
                         }
+                        drop(_pte_guard);
                     }
 
                     let mut vma_mgr = self.vma_write();
@@ -961,10 +977,14 @@ pub unsafe fn alloc_and_map_user_memory(
         return None;
     }
 
-    map_user_region(user_root_ppn, virt_addr, phys_addr as u64, size, flags);
-
+    // Zero BEFORE mapping: the pages are reachable through the linear map
+    // regardless. Mapping first exposed stale page contents (old freed
+    // data) to user space for the duration of the memset — an information
+    // leak window on every execve.
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
     core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
+
+    map_user_region(user_root_ppn, virt_addr, phys_addr as u64, size, flags);
 
     // R7-C5: the rounded-up block allocated 2^order pages but the mapping
     // only covers page_count — the unmapped excess has no PTE, so no
@@ -1013,10 +1033,11 @@ pub unsafe fn alloc_and_map_to_kernel_table(
 
     let user_flags = flags | PageTableEntry::U;
 
-    map_user_region(kernel_ppn, virt_addr, phys_addr as u64, size, user_flags);
-
+    // Zero BEFORE mapping (same leak-window fix as alloc_and_map_user_memory).
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
     core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
+
+    map_user_region(kernel_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
     // R7-C5: the rounded-up block allocated 2^order pages but the mapping
     // only covers page_count — the unmapped excess has no PTE, so no
@@ -1063,10 +1084,11 @@ pub unsafe fn alloc_and_map_to_user_table(
     }
 
     let user_flags = flags | PageTableEntry::U;
-    map_user_region(user_ppn, virt_addr, phys_addr as u64, size, user_flags);
-
+    // Zero BEFORE mapping (same leak-window fix as alloc_and_map_user_memory).
     let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
     core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
+
+    map_user_region(user_ppn, virt_addr, phys_addr as u64, size, user_flags);
 
     // R7-C5: the rounded-up block allocated 2^order pages but the mapping
     // only covers page_count — the unmapped excess has no PTE, so no

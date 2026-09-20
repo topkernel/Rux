@@ -17,7 +17,7 @@ Welcome to the Rux operating system kernel documentation center!
 - **[Memory Management](architecture/memory.md)** - Physical memory, virtual memory, allocator design
 
 ### 💻 Development Guides
-- **[Testing Guide](guides/testing.md)** - Unit tests + proptest + Kani proofs + SPIN models
+- **[Testing Guide](test/testing.md)** - Unit tests + proptest + Kani proofs + SPIN models
 - **[Formal Verification](development/formal-verification.md)** - 4-layer verification strategy (proptest + Kani + SPIN + Miri)
 - **[Lock Hierarchy](architecture/lock-ordering.md)** - Kernel lock ordering and nesting rules
 
@@ -27,7 +27,7 @@ Welcome to the Rux operating system kernel documentation center!
 - **[Code Review 2026-04-17 (2nd round)](development/code-review-2026-04-17.md)** - 425 findings, all fixed/deferred
 
 ### 📊 Project Progress
-- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 51)
+- **[Roadmap](progress/roadmap.md)** - Phase planning and current status (Phase 52)
 - **[Quick Reference](progress/quickref.md)** - Common commands and API cheat sheet
 - **[Changelog](progress/changelog.md)** - Version history and update records
 

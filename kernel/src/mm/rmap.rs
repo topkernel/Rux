@@ -307,6 +307,21 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                     // PTE lock like every other writer (fork-COW/munmap/
                     // mprotect/fault-map) — was racing them.
                     let _pte_g = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+
+                    // Re-validate the leaf under the lock (R7-C3 pattern):
+                    // the walk above ran OUTSIDE it, and a concurrent leaf
+                    // writer (COW break / swap-in / munmap) may have
+                    // swapped in a different physical page in between.
+                    // Overwriting blind would zero the NEW page's PTE while
+                    // decrementing THIS page's mapcount. Intermediate
+                    // levels are stable here: page tables are only unlinked
+                    // at mm teardown, excluded by the mm pin above.
+                    let pte0 = (*table0).get(vpn0);
+                    if !pte0.is_valid() || pte0.ppn() as usize != target_pfn {
+                        drop(_pte_g);
+                        return;
+                    }
+
                     // Write new PTE value (0 for unmap, swap_entry for swap-out)
                     (*table0).set(
                         vpn0,

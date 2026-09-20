@@ -37,6 +37,8 @@ pub const OOM_SCORE_ADJ_MAX: i32 = 1000;
 pub struct OomControl {
     /// Selected victim task pointer
     pub chosen: Option<*mut Task>,
+    /// PID of the selected victim (used to re-pin it at kill time)
+    pub chosen_pid: u32,
     /// OOM badness score of the selected victim
     pub chosen_points: u64,
     /// Total managed pages in the system (for score scaling)
@@ -52,6 +54,7 @@ impl OomControl {
     pub fn new(totalpages: u64, gfp_mask: u32, order: u32) -> Self {
         Self {
             chosen: None,
+            chosen_pid: 0,
             chosen_points: 0,
             totalpages,
             gfp_mask,
@@ -75,10 +78,14 @@ impl OomControl {
 /// Higher score = more likely to be killed.
 pub fn oom_badness(task: &Task, totalpages: u64) -> u64 {
     // Skip kernel threads (no address space)
-    let mm = match task.address_space() {
-        Some(mm) => mm,
+    // R25-2 pattern: PIN the mm — the pid-hash bucket lock held by our
+    // caller does not stop a concurrent do_exit → exit_mm on another CPU
+    // from dropping the last mm reference (Drop frees the page tables).
+    let mm_arc = match task.address_space_arc() {
+        Some(a) => a,
         None => return 0,
     };
+    let mm = mm_arc.as_ref();
 
     // Skip if MMF_OOM_DISABLE is set
     if mm.has_flag(MmFlags::MMF_OOM_DISABLE) {
@@ -159,6 +166,7 @@ fn select_bad_process(oc: &mut OomControl) {
 
         if points > oc.chosen_points {
             oc.chosen = Some(task_ptr);
+            oc.chosen_pid = pid;
             oc.chosen_points = points;
         }
     });
@@ -175,17 +183,28 @@ fn select_bad_process(oc: &mut OomControl) {
 fn oom_kill_process(oc: &mut OomControl) {
 
 
-    let victim = match oc.chosen {
+    let chosen = match oc.chosen {
         Some(t) => t,
         None => return,
     };
 
+    // R25-5/R32-F8: pin-verify the victim BEFORE dereferencing `chosen`.
+    // The raw pointer crossed an unlocked window since select_bad_process
+    // dropped the bucket locks — the victim may already have been reaped
+    // and freed (synchronize_rcu() is a no-op). The identity check also
+    // rejects PID reuse: if the pinned lookup returns a different Task,
+    // the original victim is gone and killing the PID's new owner would
+    // be wrong.
+    let victim = crate::process::pid_hash::pid_hash_lookup_pinned(oc.chosen_pid);
+    if victim.is_null() || victim != chosen {
+        if !victim.is_null() {
+            crate::process::task::Task::task_put(victim);
+        }
+        return;
+    }
+
     unsafe {
         let victim_pid = (*victim).pid();
-        // R25-5: pin the victim — the raw pointer crossed phase boundaries
-        // with no lock; the victim could be reaped on another CPU in
-        // between (gone = already dead, treat as success).
-        let _pin = crate::process::pid_hash::pid_hash_lookup_pinned(victim_pid);
         let victim_name = (*victim).comm();
         let name_str = core::str::from_utf8(
             victim_name.split(|&b| b == 0).next().unwrap_or(b"?"),
@@ -204,16 +223,19 @@ fn oom_kill_process(oc: &mut OomControl) {
 
         // Step 2: Kill all processes sharing victim's mm (different thread groups).
         // Compare AddressSpace raw pointers to detect mm sharing.
-        let victim_mm_ptr = (*victim).address_space()
-            .map(|mm| mm as *const _ as usize);
+        // R25-2 pattern: clone the mm Arc — the bucket lock taken by the
+        // iteration below does not stop a concurrent do_exit → exit_mm
+        // from dropping the last reference to this mm.
+        let victim_mm_ptr = (*victim).address_space_arc()
+            .map(|mm| mm.as_ref() as *const _ as usize);
         if let Some(mm_ptr) = victim_mm_ptr {
             crate::process::pid_hash::pid_hash_for_each_task(|task_ptr| {
                 let t = &*task_ptr;
                 if t.pid() == victim_pid {
                     return; // Skip the victim itself
                 }
-                let their_mm_ptr = t.address_space()
-                    .map(|mm| mm as *const _ as usize);
+                let their_mm_ptr = t.address_space_arc()
+                    .map(|mm| mm.as_ref() as *const _ as usize);
                 if let Some(their_ptr) = their_mm_ptr {
                     if their_ptr == mm_ptr {
                         // Same mm, different task — kill it too
@@ -230,6 +252,10 @@ fn oom_kill_process(oc: &mut OomControl) {
         // This grants the victim access to memory reserves so it can exit cleanly.
         (*victim).set_ti_flag(TIF_MEMDIE);
     }
+
+    // Release the pin taken above (the old code never put it — the leaked
+    // task_refcnt pinned the victim's Task slot forever).
+    crate::process::task::Task::task_put(victim);
 }
 
 // ==================== out_of_memory ====================

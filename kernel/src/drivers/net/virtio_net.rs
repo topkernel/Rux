@@ -119,10 +119,12 @@ impl VirtIONetDevice {
                 return Err("Invalid VirtIO magic value");
             }
 
-            // Verify version
+            // Verify version — only Modern (v2) is supported. The register
+            // block below uses the modern split-address layout (0x80/0x90/
+            // 0xa0); legacy v1 devices need the QueuePFN model instead.
             let version = core::ptr::read_volatile((self.base_addr + VERSION) as *const u32);
-            if version != 1 && version != 2 {
-                return Err("Unsupported VirtIO version");
+            if version != 2 {
+                return Err("Unsupported VirtIO version (only Modern v2)");
             }
 
             // Verify device ID (network device = 1)
@@ -164,44 +166,7 @@ impl VirtIONetDevice {
             // Set queue size
             self.queue_size = if max_queue_size < 8 { 4 } else { 8 };
 
-            // Allocate descriptor table
-            let desc_size = self.queue_size as usize * core::mem::size_of::<queue::Desc>();
-            let desc_layout = alloc::alloc::Layout::from_size_align(desc_size, 16)
-                .map_err(|_| "Failed to create descriptor layout")?;
-            let desc_ptr = alloc::alloc::alloc(desc_layout) as *mut queue::Desc;
-            if desc_ptr.is_null() {
-                return Err("Failed to allocate TX descriptor table");
-            }
-
-            // Initialize descriptor table
-            let desc_slice = core::slice::from_raw_parts_mut(desc_ptr, self.queue_size as usize);
-            for desc in desc_slice.iter_mut() {
-                *desc = queue::Desc {
-                    addr: 0,
-                    len: 0,
-                    flags: 0,
-                    next: 0,
-                };
-            }
-
-            // Set queue addresses (convert virtual to physical, write lo/hi separately)
-            let desc_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(desc_ptr as u64)
-            ).0;
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (desc_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (desc_phys >> 32) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, 0);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, 0);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, 0);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, 0);
-
-            // Set queue count
-            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
-
-            // Set queue ready
-            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
-
-            // Create VirtQueue
+            // Create VirtQueue (single contiguous desc+avail+used allocation)
             let tx_queue = match queue::VirtQueue::new(
                 self.queue_size,
                 0,  // queue_index: TX queue is queue 0
@@ -210,53 +175,45 @@ impl VirtIONetDevice {
                 self.base_addr + 0x64,  // interrupt_ack offset
             ) {
                 Some(q) => q,
-                None => {
-                    alloc::alloc::dealloc(desc_ptr as *mut u8, desc_layout);
-                    return Err("Failed to create TX VirtQueue");
-                }
+                None => return Err("Failed to create TX VirtQueue"),
             };
+
+            // Register the VirtQueue's OWN rings with the device (modern
+            // virtio-mmio split-address layout). The previous code wrote a
+            // SEPARATELY allocated descriptor table here and hard-coded the
+            // avail/used registers to 0 — the device never saw the rings the
+            // driver actually submits on, so TX never completed and RX DMA
+            // targeted physical address 0.
+            let tx_desc_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_desc_addr())
+            ).0;
+            let tx_avail_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_avail_addr())
+            ).0;
+            let tx_used_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_used_addr())
+            ).0;
+
+            // Set queue count
+            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
+
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (tx_desc_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (tx_desc_phys >> 32) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, (tx_avail_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, (tx_avail_phys >> 32) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, (tx_used_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, (tx_used_phys >> 32) as u32);
+
+            // Set queue ready
+            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
+
             *self.tx_queue.lock() = Some(tx_queue);
 
             // ========== Setup RX queue (Queue 1) ==========
             // Select queue 1
             core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 1);
 
-            // Allocate descriptor table
-            let desc_ptr_rx = alloc::alloc::alloc(desc_layout) as *mut queue::Desc;
-            if desc_ptr_rx.is_null() {
-                alloc::alloc::dealloc(desc_ptr as *mut u8, desc_layout);
-                return Err("Failed to allocate RX descriptor table");
-            }
-
-            // Initialize descriptor table
-            let desc_slice_rx = core::slice::from_raw_parts_mut(desc_ptr_rx, self.queue_size as usize);
-            for desc in desc_slice_rx.iter_mut() {
-                *desc = queue::Desc {
-                    addr: 0,
-                    len: 0,
-                    flags: 0,
-                    next: 0,
-                };
-            }
-
-            // Set queue addresses (convert virtual to physical, write lo/hi separately)
-            let desc_phys_rx = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(desc_ptr_rx as u64)
-            ).0;
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (desc_phys_rx & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (desc_phys_rx >> 32) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, 0);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, 0);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, 0);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, 0);
-
-            // Set queue count
-            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
-
-            // Set queue ready
-            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
-
-            // Create VirtQueue
+            // Create VirtQueue (single contiguous desc+avail+used allocation)
             let rx_queue = match queue::VirtQueue::new(
                 self.queue_size,
                 1,  // queue_index: RX queue is queue 1
@@ -265,12 +222,33 @@ impl VirtIONetDevice {
                 self.base_addr + 0x64,  // interrupt_ack offset
             ) {
                 Some(q) => q,
-                None => {
-                    alloc::alloc::dealloc(desc_ptr as *mut u8, desc_layout);
-                    alloc::alloc::dealloc(desc_ptr_rx as *mut u8, desc_layout);
-                    return Err("Failed to create RX VirtQueue");
-                }
+                None => return Err("Failed to create RX VirtQueue"),
             };
+
+            // Register the VirtQueue's rings (same modern MMIO layout as TX)
+            let rx_desc_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(rx_queue.get_desc_addr())
+            ).0;
+            let rx_avail_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(rx_queue.get_avail_addr())
+            ).0;
+            let rx_used_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(rx_queue.get_used_addr())
+            ).0;
+
+            // Set queue count
+            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
+
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (rx_desc_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (rx_desc_phys >> 32) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, (rx_avail_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, (rx_avail_phys >> 32) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, (rx_used_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, (rx_used_phys >> 32) as u32);
+
+            // Set queue ready
+            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
+
             *self.rx_queue.lock() = Some(rx_queue);
 
             // Set driver status: DRIVER_OK
@@ -388,6 +366,12 @@ impl VirtIONetDevice {
             0,
         );
 
+        // Snapshot used.idx BEFORE submit: QEMU's iothread can complete the
+        // TX before a post-submit get_used() runs, and a snapshot that
+        // already includes our completion makes the wait below time out —
+        // reporting a false EIO for every fast completion.
+        let prev_used = queue.get_used();
+
         // Submit to available ring
         queue.submit(header_desc_idx);
 
@@ -395,8 +379,40 @@ impl VirtIONetDevice {
         queue.notify();
 
         // Wait for completion
-        let prev_used = queue.get_used();
-        let _used = queue.wait_for_completion(prev_used);
+        let new_used = queue.wait_for_completion(prev_used);
+
+        if new_used == prev_used {
+            // R8-M2 / R21-N2 discipline (same as virtio-blk): the TX chain
+            // is STILL SUBMITTED — the device may be DMA-reading hdr_ptr and
+            // the skb data right now. Late-drain the used ring with a long
+            // bounded spin; on a true timeout LEAK both buffers instead of
+            // freeing in-flight DMA targets.
+            let used_ring = queue.used_ring_ptr();
+            let mut late = false;
+            for _ in 0..50_000_000u64 {
+                // SAFETY: used_ring points to this queue's used ring; offset 2
+                // is the idx field (u16) within the ring structure.
+                let idx = unsafe {
+                    core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+                };
+                if idx != prev_used {
+                    late = true;
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if !late {
+                let mut stats = self.stats.lock_irqsave();
+                stats.tx_errors += 1;
+                drop(stats);
+                // hdr and skb deliberately NOT freed — device still owns them.
+                // SkBuff's Drop releases its buffer, so forget() it to make
+                // the leak explicit (R21-N2: integrity over a leak).
+                core::mem::forget(skb);
+                return -5;  // EIO
+            }
+            // Completed late — fall through to the normal cleanup.
+        }
 
         // Free packet header
         // SAFETY: hdr_ptr was allocated with hdr_layout above and is still valid.
@@ -451,11 +467,23 @@ impl VirtIONetDevice {
                 // is consumed, so still account the buffer and refill
                 // (was a bare `?` that lost the slot forever).
                 drop(queue_guard);
-                self.rx_buffers.lock_irqsave().pop();
+                let stale = self.rx_buffers.lock_irqsave().pop();
+                if let Some(addr) = stale {
+                    self.dealloc_rx_buffer(addr);
+                }
                 self.refill_rx_buffers();
                 return None;
             }
         };
+
+        // desc.addr is the PHYSICAL (DMA) address programmed into the
+        // descriptor; the kernel must touch the buffer through the linear
+        // mapping. The old code used desc.addr directly as a kernel pointer
+        // AND dealloc'd it — a physical address dereference that only
+        // "worked" while nothing arrived (the RX rings were never armed).
+        let buf_virt = crate::arch::riscv64::mm::phys_to_virt(
+            crate::arch::riscv64::mm::PhysAddr::new(desc.addr)
+        ).bits();
 
         // VirtIO-Net packet structure:
         // - 12 bytes VirtIONetHdr
@@ -467,15 +495,16 @@ impl VirtIONetDevice {
             // recycled or the buffer AND its descriptor are lost forever
             // (enough of them wedge RX at zero posted buffers).
             drop(queue_guard);
-            self.recycle_rx_buffer(desc.addr);
+            self.recycle_rx_buffer(buf_virt);
             return None; // Data too short
         }
 
         let pkt_data_len = total_len - core::mem::size_of::<VirtIONetHdr>();
-        // SAFETY: desc.addr points to a device-completed RX buffer of total_len bytes;
-        // the buffer remains valid until after this function returns.
+        // SAFETY: buf_virt is the linear-mapping address of the device-completed
+        // RX buffer of total_len bytes; the buffer remains valid until after
+        // this function returns.
         let hdr_and_data = unsafe {
-            core::slice::from_raw_parts(desc.addr as *const u8, total_len)
+            core::slice::from_raw_parts(buf_virt as *const u8, total_len)
         };
 
         // Skip VirtIO-Net header, keep only Ethernet frame
@@ -487,7 +516,7 @@ impl VirtIONetDevice {
             None => {
                 // R24: recycle on allocation failure (was a leak).
                 drop(queue_guard);
-                self.recycle_rx_buffer(desc.addr);
+                self.recycle_rx_buffer(buf_virt);
                 return None;
             }
         };
@@ -495,7 +524,7 @@ impl VirtIONetDevice {
             // R24: recycle and free the just-allocated skb (was a leak).
             skb.free();
             drop(queue_guard);
-            self.recycle_rx_buffer(desc.addr);
+            self.recycle_rx_buffer(buf_virt);
             return None;
         }
 
@@ -506,7 +535,7 @@ impl VirtIONetDevice {
 
         // Free old RX buffer and post a replacement
         drop(queue_guard);
-        self.recycle_rx_buffer(desc.addr);
+        self.recycle_rx_buffer(buf_virt);
 
         Some(skb)
     }
@@ -516,9 +545,20 @@ impl VirtIONetDevice {
     /// path that consumes a used-ring entry must run this; previously only
     /// the full-success path did, so any early return permanently lost the
     /// buffer and its descriptor.
+    ///
+    /// `addr` is the buffer's KERNEL VIRTUAL address (as tracked in
+    /// rx_buffers), not the physical address stored in the descriptor.
     fn recycle_rx_buffer(&self, addr: u64) {
-        // Use the SAME layout as refill_rx_buffers() allocation:
-        //   buf_size = size_of::<VirtIONetHdr>() + mtu + 64, align = 64
+        self.dealloc_rx_buffer(addr);
+        // Pop one entry from rx_buffers to reflect the freed buffer,
+        // so refill_rx_buffers() knows to allocate a replacement.
+        self.rx_buffers.lock_irqsave().pop();
+        self.refill_rx_buffers();
+    }
+
+    /// Dealloc one RX buffer with the layout refill_rx_buffers() allocates:
+    ///   buf_size = size_of::<VirtIONetHdr>() + mtu + 64, align = 64
+    fn dealloc_rx_buffer(&self, addr: u64) {
         let buf_size = core::mem::size_of::<VirtIONetHdr>() + self.mtu as usize + 64;
         // SAFETY: Buffer was allocated with identical layout in refill_rx_buffers();
         // from_size_align cannot fail because buf_size and align are the same constants.
@@ -529,10 +569,6 @@ impl VirtIONetDevice {
                 crate::pr_err!("virtio_net: invalid RX dealloc layout buf_size={}", buf_size);
             }
         }
-        // Pop one entry from rx_buffers to reflect the freed buffer,
-        // so refill_rx_buffers() knows to allocate a replacement.
-        self.rx_buffers.lock_irqsave().pop();
-        self.refill_rx_buffers();
     }
 
     /// Refill RX buffers

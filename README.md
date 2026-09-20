@@ -7,9 +7,9 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
-[![Tests](https://img.shields.io/badge/tests-3%2C777%20cases-brightgreen.svg)](#-test-status)
+[![Tests](https://img.shields.io/badge/tests-4%2C125%20cases-brightgreen.svg)](#-test-status)
 [![Verification](https://img.shields.io/badge/verification-4%20tools-brightgreen.svg)](#-formal-verification)
-[![Code](https://img.shields.io/badge/code-101%2C200%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-112%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
 
@@ -50,30 +50,30 @@
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~102,400 lines | [Code Structure](docs/architecture/structure.md) |
+| **Lines of Code** | ~112,000 lines | [Code Structure](docs/architecture/structure.md) |
 | **Source Files** | 278 files (274 Rust + 3 ASM + 1 LD) | [Project Structure](docs/architecture/structure.md) |
-| **Kernel Unit Tests** | 58 files, 825 cases | [Unit Test Report](docs/test/unit-test-report.md) |
-| **Formal Verification** | 4 tools, 1,249+ cases | [Verification Design](docs/development/formal-verification.md) |
+| **Kernel Unit Tests** | 60 files, 995 cases (last report: 901 PASS + 94 SKIP) | [Unit Test Report](docs/test/unit-test-report.md) |
+| **Formal Verification** | 4 tools, 1,116+ test functions; 157 Kani proofs | [Verification Design](docs/development/formal-verification.md) |
 | **Smoke Tests** | 15 tests (all passing) | [Testing Guide](docs/test/testing.md) |
 | **Linux LTP** | 1,838 official tests | [Testing Guide](docs/test/testing.md) |
 | **Platform Support** | RISC-V 64-bit | [Roadmap](docs/progress/roadmap.md) |
-| **Syscall Numbers** | 348 dispatched | [Roadmap](docs/progress/roadmap.md) |
+| **Syscall Numbers** | 344 dispatched | [Roadmap](docs/progress/roadmap.md) |
 
 **Module Distribution**:
-- Filesystem (fs/): 22,539 lines (22.2%)
-- System Calls (syscall/): 12,692 lines (12.5%)
-- Unit Tests (tests/): 9,641 lines (9.5%)
-- Memory Management (mm/): 9,843 lines (9.7%)
-- Device Drivers (drivers/): 9,047 lines (8.9%)
-- Architecture (arch/): 7,697 lines (7.6%)
-- Top-level: 6,257 lines (6.2%)
-- Network Stack (net/): 5,854 lines (5.8%)
-- Process Management (process/): 4,667 lines (4.6%)
-- IPC (ipc/): 3,308 lines (3.3%)
-- Process Scheduling (sched/): 3,482 lines (3.4%)
-- Sync Primitives (sync/): 2,478 lines (2.4%)
-- Interrupt (interrupt/): 1,676 lines (1.7%)
-- Diagnostics (dfx/): 1,027 lines (1.0%)
+- Filesystem (fs/): 24,478 lines (21.9%)
+- System Calls (syscall/): 14,061 lines (12.6%)
+- Memory Management (mm/): 10,632 lines (9.5%)
+- Unit Tests (tests/): 9,610 lines (8.6%)
+- Device Drivers (drivers/): 9,504 lines (8.5%)
+- Architecture (arch/): 8,422 lines (7.5%)
+- Top-level: 8,396 lines (7.5%)
+- Network Stack (net/): 6,905 lines (6.2%)
+- Process Management (process/): 5,818 lines (5.2%)
+- Process Scheduling (sched/): 4,307 lines (3.8%)
+- IPC (ipc/): 4,055 lines (3.6%)
+- Sync Primitives (sync/): 3,053 lines (2.7%)
+- Interrupt (interrupt/): 1,762 lines (1.6%)
+- Diagnostics (dfx/): 1,044 lines (0.9%)
 
 ---
 
@@ -207,38 +207,38 @@ root:/#
 
 ```
 Rux/
-├── kernel/                 # Kernel source (~102,400 lines)
+├── kernel/                 # Kernel source (~112,000 lines)
 │   ├── src/
-│   │   ├── fs/           # Filesystem (22,325 lines)
+│   │   ├── fs/           # Filesystem (24,478 lines)
 │   │   │   ├── ext4/     # ext4 filesystem
 │   │   │   ├── jbd2/     # JBD2 journaling layer
 │   │   │   ├── devfs/    # devfs device filesystem
 │   │   │   └── procfs/   # procfs process filesystem
-│   │   ├── arch/         # RISC-V architecture (7,697 lines)
+│   │   ├── arch/         # RISC-V architecture (8,422 lines)
 │   │   │   ├── mm/       # Arch-specific MM (pt, fixmap, ASID, page fault)
 │   │   │   ├── boot.S    # MMU trampoline, VMA/LMA linking
 │   │   │   ├── trap.S    # PtRegs save/restore, ret_from_fork
 │   │   │   └── uaccess.S # User memory access assembly
-│   │   ├── drivers/      # Device drivers (8,918 lines)
+│   │   ├── drivers/      # Device drivers (9,504 lines)
 │   │   │   ├── gpu/      # GPU/framebuffer drivers
 │   │   │   ├── input/    # Input device drivers
 │   │   │   ├── virtio/   # VirtIO devices (blk/net/gpu/input)
 │   │   │   └── net/      # Network devices
-│   │   ├── mm/           # Memory management (9,389 lines)
+│   │   ├── mm/           # Memory management (10,632 lines)
 │   │   │   ├── Zone allocator (DMA/DMA32/NORMAL/MOVABLE)
 │   │   │   ├── vmemmap, buddy, slab, PCP, memblock
 │   │   │   ├── VMA, mm_struct, page fault, COW
 │   │   │   └── rmap, hugepage, meminfo
-│   │   ├── tests/        # Unit tests (58 files, 825 cases)
-│   │   ├── syscall/      # System calls (12,405 lines, 348 syscalls)
-│   │   ├── ipc/          # IPC (3,202 lines) — System V, POSIX MQ
-│   │   ├── net/          # Network stack (5,753 lines)
-│   │   ├── sched/        # Process scheduling (3,467 lines)
+│   │   ├── tests/        # Unit tests (60 files, 995 cases)
+│   │   ├── syscall/      # System calls (14,061 lines, 344 syscalls)
+│   │   ├── ipc/          # IPC (4,055 lines) — System V, POSIX MQ
+│   │   ├── net/          # Network stack (6,905 lines)
+│   │   ├── sched/        # Process scheduling (4,307 lines)
 │   │   │   ├── CFS, RT (FIFO/RR), Deadline (EDF+CBS), Idle
-│   │   ├── process/      # Process management (4,489 lines)
-│   │   ├── sync/         # Sync primitives (1,961 lines)
-│   │   ├── interrupt/    # Interrupt subsystem (1,653 lines)
-│   │   └── dfx/          # Diagnostics/DFX (1,027 lines)
+│   │   ├── process/      # Process management (5,818 lines)
+│   │   ├── sync/         # Sync primitives (3,053 lines)
+│   │   ├── interrupt/    # Interrupt subsystem (1,762 lines)
+│   │   └── dfx/          # Diagnostics/DFX (1,044 lines)
 │   └── build.rs          # Build script
 ├── userspace/            # Userspace programs
 │   ├── mrsh/             # mrsh (minimal POSIX shell, musl libc)
@@ -274,7 +274,7 @@ Detailed structure: [Project Structure Documentation](docs/architecture/structur
 
 ### System Calls
 
-Supports 348 Linux system calls, including:
+Supports 344 Linux system calls, including:
 - File: openat/close/read/write/readv/writev/pread64/pwrite64/lseek/fstat/getdents64/mkdirat/rmdir/unlinkat/sendfile/statfs/copy_file_range/statx
 - Process: fork/execve/wait4/exit/getpid/getppid/gettid/kill/clone/sched_yield/prctl/getrusage
 - Memory: brk (expand+shrink)/mmap/munmap (MAP_PRIVATE COW)/mprotect/mremap/madvise/msync
@@ -291,7 +291,7 @@ Supports 348 Linux system calls, including:
 ### Core Documentation
 
 - **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
-- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 51)
+- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 52)
 - **[Project Structure](docs/architecture/structure.md)** - Source code organization
 - **[Design Principles](docs/architecture/design.md)** - POSIX compatibility and Linux ABI alignment
 
@@ -307,31 +307,31 @@ Supports 348 Linux system calls, including:
 
 - **[Development Workflow](docs/guides/development.md)** - Contributing code and development standards
 - **[Boot Process](docs/architecture/boot.md)** - From OpenSBI to kernel boot
-- **[User Programs](docs/development/user-programs.md)** - ELF loading and execve
+- **[User Programs](docs/archive/user-programs.md)** - ELF loading and execve (archived)
 - **[Formal Verification](docs/development/formal-verification.md)** - 4-layer verification strategy
 
 ### Test Reports
 
-- **[Unit Test Report](docs/test/unit-test-report.md)** - 825 kernel unit test cases
-- **[Formal Verification Report](docs/test/formal-verification-report.md)** - 1,088 proptest-based invariant tests
+- **[Unit Test Report](docs/test/unit-test-report.md)** - Kernel unit test cases (60 files, 901 PASS + 94 SKIP at last report)
+- **[Formal Verification Report](docs/test/formal-verification-report.md)** - proptest-based invariant tests
 
 ---
 
 ## 🧪 Test Status
 
-**Total: 3,777 test cases + 161 formal verification proofs**
+**Total: 4,125 test cases + 161 formal verification proofs**
 
 | Test Suite | Cases | Run Command | Environment |
 |------------|-------|-------------|-------------|
-| **Kernel Unit Tests** | 825 | `make test` | QEMU (no_std, custom harness) |
-| **Formal Verification** | 1,088 | `make verify` | Host (std, proptest) |
+| **Kernel Unit Tests** | 995 | `make test` | QEMU (no_std, custom harness) |
+| **Formal Verification** | 1,116 | `make verify` | Host (std, proptest) |
 | **Linux LTP** | 1,838 | `make run` → `/test/linux-ltp/run_ltp.sh` | QEMU |
 | **Smoke Tests** | 15 | `make run` → `/test/smoke_test` | QEMU |
 | **Kani Proofs** | 157 | `make kani` | Host (Kani/CBMC, all-input symbolic) |
 | **SPIN Models** | 4 | `make spin` | Host (SPIN/Promela, concurrency) |
 | **Miri UB Detection** | - | `make miri` | Host (Miri, undefined behavior) |
 
-### Kernel Unit Tests (825 cases, 58 files)
+### Kernel Unit Tests (995 cases at last report, 60 files)
 - **Framework**: Custom `no_std` harness (`test_pass`, `test_fail`, `test_assert!`)
 - **Coverage**: Memory management, process management, filesystem, network, drivers, syscalls, IPC, scheduler, synchronization
 - **Report**: [Unit Test Report](docs/test/unit-test-report.md)

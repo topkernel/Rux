@@ -2,7 +2,7 @@
 
 > Scope: All production code (276 files, 106,346 lines)
 > Reference: Linux 6.19 (`/home/william/Rux/refer/linux/`)
-> Previous review: `docs/development/code-review-2026-04-15.md` (425 findings, all fixed/deferred)
+> Previous review: `docs/archive/code-review-2026-04-15.md` (425 findings, all fixed/deferred)
 > Focus: POSIX/ABI compatibility, Linux behavioral equivalence, musl binary compatibility
 
 ## Severity Definitions

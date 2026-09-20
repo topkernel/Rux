@@ -227,16 +227,21 @@ impl VirtIOBlkDevice {
             let desc_addr = virtqueue.get_desc_addr();
             let avail_addr = virtqueue.get_avail_addr();
             let used_addr = virtqueue.get_used_addr();
-            // 14. Modern VirtIO: Set queue addresses (64-bit, split into high/low)
-            // Modern VirtIO uses three separate address register pairs to set queue
-            use crate::drivers::virtio::offset;
-            const QUEUE_DESC_LO_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DESC_LO as u64;
-            const QUEUE_DESC_HI_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DESC_HI as u64;
-            const QUEUE_DRIVER_LO_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DRIVER_LO as u64;
-            const QUEUE_DRIVER_HI_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DRIVER_HI as u64;
-            const QUEUE_DEVICE_LO_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DEVICE_LO as u64;
-            const QUEUE_DEVICE_HI_OFFSET: u64 = offset::COMMON_CFG_QUEUE_DEVICE_HI as u64;
-            const QUEUE_READY_OFFSET: u64 = offset::COMMON_CFG_QUEUE_ENABLE as u64;
+            // 14. Modern virtio-mmio (v2) split queue-address registers (the
+            // same layout QEMU virt implements): QueueDesc 0x80/0x84,
+            // QueueAvail 0x90/0x94, QueueUsed 0xa0/0xa4, QueueReady 0x44.
+            // The previous code reused the PCI common-cfg offsets
+            // (0x20-0x34, enable 0x1c): the address writes landed on
+            // GuestFeaturesSel/GuestFeatures/QueueSel and QueueReady was
+            // never actually set — the device never used the rings this
+            // driver submits on (queue setup silently no-op'd).
+            const QUEUE_DESC_LO_OFFSET: u64 = 0x80;
+            const QUEUE_DESC_HI_OFFSET: u64 = 0x84;
+            const QUEUE_DRIVER_LO_OFFSET: u64 = 0x90;
+            const QUEUE_DRIVER_HI_OFFSET: u64 = 0x94;
+            const QUEUE_DEVICE_LO_OFFSET: u64 = 0xA0;
+            const QUEUE_DEVICE_HI_OFFSET: u64 = 0xA4;
+            const QUEUE_READY_OFFSET: u64 = 0x44;
 
             // Convert virtual addresses to physical addresses
             let desc_phys_addr = crate::arch::riscv64::mm::virt_to_phys(

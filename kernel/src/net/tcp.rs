@@ -422,6 +422,14 @@ pub struct TcpTimers {
     /// R21-N3b: when FIN_WAIT1/2 was entered (jiffies) — bounds orphaned
     /// half-closes against dead peers.
     pub fin_wait_since: u64,
+    /// R32-B8: when CLOSE_WAIT was entered (jiffies) — bounds orphaned
+    /// half-closed connections (peer FINed, no fd ever claimed the slot)
+    /// so the 64-slot table cannot be exhausted by e.g. port scans.
+    pub close_wait_since: u64,
+    /// R32-N16: SYN retransmission count while in SYN_SENT — a lost SYN
+    /// used to leave connect() hanging in SYN_SENT forever (the timer
+    /// tick's catch-all arm did nothing for the state).
+    pub syn_retries: u32,
 }
 
 impl TcpTimers {
@@ -430,6 +438,8 @@ impl TcpTimers {
             retransmit_deadline: 0,
             fin_wait_since: 0,
             delack_deadline: 0,
+            close_wait_since: 0,
+            syn_retries: 0,
         }
     }
 
@@ -516,6 +526,12 @@ pub struct TcpSocket {
     /// still wraps this slot; freeing it let alloc() reuse the index and
     /// the stale fd read/write a stranger's connection.
     pub user_refs: core::sync::atomic::AtomicU32,
+    /// R32-B7: set when the last userspace fd dropped the slot while the
+    /// connection was still closing (FIN_WAIT/LAST_ACK). The timer sweep
+    /// frees no-parent (client) CLOSE corpses only when this is set —
+    /// without it they are indistinguishable from fresh pre-connect slots
+    /// (user_refs==0, no parent_fd) and would leak forever.
+    pub orphaned: bool,
     /// Out-of-order reassembly queue (received but not yet deliverable)
     pub ooo_queue: alloc::collections::VecDeque<TcpOooSeg>,
 
@@ -563,6 +579,7 @@ impl TcpSocket {
             recv_buffer: alloc::collections::VecDeque::new(),
             retrans_queue: alloc::collections::VecDeque::new(),
             user_refs: core::sync::atomic::AtomicU32::new(0),
+            orphaned: false,
             ooo_queue: alloc::collections::VecDeque::new(),
 
             rtt_estimator: TcpRttEstimator::new(),
@@ -616,8 +633,19 @@ impl TcpSocket {
         // Send SYN packet (first step of three-way handshake)
         self.send_syn()?;
         self.state = TcpState::TCP_SYN_SENT;
+        // R32-N16: arm the retransmit timer so the timer tick can
+        // retransmit a lost SYN (bounded by syn_retries). Without this a
+        // single lost SYN parked the socket in SYN_SENT forever.
+        self.timers.start_retransmit(crate::config::TCP_RTO_DEFAULT_US);
 
         Ok(())
+    }
+
+    /// Re-send the initial SYN (R32-N16, called from the timer tick).
+    /// `snd_nxt` still holds the SYN's sequence number in SYN_SENT, so
+    /// send_syn() re-emits the identical segment.
+    pub fn resend_syn(&self) -> Result<(), ()> {
+        self.send_syn()
     }
 
     /// Send SYN packet (first step of three-way handshake)
@@ -644,6 +672,21 @@ impl TcpSocket {
 
     /// Send SYN-ACK packet (second step of three-way handshake)
     fn send_synack(&mut self, _ack_seq: TcpSeq) -> Result<(), ()> {
+        self.send_synack_packet()?;
+
+        // R14-7 (HIGH-3): the SYN consumes one sequence number. Without
+        // this, the peer's rcv_nxt (= ISN+1) mismatched every subsequent
+        // server segment, and the first client ACK made in_flight wrap
+        // (usable_window 0) — server-side TX permanently blocked.
+        self.snd_nxt = self.snd_nxt.wrapping_add(1);
+
+        Ok(())
+    }
+
+    /// Emit the SYN-ACK segment itself without touching sequence
+    /// accounting (R32-N16). Used both by the handshake and by the
+    /// SYN_RECV retransmission path — resending must NOT advance snd_nxt.
+    fn send_synack_packet(&self) -> Result<(), ()> {
         let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
 
         tcp_build_packet(
@@ -659,12 +702,6 @@ impl TcpSocket {
         )?;
 
         crate::net::ipv4::ipv4_send_src(skb, self.local_ip, self.remote_ip, 6);
-
-        // R14-7 (HIGH-3): the SYN consumes one sequence number. Without
-        // this, the peer's rcv_nxt (= ISN+1) mismatched every subsequent
-        // server segment, and the first client ACK made in_flight wrap
-        // (usable_window 0) — server-side TX permanently blocked.
-        self.snd_nxt = self.snd_nxt.wrapping_add(1);
 
         Ok(())
     }
@@ -768,9 +805,15 @@ impl TcpSocket {
                 }
             }
             TcpState::TCP_SYN_RECV => {
+                // Server: retransmitted SYN means our SYN-ACK was lost —
+                // resend it with the SAME sequence number (R32-N16; the
+                // handshake path advances snd_nxt, the resend must not).
+                if tcp_hdr.syn() && !tcp_hdr.ack() {
+                    let _ = self.send_synack_packet();
+                }
                 // Server: receive ACK packet
                 if tcp_hdr.ack() && !tcp_hdr.syn() {
-                    self.handle_ack_recv()?;
+                    self.handle_ack_recv(tcp_hdr)?;
                 }
             }
             TcpState::TCP_ESTABLISHED => {
@@ -831,6 +874,14 @@ impl TcpSocket {
                 }
                 if tcp_hdr.fin() {
                     self.handle_fin_recv()?;
+                }
+            }
+            TcpState::TCP_TIME_WAIT => {
+                // R32-N17: the peer retransmitted its FIN (our final ACK
+                // was lost) — re-ACK it, otherwise the peer exhausts its
+                // FIN retransmissions and aborts the close with an RST.
+                if tcp_hdr.fin() {
+                    let _ = self.send_ack();
                 }
             }
             TcpState::TCP_CLOSING => {
@@ -911,12 +962,25 @@ impl TcpSocket {
         // Send ACK (third step of three-way handshake)
         self.send_ack()?;
         self.state = TcpState::TCP_ESTABLISHED;
+        // R32-N16: handshake complete — stop the SYN retransmit machinery
+        // armed in connect().
+        self.timers.stop_retransmit();
+        self.timers.syn_retries = 0;
 
         Ok(())
     }
 
     /// Handle received ACK packet (server)
-    fn handle_ack_recv(&mut self) -> Result<(), ()> {
+    fn handle_ack_recv(&mut self, tcp_hdr: &TcpHdr) -> Result<(), ()> {
+        // R32-B12: the handshake-completing ACK must acknowledge our SYN
+        // exactly (snd_una < ack <= snd_nxt, where snd_nxt == ISN+1 after
+        // send_synack). The old code advanced snd_una on ANY ACK — a
+        // stale ACK from an earlier connection sharing the 4-tuple (the
+        // accept slot-reuse race) falsely completed the handshake.
+        let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
+        if !self.seq_before(self.snd_una, ack_num) || self.seq_before(self.snd_nxt, ack_num) {
+            return Ok(()); // stale or out-of-window ACK — keep waiting
+        }
         // Check if ACK acknowledges our SYN-ACK
         // Three-way handshake complete, connection established
         // R14-7: the ACK acknowledges the SYN's sequence number — advance
@@ -1019,6 +1083,9 @@ impl TcpSocket {
         match self.state {
             TcpState::TCP_ESTABLISHED => {
                 self.state = TcpState::TCP_CLOSE_WAIT;
+                // R32-B8: timestamp the CLOSE_WAIT entry so the timer tick
+                // can bound orphaned half-closed connections.
+                self.timers.close_wait_since = crate::drivers::timer::get_jiffies();
             }
             TcpState::TCP_FIN_WAIT2 => {
                 self.state = TcpState::TCP_TIME_WAIT;
@@ -1127,6 +1194,8 @@ impl TcpSocket {
             }
             TcpState::TCP_CLOSE_WAIT => {
                 self.state = TcpState::TCP_LAST_ACK;
+                // R32-B8: leaving CLOSE_WAIT — disarm the orphan timeout.
+                self.timers.close_wait_since = 0;
                 let _ = self.send_fin();
             }
             _ => {
@@ -1136,6 +1205,14 @@ impl TcpSocket {
     }
 
     // ========== Reliable transmission methods ==========
+
+    /// R32-N4: maximum bytes accepted into the send buffer per send() call.
+    /// The buffer has no backpressure (the syscall layer cannot block), and
+    /// `access_ok` alone admits user lengths up to 256GB — one huge
+    /// sendto/write exhausted the 32MB kernel heap (VecDeque byte pushes
+    /// until OOM panic). Accepting a prefix is POSIX-legal for stream
+    /// sockets: the caller sees a partial write and retries the remainder.
+    pub const TCP_SEND_MAX_CHUNK: usize = 256 * 1024;
 
     /// Reliable send data
     ///
@@ -1155,15 +1232,18 @@ impl TcpSocket {
             return Ok(0);
         }
 
+        // R32-N4: cap the accepted prefix (partial write semantics).
+        let accept = core::cmp::min(data.len(), Self::TCP_SEND_MAX_CHUNK);
+
         // Put data into send buffer
-        for &byte in data {
+        for &byte in &data[..accept] {
             self.send_buffer.push_back(byte);
         }
 
         // Try to send data
         self.tx_packets()?;
 
-        Ok(data.len())
+        Ok(accept)
     }
 
     /// Send packets (core send logic)
@@ -1175,7 +1255,7 @@ impl TcpSocket {
         let in_flight = self.snd_nxt.wrapping_sub(self.snd_una);
 
         // Calculate usable window: min(snd_wnd, cwnd) - in_flight
-        let usable_window = core::cmp::min(self.snd_wnd as u32, self.congestion.cwnd)
+        let mut usable_window = core::cmp::min(self.snd_wnd as u32, self.congestion.cwnd)
             .saturating_sub(in_flight as u32);
 
         if usable_window == 0 {
@@ -1204,7 +1284,7 @@ impl TcpSocket {
             }
 
             // Send TCP segment
-            self.tx_segment(&seg_data)?;
+            self.tx_segment(self.snd_nxt, &seg_data)?;
 
             // Add segment to retransmit queue
             let seg = TcpSendSeg::new(self.snd_nxt, &seg_data, now);
@@ -1212,6 +1292,14 @@ impl TcpSocket {
 
             // Update sequence number
             self.snd_nxt = self.snd_nxt.wrapping_add(seg_size as u32);
+
+            // R32-N1: consume the window as we fill it. usable_window was
+            // computed once from in_flight and never decremented before, so
+            // the loop kept granting the full min(snd_wnd, cwnd) to EVERY
+            // iteration — the entire send_buffer went out in mss-sized
+            // segments, exceeding cwnd/snd_wnd by up to (buffer/mss)x and
+            // defeating congestion control.
+            usable_window -= seg_size as u32;
         }
 
         // Start retransmit timer
@@ -1223,7 +1311,14 @@ impl TcpSocket {
     }
 
     /// Send single TCP segment
-    fn tx_segment(&self, data: &[u8]) -> Result<(), ()> {
+    ///
+    /// `seq` is the sequence number of the first byte of `data`. R32-B5:
+    /// this is now a parameter instead of implicitly using snd_nxt — the
+    /// retransmit paths (timer expiry, fast retransmit) re-send segments
+    /// whose starting sequence is BELOW snd_nxt once later data has been
+    /// transmitted; using snd_nxt there emitted a wrong byte range that
+    /// the peer treated as duplicate/invalid data.
+    fn tx_segment(&self, seq: TcpSeq, data: &[u8]) -> Result<(), ()> {
         let mut skb = crate::net::buffer::alloc_skb(1500).ok_or(())?;
 
         // Add data
@@ -1239,7 +1334,7 @@ impl TcpSocket {
             &mut skb,
             self.local_port,
             self.remote_port,
-            self.snd_nxt,
+            seq,
             self.rcv_nxt,
             if is_fin_retrans { 0x0011 } else { 0x0018 }, // FIN+ACK vs PSH+ACK
             self.rcv_wnd,
@@ -1334,8 +1429,9 @@ impl TcpSocket {
     /// Fast retransmit
     fn fast_retransmit(&mut self) {
         if let Some(seg) = self.retrans_queue.front() {
-            // Retransmit earliest segment
-            let _ = self.tx_segment(&seg.data);
+            // Retransmit earliest segment — with ITS starting sequence
+            // number, not snd_nxt (R32-B5).
+            let _ = self.tx_segment(seg.seq, &seg.data);
         }
     }
 
@@ -1366,8 +1462,10 @@ impl TcpSocket {
                     data_to_retransmit = None;
                 } else {
                     should_close = false;
-                    // Copy data for retransmission
-                    data_to_retransmit = Some(seg.data.clone());
+                    // Copy seq + data for retransmission (R32-B5: the
+                    // segment's OWN seq, not snd_nxt — the window may have
+                    // advanced past it since the original transmission).
+                    data_to_retransmit = Some((seg.seq, seg.data.clone()));
                     // Increment retransmit count
                     seg.retries += 1;
                 }
@@ -1386,8 +1484,8 @@ impl TcpSocket {
         self.congestion.on_timeout(self.mss);
 
         // Retransmit
-        if let Some(data) = data_to_retransmit {
-            let _ = self.tx_segment(&data);
+        if let Some((seq, data)) = data_to_retransmit {
+            let _ = self.tx_segment(seq, &data);
         }
 
         // RTO exponential backoff
@@ -1423,9 +1521,14 @@ impl TcpSocket {
 
     /// Update receive window
     pub fn update_rcv_wnd(&mut self) {
-        // Receive window = buffer size - used space
-        let used = self.recv_buffer.len() as u16;
-        self.rcv_wnd = TCP_MAX_WINDOW.saturating_sub(used);
+        // Receive window = buffer size - used space.
+        // R32-B11: compute in u32 and clamp BEFORE the u16 narrowing —
+        // `recv_buffer.len() as u16` truncated modulo 65536, so a backlog
+        // of exactly 64KB+ advertised a window of TCP_MAX_WINDOW (full)
+        // while the buffer was actually overflowing, telling the peer to
+        // send even more.
+        let used = (self.recv_buffer.len() as u32).min(TCP_MAX_WINDOW as u32);
+        self.rcv_wnd = TCP_MAX_WINDOW.saturating_sub(used as u16);
     }
 }
 
@@ -1497,6 +1600,15 @@ impl TcpConnectionManager {
                     }
                     continue;
                 }
+                // R32-B12: CLOSE corpses (pending sweep reaping) must not
+                // swallow packets — a 4-tuple match on them ran the state
+                // machine's dead arm and returned Ok, so neither a fresh
+                // child (pass b) nor an RST could ever be produced for a
+                // reused slot. Skip them: the packet falls through to the
+                // listener spawn below, or to the RST path.
+                if socket.state == TcpState::TCP_CLOSE {
+                    continue;
+                }
                 if socket.local_port == dest_port
                     && socket.remote_port == src_port
                     && socket.remote_ip == src_ip
@@ -1506,6 +1618,32 @@ impl TcpConnectionManager {
                     // Normalize it so later comparisons are exact.
                     if socket.local_ip == 0 {
                         socket.local_ip = dest_ip;
+                    }
+                    // R32-B12 (accept slot-reuse race): a pure SYN for a
+                    // tuple held by a DYING connection is a new incarnation
+                    // (peer rebooted / port reuse): the old connection can
+                    // never use it. Reset the old socket and keep scanning
+                    // so this same SYN can spawn a fresh child under the
+                    // listener (pass b). The old slot is reaped by the
+                    // timer sweep once it reaches CLOSE with user_refs==0.
+                    if is_syn
+                        && matches!(
+                            socket.state,
+                            TcpState::TCP_FIN_WAIT1
+                                | TcpState::TCP_FIN_WAIT2
+                                | TcpState::TCP_CLOSING
+                                | TcpState::TCP_LAST_ACK
+                                | TcpState::TCP_TIME_WAIT
+                                | TcpState::TCP_CLOSE_WAIT
+                        )
+                    {
+                        socket.state = TcpState::TCP_CLOSE;
+                        socket.send_buffer.clear();
+                        socket.recv_buffer.clear();
+                        socket.retrans_queue.clear();
+                        socket.ooo_queue.clear();
+                        socket.timers.stop_retransmit();
+                        continue;
                     }
                     let payload = match tcp_payload_slice(skb, tcp_hdr.header_len()) {
                         Some(p) => p,
@@ -1757,6 +1895,23 @@ pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
     let _table_g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
     unsafe {
+        // R32-N9: reject a port already held by another live socket. The
+        // old code accepted every bind, so two listeners (or a listener
+        // and a connecting client) could share a port; RX then delivered
+        // to whichever slot the scan found first. Port 0 means "assign
+        // later" (ephemeral auto-bind in tcp_connect) and never conflicts.
+        if port != 0 {
+            for i in 0..TCP_SOCKET_TABLE.count {
+                if i == fd as usize {
+                    continue;
+                }
+                if let Some(s) = TCP_SOCKET_TABLE.sockets[i].as_ref() {
+                    if s.local_port == port && s.state != TcpState::TCP_CLOSE {
+                        return -98; // EADDRINUSE
+                    }
+                }
+            }
+        }
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
             match socket.bind(port) {
                 Ok(()) => 0,
@@ -1892,11 +2047,18 @@ pub fn tcp_accept(fd: i32) -> i32 {
         }
 
         // Find an established, not-yet-accepted child of this listener.
+        // R32-B8: CLOSE_WAIT children are acceptable too — the peer FINed
+        // before accept() ran (port-scan pattern). Excluding them made
+        // them permanently unacceptable, so they could never gain an fd
+        // and sat in CLOSE_WAIT until the orphan timeout; handing them
+        // out now delivers the buffered data + EOF to the application
+        // (recv is legal in CLOSE_WAIT).
         for i in 0..TCP_SOCKET_TABLE.count {
             if let Some(socket) = TCP_SOCKET_TABLE.sockets[i].as_mut() {
                 if socket.parent_fd == Some(fd)
                     && !socket.accepted
-                    && socket.state == TcpState::TCP_ESTABLISHED
+                    && (socket.state == TcpState::TCP_ESTABLISHED
+                        || socket.state == TcpState::TCP_CLOSE_WAIT)
                 {
                     socket.accepted = true;
                     return i as i32;

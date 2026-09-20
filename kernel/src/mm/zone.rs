@@ -514,6 +514,13 @@ impl Zone {
                         let ov = (*page).order();
                         if ov == 0 { putchar(b'0'); } else { let mut vv = ov as usize; let mut dd = [0u8;4]; let mut kk = 0; while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; } while kk > 0 { kk -= 1; putchar(dd[kk]); } }
                         putchar(b'\n');
+                        // OnFreelist is the authoritative linked-state bit:
+                        // the page is STILL LINKED in a freelist, so this is
+                        // a genuine double free. Proceeding would relink an
+                        // already-linked block (two lists share its
+                        // next_free) and corrupt both — leak it instead,
+                        // like Linux's bad_page() path.
+                        return;
                     }
                 }
             }

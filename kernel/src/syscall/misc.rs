@@ -66,6 +66,12 @@ static EPOLL_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// Epoll monitored fd entry
 struct EpollEntry {
     fd: i32,
+    /// Opaque identity of the open file description captured at ADD time
+    /// (R32-B9): the Arc allocation address. Compared for equality only,
+    /// never dereferenced, so it is harmless after the file is freed.
+    /// Guards the wait path against the fd NUMBER being closed and reused
+    /// by an unrelated open file.
+    file_id: usize,
     events: u32,
     data: u64,
 }
@@ -549,9 +555,20 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns epoll file descriptor on success, negative error code on failure
 pub fn sys_epoll_create1(args: SyscallArgs) -> i64 {
-    // Simplified implementation: ignore flags
-    // O_CLOEXEC (0x80000) and other flags not currently supported
-    sys_epoll_create(args)
+    // R32 (NEW-2): honor EPOLL_CLOEXEC instead of ignoring all flags —
+    // the old delegation leaked epoll fds across execve (eventfd2 and
+    // timerfd_create already support their CLOEXEC bits via the same
+    // per-descriptor flag). Same install-then-flag pattern as those.
+    let flags = args[0] as i32;
+    const EPOLL_CLOEXEC: i32 = 0x80000;
+    if flags & !EPOLL_CLOEXEC != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let ret = sys_epoll_create([0, 0, 0, 0, 0, 0]);
+    if ret >= 0 && flags & EPOLL_CLOEXEC != 0 {
+        crate::fs::set_cloexec_fd(ret as usize, true);
+    }
+    ret
 }
 
 /// sys_epoll_ctl - Control epoll instance
@@ -612,17 +629,45 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
 
     match op {
         EPOLL_CTL_ADD => {
+            // R32-B9: Linux requires the target fd to be OPEN at ADD time
+            // (EBADF otherwise), and the registration binds to that open
+            // file description. Record the description's identity (the
+            // Arc's address) so that a later close(fd)+reopen reusing the
+            // same NUMBER can never be mistaken for the registered file
+            // at wait time. The Arc clone itself is dropped here — the
+            // entry deliberately does NOT pin the file, so the last
+            // close(fd) still runs the file's close op (pipe EOF etc.).
+            let file = match fdtable.get_file(fd as usize) {
+                Some(f) => f,
+                None => return -(errno::EBADF as i64),
+            };
+            let file_id = alloc::sync::Arc::as_ptr(&file) as usize;
             // SAFETY: event_ptr validated with access_ok above; reads EPollEvent.
             let event = unsafe { *event_ptr };
             let mut entries = epoll.entries.lock();
-            if entries.iter().any(|e| e.fd == fd) {
-                return -(errno::EEXIST as i64);
+            match entries.iter_mut().find(|e| e.fd == fd) {
+                Some(existing) => {
+                    if existing.file_id == file_id {
+                        return -(errno::EEXIST as i64);
+                    }
+                    // The fd number was closed and reused between the old
+                    // ADD and this one: the old open file description is
+                    // gone from this fd — rebind the entry to the new one
+                    // instead of returning EEXIST for a file that is not
+                    // actually registered.
+                    existing.file_id = file_id;
+                    existing.events = event.events;
+                    existing.data = event.data;
+                }
+                None => {
+                    entries.push(EpollEntry {
+                        fd,
+                        file_id,
+                        events: event.events,
+                        data: event.data,
+                    });
+                }
             }
-            entries.push(EpollEntry {
-                fd,
-                events: event.events,
-                data: event.data,
-            });
         }
         EPOLL_CTL_DEL => {
             let mut entries = epoll.entries.lock();
@@ -713,10 +758,18 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         let mut ready_events: alloc::vec::Vec<EPollEvent> = alloc::vec::Vec::new();
 
         for entry in entries.iter() {
+            // R32-B9: the registration binds to the open file description
+            // recorded at ADD time (entry.file_id). The fd NUMBER alone is
+            // not enough: after close(fd) and reuse of the number by an
+            // unrelated file, the old lookup silently polled the NEW file
+            // and reported its readiness with the OLD entry's user data.
+            // Only accept the mapping while the fd still resolves to the
+            // same description; otherwise keep the pre-existing closed-fd
+            // polarity (EPOLLERR|EPOLLHUP).
             let file = match fdtable.get_file(entry.fd as usize) {
-                Some(f) => f,
-                None => {
-                    // fd was closed, report error
+                Some(f) if alloc::sync::Arc::as_ptr(&f) as usize == entry.file_id => f,
+                _ => {
+                    // fd was closed (or its number reused), report error
                     ready_events.push(EPollEvent {
                         events: EPOLLERR | EPOLLHUP,
                         data: entry.data,
@@ -1280,6 +1333,13 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // R32-B10: validate flags — only TFD_TIMER_ABSTIME is legal here;
+    // garbage bits were silently treated as relative mode.
+    const TFD_TIMER_ABSTIME: i32 = 1;
+    if flags & !TFD_TIMER_ABSTIME != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     // Validate fd and get file
     // SAFETY: fd is a valid timerfd file descriptor from timerfd_create.
     let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
@@ -1345,11 +1405,22 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
         0
     };
 
+    // R32-B10: for TFD_TIMER_ABSTIME, it_value is an ABSOLUTE time on the
+    // timer's clock, not a delay. Both CLOCK_REALTIME and CLOCK_MONOTONIC
+    // read from mtime (time since boot — sys_clock_gettime), and jiffies
+    // also count from boot, so the absolute timespec converts directly
+    // into an absolute jiffies value. The old code added `now` in BOTH
+    // branches, treating every absolute deadline as a relative delay (a
+    // timer armed for an absolute point T fired ~T-after-arm instead).
+    // A deadline already in the past (absolute jiffies <= now) satisfies
+    // the wheel's `expires <= current` test and fires on the next softirq
+    // scan — matching Linux's immediate expiry for past ABSTIME values.
+    let now = crate::drivers::timer::get_jiffies();
     let expires = if flags & 1 != 0 {
-        // TFD_TIMER_ABSTIME
-        crate::drivers::timer::get_jiffies() + value_jiffies
+        // TFD_TIMER_ABSTIME: value_jiffies is already the absolute jiffies.
+        value_jiffies
     } else {
-        crate::drivers::timer::get_jiffies() + value_jiffies
+        now + value_jiffies
     };
 
     // Use timerfd mode: pass the expiration_count address as tfd_addr

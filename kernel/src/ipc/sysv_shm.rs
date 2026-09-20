@@ -284,6 +284,12 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             0
         }
         IPC_STAT => {
+            // R32 (NEW-4 twin): Linux requires S_IRUGO for IPC_STAT — was
+            // missing (metadata leak to any caller).
+            let idx2 = match SHM_IDS.find_with_perms(shmid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
             let buf_ptr = buf as *mut ShmidDsUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
                 return -(errno::EFAULT as i64);
@@ -302,7 +308,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             };
             {
                 let slots = SHM_IDS.slots.lock();
-                if let Some(ref entry) = slots[idx] {
+                if let Some(ref entry) = slots[idx2] {
                     ds.shm_perm = entry.inner.perm.to_uapi();
                     ds.shm_segsz = entry.inner.segsz;
                     ds.shm_atime = entry.inner.shm_atime.load(Ordering::Relaxed);
@@ -409,6 +415,11 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                 if let Some(ref entry) = slots[raw_idx] {
                     if entry.deleted {
                         return -(errno::EINVAL as i64);
+                    }
+                    // R32 (NEW-4 twin): SHM_STAT also requires S_IRUGO in
+                    // Linux (it is IPC_STAT addressed by raw index).
+                    if !ipc_check_permissions(entry.inner.get_perm(), 0o4) {
+                        return -(errno::EACCES as i64);
                     }
                     ds.shm_perm = entry.inner.perm.to_uapi();
                     ds.shm_segsz = entry.inner.segsz;

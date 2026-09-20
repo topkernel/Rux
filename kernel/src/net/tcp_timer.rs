@@ -76,10 +76,11 @@ impl TcpTimerManager {
         // LAST_ACK's final ACK) with no fd ever created (never accepted, or
         // accept's pin failed) was reaped by no one — the 64-slot table
         // fills one leaked slot per RST'd connection. parent_fd.is_some()
-        // is the discriminator: client/listener sockets (no parent_fd) sit
-        // in TCP_CLOSE while fresh/pre-connect with user_refs==0 — they are
-        // fd-backed and reaped by Socket::close instead; sweeping them
-        // would free live pre-connect sockets.
+        // is the discriminator for children; R32-B7 adds `orphaned` for
+        // CLIENT/listener slots whose fd left them mid-close (FIN_WAIT
+        // etc.) — without the flag those CLOSE corpses were invisible to
+        // the sweep (indistinguishable from fresh pre-connect slots with
+        // user_refs==0) and leaked forever.
         let freeable: alloc::vec::Vec<usize> = sockets
             .iter()
             .enumerate()
@@ -87,8 +88,8 @@ impl TcpTimerManager {
                 slot.as_ref()
                     .map(|sk| {
                         sk.state == TcpState::TCP_CLOSE
-                            && sk.parent_fd.is_some()
                             && sk.user_refs.load(core::sync::atomic::Ordering::Acquire) == 0
+                            && (sk.parent_fd.is_some() || sk.orphaned)
                     })
                     .unwrap_or(false)
             })
@@ -108,6 +109,32 @@ impl TcpTimerManager {
             | TcpState::TCP_CLOSE_WAIT
             | TcpState::TCP_CLOSING
             | TcpState::TCP_LAST_ACK => {
+                // R32-B8: orphaned CLOSE_WAIT reclamation — the peer sent
+                // FIN and no fd ever claimed the slot (child never
+                // accepted, or accept unwound). Nothing else can observe
+                // or close this connection; without a bound it sat in
+                // CLOSE_WAIT forever and each port-scan style
+                // connect+FIN leaked one of the 64 table slots. fd-held
+                // CLOSE_WAITs (user_refs > 0) are left alone — the
+                // application may still be draining/sending, exactly like
+                // Linux; they are reclaimed when the fd closes.
+                if socket.state == TcpState::TCP_CLOSE_WAIT
+                    && socket.user_refs.load(core::sync::atomic::Ordering::Acquire) == 0
+                {
+                    if socket.timers.close_wait_since == 0 {
+                        socket.timers.close_wait_since = now;
+                    } else if now - socket.timers.close_wait_since
+                        > (crate::config::TCP_TIMEWAIT_TIMEOUT_US / 10_000)
+                    {
+                        socket.state = TcpState::TCP_CLOSE;
+                        socket.send_buffer.clear();
+                        socket.recv_buffer.clear();
+                        socket.retrans_queue.clear();
+                        socket.ooo_queue.clear();
+                        socket.timers.stop_retransmit();
+                    }
+                }
+
                 // R23-2: restored the combined retransmit/delack arm —
                 // the R21-N3b split (ESTABLISHED grouped with FIN_WAIT)
                 // both killed 60s+ live connections via the fin_wait
@@ -132,6 +159,30 @@ impl TcpTimerManager {
                     // Send delayed ACK
                     let _ = socket.send_ack_public();
                     socket.timers.delack_deadline = 0;
+                }
+            }
+            TcpState::TCP_SYN_SENT => {
+                // R32-N16: SYN retransmission. connect() arms
+                // retransmit_deadline; the old catch-all arm ignored
+                // SYN_SENT entirely, so one lost SYN parked the socket
+                // (and the connect()ing task) in SYN_SENT forever.
+                if socket.timers.retransmit_deadline > 0
+                    && now >= socket.timers.retransmit_deadline
+                {
+                    if socket.timers.syn_retries >= TCP_MAX_RETRIES {
+                        socket.state = TcpState::TCP_CLOSE;
+                        socket.timers.stop_retransmit();
+                        socket.timers.syn_retries = 0;
+                        self.timeout_closes += 1;
+                    } else {
+                        socket.timers.syn_retries += 1;
+                        let _ = socket.resend_syn();
+                        // Exponential backoff, capped at TCP_RTO_MAX_US.
+                        let shift = core::cmp::min(socket.timers.syn_retries, 6) as u32;
+                        let backoff_us = (crate::config::TCP_RTO_DEFAULT_US << shift)
+                            .min(TCP_RTO_MAX_US);
+                        socket.timers.start_retransmit(backoff_us);
+                    }
                 }
             }
             TcpState::TCP_FIN_WAIT1 | TcpState::TCP_FIN_WAIT2 => {

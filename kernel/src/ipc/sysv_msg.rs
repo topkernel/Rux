@@ -183,6 +183,13 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             0
         }
         IPC_STAT => {
+            // R32 (NEW-4 twin): Linux requires S_IRUGO for IPC_STAT — the
+            // old path used the perm-free find() and leaked the queue's
+            // metadata to any caller.
+            let idx2 = match MSG_IDS.find_with_perms(msqid, 0o4) {
+                Ok(i) => i,
+                Err(e) => return e as i64,
+            };
             let buf_ptr = buf as *mut MsqidDsUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<MsqidDsUapi>()) {
                 return -(errno::EFAULT as i64);
@@ -202,7 +209,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             };
             {
                 let slots = MSG_IDS.slots.lock();
-                if let Some(ref entry) = slots[idx] {
+                if let Some(ref entry) = slots[idx2] {
                     ds.msg_perm = entry.inner.perm.to_uapi();
                     ds.msg_stime = entry.inner.msg_stime.load(Ordering::Relaxed);
                     ds.msg_rtime = entry.inner.msg_rtime.load(Ordering::Relaxed);
@@ -616,7 +623,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                     entry.inner.qnum.fetch_sub(1, Ordering::Relaxed);
                     entry.inner.msg_rtime.store(ipc_current_time(), Ordering::Relaxed);
                     entry.inner.msg_lrpid.store(get_current_pid(), Ordering::Relaxed);
-                    Some(msg)
+                    Some((mi, msg))
                 } else {
                     None
                 }
@@ -625,7 +632,7 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
             }
         };
 
-        if let Some(msg) = result {
+        if let Some((mi, msg)) = result {
             // Copy mtype (8 bytes)
             // SAFETY: msgp was access_ok-validated for msgsz+8 bytes above;
             // writing 8 bytes for mtype at the start of the buffer.
@@ -640,10 +647,14 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                     msgsz
                 } else {
                     // Restore the message to queue
+                    // R32 (NEW-11): re-insert at the ORIGINAL position —
+                    // the old push-to-tail reordered the queue on every
+                    // failed (too-small-buffer) receive, so a retry with a
+                    // larger buffer could observe a different message.
                     let slots = MSG_IDS.slots.lock();
                     if let Some(ref entry) = slots[idx] {
                         let mut messages = entry.inner.messages.lock();
-                        messages.push(msg);
+                        messages.insert(mi, msg);
                         entry.inner.cbytes.fetch_add(msg_len, Ordering::Relaxed);
                         entry.inner.qnum.fetch_add(1, Ordering::Relaxed);
                     }

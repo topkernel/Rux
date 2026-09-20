@@ -297,6 +297,25 @@ pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
     unsafe {
+        // R32-N9: reject a port already held by another bound socket — the
+        // old code accepted every bind and udp_rcv then delivered to
+        // whichever slot the scan found first. Port 0 (ephemeral) never
+        // conflicts. A specific-address bind may coexist with an
+        // INADDR_ANY(0) bind on the same port only if this bind itself is
+        // the ANY one (matching Linux's wildcard/exact precedence is not
+        // implemented — first binder wins).
+        if port != 0 {
+            for i in 0..UDP_SOCKET_TABLE.count {
+                if i == fd as usize {
+                    continue;
+                }
+                if let Some(s) = UDP_SOCKET_TABLE.sockets[i].as_ref() {
+                    if s.bound && s.local_port == port {
+                        return -98; // EADDRINUSE
+                    }
+                }
+            }
+        }
         if let Some(socket) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
             match socket.bind(ip, port) {
                 Ok(()) => 0,

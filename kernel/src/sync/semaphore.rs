@@ -152,52 +152,76 @@ impl Semaphore {
     /// # }
     /// ```
     pub fn down_interruptible(&self) -> Result<(), ()> {
-        // Fast path.
+        // R32-F10: register on the wait queue BEFORE decrementing — the
+        // same discipline as down() (R7-B6b). The old order (fetch_sub
+        // first, prepare_to_wait later, with a `count > 0` recheck) had a
+        // lost-wakeup window: an up() landing between the fetch_sub and
+        // the registration incremented the count back to exactly 0 (the +1
+        // paired with our reservation) and, seeing old < 0, called
+        // wake_up_one on an EMPTY queue. The recheck's `> 0` then missed
+        // the count of 0, so we slept anyway — and every later up() saw
+        // old >= 0 and woke NOBODY: the waiter slept forever (only a
+        // signal could break it out, and with none pending it never
+        // returned EINTR). Registering first means any up() that pairs
+        // with our decrement finds us on the queue and wakes us.
+        let current = match crate::sched::current() {
+            Some(task) => task,
+            None => {
+                // No current task (early boot / IRQ context): cannot block.
+                // Do not touch the count — report failure to the caller.
+                return Err(());
+            }
+        };
+
+        // Register + mark INTERRUPTIBLE (atomically under the waitqueue
+        // lock — see wait_event_interruptible!). EXCLUSIVE (tail insert,
+        // FIFO), matching down(): a transient fast-path registrant must
+        // not sit ahead of a real sleeper and steal up()'s single wake
+        // token (R8-6).
+        self.wait.prepare_to_wait(current, true, true);
+
         let old = self.count.fetch_sub(1, Ordering::Acquire);
         if old > 0 {
-            return Ok(());
-        }
-
-        // Slow path with signal checking.
-        loop {
-            let current = match crate::sched::current() {
-                Some(task) => task,
-                None => {
-                    self.count.fetch_add(1, Ordering::Release);
-                    return Err(());
-                }
-            };
-
-            self.wait.prepare_to_wait(current, false, true);
-
-            if self.count.load(Ordering::Acquire) > 0 {
-                self.wait.finish_wait(current);
-                return Ok(());
-            }
-
-            if crate::signal::signal_pending() {
-                self.wait.finish_wait(current);
-                // Undo our initial fetch_sub.
-                self.count.fetch_add(1, Ordering::Release);
-                return Err(());
-            }
-
-            crate::arch::riscv64::cpu::restore_irq(true);
-            crate::sched::schedule();
-
+            // Acquired on the fast path — unregister and go.
             self.wait.finish_wait(current);
-
-            // Check if woken by signal rather than up().
-            if crate::signal::signal_pending() {
-                // Interrupted — undo our initial fetch_sub.
-                self.count.fetch_add(1, Ordering::Release);
-                return Err(());
-            }
-
-            // Woken by up(): our initial fetch_sub already reserved a slot.
-            // The up() that woke us incremented count, so it is correct.
+            // finish_wait restored RUNNING; a concurrent up() may ALSO have
+            // seen us queued+sleeping and enqueued us (NEW-C2 family) —
+            // undo that (per-class on_rq guards make it a no-op otherwise).
+            crate::sched::dequeue_task(&*current);
             return Ok(());
         }
+
+        // A signal that arrived before we sleep must interrupt immediately
+        // (the caller maps Err to EINTR) rather than continuing into the
+        // sleep.
+        if crate::signal::signal_pending() {
+            self.wait.finish_wait(current);
+            // R9-17: NEW-C2 discipline for the signal path too — undo a
+            // concurrent wake enqueue before returning.
+            crate::sched::dequeue_task(&*current);
+            // Undo our decrement — we are not taking the semaphore.
+            self.count.fetch_add(1, Ordering::Release);
+            return Err(());
+        }
+
+        // Slow path: our decrement is queued; the pairing up() will wake us.
+        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::sched::schedule();
+
+        // Woken up — finish_wait restores RUNNING and removes from queue.
+        self.wait.finish_wait(current);
+
+        // Interrupted by a signal rather than up(): release the
+        // reservation and report EINTR to the caller. (If an up() raced
+        // the signal, its +1 stays in the count for the next down — no
+        // token is lost.)
+        if crate::signal::signal_pending() {
+            self.count.fetch_add(1, Ordering::Release);
+            return Err(());
+        }
+
+        // Woken by up(): our fetch_sub reserved the slot the up() released.
+        Ok(())
     }
 
     /// Try P operation (non-blocking)

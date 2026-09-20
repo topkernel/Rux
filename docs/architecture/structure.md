@@ -6,44 +6,44 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-04-08
+**Last Updated**: 2026-09-20
 
 ### Overall Statistics
 
 | Metric | Value |
 |--------|-------|
 | **Total Source Files** | 278 (274 Rust + 3 Assembly + 1 Linker Script) |
-| **Total Lines of Code** | **~102,400 lines** |
+| **Total Lines of Code** | **~112,000 lines** |
 | **Kernel Binary Size (debug)** | ~3 MB |
 
 ### Module Code Distribution
 
 | Module | Files | Lines of Code | Percentage | Description |
 |--------|-------|---------------|------------|-------------|
-| **fs/** | 52 | 22,539 | 22.2% | File system (ext4, procfs, jbd2, VFS) |
-| **syscall/** | 11 | 12,692 | 12.5% | System call dispatch |
-| **mm/** | 25 | 9,843 | 9.7% | Memory management |
-| **tests/** | 60 | 9,641 | 9.5% | Unit tests |
-| **drivers/** | 28 | 9,047 | 8.9% | Device drivers |
-| **arch/** | 21 | 7,697 | 7.6% | Architecture-specific (RISC-V) |
-| **Top-level** | 12 | 6,257 | 6.2% | Main entry, console, config, etc. |
-| **net/** | 12 | 5,854 | 5.8% | Network protocol stack |
-| **process/** | 9 | 4,667 | 4.6% | Process management |
-| **ipc/** | 6 | 3,308 | 3.3% | IPC (System V, POSIX MQ) |
-| **sched/** | 8 | 3,482 | 3.4% | Process scheduling |
-| **sync/** | 8 | 2,478 | 2.4% | Synchronization primitives |
-| **interrupt/** | 8 | 1,676 | 1.7% | Interrupt subsystem |
-| **dfx/** | 8 | 1,027 | 1.0% | Diagnostics and debugging |
+| **fs/** | 52 | 24,478 | 21.9% | File system (ext4, procfs, jbd2, VFS) |
+| **syscall/** | 11 | 14,061 | 12.6% | System call dispatch |
+| **mm/** | 25 | 10,632 | 9.5% | Memory management |
+| **tests/** | 60 | 9,610 | 8.6% | Unit tests |
+| **drivers/** | 28 | 9,504 | 8.5% | Device drivers |
+| **arch/** | 21 | 8,422 | 7.5% | Architecture-specific (RISC-V) |
+| **Top-level** | 12 | 8,396 | 7.5% | Main entry, console, config, etc. |
+| **net/** | 12 | 6,905 | 6.2% | Network protocol stack |
+| **process/** | 9 | 5,818 | 5.2% | Process management |
+| **sched/** | 8 | 4,307 | 3.8% | Process scheduling |
+| **ipc/** | 6 | 4,055 | 3.6% | IPC (System V, POSIX MQ) |
+| **sync/** | 8 | 3,053 | 2.7% | Synchronization primitives |
+| **interrupt/** | 8 | 1,762 | 1.6% | Interrupt subsystem |
+| **dfx/** | 8 | 1,044 | 0.9% | Diagnostics and debugging |
 
 ### Test Statistics
 
 | Test Type | Count | Description |
 |-----------|-------|-------------|
-| **Kernel Unit Tests** | 58 files, 825 cases | Memory, process, file system, network, etc. |
-| **Formal Verification** | 1,088 proptest cases (98 modules); 157 Kani proofs (22 modules); 4 SPIN models (8 LTL) | 4-layer: proptest (L1), Kani (L2), SPIN (L3), Miri (L4) |
+| **Kernel Unit Tests** | 60 files, 995 cases (last report: 901 PASS + 94 SKIP) | Memory, process, file system, network, etc. |
+| **Formal Verification** | 1,116 verify-crate test functions (98 modules); 157 Kani proofs (22 modules); 4 SPIN models (8 LTL) | 4-layer: proptest (L1), Kani (L2), SPIN (L3), Miri (L4) |
 | **Smoke Tests** | 15 tests (all passing) | Core functionality validation |
 | **Linux LTP Tests** | 1,838 tests | Official LTP test suite (syscall, mem, fs, etc.) |
-| **Total** | **3,777 test cases + 161 formal verification proofs** | Comprehensive kernel verification coverage |
+| **Total** | **4,125 test cases + 161 formal verification proofs** | Comprehensive kernel verification coverage |
 
 ---
 
@@ -59,7 +59,7 @@ Rux/
 +-- test/                   # Test and debug scripts
 |   +-- run.sh             # Quick run script
 |   +-- mkrootfs.sh        # Create rootfs image
-|   +-- rootfs.img         # ext4 rootfs image (128MB)
+|   +-- rootfs.img         # ext4 rootfs image (1GB)
 |
 +-- scripts/                # Utility scripts
 |   +-- verify_sync_check.py # Kernel/verify sync checker
@@ -357,19 +357,27 @@ Rux/
 |   |   |   +-- softlockup.rs # Soft lockup detector
 |   |   |   +-- taint.rs     # Kernel taint tracking
 |   |   |
-|   |   +-- tests/        # Unit tests (60 test files)
+|   |   +-- tests/        # Unit tests (59 test files + mod.rs)
 |   |   |   +-- mod.rs       # Test framework entry
+|   |   |
+|   |   |   |  # Pure logic tests
+|   |   |   +-- dev_t.rs
+|   |   |   +-- checksum.rs
+|   |   |   +-- errno_test.rs
+|   |   |   +-- config_test.rs
+|   |   |   +-- vma_flags.rs
 |   |   |
 |   |   |   |  # Memory tests
 |   |   |   +-- heap_allocator.rs
 |   |   |   +-- page_allocator.rs
-|   |   |   +-- standard_alloc.rs
+|   |   |   +-- buffer_state.rs
 |   |   |   +-- mem_mmap.rs
 |   |   |   +-- mem_cow.rs
 |   |   |
 |   |   |   |  # Process/scheduling tests
 |   |   |   +-- fork.rs
 |   |   |   +-- getpid.rs
+|   |   |   +-- pid_test.rs
 |   |   |   +-- wait4.rs
 |   |   |   +-- process_tree.rs
 |   |   |   +-- scheduler.rs
@@ -380,7 +388,10 @@ Rux/
 |   |   |   +-- execve.rs
 |   |   |   +-- boundary.rs
 |   |   |   +-- listhead.rs
-|   |   |   +-- quick.rs
+|   |   |
+|   |   |   |  # Synchronization tests
+|   |   |   +-- semaphore.rs
+|   |   |   +-- futex_test.rs
 |   |   |
 |   |   |   |  # File system tests
 |   |   |   +-- file_open.rs
@@ -395,13 +406,14 @@ Rux/
 |   |   |   +-- mkdir_unlink.rs
 |   |   |   +-- ext4_allocator.rs
 |   |   |   +-- ext4_file_write.rs
-|   |   |   +-- ext4_indirect_blocks.rs
+|   |   |   +-- mount_flags.rs
 |   |   |
 |   |   |   |  # IPC tests
 |   |   |   +-- pipe2.rs
 |   |   |   +-- ipc_poll.rs
 |   |   |   +-- ipc_epoll.rs
 |   |   |   +-- ipc_eventfd.rs
+|   |   |   +-- ipc_sysv.rs
 |   |   |
 |   |   |   |  # Signal tests
 |   |   |   +-- signal.rs
@@ -410,10 +422,10 @@ Rux/
 |   |   |   |  # Network tests
 |   |   |   +-- network.rs
 |   |   |   +-- tcp_handshake.rs
+|   |   |   +-- virtio_net.rs
 |   |   |
 |   |   |   |  # Driver tests
 |   |   |   +-- virtio_queue.rs
-|   |   |   +-- virtio_net.rs
 |   |   |   +-- framebuffer.rs
 |   |   |
 |   |   |   |  # System call tests
@@ -426,7 +438,6 @@ Rux/
 |   |   |   +-- syscall_io.rs
 |   |   |   +-- syscall_time.rs
 |   |   |   +-- syscall_misc.rs
-|   |   |   +-- user_syscall.rs
 |   |   |
 |   |   +-- console.rs    # Console (UART)
 |   |   +-- config.rs     # Auto-generated config (do not edit manually)
@@ -515,20 +526,15 @@ Internal structure of rootfs image (`test/rootfs.img`):
 |
 +-- test/               # Test programs
 |   +-- smoke_test      # Smoke tests (15 tests)
+|   +-- dynamic_link_test # Dynamic linking test
+|   +-- nettest         # Loopback network E2E test (UDP/TCP echo)
 |   +-- linux-ltp/      # Official LTP tests (1,838 tests)
 |       +-- testcases/bin/  # LTP test binaries
 |       +-- run_ltp.sh
 |       +-- run_quick.sh
 |       +-- run_syscalls.sh
 |
-+-- dev/                # Device files
-|   +-- console
-|   +-- null
-|   +-- zero
-|   +-- input/
-|   |   +-- event0      # Input device
-|   +-- fb0             # Framebuffer
-|
++-- dev/                # Device files (devfs: null, kmsg, input/event0-1)
 +-- proc/               # procfs mount point
 +-- tmp/                # Temporary files
 +-- var/                # Variable data
@@ -695,5 +701,5 @@ make verify  # Run formal verification (sync check + proptest)
 
 ---
 
-**Document Version**: v12.0
-**Last Updated**: 2026-04-09
+**Document Version**: v12.1
+**Last Updated**: 2026-09-20

@@ -599,12 +599,17 @@ impl VirtIOPCI {
     /// - `queue_index`: Queue index (0 for first queue)
     /// - `vector`: MSI-X vector number (0 means don't use MSI-X, use legacy INTx)
     pub fn set_queue_vector(&self, queue_index: u16, vector: u16) {
-        // SAFETY: common_cfg_bar points to valid MMIO region; writing MSI-X vector register.
+        // SAFETY: common_cfg_bar points to valid MMIO region; selecting the
+        // queue then writing its msix_vector register. NOTE: the vector
+        // register is COMMON_CFG_QUEUE_MSIX_VECTOR (0x1A) — the old code
+        // wrote 0x1C, which is QUEUE_ENABLE, and would have disabled the
+        // queue had anything ever called this.
         unsafe {
-            let vector_ptr = (self.common_cfg_bar + 0x1C) as *mut u16;
+            let select_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
+            core::ptr::write_volatile(select_ptr, queue_index);
+            let vector_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_MSIX_VECTOR as u64) as *mut u16;
             core::ptr::write_volatile(vector_ptr, vector);
         }
-        let _ = queue_index; // Avoid unused warning
     }
 
     /// Read data from block device
@@ -748,7 +753,8 @@ impl VirtIOPCI {
             // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-                }
+                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+            }
             return Err("VirtIO request timeout");
         }
 
@@ -758,6 +764,7 @@ impl VirtIOPCI {
         // SAFETY: Both pointers were allocated with their respective layouts and are valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
         }
 
         match status.status {
@@ -896,6 +903,7 @@ impl VirtIOPCI {
             // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
                 }
             return Err("VirtIO write request timeout");
         }
@@ -906,6 +914,7 @@ impl VirtIOPCI {
         // SAFETY: Both pointers were allocated with their respective layouts and are valid.
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
         }
 
         match status.status {

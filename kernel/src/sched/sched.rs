@@ -910,6 +910,17 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     if !grq.dl_rq.is_empty() {
         if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id, prev) {
             mark_picked_on_cpu(task);
+            // R32-DL1: reset the CBS execution clock at pick (mirror of the
+            // CFS R20-6 fix). exec_start otherwise still holds the
+            // timestamp of the task's PREVIOUS switch-out (or 0 before its
+            // first run), so the first scheduler_tick/__schedule charge
+            // after a wake billed the entire sleep duration (or the whole
+            // uptime) into the runtime budget and throttled the task
+            // instantly.
+            (*task).dl_entity().exec_start.store(
+                crate::sched::fair::sched_clock(),
+                core::sync::atomic::Ordering::Release,
+            );
             // R7-B5: pick removes the task from the queue — pair the count.
             grq.nr_running.fetch_update(
                 core::sync::atomic::Ordering::SeqCst,
@@ -1223,14 +1234,15 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
     };
 
     if linked {
+        // R31-5 discipline: propagate the class dequeue result (RT/DL now
+        // return accurate bools; the old `; true` hardcodes drifted
+        // nr_running whenever the guarded dequeue was a no-op).
         let dequeued = match old_policy {
             SchedPolicy::Fifo | SchedPolicy::Rr => {
-                grq_guard.rt_rq.dequeue(task);
-                true
+                grq_guard.rt_rq.dequeue(task)
             }
             SchedPolicy::Deadline => {
-                grq_guard.dl_rq.dequeue(task);
-                true
+                grq_guard.dl_rq.dequeue(task)
             }
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
                 grq_guard.cfs_rq.dequeue(task)

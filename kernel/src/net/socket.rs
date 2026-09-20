@@ -145,26 +145,34 @@ impl Socket {
 
     /// Bind to address
     pub fn bind(&self, addr: u32, port: u16) -> Result<(), i32> {
-        *self.local_addr.lock() = addr;
-        *self.local_port.lock() = port;
-        *self.bound.lock() = true;
-
+        // R32-N9: propagate the protocol-layer return code — both tcp_bind
+        // and udp_bind now return EADDRINUSE on port conflicts and the old
+        // code swallowed it, reporting success for a bind that never took.
         match self.sock_type {
             SocketType::Tcp => {
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
                 let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
-                crate::net::tcp::tcp_bind(tcp_fd, port);
-                Ok(())
+                let ret = crate::net::tcp::tcp_bind(tcp_fd, port);
+                if ret != 0 {
+                    return Err(ret);
+                }
             }
             SocketType::Udp => {
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
                 let udp_fd = self.udp_fd.lock().ok_or(-9)?;
-                crate::net::udp::udp_bind(udp_fd, addr, port);
-                Ok(())
+                let ret = crate::net::udp::udp_bind(udp_fd, addr, port);
+                if ret != 0 {
+                    return Err(ret);
+                }
             }
         }
+
+        *self.local_addr.lock() = addr;
+        *self.local_port.lock() = port;
+        *self.bound.lock() = true;
+        Ok(())
     }
 
     /// Listen for connections
@@ -276,7 +284,13 @@ impl Socket {
         match self.sock_type {
             SocketType::Tcp => {
                 let state = *self.state.lock();
-                if state != SocketState::Connected {
+                // R32-N28: only an UNCONNECTED socket is ENOTCONN. `Closing`
+                // (set by shutdown(SHUT_WR/SHUT_RDWR)) must keep the read
+                // half alive — the old `!= Connected` gate made recv() fail
+                // with ENOTCONN right after shutdown(SHUT_WR), losing all
+                // still-in-flight peer data; the buffered data (or EOF once
+                // drained) is delivered by the TcpSocket::recv paths below.
+                if state == SocketState::Unconnected {
                     return Err(-107); // ENOTCONN
                 }
                 // SAFETY: tcp_fd is only written once during socket creation and
@@ -374,7 +388,6 @@ impl Socket {
                         if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                             socket.close();
                             // Only free immediately if connection is fully closed.
-                            // Otherwise, let the timer tick clean up after TIME_WAIT expires.
                             if socket.state == crate::net::tcp::TcpState::TCP_CLOSE {
                                 // R21-N4: drop our pin; free only when the
                                 // timer side already reaped to CLOSE and no
@@ -384,12 +397,29 @@ impl Socket {
                                     .swap(0, core::sync::atomic::Ordering::AcqRel);
                                 free_now = prev <= 1;
                             } else {
-                                // Still closing (FIN_WAIT etc.) — unpin; the
-                                // timer tick reaps when refs hits 0.
-                                let prev = socket
-                                    .user_refs
-                                    .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
-                                free_now = prev <= 1;
+                                // R32-B7: still closing (FIN_WAIT1/LAST_ACK/
+                                // ...). NEVER free now — the FIN may be lost
+                                // and needs the retransmit machinery, and the
+                                // peer needs TIME_WAIT-side time. The timer
+                                // tick's orphan paths (FIN_WAIT timeout,
+                                // retrans exhaustion, B8 CLOSE_WAIT timeout)
+                                // transition the slot to CLOSE, and the tick
+                                // sweep frees it once user_refs hits 0.
+                                if socket.user_refs.load(core::sync::atomic::Ordering::Acquire)
+                                    > 0
+                                {
+                                    // Unpin the accepted-socket reference
+                                    // (never wraps: pinned slots hold >= 1).
+                                    socket.user_refs.fetch_sub(
+                                        1,
+                                        core::sync::atomic::Ordering::AcqRel,
+                                    );
+                                }
+                                // Client/listener slots have no parent_fd;
+                                // mark them so the R24 sweep reaps the CLOSE
+                                // corpse instead of mistaking it for a fresh
+                                // pre-connect slot (which it must keep).
+                                socket.orphaned = true;
                             }
                         }
                     }
@@ -488,8 +518,13 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
         let mut readable = !socket.recv_queue.lock().is_empty();
         // R22-4: TCP data lands in the protocol table's recv_buffer, not
         // recv_queue — poll never reported readable and clients spun.
+        // R32-N6: take the table lock while peeking at the protocol slot —
+        // the NetRx softirq and the timer tick mutate recv_buffer/state
+        // under it, and this read raced both (leaf-scoped, nothing below
+        // re-enters tcp_rcv, same shape as Socket::send).
         if !readable {
             if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+                let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
                 if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                     readable = !ts.recv_buffer.is_empty();
                     if !readable
@@ -741,11 +776,22 @@ pub fn socket_create_accepted(tcp_fd: i32) -> Result<usize, i32> {
 /// R22-5: release the raw Arc<Socket> reference and drop the protocol
 /// slot's user pin on a failed accepted-socket fd install.
 fn unwind_accepted(file: &Arc<File>, tcp_fd: i32) {
-    if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
-        let prev = ts.user_refs.swap(0, core::sync::atomic::Ordering::AcqRel);
-        if prev <= 1 {
-            crate::net::tcp::tcp_socket_free(tcp_fd);
+    // R32-N6: serialize against the timer sweep / tcp_rcv (same discipline
+    // as Socket::close — leaf-scoped, no RX re-entry below).
+    // tcp_socket_free takes the lock itself, so the free happens after the
+    // guard drops (same shape as Socket::close).
+    let free_now = {
+        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+        match crate::net::tcp::tcp_socket_get(tcp_fd) {
+            Some(ts) => {
+                let prev = ts.user_refs.swap(0, core::sync::atomic::Ordering::AcqRel);
+                prev <= 1
+            }
+            None => false,
         }
+    };
+    if free_now {
+        crate::net::tcp::tcp_socket_free(tcp_fd);
     }
     let ptr = unsafe { *file.private_data.get() };
     if let Some(ptr) = ptr {

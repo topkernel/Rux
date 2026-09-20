@@ -50,6 +50,14 @@ impl CharDev {
 }
 
 pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
+    // POSIX: read(fd, buf, 0) returns 0 without touching the buffer. The
+    // loop below stores slice[bytes_read] BEFORE checking bytes_read >=
+    // count, so a zero-length slice would panic on index-out-of-bounds the
+    // moment a character is available (sys_read filters count==0 today, but
+    // File::read is callable from other kernel paths).
+    if count == 0 {
+        return 0;
+    }
     let mut bytes_read: usize = 0;
     let slice = core::slice::from_raw_parts_mut(buf, count);
 

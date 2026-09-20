@@ -25,6 +25,10 @@ aarch64 = []
 x86_64 = []
 riscv64 = []
 unit-test = []  # Enable unit tests (only used during testing)
+# DFX: spinlock holder tracking (two atomic stores per lock/unlock pair).
+# Zero-cost when off; enabled when hunting lock deadlocks
+# (see test/hunt-wedge.sh and docs/guides/debugging.md).
+dfx-lock-owner = []
 
 [[bin]]
 name = "rux"

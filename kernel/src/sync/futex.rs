@@ -353,6 +353,14 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             dl, crate::sched::get_current_pid(),
         ))
         .unwrap_or(0);
+    // R32 (NEW-3): if a deadline was requested but the timer pool is
+    // exhausted (add_timer_wakeup → 0), schedule() below would sleep
+    // FOREVER — nothing else wakes an un-signaled futex, so the timed
+    // wait degenerated into an untimed hang. Unlink and fail instead.
+    if deadline.is_some() && timer_id == 0 {
+        remove_waiter(bucket_idx, waiter_idx);
+        return -ENOMEM as i64;
+    }
     crate::sched::schedule();
     if timer_id != 0 {
         crate::timer::del_timer(timer_id);
