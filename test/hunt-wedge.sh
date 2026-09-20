@@ -23,9 +23,19 @@ ROUNDS=${1:-6}
 WORK=/tmp/rux-hunt
 mkdir -p $WORK
 
-# Build with the diagnostics feature (two extra atomic stores per lock).
-echo "[hunt] building kernel with dfx-lock-owner ..."
-cargo build --target riscv64gc-unknown-none-elf --features riscv64,dfx-lock-owner || exit 1
+# HUNT_PROD=1: hunt with the PRODUCTION build (no dfx-lock-owner) — the
+# feature changes binary layout and shifts the very races being hunted;
+# use it when the production gate reproduces a wedge the diagnostic build
+# does not. Monitor capture works either way (it needs no guest support);
+# only the holder=<cpu> field and dfx=watchdog taskdump are owner-build
+# features.
+if [ "${HUNT_PROD:-0}" = "1" ]; then
+    echo "[hunt] building PRODUCTION kernel (no dfx-lock-owner) ..."
+    cargo build --target riscv64gc-unknown-none-elf --features riscv64 || exit 1
+else
+    echo "[hunt] building kernel with dfx-lock-owner ..."
+    cargo build --target riscv64gc-unknown-none-elf --features riscv64,dfx-lock-owner || exit 1
+fi
 KRN=$WORK/kernel.elf
 RFS=test/rootfs.img
 # Snapshot the diagnostic build ONCE: later `cargo build` runs (e.g. a

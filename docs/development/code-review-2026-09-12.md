@@ -601,6 +601,21 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.27 第三十三轮：等待/唤醒协议专项 — 5 项修复 + 观测器悖论确立
+
+**专项 agent 修复（5 项）**：
+1. **A-1 (H)** `Task::wake_up` 陈旧过滤复活窗口——无锁 set_state(RUNNING)+enqueue 与 do_exit/reap 竞争：窗口内任务可被唤醒、跑完、退出、reap（栈已释放），陈旧唤醒再把死任务入队，第三 CPU pick 后 `__switch_to` 装载已释放的 thread.sp——与 A 型现场（trap 序言在堆地址 store fault 持 TCP 锁卡死）完全吻合。修：新 `sched::wake_up_enqueue`——GRQ 锁内原子完成重验（仍为 sleeping/STOPPED）+ 转 RUNNING + 入队；论证：锁下仍睡的任务不可能到达 do_exit（唤醒与 pick 都在本锁下）。
+2. **A-2 (M)** `enqueue_task_locked` 增加 is_dead()（ZOMBIE|DEAD）二道闸 + `ENQ-DEAD-TASK dropped` 打点——覆盖全部入队路径。
+3. **A-3/A-4 验证**：__schedule 的 prev 出队与 pick 同一 GRQ 临界区（原子）；do_exit 的 ZOMBIE→dequeue→末次 schedule 被 preempt_count 包住；release_task 的 on_cpu 等待精确覆盖"还在 CPU 上"；fork 构造期半成品（state=RUNNING）不受陈旧 wake 影响。
+4. **B-1 (H)** nanosleep 重写为 state-first + re-check：timer softirq 唤醒是一次性的，旧"查 jiffies→Task::sleep"顺序在窗口内丢弃唯一 waker → 永睡（B 型现场：全 CPU idle、`echo PP | cat` 静默挂）。B 型 hunt 现场证实挂点在两次管道间的 sleep 10。
+5. **B-2 (M)** ksoftirqd 竞态分支补 NEW-C2 出队补偿（防双跑）。B-3 全库裸睡眠点排查：bio 实为 yield 轮询、poll 族忙等——无丢唤醒窗口；Task::sleep 文档封禁（最后一位调用者已迁移）。
+
+**观测器悖论确立**：死锁复现（12-25%）仅在 heredoc 一次性 stdin 的纯门禁配置；QEMU monitor socket、dfx-lock-owner feature（二进制布局）、FIFO 实时注入（命令到达时机）任一变化都偏移时序使复现消失（owner hunt 10 绿、生产+monitor hunt 10 绿、monitor 门禁 4 绿、FIFO 门禁 4 绿 vs 纯门禁 8 轮 2 死锁：TIMERS 锁与 TCP_TABLE_LOCK 两把）。
+
+**DFX 增强**：UART RX 中断路径的 "DUMP!" magic 触发（dfx=taskdump 运行时开关）——挂起时 RX 中断是唯一必然存活的代码路径，B 型现场的任务快照由此可得；test/hunt-wedge.sh 增加 HUNT_PROD=1 生产模式。TIMERS↔ACTIONS 锁序全库统一（TIMERS→ACTIONS），投递已锁外（R12-3）——锁序环排除；堆锁已 irqsave——堆锁自死锁环排除。
+
+**R34 首项**：A 型/TIMERS 型残余（~25%）代码审计方向——timer 软中断持 TIMERS+ACTIONS 锁内 BTreeMap retain/insert/rearm 的堆分配路径、TCP 锁内 send_buffer push 堆分配、以及与 zone/页面补充锁的潜在交互；virtio-net 修复代码的真实 slirp 流量验证（此前所有测试流量均走 loopback 短路）。
+
 ### 20.26 A 型死锁根因破案 + DFX 特性沉淀
 
 **hunt-wedge 第一轮捕获 A 型完整现场**（DFX 特性首战：owner 诊断 + dfx=watchdog 任务快照 + QEMU monitor dump 三件套同时工作）：

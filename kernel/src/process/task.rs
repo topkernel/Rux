@@ -1475,6 +1475,17 @@ impl Task {
     ///
     /// After calling this function, process enters sleep state and triggers scheduling
     ///
+    /// # WARNING — raw protocol, lost-wakeup prone (R33)
+    /// `wake_up` drops every wake that arrives while the target is not yet
+    /// `is_sleeping()`. A condition checked BEFORE this call has a window
+    /// (check → set_state) in which the one-shot waker fires and is
+    /// discarded — the sleeper then blocks forever. In-kernel callers must
+    /// use the state-first + re-check discipline (set_state, RE-CHECK the
+    /// condition, then schedule — see `sys_rt_sigtimedwait` /
+    /// `nanosleep_impl`) or a wait queue (`WaitQueueHead::prepare_to_wait`).
+    /// This function performs no re-check and must not be called with an
+    /// only-once waker armed.
+    ///
     /// # Arguments
     /// - `state`: Sleep state (TaskState::INTERRUPTIBLE or TaskState::UNINTERRUPTIBLE)
     ///
@@ -1566,16 +1577,25 @@ impl Task {
 
                 // Update task's CPU if it changed
                 // R13-5: never steer a task that is still executing (on_cpu set
-// until its context is saved) — see the deferred-notify steering fix.
+                // until its context is saved) — see the deferred-notify steering fix.
                 if target_cpu != prev_cpu && !(*task).on_cpu() {
                     (*task).set_ti_cpu(target_cpu);
                 }
 
-                // Wake process: set to RUNNING state
-                (*task).set_state(TaskState::new(TaskState::RUNNING));
-
-                // Add process to run queue on the selected CPU
-                crate::sched::enqueue_task(&mut *task);
+                // R33 (A-family wedge — dead-task resurrection): transition to
+                // RUNNING + enqueue ATOMICICALLY under the GRQ lock
+                // (sched::wake_up_enqueue). The old unlocked sequence raced
+                // do_exit: this wake's filter above read INTERRUPTIBLE; another
+                // CPU then woke the task, it ran and exited (ZOMBIE + dequeue +
+                // final schedule + parent reap freed its kernel stack), and our
+                // stale set_state(RUNNING) + enqueue re-queued the dead task
+                // anyway. A third CPU picking it context-switched onto the freed
+                // stack (__switch_to loads thread.sp into sp) — the observed
+                // trap-with-sp-on-heap-address full-system wedge. The locked
+                // re-check refuses ZOMBIE/DEAD/RUNNING.
+                if !crate::sched::wake_up_enqueue(task) {
+                    return false;
+                }
 
                 // Set need_resched flag on target CPU and send IPI if cross-CPU
                 crate::sched::resched_cpu(target_cpu as usize);

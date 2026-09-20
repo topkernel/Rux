@@ -81,6 +81,13 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
                         )
                     );
                 }
+                // R33 (NEW-C2 discipline): the racing wakeup_ksoftirqd saw
+                // us INTERRUPTIBLE and may have set RUNNING + enqueued us
+                // while we are in fact still executing on this CPU. Without
+                // taking ourselves back off, a second CPU could pick and
+                // run this very kthread concurrently (double-drain, stack
+                // corruption). No-op when nothing enqueued us.
+                crate::sched::dequeue_task(&*current);
             }
             continue;
         }

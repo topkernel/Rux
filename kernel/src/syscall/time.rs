@@ -183,19 +183,33 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     let sleep_jiffies = timer::msecs_to_jiffies(sleep_msecs);
     let target_jiffies = start_jiffies + sleep_jiffies;
 
-    // Get current PID for timer wakeup
-    let my_pid = if let Some(current) = crate::sched::current() {
-        unsafe { (*current).pid() }
-    } else {
-        return -(errno::EFAULT as i64);
+    // Get current task pointer + PID for timer wakeup
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut process::task::Task,
+        None => return -(errno::EFAULT as i64),
     };
+    // SAFETY: current is the currently running task's pointer from
+    // sched::current(), valid for the whole syscall (we are it).
+    let my_pid = unsafe { (*current).pid() };
 
     // Register a one-shot timer to wake us up at the target time.
-    // Without this, Task::sleep() would have no mechanism to wake us
+    // Without this, the sleep below would have no mechanism to wake us
     // — timer softirq would fire but nobody would call wake_up_process.
     let timer_id = crate::timer::add_timer_wakeup(target_jiffies, my_pid);
 
-    // Sleep loop until target time is reached
+    // R33 (B-family wedge — lost wakeup): state-first + re-check protocol.
+    // The timer softirq's wake is ONE-SHOT: it fires wake_up_process exactly
+    // once and deletes the timer. Task::wake_up drops a wake that finds the
+    // target not is_sleeping(), so a timer expiry landing between the
+    // jiffies/signal check and the (old) Task::sleep's set_state was
+    // silently discarded — the only waker was consumed and the task slept
+    // forever (the `echo PP | cat` silent-hang signature: all CPUs idle,
+    // the sleeper never re-checks). Marking INTERRUPTIBLE BEFORE the final
+    // re-check closes the window: the racing wake either lands (flips us
+    // RUNNING + enqueues while we still execute — undone by the dequeue
+    // below, NEW-C2 discipline) or the re-check observes the advanced
+    // jiffies / pending signal and we exit the loop instead of sleeping.
+    // Mirrors sys_rt_sigtimedwait's established pattern.
     loop {
         let current_jiffies = timer::get_jiffies();
 
@@ -230,12 +244,44 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             return -(errno::EINTR as i64);
         }
 
-        // Use Task::sleep() to enter interruptible sleep
-        // Note: This will trigger scheduling, continue checking time after waking
         if timer_id != 0 {
-            process::Task::sleep(crate::process::task::TaskState::new(
-                crate::process::task::TaskState::INTERRUPTIBLE
-            ));
+            // Mark INTERRUPTIBLE BEFORE the final re-check (state-first).
+            // SAFETY: current is the running task's pointer (see above).
+            unsafe {
+                (*current).set_state(process::task::TaskState::new(
+                    process::task::TaskState::INTERRUPTIBLE
+                ));
+            }
+
+            // Re-check AFTER marking sleeping: the one-shot timer (or a
+            // signal) may have fired between the checks above and the
+            // set_state. Either its wake was captured by the INTERRUPTIBLE
+            // state (we may already be RUNNING + enqueued again), or the
+            // condition is now observable — either way we must not sleep.
+            if timer::get_jiffies() >= target_jiffies || signal::signal_pending() {
+                // SAFETY: current is the running task's pointer.
+                unsafe {
+                    (*current).set_state(process::task::TaskState::new(
+                        process::task::TaskState::RUNNING
+                    ));
+                }
+                // NEW-C2: a wake in the window above may have enqueued us
+                // while we are in fact still executing on this CPU — take
+                // ourselves back off before looping, or a second CPU could
+                // pick and run this very task.
+                // SAFETY: current is the running task's pointer (see above).
+                unsafe {
+                    crate::sched::dequeue_task(&*current);
+                }
+                continue;
+            }
+
+            // Enable interrupts before schedule() — syscall context runs
+            // with SIE=0; without this the local timer tick cannot fire and
+            // lock_irqsave in __schedule would save SIE=0 for our wake path
+            // (same discipline as do_wait / wait_event).
+            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::sched::schedule();
         } else {
             // Timer registration failed (timer table full): an
             // INTERRUPTIBLE sleep would have NO waker — the task would

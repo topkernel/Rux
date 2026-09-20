@@ -1022,6 +1022,27 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
         }
     }
 
+    // R33 (A-family wedge — dead-task resurrection): refuse an EXITING task
+    // BEFORE the unconditional set_state(RUNNING) below. do_exit sets ZOMBIE
+    // before its own dequeue; a wake_up whose UNLOCKED is_sleeping() filter
+    // read predated the target's exit would otherwise flip ZOMBIE→RUNNING
+    // and re-queue the dying task AFTER its dequeue. The reaping parent's
+    // release_task could then free the kernel stack while another CPU picks
+    // the zombie and __switch_to loads thread.sp (freed stack) into sp —
+    // the A-type wedge (trap sequence storing to a heap address that no
+    // longer maps the stack). ZOMBIE/DEAD are terminal here: nothing
+    // legitimately enqueues an exiting task. (0xDEADBEEF poison also trips
+    // is_dead() — bit 0x20 set — as a second line behind the pid check.)
+    {
+        let st = (*task).state();
+        if st.is_dead() {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"ENQ-DEAD-TASK dropped\n";
+            for &b in MSG { putchar(b); }
+            return;
+        }
+    }
+
     let policy = (*task).policy();
 
     // Set task state to RUNNING
@@ -1097,6 +1118,48 @@ pub fn enqueue_task(task: &'static mut Task) {
             resched_cpu(target);
         }
     }
+}
+
+/// R33 (A-family wedge — dead-task resurrection): atomically, under the GRQ
+/// lock, re-verify that `task` is still in a wakeable state (sleeping or
+/// stopped), transition it to RUNNING and enqueue it.
+///
+/// `Task::wake_up` filters on an UNLOCKED state read. Between that read and
+/// the old unlocked set_state(RUNNING)+enqueue_task, the target could be
+/// woken by another CPU, run to completion, pass do_exit (set ZOMBIE +
+/// dequeue + final schedule) and be reaped by its parent — release_task
+/// frees the kernel stack BEFORE the pinned task_put, so the stale wake
+/// would then resurrect a freed-stack task onto the runqueue. Holding the
+/// GRQ lock across re-check + transition + enqueue closes the window:
+///   - a task still INTERRUPTIBLE/STOPPED cannot exit while we hold the
+///     lock (to reach do_exit it must first be woken and scheduled, and
+///     both the wake transition and the pick happen under this lock);
+///   - a task that already exited reads ZOMBIE/DEAD here and is refused
+///     (enqueue_task_locked's dead-guard double-checks before its
+///     set_state(RUNNING)).
+/// Returns true if the task was transitioned and enqueued.
+pub fn wake_up_enqueue(task: *mut Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    let mut grq_guard = grq().lock_irqsave();
+    // SAFETY: task is non-null and validated by the caller (Task::wake_up's
+    // poison check plus an unlocked wakeable-state filter, or a pinned
+    // pid-hash lookup); the GRQ lock is held across the state transition so
+    // the re-check and the enqueue are one atomic step.
+    unsafe {
+        let st = (*task).state();
+        if !(st.is_sleeping() || st.contains(TaskState::STOPPED)) {
+            // RUNNING (woken elsewhere / never slept), ZOMBIE, or DEAD —
+            // the wake is stale or redundant; drop it. (Freed-page poison
+            // keeps bit0 set so it passes is_sleeping(); it is caught one
+            // step later by the pid poison check — and the dead-guard —
+            // inside enqueue_task_locked.)
+            return false;
+        }
+        enqueue_task_locked(&mut *grq_guard, task);
+    }
+    true
 }
 
 /// Check if a newly-enqueued RT task should preempt a running task on another CPU.

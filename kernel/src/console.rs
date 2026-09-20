@@ -123,6 +123,9 @@ impl UartRxBuf {
 /// Global UART RX ring buffer
 static UART_RX_BUF: UartRxBuf = UartRxBuf::new();
 
+/// Rolling match position for the DFX "DUMP!" magic (RX IRQ context only).
+static mut DUMP_MAGIC_POS: usize = 0;
+
 /// Wait queue for blocking reads — readers sleep here when buffer is empty.
 static UART_READ_WAITQ: crate::process::wait::WaitQueueHead =
     crate::process::wait::WaitQueueHead::new();
@@ -301,6 +304,30 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
                 let c = read_reg(base, UART_RBR);
                 UART_RX_BUF.put(c);
                 chars_received += 1;
+                // DFX taskdump magic trigger ("DUMP!"): the RX interrupt is
+                // the only code guaranteed to still run when every task is
+                // wedged (silent-hang form — no spinlock to trip the
+                // deadlock watchdog), which is exactly when a task snapshot
+                // is needed. Match a rolling window so the sequence may sit
+                // anywhere in the byte stream; armed only by dfx=taskdump.
+                if crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::TaskDumpKey,
+                ) {
+                    const MAGIC: &[u8; 5] = b"DUMP!";
+                    DUMP_MAGIC_POS = if DUMP_MAGIC_POS < MAGIC.len()
+                        && c == MAGIC[DUMP_MAGIC_POS]
+                    {
+                        DUMP_MAGIC_POS + 1
+                    } else if c == MAGIC[0] {
+                        1
+                    } else {
+                        0
+                    };
+                    if DUMP_MAGIC_POS == MAGIC.len() {
+                        DUMP_MAGIC_POS = 0;
+                        crate::dfx::taskdump::dump_all_tasks("uart-magic");
+                    }
+                }
             }
         }
 
