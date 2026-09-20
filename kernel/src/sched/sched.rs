@@ -1007,17 +1007,20 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
         // an unambiguous freed-page detector.
         let pid = (*task).pid();
         if pid == TASK_POISON {
-            use crate::console::putchar;
+            // R34: SBI direct write — this probe fires while the GRQ lock is
+            // held; console::putchar would take the UART lock under GRQ
+            // (same discipline as RawSpinlock::deadlock_warn and the buddy
+            // double-free tripwire).
             const MSG: &[u8] = b"ENQ-POISONED-TASK dropped pid=0x";
-            for &b in MSG { putchar(b); }
+            for &b in MSG { sbi_rt::legacy::console_putchar(b as usize); }
             let mut sh = 64;
             let v = pid as u64;
             while sh > 0 {
                 sh -= 4;
                 let nb = ((v >> sh) & 0xF) as u8;
-                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
             }
-            putchar(b'\n');
+            sbi_rt::legacy::console_putchar(b'\n' as usize);
             return;
         }
     }
@@ -1036,9 +1039,10 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) {
     {
         let st = (*task).state();
         if st.is_dead() {
-            use crate::console::putchar;
+            // R34: SBI direct write — under the GRQ lock (was console::putchar,
+            // which nests the UART lock inside GRQ).
             const MSG: &[u8] = b"ENQ-DEAD-TASK dropped\n";
-            for &b in MSG { putchar(b); }
+            for &b in MSG { sbi_rt::legacy::console_putchar(b as usize); }
             return;
         }
     }

@@ -129,16 +129,29 @@ impl WaitQueueHead {
     /// Actual number of processes woken
     pub fn wake_up(&self, _mode: WakeUpHint, nr: usize) -> usize {
         // Use lock_irqsave: this is called from interrupt handlers.
-        // Collect task pointers under the lock, then drop the lock before
-        // calling wake_up_process to avoid ABBA deadlock with the GRQ lock
-        // (waitqueue lock -> GRQ lock vs. GRQ lock -> waitqueue interaction).
         let list = self.list.lock_irqsave();
         let mut awakened = 0;
         let max_wake = if nr == 0 { usize::MAX } else { nr };
 
-        // Collect tasks to wake while holding the waitqueue lock.
-        let mut wake_list: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
-
+        // R12-1 (deferred-wake UAF — the definitive fix): wake WHILE STILL
+        // HOLDING the queue lock. A not-yet-woken entry on the queue proves
+        // its task has not passed finish_wait (which needs this same lock),
+        // therefore has not returned to userspace, therefore has not
+        // exited or been reaped — the entry's task pointer cannot go stale
+        // under us. The old collect-then-drop-then-wake window let a
+        // signal-woken sleeper run, exit and be FREED before our wake —
+        // the wild-pointer enqueue and the S1 jump-to-user corruption.
+        // Lock order queue->GRQ is safe: no GRQ-held path takes a
+        // waitqueue lock (scheduler_tick polls the console queue BEFORE
+        // acquiring the GRQ). The earlier PID-revalidation and reverted
+        // RCU-wrap were interim measures.
+        //
+        // R34: wake directly inside the iteration — the earlier
+        // collect-into-a-Vec (heap allocation under this irqsave lock)
+        // was pure overhead: waking here is equivalent (a woken task's
+        // finish_wait on another CPU simply blocks on this lock, it
+        // cannot mutate the list mid-iteration) and removes an in-lock
+        // heap allocation from every event source's hot path.
         for entry in list.iter() {
             if awakened >= max_wake {
                 break;
@@ -149,7 +162,7 @@ impl WaitQueueHead {
 
                 let task = entry.task();
                 if !task.is_null() {
-                    wake_list.push(task);
+                    crate::sched::wake_up_process(task);
                 }
 
                 awakened += 1;
@@ -158,22 +171,6 @@ impl WaitQueueHead {
                     break;
                 }
             }
-        }
-
-        // R12-1 (deferred-wake UAF — the definitive fix): wake WHILE STILL
-        // HOLDING the queue lock. A not-yet-woken entry on the queue proves
-        // its task has not passed finish_wait (which needs this same lock),
-        // therefore has not returned to userspace, therefore has not
-        // exited or been reaped — the collected pointer cannot go stale
-        // under us. The old collect-then-drop-then-wake window let a
-        // signal-woken sleeper run, exit and be FREED before our wake —
-        // the wild-pointer enqueue and the S1 jump-to-user corruption.
-        // Lock order queue->GRQ is safe: no GRQ-held path takes a
-        // waitqueue lock (scheduler_tick polls the console queue BEFORE
-        // acquiring the GRQ). The earlier PID-revalidation and reverted
-        // RCU-wrap were interim measures.
-        for task in wake_list {
-            crate::sched::wake_up_process(task);
         }
         drop(list);
 

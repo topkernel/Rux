@@ -601,6 +601,18 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.28 第三十四轮：死锁残余清零 + virtio-net 真实流量打通 — 门禁历史首次 8/8
+
+**锁内堆分配审计（统一起因假说验证成立）**：全局锁序图实测无环（TIMERS→ACTIONS/BUDDY；TCP→LO_BACKLOG/TX_QUEUE/BUDDY/GRQ；waitq→GRQ；UART/GRQ/BUDDY 无出边）。permanent wedge 的真身是三链：
+1. **链 1（TIMERS/TCP 两型统一起因，已消除）**：锁内堆分配失败 → `#[alloc_error_handler]` panic（panic=abort 无 unwind）→ panic 后 `loop{wfi}` **持锁永停**——幸存 CPU 各自的锁依赖随机决定卡 TIMERS 还是 TCP 锁（与两型现场签名吻合）；panic 短消息被测试输出淹没故从未见到。修复：timer 软中断临界区**零分配**（EXPIRY_BUDGET=64 锁外预留容量 + budget 计数保 push 永不增长 + 周期定时器原地改 expires 重挂，消灭 remove+insert 节点 churn）；tcp_timer tick 的 Vec::collect → 定长栈数组[64]。
+2. **链 2（TCP 型放大器，列报告）**：TCP_TABLE_LOCK→virtio TX 锁内 10M+50M 次自旋（tcg 下秒级/包）——根治需 TX 移出表锁的重构。
+3. **链 3（已消除）**：Socket::recv_queue plain lock 同 CPU 被 NetRx 软中断重入——recv/enqueue_packet/poll 全部改 lock_irqsave。
+附带：GRQ/BUDDY 锁内探针打点改 SBI 直写（删 GRQ→UART、BUDDY→UART 边）；wait.rs 的 wake_up 持锁收集 Vec 改迭代内直 wake（消除事件源热路径的锁内堆分配——总控复核时发现）。
+
+**virtio-net 真实流量首次打通（SLIRP PASS）**：此前全部测试流量走 loopback 短路，驱动从未见过真实设备。QEMU 正确参数（`/usr/bin/qemu-system-riscv64` + `-netdev user -device virtio-net-device -global virtio-mmio.force-legacy=false`）。修复 10 项：feature negotiation 从未写过（VERSION_1+MAC，每帧错位 2 字节的根因）、RX/TX 队列角色反转（spec 5.1.3）、notify MMIO 必须写 4 字节（u16 全部被丢弃）、ArpPacket packed（2 字节 padding 空洞）、设备真实 MAC、本地 IP 10.0.2.15、SYN_SENT 收 RST 不 abort、CLOSE 后 recv EOF、MTU 读偏移、探测失败静默。实测：ARP 双向、TX 链完成、RX DMA+phys_to_virt、UDP DNS 往返（94-97B 应答）、TCP SYN→RST 正确关闭；pcap 8 包干净会话；nettest 无回归。遗留：首包广播重试掩盖（无 ARP 队列）、RX 中断路径未单独确认、virtio-blk MMIO 路径同样缺 negotiation（PCI 不受影响）。
+
+**门禁**：8/8 全绿（smoke 15/15×8、nettest 8/8、pp/x 8/8、kpanic 0、deadlock 0）——对比 R31（pp 4/8 x 1/8）、R32（7/8）、R33（6/8）。25% 复现的死锁在 TIMERS 零分配修复后消失。
+
 ### 20.27 第三十三轮：等待/唤醒协议专项 — 5 项修复 + 观测器悖论确立
 
 **专项 agent 修复（5 项）**：

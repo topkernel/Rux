@@ -94,17 +94,26 @@ impl VirtIONetDevice {
         // SAFETY: base_addr points to valid VirtIO MMIO registers; all register
         // offsets follow the VirtIO MMIO device specification.
         unsafe {
-            // VirtIO MMIO register offsets (Modern v2 spec)
+            // VirtIO MMIO register offsets (linux/virtio_mmio.h — the
+            // shared legacy/modern layout; queueSel=0x30, status=0x70,
+            // ready=0x44). R34: the previous code was missing feature
+            // negotiation entirely (DriverFeatures 0x20/0x24 were never
+            // written, so QEMU's virtio-net ran with the legacy 10-byte
+            // vnet header while this driver submits 12-byte headers).
             const MAGIC_VALUE: u64 = 0x00;
             const VERSION: u64 = 0x04;
             const DEVICE_ID: u64 = 0x08;
-            const VENDOR: u64 = 0x0C;
             const DEVICE_FEATURES: u64 = 0x10;
+            const DEVICE_FEATURES_SEL: u64 = 0x14;
+            const DRIVER_FEATURES: u64 = 0x20;
+            const DRIVER_FEATURES_SEL: u64 = 0x24;
             const QUEUE_SEL: u64 = 0x30;
             const QUEUE_NUM_MAX: u64 = 0x34;
             const QUEUE_NUM: u64 = 0x38;
             const QUEUE_READY: u64 = 0x44;
             const QUEUE_NOTIFY: u64 = 0x50;
+            const INTERRUPT_STATUS: u64 = 0x60;
+            const INTERRUPT_ACK: u64 = 0x64;
             const STATUS: u64 = 0x70;
             const QUEUE_DESC_LO: u64 = 0x80;
             const QUEUE_DESC_HI: u64 = 0x84;
@@ -112,6 +121,17 @@ impl VirtIONetDevice {
             const QUEUE_DRIVER_HI: u64 = 0x94;
             const QUEUE_DEVICE_LO: u64 = 0xA0;
             const QUEUE_DEVICE_HI: u64 = 0xA4;
+            const CONFIG: u64 = 0x100;
+
+            // Feature bits (word << 5 | bit within word)
+            const F_NET_MAC: u32 = 1 << 5;          // word 0: device MAC in config
+            const F_VERSION_1: u32 = 1 << 0;        // word 1: VIRTIO_F_VERSION_1
+
+            // Status bits
+            const S_ACKNOWLEDGE: u32 = 0x01;
+            const S_DRIVER: u32 = 0x02;
+            const S_FEATURES_OK: u32 = 0x08;
+            const S_DRIVER_OK: u32 = 0x04;
 
             // Verify magic number
             let magic = core::ptr::read_volatile((self.base_addr + MAGIC_VALUE) as *const u32);
@@ -133,28 +153,73 @@ impl VirtIONetDevice {
                 return Err("Not a VirtIO network device");
             }
 
-            // Set driver status: ACKNOWLEDGE
-            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0x01);
+            // Reset device, then walk the standard status sequence.
+            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0);
+            for _ in 0..100_000u32 {
+                if core::ptr::read_volatile((self.base_addr + STATUS) as *const u32) == 0 {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
 
-            // Set driver status: DRIVER
-            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0x03);
+            // Set driver status: ACKNOWLEDGE, then DRIVER
+            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, S_ACKNOWLEDGE);
+            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, S_ACKNOWLEDGE | S_DRIVER);
 
-            // Read MAC address (from config space, offset 0x100)
-            // In QEMU virt platform, MAC address is at offset 0 in config space
-            let config_ptr = (self.base_addr + 0x100) as *const u8;
+            // R34: feature negotiation was missing entirely. VIRTIO_F_VERSION_1
+            // MUST be accepted on a modern (v2) device — without it QEMU's
+            // virtio-net operates with the legacy 10-byte vnet header while
+            // this driver submits 12-byte headers, corrupting every frame by
+            // 2 bytes. Accept exactly VERSION_1 (+MAC); MRG_RXBUF/CTRL_VQ/
+            // EVENT_IDX/GSO are deliberately NOT accepted.
+            core::ptr::write_volatile((self.base_addr + DEVICE_FEATURES_SEL) as *mut u32, 1);
+            let feats_hi = core::ptr::read_volatile((self.base_addr + DEVICE_FEATURES) as *const u32);
+            if feats_hi & F_VERSION_1 == 0 {
+                return Err("Device does not offer VIRTIO_F_VERSION_1");
+            }
+            core::ptr::write_volatile((self.base_addr + DEVICE_FEATURES_SEL) as *mut u32, 0);
+            let feats_lo = core::ptr::read_volatile((self.base_addr + DEVICE_FEATURES) as *const u32);
+            // Word 0: accept only VIRTIO_NET_F_MAC (informative — we read the
+            // MAC from config space either way), and only if offered.
+            let accept_lo = feats_lo & F_NET_MAC;
+            // Word 1: accept VIRTIO_F_VERSION_1.
+            let accept_hi = feats_hi & F_VERSION_1;
+            core::ptr::write_volatile((self.base_addr + DRIVER_FEATURES_SEL) as *mut u32, 0);
+            core::ptr::write_volatile((self.base_addr + DRIVER_FEATURES) as *mut u32, accept_lo);
+            core::ptr::write_volatile((self.base_addr + DRIVER_FEATURES_SEL) as *mut u32, 1);
+            core::ptr::write_volatile((self.base_addr + DRIVER_FEATURES) as *mut u32, accept_hi);
+
+            core::ptr::write_volatile(
+                (self.base_addr + STATUS) as *mut u32,
+                S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK,
+            );
+            let status = core::ptr::read_volatile((self.base_addr + STATUS) as *const u32);
+            if status & S_FEATURES_OK == 0 {
+                return Err("Device rejected negotiated features (features_ok cleared)");
+            }
+
+            // Read MAC address (from config space, offset 0x100).
+            let config_ptr = (self.base_addr + CONFIG) as *const u8;
             for i in 0..6 {
-                self.mac[i] = *config_ptr.add(i);
+                self.mac[i] = core::ptr::read_volatile(config_ptr.add(i));
             }
 
-            // Read MTU (from offset 0x106)
-            let mtu_ptr = (self.base_addr + 0x106) as *const u16;
-            self.mtu = core::ptr::read_volatile(mtu_ptr);
-            if self.mtu == 0 {
-                self.mtu = 1500; // Default MTU
+            // Read MTU — virtio-net config: mac[6], status u16 @6,
+            // max_virtqueue_pairs u16 @8, mtu u16 @10 → MMIO 0x10a.
+            // (0x106 was the old wrong offset: that is the STATUS field.)
+            let mtu_ptr = (self.base_addr + CONFIG + 10) as *const u16;
+            self.mtu = u16::from_le(core::ptr::read_volatile(mtu_ptr));
+            if self.mtu == 0 || self.mtu > 1500 {
+                self.mtu = 1500; // No VIRTIO_NET_F_MTU negotiated
             }
 
-            // ========== Setup TX queue (Queue 0) ==========
-            // Select queue 0
+            // R34: queue roles were INVERTED. Virtio-net 1.x with a single
+            // queue pair is queue 0 = receiveq1, queue 1 = transmitq1 (spec
+            // 5.1.3). The old code posted RX buffers on the transmit queue
+            // and submitted TX chains on the receive queue — with a real
+            // device neither direction could ever work.
+            //
+            // ========== Setup RX queue (Queue 0) ==========
             core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 0);
 
             // Read max queue size
@@ -166,66 +231,23 @@ impl VirtIONetDevice {
             // Set queue size
             self.queue_size = if max_queue_size < 8 { 4 } else { 8 };
 
-            // Create VirtQueue (single contiguous desc+avail+used allocation)
-            let tx_queue = match queue::VirtQueue::new(
+            // Create VirtQueue (single contiguous desc+avail+used allocation).
+            // W32: virtio-mmio rejects notify writes that are not 32-bit.
+            let rx_queue = match queue::VirtQueue::with_notify_width(
                 self.queue_size,
-                0,  // queue_index: TX queue is queue 0
+                0,  // queue_index: RX queue is queue 0
                 self.base_addr + QUEUE_NOTIFY,
-                self.base_addr + 0x60,  // interrupt_status offset
-                self.base_addr + 0x64,  // interrupt_ack offset
-            ) {
-                Some(q) => q,
-                None => return Err("Failed to create TX VirtQueue"),
-            };
-
-            // Register the VirtQueue's OWN rings with the device (modern
-            // virtio-mmio split-address layout). The previous code wrote a
-            // SEPARATELY allocated descriptor table here and hard-coded the
-            // avail/used registers to 0 — the device never saw the rings the
-            // driver actually submits on, so TX never completed and RX DMA
-            // targeted physical address 0.
-            let tx_desc_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_desc_addr())
-            ).0;
-            let tx_avail_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_avail_addr())
-            ).0;
-            let tx_used_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_used_addr())
-            ).0;
-
-            // Set queue count
-            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
-
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (tx_desc_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (tx_desc_phys >> 32) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, (tx_avail_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, (tx_avail_phys >> 32) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, (tx_used_phys & 0xFFFFFFFF) as u32);
-            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, (tx_used_phys >> 32) as u32);
-
-            // Set queue ready
-            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
-
-            *self.tx_queue.lock() = Some(tx_queue);
-
-            // ========== Setup RX queue (Queue 1) ==========
-            // Select queue 1
-            core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 1);
-
-            // Create VirtQueue (single contiguous desc+avail+used allocation)
-            let rx_queue = match queue::VirtQueue::new(
-                self.queue_size,
-                1,  // queue_index: RX queue is queue 1
-                self.base_addr + QUEUE_NOTIFY,
-                self.base_addr + 0x60,  // interrupt_status offset
-                self.base_addr + 0x64,  // interrupt_ack offset
+                self.base_addr + INTERRUPT_STATUS,
+                self.base_addr + INTERRUPT_ACK,
+                queue::NotifyWidth::W32,
             ) {
                 Some(q) => q,
                 None => return Err("Failed to create RX VirtQueue"),
             };
 
-            // Register the VirtQueue's rings (same modern MMIO layout as TX)
+            // Register the VirtQueue's OWN rings with the device (modern
+            // virtio-mmio split-address layout). R32 fixed the addresses;
+            // R34 fixed the register offsets they are written through.
             let rx_desc_phys = crate::arch::riscv64::mm::virt_to_phys(
                 crate::arch::riscv64::mm::VirtAddr::new(rx_queue.get_desc_addr())
             ).0;
@@ -251,8 +273,57 @@ impl VirtIONetDevice {
 
             *self.rx_queue.lock() = Some(rx_queue);
 
-            // Set driver status: DRIVER_OK
-            core::ptr::write_volatile((self.base_addr + STATUS) as *mut u32, 0x07);
+            // ========== Setup TX queue (Queue 1) ==========
+            core::ptr::write_volatile((self.base_addr + QUEUE_SEL) as *mut u32, 1);
+
+            let max_queue_size_tx = core::ptr::read_volatile((self.base_addr + QUEUE_NUM_MAX) as *const u32);
+            if max_queue_size_tx < self.queue_size as u32 {
+                return Err("VirtIO TX queue smaller than RX queue");
+            }
+
+            let tx_queue = match queue::VirtQueue::with_notify_width(
+                self.queue_size,
+                1,  // queue_index: TX queue is queue 1
+                self.base_addr + QUEUE_NOTIFY,
+                self.base_addr + INTERRUPT_STATUS,
+                self.base_addr + INTERRUPT_ACK,
+                queue::NotifyWidth::W32,
+            ) {
+                Some(q) => q,
+                None => return Err("Failed to create TX VirtQueue"),
+            };
+
+            let tx_desc_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_desc_addr())
+            ).0;
+            let tx_avail_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_avail_addr())
+            ).0;
+            let tx_used_phys = crate::arch::riscv64::mm::virt_to_phys(
+                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_used_addr())
+            ).0;
+
+            // Set queue count
+            core::ptr::write_volatile((self.base_addr + QUEUE_NUM) as *mut u32, self.queue_size as u32);
+
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_LO) as *mut u32, (tx_desc_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DESC_HI) as *mut u32, (tx_desc_phys >> 32) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_LO) as *mut u32, (tx_avail_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DRIVER_HI) as *mut u32, (tx_avail_phys >> 32) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_LO) as *mut u32, (tx_used_phys & 0xFFFFFFFF) as u32);
+            core::ptr::write_volatile((self.base_addr + QUEUE_DEVICE_HI) as *mut u32, (tx_used_phys >> 32) as u32);
+
+            // Set queue ready
+            core::ptr::write_volatile((self.base_addr + QUEUE_READY) as *mut u32, 1);
+
+            *self.tx_queue.lock() = Some(tx_queue);
+
+            // Set driver status: DRIVER_OK (acknowledge | driver |
+            // features_ok | driver_ok)
+            core::ptr::write_volatile(
+                (self.base_addr + STATUS) as *mut u32,
+                S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK | S_DRIVER_OK,
+            );
 
             // Mark as initialized
             *self.initialized.lock() = true;
@@ -313,7 +384,7 @@ impl VirtIONetDevice {
                 gso_size: 0,
                 csum_start: 0,
                 csum_offset: 0,
-                num_buffers: 1,
+                num_buffers: 0, // unused on TX (spec 5.1.6.1)
             };
         }
 

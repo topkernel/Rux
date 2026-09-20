@@ -54,6 +54,21 @@ pub struct UsedRing {
     // Array followed by avail_event_idx
 }
 
+/// Width of the queue-notify register write for this transport.
+///
+/// R34: virtio-mmio rejects every register access whose size != 4 (QEMU:
+/// "wrong size access to register!" — the write is dropped), so MMIO
+/// queues MUST notify with a 32-bit write. virtio-pci's notify cap accepts
+/// sub-4-byte writes (Linux uses iowrite16 there), and the PCI block
+/// driver has always used 16-bit notifies, so it keeps W16.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyWidth {
+    /// 16-bit notify write (virtio-pci notify capability)
+    W16,
+    /// 32-bit notify write (virtio-mmio QueueNotify register)
+    W32,
+}
+
 /// VirtIO virtual queue
 ///
 /// Uses Modern VirtIO (v1.0+) layout
@@ -64,6 +79,8 @@ pub struct VirtQueue {
     queue_index: u16,
     /// Queue notification address
     queue_notify: u64,
+    /// Notify register access width for this transport
+    notify_width: NotifyWidth,
     /// Interrupt status address (VIRTIO_MMIO_INTERRUPT_STATUS - Read Only)
     interrupt_status: u64,
     /// Interrupt acknowledge address (VIRTIO_MMIO_INTERRUPT_ACK - Write Only)
@@ -93,6 +110,11 @@ impl VirtQueue {
     /// - `interrupt_status`: Interrupt status register address
     /// - `interrupt_ack`: Interrupt acknowledge register address
     pub fn new(queue_size: u16, queue_index: u16, queue_notify: u64, interrupt_status: u64, interrupt_ack: u64) -> Option<Self> {
+        Self::with_notify_width(queue_size, queue_index, queue_notify, interrupt_status, interrupt_ack, NotifyWidth::W16)
+    }
+
+    /// Create new VirtQueue with an explicit notify access width.
+    pub fn with_notify_width(queue_size: u16, queue_index: u16, queue_notify: u64, interrupt_status: u64, interrupt_ack: u64, notify_width: NotifyWidth) -> Option<Self> {
         let desc_size = queue_size as usize * 16;
         let avail_size = 2 + 2 + queue_size as usize * 2 + 2;
         let used_size = 2 + 2 + queue_size as usize * 8 + 2;
@@ -146,6 +168,7 @@ impl VirtQueue {
             queue_size,
             queue_index,
             queue_notify,
+            notify_width,
             interrupt_status,
             interrupt_ack,
             desc,
@@ -230,10 +253,18 @@ impl VirtQueue {
         // SAFETY: queue_notify is a valid MMIO address for the VirtIO notify register;
         // volatile write ensures the store reaches the device.
         unsafe {
-            // Use 16-bit write as per VirtIO spec
-            let queue_notify = self.queue_notify as *mut u16;
-            // Write queue index to notify register
-            core::ptr::write_volatile(queue_notify, self.queue_index);
+            match self.notify_width {
+                NotifyWidth::W16 => {
+                    // virtio-pci notify capability (matches Linux iowrite16)
+                    let queue_notify = self.queue_notify as *mut u16;
+                    core::ptr::write_volatile(queue_notify, self.queue_index);
+                }
+                NotifyWidth::W32 => {
+                    // virtio-mmio QueueNotify: QEMU drops any access != 4 bytes
+                    let queue_notify = self.queue_notify as *mut u32;
+                    core::ptr::write_volatile(queue_notify, self.queue_index as u32);
+                }
+            }
         }
 
         // RISC-V MMIO fence after write: fence i, ir

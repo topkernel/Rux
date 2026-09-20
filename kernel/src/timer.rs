@@ -56,6 +56,19 @@ static ACTIONS: Spinlock<BTreeMap<u64, TimerAction>> = Spinlock::new(BTreeMap::n
 /// Last-processed jiffies value.
 static LAST_TICK: AtomicU64 = AtomicU64::new(0);
 
+/// R34 (TIMERS-side wedge): maximum expiries processed per softirq pass.
+/// The `expired`/`rearmed` Vecs are reserved to exactly this budget BEFORE
+/// the TIMERS lock is taken, so the pushes inside the critical section can
+/// never grow the buffer — every heap allocation that used to happen under
+/// TIMERS+ACTIONS (Vec growth on `expired.push` inside `retain`) was an
+/// OOM-panic point: `alloc_error_handler` panics (no unwinding, panic =
+/// abort), leaving the panicking CPU parked in `wfi` with TIMERS held and
+/// the other 3 CPUs spinning on the TIMERS lock forever (the observed
+/// "holder never returns" signature). Leftover expired entries stay in the
+/// map and are drained on the next jiffy (LAST_TICK dedupe only skips the
+/// SAME jiffy).
+const EXPIRY_BUDGET: usize = 64;
+
 // ==================== Public API ====================
 
 /// Add a one-shot timer that wakes up a sleeping process on expiry.
@@ -194,16 +207,31 @@ pub fn timer_softirq_handler(_nr: usize) {
 
     // Collect expired timers under locks; deliver AFTER releasing them
     // (R12-3 — see the moved delivery block below).
-    let mut expired = alloc::vec::Vec::new();
-    // R25-1: re-armed periodic ids — collected under the same locks; the
-    // delivery-time close-race guard must not mistake our own re-arm for
-    // a deletion (periodic timerfd expiries were silently dropped).
-    let mut rearmed: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    // R34: capacity reserved OUTSIDE the lock; the budget counter below
+    // guarantees no in-lock growth, and periodic timers are re-armed IN
+    // PLACE inside the retain closure (node kept, only `expires` mutated),
+    // so the TIMERS+ACTIONS critical section performs NO heap allocation
+    // at all — every allocation that used to happen under the locks
+    // (`expired`/`rearmed` Vec growth, remove+insert churn of re-armed
+    // nodes) was an OOM-panic point: `alloc_error_handler` panics
+    // (panic=abort, no unwinding), parking the CPU in `wfi` with TIMERS
+    // held while the other 3 CPUs spin on the TIMERS lock forever — the
+    // observed "holder never returns" signature. Leftover expired entries
+    // (budget exhausted) stay in the map and drain on the next jiffy
+    // (LAST_TICK dedupe only skips the SAME jiffy).
+    let mut expired: alloc::vec::Vec<(u64, TimerAction)> = alloc::vec::Vec::with_capacity(EXPIRY_BUDGET);
     {
         let mut timers = TIMERS.lock_irqsave();
-        let mut actions = ACTIONS.lock_irqsave();
+        let actions = ACTIONS.lock_irqsave();
+        let mut budget = EXPIRY_BUDGET;
         timers.retain(|&id, entry| {
             if entry.expires <= current {
+                if budget == 0 {
+                    // Budget exhausted: keep the entry — it is re-scanned on
+                    // the next jiffy. Never let the critical section allocate.
+                    return true;
+                }
+                budget -= 1;
                 if let Some(action) = actions.get(&id) {
                     expired.push((id, TimerAction {
                         pid: action.pid,
@@ -212,8 +240,17 @@ pub fn timer_softirq_handler(_nr: usize) {
                         tfd_addr: action.tfd_addr,
                         wake_pid: action.wake_pid,
                     }));
+                    if action.interval_jiffies > 0 {
+                        // Periodic: re-arm IN PLACE (same id, node kept) —
+                        // semantically identical to the old remove+re-insert
+                        // of the same key, but without the under-lock
+                        // dealloc+alloc pair. Bonus: del_timer can no longer
+                        // miss the briefly-removed id (orphan-timer race).
+                        entry.expires = current + action.interval_jiffies;
+                        return true;
+                    }
                 }
-                false
+                false // one-shot: remove (dealloc cannot fail)
             } else {
                 true
             }
@@ -224,29 +261,11 @@ pub fn timer_softirq_handler(_nr: usize) {
         // wake_up_process (TIMERS -> GRQ nesting) was the observed TIMERS
         // wedge ingredient (3 CPUs spinning on the TIMERS lock after a
         // pipeline). The `expired` list is a detached local snapshot, so
-        // concurrency here is only against del_timer on the same ids;
-        // the re-arm pass below still runs under the locks. The tfd
-        // increment is a plain atomic (H48's close-race protection is the
-        // refcount on the fd side; the H48 comment applied to freeing,
-        // which does not happen in this loop).
+        // concurrency here is only against del_timer on the same ids.
+        // The tfd increment is a plain atomic (H48's close-race protection
+        // is the refcount on the fd side; the H48 comment applied to
+        // freeing, which does not happen in this loop).
         // (Delivery happens after the locks drop — see the moved block.)
-
-        // Re-arm periodic timers (still under locks for consistency)
-        for (id, action) in &expired {
-            if action.interval_jiffies > 0 {
-                rearmed.push(*id);
-                actions.insert(*id, TimerAction {
-                    pid: action.pid,
-                    signo: action.signo,
-                    interval_jiffies: action.interval_jiffies,
-                    tfd_addr: action.tfd_addr,
-                    wake_pid: action.wake_pid,
-                });
-                timers.insert(*id, TimerEntry {
-                    expires: current + action.interval_jiffies,
-                });
-            }
-        }
     } // TIMERS + ACTIONS released here
 
     // R12-3: delivery OUTSIDE the timer locks. The old in-lock
@@ -273,7 +292,8 @@ pub fn timer_softirq_handler(_nr: usize) {
             // (rearmed ids were excluded, but rearmed ids are exactly the
             // periodic ones). The H48 close-race (increment on a freed
             // counter) is accepted per the timerfd refcount audit.
-            let _ = rearmed;
+            // (R34: the `rearmed` id list itself became unnecessary when
+            // re-arming moved in-place into the retain closure.)
             unsafe {
                 let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
                 (*counter_ptr).fetch_add(1, Ordering::Release);

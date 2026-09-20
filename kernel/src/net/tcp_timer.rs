@@ -81,23 +81,33 @@ impl TcpTimerManager {
         // etc.) — without the flag those CLOSE corpses were invisible to
         // the sweep (indistinguishable from fresh pre-connect slots with
         // user_refs==0) and leaked forever.
-        let freeable: alloc::vec::Vec<usize> = sockets
-            .iter()
-            .enumerate()
-            .filter(|(_idx, slot)| {
-                slot.as_ref()
-                    .map(|sk| {
-                        sk.state == TcpState::TCP_CLOSE
-                            && sk.user_refs.load(core::sync::atomic::Ordering::Acquire) == 0
-                            && (sk.parent_fd.is_some() || sk.orphaned)
-                    })
-                    .unwrap_or(false)
-            })
-            .map(|(idx, _)| idx)
-            .collect();
+        //
+        // R34 (TCP-side wedge): this whole tick runs under TCP_TABLE_LOCK —
+        // the old `Vec::collect()` heap-allocated under the lock, an
+        // OOM-panic point (`alloc_error_handler` panics; panic=abort parks
+        // the CPU in `wfi` holding TCP_TABLE_LOCK while the other 3 CPUs
+        // spin on it forever — the observed "holder never returns"
+        // signature). The table is bounded by TCP_SOCKET_TABLE_SIZE, so a
+        // fixed stack array removes the allocation entirely.
+        let mut freeable = [0usize; crate::net::tcp::TCP_SOCKET_TABLE_SIZE];
+        let mut freeable_len = 0usize;
+        for (idx, slot) in sockets.iter().enumerate() {
+            if slot
+                .as_ref()
+                .map(|sk| {
+                    sk.state == TcpState::TCP_CLOSE
+                        && sk.user_refs.load(core::sync::atomic::Ordering::Acquire) == 0
+                        && (sk.parent_fd.is_some() || sk.orphaned)
+                })
+                .unwrap_or(false)
+            {
+                freeable[freeable_len] = idx;
+                freeable_len += 1;
+            }
+        }
         drop(sockets);
-        for idx in freeable {
-            table.free(idx);
+        for idx in freeable.iter().take(freeable_len) {
+            table.free(*idx);
         }
     }
 

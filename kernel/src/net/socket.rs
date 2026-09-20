@@ -297,7 +297,13 @@ impl Socket {
                 // read only from this single-threaded socket context.
                 let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
 
-                let mut queue = self.recv_queue.lock();
+                // R34: irqsave — this plain lock is also taken by
+                // enqueue_packet() from the NetRx softirq; a timer IRQ at
+                // irq_exit on THIS CPU while a syscall holds the plain lock
+                // would make the softirq spin on it forever (the holder is
+                // the interrupted syscall below it — same-CPU permanent
+                // wedge).
+                let mut queue = self.recv_queue.lock_irqsave();
                 if let Some(packet) = queue.pop_front() {
                     let len = packet.data.len().min(buf.len());
                     buf[..len].copy_from_slice(&packet.data[..len]);
@@ -330,7 +336,10 @@ impl Socket {
                 Err(-11) // EAGAIN
             }
             SocketType::Udp => {
-                let mut queue = self.recv_queue.lock();
+                // R34: irqsave — pairs with enqueue_packet() from the NetRx
+                // softirq (same-CPU plain-lock reentrancy wedge; see the TCP
+                // branch comment above).
+                let mut queue = self.recv_queue.lock_irqsave();
                 if let Some(packet) = queue.pop_front() {
                     let len = packet.data.len().min(buf.len());
                     buf[..len].copy_from_slice(&packet.data[..len]);
@@ -368,7 +377,10 @@ impl Socket {
 
     /// Enqueue packet to receive buffer
     pub fn enqueue_packet(&self, packet: RecvPacket) {
-        self.recv_queue.lock().push_back(packet);
+        // R34: irqsave — runs from the NetRx softirq; the syscall-side
+        // reader (Socket::recv) holds this lock across its empty-check, and
+        // a plain lock here would same-CPU deadlock against it at irq_exit.
+        self.recv_queue.lock_irqsave().push_back(packet);
     }
 
     /// Close socket
@@ -515,7 +527,9 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
     let socket = unsafe { &*(ptr as *const Socket) };
 
     if events & POLLIN != 0 {
-        let mut readable = !socket.recv_queue.lock().is_empty();
+        // R34: irqsave — same recv_queue reentrancy discipline as recv()
+        // (enqueue_packet runs from the NetRx softirq).
+        let mut readable = !socket.recv_queue.lock_irqsave().is_empty();
         // R22-4: TCP data lands in the protocol table's recv_buffer, not
         // recv_queue — poll never reported readable and clients spun.
         // R32-N6: take the table lock while peeking at the protocol slot —

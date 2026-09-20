@@ -82,8 +82,9 @@ pub fn virtio_probe_devices() -> usize {
                 // Identify device type and initialize
                 match device_id {
                     1 => {
-                        if init_virtio_net(base_addr).is_ok() {
-                            device_count += 1;
+                        match init_virtio_net(base_addr) {
+                            Ok(()) => device_count += 1,
+                            Err(e) => crate::pr_err!("virtio-net: init failed at 0x{:x}: {}", base_addr, e),
                         }
                     }
                     2 => {

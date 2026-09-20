@@ -67,7 +67,15 @@ pub struct ArpHdr {
 }
 
 /// ARP packet (Ethernet + IPv4)
-#[repr(C)]
+///
+/// R34: `packed` is load-bearing. With plain repr(C) the u32 address
+/// fields after the 6-byte MAC arrays force 2 bytes of padding each
+/// (size 32, not 28), so every ARP frame went out with its spa/tpa
+/// fields shifted and inbound replies parsed from the wrong offsets —
+/// found on the wire against slirp via filter-dump. The wire layout has
+/// no alignment holes; field reads/writes go through direct packed field
+/// access (no references to fields are taken).
+#[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct ArpPacket {
     /// ARP header
@@ -411,8 +419,14 @@ fn is_local_ip(ip: u32) -> bool {
 }
 
 /// Get local IP address (host byte order)
+///
+/// R34: 10.0.2.15 — the fixed guest address of QEMU slirp user networking
+/// (10.0.2.0/24: .2 = gateway/host alias, .3 = virtual DNS). The previous
+/// 192.168.1.100 made every outbound packet carry a source address slirp
+/// does not route back without an extra ARP round-trip for a foreign
+/// address; the slirp-standard address works out of the box.
 pub fn get_local_ip() -> u32 {
-    0xC0A80164
+    0x0A00020F
 }
 
 /// Get local MAC address

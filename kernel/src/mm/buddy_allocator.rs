@@ -361,29 +361,33 @@ impl BuddyAllocator {
                 // Task allocator itself, the page just received its SECOND
                 // owner — the long-hunted first handoff, named at the
                 // moment it happens. ra identifies the taker.
+                // R34: SBI direct write — this fires while the BUDDY lock is
+                // held; console::putchar would take the UART lock under
+                // BUDDY (every other allocator on all CPUs then piles up
+                // behind it). Same discipline as the double-free tripwire
+                // below and RawSpinlock::deadlock_warn.
                 if !crate::sched::sched::IN_TASK_ALLOC.load(core::sync::atomic::Ordering::Acquire)
                     && crate::sched::sched::task_page_is_owned(addr as *const u8)
                 {
-                    use crate::console::putchar;
                     const MSG: &[u8] = b"heap: DOUBLE-HANDOFF page=0x";
-                    for &b in MSG { putchar(b); }
+                    for &b in MSG { sbi_rt::legacy::console_putchar(b as usize); }
                     let mut sh = 64;
                     while sh > 0 {
                         sh -= 4;
                         let nb = ((addr >> sh) & 0xF) as u8;
-                        putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                        sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
                     }
                     const M2: &[u8] = b" ra=0x";
-                    for &b in M2 { putchar(b); }
+                    for &b in M2 { sbi_rt::legacy::console_putchar(b as usize); }
                     let mut ra: usize;
                     unsafe { core::arch::asm!("mv {}, ra", out(reg) ra, lateout("x1") _, options(nomem, nostack)); }
                     sh = 64;
                     while sh > 0 {
                         sh -= 4;
                         let nb = ((ra >> sh) & 0xF) as u8;
-                        putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                        sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
                     }
-                    putchar(b'\n');
+                    sbi_rt::legacy::console_putchar(b'\n' as usize);
                 }
                 return addr as *mut u8;
             }

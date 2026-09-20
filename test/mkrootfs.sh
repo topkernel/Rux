@@ -109,6 +109,21 @@ else
     echo "Warning: riscv64-linux-gnu-gcc not found, skipping nettest"
 fi
 
+# Build + install the slirp virtio-net E2E test (same freestanding recipe
+# as nettest; exercises the REAL virtio-net MMIO device against QEMU user
+# networking — see docs/test/testing.md for the QEMU invocation).
+SLIRP_TEST_SRC="$PROJECT_ROOT/test/slirp_test.c"
+if [ -f "$SLIRP_TEST_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing slirp_test to /test/slirp_test..."
+    if riscv64-linux-gnu-gcc -nostdlib -nostartfiles -static -O2 -fno-builtin \
+         -o "$STAGING/test/slirp_test" "$SLIRP_TEST_SRC"; then
+        chmod +x "$STAGING/test/slirp_test"
+    else
+        echo "Warning: slirp_test failed to compile (skipping)"
+        rm -f "$STAGING/test/slirp_test"
+    fi
+fi
+
 # Copy linux-ltp test suite
 LINUX_LTP_DIR="$PROJECT_ROOT/userspace/linux-ltp/output"
 if [ -d "$LINUX_LTP_DIR/testcases" ]; then
@@ -219,5 +234,6 @@ echo "Test programs (/test/):"
 echo "  /test/smoke_test        - kernel smoke test"
 echo "  /test/dynamic_link_test - dynamic linking test"
 echo "  /test/nettest           - loopback network E2E test (UDP/TCP echo)"
+echo "  /test/slirp_test        - virtio-net slirp E2E test (real NIC traffic)"
 echo "  /test/linux-ltp/        - official LTP tests (if built)"
 echo "    run: /test/linux-ltp/run_quick.sh"

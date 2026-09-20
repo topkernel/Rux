@@ -334,9 +334,16 @@ fn resolve_dest_mac(skb: &SkBuff) -> Option<[u8; ETH_ALEN]> {
 }
 
 /// Get network device MAC address
+///
+/// R34: returns the MAC the device actually reports (read from virtio-net
+/// config space). The old hardcoded 52:54:00:12:34:56 made every outbound
+/// frame carry a source MAC different from the device's — QEMU's virtio-net
+/// RX filter (device MAC + broadcast only, no CTRL_VQ promisc support) then
+/// dropped every slirp reply, because the peer answered the MAC it saw, not
+/// the one the device owns.
 fn get_device_mac() -> Option<[u8; 6]> {
-    if let Some(_device) = crate::drivers::net::virtio_net::get_device() {
-        return Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+    if let Some(device) = crate::drivers::net::virtio_net::get_device() {
+        return Some(device.get_mac());
     }
 
     None

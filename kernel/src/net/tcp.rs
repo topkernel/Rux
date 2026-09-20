@@ -1104,6 +1104,17 @@ impl TcpSocket {
     /// Handle received RST packet (RFC 793 §3.9)
     fn handle_rst_recv(&mut self) {
         match self.state {
+            TcpState::TCP_SYN_SENT => {
+                // R34: RFC 793 — in SYN_SENT an RST (with an acceptable
+                // ACK, e.g. slirp/host refusing the connection) aborts the
+                // connect. The old code ignored it and the SYN retransmit
+                // timer kept firing forever (observed as a SYN/RST ping-pong
+                // against QEMU user networking).
+                self.state = TcpState::TCP_CLOSE;
+                self.send_buffer.clear();
+                self.recv_buffer.clear();
+                self.retrans_queue.clear();
+            }
             TcpState::TCP_SYN_RECV => {
                 // If ACK is acceptable, abort connection
                 self.state = TcpState::TCP_CLOSE;
@@ -1154,6 +1165,13 @@ impl TcpSocket {
             | TcpState::TCP_CLOSE_WAIT
             | TcpState::TCP_FIN_WAIT1
             | TcpState::TCP_FIN_WAIT2 => {}
+            // R34: a VFS-connected socket sitting in TCP_CLOSE is an ABORTED
+            // connection (RST in SYN_SENT, retrans exhaustion) — unconnected
+            // sockets never reach here (the VFS layer returns ENOTCONN
+            // first). Surfacing EOF matches the R22-4 convention ("zero
+            // length read on a half/RST-closed connection is EOF");
+            // previously recv spun EAGAIN forever on a dead connection.
+            TcpState::TCP_CLOSE => return Ok(0),
             _ => return Err(()),
         }
 
