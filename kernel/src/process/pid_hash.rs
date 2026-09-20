@@ -49,6 +49,20 @@ fn lock_bucket(idx: usize) {
     }
 }
 
+/// Try-lock a bucket. Returns false if it is currently held.
+///
+/// For wedge-diagnostic paths (dfx taskdump): the code that most needs the
+/// snapshot runs precisely when some CPU is stuck — possibly while holding
+/// a bucket lock (sys_kill broadcast / send_signal_to_pgid / oom_kill call
+/// send_signal → wake_up → runqueue lock INSIDE the for_each callback).
+/// Blocking there would wedge the diagnostic itself.
+#[inline]
+fn try_lock_bucket(idx: usize) -> bool {
+    BUCKET_LOCK[idx]
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+}
+
 #[inline]
 fn unlock_bucket(idx: usize) {
     BUCKET_LOCK[idx].store(false, Ordering::Release);
@@ -180,6 +194,36 @@ where
         }
         unlock_bucket(i);
     }
+}
+
+/// Non-blocking variant of `pid_hash_for_each_task` for wedge diagnostics.
+///
+/// Buckets whose lock is held are SKIPPED (the snapshot is partial), never
+/// waited for. Returns the number of skipped buckets so the caller can
+/// report that the dump is incomplete.
+pub fn pid_hash_for_each_task_try<F>(mut f: F) -> usize
+where
+    F: FnMut(*mut Task),
+{
+    let mut skipped = 0;
+    for i in 0..PID_HASH_BUCKETS {
+        if !try_lock_bucket(i) {
+            skipped += 1;
+            continue;
+        }
+        // SAFETY: We hold the bucket lock so no concurrent insert/remove can
+        // modify the chain; tasks unlinked by a stalled holder are simply
+        // missed by this snapshot.
+        unsafe {
+            let mut curr = BUCKET_HEAD[i].load(Ordering::Acquire);
+            while !curr.is_null() {
+                f(curr);
+                curr = (*curr).pid_hash_next;
+            }
+        }
+        unlock_bucket(i);
+    }
+    skipped
 }
 
 /// Collect PIDs currently in the hash table.

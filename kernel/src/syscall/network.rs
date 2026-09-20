@@ -278,13 +278,36 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     // detour) inside the table critical section. try_reserve_exact makes
     // an OOM a clean ENOMEM (file.rs convention) instead of the allocator
     // panic handler.
+    //
+    // R36 (R7-D4 family): bound the staged copy. `len` is bounded only by
+    // access_ok (the USER_END ceiling, ~256GB); the fixed 32MB buddy heap
+    // means a multi-MB `len` either fails cleanly (ENOMEM) or — worse —
+    // SUCCEEDS and transiently monopolizes most of the kernel heap for
+    // data the protocol layer accepts only in bounded chunks anyway:
+    // TCP takes at most TCP_SEND_MAX_CHUNK per call (partial write is
+    // POSIX-legal for stream sockets — R32-N4), and a UDP datagram can
+    // never exceed UDP_MAX_DATAGRAM (Linux returns EMSGSIZE above it).
+    // sys_read/sys_write/sys_recvfrom stage at RW_CHUNK and sys_sendmsg
+    // caps its iovec aggregate at 4*RW_CHUNK for exactly this reason —
+    // the R35 kbuf here was the one uncapped outlier.
+    let stage = match socket.sock_type {
+        crate::net::socket::SocketType::Tcp => {
+            len.min(crate::net::tcp::TcpSocket::TCP_SEND_MAX_CHUNK)
+        }
+        crate::net::socket::SocketType::Udp => {
+            if len > crate::net::udp::UDP_MAX_DATAGRAM {
+                return -(errno::EMSGSIZE as i64);
+            }
+            len
+        }
+    };
     let mut kbuf = alloc::vec::Vec::new();
-    if kbuf.try_reserve_exact(len).is_err() {
+    if kbuf.try_reserve_exact(stage).is_err() {
         return -(errno::ENOMEM as i64);
     }
-    kbuf.resize(len, 0);
-    // SAFETY: buf_ptr validated with access_ok(len) above.
-    if unsafe { crate::arch::riscv64::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf_ptr, len) } != 0 {
+    kbuf.resize(stage, 0);
+    // SAFETY: buf_ptr validated with access_ok(len) above; stage <= len.
+    if unsafe { crate::arch::riscv64::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf_ptr, stage) } != 0 {
         return -(errno::EFAULT as i64);
     }
     let data = kbuf.as_slice();

@@ -601,6 +601,15 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.30 第三十六轮：零发现验证轮 — 1/4 零发现 + 7 项确证（3 HIGH）
+
+四个复审 agent（net / fs+ipc / sched+mm / core+drivers）对 R32-R35 改动面对抗验证：
+- **sched/mm：零发现**（wake_up_enqueue 原子性/STOPPED 语义/timer budget 无饿死/nanosleep 中断约定/rmap-vma 锁序全部通过）。
+- **core/drivers：3 项**——(H) send_signal_locked 残留 R32 前的顶层 pending.add 未删，三处 add 架空 prepare_signal 语义（SIG_IGN 残留瞬态位虚假 EINTR；RT 信号双重入队且 remove_one 只清 bitmap → 队列无界泄漏）；(H) setup_frame SA_RESTART 分支不还原 a0=orig_a0，重启的 ecall 带 -512 当第一参数（read(-512)→EBADF）；(M) taskdump 的 pid_hash 桶锁阻塞迭代在死锁现场会自身卡死（持桶锁调 wake 的嵌套是现实路径）→ 改 try-lock 跳过并标注 stuck 桶数。
+- **net：1 项**——(H) R35 给 sys_sendto 的 kbuf try_reserve_exact(len) 无上限（len≤access_ok 256GB），30MB send 瞬时独占 94% 的 32MB 堆，期间他 CPU 未 try_reserve 化的分配 panic（R34 根因族回归）——按类型限幅（TCP 256KB 部分写 / UDP 65507+EMSGSIZE），暂存上界 256KB。其余 TcpTxBatch 9 记录点/emit 部分失败一致性/陈旧 ACK/ARP flush-GC 竞争全部验证通过。
+- **fs/ipc：3 项**——(H) epoll file_id 用 Arc 堆地址，slab 尺寸分类分配使 close-reopen 工作流的地址+fd 号复用成为**预期行为**（事件错关联/合法 ADD 误 EEXIST）→ File 增加单调 generation file_id；(M) pipe 读写与 io_completion 共 5 处中止路径漏 R8-5/R9-17 NEW-C2 撤销（违反"运行任务不在 GRQ"不变量）；(L) mq_open find-then-create TOCTOU 同名双实例（第二个永生泄漏）→ mq_alloc 锁内复查+重试。
+**门禁 6/8**（run2 B 型 + run6 TIMERS 锁死锁）——File 加字段致布局抖动，暴露 R34 留档的最后一颗雷：**add_timer_wakeup 的 BTreeMap insert 节点分配仍在 TIMERS 锁内**（当时标"冷路径不修"）。R37 以固定槽位表根治 TIMERS/ACTIONS。
+
 ### 20.29 第三十五轮：TCP 表锁出锁发射重构 + ARP 队列 + virtio-blk MMIO — 门禁再 8/8
 
 **TcpTxBatch（链 2 根治）**：新增统一"锁内决策/锁外发射"机制（tcp.rs）——每个 TCP_TABLE_LOCK 持有者**取锁前** try_reserve 预留描述符数组+字节 arena（OOM → 干净 ENOMEM 降级，非锁内 panic）；锁内 5 个发送原语（send_syn/synack/ack/fin/tx_segment）只记录 wire-ready 描述符 + memcpy 进预留容量（**锁内零分配、零发包、零自旋**）；出锁后 emit_all 逐段 alloc_skb→build→xmit。7 处发射点全部出锁（tcp_rcv/connect/timer tick×2/Socket send/recv/close/shutdown）；sys_sendto/recvfrom 的用户拷贝移到锁外（try_reserve + copy_from_user）。重入安全与 Socket::close 同论证（loopback 只入队、virtio 直发，不回调本 CPU tcp_rcv）。残留的 recv/send_buffer VecDeque 增长与 retrans 段 owned Vec 均 try_reserve 化（失败优雅降级）——**锁内已无任何不可失败的 panic 分配**。

@@ -67,11 +67,13 @@ static EPOLL_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
 struct EpollEntry {
     fd: i32,
     /// Opaque identity of the open file description captured at ADD time
-    /// (R32-B9): the Arc allocation address. Compared for equality only,
-    /// never dereferenced, so it is harmless after the file is freed.
+    /// (R32-B9, R36-B1): the File's monotonic generation id. Compared for
+    /// equality only, never dereferenced, so it is harmless after the file
+    /// is freed — and, unlike the earlier Arc-address scheme, it can never
+    /// alias a NEW file even when the allocator recycles the old address.
     /// Guards the wait path against the fd NUMBER being closed and reused
     /// by an unrelated open file.
-    file_id: usize,
+    file_id: u64,
     events: u32,
     data: u64,
 }
@@ -631,17 +633,22 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
         EPOLL_CTL_ADD => {
             // R32-B9: Linux requires the target fd to be OPEN at ADD time
             // (EBADF otherwise), and the registration binds to that open
-            // file description. Record the description's identity (the
-            // Arc's address) so that a later close(fd)+reopen reusing the
-            // same NUMBER can never be mistaken for the registered file
-            // at wait time. The Arc clone itself is dropped here — the
-            // entry deliberately does NOT pin the file, so the last
-            // close(fd) still runs the file's close op (pipe EOF etc.).
+            // file description. Record the description's identity so that a
+            // later close(fd)+reopen reusing the same NUMBER can never be
+            // mistaken for the registered file at wait time. R36-B1: the
+            // identity is the File's monotonic generation id, NOT the Arc's
+            // heap address — the slab reuses a freed File's address for the
+            // next same-size allocation almost deterministically, so an
+            // address-keyed entry could silently match a NEW file that
+            // recycled both the fd number and the address. The Arc clone
+            // itself is dropped here — the entry deliberately does NOT pin
+            // the file, so the last close(fd) still runs the file's close
+            // op (pipe EOF etc.).
             let file = match fdtable.get_file(fd as usize) {
                 Some(f) => f,
                 None => return -(errno::EBADF as i64),
             };
-            let file_id = alloc::sync::Arc::as_ptr(&file) as usize;
+            let file_id = file.file_id;
             // SAFETY: event_ptr validated with access_ok above; reads EPollEvent.
             let event = unsafe { *event_ptr };
             let mut entries = epoll.entries.lock();
@@ -765,9 +772,12 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             // and reported its readiness with the OLD entry's user data.
             // Only accept the mapping while the fd still resolves to the
             // same description; otherwise keep the pre-existing closed-fd
-            // polarity (EPOLLERR|EPOLLHUP).
+            // polarity (EPOLLERR|EPOLLHUP).  R36-B1: file_id is the File's
+            // generation id (never reused), so a reopened fd can never
+            // re-match a stale entry even when the allocator recycles the
+            // old File's heap address.
             let file = match fdtable.get_file(entry.fd as usize) {
-                Some(f) if alloc::sync::Arc::as_ptr(&f) as usize == entry.file_id => f,
+                Some(f) if f.file_id == entry.file_id => f,
                 _ => {
                     // fd was closed (or its number reused), report error
                     ready_events.push(EPollEvent {

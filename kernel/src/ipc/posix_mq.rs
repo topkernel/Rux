@@ -157,15 +157,36 @@ fn mq_find_by_name(name: &[u8]) -> Option<(usize, alloc::sync::Arc<PosixMq>)> {
 }
 
 /// Allocate a slot for a new POSIX MQ.
-fn mq_alloc(mq: PosixMq) -> Option<usize> {
+///
+/// R36-B3: the name-uniqueness recheck happens under the SAME lock as the
+/// insertion. sys_mq_open's find-then-create sequence releases MQ_TABLE
+/// between the two, so two concurrent mq_open(O_CREAT) calls with the same
+/// name could BOTH miss the find and each insert its own queue — duplicate
+/// instances of one POSIX name (later opens/unlinks then only ever saw the
+/// first, and the second was unreachable but immortal). On NameExists the
+/// caller retries the find phase, which now observes the winner.
+enum MqAlloc {
+    Created(usize),
+    NameExists,
+    Full,
+}
+
+fn mq_alloc(mq: PosixMq) -> MqAlloc {
     let mut table = MQ_TABLE.lock();
+    for slot in table.iter() {
+        if let Some(ref m) = slot {
+            if !m.is_unlinked() && m.name == mq.name {
+                return MqAlloc::NameExists;
+            }
+        }
+    }
     for (i, slot) in table.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(alloc::sync::Arc::new(mq));
-            return Some(i);
+            return MqAlloc::Created(i);
         }
     }
-    None
+    MqAlloc::Full
 }
 
 /// Parse name from userspace pointer. Must start with '/'.
@@ -235,60 +256,67 @@ pub fn sys_mq_open(args: [u64; 6]) -> i64 {
     let creating = (oflag & O_CREAT_MQ as i32) != 0;
     let excl = (oflag & O_EXCL_MQ as i32) != 0;
 
-    // Find existing queue
-    if let Some((_idx, mq)) = mq_find_by_name(&name) {
-        if excl {
-            return -(errno::EEXIST as i64);
-        }
-        // Check read/write permission
-        let can_read = ((oflag & 3) != 1) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o4);
-        let can_write = ((oflag & 3) != 0) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2);
+    // R36-B3: find-then-create wrapped in a retry loop — mq_alloc rechecks
+    // the name under the table lock and reports NameExists when a concurrent
+    // creator won the race; we then re-run the find phase instead of
+    // inserting a duplicate instance of the same POSIX name.
+    loop {
+        // Find existing queue
+        if let Some((_idx, mq)) = mq_find_by_name(&name) {
+            if excl {
+                return -(errno::EEXIST as i64);
+            }
+            // Check read/write permission
+            let can_read = ((oflag & 3) != 1) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o4);
+            let can_write = ((oflag & 3) != 0) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2);
 
-        if !can_read && !can_write {
-            return -(errno::EACCES as i64);
+            if !can_read && !can_write {
+                return -(errno::EACCES as i64);
+            }
+
+            // Allocate a file descriptor
+            // R32 (NEW-6): allocate + store in ONE critical section. The old
+            // allocate_mq_fd()/store_mq_fd() pair only "reserved" a slot by
+            // leaving it None, so two concurrent mq_open calls could draw the
+            // SAME fd number; the second store overwrote the first, leaking a
+            // refcount and breaking the first caller's fd.
+            let fd = match allocate_and_store_mq_fd(mq.clone()) {
+                Some(f) => f,
+                None => return -(errno::EMFILE as i64),
+            };
+
+            mq.refcount.fetch_add(1, Ordering::Relaxed);
+            return fd as i64;
         }
 
-        // Allocate a file descriptor
-        // R32 (NEW-6): allocate + store in ONE critical section. The old
-        // allocate_mq_fd()/store_mq_fd() pair only "reserved" a slot by
-        // leaving it None, so two concurrent mq_open calls could draw the
-        // SAME fd number; the second store overwrote the first, leaking a
-        // refcount and breaking the first caller's fd.
-        let fd = match allocate_and_store_mq_fd(mq.clone()) {
-            Some(f) => f,
-            None => return -(errno::EMFILE as i64),
+        // Queue not found
+        if !creating {
+            return -(errno::ENOENT as i64);
+        }
+
+        // Create new queue
+        let mq = PosixMq::new(&name, mode as u16, attr.as_ref());
+        let idx = match mq_alloc(mq) {
+            MqAlloc::Created(i) => i,
+            MqAlloc::NameExists => continue, // lost the create race — re-find
+            MqAlloc::Full => return -(errno::ENOSPC as i64),
         };
 
-        mq.refcount.fetch_add(1, Ordering::Relaxed);
+        let mq = MQ_TABLE.lock()[idx].as_ref().unwrap().clone();
+
+        let fd = match allocate_and_store_mq_fd(mq.clone()) {
+            Some(f) => f,
+            None => {
+                // R32 (NEW-6): no fd available — remove the queue we just
+                // created instead of leaking it in MQ_TABLE forever (it had
+                // refcount 1 with no fd that could ever release it).
+                let mut table = MQ_TABLE.lock();
+                let _dropped = table[idx].take();
+                return -(errno::EMFILE as i64);
+            }
+        };
         return fd as i64;
     }
-
-    // Queue not found
-    if !creating {
-        return -(errno::ENOENT as i64);
-    }
-
-    // Create new queue
-    let mq = PosixMq::new(&name, mode as u16, attr.as_ref());
-    let idx = match mq_alloc(mq) {
-        Some(i) => i,
-        None => return -(errno::ENOSPC as i64),
-    };
-
-    let mq = MQ_TABLE.lock()[idx].as_ref().unwrap().clone();
-
-    let fd = match allocate_and_store_mq_fd(mq.clone()) {
-        Some(f) => f,
-        None => {
-            // R32 (NEW-6): no fd available — remove the queue we just
-            // created instead of leaking it in MQ_TABLE forever (it had
-            // refcount 1 with no fd that could ever release it).
-            let mut table = MQ_TABLE.lock();
-            let _dropped = table[idx].take();
-            return -(errno::EMFILE as i64);
-        }
-    };
-    fd as i64
 }
 
 /// sys_mq_unlink — Remove a message queue (NR 181)

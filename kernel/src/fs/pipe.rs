@@ -269,6 +269,13 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 // its wake_up_all() found an empty queue — don't sleep.
                 if pipe.buffer.lock().available_read() > 0 || pipe.is_write_closed() {
                     pipe.read_queue().finish_wait(current);
+                    // R36-B2 (R8-5 NEW-C2 discipline, missed here): a wake
+                    // that landed between prepare_to_wait and this recheck
+                    // enqueued us while we never slept — take ourselves
+                    // back off the GRQ (on_rq guards make it a no-op
+                    // otherwise) or nr_running stays inflated and the
+                    // idle fast path is defeated until our next switch.
+                    crate::sched::dequeue_task(&*current);
                     continue;
                 }
 
@@ -278,6 +285,9 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 // unkillable until a writer arrived.
                 if crate::signal::signal_pending() {
                     pipe.read_queue().finish_wait(current);
+                    // R36-B2: undo a concurrent data-arrival wake enqueue
+                    // before returning (R9-17 discipline).
+                    crate::sched::dequeue_task(&*current);
                     return -(crate::errno::constants::EINTR) as isize;
                 }
 
@@ -367,12 +377,19 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 // its wake_up_all() found an empty queue — don't sleep.
                 if pipe.buffer.lock().available_write() > 0 || pipe.is_read_closed() {
                     pipe.write_queue().finish_wait(current);
+                    // R36-B2 (R8-5 NEW-C2 discipline, missed here): undo a
+                    // concurrent drain/close wake that enqueued us while we
+                    // never slept.
+                    crate::sched::dequeue_task(&*current);
                     continue;
                 }
 
                 // R20-FS7: same pre-schedule signal recheck as the read path.
                 if crate::signal::signal_pending() {
                     pipe.write_queue().finish_wait(current);
+                    // R36-B2: undo a concurrent space-available wake enqueue
+                    // before returning (R9-17 discipline).
+                    crate::sched::dequeue_task(&*current);
                     if total_written > 0 {
                         return total_written as isize;
                     }

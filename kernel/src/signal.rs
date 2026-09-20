@@ -1029,8 +1029,15 @@ unsafe fn setup_frame(
     let a0_val = regs.a0 as i64;
     if a0_val == ERESTARTSYS || a0_val == ERESTARTNOHAND {
         if action.sa_flags.bits() & SigFlags::SA_RESTART != 0 && a0_val == ERESTARTSYS {
-            // Rewind PC to re-execute the ecall instruction.
+            // Rewind PC to re-execute the ecall instruction. The saved a0
+            // must be the ORIGINAL first argument, not the -512 sentinel:
+            // after the handler returns, rt_sigreturn restores this frame
+            // and the ecall re-executes with a0 as syscall arg 0 (Linux's
+            // do_signal sets regs->a0 = regs->orig_a0 before building the
+            // frame — leaving the sentinel here restarted read(-512, ...)
+            // → EBADF / EFAULT).
             frame.uc.uc_mcontext.sc_regs[0] = regs.epc - 4;
+            frame.uc.uc_mcontext.sc_regs[10] = regs.orig_a0;
         } else {
             // Convert restart code to -EINTR for userspace.
             frame.uc.uc_mcontext.sc_regs[10] = (-(crate::errno::constants::EINTR as i64)) as u64;
@@ -1343,10 +1350,6 @@ unsafe fn send_signal_locked(task_ptr: *mut crate::process::task::Task, _pid: u3
         signal_wake_up(task_ptr);
         return Ok(());
     }
-
-    // Add signal to pending set BEFORE checking mask.
-    // Masked signals stay pending and will be delivered when unmasked.
-    task.pending.add(sig);
 
     // Idle task has no signal handling
     let signal_ref: &SignalStruct = match task.signal.as_ref() {

@@ -90,6 +90,16 @@ pub struct FileOps {
     pub poll: Option<fn(&File, u16) -> u16>,
 }
 
+/// R36-B1: monotonically increasing open-file-description generation.
+/// Epoll registrations record this instead of the Arc's heap address: the
+/// slab allocator hands a freed File's address back to the NEXT same-size
+/// allocation with near certainty, and fd numbers recycle the same way, so
+/// the old address-as-identity scheme let a stale entry silently match a
+/// NEW file after close(fd)+reopen (and made the legitimate re-ADD return
+/// EEXIST). A never-repeating generation keeps the identity stable for the
+/// description's lifetime without pinning the Arc.
+static FILE_ID_GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
 #[repr(C, align(16))]
 pub struct File {
     /// R31-B3: set by close_fd when the slot was removed but an in-flight
@@ -110,6 +120,10 @@ pub struct File {
     pub private_data: UnsafeCell<Option<*mut u8>>,
     /// close-on-exec flag (FD_CLOEXEC)
     pub cloexec: Spinlock<bool>,
+    /// R36-B1: unique open-file-description id (see FILE_ID_GENERATION).
+    /// Written once in File::new before the value is shared; readers only
+    /// need a plain u64 load (the Arc publication orders it).
+    pub file_id: u64,
 }
 
 // SAFETY: File is only shared across threads when referenced through Arc,
@@ -138,6 +152,7 @@ impl File {
             private_data: UnsafeCell::new(None),
             close_pending: core::sync::atomic::AtomicBool::new(false),
             cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
+            file_id: FILE_ID_GENERATION.fetch_add(1, Ordering::Relaxed),
         }
     }
 

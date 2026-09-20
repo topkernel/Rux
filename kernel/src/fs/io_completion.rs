@@ -77,6 +77,12 @@ impl IoCompletion {
             // Recheck after setting state (waker may have fired)
             if self.done.load(Ordering::Acquire) {
                 self.wait_queue.finish_wait(current);
+                // R36-B2 (R8-5 NEW-C2 discipline, missed here): a complete()
+                // that raced between prepare_to_wait and this recheck woke
+                // and enqueued us while we never slept — take ourselves
+                // back off the GRQ (no-op via on_rq guards otherwise) or
+                // nr_running stays inflated until our next context switch.
+                crate::sched::dequeue_task(&*current);
                 return self.status.load(Ordering::Acquire);
             }
 

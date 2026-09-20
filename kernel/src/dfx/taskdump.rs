@@ -51,14 +51,22 @@ pub fn dump_all_tasks(reason: &str) {
     puts(") ===\n");
 
     let mut count: usize = 0;
-    // SAFETY: pid_hash_for_each_task pins nothing; the callback only reads
-    // stable Task fields (pid/state/policy/comm) of tasks that remain in
-    // the hash while we hold no locks of our own. A task exiting on
-    // another CPU concurrently may be missed (fine for a snapshot) but can
-    // never be half-printed: the slot is freed only after pid_hash_remove,
-    // which the iterator's bucket locks serialize against.
-    unsafe {
-        crate::process::pid_hash::pid_hash_for_each_task(|task_ptr| {
+    // Non-blocking iteration: this dump runs from the spinlock deadlock
+    // watchdog (spinning, IRQs off) or the UART RX magic — exactly the
+    // contexts where another CPU may be stuck HOLDING a pid-hash bucket
+    // lock (the kill-broadcast / OOM paths call send_signal → wake_up
+    // inside the for_each callback). Blocking on a bucket lock would wedge
+    // the diagnostic itself, so busy buckets are skipped and the partial
+    // snapshot is labeled below.
+    //
+    // SAFETY: pid_hash_for_each_task_try pins nothing and blocks on nothing;
+    // the callback only reads stable Task fields (pid/state/policy/comm) of
+    // tasks that remain in the hash while we hold the bucket lock. A task
+    // exiting on another CPU concurrently may be missed (fine for a
+    // snapshot) but can never be half-printed: the slot is freed only after
+    // pid_hash_remove, which the iterator's bucket locks serialize against.
+    let skipped = unsafe {
+        crate::process::pid_hash::pid_hash_for_each_task_try(|task_ptr| {
             let t = &*task_ptr;
             count += 1;
             puts("task pid=");
@@ -78,11 +86,16 @@ pub fn dump_all_tasks(reason: &str) {
                 }
             }
             putc(b'\n');
-        });
-    }
+        })
+    };
     puts("=== ");
     put_dec(count as u64);
     puts(" tasks ===\n");
+    if skipped > 0 {
+        puts("warning: ");
+        put_dec(skipped as u64);
+        puts(" pid-hash buckets were locked (stuck holder?) and skipped\n");
+    }
 }
 
 fn state_name(bits: u32) -> &'static str {
