@@ -29,6 +29,16 @@ mkdir -p $WORK
 # does not. Monitor capture works either way (it needs no guest support);
 # only the holder=<cpu> field and dfx=watchdog taskdump are owner-build
 # features.
+# HUNT_ICOUNT=1: deterministic execution (-icount shift=2) — timing
+# advances by instruction count, so the QEMU monitor no longer perturbs
+# the race (this is what finally captured the residual wedge after every
+# other observation手段 masked it). Use with HUNT_PROD=1 for the
+# production-layout binary.
+if [ "${HUNT_ICOUNT:-0}" = "1" ]; then
+    ICOUNT_ARGS="-icount shift=2"
+else
+    ICOUNT_ARGS=""
+fi
 if [ "${HUNT_PROD:-0}" = "1" ]; then
     echo "[hunt] building PRODUCTION kernel (no dfx-lock-owner) ..."
     cargo build --target riscv64gc-unknown-none-elf --features riscv64 || exit 1
@@ -47,7 +57,7 @@ for round in $(seq 1 $ROUNDS); do
   LOG=$WORK/hunt.log; DUMP=$WORK/hunt.dump; MON=$WORK/qmon.sock
   rm -f $MON $LOG $DUMP
 
-  qemu-system-riscv64 -M virt -accel tcg,thread=single -cpu rv64 -m 2G -smp 4 \
+  qemu-system-riscv64 -M virt -accel tcg,thread=single ${ICOUNT_ARGS} -cpu rv64 -m 2G -smp 4 \
     -nographic -serial mon:stdio \
     -monitor unix:$MON,server,nowait \
     -drive file=$RFS,if=none,id=rootfs,format=raw \
@@ -111,7 +121,7 @@ cmd("info cpus")
 for cpu in range(4):
     cmd(f"cpu {cpu}")
     cmd("info registers")
-    cmd("x/48gx $sp")
+    cmd("x/256gx $sp")
     cmd("x/8i $pc-16")
 s.close()
 PYEOF
