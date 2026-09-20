@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.36 第四十四轮：A 型定性为模拟器 artifact + B 型残余为真并发 bug
+
+**tcg thread=multi 对比实验（决定性）**：同一二进制，multi 下 8 轮门禁——**A 型死锁零出现**（single 下 ~12-25%）——**A 型（持锁消失、锁漂移、无输出）确证为 QEMU tcg 单线程 vcpu 互斥推进模型的 artifact**：单线程下某 vcpu 持锁窗口与其他 vcpu 的中断/设备模型交织产生的、真实硬件（真并行）与多线程模拟器上不存在的形态。历轮对 A 型的修复（锁内分配、复活链、防御）仍是正确的健壮性提升，但 A 型本身不再是内核缺陷。
+**B 型（管道静默挂）在 multi 下 2/8 仍现**——**真实内核并发 bug**，R42 的 SLEEPING-but-linked 修复未覆盖全部产生器。multi 提供更真实的并发暴露（probe 的 pipe 10 STALL 捕获），但 magic 注入未达 RX 中断（multi 下 UART IRQ 路由/挂起形态差异，待下轮：multi+monitor 或 guest 侧周期 taskdump）。
+**循环指令的状态**：A 型关闭（非缺陷）；B 型残余为唯一开放内核问题；R40 零发现 2/2 已达成过一轮——B 型残余归零后即可达成最终零发现收口。
+
 ### 20.35 第四十二/四十三轮：SLEEPING-but-linked 丢失唤醒（残余的最简产生器）+ 堆锁 ECALL 排除
 
 **R42 终验发现 1 项 HIGH（已修）**：R39 的 set_state 重排序在"SLEEPING-but-linked 窗口"上破坏了 pre-R39 语义——睡眠者置 SLEEPING（waitqueue/futex 锁下，非 GRQ 锁）到自身 __schedule 摘链之间任务仍在类队列；窗口内 waker 的一次性 token 先耗（wait entry 标 woken/futex 摘链，结果被忽略）→ wake_up_enqueue 因"已在队"拒绝且不置 RUNNING（R41 返回 true 掩盖）→ 睡眠者照常摘链睡去 → **永久挂死**。R41 tripwire 不触发（任务真链入，非 stale flag）。修复：ensure_linked_locked 验证真链入时恢复 set_state(RUNNING)（比 pre-R39 更窄：仅 GRQ 锁下验证链入时翻转）。**这是 R39 以来历轮门禁静默残余的最简可构造产生器。**
