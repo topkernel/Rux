@@ -79,7 +79,9 @@ pub fn dump_all_tasks(reason: &str) {
         crate::process::pid_hash::pid_hash_for_each_task_try(|task_ptr| {
             let t = &*task_ptr;
             count += 1;
-            puts("task pid=");
+            puts("task @0x");
+            put_hex(task_ptr as u64);
+            puts(" pid=");
             put_dec(t.pid() as u64);
             puts(" state=");
             puts(state_name(t.state().bits()));

@@ -714,18 +714,40 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
-    // R12-4: poison + record before the free — the next "zeroed/garbage
-    // linked child" or wild-pointer wake then shows this exact marker
-    // instead of anonymous zeros, proving (or ruling out) the
-    // freed-while-referenced family at first sight.
-    unsafe {
-        let slot = task_ptr as *mut u8;
-        let h = FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
-        FREED_TASK_RING[h].store((*task_ptr).pid(), core::sync::atomic::Ordering::Relaxed);
-        // state(0x48) and pid(0x4c) as one u64 write
-        core::ptr::write_volatile(slot.add(0x48) as *mut u64, TASK_POISON as u64 | ((TASK_POISON as u64) << 32));
-        alloc::alloc::dealloc(slot, core::alloc::Layout::new::<Task>());
-    }
+        // R12-4: poison + record before the free — the next "zeroed/garbage
+        // linked child" or wild-pointer wake then shows this exact marker
+        // instead of anonymous zeros, proving (or ruling out) the
+        // freed-while-referenced family at first sight.
+        unsafe {
+            let slot = task_ptr as *mut u8;
+            let h = FREED_RING_HEAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64;
+            FREED_TASK_RING[h].store((*task_ptr).pid(), core::sync::atomic::Ordering::Relaxed);
+            // R47: poison state and pid at their COMPILE-TIME offsets
+            // (task_offsets::TASK_STATE/TASK_PID; currently 0x50/0x54). The
+            // previous hardcoded `slot.add(0x48)` u64 write predated the
+            // journal_handle/ti_on_cpu/task_refcnt insertion before `state`
+            // (the same +8 drift trap.rs R20 fixed for its own walk) and
+            // landed entirely inside ti_a2 — so every poison reader
+            // (Task::wake_up R15-6, enqueue_task_locked R15-6,
+            // ensure_linked_locked R41, trap.rs panic walk) checked fields
+            // that were never poisoned. Freed Task pages were
+            // indistinguishable from live ones, and the stale wakes those
+            // guards exist to drop proceeded to set_state(RUNNING == 0)
+            // into freed-then-reused pages — the positional 4-byte zero at
+            // the state word behind the phantom-RUNNING / recurrence-at-
+            // same-address signature (rounds 39-47 form-B). Two separate
+            // u32 writes (not one u64) so a future field inserted between
+            // state and pid cannot silently miss pid again.
+            core::ptr::write_volatile(
+                slot.add(crate::process::task::TASK_STATE) as *mut u32,
+                TASK_POISON,
+            );
+            core::ptr::write_volatile(
+                slot.add(crate::process::task::TASK_PID) as *mut u32,
+                TASK_POISON,
+            );
+            alloc::alloc::dealloc(slot, core::alloc::Layout::new::<Task>());
+        }
 }
 
 // ==================== Core Scheduling ====================
@@ -1120,9 +1142,11 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
     // (kernel illegal instruction at a page-aligned linear-map heap
     // address). Detect the poison, report, and drop the enqueue.
     {
-        // free_task_slot poisons state AND pid in one u64 write at +0x48;
-        // a real PID can never equal 0xDEADBEEF, so the pid check alone is
-        // an unambiguous freed-page detector.
+        // free_task_slot poisons state AND pid (two u32 writes at their
+        // compile-time offsets — task_offsets::TASK_STATE/TASK_PID; R47 fixed
+        // the stale hardcoded +0x48 that landed in ti_a2); a real PID can
+        // never equal 0xDEADBEEF, so the pid check alone is an unambiguous
+        // freed-page detector.
         let pid = (*task).pid();
         if pid == TASK_POISON {
             // R34: SBI direct write — this probe fires while the GRQ lock is

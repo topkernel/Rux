@@ -601,6 +601,15 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.39 第四十七轮：终极拼图 — 毒化偏移错 8 字节，全部死任务防护从未生效
+
+**R47 双线收口**：
+- 块 I/O 的 DMA/缓冲面全部算术验证无越界（blkdev_read 的 vec 恰等长、五条提交路径 desc len = buf.len、R17-C 合并块内 len 和 17≤64、bio 无跨段合并、页粒度堆无小块邻接 OOB）。
+- **真凶**：`free_task_slot`（sched.rs:726）的毒化硬编码 `+0x48` 写 u64，而 state 在 **+0x50**、pid 在 **+0x54**（trap.rs R20 记录过字段插入的 +8 漂移；编译期 offset_of 确认）——**毒化 42 轮以来从未生效**，Task::wake_up / enqueue_task_locked / ensure_linked_locked / trap 的全部死任务防护读的是从未毒化过的 pid/state，全部空转。**R46 的"外部 4 字节零覆写"就是陈旧唤醒自己的 set_state(RUNNING)（状态字处写 0）落在已释放复用的 Task 页**——同地址双 Task 幻象（0xffffffd600e55000 的 306→319）、跨 pid 同型栈（位置性写入）、块 I/O 受害者语境（306 停在锁释放、319 死于 vec![0;n] 的 buddy 清零——都是受害者上下文而非写者上下文）全部解释。
+- **修复**：毒化改用编译期常量 `TASK_STATE`/`TASK_PID`（offset_of!）两次 u32 写（未来字段插入不再静默漂移），更新两处陈旧契约注释。R15-6/R33/R46 的全部防护自此真正武装。
+**门禁（修复版）**：single 8 轮 7 绿 + 1 次 A 型（模拟器 artifact）；**multi 4 轮 4/4 全绿——B 型（唯一真实内核缺陷）零复现**。
+**循环状态**：B 型归零、A 型定性非缺陷、R40 零发现轮在案——**审查循环的停止条件达成**（R48 做最终零发现确认后收官）。
+
 ### 20.38 第四十六轮：B 型产生器定性为外部内存覆写 + 调度器侧不可维持性收口
 
 **R46 穷举证明**：__schedule 的 prev 不变量 + 全部 set_state/脱链写点 + 单 GRQ 锁覆盖——任何合法交错满足"离 CPU ⟹ (RUNNING∧链入) ∨ (¬RUNNING∧脱链)"；**捕获形态（RUNNING∧on_rq=0∧离CPU∧栈冻结于 trap 出口）不在合法交集中**。结合 R41 tripwire 历次零触发、RUNNING==0（零写入恰造此形态）、跨 pid/轮次栈形完全同型（竞态断点会漂移、位置覆写不会）——**产生器是外部 4 字节零覆写 Task+0x48（state 字段）**：SIGSTOP 停止的管道子进程（STOPPED）被零覆写为 RUNNING——历档 smash 家族（R18-3/R12-4/R15-6）的位置性覆写引擎。
