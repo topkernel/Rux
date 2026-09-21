@@ -398,8 +398,14 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
             // is exactly "picked, context not yet saved": true inside
             // that window (skip), false once genuinely switched out
             // (safe to steer).
-            if (*parent).state().is_sleeping() && !(*parent).on_cpu() {
-                (*parent).set_ti_cpu(cpu as i32);
+            // R49: the on_cpu gate must be evaluated ATOMICALLY with the
+            // pick path — the old unlocked check-then-write raced
+            // mark_picked_on_cpu + context_switch's ti_cpu stamp (see
+            // steer_task_cpu). The is_sleeping() filter stays unlocked
+            // (cheap pre-filter); the on_cpu re-check moved under the
+            // GRQ lock inside steer_task_cpu.
+            if (*parent).state().is_sleeping() {
+                steer_task_cpu(parent, cpu as i32);
             }
         }
         crate::process::task::Task::task_put(parent);
@@ -1295,6 +1301,41 @@ pub fn enqueue_task(task: &'static mut Task) {
     }
 }
 
+/// R49 (on_cpu clear-protocol gap — the seed): steer `task`'s ti_cpu to
+/// `target` only while it is verifiably NOT on a CPU. ti_cpu is the CPU
+/// identity source — cpu_id() reads tp->ti_cpu (smp.rs) and trap.S picks
+/// the per-CPU interrupt stack the same way — so a steer store that lands
+/// while the task is picked/executing detaches the hardware CPU from its
+/// PER_CPU slot: the next __schedule there resolves `prev` from the WRONG
+/// slot, __switch_to saves/clears the wrong task, and mark_picked_on_cpu
+/// marks accumulate with no owning switch — the permanent
+/// RUNNING ∧ on_cpu=1 ∧ unlinked phantoms (round-49 capture: pid
+/// 344/345/356, all four CPUs wfi-idle).
+///
+/// The two pre-R49 call sites gated the steer on an UNLOCKED on_cpu read
+/// (check-then-write TOCTOU): the gate can pass on CPU B, then another
+/// CPU's racing wake links the task and a third CPU picks it
+/// (mark_picked_on_cpu under the GRQ lock) and stamps ti_cpu in
+/// sched::context_switch — and CPU B's delayed steer store STILL lands,
+/// while the task executes. Under the GRQ lock the re-check is atomic
+/// with every pick (picks hold this lock), and any later switch-in
+/// re-stamps ti_cpu itself (sched::context_switch line-order: stamp
+/// before __switch_to), so a steer admitted here can never race a mark.
+pub fn steer_task_cpu(task: *mut Task, target: i32) {
+    if task.is_null() {
+        return;
+    }
+    let _g = grq().lock_irqsave();
+    // SAFETY: task is non-null and validated by the caller; holding the
+    // GRQ lock excludes concurrent picks, so on_cpu==false here means no
+    // CPU owns the task in the mark_picked_on_cpu → __switch_to window.
+    unsafe {
+        if !(*task).on_cpu() {
+            (*task).set_ti_cpu(target);
+        }
+    }
+}
+
 /// R33 (A-family wedge — dead-task resurrection): atomically, under the GRQ
 /// lock, re-verify that `task` is still in a wakeable state (sleeping or
 /// stopped), transition it to RUNNING and enqueue it.
@@ -1352,17 +1393,60 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
             // the insert below, which links it; a co-existing stale
             // on_rq=true is healed by the R41 branch this falls into, so
             // both mirror phantoms now heal at the same point.
-            let phantom = st == TaskState::new(TaskState::RUNNING)
-                && !(*task).on_cpu()
-                && !match (*task).policy() {
-                    SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task),
-                    SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task),
-                    SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-                        grq_guard.cfs_rq.is_linked(task)
-                    }
-                };
+            //
+            // R49 (on_cpu clear-protocol gap — the orphaned pick mark): a
+            // pick mark is OWNED by the PER_CPU slot it was booked into
+            // (__schedule writes current = next under this same GRQ lock,
+            // before releasing it), so under the lock "is on a CPU" is
+            // decidable by scanning the current slots — no CPU can be
+            // mid-pick while we hold the lock, and every completed pick
+            // has already published current == picked. A RUNNING task that
+            // is unlinked AND owned by no CPU's current slot carries an
+            // ORPHANED mark: the mark's CPU fast-path-returned or resolved
+            // prev from a diverged PER_CPU slot (the R49 steer TOCTOU
+            // cascade), so no __switch_to will ever run with it as prev
+            // and clear the mark — while the class picks (fair/rt/dl)
+            // REFUSE on_cpu-marked tasks and every wake route refused it
+            // (round-49 capture: pid 344/345/356, RUNNING, on_cpu=1,
+            // linked=0, on_rq=0, all CPUs wfi). The on_cpu read is
+            // therefore no longer part of the phantom predicate; the
+            // current-slot scan is authoritative. An orphaned mark must be
+            // cleared BEFORE the re-link below, or the freshly linked task
+            // remains unpickable (the pick skip treats a queued on_cpu
+            // task as "context not saved yet").
+            let linked = match (*task).policy() {
+                SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task),
+                SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task),
+                SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                    grq_guard.cfs_rq.is_linked(task)
+                }
+            };
+            let curr_on = (0..MAX_CPUS).any(|c| cpu_state(c).current == task);
+            let phantom = st == TaskState::new(TaskState::RUNNING) && !linked && !curr_on;
             if !phantom {
                 return false;
+            }
+            if (*task).on_cpu() {
+                // R34: SBI direct write — we hold the GRQ lock here.
+                {
+                    const MSG: &[u8] = b"R49-ONCPU-ORPHAN healed pid=0x";
+                    for &b in MSG {
+                        sbi_rt::legacy::console_putchar(b as usize);
+                    }
+                    let v = (*task).pid() as u64;
+                    let mut sh = 64;
+                    while sh > 0 {
+                        sh -= 4;
+                        let nb = ((v >> sh) & 0xF) as u8;
+                        sbi_rt::legacy::console_putchar(
+                            (if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize,
+                        );
+                    }
+                    sbi_rt::legacy::console_putchar(b'\n' as usize);
+                }
+                // No CPU owns this mark (curr_on == false under the lock):
+                // clearing it cannot break the NEW2 pick-skip protocol.
+                (*task).set_on_cpu(false);
             }
             // R34: SBI direct write — we hold the GRQ lock here.
             {
@@ -1432,6 +1516,16 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
             false
         }
     }
+}
+
+/// DFX diagnostic: authoritative CFS linked-state by pointer scan (no locks —
+/// a racing tree is acceptable for a diagnostic; the scan mirrors dequeue's
+/// own lookup). Used by taskdump to distinguish flag-desync from
+/// really-off-queue phantoms.
+pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> bool {
+    // SAFETY: GRQ is initialized before the first task exists; the CFS map
+    // scan treats the pointer as a key comparison only.
+    unsafe { (*grq()).cfs_rq.is_linked(task) }
 }
 
 /// Check if a newly-enqueued RT task should preempt a running task on another CPU.

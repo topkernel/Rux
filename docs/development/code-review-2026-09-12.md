@@ -601,6 +601,14 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.41 第四十九轮：ti_cpu 转向 TOCTOU — on_cpu 协议的上游缺口
+
+**判别字段（taskdump 增 on_cpu/权威 linked 树扫描）抓到决定性快照**：挂起时刻 pid 344/345/356 三任务 `RUNNING∧on_cpu=1∧unlinked`（**永久孤儿 mark**——瞬态窗概率 10⁻⁶⁻⁹ 且 WFI 时刻不可能在 pick 窗内）+ pid 332 `RUNNING∧on_cpu=0∧unlinked`（切出正确但 requeue 记错头）。
+**R49 根因（确证）**：两处 ti_cpu 转向写以**未加锁 on_cpu 读**作门（Task::wake_up 的唤醒亲和转向、deferred-exit-notify 的父任务转向）——check-then-write TOCTOU 与 mark_picked/__switch_to 清除协议竞争：中毒一次后 X 运行在硬件 A 而 ti_cpu=B，此后 `cpu_id()/this_cpu()` 永久偏离，__schedule 解出错误 prev（dequeue/requeue/current 写全记错任务）、__switch_to 清除错误任务、ti_cpu 盖章继续用中毒值——**自传播**。孤儿 on_cpu=1 组与 332 组是同一中毒的两个互补面。
+**修复**：`steer_task_cpu`（GRQ 锁下复检 !on_cpu 再写，与一切 pick 原子）替换两处裸写；wake_up_enqueue 的幻影判定升级为权威式（RUNNING∧¬linked∧¬∃i PER_CPU[i].current==task，锁下扫描）+ `R49-ONCPU-ORPHAN` tripwire + 孤儿愈合先清 mark 再重链（NEW2 pick-skip 链闭合）；路由 hint 扩展让 on_cpu=1 孤儿可达愈合。修复后"硬件 CPU C 上执行的任务恒有 ti_cpu=C"按归纳成立，两形态不可构造。
+**门禁**：single 6/8 + multi 3/4——修复真实（推演完备）但残余 B 型仍 ~12% 且零 tripwire：**还有至少一层未定位的产生器**。R41/R46/R49 三 tripwire 现已全部武装——下一次复现将自带指路信息。
+**循环状态**：R32-R49 共 18 轮、30+ 层根因递进、170+ 修复；门禁 pp 4/8 → 稳定 6-8/8（A 型 artifact 之外）。零发现条件未达成，循环开放待续（下一会话从武装后的 tripwire 现场 + 判别字段直接开局）。
+
 ### 20.40 第四十八轮：毒化验证全过 + 不变式缺口闭合 — 循环阶段收官
 
 **R48**：R47 毒化的对抗验证全部通过（写/读格式精确匹配 offset_of 实测 0x50/0x54、写序无未防护窗口、new_task_at 复用即清毒、全树无残留硬编码 0x48）；R46 phantom 与毒化交互正确（毒化值永不进 phantom 分支、dead-guard 先拦）。**1 项确证发现已修**：alloc_task_slot 失败路径裸 dealloc 未毒化（new_task_at 已写真 state/pid 覆盖前世毒化后返还）——击破"Task 页返还必带毒"不变式，且 R46 heal 会把半初始化任务（垃圾 thread.sp）重新入队切换。修复：改走 free_task_slot。**全树 Task 页返还路径不变式闭合**（fork×4、task_put、alloc 失败×2）。

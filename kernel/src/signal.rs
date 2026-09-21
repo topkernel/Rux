@@ -1530,9 +1530,15 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
         // of a "RUNNING" target was refused here. Task::wake_up's
         // GRQ-locked re-check authoritatively separates the genuine phantom
         // (healed + linked) from a queued/on-CPU RUNNING task (refused).
+        // R49: the on_cpu == 0 condition was dropped — an ORPHANED pick
+        // mark (RUNNING, unlinked, owned by no CPU's current slot) reads
+        // on_cpu == 1 and is the same unwakeable phantom; only
+        // wake_up_enqueue's locked current-slot scan can tell it from a
+        // mark a CPU genuinely owns mid-pick. Route every RUNNING suspect;
+        // the authoritative re-check refuses the legitimate ones.
         if task_state.is_sleeping()
             || task_state.contains(TaskState::STOPPED)
-            || (task_state == TaskState::new(TaskState::RUNNING) && !(*task).on_cpu())
+            || task_state == TaskState::new(TaskState::RUNNING)
         {
             // Use Task::wake_up which properly enqueues the task to its CPU's run queue
             crate::process::Task::wake_up(task);

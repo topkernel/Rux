@@ -1575,11 +1575,25 @@ impl Task {
                 let prev_cpu = (*task).ti_cpu();
                 let target_cpu = sched_class.select_task_rq(task, prev_cpu, 0);
 
-                // Update task's CPU if it changed
-                // R13-5: never steer a task that is still executing (on_cpu set
-                // until its context is saved) — see the deferred-notify steering fix.
-                if target_cpu != prev_cpu && !(*task).on_cpu() {
-                    (*task).set_ti_cpu(target_cpu);
+                // Update task's CPU if it changed.
+                // R13-5: never steer a task that is still executing (on_cpu
+                // set from pick until __switch_to saves its context) — see
+                // the deferred-notify steering fix.
+                // R49 (on_cpu clear-protocol gap — the seed): the old
+                // UNLOCKED `!on_cpu()` check-then-write raced the pick
+                // path: this CPU passes the gate, another CPU's racing
+                // wake links the task, a third picks it
+                // (mark_picked_on_cpu + context_switch's ti_cpu stamp),
+                // and THIS CPU's delayed steer store still lands while
+                // the task executes — tp->ti_cpu then no longer names the
+                // hardware CPU, cpu_id()/this_cpu() resolve the WRONG
+                // PER_CPU slot on that CPU, and __schedule switches
+                // context against a task running elsewhere (the R13-1
+                // engine; the round-49 permanent on_cpu=1 phantom family).
+                // The on_cpu re-check now runs under the GRQ lock, which
+                // excludes every concurrent pick.
+                if target_cpu != prev_cpu {
+                    crate::sched::steer_task_cpu(task, target_cpu);
                 }
 
                 // R33 (A-family wedge — dead-task resurrection): transition to
@@ -1617,7 +1631,15 @@ impl Task {
                 // verifies actual linkage and heals only the genuine
                 // divergence (a queued or on-CPU RUNNING task is still
                 // refused there, unchanged).
-                if old_state == TaskState::new(TaskState::RUNNING) && !(*task).on_cpu() {
+                // R49: the hint no longer requires on_cpu == 0 — an
+                // ORPHANED pick mark (RUNNING, unlinked, owned by no
+                // CPU's current slot — the 344/345/356 morphology) reads
+                // on_cpu == 1 but is exactly as unwakeable, and only the
+                // locked re-check can tell an orphaned mark from one that
+                // a CPU genuinely owns mid-pick. The hint routes both;
+                // wake_up_enqueue's authoritative current-slot scan sorts
+                // them apart.
+                if old_state == TaskState::new(TaskState::RUNNING) {
                     if !crate::sched::wake_up_enqueue(task) {
                         return false;
                     }

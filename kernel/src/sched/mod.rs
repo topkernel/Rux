@@ -37,6 +37,7 @@ pub use sched::{
     dequeue_task,
     dequeue_if_enqueued,
     wake_up_enqueue,
+    steer_task_cpu,
     change_task_policy,
     init,
     schedule,

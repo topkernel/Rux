@@ -85,6 +85,16 @@ pub fn dump_all_tasks(reason: &str) {
             put_dec(t.pid() as u64);
             puts(" state=");
             puts(state_name(t.state().bits()));
+            puts(" on_cpu=");
+            put_dec(t.on_cpu() as u64);
+            // Authoritative linked-state (tree/list scan, not the flag) —
+            // settles flag-desync vs really-off-queue in one shot.
+            let linked = unsafe {
+                let g = crate::sched::sched::grq_diag_cfs_linked(task_ptr);
+                g
+            };
+            puts(" linked=");
+            put_dec(linked as u64);
             puts(" on_rq=");
             put_dec(t.sched_entity().on_rq.load(Ordering::Relaxed) as u64);
             puts(" policy=");
