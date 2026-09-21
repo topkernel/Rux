@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.42 第五十轮：真值 prev 解析尝试 → 回退（工程纪律）— 回退后 8/8
+
+**R50 分析**（保留价值）：指令级排除法证明 pick→switch-in 窗口中断原子（unlock_irqretain 不开 SIE），三任务"已 pick 未运行"实为**最后一次 switch-out 被 misdirect**（ti_cpu 毒化使 `PER_CPU[tp→ti_cpu].current` 解出错误 prev——树内生产者已被 R49 封死，幸存者为 smash 族协议外写）。R50 实现 `__schedule` 入口 tp 硬件真值比对 + slot 发散 heal（R50-SLOT-DIVERGENCE tripwire）+ steer 皮带（idle 未 mark 洞）。
+**门禁否决**：R50 版 single 4/8 + multi 2/4（tripwire 零触发）——防御性 heal 的 127 行扫描改变了关键时序、放大其他窗口，**劣于 R49 基线（6-7/8）**。按工程纪律**回退**——回退后（R49 版）门禁 **8/8 全绿**。结论：**R49 提交版（ed236ff）为当前最佳**；残余 B 型（~12% 波动窗口）的 smash 族源头（R18/R19 栈深/清零引擎）列为下一战役——那是比调度器更底层的内存安全战场。
+**五十轮总结**：R32-R50 共 19 轮有效循环、31 个提交、180+ 修复；门禁 pp 4/8 → 稳定 6-8/8（最佳 8/8）；A 型定性模拟器 artifact；B 型经九层根因递进（幻影 RUNNING→防御→睡眠窗口→外部覆写归因→毒化偏移→不变式→ti_cpu TOCTOU→真值解析尝试/回退）从 ~50% 压至 ~12% 波动；DFX 全家（4 开关/2 feature/hunt/probe/判别字段）与三 tripwire 入库。
+
 ### 20.41 第四十九轮：ti_cpu 转向 TOCTOU — on_cpu 协议的上游缺口
 
 **判别字段（taskdump 增 on_cpu/权威 linked 树扫描）抓到决定性快照**：挂起时刻 pid 344/345/356 三任务 `RUNNING∧on_cpu=1∧unlinked`（**永久孤儿 mark**——瞬态窗概率 10⁻⁶⁻⁹ 且 WFI 时刻不可能在 pick 窗内）+ pid 332 `RUNNING∧on_cpu=0∧unlinked`（切出正确但 requeue 记错头）。
