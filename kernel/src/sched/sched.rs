@@ -694,7 +694,17 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
         if !Task::new_task_at(task_ptr, pid, SchedPolicy::Normal) {
             // R10-9: stack allocation failed — discard the slot cleanly.
             crate::process::pid::free_pid(pid);
-            unsafe { alloc::alloc::dealloc(task_ptr as *mut u8, core::alloc::Layout::new::<Task>()); }
+            // R48: new_task_at already wrote state=RUNNING and pid=<pid>
+            // over any poison left by the page's previous life BEFORE it
+            // failed — a raw dealloc here would return an UNPOISONED,
+            // valid-looking Task page to the buddy, disarming every
+            // R15-6/R33/R47 freed-page guard (a stale wake would then
+            // sail through the pid check, read RUNNING, and the R46 heal
+            // would re-enqueue the half-initialized task: on_cpu=false,
+            // on_rq=false, state=RUNNING is exactly the phantom shape).
+            // Route through free_task_slot so the page leaves POISONED at
+            // the compile-time offsets and the slot hits FREED_TASK_RING.
+            free_task_slot(task_ptr);
             return None;
         }
         crate::process::pid_hash::pid_hash_insert(task_ptr);
