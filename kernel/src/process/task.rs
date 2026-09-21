@@ -1602,6 +1602,30 @@ impl Task {
 
                 true
             } else {
+                // R46 (B-form phantom — refused-wake mirror of R41/R42):
+                // RUNNING is legitimate only while the task is on a CPU
+                // (on_cpu == 1 from pick until __switch_to saves the
+                // outgoing context) or linked on a class queue. This
+                // branch refused EVERY wake of a task whose state reads
+                // RUNNING, so a RUNNING task that is on NO CPU (a write
+                // into the state word from outside the scheduler — note
+                // RUNNING == 0 — or a future regression; the scheduler's
+                // own transitions cannot produce it) stayed unschedulable
+                // forever: no queue holds it, no wake reaches it. The
+                // on_cpu read here is an unlocked HINT only; route the
+                // suspect into wake_up_enqueue, whose GRQ-locked re-check
+                // verifies actual linkage and heals only the genuine
+                // divergence (a queued or on-CPU RUNNING task is still
+                // refused there, unchanged).
+                if old_state == TaskState::new(TaskState::RUNNING) && !(*task).on_cpu() {
+                    if !crate::sched::wake_up_enqueue(task) {
+                        return false;
+                    }
+                    // Linked again — nudge its last CPU so it is picked
+                    // promptly instead of waiting for the next idle tick.
+                    crate::sched::resched_cpu((*task).ti_cpu() as usize);
+                    return true;
+                }
                 false
             }
         }

@@ -1521,7 +1521,19 @@ pub fn signal_wake_up_state(task: *mut crate::process::task::Task, _state: crate
         // task was dequeued when it scheduled away, so SIGCONT/SIGKILL must
         // re-enqueue it — otherwise it can never be continued or killed
         // (job-control DoS: Ctrl+Z then kill -9 does nothing).
-        if task_state.is_sleeping() || task_state.contains(TaskState::STOPPED) {
+        //
+        // R46: also route a RUNNING task that is on NO CPU (on_cpu == 0)
+        // into Task::wake_up. Such a state is not producible by the
+        // scheduler itself (off-CPU prev leaves __schedule either
+        // RUNNING+linked or !RUNNING+unlinked) — it is the B-form phantom,
+        // and without this it would be permanently unwakeable: every wake
+        // of a "RUNNING" target was refused here. Task::wake_up's
+        // GRQ-locked re-check authoritatively separates the genuine phantom
+        // (healed + linked) from a queued/on-CPU RUNNING task (refused).
+        if task_state.is_sleeping()
+            || task_state.contains(TaskState::STOPPED)
+            || (task_state == TaskState::new(TaskState::RUNNING) && !(*task).on_cpu())
+        {
             // Use Task::wake_up which properly enqueues the task to its CPU's run queue
             crate::process::Task::wake_up(task);
 

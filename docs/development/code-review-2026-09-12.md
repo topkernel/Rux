@@ -601,6 +601,13 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.38 第四十六轮：B 型产生器定性为外部内存覆写 + 调度器侧不可维持性收口
+
+**R46 穷举证明**：__schedule 的 prev 不变量 + 全部 set_state/脱链写点 + 单 GRQ 锁覆盖——任何合法交错满足"离 CPU ⟹ (RUNNING∧链入) ∨ (¬RUNNING∧脱链)"；**捕获形态（RUNNING∧on_rq=0∧离CPU∧栈冻结于 trap 出口）不在合法交集中**。结合 R41 tripwire 历次零触发、RUNNING==0（零写入恰造此形态）、跨 pid/轮次栈形完全同型（竞态断点会漂移、位置覆写不会）——**产生器是外部 4 字节零覆写 Task+0x48（state 字段）**：SIGSTOP 停止的管道子进程（STOPPED）被零覆写为 RUNNING——历档 smash 家族（R18-3/R12-4/R15-6）的位置性覆写引擎。
+**修复（调度器侧不可维持性，R41 家族镜像收口）**：wake_up_enqueue 拒绝分支内 GRQ 锁内权威 phantom 判定（RUNNING∧!on_cpu∧!is_linked → R46-RUNNING-PHANTOM tripwire + 治愈链入）；Task::wake_up 与 signal_wake_up_state 的 RUNNING∧!on_cpu hint 路由进权威复查——**唤醒路径每个拒绝分支现在要么转换+链入、要么验证本已可调度、要么修复发散**。
+**multi 门禁 7/8**：run3 边界情形（幻象后无任何唤醒事件指向它——治愈点不可达）——治本需抓覆写源头。
+**R47 计划**：taskdump 增加 Task 结构地址打印 → 复现时经 gdbstub（-s + icount 确定性）对 Task+0x48 设 hardware watchpoint → 覆写者一次现形（候选：alloc 清零路径越界、fork 子任务清零残余、zero_page 批量清零）。
+
 ### 20.37 第四十五轮：周期快照 DFX + B 型最终形态锁定（RUNNING + on_rq=0）
 
 **dfx=periodic 运行时开关**（dfx/switches.rs + timer.rs 软中断尾部锁外，5s 周期，SBI 直写）：静默挂起不触发任何 watchdog 且挂起后 shell 停止消费 RX（magic 失效）——定时快照从 timer 软中断必然落地。周期快照会干扰基于提示符的外层检测（误报 timeout），但快照本身完整可靠。

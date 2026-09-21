@@ -1296,7 +1296,60 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
             // keeps bit0 set so it passes is_sleeping(); it is caught one
             // step later by the pid poison check — and the dead-guard —
             // inside enqueue_task_locked.)
-            return false;
+            //
+            // R46 (B-form phantom — the refused-wake mirror of R41): RUNNING
+            // is legitimate ONLY while the task is on a CPU (on_cpu, set at
+            // pick, cleared by __switch_to once the outgoing context is
+            // saved) or linked on a class queue. __schedule's discipline
+            // makes every context switch-out leave prev either
+            // (RUNNING ∧ linked) or (¬RUNNING ∧ unlinked), and every RUNNING
+            // write in the tree is paired with an insert or with
+            // on-CPU-ness — so RUNNING ∧ !on_cpu ∧ unlinked is NOT
+            // producible by any interleaving of the scheduler itself. It
+            // arrives from outside (a zero/write into the state word by the
+            // documented Task-struct smash families — note RUNNING == 0 —
+            // or a future regression), and because every upstream wake
+            // filter refuses a RUNNING target, nothing would ever schedule
+            // the task again: no queue holds it, no wake reaches it
+            // (round-46 capture: pid 335, state=RUNNING, on_rq=0, 4 CPUs
+            // wfi-idle, stack frozen in trap_exit -> asm_need_resched ->
+            // schedule -> __schedule -> context_switch). Verify ACTUAL
+            // linkage (never trust the flag), report, and fall through to
+            // the insert below, which links it; a co-existing stale
+            // on_rq=true is healed by the R41 branch this falls into, so
+            // both mirror phantoms now heal at the same point.
+            let phantom = st == TaskState::new(TaskState::RUNNING)
+                && !(*task).on_cpu()
+                && !match (*task).policy() {
+                    SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task),
+                    SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task),
+                    SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                        grq_guard.cfs_rq.is_linked(task)
+                    }
+                };
+            if !phantom {
+                return false;
+            }
+            // R34: SBI direct write — we hold the GRQ lock here.
+            {
+                const MSG: &[u8] = b"R46-RUNNING-PHANTOM healed pid=0x";
+                for &b in MSG {
+                    sbi_rt::legacy::console_putchar(b as usize);
+                }
+                let v = (*task).pid() as u64;
+                let mut sh = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((v >> sh) & 0xF) as u8;
+                    sbi_rt::legacy::console_putchar(
+                        (if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize,
+                    );
+                }
+                sbi_rt::legacy::console_putchar(b'\n' as usize);
+            }
+            // Fall through: enqueue_task_locked links the task (its
+            // set_state(RUNNING) is a no-op re-write; nr_running pairs with
+            // the new linkage per R7-B5).
         }
         // R39: propagate the insert result. A refused insert (only possible
         // via a guard divergence for a sleeping/STOPPED target) leaves the
