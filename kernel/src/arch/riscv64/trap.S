@@ -574,6 +574,29 @@ trap_exit:
     // sp is restored from thread.sp by __switch_to, which points to pt_regs.
     call asm_schedule
 
+    // R53 (form-B residual — the SIE=1 user-return loop): __schedule
+    // unconditionally returns with interrupts ENABLED (restore_irq(true)
+    // at its tail — required for syscall-context callers). The kernel
+    // return path re-disables SIE right after its asm_schedule call (see
+    // the csrci below); this user path did NOT — so after ONE preemption,
+    // every further iteration of the .Lcheck_signals_and_resched loop
+    // (check_and_deliver_signals + the asm_need_resched load at
+    // sched.rs:461) executed with SIE=1. A timer/IPI landing at that load
+    // then nests a KERNEL-mode trap exit whose ti_kernel_sp save (in
+    // .Lrestore_kernel_and_exit) orphans this task's outer user pt_regs:
+    // .Lrestore_and_exit afterwards restores the nested KERNEL frame
+    // through the user ritual (sscratch=tp while sret-ing to kernel
+    // mode), the next kernel trap mis-enters .Lfrom_user (stack jump via
+    // the clobbered ti_kernel_sp, ti_user_sp corruption), and the
+    // recycled-frame race between the restore and the nested frame reuse
+    // produces half-written register restores — the out-of-protocol
+    // write engine behind the smash families. The sched.rs:461 load is
+    // interruptible at exactly ONE call site in the kernel — this one
+    // (both .Lcheck_resched_kernel entries are SIE=0 by construction).
+    // Mirror the kernel path: re-disable interrupts for the rest of the
+    // trap return. The final sret restores the user's SIE from PT_STATUS.
+    csrci sstatus, 2
+
     // CRITICAL FIX: After schedule() returns, we MUST reload sp from ti_kernel_sp.
     // For preempted tasks, thread.sp points to the kernel sp at preemption time,
     // NOT to pt_regs. We need to restore sp = ti_kernel_sp - PT_SIZE to access pt_regs.

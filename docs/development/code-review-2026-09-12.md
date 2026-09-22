@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.45 第五十三轮：trap 返回循环 SIE 纪律 — 一条指令的修复与残余窄缝
+
+**R53 终局推演（完整自洽，与全部既往轮次兼容）**：need_resched load（sched.rs:461）在全内核恰有一个可中断调用点——trap 返回循环用户路径的第 ≥2 轮（`__schedule` 以 restore_irq(true) 返回后，用户路径缺少与内核路径 trap.S:723 镜像的 `csrci sstatus, 2`）——**load 处被中断 → 近端：嵌套 handler 自旋在本 CPU 锁上静默楔死（零 tripwire 的完整解释）；远端：嵌套退出污染 ti_kernel_sp → 帧孤儿化 → 误入 .Lfrom_user → 半写寄存器恢复 → 野 PC/SP——smash/协议外写引擎的树内实体**。
+**修复（1 条指令）**：trap.S:598 用户路径 asm_schedule 后补 `csrci sstatus, 2`（与 723 严格镜像）——trap 返回循环恢复 SIE=0 不变量，链条从根上死亡。
+**门禁**：single 6/8（run1 A 型、run7 B 型 1 次）+ multi 2/4（A 型 2 次——multi 下 A 型再现是新现象）——**未归零**。R53 自己的残余候选：内核路径 `restore_irq(true)→ret→csrci` 的 ~10 指令尾部窄缝（同机制的最后暴露面）。下轮：该窄缝的收口（asm_schedule 返回前不开 SIE——直接在 Rust 尾部把 restore_irq(true) 移到 asm 层 csrci 之前，或 asm_schedule 出口自带 SIE=0）。
+
 ### 20.44 第五十二轮：构造-入队窗口收口 — TASK_NEW 状态（Linux 语义）
 
 **ti_cpu 列的裁决价值**：形态 A（ti_cpu=-1 构造值）证明这些任务从未被 pick/世袭戳——推翻 R50 的毒化假说方向。R52 穷举确证真缺口：**R46 heal 的幽灵谓词（RUNNING∧¬linked∧curr_on=false）对构造中的半成品子任务为真**——构造-入队长窗口内（new_task_at 的 state=RUNNING + pid_hash_insert 之后、enqueue 之前，copy_mm 的 COW 遍历等负载相关时长），任何对子 pid 的唤醒（kill 广播/SIGCHLD/OOM 扫描）触发 heal **把半成品链入运行队列**→ 另一 CPU pick 到构造值 thread.sp/ra 上运行（楔死家族）→ 同时 fork 自己的 enqueue 被 heal 置位的 on_rq 守卫静默吃掉且返回值被忽略——fork 报告成功。R48 的冻结变体注释早已描述过同机制。
