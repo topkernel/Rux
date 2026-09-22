@@ -700,14 +700,18 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
         if !Task::new_task_at(task_ptr, pid, SchedPolicy::Normal) {
             // R10-9: stack allocation failed — discard the slot cleanly.
             crate::process::pid::free_pid(pid);
-            // R48: new_task_at already wrote state=RUNNING and pid=<pid>
-            // over any poison left by the page's previous life BEFORE it
-            // failed — a raw dealloc here would return an UNPOISONED,
+            // R48: new_task_at already wrote state=TASK_NEW (R52; was
+            // RUNNING) and pid=<pid> over any poison left by the page's
+            // previous life BEFORE it failed — a raw dealloc here would
+            // return an UNPOISONED,
             // valid-looking Task page to the buddy, disarming every
             // R15-6/R33/R47 freed-page guard (a stale wake would then
-            // sail through the pid check, read RUNNING, and the R46 heal
-            // would re-enqueue the half-initialized task: on_cpu=false,
-            // on_rq=false, state=RUNNING is exactly the phantom shape).
+            // sail through the pid check, read a runnable-looking state,
+            // and reach the wake path — pre-R52 it read RUNNING and the
+            // R46 heal re-enqueued the half-initialized task: on_cpu=false,
+            // on_rq=false, state=RUNNING was exactly the phantom shape;
+            // TASK_NEW now refuses every wake route, and the poison keeps
+            // the pid check as the first-line drop).
             // Route through free_task_slot so the page leaves POISONED at
             // the compile-time offsets and the slot hits FREED_TASK_RING.
             free_task_slot(task_ptr);
@@ -1218,10 +1222,12 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
     //     state==RUNNING whenever the guard legitimately skips (a linked
     //     task is always RUNNING: __schedule re-enqueues only prev_running,
     //     the RR tick rotation gates on RUNNING, fork/kthread tasks are
-    //     freshly inserted, change_task_policy dequeues before re-enqueue);
+    //     freshly inserted as TASK_NEW and get RUNNING only from this
+    //     branch, change_task_policy dequeues before re-enqueue);
     //   - a refused insert now leaves the task SLEEPING (honest, form-A,
     //     still wakeable) instead of a phantom RUNNING that nothing will
-    //     ever schedule.
+    //     ever schedule — and leaves a fresh TASK_NEW task TASK_NEW (R52),
+    //     so the creating fork/kthread can detect the refusal and unwind.
     let policy = (*task).policy();
 
     // R7-B5: count only actual insertions. The class enqueues all carry a
@@ -1259,7 +1265,18 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
 }
 
 /// Enqueue a task and try to wake an idle CPU.
-pub fn enqueue_task(task: &'static mut Task) {
+///
+/// R52 (fork enqueue gap): returns whether the task is actually linked
+/// now (the GRQ-locked insert's own verdict). For a freshly constructed
+/// task every legitimate guard passes — a `false` here is a guard
+/// divergence (poison, dead-state, or a stale class on_rq flag landing
+/// on a never-enqueued task) and the caller MUST NOT report creation
+/// success: the child would be a RUNNING-looking task on no queue and
+/// no CPU that nothing will ever schedule (the form-A phantom), while
+/// its parent waits on a PID that never runs. fork.rs and kthread.rs
+/// unwind the child on `false`; the task's state stays TASK_NEW on
+/// refusal (R39 discipline: no phantom RUNNING is manufactured).
+pub fn enqueue_task(task: &'static mut Task) -> bool {
     let task_ptr = task as *mut Task;
     let cpus_allowed = task.cpus_allowed();
 
@@ -1273,20 +1290,27 @@ pub fn enqueue_task(task: &'static mut Task) {
     // Lock GRQ and enqueue
     let mut grq_guard = grq().lock_irqsave();
     // SAFETY: GRQ lock is held via grq_guard; enqueue_task_locked expects the lock to be held.
-    unsafe {
-        enqueue_task_locked(&mut *grq_guard, task_ptr);
-    }
-    // (fresh fork/init/kthread task: insert always succeeds; result unused)
+    let inserted = unsafe {
+        enqueue_task_locked(&mut *grq_guard, task_ptr)
+    };
 
     // Check for cross-CPU preemption (RT/DL)
-    let policy = task.policy();
-    if policy == SchedPolicy::Fifo || policy == SchedPolicy::Rr {
-        check_rt_preempt(task_ptr, cpus_allowed);
-    } else if policy == SchedPolicy::Deadline {
-        check_dl_preempt(task_ptr, cpus_allowed);
+    if inserted {
+        let policy = task.policy();
+        if policy == SchedPolicy::Fifo || policy == SchedPolicy::Rr {
+            check_rt_preempt(task_ptr, cpus_allowed);
+        } else if policy == SchedPolicy::Deadline {
+            check_dl_preempt(task_ptr, cpus_allowed);
+        }
     }
 
     drop(grq_guard);
+
+    if !inserted {
+        // Nothing was linked — do not spend resched IPIs on a task that
+        // is not runnable.
+        return false;
+    }
 
     // Try to wake an idle CPU
     if let Some(idle_cpu) = grq().find_idle_cpu(cpus_allowed) {
@@ -1299,6 +1323,8 @@ pub fn enqueue_task(task: &'static mut Task) {
             resched_cpu(target);
         }
     }
+
+    true
 }
 
 /// R49 (on_cpu clear-protocol gap — the seed): steer `task`'s ti_cpu to

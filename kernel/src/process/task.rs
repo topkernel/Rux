@@ -252,6 +252,25 @@ impl TaskState {
     /// Process final state, will be reclaimed
     pub const DEAD: u32 = 0x00000010;
 
+    /// Newly constructed, not yet on a run queue (Linux TASK_NEW)
+    ///
+    /// R52 (fork enqueue gap): `new_task_at` writes this INSTEAD of
+    /// RUNNING. Between construction and `enqueue_task` the task is
+    /// already visible in the pid hash with a valid pid — previously it
+    /// also carried state=RUNNING there, so ANY concurrent wake routed
+    /// through Task::wake_up / signal_wake_up_state reached the R46
+    /// "RUNNING-phantom" heal and LINKED THE HALF-BUILT CHILD (no
+    /// thread.sp/ra yet, no mm); a CPU then picked it and context
+    /// switched onto constructor values — the R33/R48 wedge family —
+    /// while do_clone's own enqueue was silently eaten by the class
+    /// on_rq guard (result ignored at fork.rs:449). TASK_NEW is refused
+    /// by every wake route (not sleeping, not STOPPED, not RUNNING),
+    /// matching Linux: a half-built task cannot be woken, killed, or
+    /// OOM-selected. The NEW→RUNNING transition happens only inside
+    /// `enqueue_task_locked`, atomically with the class insert under
+    /// the GRQ lock.
+    pub const TASK_NEW: u32 = 0x00000080;
+
     /// Create new state
     #[inline]
     pub const fn new(bits: u32) -> Self {
@@ -1235,9 +1254,13 @@ impl Task {
         }
 
         // Write each field
+        // R52: TASK_NEW, not RUNNING — the task is hash-visible from
+        // pid_hash_insert until enqueue_task, and must be unwakeable in
+        // that window (see TaskState::TASK_NEW). enqueue_task_locked
+        // flips it to RUNNING atomically with the class insert.
         ptr::write(
             (ptr as usize + offset_of!(Task, state)) as *mut AtomicU32,
-            AtomicU32::new(TaskState::RUNNING),
+            AtomicU32::new(TaskState::TASK_NEW),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, pid)) as *mut Pid,

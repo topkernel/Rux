@@ -157,6 +157,13 @@ fn state_name(bits: u32) -> &'static str {
     use crate::process::task::TaskState as S;
     match bits {
         S::RUNNING => "RUNNING",
+        // R52: a task between new_task_at and its first enqueue. Legit
+        // only transiently inside do_clone/kernel_thread; a PERSISTENT
+        // NEW+ti_cpu=-1 line means the creating fork never reached its
+        // enqueue (or its CPU froze mid-fork) — while RUNNING+ti_cpu=-1
+        // is now impossible from the constructor and points at an
+        // out-of-protocol state-word write.
+        S::TASK_NEW => "NEW(built)",
         S::INTERRUPTIBLE => "INTERRUPTIBLE(sleep)",
         S::UNINTERRUPTIBLE => "UNINTERRUPTIBLE(dsleep)",
         S::STOPPED => "STOPPED",

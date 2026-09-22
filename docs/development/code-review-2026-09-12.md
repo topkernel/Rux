@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.44 第五十二轮：构造-入队窗口收口 — TASK_NEW 状态（Linux 语义）
+
+**ti_cpu 列的裁决价值**：形态 A（ti_cpu=-1 构造值）证明这些任务从未被 pick/世袭戳——推翻 R50 的毒化假说方向。R52 穷举确证真缺口：**R46 heal 的幽灵谓词（RUNNING∧¬linked∧curr_on=false）对构造中的半成品子任务为真**——构造-入队长窗口内（new_task_at 的 state=RUNNING + pid_hash_insert 之后、enqueue 之前，copy_mm 的 COW 遍历等负载相关时长），任何对子 pid 的唤醒（kill 广播/SIGCHLD/OOM 扫描）触发 heal **把半成品链入运行队列**→ 另一 CPU pick 到构造值 thread.sp/ra 上运行（楔死家族）→ 同时 fork 自己的 enqueue 被 heal 置位的 on_rq 守卫静默吃掉且返回值被忽略——fork 报告成功。R48 的冻结变体注释早已描述过同机制。
+**修复（Linux TASK_NEW 语义，6 文件）**：TaskState::TASK_NEW=0x80——构造期任务不可被任何唤醒链接触（两道唤醒门 + 幽灵谓词均拒绝）；NEW→RUNNING 唯一转移在 enqueue_task_locked 的 inserted 分支（GRQ 锁内原子）；enqueue_task 返回 bool（拒绝不再浪费 resched IPI）；fork/kthread/init 的拒绝路径全部完整 unwind（fork 含 R52 tripwire）；kthread/init 删除 enqueue 前的显式 set_state(RUNNING)（重开窗口的反模式）；taskdump 新增 NEW(built) 标签——**下次复现自带裁决**（NEW(built) 持续=冻结 fork 即形态 a；RUNNING+ti_cpu=-1=协议外写入即 smash 家族 b）。
+**门禁**：single 7/8（唯一失败 A 型 artifact）+ multi 3/4（B 型 1 次 ~12% 不变）——R52 的窗口是真实供给源之一但非全部；裁决标签已预置。
+
 ### 20.43 第五十一轮（进行中）：smash 源头追捕 — watchpoint 两遍法受挫与转向
 
 **两遍法实验**：第一遍 icount probe 锁定幻象地址（pid 344 @0xffffffd60175e000）；第二遍 gdbstub + ti_cpu watchpoint——两个受挫：(a) gdb batch 命令序列化格式错误（watch 未生效）；(b) **icount 不保证堆地址跨进程一致**（SBI/console 仍真实时间影响分配序列）——第二遍幻象在新地址（pid 329 @0x1753000）复现，watch 目标失效。

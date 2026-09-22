@@ -446,7 +446,33 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         }
 
         // Add new task to run queue
-        crate::sched::enqueue_task(&mut *task_ptr);
+        //
+        // R52 (fork enqueue gap — form A): the enqueue result is now
+        // CHECKED, not assumed. The child has been hash-visible with a
+        // valid pid since alloc_task_slot; until this point it is
+        // TASK_NEW (unwakeable — no racing signal/OOM kill can link it
+        // early). If the GRQ-locked insert refuses (a guard divergence:
+        // poison, dead-state, or a stale class on_rq flag on a
+        // never-enqueued task), the child is on NO queue and NO cpu
+        // while the parent believes fork() succeeded — it waits on a
+        // PID that never runs (the ti_cpu=-1 / on_rq=0 / linked=0 /
+        // RUNNING-looking phantom). Unwind the child completely and
+        // fail the fork instead; the page leaves poisoned, so the
+        // invariant "constructed ⇒ enqueued or fully unwound" holds by
+        // construction. (The parent has not slept yet — the vfork block
+        // below never runs on this path.)
+        if !crate::sched::enqueue_task(&mut *task_ptr) {
+            crate::pr_warn!(
+                "fork: enqueue refused for child pid={} — unwinding (R52 tripwire)",
+                pid
+            );
+            (*current_ptr).remove_child(task_ptr);
+            crate::process::pid_hash::pid_hash_remove(pid);
+            (*task_ptr).free_kernel_stack();
+            crate::process::pid::free_pid(pid);
+            crate::sched::free_task_slot(task_ptr);
+            return None;
+        }
 
         if is_vfork {
             crate::pr_info!("vfork: parent={} blocked, child={}",

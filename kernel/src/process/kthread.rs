@@ -11,7 +11,7 @@ use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use crate::sync::spinlock::Spinlock;
 
-use crate::process::task::{self, Task, TaskState};
+use crate::process::task::{self, Task};
 use crate::sched;
 
 // ============================================================================
@@ -102,8 +102,11 @@ pub fn kernel_thread(
         thread.s[1] = arg as u64;
     }
 
-    // 6. Set task state to RUNNING (already set by alloc_task_slot, but be explicit)
-    task.set_state(TaskState::new(TaskState::RUNNING));
+    // 6. Task state: stays TASK_NEW (written by new_task_at) until the
+    //    class insert flips it to RUNNING atomically with the linkage
+    //    (R52 — the old explicit set_state(RUNNING) here re-opened the
+    //    half-built-task-is-wakeable window between this line and the
+    //    enqueue below).
 
     // 7. Store KthreadInfo
     {
@@ -116,7 +119,29 @@ pub fn kernel_thread(
 
     // 8. Enqueue the task (makes it visible to scheduler)
     //    enqueue_task consumes the mutable reference, so we re-borrow via raw pointer.
-    sched::enqueue_task(task);
+    //    R52: CHECK the insert — a refused enqueue must unwind the kthread
+    //    (hash/pid/slot + the KTHREAD_MAP entry), never leave a
+    //    constructed-but-unschedulable task behind (fork.rs has the twin).
+    if !sched::enqueue_task(task) {
+        crate::pr_warn!(
+            "kthread '{}': enqueue refused for pid={} — unwinding (R52 tripwire)",
+            _name, pid
+        );
+        {
+            let mut map = KTHREAD_MAP.lock();
+            map.remove(&pid);
+        }
+        // SAFETY: task_ptr was returned by alloc_task_slot and never
+        // enqueued; unwind mirrors the fork.rs failure paths (hash first,
+        // then the stack — R7-B3/R33-pre discipline).
+        unsafe {
+            crate::process::pid_hash::pid_hash_remove(pid);
+            (*task_ptr).free_kernel_stack();
+            crate::process::pid::free_pid(pid);
+            crate::sched::free_task_slot(task_ptr);
+        }
+        return None;
+    }
 
     crate::pr_info!("kthread: created kernel thread '{}' pid={}", _name, pid);
 

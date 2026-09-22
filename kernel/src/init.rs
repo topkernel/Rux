@@ -141,14 +141,21 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
             return None;
         }
 
-        // Mark as user process (using TaskState::new(TaskState::RUNNING))
-        (*task_ptr).set_state(crate::process::task::TaskState::new(crate::process::task::TaskState::RUNNING));
+        // R52: init stays TASK_NEW (from new_task_at) through hash-insert
+        // until the enqueue's class insert flips it to RUNNING — same
+        // discipline as fork/kthread. (The old explicit RUNNING write
+        // here re-opened the wakeable-half-built-task window.)
 
         // Register init process in PID hash table (required for find_task_by_pid)
         crate::process::pid_hash::pid_hash_insert(task_ptr);
 
         // Add init process to run queue
-        sched::sched::enqueue_task(&mut *task_ptr);
+        // R52: check the insert. INIT_TASK_STORAGE is a static (not heap)
+        // and the pid is fixed — on refusal just fail boot; nothing to free.
+        if !sched::sched::enqueue_task(&mut *task_ptr) {
+            println!("init: enqueue refused for pid 1 (R52 tripwire)");
+            return None;
+        }
 
         Some(task_ptr)
     }
