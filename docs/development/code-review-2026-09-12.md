@@ -601,6 +601,12 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.43 第五十一轮（进行中）：smash 源头追捕 — watchpoint 两遍法受挫与转向
+
+**两遍法实验**：第一遍 icount probe 锁定幻象地址（pid 344 @0xffffffd60175e000）；第二遍 gdbstub + ti_cpu watchpoint——两个受挫：(a) gdb batch 命令序列化格式错误（watch 未生效）；(b) **icount 不保证堆地址跨进程一致**（SBI/console 仍真实时间影响分配序列）——第二遍幻象在新地址（pid 329 @0x1753000）复现，watch 目标失效。
+**转向**：taskdump 增加 **ti_cpu 列**——周期快照前后帧的 ti_cpu 变化即毒化窗口（≤5s），结合 R50 已证明的 misdirect 机制（PER_CPU[tp→ti_cpu] 解错 prev），下轮从毒化窗口的帧间 diff 直接缩小到毒化时刻的执行上下文；配合修正的 gdb MI 动态 attach（运行中解析幻象地址后设 watch，抓后续 mark/世袭戳对幻象字段的操作链）。
+**R50 结论重申**：树内 ti_cpu 写者已全封（R49），幸存生产者为 smash 族协议外写（R18/R19 栈深/清零引擎域）——ti_cpu 列将首次给出毒化的**时刻**信息（此前只有事后状态）。
+
 ### 20.42 第五十轮：真值 prev 解析尝试 → 回退（工程纪律）— 回退后 8/8
 
 **R50 分析**（保留价值）：指令级排除法证明 pick→switch-in 窗口中断原子（unlock_irqretain 不开 SIE），三任务"已 pick 未运行"实为**最后一次 switch-out 被 misdirect**（ti_cpu 毒化使 `PER_CPU[tp→ti_cpu].current` 解出错误 prev——树内生产者已被 R49 封死，幸存者为 smash 族协议外写）。R50 实现 `__schedule` 入口 tp 硬件真值比对 + slot 发散 heal（R50-SLOT-DIVERGENCE tripwire）+ steer 皮带（idle 未 mark 洞）。

@@ -85,6 +85,8 @@ pub fn dump_all_tasks(reason: &str) {
             put_dec(t.pid() as u64);
             puts(" state=");
             puts(state_name(t.state().bits()));
+            puts(" ti_cpu=");
+            put_dec(t.ti_cpu() as u64);
             puts(" on_cpu=");
             put_dec(t.on_cpu() as u64);
             // Authoritative linked-state (tree/list scan, not the flag) —
