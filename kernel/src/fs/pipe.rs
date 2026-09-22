@@ -291,6 +291,8 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                     return -(crate::errno::constants::EINTR) as isize;
                 }
 
+                // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
+                crate::arch::riscv64::cpu::restore_irq(true);
                 crate::sched::schedule();
 
                 pipe.read_queue().finish_wait(current);
@@ -396,6 +398,8 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                     return -(crate::errno::constants::EINTR) as isize;
                 }
 
+                // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
+                crate::arch::riscv64::cpu::restore_irq(true);
                 crate::sched::schedule();
 
                 pipe.write_queue().finish_wait(current);

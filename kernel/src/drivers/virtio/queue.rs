@@ -427,6 +427,8 @@ impl VirtQueue {
             }
 
             // Sleep until woken by interrupt
+            // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
+            crate::arch::riscv64::cpu::restore_irq(true);
             crate::sched::schedule();
 
             // Remove from wait queue and loop back to re-check condition
@@ -539,6 +541,8 @@ impl VirtQueue {
             }
 
             // Sleep until woken by interrupt
+            // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
+            crate::arch::riscv64::cpu::restore_irq(true);
             crate::sched::schedule();
             wait_queue.remove(current);
         }

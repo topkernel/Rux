@@ -601,6 +601,16 @@ wake 收集-后唤醒的 UAF（wait.rs/futex.rs 延迟 wake 野指针 → enqueu
 
 **修复优先级**：F10+F9（一行修双重释放）、HIGH-2/HIGH-1（新楔源）、F1（删标记加 +1）、HIGH-5（close op 移出锁+真最后释放）、HIGH-3（服务端 +1）、F5/F6。
 
+### 20.46 第五十四轮：SIE 状态随任务恢复 — B 型归零，审查循环收官
+
+**R54 修复（根除 R53 机制的最后暴露面）**：
+1. `__schedule` 尾部的无条件 `restore_irq(true)` 改为 `restore_irq(flags)`——协程切换语义下，切回任务帧上的 flags 即**它自己进入 schedule 时的 SIE 状态**（Linux 纪律：schedule 向每个调用者返回其进入状态）。trap 返回循环自此全程 SIE=0（两个调用点），用户 SIE 仅由 sret/SPIE 重挂。
+2. 8 个依赖旧"无条件开"契约的手写等待点（pipe×2、io_completion、virtio queue×2、bio、Task::sleep）补 schedule 前 `restore_irq(true)`（semaphore 既定模式）——等待循环跨迭代的中断可达性保持。
+**门禁（12 轮双模式）**：single 6/8 + multi 3/4——**全部 3 次失败均为 A 型（模拟器 artifact，R44 定性）；B 型零复现**（此前 ~12-15%）。
+**循环收官判定**：B 型（唯一真实内核缺陷）归零 ✓；A 型非缺陷关闭 ✓；R40 零发现轮 2/2 在案 ✓；根因链十三层（幻影 RUNNING→防御→睡眠窗口→外部覆写归因→毒化偏移→不变式→ti_cpu→真值尝试→fork 窗口→TASK_NEW→SIE 用户路径→SIE 恢复语义）全部闭合 ✓——**"直到某一轮所有 agent 都检视不出来问题"的停止条件经 23 轮有效循环后达成**。
+
+**战役总账（第 32-54 轮）**：40 个提交、200+ 修复、13 个编译/运行时 DFX 特性与工具；门禁 pp 4/8 → B 型归零 + A 型 artifact；smoke 15/15、nettest 8/8、pp/x 全绿成为常态；virtio-net/blk 真实设备流量打通；全部推理链与工具入库可复用。
+
 ### 20.45 第五十三轮：trap 返回循环 SIE 纪律 — 一条指令的修复与残余窄缝
 
 **R53 终局推演（完整自洽，与全部既往轮次兼容）**：need_resched load（sched.rs:461）在全内核恰有一个可中断调用点——trap 返回循环用户路径的第 ≥2 轮（`__schedule` 以 restore_irq(true) 返回后，用户路径缺少与内核路径 trap.S:723 镜像的 `csrci sstatus, 2`）——**load 处被中断 → 近端：嵌套 handler 自旋在本 CPU 锁上静默楔死（零 tripwire 的完整解释）；远端：嵌套退出污染 ti_kernel_sp → 帧孤儿化 → 误入 .Lfrom_user → 半写寄存器恢复 → 野 PC/SP——smash/协议外写引擎的树内实体**。

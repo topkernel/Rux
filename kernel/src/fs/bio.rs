@@ -803,6 +803,8 @@ unsafe fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
             let pid = crate::sched::get_current_pid();
             let dl = crate::drivers::timer::get_jiffies().saturating_add(1);
             let id = crate::timer::add_timer_wakeup(dl, pid);
+            // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
+            crate::arch::riscv64::cpu::restore_irq(true);
             crate::sched::schedule();
             if id != 0 {
                 crate::timer::del_timer(id);

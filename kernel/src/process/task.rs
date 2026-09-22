@@ -1536,6 +1536,8 @@ impl Task {
         }
 
         // Trigger scheduling, select other process to run
+        // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
+        crate::arch::riscv64::cpu::restore_irq(true);
         crate::sched::schedule();
     }
 

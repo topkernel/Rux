@@ -925,19 +925,23 @@ unsafe fn __schedule() {
     // in a per-CPU slot by do_exit → defer_exit_notify() on THIS CPU.
     process_deferred_exit_notify_cpu(crate::arch::cpu_id() as usize);
 
-    // We must ensure interrupts are enabled so that timer ticks, wake-ups,
-    // and I/O completions can be delivered. The previous task's saved IRQ
-    // state (flags) is irrelevant here — the new task needs SIE=1.
+    // R54: restore the SIE state THIS task had when it entered its own
+    // __schedule — after context_switch the executing frame belongs to
+    // the switched-IN task, and `flags` in that frame is the state ITS
+    // caller came in with (the coroutine-switch semantics give every
+    // task its own complete frame). This is the Linux discipline:
+    // schedule() returns to each caller with that caller's irq state.
     //
-    // This is critical when schedule() is called from syscall context
-    // where SIE=0 (cleared by hardware on trap entry). Without this,
-    // restore_irq(false) leaves the new task with SIE=0, preventing
-    // any interrupts until sret — which may never happen if the new
-    // task blocks again.
-    //
-    // Matches Linux behavior: __schedule() always returns with
-    // interrupts enabled in the calling context.
-    crate::arch::riscv64::cpu::restore_irq(true);
+    // The old unconditional restore_irq(true) was the LAST exposure of
+    // the R53 mechanism: it re-enabled SIE in the middle of the trap
+    // return loop's asm_schedule->ret->csrci tail (kernel path) and
+    // forced every waiter back into the loop with SIE=1 (user path,
+    // pre-R53). With per-caller restoration, the whole trap-return
+    // loop runs at SIE=0; user SIE is re-armed solely by sret/SPIE,
+    // and wait-path callers (wait_event/nanosleep/futex...) re-enable
+    // explicitly before their own schedule() — their flags are 1.
+    // The idle loop re-arms before each iteration (sched.rs idle).
+    crate::arch::riscv64::cpu::restore_irq(flags);
 }
 
 /// Pick the next task to run on this CPU.
