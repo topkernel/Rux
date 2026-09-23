@@ -51,18 +51,9 @@ pub unsafe fn root_page_table_ppn() -> u64 {
 
 static MMU_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-#[link_section = ".bss"]
-static mut TRAP_STACKS: [[u8; 16384]; crate::config::MAX_CPUS] = [[0; 16384]; crate::config::MAX_CPUS];
-
-/// Get trap stack for current CPU
-pub unsafe fn get_trap_stack() -> u64 {
-    let cpu_id = crate::arch::riscv64::smp::cpu_id() as usize;
-    if cpu_id >= crate::config::MAX_CPUS {
-        panic!("mm: Invalid CPU ID {}", cpu_id);
-    }
-    let stack_base = &mut TRAP_STACKS[cpu_id] as *mut [u8; 16384] as *mut u8;
-    stack_base.add(16384) as u64  // stack top
-}
+// TRAP_STACKS + get_trap_stack() REMOVED (wave-6, review 2.6): 16KB x
+// MAX_CPUS of .bss with zero callers (kernel traps run on the current
+// task stack; IRQ stacks live in the interrupt subsystem).
 
 // ==================== Page Table Allocation ====================
 //

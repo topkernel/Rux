@@ -80,7 +80,18 @@ pub enum PageFlag {
     /// slot array can record; reverse mapping falls back to slot 0 plus a
     /// full task scan (review 4.10).
     RmapOverflow = 1 << 17,
+    /// Page is in the middle of a compaction migration (review 4.16): its
+    /// PTEs hold migration-entry markers and the fault path must wait for
+    /// the migration to finish instead of installing a zero page.
+    Migrating = 1 << 21,
 }
+
+/// Flag-bit window [18:20] storing the LRU list index (0..NR_LRU_LISTS)
+/// of a page carrying `PageFlag::Lru`. Storing the index on the page makes
+/// LRU unlink O(1) with the doubly-linked lru_next/lru_prev pair (review
+/// 4.11) — no list walk to find which of the 5 lists owns the page.
+pub const LRU_LIST_SHIFT: u32 = 18;
+pub const LRU_LIST_MASK: u32 = 0x7 << LRU_LIST_SHIFT;
 
 /// Page flags collection
 #[derive(Debug, Default)]
@@ -550,6 +561,27 @@ impl Page {
     #[inline]
     pub fn set_lru_prev(&self, pfn: usize) {
         self.lru_prev.store(pfn, Ordering::Release);
+    }
+
+    /// Record which LRU list (0..NR_LRU_LISTS) the page is linked on.
+    /// Only meaningful while PageFlag::Lru is set.
+    #[inline]
+    pub fn set_lru_list(&self, idx: usize) {
+        self.flags.0.fetch_and(!LRU_LIST_MASK, Ordering::Release);
+        self.flags.0
+            .fetch_or(((idx as u32) & 0x7) << LRU_LIST_SHIFT, Ordering::Release);
+    }
+
+    /// Read the recorded LRU list index (0 if never set).
+    #[inline]
+    pub fn lru_list(&self) -> usize {
+        ((self.flags.0.load(Ordering::Acquire) >> LRU_LIST_SHIFT) & 0x7) as usize
+    }
+
+    /// Clear the recorded LRU list index.
+    #[inline]
+    pub fn clear_lru_list(&self) {
+        self.flags.0.fetch_and(!LRU_LIST_MASK, Ordering::Release);
     }
 
     // ========== rmap multi-mapping slots (review 4.10) ==========

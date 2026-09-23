@@ -17,6 +17,7 @@ use core::sync::atomic::Ordering;
 
 use crate::process::task::{Task, TaskState, TIF_MEMDIE};
 use crate::mm::mm_struct::MmFlags;
+use crate::sync::spinlock::Spinlock;
 
 // ==================== Constants ====================
 
@@ -27,6 +28,12 @@ pub const OOM_SCORE_ADJ_MIN: i32 = -1000;
 /// OOM score adjustment: maximum priority to be killed.
 /// Following Linux's OOM_SCORE_ADJ_MAX in include/uapi/linux/oom.h.
 pub const OOM_SCORE_ADJ_MAX: i32 = 1000;
+
+/// Serializes out_of_memory() (review 4.13: no oom_lock — concurrent OOM
+/// triggers from kswapd/direct reclaim each selected and SIGKILLed their
+/// own victim, killing several processes for one shortage and racing
+/// OomControl state).
+static OOM_LOCK: Spinlock<()> = Spinlock::new(());
 
 // ==================== OOM Control ====================
 
@@ -100,10 +107,15 @@ pub fn oom_badness(task: &Task, totalpages: u64) -> u64 {
         return 0;
     }
 
-    // Baseline score: total virtual pages
-    // Linux uses exact RSS, but Rux has no per-process RSS counter.
-    // total_vm is an upper bound — acceptable for initial implementation.
-    let mut points = mm.total_vm();
+    // Baseline score: resident pages (review 4.14).
+    // Linux scores rss + pgtables_bytes + swap; Rux counts resident pages
+    // in mm.rss (fault-in inc / unmap dec). total_vm is only the fallback
+    // for mms that predate the counters (or before any fault) — with the
+    // old pure-total_vm baseline, a process that mmap()ed a huge region
+    // but never touched it outranked (and preempted the killing of) real
+    // memory hogs.
+    let rss = mm.rss();
+    let mut points = if rss > 0 { rss } else { mm.total_vm() };
 
     // Scale adjustment: oom_score_adj * totalpages / 1000
     // This matches Linux's scaling to make adjustment proportional to system memory.
@@ -269,6 +281,9 @@ fn oom_kill_process(oc: &mut OomControl) {
 ///
 /// Returns true if a victim was killed, false otherwise.
 pub fn out_of_memory(oc: &mut OomControl) -> bool {
+    // Serialize the whole select+kill decision (review 4.13 oom_lock).
+    let _oom_guard = OOM_LOCK.lock();
+
     crate::pr_err!(
         "oom: out of memory (order={}, gfp={:#x})",
         oc.order, oc.gfp_mask

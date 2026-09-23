@@ -224,6 +224,45 @@ pub fn try_to_unmap_with_swap(page: &Page, swap_entry: u64) -> i32 {
     try_to_unmap_inner(page, swap_entry)
 }
 
+/// Record a (mm, virtual page number) mapping on the page (review 4.10).
+///
+/// Slot 0 (the `index` field) holds the FIRST mapping; up to three more
+/// fit in `rmap_alt`. Beyond that the page keeps only slot 0 and the
+/// `RmapOverflow` flag sends reverse-map lookups through the full task
+/// scan (degraded single-value recording).
+///
+/// Called from the fault paths that install a PTE (page_fault.rs /
+/// mm_ops.rs) — `page_add_anon_rmap` has no live callers.
+pub fn page_record_mapping(page: &Page, mm_ptr: usize, vaddr: usize) {
+    let vpn = vaddr / super::PAGE_SIZE;
+    if page.index() == 0 {
+        // First mapping — slot 0.
+        page.set_index(vpn);
+        return;
+    }
+    if page.index() == vpn {
+        return; // re-recording the same mapping (index only) — no-op
+    }
+    if !page.rmap_alt_add(mm_ptr, vpn) {
+        // All 3 alternate slots busy: degrade to single-value recording.
+        page.set_flag(super::page_desc::PageFlag::RmapOverflow);
+    }
+}
+
+/// Try to unmap a page from all processes, replacing PTEs with a
+/// migration-entry marker (compaction, review 4.16).
+///
+/// Like `try_to_unmap()` but writes a migration marker into each PTE
+/// instead of zeroing it: a fault on the marker WAITS for the migration to
+/// complete instead of installing a zero page (which the subsequent remap
+/// would overwrite — silent user-write loss).
+///
+/// # Returns
+/// Number of PTEs successfully replaced with migration markers.
+pub fn try_to_unmap_migration(page: &Page) -> i32 {
+    try_to_unmap_inner(page, super::swap::make_migration_entry())
+}
+
 /// Shared implementation for try_to_unmap and try_to_unmap_with_swap.
 ///
 /// When `swap_entry == 0`, PTEs are zeroed (unmap).
@@ -240,10 +279,24 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
 
     let target_pfn = super::page_desc::page_to_pfn(page as *const Page);
     let target_index = page.index();
-    if target_index == 0 {
+    if target_index == 0 && !page.test_flag(super::page_desc::PageFlag::RmapOverflow) {
         return 0;
     }
-    let target_vaddr = target_index * (super::PAGE_SIZE as usize);
+
+    // Candidate virtual addresses: slot 0 (page.index) plus every alternate
+    // rmap slot (multi-mapping pages — MAP_FIXED re-maps of the same frame).
+    // Review 4.10: with only slot 0, unmapping a double-mapped page left the
+    // second PTE in place while the page was freed/reused (stale-PTE UAF).
+    let mut target_vaddrs: Vec<usize> = Vec::new();
+    if target_index != 0 {
+        target_vaddrs.push(target_index * (super::PAGE_SIZE as usize));
+    }
+    page.rmap_alt_for_each(|_mm, vpn| {
+        let vaddr = vpn * (super::PAGE_SIZE as usize);
+        if !target_vaddrs.contains(&vaddr) {
+            target_vaddrs.push(vaddr);
+        }
+    });
 
     let unmapped_count = Cell::new(0i32);
 
@@ -263,88 +316,94 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
             };
             let mm = _mm_arc.as_ref();
 
-            // Hold VMA lock across both the check and page table walk
-            // to prevent concurrent munmap from freeing page tables (fixes F03-07).
-            let vma_mgr = mm.vma_read();
-            let vma_matches = vma_mgr.iter().any(|vma| {
-                vma.vma_type() == super::vma::VmaType::Anonymous
-                    && vma.contains(super::page::VirtAddr::new(target_vaddr))
-            });
+            for target_vaddr in target_vaddrs.iter() {
+                let target_vaddr = *target_vaddr;
 
-            if !vma_matches {
-                return;
-            }
-            // vma_mgr still held — protects page table walk below
+                // Hold VMA lock across both the check and page table walk
+                // to prevent concurrent munmap from freeing page tables (fixes F03-07).
+                let vma_mgr = mm.vma_read();
+                let vma_matches = vma_mgr.iter().any(|vma| {
+                    vma.vma_type() == super::vma::VmaType::Anonymous
+                        && vma.contains(super::page::VirtAddr::new(target_vaddr))
+                });
 
-            let root_ppn = mm.pgd();
-            let walk_result = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
-                root_ppn, target_vaddr as u64,
-            );
+                if !vma_matches {
+                    continue;
+                }
+                // vma_mgr still held — protects page table walk below
 
-            if let Some((ppn, _pte_bits)) = walk_result {
-                if ppn as usize == target_pfn {
-                    let vpn2 = ((target_vaddr >> 30) & 0x1FF) as usize;
-                    let vpn1 = ((target_vaddr >> 21) & 0x1FF) as usize;
-                    let vpn0 = ((target_vaddr >> 12) & 0x1FF) as usize;
+                let root_ppn = mm.pgd();
+                let walk_result = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                    root_ppn, target_vaddr as u64,
+                );
 
-                    let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                        root_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
-                    );
-                    let pte2 = (*root_table).get(vpn2);
-                    if !pte2.is_valid() { return; }
+                if let Some((ppn, _pte_bits)) = walk_result {
+                    if ppn as usize == target_pfn {
+                        let vpn2 = ((target_vaddr >> 30) & 0x1FF) as usize;
+                        let vpn1 = ((target_vaddr >> 21) & 0x1FF) as usize;
+                        let vpn0 = ((target_vaddr >> 12) & 0x1FF) as usize;
 
-                    let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                        pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
-                    );
-                    let pte1 = (*table1).get(vpn1);
-                    if !pte1.is_valid() { return; }
+                        let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                            root_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
+                        );
+                        let pte2 = (*root_table).get(vpn2);
+                        if !pte2.is_valid() { continue; }
 
-                    let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                        pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
-                    );
+                        let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                            pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                        );
+                        let pte1 = (*table1).get(vpn1);
+                        if !pte1.is_valid() { continue; }
 
-                    // R22-3 (§17.4 close): leaf-PTE mutation under the
-                    // PTE lock like every other writer (fork-COW/munmap/
-                    // mprotect/fault-map) — was racing them.
-                    let _pte_g = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                        let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                            pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                        );
 
-                    // Re-validate the leaf under the lock (R7-C3 pattern):
-                    // the walk above ran OUTSIDE it, and a concurrent leaf
-                    // writer (COW break / swap-in / munmap) may have
-                    // swapped in a different physical page in between.
-                    // Overwriting blind would zero the NEW page's PTE while
-                    // decrementing THIS page's mapcount. Intermediate
-                    // levels are stable here: page tables are only unlinked
-                    // at mm teardown, excluded by the mm pin above.
-                    let pte0 = (*table0).get(vpn0);
-                    if !pte0.is_valid() || pte0.ppn() as usize != target_pfn {
+                        // R22-3 (§17.4 close): leaf-PTE mutation under the
+                        // PTE lock like every other writer (fork-COW/munmap/
+                        // mprotect/fault-map) — was racing them.
+                        let _pte_g = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+
+                        // Re-validate the leaf under the lock (R7-C3 pattern):
+                        // the walk above ran OUTSIDE it, and a concurrent leaf
+                        // writer (COW break / swap-in / munmap) may have
+                        // swapped in a different physical page in between.
+                        // Overwriting blind would zero the NEW page's PTE while
+                        // decrementing THIS page's mapcount. Intermediate
+                        // levels are stable here: page tables are only unlinked
+                        // at mm teardown, excluded by the mm pin above.
+                        let pte0 = (*table0).get(vpn0);
+                        if !pte0.is_valid() || pte0.ppn() as usize != target_pfn {
+                            drop(_pte_g);
+                            continue;
+                        }
+
+                        // Write new PTE value (0 for unmap, swap_entry for swap-out,
+                        // migration marker during compaction)
+                        (*table0).set(
+                            vpn0,
+                            crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(swap_entry),
+                        );
+
                         drop(_pte_g);
-                        return;
+                        // R10-6: sfence.vma is HART-LOCAL — a "global" flush
+                        // buys nothing over the per-address one (round-9's
+                        // R9-18 was ineffective by ISA semantics). Keep the
+                        // cheap form; cross-CPU shootdown is issued in batch
+                        // by the unmap/exit callers via IPI (see
+                        // arch::ipi::flush_tlb_others, review 4.10).
+                        core::arch::asm!(
+                            "fence",
+                            "sfence.vma {}, zero",
+                            "fence",
+                            in(reg) target_vaddr,
+                            options(nostack, preserves_flags)
+                        );
+
+                        // Decrement mapcount
+                        page.dec_mapcount();
+                        unmapped_count.set(unmapped_count.get() + 1);
                     }
-
-                    // Write new PTE value (0 for unmap, swap_entry for swap-out)
-                    (*table0).set(
-                        vpn0,
-                        crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(swap_entry),
-                    );
-
-                    drop(_pte_g);
-                    // R10-6: sfence.vma is HART-LOCAL — a "global" flush
-                    // buys nothing over the per-address one (round-9's
-                    // R9-18 was ineffective by ISA semantics). Keep the
-                    // cheap form; the real fix is IPI-based remote
-                    // shootdown (documented open item, see review §20).
-                    core::arch::asm!(
-                        "fence",
-                        "sfence.vma {}, zero",
-                        "fence",
-                        in(reg) target_vaddr,
-                        options(nostack, preserves_flags)
-                    );
-
-                    // Decrement mapcount
-                    page.dec_mapcount();
-                    unmapped_count.set(unmapped_count.get() + 1);
                 }
             }
         }

@@ -129,12 +129,94 @@ impl MemBlockType {
         }
     }
 
-    /// Add a region
-    pub fn add(&mut self, base: usize, size: usize) -> Result<(), ()> {
-        if self.cnt >= MAX_MEMBLOCK_REGIONS {
+    /// Insert [base, base+size) keeping the region array SORTED by base and
+    /// fully merged (Linux memblock_insert_region + memblock_merge_regions).
+    ///
+    /// The old add/add_reserved merged with the FIRST adjacent entry only,
+    /// so a range that BRIDGED two existing regions left one of them
+    /// overlapping the new extent: total_size double-counted the overlap
+    /// and the region was handed to the zone allocator twice (review 4.17).
+    /// This helper folds EVERY overlapping or touching region into one
+    /// extent (union) and re-inserts it at its sorted position.
+    fn insert_and_merge_all(&mut self, base: usize, size: usize, flags: MemBlockFlags) -> Result<(), ()> {
+        let mut m_base = base;
+        let mut m_end = match base.checked_add(size) {
+            Some(e) => e,
+            None => return Err(()),
+        };
+        let mut m_flags = flags;
+
+        // Fold pass (to fixed point): absorb every region that overlaps or
+        // touches the extent. A bridging insert can pull in several regions
+        // one after another; iterating to a fixed point also catches a
+        // region that only becomes adjacent after the extent grew.
+        loop {
+            let mut changed = false;
+            for i in 0..self.cnt {
+                let r = self.regions[i];
+                let r_end = r.base + r.size;
+                if m_base <= r_end && m_end >= r.base {
+                    if m_base > r.base {
+                        m_base = r.base;
+                        changed = true;
+                    }
+                    if m_end < r_end {
+                        m_end = r_end;
+                        changed = true;
+                    }
+                    // Absorbed regions donate their flags if the incoming
+                    // range has none (keeps NOMAP sticky across merges).
+                    if m_flags == MemBlockFlags::NONE && r.flags != MemBlockFlags::NONE {
+                        m_flags = r.flags;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        // Compact pass: drop absorbed regions (subtract their size from the
+        // total), keeping the survivors in sorted order.
+        let mut write = 0usize;
+        for read in 0..self.cnt {
+            let r = self.regions[read];
+            let r_end = r.base + r.size;
+            if m_base <= r_end && m_end >= r.base {
+                self.total_size = self.total_size.saturating_sub(r.size);
+            } else {
+                self.regions[write] = r;
+                write += 1;
+            }
+        }
+        let live = write;
+
+        // If nothing was absorbed we need one extra slot for the new region.
+        if live == self.cnt && self.cnt >= MAX_MEMBLOCK_REGIONS {
             return Err(());
         }
 
+        // Sorted insertion index among the live prefix.
+        let mut at = 0usize;
+        while at < live && self.regions[at].base < m_base {
+            at += 1;
+        }
+
+        // Shift [at, live) right by one and place the merged extent.
+        let mut idx = live;
+        while idx > at {
+            self.regions[idx] = self.regions[idx - 1];
+            idx -= 1;
+        }
+        self.regions[at] = MemBlockRegion::with_flags(m_base, m_end - m_base, m_flags);
+        self.cnt = live + 1;
+        self.total_size += m_end - m_base;
+
+        Ok(())
+    }
+
+    /// Add a region (memory type): page-aligned, sorted, fully merged.
+    pub fn add(&mut self, base: usize, size: usize) -> Result<(), ()> {
         // Align region to page boundaries using base+end (not base+size independently)
         let aligned_base = (base + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let aligned_end = (base + size) & !(PAGE_SIZE - 1);
@@ -142,81 +224,13 @@ impl MemBlockType {
         if aligned_end <= aligned_base {
             return Err(());
         }
-        let base = aligned_base;
-        let size = aligned_end - aligned_base;
 
-        // Check for overlaps and merge if possible
-        for i in 0..self.cnt {
-            let region = &mut self.regions[i];
-
-            // Check if new region can be merged with existing one
-            if base == region.end() {
-                // Extend existing region
-                region.size += size;
-                self.total_size += size;
-                return Ok(());
-            } else if base + size == region.base {
-                // Prepend to existing region
-                region.base = base;
-                region.size += size;
-                self.total_size += size;
-                return Ok(());
-            } else if base >= region.base && base < region.end() {
-                // Overlapping region, extend if needed
-                let new_end = base + size;
-                if new_end > region.end() {
-                    let extra = new_end - region.end();
-                    region.size += extra;
-                    self.total_size += extra;
-                }
-                return Ok(());
-            }
-        }
-
-        // Add new region
-        self.regions[self.cnt] = MemBlockRegion::new(base, size);
-        self.cnt += 1;
-        self.total_size += size;
-
-        Ok(())
+        self.insert_and_merge_all(aligned_base, aligned_end - aligned_base, MemBlockFlags::NONE)
     }
 
-    /// Add a reserved region (with merge support for adjacent regions)
+    /// Add a reserved region (no alignment, sorted, fully merged)
     pub fn add_reserved(&mut self, base: usize, size: usize, flags: MemBlockFlags) -> Result<(), ()> {
-        // Check for adjacent or overlapping regions and merge them
-        let new_end = base + size;
-
-        for i in 0..self.cnt {
-            let region = &mut self.regions[i];
-            let region_end = region.base + region.size;
-
-            // Check if this region is adjacent or overlapping
-            // Adjacent: new_start == region_end OR new_end == region.base
-            // Overlapping: new_start < region_end AND new_end > region.base
-            if base <= region_end && new_end >= region.base {
-                // Merge: extend the existing region
-                let merged_base = base.min(region.base);
-                let merged_end = new_end.max(region_end);
-                let old_size = region.size;
-                region.base = merged_base;
-                region.size = merged_end - merged_base;
-                // Adjust total_size: add only the net increase from merge
-                let net_increase = region.size.saturating_sub(old_size);
-                self.total_size += net_increase;
-                return Ok(());
-            }
-        }
-
-        // No adjacent region found, add new one
-        if self.cnt >= MAX_MEMBLOCK_REGIONS {
-            return Err(());
-        }
-
-        self.regions[self.cnt] = MemBlockRegion::with_flags(base, size, flags);
-        self.cnt += 1;
-        self.total_size += size;
-
-        Ok(())
+        self.insert_and_merge_all(base, size, flags)
     }
 
     /// Remove a region by index

@@ -45,6 +45,59 @@ pub fn is_swap_entry(pte: u64) -> bool {
     (pte & SWAP_ENTRY_SIGNATURE) != 0
 }
 
+// ==================== Migration Entries (compaction, review 4.16) ====================
+
+/// Signature bit distinguishing a compaction migration entry from empty
+/// and swap-entry PTEs. Stored in bit 61 (V=0, so accessing it faults).
+pub const MIGRATION_ENTRY_SIGNATURE: u64 = 1u64 << 61;
+
+/// Build a migration-entry marker PTE (installed while a page is being
+/// relocated by compaction — see mm/compact.rs).
+#[inline]
+pub fn make_migration_entry() -> u64 {
+    MIGRATION_ENTRY_SIGNATURE
+}
+
+/// Check whether a raw PTE value is a migration marker.
+#[inline]
+pub fn is_migration_entry(pte: u64) -> bool {
+    (pte & MIGRATION_ENTRY_SIGNATURE) != 0
+}
+
+// ==================== In-flight swap-out tracking (review 4.12) ====================
+//
+// For exclusively-owned pages the swap-out path installs the swap entry in
+// the PTE BEFORE writing the page (unmap-first prevents user stores during
+// the block write from being lost). Between PTE-install and write
+// completion, a fault on that PTE must WAIT instead of reading the slot.
+// A swap cache would track this per-slot on the page; pending vector is
+// the minimal equivalent.
+
+/// Slots whose swap entry is installed but whose data write has not yet
+/// completed: (swap_type, offset).
+static PENDING_WRITES: Spinlock<Vec<(u32, u64)>> = Spinlock::new(Vec::new());
+
+/// Mark a slot as write-in-flight (called after the PTE is replaced, before
+/// the device write).
+pub fn swap_mark_pending(swap_type: u32, offset: u64) {
+    PENDING_WRITES.lock().push((swap_type, offset));
+}
+
+/// Clear the in-flight mark after a successful (or failed) write.
+pub fn swap_clear_pending(swap_type: u32, offset: u64) {
+    PENDING_WRITES
+        .lock()
+        .retain(|&(t, o)| t != swap_type || o != offset);
+}
+
+/// True while the slot's data is still being written — swap-in must wait.
+pub fn swap_slot_pending(swap_type: u32, offset: u64) -> bool {
+    PENDING_WRITES
+        .lock()
+        .iter()
+        .any(|&(t, o)| t == swap_type && o == offset)
+}
+
 /// Extract the swap type from a swap entry.
 #[inline]
 pub fn swap_entry_type(pte: u64) -> u32 {

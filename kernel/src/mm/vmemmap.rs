@@ -45,24 +45,29 @@ static mut VMEMMAP_STATS: VmemmapStats = VmemmapStats {
 ///
 /// vmemmap = VMEMMAP_START - vmemmap_start_pfn
 /// So pfn_to_page(pfn) = vmemmap + pfn = VMEMMAP_START + (pfn - vmemmap_start_pfn) * sizeof(Page)
+///
+/// Review 4.20: `pfn - start_pfn` used to UNDERFLOW (wrap) for PFNs below
+/// the managed base, yielding a wild descriptor address — clamp instead.
 #[inline]
 pub fn pfn_to_vmemmap(pfn: usize) -> usize {
-    // Use stored start_pfn as vmemmap_start_pfn
     // SAFETY: VMEMMAP_STATS is initialized by init_vmemmap() before any
     // pfn_to_vmemmap() call; start_pfn is a plain usize field (no mutation
     // concurrent with vmemmap reads).
     let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
-    VMEMMAP_START + (pfn - start_pfn) * STRUCT_PAGE_SIZE
+    VMEMMAP_START + pfn.saturating_sub(start_pfn) * STRUCT_PAGE_SIZE
 }
 
 /// Convert vmemmap virtual address to PFN
 ///
 /// pfn = (vmemmap_addr - VMEMMAP_START) / sizeof(Page) + vmemmap_start_pfn
+///
+/// Clamped on the low side, mirroring pfn_to_vmemmap (review 4.20).
 #[inline]
 pub fn vmemmap_to_pfn(vaddr: usize) -> usize {
     // SAFETY: same as pfn_to_vmemmap — VMEMMAP_STATS is initialized before use.
     let start_pfn = unsafe { VMEMMAP_STATS.start_pfn };
-    start_pfn + (vaddr - VMEMMAP_START) / STRUCT_PAGE_SIZE
+    let vaddr = vaddr.clamp(VMEMMAP_START, usize::MAX - STRUCT_PAGE_SIZE + 1);
+    start_pfn + vaddr.saturating_sub(VMEMMAP_START) / STRUCT_PAGE_SIZE
 }
 
 /// Check if vmemmap is initialized
@@ -89,6 +94,17 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
         return Ok(());
     }
 
+    // Review 4.20: the swap(true) above is only the re-entrancy guard; on
+    // every failure path below it must be rolled back so that
+    // is_vmemmap_initialized() does not report a half-initialized vmemmap
+    // (the old code "initialized" on error and lied to every later check).
+    macro_rules! vmemmap_fail {
+        () => {{
+            VMEMMAP_INIT.store(false, core::sync::atomic::Ordering::Release);
+            return Err(());
+        }};
+    }
+
     // Validate nr_pages against MAX_PAGES from page_desc
     // This ensures pfn_to_page() bounds check is consistent with vmemmap mapping
     let max_pages = super::page_desc::MAX_PAGES;
@@ -109,7 +125,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
 
     // Check if vmemmap range is valid
     if vmemmap_end > VMEMMAP_END {
-        return Err(());
+        vmemmap_fail!();
     }
 
     // Use memblock to find a contiguous region for vmemmap pages
@@ -125,12 +141,12 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
 
     let vmemmap_phys = match vmemmap_phys {
         Some(addr) => addr,
-        None => return Err(()),
+        None => vmemmap_fail!(),
     };
 
     // Reserve the memory for vmemmap
     if super::memblock::memblock_reserve(vmemmap_phys, vmemmap_size).is_err() {
-        return Err(());
+        vmemmap_fail!();
     }
 
     // Zero the vmemmap pages using linear mapping

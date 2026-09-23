@@ -14,11 +14,10 @@
 //!    pages, calls try_to_unmap(), frees successfully unmapped pages
 
 extern crate alloc;
-use alloc::vec::Vec;
 
 use core::sync::atomic::Ordering;
 
-use super::page_desc::{PageFlag, PageType, pfn_to_page_mut, MIN_PFN, MAX_PAGES, MAX_PFN};
+use super::page_desc::{PageFlag, pfn_to_page_mut};
 use super::page_alloc::free_page;
 use super::zone::{ZoneType, WMARK_LOW};
 use super::pglist::{
@@ -167,30 +166,37 @@ fn shrink_inactive_list(
     sc.nr_scanned += nr_to_scan;
 }
 
-/// Scan page descriptors for mapped anonymous pages and swap them out.
+/// Reclaim anonymous pages: swap them out and free the physical frames.
 ///
-/// Iterates all page descriptors looking for anonymous, swap-backed, mapped
-/// pages with a single mapping (mapcount == 1).  For each candidate:
+/// Review 4.12: candidates come from the LRU_INACTIVE_ANON LIST (cold/tail
+/// end first) instead of a linear scan over every page descriptor in the
+/// system.
+///
+/// For each candidate:
 ///   1. Allocate a swap slot
-///   2. Write the page to the swap device
-///   3. Replace all PTEs with a swap entry (try_to_unmap_with_swap)
-///   4. Free the physical page
-///
-/// The scan is bounded by `nr_to_scan` to limit latency.
+///   2. EXCLUSIVELY-OWNED single-mapping pages: replace the PTE with the
+///      swap entry FIRST, then write the page to the device. Installing the
+///      entry before the write closes the torn-write window — with the old
+///      write-first order, user stores landing in the page DURING the block
+///      write were silently lost when the PTE was replaced afterwards
+///      (review 4.12). A fault in the small [PTE-installed, write-done]
+///      window waits on the slot's pending-write mark (swap.rs).
+///      Multi-mapping pages keep the legacy write-first order (the
+///      swap-in/free-slot race on the remaining PTEs is not handled
+///      without a swap cache).
+///   3. Free the physical page
 fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
     use super::rmap::try_to_unmap_with_swap;
 
     let mut reclaimed = 0usize;
 
-    for i in 0..MAX_PAGES {
+    let candidates = super::lru::lru_collect_cold(LRU_INACTIVE_ANON, nr_to_scan);
+
+    for pfn in candidates {
         if reclaimed >= nr_to_scan {
             break;
         }
 
-        let pfn = MIN_PFN + i;
-        if pfn >= MAX_PFN {
-            break; // out of valid page descriptor range
-        }
         let page = pfn_to_page_mut(pfn);
         if page.is_null() {
             continue;
@@ -230,9 +236,11 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 continue;
             }
 
-            // Check referenced flag (recently accessed — give it another chance)
+            // Check referenced flag (recently accessed — give it another
+            // chance at the MRU end instead of just clearing in place)
             if p.test_flag(PageFlag::Referenced) {
                 p.clear_flag(PageFlag::Referenced);
+                super::lru::lru_move_to_tail(p, LRU_INACTIVE_ANON);
                 sc.nr_scanned += 1;
                 continue;
             }
@@ -262,55 +270,100 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
             // Build the swap entry that will be stored in PTEs
             let swap_entry = swap::make_swap_entry(swap_type, swap_offset);
 
-            // Write page contents to the swap device
+            // Single mapping (mapcount == 0) → unmap-first (see doc comment).
+            // Multiple mappings → legacy write-first order.
+            let single_mapping = p.mapcount() == 0;
+
             let phys = pfn_to_phys(pfn);
-            if swap::swap_write_page(swap_type, swap_offset, phys).is_err() {
-                // Write failed — free the slot and skip this page
-                swap::swap_free_slot(swap_type, swap_offset);
-                continue;
-            }
 
-            // Replace PTEs with swap entry
-            let unmapped = try_to_unmap_with_swap(p, swap_entry);
+            if single_mapping {
+                // Install the swap entry in the PTE (page becomes unreachable
+                // for user stores), mark the slot write-in-flight, then write.
+                let unmapped = try_to_unmap_with_swap(p, swap_entry);
+                if unmapped > 0 && !p.is_mapped() {
+                    swap::swap_mark_pending(swap_type, swap_offset);
+                    let write_ok = swap::swap_write_page(swap_type, swap_offset, phys).is_ok();
+                    swap::swap_clear_pending(swap_type, swap_offset);
 
-            if unmapped > 0 && !p.is_mapped() {
-                // Successfully swapped out — clean up and free
-                p.clear_flag(PageFlag::Anonymous);
-                p.clear_flag(PageFlag::SwapBacked);
-                p.set_index(0);
+                    if !write_ok {
+                        // The PTE already holds the entry — nothing to roll
+                        // back to. Leak the slot (freeing it would UAF the
+                        // swap-in path) and drop the page; the data is lost
+                        // to the I/O error either way.
+                        crate::pr_warn!(
+                            "vmscan: swap write failed (type={}, off={}): slot leaked",
+                            swap_type, swap_offset
+                        );
+                    }
 
-                // Remove from LRU
-                super::lru::page_remove_lru(p);
+                    p.clear_flag(PageFlag::Anonymous);
+                    p.clear_flag(PageFlag::SwapBacked);
+                    p.set_index(0);
 
-                // Drop reference; free if last holder
-                let refcount = p.put_page();
-                // R14-1 (F10): free ONLY when WE took it to zero. The old
-                // `<= 0` also freed on underflow (-1) — i.e. when another
-                // CPU had already dropped the last ref and freed the page,
-                // we freed it AGAIN (Zone::free_pages had no guard: same
-                // PFN to two owners — the NEW2 heap-trashing class).
-                if refcount == 0 {
-                    free_page(phys);
-                    reclaimed += 1;
+                    // Remove from LRU
+                    super::lru::page_remove_lru(p);
+
+                    // Drop reference; free if last holder
+                    let refcount = p.put_page();
+                    // R14-1 (F10): free ONLY when WE took it to zero.
+                    if refcount == 0 {
+                        free_page(phys);
+                        reclaimed += 1;
+                    } else {
+                        crate::pr_warn!(
+                            "vmscan: swapped-out page refcount={} (slot leaked)",
+                            refcount
+                        );
+                    }
+                } else if unmapped == 0 {
+                    // No PTE was replaced: the entry was never installed,
+                    // so the slot is genuinely unused — free it.
+                    swap::swap_free_slot(swap_type, swap_offset);
                 } else {
-                    // Page still referenced (unexpected with the refcount==1
-                    // precheck): PTEs already hold the swap entry — LEAK the
-                    // slot rather than freeing it under live references.
+                    // Partial unmap: at least one PTE now references the swap
+                    // entry — freeing the slot would be a UAF. Leak it instead.
                     crate::pr_warn!(
-                        "vmscan: swapped-out page refcount={} (slot leaked)",
-                        refcount
+                        "vmscan: partial unmap during swap-out (slot leaked)"
                     );
                 }
-            } else if unmapped == 0 {
-                // No PTE was replaced: the entry was never installed, so the
-                // slot is genuinely unused — free it.
-                swap::swap_free_slot(swap_type, swap_offset);
             } else {
-                // Partial unmap: at least one PTE now references the swap
-                // entry — freeing the slot would be a UAF. Leak it instead.
-                crate::pr_warn!(
-                    "vmscan: partial unmap during swap-out (slot leaked)"
-                );
+                // Multi-mapping page — legacy order: write first, then unmap.
+                if swap::swap_write_page(swap_type, swap_offset, phys).is_err() {
+                    // Write failed — free the slot and skip this page
+                    swap::swap_free_slot(swap_type, swap_offset);
+                    continue;
+                }
+
+                // Replace PTEs with swap entry
+                let unmapped = try_to_unmap_with_swap(p, swap_entry);
+
+                if unmapped > 0 && !p.is_mapped() {
+                    // Successfully swapped out — clean up and free
+                    p.clear_flag(PageFlag::Anonymous);
+                    p.clear_flag(PageFlag::SwapBacked);
+                    p.set_index(0);
+
+                    // Remove from LRU
+                    super::lru::page_remove_lru(p);
+
+                    // Drop reference; free if last holder
+                    let refcount = p.put_page();
+                    if refcount == 0 {
+                        free_page(phys);
+                        reclaimed += 1;
+                    } else {
+                        crate::pr_warn!(
+                            "vmscan: swapped-out page refcount={} (slot leaked)",
+                            refcount
+                        );
+                    }
+                } else if unmapped == 0 {
+                    swap::swap_free_slot(swap_type, swap_offset);
+                } else {
+                    crate::pr_warn!(
+                        "vmscan: partial unmap during swap-out (slot leaked)"
+                    );
+                }
             }
         }
     }

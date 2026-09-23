@@ -16,7 +16,6 @@
 use super::pglist::first_online_node;
 use super::buddy_allocator::buddy_stats;
 use super::slab::slab_stats;
-use super::pcp::pcp_stats;
 use super::page_desc::page_desc_stats;
 use super::PAGE_SIZE;
 use crate::config::PHYS_MEMORY_SIZE;
@@ -51,7 +50,8 @@ pub struct MemoryInfo {
     pub slab_frees: usize,
 
     // ========== Per-CPU Pages ==========
-    /// PCP page count for each CPU
+    /// PCP page count for each CPU — always 0: the pcp module was removed
+    /// (zero callers; review 4.6 / wave-6). Field kept for /proc ABI shape.
     pub pcp_pages: [usize; 4],
 
     // ========== Page Descriptor Statistics ==========
@@ -142,7 +142,7 @@ impl<'a> core::fmt::Display for MemoryInfoFormatter<'a> {
 ///
 /// Only computes mem_total/mem_free/mem_available/mem_used from the zone
 /// allocator's nr_free counter. Skips expensive buddy_stats, slab_stats,
-/// pcp_stats, and page_desc_stats scans.
+/// and page_desc_stats scans.
 pub fn get_basic_memory_info() -> MemoryInfo {
     let mut info = MemoryInfo::default();
 
@@ -178,13 +178,7 @@ pub fn get_memory_info() -> MemoryInfo {
     info.slab_allocs = slab_stats.cache_stats.iter().map(|c| c.alloc_count).sum();
     info.slab_frees = slab_stats.cache_stats.iter().map(|c| c.free_count).sum();
 
-    // Per-CPU Pages statistics
-    let pcp_stats = pcp_stats();
-    for (i, cpu_stat) in pcp_stats.cpu_stats.iter().enumerate() {
-        if i < 4 && cpu_stat.initialized {
-            info.pcp_pages[i] = cpu_stat.counts.iter().sum();
-        }
-    }
+    // Per-CPU Pages: module removed (wave-6, review 4.6) — pcp_pages stay 0.
 
     // Page descriptor statistics
     let page_stats = page_desc_stats();

@@ -17,8 +17,9 @@ use super::page_desc::{
     Page, PageFlag, pfn_to_page, pfn_to_page_mut, page_to_pfn, copy_page_contents,
 };
 use super::zone::{Zone, pfn_to_phys};
-use super::rmap::try_to_unmap;
+use super::rmap::try_to_unmap_migration;
 use super::PAGE_SIZE;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 // ============================================================================
 // Types
@@ -53,6 +54,20 @@ struct CompactControl {
 
 /// Maximum pages to scan in a single compaction pass.
 const MAX_SCAN_PAGES: usize = 4096;
+
+/// Number of migrations currently in flight (review 4.16).
+///
+/// The page-fault path consults this when it hits a migration-entry PTE:
+/// it waits while a migration is active; a marker left behind by a failed
+/// migration (migration count dropped to zero) falls through to normal
+/// fault handling instead of hanging forever.
+static ACTIVE_MIGRATIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// True while at least one compaction migration holds migration entries
+/// in user PTEs.
+pub fn migration_in_progress() -> bool {
+    ACTIVE_MIGRATIONS.load(Ordering::Acquire) > 0
+}
 
 // ============================================================================
 // Public API
@@ -245,6 +260,11 @@ unsafe fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
             continue;
         }
 
+        // Skip pages already mid-migration (defensive: concurrent compact)
+        if p.test_flag(PageFlag::Migrating) {
+            continue;
+        }
+
         return Some(pfn);
     }
 
@@ -259,11 +279,17 @@ unsafe fn find_migrate_page(cc: &mut CompactControl) -> Option<usize> {
 ///
 /// Steps:
 /// 1. Save the virtual address from `src_page.index`
-/// 2. `try_to_unmap(src_page)` — remove all PTEs
+/// 2. `try_to_unmap_migration(src_page)` — replace PTEs with migration
+///    markers (review 4.16: plain zero-PTEs let a concurrent fault install
+///    a zero page that the remap then overwrote — silent user-write loss)
 /// 3. `copy_page_contents(src, dst)` — memcpy 4KB
 /// 4. `remap_page(dst_page, vaddr)` — install new PTEs pointing to dst
 /// 5. Transfer metadata (anon flags, mapping, index) from src to dst
 /// 6. `free_pages(src_pfn, 0)` — release source to buddy
+///
+/// The migration window (steps 2-4) is bracketed by the src page's
+/// `Migrating` flag and the global ACTIVE_MIGRATIONS counter; the fault
+/// path waits on markers while a migration is in flight.
 ///
 /// # Safety
 /// Both PFNs must be valid, mapped page descriptors. The source page must
@@ -278,7 +304,7 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     }
 
     let src = &*src_page;
-    let dst = &mut *dst_page;
+    let dst = &*dst_page;
 
     // Step 1: Recover the virtual address. page.index stores the PAGE NUMBER
     // (address / PAGE_SIZE, see page_add_anon_rmap / the fault path), not the
@@ -287,6 +313,11 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     if src.index() == 0 {
         return false;
     }
+
+    // Claim the destination up front: refcount 1 keeps it out of
+    // find_free_page's "stealable" set during the window. On failure it
+    // leaks (refcount 1, unlinked) — safer than a second owner.
+    dst.set_refcount(1);
 
     // Save original mapcount — transfer exactly to dst (matches Linux behavior)
     let saved_mapcount = src.mapcount();
@@ -314,14 +345,42 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     });
     let saved_pte_flags = saved_flags_cell.get();
 
-    // Step 2: Unmap from all processes
-    let unmapped = try_to_unmap(src);
+    // Open the migration window: markers go into the PTEs, fault path waits.
+    src.set_flag(PageFlag::Migrating);
+    ACTIVE_MIGRATIONS.fetch_add(1, Ordering::AcqRel);
+
+    let ok = migrate_page_window(src, dst, src_pfn, old_vaddr, saved_mapcount, saved_pte_flags);
+
+    // Close the window (on both success and failure — a stale marker with
+    // no active migration is handled by the fault path falling through to
+    // normal demand-fill).
+    ACTIVE_MIGRATIONS.fetch_sub(1, Ordering::AcqRel);
+    src.clear_flag(PageFlag::Migrating);
+
+    ok
+}
+
+/// Migration window body — runs between the ACTIVE_MIGRATIONS inc/dec.
+///
+/// # Safety
+/// Same contract as migrate_page; window is open (markers allowed in PTEs).
+unsafe fn migrate_page_window(
+    src: &Page,
+    dst: &Page,
+    src_pfn: usize,
+    old_vaddr: usize,
+    saved_mapcount: i32,
+    saved_pte_flags: u64,
+) -> bool {
+    // Step 2: Unmap from all processes — PTEs get migration markers, so a
+    // fault in the window waits instead of materializing a zero page.
+    let unmapped = try_to_unmap_migration(src);
     if unmapped == 0 {
         return false;
     }
 
     // Step 3: Copy page contents
-    copy_page_contents(src_pfn, dst_pfn);
+    copy_page_contents(src_pfn, page_to_pfn(dst as *const Page));
 
     // Step 4: Install new PTEs pointing to dst_pfn
     remap_page(dst, old_vaddr, saved_pte_flags);

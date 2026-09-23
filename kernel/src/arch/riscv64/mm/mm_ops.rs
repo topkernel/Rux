@@ -537,6 +537,14 @@ impl MmStruct {
                 use crate::mm::page_desc::pfn_to_page_mut;
                 let page = pfn_to_page_mut(ppn_val as usize);
                 if !page.is_null() {
+                    // Multi-mapping bookkeeping (review 4.10): drop this
+                    // (mm, vpn) from the page's alternate rmap slots.
+                    unsafe {
+                        (*page).rmap_alt_remove(
+                            self as *const _ as usize,
+                            addr / PAGE_SIZE_USIZE,
+                        );
+                    }
                     if unsafe { (*page).is_mapped() } {
                         // SAFETY: page is non-null (checked above) and points to a valid page
                         // descriptor for a mapped page in this address space.
@@ -555,6 +563,9 @@ impl MmStruct {
                 unsafe {
                     self.clear_pte(addr as u64);
                 }
+                // RSS accounting (review 4.14): one resident page leaves
+                // this address space.
+                self.sub_rss(1);
             }
 
             addr += PAGE_SIZE_USIZE;
@@ -565,6 +576,13 @@ impl MmStruct {
         unsafe {
             asm!("sfence.vma zero, zero");
         }
+
+        // Remote shootdown (review 4.10): the sfence above only flushed the
+        // LOCAL hart. Other CPUs may still hold cached translations of the
+        // pages just unmapped — a stale hit reads/writes freed frames.
+        // One broadcast per batch unmap; the IPI handler performs a full
+        // flush, so pending-bit coalescing cannot lose a request.
+        crate::arch::ipi::flush_tlb_others();
 
         Ok(())
     }
@@ -728,6 +746,11 @@ impl MmStruct {
         new_space.set_arg_end(self.arg_end());
         new_space.set_env_start(self.env_start());
         new_space.set_env_end(self.env_end());
+
+        // RSS (review 4.14): the child's page tables map (COW-shared) every
+        // page the parent had resident — inherit the count so OOM badness
+        // sees forked hogs, not zero-rss newborns.
+        new_space.add_rss(self.rss());
 
         Ok(new_space)
     }
@@ -1463,6 +1486,19 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
             (*new_page).set_flag(PageFlag::Anonymous);
             (*new_page).set_index(virt_addr as usize / (PAGE_SIZE as usize));
             (*new_page).inc_mapcount();
+        }
+        // Multi-mapping bookkeeping + RSS (review 4.10/4.14): the copy is a
+        // new resident page of the faulting address space (the old page
+        // remains resident only for its other owners).
+        if let Some(mm) = crate::sched::current().and_then(|t| t.address_space()) {
+            if !new_page.is_null() {
+                crate::mm::rmap::page_record_mapping(
+                    &*new_page,
+                    mm as *const _ as usize,
+                    virt_addr as usize,
+                );
+            }
+            mm.add_rss(1);
         }
     }
 

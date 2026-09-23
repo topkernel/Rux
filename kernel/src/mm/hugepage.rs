@@ -262,8 +262,11 @@ pub mod pte_flags {
     /// Default kernel huge page flags
     pub const KERNEL_HUGE: u64 = V | R | W | X | A | D;
 
-    /// Default user huge page flags
-    pub const USER_HUGE: u64 = V | R | W | X | U | A | D;
+    /// Default user huge page flags — X deliberately OMITTED (review 4.20:
+    /// a default that includes Execute violates W^X for every anonymous
+    /// huge mapping; callers must OR in X explicitly when the VMA is
+    /// VM_EXEC).
+    pub const USER_HUGE: u64 = V | R | W | U | A | D;
 }
 
 /// Check if PTE is a huge page (leaf at level 1 or 2)

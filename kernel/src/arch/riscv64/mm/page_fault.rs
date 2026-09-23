@@ -228,10 +228,18 @@ fn try_expand_stack(
                 (*page).set_flag(PageFlag::Anonymous);
                 (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
                 (*page).inc_mapcount();
+                crate::mm::rmap::page_record_mapping(
+                    &*page,
+                    addr_space as *const _ as usize,
+                    fault_addr.bits() as usize,
+                );
             }
         }
     }
     drop(_pte_guard);
+
+    // RSS accounting (review 4.14): stack page became resident.
+    addr_space.add_rss(1);
 
     MmFaultResult::Handled
 }
@@ -274,10 +282,36 @@ pub fn handle_mm_fault(
 
     // If not mapped, check for a swap entry in the PTE (V=0 but non-zero bits)
     if !already_mapped {
-        if let Some(swap_entry) = read_pte_raw(root_ppn, fault_addr) {
-            if crate::mm::swap::is_swap_entry(swap_entry) {
+        if let Some(entry) = read_pte_raw(root_ppn, fault_addr) {
+            // Migration entry (review 4.16): compaction is relocating the
+            // page that lived here. Wait for the migration window to close
+            // instead of installing a zero page that the remap would then
+            // overwrite (silent user-write loss). Bounded spin: the window
+            // is a 4KB memcpy plus PTE rewrite on another CPU.
+            if crate::mm::swap::is_migration_entry(entry) {
+                let mut spins: u64 = 0;
+                while crate::mm::compact::migration_in_progress() {
+                    spins += 1;
+                    if spins > 16_000_000 {
+                        break; // wedged migration — fall through to refill
+                    }
+                    core::hint::spin_loop();
+                }
+                // Marker gone (remap installed a valid PTE, or munmap won)?
+                // Retry the instruction.
+                let still_marked = read_pte_raw(root_ppn, fault_addr)
+                    .map(|e| crate::mm::swap::is_migration_entry(e))
+                    .unwrap_or(false);
+                if !still_marked {
+                    return MmFaultResult::Handled;
+                }
+                // Stale marker (migration ended without remap — e.g. the
+                // VMA was concurrently unmapped and re-faulted): fall
+                // through to normal demand handling below.
+            }
+            if crate::mm::swap::is_swap_entry(entry) {
                 crate::pr_debug!("pagefault: swap-in at {:#x}", fault_addr.bits());
-                return handle_swap_fault(addr_space, fault_addr, flags, swap_entry, root_ppn);
+                return handle_swap_fault(addr_space, fault_addr, flags, entry, root_ppn);
             }
         }
     }
@@ -500,6 +534,14 @@ pub fn handle_mm_fault(
                         (*page).set_flag(PageFlag::Anonymous);
                         (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
                         (*page).inc_mapcount();
+                        // Multi-mapping bookkeeping (review 4.10): record
+                        // (mm, vpn) so try_to_unmap can find re-mapped
+                        // instances of this frame.
+                        crate::mm::rmap::page_record_mapping(
+                            unsafe { &*page },
+                            addr_space as *const _ as usize,
+                            fault_addr.bits() as usize,
+                        );
                     }
                     _ => {
                         // File-backed: rmap not wired yet
@@ -509,6 +551,10 @@ pub fn handle_mm_fault(
         }
     }
     drop(_pte_guard);
+
+    // RSS accounting (review 4.14): this address space just gained a
+    // resident page.
+    addr_space.add_rss(1);
 
     MmFaultResult::Handled
 }
@@ -640,6 +686,22 @@ fn handle_swap_fault(
         None => return MmFaultResult::OutOfMemory,
     };
 
+    // Wait for an in-flight swap-out of this slot (review 4.12): the
+    // single-mapping reclaim path installs the swap entry in the PTE
+    // BEFORE the device write; reading the slot before that write lands
+    // would swap in garbage. Bounded spin — the writer is a block write
+    // on another context.
+    {
+        let mut spins: u64 = 0;
+        while swap::swap_slot_pending(swap_type, swap_offset) {
+            spins += 1;
+            if spins > 64_000_000 {
+                break; // give up waiting; the read below fails -> retry
+            }
+            core::hint::spin_loop();
+        }
+    }
+
     // Read page contents from swap device
     if swap::swap_read_page(swap_type, swap_offset, phys_addr as usize).is_err() {
         crate::println!("swap: failed to read page from swap (type={}, offset={})", swap_type, swap_offset);
@@ -704,6 +766,11 @@ fn handle_swap_fault(
             (*page).set_flag(PageFlag::SwapBacked);
             (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
             (*page).inc_mapcount();
+            crate::mm::rmap::page_record_mapping(
+                &*page,
+                addr_space as *const _ as usize,
+                fault_addr.bits() as usize,
+            );
 
             // Add back to anon LRU
             crate::mm::lru::page_add_anon_lru(&*page);
@@ -713,6 +780,9 @@ fn handle_swap_fault(
 
     // Free the swap slot (page is back in memory)
     swap::swap_free_slot(swap_type, swap_offset);
+
+    // RSS accounting (review 4.14): the page is resident again.
+    addr_space.add_rss(1);
 
     MmFaultResult::Handled
 }

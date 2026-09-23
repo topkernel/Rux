@@ -387,11 +387,14 @@ pub extern "C" fn rust_main() -> ! {
             let slab_size = 4 * 1024 * 1024;
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
                 0x80000000,
-                0x80000000 + total_phys_memory,
+                total_phys_memory, // phys SIZE (was phys_base+size — review 4.20)
                 0x80200000,
                 KERNEL_HEAP_PHYS,
             );
             mm::layout::kernel_layout_init(layout);
+            // Boot-time cross-check: heap/slab ranges must be reserved in
+            // memblock and inside physical memory (review 4.20).
+            mm::layout::assert_memblock_consistency(&layout);
             print_status("mm", &format!("layout: kernel={:#x}-{:#x}",
                 layout.kernel_start, layout.kernel_end), true);
             print_status("mm", &format!("layout: heap={:#x}-{:#x}",
@@ -579,10 +582,8 @@ pub extern "C" fn rust_main() -> ! {
             print_status("sched", "PID allocator init", true);
             print_status("sched", "idle task (PID 0)", true);
 
-            // Initialize Per-CPU Pages (after scheduler initialization)
-            let boot_cpu = arch::cpu_id() as usize;
-            mm::init_percpu_pages(boot_cpu);
-            print_status("mm", &format!("PCP cpu{} hotpage", boot_cpu), true);
+            // (PCP per-CPU pages init removed together with mm/pcp.rs —
+            // the module had zero live consumers; see mm/mod.rs note.)
         }
 
         // Initialize kswapd background reclaim thread

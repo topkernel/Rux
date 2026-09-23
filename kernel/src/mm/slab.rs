@@ -201,10 +201,12 @@ impl SlabCache {
         // either the sentinel (0xFFFF = end-of-list) or a valid object index.
         let max_objects = (PAGE_SIZE - header_size) / self.object_size;
         if next_free != 0xFFFF && next_free as usize >= max_objects {
-            // free-list corrupted — treat slab as full to avoid out-of-bounds access
+            // free-list corrupted — treat slab as full. Do NOT return the
+            // out-of-range object (review 4.19: returning the pointer hands
+            // the caller memory past the slab's object array); fail instead.
             header.free_objects = 0;
             self.move_slab_to_full(slab_idx, slab_pages);
-            return obj_ptr;
+            return core::ptr::null_mut();
         }
 
         header.free_index = next_free;
@@ -220,6 +222,13 @@ impl SlabCache {
     }
 
     /// Free object to cache
+    ///
+    /// Returns false (and leaves the cache untouched) when the pointer does
+    /// not name a valid object of THIS cache (review 4.19): the object index
+    /// must land inside the slab's object array, be object-aligned, and the
+    /// slab header must declare this cache's object size. Without these
+    /// checks a kfree fallback loop linked foreign pointers into the wrong
+    /// size class' freelist.
     pub fn free(&mut self, ptr: *mut u8, slab_pages: &SlabPages) -> bool {
         // Find slab containing the object
         let page_addr = (ptr as usize) & !(PAGE_SIZE - 1);
@@ -235,10 +244,39 @@ impl SlabCache {
             return false;
         }
 
-        // Calculate object index
+        // Cache-ownership check: the slab must belong to this size class.
+        // header.object_size is written by create_slab() and kmalloc().
+        if header.object_size as usize != self.object_size {
+            return false;
+        }
+
+        // Calculate object index (guarding the header region)
         let header_size = core::mem::size_of::<SlabHeader>();
-        let obj_offset = ptr as usize - page_addr - header_size;
-        let obj_idx = (obj_offset / self.object_size) as u16;
+        let off = ptr as usize;
+        if off < page_addr + header_size {
+            // Pointer into the slab header — never a valid object.
+            return false;
+        }
+        let obj_offset = off - page_addr - header_size;
+
+        // Alignment: objects start at header_size + i * object_size.
+        if obj_offset % self.object_size != 0 {
+            return false;
+        }
+
+        let obj_idx_u = obj_offset / self.object_size;
+        // Bounds: index must be inside this slab's object array (also
+        // rejects pointers past the last object, e.g. into the next page).
+        if obj_idx_u >= header.total_objects as usize {
+            return false;
+        }
+        let obj_idx = obj_idx_u as u16;
+
+        // Double-free guard: freeing into a slab that already reports every
+        // object free would corrupt the freelist head chain.
+        if header.free_objects >= header.total_objects {
+            return false;
+        }
 
         // Write object index to object memory (as free list)
         // SAFETY: ptr points within a slab page; we hold the cache lock.
@@ -661,6 +699,22 @@ pub fn init_slab(base_addr: usize, size: usize) {
 /// Check if Slab allocator is initialized
 pub fn is_slab_initialized() -> bool {
     SlabAllocator::is_initialized()
+}
+
+/// Get the slab region's actual bounds as configured by init_slab()
+/// — (base_addr, base + max_pages * PAGE_SIZE), or None before init.
+///
+/// Consumers that must distinguish slab pointers from heap pointers
+/// (CombinedAllocator::dealloc) should use this instead of guessing
+/// "heap_end + hardcoded 4MB" (review 4.8: dual-source drifted).
+pub fn slab_region() -> Option<(usize, usize)> {
+    if !SlabAllocator::is_initialized() {
+        return None;
+    }
+    let pages = SlabAllocator::pages();
+    let base = pages.base_addr();
+    let end = base + pages.max_pages() * PAGE_SIZE;
+    Some((base, end))
 }
 
 /// Get Slab statistics

@@ -25,7 +25,7 @@ use crate::sbi;
 // ============================================================================
 
 /// Number of IPI types
-pub const NR_IPI_TYPES: usize = 4;
+pub const NR_IPI_TYPES: usize = 5;
 
 /// IPI type enumeration (bit positions in pending bitmap)
 #[repr(u8)]
@@ -39,6 +39,9 @@ pub enum IpiType {
     Stop = 2,
     /// IRQ work — deferred work (placeholder)
     IrqWork = 3,
+    /// TLB flush — full sfence.vma on the target (remote shootdown,
+    /// review 4.10: sfence.vma is hart-local, unmap paths must IPI peers)
+    TlbFlush = 4,
 }
 
 impl IpiType {
@@ -103,6 +106,27 @@ pub fn send_ipi_type(target: usize, ipi_type: IpiType) {
 /// Send Reschedule IPI (backward-compatible convenience wrapper).
 pub fn send_reschedule_ipi(target_cpu: usize) {
     send_ipi_type(target_cpu, IpiType::Reschedule);
+}
+
+/// Broadcast a full-TLB-flush IPI to every OTHER started CPU.
+///
+/// `sfence.vma` only invalidates on the issuing hart, so any CPU that may
+/// have cached translations of pages we just unmapped must be told to
+/// flush (review 4.10). One IPI per batch unmap — the handler performs a
+/// full `sfence.vma zero, zero`, so coalescing/dedup of the pending bit
+/// (see send_ipi_type) never loses a flush: any in-flight request covers
+/// every prior and concurrent batch.
+///
+/// Safe to call from any context; returns immediately (fire-and-forget —
+/// remote harts flush asynchronously).
+pub fn flush_tlb_others() {
+    let me = crate::arch::cpu_id() as usize;
+    let online = crate::arch::riscv64::smp::num_started_cpus().max(1);
+    for cpu in 0..core::cmp::min(online, MAX_CPUS) {
+        if cpu != me {
+            send_ipi_type(cpu, IpiType::TlbFlush);
+        }
+    }
 }
 
 // ============================================================================
@@ -346,6 +370,18 @@ fn ipi_irq_work_handler() {
     // Placeholder — no users yet
 }
 
+/// TLB shootdown handler: full flush of all non-global translations on
+/// this hart. A full sfence also covers every queued flush request, which
+/// is what makes the pending-bit coalescing in send_ipi_type safe here.
+fn ipi_tlb_flush_handler() {
+    // SAFETY: sfence.vma with all-zero operands invalidates all
+    // non-global TLB entries on the local hart. No memory operands.
+    unsafe {
+        core::arch::asm!("fence iorw, iorw");
+        core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
+    }
+}
+
 // ============================================================================
 // Legacy IRQ handler (for PLIC IRQ 11-13)
 // ============================================================================
@@ -426,6 +462,7 @@ pub fn init() {
     request_ipi(IpiType::CallFunction, ipi_call_function_handler);
     request_ipi(IpiType::Stop, ipi_stop_handler);
     request_ipi(IpiType::IrqWork, ipi_irq_work_handler);
+    request_ipi(IpiType::TlbFlush, ipi_tlb_flush_handler);
 
     // Enable software interrupt
     // SAFETY: Setting SSIE in sie allows this hart to receive software interrupts.

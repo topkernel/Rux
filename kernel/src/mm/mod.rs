@@ -13,7 +13,6 @@ pub mod page_desc;
 pub mod vma;
 pub mod pagemap;
 pub mod slab;
-pub mod pcp;
 pub mod meminfo;
 pub mod mm_struct;
 pub mod memblock;
@@ -29,6 +28,15 @@ pub mod hugepage;
 pub mod vmemmap;
 pub mod swap;
 pub mod compact;
+
+// pcp.rs (per-CPU pages) REMOVED (wave-6, review 4.6 / batch-4 S3): the
+// module had zero live call sites on the alloc/free paths — every
+// allocation went straight to the zone lock — while carrying a
+// `&'static mut` per-CPU array and a next_free-based linkage that would
+// have collided with the zone allocator's OnFreelist discipline had it
+// ever been wired. Deleting it (rather than minimally wiring the free
+// side) keeps the audit surface small; revisit with a proper
+// pageset+list_bulk design if zone-lock contention shows up.
 
 pub use page::*;
 pub use page_desc::{Page, PageFlag, PageFlags, PageType, copy_page_contents};
@@ -58,12 +66,7 @@ pub const USER_VIRT_TOP: usize = 0x0000_0000_7fff_ffff;
 
 pub use allocator::init_heap;
 pub use page_desc::{init_mem_map, pfn_to_page, pfn_to_page_mut, page_to_pfn, pfn_valid, phys_valid};
-pub use slab::{kmalloc, kfree, kzalloc, init_slab, slab_stats};
-pub use pcp::{
-    init_percpu_pages, alloc_page_pcp, free_page_pcp,
-    alloc_kernel_page, alloc_user_page, free_kernel_page, free_user_page,
-    pcp_stats, MigrateType, GFP_KERNEL, GFP_USER,
-};
+pub use slab::{kmalloc, kfree, kzalloc, init_slab, slab_stats, slab_region, is_slab_initialized};
 pub use meminfo::{
     get_memory_info, print_memory_info, get_memory_summary,
     is_memory_low, should_trigger_oom, MemoryInfo, MemorySummary,
@@ -91,7 +94,6 @@ pub use pglist::{
 pub use page_alloc::{
     alloc_pages, alloc_page, get_zeroed_page, free_pages, free_page,
     virt_to_page, virt_to_pfn, page_to_phys, page_to_virt,
-    BuddyAllocator, BuddyStats, init_kernel_buddy, buddy_alloc, buddy_free,
     __get_free_pages, __get_free_page, __get_zeroed_page, __free_pages, __free_page,
     init_zone_system,
 };

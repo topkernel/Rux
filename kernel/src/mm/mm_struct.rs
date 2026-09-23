@@ -121,6 +121,13 @@ pub struct MmStruct {
     /// Stack page count
     stack_vm: AtomicU64,
 
+    /// Resident set size in pages (review 4.14: OOM badness input).
+    /// Incremented when a page is installed into this address space by a
+    /// fault, decremented per zapped PTE in unmap_pages. COW-fork shared
+    /// pages are counted only in the mm that faults them in after the
+    /// break (approximation — no per-PTE accounting).
+    rss: AtomicU64,
+
     // ==================== mmap Region Management ====================
     /// mmap region base address
     mmap_base: AtomicUsize,
@@ -219,6 +226,7 @@ impl MmStruct {
             data_vm: AtomicU64::new(0),
             exec_vm: AtomicU64::new(0),
             stack_vm: AtomicU64::new(0),
+            rss: AtomicU64::new(0),
             // mmap region
             mmap_base: AtomicUsize::new(mmap_base),
             mmap_legacy_base: AtomicUsize::new(mmap_base),
@@ -285,22 +293,34 @@ impl MmStruct {
 
     /// Allocate ASID for this address space
     /// Returns the allocated ASID
+    ///
+    /// Atomic (review 4.2): the old check-then-set let two CPUs racing on
+    /// the same mm both observe `asid == 0`, both draw from the arch pool
+    /// and the loser's store leaked its ASID permanently (pool exhaustion).
+    /// Now a compare_exchange decides the single winner; the loser returns
+    /// the already-installed value and frees its speculative allocation.
     pub fn alloc_asid(&self) -> Option<u16> {
         // Only user address spaces need ASIDs
         if self.space_type != PageTableType::User {
             return Some(0);  // Kernel uses ASID 0
         }
 
-        // Check if already allocated
+        // Fast path: already allocated
         let current = self.asid.load(Ordering::Acquire);
         if current != 0 {
             return Some(current);
         }
 
-        // Allocate new ASID
+        // Draw a candidate, then CAS 0 -> candidate. Only the winner keeps it.
         let asid = crate::arch::mm::alloc_asid()?;
-        self.asid.store(asid, Ordering::Release);
-        Some(asid)
+        match self.asid.compare_exchange(0, asid, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => Some(asid),
+            Err(winner) => {
+                // Lost the race: another thread installed an ASID first.
+                crate::arch::mm::free_asid(asid);
+                Some(winner)
+            }
+        }
     }
 
     /// Free ASID for this address space
@@ -533,6 +553,31 @@ impl MmStruct {
         self.stack_vm.load(Ordering::Acquire)
     }
 
+    // ==================== RSS (resident set) ====================
+
+    /// Get resident set size in pages.
+    #[inline]
+    pub fn rss(&self) -> u64 {
+        self.rss.load(Ordering::Acquire)
+    }
+
+    /// Add pages to the resident set (page installed by a fault).
+    #[inline]
+    pub fn add_rss(&self, pages: u64) {
+        self.rss.fetch_add(pages, Ordering::AcqRel);
+    }
+
+    /// Subtract pages from the resident set (PTE zapped by unmap/exit).
+    /// Saturating at 0 to keep the counter meaningful on accounting gaps.
+    #[inline]
+    pub fn sub_rss(&self, pages: u64) {
+        let _ = self
+            .rss
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                v.checked_sub(pages)
+            });
+    }
+
     // ==================== mmap Region ====================
 
     /// Get mmap base address
@@ -554,11 +599,22 @@ impl MmStruct {
     }
 
     /// Update highest virtual memory end address
+    ///
+    /// Atomic max (review 4.2): the load/store pair lost updates when two
+    /// threads mapped past the old ceiling concurrently.
     #[inline]
     pub fn update_highest_vm_end(&self, addr: usize) {
-        let current = self.highest_vm_end.load(Ordering::Acquire);
-        if addr > current {
-            self.highest_vm_end.store(addr, Ordering::Release);
+        let mut current = self.highest_vm_end.load(Ordering::Acquire);
+        while addr > current {
+            match self.highest_vm_end.compare_exchange_weak(
+                current,
+                addr,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
         }
     }
 
@@ -573,14 +629,29 @@ impl MmStruct {
 
     /// Decrement user count (mm_users)
     /// Returns the value after decrement.
-    /// Panics on underflow (double-free detection).
+    ///
+    /// Underflow-safe (review 4.2): the old fetch_sub decremented first and
+    /// only warned, letting mm_users go negative and mask later double-free
+    /// bugs. Like Linux's atomic_dec_and_test consumers, a decrement at
+    /// <= 0 is refused outright.
     #[inline]
     pub fn mm_users_dec(&self) -> i32 {
-        let old = self.mm_users.fetch_sub(1, Ordering::AcqRel);
-        if old <= 0 {
-            crate::pr_warn!("mm_users underflow: mm_users_dec called at {}", old);
+        loop {
+            let old = self.mm_users.load(Ordering::Acquire);
+            if old <= 0 {
+                crate::pr_warn!("mm_users underflow: mm_users_dec called at {}", old);
+                return old;
+            }
+            match self.mm_users.compare_exchange_weak(
+                old,
+                old - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return old - 1,
+                Err(_) => continue,
+            }
         }
-        old - 1
     }
 
     /// Decrement user count and return true if it reached zero.
@@ -602,14 +673,26 @@ impl MmStruct {
     }
 
     /// Decrement reference count (mm_count)
-    /// Panics on underflow (double-free detection).
+    ///
+    /// Underflow-safe, mirroring mm_users_dec above.
     #[inline]
     pub fn mm_count_dec(&self) -> i32 {
-        let old = self.mm_count.fetch_sub(1, Ordering::AcqRel);
-        if old <= 0 {
-            crate::pr_warn!("mm_count underflow: mm_count_dec called at {}", old);
+        loop {
+            let old = self.mm_count.load(Ordering::Acquire);
+            if old <= 0 {
+                crate::pr_warn!("mm_count underflow: mm_count_dec called at {}", old);
+                return old;
+            }
+            match self.mm_count.compare_exchange_weak(
+                old,
+                old - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return old - 1,
+                Err(_) => continue,
+            }
         }
-        old - 1
     }
 
     /// Decrement reference count and return true if it reached zero.
@@ -776,6 +859,14 @@ impl Drop for MmStruct {
 
         // Free page tables when the last reference is dropped
         // Only free for user address spaces (not kernel)
+        //
+        // Per-VMA teardown note (review 4.2, "Drop 不遍历 VMA"): the actual
+        // page teardown walks the PAGE TABLES (free_user_page_tables visits
+        // every leaf PTE, does page_remove_rmap + put_page and frees the
+        // page-table pages). Driving VmaManager::unmap_pages per VMA here
+        // would put_page every resident page a SECOND time (double free).
+        // The VMA tree itself is released with the struct. RSS/LRU stats
+        // are already drained by that PTE walk.
         if self.space_type == PageTableType::User {
             unsafe {
                 crate::arch::mm::free_user_page_tables(self.pgd);

@@ -612,14 +612,15 @@ unsafe impl GlobalAlloc for CombinedAllocator {
         let heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
         let heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
 
-        // Check if pointer is in Slab area
-        // Slab area is after the heap
-        let slab_start = heap_end;
-        // TODO: This 4MB slab size is hardcoded and should be derived from
-        // config.rs or the actual slab region size passed to init_slab().
-        let slab_end = slab_start + 4 * 1024 * 1024; // 4MB slab
+        // Slab-region membership uses the TRUE bounds registered by
+        // init_slab() (review 4.8) — the old `heap_end + hardcoded 4MB`
+        // duplicated the layout and silently diverged whenever the slab
+        // region moved or resized.
+        let in_slab = crate::mm::slab::slab_region()
+            .map(|(s, e)| ptr_addr >= s && ptr_addr < e)
+            .unwrap_or(false);
 
-        if ptr_addr >= slab_start && ptr_addr < slab_end {
+        if in_slab {
             // In Slab area, use kfree
             crate::mm::kfree(ptr);
         } else if ptr_addr >= heap_start && ptr_addr < heap_end {

@@ -25,8 +25,9 @@ pub const PHYS_MEMORY_BASE: usize = 0x80000000;
 /// This is where the kernel is loaded by the bootloader
 pub const KERNEL_ENTRY: usize = 0x80200000;
 
-/// Default heap size (32MB)
-pub const DEFAULT_HEAP_SIZE: usize = 32 * 1024 * 1024;
+// (DEFAULT_HEAP_SIZE removed — crate::config::KERNEL_HEAP_SIZE is the
+// single source for the heap size; a second 32MB constant here silently
+// drifted from the config, review 4.20.)
 
 /// Default slab size (4MB)
 pub const DEFAULT_SLAB_SIZE: usize = 4 * 1024 * 1024;
@@ -72,7 +73,7 @@ impl KernelMemoryLayout {
             kernel_start: 0,
             kernel_end: 0,
             heap_start: 0,
-            heap_size: DEFAULT_HEAP_SIZE,
+            heap_size: crate::config::KERNEL_HEAP_SIZE,
             slab_start: 0,
             slab_size: DEFAULT_SLAB_SIZE,
             user_phys_start: 0,
@@ -94,7 +95,12 @@ impl KernelMemoryLayout {
         // Calculate heap region (after kernel)
         let _kernel_size = kernel_end - kernel_start;
         let heap_start = (kernel_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        let heap_size = DEFAULT_HEAP_SIZE;
+        // Single source of truth: the kernel heap buddy
+        // (buddy_allocator.rs) is sized from crate::config::KERNEL_HEAP_SIZE;
+        // deriving the layout from the same constant keeps memblock
+        // reservations, the buddy's window and this layout from drifting
+        // apart (assert_memblock_consistency enforces it at boot).
+        let heap_size = crate::config::KERNEL_HEAP_SIZE;
 
         // Calculate slab region (after heap)
         let slab_start = heap_start + heap_size;
@@ -257,6 +263,66 @@ pub fn user_phys_end() -> usize {
 }
 
 // ==================== Debug/Info Functions ====================
+
+/// Boot-time consistency assertion between the kernel layout and memblock
+/// (review 4.20).
+///
+/// The heap and slab regions this layout advertises must:
+///  - lie inside physical memory,
+///  - be exactly adjacent (slab starts where the heap ends), and
+///  - be fully covered by memblock RESERVED regions — anything else means
+///    the zone allocator (which seeds from memory minus reserved) would
+///    hand those pages to a second owner.
+///
+/// Panics at boot (deterministic, single-threaded) on violation.
+pub fn assert_memblock_consistency(layout: &KernelMemoryLayout) {
+    let phys_end = layout.phys_base.saturating_add(layout.phys_size);
+
+    assert!(
+        layout.heap_start >= layout.phys_base
+            && layout.heap_start.saturating_add(layout.heap_size) <= phys_end,
+        "layout: heap {:#x}+{:#x} outside physical memory {:#x}-{:#x}",
+        layout.heap_start,
+        layout.heap_size,
+        layout.phys_base,
+        phys_end
+    );
+    assert!(
+        layout.slab_start.saturating_add(layout.slab_size) <= phys_end,
+        "layout: slab {:#x}+{:#x} outside physical memory",
+        layout.slab_start,
+        layout.slab_size
+    );
+    assert!(
+        layout.slab_start == layout.heap_start + layout.heap_size,
+        "layout: slab {:#x} not adjacent to heap end {:#x}",
+        layout.slab_start,
+        layout.heap_start + layout.heap_size
+    );
+
+    let mb = super::memblock::memblock();
+    let regions = [
+        ("heap", layout.heap_start, layout.heap_size),
+        ("slab", layout.slab_start, layout.slab_size),
+    ];
+    for (name, base, size) in regions {
+        if size == 0 {
+            continue;
+        }
+        let first = base;
+        let last = base + size - PAGE_SIZE;
+        assert!(
+            mb.is_reserved(first) && mb.is_reserved(last),
+            "layout: {} region {:#x}-{:#x} not fully reserved in memblock \
+             (first_reserved={} last_reserved={}) — double-ownership risk",
+            name,
+            base,
+            base + size,
+            mb.is_reserved(first),
+            mb.is_reserved(last)
+        );
+    }
+}
 
 /// Print memory layout information
 pub fn print_kernel_layout() {
