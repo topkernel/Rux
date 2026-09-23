@@ -262,11 +262,126 @@ sys_clone 参数序正确、错误统一 ENOMEM；sys_set_tid_address 语义正�
 
 
 
+# 批次 4：kernel/src/mm/ — Linux 对比全文件检视
+
+范围：25 个 .rs 约 10,618 行。方法：逐文件通读 + 关键疑点 grep 交叉验证。
+
+## 4.0 统计
+
+| 类别 | 设计不一致 | 疑似bug | 待评审 | 小计 |
+|---|---|---|---|---|
+| LINUX-DIFF | 21 | 2 | 13 | 36 |
+| BUG | 1 | 5 | 6 | 12 |
+| RACE | 0 | 5 | 6 | 11 |
+| TIMING | 1 | 1 | 4 | 6 |
+| OVERFLOW | 0 | 0 | 3 | 3 |
+| COMMENT | 0 | 1 | 14 | 15 |
+| ARCH | 1 | 0 | 1 | 2 |
+| **合计** | **24** | **14** | **47** | **85** |
+
+**三条系统性主线**：
+- S1 全局 &mut 别名 UB：pglist.rs 的 NODE_DATA（static mut）经 first_online_node_mut() 在每次 alloc/free/lru/vmscan/kswapd 取 &'static mut——4 CPU 并发多独占引用同时存活（page_alloc.rs:42/135、lru.rs、vmscan.rs:89、kswapd.rs:103/152）。
+- S2 分配无慢路径：alloc_pages 失败仅异步 wake kswapd + 单次 compact 即返回 0；try_to_free_pages/is_memory_low/should_trigger_oom 全部零调用方——Linux __alloc_pages_slowpath 的重试/水位等待/直接回收/OOM 链整体缺失。
+- S3 per-CPU pageset 未接线：pcp.rs 全模块零存活调用方，所有分配直接打 zone 全局锁。
+
+## 4.1 vma.rs（829 行，已检函数 40+）
+- [BUG][疑似bug] vma.rs:627-660 — expand_downwards 只查前驱重叠，不查 (new_start, vma_start) 区间内已有 VMA：栈下有映射时扩栈直接重叠。
+- [LINUX-DIFF][设计不一致] can_merge 要求 offset 全等（Linux 匿名只要求连续）；add 仅单侧合并（Linux 三段链式）。
+- [LINUX-DIFF][设计不一致] find_stack_vma 线性扫描 + 扩栈窗口仅 1 页（Linux rlimit 内任意更低+guard gap）。
+- [COMMENT][待评审] count AtomicU32 死代码漂移；SHARED/PRIVATE 双位无校验；注释陈旧。
+
+## 4.2 mm_struct.rs（794 行，已检函数 60+）
+- [RACE][疑似bug] alloc_asid check-then-set 非原子（ASID 池泄漏）。
+- [RACE][待评审] update_highest_vm_end 非原子。
+- [COMMENT][待评审] mm_users_dec 下溢仅 warn 可变负。
+- [LINUX-DIFF] OOM_SCORE_ADJ 建模为标志位（Linux 10-bit 字段）；Drop 不遍历 VMA；统计松散无快照一致性。
+
+## 4.3 page.rs/pagemap.rs/allocator.rs
+- [OVERFLOW][待评审] ceil() 近 MAX 溢出；new 静默截断。
+- [LINUX-DIFF] VmaError::Overlap→AlreadyMapped（非 FIXED 应挪地址）；Perm 枚举与 PTE 位无对应。
+
+## 4.4 page_desc.rs（897 行，已检函数 50+）
+- [BUG][疑似bug] init_mem_map 范围外页零值=_mapcount 0（偏置约定等价"已映射一次"）。
+- [LINUX-DIFF] 无复合页元数据：尾页 refcount=1（Linux 恒 0 由 head 管）——put 尾页触发错误释放。
+- [RACE][待评审] flags/refcount 顺序散点约定无集中文档。
+
+## 4.5 zone.rs（917 行，已检函数 40+）
+- [BUG][疑似bug] zone.rs:561-584 — **is_buddy_free 不检查 OnFreelist**："refcount==0 但不在链"的页被误判可合并 → 使用中 PFN 重新挂链双重所有权（Linux page_is_buddy 必查 PageBuddy）。
+- [LINUX-DIFF] alloc_pages 无水位/预留准入；每 order 单链无 MIGRATE 类型（反碎片缺失）。
+- [TIMING] remove_from_free_list O(n)。
+- [COMMENT][疑似bug] if false 死调试 30 行；free_pages 内嵌原始 putchar。
+
+## 4.6 pcp.rs（381 行）
+- [LINUX-DIFF][疑似bug] 全模块零调用方（主线 S3）；接线后 PCP 驻留页落入 is_buddy_free 误判面。
+- [RACE] this_cpu_pcp 无抢占保护 &mut 别名。
+
+## 4.7 page_alloc.rs（664 行）
+- [RACE][疑似bug] first_online_node_mut 别名（S1）；[BUG] ZoneMovable 页释放静默泄漏。
+- [LINUX-DIFF] 无慢路径（S2）；[COMMENT] 第二套 KERNEL_BUDDY 零调用方（三套 buddy 并存）。
+
+## 4.8 buddy_allocator.rs（631 行）
+- [BUG][待评审] CombinedAllocator 以 heap_end+硬编码 4MB 判 slab 区（双源）。
+- [COMMENT] order 超 MAX 大块压链统计少认一半；探针残留。
+
+## 4.9 pglist.rs（381 行）
+- [RACE][疑似bug] NODE_DATA static mut（S1 根源）；add_zone 同型二次 add 覆盖+nr_zones 重复递增。
+
+## 4.10 rmap.rs（373 行）
+- [LINUX-DIFF] try_to_unmap 以单 index 反查+全任务扫描（无 anon_vma 树）：MAP_FIXED 跨 vaddr 漏删 PTE。
+- [RACE][疑似bug][ARCH] unmap 后仅本 hart sfence.vma（缺远程 shootdown）——跨进程读写窗口。
+
+## 4.11 lru.rs（333 行）
+- [TIMING][疑似bug] del/move_tail 线性扫描 O(n²) 回收热路径（Linux O(1) 双链）。
+- [LINUX-DIFF] 无 active 链消费、无 PTE A 位回填——双链 aging 名存实亡。
+
+## 4.12 vmscan.rs（319 行）
+- [LINUX-DIFF] reclaim_anonymous_pages 线性扫描全部页描述符（不走 LRU）；swap 写无页锁（撕裂写）。
+
+## 4.13 kswapd.rs（217 行）
+- [LINUX-DIFF] OOM 由 kswapd 16 轮失败触发（Linux 分配慢路径触发）；无 oom_lock 序列化。
+
+## 4.14 oom_kill.rs（287 行）
+- [LINUX-DIFF] badness 用 total_vm（Linux rss+pgtables+swap）：mmap 大而驻留小的进程被误杀。
+- [TIMING] 仅发 SIGKILL 无 OOM reaper/保留配额。
+
+## 4.15 swap.rs（373 行）
+- [ARCH][设计不一致] swap entry 自定义编码（内核自洽，与 Linux 编码不同）；无 swap cache。
+- [BUG][待评审] 超容量打印 truncating 实为禁用；swap 区与 fs 不查重叠。
+
+## 4.16 compact.rs（450 行）
+- [RACE][疑似bug] migrate_page 无 migration entry 保护：窗口期缺页装零页+remap 覆写（用户写丢失+零页泄漏）。
+- [RACE][疑似bug] find_free_page "偷任意无主页"与 pcp/put_page 所有权冲突面。
+- [LINUX-DIFF] 权限遍历全任务任一命中（fallback 0xD7 授 W）。
+
+## 4.17 memblock.rs（637 行）
+- [BUG][疑似bug] add 仅与第一个相邻区合并：横跨两区时重叠条目（total 虚高、重复让渡）。
+- [RACE] memblock_phys_alloc 依赖启动序无锁。
+
+## 4.18 meminfo.rs（265 行）
+- [LINUX-DIFF] mem_available==mem_free；is_memory_low/should_trigger_oom 零调用方。
+
+## 4.19 slab.rs（722 行）
+- [BUG][疑似bug] free 不校验 obj_idx 落界；kfree 回退不验证 cache 归属（挂错尺寸链）。
+- [COMMENT][疑似bug] 自由链越界"标记满并返回该指针"（应返回 null）。
+- [LINUX-DIFF] 空闲 slab 永不归还；无 per-CPU freelist。
+
+## 4.20 layout/vmemmap/hugepage.rs（800 行）
+- [LINUX-DIFF] 堆/slab/user_phys 硬编码比例与 zone 双口径（64MB 用户上限封顶驻留）。
+- [BUG][待评审] init_vmemmap 先置标志后 Err（谎报初始化）；pfn<start 减法下溢。
+- [LINUX-DIFF] 大页无预留池；USER_HUGE 默认含 X。
+
+## 4.22 musl 焦点结论
+split 精确/merge 保守/扩栈盲区；尾页 refcount 约定相反；RLIMIT_AS/DATA 未执行（ulimit -v 无效，仅 MEMLOCK 有一处）；TLB shootdown 缺失为最大并发风险。
+
+## 4.23 结论
+结构对应完整但三类核心运行时语义缺席（S2 慢路径、S3 pcp、迁移类型）；S1 static mut 为全目录 soundness 缺口。疑似 bug 14 项优先：is_buddy_free 缺 OnFreelist、expand_downwards 重叠、NODE_DATA 别名、compact 迁移窗口、memblock 部分合并、slab kfree 校验。
+
+
 ## 分批进度
 - [x] 批次 1：syscall 层（ABI 基准）
 - [x] 批次 2：arch/riscv64（含 3 个 .S）
 - [x] 批次 3：process（fork/exec/wait/signal）
-- [x] 批次 4：mm
+- [ ] 批次 4：mm
 - [x] 批次 5：fs（vfs/ext4/pipe）
 - [x] 批次 6：ipc + sync
 - [x] 批次 7：net + drivers
