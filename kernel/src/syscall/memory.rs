@@ -1404,10 +1404,11 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> i64 {
         return -errno::EFAULT as i64;
     }
 
-    // SAFETY: mode_ptr validated with access_ok(4); writes a u32 value.
+    // SAFETY: mode_ptr validated with access_ok(4); put_user is the
+    // exception-table copy path.
     unsafe {
         // MPOL_DEFAULT = 0
-        core::ptr::write_volatile(mode_ptr, 0);
+        let _ = crate::arch::riscv64::uaccess::put_user(mode_ptr, 0i32);
     }
 
     // Fill nodemask with all nodes
@@ -1419,7 +1420,7 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> i64 {
         // SAFETY: nodemask_ptr validated with access_ok; nwords bounded by maxnode.
         unsafe {
             for i in 0..nwords {
-                core::ptr::write_volatile(nodemask_ptr.add(i), usize::MAX);
+                let _ = crate::arch::riscv64::uaccess::put_user(nodemask_ptr.add(i), usize::MAX);
             }
         }
     }

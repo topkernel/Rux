@@ -45,6 +45,19 @@ fn s_mode_ctx(hart: usize) -> usize {
     2 * hart + 1
 }
 
+/// Basic priority layering (review LINUX-DIFF: every IRQ used to get
+/// priority 1, so the PLIC could never prefer the console over bulk device
+/// work). QEMU virt IRQ map: 1..=8 are the virtio-mmio slots, 10 is the
+/// UART console. Console/interactive sources outrank block/net throughput
+/// sources; everything else stays at the base priority.
+fn default_priority_for(irq: usize) -> u32 {
+    match irq {
+        10 => 5,            // UART console — keep interactive latency low
+        1..=8 => 3,         // virtio-mmio (blk/net/input/gpu)
+        _ => PLIC_PRIORITY_BASE,
+    }
+}
+
 // ==================== PLIC hardware operations ====================
 
 pub struct Plic {
@@ -107,7 +120,7 @@ impl Plic {
     /// context, this needs AMO (`amoadd.w`) or a spinlock.
     pub fn enable_interrupt(&self, hart: usize, irq: usize) {
         let _rmw = ENABLE_RMW_LOCK.lock();
-        self.set_priority(irq, PLIC_PRIORITY_BASE);
+        self.set_priority(irq, default_priority_for(irq));
         let ctx = s_mode_ctx(hart);
         let word = irq / 32;
         let bit = irq % 32;
@@ -158,14 +171,30 @@ impl Plic {
         }
     }
 
-    pub fn read_pending(&self) -> u32 {
-        let addr = self.base + offset::PENDING;
+    /// Read one word of the PLIC pending array.
+    ///
+    /// The pending array at offset::PENDING has one 32-bit word per 32
+    /// IRQs (MAX_INTERRUPTS/32 words total). The old `read_pending` only
+    /// ever read word 0, so IRQs >= 32 were invisible to any diagnostics
+    /// (review BUG: read_pending 全字).
+    pub fn read_pending_word(&self, word: usize) -> u32 {
+        let words = (MAX_INTERRUPTS + 31) / 32;
+        if word >= words {
+            return 0;
+        }
+        let addr = self.base + offset::PENDING + word * 4;
         // SAFETY: addr is a valid PLIC pending register (read-only).
         unsafe {
             let pending: u32;
             asm!("lw {}, 0({})", out(reg) pending, in(reg) addr, options(nostack));
             pending
         }
+    }
+
+    /// Read the FIRST pending word (IRQs 0..31). See read_pending_word for
+    /// the full array.
+    pub fn read_pending(&self) -> u32 {
+        self.read_pending_word(0)
     }
 
     pub fn trigger_ipi(&self, irq: usize) {
@@ -198,13 +227,18 @@ fn plic_mask(data: &IrqData) {
 }
 
 fn plic_unmask(data: &IrqData) {
-    // Only enable the IRQ on the boot hart.
-    // PLIC delivers a pending IRQ to ALL harts that have it enabled.
-    // If enabled on multiple harts, they all claim the same IRQ and
-    // contend on the irq_desc action lock → deadlock.
-    // TODO: implement proper IRQ affinity (set_affinity) to distribute.
-    let hart = crate::arch::riscv64::smp::boot_hart_id() as usize;
-    PLIC.enable_interrupt(hart, data.hwirq as usize);
+    // Multi-core enable (review LINUX-DIFF): the old code enabled the IRQ
+    // on the boot hart ONLY, serially funneling every external interrupt
+    // onto hart 0 and starving the other CPUs. PLIC claim semantics make
+    // multi-hart enable safe: when the IRQ fires, every enabled hart traps
+    // and claims, the hardware hands the IRQ to exactly ONE claimer and
+    // returns 0 to the rest (the old comment's "all claim the same IRQ and
+    // deadlock on the action lock" scenario cannot happen) — racing claims
+    // are precisely how interrupt load spreads across CPUs.
+    // Enabling an offline hart's context is harmless (it never claims).
+    for hart in 0..crate::config::MAX_CPUS {
+        PLIC.enable_interrupt(hart, data.hwirq as usize);
+    }
 }
 
 fn plic_eoi(data: &IrqData) {

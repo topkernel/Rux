@@ -2,7 +2,7 @@
 //!
 //! Implements semget, semctl, semop, semtimedop following the Linux kernel design.
 
-use crate::arch::riscv64::uaccess::{access_ok, copy_to_user};
+use crate::arch::riscv64::uaccess::{access_ok, copy_to_user, get_user, put_user};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
@@ -395,8 +395,8 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                     for i in 0..nsems {
                         let val = sems[i].value.load(Ordering::Relaxed);
                         // SAFETY: array_ptr was access_ok-validated for nsems*4 bytes above;
-                        // i is bounded by nsems so add(i) stays within the validated range.
-                        unsafe { core::ptr::write_volatile(array_ptr.add(i), val) };
+                        // put_user is the exception-table copy path (SUM=0 safe).
+                        let _ = unsafe { put_user(array_ptr.add(i), val) };
                     }
                 }
             }
@@ -420,8 +420,8 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 if let Some(ref mut sems) = *entry.inner.sems.lock() {
                     for i in 0..nsems {
                         // SAFETY: array_ptr was access_ok-validated for nsems*4 bytes above;
-                        // i is bounded by nsems so add(i) stays within the validated range.
-                        let val = unsafe { core::ptr::read_volatile(array_ptr.add(i)) };
+                        // get_user is the exception-table copy path (SUM=0 safe).
+                        let val = unsafe { get_user(array_ptr.add(i)).unwrap_or(0) };
                         if val < 0 || val > SEMVMX {
                             return -(errno::ERANGE as i64);
                         }
@@ -603,9 +603,9 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
             return -(errno::EFAULT as i64);
         }
         // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
-        // casting to two consecutive i64 values (sec + nsec) is within bounds.
-        let ts_sec = unsafe { *(timeout_ptr as *const i64) };
-        let ts_nsec = unsafe { *((timeout_ptr as *const i64).add(1)) };
+        // get_user is the exception-table copy path (SUM=0 safe).
+        let ts_sec = unsafe { get_user(timeout_ptr as *const i64).unwrap_or(0) };
+        let ts_nsec = unsafe { get_user((timeout_ptr as *const i64).add(1)).unwrap_or(0) };
         if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
             return -(errno::EINVAL as i64);
         }

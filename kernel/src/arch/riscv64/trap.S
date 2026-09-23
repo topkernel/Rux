@@ -618,6 +618,11 @@ trap_exit:
     addi sp, t0, -PT_SIZE
 
     // Restore CSR (restore sstatus first to check SPP)
+    // NOTE: sstatus is restored verbatim, including SUM. Masking SUM here
+    // would corrupt preempted uaccess copy windows (a trap nested inside
+    // __copy_user's SUM=1 region must resume with SUM=1 or the copy
+    // spuriously faults). Outside those bracketed windows SUM is always 0
+    // after the burn-in sites were fixed (SUM convergence, review SEC).
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)
     csrw sstatus, t0
@@ -747,6 +752,8 @@ trap_exit:
 
 .Lrestore_kernel_csrs:
     // Restore CSR
+    // NOTE: sstatus is restored verbatim, including SUM — see the comment
+    // at .Lrestore_and_exit (preempted uaccess windows must resume SUM=1).
     ld t0, PT_STATUS(sp)
     ld t1, PT_EPC(sp)
     csrw sstatus, t0

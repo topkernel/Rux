@@ -19,15 +19,11 @@ use crate::sbi;
 
 // IPI count per hart — must match config::MAX_CPUS
 const NUM_HARTS: usize = crate::config::MAX_CPUS;
-static IPI_COUNT: [AtomicU32; NUM_HARTS] = {
-    let arr: [AtomicU32; NUM_HARTS] = [
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-        AtomicU32::new(0),
-    ];
-    arr
-};
+// Review CONS: the literal 4-element initializer (and the hardcoded `>= 4`
+// bounds checks below) silently truncated/broke if MAX_CPUS ever changed;
+// a replication expression keeps the array sized by the single source of
+// truth (and would fail to compile with a fixed literal list).
+static IPI_COUNT: [AtomicU32; NUM_HARTS] = [const { AtomicU32::new(0) }; NUM_HARTS];
 
 /// Initialize CLINT driver
 ///
@@ -49,7 +45,7 @@ pub fn init() {
 /// # Parameters
 /// * `target_hart` - Target hart ID (0-3)
 pub fn send_ipi(target_hart: usize) {
-    if target_hart >= 4 {
+    if target_hart >= NUM_HARTS {
         return;
     }
 
@@ -68,7 +64,7 @@ pub fn send_ipi(target_hart: usize) {
 /// # Parameters
 /// * `hart` - Hart ID
 pub fn clear_ipi(hart: usize) {
-    if hart >= 4 {
+    if hart >= NUM_HARTS {
         return;
     }
 
@@ -88,7 +84,7 @@ pub fn clear_ipi(hart: usize) {
 /// # Returns
 /// IPI count
 pub fn get_ipi_count(hart: usize) -> u32 {
-    if hart < 4 {
+    if hart < NUM_HARTS {
         IPI_COUNT[hart].load(Ordering::Relaxed)
     } else {
         0

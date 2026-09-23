@@ -10,7 +10,7 @@
 //! - `copy_thread`: Copy thread state with fork
 //! - `flush_thread`: Clean up thread state
 
-use crate::arch::riscv64::pt_regs::{PtRegs, SR_PIE, SR_SPP, SR_SUM, SR_FS_INITIAL};
+use crate::arch::riscv64::pt_regs::{PtRegs, SR_PIE, SR_FS_INITIAL, SR_FS as SR_FS_MASK};
 use crate::arch::riscv64::mm::VirtAddr;
 use crate::process::task::Task;
 use core::arch::asm;
@@ -56,9 +56,13 @@ pub fn start_thread(regs: &mut PtRegs, pc: u64, sp: u64) {
     // Set sstatus:
     // - SPP = 0: Return to user mode
     // - SPIE = 1: Enable interrupts
-    // - SUM = 1: Allow S-mode to access user memory
     // - FS = INITIAL: FPU in initial state
-    regs.status = SR_PIE | SR_SUM | SR_FS_INITIAL;
+    // SUM is deliberately NOT set (SUM convergence, review SEC): the kernel
+    // keeps sstatus.SUM=0 and reaches user memory only via the uaccess
+    // exception-table paths. Burning SUM into the user-saved status here
+    // leaked a SUM=1 sstatus back into the kernel on every return-to-kernel
+    // transition.
+    regs.status = SR_PIE | SR_FS_INITIAL;
 
     // Clear cause and badaddr
     regs.cause = 0;
@@ -179,6 +183,18 @@ pub fn flush_thread() {
 
             // Clear vector state (TODO: implement when V extension is supported)
             thread.vstate_valid = false;
+
+            // Drop the LIVE FPU as well (review ARCH, FP residue): without
+            // this, the next context switch-out would record the live FS
+            // (still Clean/Dirty from the old image) into thread.fs and
+            // resurrect the old image's FP registers after execve — leaking
+            // data across images. With the live FS=Off, the new image's
+            // first FP instruction traps and goes through the fpu_init
+            // path (zeroed registers).
+            let sstatus: u64;
+            asm!("csrr {}, sstatus", out(reg) sstatus);
+            let new_sstatus = sstatus & !SR_FS_MASK;
+            asm!("csrw sstatus, {}", in(reg) new_sstatus);
         }
     }
 }

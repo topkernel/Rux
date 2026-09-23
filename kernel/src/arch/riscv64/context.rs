@@ -109,9 +109,14 @@ __switch_to:
     sd    zero, 0(t0)
 
     # Restore next's context
-    # Restore SUM bit: clear first, then conditionally set.
-    # Using only csrs leaks the SUM bit — if prev had SUM=1 and
-    # next has SUM=0, SUM remains set.
+    # Restore SUM bit: clear first, then conditionally set from next's
+    # saved value. This per-task save/restore is load-bearing (do NOT
+    # "harden" it into an unconditional clear): a task preempted while
+    # inside a uaccess copy window runs with SUM=1, and unless that value
+    # is restored on switch-in, the resumed copy loop would fault with
+    # SUM=0 and spuriously fail with EFAULT for a valid user pointer.
+    # Outside the bracketed uaccess windows every task saves SUM=0 (SUM
+    # convergence, review SEC), so no SUM=1 leaks between tasks.
     ld    t0, {thread_sum}(a4)
     li    t1, {sr_sum}
     csrc  sstatus, t1         // Clear SUM unconditionally
@@ -218,17 +223,28 @@ pub unsafe fn __switch_mm_linear(next_ppn: u64) {
 }
 
 #[inline]
-pub unsafe fn switch_mm(next_ppn: u64) {
-    let satp = (8u64 << 60) | next_ppn;
+pub unsafe fn switch_mm(next_ppn: u64, asid: u16) {
+    // satp = MODE(Sv39) | ASID | PPN. Wiring the mm's ASID (review PERF:
+    // the asid.rs allocator existed with zero consumers, so every switch
+    // used ASID 0 and needed full TLB flushes).
+    let satp = (8u64 << 60) | ((asid as u64) << 44) | next_ppn;
 
     // Switch page table
     // The user page table has identity mapping (VPN2[2]) and kernel mappings (VPN2[256-511])
     // so kernel code remains accessible after the switch
+    //
+    // One ASID-scoped sfence AFTER the satp write (the old code did a full
+    // "sfence.vma zero,zero" both before and after — the pre-switch one was
+    // pure waste). The scoped fence also covers ASID reuse: a freshly
+    // reallocated ASID may still have stale TLB entries from its previous
+    // owner, and flushing just that ASID's entries on switch-in is cheap
+    // (typically none exist). Kernel/global mappings are unaffected by an
+    // rs2!=0 sfence, so the shared kernel half never thrashes.
     core::arch::asm!(
-        "sfence.vma zero, zero",
         "csrw satp, {satp}",
-        "sfence.vma zero, zero",
+        "sfence.vma zero, {asid}",
         satp = in(reg) satp,
+        asid = in(reg) asid as u64,
         options(nostack, preserves_flags)
     );
 }
@@ -284,7 +300,17 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         let current_ppn = current_satp & 0xFFFFFFFFFFFFF;
 
         if current_ppn != next_ppn {
-            switch_mm(next_ppn);
+            // ASID wiring: allocate (once) and use the mm's own ASID so the
+            // TLB can hold multiple address spaces simultaneously. Falls
+            // back to ASID 0 if the pool is exhausted — correctness is
+            // preserved by the per-switch ASID-scoped sfence either way.
+            let asid = next_mm.asid();
+            let asid = if asid != 0 {
+                asid
+            } else {
+                next_mm.alloc_asid().unwrap_or(0)
+            };
+            switch_mm(next_ppn, asid);
         }
     } else {
         // Next task is a kernel thread or idle task — switch to the
@@ -296,7 +322,9 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         let current_satp = get_current_satp();
         let current_ppn = current_satp & 0xFFFFFFFFFFFFF;
         if current_ppn != kernel_ppn {
-            switch_mm(kernel_ppn);
+            // Kernel address space: ASID 0 (lazy-TLB style — no user
+            // translations are needed while running kernel threads).
+            switch_mm(kernel_ppn, 0);
         }
     }
 

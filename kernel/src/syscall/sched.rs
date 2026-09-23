@@ -882,8 +882,11 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     let mask_words = core::cmp::min(size / core::mem::size_of::<usize>(), 8);
     let mut has_online = false;
     for i in 0..mask_words {
-        // SAFETY: mask_ptr is access_ok-validated for size bytes; i < mask_words stays in bounds.
-        let word = unsafe { core::ptr::read_volatile(mask_ptr.add(i)) };
+        // SAFETY: mask_ptr is access_ok-validated for size bytes; get_user
+        // is the exception-table copy path (SUM=0 safe). Unreadable word = 0.
+        let word = unsafe {
+            crate::arch::riscv64::uaccess::get_user(mask_ptr.add(i)).unwrap_or(0)
+        };
         // Check bits up to ncpus
         let bits_to_check = core::cmp::min(core::mem::size_of::<usize>() * 8, ncpus);
         for bit in 0..bits_to_check {
@@ -908,8 +911,11 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     };
     let mut stored_mask: u32 = 0;
     for i in 0..mask_words {
-        // SAFETY: mask_ptr is access_ok-validated for size bytes; i < mask_words stays in bounds.
-        let word = unsafe { core::ptr::read_volatile(mask_ptr.add(i)) };
+        // SAFETY: mask_ptr is access_ok-validated for size bytes; get_user
+        // is the exception-table copy path (SUM=0 safe). Unreadable word = 0.
+        let word = unsafe {
+            crate::arch::riscv64::uaccess::get_user(mask_ptr.add(i)).unwrap_or(0)
+        };
         let bits_to_check = core::cmp::min(core::mem::size_of::<usize>() * 8, ncpus);
         for bit in 0..bits_to_check {
             let cpu = i * core::mem::size_of::<usize>() * 8 + bit;

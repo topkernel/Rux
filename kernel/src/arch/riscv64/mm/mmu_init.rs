@@ -402,14 +402,20 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 
 // ==================== Page Mapping Functions ====================
 
-/// Map a single page in page table
+/// Map a single page in page table WITHOUT flushing the TLB.
+///
+/// Internal batch primitive (review PERF: map_page used to issue a full
+/// `sfence.vma` per 4K page, so boot-time region loops paid ~1000 global
+/// TLB flushes). Region/batch callers fence ONCE after their loop; single
+/// page callers use the public `map_page`, which keeps its fence so a
+/// freshly faulted-in page is immediately usable.
 ///
 /// # Arguments
 /// - root_ppn: Root page table physical page number
 /// - virt: Virtual address
 /// - phys: Physical address
 /// - flags: Page table entry flags
-pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
+unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
 
@@ -456,8 +462,20 @@ pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64
     let pte_bits: u64 = (ppn << 10) | flags;
 
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
+}
 
-    // Flush TLB
+/// Map a single page in page table
+///
+/// # Arguments
+/// - root_ppn: Root page table physical page number
+/// - virt: Virtual address
+/// - phys: Physical address
+/// - flags: Page table entry flags
+pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
+    map_page_noflush(root_ppn, virt, phys, flags);
+
+    // Flush TLB (single-page callers — page faults, mremap, io_uring —
+    // need the new translation visible before the retrying access).
     asm!("sfence.vma");
 }
 
@@ -473,9 +491,11 @@ pub(crate) unsafe fn map_region(root_ppn: u64, start: u64, size: u64, flags: u64
     while virt.bits() < end.bits() {
         let offset = virt.bits() - virt_start.bits();
         let phys = PhysAddr::new(phys_start.bits() + offset);
-        map_page(root_ppn, virt, phys, flags);
+        map_page_noflush(root_ppn, virt, phys, flags);
         virt = VirtAddr::new(virt.bits() + PAGE_SIZE);
     }
+    // One fence for the whole region (batch aggregation).
+    asm!("sfence.vma zero, zero", options(nomem, nostack));
 }
 
 /// Map a 2MB huge page using PMD leaf entry
@@ -526,10 +546,11 @@ unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
     (*table1).set(vpn1, PageTableEntry::from_bits(entry_bits));
 }
 
-/// Map a kernel virtual page to a physical page
+/// Map a kernel virtual page to a physical page WITHOUT flushing the TLB.
 ///
-/// Used for vmemmap and other kernel mappings that need 4KB page granularity.
-pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
+/// Internal batch primitive — see map_page_noflush. Region callers fence
+/// once after their loop via map_kernel_region.
+unsafe fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) {
     let vpn2 = ((virt >> 30) & 0x1FF) as usize;
     let vpn1 = ((virt >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt >> 12) & 0x1FF) as usize;
@@ -577,19 +598,27 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
     let pte_bits: u64 = (ppn << 10) | flags;
 
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
+}
 
+/// Map a kernel virtual page to a physical page
+///
+/// Used for vmemmap and other kernel mappings that need 4KB page granularity.
+pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
+    map_kernel_page_noflush(virt, phys, flags);
     asm!("sfence.vma zero, zero", options(nomem, nostack));
 }
 
 /// Map a region of kernel virtual pages to physical pages (identity mapped MMIO)
 ///
-/// Uses current satp's page table. Maps each 4KB page individually.
+/// Uses current satp's page table. Maps each 4KB page individually, then
+/// flushes the TLB ONCE for the whole region (per-page flushes in the loop
+/// cost hundreds of global sfence.vma at boot — review PERF).
 pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
     let mut v = virt;
     let end = virt + size;
     while v < end {
         let offset = v - virt;
-        map_kernel_page(v, phys + offset, flags);
+        map_kernel_page_noflush(v, phys + offset, flags);
         v += PAGE_SIZE;
     }
     asm!("sfence.vma zero, zero", options(nomem, nostack));
@@ -670,8 +699,11 @@ pub unsafe extern "C" fn setup_vm() {
     let mut virt = kernel_phys;
     let end_phys = kernel_phys + kernel_size;
 
+    // No per-page flushes here: this runs BEFORE the MMU is enabled —
+    // boot.S's "sfence.vma; csrw satp" trampoline sequence publishes the
+    // tables once (review PERF aggregation).
     while phys < end_phys {
-        map_page(early_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
+        map_page_noflush(early_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
         phys += PAGE_SIZE;
         virt += PAGE_SIZE;
     }
@@ -680,7 +712,7 @@ pub unsafe extern "C" fn setup_vm() {
     phys = kernel_phys;
     virt = kernel_virt;
     while phys < end_phys {
-        map_page(early_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
+        map_page_noflush(early_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
         phys += PAGE_SIZE;
         virt += PAGE_SIZE;
     }
@@ -742,7 +774,9 @@ pub fn init() {
                 phys += PMD_SIZE as u64;
                 virt += PMD_SIZE as u64;
             } else {
-                map_page(root_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
+                // No per-page flush — addr_space.enable() below fences the
+                // whole table once after the switch (review PERF aggregation).
+                map_page_noflush(root_ppn, VirtAddr::new(virt), PhysAddr::new(phys), kernel_flags);
                 phys += PAGE_SIZE;
                 virt += PAGE_SIZE;
             }
@@ -783,6 +817,13 @@ pub fn init() {
 #[allow(dead_code)]
 pub fn setup_device_mappings() {
     unsafe {
+        // SVPBMT IO memory type (PTE bits 62:61) requires the CPU to
+        // implement the svpbmt extension — QEMU's default `-cpu rv64`
+        // ISA (rv64imafdch...) does NOT include svpbmt, and setting the
+        // bits there makes the PTE reserved-invalid: every MMIO access
+        // faults (observed boot panic at PLIC set_priority). Until ISA
+        // probing gates this, map devices cacheable (QEMU's memory model
+        // tolerates it); a real-machine port must probe svpbmt first.
         let device_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W |
                           PageTableEntry::A | PageTableEntry::D;
 
@@ -834,7 +875,9 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
                 if map_size == PMD_SIZE as usize {
                     map_pmd_huge_page(virt, phys, linear_flags);
                 } else {
-                    map_kernel_page(virt as u64, phys as u64, linear_flags);
+                    // No per-page flush: the whole linear mapping is fenced
+                    // once after this loop (review PERF aggregation).
+                    map_kernel_page_noflush(virt as u64, phys as u64, linear_flags);
                 }
 
                 phys += map_size;

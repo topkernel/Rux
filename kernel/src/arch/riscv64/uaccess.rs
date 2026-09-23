@@ -26,6 +26,12 @@
 // Include optimized assembly implementation
 core::arch::global_asm!(include_str!("uaccess.S"));
 
+/// Linux MAX_RW_COUNT (INT_MAX & PAGE_MASK, 2 GiB minus one page): the
+/// per-syscall upper bound for single read/write style transfers, so a
+/// huge user count can never overflow internal length arithmetic.
+/// Applied at the syscall layer via `crate::syscall::io::clamp_rw_count`.
+pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
+
 /// User space access error type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserAccessError {
@@ -223,6 +229,10 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
 /// # Returns
 /// Returns number of uncopied bytes. 0 means complete success.
 ///
+/// On failure the uncopied tail of `to` is zero-filled, matching Linux's
+/// copy_from_user (prevents kernel-heap information disclosure when the
+/// caller proceeds with a short copy).
+///
 /// # Safety
 /// - `to` must point to valid kernel memory
 /// - `from` must be a valid user space address (if invalid, returns n)
@@ -234,12 +244,24 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 
     // Check if user space address is valid
     if !access_ok(from as usize, n) {
+        // Zero the whole kernel buffer: callers (e.g. msgsnd, semtimedop)
+        // historically consumed the buffer even on failure, and leaving
+        // previous kernel heap contents in it is an information leak.
+        core::ptr::write_bytes(to, 0, n);
         return n;
     }
 
     // Delegate to assembly implementation which has exception table entries
     // for fault-safe user memory access.
-    __copy_from_user(to, from, n)
+    let uncopied = __copy_from_user(to, from, n);
+    if uncopied > 0 {
+        // Zero-fill the uncopied tail (Linux semantics, review SEC): the
+        // kernel buffer must never keep stale contents past the point the
+        // user copy reached.
+        let copied = n - uncopied;
+        core::ptr::write_bytes(to.add(copied), 0, uncopied);
+    }
+    uncopied
 }
 
 /// Zero user space memory
@@ -371,6 +393,8 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
     while i < limit {
         // get_user goes through copy_from_user → __copy_from_user (assembly)
         // which has exception table entries, so page faults are handled safely.
+        // Note: a NUL at index 0 (empty string) is a SUCCESS returning an
+        // empty slice — the old `i == 0 -> EFAULT` rejected it (review BUG).
         match unsafe { get_user(from.add(i)) } {
             Some(byte) => {
                 buf[i] = byte;
@@ -381,10 +405,6 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
             }
             None => return Err(-EFAULT),
         }
-    }
-
-    if i == 0 {
-        return Err(-EFAULT);
     }
 
     Ok(&buf[..i])

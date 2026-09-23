@@ -122,20 +122,21 @@ pub fn disable_timer_interrupt() {
 }
 
 pub fn enable_external_interrupt() {
-    // SAFETY: csrs atomically sets bits in sie and sstatus CSRs; SEIE and SUM are safe to enable.
+    // SUM convergence (review SEC): the kernel now runs with sstatus.SUM=0
+    // at all times — user memory is only reachable through the uaccess
+    // exception-table paths, which bracket their copy loops with explicit
+    // SUM set/clear. Enabling SUM here (the old behavior) silently let
+    // syscall code dereference raw user pointers: a bad pointer then
+    // skipped the exception table and hit the KernelPanic path instead of
+    // returning EFAULT.
+    // SAFETY: csrs atomically sets the SEIE bit in the sie CSR; enabling
+    // external interrupts is safe.
     unsafe {
         // Enable external interrupt (SEIE bit) - use csrs to preserve other bits
         let seie: u64 = 512;  // SEIE bit (2^9)
         asm!(
             "csrs sie, {}",
             in(reg) seie,
-            options(nomem, nostack)
-        );
-
-        let sstatus_sum: u64 = 262144;  // SUM bit (1 << 18)
-        asm!(
-            "csrs sstatus, {}",
-            in(reg) sstatus_sum,
             options(nomem, nostack)
         );
     }
@@ -166,15 +167,29 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
         // After sret, the CPU would re-execute WFI, causing the idle loop
         // to never advance past WFI. Advancing epc by 4 skips WFI.
         //
-        // Safety: epc must be in the mapped kernel text region (SV39 canonical
-        // upper half) before dereferencing.  During early SMP boot, sepc may
-        // contain an unmapped physical address, which would trigger a nested
-        // page fault and kernel panic.
-        if !regs_ref.user_mode() && regs_ref.epc % 4 == 0 && (regs_ref.epc >> 48) == 0xffff {
-            const WFI_INSN: u32 = 0x10500073;
-            let insn = core::ptr::read_volatile(regs_ref.epc as *const u32);
-            if insn == WFI_INSN {
-                regs_ref.epc += 4;
+        // Safety: the dereference below is a raw kernel-mode read, so the
+        // epc must be provably inside the kernel text mapping before we
+        // touch it. Restricting to [_stext, _etext] (instead of merely
+        // "canonical upper half") excludes every other kernel VA range —
+        // during early SMP boot sepc may hold an unmapped physical address,
+        // and a fault on this read is a nested-trap KernelPanic (review
+        // RISK). WFI can only legally execute in kernel text anyway.
+        if !regs_ref.user_mode() && regs_ref.epc % 4 == 0 {
+            extern "C" {
+                static _stext: u8;
+                static _etext: u8;
+            }
+            // SAFETY: linker symbols _stext/_etext bound the kernel text
+            // section; only their addresses are read.
+            let (lo, hi) = unsafe {
+                (&raw const _stext as usize as u64, &raw const _etext as usize as u64)
+            };
+            if regs_ref.epc >= lo && regs_ref.epc < hi {
+                const WFI_INSN: u32 = 0x10500073;
+                let insn = core::ptr::read_volatile(regs_ref.epc as *const u32);
+                if insn == WFI_INSN {
+                    regs_ref.epc += 4;
+                }
             }
         }
 
@@ -397,18 +412,28 @@ fn handle_syscall(regs: &mut PtRegs) {
     let instr_size = if orig_epc % 4 == 0 {
         4 // 32-bit instruction
     } else {
-        // Read the instruction to check if it's compressed
-        // SAFETY: orig_epc points into the user text segment which is mapped and readable;
-        // read_volatile is used to avoid compiler optimizations on instruction fetch.
-        let instr16: u16;
-        unsafe {
-            let ptr = orig_epc as *const u16;
-            instr16 = core::ptr::read_volatile(ptr);
-        }
-        if (instr16 & 0x3) != 0x3 {
-            2 // 16-bit compressed instruction
+        // Read the instruction through the exception-table copy path — a
+        // raw read_volatile of the USER epc faults the kernel with SUM=0
+        // (review ARCH: epc must only be touched via uaccess).
+        let mut insn_buf = [0u8; 2];
+        let uncopied = unsafe {
+            super::uaccess::copy_from_user(
+                insn_buf.as_mut_ptr(),
+                orig_epc as *const u8,
+                2,
+            )
+        };
+        if uncopied > 0 {
+            // Unmapped epc: the retried instruction will fault in user mode
+            // and be reported as SIGSEGV there. Assume 4 bytes for now.
+            4
         } else {
-            4 // 32-bit instruction
+            let instr16 = u16::from_ne_bytes(insn_buf);
+            if (instr16 & 0x3) != 0x3 {
+                2 // 16-bit compressed instruction
+            } else {
+                4 // 32-bit instruction
+            }
         }
     };
     regs.epc = orig_epc + instr_size;
@@ -422,18 +447,27 @@ fn handle_syscall(regs: &mut PtRegs) {
 /// Check for FPU first-use before terminating.
 /// When sstatus.FS = OFF, any FP instruction causes IllegalInstruction.
 /// We detect this case and enable FPU lazily (set FS = INITIAL),
-/// then retry the instruction.
+/// zero the FP registers (initial-state semantics), then retry the
+/// instruction.
 fn handle_illegal_instruction(regs: &mut PtRegs) {
     let epc = regs.epc;
 
-    // Read the instruction to determine size
-    // SAFETY: epc points to the faulting instruction in user or kernel text memory;
-    // read_unaligned is safe since the pointer is valid and instruction fetches may be unaligned.
-    let instr16: u16;
-    unsafe {
-        let ptr16 = epc as *const u16;
-        instr16 = core::ptr::read_unaligned(ptr16);
+    // Read the instruction through the exception-table copy path — for
+    // user-mode faults epc is a USER address, which a raw read_unaligned
+    // would fault on with SUM=0 (review ARCH).
+    let mut insn_buf = [0u8; 4];
+    let uncopied16 = unsafe {
+        super::uaccess::copy_from_user(insn_buf.as_mut_ptr(), epc as *const u8, 2)
+    };
+    if uncopied16 > 0 {
+        // Instruction stream unreadable: cannot decode or retry safely.
+        crate::pr_debug!("trap: unreadable instruction at epc={:#x}", epc);
+        if regs.user_mode() {
+            crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
+        }
+        return;
     }
+    let instr16 = u16::from_ne_bytes([insn_buf[0], insn_buf[1]]);
 
     // Check if this is a compressed (16-bit) instruction
     let is_compressed = (instr16 & 0x3) != 0x3;
@@ -458,12 +492,14 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
             // FP compute: opcode[6:0] = 0000101 (FMADD etc) or 0001001 (FMSUB etc)
             //             or 0001101 (FNMSUB etc) or 0001110 (FNMADD etc) or 1010011 (FP ops)
             let instr32: u32 = if instr_size == 4 {
-                // SAFETY: epc points to a valid 32-bit instruction in text memory;
-                // read_unaligned handles potential misalignment of the fetch.
-                unsafe {
-                    let ptr32 = epc as *const u32;
-                    core::ptr::read_unaligned(ptr32)
-                }
+                let _ = unsafe {
+                    super::uaccess::copy_from_user(
+                        insn_buf.as_mut_ptr(),
+                        epc as *const u8,
+                        4,
+                    )
+                };
+                u32::from_ne_bytes(insn_buf)
             } else {
                 instr16 as u32
             };
@@ -475,8 +511,18 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         };
 
         if is_fp {
-            // Enable FPU by setting FS = INITIAL in pt_regs
-            // The instruction will be retried automatically
+            // First FP use: enable the FPU AND zero the FP registers/fcsr.
+            // FS=Initial means the registers architecturally read as zero;
+            // without the explicit clear, the registers still hold whatever
+            // the previous task on this CPU left there (cross-task numeric
+            // pollution + information leakage — review ARCH, fpu_init had
+            // zero callers).
+            // SAFETY: fpu_init sets live sstatus.FS=Initial before touching
+            // the FP registers (executing FP with FS=Off would trap) and
+            // zeroes f0-f31 + fcsr. The interrupted context cannot have live
+            // FP state: FS was Off, so every FP instruction trapped.
+            unsafe { super::thread::fpu_init(); }
+            // Enable FPU in the SAVED status too, so sret does not undo it.
             regs.status = (regs.status & !SR_FS) | SR_FS_INITIAL;
             return;
         }

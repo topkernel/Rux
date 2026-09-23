@@ -1197,19 +1197,19 @@ pub fn sys_getresuid(args: SyscallArgs) -> i64 {
                 if !crate::arch::riscv64::uaccess::access_ok(ruid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                core::ptr::write_volatile(ruid_ptr, cred.uid);
+                let _ = crate::arch::riscv64::uaccess::put_user(ruid_ptr, cred.uid);
             }
             if !euid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(euid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                core::ptr::write_volatile(euid_ptr, cred.euid);
+                let _ = crate::arch::riscv64::uaccess::put_user(euid_ptr, cred.euid);
             }
             if !suid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(suid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                core::ptr::write_volatile(suid_ptr, cred.suid);
+                let _ = crate::arch::riscv64::uaccess::put_user(suid_ptr, cred.suid);
             }
         }
         0
@@ -1304,19 +1304,19 @@ pub fn sys_getresgid(args: SyscallArgs) -> i64 {
                 if !crate::arch::riscv64::uaccess::access_ok(rgid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                core::ptr::write_volatile(rgid_ptr, cred.gid);
+                let _ = crate::arch::riscv64::uaccess::put_user(rgid_ptr, cred.gid);
             }
             if !egid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(egid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                core::ptr::write_volatile(egid_ptr, cred.egid);
+                let _ = crate::arch::riscv64::uaccess::put_user(egid_ptr, cred.egid);
             }
             if !sgid_ptr.is_null() {
                 if !crate::arch::riscv64::uaccess::access_ok(sgid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                core::ptr::write_volatile(sgid_ptr, cred.sgid);
+                let _ = crate::arch::riscv64::uaccess::put_user(sgid_ptr, cred.sgid);
             }
         }
         0
@@ -1403,11 +1403,17 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Read group IDs from userspace
-    let mut groups = alloc::vec::Vec::with_capacity(size as usize);
+    // Read group IDs from userspace through the exception-table copy path
+    // (SUM=0 safe). copy_from_user zero-fills the uncopied tail on failure,
+    // so a partial read leaves zero group ids rather than garbage.
+    let mut groups = alloc::vec::Vec::new();
+    groups.resize(size as usize, 0u32);
     unsafe {
-        let src = core::slice::from_raw_parts(list_ptr, size as usize);
-        groups.extend_from_slice(src);
+        crate::arch::riscv64::uaccess::copy_from_user(
+            groups.as_mut_ptr() as *mut u8,
+            list_ptr as *const u8,
+            size as usize * 4,
+        );
     }
 
     // Store in task credentials
@@ -1668,9 +1674,10 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 4) {
                 return -(errno::EFAULT as i64);
             }
-            // SAFETY: ptr validated with access_ok; current is valid.
+            // SAFETY: ptr validated with access_ok; put_user is the
+            // exception-table copy path.
             unsafe {
-                core::ptr::write_volatile(ptr, (*current).pdeath_signal);
+                let _ = crate::arch::riscv64::uaccess::put_user(ptr, (*current).pdeath_signal);
             }
             0
         }
@@ -2242,36 +2249,39 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     // struct sysinfo: 112 bytes, fill with available info
-    // SAFETY: info_ptr validated with access_ok above; all writes are within the
-    // 112-byte struct sysinfo layout.
+    // SAFETY: info_ptr validated with access_ok above; every field write goes
+    // through put_user (exception-table copy path, SUM=0 safe).
     unsafe {
+        let put_u64 = crate::arch::riscv64::uaccess::put_user::<u64>;
         // uptime (seconds) - from jiffies
         let uptime = crate::drivers::timer::get_jiffies() as u64 / crate::drivers::timer::HZ as u64;
-        core::ptr::write_volatile(info_ptr as *mut u64, uptime);
+        let _ = put_u64(info_ptr as *mut u64, uptime);
         // loads[1],2,3] - zero
-        core::ptr::write_volatile(info_ptr.add(8) as *mut u64, 0);
-        core::ptr::write_volatile(info_ptr.add(16) as *mut u64, 0);
-        core::ptr::write_volatile(info_ptr.add(24) as *mut u64, 0);
+        let _ = put_u64(info_ptr.add(8) as *mut u64, 0);
+        let _ = put_u64(info_ptr.add(16) as *mut u64, 0);
+        let _ = put_u64(info_ptr.add(24) as *mut u64, 0);
         // totalram (bytes)
-        core::ptr::write_volatile(info_ptr.add(32) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64);
+        let _ = put_u64(info_ptr.add(32) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64);
         // freeram
-        core::ptr::write_volatile(info_ptr.add(40) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64 / 2);
+        let _ = put_u64(info_ptr.add(40) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64 / 2);
         // sharedram, bufferram
-        core::ptr::write_volatile(info_ptr.add(48) as *mut u64, 0);
-        core::ptr::write_volatile(info_ptr.add(56) as *mut u64, 0);
+        let _ = put_u64(info_ptr.add(48) as *mut u64, 0);
+        let _ = put_u64(info_ptr.add(56) as *mut u64, 0);
         // totalswap, freeswap
-        core::ptr::write_volatile(info_ptr.add(64) as *mut u64, 0);
-        core::ptr::write_volatile(info_ptr.add(72) as *mut u64, 0);
+        let _ = put_u64(info_ptr.add(64) as *mut u64, 0);
+        let _ = put_u64(info_ptr.add(72) as *mut u64, 0);
         // procs (current process count)
         use core::sync::atomic::{AtomicU16, Ordering};
         static PROC_COUNT: AtomicU16 = AtomicU16::new(0);
         PROC_COUNT.store(0, Ordering::Relaxed);
         crate::sched::for_each_task(|_| { PROC_COUNT.fetch_add(1, Ordering::Relaxed); });
-        core::ptr::write_volatile(info_ptr.add(80) as *mut u16, PROC_COUNT.load(Ordering::Relaxed));
+        let _ = crate::arch::riscv64::uaccess::put_user::<u16>(
+            info_ptr.add(80) as *mut u16, PROC_COUNT.load(Ordering::Relaxed));
         // totalhigh, freehigh, mem_unit
-        core::ptr::write_volatile(info_ptr.add(88) as *mut u64, 0);
-        core::ptr::write_volatile(info_ptr.add(96) as *mut u64, 0);
-        core::ptr::write_volatile(info_ptr.add(104) as *mut u32, 1); // mem_unit = 1 (bytes)
+        let _ = put_u64(info_ptr.add(88) as *mut u64, 0);
+        let _ = put_u64(info_ptr.add(96) as *mut u64, 0);
+        let _ = crate::arch::riscv64::uaccess::put_user::<u32>(
+            info_ptr.add(104) as *mut u32, 1); // mem_unit = 1 (bytes)
     }
     0
 }
@@ -2600,10 +2610,11 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
         _ => return -(errno::EINVAL as i64),
     };
 
-    // SAFETY: rlim_ptr validated with access_ok above; writes two u64 values.
+    // SAFETY: rlim_ptr validated with access_ok above; put_user is the
+    // exception-table copy path.
     unsafe {
-        core::ptr::write_volatile(rlim_ptr, cur);
-        core::ptr::write_volatile(rlim_ptr.add(1), max);
+        let _ = crate::arch::riscv64::uaccess::put_user(rlim_ptr, cur);
+        let _ = crate::arch::riscv64::uaccess::put_user(rlim_ptr.add(1), max);
     }
     0
 }
@@ -2624,9 +2635,10 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // SAFETY: rlim_ptr validated with access_ok; reads two u64 values.
-    let rlim_cur = unsafe { core::ptr::read_volatile(rlim_ptr) };
-    let rlim_max = unsafe { core::ptr::read_volatile(rlim_ptr.add(1)) };
+    // SAFETY: rlim_ptr validated with access_ok; get_user is the
+    // exception-table copy path (SUM=0 safe).
+    let rlim_cur = unsafe { crate::arch::riscv64::uaccess::get_user(rlim_ptr).unwrap_or(0) };
+    let rlim_max = unsafe { crate::arch::riscv64::uaccess::get_user(rlim_ptr.add(1)).unwrap_or(0) };
 
     const RLIMIT_NOFILE: u32 = 7;
     const RLIMIT_DATA: u32 = 2;
@@ -2920,8 +2932,9 @@ pub fn sys_quotactl(args: SyscallArgs) -> i64 {
                 if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                // SAFETY: addr validated with access_ok; writing 4 bytes.
-                unsafe { core::ptr::write_volatile(addr as *mut i32, -1); }
+                // SAFETY: addr validated with access_ok; put_user is the
+                // exception-table copy path.
+                unsafe { let _ = crate::arch::riscv64::uaccess::put_user(addr as *mut i32, -1); }
             }
             0
         }
@@ -2931,8 +2944,9 @@ pub fn sys_quotactl(args: SyscallArgs) -> i64 {
                 if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 16) {
                     return -(errno::EFAULT as i64);
                 }
-                // SAFETY: addr validated with access_ok; writing 16 bytes of zeros.
-                unsafe { core::ptr::write_bytes(addr, 0, 16); }
+                // SAFETY: addr validated with access_ok; clear_user is the
+                // exception-table zeroing path.
+                unsafe { crate::arch::riscv64::uaccess::clear_user(addr, 16); }
             }
             0
         }
@@ -2978,11 +2992,11 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
     const KEY_IMPID: u64 = 2;
     const KEY_MMU: u64 = 6;
 
-    // SAFETY: pairs_ptr validated with access_ok; reads keys and writes values
-    // within the validated count*16 byte range.
+    // SAFETY: pairs_ptr validated with access_ok; get_user/put_user are the
+    // exception-table copy paths (SUM=0 safe).
     unsafe {
         for i in 0..count {
-            let key = core::ptr::read_volatile(pairs_ptr.add(i * 2));
+            let key = crate::arch::riscv64::uaccess::get_user(pairs_ptr.add(i * 2)).unwrap_or(u64::MAX);
             let value = match key {
                 // mvendorid/marchid/mimpid are M-mode CSRs and trap in S-mode;
                 // report 0 ("not implemented") like an SBI-less platform would.
@@ -2992,7 +3006,7 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
                 KEY_MMU => 1, // sv39
                 _ => u64::MAX,
             };
-            core::ptr::write_volatile(pairs_ptr.add(i * 2 + 1), value);
+            let _ = crate::arch::riscv64::uaccess::put_user(pairs_ptr.add(i * 2 + 1), value);
         }
     }
 

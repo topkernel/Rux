@@ -255,8 +255,16 @@ __copy_user_sum_enabled:
 
 .Lshift_copy_loop:
     srl     a4, a5, t3              // Shift right by prev amount
+    // Overread guard (review BUG): the full-word load below can read up to
+    // 7 bytes PAST the source end. Those bytes are never stored, but the
+    // load itself faults when the source ends at a page boundary — a
+    // spurious EFAULT for a completely valid copy range. When the store
+    // for this iteration is the last one (a0+8 >= t0), finish the
+    // remaining bytes through the byte-copy tail instead.
+    addi    t2, a0, 8
+    bgeu    t2, t0, .Lshift_tail
 .Lshift_load:
-    ld      a5, 8(a1)               // Load next word
+    ld      a5, 8(a1)               // Load next word (fully in-bounds)
     EXTABLE .Lshift_load, .Lcopy_exception
     addi    a1, a1, 8
     sll     a2, a5, t4              // Shift left by complementary amount
@@ -267,8 +275,12 @@ __copy_user_sum_enabled:
     addi    a0, a0, 8
     bltu    a0, t1, .Lshift_copy_loop
 
-    // Restore src to original unaligned value
+.Lshift_tail:
+    // Restore src to the original unaligned cursor (a1 was aligned down by
+    // a3 and advanced by 8 per completed iteration; +a3 yields exactly the
+    // next uncopied source byte) and finish byte-wise.
     add     a1, a1, a3
+    j       .Lbyte_copy_tail
 
     // ========================================================================
     // Phase 3: Byte copy tail (remaining bytes)

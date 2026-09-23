@@ -19,8 +19,9 @@ struct Iovec{
 /// Maximum byte count for a single read/write style syscall.
 /// Matches Linux MAX_RW_COUNT (INT_MAX & PAGE_MASK); larger user requests are
 /// truncated instead of driving the kernel heap allocator past its size
-/// (alloc failure would panic the kernel).
-pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
+/// (alloc failure would panic the kernel). Single definition lives in the
+/// arch uaccess layer (review CONS: keep one MAX_RW_COUNT, not two).
+pub use crate::arch::riscv64::uaccess::MAX_RW_COUNT;
 
 /// Kernel staging chunk for read/write syscalls. Bounded so a huge user
 /// count can never ask the allocator for more than the kernel heap holds —

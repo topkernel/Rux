@@ -30,6 +30,16 @@ pub struct VirtioGpuDevice {
     pci: VirtIOPCI,
     /// Control queue
     ctrl_queue: Option<VirtQueue>,
+    /// Serializes control-queue descriptor/ring mutation.
+    ///
+    /// send_command hardcodes descriptors 0/1 and bumps the avail index
+    /// in place, so two concurrent submissions would overwrite each
+    /// other's descriptors mid-flight. Today the only externally reachable
+    /// path (flush_framebuffer) happens to serialize through the
+    /// GPU_DEVICE spinlock, but that invariant lives in another module —
+    /// this lock makes it local and future-proof (review RACE:
+    /// "virtio-gpu desc 无锁").
+    cmd_lock: crate::sync::spinlock::Spinlock<()>,
     /// Framebuffer information
     fb_info: Option<FrameBufferInfo>,
     /// Framebuffer pointer
@@ -151,6 +161,7 @@ impl VirtioGpuDevice {
         let mut device = Self {
             pci,
             ctrl_queue: None,
+            cmd_lock: crate::sync::spinlock::Spinlock::new(()),
             fb_info: None,
             fb_ptr: core::ptr::null_mut(),
             fb_layout: None,
@@ -605,6 +616,12 @@ impl VirtioGpuDevice {
                                resp_size: usize) -> Option<()> {
         let queue = self.ctrl_queue.as_ref()?;
 
+        // Serialize the hardcoded-desc submission (see cmd_lock field).
+        // The guard spans the whole submit-and-wait: releasing earlier
+        // would let a second CPU overwrite descriptors 0/1 before the
+        // device reads them.
+        let _cmd_guard = self.cmd_lock.lock();
+
         // Convert virtual addresses to physical addresses
         #[cfg(feature = "riscv64")]
         let cmd_phys = crate::arch::riscv64::mm::virt_to_phys(
@@ -718,16 +735,11 @@ impl Drop for VirtioGpuDevice {
 
 /// Probe VirtIO-GPU device
 pub fn probe_virtio_gpu() -> Option<VirtioGpuDevice> {
-    for device in 0..32u8 {
-        let ecam_addr = pci::RISCV_PCIE_ECAM_BASE + ((device as u64) * pci::PCIE_ECAM_SIZE);
-
-        let vendor_id = unsafe { read_volatile((ecam_addr as *const u16)) };
-        let device_id = unsafe { read_volatile((ecam_addr as *const u16).add(1)) };
-
-        if vendor_id == VIRTIO_GPU_PCI_VENDOR && device_id == virtio_device::VIRTIO_GPU {
-            let virtio_pci = VirtIOPCI::new(ecam_addr).ok()?;
-            return VirtioGpuDevice::new(virtio_pci);
-        }
+    // Shared ECAM walker: 0x8000 stride per slot + all 8 functions (the
+    // old 0x1000 stride hid every slot >= 4 — review BUG).
+    for ecam_addr in pci::find_ecam_devices(VIRTIO_GPU_PCI_VENDOR, &[virtio_device::VIRTIO_GPU]) {
+        let virtio_pci = VirtIOPCI::new(ecam_addr).ok()?;
+        return VirtioGpuDevice::new(virtio_pci);
     }
 
     None

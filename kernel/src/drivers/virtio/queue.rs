@@ -93,6 +93,8 @@ pub struct VirtQueue {
     pub(crate) used: *mut UsedRing,
     /// vring address
     vring_addr: u64,
+    /// Layout of the combined vring allocation (for free_vring)
+    vring_layout: alloc::alloc::Layout,
     /// Next descriptor index to allocate
     next_desc: AtomicU16,
 }
@@ -175,8 +177,33 @@ impl VirtQueue {
             avail,
             used,
             vring_addr: mem_ptr as u64,
+            vring_layout: layout,
             next_desc: AtomicU16::new(0),
         })
+    }
+
+    /// Free the vring allocation backing this queue.
+    ///
+    /// VirtQueue has no Drop impl (the long-lived configured queues are
+    /// intentionally never freed), so transient per-call queues — the
+    /// legacy read_block/write_block paths — MUST call this on every exit
+    /// path or leak a page-granular vring per I/O (review BUG: "write_block
+    /// desc 失败清理" — the allocation leak fired on the desc-failure early
+    /// returns too).
+    ///
+    /// # Safety
+    /// The queue must not be registered with a device (no in-flight DMA).
+    pub unsafe fn free_vring(&mut self) {
+        if !self.desc.is_null() {
+            // SAFETY: vring_layout is the exact layout used for the single
+            // allocation that desc/avail/used all point into.
+            unsafe {
+                alloc::alloc::dealloc(self.desc as *mut u8, self.vring_layout);
+            }
+            self.desc = core::ptr::null_mut();
+            self.avail = core::ptr::null_mut();
+            self.used = core::ptr::null_mut();
+        }
     }
 
     /// Get current available index
@@ -267,12 +294,17 @@ impl VirtQueue {
             }
         }
 
-        // RISC-V MMIO fence after write: fence i, ir
-        // This ensures the MMIO write completes before any subsequent reads.
-        // MMIO read fence: RISCV_FENCE(i, ir)
+        // RISC-V MMIO fence after write: fence iorw, iorw
+        // This is the WRITE-side device fence (Linux __io_aw(): "fence
+        // iorw, iorw"): the MMIO store must reach the device before any
+        // subsequent memory or MMIO access by this hart. The old
+        // "fence i, ir" is the READ-side ordering fence (__io_ar) used in
+        // the wrong place — it ordered device INPUT against instruction
+        // fetch and did not order the notify store at all (review ARCH:
+        // fence i,ir 用反, weakly-ordered platform risk).
         #[cfg(feature = "riscv64")]
         unsafe {
-            core::arch::asm!("fence i, ir");
+            core::arch::asm!("fence iorw, iorw");
         }
 
         // Restore interrupts
@@ -289,11 +321,23 @@ impl VirtQueue {
     /// Wait for device to complete request
     pub fn wait_for_completion(&self, prev_used: u16) -> u16 {
         // Timeout value from config (in loop iterations, approximately microseconds)
-        let mut timeout = crate::config::VIRTIO_QUEUE_TIMEOUT_US;
+        self.wait_for_completion_max(prev_used, crate::config::VIRTIO_QUEUE_TIMEOUT_US)
+    }
 
+    /// Wait for device to complete request with an explicit iteration budget.
+    ///
+    /// `max_iters` is a spin-loop iteration budget (~µs each under TCG).
+    /// Callers that hold a lock_irqsave across this wait (e.g. the net TX
+    /// path) MUST pass a small budget: every iteration runs with external
+    /// interrupts disabled, so the budget directly bounds the worst-case
+    /// IRQ-blackout window (review TIMING: xmit used 10M+50M iters — tens
+    /// of seconds of disabled interrupts under TCG).
+    pub fn wait_for_completion_max(&self, prev_used: u16, max_iters: u64) -> u16 {
         if self.used.is_null() {
             return prev_used;
         }
+
+        let mut timeout = max_iters;
 
         loop {
             // Use memory barrier to ensure read ordering

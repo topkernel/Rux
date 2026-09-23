@@ -2,7 +2,7 @@
 //!
 //! Implements msgget, msgctl, msgsnd, msgrcv following the Linux kernel design.
 
-use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user};
+use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
@@ -418,8 +418,9 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // SAFETY: msgp was null-checked and access_ok-validated above.
-    let mtype = unsafe { core::ptr::read_volatile(msgp as *const i64) };
+    // SAFETY: msgp was null-checked and access_ok-validated above; get_user
+    // is the exception-table copy path (SUM=0 safe).
+    let mtype = unsafe { get_user(msgp as *const i64).unwrap_or(0) };
     if mtype <= 0 {
         return -(errno::EINVAL as i64);
     }
@@ -650,9 +651,9 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                         let msg = &messages[mi];
                         // Copy mtype (8 bytes)
                         // SAFETY: msgp was access_ok-validated for msgsz+8 bytes above;
-                        // writing 8 bytes for mtype at the start of the buffer.
+                        // put_user is the exception-table copy path.
                         unsafe {
-                            core::ptr::write_volatile(msgp as *mut i64, msg.mtype);
+                            let _ = put_user(msgp as *mut i64, msg.mtype);
                         }
                         let msg_len = msg.data.len();
                         if msg_len > msgsz {
@@ -690,9 +691,9 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
         if let Some((mi, msg)) = result {
             // Copy mtype (8 bytes)
             // SAFETY: msgp was access_ok-validated for msgsz+8 bytes above;
-            // writing 8 bytes for mtype at the start of the buffer.
+            // put_user is the exception-table copy path.
             unsafe {
-                core::ptr::write_volatile(msgp as *mut i64, msg.mtype);
+                let _ = put_user(msgp as *mut i64, msg.mtype);
             }
             // Copy message data
             let msg_len = msg.data.len();

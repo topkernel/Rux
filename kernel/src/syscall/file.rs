@@ -1921,6 +1921,12 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                         }
                     } else {
                         let _ = crate::fs::bio::sync_buffers();
+                        // Persist the DISK's volatile cache too — draining
+                        // only the kernel buffer cache was a no-op flush
+                        // (review BUG: "Flush 假成功，fsync 无持久化").
+                        if crate::drivers::virtio::flush_pci_blk().is_err() {
+                            return -(errno::EIO as i64);
+                        }
                         0
                     }
                 }
@@ -1944,6 +1950,10 @@ pub fn sys_fdatasync(args: SyscallArgs) -> i64 {
 pub fn sys_sync(_args: SyscallArgs) -> i64 {
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
+    // And persist the disk's volatile cache (see sys_fsync).
+    if crate::drivers::virtio::flush_pci_blk().is_err() {
+        return -(errno::EIO as i64);
+    }
     0
 }
 

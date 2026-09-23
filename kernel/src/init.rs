@@ -635,9 +635,11 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
         // SPP = 0 means return to user mode, SPIE = 1 means enable interrupts
         const SR_SPP: u64 = 1 << 8;
         const SR_SPIE: u64 = 1 << 5;
-        const SR_SUM: u64 = 1 << 18;
 
-        let child_status = SR_SPIE | SR_SUM;  // Clear SPP, set SPIE and SUM
+        // SUM is deliberately NOT set (SUM convergence, review SEC): the
+        // kernel runs with sstatus.SUM=0 and reaches user memory only via
+        // the uaccess exception-table paths.
+        let child_status = SR_SPIE;  // Clear SPP, set SPIE
 
         core::ptr::write(child_regs, PtRegs {
             epc: entry,                    // User program entry point

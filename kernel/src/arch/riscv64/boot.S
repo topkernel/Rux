@@ -205,8 +205,10 @@ _start:
 
     // early_pmd_io[0]: VA 0x00000000 -> PA 0x00000000 (first 2MB, identity)
     la t3, early_pmd_io
-    sub t3, t3, t1               // physical
-    // PPN for 0x00000000 = 0, flags: V|R|W|A|D|G = 0xC7 (no X for device memory)
+    sub t3, t3, t1               // t3 = early_pmd_io (physical)
+    // PPN for 0x00000000 = 0; flags 0xC7 = V|R|W|A|D (device memory, no X,
+    // no G — bit 5 would be 0x20 and is NOT set; review DOC: the old
+    // comment wrongly claimed G was included).
     li t4, 0xC7
     sd t4, 0(t3)
 
@@ -214,7 +216,7 @@ _start:
     // PMD index = (0x10000000 >> 21) & 0x1FF = 128, offset = 128 * 8 = 1024
     li t5, 0x10000000
     srli t5, t5, 2               // PPN in PTE format
-    li t6, 0xC7                  // V|R|W|A|D|G (device memory, no X)
+    li t6, 0xC7                  // V|R|W|A|D (device memory, no X, no G)
     or t5, t5, t6
     li t4, 1024                  // offset = 128 * 8
     add t4, t3, t4
@@ -384,14 +386,26 @@ secondary_start:
     // vmemmap, device mappings, etc.
     // Fence to ensure we see the boot hart's store to BOOT_HART_SATP
     fence
+.Lreread_boot_satp:
     la t0, BOOT_HART_SATP
     ld t0, 0(t0)                 // t0 = boot hart's satp (permanent page table)
-    // If BOOT_HART_SATP is 0, spin (boot hart hasn't set it yet)
     beqz t0, .Lsecondary_hang
 
     sfence.vma
     csrw satp, t0
     sfence.vma
+    j .Lsatp_switched
+
+.Lsecondary_hang:
+    // BOOT_HART_SATP not published yet. The old code spun in `wfi; j` and
+    // NEVER re-read the flag — a secondary arriving before the boot hart
+    // committed the table stayed here forever, so the "spin until it is
+    // set" comment was a lie. Poll properly: wfi, re-fence, re-read.
+    wfi
+    fence io, iorw               // make the re-read observe the new store
+    j .Lreread_boot_satp
+
+.Lsatp_switched:
 
     // Set stvec to real trap handler
     la t0, trap_entry
@@ -423,9 +437,7 @@ secondary_start:
     la t0, secondary_cpu_entry
     jr t0
 
-.Lsecondary_hang:
-    wfi
-    j .Lsecondary_hang
+// (the old wfi-only .Lsecondary_hang was folded into the re-read loop above)
 
 // ============================================================================
 // Data section (page tables and global data)

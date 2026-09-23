@@ -57,10 +57,11 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
     let sec = cycles / freq_hz + wall_epoch_offset_secs();
     let usec = (cycles % freq_hz) * 1_000_000 / freq_hz;
 
-    // SAFETY: tv_ptr validated with access_ok; writes TimeVal fields (two i64).
+    // SAFETY: tv_ptr validated with access_ok; put_user is the
+    // exception-table copy path (SUM=0 safe).
     unsafe {
-        (*tv_ptr).tv_sec = sec as i64;
-        (*tv_ptr).tv_usec = usec as i64;
+        let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tv_ptr).tv_sec, sec as i64);
+        let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tv_ptr).tv_usec, usec as i64);
     }
 
     0
@@ -93,19 +94,21 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             // zero until set — no RTC on this platform).
             let (mono_sec, mono_nsec) = monotonic_time();
             let sec = mono_sec + wall_epoch_offset_secs();
-            // SAFETY: tp_ptr validated with access_ok; writes TimespecForGettime fields.
+            // SAFETY: tp_ptr validated with access_ok; put_user is the
+            // exception-table copy path (SUM=0 safe).
             unsafe {
-                (*tp_ptr).tv_sec = sec as i64;
-                (*tp_ptr).tv_nsec = mono_nsec as i64;
+                let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, mono_nsec as i64);
             }
             0
         }
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME => {
             let (sec, nsec) = monotonic_time();
-            // SAFETY: tp_ptr validated with access_ok; writes TimespecForGettime fields.
+            // SAFETY: tp_ptr validated with access_ok; put_user is the
+            // exception-table copy path (SUM=0 safe).
             unsafe {
-                (*tp_ptr).tv_sec = sec as i64;
-                (*tp_ptr).tv_nsec = nsec as i64;
+                let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
             }
             0
         }
@@ -116,10 +119,13 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             let cputime_ns = crate::process::current_task()
                 .map(|t| t.sched_entity().sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire))
                 .unwrap_or(0);
-            // SAFETY: tp_ptr validated with access_ok; writes TimespecForGettime fields.
+            // SAFETY: tp_ptr validated with access_ok; put_user is the
+            // exception-table copy path (SUM=0 safe).
             unsafe {
-                (*tp_ptr).tv_sec = (cputime_ns / 1_000_000_000) as i64;
-                (*tp_ptr).tv_nsec = (cputime_ns % 1_000_000_000) as i64;
+                let _ = crate::arch::riscv64::uaccess::put_user(
+                    &raw mut (*tp_ptr).tv_sec, (cputime_ns / 1_000_000_000) as i64);
+                let _ = crate::arch::riscv64::uaccess::put_user(
+                    &raw mut (*tp_ptr).tv_nsec, (cputime_ns % 1_000_000_000) as i64);
             }
             0
         }
@@ -168,8 +174,16 @@ pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // SAFETY: req_ptr validated with access_ok; reads Timespec (two i64 fields).
-    let req = unsafe { *req_ptr };
+    // SAFETY: req_ptr validated with access_ok; copy_from_user is the
+    // exception-table copy path (SUM=0 safe) and zero-fills on fault.
+    let mut req = Timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            &mut req as *mut Timespec as *mut u8,
+            req_ptr as *const u8,
+            core::mem::size_of::<Timespec>(),
+        );
+    }
 
     // POSIX: tv_nsec must be in [0, 999_999_999]; a negative tv_sec is also
     // EINVAL (previously a negative request slept ~1ms instead).
@@ -249,15 +263,18 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             crate::timer::del_timer(timer_id);
             // Write remaining time to rem (if rem_ptr is provided)
             if !rem_ptr.is_null() {
-                // SAFETY: rem_ptr validated with access_ok in caller; writes Timespec.
+                // SAFETY: rem_ptr validated with access_ok in caller;
+                // copy_to_user is the exception-table copy path (SUM=0 safe).
                 unsafe {
                     // Convert milliseconds to timespec
                     let rem_sec = (remaining_msecs / 1000) as i64;
                     let rem_nsec = ((remaining_msecs % 1000) * 1_000_000) as i64;
-                    *rem_ptr = Timespec {
-                        tv_sec: rem_sec,
-                        tv_nsec: rem_nsec,
-                    };
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        rem_ptr as *mut u8,
+                        &Timespec { tv_sec: rem_sec, tv_nsec: rem_nsec }
+                            as *const Timespec as *const u8,
+                        core::mem::size_of::<Timespec>(),
+                    );
                 }
             }
 
@@ -423,15 +440,16 @@ pub fn sys_getitimer(args: SyscallArgs) -> i64 {
     };
 
     // Write struct itimerval
-    // SAFETY: curr_value validated with access_ok(32); writes 4 i64 values at known offsets.
+    // SAFETY: curr_value validated with access_ok(32); put_user goes through
+    // the exception-table copy path (SUM=0 safe).
     unsafe {
         // it_interval (offset 0)
         let p = curr_value as *mut i64;
-        core::ptr::write(p, interval_sec);
-        core::ptr::write(p.add(1), interval_usec);
+        let _ = crate::arch::riscv64::uaccess::put_user(p, interval_sec);
+        let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), interval_usec);
         // it_value (offset 16)
-        core::ptr::write(p.add(2), value_sec);
-        core::ptr::write(p.add(3), value_usec);
+        let _ = crate::arch::riscv64::uaccess::put_user(p.add(2), value_sec);
+        let _ = crate::arch::riscv64::uaccess::put_user(p.add(3), value_usec);
     }
 
     0
@@ -458,8 +476,9 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         // Get old timer state and write it as zeros (disarmed)
-        // SAFETY: old_value validated with access_ok(32); writes 32 zero bytes.
-        unsafe { core::ptr::write_bytes(old_value, 0, 32); }
+        // SAFETY: old_value validated with access_ok(32); clear_user is the
+        // exception-table zeroing path.
+        unsafe { crate::arch::riscv64::uaccess::clear_user(old_value as *mut u8, 32); }
     }
 
     if new_value.is_null() {
@@ -679,12 +698,13 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         // struct sigevent { sigval sigev_value, int sigev_signo, int sigev_notify, ... }
-        // SAFETY: sigevent_ptr validated with access_ok(64); reads i32 fields at known offsets.
+        // SAFETY: sigevent_ptr validated with access_ok(64); get_user goes
+        // through the exception-table copy path (SUM=0 safe).
         unsafe {
             let p = sigevent_ptr as *const i32;
             // sigev_value is 8 bytes (union), then sigev_signo at offset 8
-            let signo = core::ptr::read(p.add(2));
-            let notify = core::ptr::read(p.add(3));
+            let signo = crate::arch::riscv64::uaccess::get_user(p.add(2)).unwrap_or(0);
+            let notify = crate::arch::riscv64::uaccess::get_user(p.add(3)).unwrap_or(0);
             if signo > 0 && signo <= 64 {
                 sigev_signo = signo;
             }
@@ -719,9 +739,10 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
 
     let mut timers = task.posix_timers.lock();
     timers.push(state);
-    // SAFETY: timerid_ptr validated with access_ok(4); writes one i32.
+    // SAFETY: timerid_ptr validated with access_ok(4); put_user is the
+    // exception-table copy path.
     unsafe {
-        core::ptr::write_volatile(timerid_ptr, user_timer_id);
+        let _ = crate::arch::riscv64::uaccess::put_user(timerid_ptr, user_timer_id);
     }
 
     0
@@ -753,14 +774,15 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     };
 
     // Read struct itimerspec { struct timespec it_interval, struct timespec it_value }
-    // SAFETY: new_value validated with access_ok(32); reads 4 i64 fields at known offsets.
+    // SAFETY: new_value validated with access_ok(32); get_user is the
+    // exception-table copy path (SUM=0 safe). Unreadable fields read as 0.
     let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
         let p = new_value as *const i64;
         (
-            core::ptr::read(p),
-            core::ptr::read(p.add(1)),
-            core::ptr::read(p.add(2)),
-            core::ptr::read(p.add(3)),
+            crate::arch::riscv64::uaccess::get_user(p).unwrap_or(0),
+            crate::arch::riscv64::uaccess::get_user(p.add(1)).unwrap_or(0),
+            crate::arch::riscv64::uaccess::get_user(p.add(2)).unwrap_or(0),
+            crate::arch::riscv64::uaccess::get_user(p.add(3)).unwrap_or(0),
         )
     };
 
@@ -777,8 +799,9 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: old_value validated with access_ok(32); writes 32 zero bytes.
-        unsafe { core::ptr::write_bytes(old_value, 0, 32); }
+        // SAFETY: old_value validated with access_ok(32); clear_user is the
+        // exception-table zeroing path.
+        unsafe { crate::arch::riscv64::uaccess::clear_user(old_value as *mut u8, 32); }
     }
 
     let pid = task.pid();
@@ -891,19 +914,20 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> i64 {
     };
 
     // Write struct itimerspec { struct timespec it_interval, struct timespec it_value }
-    // SAFETY: curr_value validated with access_ok(32); writes 4 i64 values at known offsets.
+    // SAFETY: curr_value validated with access_ok(32); put_user is the
+    // exception-table copy path (SUM=0 safe).
     unsafe {
         let p = curr_value as *mut i64;
         if timer.interval_jiffies > 0 {
             let int_msecs = crate::drivers::timer::jiffies_to_msecs(timer.interval_jiffies);
-            core::ptr::write(p, (int_msecs / 1000) as i64);
-            core::ptr::write(p.add(1), 0i64);
+            let _ = crate::arch::riscv64::uaccess::put_user(p, (int_msecs / 1000) as i64);
+            let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), 0i64);
         } else {
-            core::ptr::write(p, 0i64);
-            core::ptr::write(p.add(1), 0i64);
+            let _ = crate::arch::riscv64::uaccess::put_user(p, 0i64);
+            let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), 0i64);
         }
-        core::ptr::write(p.add(2), val_sec);
-        core::ptr::write(p.add(3), val_nsec);
+        let _ = crate::arch::riscv64::uaccess::put_user(p.add(2), val_sec);
+        let _ = crate::arch::riscv64::uaccess::put_user(p.add(3), val_nsec);
     }
 
     0
@@ -984,12 +1008,13 @@ pub fn sys_adjtimex(args: SyscallArgs) -> i64 {
     }
 
     // TIME_OK = 0: clock is synchronized
-    // SAFETY: buf_ptr validated with access_ok(128); writes 128 bytes and sets status field.
+    // SAFETY: buf_ptr validated with access_ok(128); clear_user/put_user are
+    // the exception-table copy paths.
     unsafe {
-        core::ptr::write_bytes(buf_ptr, 0, 128);
+        crate::arch::riscv64::uaccess::clear_user(buf_ptr, 128);
         // status field at offset 4 (after modes u32)
         // Return TIME_OK
-        core::ptr::write_volatile(buf_ptr.add(4) as *mut i32, 0);
+        let _ = crate::arch::riscv64::uaccess::put_user(buf_ptr.add(4) as *mut i32, 0);
     }
     0
 }
@@ -1012,10 +1037,11 @@ pub fn sys_clock_adjtime(args: SyscallArgs) -> i64 {
     }
 
     // TIME_OK = 0: return as synchronized
-    // SAFETY: buf_ptr validated with access_ok(128); writes 128 bytes and sets status field.
+    // SAFETY: buf_ptr validated with access_ok(128); clear_user/put_user are
+    // the exception-table copy paths.
     unsafe {
-        core::ptr::write_bytes(buf_ptr, 0, 128);
-        core::ptr::write_volatile(buf_ptr.add(4) as *mut i32, 0);
+        crate::arch::riscv64::uaccess::clear_user(buf_ptr, 128);
+        let _ = crate::arch::riscv64::uaccess::put_user(buf_ptr.add(4) as *mut i32, 0);
     }
     0
 }
@@ -1056,15 +1082,16 @@ pub fn sys_get_robust_list(args: SyscallArgs) -> i64 {
         if !crate::arch::riscv64::uaccess::access_ok(head_ptr as usize, 8) {
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: head_ptr validated with access_ok(8); writes one u64.
-        unsafe { core::ptr::write_volatile(head_ptr, 0); }
+        // SAFETY: head_ptr validated with access_ok(8); put_user is the
+        // exception-table copy path.
+        unsafe { let _ = crate::arch::riscv64::uaccess::put_user(head_ptr, 0u64); }
     }
     if !len_ptr.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(len_ptr as usize, 4) {
             return -(errno::EFAULT as i64);
         }
         // SAFETY: len_ptr validated with access_ok(4); writes sizeof(struct robust_list_head).
-        unsafe { core::ptr::write_volatile(len_ptr, 24); } // sizeof(struct robust_list_head) on 64-bit
+        unsafe { let _ = crate::arch::riscv64::uaccess::put_user(len_ptr, 24u32); } // sizeof(struct robust_list_head) on 64-bit
     }
     0
 }

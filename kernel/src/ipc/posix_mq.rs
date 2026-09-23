@@ -3,7 +3,7 @@
 //! Implements mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr
 //! following the Linux kernel design. POSIX MQs are file descriptor-based.
 
-use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user};
+use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user, put_user};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
@@ -649,8 +649,8 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
             // Copy priority
             if !prio_ptr.is_null() && access_ok(prio_ptr as usize, 4) {
                 // SAFETY: prio_ptr was access_ok-validated for 4 bytes above;
-                // writing a u32 value to a valid userspace pointer.
-                unsafe { core::ptr::write_volatile(prio_ptr, msg.priority) };
+                // put_user is the exception-table copy path.
+                unsafe { let _ = put_user(prio_ptr, msg.priority); };
             }
 
             return copy_len as i64;
@@ -769,8 +769,19 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
     }
 
     // SAFETY: sevp was access_ok-validated for size_of::<SigEvent>() above;
-    // SigEvent is #[repr(C)] and the read is within validated bounds.
-    let sev = unsafe { core::ptr::read(sevp) };
+    // copy_from_user is the exception-table copy path (SUM=0 safe) and
+    // zero-fills the tail on a partial fault, so the struct is fully
+    // initialized either way.
+    let mut sev_buf = core::mem::MaybeUninit::<SigEvent>::zeroed();
+    unsafe {
+        copy_from_user(
+            sev_buf.as_mut_ptr() as *mut u8,
+            sevp as *const u8,
+            core::mem::size_of::<SigEvent>(),
+        );
+    }
+    // SAFETY: fully initialized by the zeroed() above.
+    let sev = unsafe { sev_buf.assume_init() };
 
     if sev.sigev_notify == SIGEV_NONE {
         mq.notify_pid.store(0, Ordering::Relaxed);

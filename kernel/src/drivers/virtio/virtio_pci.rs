@@ -547,12 +547,31 @@ impl VirtIOPCI {
     }
 
     /// Get notification address
+    ///
+    /// Per VirtIO 1.0 spec 4.1.4.4:
+    ///   notify_off    = common_cfg.queue_notify_off (read per queue)
+    ///   notify_addr   = notify_cap.bar_base + notify_cap.offset
+    ///                 + notify_off * notify_off_multiplier
+    ///
+    /// The old code computed `queue_index * multiplier * 2` (review BUG
+    /// "notify 地址多乘 2"): it used the queue INDEX instead of the queue's
+    /// notify_off field, and scaled the multiplier (already in bytes) by an
+    /// extra ×2. It only "worked" because QEMU sets multiplier=0 so every
+    /// queue notifies at the same address — any queue with a real
+    /// multiplier would hit the wrong doorbell.
     pub fn get_notify_addr(&self, queue_index: u16) -> u64 {
-        // Critical fix: per VirtIO 1.0 specification 4.1.4.4,
-        // notification address = notify_offset + 2 * (queue_index * notify_off_multiplier)
-        // i.e.: multiply notify_off_multiplier by 2 (since it's in 16-bit units, need to multiply by 2 to convert to bytes)
-        let queue_offset = (queue_index as u64 * self.notify_off_multiplier as u64) * 2;
-        self.notify_cfg_bar + self.notify_cfg_offset as u64 + queue_offset
+        // Select the queue and read its queue_notify_off.
+        // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO
+        // common config region; queue_select/queue_notify_off are standard
+        // per-queue registers.
+        let notify_off: u16 = unsafe {
+            let select_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16;
+            core::ptr::write_volatile(select_ptr, queue_index);
+            let noff_ptr = (self.common_cfg_bar + offset::COMMON_CFG_QUEUE_NOTIFY_OFF as u64) as *const u16;
+            core::ptr::read_volatile(noff_ptr)
+        };
+        self.notify_cfg_bar + self.notify_cfg_offset as u64
+            + notify_off as u64 * self.notify_off_multiplier as u64
     }
 
     /// Notify device
@@ -749,7 +768,10 @@ impl VirtIOPCI {
         let new_used = virt_queue.wait_for_completion(prev_used);
 
         if new_used == prev_used {
-            // Request failed, device did not update used ring
+            // Request failed, device did not update used ring.
+            // NOTE: the chain may still be in flight, so the vring is NOT
+            // freed here — only the request buffers are (device-visible
+            // DMA for them ended with the used-ring stall check above).
             // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
@@ -765,6 +787,7 @@ impl VirtIOPCI {
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+            virt_queue.free_vring();
         }
 
         match status.status {
@@ -795,17 +818,31 @@ impl VirtIOPCI {
             Some(q) => q,
         };
 
+        // The per-call vring must be freed on EVERY exit path (review BUG:
+        // desc-failure early returns leaked a page-granular vring per call).
         let header_desc_idx = match virt_queue.alloc_desc() {
             Some(idx) => idx,
-            None => return Err("Failed to alloc header descriptor"),
+            None => {
+                // SAFETY: queue was never submitted to the device.
+                unsafe { virt_queue.free_vring() };
+                return Err("Failed to alloc header descriptor");
+            }
         };
         let data_desc_idx = match virt_queue.alloc_desc() {
             Some(idx) => idx,
-            None => return Err("Failed to alloc data descriptor"),
+            None => {
+                // SAFETY: queue was never submitted to the device.
+                unsafe { virt_queue.free_vring() };
+                return Err("Failed to alloc data descriptor");
+            }
         };
         let resp_desc_idx = match virt_queue.alloc_desc() {
             Some(idx) => idx,
-            None => return Err("Failed to alloc response descriptor"),
+            None => {
+                // SAFETY: queue was never submitted to the device.
+                unsafe { virt_queue.free_vring() };
+                return Err("Failed to alloc response descriptor");
+            }
         };
 
         // Write request: VIRTIO_BLK_T_OUT
@@ -822,6 +859,8 @@ impl VirtIOPCI {
             header_ptr = alloc::alloc::alloc(header_layout) as *mut VirtIOBlkReqHeader;
         }
         if header_ptr.is_null() {
+            // SAFETY: queue was never submitted to the device.
+            unsafe { virt_queue.free_vring() };
             return Err("Failed to allocate header");
         }
         // SAFETY: header_ptr is non-null and properly aligned.
@@ -839,6 +878,7 @@ impl VirtIOPCI {
             // SAFETY: header_ptr was allocated with header_layout above and is still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                virt_queue.free_vring();
             }
             return Err("Failed to allocate response");
         }
@@ -900,6 +940,7 @@ impl VirtIOPCI {
         let new_used = virt_queue.wait_for_completion(prev_used);
 
         if new_used == prev_used {
+            // Chain possibly still in flight — vring not freed (see above).
             // SAFETY: Both pointers were allocated above and are still valid.
             unsafe {
                 alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
@@ -915,6 +956,7 @@ impl VirtIOPCI {
         unsafe {
             alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
             alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+            virt_queue.free_vring();
         }
 
         match status.status {
@@ -1344,5 +1386,163 @@ fn write_block_once(
     match status.status {
         crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(buf.len()),
         _ => Err("VirtIO block write I/O error"),
+    }
+}
+
+/// Flush the device's write cache using the pre-configured VirtQueue.
+///
+/// Sends a real VIRTIO_BLK_T_FLUSH request (header + resp, no data
+/// descriptor) so the disk's volatile cache is persisted. The old fsync
+/// path only drained the kernel's write-through buffer cache and never
+/// told the DEVICE to persist — "Flush 假成功" (review BUG: fsync 无持久化).
+///
+/// # Returns
+/// Ok(0) when the device acknowledges the flush.
+pub fn flush_block_using_configured_queue(
+    _pci_dev: &VirtIOPCI,
+) -> Result<usize, &'static str> {
+    use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
+
+    const MAX_RETRIES: usize = 5;
+    let mut retries = 0;
+    loop {
+        match flush_block_once() {
+            Ok(n) => return Ok(n),
+            Err(e) => {
+                retries += 1;
+                if retries >= MAX_RETRIES {
+                    return Err(e);
+                }
+                for _ in 0..10000 {
+                    core::hint::spin_loop();
+                }
+            }
+        }
+    }
+}
+
+/// Single flush attempt using the pre-configured VirtQueue.
+fn flush_block_once() -> Result<usize, &'static str> {
+    use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
+    use crate::arch::riscv64::mm::VirtAddr;
+
+    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
+        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
+            Some(q) => q,
+            None => return Err("No configured VirtQueue found"),
+        };
+
+        virt_queue.reclaim_descs();
+
+        // FLUSH is a 2-descriptor chain: header -> resp (no data).
+        let header_desc_idx = match virt_queue.alloc_desc_chain(2) {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc header descriptor"),
+        };
+        let resp_desc_idx = match virt_queue.alloc_desc_chain(2) {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc response descriptor"),
+        };
+
+        let req_header = VirtIOBlkReqHeader {
+            type_: req_type::VIRTIO_BLK_T_FLUSH,
+            reserved: 0,
+            sector: 0,
+        };
+
+        // Combined header+resp block (R17-C discipline, same as RW paths).
+        let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
+        // SAFETY: Layout is non-zero-sized; null check follows immediately.
+        let io_buf: *mut u8 = unsafe { alloc::alloc::alloc(io_layout) };
+        if io_buf.is_null() {
+            return Err("Failed to allocate flush header");
+        }
+        let header_layout = io_layout;
+        let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
+        // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
+        let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
+        // SAFETY: header_ptr is non-null and 16B-aligned.
+        unsafe {
+            *header_ptr = req_header;
+            (*resp_ptr).status = 0xFF;
+        }
+
+        const VIRTQ_DESC_F_NEXT: u16 = 1;
+        const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+        #[cfg(feature = "riscv64")]
+        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            VirtAddr::new(header_ptr as u64)
+        ).0;
+        #[cfg(not(feature = "riscv64"))]
+        let header_phys_addr = header_ptr as u64;
+        #[cfg(feature = "riscv64")]
+        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+            VirtAddr::new(resp_ptr as u64)
+        ).0;
+        #[cfg(not(feature = "riscv64"))]
+        let resp_phys_addr = resp_ptr as u64;
+
+        virt_queue.set_desc(
+            header_desc_idx,
+            header_phys_addr,
+            core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+            VIRTQ_DESC_F_NEXT,
+            resp_desc_idx,
+        );
+        virt_queue.set_desc(
+            resp_desc_idx,
+            resp_phys_addr,
+            core::mem::size_of::<VirtIOBlkResp>() as u32,
+            VIRTQ_DESC_F_WRITE,
+            0,
+        );
+
+        let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+        virt_queue.submit(header_desc_idx);
+        crate::drivers::virtio::increment_expected_used_idx();
+
+        let used_ptr = virt_queue.used_ring_ptr();
+        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr)
+    };
+
+    let new_used = VirtQueue::wait_for_used_interruptible(
+        used_ring_ptr,
+        crate::drivers::virtio::get_pci_blk_wait_queue(),
+        prev_expected,
+    );
+
+    if new_used == prev_expected {
+        // Same R21-N2 discipline as the RW paths: descriptors still
+        // submitted, late-drain bounded; a true timeout leaks the 64B
+        // block instead of freeing in-flight DMA targets.
+        let mut late = false;
+        for _ in 0..5_000_000u64 {
+            let idx = unsafe {
+                core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
+            };
+            if idx != prev_expected {
+                late = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if !late {
+            return Err("VirtIO flush request timeout");
+        }
+    }
+
+    // SAFETY: resp_ptr was allocated above; device has completed the flush.
+    let status = unsafe { *resp_ptr };
+    // SAFETY: header_ptr is the base of the combined block; resp at +48.
+    unsafe {
+        alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+    }
+
+    match status.status {
+        crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(0),
+        _ => Err("VirtIO block flush I/O error"),
     }
 }

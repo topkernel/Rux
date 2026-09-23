@@ -449,18 +449,31 @@ impl VirtIONetDevice {
         // Notify device
         queue.notify();
 
-        // Wait for completion
-        let new_used = queue.wait_for_completion(prev_used);
+        // Wait for completion — with a BOUNDED spin budget.
+        //
+        // This wait runs while holding the tx_queue lock_irqsave: external
+        // interrupts are disabled for the whole window. The old budget was
+        // 10M iterations here plus a 50M-iteration late-drain below (tens
+        // of seconds of IRQ blackout under QEMU TCG — review TIMING).
+        // 200K iterations is a few ms of TCG time, orders of magnitude
+        // beyond what a healthy virtio-net TX completion needs (the slirp
+        // backend completes in microseconds); a genuinely stuck device now
+        // fails fast instead of freezing every CPU's interrupts.
+        const TX_WAIT_BUDGET: u64 = 200_000;
+        let new_used = queue.wait_for_completion_max(prev_used, TX_WAIT_BUDGET);
 
         if new_used == prev_used {
             // R8-M2 / R21-N2 discipline (same as virtio-blk): the TX chain
             // is STILL SUBMITTED — the device may be DMA-reading hdr_ptr and
-            // the skb data right now. Late-drain the used ring with a long
-            // bounded spin; on a true timeout LEAK both buffers instead of
+            // the skb data right now. Late-drain the used ring with a
+            // bounded spin (500K iters — see TX_WAIT_BUDGET above; the old
+            // 50M-iteration drain held the IRQ-off lock for tens of
+            // seconds); on a true timeout LEAK both buffers instead of
             // freeing in-flight DMA targets.
+            const TX_LATE_DRAIN_BUDGET: u64 = 500_000;
             let used_ring = queue.used_ring_ptr();
             let mut late = false;
-            for _ in 0..50_000_000u64 {
+            for _ in 0..TX_LATE_DRAIN_BUDGET {
                 // SAFETY: used_ring points to this queue's used ring; offset 2
                 // is the idx field (u16) within the ring structure.
                 let idx = unsafe {

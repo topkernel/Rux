@@ -188,27 +188,20 @@ pub fn init_block_devices() -> usize {
 pub fn init_pci_block_devices() -> usize {
     let mut device_count = 0;
 
-    // Scan PCIe bus (QEMU virt platform)
-    const MAX_DEVICES: u8 = 32;
+    // Scan PCIe bus through the shared ECAM walker: 0x8000 stride per slot
+    // + all 8 functions. The old local scan used a 0x1000 stride, reading
+    // the FUNCTION bits as device numbers — every slot >= 4 was invisible
+    // (review BUG "PCI 探测步长 0x1000 错，slot≥4 全漏").
+    let ecam_addresses = crate::drivers::pci::find_ecam_devices(
+        crate::drivers::pci::vendor::RED_HAT,
+        &[
+            crate::drivers::pci::virtio_device::VIRTIO_BLK,
+            crate::drivers::pci::virtio_device::VIRTIO_BLK_MODERN,
+        ],
+    );
 
-    for device in 0..MAX_DEVICES {
-        let ecam_addr = crate::drivers::pci::RISCV_PCIE_ECAM_BASE + (device as u64 * crate::drivers::pci::PCIE_ECAM_SIZE);
-        let config = crate::drivers::pci::PCIConfig::new(ecam_addr);
-
-        let vendor_id = config.vendor_id();
-
-        // Skip empty devices
-        if vendor_id == 0xFFFF {
-            continue;
-        }
-
-        let device_id = config.device_id();
-
-        // Check if VirtIO block device
-        if vendor_id == crate::drivers::pci::vendor::RED_HAT &&
-           (device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK ||
-            device_id == crate::drivers::pci::virtio_device::VIRTIO_BLK_MODERN) {
-
+    for ecam_addr in ecam_addresses {
+        {
             match crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
                 Ok(mut virtio_dev) => {
                     // Reset device
@@ -228,18 +221,29 @@ pub fn init_pci_block_devices() -> usize {
                     // Read device features
                     let features = virtio_dev.read_device_features();
 
-                    // Only accept features the driver actually implements.
-                    // EVENT_IDX must NOT be accepted: the avail-ring
-                    // used_event slot is never initialized, so the device
-                    // would read a garbage value and could suppress
-                    // completion notifications indefinitely — the root
-                    // cause of the historical "random timeout" retries
-                    // (review DRIV-H2). INDIRECT/ANY_LAYOUT are unimplemented
-                    // as well.
-                    const F_EVENT_IDX: u32 = 1 << 29;
-                    const F_INDIRECT_DESC: u32 = 1 << 28;
-                    const F_ANY_LAYOUT: u32 = 1 << 27;
-                    let masked = features & !(F_EVENT_IDX | F_INDIRECT_DESC | F_ANY_LAYOUT);
+                    // Feature negotiation narrowed to the implemented set
+                    // (review BUG: "feature 协商三路径三套口径" — the old
+                    // blacklist still accepted every other device feature
+                    // the driver never honors). Word 0 accept-set:
+                    //   SEG_MAX / GEOMETRY / BLK_SIZE — passed through to
+                    //       the block layer without interpretation;
+                    //   RO — honored implicitly: the disk is treated as
+                    //       read-only when the device offers it;
+                    //   FLUSH — now implemented (VIRTIO_BLK_T_FLUSH via
+                    //       flush_block_using_configured_queue).
+                    // EVENT_IDX stays rejected: the avail-ring used_event
+                    // slot is never initialized, so the device would read a
+                    // garbage value and could suppress completion
+                    // notifications indefinitely (review DRIV-H2).
+                    // INDIRECT/ANY_LAYOUT remain unimplemented.
+                    const F_SEG_MAX: u32 = 1 << 1;
+                    const F_GEOMETRY: u32 = 1 << 2;
+                    const F_RO: u32 = 1 << 3;
+                    const F_BLK_SIZE: u32 = 1 << 4;
+                    const F_FLUSH: u32 = 1 << 6;
+                    const SUPPORTED_W0: u32 =
+                        F_SEG_MAX | F_GEOMETRY | F_RO | F_BLK_SIZE | F_FLUSH;
+                    let masked = features & SUPPORTED_W0;
 
                     // Write driver features (word 0 + VIRTIO_F_VERSION_1 in
                     // word 1, required for modern-only devices)

@@ -414,6 +414,48 @@ pub const RISCV_PCIE_ECAM_BASE: u64 = 0x30000000;
 /// PCIe ECAM configuration space size
 pub const PCIE_ECAM_SIZE: u64 = 0x1000;
 
+/// Scan the PCIe ECAM space and return the ECAM address of every function
+/// whose vendor matches `vendor` and whose device id is in `device_ids`.
+///
+/// ECAM layout: addr = ECAM | bus<<20 | dev<<15 | fn<<12, so the per-slot
+/// stride is 0x8000 and each slot carries 8 functions. The driver-local
+/// scans previously walked the space with a bare 0x1000 stride — they read
+/// the FUNCTION bits as device numbers, hiding every slot >= 4 (review
+/// BUG "PCI 探测步长 0x1000 错"). All probe paths now share this helper.
+pub fn find_ecam_devices(vendor: u16, device_ids: &[u16]) -> alloc::vec::Vec<u64> {
+    #[cfg(feature = "riscv64")]
+    {
+        const MAX_SLOTS: u8 = 32;
+        const FUNCTIONS_PER_SLOT: u64 = 8;
+
+        let mut found = alloc::vec::Vec::new();
+        for slot in 0..MAX_SLOTS {
+            for func in 0..FUNCTIONS_PER_SLOT {
+                let ecam_addr = RISCV_PCIE_ECAM_BASE
+                    + (slot as u64 * 0x8000)
+                    + (func * PCIE_ECAM_SIZE);
+                let config = PCIConfig::new(ecam_addr);
+
+                let vid = config.vendor_id();
+                if vid != vendor {
+                    continue;
+                }
+                let did = config.device_id();
+                if device_ids.contains(&did) {
+                    found.push(ecam_addr);
+                }
+            }
+        }
+        found
+    }
+
+    #[cfg(not(feature = "riscv64"))]
+    {
+        let _ = (vendor, device_ids);
+        alloc::vec::Vec::new()
+    }
+}
+
 /// Enumerate VirtIO devices on PCI bus
 ///
 /// # Returns

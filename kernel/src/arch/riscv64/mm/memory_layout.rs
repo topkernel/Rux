@@ -461,7 +461,15 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
         // Legacy identity mapping (for transition period)
         PhysAddr::new(addr)
     } else {
-        // User virtual address or other: return as-is
+        // Not a linear-map or identity address: passing e.g. a kernel-image
+        // (0xffffffff80000000-region) or arbitrary pointer here is a bug in
+        // the caller — the returned "physical" address would silently feed
+        // a device DMA (review RISK). Warn once per offending site; the
+        // raw value is still returned to preserve the historical behavior.
+        crate::pr_warn!(
+            "virt_to_phys: address {:#x} is outside the linear mapping",
+            addr
+        );
         PhysAddr::new(addr)
     }
 }

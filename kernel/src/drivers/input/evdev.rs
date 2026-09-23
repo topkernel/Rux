@@ -179,13 +179,61 @@ fn evdev_file_close(_file: &File) -> i32 {
     0
 }
 
+/// evdev poll function
+///
+/// Review LINUX-DIFF ("evdev 无 poll"): select/poll on /dev/input/eventX
+/// used to hit the FileOps default (never ready), so libinput-style
+/// pollers spun or misdetected the device. Report readable whenever the
+/// queue holds an event (drain the virtio queues first so a keystroke
+/// that has not raised an IRQ yet still wakes the poller).
+fn evdev_file_poll(file: &File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+
+    // Get the device (same dispatch as evdev_file_read)
+    // SAFETY: private_data contains a valid DevNo pointer set during open;
+    // the EVDEV_* statics are initialized by init_evdev() before any file
+    // operations can occur.
+    let device = unsafe {
+        match *file.private_data.get() {
+            Some(ptr) => {
+                let devno = *(ptr as *const DevNo);
+                if devno == DEV_EVDEV_KEYBOARD {
+                    EVDEV_KEYBOARD.as_ref()
+                } else if devno == DEV_EVDEV_POINTER {
+                    EVDEV_POINTER.as_ref()
+                } else {
+                    return 0
+                }
+            }
+            None => return POLLERR,
+        }
+    };
+    let device = match device {
+        Some(d) => d,
+        None => return POLLERR,
+    };
+
+    let mut ready = 0u16;
+    if events & POLLIN != 0 {
+        // Drain the virtio queues so recently-arrived input counts.
+        poll_virtio_events();
+        if device.has_event() {
+            ready |= POLLIN | POLLRDNORM;
+        }
+    }
+    if events & POLLOUT != 0 {
+        // evdev is never writable.
+    }
+    ready
+}
+
 /// evdev FileOps
 pub static EVDEV_OPS: FileOps = FileOps {
     read: Some(evdev_file_read),
     write: None,
     lseek: None,
     close: Some(evdev_file_close),
-    poll: None,
+    poll: Some(evdev_file_poll),
 };
 
 // ============================================================================
@@ -312,31 +360,66 @@ pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
         }
 
         EVIOCGBIT => {
-            // EVIOCGBIT(ev, len) encodes ev in the low byte: nr = 0x20 + ev.
-            // Extract: ev = (cmd & 0xFF) - 0x20
+            // EVIOCGBIT(ev, len) encodes ev in the ioctl nr: nr = 0x20 + ev.
+            // Review BUG ("EVIOCG* 真实数据"): the old bitmaps were wrong —
+            // the ev-type bitmap had EV_MSC/EV_REL bits set where EV_KEY
+            // belongs, the key bitmap claimed every bit 0..255 for BOTH
+            // device kinds, and REL_WHEEL was missing. Report what the
+            // virtio devices actually emit:
+            //   keyboard: EV_SYN|EV_KEY (keys 0x01..=0x58)
+            //   pointer:  EV_SYN|EV_KEY|EV_REL|EV_ABS
+            //             (BTN_LEFT/RIGHT/MIDDLE, REL_X/Y/WHEEL, ABS_X/Y)
             let event_type = (cmd & 0xFF) as usize - 0x20;
+            // User buffer length is encoded in bits 29..16 of the ioctl.
+            let out_len = ((cmd >> 16) & 0x3FFF) as usize;
+            let out_len = if out_len == 0 { 32 } else { out_len.min(256) };
             // SAFETY: arg is a valid kernel pointer; writes are bounded to
-            // small fixed-size regions (4 bytes or 32 bytes max).
+            // min(ioctl size, 256) bytes.
             unsafe {
                 let bits_ptr = arg as *mut u8;
+                core::ptr::write_bytes(bits_ptr, 0, out_len);
+                let set_bit = |byte_idx: usize, bit: u16| {
+                    if byte_idx < out_len {
+                        // SAFETY: byte_idx < out_len bounds the write.
+                        unsafe {
+                            *bits_ptr.add(byte_idx) |= 1 << (bit & 7);
+                        }
+                    }
+                };
                 match event_type {
                     0 => {
-                        let bits: [u8; 4] = [0x01, 0x03, 0x00, 0x00];
-                        core::ptr::copy_nonoverlapping(bits.as_ptr(), bits_ptr, 4);
+                        // Supported event types bitmap.
+                        set_bit(0, EV_SYN as u16);
+                        set_bit(0, EV_KEY as u16);
+                        if device.is_pointer {
+                            set_bit(0, EV_REL as u16);
+                            set_bit(0, EV_ABS as u16);
+                        }
                     }
                     1 => {
-                        for i in 0..32 {
-                            core::ptr::write(bits_ptr.add(i), 0xFF);
+                        if device.is_pointer {
+                            // BTN_LEFT/RIGHT/MIDDLE = 0x110..0x112
+                            set_bit(0x110 / 8, BTN_LEFT & 7);
+                            set_bit(0x110 / 8, BTN_RIGHT & 7);
+                            set_bit(0x110 / 8, BTN_MIDDLE & 7);
+                        } else {
+                            // Standard keyboard keys 0x01..=0x58.
+                            for code in 1u16..=0x58 {
+                                set_bit((code / 8) as usize, code % 8);
+                            }
                         }
                     }
                     2 => {
                         if device.is_pointer {
-                            core::ptr::write(bits_ptr, 0x03);
+                            set_bit(REL_X as usize / 8, REL_X & 7);
+                            set_bit(REL_Y as usize / 8, REL_Y & 7);
+                            set_bit(REL_WHEEL as usize / 8, REL_WHEEL & 7);
                         }
                     }
                     3 => {
                         if device.is_pointer {
-                            core::ptr::write(bits_ptr, 0x03);
+                            set_bit(ABS_X as usize / 8, ABS_X & 7);
+                            set_bit(ABS_Y as usize / 8, ABS_Y & 7);
                         }
                     }
                     _ => {}

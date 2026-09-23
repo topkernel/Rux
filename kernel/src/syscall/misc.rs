@@ -130,16 +130,17 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
 
     // nfds == 0 with a NULL array is the classic poll(NULL, 0, ms) sleep
     // idiom — legal on Linux. Only a NULL array with nfds != 0 is EFAULT.
+    let fds_size = core::mem::size_of::<PollFd>().saturating_mul(nfds);
     if fds_ptr.is_null() {
         if nfds != 0 {
             return -(errno::EFAULT as i64);
         }
+    } else if fds_size == 0 {
+        // Overflowed (Linux does not cap nfds): reject rather than wrap.
+        if nfds != 0 {
+            return -(errno::EINVAL as i64);
+        }
     } else {
-        // Overflow-safe size computation: Linux does not cap nfds.
-        let fds_size = match core::mem::size_of::<PollFd>().checked_mul(nfds) {
-            Some(s) => s,
-            None => return -(errno::EINVAL as i64),
-        };
         if !crate::arch::riscv64::uaccess::access_ok(fds_ptr as usize, fds_size) {
             return -(errno::EFAULT as i64);
         }
@@ -162,11 +163,20 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
     loop {
         let mut ready_count = 0usize;
 
-        // Check all file descriptors
-        for i in 0..nfds {
-            // SAFETY: fds_ptr validated with access_ok; nfds bounded to 1024.
-            unsafe {
-                let pollfd = &mut *fds_ptr.add(i);
+        // Check all file descriptors. The pollfd array is USER memory:
+        // copy it in, compute revents, copy it back — all through the
+        // exception-table paths (SUM=0 safe; raw derefs fault the kernel).
+        // SAFETY: fds_ptr validated with access_ok; nfds bounded to 1024.
+        unsafe {
+            let mut pollfds = alloc::vec![PollFd { fd: -1, events: 0, revents: 0 }; nfds];
+            crate::arch::riscv64::uaccess::copy_from_user(
+                pollfds.as_mut_ptr() as *mut u8,
+                fds_ptr as *const u8,
+                fds_size,
+            );
+
+            for i in 0..nfds {
+                let pollfd = &mut pollfds[i];
                 pollfd.revents = 0;
 
                 let file = match fdtable.get_file(pollfd.fd as usize) {
@@ -214,6 +224,13 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                     ready_count += 1;
                 }
             }
+
+            // SAFETY: fds_ptr validated with access_ok(fds_size) above.
+            crate::arch::riscv64::uaccess::copy_to_user(
+                fds_ptr as *mut u8,
+                pollfds.as_ptr() as *const u8,
+                fds_size,
+            );
         }
 
         if ready_count > 0 {
@@ -270,10 +287,11 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
     let timeout_ms: i32 = if timeout_ptr.is_null() {
         -1  // NULL = infinite wait
     } else {
-        // SAFETY: timeout_ptr validated with access_ok; reads two u64 fields.
+        // SAFETY: timeout_ptr validated with access_ok; get_user is the
+        // exception-table copy path (SUM=0 safe).
         unsafe {
-            let tv_sec = core::ptr::read_volatile(timeout_ptr);
-            let tv_nsec = core::ptr::read_volatile(timeout_ptr.add(1));
+            let tv_sec = crate::arch::riscv64::uaccess::get_user(timeout_ptr).unwrap_or(0);
+            let tv_nsec = crate::arch::riscv64::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
             if tv_nsec >= 1_000_000_000 {
                 // Invalid timespec: match Linux poll_select_set_timeout().
                 return -(errno::EINVAL as i64);
@@ -323,10 +341,11 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
     let (timeout_ms, has_timeout) = if timeout_ptr.is_null() {
         (0i64, false)
     } else {
-        // SAFETY: timeout_ptr validated with access_ok; reads two i64 fields.
+        // SAFETY: timeout_ptr validated with access_ok; get_user is the
+        // exception-table copy path (SUM=0 safe).
         unsafe {
-            let tv_sec = core::ptr::read_volatile(timeout_ptr);
-            let tv_nsec = core::ptr::read_volatile(timeout_ptr.add(1));
+            let tv_sec = crate::arch::riscv64::uaccess::get_user(timeout_ptr).unwrap_or(0);
+            let tv_nsec = crate::arch::riscv64::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
             if tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1_000_000_000 {
                 return -(errno::EINVAL as i64);
             }
@@ -410,18 +429,43 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
         return -(errno::EFAULT as i64);
     }
 
-    // Snapshot original fd_sets
+    // Snapshot original fd_sets through the exception-table copy path
+    // (SUM=0 safe; raw derefs of the user fd_sets fault the kernel).
     // SAFETY: fd set pointers validated with access_ok; reads are within FdSet size.
     let original_readfds = unsafe {
-        if readfds_ptr.is_null() { FdSet::new() } else { *readfds_ptr }
+        if readfds_ptr.is_null() { FdSet::new() } else {
+            let mut v = FdSet::new();
+            crate::arch::riscv64::uaccess::copy_from_user(
+                &mut v as *mut FdSet as *mut u8,
+                readfds_ptr as *const u8,
+                fdset_size,
+            );
+            v
+        }
     };
     // SAFETY: same as above.
     let original_writefds = unsafe {
-        if writefds_ptr.is_null() { FdSet::new() } else { *writefds_ptr }
+        if writefds_ptr.is_null() { FdSet::new() } else {
+            let mut v = FdSet::new();
+            crate::arch::riscv64::uaccess::copy_from_user(
+                &mut v as *mut FdSet as *mut u8,
+                writefds_ptr as *const u8,
+                fdset_size,
+            );
+            v
+        }
     };
     // SAFETY: same as above.
     let original_exceptfds = unsafe {
-        if exceptfds_ptr.is_null() { FdSet::new() } else { *exceptfds_ptr }
+        if exceptfds_ptr.is_null() { FdSet::new() } else {
+            let mut v = FdSet::new();
+            crate::arch::riscv64::uaccess::copy_from_user(
+                &mut v as *mut FdSet as *mut u8,
+                exceptfds_ptr as *const u8,
+                fdset_size,
+            );
+            v
+        }
     };
 
     let fdtable = match crate::sched::get_current_fdtable() {
@@ -511,22 +555,60 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
         }
 
         if ready_count > 0 {
-            // SAFETY: fd set pointers validated with access_ok above; writes FdSet-sized results.
+            // SAFETY: fd set pointers validated with access_ok above;
+            // copy_to_user is the exception-table copy path.
             unsafe {
-                if !readfds_ptr.is_null() { *readfds_ptr = result_readfds; }
-                if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
-                if !exceptfds_ptr.is_null() { *exceptfds_ptr = result_exceptfds; }
+                if !readfds_ptr.is_null() {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        readfds_ptr as *mut u8,
+                        &result_readfds as *const FdSet as *const u8,
+                        fdset_size,
+                    );
+                }
+                if !writefds_ptr.is_null() {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        writefds_ptr as *mut u8,
+                        &result_writefds as *const FdSet as *const u8,
+                        fdset_size,
+                    );
+                }
+                if !exceptfds_ptr.is_null() {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        exceptfds_ptr as *mut u8,
+                        &result_exceptfds as *const FdSet as *const u8,
+                        fdset_size,
+                    );
+                }
             }
             return ready_count as i64;
         }
 
         // No fd ready — check timeout
         if has_timeout && timeout_ms == 0 {
-            // SAFETY: fd set pointers validated with access_ok above; writes FdSet-sized results.
+            // SAFETY: fd set pointers validated with access_ok above;
+            // copy_to_user is the exception-table copy path.
             unsafe {
-                if !readfds_ptr.is_null() { *readfds_ptr = result_readfds; }
-                if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
-                if !exceptfds_ptr.is_null() { *exceptfds_ptr = result_exceptfds; }
+                if !readfds_ptr.is_null() {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        readfds_ptr as *mut u8,
+                        &result_readfds as *const FdSet as *const u8,
+                        fdset_size,
+                    );
+                }
+                if !writefds_ptr.is_null() {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        writefds_ptr as *mut u8,
+                        &result_writefds as *const FdSet as *const u8,
+                        fdset_size,
+                    );
+                }
+                if !exceptfds_ptr.is_null() {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        exceptfds_ptr as *mut u8,
+                        &result_exceptfds as *const FdSet as *const u8,
+                        fdset_size,
+                    );
+                }
             }
             return 0;
         }
@@ -534,11 +616,30 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
         if has_timeout && timeout_ms > 0 {
             let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
             if elapsed >= timeout_jiffies {
-                // SAFETY: fd set pointers validated with access_ok above; writes FdSet-sized results.
+                // SAFETY: fd set pointers validated with access_ok above;
+                // copy_to_user is the exception-table copy path.
                 unsafe {
-                    if !readfds_ptr.is_null() { *readfds_ptr = result_readfds; }
-                    if !writefds_ptr.is_null() { *writefds_ptr = result_writefds; }
-                    if !exceptfds_ptr.is_null() { *exceptfds_ptr = result_exceptfds; }
+                    if !readfds_ptr.is_null() {
+                        crate::arch::riscv64::uaccess::copy_to_user(
+                            readfds_ptr as *mut u8,
+                            &result_readfds as *const FdSet as *const u8,
+                            fdset_size,
+                        );
+                    }
+                    if !writefds_ptr.is_null() {
+                        crate::arch::riscv64::uaccess::copy_to_user(
+                            writefds_ptr as *mut u8,
+                            &result_writefds as *const FdSet as *const u8,
+                            fdset_size,
+                        );
+                    }
+                    if !exceptfds_ptr.is_null() {
+                        crate::arch::riscv64::uaccess::copy_to_user(
+                            exceptfds_ptr as *mut u8,
+                            &result_exceptfds as *const FdSet as *const u8,
+                            fdset_size,
+                        );
+                    }
                 }
                 return 0;
             }
@@ -702,8 +803,16 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 None => return -(errno::EBADF as i64),
             };
             let file_id = file.file_id;
-            // SAFETY: event_ptr validated with access_ok above; reads EPollEvent.
-            let event = unsafe { *event_ptr };
+            // SAFETY: event_ptr validated with access_ok above; copy_from_user
+            // is the exception-table copy path (SUM=0 safe).
+            let mut event = EPollEvent { events: 0, data: 0 };
+            unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    &mut event as *mut EPollEvent as *mut u8,
+                    event_ptr as *const u8,
+                    core::mem::size_of::<EPollEvent>(),
+                );
+            }
             let mut entries = epoll.entries.lock();
             match entries.iter_mut().find(|e| e.fd == fd) {
                 Some(existing) => {
@@ -738,8 +847,16 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             }
         }
         EPOLL_CTL_MOD => {
-            // SAFETY: event_ptr validated with access_ok above; reads EPollEvent.
-            let event = unsafe { *event_ptr };
+            // SAFETY: event_ptr validated with access_ok above; copy_from_user
+            // is the exception-table copy path (SUM=0 safe).
+            let mut event = EPollEvent { events: 0, data: 0 };
+            unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    &mut event as *mut EPollEvent as *mut u8,
+                    event_ptr as *const u8,
+                    core::mem::size_of::<EPollEvent>(),
+                );
+            }
             let mut entries = epoll.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.fd == fd) {
                 entry.events = event.events;
@@ -875,11 +992,14 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
 
         if !ready_events.is_empty() {
             let count = ready_events.len().min(maxevents as usize);
-            // SAFETY: events_ptr validated with access_ok; count bounded by maxevents <= 1024.
+            // SAFETY: events_ptr validated with access_ok; copy_to_user is
+            // the exception-table copy path (SUM=0 safe).
             unsafe {
-                for i in 0..count {
-                    *events_ptr.add(i) = ready_events[i];
-                }
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    events_ptr as *mut u8,
+                    ready_events.as_ptr() as *const u8,
+                    count * core::mem::size_of::<EPollEvent>(),
+                );
             }
             return count as i64;
         }
@@ -1278,30 +1398,32 @@ fn timerfd_poll(file: &crate::fs::File, events: u16) -> u16 {
 
 /// Write old timer settings (for timerfd_gettime / timerfd_settime old_value)
 fn timerfd_write_olds(tfd: &TimerFd, old_value: *mut u64) {
-    // SAFETY: old_value validated with access_ok(32 bytes) by callers; writes 4 i64 values.
+    // SAFETY: old_value validated with access_ok(32 bytes) by callers;
+    // put_user is the exception-table copy path (SUM=0 safe).
     unsafe {
         let p = old_value as *mut i64;
+        let put = crate::arch::riscv64::uaccess::put_user;
         // it_interval
         if tfd.interval_jiffies > 0 {
             let int_msecs = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
-            core::ptr::write(p, (int_msecs / 1000) as i64);
-            core::ptr::write(p.add(1), 0i64);
+            let _ = put(p, (int_msecs / 1000) as i64);
+            let _ = put(p.add(1), 0i64);
         } else {
-            core::ptr::write(p, 0i64);
-            core::ptr::write(p.add(1), 0i64);
+            let _ = put(p, 0i64);
+            let _ = put(p.add(1), 0i64);
         }
         // it_value
         if tfd.kernel_timer_id != 0 && crate::timer::timer_pending(tfd.kernel_timer_id) {
             if tfd.interval_jiffies > 0 {
                 let val_msecs = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
-                core::ptr::write(p.add(2), (val_msecs / 1000) as i64);
+                let _ = put(p.add(2), (val_msecs / 1000) as i64);
             } else {
-                core::ptr::write(p.add(2), 1i64);
+                let _ = put(p.add(2), 1i64);
             }
-            core::ptr::write(p.add(3), 0i64);
+            let _ = put(p.add(3), 0i64);
         } else {
-            core::ptr::write(p.add(2), 0i64);
-            core::ptr::write(p.add(3), 0i64);
+            let _ = put(p.add(2), 0i64);
+            let _ = put(p.add(3), 0i64);
         }
     }
 }
@@ -1534,14 +1656,16 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     }
 
     // Read struct itimerspec { struct timespec it_interval, struct timespec it_value }
-    // SAFETY: new_value validated with access_ok(32 bytes); reads 4 i64 fields.
+    // SAFETY: new_value validated with access_ok(32 bytes); get_user is the
+    // exception-table copy path (SUM=0 safe). Unreadable fields read as 0.
     let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
         let p = new_value as *const i64;
+        let get = crate::arch::riscv64::uaccess::get_user::<i64>;
         (
-            core::ptr::read(p),
-            core::ptr::read(p.add(1)),
-            core::ptr::read(p.add(2)),
-            core::ptr::read(p.add(3)),
+            get(p).unwrap_or(0),
+            get(p.add(1)).unwrap_or(0),
+            get(p.add(2)).unwrap_or(0),
+            get(p.add(3)).unwrap_or(0),
         )
     };
 

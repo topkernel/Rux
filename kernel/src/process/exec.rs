@@ -745,6 +745,14 @@ pub(crate) fn do_execve_elf(
         // ===== Return to user mode immediately after successful execve =====
         // After execve returns, sret will jump to new program entry
 
+        // Flush arch thread state (FP registers) before returning to the
+        // new image — the old image's FP register values must not leak
+        // into the exec'd program (review ARCH, FP residue; flush_thread
+        // had zero callers). Sets thread.fs=Off and the live sstatus.FS=Off
+        // so the new image's first FP instruction goes through the lazy
+        // fpu_init path with zeroed registers.
+        crate::arch::riscv64::process::flush_thread();
+
         // R11-5: use the entry-captured frame (see fn head).
         if current_regs.is_null() {
             // No trap frame, this is the init process case
@@ -755,14 +763,17 @@ pub(crate) fn do_execve_elf(
         // Directly modify current trap frame
         // SPP = 0 means return to user mode, SPIE = 1 means enable interrupts
         const SR_SPIE: u64 = 1 << 5;
-        const SR_SUM: u64 = 1 << 18;
 
+        // SUM is deliberately NOT set (SUM convergence, review SEC): the
+        // kernel runs with sstatus.SUM=0 and reaches user memory only via
+        // the uaccess exception-table paths.
+        //
         // SAFETY: current_regs was obtained from current_pt_regs() and checked for null above.
         // We are modifying the trap frame to set up the new program's entry point and stack.
         unsafe {
             (*current_regs).epc = actual_entry;         // Entry point (interpreter or program)
             (*current_regs).sp = adjusted_stack_top;   // New user stack
-            (*current_regs).status = SR_SPIE | SR_SUM; // Clear SPP, set SPIE and SUM
+            (*current_regs).status = SR_SPIE;          // Clear SPP, set SPIE
             (*current_regs).tp = 0;                   // Clear TLS pointer - musl libc will reinitialize
             (*current_regs).a0 = argc;                 // argc for C runtime
             // Other registers remain 0

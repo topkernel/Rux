@@ -37,8 +37,18 @@ pub struct FbBitfield {
 }
 
 /// Fixed screen information
-#[repr(C)]
 #[derive(Clone, Copy)]
+/// Framebuffer fixed information — layout matches Linux
+/// `struct fb_fix_screeninfo` byte-for-byte (review BUG:
+/// "FbFixScreeninfo 布局错位"): type_aux and the three pan steps were
+/// missing, shifting visual/line_length/mmio_* by 8+ bytes, so user fb
+/// programs (fbset, SDL FB_DEV) read garbage strides and MMIO offsets.
+///
+/// Offsets: id 0, smem_start 16, smem_len 24, type 28, type_aux 32,
+/// visual 36, xpanstep 40, ypanstep 42, ywrapstep 44, (pad 46),
+/// line_length 48, (pad 52), mmio_start 56, mmio_len 64, accel 68,
+/// capabilities 72, reserved 74; sizeof = 80.
+#[repr(C)]
 pub struct FbFixScreeninfo {
     /// Driver name (16 bytes)
     pub id: [u8; 16],
@@ -48,8 +58,14 @@ pub struct FbFixScreeninfo {
     pub smem_len: u32,
     /// Framebuffer type
     pub type_: u32,
+    /// Interleave for interleaved framebuffers
+    pub type_aux: u32,
     /// Visual type
     pub visual: u32,
+    /// Zero if no hardware panning
+    pub xpanstep: u16,
+    pub ypanstep: u16,
+    pub ywrapstep: u16,
     /// Line length (bytes)
     pub line_length: u32,
     /// MMIO start address
@@ -71,7 +87,11 @@ impl Default for FbFixScreeninfo {
             smem_start: 0,
             smem_len: 0,
             type_: FB_TYPE_PACKED_PIXELS,
+            type_aux: 0,
             visual: FB_VISUAL_TRUECOLOR,
+            xpanstep: 0,
+            ypanstep: 0,
+            ywrapstep: 0,
             line_length: 0,
             mmio_start: 0,
             mmio_len: 0,

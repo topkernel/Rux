@@ -185,10 +185,20 @@ pub struct InputEvent {
 
 impl InputEvent {
     /// Create new input event
+    ///
+    /// The timestamp is taken from the CLINT timer (review LINUX-DIFF:
+    /// "InputEvent 时间戳恒 0" — libinput rejects/fabricates timing when
+    /// input_event.time is zero). read_time() runs at
+    /// TIMER_CLOCK_FREQ_HZ; convert to the struct timeval
+    /// (seconds + microseconds) the uapi expects.
     pub fn new(type_: u16, code: u16, value: i32) -> Self {
+        let cycles = crate::drivers::intc::clint::read_time();
+        let freq = crate::config::TIMER_CLOCK_FREQ_HZ;
+        let tv_sec = cycles / freq;
+        let tv_usec = (cycles % freq) * 1_000_000 / freq;
         Self {
-            tv_sec: 0,
-            tv_usec: 0,
+            tv_sec,
+            tv_usec,
             type_,
             code,
             value,

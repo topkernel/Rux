@@ -1301,6 +1301,25 @@ fn pci_virtio_write_block(
     }
 }
 
+/// Flush the PCI VirtIO block device's write cache (VIRTIO_BLK_T_FLUSH).
+///
+/// Persists the disk's volatile cache after the kernel's write-through
+/// buffer cache has been drained. Returns Ok(()) when no PCI blk device
+/// is registered (nothing to flush) so callers can invoke it blindly.
+pub fn flush_pci_blk() -> Result<(), i32> {
+    let dev = get_pci_device();
+    match dev {
+        Some(pci_dev) => {
+            use virtio_pci::flush_block_using_configured_queue;
+            match flush_block_using_configured_queue(&pci_dev) {
+                Ok(_) => Ok(()),
+                Err(_) => Err(-5),  // EIO
+            }
+        }
+        None => Ok(()),
+    }
+}
+
 /// Get PCI VirtIO GenDisk
 ///
 /// Get PCI VirtIO device's GenDisk from block device manager

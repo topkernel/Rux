@@ -2,7 +2,7 @@
 //!
 //! Implements shmget, shmctl, shmat, shmdt following the Linux kernel design.
 
-use crate::arch::riscv64::uaccess::{access_ok, copy_to_user};
+use crate::arch::riscv64::uaccess::{access_ok, clear_user, copy_to_user, put_user};
 use crate::arch::riscv64::mm::map_user_page;
 use crate::arch::riscv64::mm::memory_layout::{VirtAddr as MmVirtAddr, PhysAddr as MmPhysAddr};
 use crate::mm::page::{PAGE_SIZE, PAGE_MASK, VirtAddr};
@@ -415,18 +415,13 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                 return -(errno::EFAULT as i64);
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for 48 bytes above;
-            // zeroing the entire buffer is within bounds.
-            unsafe { core::ptr::write_bytes(buf_ptr, 0, 48) };
-            // SAFETY: buf_ptr was access_ok-validated for 48 bytes; offset 0 is within bounds.
-            unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, 256 * 4096u64) };
-            // SAFETY: buf_ptr + 8 is within the 48-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, 1u64) };
-            // SAFETY: buf_ptr + 16 is within the 48-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(16) as *mut u64, 256u64) };
-            // SAFETY: buf_ptr + 24 is within the 48-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(24) as *mut u64, 4096u64) };
-            // SAFETY: buf_ptr + 32 is within the 48-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(32) as *mut u64, 256 * 256u64) };
+            // clear_user/put_user are the exception-table copy paths (SUM=0 safe).
+            unsafe { clear_user(buf_ptr, 48) };
+            let _ = unsafe { put_user(buf_ptr as *mut u64, 256 * 4096u64) };
+            let _ = unsafe { put_user(buf_ptr.add(8) as *mut u64, 1u64) };
+            let _ = unsafe { put_user(buf_ptr.add(16) as *mut u64, 256u64) };
+            let _ = unsafe { put_user(buf_ptr.add(24) as *mut u64, 4096u64) };
+            let _ = unsafe { put_user(buf_ptr.add(32) as *mut u64, 256 * 256u64) };
             SHM_IDS.count() as i64
         }
         11 => {
@@ -509,11 +504,10 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                 return -(errno::EFAULT as i64);
             }
             // SAFETY: buf_ptr was null-checked and access_ok-validated for 64 bytes above;
-            // zeroing the entire buffer is within bounds.
-            unsafe { core::ptr::write_bytes(buf_ptr, 0, 64) };
+            // clear_user/put_user are the exception-table copy paths (SUM=0 safe).
+            unsafe { clear_user(buf_ptr, 64) };
             // used_ids (offset 0)
-            // SAFETY: buf_ptr was access_ok-validated for 64 bytes; offset 0 is within bounds.
-            unsafe { core::ptr::write_volatile(buf_ptr as *mut u64, SHM_IDS.count() as u64) };
+            let _ = unsafe { put_user(buf_ptr as *mut u64, SHM_IDS.count() as u64) };
             // shm_tot (offset 8) — total shared memory pages
             let mut total_pages: u64 = 0;
             {
@@ -527,8 +521,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
                     }
                 }
             }
-            // SAFETY: buf_ptr + 8 is within the 64-byte access_ok-validated range.
-            unsafe { core::ptr::write_volatile(buf_ptr.add(8) as *mut u64, total_pages) };
+            let _ = unsafe { put_user(buf_ptr.add(8) as *mut u64, total_pages) };
             // shm_rss (offset 16), shm_swp (offset 24) — no swap support, 0
             // swap_attempts (offset 32), swap_successes (offset 40) — 0
             // shm_tot is already written; remaining fields stay 0

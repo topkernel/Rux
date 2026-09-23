@@ -127,6 +127,13 @@ impl VirtioInputDevice {
             last_used: 0,
         };
 
+        // A virtio-input device without a Device CFG capability is unusable
+        // (every one of its registers lives there) — and it would make the
+        // config reads below touch address 0.
+        if device.pci.device_cfg_bar == 0 {
+            return None;
+        }
+
         device.init_virtio()?;
         device.read_device_info();
 
@@ -205,15 +212,16 @@ impl VirtioInputDevice {
             crate::arch::riscv64::mm::VirtAddr::new(event_buffer as u64)
         ).0;
 
-        // Create VirtQueue
-        let notify_base = self.pci.notify_cfg_bar + self.pci.notify_cfg_offset as u64;
-        let notify_offset = (EVENT_QUEUE as u64) * (self.pci.notify_off_multiplier as u64) * 2;
+        // Create VirtQueue. The notify address comes from the spec formula
+        // via get_notify_addr (reads queue_notify_off from common cfg; the
+        // old inline `queue_index * multiplier * 2` scaled the multiplier
+        // — already in bytes — a second time, review BUG "notify ×2").
         let isr_base = self.pci.isr_cfg_bar + self.pci.isr_cfg_offset as u64;
 
         let queue = VirtQueue::new(
             queue_size,
             EVENT_QUEUE,
-            notify_base + notify_offset,
+            self.pci.get_notify_addr(EVENT_QUEUE),
             isr_base,
             isr_base + 4,
         )?;
@@ -286,7 +294,13 @@ impl VirtioInputDevice {
 
     /// Read device info
     fn read_device_info(&mut self) {
-        let config_base = self.pci.common_cfg_bar;
+        // The virtio-input config registers (select/subsel/size/payload)
+        // live in the DEVICE CFG capability BAR, NOT in common cfg. The
+        // old code read/wrote config through common_cfg_bar — those writes
+        // landed on device_feature_select and the "name" reads returned
+        // common-cfg garbage, so is_pointer() misclassified every device
+        // as a keyboard (review BUG: virtio-input 从错误 BAR 读 config).
+        let config_base = self.pci.device_cfg_bar;
 
         // Read device name
         unsafe {
@@ -312,7 +326,8 @@ impl VirtioInputDevice {
 
     /// Check if it is a pointer device
     fn check_pointer_device(&self) -> bool {
-        let config_base = self.pci.common_cfg_bar;
+        // Device CFG BAR — see read_device_info.
+        let config_base = self.pci.device_cfg_bar;
 
         unsafe {
             // Check EV_ABS event (absolute coordinates)
@@ -470,23 +485,18 @@ pub fn probe_virtio_input_devices() -> Option<(VirtioInputDevice, Option<VirtioI
     let mut keyboard: Option<VirtioInputDevice> = None;
     let mut pointer: Option<VirtioInputDevice> = None;
 
-    for device in 0..32u8 {
-        let ecam_addr = pci::RISCV_PCIE_ECAM_BASE + ((device as u64) * pci::PCIE_ECAM_SIZE);
-
-        let vendor_id = unsafe { read_volatile((ecam_addr as *const u16)) };
-        let device_id = unsafe { read_volatile((ecam_addr as *const u16).add(1)) };
-
-        if vendor_id == VIRTIO_INPUT_PCI_VENDOR && device_id == VIRTIO_INPUT_PCI_DEVICE {
-            if let Ok(virtio_pci) = VirtIOPCI::new(ecam_addr) {
-                if let Some(input_dev) = VirtioInputDevice::new(virtio_pci) {
-                    if input_dev.is_pointer() {
-                        if pointer.is_none() {
-                            pointer = Some(input_dev);
-                        }
-                    } else {
-                        if keyboard.is_none() {
-                            keyboard = Some(input_dev);
-                        }
+    // Shared ECAM walker: 0x8000 stride per slot + all 8 functions (the
+    // old 0x1000 stride hid every slot >= 4 — review BUG).
+    for ecam_addr in pci::find_ecam_devices(VIRTIO_INPUT_PCI_VENDOR, &[VIRTIO_INPUT_PCI_DEVICE]) {
+        if let Ok(virtio_pci) = VirtIOPCI::new(ecam_addr) {
+            if let Some(input_dev) = VirtioInputDevice::new(virtio_pci) {
+                if input_dev.is_pointer() {
+                    if pointer.is_none() {
+                        pointer = Some(input_dev);
+                    }
+                } else {
+                    if keyboard.is_none() {
+                        keyboard = Some(input_dev);
                     }
                 }
             }
@@ -508,16 +518,11 @@ pub fn probe_virtio_input_devices() -> Option<(VirtioInputDevice, Option<VirtioI
 
 /// Probe single VirtIO Input device
 pub fn probe_virtio_input() -> Option<VirtioInputDevice> {
-    for device in 0..32u8 {
-        let ecam_addr = pci::RISCV_PCIE_ECAM_BASE + ((device as u64) * pci::PCIE_ECAM_SIZE);
-
-        let vendor_id = unsafe { read_volatile((ecam_addr as *const u16)) };
-        let device_id = unsafe { read_volatile((ecam_addr as *const u16).add(1)) };
-
-        if vendor_id == VIRTIO_INPUT_PCI_VENDOR && device_id == VIRTIO_INPUT_PCI_DEVICE {
-            if let Ok(virtio_pci) = VirtIOPCI::new(ecam_addr) {
-                return VirtioInputDevice::new(virtio_pci);
-            }
+    // Shared ECAM walker: 0x8000 stride per slot + all 8 functions (the
+    // old 0x1000 stride hid every slot >= 4 — review BUG).
+    for ecam_addr in pci::find_ecam_devices(VIRTIO_INPUT_PCI_VENDOR, &[VIRTIO_INPUT_PCI_DEVICE]) {
+        if let Ok(virtio_pci) = VirtIOPCI::new(ecam_addr) {
+            return VirtioInputDevice::new(virtio_pci);
         }
     }
 

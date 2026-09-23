@@ -136,6 +136,33 @@ pub fn sys_listen(args: SyscallArgs) -> i64 {
 }
 
 /// W3: resolve a socket fd to (Arc<Socket>, nonblock-view of its file).
+
+// ==================== user-memory helpers (SUM=0 safe) ====================
+//
+// Raw dereferences of user pointers must not appear in syscall code: with
+// sstatus.SUM=0 in the kernel they page-fault into KernelPanic. These
+// helpers route through the exception-table copy paths.
+
+/// Write a sockaddr_in { AF_INET, port, addr, zero-pad } and *addrlen=16
+/// into user memory. Callers must access_ok-validate both pointers;
+/// failures are dropped (same visible semantics as the old bare stores,
+/// minus the kernel-fault window on unmapped pages).
+unsafe fn put_sockaddr_in(addr_ptr: *mut u8, addrlen_ptr: *mut u32, port: u16, addr: u32) {
+    use crate::arch::riscv64::uaccess::{put_user, clear_user};
+    let _ = put_user(addr_ptr as *mut u16, 2u16); // sin_family = AF_INET
+    let _ = put_user(addr_ptr.add(2) as *mut u16, port.to_be());
+    let _ = put_user(addr_ptr.add(4) as *mut u32, addr.to_be());
+    clear_user(addr_ptr.add(8), 8); // sin_zero
+    let _ = put_user(addrlen_ptr, 16u32);
+}
+
+/// Read one usize field of a user iovec/msghdr through get_user.
+/// `addr` is the raw user address (usize, as stored in msghdr/iovec fields).
+/// An unreadable field reads as 0 (callers already range-check).
+unsafe fn get_user_usize(addr: usize) -> usize {
+    crate::arch::riscv64::uaccess::get_user(addr as *const usize).unwrap_or(0)
+}
+
 fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
@@ -197,14 +224,9 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
                     // For an accepted connection the peer is the CHILD's
                     // remote endpoint, not the listener's.
                     let (paddr, pport) = crate::net::tcp::tcp_remote_endpoint(ret);
-                    // SAFETY: addr_ptr/addrlen_ptr validated with access_ok.
-                    unsafe {
-                        core::ptr::write(addr_ptr as *mut u16, 2u16); // AF_INET
-                        core::ptr::write(addr_ptr.add(2) as *mut u16, pport.to_be());
-                        core::ptr::write(addr_ptr.add(4) as *mut u32, paddr.to_be());
-                        core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
-                        core::ptr::write_volatile(addrlen_ptr, 16u32);
-                    }
+                    // SAFETY: addr_ptr/addrlen_ptr validated with access_ok;
+                    // put_sockaddr_in uses the exception-table copy path.
+                    unsafe { put_sockaddr_in(addr_ptr, addrlen_ptr, pport, paddr); }
                 }
             }
             return new_fd as i64;
@@ -440,8 +462,11 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // SAFETY: addrlen_ptr validated with access_ok(4); reading 4-byte u32.
-    let addrlen = unsafe { core::ptr::read_volatile(addrlen_ptr) } as usize;
+    // SAFETY: addrlen_ptr validated with access_ok(4); get_user is the
+    // exception-table copy path (SUM=0 safe).
+    let addrlen = unsafe {
+        crate::arch::riscv64::uaccess::get_user::<u32>(addrlen_ptr).unwrap_or(0)
+    } as usize;
     if addrlen < 16 {
         return -(errno::EINVAL as i64);
     }
@@ -482,14 +507,8 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
 
     let local_addr = *socket.local_addr.lock();
     let local_port = *socket.local_port.lock();
-    // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; writing sockaddr_in layout.
-    unsafe {
-        core::ptr::write(addr_ptr as *mut u16, 2u16); // AF_INET
-        core::ptr::write(addr_ptr.add(2) as *mut u16, local_port.to_be());
-        core::ptr::write(addr_ptr.add(4) as *mut u32, local_addr.to_be());
-        core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
-        core::ptr::write_volatile(addrlen_ptr, 16u32);
-    }
+    // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
+    unsafe { put_sockaddr_in(addr_ptr, addrlen_ptr, local_port, local_addr); }
     0
 }
 
@@ -511,8 +530,11 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // SAFETY: addrlen_ptr validated with access_ok; reading 4-byte u32.
-    let addrlen = unsafe { core::ptr::read_volatile(addrlen_ptr) } as usize;
+    // SAFETY: addrlen_ptr validated with access_ok; get_user is the
+    // exception-table copy path (SUM=0 safe).
+    let addrlen = unsafe {
+        crate::arch::riscv64::uaccess::get_user::<u32>(addrlen_ptr).unwrap_or(0)
+    } as usize;
     if addrlen < 16 {
         return -(errno::EINVAL as i64);
     }
@@ -526,14 +548,8 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
         if state == crate::net::socket::SocketState::Connected {
             let peer_addr = *socket.remote_addr.lock();
             let peer_port = *socket.remote_port.lock();
-            // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; writing sockaddr_in layout.
-            unsafe {
-                core::ptr::write(addr_ptr as *mut u16, 2u16); // AF_INET
-                core::ptr::write(addr_ptr.add(2) as *mut u16, peer_port.to_be());
-                core::ptr::write(addr_ptr.add(4) as *mut u32, peer_addr.to_be());
-                core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
-                core::ptr::write_volatile(addrlen_ptr, 16u32);
-            }
+            // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
+            unsafe { put_sockaddr_in(addr_ptr, addrlen_ptr, peer_port, peer_addr); }
             return 0;
         }
         return -(errno::ENOTCONN as i64);
@@ -776,8 +792,11 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     if !crate::arch::riscv64::uaccess::access_ok(optlen_ptr as usize, 4) {
         return -(errno::EFAULT as i64);
     }
-    // SAFETY: optlen_ptr validated with access_ok; reading 4-byte u32.
-    let optlen = unsafe { core::ptr::read_volatile(optlen_ptr) } as usize;
+    // SAFETY: optlen_ptr validated with access_ok; get_user is the
+    // exception-table copy path (SUM=0 safe).
+    let optlen = unsafe {
+        crate::arch::riscv64::uaccess::get_user::<u32>(optlen_ptr).unwrap_or(0)
+    } as usize;
     if optlen == 0 {
         return -(errno::EINVAL as i64);
     }
@@ -797,13 +816,13 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     // SAFETY: optval/optlen_ptr validated with access_ok above.
     unsafe fn write_int(optval: *mut u8, optlen: usize, optlen_ptr: *mut u32, val: i32) {
         let write_len = core::cmp::min(optlen, 4);
-        core::ptr::write_bytes(optval, 0, optlen.min(write_len));
-        core::ptr::copy_nonoverlapping(
-            &val as *const i32 as *const u8,
+        crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len));
+        crate::arch::riscv64::uaccess::copy_to_user(
             optval,
+            &val as *const i32 as *const u8,
             write_len,
         );
-        core::ptr::write_volatile(optlen_ptr, write_len as u32);
+        let _ = crate::arch::riscv64::uaccess::put_user(optlen_ptr, write_len as u32);
     }
 
     // SAFETY: optval and optlen_ptr validated with access_ok; writes stay within
@@ -887,32 +906,34 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                     let sec = (us / 1_000_000) as u64;
                     let usec = (us % 1_000_000) as u64;
                     let write_len = core::cmp::min(optlen, 16);
-                    core::ptr::write_bytes(optval, 0, optlen.min(write_len));
+                    crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len));
                     if write_len >= 8 {
-                        core::ptr::copy_nonoverlapping(
-                            &sec as *const u64 as *const u8, optval, 8.min(write_len),
+                        crate::arch::riscv64::uaccess::copy_to_user(
+                            optval,
+                            &sec as *const u64 as *const u8,
+                            8.min(write_len),
                         );
                     }
                     if write_len >= 16 {
-                        core::ptr::copy_nonoverlapping(
-                            &usec as *const u64 as *const u8,
+                        crate::arch::riscv64::uaccess::copy_to_user(
                             optval.add(8),
+                            &usec as *const u64 as *const u8,
                             8,
                         );
                     }
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    let _ = crate::arch::riscv64::uaccess::put_user(optlen_ptr, write_len as u32);
                 }
                 SO_LINGER => {
                     // struct linger { l_onoff: i32, l_linger: i32 } = 8 bytes
                     let write_len = core::cmp::min(optlen, 8);
-                    core::ptr::write_bytes(optval, 0, optlen.min(write_len)); // Linger off
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len)); // Linger off
+                    let _ = crate::arch::riscv64::uaccess::put_user(optlen_ptr, write_len as u32);
                 }
                 SO_PEERCRED => {
                     // struct ucred { pid, uid, gid } = 12 bytes
                     let write_len = core::cmp::min(optlen, 12);
-                    core::ptr::write_bytes(optval, 0, optlen.min(write_len));
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len));
+                    let _ = crate::arch::riscv64::uaccess::put_user(optlen_ptr, write_len as u32);
                 }
                 _ => {
                     return -(errno::ENOPROTOOPT as i64);
@@ -924,8 +945,8 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                 }
                 TCP_CORK | TCP_INFO => {
                     let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::write_bytes(optval, 0, optlen.min(write_len));
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len));
+                    let _ = crate::arch::riscv64::uaccess::put_user(optlen_ptr, write_len as u32);
                 }
                 _ => {
                     return -(errno::ENOPROTOOPT as i64);
@@ -1023,10 +1044,17 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     // Read msg_name (sa_family) and msg_iov (iovec) from msghdr
     // struct msghdr { msg_name, msg_namelen, msg_iov, msg_iovlen, msg_control, msg_controllen, msg_flags }
     // SAFETY: msg_ptr validated with access_ok(64); reading fields at known offsets.
-    let msg_name_ptr = unsafe { *(msg_ptr as *const *const u8) };
-    let msg_namelen = unsafe { *((msg_ptr.add(8)) as *const u32) };
-    let msg_iov_ptr = unsafe { *((msg_ptr.add(16)) as *const usize) };
-    let msg_iovlen = unsafe { *((msg_ptr.add(24)) as *const usize) };
+    // SAFETY: msg_ptr validated with access_ok(64); get_user is the
+    // exception-table copy path (SUM=0 safe). Unreadable fields read as 0.
+    let msg_name_ptr = unsafe {
+        crate::arch::riscv64::uaccess::get_user::<*const u8>(msg_ptr as *const *const u8)
+            .unwrap_or(core::ptr::null())
+    };
+    let msg_namelen = unsafe {
+        crate::arch::riscv64::uaccess::get_user::<u32>(msg_ptr.add(8) as *const u32).unwrap_or(0)
+    };
+    let msg_iov_ptr = unsafe { get_user_usize(msg_ptr.add(16) as usize) };
+    let msg_iovlen = unsafe { get_user_usize(msg_ptr.add(24) as usize) };
 
     // Collect data from iovec
     // struct iovec { iov_base, iov_len }
@@ -1047,8 +1075,8 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     for i in 0..msg_iovlen {
         // SAFETY: iovec base/len read from user memory at validated offset; iov_base
         // validated with access_ok before slice creation.
-        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
-        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
+        let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
+        let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
         if iov_len > 0 {
             if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
                 return -(errno::EFAULT as i64);
@@ -1070,8 +1098,20 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
                 return -(errno::EMSGSIZE as i64);
             }
 
-            // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
-            buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
+            // SAFETY: iov_base validated with access_ok; gather through the
+            // exception-table copy path (SUM=0 safe).
+            let start = buf.len();
+            buf.resize(start + iov_len, 0);
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    buf.as_mut_ptr().add(start),
+                    iov_base as *const u8,
+                    iov_len,
+                )
+            };
+            if uncopied > 0 {
+                return -(errno::EFAULT as i64);
+            }
             total_len += iov_len;
         }
     }
@@ -1153,10 +1193,18 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
 
     // Read iovec from msghdr
     // SAFETY: msg_ptr validated with access_ok(64); reading fields at known offsets.
-    let msg_name_ptr = unsafe { *(msg_ptr as *const *mut u8) };
-    let msg_namelen_ptr = unsafe { *(msg_ptr.add(8) as *const *mut u32) };
-    let msg_iov_ptr = unsafe { *((msg_ptr.add(16)) as *const usize) };
-    let msg_iovlen = unsafe { *((msg_ptr.add(24)) as *const usize) };
+    // SAFETY: msg_ptr validated with access_ok(64); get_user is the
+    // exception-table copy path (SUM=0 safe). Unreadable fields read as 0.
+    let msg_name_ptr = unsafe {
+        crate::arch::riscv64::uaccess::get_user::<*mut u8>(msg_ptr as *const *mut u8)
+            .unwrap_or(core::ptr::null_mut())
+    };
+    let msg_namelen_ptr = unsafe {
+        crate::arch::riscv64::uaccess::get_user::<*mut u32>(msg_ptr.add(8) as *const *mut u32)
+            .unwrap_or(core::ptr::null_mut())
+    };
+    let msg_iov_ptr = unsafe { get_user_usize(msg_ptr.add(16) as usize) };
+    let msg_iovlen = unsafe { get_user_usize(msg_ptr.add(24) as usize) };
 
     // Calculate total buffer size
     let mut total_buf_len = 0usize;
@@ -1171,8 +1219,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     }
     for i in 0..msg_iovlen {
         // SAFETY: iovec fields read from user memory at validated offset.
-        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
-        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
+        let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
+        let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
         if iov_len > 0 && !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
             return -(errno::EFAULT as i64);
         }
@@ -1228,8 +1276,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     for i in 0..msg_iovlen {
         if offset >= bytes_read { break; }
         // SAFETY: iovec fields at validated user offset; copy_len bounds the write.
-        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
-        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
+        let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
+        let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
         let copy_len = core::cmp::min(iov_len, bytes_read - offset);
         if copy_len > 0 {
             // R20-3: exception-table copy — a raw
@@ -1256,14 +1304,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             if crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, 16)
                 && crate::arch::riscv64::uaccess::access_ok(msg_namelen_ptr as usize, 4)
             {
-                // SAFETY: pointers validated with access_ok; sockaddr_in layout.
-                unsafe {
-                    core::ptr::write(msg_name_ptr as *mut u16, 2u16); // AF_INET
-                    core::ptr::write(msg_name_ptr.add(2) as *mut u16, port.to_be());
-                    core::ptr::write(msg_name_ptr.add(4) as *mut u32, addr.to_be());
-                    core::ptr::write_bytes(msg_name_ptr.add(8), 0, 8);
-                    core::ptr::write_volatile(msg_namelen_ptr, 16u32);
-                }
+                // SAFETY: pointers validated with access_ok; exception-table copy.
+                unsafe { put_sockaddr_in(msg_name_ptr, msg_namelen_ptr, port, addr); }
             }
         }
     }
@@ -1271,9 +1313,10 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // W3: msg_flags (offset 48 in msghdr) — MSG_TRUNC when a UDP datagram
     // was longer than the provided buffer space.
     // (datagram_truncated was measured pre-receive; see above.)
-    // SAFETY: msg_ptr validated with access_ok(64); offset 48..52 in range.
+    // SAFETY: msg_ptr validated with access_ok(64); put_user is the
+    // exception-table copy path.
     unsafe {
-        core::ptr::write_volatile(msg_ptr.add(48) as *mut u32, out_flags);
+        let _ = crate::arch::riscv64::uaccess::put_user(msg_ptr.add(48) as *mut u32, out_flags);
     }
 
     bytes_read as i64
@@ -1352,9 +1395,12 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
         // msghdr layout: msg_name(8), msg_namelen(4), msg_iov(8), msg_iovlen(8),
         //                 msg_control(8), msg_controllen(8), msg_flags(4) = 48 bytes
         // SAFETY: mm validated; reading iovec fields at known offsets.
-        let msg_name_ptr = unsafe { *(mm as *const *const u8) };
-        let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
-        let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
+        let msg_name_ptr = unsafe {
+            crate::arch::riscv64::uaccess::get_user::<*const u8>(mm as *const *const u8)
+                .unwrap_or(core::ptr::null())
+        };
+        let msg_iov_ptr = unsafe { get_user_usize(mm.add(16) as usize) };
+        let msg_iovlen = unsafe { get_user_usize(mm.add(24) as usize) };
         // R20-2: bound the iovec count (UIO_MAXIOV) — an unbounded
         // user u64 here looped the kernel over wild pointers (each
         // iteration a raw kernel deref of msg_iov_ptr+j*16). Stop the
@@ -1379,8 +1425,8 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
         let mut total_len = 0usize;
         for j in 0..msg_iovlen {
             // SAFETY: iovec fields at validated offset; iov_base validated below.
-            let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
-            let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
+            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(j * 16)) };
+            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(j * 16 + 8)) };
             if iov_len > 0 {
                 if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
                     if total_sent == 0 {
@@ -1399,8 +1445,23 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
                     }
                     return total_sent as i64;
                 }
-                // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
-                buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
+                // SAFETY: iov_base validated with access_ok; gather through the
+                // exception-table copy path (SUM=0 safe).
+                let start = buf.len();
+                buf.resize(start + iov_len, 0);
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(
+                        buf.as_mut_ptr().add(start),
+                        iov_base as *const u8,
+                        iov_len,
+                    )
+                } > 0
+                {
+                    if total_sent == 0 {
+                        return -(errno::EFAULT as i64);
+                    }
+                    return total_sent as i64;
+                }
                 total_len += iov_len;
             }
         }
@@ -1455,9 +1516,10 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
             }
         };
         // Write msg_len in mmsghdr
-        // SAFETY: mm offset within validated msgvec range; writing 4-byte u32.
+        // SAFETY: mm offset within validated msgvec range; put_user is the
+        // exception-table copy path.
         unsafe {
-            core::ptr::write_volatile(mm.add(56) as *mut u32, sent as u32);
+            let _ = crate::arch::riscv64::uaccess::put_user(mm.add(56) as *mut u32, sent as u32);
         }
         total_sent += 1;
     }
@@ -1527,8 +1589,8 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
         // SAFETY: msgvec validated with access_ok; mm offset within validated range.
         let mm = unsafe { msgvec.add(i * 64) };
         // SAFETY: mm validated; reading iovec fields at known offsets.
-        let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
-        let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
+        let msg_iov_ptr = unsafe { get_user_usize(mm.add(16) as usize) };
+        let msg_iovlen = unsafe { get_user_usize(mm.add(24) as usize) };
 
         // Calculate total buffer size
         let mut total_buf_len = 0usize;
@@ -1549,8 +1611,8 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
         }
         for j in 0..msg_iovlen {
             // SAFETY: iovec fields at validated offset; iov_base validated below.
-            let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
-            let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
+            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(j * 16)) };
+            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(j * 16 + 8)) };
             if iov_len > 0 && !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
                 if total_recv == 0 {
                     return -(errno::EFAULT as i64);
@@ -1589,8 +1651,8 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
         for j in 0..msg_iovlen {
             if offset >= bytes_read { break; }
             // SAFETY: iovec fields at validated offset; copy_len bounds the write.
-            let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
-            let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
+            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(j * 16)) };
+            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(j * 16 + 8)) };
             let copy_len = core::cmp::min(iov_len, bytes_read - offset);
             if copy_len > 0 {
                 // R20-3: exception-table copy — see sys_recvmsg.
@@ -1610,9 +1672,10 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
                 offset += copy_len;
             }
         }
-        // SAFETY: mm offset within validated msgvec range; writing 4-byte u32.
+        // SAFETY: mm offset within validated msgvec range; put_user is the
+        // exception-table copy path.
         unsafe {
-            core::ptr::write_volatile(mm.add(56) as *mut u32, bytes_read as u32);
+            let _ = crate::arch::riscv64::uaccess::put_user(mm.add(56) as *mut u32, bytes_read as u32);
         }
         total_recv += 1;
         if bytes_read == 0 {
@@ -1750,17 +1813,8 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     // If address pointer is provided, write source address
     if let Some((addr, port)) = src_addr {
         if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
-            // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; writing sockaddr_in layout.
-            unsafe {
-                // Write sockaddr_in structure
-                core::ptr::write(addr_ptr as *mut u16, 2);  // sin_family = AF_INET
-                core::ptr::write(addr_ptr.add(2) as *mut u16, port.to_be());
-                core::ptr::write(addr_ptr.add(4) as *mut u32, addr.to_be());
-                // sin_zero remains 0
-                core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
-                // Write address length
-                core::ptr::write(addrlen_ptr, 16);
-            }
+            // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
+            unsafe { put_sockaddr_in(addr_ptr, addrlen_ptr, port, addr); }
         }
     }
     bytes_read as i64
