@@ -39,8 +39,11 @@ fn now_ns() -> u64 {
             options(nomem, nostack)
         );
     }
-    // Assume 10MHz timebase → 100ns per tick
-    time * (crate::config::TIMER_CLOCK_FREQ_HZ / 1_000_000) as u64
+    // timebase ticks → ns: for the 10 MHz CLINT that is exactly 100 ns per
+    // tick. The old `time * (FREQ / 1_000_000)` computed ×10 instead of
+    // ×100 — every elapsed window read 10x too small, delaying a 10s
+    // lockup report to ~100s real time (review批次8 换算修复).
+    time.saturating_mul(1_000_000_000) / crate::config::TIMER_CLOCK_FREQ_HZ as u64
 }
 
 /// Initialize the softlockup detector.

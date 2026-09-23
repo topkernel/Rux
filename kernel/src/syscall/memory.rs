@@ -90,6 +90,14 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
 
             // Expand heap: need to map new memory pages
             if new_brk > current_brk {
+                // Upper bound: the brk must stay inside the user address
+                // space. Without this check a brk above USER_END would map
+                // user-accessible pages into the kernel range (review批次4).
+                let user_end = crate::arch::riscv64::mm::user_addr::USER_END as u64;
+                if new_brk > user_end {
+                    return current_brk as i64; // Linux: keep old brk on failure
+                }
+
                 // Calculate page range to map
                 let current_page_start = current_brk & !(PAGE_SIZE as u64 - 1);
                 let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
@@ -175,6 +183,27 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
+    // Reject unknown mapping flags (Linux do_mmap rejects unmapped bits).
+    // Honored set: type bits plus the asm-generic flags we recognize.
+    let known_map_flags: u32 = map::MAP_TYPE_MASK
+        | map::MAP_FIXED
+        | map::MAP_ANONYMOUS
+        | map::MAP_STACK
+        | map::MAP_FIXED_NOREPLACE
+        | map::MAP_HUGETLB
+        | map::MAP_LOCKED
+        | map::MAP_NORESERVE
+        | map::MAP_POPULATE
+        | map::MAP_NODUMP
+        | 0x0100   // MAP_GROWSDOWN
+        | 0x0800   // MAP_DENYWRITE
+        | 0x1000   // MAP_EXECUTABLE
+        | 0x10000  // MAP_NONBLOCK
+        | 0x80000; // MAP_SYNC
+    if map_flags & !known_map_flags != 0 {
+        return mmap_error::EINVAL;
+    }
+
     // User-address-space limit. The user root page table shares the kernel
     // PGD entries (copy_kernel_mappings), so a fixed mapping at or above
     // USER_END would walk into the shared kernel L1/L0 tables and replace
@@ -193,11 +222,12 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         }
     }
 
-    // Check if framebuffer device mapping (fd >= 1000 indicates device file)
-    if fd >= 1000 {
-        let result = sys_mmap_framebuffer(addr, actual_length, prot_flags, map_flags);
-        return result;
-    }
+    // (review批次1) The "fd >= 1000 means framebuffer" special case is
+    // GONE: an unrelated file that happens to get a high fd number was
+    // silently mapped onto the framebuffer instead of its own contents.
+    // File-backed mappings now go through the generic path; mmap on a file
+    // description without mmap-capable ops (e.g. a device node with no
+    // driver backing) fails with ENODEV, matching Linux.
 
     // Check if this is an io_uring fd
     if fd >= 0 {
@@ -222,27 +252,42 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         return mmap_error::EBADF;
     }
 
+    // Non-anonymous mapping: the file must exist and be mappable (Linux:
+    // -ENODEV when the file has no ->mmap; -EBADF when the fd is bad).
+    if (map_flags & map::MAP_ANONYMOUS == 0) && fd >= 0 {
+        match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            Some(file) => {
+                if file.get_ops().is_none() {
+                    return mmap_error::ENODEV;
+                }
+            }
+            None => return mmap_error::EBADF,
+        }
+    }
+
     // Get current process
     match crate::sched::current() {
         Some(current_task) => {
             // Check if address space exists
             match current_task.address_space_mut() {
                 Some(address_space) => {
-                    // Parse protection flags
-                    let perm = if prot_flags & prot::PROT_EXEC != 0 {
-                        if prot_flags & prot::PROT_WRITE != 0 {
-                            Perm::ReadWriteExec
-                        } else if prot_flags & prot::PROT_READ != 0 {
-                            Perm::ReadWriteExec  // Simplified: read+exec
-                        } else {
-                            Perm::ReadWriteExec  // Simplified: exec only
-                        }
-                    } else if prot_flags & prot::PROT_WRITE != 0 {
-                        Perm::ReadWrite
-                    } else if prot_flags & prot::PROT_READ != 0 {
-                        Perm::Read
-                    } else {
-                        Perm::None
+                    // Parse protection flags — exact, no implicit W for
+                    // exec (review批次1: "PROT_EXEC simplified to RWX"
+                    // broke W^X for every mapped library).
+                    let perm = match (
+                        prot_flags & prot::PROT_READ != 0,
+                        prot_flags & prot::PROT_WRITE != 0,
+                        prot_flags & prot::PROT_EXEC != 0,
+                    ) {
+                        (false, false, false) => Perm::None,
+                        (true, false, false) => Perm::Read,
+                        (true, true, false) => Perm::ReadWrite,
+                        (true, true, true) => Perm::ReadWriteExec,
+                        (true, false, true) => Perm::ReadExec,
+                        // Write-only/exec-only are honored as-is on Sv39
+                        // (X-only is architectural; W-only folds to RW).
+                        (false, true, _) => Perm::ReadWrite,
+                        (false, false, true) => Perm::Exec,
                     };
 
                     // Parse VMA flags
@@ -327,142 +372,6 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         }
     }
 }
-/// sys_mmap_framebuffer - Map framebuffer to user space
-///
-/// # Arguments
-/// - addr: suggested virtual address (0 means let kernel choose)
-/// - length: mapping length
-/// - prot: protection flags (PROT_READ | PROT_WRITE)
-/// - flags: mapping flags (MAP_SHARED)
-///
-/// # Returns
-/// Returns mapped virtual address on success, negative error code on failure
-fn sys_mmap_framebuffer(addr: usize, length: usize, prot: u32, flags: u32) -> i64 {
-    use crate::mm::page::{VirtAddr, PAGE_SIZE};
-    use crate::arch::riscv64::mm::PageTableEntry;
-    use crate::mm::vma::{Vma, VmaFlags};
-
-    // Get framebuffer info
-    let fb_info = match crate::drivers::gpu::get_framebuffer_info() {
-        Some(info) => info,
-        None => return -6_i64,  // ENXIO
-    };
-
-    // Check requested length
-    if length == 0 || length > fb_info.size as usize {
-        return -22_i64;  // EINVAL
-    }
-
-    // Get current process
-    let current_task = match crate::sched::current() {
-        Some(task) => task,
-        None => return -12_i64,  // ENOMEM
-    };
-
-    // Calculate mapping virtual address
-    // Use address from user_addr constants as default framebuffer mapping address
-    let vaddr = if addr == 0 {
-        crate::arch::riscv64::mm::user_addr::MMAP_START
-    } else {
-        addr
-    };
-    let vaddr_aligned = vaddr & !(PAGE_SIZE - 1);
-
-    // Calculate needed pages and aligned length
-    // Add 2 extra pages for boundary access (maps to last valid framebuffer page)
-    let base_pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
-    let pages_needed = base_pages + 2;
-    let aligned_length = pages_needed.checked_mul(PAGE_SIZE).unwrap_or(usize::MAX);
-
-    // R7-C6: the +2 boundary pages extend past the syscall-level USER_END
-    // check that validated the RAW length — without this re-check the last
-    // map_user_page writes land in the kernel-shared PGD region (NEW-C1
-    // class). Reject instead of clamping so callers notice.
-    {
-        use crate::arch::riscv64::mm::user_addr;
-        match vaddr_aligned.checked_add(aligned_length) {
-            Some(end) if end <= user_addr::USER_END => {}
-            _ => return -22_i64, // EINVAL
-        }
-    }
-
-    // Convert kernel virtual address to physical address
-    // fb_info.addr is kernel heap allocated virtual address, need to convert to physical address
-    let fb_virt_addr = crate::arch::riscv64::mm::VirtAddr::new(fb_info.addr as usize as u64);
-    let fb_phys_addr = crate::arch::riscv64::mm::virt_to_phys(fb_virt_addr).0 as usize;
-    let fb_phys_aligned = fb_phys_addr & !(PAGE_SIZE - 1);
-
-    // Get current process address space
-    let addr_space = match current_task.address_space() {
-        Some(aspace) => aspace,
-        None => return -12_i64,  // ENOMEM
-    };
-
-    // Register VMA (device mapping)
-    let mut vma_flags = VmaFlags::new();
-    if prot & 0x1 != 0 { vma_flags.insert(VmaFlags::READ); }
-    if prot & 0x2 != 0 { vma_flags.insert(VmaFlags::WRITE); }
-    if prot & 0x4 != 0 { vma_flags.insert(VmaFlags::EXEC); }
-
-    let vma = Vma::new(
-        VirtAddr::new(vaddr_aligned),
-        VirtAddr::new(vaddr_aligned + aligned_length),
-        vma_flags,
-    );
-
-    // Add VMA to address space
-    if addr_space.vma_write().add(vma).is_err() {
-        return -12_i64;  // ENOMEM
-    }
-
-    // Get user page table PPN
-    let user_ppn = addr_space.root_ppn();
-
-    // Get current process page table and map pages
-    // SAFETY: user_ppn is a valid page table root from the current task's address space;
-    // fb_phys_aligned points to valid framebuffer physical memory; vaddr_aligned is
-    // page-aligned within valid user address range.
-    unsafe {
-        // Build page table entry flags
-        let mut pte_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
-        if prot & 0x1 != 0 {  // PROT_READ
-            pte_flags |= PageTableEntry::R;
-        }
-        if prot & 0x2 != 0 {  // PROT_WRITE
-            pte_flags |= PageTableEntry::R | PageTableEntry::W;
-        }
-        if prot & 0x4 != 0 {  // PROT_EXEC
-            pte_flags |= PageTableEntry::X;
-        }
-
-        // Map each page to user page table
-        // Calculate the number of valid physical pages in the framebuffer
-        let fb_phys_pages = (fb_info.size as usize + PAGE_SIZE - 1) / PAGE_SIZE;
-        // R7-A5/C6: map under the PTE lock, same as the other leaf-PTE
-        // writers.
-        let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
-        for i in 0..pages_needed {
-            let va = vaddr_aligned + i * PAGE_SIZE;
-            // For pages beyond the framebuffer size, map to the last valid physical page
-            let phys_idx = if i >= fb_phys_pages { fb_phys_pages.saturating_sub(1) } else { i };
-            let pa = fb_phys_aligned + phys_idx * PAGE_SIZE;
-
-            // Use user page table mapping
-            crate::arch::riscv64::mm::map_user_page(
-                user_ppn,
-                crate::arch::riscv64::mm::VirtAddr::new(va as u64),
-                crate::arch::riscv64::mm::PhysAddr::new(pa as u64),
-                pte_flags,
-            );
-        }
-        drop(_pte_guard);
-
-        // Flush TLB
-        core::arch::asm!("sfence.vma");
-    }
-
-    vaddr_aligned as i64
-}
 /// sys_munmap - Unmap memory
 ///
 ///
@@ -540,6 +449,13 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
 
     // Validate arguments
     if length == 0 {
+        return -22_i64;  // EINVAL
+    }
+
+    // Unknown protection bits are EINVAL. PROT_GROWSDOWN/GROWSUP are
+    // mprotect *flags* living in the high bits — accepted (and ignored,
+    // since we operate on the exact range passed).
+    if prot & !(crate::arch::riscv64::mm::prot::PROT_MASK | 0x0100_0000 | 0x0200_0000) != 0 {
         return -22_i64;  // EINVAL
     }
 
@@ -1159,11 +1075,16 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
     // 2. Perform operation based on advice
     match advice {
         MADV_DONTNEED | MADV_FREE => {
-            // MADV_DONTNEED: Release pages but keep VMA
-            // Note: Behavior is to discard page contents, next access gets zero page
-            // Simplified implementation: we don't do actual release because need to handle page table entry modification
-            // This is acceptable for most applications
-            0
+            // MADV_DONTNEED: discard the mapped pages but keep the VMAs.
+            // The next fault re-zero-fills anonymous ranges — glibc/jemalloc
+            // heap shrink depends on the data actually being discarded
+            // (review批次1: previously a silent no-op). MADV_FREE is
+            // permitted to behave like DONTNEED (eager discard instead of
+            // lazy marking).
+            match address_space.zap_page_range(VirtAddr::new(addr), length_aligned) {
+                Ok(()) => 0,
+                Err(_) => mmap_error::ENOMEM,
+            }
         }
         MADV_REMOVE => {
             // MADV_REMOVE: Completely free mapping (equivalent to munmap)

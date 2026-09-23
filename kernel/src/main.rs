@@ -617,6 +617,15 @@ pub extern "C" fn rust_main() -> ! {
             print_status("softirq", "ksoftirqd per-CPU threads", true);
         }
 
+        // Start the hung-task detector kthread here (late boot — after
+        // secondaries are online, same context as ksoftirqd; the early
+        // dfx::init() slot runs BEFORE start_secondaries so its wake_up
+        // IPIs could target offline CPUs). Its sleep loop is timer-driven.
+        {
+            crate::dfx::hung_task::init();
+            print_status("dfx", "khungtaskd hung-task detector", true);
+        }
+
         // Enable external interrupts
         {
             arch::trap::enable_external_interrupt();
@@ -767,6 +776,18 @@ fn panic(info: &PanicInfo) -> ! {
     dfx::backtrace::dump_csrs();
     dfx::backtrace::dump_regs_inline();
     dfx::backtrace::dump_stack();
+
+    // Stop the other CPUs (Linux panic → smp_send_stop). Without this the
+    // panicking CPU halts while the others keep running — corrupting state
+    // under the panic dump and stealing the UART mid-print (review批次8).
+    {
+        let me = arch::cpu_id() as usize;
+        for cpu in 0..crate::config::MAX_CPUS {
+            if cpu != me {
+                arch::ipi::send_ipi_type(cpu, arch::ipi::IpiType::Stop);
+            }
+        }
+    }
 
     // Flush persistent log
     crate::printk::persistent_log_flush();

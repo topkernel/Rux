@@ -1462,15 +1462,20 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
                 arm_dl_replenish_timer(task);
                 return false;
             }
-            // Deadline reached (timer fired, or first-ever enqueue / task
-            // never throttled): one replenishment per period. Drop any
-            // stale timer so a late wake cannot double-enqueue.
+            // Drop any stale timer so a late wake cannot double-enqueue.
             let stale = dl.replenish_timer.swap(0, core::sync::atomic::Ordering::AcqRel);
             if stale != 0 {
                 crate::timer::del_timer(stale);
             }
-            dl.update_deadline(now);
-            dl.replenish_runtime();
+            // Replenish ONLY when the current CBS period has elapsed (or on
+            // the first-ever enqueue, where deadline is still 0). A wake
+            // WITHIN the period keeps the residual budget — otherwise a task
+            // that sleeps just before exhausting its budget would be refilled
+            // on every wake, re-opening the 100%-CPU hole (review批次8).
+            if now >= deadline {
+                dl.update_deadline(now);
+                dl.replenish_runtime();
+            }
             grq.dl_rq.enqueue(task)
         }
         SchedPolicy::Normal | SchedPolicy::Batch => {

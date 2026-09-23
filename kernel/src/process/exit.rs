@@ -391,7 +391,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             (*leader).ppid()
         };
 
-        crate::pr_info!("exit: pid={}, tgid={}, exit_code={}, ppid={} ({})",
+        crate::pr_debug!("exit: pid={}, tgid={}, exit_code={}, ppid={} ({})",
             current_pid, (*current).tgid(), exit_code, parent_pid,
             if is_leader { "leader" } else { "thread" });
 

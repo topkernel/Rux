@@ -380,12 +380,13 @@ fn io_uring_create(entries: u32, params: &mut IoUringParams) -> Result<Box<IoUri
         core::ptr::write_volatile(base.add(20) as *mut u32, 0);  // flags
     }
 
-    // Fill in params
+    // Fill in params. NOTE (review批次6 P1): do NOT advertise
+    // IORING_FEAT_SINGLE_MMAP — this implementation maps the SQ ring, CQ
+    // ring and SQEs as SEPARATE regions. With the bit set, liburing maps
+    // one region for both rings and computes wrong ring pointers.
     params.sq_entries = sq_entries;
     params.cq_entries = cq_entries;
-    params.features = IORING_FEAT_SINGLE_MMAP
-        | IORING_FEAT_SUBMIT_STABLE
-        | IORING_FEAT_RW_CUR_POS;
+    params.features = IORING_FEAT_SUBMIT_STABLE | IORING_FEAT_RW_CUR_POS;
 
     // SQ offsets
     params.sq_off.head = 0;
@@ -532,8 +533,14 @@ pub fn io_uring_mmap_handler(
     let addr_space = current_task.address_space().ok_or(-12)?;
     let user_ppn = addr_space.root_ppn();
 
+    // addr == 0 asks the kernel to choose (review批次6 P1: the old fixed
+    // MMAP_START made every SECOND ring mmap collide with the first).
+    // find_free_area honors existing VMAs, so repeated NULL mappings stack.
     let vaddr = if addr == 0 {
-        crate::arch::riscv64::mm::user_addr::MMAP_START
+        match addr_space.find_free_area(region.size) {
+            Ok(v) => v.as_usize(),
+            Err(_) => return Err(-12), // ENOMEM: no gap left
+        }
     } else {
         addr & !(PAGE_SIZE - 1)
     };
@@ -980,7 +987,10 @@ pub fn sys_io_uring_setup(args: [u64; 6]) -> u64 {
 
     let ring = match io_uring_create(entries, &mut params) {
         Ok(r) => r,
-        Err(e) => return -(e as i64) as u64,
+        // `e` is already a NEGATIVE errno (io_uring_create returns Err(-12)
+        // etc.) — do NOT negate again (review批次6 P2: the double negation
+        // turned ENOMEM into a fake "returned fd 12").
+        Err(e) => return (e as i64) as u64,
     };
 
     let fdtable = match crate::sched::get_current_fdtable() {
@@ -1065,11 +1075,27 @@ pub fn sys_io_uring_enter(args: [u64; 6]) -> u64 {
     if flags & IORING_ENTER_GETEVENTS != 0 && min_complete > 0 {
         let result = wait_for_cqes(ring, min_complete);
         if result < 0 {
-            return -(result as i64) as u64;
+            // result is already a negative errno — no double negation
+            // (review批次6 P2).
+            return (result as i64) as u64;
         }
     }
 
-    submitted as u64
+    // Linux io_uring_enter returns the number of CQEs ready (post-wait)
+    // when nothing was submitted — previously a pure-enter wait call
+    // always returned 0 and callers could not distinguish "woke with N
+    // completions" from "timeout/nothing" (review批次6 M).
+    if submitted == 0 {
+        let head = unsafe {
+            core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_head_off) as *const u32)
+        };
+        let tail = unsafe {
+            core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_tail_off) as *const u32)
+        };
+        (tail.wrapping_sub(head)) as u64
+    } else {
+        submitted as u64
+    }
 }
 
 /// sys_io_uring_register — register buffers/files/eventfd (NR 427).

@@ -36,6 +36,9 @@ const TIME_SLICE_TICKS: u64 = CLOCK_FREQ / HZ;  // 10ms
 /// Type: AtomicU64 (supports multi-core concurrent access)
 static JIFFIES: AtomicU64 = AtomicU64::new(0);
 
+/// timebase value at the first tick — the origin of the nominal tick grid.
+static JIFFIES_BASE: AtomicU64 = AtomicU64::new(0);
+
 /// jiffies related functions
 
 /// Get current jiffies value
@@ -48,12 +51,38 @@ pub fn get_jiffies() -> u64 {
     JIFFIES.load(Ordering::Acquire)
 }
 
-/// Increment jiffies counter
+/// Advance jiffies from the TIMEBASE, not from IRQ counts.
 ///
-/// Called on every clock interrupt
+/// Review批次7 (TIMING 高): every hart's timer IRQ incremented the single
+/// global counter — with 4 CPUs, jiffies ran 4x fast (every jiffies-based
+/// timeout fired at 1/4 of its nominal duration). Deriving jiffies from
+/// `floor((time - base) / ticks_per_period)` instead makes the update
+/// idempotent and multi-hart safe, and also keeps jiffies glued to the
+/// NOMINAL tick grid (immune to accumulated re-arm latency).
 #[inline]
 fn increment_jiffies() {
-    JIFFIES.fetch_add(1, Ordering::Release);
+    let now = read_time();
+    // Establish the grid origin on the first call (boot CPU's first tick).
+    if JIFFIES_BASE.load(Ordering::Acquire) == 0 {
+        JIFFIES_BASE
+            .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire)
+            .ok();
+    }
+    let base = JIFFIES_BASE.load(Ordering::Acquire);
+    let nominal = now.saturating_sub(base) / TIME_SLICE_TICKS;
+    // Monotonic: only ever move forward (max of current and nominal).
+    let mut cur = JIFFIES.load(Ordering::Acquire);
+    while nominal > cur {
+        match JIFFIES.compare_exchange_weak(
+            cur,
+            nominal,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(actual) => cur = actual,
+        }
+    }
 }
 
 /// Convert jiffies to milliseconds
@@ -105,11 +134,15 @@ pub fn set_timer(deadline: u64) {
     set_timer_sbi(deadline);
 }
 
-/// Set next timer interrupt (time slice length)
+/// Set next timer interrupt, aligned to the NOMINAL tick grid.
 ///
+/// Review批次8: arming at `now + period` accumulates every handler's
+/// latency into the period (permanent drift — sleeps lengthen under
+/// load). Rounding up to the next grid multiple keeps the interrupt
+/// cadence glued to nominal 1/HZ boundaries.
 pub fn set_next_trigger() {
     let current = read_time();
-    let deadline = current + TIME_SLICE_TICKS;  // 10ms
+    let deadline = (current / TIME_SLICE_TICKS + 1) * TIME_SLICE_TICKS;
     set_timer(deadline);
 }
 

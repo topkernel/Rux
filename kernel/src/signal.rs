@@ -1484,6 +1484,12 @@ pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) {
     use crate::sched;
 
+    // ^C interrupt path (review批次8): deliver any ISIG character the UART
+    // RX IRQ recorded. Must run even when no signal is pending YET — this
+    // delivery is what CREATES the pending signal, and it lets ^C reach a
+    // busy foreground task that is not blocked in read().
+    crate::console::tty_isig_deliver_pending();
+
     // SAFETY: regs is passed from trap handler; sched::current() returns the running task.
     unsafe {
         if regs.is_null() {

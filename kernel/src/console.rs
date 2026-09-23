@@ -304,6 +304,18 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
                 let c = read_reg(base, UART_RBR);
                 UART_RX_BUF.put(c);
                 chars_received += 1;
+
+                // ^C interrupt path (review批次8): record ISIG characters
+                // the moment they arrive instead of waiting for a reader to
+                // consume them — a busy foreground task (not blocked in
+                // read) must still be interruptible. The byte STAYS in the
+                // ring buffer; the signal itself is delivered in TASK
+                // context (check_and_deliver_signals / process_input):
+                // send_signal_to_pgid walks the pid hash under bucket
+                // spinlocks, and the interrupted task may itself hold one —
+                // sending from the IRQ here could self-deadlock the CPU.
+                tty_isig_record(c);
+
                 // DFX taskdump magic trigger ("DUMP!"): the RX interrupt is
                 // the only code guaranteed to still run when every task is
                 // wedged (silent-hang form — no spinlock to trip the
@@ -337,6 +349,68 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
     }
 
     crate::interrupt::IrqReturn::Handled
+}
+
+/// Pending ISIG signal recorded by the RX IRQ (producer) and delivered in
+/// task context by tty_isig_deliver_pending() (consumer). 0 = none.
+static PENDING_ISIG_SIGNO: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+/// Last ISIG signal delivered and when (jiffies) — the de-duplication
+/// window that keeps process_input() from double-sending a signal for the
+/// same byte the IRQ-recorded path already delivered.
+static LAST_ISIG_SIGNO: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+static LAST_ISIG_JIFFY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// IRQ-context half of the ^C path: record an ISIG character (INTR ^C /
+/// QUIT ^\ / SUSP ^Z) for task-context delivery. Never sends directly.
+fn tty_isig_record(c: u8) {
+    let lflag = crate::syscall::io::tty_get_lflag();
+    const L_ISIG: u32 = 0x0001;
+    if lflag & L_ISIG == 0 {
+        return;
+    }
+    let signo = match c {
+        0x03 => crate::signal::Signal::SIGINT as i32,
+        0x1a => crate::signal::Signal::SIGTSTP as i32,
+        0x1c => crate::signal::Signal::SIGQUIT as i32,
+        _ => return,
+    };
+    // Last writer wins (rapid double ^C is redundant).
+    PENDING_ISIG_SIGNO.store(signo, core::sync::atomic::Ordering::Release);
+}
+
+/// Deliver any ISIG the RX IRQ recorded. Called in TASK context from
+/// check_and_deliver_signals (every return to user) — this is what makes
+/// ^C interrupt a busy foreground task that is not blocked in read().
+pub fn tty_isig_deliver_pending() {
+    let signo = PENDING_ISIG_SIGNO.swap(0, core::sync::atomic::Ordering::AcqRel);
+    if signo != 0 {
+        tty_isig_deliver(signo);
+    }
+}
+
+/// Send an ISIG signal to the tty foreground process group (task context
+/// only — walks the pid hash). De-duplicated across delivery paths.
+fn tty_isig_deliver(signo: i32) {
+    // De-dup window: the same byte can traverse both the recorded-pending
+    // path and process_input()'s consume-time send.
+    let now = crate::drivers::timer::get_jiffies();
+    let last_s = LAST_ISIG_SIGNO.load(core::sync::atomic::Ordering::Acquire);
+    let last_j = LAST_ISIG_JIFFY.load(core::sync::atomic::Ordering::Acquire);
+    if last_s == signo && now.saturating_sub(last_j) < 4 {
+        return;
+    }
+    LAST_ISIG_SIGNO.store(signo, core::sync::atomic::Ordering::Release);
+    LAST_ISIG_JIFFY.store(now, core::sync::atomic::Ordering::Release);
+
+    // Target the tty foreground process group; fall back to the caller's.
+    let mut pgid = crate::syscall::io::tty_get_fg_pgrp();
+    if pgid == 0 {
+        pgid = crate::process::current_pgid();
+    }
+    if pgid != 0 {
+        crate::signal::send_signal_to_pgid(pgid, signo);
+    }
 }
 
 // ============================================================================
@@ -469,48 +543,33 @@ fn process_input(c: u8) -> Option<u8> {
     let lflag = crate::syscall::io::tty_get_lflag();
     const L_ISIG: u32 = 0x0001;
     if lflag & L_ISIG != 0 {
-        let pgid = crate::process::current_pgid();
-        match c {
-            0x03 => {  // ^C -> SIGINT
-                if echo_enabled {
-                    putchar(b'^');
-                    putchar(b'C');
-                    putchar(b'\r');
-                    putchar(b'\n');
+        let signo = match c {
+            0x03 => crate::signal::Signal::SIGINT as i32,  // ^C
+            0x1a => crate::signal::Signal::SIGTSTP as i32, // ^Z
+            0x1c => crate::signal::Signal::SIGQUIT as i32, // ^\
+            _ => 0,
+        };
+        if signo != 0 {
+            if echo_enabled {
+                match signo {
+                    s if s == crate::signal::Signal::SIGINT as i32 => {
+                        putchar(b'^'); putchar(b'C');
+                    }
+                    s if s == crate::signal::Signal::SIGTSTP as i32 => {
+                        putchar(b'^'); putchar(b'Z');
+                    }
+                    _ => {
+                        putchar(b'^'); putchar(b'\\');
+                    }
                 }
-                crate::signal::send_signal_to_pgid(
-                    pgid,
-                    crate::signal::Signal::SIGINT as i32,
-                );
-                return Some(c);
+                putchar(b'\r');
+                putchar(b'\n');
             }
-            0x1a => {  // ^Z -> SIGTSTP
-                if echo_enabled {
-                    putchar(b'^');
-                    putchar(b'Z');
-                    putchar(b'\r');
-                    putchar(b'\n');
-                }
-                crate::signal::send_signal_to_pgid(
-                    pgid,
-                    crate::signal::Signal::SIGTSTP as i32,
-                );
-                return Some(c);
-            }
-            0x1c => {  // ^\ -> SIGQUIT
-                if echo_enabled {
-                    putchar(b'^');
-                    putchar(b'\\');
-                    putchar(b'\r');
-                    putchar(b'\n');
-                }
-                crate::signal::send_signal_to_pgid(
-                    pgid,
-                    crate::signal::Signal::SIGQUIT as i32,
-                );
-                return Some(c);
-            }
-            _ => {}
+            // Route through the de-duplicating deliverer: the RX IRQ may
+            // already have delivered this byte via the recorded-pending
+            // path (check_and_deliver_signals).
+            tty_isig_deliver(signo);
+            return Some(c);
         }
     }
 

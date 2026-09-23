@@ -678,6 +678,55 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     // Use previously created user address space (user_ppn created at function start)
     let addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
+    // W^X tightening (review批次8): the one-shot pre-map above installed
+    // RWX for the ENTIRE image (exec pages were writable / data pages
+    // executable — a full W^X defeat for init). Clamp down per segment:
+    // first drop X everywhere (gaps, BSS tails, stack/TLS stay RW), then
+    // re-apply each PT_LOAD's own R/W/X bits.
+    {
+        use crate::arch::riscv64::mm::PageTableEntry as PTE;
+        use crate::fs::elf::{PF_R, PF_W, PF_X};
+
+        // 1) Whole pre-mapped range → RW (no X).
+        let rw = PTE::V | PTE::U | PTE::R | PTE::W | PTE::A | PTE::D;
+        // SAFETY: [virt_start, virt_end + reserved) is inside the user range;
+        // set_range_permissions refuses kernel-range addresses anyway.
+        unsafe {
+            addr_space.set_range_permissions(virt_start, total_size as usize, rw);
+        }
+
+        // 2) Per-segment bits. Sv39: W without R is reserved, so PF_W
+        // implies R|W (same fold Linux does).
+        for i in 0..phdr_count {
+            let phdr = unsafe { ehdr.get_program_header(program_data, i) }
+                .ok_or(ElfError::InvalidProgramHeaders)?;
+            if !phdr.is_load() {
+                continue;
+            }
+            let mut seg = PTE::V | PTE::U | PTE::A | PTE::D;
+            // PF_R sets R; PF_W folds to R|W; PF_X sets X.
+            if phdr.p_flags & PF_W != 0 {
+                seg |= PTE::R | PTE::W;
+            } else if phdr.p_flags & PF_R != 0 {
+                seg |= PTE::R;
+            }
+            if phdr.p_flags & PF_X != 0 {
+                seg |= PTE::X;
+            }
+            let seg_start = phdr.p_vaddr & !(mm::PAGE_SIZE - 1);
+            let seg_end = (phdr.p_vaddr + phdr.p_memsz + mm::PAGE_SIZE - 1) & !(mm::PAGE_SIZE - 1);
+            // SAFETY: segment range is within the user range (validated in
+            // the load pass above).
+            unsafe {
+                addr_space.set_range_permissions(
+                    seg_start,
+                    (seg_end - seg_start) as usize,
+                    seg,
+                );
+            }
+        }
+    }
+
     // Register VMA for ELF segments
     use crate::mm::vma::{Vma, VmaFlags};
     use crate::mm::page::VirtAddr as PageVirtAddr;

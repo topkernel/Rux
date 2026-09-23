@@ -250,11 +250,27 @@ fn tasklet_action(_vec: usize) {
             let next = (*pos).next;
             let tasklet = (pos as usize - offset_of!(TaskletStruct, list)) as *mut TaskletStruct;
 
-            // Clear SCHED bit and set RUN bit
-            (*tasklet).state.store(
+            // CAS (review批次8): atomically clear SCHED and set RUN in one
+            // swap. This is the Linux tasklet_trylock() +
+            // test_and_clear_bit(SCHED) pair. It closes the double-link race
+            // of the old plain store: an interrupt re-scheduling the tasklet
+            // DURING func() sets SCHED (0→1) and links it once; the old code
+            // then ALSO re-linked it after observing SCHED set, leaving the
+            // tasklet on the per-CPU list twice (double run + list
+            // corruption on the second dequeue).
+            let old_state = (*tasklet).state.swap(
                 1u32 << TASKLET_STATE_RUN,
-                Ordering::Release
+                Ordering::AcqRel
             );
+            if old_state & (1u32 << TASKLET_STATE_SCHED) == 0 {
+                // SCHED was cleared while queued (tasklet_kill): do not run.
+                (*tasklet).state.fetch_and(
+                    !(1u32 << TASKLET_STATE_RUN),
+                    Ordering::AcqRel,
+                );
+                pos = next;
+                continue;
+            }
 
             // Run if enabled
             if !(*tasklet).is_disabled() {
@@ -263,19 +279,13 @@ fn tasklet_action(_vec: usize) {
                 }
             }
 
-            // Clear RUN bit; if SCHED was re-set, re-queue
-            let old_state = (*tasklet).state.fetch_and(
-                !(1u32 << TASKLET_STATE_RUN), Ordering::AcqRel
+            // Clear RUN only. If the tasklet was re-scheduled during func(),
+            // THAT path (tasklet_schedule's fetch_or SCHED 0→1) already
+            // linked it — do NOT link again here.
+            (*tasklet).state.fetch_and(
+                !(1u32 << TASKLET_STATE_RUN),
+                Ordering::AcqRel
             );
-            if old_state & (1u32 << TASKLET_STATE_SCHED) != 0 {
-                let _lock = TASKLET_LOCK[cpu].lock_irqsave();
-                (*tasklet).list.add_tail(
-                    &mut TASKLET_VEC[cpu] as *mut ListHead
-                );
-                crate::interrupt::softirq::raise_softirq_irqoff(
-                    crate::interrupt::softirq::SoftirqIndex::Tasklet as usize
-                );
-            }
 
             pos = next;
         }
@@ -312,10 +322,19 @@ fn tasklet_hi_action(_vec: usize) {
             let next = (*pos).next;
             let tasklet = (pos as usize - offset_of!(TaskletStruct, list)) as *mut TaskletStruct;
 
-            (*tasklet).state.store(
+            // CAS: clear SCHED + set RUN atomically (see tasklet_action).
+            let old_state = (*tasklet).state.swap(
                 1u32 << TASKLET_STATE_RUN,
-                Ordering::Release
+                Ordering::AcqRel
             );
+            if old_state & (1u32 << TASKLET_STATE_SCHED) == 0 {
+                (*tasklet).state.fetch_and(
+                    !(1u32 << TASKLET_STATE_RUN),
+                    Ordering::AcqRel,
+                );
+                pos = next;
+                continue;
+            }
 
             if !(*tasklet).is_disabled() {
                 if let Some(func) = (*tasklet).func {
@@ -323,18 +342,11 @@ fn tasklet_hi_action(_vec: usize) {
                 }
             }
 
-            let old_state = (*tasklet).state.fetch_and(
-                !(1u32 << TASKLET_STATE_RUN), Ordering::AcqRel
+            // Clear RUN only; a re-schedule during func() linked itself.
+            (*tasklet).state.fetch_and(
+                !(1u32 << TASKLET_STATE_RUN),
+                Ordering::AcqRel
             );
-            if old_state & (1u32 << TASKLET_STATE_SCHED) != 0 {
-                let _lock = TASKLET_HI_LOCK[cpu].lock_irqsave();
-                (*tasklet).list.add_tail(
-                    &mut TASKLET_HI_VEC[cpu] as *mut ListHead
-                );
-                crate::interrupt::softirq::raise_softirq_irqoff(
-                    crate::interrupt::softirq::SoftirqIndex::Hi as usize
-                );
-            }
 
             pos = next;
         }

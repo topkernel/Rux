@@ -294,10 +294,9 @@ pub fn timer_softirq_handler(_nr: usize) {
             // counter) is accepted per the timerfd refcount audit.
             // (R34: the `rearmed` id list itself became unnecessary when
             // re-arming moved in-place into the retain closure.)
-            unsafe {
-                let counter_ptr = action.tfd_addr as *const core::sync::atomic::AtomicU64;
-                (*counter_ptr).fetch_add(1, Ordering::Release);
-            }
+            // The address now names the whole TimerFd so the notify hook can
+            // also wake readers blocked in timerfd_read (review批次1).
+            crate::syscall::misc::timerfd_expire_notify(action.tfd_addr);
         } else if action.pid != 0 && action.signo != 0 {
             let _ = crate::signal::send_signal(action.pid, action.signo);
         }
@@ -318,10 +317,7 @@ pub fn timer_softirq_handler(_nr: usize) {
 /// Jiffies of the last periodic DFX snapshot (dfx=periodic).
 static LAST_PERIODIC_DUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-// ==================== Initialization ====================
-
-/// Initialize the timer subsystem.
-pub fn init() {
-    LAST_TICK.store(timer::get_jiffies(), Ordering::Relaxed);
-    crate::pr_info!("timer: software timer subsystem initialized");
-}
+// Initialization: the old dead `pub fn init()` (never called anywhere — it
+// only seeded LAST_TICK and printed a banner) was removed in the review
+// batch-8 dead-code cleanup; the softirq scan self-seeds LAST_TICK on its
+// first run (line ~197).

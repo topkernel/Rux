@@ -114,22 +114,30 @@ static CONSOLE_LOGLEVEL: AtomicU8 = AtomicU8::new(loglevel::DEFAULT_CONSOLE_LOGL
 /// Set during boot after printk is ready.
 static PRINTK_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Re-entrancy guard to prevent recursive printk.
-static IN_PRINTK: AtomicBool = AtomicBool::new(false);
+/// Re-entrancy guard to prevent recursive printk. PER-CPU (review批次8):
+/// a single global flag meant a printk running on CPU A silently dropped
+/// every concurrent printk from CPU B (lost logs under exactly the
+/// multi-CPU conditions printk matters most).
+static IN_PRINTK: [AtomicBool; crate::config::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::config::MAX_CPUS];
 
-/// RAII guard for the `IN_PRINTK` re-entrancy flag.
+/// RAII guard for the per-CPU `IN_PRINTK` re-entrancy flag.
 ///
 /// On drop, clears the flag so that a panic inside printk never permanently
 /// disables the logging subsystem.
-struct PrintkGuard(());
+struct PrintkGuard(usize);
 
 impl PrintkGuard {
-    /// Try to acquire the printk re-entrancy guard.
+    /// Try to acquire THIS CPU's printk re-entrancy guard.
     ///
-    /// Returns `None` if already inside printk (re-entrant call).
+    /// Returns `None` if already inside printk on this CPU (re-entrant call).
     fn try_new() -> Option<Self> {
-        if IN_PRINTK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            Some(PrintkGuard(()))
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu >= crate::config::MAX_CPUS {
+            return None; // unknown CPU: refuse rather than corrupt memory
+        }
+        if IN_PRINTK[cpu].compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            Some(PrintkGuard(cpu))
         } else {
             None
         }
@@ -138,7 +146,7 @@ impl PrintkGuard {
 
 impl Drop for PrintkGuard {
     fn drop(&mut self) {
-        IN_PRINTK.store(false, Ordering::Release);
+        IN_PRINTK[self.0].store(false, Ordering::Release);
     }
 }
 
@@ -184,11 +192,9 @@ impl<'a> fmt::Write for BufferWriter<'a> {
 /// This is the core function called by all printk macros.
 /// It:
 /// 1. Formats the message into a stack buffer
-/// 2. If level <= console_loglevel, writes to ring buffer only
-///
-/// UART is reserved for userspace I/O and panic output.
-/// Boot [ok] messages use putchar() directly (not printk).
-/// Panic handler uses putchar_no_lock() directly.
+/// 2. If level <= console_loglevel, writes to the ring buffer AND emits
+///    synchronously to the console UART (review批次8: the console path was
+///    missing entirely — kernel messages were invisible outside panics)
 pub fn printk(level: u8, args: fmt::Arguments) {
     // Re-entrancy guard: if already in printk, discard
     let _guard = match PrintkGuard::try_new() {
@@ -212,6 +218,23 @@ pub fn printk(level: u8, args: fmt::Arguments) {
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
         let timestamp = crate::drivers::intc::clint::read_time();
         write_to_ring_buffer(level, &buf[..text_len], timestamp);
+    }
+
+    // Console emit (level filter already passed above)
+    emit_to_console(&buf[..text_len]);
+}
+
+/// Console (UART) emission path for printk records.
+///
+/// Uses the LOCK-FREE MMIO writer (putchar_no_lock), never the UART
+/// spinlock: printk can run with arbitrary locks held or in IRQ context.
+/// Re-entrancy is already excluded by the IN_PRINTK guard in the callers.
+fn emit_to_console(text: &[u8]) {
+    for &b in text {
+        if b == b'\n' {
+            crate::console::putchar_no_lock(b'\r');
+        }
+        crate::console::putchar_no_lock(b);
     }
 }
 
@@ -244,13 +267,18 @@ fn printk_bytes(level: u8, text: &[u8]) {
         let timestamp = crate::drivers::intc::clint::read_time();
         write_to_ring_buffer(level, text, timestamp);
     }
+
+    // Console emit (level filter already passed above)
+    emit_to_console(text);
 }
 
 // ==================== Ring Buffer Write ====================
 
 fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     let pid = crate::process::current_pid() as u32;
-    let cpu_id: u16 = 0;
+    // Real CPU id (review批次8: hard-coded 0 attributed every message to
+    // CPU 0, hiding cross-CPU issues in the logs).
+    let cpu_id: u16 = (crate::arch::cpu_id() as u16).min(u16::MAX);
 
     let mut rb = RING_BUFFER.lock_irqsave();
 

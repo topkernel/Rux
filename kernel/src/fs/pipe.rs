@@ -508,19 +508,43 @@ fn pipe_file_close(file: &File) -> i32 {
     }
 }
 
+/// Pipe file operations (module-level so other subsystems can identity-check
+/// a File against it — FIONREAD etc.).
+pub static PIPE_OPS: FileOps = FileOps {
+    read: Some(pipe_file_read),
+    write: Some(pipe_file_write),
+    lseek: None,  // Pipe doesn't support lseek
+    close: Some(pipe_file_close),
+    poll: Some(pipe_file_poll),
+};
+
+/// Real readable byte count for FIONREAD on a pipe File.
+/// Returns None when `file` is not a pipe (identity-checked against
+/// PIPE_OPS so a foreign private_data pointer is never type-confused).
+pub fn pipe_fionread(file: &File) -> Option<usize> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity confirmed this is a pipe File; private_data was
+    // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
+    // while the File exists.
+    let ptr = unsafe { *file.private_data.get() }?;
+    let pipe = unsafe { &*(ptr as *const Pipe) };
+    Some(pipe.available_read())
+}
+
+impl Pipe {
+    /// Number of bytes currently buffered (for FIONREAD).
+    pub fn available_read(&self) -> usize {
+        self.buffer.lock().available_read()
+    }
+}
+
 pub fn create_pipe() -> (Arc<File>, Arc<File>) {
     // Create pipe wrapped in Arc so both ends share ownership.
     // The Pipe is freed when the last Arc drops.
     let pipe = Arc::new(Pipe::new());
-
-    // Pipe file operations
-    static PIPE_OPS: FileOps = FileOps {
-        read: Some(pipe_file_read),
-        write: Some(pipe_file_write),
-        lseek: None,  // Pipe doesn't support lseek
-        close: Some(pipe_file_close),
-        poll: Some(pipe_file_poll),
-    };
 
     // Store Arc::into_raw as *mut u8 in private_data.
     // pipe_file_close reconstructs the Arc with Arc::from_raw to drop one ref.

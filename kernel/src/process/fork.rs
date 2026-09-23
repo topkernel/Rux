@@ -294,7 +294,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         };
         let pid = (*task_ptr).pid();
 
-        crate::pr_info!("fork: parent={}, child={}, flags={:#x}",
+        crate::pr_debug!("fork: parent={}, child={}, flags={:#x}",
             (*current).pid(), pid, args.flags);
 
         // Full-unwind helper for every failure path past allocation: the
@@ -547,7 +547,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         }
 
         if is_vfork {
-            crate::pr_info!("vfork: parent={} blocked, child={}",
+            crate::pr_debug!("vfork: parent={} blocked, child={}",
                 (*current_ptr).pid(), pid);
 
             (*current).set_state(TaskState::new(TaskState::UNINTERRUPTIBLE));

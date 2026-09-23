@@ -13,6 +13,15 @@ const CLOCK_REALTIME: u32 = 0;
 const CLOCK_MONOTONIC: u32 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
 const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
+const CLOCK_MONOTONIC_RAW: u32 = 4;
+const CLOCK_BOOTTIME: u32 = 7;
+
+/// Read the monotonic clock as (seconds, nanoseconds) from the CLINT.
+fn monotonic_time() -> (u64, u64) {
+    let cycles = crate::drivers::intc::clint::read_time();
+    let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ; // 10 MHz
+    (cycles / freq_hz, (cycles % freq_hz) * 1_000_000_000 / freq_hz)
+}
 
 #[repr(C)]
 struct TimespecForGettime {
@@ -41,11 +50,11 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Get time from RISC-V timer
+    // Get time from RISC-V timer + wall-clock epoch offset
     let cycles = crate::drivers::intc::clint::read_time();
     let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;  // 10 MHz
 
-    let sec = cycles / freq_hz;
+    let sec = cycles / freq_hz + wall_epoch_offset_secs();
     let usec = (cycles % freq_hz) * 1_000_000 / freq_hz;
 
     // SAFETY: tv_ptr validated with access_ok; writes TimeVal fields (two i64).
@@ -78,16 +87,21 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Currently only support REALTIME and MONOTONIC
     match clk_id {
-        CLOCK_REALTIME | CLOCK_MONOTONIC => {
-            // Get time from RISC-V timer
-            let cycles = crate::drivers::intc::clint::read_time();
-            let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;  // 10 MHz
-
-            let sec = cycles / freq_hz;
-            let nsec = (cycles % freq_hz) * 1_000_000_000 / freq_hz;
-
+        CLOCK_REALTIME => {
+            // Wall clock = monotonic + epoch offset (settimeofday-adjustable;
+            // zero until set — no RTC on this platform).
+            let (mono_sec, mono_nsec) = monotonic_time();
+            let sec = mono_sec + wall_epoch_offset_secs();
+            // SAFETY: tp_ptr validated with access_ok; writes TimespecForGettime fields.
+            unsafe {
+                (*tp_ptr).tv_sec = sec as i64;
+                (*tp_ptr).tv_nsec = mono_nsec as i64;
+            }
+            0
+        }
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME => {
+            let (sec, nsec) = monotonic_time();
             // SAFETY: tp_ptr validated with access_ok; writes TimespecForGettime fields.
             unsafe {
                 (*tp_ptr).tv_sec = sec as i64;
@@ -96,11 +110,16 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             0
         }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            // For CPU time, currently return 0
-            // SAFETY: tp_ptr validated with access_ok; writes zero-filled TimespecForGettime.
+            // Minimal implementation: the scheduling entity's cumulative
+            // execution time (nanoseconds). PROCESS and THREAD collapse to
+            // the same value until per-thread accounting exists.
+            let cputime_ns = crate::process::current_task()
+                .map(|t| t.sched_entity().sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire))
+                .unwrap_or(0);
+            // SAFETY: tp_ptr validated with access_ok; writes TimespecForGettime fields.
             unsafe {
-                (*tp_ptr).tv_sec = 0;
-                (*tp_ptr).tv_nsec = 0;
+                (*tp_ptr).tv_sec = (cputime_ns / 1_000_000_000) as i64;
+                (*tp_ptr).tv_nsec = (cputime_ns % 1_000_000_000) as i64;
             }
             0
         }
@@ -152,8 +171,9 @@ pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
     // SAFETY: req_ptr validated with access_ok; reads Timespec (two i64 fields).
     let req = unsafe { *req_ptr };
 
-    // POSIX: tv_nsec must be in [0, 999_999_999]
-    if req.tv_nsec < 0 || req.tv_nsec > 999_999_999 {
+    // POSIX: tv_nsec must be in [0, 999_999_999]; a negative tv_sec is also
+    // EINVAL (previously a negative request slept ~1ms instead).
+    if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec > 999_999_999 {
         return -(errno::EINVAL as i64);
     }
 
@@ -330,9 +350,10 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
     let clk_id = args[0] as i32;
     let res = args[1] as *mut u64;
 
-    // Validate clock ID — only REALTIME and MONOTONIC supported
+    // Validate clock ID
     match clk_id as u32 {
-        CLOCK_REALTIME | CLOCK_MONOTONIC => {}
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME
+        | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {}
         _ => return -(errno::EINVAL as i64),
     }
 
@@ -551,53 +572,82 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
-    let _clk_id = args[0] as i32;
-    let _flags = args[1] as i32; // bit0 = TIMER_ABSTIME
+    let clk_id = args[0] as u32;
+    let flags = args[1] as i32; // bit0 = TIMER_ABSTIME
     let rqtp = args[2] as *const Timespec;
     let rmtp = args[3] as *mut Timespec;
 
+    // Linux special case: clock_nanosleep returns the POSITIVE errno on
+    // failure (unlike most syscalls which return -errno). musl/glibc expect
+    // this for all error paths below.
+    let fail = |e: i32| -> i64 { e as i64 };
+
+    // Only the sleepable clocks are valid here.
+    match clk_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC => {}
+        _ => return fail(errno::EINVAL),
+    }
+
     // Validate request pointer
     if rqtp.is_null() {
-        return -(errno::EFAULT as i64);
+        return fail(errno::EFAULT);
     }
 
     // Check if rqtp is in valid user space
     if !crate::arch::riscv64::uaccess::access_ok(rqtp as usize, core::mem::size_of::<Timespec>()) {
-        return -(errno::EFAULT as i64);
+        return fail(errno::EFAULT);
     }
 
-    // Check rmtp if provided
+    // Check rmtp if provided (only meaningful without TIMER_ABSTIME, but
+    // validate whatever the caller passed)
     if !rmtp.is_null() && !crate::arch::riscv64::uaccess::access_ok(rmtp as usize, core::mem::size_of::<Timespec>()) {
-        return -(errno::EFAULT as i64);
+        return fail(errno::EFAULT);
     }
 
     // Read requested sleep time
     // SAFETY: rqtp validated with access_ok; reads Timespec (two i64 fields).
     let req = unsafe { *rqtp };
 
-    // TIMER_ABSTIME: rqtp is an absolute CLOCK_MONOTONIC timestamp — sleep
-    // until then, not for that duration (pthread_cond_timedwait depends on
-    // this; without it every absolute wait slept for decades — review M-16).
-    if _flags & 1 != 0 {
+    if req.tv_nsec < 0 || req.tv_nsec > 999_999_999 {
+        return fail(errno::EINVAL);
+    }
+
+    // TIMER_ABSTIME: rqtp is an absolute timestamp on the selected clock —
+    // sleep until then, not for that duration (pthread_cond_timedwait depends
+    // on this; without it every absolute wait slept for decades — review M-16).
+    if flags & 1 != 0 {
         // Current monotonic time in ns (same source as clock_gettime).
-        let cycles = crate::drivers::intc::clint::read_time();
-        let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
-        let now_nanos = (cycles / freq_hz).saturating_mul(1_000_000_000)
-            + ((cycles % freq_hz) * 1_000_000_000 / freq_hz);
-        let target_nanos = (req.tv_sec as u64).saturating_mul(1_000_000_000)
-            .saturating_add(req.tv_nsec.max(0) as u64);
-        if target_nanos <= now_nanos {
+        let (mono_sec, mono_nsec) = monotonic_time();
+        let now_nanos = mono_sec.saturating_mul(1_000_000_000).saturating_add(mono_nsec);
+        // For CLOCK_REALTIME the deadline is expressed against the wall
+        // epoch: shift it back into the monotonic domain.
+        let epoch_nanos = wall_epoch_offset_secs().saturating_mul(1_000_000_000);
+        let target_nanos = (req.tv_sec.max(0) as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(req.tv_nsec as u64);
+        let target_monotonic = if clk_id == CLOCK_REALTIME {
+            target_nanos.saturating_sub(epoch_nanos)
+        } else {
+            target_nanos
+        };
+        if target_monotonic <= now_nanos {
             return 0; // deadline already passed
         }
-        let rel_nanos = target_nanos - now_nanos;
+        let rel_nanos = target_monotonic - now_nanos;
         let rel = Timespec {
             tv_sec: (rel_nanos / 1_000_000_000) as i64,
             tv_nsec: ((rel_nanos % 1_000_000_000)) as i64,
         };
-        return nanosleep_impl(&rel, rmtp);
+        let r = nanosleep_impl(&rel, core::ptr::null_mut()); // rmtp ignored with ABSTIME
+        return if r < 0 { fail((-r) as i32) } else { r };
     }
 
-    nanosleep_impl(&req, rmtp)
+    if req.tv_sec < 0 {
+        return fail(errno::EINVAL);
+    }
+
+    let r = nanosleep_impl(&req, rmtp);
+    if r < 0 { fail((-r) as i32) } else { r }
 }
 
 /// sys_timer_create - Create POSIX interval timer (NR 107)
@@ -642,14 +692,20 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         }
     }
 
+    // Allocate a stable, never-reused timer handle. Previously the id was
+    // `timers.len() + 1` and lookups were by Vec index: deleting a middle
+    // timer shifted every later entry and silently redirected operations on
+    // surviving timers to the WRONG timer (review批次1). Ids only need to be
+    // unique within the process; a global monotonic source guarantees it
+    // across create/delete cycles for the process' lifetime.
+    static NEXT_POSIX_TIMER_ID: core::sync::atomic::AtomicI32 =
+        core::sync::atomic::AtomicI32::new(1);
+    let user_timer_id = NEXT_POSIX_TIMER_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
     let task = match crate::process::current_task() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
-
-    // Allocate timer ID (per-process)
-    let mut timers = task.posix_timers.lock();
-    let user_timer_id = (timers.len() + 1) as i32;
 
     let state = crate::process::task::PosixTimerState {
         kernel_timer_id: 0,
@@ -661,6 +717,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         user_timer_id: user_timer_id,
     };
 
+    let mut timers = task.posix_timers.lock();
     timers.push(state);
     // SAFETY: timerid_ptr validated with access_ok(4); writes one i32.
     unsafe {
@@ -695,18 +752,6 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         None => return -(errno::ESRCH as i64),
     };
 
-    // Find timer by user ID (1-indexed)
-    let idx = (timerid as usize).saturating_sub(1);
-
-    // Write old_value as disarmed
-    if !old_value.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
-            return -(errno::EFAULT as i64);
-        }
-        // SAFETY: old_value validated with access_ok(32); writes 32 zero bytes.
-        unsafe { core::ptr::write_bytes(old_value, 0, 32); }
-    }
-
     // Read struct itimerspec { struct timespec it_interval, struct timespec it_value }
     // SAFETY: new_value validated with access_ok(32); reads 4 i64 fields at known offsets.
     let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
@@ -719,12 +764,23 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         )
     };
 
+    // Find timer by stable user handle (review批次1: index arithmetic
+    // misdirected operations after a middle timer was deleted).
     let mut timers = task.posix_timers.lock();
-    if idx >= timers.len() {
-        return -(errno::EINVAL as i64);
+    let timer = match timers.iter_mut().find(|t| t.user_timer_id == timerid) {
+        Some(t) => t,
+        None => return -(errno::EINVAL as i64),
+    };
+
+    // Write old_value as disarmed (before mutating the timer)
+    if !old_value.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: old_value validated with access_ok(32); writes 32 zero bytes.
+        unsafe { core::ptr::write_bytes(old_value, 0, 32); }
     }
 
-    let timer = &mut timers[idx];
     let pid = task.pid();
 
     // Disarm existing kernel timer
@@ -808,14 +864,12 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> i64 {
         None => return -(errno::ESRCH as i64),
     };
 
-    let idx = (timerid as usize).saturating_sub(1);
+    // Lookup by stable user handle, not Vec index (review批次1).
     let timers = task.posix_timers.lock();
-
-    if idx >= timers.len() {
-        return -(errno::EINVAL as i64);
-    }
-
-    let timer = &timers[idx];
+    let timer = match timers.iter().find(|t| t.user_timer_id == timerid) {
+        Some(t) => t,
+        None => return -(errno::EINVAL as i64),
+    };
 
     // Compute remaining time
     let (val_sec, val_nsec) = if timer.kernel_timer_id != 0 {
@@ -864,14 +918,12 @@ pub fn sys_timer_getoverrun(args: SyscallArgs) -> i64 {
         None => return -(errno::ESRCH as i64),
     };
 
-    let idx = (timerid as usize).saturating_sub(1);
+    // Lookup by stable user handle, not Vec index (review批次1).
     let timers = task.posix_timers.lock();
-
-    if idx >= timers.len() {
-        return -(errno::EINVAL as i64);
+    match timers.iter().find(|t| t.user_timer_id == timerid) {
+        Some(t) => t.overrun_count as i64,
+        None => -(errno::EINVAL as i64),
     }
-
-    timers[idx].overrun_count as i64
 }
 
 /// sys_timer_delete - Delete POSIX timer (NR 111)
@@ -883,12 +935,13 @@ pub fn sys_timer_delete(args: SyscallArgs) -> i64 {
         None => return -(errno::ESRCH as i64),
     };
 
-    let idx = (timerid as usize).saturating_sub(1);
-
+    // Lookup by stable user handle. Removing the entry is safe now that
+    // every other operation resolves handles by value (no index shift).
     let mut timers = task.posix_timers.lock();
-    if idx >= timers.len() {
-        return -(errno::EINVAL as i64);
-    }
+    let idx = match timers.iter().position(|t| t.user_timer_id == timerid) {
+        Some(i) => i,
+        None => return -(errno::EINVAL as i64),
+    };
 
     // Disarm kernel timer
     let timer = &timers[idx];

@@ -340,7 +340,7 @@ impl MmStruct {
     }
 
     /// Find free virtual address area
-    fn find_free_area(&self, size: usize) -> Result<PageVirtAddr, MapError> {
+    pub fn find_free_area(&self, size: usize) -> Result<PageVirtAddr, MapError> {
         use user_addr::{MMAP_START, MMAP_END, USER_END};
 
         let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
@@ -463,6 +463,22 @@ impl MmStruct {
         Ok(())
     }
 
+    /// Zap the mapped pages in [start, start+size) WITHOUT touching the
+    /// VMAs — madvise(MADV_DONTNEED) semantics. The next fault on the range
+    /// re-materializes a zero page (anonymous VMAs) or re-reads the file
+    /// page (file-backed VMAs). Reuses unmap_pages so the walk/rmap/
+    /// refcount/clear_pte/sfence teardown happens under PTE_MODIFY_LOCK.
+    pub fn zap_page_range(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
+        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+        if start.as_usize() % PAGE_SIZE_USIZE != 0 {
+            return Err(MapError::Invalid);
+        }
+        if start.as_usize().checked_add(aligned_size).is_none() {
+            return Err(MapError::Invalid);
+        }
+        self.unmap_pages(start, aligned_size)
+    }
+
     /// Legacy munmap body kept for reference — the new implementation above
     /// replaces it. Previously only whole-VMA removal was supported.
     #[allow(dead_code)]
@@ -575,6 +591,58 @@ impl MmStruct {
         let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
 
         (*table0).set(vpn0, PageTableEntry::from_bits(0));
+    }
+
+    /// Rewrite the leaf-PTE permission flags for [start, start+size) in the
+    /// USER portion of this address space, preserving each PTE's PPN.
+    ///
+    /// Used by the init/ELF loaders to tighten a one-shot RWX pre-map down
+    /// to per-segment (W^X) permissions (review批次8). `flags` holds the
+    /// low PTE bits (V/U/R/W/X/A/D); pages not currently mapped are left
+    /// alone. Callers must ensure `end <= USER_END` (kernel range PTEs are
+    /// shared and must never be rewritten from here).
+    pub unsafe fn set_range_permissions(&self, start: u64, size: usize, flags: u64) {
+        use super::memory_layout::user_addr;
+        let aligned_start = start & !(PAGE_SIZE_USIZE as u64 - 1);
+        let end = match aligned_start.checked_add(size as u64) {
+            Some(e) => (e + PAGE_SIZE_USIZE as u64 - 1) & !(PAGE_SIZE_USIZE as u64 - 1),
+            None => return,
+        };
+        if aligned_start < user_addr::USER_START as u64 || end > user_addr::USER_END as u64 {
+            return; // refuse kernel-range rewrites
+        }
+
+        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        let mut va = aligned_start;
+        while va < end {
+            let vpn2 = ((va >> 30) & 0x1FF) as usize;
+            let vpn1 = ((va >> 21) & 0x1FF) as usize;
+            let vpn0 = ((va >> 12) & 0x1FF) as usize;
+
+            let root_table = get_page_table_virt(self.pgd << PAGE_SHIFT);
+            let pte2 = (*root_table).get(vpn2);
+            if !pte2.is_valid() {
+                va += PAGE_SIZE_USIZE as u64;
+                continue;
+            }
+            let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+            let pte1 = (*table1).get(vpn1);
+            if !pte1.is_valid() {
+                va += PAGE_SIZE_USIZE as u64;
+                continue;
+            }
+            let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+            let old = (*table0).get(vpn0);
+            if old.is_valid() {
+                // Preserve PPN ([53:10]), replace the flag bits.
+                let ppn_bits = old.bits() & !0x3FFu64;
+                (*table0).set(vpn0, PageTableEntry::from_bits(ppn_bits | flags));
+            }
+            va += PAGE_SIZE_USIZE as u64;
+        }
+        // SAFETY: sfence.vma invalidates TLB entries so the tightened
+        // permissions take effect immediately.
+        asm!("sfence.vma zero, zero");
     }
 
     /// brk system call implementation (legacy interface)

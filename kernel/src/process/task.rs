@@ -478,6 +478,12 @@ pub struct Task {
     /// CPU affinity mask — bit i set = CPU i allowed
     cpus_allowed: core::sync::atomic::AtomicU32,
 
+    /// khungtaskd bookkeeping (review批次8): timestamp (ns) when this task
+    /// was FIRST seen in D-state in the current window; 0 = not in D-state.
+    /// Per-task storage replaces the old pid-indexed side table — real pids
+    /// exceed MAX_TASKS, so the table silently skipped every real task.
+    pub hung_task_since: core::sync::atomic::AtomicU64,
+
     /// R12-5: lookup pin count — pid_hash_lookup increments, task_put
     /// decrements and frees at zero. Closes the lookup->use window that
     /// fed freed Task pointers into enqueue.
@@ -847,6 +853,7 @@ impl Task {
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
             cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
+            hung_task_since: core::sync::atomic::AtomicU64::new(0),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
             journal_handle: core::cell::Cell::new(core::ptr::null_mut()),
             task_refcnt: core::sync::atomic::AtomicU32::new(1),

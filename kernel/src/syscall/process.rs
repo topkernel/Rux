@@ -429,7 +429,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
 
     match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec) {
         Ok(()) => {
-            crate::pr_info!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
+            crate::pr_debug!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
             0
         }
         Err(e) => {
@@ -2996,7 +2996,8 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
         }
     }
 
-    count as i64
+    // Linux returns 0 (not the pair count) on success.
+    0
 }
 
 /// sys_riscv_flush_icache - Flush instruction cache
@@ -3145,7 +3146,9 @@ pub fn sys_close_range(args: SyscallArgs) -> i64 {
             closed += 1;
         }
     }
-    closed as i64
+    // Linux returns 0 (not the number of closed fds).
+    let _ = closed;
+    0
 }
 
 /// sys_pidfd_open - Get pidfd for process (NR 434)

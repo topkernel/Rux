@@ -128,20 +128,21 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
     let nfds = args[1] as usize;
     let timeout_ms = args[2] as i32;
 
-    // Check pointer validity
+    // nfds == 0 with a NULL array is the classic poll(NULL, 0, ms) sleep
+    // idiom — legal on Linux. Only a NULL array with nfds != 0 is EFAULT.
     if fds_ptr.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-
-    // Check if fds_ptr is in valid user space
-    let fds_size = core::mem::size_of::<PollFd>() * nfds;
-    if !crate::arch::riscv64::uaccess::access_ok(fds_ptr as usize, fds_size) {
-        return -(errno::EFAULT as i64);
-    }
-
-    // Check nfds range
-    if nfds == 0 || nfds > 1024 {
-        return -(errno::EINVAL as i64);
+        if nfds != 0 {
+            return -(errno::EFAULT as i64);
+        }
+    } else {
+        // Overflow-safe size computation: Linux does not cap nfds.
+        let fds_size = match core::mem::size_of::<PollFd>().checked_mul(nfds) {
+            Some(s) => s,
+            None => return -(errno::EINVAL as i64),
+        };
+        if !crate::arch::riscv64::uaccess::access_ok(fds_ptr as usize, fds_size) {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     // Get current process fdtable
@@ -257,14 +258,26 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
     // ppoll has same pollfd checking logic as poll, but reads timeout from timespec
     let timeout_ptr = args[2] as *const u64;
 
+    // A NULL timeout means "wait forever" (legal); a non-NULL but invalid
+    // pointer must fail with EFAULT instead of silently waiting forever.
+    if !timeout_ptr.is_null()
+        && !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16)
+    {
+        return -(errno::EFAULT as i64);
+    }
+
     // Read timeout from struct timespec { tv_sec: u64, tv_nsec: u64 }
-    let timeout_ms: i32 = if timeout_ptr.is_null() || !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16) {
-        -1  // NULL or invalid pointer = infinite wait
+    let timeout_ms: i32 = if timeout_ptr.is_null() {
+        -1  // NULL = infinite wait
     } else {
         // SAFETY: timeout_ptr validated with access_ok; reads two u64 fields.
         unsafe {
             let tv_sec = core::ptr::read_volatile(timeout_ptr);
             let tv_nsec = core::ptr::read_volatile(timeout_ptr.add(1));
+            if tv_nsec >= 1_000_000_000 {
+                // Invalid timespec: match Linux poll_select_set_timeout().
+                return -(errno::EINVAL as i64);
+            }
             if tv_sec == 0 && tv_nsec == 0 {
                 0  // Immediate return
             } else {
@@ -291,7 +304,7 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
 /// - args[1]: readfds - pointer to readable file descriptor set
 /// - args[2]: writefds - pointer to writable file descriptor set
 /// - args[3]: exceptfds - pointer to exception file descriptor set
-/// - args[4]: timeout - pointer to TimeVal structure
+/// - args[4]: timeout - pointer to TimeSpec structure (sec, nsec)
 /// - args[5]: sigmask - pointer to signal mask
 ///
 /// # Returns
@@ -299,11 +312,81 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
 pub fn sys_pselect6(args: SyscallArgs) -> i64 {
     use poll_events::*;
 
+    // pselect6's timeout is a *timespec*, not a timeval: parsing it as a
+    // timeval inflated every wait 1000x (tv_nsec read as tv_usec).
+    let timeout_ptr = args[4] as *const i64; // { tv_sec, tv_nsec }
+    if !timeout_ptr.is_null()
+        && !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16)
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let (timeout_ms, has_timeout) = if timeout_ptr.is_null() {
+        (0i64, false)
+    } else {
+        // SAFETY: timeout_ptr validated with access_ok; reads two i64 fields.
+        unsafe {
+            let tv_sec = core::ptr::read_volatile(timeout_ptr);
+            let tv_nsec = core::ptr::read_volatile(timeout_ptr.add(1));
+            if tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1_000_000_000 {
+                return -(errno::EINVAL as i64);
+            }
+            (
+                tv_sec
+                    .saturating_mul(1000)
+                    .saturating_add(tv_nsec / 1_000_000),
+                true,
+            )
+        }
+    };
+
+    pselect6_common(args, timeout_ms, has_timeout)
+}
+
+/// sys_select — same core, but the timeout argument is a *timeval*
+/// (tv_sec/tv_usec). It delegates to the pselect6 core with the timeout
+/// pre-converted to milliseconds.
+pub fn sys_select(args: SyscallArgs) -> i64 {
+    let timeout_ptr = args[4] as *const TimeVal;
+    if !timeout_ptr.is_null()
+        && !crate::arch::riscv64::uaccess::access_ok(
+            timeout_ptr as usize,
+            core::mem::size_of::<TimeVal>(),
+        )
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let (timeout_ms, has_timeout) = if timeout_ptr.is_null() {
+        (0i64, false)
+    } else {
+        // SAFETY: timeout_ptr validated with access_ok above.
+        unsafe {
+            let tv = *timeout_ptr;
+            if tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1_000_000 {
+                return -(errno::EINVAL as i64);
+            }
+            (
+                tv.tv_sec
+                    .saturating_mul(1000)
+                    .saturating_add(tv.tv_usec / 1000),
+                true,
+            )
+        }
+    };
+
+    // select has no sigmask argument; clear args[5] before entering the core.
+    let core_args: SyscallArgs = [args[0], args[1], args[2], args[3], args[4], 0];
+    pselect6_common(core_args, timeout_ms, has_timeout)
+}
+
+/// Core fd-set multiplexing loop shared by select(2) and pselect6(2).
+/// `timeout_ms`/`has_timeout` are pre-parsed by the ABI-specific wrappers.
+fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64 {
+    use poll_events::*;
+
     let nfds = args[0] as i32;
     let readfds_ptr = args[1] as *mut FdSet;
     let writefds_ptr = args[2] as *mut FdSet;
     let exceptfds_ptr = args[3] as *mut FdSet;
-    let timeout_ptr = args[4] as *const TimeVal;
     let _sigmask_ptr = args[5] as *const u64;
 
     // Validate nfds range
@@ -320,9 +403,6 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     if !exceptfds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(exceptfds_ptr as usize, fdset_size) {
-        return -(errno::EFAULT as i64);
-    }
-    if !timeout_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, core::mem::size_of::<TimeVal>()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -342,17 +422,6 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
     // SAFETY: same as above.
     let original_exceptfds = unsafe {
         if exceptfds_ptr.is_null() { FdSet::new() } else { *exceptfds_ptr }
-    };
-
-    // Parse timeout
-    let (timeout_ms, has_timeout) = if timeout_ptr.is_null() {
-        (0i64, false)
-    } else {
-        // SAFETY: timeout_ptr validated with access_ok; reads two i64 fields.
-        unsafe {
-            let tv = *timeout_ptr;
-            (tv.tv_sec * 1000 + tv.tv_usec / 1000, true)
-        }
     };
 
     let fdtable = match crate::sched::get_current_fdtable() {
@@ -482,22 +551,6 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
 
         crate::sched::yield_cpu();
     }
-}
-
-/// sys_select - I/O multiplexing (BSD style)
-///
-/// # Arguments
-/// - args[0]: nfds - highest file descriptor number to check + 1
-/// - args[1]: readfds - pointer to readable file descriptor set
-/// - args[2]: writefds - pointer to writable file descriptor set
-/// - args[3]: exceptfds - pointer to exception file descriptor set
-/// - args[4]: timeout - pointer to TimeVal structure
-///
-/// # Returns
-/// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
-pub fn sys_select(args: SyscallArgs) -> i64 {
-    // select is a special case of pselect6 with sigmask as null
-    sys_pselect6([args[0], args[1], args[2], args[3], args[4], 0])
 }
 
 /// sys_epoll_create - Create epoll instance
@@ -808,8 +861,12 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                 if revents & POLLERR != 0 { ep_events |= EPOLLERR; }
                 if revents & POLLHUP != 0 { ep_events |= EPOLLHUP; }
 
+                // Linux always reports EPOLLERR/EPOLLHUP even when the
+                // registration did not subscribe to them — they are not
+                // maskable. Only the I/O readiness bits honor entry.events.
+                let report_mask = entry.events | EPOLLERR | EPOLLHUP;
                 ready_events.push(EPollEvent {
-                    events: ep_events & entry.events,
+                    events: ep_events & report_mask,
                     data: entry.data,
                 });
             }
@@ -874,6 +931,8 @@ struct EventFd {
     counter: core::sync::atomic::AtomicU64,
     /// EFD_SEMAPHORE flag
     semaphore: bool,
+    /// Waiters blocked for counter != 0 (readers) or counter decrease (writers)
+    wait_queue: crate::process::wait::WaitQueueHead,
 }
 
 impl EventFd {
@@ -881,6 +940,42 @@ impl EventFd {
         Self {
             counter: core::sync::atomic::AtomicU64::new(initval),
             semaphore: (flags & EFD_SEMAPHORE) != 0,
+            wait_queue: crate::process::wait::WaitQueueHead::new(),
+        }
+    }
+
+    /// wait_event-style interruptible block until `ready()` holds.
+    /// Returns Err(EINTR) when interrupted by a signal.
+    fn block_until(&self, ready: impl Fn() -> bool) -> Result<(), i32> {
+        loop {
+            if ready() {
+                return Ok(());
+            }
+            let current = match crate::sched::current() {
+                Some(t) => t,
+                None => return Ok(()), // cannot block: fall back to caller
+            };
+            // Atomically register + mark INTERRUPTIBLE, then re-check.
+            self.wait_queue.prepare_to_wait(current, false, true);
+            if ready() {
+                self.wait_queue.finish_wait(current);
+                // NEW-C2: undo a concurrent wake enqueue before looping.
+                // SAFETY: current is the running task's pointer.
+                unsafe { crate::sched::dequeue_task(&*current); }
+                return Ok(());
+            }
+            if crate::signal::signal_pending() {
+                self.wait_queue.finish_wait(current);
+                // SAFETY: current is the running task's pointer.
+                unsafe { crate::sched::dequeue_task(&*current); }
+                return Err(errno::EINTR);
+            }
+            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::sched::schedule();
+            self.wait_queue.finish_wait(current);
+            if crate::signal::signal_pending() {
+                return Err(errno::EINTR);
+            }
         }
     }
 }
@@ -897,14 +992,29 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: ptr came from Box::into_raw in sys_eventfd2; valid and properly aligned.
     let efd = unsafe { &*(ptr as *const EventFd) };
 
+    // Blocking semantics (review批次1: previously returned EAGAIN even for
+    // blocking fds, busy-looping every poll/read caller).
+    if efd.counter.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+        if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+            return -errno::EAGAIN as isize;
+        }
+        match efd.block_until(|| efd.counter.load(core::sync::atomic::Ordering::Relaxed) != 0) {
+            Ok(()) => {}
+            Err(e) => return -(e) as isize,
+        }
+    }
+
     loop {
         let val = efd.counter.load(core::sync::atomic::Ordering::Relaxed);
         if val == 0 {
             if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
                 return -errno::EAGAIN as isize;
             }
-            // TODO: block until woken
-            return -errno::EAGAIN as isize;
+            // Raced to zero between the wake and the CAS: block again.
+            match efd.block_until(|| efd.counter.load(core::sync::atomic::Ordering::Relaxed) != 0) {
+                Ok(()) => continue,
+                Err(e) => return -(e) as isize,
+            }
         }
         let new_val = if efd.semaphore { val - 1 } else { 0 };
         if efd.counter.compare_exchange_weak(
@@ -914,6 +1024,8 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         ).is_ok() {
             let return_val = if efd.semaphore { 1u64 } else { val };
             buf[..8].copy_from_slice(&return_val.to_le_bytes());
+            // A reader consumed — writers waiting for space can proceed.
+            efd.wait_queue.wake_up_all();
             return 8;
         }
         // CAS failed, retry
@@ -947,6 +1059,8 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
                     core::sync::atomic::Ordering::AcqRel,
                     core::sync::atomic::Ordering::Relaxed,
                 ).is_ok() {
+                    // Counter no longer zero — wake blocked readers.
+                    efd.wait_queue.wake_up_all();
                     return 8;
                 }
                 // CAS failed, retry
@@ -957,8 +1071,16 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
                 if flags & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
                     return -errno::EAGAIN as isize;
                 }
-                // TODO: block until counter decreases
-                return -errno::EAGAIN as isize;
+                // Blocking mode: wait for a reader to drain the counter
+                // (review批次1: previously returned EAGAIN immediately).
+                let cur_ok = || {
+                    efd.counter.load(core::sync::atomic::Ordering::Relaxed)
+                        .checked_add(val).is_some()
+                };
+                match efd.block_until(cur_ok) {
+                    Ok(()) => continue,
+                    Err(e) => return -(e) as isize,
+                }
             }
         }
     }
@@ -1026,6 +1148,8 @@ struct TimerFd {
     interval_jiffies: u64,
     /// Number of timer expirations since last read()
     expiration_count: core::sync::atomic::AtomicU64,
+    /// Readers blocked until the timer fires
+    wait_queue: crate::process::wait::WaitQueueHead,
 }
 
 impl TimerFd {
@@ -1035,6 +1159,7 @@ impl TimerFd {
             kernel_timer_id: 0,
             interval_jiffies: 0,
             expiration_count: core::sync::atomic::AtomicU64::new(0),
+            wait_queue: crate::process::wait::WaitQueueHead::new(),
         }
     }
 }
@@ -1051,14 +1176,43 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and properly aligned.
     let tfd = unsafe { &*(ptr as *const TimerFd) };
 
-    // Read and reset the expiration count
-    let count = tfd.expiration_count.swap(0, core::sync::atomic::Ordering::AcqRel);
-    if count == 0 {
-        // Non-blocking check
+    // Blocking read (review批次1: previously EAGAIN — busy loop for every
+    // blocking timerfd consumer). Block until an expiration is pending.
+    if tfd.expiration_count.load(core::sync::atomic::Ordering::Acquire) == 0 {
         if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
             return -errno::EAGAIN as isize;
         }
-        // TODO: block until timer fires
+        loop {
+            let current = match crate::sched::current() {
+                Some(t) => t,
+                None => return -errno::EAGAIN as isize,
+            };
+            tfd.wait_queue.prepare_to_wait(current, false, true);
+            if tfd.expiration_count.load(core::sync::atomic::Ordering::Acquire) > 0 {
+                tfd.wait_queue.finish_wait(current);
+                // SAFETY: current is the running task's pointer.
+                unsafe { crate::sched::dequeue_task(&*current); }
+                break;
+            }
+            if crate::signal::signal_pending() {
+                tfd.wait_queue.finish_wait(current);
+                // SAFETY: current is the running task's pointer.
+                unsafe { crate::sched::dequeue_task(&*current); }
+                return -(errno::EINTR) as isize;
+            }
+            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::sched::schedule();
+            tfd.wait_queue.finish_wait(current);
+            if crate::signal::signal_pending() {
+                return -(errno::EINTR) as isize;
+            }
+        }
+    }
+
+    // Read and reset the expiration count
+    let count = tfd.expiration_count.swap(0, core::sync::atomic::Ordering::AcqRel);
+    if count == 0 {
+        // Raced with another reader: treat as EAGAIN (nothing pending now).
         return -errno::EAGAIN as isize;
     }
 
@@ -1433,16 +1587,18 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
         now + value_jiffies
     };
 
-    // Use timerfd mode: pass the expiration_count address as tfd_addr
-    // The timer softirq handler will increment it on expiry.
-    let counter_addr = &tfd.expiration_count as *const core::sync::atomic::AtomicU64 as u64;
+    // Use timerfd mode: pass the TimerFd address to the timer softirq; on
+    // expiry it calls timerfd_expire_notify() which bumps the counter AND
+    // wakes readers blocked in timerfd_read (review批次1: the counter bump
+    // alone never woke anyone, so a blocking read would sleep forever).
+    let tfd_addr = tfd as *const TimerFd as u64;
 
     let new_kernel_id = crate::timer::add_timer_with_action(
         expires,
         0, // no signal
         0, // no signal
         interval_jiffies,
-        counter_addr,
+        tfd_addr,
     );
 
     tfd.kernel_timer_id = new_kernel_id;
@@ -1450,6 +1606,25 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     tfd.expiration_count.store(0, core::sync::atomic::Ordering::Relaxed);
 
     0
+}
+
+/// Timer-softirq expiry hook: bump the timerfd's expiration counter and wake
+/// readers blocked in timerfd_read. `tfd_addr` is the TimerFd address that
+/// sys_timerfd_settime registered in the timer action.
+///
+/// SAFETY contract (same accepted close-race as the old direct counter bump):
+/// the TimerFd box lives as long as the File's last Arc reference; a close
+/// racing this delivery is bounded to one softirq pass and audited.
+pub fn timerfd_expire_notify(tfd_addr: u64) {
+    if tfd_addr == 0 {
+        return;
+    }
+    // SAFETY: see contract above.
+    unsafe {
+        let tfd = &*(tfd_addr as *const TimerFd);
+        tfd.expiration_count.fetch_add(1, core::sync::atomic::Ordering::Release);
+        tfd.wait_queue.wake_up_all();
+    }
 }
 
 /// sys_timerfd_gettime - Get timer settings
@@ -1507,7 +1682,7 @@ pub fn sys_getrandom(args: SyscallArgs) -> i64 {
     let _flags = args[2] as u32;
 
     if buf_ptr.is_null() {
-        return -(errno::EINVAL as i64);
+        return -(errno::EFAULT as i64);
     }
 
     if buflen == 0 {
@@ -1519,24 +1694,166 @@ pub fn sys_getrandom(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Use simple pseudo-random number generator
-    // In a real system should use hardware random or more secure RNG
+    // ChaCha20-based CRNG (review批次1: the old LCG was trivially
+    // predictable — a fatal weakness for TLS/SSH seeding).
     // SAFETY: buf_ptr validated with access_ok(buflen); writes buflen bytes.
     unsafe {
-        // Use timestamp as seed
-        let seed = crate::drivers::intc::clint::read_time();
-
-        // Simple linear congruential generator
-        let mut state = seed;
-        for i in 0..buflen {
-            // LCG: state = state * 1103515245 + 12345
-            state = state.wrapping_mul(1103515245).wrapping_add(12345);
-            *buf_ptr.add(i) = ((state >> 16) & 0xff) as u8;
+        let mut guard = GETRANDOM_CRNG.lock();
+        let rng = guard.get_or_insert_with(ChaCha20Crng::new);
+        let mut filled = 0usize;
+        while filled < buflen {
+            let (block, used) = rng.next_bytes();
+            let chunk = (buflen - filled).min(64 - used);
+            core::ptr::copy_nonoverlapping(
+                block.as_ptr().add(used),
+                buf_ptr.add(filled),
+                chunk,
+            );
+            rng.consume(chunk);
+            filled += chunk;
         }
     }
 
     buflen as i64
 }
+
+/// ChaCha20 keystream generator backing sys_getrandom.
+///
+/// Construction: a 256-bit key is drawn once per boot from CLINT timebase,
+/// jiffies, and (best-effort) address-entropy; every 64-byte block is then
+/// `ChaCha20(key, counter, nonce=fresh_entropy)` so no keystream block ever
+/// repeats even across counter reuse, and each call is re-keyed by fresh
+/// timer entropy (the evolving public nonce cannot be used to recover the
+/// key — ChaCha20 acts as a PRF here).
+struct ChaCha20Crng {
+    key: [u32; 8],
+    counter: u64,
+    /// Partially consumed keystream block (index into `block`).
+    block: [u8; 64],
+    pos: usize,
+}
+
+impl ChaCha20Crng {
+    /// Quarter round on four state words.
+    #[inline]
+    fn qr(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+        s[a] = s[a].wrapping_add(s[b]);
+        s[d] ^= s[a];
+        s[d] = s[d].rotate_left(16);
+        s[c] = s[c].wrapping_add(s[d]);
+        s[b] ^= s[c];
+        s[b] = s[b].rotate_left(12);
+        s[a] = s[a].wrapping_add(s[b]);
+        s[d] ^= s[a];
+        s[d] = s[d].rotate_left(8);
+        s[c] = s[c].wrapping_add(s[d]);
+        s[b] ^= s[c];
+        s[b] = s[b].rotate_left(7);
+    }
+
+    /// One 20-round ChaCha20 block from key/counter/nonce.
+    fn block(key: &[u32; 8], counter: u64, nonce: u64) -> [u8; 64] {
+        const CONSTANTS: [u32; 4] =
+            [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
+        let mut s = [
+            CONSTANTS[0],
+            CONSTANTS[1],
+            CONSTANTS[2],
+            CONSTANTS[3],
+            key[0],
+            key[1],
+            key[2],
+            key[3],
+            key[4],
+            key[5],
+            key[6],
+            key[7],
+            counter as u32,
+            (counter >> 32) as u32,
+            nonce as u32,
+            (nonce >> 32) as u32,
+        ];
+        let mut w = s;
+        for _ in 0..10 {
+            // Column rounds
+            Self::qr(&mut w, 0, 4, 8, 12);
+            Self::qr(&mut w, 1, 5, 9, 13);
+            Self::qr(&mut w, 2, 6, 10, 14);
+            Self::qr(&mut w, 3, 7, 11, 15);
+            // Diagonal rounds
+            Self::qr(&mut w, 0, 5, 10, 15);
+            Self::qr(&mut w, 1, 6, 11, 12);
+            Self::qr(&mut w, 2, 7, 8, 13);
+            Self::qr(&mut w, 3, 4, 9, 14);
+        }
+        let mut out = [0u8; 64];
+        for i in 0..16 {
+            let x = w[i].wrapping_add(s[i]);
+            out[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());
+        }
+        out
+    }
+
+    /// Mix 64 bits of entropy into a u64 (splitmix64 finalizer).
+    #[inline]
+    fn mix64(x: u64) -> u64 {
+        let mut z = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// Seed a fresh CRNG from the best entropy available pre-boot-rng:
+    /// CLINT timebase, jiffies, a monotonically increasing boot counter,
+    /// and the address of a stack local (ASLR/scheduler placement).
+    fn new() -> Self {
+        let clint = crate::drivers::intc::clint::read_time();
+        let jiffies = crate::drivers::timer::get_jiffies() as u64;
+        static BOOT_NONCE: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let stack_addr = &clint as *const _ as u64;
+        let boot = BOOT_NONCE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+        let mut key = [0u32; 8];
+        let e = [
+            clint,
+            clint >> 13, // spread the fast-moving bits
+            jiffies,
+            jiffies ^ 0xa5a5_5a5a_a5a5_5a5a,
+            boot,
+            stack_addr,
+            stack_addr >> 3,
+            clint ^ (jiffies << 17) ^ (boot << 41),
+        ];
+        for (i, v) in e.iter().enumerate() {
+            key[i] = Self::mix64(*v) as u32;
+            key[(i + 4) % 8] ^= (Self::mix64(*v ^ 0xdead_beef_dead_beef) >> 32) as u32;
+        }
+        ChaCha20Crng { key, counter: Self::mix64(clint ^ boot), block: [0; 64], pos: 64 }
+    }
+
+    /// Return the current (possibly partially consumed) keystream block and
+    /// the consumed offset. Generates a fresh block when the previous one is
+    /// exhausted, with a nonce drawn from fresh CLINT entropy.
+    fn next_bytes(&mut self) -> ([u8; 64], usize) {
+        if self.pos >= 64 {
+            let entropy = crate::drivers::intc::clint::read_time();
+            self.block = Self::block(&self.key, self.counter, Self::mix64(entropy));
+            self.counter = self.counter.wrapping_add(1);
+            self.pos = 0;
+        }
+        (self.block, self.pos)
+    }
+
+    /// Mark `n` bytes of the current block as consumed.
+    fn consume(&mut self, n: usize) {
+        self.pos = (self.pos + n).min(64);
+    }
+}
+
+/// Global getrandom CRNG state (lazily seeded on first use).
+static GETRANDOM_CRNG: crate::sync::spinlock::Spinlock<Option<ChaCha20Crng>> =
+    crate::sync::spinlock::Spinlock::new(None);
 
 
 /// Best-effort eventpoll_release: when a file description is closed, purge

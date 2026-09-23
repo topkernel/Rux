@@ -240,6 +240,13 @@ pub fn request_irq(
         }
     }
 
+    // Reset the disable depth (review批次8): free_irq's last-handler path
+    // deliberately leaves depth == 1 (IRQ off). Without this reset a
+    // RE-request_irq after a free_irq would unmask the hardware but keep
+    // depth > 0 — handle_irq_event then dropped every interrupt for the
+    // freshly registered handler (re-probing a driver deadlocked its IRQ).
+    desc.depth.store(0, Ordering::Release);
+
     Ok(())
 }
 

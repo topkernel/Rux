@@ -63,35 +63,71 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
     let which = args[0] as i32;
     let who = args[1] as u32;
 
-    // Only support PRIO_PROCESS
-    if which != PRIO_PROCESS {
-        return -(errno::EINVAL as i64);
-    }
+    match which {
+        PRIO_PROCESS => {
+            let target_pid = if who == 0 {
+                // who = 0 means current process
+                match crate::sched::current() {
+                    // SAFETY: sched::current() returns a valid Task pointer when Some.
+                    Some(t) => unsafe { (*t).pid() },
+                    None => return -(errno::ESRCH as i64),
+                }
+            } else {
+                who
+            };
 
-    let target_pid = if who == 0 {
-        // who = 0 means current process
-        match crate::sched::current() {
-            // SAFETY: sched::current() returns a valid Task pointer when Some.
-            Some(t) => unsafe { (*t).pid() },
-            None => return -(errno::ESRCH as i64),
+            // Find target process
+            // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
+            let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
+            if task.is_null() {
+                return -(errno::ESRCH as i64);  // Process does not exist
+            }
+
+            // Linux ABI returns 20 - nice (nice -20 → 40, nice 19 → 1). The old
+            // nice + 20 encoding made glibc compute the negated nice value
+            // (review M-12).
+            // SAFETY: task is validated non-null above; nice() reads the task's nice field.
+            let nice = unsafe { (*task).nice() };
+            (20 - nice) as i64
         }
-    } else {
-        who
-    };
-
-    // Find target process
-    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-    if task.is_null() {
-        return -(errno::ESRCH as i64);  // Process does not exist
+        // Group/user-wide queries (review批次1: previously EINVAL). who==0
+        // selects the caller's own pgid/uid; the result is the HIGHEST
+        // priority (lowest nice) among all matching tasks.
+        PRIO_PGRP | PRIO_USER => {
+            let key = if who == 0 {
+                match crate::sched::current() {
+                    // SAFETY: sched::current() returns a valid Task pointer when Some.
+                    Some(t) => unsafe {
+                        if which == PRIO_PGRP { (*t).pgid() } else { (*t).cred().uid }
+                    },
+                    None => return -(errno::ESRCH as i64),
+                }
+            } else {
+                who
+            };
+            let mut best_nice: Option<i32> = None;
+            crate::process::pid_hash::pid_hash_for_each_task(|t| {
+                // SAFETY: the callback runs under the bucket lock; the task
+                // pointer is valid for the duration of the callback.
+                let matches = unsafe {
+                    if which == PRIO_PGRP { (*t).pgid() == key } else { (*t).cred().uid == key }
+                };
+                if matches {
+                    // SAFETY: nice() only reads the task's nice field.
+                    let n = unsafe { (*t).nice() };
+                    best_nice = Some(match best_nice {
+                        Some(b) if b <= n => b,
+                        _ => n,
+                    });
+                }
+            });
+            match best_nice {
+                Some(n) => (20 - n) as i64,
+                None => -(errno::ESRCH as i64),
+            }
+        }
+        _ => -(errno::EINVAL as i64),
     }
-
-    // Linux ABI returns 20 - nice (nice -20 → 40, nice 19 → 1). The old
-    // nice + 20 encoding made glibc compute the negated nice value
-    // (review M-12).
-    // SAFETY: task is validated non-null above; nice() reads the task's nice field.
-    let nice = unsafe { (*task).nice() };
-    (20 - nice) as i64
 }
 
 /// sys_setpriority - Set process priority
@@ -109,49 +145,109 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
     let who = args[1] as u32;
     let niceval = args[2] as i32;
 
-    // Only support PRIO_PROCESS
-    if which != PRIO_PROCESS {
-        return -(errno::EINVAL as i64);
-    }
-
     // Check nice value range
     let niceval = niceval.clamp(MIN_NICE, MAX_NICE);
 
-    let target_pid = if who == 0 {
-        // who = 0 means current process
-        match crate::sched::current() {
-            // SAFETY: sched::current() returns a valid Task pointer when Some.
-            Some(t) => unsafe { (*t).pid() },
-            None => return -(errno::ESRCH as i64),
+    // Collect the target PIDs for the selector (review批次1: PRIO_PGRP /
+    // PRIO_USER were previously EINVAL).
+    let mut target_pids: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
+    match which {
+        PRIO_PROCESS => {
+            target_pids.push(if who == 0 {
+                match crate::sched::current() {
+                    // SAFETY: sched::current() returns a valid Task pointer when Some.
+                    Some(t) => unsafe { (*t).pid() },
+                    None => return -(errno::ESRCH as i64),
+                }
+            } else {
+                who
+            });
         }
-    } else {
-        who
-    };
-
-    // Find target process
-    // SAFETY: find_task_by_pid returns a valid pointer when non-null; checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
-    if task.is_null() {
-        return -(errno::ESRCH as i64);  // Process does not exist
+        PRIO_PGRP | PRIO_USER => {
+            let key = if who == 0 {
+                match crate::sched::current() {
+                    // SAFETY: sched::current() returns a valid Task pointer when Some.
+                    Some(t) => unsafe {
+                        if which == PRIO_PGRP { (*t).pgid() } else { (*t).cred().uid }
+                    },
+                    None => return -(errno::ESRCH as i64),
+                }
+            } else {
+                who
+            };
+            // Collect under the bucket lock, apply after it drops (renice
+            // takes the GRQ lock — never nest it inside a pid-hash bucket).
+            crate::process::pid_hash::pid_hash_for_each_task(|t| {
+                // SAFETY: callback runs under the bucket lock; pid() reads
+                // the task's pid field.
+                let matches = unsafe {
+                    if which == PRIO_PGRP { (*t).pgid() == key } else { (*t).cred().uid == key }
+                };
+                if matches {
+                    target_pids.push(unsafe { (*t).pid() });
+                }
+            });
+            if target_pids.is_empty() {
+                return -(errno::ESRCH as i64);
+            }
+        }
+        _ => return -(errno::EINVAL as i64),
     }
 
-    // Permission check: require CAP_SYS_NICE to change another process's priority
     let current_pid = crate::process::current_pid();
-    if target_pid != current_pid {
-        if !crate::security::capable(crate::security::CAP_SYS_NICE) {
-            return -(errno::EPERM as i64);
+    let mut last_err: i64 = 0;
+    let mut applied = 0usize;
+
+    for target_pid in target_pids {
+        // Pin the task across the renice (a concurrent exit could otherwise
+        // free it between lookup and use).
+        // SAFETY: pid_hash_lookup_pinned returns a pinned valid task or null.
+        let task = unsafe { crate::process::pid_hash::pid_hash_lookup_pinned(target_pid) };
+        if task.is_null() {
+            last_err = -(errno::ESRCH as i64);
+            continue;
         }
+
+        // Permission checks (Linux setpriority):
+        // - another process's priority requires CAP_SYS_NICE (EPERM);
+        // - RAISING priority (lowering nice) requires CAP_SYS_NICE even for
+        //   self (EACCES) — previously any self-renice passed (review批次1).
+        // SAFETY: task validated non-null; nice() only reads.
+        let cur_nice = unsafe { (*task).nice() };
+        if target_pid != current_pid {
+            if !crate::security::capable(crate::security::CAP_SYS_NICE) {
+                // SAFETY: release the pin taken above.
+                unsafe { crate::process::task::Task::task_put(task); }
+                last_err = -(errno::EPERM as i64);
+                continue;
+            }
+        } else if niceval < cur_nice
+            && !crate::security::capable(crate::security::CAP_SYS_NICE)
+        {
+            // SAFETY: release the pin taken above.
+            unsafe { crate::process::task::Task::task_put(task); }
+            last_err = -(errno::EACCES as i64);
+            continue;
+        }
+
+        // Set nice value
+        // R25-6: renice under the GRQ lock with load_weight rebalance — the
+        // plain write let CFS enqueue/dequeue fetch_add/sub mismatched weights
+        // (load_weight wrapped -> garbage sched_slice) and raced the runqueue.
+        // SAFETY: task is pinned and valid.
+        unsafe {
+            crate::sched::sched::sched_renice_locked(task, niceval);
+        }
+        // SAFETY: release the pin taken above.
+        unsafe { crate::process::task::Task::task_put(task); }
+        applied += 1;
     }
 
-    // Set nice value
-    // R25-6: renice under the GRQ lock with load_weight rebalance — the
-    // plain write let CFS enqueue/dequeue fetch_add/sub mismatched weights
-    // (load_weight wrapped -> garbage sched_slice) and raced the runqueue.
-    unsafe {
-        crate::sched::sched::sched_renice_locked(task, niceval);
+    if applied == 0 && last_err != 0 {
+        last_err
+    } else {
+        0
     }
-
-    0
 }
 
 // ============================================================================
@@ -556,22 +652,47 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     if attr_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, core::mem::size_of::<SchedAttr>()) {
+    // Read the user-declared size first (review批次1: setattr 不按 size 截读).
+    // Linux copies only attr->size bytes: an older/smaller user struct must
+    // not be over-read (the rest of the kernel copy stays zero).
+    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, 8) {
         return -(errno::EFAULT as i64);
     }
-    let mut attr = core::mem::MaybeUninit::<SchedAttr>::uninit();
-    // SAFETY: attr_ptr is access_ok-validated; SchedAttr is repr(C) plain data.
+    let mut size_word = [0u8; 4];
+    // SAFETY: attr_ptr validated with access_ok(8) above (covers these 4).
+    if unsafe { crate::arch::riscv64::uaccess::copy_from_user(
+        size_word.as_mut_ptr(), attr_ptr as *const u8, 4) } != 0 {
+        return -(errno::EFAULT as i64);
+    }
+    let user_size = u32::from_le_bytes(size_word) as usize;
+    if user_size == 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // A user struct LARGER than the kernel's is E2BIG (Linux sched_copy_attr).
+    if user_size > core::mem::size_of::<SchedAttr>() {
+        return -(errno::E2BIG as i64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, user_size) {
+        return -(errno::EFAULT as i64);
+    }
+    let mut attr_storage = [0u8; core::mem::size_of::<SchedAttr>()];
+    // SAFETY: attr_ptr is access_ok-validated for user_size; copying into a
+    // zeroed stack buffer leaves any fields beyond user_size as zero.
     let uncopied = unsafe {
         crate::arch::riscv64::uaccess::copy_from_user(
-            attr.as_mut_ptr() as *mut u8,
+            attr_storage.as_mut_ptr(),
             attr_ptr as *const u8,
-            core::mem::size_of::<SchedAttr>(),
+            user_size,
         )
     };
     if uncopied != 0 {
         return -(errno::EFAULT as i64);
     }
-    let attr = unsafe { attr.assume_init() };
+    // SAFETY: attr_storage is a fully-initialized byte buffer of exactly
+    // sizeof(SchedAttr) and SchedAttr is repr(C) plain data.
+    let attr = unsafe {
+        core::ptr::read_unaligned(attr_storage.as_ptr() as *const SchedAttr)
+    };
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
@@ -778,7 +899,32 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // Accept the affinity mask (no per-task storage yet)
+    // Accept the affinity mask and STORE it per-task (review批次1: the old
+    // code validated and threw the mask away, so getaffinity always lied).
+    // SAFETY: sched::current() returns the running task's pointer.
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    let mut stored_mask: u32 = 0;
+    for i in 0..mask_words {
+        // SAFETY: mask_ptr is access_ok-validated for size bytes; i < mask_words stays in bounds.
+        let word = unsafe { core::ptr::read_volatile(mask_ptr.add(i)) };
+        let bits_to_check = core::cmp::min(core::mem::size_of::<usize>() * 8, ncpus);
+        for bit in 0..bits_to_check {
+            let cpu = i * core::mem::size_of::<usize>() * 8 + bit;
+            if cpu < ncpus && (word & (1 << bit)) != 0 {
+                stored_mask |= 1 << cpu;
+            }
+        }
+    }
+    if stored_mask == 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // SAFETY: current is the running task; set_cpus_allowed is a locked store.
+    unsafe {
+        (*current).set_cpus_allowed(stored_mask);
+    }
     0
 }
 
@@ -812,19 +958,31 @@ pub fn sys_sched_getaffinity(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Only pid 0 (self) supported for now; validate non-zero PID exists.
-    if pid != 0 && pid != crate::process::current_pid() {
-        // Check if the target PID actually exists
+    // Resolve the target task (self, or an existing pid).
+    // SAFETY: sched::current() returns the running task's pointer.
+    let task = if pid == 0 || pid == crate::process::current_pid() {
+        match crate::sched::current() {
+            Some(t) => t,
+            None => return -(errno::ESRCH as i64),
+        }
+    } else {
+        // SAFETY: find_task_by_pid returns a valid task pointer or null.
         let target = unsafe { crate::sched::find_task_by_pid(pid) };
         if target.is_null() {
             return -(errno::ESRCH as i64);
         }
-    }
+        target
+    };
 
-    // Build affinity mask: all CPUs allowed.
+    // Report the STORED affinity mask (review批次1: previously always
+    // all-CPUs regardless of what setaffinity installed).
+    // SAFETY: task validated non-null; cpus_allowed() is an atomic read.
+    let allowed = unsafe { (*task).cpus_allowed() };
     let mut kernel_mask = alloc::vec![0u8; bytes_needed];
     for cpu in 0..ncpus {
-        kernel_mask[cpu / 8] |= 1 << (cpu % 8);
+        if allowed & (1 << cpu) != 0 {
+            kernel_mask[cpu / 8] |= 1 << (cpu % 8);
+        }
     }
 
     unsafe {
