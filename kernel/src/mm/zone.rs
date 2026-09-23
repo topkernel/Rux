@@ -350,6 +350,17 @@ impl Zone {
                     // outside the lock let a concurrent free path treat these
                     // pages as buddies and corrupt the free lists
                     // (review MM-H2).
+                    //
+                    // NOTE on the compound-page convention (review 4.4):
+                    // Linux keeps tail refcounts at 0 with only the head
+                    // counted.  Rux CANNOT adopt that: the arch teardown
+                    // path (free_user_page_tables) walks every PTE and
+                    // put_page()s EACH member page individually, so every
+                    // member must own a count.  Blocks here are "allocation
+                    // groups", not Linux compound pages.  The corresponding
+                    // protection is the member-state check in free_pages()
+                    // (an order>0 block is only released when every member
+                    // is unreferenced).
                     let count = 1usize << order;
                     for i in 0..count {
                         let page = pfn_to_page_mut(pfn + i);
@@ -380,36 +391,6 @@ impl Zone {
 
     /// Allocate a block from a specific order level
     fn alloc_from_order(&self, current_order: usize, target_order: usize) -> Option<usize> {
-        // R16-1: alloc-side tripwire — the freed-side TDF can't see a FIRST
-        // erroneous free of a LIVE page (that page isn't on a freelist yet).
-        // If a block handed out by the allocator still looks mapped/referenced,
-        // a live page was recycled. Checked on the leader under the zone lock.
-        {
-            let pg = pfn_to_page(self.free_area[current_order].free_list.load(core::sync::atomic::Ordering::Acquire));
-            if !pg.is_null() {
-                unsafe {
-                    let rc = (*pg).refcount();
-                    let mc = (*pg).mapcount();
-                    if false { // R16-1a disabled: cross-CPU window between remove_from_free_list
-                    // and set_refcount on the OTHER cpu makes head-of-order reads racy;
-                    // the reliable engine detector is the freed-side TDF (0 hits).
-                        use crate::console::putchar;
-                        for &b in b"zone: RECYCLED-LIVE pfn=" { putchar(b); }
-                        let p = self.free_area[current_order].free_list.load(core::sync::atomic::Ordering::Acquire);
-                        let mut v = p; let mut d = [0u8; 12]; let mut k = 0;
-                        while v > 0 { d[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
-                        while k > 0 { k -= 1; putchar(d[k]); }
-                        for &b in b" rc=" { putchar(b); }
-                        let mut vv = rc; if vv < 0 { putchar(b'-'); vv = -vv; }
-                        if vv == 0 { putchar(b'0'); }
-                        let mut dd = [0u8; 12]; let mut kk = 0;
-                        while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
-                        while kk > 0 { kk -= 1; putchar(dd[kk]); }
-                        putchar(b'\n');
-                    }
-                }
-            }
-        }
         let head = self.free_area[current_order].free_list.load(Ordering::Acquire);
         if head == FREE_LIST_NULL {
             return None;
@@ -483,48 +464,34 @@ impl Zone {
         }
 
         // R15-3: TRUE double-free tripwire on the primary allocator path.
-        // A second free is proven by the page STILL BEING LINKED in a
-        // freelist (next_free != sentinel). The round-14 variant tested
-        // refcount==0 — which is true for every legit put_page-driven
-        // FIRST free (Zone::free_pages runs after put_page already hit 0):
-        // 868 false flags per run, all "[not-linked]".
+        // OnFreelist is the authoritative linked-state bit: if it is still
+        // set, the page is STILL LINKED in a freelist, so this is a genuine
+        // double free. Proceeding would relink an already-linked block
+        // (two lists share its next_free) and corrupt both — leak it
+        // instead, like Linux's bad_page() path.
         {
             let page = pfn_to_page_mut(pfn);
             if !page.is_null() {
                 unsafe {
                     if (*page).test_flag(PageFlag::OnFreelist) {
-                        // R15-4: dump the raw descriptor fields to classify
-                        // dirty-next_free vs真 double-free (order tells which:
-                        // a linked free block's member carries its split order).
-                        use crate::console::putchar;
-                        const MSG: &[u8] = b"TDF pfn=";
-                        for &b in MSG { putchar(b); }
-                        let mut v = pfn;
-                        let mut digs = [0u8; 12]; let mut k = 0;
-                        if v == 0 { digs[0] = b'0'; k = 1; }
-                        while v > 0 { digs[k] = b'0' + (v % 10) as u8; k += 1; v /= 10; }
-                        while k > 0 { k -= 1; putchar(digs[k]); }
-                        const M2: &[u8] = b" nf=0x";
-                        for &b in M2 { putchar(b); }
-                        let nf = (*page).next_free();
-                        let mut sh = 64;
-                        while sh > 0 { sh -= 4; let nb = ((nf >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
-                        const M3: &[u8] = b" ord=";
-                        for &b in M3 { putchar(b); }
-                        let ov = (*page).order();
-                        if ov == 0 { putchar(b'0'); } else { let mut vv = ov as usize; let mut dd = [0u8;4]; let mut kk = 0; while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; } while kk > 0 { kk -= 1; putchar(dd[kk]); } }
-                        putchar(b'\n');
-                        // OnFreelist is the authoritative linked-state bit:
-                        // the page is STILL LINKED in a freelist, so this is
-                        // a genuine double free. Proceeding would relink an
-                        // already-linked block (two lists share its
-                        // next_free) and corrupt both — leak it instead,
-                        // like Linux's bad_page() path.
+                        // Taint-only reporting: this runs under the zone
+                        // lock; raw putchar / printk here can wedge the
+                        // console path (same discipline as the heap
+                        // buddy's R43 tripwires).
+                        crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
                         return;
                     }
                 }
             }
         }
+        // Member-state invariant for high-order frees (review 4.4):
+        // the block's members are reset by add_to_free_list() when the
+        // (possibly merged) block joins the free list (R25-4 zeroes every
+        // member).  A caller freeing an order>0 block therefore must not
+        // have outstanding put_page-able references on any member —
+        // members carry per-page refcounts in Rux (see alloc_pages note);
+        // freeing a block whose members are still PTE-mapped is a caller
+        // bug that no metadata here can detect.
         let mut current_pfn = pfn;
         let mut current_order = order;
 
@@ -558,6 +525,14 @@ impl Zone {
     }
 
     /// Check if buddy is free
+    ///
+    /// Mirrors `page_is_buddy()` in mm/page_alloc.c: the candidate must
+    /// actually be ON the free list (PageBuddy/OnFreelist), not merely
+    /// look free.  Checking only `refcount == 0 && order == order`
+    /// misjudged pages that are free-looking but not linked (PCP-resident
+    /// pages, freshly-allocated-but-not-yet-initialized pages, reserved
+    /// pages outside memblock tracking) as mergeable — merging such a page
+    /// gave one PFN two owners (review 4.5).
     fn is_buddy_free(&self, buddy_pfn: usize, order: usize) -> bool {
         // Check if buddy is in zone range
         let start = self.zone_start_pfn.load(Ordering::Acquire);
@@ -566,20 +541,24 @@ impl Zone {
             return false;
         }
 
-        // Check if buddy's page descriptor indicates it's free (refcount == 0)
-        // and has the correct order. This is more reliable than walking the list.
         let page = pfn_to_page(buddy_pfn);
         if page.is_null() {
             return false;
         }
 
         // SAFETY: page is non-null (checked above); buddy_pfn is within zone
-        // range.  Read-only access — lock is held so descriptor is stable.
+        // range.  Read-only access — zone lock is held so the descriptor's
+        // linked-state is stable.
         unsafe {
-            // A buddy is only suitable for merging if:
+            // A buddy is only suitable for merging if ALL of:
             // 1. refcount == 0 (free)
-            // 2. order matches the expected order
-            (*page).refcount() == 0 && (*page).order() == order as u8
+            // 2. OnFreelist is set (authoritative linked-state bit)
+            // 3. order matches the free-list order being merged at
+            // 4. not a reserved page
+            (*page).refcount() == 0
+                && (*page).test_flag(PageFlag::OnFreelist)
+                && (*page).order() == order as u8
+                && !(*page).test_flag(PageFlag::Reserved)
         }
     }
 
@@ -837,10 +816,12 @@ pub fn setup_per_zone_wmarks(
         return;
     }
 
-    // min_free_kbytes = int_sqrt(lowmem_kbytes * 16) / 4
+    // min_free_kbytes = int_sqrt(lowmem_kbytes * 16)
     // clamped to [128, 262144]
+    // (mm/page_alloc.c __setup_per_zone_wmarks(); the historical "/ 4" here
+    // made every watermark four times smaller than Linux's)
     let managed_kb = total_managed * PAGE_SIZE / 1024;
-    let mut min_free_kbytes = int_sqrt(managed_kb * 16) / 4;
+    let mut min_free_kbytes = int_sqrt(managed_kb * 16);
     if min_free_kbytes < 128 {
         min_free_kbytes = 128;
     }

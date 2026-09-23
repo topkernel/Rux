@@ -31,7 +31,6 @@
 
 pub use crate::mm::page::{VirtAddr, PAGE_SIZE};
 use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmaFlags(u32);
@@ -343,19 +342,36 @@ impl Vma {
     }
 
     /// Can merge with another VMA?
+    ///
+    /// Adjacent with identical attributes.  For anonymous VMAs the file
+    /// offset is irrelevant — Linux (can_vma_merge_before/after) merges on
+    /// offset *continuity* (`self.offset + size == other.offset` style),
+    /// which for anonymous mappings is always satisfiable; requiring exact
+    /// offset equality fragmented anonymous heaps (mmap chains after brk).
+    /// For file-backed VMAs the offset must be continuous with the
+    /// preceding mapping's extent (merging two mappings of DIFFERENT
+    //  files/offsets corrupted reads through the first fd — review MM-H1).
     pub fn can_merge(&self, other: &Vma) -> bool {
-        // Must be adjacent with identical attributes AND backing: merging
-        // two mappings of DIFFERENT files (or different offsets of the
-        // same file) made the merged VMA read every page through the first
-        // mapping's fd/offset — silent cross-file data corruption
-        // (review MM-H1). File-backed VMAs only merge with an exact
-        // fd+offset match; anonymous ones merge freely.
-        self.end.as_usize() == other.start.as_usize()
-            && self.flags.bits() == other.flags.bits()
-            && self.vma_type == other.vma_type
-            && self.file_fd == other.file_fd
-            && self.file_size == other.file_size
-            && self.offset == other.offset
+        if self.end.as_usize() != other.start.as_usize() {
+            return false;
+        }
+        if self.flags.bits() != other.flags.bits()
+            || self.vma_type != other.vma_type
+            || self.file_fd != other.file_fd
+            || self.file_size != other.file_size
+        {
+            return false;
+        }
+        // Backing continuity: for file-backed mappings the new VMA must
+        // start exactly where this one's file extent ends; anonymous
+        // mappings have no backing, so any (contiguous) offset is fine.
+        match self.vma_type {
+            VmaType::Anonymous | VmaType::SharedMemory => true,
+            _ => {
+                let self_pages = (self.end.as_usize() - self.start.as_usize()) / PAGE_SIZE;
+                self.offset + self_pages * PAGE_SIZE == other.offset
+            }
+        }
     }
 
     /// Merge with another VMA
@@ -396,9 +412,6 @@ pub struct VmaManager {
 
     /// Cached maximum end address (for fast overlap detection)
     max_end: VirtAddr,
-
-    /// VMA count (for compatibility)
-    count: AtomicU32,
 }
 
 impl VmaManager {
@@ -407,11 +420,15 @@ impl VmaManager {
         Self {
             vmas: BTreeMap::new(),
             max_end: VirtAddr::new(0),
-            count: AtomicU32::new(0),
         }
     }
 
     /// Add VMA
+    ///
+    /// Follows Linux `vma_merge()`: the new VMA is merged with the
+    /// PREDECESSOR and (chained) with any SUCCESSORS that are adjacent and
+    /// compatible, so [A][new][B] collapses to a single VMA when all three
+    /// are mergeable.  The old implementation merged at most one side.
     ///
     /// # Parameters
     /// - `vma`: VMA to add
@@ -421,15 +438,10 @@ impl VmaManager {
     /// - `Err(VmaError::Overlap)`: Overlaps with existing VMA
     ///
     /// # Performance
-    /// O(log n) overlap check + O(log n) insert
+    /// O(log n) overlap check + O(log n) insert + O(k log n) chain merge
     pub fn add(&mut self, vma: Vma) -> Result<(), VmaError> {
         let start = vma.start();
         let end = vma.end();
-
-        // Optimization 1: Only check potentially overlapping VMAs
-        // Since VMAs are sorted by start address, only need to check:
-        // - Previous VMA (may extend into new VMA range)
-        // - All VMAs with start address within new VMA range
 
         // Check if previous VMA overlaps
         if let Some((_, prev_vma)) = self.vmas.range(..start).next_back() {
@@ -444,48 +456,62 @@ impl VmaManager {
             // silently overlapped (verify proptest: 0xf000-0x13000 vs
             // 0x12000-0x13000).
             if prev_vma.can_merge(&vma) && !self.has_vma_starting_within(start, end) {
-                if let Some(prev) = self.vmas.get_mut(&prev_vma.start()) {
-                    if prev.merge(vma) {
-                        // Merged — update max_end, no count change needed
-                        if prev.end().as_usize() > self.max_end.as_usize() {
-                            self.max_end = prev.end();
+                let prev_start = prev_vma.start();
+
+                // Chain-merge successors of the incoming VMA (Linux
+                // vma_merge merges prev + new + next in one pass).
+                let mut merged = vma;
+                loop {
+                    let cur_end = merged.end();
+                    let next = self.vmas.range(cur_end..).next().map(|(_, nv)| *nv);
+                    match next {
+                        Some(nv) if nv.start() == cur_end && merged.can_merge(&nv) => {
+                            merged.merge_at_end(nv.end());
+                            self.vmas.remove(&nv.start());
                         }
-                        return Ok(());
+                        _ => break,
                     }
                 }
-            }
-        }
 
-        // Check VMAs with start address in new VMA range
-        if let Some((_, next_vma)) = self.vmas.range(start..=end).next() {
-            if next_vma.start().as_usize() == end.as_usize() && vma.can_merge(next_vma) {
-                // Merge with next VMA: remove next, extend new vma to cover it
-                let next_end = next_vma.end();
-                let next_start = next_vma.start();
-                let mut merged_vma = vma;
-                merged_vma.merge_at_end(next_end);
-                self.vmas.remove(&next_start);
-                self.vmas.insert(start, merged_vma);
-                self.count.fetch_sub(1, Ordering::Release);
-                if next_end.as_usize() > self.max_end.as_usize() {
-                    self.max_end = next_end;
+                if let Some(prev) = self.vmas.get_mut(&prev_start) {
+                    prev.merge_at_end(merged.end());
+                    if prev.end().as_usize() > self.max_end.as_usize() {
+                        self.max_end = prev.end();
+                    }
                 }
                 return Ok(());
             }
-            // If VMA exists with start address in [start, end) range, then overlap
+        }
+
+        // Reject overlaps: any VMA starting inside [start, end)
+        if let Some((_, next_vma)) = self.vmas.range(start..=end).next() {
             if next_vma.start().as_usize() < end.as_usize() {
                 return Err(VmaError::Overlap);
             }
         }
 
-        // Update maximum end address
-        if end.as_usize() > self.max_end.as_usize() {
-            self.max_end = end;
+        // Fresh insert; chain-merge adjacent successors into it.
+        let mut merged = vma;
+        let mut swallowed = 0usize;
+        loop {
+            let cur_end = merged.end();
+            let next = self.vmas.range(cur_end..).next().map(|(_, nv)| *nv);
+            match next {
+                Some(nv) if nv.start() == cur_end && merged.can_merge(&nv) => {
+                    merged.merge_at_end(nv.end());
+                    self.vmas.remove(&nv.start());
+                    swallowed += 1;
+                }
+                _ => break,
+            }
         }
 
-        // Insert into BTreeMap
-        self.vmas.insert(start, vma);
-        self.count.fetch_add(1, Ordering::Release);
+        let final_end = merged.end();
+        self.vmas.insert(start, merged);
+
+        if final_end.as_usize() > self.max_end.as_usize() {
+            self.max_end = final_end;
+        }
         Ok(())
     }
 
@@ -548,7 +574,6 @@ impl VmaManager {
                     .max()
                     .unwrap_or(VirtAddr::new(0));
             }
-            self.count.fetch_sub(1, Ordering::Release);
             Ok(())
         } else {
             Err(VmaError::NotFound)
@@ -601,7 +626,6 @@ impl VmaManager {
     pub fn clear(&mut self) {
         self.vmas.clear();
         self.max_end = VirtAddr::new(0);
-        self.count.store(0, Ordering::Release);
     }
 
     /// Get maximum end address
@@ -631,15 +655,25 @@ impl VmaManager {
         }
 
         // Get the VMA to expand
-        let vma = self.vmas.get_mut(&vma_start).ok_or(VmaError::NotFound)?;
+        let cur_start = {
+            let vma = self.vmas.get(&vma_start).ok_or(VmaError::NotFound)?;
+            // new_start must be below current start
+            if new_start.as_usize() >= vma.start.as_usize() {
+                return Err(VmaError::Invalid);
+            }
+            vma.start
+        };
 
-        // new_start must be below current start
-        if new_start.as_usize() >= vma.start.as_usize() {
-            return Err(VmaError::Invalid);
+        // Full-interval overlap check (review 4.1): the extension covers
+        // [new_start, cur_start) — the OLD code only looked at the VMA
+        // preceding new_start, so a mapping living strictly INSIDE the
+        // extension window was silently swallowed and the expanded stack
+        // overlapped it.
+        if self.has_vma_starting_within(new_start, cur_start) {
+            return Err(VmaError::Overlap);
         }
-
-        // Check for overlap with previous VMA
-        // The new range is [new_start, vma.start)
+        // The extension must also not be covered by a predecessor that
+        // reaches into the window.
         if let Some((_, prev_vma)) = self.vmas.range(..new_start).next_back() {
             if prev_vma.end().as_usize() > new_start.as_usize() {
                 // Would overlap with previous VMA
@@ -659,7 +693,15 @@ impl VmaManager {
         Ok(())
     }
 
-    /// Find stack VMA (VMA with GROWSDOWN flag) containing or near the address
+    /// Find stack VMA (VMA with GROWSDOWN flag) containing or below the address
+    ///
+    /// Lookup is O(log n) via the BTreeMap: the candidate is either the VMA
+    /// containing `addr`, or — for a fault BELOW the stack bottom — the
+    /// first VMA starting above `addr`.  The caller (page fault path)
+    /// enforces the growth limit (`mm.stack_limit`, from RLIMIT_STACK);
+    /// unlike the old 1-page window this allows growing to any depth below
+    /// the current bottom until the limit or a collision — matching
+    /// Linux's `expand_downwards()` behavior (guard-gap omitted).
     ///
     /// # Arguments
     /// - `addr`: Address to check
@@ -668,25 +710,23 @@ impl VmaManager {
     /// - `Some((start_addr, vma))`: Stack VMA found, returns its start address for expansion
     /// - `None`: No stack VMA found
     pub fn find_stack_vma(&self, addr: VirtAddr) -> Option<(VirtAddr, &Vma)> {
-        // Look for a GROWSDOWN VMA where addr is just below it
-        // Stack grows down, so we're looking for a VMA where:
-        // addr < vma.start (or addr is in the VMA)
-
-        for (start, vma) in self.vmas.iter() {
-            if vma.flags().contains(VmaFlags::GROWSDOWN) {
-                // Check if addr is within this VMA or just below it
-                // For stack expansion, addr should be near (but below) the VMA start
-                if vma.contains(addr) {
-                    return Some((*start, vma));
-                }
-                // Check if addr is just below VMA start (within one page for expansion)
-                // This handles the case where fault address is below current stack bottom
-                let page_below_start = start.as_usize().saturating_sub(PAGE_SIZE);
-                if addr.as_usize() >= page_below_start && addr.as_usize() < start.as_usize() {
-                    return Some((*start, vma));
+        // Case 1: addr falls inside a VMA — return it if growable.
+        if addr.as_usize() < self.max_end.as_usize() {
+            if let Some((_, vma)) = self.vmas.range(..=addr).next_back() {
+                if vma.contains(addr) && vma.flags().contains(VmaFlags::GROWSDOWN) {
+                    return Some((vma.start(), vma));
                 }
             }
         }
+
+        // Case 2: addr is below the first VMA starting above it — that VMA
+        // is the downward-growth candidate.
+        if let Some((start, vma)) = self.vmas.range(addr..).next() {
+            if vma.flags().contains(VmaFlags::GROWSDOWN) {
+                return Some((*start, vma));
+            }
+        }
+
         None
     }
 }

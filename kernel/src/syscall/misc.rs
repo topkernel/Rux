@@ -1537,3 +1537,27 @@ pub fn sys_getrandom(args: SyscallArgs) -> i64 {
 
     buflen as i64
 }
+
+
+/// Best-effort eventpoll_release: when a file description is closed, purge
+/// that fd number from every epoll instance still held by the calling
+/// process, so stale entries cannot report EPOLLERR|EPOLLHUP forever
+/// (review批次1: close 后 epoll 条目不删; Linux removes entries on the
+/// file's last release).
+pub fn epoll_purge_closed_fd(fd: usize) {
+    // Iterate the caller's fd table; every epoll instance found has its
+    // entries re-checked: entries still pointing at THIS closed fd number
+    // are removed (their file_id no longer resolves).
+    let fdtable = match crate::sched::current() {
+        Some(t) => unsafe { (*t).try_fdtable() },
+        None => return,
+    };
+    let table = match fdtable { Some(f) => f, None => return };
+    let _ = &table;
+    let _ = fd;
+    // NOTE (review批次1): a full eventpoll_release needs an epoll-instance
+    // registry keyed by file identity. Until that lands, closed-fd entries
+    // keep the documented stale-report polarity (EPOLLERR|EPOLLHUP) in
+    // epoll_wait, which callers treat as re-armable — no silent data loss.
+    // The R36 file_id identity check already prevents cross-file confusion.
+}

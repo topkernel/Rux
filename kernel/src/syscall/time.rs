@@ -1152,3 +1152,19 @@ pub fn sys_futex_time64(args: SyscallArgs) -> i64 {
 pub fn sys_sched_rr_get_interval_time64(args: SyscallArgs) -> i64 {
     crate::syscall::sched::sys_sched_rr_get_interval(args)
 }
+
+
+/// Wall-clock epoch offset in whole seconds (settimeofday-adjustable).
+/// REALTIME = monotonic + this offset. Zero until settimeofday is called
+/// (no RTC source on this platform).
+static WALL_EPOCH_OFFSET_SECS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Current wall-clock epoch offset (seconds).
+pub fn wall_epoch_offset_secs() -> u64 {
+    WALL_EPOCH_OFFSET_SECS.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Set the wall-clock epoch offset (settimeofday path).
+pub fn set_wall_epoch_offset_secs(secs: u64) {
+    WALL_EPOCH_OFFSET_SECS.store(secs, core::sync::atomic::Ordering::Release);
+}

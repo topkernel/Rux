@@ -76,6 +76,10 @@ pub enum PageFlag {
     /// authoritative linked-state bit — next_free is NOT reliable, it
     /// survives both power-on-0 and historical-leader residue).
     OnFreelist = 1 << 16,
+    /// The page has more distinct (mm, vaddr) mappings than the fixed rmap
+    /// slot array can record; reverse mapping falls back to slot 0 plus a
+    /// full task scan (review 4.10).
+    RmapOverflow = 1 << 17,
 }
 
 /// Page flags collection
@@ -153,16 +157,18 @@ pub enum PageType {
 ///
 /// Each physical page frame corresponds to a Page structure, used to track page usage.
 ///
-/// Memory layout (64 bytes, aligned to cache line):
+/// Memory layout (128 bytes, 64-byte aligned):
 /// - flags: 4 bytes (atomic flags)
 /// - _mapcount: 4 bytes (map count, -1 means unmapped)
 /// - _refcount: 4 bytes (reference count)
 /// - private: 8 bytes (private data)
-/// - mapping: 8 bytes (associated address_space, for rmap)
-/// - index: 8 bytes (offset in mapping, for rmap)
+/// - mapping: 8 bytes (rmap slot 0: mm ptr / address_space)
+/// - index: 8 bytes (rmap slot 0: virtual page number)
+/// - rmap_alt: 48 bytes (rmap slots 1..3: (mm ptr, vpn) pairs)
 /// - _type: 4 bytes (page type)
 /// - next_free: 8 bytes (free list pointer, for allocator)
-/// - lru_next: 8 bytes (LRU next PFN, for singly-linked LRU list)
+/// - lru_next: 8 bytes (LRU next PFN)
+/// - lru_prev: 8 bytes (LRU prev PFN — doubly-linked LRU, O(1) unlink)
 ///
 #[repr(C, align(64))]
 pub struct Page {
@@ -176,6 +182,11 @@ pub struct Page {
 
     /// Reference count: number of references to this page
     /// 0 means free, > 0 means in use
+    ///
+    /// NOTE (compound convention, review 4.4): unlike Linux, Rux keeps a
+    /// per-member refcount on every page of a high-order allocation — the
+    /// arch teardown path put_page()s each member individually via its
+    /// PTE.  Do not free an order>0 block while members are still mapped.
     _refcount: AtomicI32,
 
     /// Private data
@@ -184,14 +195,21 @@ pub struct Page {
     /// - File system: stores buffer_head
     private: AtomicUsize,
 
-    /// Associated address space (for rmap)
-    /// Points to struct address_space or stores VPN for anon pages
-    /// This field is rmap-only; LRU uses the dedicated lru_next field.
+    /// rmap slot 0: associated address_space / owning mm pointer
+    /// This field is rmap-only; LRU uses the dedicated lru_next/lru_prev.
     mapping: AtomicUsize,
 
-    /// Offset in mapping (in page units, for rmap)
-    /// This field is rmap-only; LRU uses the dedicated lru_next field.
+    /// rmap slot 0: virtual page number in the owning mm
+    /// This field is rmap-only; LRU uses the dedicated lru_next/lru_prev.
     index: AtomicUsize,
+
+    /// rmap slots 1..3: (mm pointer, virtual page number) pairs for
+    /// additional mappings (MAP_FIXED / shared anon).  `rmap_alt[2*k]` is
+    /// the mm pointer, `rmap_alt[2*k+1]` the virtual page number.  All
+    /// zero = unused slot.  When a 4th distinct mapping arrives the slots
+    /// are flushed and the `RmapOverflow` flag is set — reverse-map
+    /// lookups then fall back to the slot-0 + full-task-scan path.
+    rmap_alt: [AtomicUsize; 6],
 
     /// Page type (for special pages)
     _type: AtomicU32,
@@ -200,8 +218,13 @@ pub struct Page {
     next_free: AtomicUsize,
 
     /// LRU next pointer (PFN of next page in LRU list, 0 = end of list)
-    /// Used for singly-linked LRU lists; separate from mapping/index (rmap).
+    /// Used for doubly-linked LRU lists; separate from mapping/index (rmap).
     lru_next: AtomicUsize,
+
+    /// LRU prev pointer (PFN of previous page in LRU list, 0 = head/end)
+    /// Companion to lru_next — makes unlink O(1) instead of a full list
+    /// walk per reclaim (review 4.11).
+    lru_prev: AtomicUsize,
 }
 
 /// Map count initial offset value (-1 means unmapped)
@@ -217,9 +240,14 @@ impl Page {
             private: AtomicUsize::new(0),
             mapping: AtomicUsize::new(0),
             index: AtomicUsize::new(0),
+            rmap_alt: {
+                const INIT: AtomicUsize = AtomicUsize::new(0);
+                [INIT; 6]
+            },
             _type: AtomicU32::new(PageType::Normal as u32),
             next_free: AtomicUsize::new(usize::MAX),  // FREE_LIST_NULL
             lru_next: AtomicUsize::new(0),
+            lru_prev: AtomicUsize::new(0),
         }
     }
 
@@ -237,7 +265,11 @@ impl Page {
         self.private.store(0, Ordering::Release);
         self.mapping.store(0, Ordering::Release);
         self.index.store(0, Ordering::Release);
+        for slot in self.rmap_alt.iter() {
+            slot.store(0, Ordering::Release);
+        }
         self.lru_next.store(0, Ordering::Release);
+        self.lru_prev.store(0, Ordering::Release);
         // R15-5 (探针误报根因): init_free 漏重置 next_free。描述符内存
         // 上电为 0，未进过空闲链表的页 next_free=0 而非 FREE_LIST_NULL
         // ——TDF 探针(next_free!=MAX)把每个首次释放都误报成双重释放
@@ -508,6 +540,71 @@ impl Page {
         self.lru_next.store(pfn, Ordering::Release);
     }
 
+    /// Get LRU prev PFN (0 = list head / none)
+    #[inline]
+    pub fn lru_prev(&self) -> usize {
+        self.lru_prev.load(Ordering::Acquire)
+    }
+
+    /// Set LRU prev PFN
+    #[inline]
+    pub fn set_lru_prev(&self, pfn: usize) {
+        self.lru_prev.store(pfn, Ordering::Release);
+    }
+
+    // ========== rmap multi-mapping slots (review 4.10) ==========
+
+    /// Record an additional (mm, virtual page number) mapping.
+    ///
+    /// Returns false when all slots are in use — the caller should then
+    /// set `RmapOverflow` and fall back to the scan-based reverse map.
+    /// Slots are NOT deduplicated per (mm, vpn); the rmap add path must
+    /// not record the same mapping twice.
+    pub fn rmap_alt_add(&self, mm: usize, vpn: usize) -> bool {
+        for k in 0..3 {
+            let mm_slot = &self.rmap_alt[2 * k];
+            let vpn_slot = &self.rmap_alt[2 * k + 1];
+            if mm_slot.load(Ordering::Acquire) == 0 {
+                vpn_slot.store(vpn, Ordering::Release);
+                mm_slot.store(mm, Ordering::Release);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Remove the slot matching (mm, vpn) if present.
+    pub fn rmap_alt_remove(&self, mm: usize, vpn: usize) {
+        for k in 0..3 {
+            if self.rmap_alt[2 * k].load(Ordering::Acquire) == mm
+                && self.rmap_alt[2 * k + 1].load(Ordering::Acquire) == vpn
+            {
+                self.rmap_alt[2 * k].store(0, Ordering::Release);
+                self.rmap_alt[2 * k + 1].store(0, Ordering::Release);
+                return;
+            }
+        }
+    }
+
+    /// Clear all alternate rmap slots.
+    pub fn rmap_alt_clear(&self) {
+        for slot in self.rmap_alt.iter() {
+            slot.store(0, Ordering::Release);
+        }
+        self.flags.clear(PageFlag::RmapOverflow);
+    }
+
+    /// Call `f(mm, vpn)` for every recorded alternate mapping.
+    pub fn rmap_alt_for_each<F: FnMut(usize, usize)>(&self, mut f: F) {
+        for k in 0..3 {
+            let mm = self.rmap_alt[2 * k].load(Ordering::Acquire);
+            if mm != 0 {
+                let vpn = self.rmap_alt[2 * k + 1].load(Ordering::Acquire);
+                f(mm, vpn);
+            }
+        }
+    }
+
     // ========== Free list operations (allocator internal use) ==========
 
     /// Get next free page's PFN
@@ -613,7 +710,10 @@ static MEM_MAP_INIT: AtomicUsize = AtomicUsize::new(0);
 /// Initialize page array
 ///
 /// Initialize page descriptors within specified range.
-/// Pages outside the range are marked as reserved.
+/// Pages backing memblock-RESERVED regions (kernel image, dtb, early
+/// allocations, vmemmap storage) are marked Reserved so they can never be
+/// mistaken for free memory (review 4.4: descriptors left at power-on
+/// zero look like free/unmapped pages).
 ///
 /// # Arguments
 /// - `start_pfn`: Available memory start PFN
@@ -641,6 +741,30 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
             }
         }
     }
+
+    // Re-mark reserved ranges (review 4.4): iterate memblock's reserved
+    // list and set Reserved + refcount 1 on every covered page inside the
+    // initialized span, mirroring Linux's memblock_reserve → reserve pages
+    // marking during free_area_init.  Runs once during boot (single CPU).
+    let span_start = start_pfn * PAGE_SIZE;
+    let span_end = (start_pfn + init_count) * PAGE_SIZE;
+    super::memblock::memblock().reserved().iter().for_each(|region| {
+        let res_start = region.base.max(span_start) & !(PAGE_SIZE - 1);
+        let res_end = (region.base + region.size).min(span_end);
+        if res_end <= res_start {
+            return;
+        }
+        let mut addr = res_start;
+        while addr < res_end {
+            let page = pfn_to_page(addr / PAGE_SIZE);
+            if !page.is_null() {
+                unsafe {
+                    (*page).init_reserved();
+                }
+            }
+            addr += PAGE_SIZE;
+        }
+    });
 }
 
 // ========== PFN <-> Page conversion (vmemmap-style) ==========

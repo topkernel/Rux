@@ -253,6 +253,58 @@ impl File {
         -29 // ESPIPE
     }
 
+    /// Position-invariant read at an explicit offset (pread(2) backing).
+    ///
+    /// Unlike read()+set_pos(), this never touches the shared file
+    /// position, so a concurrent read/write on another thread sharing the
+    /// fd cannot observe (or corrupt) the offset — pread/pwrite must be
+    /// atomic w.r.t. the file offset (review批次1 RACE).
+    ///
+    /// Returns -ESPIPE for non-seekable objects (pipes/sockets — Linux
+    /// pread on them fails with ESPIPE).
+    pub unsafe fn read_at(&self, offset: u64, buf: *mut u8, count: usize) -> isize {
+        // f_mode enforcement, same as read().
+        if self.flags().is_writeonly() {
+            return -9; // EBADF
+        }
+        let inode_opt = &*self.inode.get();
+        let inode = match inode_opt.as_ref() {
+            Some(i) => i,
+            None => return -9,
+        };
+        let slice = core::slice::from_raw_parts_mut(buf, count);
+        // Only seekable (inode-backed) files support offset reads.
+        if inode.ops.is_none() {
+            return -29; // ESPIPE
+        }
+        let n = inode.read_data(offset as usize, slice);
+        n as isize
+    }
+
+    /// Position-invariant write at an explicit offset (pwrite(2) backing).
+    ///
+    /// O_APPEND is ignored by pwrite per POSIX (the explicit offset wins).
+    pub unsafe fn write_at(&self, offset: u64, buf: *const u8, count: usize) -> isize {
+        // f_mode enforcement, same as write().
+        if self.flags().is_readonly() {
+            return -9; // EBADF
+        }
+        let inode_opt = &*self.inode.get();
+        let inode = match inode_opt.as_ref() {
+            Some(i) => i,
+            None => return -9,
+        };
+        let slice = core::slice::from_raw_parts(buf, count);
+        if inode.ops.is_none() {
+            return -29; // ESPIPE
+        }
+        // Serialize concurrent explicit-offset writers like reg_file_write
+        // does (O_APPEND/pos race class, review 5.2).
+        let _write_guard = self.write_lock.lock();
+        let n = inode.write_data(offset as usize, slice);
+        n as isize
+    }
+
     /// Close file
     pub unsafe fn close(&mut self) -> i32 {
         if let Some(ops) = *self.ops.get() {

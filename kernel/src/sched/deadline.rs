@@ -43,12 +43,6 @@ pub struct DlRunQueue {
     /// Earliest deadline in queue
     pub earliest_dl: AtomicU64,
 
-    /// Running bandwidth (total)
-    pub running_bw: AtomicU64,
-
-    /// Whether queue is overloaded
-    pub overloaded: AtomicBool,
-
     /// Next task ID for unique keys
     next_id: AtomicU64,
 }
@@ -67,8 +61,6 @@ impl DlRunQueue {
             tasks: BTreeMap::new(),
             dl_nr_running: AtomicU32::new(0),
             earliest_dl: AtomicU64::new(u64::MAX),
-            running_bw: AtomicU64::new(0),
-            overloaded: AtomicBool::new(false),
             next_id: AtomicU64::new(0),
         }
     }
@@ -333,6 +325,12 @@ pub struct SchedDlEntity {
     /// Whether throttled (out of runtime)
     pub dl_throttled: AtomicBool,
 
+    /// Kernel timer ID armed to replenish this entity at its deadline
+    /// (0 = no timer pending). See sched.rs::arm_dl_replenish_timer —
+    /// a throttled task sits off the runqueue and is re-enqueued (with a
+    /// refilled budget) only by this timer's wake.
+    pub replenish_timer: AtomicU64,
+
     /// Whether on runqueue
     pub on_rq: AtomicBool,
 
@@ -353,6 +351,7 @@ impl SchedDlEntity {
             dl_period: AtomicU64::new(DL_DEFAULT_PERIOD_NS),
             dl_runtime: AtomicU64::new(DL_DEFAULT_RUNTIME_NS),
             dl_throttled: AtomicBool::new(false),
+            replenish_timer: AtomicU64::new(0),
             on_rq: AtomicBool::new(false),
             dl_boosted: AtomicBool::new(false),
             exec_start: AtomicU64::new(0),
@@ -386,8 +385,12 @@ impl SchedDlEntity {
 
     /// Replenish runtime and advance deadline (CBS replenishment)
     ///
-    /// Called when a DL task wakes up or its period expires. Refills the
-    /// runtime budget and advances the deadline to `now + period`.
+    /// Called ONLY when a full period has been served out — i.e. from
+    /// `enqueue_task_locked` when the task's throttle window has expired
+    /// (the replenish timer's wake, or a first-ever enqueue). CBS is defeated
+    /// if this runs on every re-enqueue: the old code replenished on each
+    /// __schedule requeue of prev, so a single DL task could burn 100% of
+    /// every CPU (review batch 8, HIGH).
     pub fn replenish_runtime(&self) {
         let runtime = self.dl_runtime.load(Ordering::Acquire) as i64;
         self.runtime.store(runtime, Ordering::Release);

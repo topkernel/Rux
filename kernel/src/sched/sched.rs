@@ -59,6 +59,10 @@ pub struct GlobalRunQueue {
     idle_cpus: core::sync::atomic::AtomicU32,
 }
 
+/// Rotating scan start for find_idle_cpu (review batch 8 — idle spreading).
+static LAST_IDLE_HINT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 unsafe impl Sync for GlobalRunQueue {}
 
 impl GlobalRunQueue {
@@ -120,13 +124,23 @@ impl GlobalRunQueue {
     }
 
     /// Find an idle CPU in the given affinity mask.
+    ///
+    /// Review batch 8: the scan start rotates (last chosen + 1) so wakeups
+    /// spread across idle CPUs instead of piling every task onto the
+    /// lowest-numbered one.
     pub fn find_idle_cpu(&self, affinity: u32) -> Option<usize> {
         let idle = self.idle_cpus.load(core::sync::atomic::Ordering::Acquire);
         let candidates = idle & affinity;
         if candidates == 0 {
             return None;
         }
-        Some(candidates.trailing_zeros() as usize)
+        // Rotate so the scan starts just past the CPU chosen last time.
+        let start = LAST_IDLE_HINT.load(core::sync::atomic::Ordering::Relaxed) % MAX_CPUS;
+        let rotated = candidates.rotate_right(start as u32);
+        let pick = rotated.trailing_zeros() as usize;
+        let cpu = (pick + start) % MAX_CPUS;
+        LAST_IDLE_HINT.store(cpu + 1, core::sync::atomic::Ordering::Relaxed);
+        Some(cpu)
     }
 
     /// Total load across all classes (for informational purposes).
@@ -141,6 +155,126 @@ impl GlobalRunQueue {
         let rt = self.rt_rq.nr_running() as usize;
         let dl = self.dl_rq.nr_running() as usize;
         cfs + rt + dl
+    }
+}
+
+// ==================== SCHED_DEADLINE CBS throttling (batch 8 HIGH) ====================
+//
+// CBS was completely defeated: every enqueue (including __schedule's
+// requeue of prev) called replenish_runtime(), so a single DL task could
+// burn 100% of every CPU forever. The fix: a task whose runtime budget is
+// exhausted is THROTTLED — it is moved off the runqueue (state left
+// INTERRUPTIBLE so __schedule does not demand a requeue link) and a kernel
+// timer is armed at its deadline; the timer's wake re-enqueues it with a
+// refilled budget (replenishment now happens exactly once per period).
+
+/// Convert a nanosecond delta (sched_clock domain) to a jiffies count for
+/// the kernel timer wheel, never rounding below one tick.
+fn dl_ns_to_jiffies(delta_ns: u64) -> u64 {
+    let hz = crate::config::KERNEL_HZ as u64;
+    (delta_ns * hz / 1_000_000_000).max(1)
+}
+
+/// Arm (or re-arm) the replenish timer for a throttled DL task.
+///
+/// Safe to call with the GRQ lock held: lock order GRQ -> TIMERS is one-way
+/// because the timer softirq delivers its wake_up_process calls only AFTER
+/// releasing TIMERS (R12-3), so no path holds TIMERS while acquiring GRQ.
+/// The single BTreeMap insert here is the same order of allocation the
+/// class-queue inserts already perform under this lock.
+fn arm_dl_replenish_timer(task: *mut Task) {
+    // SAFETY: callers pass a validated, poison-checked Task pointer.
+    unsafe {
+        let dl = (*task).dl_entity();
+        // Already armed and still pending (timer ids are one-shot)?
+        let cur = dl.replenish_timer.load(core::sync::atomic::Ordering::Acquire);
+        if cur != 0 && crate::timer::timer_pending(cur) {
+            return;
+        }
+        let now = crate::sched::fair::sched_clock();
+        let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
+        let delta_ns = deadline.saturating_sub(now);
+        let expires = crate::drivers::timer::get_jiffies() + dl_ns_to_jiffies(delta_ns);
+        let id = crate::timer::add_timer_wakeup(expires, (*task).pid());
+        if id != 0 {
+            dl.replenish_timer.store(id, core::sync::atomic::Ordering::Release);
+        }
+        // id == 0 (timer table full): leave the task throttled; the next
+        // wake attempt retries the arm. Failing to arm must NOT fall back to
+        // an early replenish — that re-opens the 100%-CPU hole CBS closes.
+    }
+}
+
+/// Throttle a DL task whose CBS budget is exhausted: mark it, move it out of
+/// the runnable set (INTERRUPTIBLE, so the upcoming __schedule treats it as
+/// a blocker instead of demanding a requeue link), and arm the replenish
+/// timer for its deadline. Idempotent.
+unsafe fn dl_throttle(task: *mut Task) {
+    let dl = (*task).dl_entity();
+    if dl.dl_throttled.load(core::sync::atomic::Ordering::Acquire) {
+        // A second exhaustion report for an already-throttled task can only
+        // be a straggler tick — but its timer may have fired and failed to
+        // re-arm, so refresh it.
+        arm_dl_replenish_timer(task);
+        return;
+    }
+    dl.dl_throttled.store(true, core::sync::atomic::Ordering::Release);
+    // Only RUNNING tasks are on a CPU; anything else is already blocking.
+    if (*task).state() == TaskState::new(TaskState::RUNNING) {
+        (*task).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+    }
+    arm_dl_replenish_timer(task);
+}
+
+// ==================== RT bandwidth throttling (batch 8 MED) ====================
+//
+// SCHED_FIFO/RR had no throttling: a CAP_SYS_NICE-holding RT task could
+// starve every CPU indefinitely. Mirror Linux's sched_rt_runtime_us /
+// sched_rt_period_us defaults (950ms per 1s) as a GLOBAL budget: RT
+// execution is accounted in jiffies across all CPUs; once the budget is
+// spent, the RT class is skipped at pick time until the period rolls over
+// (the timer tick itself is the unthrottle "timer").
+
+/// RT runtime budget per period in jiffies: 950ms * MAX_CPUS.
+const RT_RUNTIME_JIFFIES: u64 = (950 * crate::config::KERNEL_HZ as u64 / 1000) * MAX_CPUS as u64;
+/// RT accounting period in jiffies: 1s.
+const RT_PERIOD_JIFFIES: u64 = 1000 * crate::config::KERNEL_HZ as u64 / 1000;
+
+static RT_THROTTLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static RT_TIME_USED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RT_PERIOD_START: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Per-tick RT bandwidth accounting. Called from scheduler_tick with the
+/// ticking CPU's current task (no locks — plain atomics).
+fn rt_bandwidth_tick(current: *mut Task) {
+    let now = crate::drivers::timer::get_jiffies();
+    let period_start = RT_PERIOD_START.load(core::sync::atomic::Ordering::Acquire);
+    if period_start == 0 {
+        RT_PERIOD_START.store(now, core::sync::atomic::Ordering::Release);
+        return;
+    }
+    if now.saturating_sub(period_start) >= RT_PERIOD_JIFFIES {
+        // Period rollover: replenish the budget, lift the throttle, and let
+        // a throttled-away RT task be picked again.
+        RT_PERIOD_START.store(now, core::sync::atomic::Ordering::Release);
+        RT_TIME_USED.store(0, core::sync::atomic::Ordering::Release);
+        if RT_THROTTLED.swap(false, core::sync::atomic::Ordering::AcqRel) {
+            set_need_resched();
+        }
+        return;
+    }
+
+    // SAFETY: current is this CPU's current task, paused inside the tick.
+    unsafe {
+        let policy = (*current).policy();
+        if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
+            let used = RT_TIME_USED.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
+            if used >= RT_RUNTIME_JIFFIES
+                && !RT_THROTTLED.swap(true, core::sync::atomic::Ordering::AcqRel)
+            {
+                set_need_resched();
+            }
+        }
     }
 }
 
@@ -647,32 +781,82 @@ pub fn init() {
 /// that carries a live Task (marked at alloc, unmarked at free) is refused
 /// and reported. Proved the free side clean in round 17; kept as the
 /// permanent tripwire for the alloc-side handoff hunt.
-static TASK_PAGE_OWNED: [core::sync::atomic::AtomicU64; 128] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; 128];
+///
+/// Batch 8: FULL coverage of physical RAM. The old 128-word table indexed
+/// with `(page >> 6) & 127` aliased every 8192 pages — a page 512MB away
+/// could read another page's ownership bit (false tripwire hits / silent
+/// misses). One bit per 4K page of PHYS_MEMORY_SIZE, keyed by PHYSICAL page
+/// number; Task allocations come from the buddy heap, which lives in the
+/// high linear map (HEAP_START = 0x80A0_0000 + VA_PA_OFFSET), so both the
+/// low identity window and the linear-map window are translated to phys.
+const TASK_PAGE_PAGES: usize = crate::config::PHYS_MEMORY_SIZE / crate::config::PAGE_SIZE;
+const TASK_PAGE_WORDS: usize = (TASK_PAGE_PAGES + 63) / 64;
+static TASK_PAGE_OWNED: [core::sync::atomic::AtomicU64; TASK_PAGE_WORDS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; TASK_PAGE_WORDS];
+
+/// Physical page index (0 = RAM base 0x8000_0000) for the page carrying
+/// `ptr`, or None when the pointer is outside mapped RAM (nothing to track).
+#[inline]
+fn task_page_index(ptr: *const u8) -> Option<usize> {
+    const RAM_BASE: usize = 0x8000_0000;
+    let p = ptr as usize;
+    let page_offset = crate::arch::riscv64::mm::memory_layout::PAGE_OFFSET;
+    if p >= page_offset {
+        // Linear map: virt = PAGE_OFFSET + (phys - RAM_BASE)
+        let off = p - page_offset;
+        if off < crate::config::PHYS_MEMORY_SIZE {
+            return Some(off >> 12);
+        }
+    } else if p >= RAM_BASE && p - RAM_BASE < crate::config::PHYS_MEMORY_SIZE {
+        // Low identity window (kernel image, early-boot allocations)
+        return Some((p - RAM_BASE) >> 12);
+    }
+    None
+}
+
+#[inline]
+fn task_page_bit(ptr: *const u8) -> Option<(usize, u64)> {
+    let page = task_page_index(ptr)?;
+    Some((page >> 6, 1u64 << (page & 63)))
+}
 
 #[inline]
 fn task_page_mark(ptr: *mut u8) {
-    let page = (ptr as usize) >> 12;
-    let w = &TASK_PAGE_OWNED[(page >> 6) & 127];
-    w.fetch_or(1u64 << (page & 63), core::sync::atomic::Ordering::AcqRel);
+    if let Some((w, bit)) = task_page_bit(ptr) {
+        TASK_PAGE_OWNED[w].fetch_or(bit, core::sync::atomic::Ordering::AcqRel);
+    }
 }
 #[inline]
 fn task_page_unmark(ptr: *mut u8) {
-    let page = (ptr as usize) >> 12;
-    let w = &TASK_PAGE_OWNED[(page >> 6) & 127];
-    w.fetch_and(!(1u64 << (page & 63)), core::sync::atomic::Ordering::AcqRel);
+    if let Some((w, bit)) = task_page_bit(ptr) {
+        TASK_PAGE_OWNED[w].fetch_and(!bit, core::sync::atomic::Ordering::AcqRel);
+    }
 }
 /// Set while alloc_task_slot itself is allocating, so the heap's
 /// alloc-side probe (R18-1) does not flag the legitimate first handoff.
 pub static IN_TASK_ALLOC: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Word index in TASK_PAGE_OWNED for a page pointer, if representable.
+#[inline]
+fn task_page_word(ptr: *const u8) -> Option<usize> {
+    let base = 0x8000_0000usize;
+    let addr = ptr as usize;
+    if addr < base { return None; }
+    let page = (addr - base) >> 12;
+    Some((page >> 6) & 127)
+}
+
 /// True if the page carrying `ptr` is marked as a live Task page.
 #[inline]
 pub fn task_page_is_owned(ptr: *const u8) -> bool {
-    let page = (ptr as usize) >> 12;
-    let w = &TASK_PAGE_OWNED[(page >> 6) & 127];
-    w.load(core::sync::atomic::Ordering::Acquire) & (1u64 << (page & 63)) != 0
+    match task_page_word(ptr) {
+        Some(w) => {
+            let page = ((ptr as usize) - 0x8000_0000) >> 12;
+            TASK_PAGE_OWNED[w].load(core::sync::atomic::Ordering::Acquire) & (1u64 << (page & 63)) != 0
+        }
+        None => false,
+    }
 }
 
 pub fn alloc_task_slot() -> Option<*mut Task> {
@@ -844,13 +1028,17 @@ unsafe fn __schedule() {
             }
         }
     } else if prev_policy == SchedPolicy::Deadline {
-        // Update DL runtime accounting
+        // Update DL runtime accounting; on exhaustion THROTTLE prev so the
+        // requeue below is refused cleanly (prev goes out like a sleeper;
+        // the replenish timer re-enqueues it at the deadline — batch 8 CBS).
         let dl = (*prev).dl_entity();
         let now = crate::sched::fair::sched_clock();
         let exec_start = dl.exec_start.load(core::sync::atomic::Ordering::Acquire);
         if exec_start != 0 && now > exec_start {
             let delta = now - exec_start;
-            dl.consume_runtime(delta);
+            if !dl.consume_runtime(delta) {
+                dl_throttle(prev);
+            }
         }
         dl.exec_start.store(now, core::sync::atomic::Ordering::Release);
     }
@@ -982,8 +1170,9 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
         }
     }
 
-    // 3. RT — pick highest-priority task that can run on this CPU
-    if !grq.rt_rq.is_empty() {
+    // 3. RT — pick highest-priority task that can run on this CPU.
+    //    Skipped entirely while the RT bandwidth is throttled (batch 8).
+    if !grq.rt_rq.is_empty() && !RT_THROTTLED.load(core::sync::atomic::Ordering::Acquire) {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id, prev) {
             mark_picked_on_cpu(task);
             grq.nr_running.fetch_update(
@@ -1009,8 +1198,15 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
             // exec_start, so after a sleep it still holds the timestamp of
             // the task's PREVIOUS run — the first update_curr/direct charge
             // after wakeup billed the entire sleep duration into vruntime.
-            (*task).sched_entity().set_exec_start(crate::sched::fair::sched_clock());
             let se = (*task).sched_entity();
+            se.set_exec_start(crate::sched::fair::sched_clock());
+            // Batch 8: start a fresh activation window — scheduler_tick
+            // judges preemption on sum_exec_runtime - prev_sum_exec_runtime
+            // (current run length) vs the slice (Linux check_preempt_tick).
+            se.prev_sum_exec_runtime.store(
+                se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire),
+                core::sync::atomic::Ordering::Release,
+            );
             let slice_ns = grq.cfs_rq.sched_slice(se);
             let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
             (*task).set_time_slice(slice_ms.max(1) as u32);
@@ -1064,6 +1260,17 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
     // exiting task) BEFORE any field read below — a freed page cannot be
     // healed, and the policy/entity reads must not touch it.
     if (*task).pid() == TASK_POISON || (*task).state().is_dead() {
+        return false;
+    }
+
+    // Batch 8 (CBS): a throttled DL task is LEGITIMATELY unlinked — its
+    // budget window has not expired. Do not "heal" it (the forced re-insert
+    // below would re-open the 100%-CPU hole CBS closes); the replenish
+    // timer is the guaranteed wake that re-links it.
+    if (*task).policy() == SchedPolicy::Deadline
+        && (*task).dl_entity().dl_throttled.load(core::sync::atomic::Ordering::Acquire)
+    {
+        arm_dl_replenish_timer(task);
         return false;
     }
 
@@ -1243,9 +1450,27 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             grq.rt_rq.enqueue(task, false)
         }
         SchedPolicy::Deadline => {
+            // Batch 8 (CBS): a throttled task whose deadline has not yet
+            // arrived must NOT be re-enqueued (and must NOT be replenished —
+            // the old unconditional replenish on every requeue is exactly
+            // the defeated-CBS bug). Refuse; the replenish timer owns the
+            // re-link. State stays SLEEPING — honest and still wakeable.
             let now = crate::sched::fair::sched_clock();
-            (*task).dl_entity().update_deadline(now);
-            (*task).dl_entity().replenish_runtime();
+            let dl = (*task).dl_entity();
+            let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
+            if dl.dl_throttled.load(core::sync::atomic::Ordering::Acquire) && now < deadline {
+                arm_dl_replenish_timer(task);
+                return false;
+            }
+            // Deadline reached (timer fired, or first-ever enqueue / task
+            // never throttled): one replenishment per period. Drop any
+            // stale timer so a late wake cannot double-enqueue.
+            let stale = dl.replenish_timer.swap(0, core::sync::atomic::Ordering::AcqRel);
+            if stale != 0 {
+                crate::timer::del_timer(stale);
+            }
+            dl.update_deadline(now);
+            dl.replenish_runtime();
             grq.dl_rq.enqueue(task)
         }
         SchedPolicy::Normal | SchedPolicy::Batch => {
@@ -1298,13 +1523,16 @@ pub fn enqueue_task(task: &'static mut Task) -> bool {
         enqueue_task_locked(&mut *grq_guard, task_ptr)
     };
 
-    // Check for cross-CPU preemption (RT/DL)
+    // Check for cross-CPU preemption (RT/DL direct; CFS via wakeup granularity)
     if inserted {
         let policy = task.policy();
         if policy == SchedPolicy::Fifo || policy == SchedPolicy::Rr {
             check_rt_preempt(task_ptr, cpus_allowed);
         } else if policy == SchedPolicy::Deadline {
             check_dl_preempt(task_ptr, cpus_allowed);
+        } else {
+            // Normal / Batch / Idle
+            check_cfs_preempt(task_ptr, cpus_allowed);
         }
     }
 
@@ -1558,6 +1786,50 @@ pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> bool {
     unsafe { (*grq()).cfs_rq.is_linked(task) }
 }
 
+/// Check if a newly-enqueued CFS task should preempt a running CFS task.
+///
+/// Batch 8 (HIGH): CFS had NO wakeup preemption — check_preempt() in
+/// fair.rs existed but had no callers, so a woken task waited for the next
+/// tick (up to 10ms) even when its vruntime was far behind the CPU hog it
+/// should have preempted. Mirrors check_rt/dl_preempt: resched the first
+/// CPU (within the task's affinity) whose current task loses to the waker
+/// by the wakeup granularity.
+fn check_cfs_preempt(task: *mut Task, cpus_allowed: u32) {
+    // SAFETY: task is a valid pointer from enqueue_task; per-CPU current/idle
+    // pointers are valid when not null (set during CPU init).
+    unsafe {
+        let se_vruntime = (*task).sched_entity().get_vruntime();
+        for cpu in 0..MAX_CPUS {
+            if (cpus_allowed & (1u32 << cpu)) == 0 {
+                continue;
+            }
+            let running = cpu_state(cpu).current;
+            if running.is_null() || running == cpu_state(cpu).idle {
+                continue;
+            }
+            let r_policy = (*running).policy();
+            if r_policy == SchedPolicy::Normal
+                || r_policy == SchedPolicy::Batch
+                || r_policy == SchedPolicy::Idle
+            {
+                // Idle-policy tasks never preempt anyone (Linux).
+                if (*task).policy() == SchedPolicy::Idle {
+                    continue;
+                }
+                let curr_vruntime = (*running).sched_entity().get_vruntime();
+                if se_vruntime < curr_vruntime {
+                    let delta = curr_vruntime - se_vruntime;
+                    if delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS {
+                        resched_cpu(cpu);
+                        return;
+                    }
+                }
+            }
+            // RT/DL incumbents preempt CFS regardless — their own checks handle those.
+        }
+    }
+}
+
 /// Check if a newly-enqueued RT task should preempt a running task on another CPU.
 fn check_rt_preempt(task: *mut Task, cpus_allowed: u32) {
     // SAFETY: task is a valid pointer from enqueue_task; cpu_state(cpu).current/idle
@@ -1686,17 +1958,36 @@ pub fn change_task_policy(task: *mut Task, new_policy: crate::process::task::Sch
     // state is NOT sufficient: a task picked by another CPU is dequeued at
     // pick time — re-enqueueing it lets two CPUs run it simultaneously
     // (regression round 5, HIGH).
-    let linked = match old_policy {
-        SchedPolicy::Fifo | SchedPolicy::Rr => {
-            unsafe { (*task).rt_entity().is_on_rq() }
+    //
+    // Batch 8 (CBS): a THROTTLED DL task is deliberately unlinked (it sleeps
+    // until its replenish timer fires). Treat it as linked here so the
+    // policy switch migrates it onto the new class queue instead of leaving
+    // it stranded asleep with its timer cancelled.
+    let mut was_throttled = false;
+    if old_policy == SchedPolicy::Deadline {
+        let dl = unsafe { (*task).dl_entity() };
+        was_throttled = dl.dl_throttled.load(core::sync::atomic::Ordering::Acquire);
+        if was_throttled {
+            // Cancel the replenish timer — the new class owns the wake now.
+            dl.dl_throttled.store(false, core::sync::atomic::Ordering::Release);
+            let stale = dl.replenish_timer.swap(0, core::sync::atomic::Ordering::AcqRel);
+            if stale != 0 {
+                crate::timer::del_timer(stale);
+            }
         }
-        SchedPolicy::Deadline => {
-            unsafe { (*task).dl_entity().is_on_rq() }
-        }
-        SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-            unsafe { (*task).sched_entity().is_on_rq() }
-        }
-    };
+    }
+    let linked = was_throttled
+        || match old_policy {
+            SchedPolicy::Fifo | SchedPolicy::Rr => {
+                unsafe { (*task).rt_entity().is_on_rq() }
+            }
+            SchedPolicy::Deadline => {
+                unsafe { (*task).dl_entity().is_on_rq() }
+            }
+            SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                unsafe { (*task).sched_entity().is_on_rq() }
+            }
+        };
 
     if linked {
         // R31-5 discipline: propagate the class dequeue result (RT/DL now
@@ -1878,6 +2169,10 @@ pub fn scheduler_tick() {
         return;
     }
 
+    // RT bandwidth accounting / throttle (batch 8) — runs every tick on
+    // every CPU, before the class-specific work.
+    rt_bandwidth_tick(current);
+
     // SAFETY: current is this_cpu().current, a valid Task pointer set during CPU init;
     // null check above; we only touch fields appropriate for the current CPU's task.
     unsafe {
@@ -1906,29 +2201,18 @@ pub fn scheduler_tick() {
                         }
                     }
 
-                    let curr_vruntime = {
-                        let se = (*current).sched_entity();
-                        se.get_vruntime()
-                    };
-
-                    if let Some(next) = grq_guard.cfs_rq.peek_next() {
-                        if !next.is_null() && next != current {
-                            let next_vruntime = {
-                                let next_se = (*next).sched_entity();
-                                next_se.get_vruntime()
-                            };
-                            if curr_vruntime > next_vruntime {
-                                let delta = curr_vruntime - next_vruntime;
-                                delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
+                    // Batch 8: preempt when the CURRENT ACTIVATION has run
+                    // longer than its time slice (Linux check_preempt_tick:
+                    // `if (delta_exec > slice) resched_curr()`). The old
+                    // vruntime-vs-leftmost comparison misjudged unequal
+                    // weights: a heavy task's slice is proportionally
+                    // longer than the time its vruntime needs to overtake
+                    // the leftmost (and vice versa for light tasks).
+                    let se = (*current).sched_entity();
+                    let slice_ns = grq_guard.cfs_rq.sched_slice(se);
+                    let sum = se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
+                    let prev_sum = se.prev_sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
+                    sum.saturating_sub(prev_sum) > slice_ns
                 }; // grq_guard dropped here
 
                 if should_resched {
@@ -1983,6 +2267,10 @@ pub fn scheduler_tick() {
                 let delta = now - dl_entity.exec_start.load(core::sync::atomic::Ordering::Relaxed);
                 dl_entity.exec_start.store(now, core::sync::atomic::Ordering::Release);
                 if !dl_entity.consume_runtime(delta) {
+                    // Batch 8 (CBS): budget exhausted — throttle (state left
+                    // INTERRUPTIBLE, replenish timer armed at the deadline)
+                    // and leave the CPU to lower classes.
+                    dl_throttle(current);
                     set_need_resched();
                 }
             }
@@ -2050,6 +2338,29 @@ pub fn grq_cfs_adjust(old_w: u64, new_w: u64) {
 }
 
 pub fn yield_cpu() {
+    // Batch 8: sched_yield was a no-op for CFS — schedule() re-picked the
+    // same (leftmost) task. Linux yield_task_fair places the yielder behind
+    // its peers: charge any outstanding exec time, then bump vruntime by one
+    // full slice so the requeue at pick time puts equal entities first.
+    if let Some(cur) = current() {
+        let policy = cur.policy();
+        if matches!(policy, SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle) {
+            let task_ptr = cur as *mut Task;
+            let mut grq_guard = grq().lock_irqsave();
+            let now = crate::sched::fair::sched_clock();
+            let se = cur.sched_entity();
+            if grq_guard.cfs_rq.get_curr() == task_ptr {
+                grq_guard.cfs_rq.update_curr(now);
+            } else {
+                let delta = se.update_exec_runtime(now);
+                if delta > 0 {
+                    se.update_vruntime(delta);
+                }
+            }
+            let slice = grq_guard.cfs_rq.sched_slice(se);
+            se.add_vruntime(slice);
+        }
+    }
     schedule();
 }
 

@@ -761,6 +761,46 @@ pub struct Task {
     /// POSIX timers created via timer_create.
     /// Stores (timer_id, clock_id, interval_jiffies, sigev_signo, sigev_notify, overrun_count).
     pub posix_timers: Spinlock<alloc::vec::Vec<PosixTimerState>>,
+
+    /// Resource limits (RLIMIT_*): [(rlim_cur, rlim_max); 16].
+    /// Initialized to kernel defaults; getrlimit/setrlimit/prlimit64 read
+    /// and write here (review批次1: rlimit 只认 NOFILE / 静默接受).
+    pub rlimits: Spinlock<[(u64, u64); RLIM_NLIMITS]>,
+}
+
+/// Number of RLIMIT_* resources (matches Linux RLIM_NLIMITS).
+pub const RLIM_NLIMITS: usize = 16;
+
+/// RLIMIT resource indices (asm-generic, same as Linux uapi).
+#[allow(dead_code)]
+pub mod rlimit_res {
+    pub const CPU: usize = 0;
+    pub const FSIZE: usize = 1;
+    pub const DATA: usize = 2;
+    pub const STACK: usize = 3;
+    pub const CORE: usize = 4;
+    pub const RSS: usize = 5;
+    pub const NPROC: usize = 6;
+    pub const NOFILE: usize = 7;
+    pub const MEMLOCK: usize = 8;
+    pub const AS: usize = 9;
+    pub const LOCKS: usize = 10;
+    pub const SIGPENDING: usize = 11;
+    pub const MSGQUEUE: usize = 12;
+    pub const NICE: usize = 13;
+    pub const RTPRIO: usize = 14;
+    pub const RLIMIT_RTTIME: usize = 15;
+}
+
+/// Kernel default limits (cur, max):
+/// - NOFILE 1024/4096 (fdtable is a fixed 1024-entry table today)
+/// - STACK 8MB soft / RLIM_INFINITY hard
+/// - everything else RLIM_INFINITY (u64::MAX) like Linux's init_cred.
+pub fn default_rlimits() -> [(u64, u64); RLIM_NLIMITS] {
+    let mut t = [(u64::MAX, u64::MAX); RLIM_NLIMITS];
+    t[rlimit_res::NOFILE] = (1024, 4096);
+    t[rlimit_res::STACK] = (8 * 1024 * 1024, u64::MAX);
+    t
 }
 
 /// Per-process POSIX timer state.
@@ -878,6 +918,7 @@ impl Task {
                 core::sync::atomic::AtomicU64::new(0),
             ],
             posix_timers: Spinlock::new(alloc::vec::Vec::new()),
+            rlimits: Spinlock::new(default_rlimits()),
         };
 
         // Initialize children and sibling lists (must be after struct construction)

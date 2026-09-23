@@ -59,6 +59,7 @@ pub enum SyscallNo {
     EpollPwait = 22,
     Dup = 23,
     Dup2 = 24,
+    Dup3 = 249,
     Fcntl = 25,
     InotifyInit1 = 26,
     InotifyAddWatch = 27,
@@ -174,12 +175,10 @@ pub enum SyscallNo {
     Setfsuid = 151,
     Setfsgid = 152,
     Times = 153,
-    Sethostname = 154,
-    Setdomainname = 155,
-    Getrlimit = 156,
-    Setrlimit = 157,
-    CreateModule = 158,
-    Getdents = 159,
+    Sethostname = 161,
+    Setdomainname = 162,
+    Getrlimit = 163,
+    Setrlimit = 164,
     Uname = 160,
     Gettid = 178,
     Prlimit64 = 261,
@@ -234,15 +233,18 @@ pub enum SyscallNo {
     Gettimeofday = 169,
     Settimeofday = 170,
 
-    // Others
-    Select = 280,
-    Pselect6 = 281,
-    Eventfd = 290,
+    // Multiplexing (asm-generic 64-bit has no select/eventfd(2)-less
+    // legacy entries — pselect6=72, eventfd2=19; 280=bpf, 281=execveat,
+    // 290=pkey_free are NOT select/pselect/eventfd).
+    Pselect6 = 72,
+    Ppoll = 73,
 }
 
-/// Error code definitions
+/// Error code definitions — full asm-generic errno table (errno-base.h +
+/// errno.h). Values verified against Linux include/uapi/asm-generic/errno.h.
 #[allow(dead_code)]
 pub mod errno {
+    // errno-base.h (1-34)
     pub const EPERM: i32 = 1;       // Operation not permitted
     pub const ENOENT: i32 = 2;      // No such file or directory
     pub const ESRCH: i32 = 3;       // No such process
@@ -277,28 +279,105 @@ pub mod errno {
     pub const EPIPE: i32 = 32;      // Broken pipe
     pub const EDOM: i32 = 33;       // Math argument out of domain
     pub const ERANGE: i32 = 34;     // Math result not representable
-    pub const EDEADLK: i32 = 35;    // Resource deadlock avoided
-    pub const ENAMETOOLONG: i32 = 36; // File name too long
-    pub const ENOSYS: i32 = 38;     // Invalid system call number
-    pub const ENOTEMPTY: i32 = 39;  // Directory not empty
-    pub const ELOOP: i32 = 40;      // Too many symbolic links encountered
-    pub const ENOPROTOOPT: i32 = 92; // Protocol not available
-    pub const EOPNOTSUPP: i32 = 95; // Operation not supported
-    pub const EAFNOSUPPORT: i32 = 97; // Address family not supported
-    pub const EADDRINUSE: i32 = 98; // Address already in use
-    pub const EADDRNOTAVAIL: i32 = 99; // Cannot assign requested address
-    pub const ENETDOWN: i32 = 100;  // Network is down
-    pub const ENETUNREACH: i32 = 101; // Network is unreachable
-    pub const ECONNRESET: i32 = 104; // Connection reset by peer
-    pub const ENOTCONN: i32 = 107;  // Transport endpoint not connected
-    pub const ETIMEDOUT: i32 = 110; // Connection timed out
-    pub const ECONNREFUSED: i32 = 111; // Connection refused
-    pub const EINPROGRESS: i32 = 115; // Operation now in progress
-    pub const ENOTSOCK: i32 = 88;   // Socket operation on non-socket
-    pub const ESOCKTNOSUPPORT: i32 = 124; // Socket type not supported
-    pub const EIDRM: i32 = 43;             // Identifier removed
-    pub const EMSGSIZE: i32 = 90;          // Message too long
-    pub const ENOMSG: i32 = 42;            // No message of desired type
+
+    // errno.h (35-133)
+    pub const EDEADLK: i32 = 35;        // Resource deadlock would occur
+    pub const ENAMETOOLONG: i32 = 36;   // File name too long
+    pub const ENOLCK: i32 = 37;         // No record locks available
+    pub const ENOSYS: i32 = 38;         // Invalid system call number
+    pub const ENOTEMPTY: i32 = 39;      // Directory not empty
+    pub const ELOOP: i32 = 40;          // Too many symbolic links encountered
+    pub const ENOMSG: i32 = 42;         // No message of desired type
+    pub const EIDRM: i32 = 43;          // Identifier removed
+    pub const ECHRNG: i32 = 44;         // Channel number out of range
+    pub const EL2NSYNC: i32 = 45;       // Level 2 not synchronized
+    pub const EL3HLT: i32 = 46;         // Level 3 halted
+    pub const EL3RST: i32 = 47;         // Level 3 reset
+    pub const ELNRNG: i32 = 48;         // Link number out of range
+    pub const EUNATCH: i32 = 49;        // Protocol driver not attached
+    pub const ENOCSI: i32 = 50;         // No CSI structure available
+    pub const EL2HLT: i32 = 51;         // Level 2 halted
+    pub const EBADE: i32 = 52;          // Invalid exchange
+    pub const EBADR: i32 = 53;          // Invalid request descriptor
+    pub const EXFULL: i32 = 54;         // Exchange full
+    pub const ENOANO: i32 = 55;         // No anode
+    pub const EBADRQC: i32 = 56;        // Bad request code
+    pub const EBADSLT: i32 = 57;        // Invalid slot
+    pub const EBFONT: i32 = 59;         // Bad font file format
+    pub const ENOSTR: i32 = 60;         // Device not a stream
+    pub const ENODATA: i32 = 61;        // No data available
+    pub const ETIME: i32 = 62;          // Timer expired
+    pub const ENOSR: i32 = 63;          // Out of streams resources
+    pub const ENONET: i32 = 64;         // Machine is not on the network
+    pub const ENOPKG: i32 = 65;         // Package not installed
+    pub const EREMOTE: i32 = 66;        // Object is remote
+    pub const ENOLINK: i32 = 67;        // Link has been severed
+    pub const EADV: i32 = 68;           // Advertise error
+    pub const ESRMNT: i32 = 69;         // Srmount error
+    pub const ECOMM: i32 = 70;          // Communication error on send
+    pub const EPROTO: i32 = 71;         // Protocol error
+    pub const EMULTIHOP: i32 = 72;      // Multihop attempted
+    pub const EDOTDOT: i32 = 73;        // RFS specific error
+    pub const EBADMSG: i32 = 74;        // Not a data message
+    pub const EOVERFLOW: i32 = 75;      // Value too large for defined data type
+    pub const ENOTUNIQ: i32 = 76;       // Name not unique on network
+    pub const EBADFD: i32 = 77;         // File descriptor in bad state
+    pub const EREMCHG: i32 = 78;        // Remote address changed
+    pub const ELIBACC: i32 = 79;        // Can not access a needed shared library
+    pub const ELIBBAD: i32 = 80;        // Accessing a corrupted shared library
+    pub const ELIBSCN: i32 = 81;        // .lib section in a.out corrupted
+    pub const ELIBMAX: i32 = 82;        // Attempting to link in too many shared libraries
+    pub const ELIBEXEC: i32 = 83;       // Cannot exec a shared library directly
+    pub const EILSEQ: i32 = 84;         // Illegal byte sequence
+    pub const ERESTART: i32 = 85;       // Interrupted system call should be restarted
+    pub const ESTRPIPE: i32 = 86;       // Streams pipe error
+    pub const EUSERS: i32 = 87;         // Too many users
+    pub const ENOTSOCK: i32 = 88;       // Socket operation on non-socket
+    pub const EDESTADDRREQ: i32 = 89;   // Destination address required
+    pub const EMSGSIZE: i32 = 90;       // Message too long
+    pub const EPROTOTYPE: i32 = 91;     // Protocol wrong type for socket
+    pub const ENOPROTOOPT: i32 = 92;    // Protocol not available
+    pub const EPROTONOSUPPORT: i32 = 93; // Protocol not supported
+    pub const ESOCKTNOSUPPORT: i32 = 94; // Socket type not supported
+    pub const EOPNOTSUPP: i32 = 95;     // Operation not supported on transport endpoint
+    pub const EPFNOSUPPORT: i32 = 96;   // Protocol family not supported
+    pub const EAFNOSUPPORT: i32 = 97;   // Address family not supported by protocol
+    pub const EADDRINUSE: i32 = 98;     // Address already in use
+    pub const EADDRNOTAVAIL: i32 = 99;  // Cannot assign requested address
+    pub const ENETDOWN: i32 = 100;      // Network is down
+    pub const ENETUNREACH: i32 = 101;   // Network is unreachable
+    pub const ENETRESET: i32 = 102;     // Network dropped connection because of reset
+    pub const ECONNABORTED: i32 = 103;  // Software caused connection abort
+    pub const ECONNRESET: i32 = 104;    // Connection reset by peer
+    pub const ENOBUFS: i32 = 105;       // No buffer space available
+    pub const EISCONN: i32 = 106;       // Transport endpoint is already connected
+    pub const ENOTCONN: i32 = 107;      // Transport endpoint is not connected
+    pub const ESHUTDOWN: i32 = 108;     // Transport endpoint shutdown -- no more sends
+    pub const ETOOMANYREFS: i32 = 109;  // Too many references: cannot splice
+    pub const ETIMEDOUT: i32 = 110;     // Connection timed out
+    pub const ECONNREFUSED: i32 = 111;  // Connection refused
+    pub const EHOSTDOWN: i32 = 112;     // Host is down
+    pub const EHOSTUNREACH: i32 = 113;  // No route to host
+    pub const EALREADY: i32 = 114;      // Operation already in progress
+    pub const EINPROGRESS: i32 = 115;   // Operation now in progress
+    pub const ESTALE: i32 = 116;        // Stale file handle
+    pub const EUCLEAN: i32 = 117;       // Structure needs cleaning
+    pub const ENOTNAM: i32 = 118;       // Not a XENIX named type file
+    pub const ENAVAIL: i32 = 119;       // No XENIX semaphores available
+    pub const EISNAM: i32 = 120;        // Is a named type file
+    pub const EREMOTEIO: i32 = 121;     // Remote I/O error
+    pub const EDQUOT: i32 = 122;        // Quota exceeded
+    pub const ENOMEDIUM: i32 = 123;     // No medium found
+    pub const EMEDIUMTYPE: i32 = 124;   // Wrong medium type
+    pub const ECANCELED: i32 = 125;     // Operation canceled
+    pub const ENOKEY: i32 = 126;        // Required key not available
+    pub const EKEYEXPIRED: i32 = 127;   // Key has expired
+    pub const EKEYREVOKED: i32 = 128;   // Key has been revoked
+    pub const EKEYREJECTED: i32 = 129;  // Key was rejected by service
+    pub const EOWNERDEAD: i32 = 130;    // Owner died (robust mutexes)
+    pub const ENOTRECOVERABLE: i32 = 131; // State not recoverable (robust mutexes)
+    pub const ERFKILL: i32 = 132;       // Operation not possible due to RF-kill
+    pub const EHWPOISON: i32 = 133;     // Memory page has hardware error
 }
 
 /// Time value structure (struct timeval)
@@ -349,5 +428,9 @@ impl FdSet {
     }
 }
 
-/// File descriptor count limit for select system call - from config
-pub const FD_SETSIZE: i32 = crate::config::FD_SETSIZE as i32;
+/// File descriptor count limit for select-style syscalls.
+///
+/// FD_SETSIZE is fixed at 1024 to match the FdSet layout above (16 × u64 =
+/// 1024 bits) and the asm-generic ABI. Taking it from config would silently
+/// break the bit layout whenever the config value differs (review 批次1).
+pub const FD_SETSIZE: i32 = 1024;

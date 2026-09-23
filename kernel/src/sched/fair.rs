@@ -412,14 +412,35 @@ impl CfsRunQueue {
     }
 
     /// Update minimum vruntime
+    ///
+    /// Linux update_min_vruntime semantics (review batch 8): the value is the
+    /// MINIMUM of the leftmost queued entity's vruntime and the running
+    /// entity's vruntime (monotonically non-decreasing). Excluding `curr`
+    /// let min_vruntime run arbitrarily far ahead of the running task — a
+    /// sleeper woken later than one latency window was clamped up to
+    /// min_vruntime, erasing its entire sleep compensation.
     fn update_min_vruntime(&mut self) {
-        // Get minimum vruntime from queue
-        if let Some((&key, _)) = self.tasks_timeline.iter().next() {
-            let min_vruntime = self.min_vruntime.load(Ordering::Acquire);
+        // SAFETY: self.curr is either null or set by set_curr() to a valid
+        // Task pointer; only its sched_entity vruntime is read.
+        let curr_v = if self.curr.is_null() {
+            None
+        } else {
+            Some(unsafe { (*self.curr).sched_entity().get_vruntime() })
+        };
 
-            // min_vruntime only increases, ensure monotonic increase
-            if key.vruntime > min_vruntime {
-                self.min_vruntime.store(key.vruntime, Ordering::Release);
+        let leftmost = self.tasks_timeline.iter().next().map(|(&k, _)| k.vruntime);
+
+        // vruntime = curr (if running) clamped by leftmost (if any queued).
+        let vruntime = match (curr_v, leftmost) {
+            (Some(c), Some(l)) => Some(c.min(l)),
+            (only_one, _) => only_one.or(leftmost),
+        };
+
+        if let Some(v) = vruntime {
+            let min_vruntime = self.min_vruntime.load(Ordering::Acquire);
+            // min_vruntime only increases, ensure monotonic
+            if v > min_vruntime {
+                self.min_vruntime.store(v, Ordering::Release);
             }
         }
     }
@@ -461,15 +482,18 @@ impl CfsRunQueue {
                 return false;
             }
 
-            // Align vruntime to min_vruntime if it falls behind.
-            // For yielding tasks (migrate=false), keep their vruntime so they
-            // don't regain priority over tasks that haven't run yet.
-            // For migrated tasks, same treatment — preserve vruntime, only
-            // bump up to min_vruntime if behind.
+            // Sleep/wake compensation with a bounded window (review batch 8,
+            // Linux place_entity): a waking sleeper keeps its vruntime credit
+            // so it preempts a CPU hog that ran while it slept, but the
+            // credit is clamped to one scheduling-latency window behind
+            // min_vruntime — an arbitrarily long sleeper must not monopolize
+            // the CPU for an equivalently long burst after waking. The old
+            // unconditional clamp-up to min_vruntime erased ALL compensation.
             let min_vruntime = self.get_min_vruntime();
+            let floor = min_vruntime.saturating_sub(SCHED_LATENCY_NS);
             let vruntime = se.get_vruntime();
-            if vruntime < min_vruntime {
-                se.set_vruntime(min_vruntime);
+            if vruntime < floor {
+                se.set_vruntime(floor);
             }
 
             // Generate unique key

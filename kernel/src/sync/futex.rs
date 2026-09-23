@@ -611,7 +611,7 @@ pub fn futex_wait_bitset(uaddr: usize, flags: u32, val: u32, _timeout: u64, bits
 /// offset. Plain FUTEX_WAIT passes a relative duration (round 6 MED: was
 /// always relative, so every pthread_cond_timedwait fired instantly or
 /// never).
-fn futex_parse_timeout(timeout_ptr: u64, absolute: bool) -> Result<Option<u64>, i32> {
+pub fn futex_parse_timeout(timeout_ptr: u64, absolute: bool) -> Result<Option<u64>, i32> {
     use crate::drivers::timer::{get_jiffies, HZ};
     if timeout_ptr == 0 {
         return Ok(None);

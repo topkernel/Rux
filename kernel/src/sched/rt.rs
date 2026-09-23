@@ -16,7 +16,9 @@ use crate::process::task::{Task, SchedPolicy};
 use crate::list::ListHead;
 use super::class::{SchedClass, RunQueueRef, ENQUEUE_HEAD};
 
-/// Maximum RT priority (0-99, lower value = higher priority)
+/// Maximum RT priority (0-99, HIGHER value = higher priority, matching
+/// Linux). The runqueue bitmap index is inverted (bit 0 = priority 99) so
+/// the lowest set bit is the highest-priority runnable task.
 pub const MAX_RT_PRIO: usize = 100;
 
 /// Default RR time slice in ticks. 100ms / (1000ms / KERNEL_HZ) = 10 ticks at HZ=100.
@@ -28,13 +30,14 @@ pub struct RtRunQueue {
     pub rt_nr_running: AtomicU32,
 
     /// Number of RR tasks
+    ///
+    /// Maintained by enqueue/dequeue but not yet read anywhere (reserved for
+    /// /proc/schedstat and RR throttling diagnostics) — kept accurate so a
+    /// future reader does not inherit drift.
     pub rr_nr_running: AtomicU32,
 
     /// Highest priority in queue
     pub highest_prio: AtomicU32,
-
-    /// Whether queue is overloaded (more tasks than CPUs)
-    pub overloaded: AtomicBool,
 
     /// Priority bitmap: bit i is set if priority i has runnable tasks
     /// We need 100 bits, so use 2 x 64-bit words
@@ -57,7 +60,6 @@ impl RtRunQueue {
             rt_nr_running: AtomicU32::new(0),
             rr_nr_running: AtomicU32::new(0),
             highest_prio: AtomicU32::new(MAX_RT_PRIO as u32),
-            overloaded: AtomicBool::new(false),
             bitmap: [AtomicU64::new(0), AtomicU64::new(0)],
             queue,
         }
@@ -70,7 +72,6 @@ impl RtRunQueue {
             rt_nr_running: AtomicU32::new(0),
             rr_nr_running: AtomicU32::new(0),
             highest_prio: AtomicU32::new(MAX_RT_PRIO as u32),
-            overloaded: AtomicBool::new(false),
             bitmap: [AtomicU64::new(0), AtomicU64::new(0)],
             queue: [const { ListHead::new() }; MAX_RT_PRIO],
         }

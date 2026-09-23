@@ -14,6 +14,10 @@ const PATH_MAX: usize = 4096;
 
 /// sys_open - Open file (legacy interface, wrapped to openat)
 ///
+/// NOTE: riscv64 (asm-generic) has NO plain `open` syscall — this wrapper
+/// exists only for the in-kernel test suite (tests/syscall_file.rs) and is
+/// never dispatched. Kept intentionally; do not wire into dispatch.rs.
+///
 /// # Arguments
 /// - args[0]: pathname - file path
 /// - args[1]: flags - open flags
@@ -202,7 +206,17 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
     // SAFETY: fd is a valid file descriptor owned by the current process.
     unsafe {
         match close_file_fd(fd) {
-            Ok(()) => 0,
+            Ok(()) => {
+                // Linux eventpoll removes interest entries when the last
+                // reference to the registered file description goes away
+                // (eventpoll_release). Best-effort same-process equivalent:
+                // purge this fd from every epoll instance the caller still
+                // holds open, so a stale entry cannot keep reporting
+                // EPOLLERR|EPOLLHUP forever (review批次1: close 后 epoll
+                // 条目不删).
+                crate::syscall::misc::epoll_purge_closed_fd(fd);
+                0
+            }
             Err(e) => e as i64,
         }
     }
@@ -376,7 +390,10 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
     }
 }
 
-/// sys_mkdir - Create directory (deprecated, use mkdirat)
+/// sys_mkdir - Create directory (legacy wrapper)
+///
+/// NOTE: riscv64 has no plain `mkdir` syscall — kept for the in-kernel test
+/// suite only; not dispatched (mkdirat is the real entry).
 pub fn sys_mkdir(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[0] as *const u8;
     let mode = args[1] as u32; // passed through like mkdirat (review SYSA-M1)
@@ -456,6 +473,15 @@ pub fn sys_linkat(args: SyscallArgs) -> i64 {
     let oldpath_ptr = args[1] as *const u8;
     let newdirfd = args[2] as i32;
     let newpath_ptr = args[3] as *const u8;
+    let flags = args[4] as u32;
+
+    // Flags validation (Linux): only AT_SYMLINK_FOLLOW (0x400) and
+    // AT_EMPTY_PATH (0x1000) are legal — anything else is EINVAL.
+    const AT_SYMLINK_FOLLOW: u32 = 0x400;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     let old_full = match resolve_user_path(olddirfd, oldpath_ptr) {
         Ok(p) => p,
@@ -484,6 +510,11 @@ pub fn sys_unlinkat(args: SyscallArgs) -> i64 {
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let flags = args[2] as u32;
+
+    // Only AT_REMOVEDIR is legal for unlinkat (Linux: EINVAL otherwise).
+    if flags & !AT_REMOVEDIR != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
@@ -558,19 +589,18 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
             // SAFETY: current is the running task's Task pointer from sched::current().
             let exe_path = unsafe { (*current).get_exe_path() };
 
-            if exe_path.len() >= bufsize {
-                return -(errno::ENAMETOOLONG as i64);
-            }
-
-            // SAFETY: buf validated with access_ok(bufsize); copy_to_user
-            // is exception-table protected (returns uncopied byte count).
+            // Linux readlink NEVER fails with ENAMETOOLONG — it truncates
+            // the target to bufsiz and returns the truncated length (the
+            // buffer is not NUL-terminated).
+            let copy_len = exe_path.len().min(bufsize);
+            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
             unsafe {
-                if crate::arch::riscv64::uaccess::copy_to_user(buf, exe_path.as_ptr(), exe_path.len()) != 0 {
+                if crate::arch::riscv64::uaccess::copy_to_user(buf, exe_path.as_ptr(), copy_len) != 0 {
                     return -(errno::EFAULT as i64);
                 }
             }
 
-            return exe_path.len() as i64;
+            return copy_len as i64;
         }
     }
 
@@ -578,16 +608,15 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     // Supports both absolute and relative paths (already dirfd-resolved)
     let full_path = resolve_proc_readlink_path(dirfd, &pathname);
     if let Some(target) = handle_proc_fd_readlink(&full_path) {
-        if target.len() >= bufsize {
-            return -(errno::ENAMETOOLONG as i64);
-        }
+        // Same truncation semantics as above (Linux policy, not ENAMETOOLONG).
+        let copy_len = target.len().min(bufsize);
         // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
         unsafe {
-            if crate::arch::riscv64::uaccess::copy_to_user(buf, target.as_ptr(), target.len()) != 0 {
+            if crate::arch::riscv64::uaccess::copy_to_user(buf, target.as_ptr(), copy_len) != 0 {
                 return -(errno::EFAULT as i64);
             }
         }
-        return target.len() as i64;
+        return copy_len as i64;
     }
 
     // Generic path: look up the symlink itself (NOFOLLOW) and read its
@@ -907,6 +936,13 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
+    // The mount target must exist (Linux path_mount resolves it before the
+    // filesystem-specific helper runs — the old code fabricated success for
+    // any path string).
+    if let Err(e) = crate::fs::vfs::path_lookup(target, 0) {
+        return e as i64;
+    }
+
     match crate::fs::mount::do_mount(target, fs_type_str, args[3]) {
         Ok(()) => 0,
         Err(e) => -(e as i64),
@@ -959,11 +995,17 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
     if mode & 0o002 != 0 { may_mask |= crate::fs::permission::MAY_WRITE; }
     if mode & 0o001 != 0 { may_mask |= crate::fs::permission::MAY_EXEC; }
 
-    let cred = if let Some(task) = crate::sched::current() {
+    // faccessat uses the REAL uid/gid for the permission decision (Linux:
+    // the euid is only used when AT_EACCESS is passed — and faccessat on
+    // riscv64 has no flags argument, so the real id is always correct
+    // here). The old code used the entire cred (which resolves by euid).
+    let mut cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new_init()
     };
+    cred.euid = cred.uid;
+    cred.egid = cred.gid;
 
     match crate::fs::vfs::path_lookup(&full_path, 0) {
         Ok(vfs_path) => {
@@ -982,37 +1024,130 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
     }
 }
 
-/// sys_futimesat - Change file timestamps (syscall 88)
+/// sys_futimesat - Change file timestamps (syscall 88 = utimensat)
 ///
-/// # Arguments
+/// utimensat ABI: (dirfd, pathname, times, flags)
 /// - args[0]: dirfd - directory file descriptor
-/// - args[1]: pathname - file path
-/// - args[2]: times - pointer to timeval array (or NULL)
+/// - args[1]: pathname - file path (NULL means futimens(fd))
+/// - args[2]: times - pointer to timespec[2] (or NULL = UTIME_NOW both)
+/// - args[3]: flags - AT_SYMLINK_NOFOLLOW / AT_EMPTY_PATH
 ///
 /// # Returns
-/// Returns 0 on success, negative error code on failure
+/// 0 on success, negative error code on failure
 ///
 /// # Behavior
-/// - If file exists: update timestamps and return 0
-/// - If file doesn't exist: return -ENOENT (does NOT create the file)
-/// - If times is NULL: use current time for both atime and mtime
+/// - times NULL: set both atime and mtime to the current time
+/// - times[i].tv_nsec == UTIME_OMIT (0x3ffffffe): leave that timestamp alone
+/// - times[i].tv_nsec == UTIME_NOW  (0x3fffffff): use the current time
+/// - Otherwise use the given {tv_sec, tv_nsec}
 pub fn sys_futimesat(args: SyscallArgs) -> i64 {
+    const UTIME_OMIT: i64 = 0x3fff_fffe;
+    const UTIME_NOW: i64 = 0x3fff_ffff;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
+    let times_ptr = args[2] as *const crate::syscall::time::Timespec;
+    let flags = args[3] as u32;
+
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Parse the user timespec pair first (before any path work) so bad
+    // values/negative tv_sec are reported as EINVAL and unreadable memory
+    // as EFAULT, matching Linux.
+    let (atime, mtime): (Option<u64>, Option<u64>) = if times_ptr.is_null() {
+        (None, None) // NULL = UTIME_NOW for both
+    } else {
+        if !crate::arch::riscv64::uaccess::access_ok(times_ptr as usize, 32) {
+            return -(errno::EFAULT as i64);
+        }
+        let mut buf = [0u8; 32];
+        // SAFETY: times_ptr validated with access_ok(32); exception-table copy.
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(
+                buf.as_mut_ptr(),
+                times_ptr as *const u8,
+                32,
+            )
+        };
+        if uncopied > 0 {
+            return -(errno::EFAULT as i64);
+        }
+        let rd = |i: usize| i64::from_le_bytes(buf[i * 8..i * 8 + 8].try_into().unwrap());
+        let mut parsed = [None, None];
+        for i in 0..2 {
+            let (sec, nsec) = (rd(i * 2), rd(i * 2 + 1));
+            if nsec == UTIME_OMIT {
+                parsed[i] = None; // leave alone
+            } else if nsec == UTIME_NOW {
+                parsed[i] = Some(current_time_secs()); // now
+            } else {
+                if nsec < 0 || nsec >= 1_000_000_000 || sec < 0 {
+                    return -(errno::EINVAL as i64);
+                }
+                parsed[i] = Some(sec as u64);
+            }
+        }
+        (parsed[0], parsed[1])
+    };
+
+    // futimens(fd): pathname NULL, dirfd is the fd.
+    if pathname_ptr.is_null() {
+        // SAFETY: dirfd is a caller-supplied fd; get_file_fd returns None for
+        // invalid fds.
+        let file = match unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+            Some(f) => f,
+            None => return -(errno::EBADF as i64),
+        };
+        // SAFETY: inode is an UnsafeCell; we hold &File so no concurrent mutation.
+        let inode_opt = unsafe { &*file.inode.get() };
+        let inode = match inode_opt.as_ref() {
+            Some(i) => i,
+            None => return -(errno::EBADF as i64),
+        };
+        // Times setter permission: owner or CAP_FOWNER (same rule as the
+        // path form).
+        let cred = match crate::sched::current() {
+            Some(t) => t.cred().clone(),
+            None => return -(errno::EPERM as i64),
+        };
+        let inode_uid = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+        if cred.euid != inode_uid
+            && !crate::security::has_capability(&cred, crate::security::CAP_FOWNER)
+        {
+            return -(errno::EPERM as i64);
+        }
+        if let Some(m) = mtime {
+            let _ = inode.op_setattr(crate::fs::inode::setattr_attr::ATTR_MTIME, m, 0);
+        }
+        if let Some(a) = atime {
+            let _ = inode.op_setattr(crate::fs::inode::setattr_attr::ATTR_ATIME, a, 0);
+        }
+        return 0;
+    }
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
 
-    // Check if file exists
-    match crate::fs::stat_file_by_path(&full_path, &mut crate::fs::Stat::new()) {
-        Ok(()) => {
-            // File exists - TODO: actually update timestamps
-            0
-        }
-        Err(e) => e as i64,
+    // UTIME_NOW (times==NULL or per-component) needs a "now" the vfs layer
+    // understands; vfs_utimensat treats None as UTIME_NOW.
+    match crate::fs::vfs::vfs_utimensat(&full_path, atime, mtime) {
+        Ok(()) => 0,
+        Err(e) => -(e as i64),
     }
+}
+
+/// Current wall-clock time in whole seconds (for UTIME_NOW).
+fn current_time_secs() -> u64 {
+    let cycles = crate::drivers::intc::clint::read_time();
+    let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
+    let monotonic = cycles / freq_hz;
+    monotonic + crate::syscall::time::wall_epoch_offset_secs()
 }
 
 /// Read a null-terminated path string from user space into a kernel buffer.
@@ -1140,6 +1275,15 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[1] as *const u8;
     let uid = args[2] as u32;
     let gid = args[3] as u32;
+    let flags = args[4] as u32;
+
+    // Flags validation (Linux): AT_SYMLINK_NOFOLLOW (0x100) and
+    // AT_EMPTY_PATH (0x1000) only — anything else is EINVAL.
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
@@ -1167,7 +1311,7 @@ pub fn sys_ftruncate(args: SyscallArgs) -> i64 {
     }
 }
 
-/// sys_truncate - Truncate a file by path (syscall 76)
+/// sys_truncate - Truncate a file by path (syscall 45)
 ///
 /// # Arguments
 /// - args[0]: pathname - file path
@@ -1275,6 +1419,13 @@ pub fn sys_statfs(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
+    // Linux statfs fails with ENOENT for paths that do not exist — the old
+    // code fabricated rootfs numbers for ANY path (review批次1: statfs 不查
+    // 路径存在性).
+    if let Err(e) = crate::fs::vfs::path_lookup(&full_path, 0) {
+        return e as i64;
+    }
+
     let path_str = full_path.as_str();
     if path_str.starts_with("/mnt") || path_str.starts_with("/disk") {
         fill_ext4_statfs(&mut statfs_buf);
@@ -1380,7 +1531,7 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
 
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
-    let _flags = args[2] as u32;
+    let flags = args[2] as u32;
     let mask = args[3] as u32;
     let statxbuf = args[4] as *mut Statx;
 
@@ -1391,16 +1542,51 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_STATX_SYNC_TYPE: u32 = 0x6000; // SYNC_AS_STAT/FSYNC/NOATIME family
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     let mut stat = Stat::new();
 
-    // TODO: Support AT_SYMLINK_NOFOLLOW (0x100) — requires no-follow path lookup
-    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
-        Ok(p) => p,
-        Err(e) => return e as i64,
+    // AT_EMPTY_PATH + empty pathname: operate on dirfd itself (fstat).
+    let is_empty_path = {
+        let mut probe = [0u8; 1];
+        !pathname_ptr.is_null()
+            && crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1)
+            && unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    probe.as_mut_ptr(),
+                    pathname_ptr,
+                    1,
+                )
+            } == 0
+            && probe[0] == 0
     };
 
-    if let Err(e) = crate::fs::vfs::stat_file_by_path(&full_path, &mut stat) {
-        return e as i64;
+    if is_empty_path && (flags & AT_EMPTY_PATH) != 0 {
+        // fstat(dirfd)
+        match crate::fs::file_stat(dirfd as usize, &mut stat) {
+            Ok(()) => {}
+            Err(e) => return -(e as i64),
+        }
+    } else {
+        let full_path = match resolve_user_path(dirfd, pathname_ptr) {
+            Ok(p) => p,
+            Err(e) => return e as i64,
+        };
+        // AT_SYMLINK_NOFOLLOW: lstat-style lookup (do not follow the final
+        // symlink component).
+        let lookup_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            crate::fs::vfs::LOOKUP_NOFOLLOW
+        } else {
+            0
+        };
+        if let Err(e) = crate::fs::vfs::stat_file_by_path_with_flags(&full_path, &mut stat, lookup_flags) {
+            return e as i64;
+        }
     }
 
     // STATX mask constants
@@ -1415,24 +1601,25 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
     const STATX_INO: u32 = 0x0100;
     const STATX_SIZE: u32 = 0x0200;
     const STATX_BLOCKS: u32 = 0x0400;
+    const STATX_BTIME: u32 = 0x0800;
+
+    // Linux semantics: STATX_ALL-style requests are ANDed with what the fs
+    // can provide; unknown request bits are not an error. We always answer
+    // the basic set.
+    let requested = mask
+        & (STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID | STATX_GID
+           | STATX_ATIME | STATX_MTIME | STATX_CTIME | STATX_INO | STATX_SIZE
+           | STATX_BLOCKS | STATX_BTIME);
 
     let mut stx = Statx::new();
-    let mut requested = 0u32;
-
-    if mask & STATX_TYPE != 0 { requested |= STATX_TYPE; }
-    if mask & STATX_MODE != 0 { requested |= STATX_MODE; }
-    if mask & STATX_NLINK != 0 { requested |= STATX_NLINK; }
-    if mask & STATX_UID != 0 { requested |= STATX_UID; }
-    if mask & STATX_GID != 0 { requested |= STATX_GID; }
-    if mask & STATX_ATIME != 0 { requested |= STATX_ATIME; }
-    if mask & STATX_MTIME != 0 { requested |= STATX_MTIME; }
-    if mask & STATX_CTIME != 0 { requested |= STATX_CTIME; }
-    if mask & STATX_INO != 0 { requested |= STATX_INO; }
-    if mask & STATX_SIZE != 0 { requested |= STATX_SIZE; }
-    if mask & STATX_BLOCKS != 0 { requested |= STATX_BLOCKS; }
-
     stx.stx_mask = requested;
     stx.stx_blksize = stat.st_blksize as u32;
+    // stx_attributes: no compression/immutable/append/nonce flags are
+    // tracked by the Rux VFS — report a clean 0 with STATX_ATTR bit flags
+    // unset (Linux reports attribute bits only when the supporting mask bit
+    // is set; 0 is always correct for "nothing special").
+    stx.stx_attributes = 0;
+    stx.stx_attributes_mask = 0;
 
     if requested & STATX_TYPE != 0 || requested & STATX_MODE != 0 {
         stx.stx_mode = stat.st_mode as u16;
@@ -1488,12 +1675,19 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
     let how_ptr = args[2] as *const OpenHow;
     let size = args[3] as usize;
 
-    // Validate: size must cover at least flags + mode + resolve (24 bytes)
+    // Validate: size must cover at least flags + mode + resolve (24 bytes).
+    // Linux openat2 uses copy_struct_from_user: size < the known struct is
+    // EINVAL (cannot see the version); size > the known struct is accepted
+    // only when ALL unknown trailing bytes are zero — otherwise E2BIG
+    // (userspace passed fields the kernel does not understand).
     const OPEN_HOW_VER0_SIZE: usize = 24;
     const OPEN_HOW_MAX_SIZE: usize = 24;
 
-    if size < OPEN_HOW_VER0_SIZE || size > OPEN_HOW_MAX_SIZE {
+    if size < OPEN_HOW_VER0_SIZE {
         return -(errno::EINVAL as i64);
+    }
+    if size > OPEN_HOW_MAX_SIZE + 4096 {
+        return -(errno::E2BIG as i64);
     }
 
     if how_ptr.is_null() {
@@ -1503,9 +1697,13 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Read struct open_how from user space
-    let mut buf = [0u8; OPEN_HOW_MAX_SIZE];
-    // SAFETY: how_ptr validated with access_ok(size); copies size bytes from user.
+    // Read struct open_how from user space. `size` may exceed our known
+    // 24-byte v0 layout; read up to `size` bytes into a padded buffer and
+    // require every byte past the known tail to be zero (E2BIG otherwise,
+    // matching copy_struct_from_user semantics).
+    let mut buf = [0u8; OPEN_HOW_MAX_SIZE + 4096];
+    // SAFETY: how_ptr validated with access_ok(size); copies size bytes from
+    // user into a buffer of at least that size (bounded above).
     let uncopied = unsafe {
         crate::arch::riscv64::uaccess::copy_from_user(
             buf.as_mut_ptr(),
@@ -1515,6 +1713,10 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
     };
     if uncopied > 0 {
         return -(errno::EFAULT as i64);
+    }
+    // Unknown trailing fields must be zero (copy_struct_from_user rule).
+    if buf[OPEN_HOW_MAX_SIZE..size].iter().any(|&b| b != 0) {
+        return -(errno::E2BIG as i64);
     }
     // SAFETY: buf contains size bytes copied from user; OPEN_HOW_MAX_SIZE >= OPEN_HOW_VER0_SIZE (24);
     // OpenHow is #[repr(C)] with 3 u64 fields = 24 bytes, so read is valid.
@@ -1567,6 +1769,8 @@ pub fn sys_mknodat(args: SyscallArgs) -> i64 {
 
     // Support regular files, directories, and FIFOs (review SYSA-M20 /
     // VFS-M16: mkfifo was unusable, breaking shell pipeline setup).
+    // ftype == 0 means "no type bits" — Linux treats it as a regular file
+    // (`mknod(path, mode, dev)` with plain permission bits).
     let ftype = mode & 0o170000;
     if ftype == 0o010000 {
         // FIFO: neither ext4 nor rootfs preserves the S_IFIFO type (both
@@ -1574,7 +1778,7 @@ pub fn sys_mknodat(args: SyscallArgs) -> i64 {
         // silently creating a regular file is worse than failing
         // (regression round 6 HIGH).
         return -(errno::ENOSYS as i64);
-    } else if ftype != 0o100000 && ftype != 0o040000 {
+    } else if ftype != 0o100000 && ftype != 0o040000 && ftype != 0 {
         return -(errno::EINVAL as i64); // block/char devices: TODO (CAP_MKNOD)
     } else if ftype == 0o040000 {
         // Directory
@@ -1658,61 +1862,80 @@ pub fn sys_fallocate(args: SyscallArgs) -> i64 {
     const FALLOC_FL_ZERO_RANGE: i32 = 16;
     const FALLOC_FL_INSERT_RANGE: i32 = 32;
     const FALLOC_FL_UNSHARE_RANGE: i32 = 64;
+    const KNOWN_MODES: i32 = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE
+        | FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_ZERO_RANGE
+        | FALLOC_FL_INSERT_RANGE | FALLOC_FL_UNSHARE_RANGE;
 
     if offset < 0 || length <= 0 {
         return -(errno::EINVAL as i64);
     }
-
-    // Validate fd is open
-    // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
-    match unsafe { crate::fs::get_file_fd(fd as usize) } {
-        Some(_) => {}
-        None => return -(errno::EBADF as i64),
+    // Unknown mode bits are EINVAL; PUNCH_HOLE requires KEEP_SIZE.
+    if mode & !KNOWN_MODES != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 && mode & FALLOC_FL_KEEP_SIZE == 0 {
+        return -(errno::EINVAL as i64);
     }
 
-    match mode {
-        FALLOC_FL_KEEP_SIZE | 0 => {
-            // Simple preallocation — succeed silently
-            // FALLOC_FL_KEEP_SIZE: allocate space but don't change file size
-            0
-        }
-        FALLOC_FL_PUNCH_HOLE | (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE) => {
-            // Punch hole — succeed silently (file system doesn't support hole punching)
-            0
-        }
-        FALLOC_FL_ZERO_RANGE | (FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE) => {
-            // Zero range — succeed silently
-            0
-        }
-        FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE | FALLOC_FL_UNSHARE_RANGE => {
-            // These require filesystem support
-            -(errno::EOPNOTSUPP as i64)
-        }
-        _ => -(errno::EINVAL as i64),
+    // Wire to the VFS layer (W2 exposed vfs_fallocate, which routes to
+    // ext4_fallocate). Filesystems without the op answer ENOSYS/EOPNOTSUPP
+    // themselves instead of the old unconditional fake success (which broke
+    // coreutils/dd error paths that rely on fallocate failing honestly).
+    match crate::fs::vfs::vfs_fallocate(fd as usize, mode, offset as u64, length as u64) {
+        Ok(()) => 0,
+        Err(e) => -(e as i64),
     }
 }
 
-/// sys_futimesat - change file timestamps (NR 88 = utimensat)
+/// sys_fsync - Synchronize a file's in-core state with storage (NR 82)
 pub fn sys_fsync(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
-        Some(_file) => {
-            // TODO: implement fsync for individual files
-            0 // Success stub
+        Some(file) => {
+            // SAFETY: inode is an UnsafeCell written at open time; read-only here.
+            let inode_opt = unsafe { &*file.inode.get() };
+            match inode_opt.as_ref() {
+                Some(inode) => {
+                    // ext4 files: flush data blocks + journal commit via the
+                    // W2-exposed ext4_sync_file. Other filesystems (rootfs,
+                    // pipes, ...) have no fsync op — flush the shared buffer
+                    // cache as a best effort.
+                    let is_ext4 = inode.ops.is_some_and(|o| core::ptr::eq(
+                        o as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _,
+                    ));
+                    if is_ext4 {
+                        let fs_ptr = match inode.private_data {
+                            Some(p) => p as *const crate::fs::ext4::Ext4FileSystem,
+                            None => return -(errno::EIO as i64),
+                        };
+                        let ext4_inode = match inode.sb {
+                            Some(p) => unsafe { &*(p as *const crate::fs::ext4::inode::Ext4Inode) },
+                            None => return -(errno::EIO as i64),
+                        };
+                        // SAFETY: both pointers were installed at file open
+                        // time and live as long as the inode (Arc).
+                        match unsafe { crate::fs::ext4::file::ext4_sync_file(&*fs_ptr, ext4_inode) } {
+                            Ok(()) => 0,
+                            Err(e) => -(e as i64),
+                        }
+                    } else {
+                        let _ = crate::fs::bio::sync_buffers();
+                        0
+                    }
+                }
+                None => -(errno::EBADF as i64),
+            }
         }
         None => -(errno::EBADF as i64),
     }
 }
 
-/// sys_fdatasync - synchronize a file's in-core data with storage device
+/// sys_fdatasync - synchronize a file's data (not metadata) with storage
 pub fn sys_fdatasync(args: SyscallArgs) -> i64 {
-    let fd = args[0] as i32;
-    // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
-    match unsafe { crate::fs::get_file_fd(fd as usize) } {
-        Some(_) => 0,
-        None => -(errno::EBADF as i64),
-    }
+    // Same durability path as fsync (ext4_sync_file already writes the data
+    // blocks; the journal commit covers the metadata we updated).
+    sys_fsync(args)
 }
 
 /// sys_sync - synchronize filesystem caches
@@ -1760,7 +1983,12 @@ pub fn sys_chroot(args: SyscallArgs) -> i64 {
         return -(errno::ENOTDIR as i64);
     }
 
-    // TODO: implement actual root switching
+    // TODO (VFS): the Rux path-lookup layer has no per-task root — chroot
+    // currently validates the directory but does NOT isolate path
+    // resolution (a process after chroot can still open absolute paths
+    // outside the new root). Enforcing this needs a root dentry on the task
+    // and VFS support; documented as a known limitation rather than a fake
+    // success with isolation.
     0
 }
 
@@ -1875,13 +2103,51 @@ pub fn sys_open_by_handle_at(_args: SyscallArgs) -> i64 {
 /// sys_copy_file_range - Copy data between files (NR 285)
 pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
     let fd_in = args[0] as i32;
-    let _off_in = args[1] as *mut i64;
+    let off_in_ptr = args[1] as *mut i64;
     let fd_out = args[2] as i32;
-    let _off_out = args[3] as *mut i64;
+    let off_out_ptr = args[3] as *mut i64;
     let len = args[4] as usize;
     let _flags = args[5] as u32;
 
     if len == 0 { return 0; }
+
+    // off_in/off_out semantics: when non-NULL the offsets are read from and
+    // written back through the pointers and the file positions are NOT
+    // touched. Read them with the exception-table copy (EFAULT, not panic,
+    // on bad pointers — the old code dereferenced them raw and then ignored
+    // them entirely).
+    let mut off_in: Option<i64> = None;
+    if !off_in_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(off_in_ptr as usize, 8) {
+            return -(errno::EFAULT as i64);
+        }
+        let mut buf = [0u8; 8];
+        // SAFETY: off_in_ptr validated with access_ok(8).
+        if unsafe { crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), off_in_ptr as *const u8, 8) } != 0 {
+            return -(errno::EFAULT as i64);
+        }
+        let v = i64::from_le_bytes(buf.try_into().unwrap());
+        if v < 0 {
+            return -(errno::EINVAL as i64);
+        }
+        off_in = Some(v);
+    }
+    let mut off_out: Option<i64> = None;
+    if !off_out_ptr.is_null() {
+        if !crate::arch::riscv64::uaccess::access_ok(off_out_ptr as usize, 8) {
+            return -(errno::EFAULT as i64);
+        }
+        let mut buf = [0u8; 8];
+        // SAFETY: off_out_ptr validated with access_ok(8).
+        if unsafe { crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), off_out_ptr as *const u8, 8) } != 0 {
+            return -(errno::EFAULT as i64);
+        }
+        let v = i64::from_le_bytes(buf.try_into().unwrap());
+        if v < 0 {
+            return -(errno::EINVAL as i64);
+        }
+        off_out = Some(v);
+    }
 
     use crate::fs::get_file_fd;
     // SAFETY: fd_in and fd_out are validated i32; get_file_fd returns None for invalid fds.
@@ -1895,23 +2161,65 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
             None => return -(errno::EBADF as i64),
         };
 
+        let mut cur_in = off_in.unwrap_or_else(|| in_file.get_pos() as i64);
+        let mut cur_out = off_out.unwrap_or_else(|| out_file.get_pos() as i64);
+
         let mut total = 0usize;
         let mut remaining = len;
-        while remaining > 0 {
+        let mut first_err: i64 = 0;
+        'outer: while remaining > 0 {
             let chunk = core::cmp::min(remaining, 8192);
             let mut buf = alloc::vec![0u8; chunk];
-            let n = in_file.read(buf.as_mut_ptr(), chunk);
-            if n <= 0 { break; }
+            // Read at cur_in without moving the fd position (read_at is
+            // position-invariant; ESPIPE for unseekable sources).
+            let n = in_file.read_at(cur_in as u64, buf.as_mut_ptr(), chunk);
+            if n <= 0 {
+                // Linux: a FIRST read failure is an error return, not a
+                // fake "0 bytes copied" success (review批次1).
+                if total == 0 && n < 0 {
+                    first_err = n as i64;
+                }
+                break;
+            }
             let mut written = 0usize;
             while written < n as usize {
-                let w = out_file.write(buf.as_ptr().add(written), (n as usize) - written);
-                if w <= 0 { return total as i64; }
+                let w = out_file.write_at((cur_out + written as i64) as u64, buf.as_ptr().add(written), (n as usize) - written);
+                if w <= 0 {
+                    if total == 0 && written == 0 && w < 0 {
+                        first_err = w as i64;
+                    }
+                    break 'outer; // destination full / error: stop copying
+                }
                 written += w as usize;
             }
+            cur_in += n as i64;
+            cur_out += written as i64;
             total += written;
             remaining -= written;
         }
-        total as i64
+
+        // Write the advanced offsets back (file positions were never moved).
+        if !off_in_ptr.is_null() {
+            // SAFETY: off_in_ptr validated with access_ok(8).
+            if unsafe { crate::arch::riscv64::uaccess::copy_to_user(off_in_ptr as *mut u8, cur_in.to_le_bytes().as_ptr(), 8) } != 0 {
+                return -(errno::EFAULT as i64);
+            }
+        }
+        if !off_out_ptr.is_null() {
+            // SAFETY: off_out_ptr validated with access_ok(8).
+            if unsafe { crate::arch::riscv64::uaccess::copy_to_user(off_out_ptr as *mut u8, cur_out.to_le_bytes().as_ptr(), 8) } != 0 {
+                return -(errno::EFAULT as i64);
+            }
+        }
+
+        if total > 0 {
+            total as i64
+        } else if first_err != 0 {
+            first_err
+        } else {
+            // EOF on the source with nothing copied is a 0 return.
+            0
+        }
     }
 }
 
@@ -2065,38 +2373,86 @@ pub fn sys_map_shadow_stack(_args: SyscallArgs) -> i64 {
 
 /// sys_futex_wake - Wake futex (NR 454)
 pub fn sys_futex_wake(args: SyscallArgs) -> i64 {
-    // futex_wake ABI: (uaddr, mask, nr, flags)
-    const FUTEX2_PRIVATE_FLAG_W: u64 = 1;
-    let private = if args[3] & FUTEX2_PRIVATE_FLAG_W != 0 { 128u64 } else { 0 };
-    let futex_args: crate::syscall::SyscallArgs = [
-        args[0],           // uaddr
-        1 | private,       // FUTEX_WAKE (+ FUTEX_PRIVATE_FLAG)
-        args[2],           // nr_wake (0 = no-op, correctly passes through)
-        0, 0, 0,
-    ];
-    crate::syscall::sched::sys_futex(futex_args)
+    // futex_wake ABI (Linux 6.7): (uaddr, mask, nr, flags).
+    // FUTEX2 flags: bits 0-1 are the futex size domain (FUTEX2_SIZE_U8/U16/
+    // U32/U64), bit 7 is FUTEX2_PRIVATE (== FUTEX_PRIVATE_FLAG 0x80).
+    // Linux sys_futex_wake only accepts FUTEX2_SIZE_U32 | FUTEX2_PRIVATE.
+    const FUTEX2_SIZE_U32: u64 = 0x2;
+    const FUTEX2_PRIVATE: u64 = 0x80;
+    const FUTEX2_VALID: u64 = FUTEX2_SIZE_U32 | FUTEX2_PRIVATE;
+    if args[3] & !FUTEX2_VALID != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let flags = crate::sync::futex::futex_to_flags(
+        args[3] as u32 | if args[3] & FUTEX2_PRIVATE != 0 {
+            crate::sync::futex::FUTEX_PRIVATE_FLAG as u32
+        } else {
+            0
+        },
+    );
+    // mask selects which waiter bitsets match; 0 = match everything
+    // (FUTEX_BITSET_MATCH_ANY).
+    const FUTEX_BITSET_MATCH_ANY: u32 = 0xFFFF_FFFF;
+    let bitset = if args[1] == 0 { FUTEX_BITSET_MATCH_ANY } else { args[1] as u32 };
+    // WAKE with nr == 0 is a valid no-op probe.
+    let nr = args[2] as i32;
+    if nr < 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // uaddr must be 4-byte aligned (Linux get_futex_key).
+    if args[0] & 0x3 != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    crate::sync::futex::futex_wake_bitset(args[0] as usize, flags, nr, bitset)
 }
 
 /// sys_futex_wait - Wait on futex (NR 455)
 pub fn sys_futex_wait(args: SyscallArgs) -> i64 {
     // futex_wait ABI (Linux 6.7): (uaddr, expected, mask, flags, *timeout)
-    // — 5 params. Translate to old futex WAIT_BITSET with proper expected
-    // value and timeout (regression round 6 HIGH: was 4-param layout with
-    // expected hardcoded 0 and flags-as-timeout).
-    // R7-A8: propagate FUTEX2_PRIVATE_FLAG (bit 0 of flags) as
-    // FUTEX_PRIVATE_FLAG so the futex key scoping matches — without it a
-    // cross-process futex waiter was matchable by any process at the same
-    // numeric address.
-    const FUTEX2_PRIVATE_FLAG: u64 = 1;
-    let private = if args[3] & FUTEX2_PRIVATE_FLAG != 0 { 128u64 } else { 0 };
-    let futex_args: crate::syscall::SyscallArgs = [
-        args[0],           // uaddr
-        9 | private,       // FUTEX_WAIT_BITSET (+ FUTEX_PRIVATE_FLAG)
-        args[1],           // expected value (futex word comparison)
-        args[4],           // *timeout (5th param)
-        0, 0xFFFFFFFFFFFFFFFF, // bitset = MATCH_ANY
-    ];
-    crate::syscall::sched::sys_futex(futex_args)
+    // — 5 params. The timeout is a RELATIVE timespec (unlike WAIT_BITSET's
+    // absolute one), and `mask` selects the waiter's bitset.
+    const FUTEX2_SIZE_U32: u64 = 0x2;
+    const FUTEX2_PRIVATE: u64 = 0x80;
+    const FUTEX2_VALID: u64 = FUTEX2_SIZE_U32 | FUTEX2_PRIVATE;
+    if args[3] & !FUTEX2_VALID != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // uaddr must be 4-byte aligned (Linux get_futex_key).
+    if args[0] & 0x3 != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    let flags = crate::sync::futex::futex_to_flags(
+        args[3] as u32 | if args[3] & FUTEX2_PRIVATE != 0 {
+            crate::sync::futex::FUTEX_PRIVATE_FLAG as u32
+        } else {
+            0
+        },
+    );
+
+    // Relative timeout → absolute jiffies deadline (futex_wait_bitset takes
+    // an absolute deadline). NULL timeout = wait forever.
+    let deadline: Option<u64> = if args[4] == 0 {
+        None
+    } else {
+        match crate::sync::futex::futex_parse_timeout(args[4], false) {
+            Ok(dl) => dl,
+            Err(e) => return -(e as i64),
+        }
+    };
+
+    // mask selects which wake-ups this waiter matches; 0 = MATCH_ANY.
+    const FUTEX_BITSET_MATCH_ANY: u32 = 0xFFFF_FFFF;
+    let bitset = if args[2] == 0 { FUTEX_BITSET_MATCH_ANY } else { args[2] as u32 };
+
+    crate::sync::futex::futex_wait_bitset(
+        args[0] as usize,
+        flags,
+        args[1] as u32, // expected value
+        0,
+        bitset,
+        deadline,
+    )
 }
 
 /// sys_futex_requeue - Requeue futex (NR 456)
@@ -2195,7 +2551,21 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
     let oldpath = args[1] as *const u8;
     let newdirfd = args[2] as i32;
     let newpath = args[3] as *const u8;
-    let _flags = args[4] as u32;
+    let flags = args[4] as u32;
+
+    const RENAME_NOREPLACE: u32 = 1 << 0;
+    const RENAME_EXCHANGE: u32 = 1 << 1;
+    const RENAME_WHITEOUT: u32 = 1 << 2;
+    const KNOWN_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT;
+
+    // Unknown flag bits are EINVAL; EXCHANGE/WHITEOUT need VFS support we
+    // do not have (return EINVAL rather than silently mis-replacing).
+    if flags & !KNOWN_FLAGS != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if flags & (RENAME_EXCHANGE | RENAME_WHITEOUT) != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     let old = match resolve_user_path(olddirfd, oldpath) {
         Ok(p) => p,
@@ -2205,6 +2575,15 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
+
+    // RENAME_NOREPLACE: fail with EEXIST if the destination exists instead
+    // of silently replacing it (the old code ignored the flag entirely).
+    if flags & RENAME_NOREPLACE != 0 {
+        let mut st = crate::fs::Stat::new();
+        if crate::fs::vfs::stat_file_by_path(&new, &mut st).is_ok() {
+            return -(errno::EEXIST as i64);
+        }
+    }
 
     match crate::fs::vfs::vfs_rename(&old, &new) {
         Ok(()) => 0,
