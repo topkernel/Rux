@@ -31,8 +31,15 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     let flags = args[0];
     let stack = args[1];
     let parent_tid = args[2] as *mut i32;
-    let child_tid = args[3] as *mut i32;
-    let tls = args[4];
+    // musl riscv64 clone.s (verified in toolchain/musl-1.2.5):
+    //   syscall(SYS_clone, flags, stack, ptid, tls, ctid)
+    //     -> a2=ptid, a3=tls, a4=ctid. The batch-1 review claimed
+    //     a3=child_tid/a4=tls and W1 "fixed" to that order — inverted
+    //     against the real musl ABI, so SETTLS programmed tp with the
+    //     ctid pointer and every new thread segfaulted at TLS access
+    //     (pthread acceptance: fault at 0x10, epc in user text).
+    let tls = args[3];
+    let child_tid = args[4] as *mut i32;
 
     let clone_args = CloneArgs {
         flags,
