@@ -161,6 +161,11 @@ impl RouteTable {
 /// Global routing table
 static mut ROUTE_TABLE: RouteTable = RouteTable::new();
 
+/// W3 (RACE): ROUTE_TABLE is read from the TX data path (every CPU) and
+/// written from route management — irqsave spinlock, mirroring the
+/// TCP/UDP table locks (the softirq side can run inline at irq_exit).
+static ROUTE_LOCK: crate::sync::spinlock::Spinlock<()> = crate::sync::spinlock::Spinlock::new(());
+
 /// Look up route
 ///
 /// # Arguments
@@ -169,7 +174,8 @@ static mut ROUTE_TABLE: RouteTable = RouteTable::new();
 /// # Returns
 /// Route entry if found, None otherwise
 pub fn route_lookup(dst: u32) -> Option<RouteEntry> {
-    // SAFETY: ROUTE_TABLE is a global static; immutable read in single-core context.
+    let _g = ROUTE_LOCK.lock_irqsave();
+    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
     unsafe { ROUTE_TABLE.lookup(dst) }
 }
 
@@ -186,7 +192,8 @@ pub fn route_lookup(dst: u32) -> Option<RouteEntry> {
 /// Ok(()) on success, Err(()) on failure
 pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Result<(), ()> {
     let route = RouteEntry::new(dst, mask, gateway, oif, mtu);
-    // SAFETY: ROUTE_TABLE is a global static; single-core kernel context.
+    let _g = ROUTE_LOCK.lock_irqsave();
+    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
     unsafe { ROUTE_TABLE.add(route) }
 }
 
@@ -199,13 +206,15 @@ pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Resul
 /// # Returns
 /// Whether removal was successful
 pub fn route_remove(dst: u32, mask: u32) -> bool {
-    // SAFETY: ROUTE_TABLE is a global static; single-core kernel context.
+    let _g = ROUTE_LOCK.lock_irqsave();
+    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
     unsafe { ROUTE_TABLE.remove(dst, mask) }
 }
 
 /// Clear routing table
 pub fn route_clear() {
-    // SAFETY: ROUTE_TABLE is a global static; single-core kernel context.
+    let _g = ROUTE_LOCK.lock_irqsave();
+    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
     unsafe { ROUTE_TABLE.clear() }
 }
 
@@ -232,17 +241,14 @@ pub fn route_init() {
 
 /// Send packet based on route
 ///
-/// # Arguments
-/// - `skb`: SkBuff
-/// - `dst`: Destination IP address
-///
-/// # Returns
-/// Ok(()) on success, Err(()) on failure
+/// W3: the old body looked up a route and then FREED the packet — every
+/// caller lost its data. The data plane now consults the table only for
+/// future gateway/MTU decisions and transmits through the direct ARP
+/// path (ethernet_send resolves the next hop; the route table is not yet
+/// wired to gateway forwarding — see the leftover list).
 pub fn route_output(skb: SkBuff, dst: u32) -> Result<(), ()> {
-    let _route = route_lookup(dst).ok_or(())?;
-
-    skb.free();
-    Ok(())
+    let _route = route_lookup(dst);
+    crate::net::ethernet::ethernet_send(skb)
 }
 
 #[cfg(test)]

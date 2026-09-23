@@ -124,6 +124,10 @@ pub struct File {
     /// Written once in File::new before the value is shared; readers only
     /// need a plain u64 load (the Arc publication orders it).
     pub file_id: u64,
+    /// Serializes write paths (O_APPEND end-of-file positioning + pos
+    /// update) so concurrent writers on SMP cannot interleave. Added for
+    /// review 5.2 (O_APPEND 写与 pos 更新无锁).
+    pub write_lock: Spinlock<()>,
 }
 
 // SAFETY: File is only shared across threads when referenced through Arc,
@@ -153,6 +157,7 @@ impl File {
             close_pending: core::sync::atomic::AtomicBool::new(false),
             cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
             file_id: FILE_ID_GENERATION.fetch_add(1, Ordering::Relaxed),
+            write_lock: Spinlock::new(()),
         }
     }
 
@@ -494,6 +499,13 @@ impl FdTable {
 
     /// Duplicate file descriptor to specific number (dup2)
     /// Validates oldfd is open before any operation.
+    ///
+    /// Atomicity (review 5.2): the close of any previous occupant of
+    /// `newfd` and the installation of the duplicated file happen under ONE
+    /// entry-lock hold — the old close-then-install sequence let a
+    /// concurrent get_file(newfd) observe an empty slot mid-dup2. The close
+    /// op of the displaced file runs after the lock is released (R14-5
+    /// discipline: never run close ops with IRQs off under the entry lock).
     pub fn dup2_fd(&self, oldfd: usize, newfd: usize) -> Option<usize> {
         if oldfd >= 1024 || newfd >= 1024 {
             return None;
@@ -505,19 +517,44 @@ impl FdTable {
             return Some(newfd);
         }
 
-        // Get the file to duplicate (validates oldfd is open)
-        let file = self.get_file(oldfd)?;
+        // Atomically validate oldfd, evict any previous occupant of newfd,
+        // and install the duplicated file — all under the entry lock.
+        let displaced: Option<Arc<File>> = {
+            let mut entry = self.entry.lock_irqsave();
+            let file = entry.fds[oldfd].clone()?;
+            let displaced = core::mem::replace(&mut entry.fds[newfd], Some(file));
+            // dup2 clears FD_CLOEXEC on the new descriptor (POSIX);
+            // install_fd already cleared the stale bit only when the slot
+            // was empty, so clear it here unconditionally.
+            entry.cloexec_bits[newfd / 64] &= !(1u64 << (newfd % 64));
+            entry.count = entry.count.saturating_sub(if displaced.is_some() { 1 } else { 0 });
+            entry.count += 1;
+            displaced
+        };
 
-        // Close newfd if open (ignore error — newfd may not be open)
-        let _ = self.close_fd(newfd);
+        // Run the displaced file's close decision outside the entry lock,
+        // mirroring close_fd's last-reference discipline.
+        if let Some(file) = displaced {
+            let run_close = Arc::strong_count(&file) == 1;
+            if run_close {
+                unsafe {
+                    let file_ptr = Arc::as_ptr(&file) as *mut File;
+                    // Clear a possibly-stale deferred flag before running the
+                    // op ourselves (double-close hazard, see close_fd).
+                    (*file_ptr).close_pending.store(false, Ordering::Release);
+                    let ops_ptr = (*file_ptr).ops.get();
+                    if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
+                        (*file_ptr).close();
+                    }
+                }
+            } else {
+                unsafe {
+                    let file_ptr = Arc::as_ptr(&file) as *mut File;
+                    (*file_ptr).close_pending.store(true, Ordering::Release);
+                }
+            }
+        }
 
-        // Install file at newfd
-        self.install_fd(newfd, file).ok()?;
-
-        // dup2 leaves FD_CLOEXEC CLEAR on the new descriptor (POSIX);
-        // dup3(flags & O_CLOEXEC) sets it — callers apply that via
-        // set_fd_cloexec.
-        self.set_fd_cloexec(newfd, false);
         Some(newfd)
     }
 
@@ -674,7 +711,13 @@ fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
 
 fn reg_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(ref inode) = unsafe { &*file.inode.get() } {
-        // O_APPEND: atomically move position to end before every write
+        // Serialize the whole read-offset → write → update-pos sequence so
+        // that two O_APPEND writers on SMP cannot interleave (their writes
+        // would each position at the "old" end). Also protects plain
+        // read/write pos racing. Review 5.2 (O_APPEND 与 pos 更新无锁).
+        let _write_guard = file.write_lock.lock();
+
+        // O_APPEND: position at end of file for every write
         let offset = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
             let end = inode.get_size();
             file.set_pos(end);
@@ -759,10 +802,33 @@ fn dir_close(_file: &File) -> i32 {
     0
 }
 
+/// Directory lseek — simple entry-index implementation (review 5.1:
+/// directories had no lseek op, so lseek(fd,0,SEEK_SET) returned ESPIPE and
+/// telldir/seekdir-style rewinds failed). The file position is the index of
+/// the next VfsDirEntry to be returned by getdents64 (which is also the
+/// d_off-1 value it reports), so SEEK_SET to a previous d_off value works.
+fn dir_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
+    let current = file.get_pos() as i64;
+    let new_pos = match whence {
+        0 => offset as i64,               // SEEK_SET: absolute entry index
+        1 => current + offset as i64,     // SEEK_CUR
+        _ => {
+            // SEEK_END on a directory is not supported (entry count is not
+            // tracked per open); ESPIPE-like EINVAL, not silence.
+            return -22;  // EINVAL
+        }
+    };
+    if new_pos < 0 {
+        return -22;  // EINVAL
+    }
+    file.set_pos(new_pos as u64);
+    new_pos as isize
+}
+
 pub static DIR_FILE_OPS: FileOps = FileOps {
     read: Some(dir_read_eisdir),
     write: None,
-    lseek: None,
+    lseek: Some(dir_file_lseek),
     close: Some(dir_close),
     poll: None,
 };

@@ -40,6 +40,11 @@ pub const TCP_RTO_DEFAULT_US: u64 = crate::config::TCP_RTO_DEFAULT_US;
 pub const TCP_MAX_RETRIES: u32 = crate::config::TCP_MAX_RETRIES;
 pub const TCP_DELACK_TIMEOUT_US: u64 = crate::config::TCP_DELACK_TIMEOUT_US;
 
+/// W3: zero-window persist probe interval (jiffies; 1 jiffy = 10ms).
+/// 5s like Linux's initial persist interval (kept fixed — no backoff —
+/// for the minimal implementation).
+pub const TCP_PERSIST_INTERVAL_JIFFIES: u64 = 500;
+
 /// TCP port number
 pub type TcpPort = u16;
 
@@ -627,6 +632,10 @@ pub struct TcpTimers {
     pub retransmit_deadline: u64,
     /// Delayed ACK timer deadline (jiffies)
     pub delack_deadline: u64,
+    /// W3: zero-window persist probe deadline (jiffies), 0 inactive.
+    /// Armed by tx_packets when the peer advertises a zero window while
+    /// data is queued; the timer tick sends 1-byte probes.
+    pub persist_deadline: u64,
     /// R21-N3b: when FIN_WAIT1/2 was entered (jiffies) — bounds orphaned
     /// half-closes against dead peers.
     pub fin_wait_since: u64,
@@ -646,6 +655,7 @@ impl TcpTimers {
             retransmit_deadline: 0,
             fin_wait_since: 0,
             delack_deadline: 0,
+            persist_deadline: 0,
             close_wait_since: 0,
             syn_retries: 0,
         }
@@ -740,6 +750,14 @@ pub struct TcpSocket {
     /// without it they are indistinguishable from fresh pre-connect slots
     /// (user_refs==0, no parent_fd) and would leak forever.
     pub orphaned: bool,
+    /// W3: pending protocol error (positive errno, 0 = none) — set on RST
+    /// (ECONNRESET/ECONNREFUSED), retransmit exhaustion (ETIMEDOUT) and
+    /// ICMP errors (tcp_v4_err). Surfaced by recv/send and read-and-cleared
+    /// by getsockopt(SO_ERROR).
+    pub pending_error: i32,
+    /// W3: SO_REUSEADDR mirrored from the VFS layer — participates in the
+    /// bind-conflict decision (Linux: both binders opting in may coexist).
+    pub reuseaddr: bool,
     /// Out-of-order reassembly queue (received but not yet deliverable)
     pub ooo_queue: alloc::collections::VecDeque<TcpOooSeg>,
 
@@ -788,6 +806,8 @@ impl TcpSocket {
             retrans_queue: alloc::collections::VecDeque::new(),
             user_refs: core::sync::atomic::AtomicU32::new(0),
             orphaned: false,
+            pending_error: 0,
+            reuseaddr: false,
             ooo_queue: alloc::collections::VecDeque::new(),
 
             rtt_estimator: TcpRttEstimator::new(),
@@ -1005,6 +1025,20 @@ impl TcpSocket {
             return Ok(());
         }
 
+        // W3: parse the MSS option on any SYN (connection's own or the
+        // handshake counterpart's) — the peer's advertised MSS below our
+        // 1460 default must be adopted or every segment we send above it
+        // gets dropped by the peer (SYN options were ignored entirely).
+        if tcp_hdr.syn() {
+            if let Some(mss) = tcp_parse_mss(tcp_hdr) {
+                if mss < self.mss {
+                    self.mss = mss;
+                }
+            }
+        }
+
+        let has_data = !data.is_empty();
+
         match self.state {
             TcpState::TCP_LISTEN => {
                 // Server: receive SYN packet
@@ -1031,10 +1065,10 @@ impl TcpSocket {
                 }
             }
             TcpState::TCP_ESTABLISHED => {
-                // Process ACK first (updates snd_una, cwnd, rtt)
+                // Process ACK first (updates snd_una, snd_wnd, cwnd, rtt)
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num, tx);
+                    self.process_ack(ack_num, has_data, tcp_hdr.window(), tx);
                 }
                 // Process data (may accompany FIN)
                 if !data.is_empty() {
@@ -1050,7 +1084,7 @@ impl TcpSocket {
                 let mut valid_ack = false;
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    valid_ack = self.process_ack(ack_num, tx);
+                    valid_ack = self.process_ack(ack_num, has_data, tcp_hdr.window(), tx);
                 }
                 if tcp_hdr.fin() && valid_ack {
                     // Simultaneous close: FIN+ACK -> TIME_WAIT
@@ -1081,7 +1115,7 @@ impl TcpSocket {
                 // Waiting for FIN from remote
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num, tx);
+                    self.process_ack(ack_num, has_data, tcp_hdr.window(), tx);
                 }
                 if !data.is_empty() {
                     self.handle_data_recv(tcp_hdr, data, tx)?;
@@ -1094,6 +1128,11 @@ impl TcpSocket {
                 // R32-N17: the peer retransmitted its FIN (our final ACK
                 // was lost) — re-ACK it, otherwise the peer exhausts its
                 // FIN retransmissions and aborts the close with an RST.
+                //
+                // W3 note: a fresh SYN for this 4-tuple while in TIME_WAIT
+                // is handled conservatively above (the R32-B12 scan resets
+                // dying connections on SYN); full RFC-silent-reopen is not
+                // implemented by design.
                 if tcp_hdr.fin() {
                     let _ = self.send_ack(tx);
                 }
@@ -1102,7 +1141,7 @@ impl TcpSocket {
                 // Simultaneous close: waiting for ACK of our FIN
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    if self.process_ack(ack_num, tx) {
+                    if self.process_ack(ack_num, has_data, tcp_hdr.window(), tx) {
                         self.state = TcpState::TCP_TIME_WAIT;
                         self.start_timewait_timer();
                     }
@@ -1112,7 +1151,7 @@ impl TcpSocket {
                 // Waiting for ACK of our FIN
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    if self.process_ack(ack_num, tx) {
+                    if self.process_ack(ack_num, has_data, tcp_hdr.window(), tx) {
                         self.state = TcpState::TCP_CLOSE;
                     }
                 }
@@ -1121,7 +1160,7 @@ impl TcpSocket {
                 // Remote sent FIN, waiting for application to close
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num, tx);
+                    self.process_ack(ack_num, has_data, tcp_hdr.window(), tx);
                 }
                 if !data.is_empty() {
                     self.handle_data_recv(tcp_hdr, data, tx)?;
@@ -1245,7 +1284,19 @@ impl TcpSocket {
             // Drain any coalescible segments from the OOO queue
             self.drain_ooo_queue();
 
-            self.send_ack(tx)?;
+            // W3 (delack): in-order data arms the delayed-ACK deadline
+            // (TCP_DELACK_TIMEOUT_US, 40ms) so back-to-back segments
+            // coalesce into one ACK — the constant and the timer-tick arm
+            // existed but nothing ever armed the deadline, so every ACK
+            // was immediate. PSH (sender flushed its write) still ACKs
+            // now; out-of-order/duplicate paths below keep immediate
+            // dup-ACKs per RFC 5681.
+            if tcp_hdr.psh() {
+                self.send_ack(tx)?;
+            } else if self.timers.delack_deadline == 0 {
+                self.timers.delack_deadline = crate::drivers::timer::get_jiffies()
+                    + TCP_DELACK_TIMEOUT_US / 10_000;
+            }
         } else {
             // Out-of-order segment within window → buffer and send
             // duplicate ACK. R35: try_reserve instead of Vec::from — an
@@ -1350,6 +1401,9 @@ impl TcpSocket {
                 // connect. The old code ignored it and the SYN retransmit
                 // timer kept firing forever (observed as a SYN/RST ping-pong
                 // against QEMU user networking).
+                // W3: record ECONNREFUSED — a blocking connect()/send()
+                // and getsockopt(SO_ERROR) must see WHY.
+                self.pending_error = 111; // ECONNREFUSED
                 self.state = TcpState::TCP_CLOSE;
                 self.send_buffer.clear();
                 self.recv_buffer.clear();
@@ -1357,6 +1411,7 @@ impl TcpSocket {
             }
             TcpState::TCP_SYN_RECV => {
                 // If ACK is acceptable, abort connection
+                self.pending_error = 104; // ECONNRESET
                 self.state = TcpState::TCP_CLOSE;
             }
             TcpState::TCP_ESTABLISHED
@@ -1364,6 +1419,7 @@ impl TcpSocket {
             | TcpState::TCP_FIN_WAIT2
             | TcpState::TCP_CLOSE_WAIT => {
                 // Abort connection
+                self.pending_error = 104; // ECONNRESET
                 self.state = TcpState::TCP_CLOSE;
                 // Clear buffers
                 self.send_buffer.clear();
@@ -1373,7 +1429,8 @@ impl TcpSocket {
             TcpState::TCP_CLOSING
             | TcpState::TCP_LAST_ACK
             | TcpState::TCP_TIME_WAIT => {
-                // In these states, just close — no error
+                // In these states, just close — no error (the close was
+                // locally initiated)
                 self.state = TcpState::TCP_CLOSE;
             }
             _ => {
@@ -1542,6 +1599,8 @@ impl TcpSocket {
     /// an OOM stops the loop cleanly with the send buffer intact instead
     /// of panicking under the lock.
     pub fn tx_packets(&mut self, tx: &mut TcpTxBatch) -> Result<(), ()> {
+        let now = crate::drivers::timer::get_jiffies();
+
         // Calculate in-flight data
         let in_flight = self.snd_nxt.wrapping_sub(self.snd_una);
 
@@ -1550,10 +1609,17 @@ impl TcpSocket {
             .saturating_sub(in_flight as u32);
 
         if usable_window == 0 {
+            // W3: a CLOSED peer window (snd_wnd == 0, not merely cwnd-
+            // limited) with queued data arms the persist timer — without
+            // the zero-window probe the connection stalls forever if the
+            // peer's window-reopening ACK is lost (it never retransmits
+            // pure window updates).
+            if self.snd_wnd == 0 && !self.send_buffer.is_empty() && self.timers.persist_deadline == 0
+            {
+                self.timers.persist_deadline = now + TCP_PERSIST_INTERVAL_JIFFIES;
+            }
             return Ok(()); // Window full, wait
         }
-
-        let now = crate::drivers::timer::get_jiffies();
 
         while !self.send_buffer.is_empty() && usable_window > 0 {
             // Calculate this send size
@@ -1665,16 +1731,18 @@ impl TcpSocket {
 
     /// Process ACK acknowledgment
     ///
-    /// When ACK is received, update send window, RTT estimate, congestion control
-    pub fn process_ack(&mut self, ack: TcpSeq, tx: &mut TcpTxBatch) -> bool {
+    /// When ACK is received, update send window, RTT estimate, congestion control.
+    ///
+    /// W3: `has_data` tells whether the carrying segment had a payload
+    /// (dup-ACK detection per RFC 5681 needs a PURE ack); `window` is the
+    /// peer's advertised window in this segment.
+    pub fn process_ack(&mut self, ack: TcpSeq, has_data: bool, window: u16, tx: &mut TcpTxBatch) -> bool {
         // Check ACK sequence number
         if self.seq_before(ack, self.snd_una) {
-            // Old ACK, might be duplicate ACK
-            self.congestion.on_dup_ack(ack, self.snd_nxt, self.mss);
-            if self.congestion.dup_ack_count >= 3 {
-                // Fast retransmit
-                self.fast_retransmit(tx);
-            }
+            // Old ACK below snd_una — STALE, not a duplicate ACK. (The old
+            // code counted these as dup-ACKs and, worse, ignored the
+            // ack == snd_una case entirely — so real dup-ACKs never fired
+            // fast retransmit and recovery depended on RTO alone.)
             return false;
         }
 
@@ -1683,12 +1751,22 @@ impl TcpSocket {
             return false;
         }
 
+        // W3: adopt the peer's window advertisement on every acceptable
+        // ACK (snd_wnd used to be the TCP_MAX_WINDOW initial value forever,
+        // ignoring both shrinking and reopening advertisements — a peer
+        // closing its window black-holed nothing but reopening it never
+        // released a stalled sender either, and large-advertising peers
+        // were under-used).
+        self.snd_wnd = window;
+
         // Calculate acknowledged bytes
         let acked_bytes = ack.wrapping_sub(self.snd_una);
 
         if acked_bytes > 0 {
             // New ACK
             // 1. Remove acknowledged segments, capture tx_time of last acked seg
+            //    (Karn-filtered in remove_acked_segments — retransmitted
+            //    segments are never RTT samples, W3)
             let ack_tx_time = self.remove_acked_segments(ack);
 
             // 2. Update snd_una
@@ -1709,12 +1787,33 @@ impl TcpSocket {
             } else {
                 self.timers.stop_retransmit();
             }
+
+            // W3: the window may have reopened — flush what was stalled in
+            // the send buffer and disarm the zero-window probe.
+            if self.snd_wnd > 0 {
+                self.timers.persist_deadline = 0;
+            }
+            if !self.send_buffer.is_empty() {
+                let _ = self.tx_packets(tx);
+            }
+        } else if !has_data {
+            // W3: ack == snd_una on a pure ACK = duplicate ACK (RFC 5681)
+            // — typically triggered by the receiver buffering an
+            // out-of-order segment. Count it; three in a row fire fast
+            // retransmit (the dead path before this fix).
+            self.congestion.on_dup_ack(ack, self.snd_nxt, self.mss);
+            if self.congestion.dup_ack_count >= 3 {
+                self.fast_retransmit(tx);
+            }
         }
         true
     }
 
     /// Remove acknowledged segments from retransmit queue.
     /// Returns the `tx_time` of the last fully-acknowledged segment (for RTT sampling).
+    ///
+    /// W3 (Karn's algorithm): segments that were retransmitted at least
+    /// once carry ambiguous RTT signal — their acks are never sampled.
     fn remove_acked_segments(&mut self, ack: TcpSeq) -> Option<u64> {
         let mut last_tx_time: Option<u64> = None;
         // Drain segments that are fully covered by the ACK.
@@ -1722,7 +1821,9 @@ impl TcpSocket {
             let seg_end = seg.seq.wrapping_add(seg.len as u32);
             // Sequence comparison: seg_end before (or equal to) ack
             if ((seg_end as i32) - (ack as i32)) <= 0 {
-                last_tx_time = Some(seg.tx_time);
+                if seg.retries == 0 {
+                    last_tx_time = Some(seg.tx_time); // Karn: only never-retransmitted
+                }
                 self.retrans_queue.pop_front();
             } else {
                 break;
@@ -1752,6 +1853,65 @@ impl TcpSocket {
             // Retransmit earliest segment — with ITS starting sequence
             // number, not snd_nxt (R32-B5).
             let _ = self.tx_segment(tx, seg.seq, &seg.data);
+        }
+    }
+
+    /// W3: zero-window persist probe (RFC 793 persist state, minimal).
+    ///
+    /// Sends a single byte past the zero window so the peer is forced to
+    /// answer (its ACK carries the current window). Prefers re-probing
+    /// the oldest unacknowledged byte; if nothing is in flight yet,
+    /// transmits one fresh byte from the send buffer.
+    pub fn send_zero_window_probe(&mut self, tx: &mut TcpTxBatch) {
+        if let Some(seg) = self.retrans_queue.front() {
+            if !seg.data.is_empty() {
+                let _ = tx.push(
+                    self.local_ip,
+                    self.remote_ip,
+                    self.local_port,
+                    self.remote_port,
+                    seg.seq,
+                    self.rcv_nxt,
+                    0x0010, // ACK
+                    self.rcv_wnd,
+                    &seg.data[..1],
+                );
+                return;
+            }
+        }
+        if self.send_buffer.is_empty() {
+            self.timers.persist_deadline = 0; // nothing to probe for
+            return;
+        }
+        // Fresh 1-byte probe: stage into the retrans queue first (R35
+        // try_reserve discipline — no allocation can fail under the lock
+        // into a panic).
+        let mut data = alloc::vec::Vec::new();
+        if data.try_reserve_exact(1).is_err() || self.retrans_queue.try_reserve(1).is_err() {
+            return; // retry at the next persist tick
+        }
+        let byte = self.send_buffer.pop_front();
+        if let Some(b) = byte {
+            data.push(b);
+            tx.push(
+                self.local_ip,
+                self.remote_ip,
+                self.local_port,
+                self.remote_port,
+                self.snd_nxt,
+                self.rcv_nxt,
+                0x0018, // PSH + ACK
+                self.rcv_wnd,
+                &data,
+            );
+            self.retrans_queue.push_back(TcpSendSeg {
+                seq: self.snd_nxt,
+                len: 1,
+                data,
+                tx_time: crate::drivers::timer::get_jiffies(),
+                retries: 0,
+            });
+            self.snd_nxt = self.snd_nxt.wrapping_add(1);
         }
     }
 
@@ -1812,6 +1972,9 @@ impl TcpSocket {
         }
 
         if should_close {
+            // W3: record ETIMEDOUT — a blocked writer / SO_ERROR reader
+            // must see why the connection died.
+            self.pending_error = 110; // ETIMEDOUT
             self.state = TcpState::TCP_CLOSE;
             self.timers.stop_retransmit();
             return;
@@ -1876,6 +2039,17 @@ pub struct TcpConnectionManager {
     pending_connections: alloc::vec::Vec<TcpSocket>,
 }
 
+/// W3: which protocol slots a dispatched segment affected — tcp_rcv wakes
+/// the corresponding VFS wait queues after dropping the table lock
+/// (blocking recv/accept sleepers).
+#[derive(Debug, Clone, Copy)]
+pub struct TcpRvWake {
+    /// Data/established socket's protocol-table index
+    pub socket: i32,
+    /// Listener whose accept queue gained a child (SYN spawn), if any
+    pub parent: Option<i32>,
+}
+
 impl TcpConnectionManager {
     pub fn new() -> Self {
         Self {
@@ -1907,11 +2081,20 @@ impl TcpConnectionManager {
     /// R35: `tx` collects every segment this packet triggers; the caller
     /// (tcp_rcv) emits them after dropping TCP_TABLE_LOCK — no virtio TX
     /// spin under the table lock (chain 2).
-    pub fn handle_tcp_packet(&mut self, skb: &SkBuff, src_ip: u32, dest_ip: u32, tx: &mut TcpTxBatch) -> Result<(), ()> {
+    ///
+    /// W3: returns the affected slots so tcp_rcv can wake blocking
+    /// recv()/accept() waiters (None = parsed but nothing to wake).
+    pub fn handle_tcp_packet(
+        &mut self,
+        skb: &SkBuff,
+        src_ip: u32,
+        dest_ip: u32,
+        tx: &mut TcpTxBatch,
+    ) -> Result<Option<TcpRvWake>, ()> {
         // Parse TCP header
         let tcp_hdr = match tcp_parse_packet(skb) {
             Some(hdr) => hdr,
-            None => return Ok(()),
+            None => return Ok(None),
         };
 
         let src_port = TcpPort::from_be(tcp_hdr.source);
@@ -1983,10 +2166,10 @@ impl TcpConnectionManager {
                     }
                     let payload = match tcp_payload_slice(skb, tcp_hdr.header_len()) {
                         Some(p) => p,
-                        None => return Ok(()),
+                        None => return Ok(None),
                     };
                     let _ = socket.handle_packet(tcp_hdr, payload, tx);
-                    return Ok(());
+                    return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
                 }
             }
 
@@ -2005,12 +2188,12 @@ impl TcpConnectionManager {
                         }
                     }
                     if children >= MAX_BACKLOG_PER_LISTEN {
-                        return Ok(()); // drop the SYN
+                        return Ok(None); // drop the SYN
                     }
 
                     let slot = match table.alloc_slot() {
                         Ok(s) => s,
-                        Err(_) => return Ok(()),
+                        Err(_) => return Ok(None),
                     };
                     let mut new_socket = TcpSocket::new();
                     new_socket.local_port = dest_port;
@@ -2023,7 +2206,7 @@ impl TcpConnectionManager {
                     // handle_syn_recv → sends SYN-ACK → SYN_RECV.
                     let _ = new_socket.handle_packet(tcp_hdr, &[], tx);
                     let _ = table.install(slot, new_socket);
-                    return Ok(());
+                    return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
                 }
             }
         }
@@ -2188,7 +2371,8 @@ pub fn tcp_socket_alloc() -> Result<i32, i32> {
         let _g = TCP_TABLE_LOCK.lock_irqsave();
         match TCP_SOCKET_TABLE.alloc() {
             Ok(fd) => Ok(fd as i32),
-            Err(_) => Err(-5), // EIO
+            // W3: protocol table exhausted → EMFILE (Linux behavior), not EIO
+            Err(_) => Err(-24), // EMFILE
         }
     }
 }
@@ -2244,21 +2428,39 @@ pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
         // old code accepted every bind, so two listeners (or a listener
         // and a connecting client) could share a port; RX then delivered
         // to whichever slot the scan found first. Port 0 means "assign
-        // later" (ephemeral auto-bind in tcp_connect) and never conflicts.
-        if port != 0 {
-            for i in 0..TCP_SOCKET_TABLE.count {
-                if i == fd as usize {
-                    continue;
-                }
-                if let Some(s) = TCP_SOCKET_TABLE.sockets[i].as_ref() {
-                    if s.local_port == port && s.state != TcpState::TCP_CLOSE {
-                        return -98; // EADDRINUSE
-                    }
+        // now" (ephemeral, W3) and never conflicts.
+        let effective_port = if port == 0 {
+            // W3: bind(0) assigns the ephemeral port IMMEDIATELY (Linux
+            // semantics — getsockname must report it right after bind),
+            // instead of deferring to connect().
+            match alloc_ephemeral_port_checked() {
+                Some(p) => p,
+                None => return -99, // EADDRNOTAVAIL — ephemeral range exhausted
+            }
+        } else {
+            if let Some(conflict_fd) = tcp_find_port_conflict(port, fd) {
+                // W3 (SO_REUSEADDR, Linux semantics): both binders opting
+                // in may coexist on the same port (server restart pattern;
+                // this stack's binds are wildcard — the exact/wildcard
+                // distinction needs per-bind address tracking, listed as a
+                // leftover). One-sided or missing opt-in is still EADDRINUSE.
+                // SAFETY: caller holds TCP_TABLE_LOCK; index verified by the scan.
+                let both_reuse = TCP_SOCKET_TABLE.sockets[conflict_fd as usize]
+                    .as_ref()
+                    .map(|s| s.reuseaddr)
+                    .unwrap_or(false)
+                    && TCP_SOCKET_TABLE
+                        .get(fd as usize)
+                        .map(|s| s.reuseaddr)
+                        .unwrap_or(false);
+                if !both_reuse {
+                    return -98; // EADDRINUSE
                 }
             }
-        }
+            port
+        };
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
-            match socket.bind(port) {
+            match socket.bind(effective_port) {
                 Ok(()) => 0,
                 Err(()) => -5, // EIO
             }
@@ -2266,6 +2468,26 @@ pub fn tcp_bind(fd: i32, port: TcpPort) -> i32 {
             -5 // EBADF
         }
     }
+}
+
+/// R32-N9 helper: another live (non-CLOSE) socket already bound to `port`?
+/// Excludes `self_fd`. Returns the conflicting slot's index.
+fn tcp_find_port_conflict(port: TcpPort, self_fd: i32) -> Option<i32> {
+    // (caller holds TCP_TABLE_LOCK)
+    // SAFETY: single-core serialization of the global table (review NET-M15).
+    unsafe {
+        for i in 0..TCP_SOCKET_TABLE.count {
+            if i == self_fd as usize {
+                continue;
+            }
+            if let Some(s) = TCP_SOCKET_TABLE.sockets[i].as_ref() {
+                if s.local_port == port && s.state != TcpState::TCP_CLOSE {
+                    return Some(i as i32);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Listen on port
@@ -2297,7 +2519,14 @@ const EPHEMERAL_PORT_MAX: u16 = 60999;
 
 /// Allocate an unused local port in the ephemeral range.
 fn alloc_ephemeral_port() -> TcpPort {
-    // (caller tcp_connect already holds TCP_TABLE_LOCK — no nested take)
+    alloc_ephemeral_port_checked().unwrap_or(0)
+}
+
+/// W3: Option-returning variant — the ephemeral range can be exhausted
+/// (every port held by a live socket); callers translate None into an
+/// errno instead of silently binding port 0.
+fn alloc_ephemeral_port_checked() -> Option<TcpPort> {
+    // (caller tcp_connect/tcp_bind already holds TCP_TABLE_LOCK — no nested take)
     // SAFETY: single-core serialization of the global table (review NET-M15).
     unsafe {
         for _ in 0..(EPHEMERAL_PORT_MAX - 32768 + 1) {
@@ -2312,10 +2541,10 @@ fn alloc_ephemeral_port() -> TcpPort {
                     .unwrap_or(false)
             });
             if !in_use {
-                return port;
+                return Some(port);
             }
         }
-        0
+        None
     }
 }
 
@@ -2425,6 +2654,112 @@ pub fn tcp_accept(fd: i32) -> i32 {
         }
 
         -11 // EAGAIN (no completed connections)
+    }
+}
+
+// ============================================================================
+// W3: blocking-semantics query helpers (socket layer wait conditions)
+// ============================================================================
+
+/// Would a recv() on this slot return data, EOF or an error (i.e. anything
+/// but EAGAIN)? Used by the blocking-read re-check and poll.
+pub fn tcp_readable(fd: i32) -> bool {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        match TCP_SOCKET_TABLE.get(fd as usize) {
+            Some(ts) => {
+                !ts.recv_buffer.is_empty()
+                    || ts.pending_error != 0
+                    // Closed / peer-FINed: recv returns EOF, not EAGAIN.
+                    || ts.state == TcpState::TCP_CLOSE
+                    || ts.state == TcpState::TCP_CLOSE_WAIT
+            }
+            None => true, // slot gone — let recv() surface the error
+        }
+    }
+}
+
+/// Can send() accept more bytes now (established with window room, or a
+/// terminal state whose error returns immediately)?
+pub fn tcp_send_ready(fd: i32) -> bool {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        match TCP_SOCKET_TABLE.get(fd as usize) {
+            Some(ts) => match ts.state {
+                TcpState::TCP_SYN_SENT | TcpState::TCP_SYN_RECV => false, // handshake pending
+                TcpState::TCP_ESTABLISHED => {
+                    let in_flight = ts.snd_nxt.wrapping_sub(ts.snd_una);
+                    core::cmp::min(ts.snd_wnd as u32, ts.congestion.cwnd) > in_flight
+                }
+                _ => true, // terminal: send() errors out immediately
+            },
+            None => true,
+        }
+    }
+}
+
+/// Does this listener have an established, not-yet-accepted child?
+/// (Blocking-accept wait condition; mirrors tcp_accept's scan.)
+pub fn tcp_accept_pending(fd: i32) -> bool {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        for i in 0..TCP_SOCKET_TABLE.count {
+            if let Some(s) = TCP_SOCKET_TABLE.sockets[i].as_ref() {
+                if s.parent_fd == Some(fd)
+                    && !s.accepted
+                    && (s.state == TcpState::TCP_ESTABLISHED
+                        || s.state == TcpState::TCP_CLOSE_WAIT)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Locked read of a slot's bound local port (ephemeral bind readback).
+pub fn tcp_local_port(fd: i32) -> u16 {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe { TCP_SOCKET_TABLE.get(fd as usize).map(|s| s.local_port).unwrap_or(0) }
+}
+
+/// W3: locked read of a slot's remote endpoint (accept's addr writeout).
+pub fn tcp_remote_endpoint(fd: i32) -> (u32, u16) {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        TCP_SOCKET_TABLE
+            .get(fd as usize)
+            .map(|s| (s.remote_ip, s.remote_port))
+            .unwrap_or((0, 0))
+    }
+}
+
+/// Read-and-clear the slot's pending protocol error (SO_ERROR semantics).
+pub fn tcp_take_pending_error(fd: i32) -> i32 {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        match TCP_SOCKET_TABLE.get_mut(fd as usize) {
+            Some(s) => core::mem::replace(&mut s.pending_error, 0),
+            None => 0,
+        }
+    }
+}
+
+/// Mirror SO_REUSEADDR into the protocol slot (participates in bind checks).
+pub fn tcp_set_reuseaddr(fd: i32, on: bool) {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        if let Some(s) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+            s.reuseaddr = on;
+        }
     }
 }
 
@@ -2600,16 +2935,64 @@ pub fn tcp_parse_packet(skb: &SkBuff) -> Option<&'static TcpHdr> {
     if hdr_len < TCP_MIN_HLEN || hdr_len > TCP_MAX_HLEN {
         return None;
     }
+    // W3: the header (options included) must fit inside the packet — an
+    // over-long data offset made tcp_payload_slice underflow and fed the
+    // checksum/state machine garbage bytes.
+    if hdr_len > data.len() {
+        return None;
+    }
 
     Some(tcp_hdr)
 }
+
+/// W3: parse the MSS option (kind 2, len 4) from a SYN's option bytes.
+/// Returns None when the option is absent or malformed.
+pub fn tcp_parse_mss(tcp_hdr: &TcpHdr) -> Option<u16> {
+    let hlen = tcp_hdr.header_len();
+    if hlen <= TCP_MIN_HLEN || hlen > TCP_MAX_HLEN {
+        return None;
+    }
+    // SAFETY: tcp_hdr aliases the skb data buffer; the option bytes occupy
+    // [TCP_MIN_HLEN, header_len) of the same buffer, which
+    // tcp_parse_packet validated against the packet length.
+    let opts = unsafe {
+        core::slice::from_raw_parts(
+            (tcp_hdr as *const TcpHdr as *const u8).add(TCP_MIN_HLEN),
+            hlen - TCP_MIN_HLEN,
+        )
+    };
+    let mut i = 0;
+    while i < opts.len() {
+        match opts[i] {
+            0 => break,           // End of option list
+            1 => { i += 1; }      // NOP
+            kind => {
+                if i + 1 >= opts.len() {
+                    break;
+                }
+                let len = opts[i + 1] as usize;
+                if len < 2 || i + len > opts.len() {
+                    break;
+                }
+                if kind == 2 && len == 4 {
+                    return Some(u16::from_be_bytes([opts[i + 2], opts[i + 3]]));
+                }
+                i += len;
+            }
+        }
+    }
+    None
+}
+
+/// W3: RX segments dropped for TCP checksum mismatch (observability).
+pub static TCP_RX_CSUM_ERRORS: AtomicU32 = AtomicU32::new(0);
 
 /// Receive and process TCP packet
 ///
 /// # Arguments
 /// - `skb`: SkBuff (containing TCP packet)
-/// - `src_ip`: Source IP address
-/// - `dest_ip`: Destination IP address
+/// - `src_ip`: Source IP address (host order)
+/// - `dest_ip`: Destination IP address (host order)
 ///
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
@@ -2623,6 +3006,22 @@ pub fn tcp_parse_packet(skb: &SkBuff) -> Option<&'static TcpHdr> {
 pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     let manager = get_tcp_manager();
 
+    // W3: verify the TCP checksum BEFORE any state-machine processing —
+    // UDP already validated, TCP accepted bit-flipped segments as valid
+    // and enqueued corrupted data. A correct segment's checksum (computed
+    // over header+data INCLUDING the stored checksum field) sums to zero.
+    let tcp_hdr = match tcp_parse_packet(skb) {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+    {
+        let payload = tcp_payload_slice(skb, tcp_hdr.header_len()).unwrap_or(&[]);
+        if tcp_checksum(src_ip.to_be(), dest_ip.to_be(), tcp_hdr, payload) != 0 {
+            TCP_RX_CSUM_ERRORS.fetch_add(1, Ordering::Relaxed);
+            return Ok(()); // silently drop (counted)
+        }
+    }
+
     // Worst case per inbound packet: SYN-ACK spawn (1) or fast-retrans
     // data (1 x MSS) + dup/data ACK + FIN ACK (see handle_packet arms) —
     // 8 descriptor slots and one MSS of arena is a comfortable bound.
@@ -2631,15 +3030,20 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     let mut tx = TcpTxBatch::new();
     let _ = tx.reserve(8, TCP_DEFAULT_MSS as usize);
 
+    // W3: slots whose RX-visible state changed (data/establish/error) —
+    // their VFS wait queues are woken after the lock drops.
+    let mut wake: Option<TcpRvWake> = None;
+
     {
         // R21-N1: RX path mutates the shared table (states, buffers, slot
         // frees) — serialized against syscalls and the timer tick.
         let _table_g = TCP_TABLE_LOCK.lock_irqsave();
 
-        if let Err(()) = manager.handle_tcp_packet(skb, src_ip, dest_ip, &mut tx) {
-            // No matching connection found — send RST (RFC 793 §3.9).
-            // R35: recorded into `tx` and emitted after the lock drops.
-            if let Some(tcp_hdr) = tcp_parse_packet(skb) {
+        match manager.handle_tcp_packet(skb, src_ip, dest_ip, &mut tx) {
+            Ok(w) => wake = w,
+            Err(()) => {
+                // No matching connection found — send RST (RFC 793 §3.9).
+                // R35: recorded into `tx` and emitted after the lock drops.
                 if !tcp_hdr.rst() && dest_ip != 0xFFFFFFFF {
                     let _ = tcp_send_reset(src_ip, dest_ip, tcp_hdr, &mut tx);
                 }
@@ -2651,6 +3055,15 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // queues to the backlog drained by a later ethernet_poll; virtio TX
     // goes straight to the device) — same argument as Socket::close.
     tx.emit_all();
+
+    // W3: wake blocking recv/accept waiters on the affected sockets (data
+    // landed, connection established, RST/error recorded).
+    if let Some(w) = wake {
+        crate::net::socket::wake_tcp_socket(w.socket);
+        if let Some(parent) = w.parent {
+            crate::net::socket::wake_tcp_socket(parent);
+        }
+    }
 
     Ok(())
 }
@@ -2701,53 +3114,76 @@ fn tcp_send_reset(src_ip: u32, dest_ip: u32, tcp_hdr: &TcpHdr, tx: &mut TcpTxBat
 /// Called when ICMP destination unreachable or time exceeded is received
 /// for a packet that matches one of our TCP connections.
 ///
-/// Records a soft error — does not abort the connection, but the next
-/// send/receive operation will detect the failure.
+/// The embedded original header belongs to OUR OWN outbound packet:
+/// `orig_src_*` is this connection's LOCAL end and `orig_dst_*` its REMOTE
+/// end. W3: the old matching compared local_port against the original
+/// DESTINATION and remote_ip against the original SOURCE — every lookup
+/// missed, so ICMP fast-fail (RST-equivalent abort) never fired.
 pub fn tcp_v4_err(
     icmp_type: u8,
     icmp_code: u8,
-    src_ip: u32,
-    src_port: u16,
-    dest_ip: u32,
-    dest_port: u16,
+    orig_src_ip: u32,
+    orig_src_port: u16,
+    orig_dst_ip: u32,
+    orig_dst_port: u16,
 ) {
-    // Look up matching connection in the global socket table (single
-    // source of truth — the manager's established list never held client
-    // connections; review NET-C4/tcp_v4_err).
-    // SAFETY: single-core softirq/syscall serialization (review NET-M15).
-    unsafe {
-        for i in 0..TCP_SOCKET_TABLE.count {
-            let socket = match TCP_SOCKET_TABLE.sockets[i].as_mut() {
-                Some(s) => s,
-                None => continue,
-            };
-            if socket.local_port == dest_port
-                && socket.remote_port == src_port
-                && socket.remote_ip == src_ip
-            {
-                match icmp_type {
-                crate::net::icmp::icmp_type::DEST_UNREACH => {
-                    // Abort the connection on host/port unreachable
-                    match icmp_code {
-                        crate::net::icmp::icmp_code::HOST_UNREACH
-                        | crate::net::icmp::icmp_code::PORT_UNREACH
-                        | crate::net::icmp::icmp_code::NET_UNREACH => {
+    let mut wake_fd: Option<i32> = None;
+    {
+        let _g = TCP_TABLE_LOCK.lock_irqsave();
+        // SAFETY: TCP_SOCKET_TABLE is a global; caller (icmp_rcv softirq /
+        // syscall poll) is serialized by the table lock.
+        unsafe {
+            'scan: for i in 0..TCP_SOCKET_TABLE.count {
+                let socket = match TCP_SOCKET_TABLE.sockets[i].as_mut() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if socket.local_port == orig_src_port
+                    && socket.remote_port == orig_dst_port
+                    && socket.remote_ip == orig_dst_ip
+                    && (socket.local_ip == 0 || socket.local_ip == orig_src_ip)
+                {
+                    match icmp_type {
+                        crate::net::icmp::icmp_type::DEST_UNREACH => {
+                            // Abort the connection on host/port/net unreachable
+                            match icmp_code {
+                                crate::net::icmp::icmp_code::HOST_UNREACH => {
+                                    socket.pending_error = 113; // EHOSTUNREACH
+                                    socket.state = TcpState::TCP_CLOSE;
+                                }
+                                crate::net::icmp::icmp_code::PORT_UNREACH => {
+                                    // Peer refused: the classic RST-equivalent
+                                    socket.pending_error = 111; // ECONNREFUSED
+                                    socket.state = TcpState::TCP_CLOSE;
+                                }
+                                crate::net::icmp::icmp_code::NET_UNREACH => {
+                                    socket.pending_error = 101; // ENETUNREACH
+                                    socket.state = TcpState::TCP_CLOSE;
+                                }
+                                _ => {
+                                    // FRAG_NEEDED etc. — just record, don't abort
+                                }
+                            }
+                        }
+                        crate::net::icmp::icmp_type::TIME_EXCEEDED => {
+                            // TTL expired — abort
+                            socket.pending_error = 110; // ETIMEDOUT
                             socket.state = TcpState::TCP_CLOSE;
                         }
-                        _ => {
-                            // FRAG_NEEDED etc. — just record, don't abort
-                        }
+                        _ => {}
                     }
+                    socket.send_buffer.clear();
+                    socket.retrans_queue.clear();
+                    socket.timers.stop_retransmit();
+                    wake_fd = Some(i as i32);
+                    break 'scan;
                 }
-                crate::net::icmp::icmp_type::TIME_EXCEEDED => {
-                    // TTL expired — abort
-                    socket.state = TcpState::TCP_CLOSE;
-                }
-                _ => {}
-            }
-            return;
             }
         }
+    }
+    // W3: wake blocked writers/readers sleeping on the aborted connection.
+    if let Some(fd) = wake_fd {
+        crate::net::socket::wake_tcp_socket(fd);
     }
 }
 

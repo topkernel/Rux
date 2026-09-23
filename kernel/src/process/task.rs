@@ -136,15 +136,6 @@ fn stack_cache_alloc() -> *mut u8 {
         }
         return bottom;
     }
-
-    // Cache empty, allocate new
-    // SAFETY: Layout has non-zero size and valid alignment (16).
-    unsafe {
-        let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
-            .ok()
-            .unwrap_or(Layout::new::<[u8; KERNEL_STACK_SIZE]>());
-        alloc(layout)
-    }
 }
 
 /// Free a kernel stack (with caching)
@@ -528,6 +519,36 @@ pub struct Task {
     /// Single-threaded process: tgid == pid
     tgid: Pid,
 
+    /// Thread group leader (task_struct::group_leader).
+    ///
+    /// Self-pointer for a leader / single-threaded process; points at the
+    /// leader for CLONE_THREAD members. The ring `next_thread` below links
+    /// every live member (leader included) into a Linux-style circular
+    /// thread_group list. NULL only between construction and first fixup —
+    /// `group_leader_ptr()` heals it to self.
+    group_leader: *mut Task,
+
+    /// Next member of the thread group ring (task_struct::thread_group).
+    ///
+    /// The ring is: leader -> m_n -> ... -> m_1 -> leader (head insert in
+    /// thread_group_join). Members unlink themselves in exit. Guarded by
+    /// PROCESS_TREE_LOCK (Linux uses ->siglock / threadgroup_lock).
+    next_thread: *mut Task,
+
+    /// Live thread count in this group (task_struct::signal->nr_threads).
+    ///
+    /// AUTHORITATIVE ON THE LEADER ONLY. Initialized to 1 at construction;
+    /// thread_group_join/leave maintain it on the leader.
+    nr_threads: AtomicU32,
+
+    /// Exited group members awaiting deferred resource release
+    /// (Linux delay_put_task_struct analogue). Leader-only. A non-leader
+    /// thread cannot free its own kernel stack/Task slot while executing on
+    /// them and no one wait4()s threads, so the exiting member parks itself
+    /// here; the leader sweeps it once on_cpu clears (another member exit,
+    /// exec, or the leader's release_task).
+    pub dead_threads: Spinlock<alloc::vec::Vec<*mut Task>>,
+
     /// Process credentials
     cred: Cred,
 
@@ -800,6 +821,10 @@ impl Task {
             sigmask_restore_valid: false,
             pid_hash_next: ptr::null_mut(),
             tgid: pid, // Single-threaded process tgid == pid
+            group_leader: ptr::null_mut(), // fixed up by group_leader_ptr() / new_task_at
+            next_thread: ptr::null_mut(),  // fixed up by next_thread_ptr() / new_task_at
+            nr_threads: AtomicU32::new(1),
+            dead_threads: Spinlock::new(alloc::vec::Vec::new()),
             cred: Cred::new_init(),
             policy,
             prio,
@@ -958,6 +983,22 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, tgid)) as *mut Pid,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, group_leader)) as *mut *mut Task,
+            ptr,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, next_thread)) as *mut *mut Task,
+            ptr,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nr_threads)) as *mut AtomicU32,
+            AtomicU32::new(1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dead_threads)) as *mut Spinlock<alloc::vec::Vec<*mut Task>>,
+            Spinlock::new(alloc::vec::Vec::new()),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cred)) as *mut Cred,
@@ -1269,6 +1310,24 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, tgid)) as *mut Pid,
             pid,
+        );
+        // Thread group: single-member ring pointing at itself until a
+        // CLONE_THREAD child joins via thread_group_join().
+        ptr::write(
+            (ptr as usize + offset_of!(Task, group_leader)) as *mut *mut Task,
+            ptr,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, next_thread)) as *mut *mut Task,
+            ptr,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nr_threads)) as *mut AtomicU32,
+            AtomicU32::new(1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, dead_threads)) as *mut Spinlock<alloc::vec::Vec<*mut Task>>,
+            Spinlock::new(alloc::vec::Vec::new()),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cred)) as *mut Cred,
@@ -1886,6 +1945,137 @@ impl Task {
     #[inline]
     pub fn set_tgid(&mut self, tgid: Pid) {
         self.tgid = tgid;
+    }
+
+    // ==================== Thread group (task_struct::thread_group) ====================
+
+    /// Thread group leader pointer; heals a NULL (pre-fixup) value to self.
+    #[inline]
+    pub fn group_leader_ptr(&self) -> *mut Task {
+        if self.group_leader.is_null() {
+            self as *const Task as *mut Task
+        } else {
+            self.group_leader
+        }
+    }
+
+    /// Raw group_leader field (no healing) — for re-init during teardown.
+    #[inline]
+    pub fn group_leader_raw(&self) -> *mut Task {
+        self.group_leader
+    }
+
+    /// Set group leader (fork.rs, when joining an existing group).
+    #[inline]
+    pub fn set_group_leader(&mut self, leader: *mut Task) {
+        self.group_leader = leader;
+    }
+
+    /// Next member in the thread group ring; heals NULL to self.
+    #[inline]
+    pub fn next_thread_ptr(&self) -> *mut Task {
+        if self.next_thread.is_null() {
+            self as *const Task as *mut Task
+        } else {
+            self.next_thread
+        }
+    }
+
+    /// Live thread count. Authoritative on the leader.
+    #[inline]
+    pub fn nr_threads(&self) -> u32 {
+        self.nr_threads.load(Ordering::Acquire)
+    }
+
+    /// Is this task its own group leader (or single-threaded)?
+    #[inline]
+    pub fn is_thread_group_leader(&self) -> bool {
+        let l = self.group_leader;
+        l.is_null() || l as *const Task == self as *const Task
+    }
+
+    /// Join `member` into this task's thread group (CLONE_THREAD).
+    ///
+    /// Head-insert into the leader's ring: leader -> member -> old_first.
+    /// nr_threads is bumped on the leader. PROCESS_TREE_LOCK serializes
+    /// concurrent join/leave/walk (the process-tree lock doubles as the
+    /// thread-group lock; both guard task_struct linkage fields).
+    ///
+    /// # Safety
+    /// `self` is a valid leader (its ring is well-formed), `member` is a
+    /// fully-constructed task not yet in any ring, and neither is being
+    /// torn down concurrently.
+    pub unsafe fn thread_group_join(&self, member: *mut Task) {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let leader = self as *const Task as *mut Task;
+        (*member).set_group_leader(leader);
+        (*member).set_tgid(self.tgid);
+        // member.parent mirrors the leader's parent (threads share the real
+        // parent) — but the member is NOT linked into the parent's children
+        // list (wait4 only ever sees process products).
+        (*member).parent = self.parent;
+        (*member).parent_children_head = ptr::null_mut();
+        (*member).next_thread = (*leader).next_thread;
+        (*leader).next_thread = member;
+        (*leader).nr_threads.fetch_add(1, Ordering::Release);
+    }
+
+    /// Remove `member` from its thread group ring and return the leader.
+    ///
+    /// Returns NULL when the member is its own leader (nothing to leave).
+    /// The caller must NOT be `member` itself already scheduled out.
+    ///
+    /// # Safety
+    /// `member` is a live ring member of a well-formed ring.
+    pub unsafe fn thread_group_leave(member: *mut Task) -> *mut Task {
+        let leader = (*member).group_leader;
+        if leader.is_null() || leader as *const Task == member as *const Task {
+            return ptr::null_mut();
+        }
+        let _lock = PROCESS_TREE_LOCK.lock();
+        // Find member's predecessor, walking from the leader (ring, no tail).
+        let mut prev = leader;
+        let mut guard = 0u32;
+        while guard < 65536 {
+            let next = (*prev).next_thread;
+            if next == member || next == leader {
+                break;
+            }
+            prev = next;
+            guard += 1;
+        }
+        if (*prev).next_thread == member {
+            (*prev).next_thread = (*member).next_thread;
+        }
+        // Re-init to a self-ring so later accidental walks stay bounded.
+        (*member).next_thread = member;
+        (*member).group_leader = member;
+        (*leader).nr_threads.fetch_sub(1, Ordering::Release);
+        leader
+    }
+
+    /// Iterate every live member of this leader's group (leader included).
+    ///
+    /// Collect under the ring lock what you need and act outside it: signal
+    /// delivery takes pid-hash pins and the GRQ, which must not nest under
+    /// PROCESS_TREE_LOCK in the reverse order anywhere.
+    ///
+    /// # Safety
+    /// `self` is a valid task whose ring is well-formed.
+    pub unsafe fn for_each_group_member<F>(&self, mut f: F)
+    where
+        F: FnMut(*mut Task),
+    {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let leader = self as *const Task as *mut Task;
+        f(leader);
+        let mut t = (*leader).next_thread;
+        let mut guard = 0u32;
+        while !t.is_null() && t != leader && guard < 65536 {
+            f(t);
+            t = (*t).next_thread;
+            guard += 1;
+        }
     }
 
     /// Get process credentials

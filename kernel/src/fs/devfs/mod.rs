@@ -117,12 +117,20 @@ fn nulldev_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
     buf.len() as isize // pretend everything was swallowed
 }
 
+/// /dev/null is ALWAYS readable (immediate EOF) and writable (discard).
+/// Explicit poll op (review 5.2 low: relied on the generic "no handler =
+/// ready" fallback, which a future default change would silently break).
+fn nulldev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
+}
+
 static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     read: Some(nulldev_read),
     write: Some(nulldev_write),
     lseek: None,
     close: None,
-    poll: None,
+    poll: Some(nulldev_poll),
 };
 
 pub fn init() {
@@ -339,10 +347,8 @@ pub fn list_dir(path: &str) -> Option<Vec<DevfsDirEntry>> {
     if path.is_empty() || path == "/" || path == "." {
         let children = root.children.lock_irqsave();
         let mut entries = Vec::new();
-        let mut ino = 1u64;
         for (name, entry) in children.iter() {
-            entries.push((name.clone(), entry.is_dir(), ino));
-            ino += 1;
+            entries.push((name.clone(), entry.is_dir(), devfs_ino_hash(name)));
         }
         return Some(entries);
     }
@@ -372,10 +378,8 @@ pub fn list_dir(path: &str) -> Option<Vec<DevfsDirEntry>> {
     // List children
     let children = current.children.lock_irqsave();
     let mut entries = Vec::new();
-    let mut ino = 1u64;
     for (name, entry) in children.iter() {
-        entries.push((name.clone(), entry.is_dir(), ino));
-        ino += 1;
+        entries.push((name.clone(), entry.is_dir(), devfs_ino_hash(name)));
     }
     Some(entries)
 }
@@ -525,7 +529,6 @@ unsafe fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inod
     }
     let children = entry.children.lock_irqsave();
     let mut entries = alloc::vec::Vec::new();
-    let mut ino = 1u64;
     for (name, child) in children.iter() {
         let dt = if child.is_dir() {
             file_type::DT_DIR
@@ -535,11 +538,13 @@ unsafe fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inod
             file_type::DT_UNKNOWN
         };
         entries.push(crate::fs::inode::VfsDirEntry {
-            ino,
+            // Same ino generator as devfs_lookup/devfs_iget (hash of the
+            // name) so getdents64+stat agree on the inode number — review
+            // 5.4 (devfs lookup/readdir ino 不一致).
+            ino: devfs_ino_hash(name),
             name: name.as_bytes().to_vec(),
             file_type: dt,
         });
-        ino += 1;
     }
     Some(entries)
 }

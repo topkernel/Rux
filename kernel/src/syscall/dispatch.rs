@@ -139,8 +139,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         90 => process::sys_capget(args),       // capget
         91 => process::sys_capset(args),       // capset
         92 => process::sys_personality(args),  // personality
-        93 => process::sys_exit(args),         // exit
-        94 => process::sys_exit(args),         // exit_group
+        93 => process::sys_exit(args),         // exit (calling thread only)
+        94 => process::sys_exit_group(args),   // exit_group (whole thread group)
         95 => process::sys_waitid(args),       // waitid
         96 => process::sys_set_tid_address(args),
         97 => process::sys_unshare(args),      // unshare
@@ -293,7 +293,8 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         237 => memory::sys_set_mempolicy(args), // set_mempolicy
         238 => memory::sys_migrate_pages(args), // migrate_pages
         239 => memory::sys_move_pages(args),   // move_pages
-        240 => process::sys_perf_event_open(args), // perf_event_open
+        240 => process::sys_rt_tgsigqueueinfo(args), // rt_tgsigqueueinfo (asm-generic 240)
+        241 => process::sys_perf_event_open(args),   // perf_event_open (asm-generic 241)
 
         // ==================== Process Operations (cont.) ====================
         220 => process::sys_clone(args),       // clone

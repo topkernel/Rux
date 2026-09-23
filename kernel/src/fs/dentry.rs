@@ -149,8 +149,10 @@ impl Dentry {
         let mut components: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
         let mut current: Option<Arc<Dentry>> = self.parent.lock().clone();
         let name = self.get_name();
-        // Limit depth to prevent infinite loops on corrupted dentry trees
-        let max_depth = 64;
+        // Limit depth to prevent infinite loops on corrupted dentry trees.
+        // 256 (review 5.1: build_path>64 截断 — deep trees silently got
+        // truncated paths, breaking /proc/self/fd links and getcwd).
+        let max_depth = 256;
         while let Some(d) = current {
             if components.len() >= max_depth {
                 break;

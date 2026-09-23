@@ -10,9 +10,8 @@
 //! - child's thread.sp points to pt_regs
 //! - child's thread.ra points to ret_from_fork
 
-use crate::process::task::{Task, TaskState, SchedPolicy, Pid};
+use crate::process::task::{Task, TaskState, Pid};
 use crate::fs::FdTable;
-use crate::process::pid::alloc_pid;
 use crate::arch::riscv64::pt_regs::PtRegs;
 
 // ============================================================================
@@ -39,6 +38,10 @@ pub const CLONE_CHILD_SETTID: u64 = 0x01000000;
 pub const CLONE_THREAD: u64 = 0x00010000;
 /// vfork semantics
 pub const CLONE_VFORK: u64 = 0x00004000;
+/// New mount namespace group (accepted, not implemented)
+pub const CLONE_NEWNS: u64 = 0x00020000;
+/// Share System V semaphore undo state (accepted; undo table copied anyway)
+pub const CLONE_SYSVSEM: u64 = 0x00040000;
 
 /// Clone arguments structure
 pub struct CloneArgs {
@@ -67,6 +70,7 @@ pub fn do_fork() -> Option<Pid> {
         child_tid: core::ptr::null_mut(),
         tls: 0,
     })
+    .ok()
 }
 
 /// copy_thread - thread context copy
@@ -177,15 +181,64 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
     Some(())
 }
 
+/// Clone flags we understand (accepted; namespace/io flags are accepted
+/// and ignored — no namespace support yet). Unknown bits are rejected
+/// with EINVAL: silently mis-executing a future flag is worse.
+const CLONE_KNOWN_FLAGS: u64 = CLONE_VM
+    | CLONE_FS
+    | CLONE_FILES
+    | CLONE_SIGHAND
+    | CLONE_PIDFD       // 0x00001000 (accepted, no pidfd yet)
+    | CLONE_PTRACE      // 0x00002000
+    | CLONE_VFORK
+    | CLONE_PARENT      // 0x00008000 (accepted; grandparent reparenting
+                        //  not done — harmless for musl)
+    | CLONE_THREAD
+    | CLONE_NEWNS       // 0x00020000
+    | CLONE_SYSVSEM     // 0x00040000 (undo table is copied anyway)
+    | CLONE_SETTLS
+    | CLONE_PARENT_SETTID
+    | CLONE_CHILD_CLEARTID
+    | CLONE_CHILD_SETTID
+    | CLONE_DETACHED    // 0x00400000 legacy, harmless
+    | CLONE_UNTRACED    // 0x00800000
+    | CLONE_NEWCGROUP   // 0x02000000
+    | CLONE_NEWUTS      // 0x04000000
+    | CLONE_NEWIPC      // 0x08000000
+    | CLONE_NEWUSER     // 0x10000000
+    | CLONE_NEWPID      // 0x20000000
+    | CLONE_NEWNET      // 0x40000000
+    | CLONE_IO;         // 0x80000000
+const CLONE_PIDFD: u64 = 0x00001000;
+const CLONE_PTRACE: u64 = 0x00002000;
+const CLONE_PARENT: u64 = 0x00008000;
+const CLONE_DETACHED: u64 = 0x00400000;
+const CLONE_UNTRACED: u64 = 0x00800000;
+const CLONE_NEWCGROUP: u64 = 0x02000000;
+const CLONE_NEWUTS: u64 = 0x04000000;
+const CLONE_NEWIPC: u64 = 0x08000000;
+const CLONE_NEWUSER: u64 = 0x10000000;
+const CLONE_NEWPID: u64 = 0x20000000;
+const CLONE_NEWNET: u64 = 0x40000000;
+const CLONE_IO: u64 = 0x80000000;
+
+/// errno helpers (negative i32, syscall convention)
+fn einval() -> i32 { crate::errno::Errno::InvalidArgument.as_neg_i32() }
+fn eagain() -> i32 { crate::errno::Errno::TryAgain.as_neg_i32() }
+fn enomem() -> i32 { crate::errno::Errno::OutOfMemory.as_neg_i32() }
+fn efault() -> i32 { crate::errno::Errno::BadAddress.as_neg_i32() }
+
 /// Create child process/thread
 ///
 /// # Arguments
 /// - args: Clone arguments
 ///
 /// # Returns
-/// - Some(pid): PID of child process/thread (returned in parent)
-/// - None: Creation failed
-pub fn do_clone(args: CloneArgs) -> Option<Pid> {
+/// - Ok(pid): PID of child process/thread (returned in parent)
+/// - Err(errno): negative errno — EINVAL for illegal flag combinations,
+///   EAGAIN when the PID space is exhausted, ENOMEM for allocation
+///   failures, EFAULT when a CLONE_*SETTID pointer is unwritable.
+pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
     use crate::arch::riscv64::trap::current_pt_regs;
 
     // Validate clone flag constraints (matches Linux kernel checks):
@@ -193,11 +246,16 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
     // CLONE_SIGHAND requires CLONE_VM (kernel/fork.c copy_process)
     if args.flags & CLONE_THREAD != 0 && args.flags & CLONE_SIGHAND == 0 {
         crate::pr_warn!("clone: CLONE_THREAD requires CLONE_SIGHAND");
-        return None;
+        return Err(einval());
     }
     if args.flags & CLONE_SIGHAND != 0 && args.flags & CLONE_VM == 0 {
         crate::pr_warn!("clone: CLONE_SIGHAND requires CLONE_VM");
-        return None;
+        return Err(einval());
+    }
+    // Unknown flag bits (excluding the low CSIGNAL byte) → EINVAL.
+    if args.flags & !CLONE_KNOWN_FLAGS & !0xff != 0 {
+        crate::pr_warn!("clone: unknown flags {:#x}", args.flags);
+        return Err(einval());
     }
 
     // SAFETY: current is the parent task's raw pointer, valid throughout clone.
@@ -205,43 +263,64 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
     // child task fields are done before it is enqueued, so no concurrent access.
     unsafe {
         // Get current task (parent process)
-        let current = crate::sched::current()?;
+        let current = match crate::sched::current() {
+            Some(c) => c,
+            None => return Err(enomem()),
+        };
         let current_ptr = current as *mut Task;
 
         // Get parent's current PtRegs (saved during trap handling)
         let parent_pt_regs = current_pt_regs();
         if parent_pt_regs.is_null() {
-            return None;
+            return Err(enomem());
         }
 
         // Allocate task slot from scheduler
         // Note: alloc_task_slot calls new_task_at which already allocates kernel stack
-        let task_ptr = crate::sched::alloc_task_slot()?;
+        let task_ptr = match crate::sched::alloc_task_slot() {
+            Some(p) => p,
+            None => {
+                // Distinguish PID exhaustion (EAGAIN, Linux semantics) from
+                // task/stack allocation failure (ENOMEM): probe the PID
+                // allocator — if it is exhausted the failure was the PID.
+                return Err(match crate::process::pid::alloc_pid() {
+                    None => eagain(),
+                    Some(p) => {
+                        crate::process::pid::free_pid(p);
+                        enomem()
+                    }
+                });
+            }
+        };
         let pid = (*task_ptr).pid();
 
         crate::pr_info!("fork: parent={}, child={}, flags={:#x}",
             (*current).pid(), pid, args.flags);
 
-        // Add child to parent's children list
-        (*current_ptr).add_child(task_ptr);
-
-        // === copy_thread: Set up child's context ===
-        let parent_regs = &*parent_pt_regs;
-        if copy_thread(&mut *task_ptr, &args, parent_regs).is_none() {
+        // Full-unwind helper for every failure path past allocation: the
+        // child is hash-visible from alloc_task_slot, so unlink BEFORE
+        // freeing the stack (R33-pre: a concurrent kill on a hashed slot
+        // with a freed stack is the context-switch-onto-heap wedge).
+        let unwind = |task_ptr: *mut Task, err: i32| -> Result<Pid, i32> {
             (*current_ptr).remove_child(task_ptr);
-            // R7-B3: free_task_slot is a plain dealloc — the task stays in
-            // the PID hash and keeps its PID otherwise; a later kill/wait on
-            // that PID dereferences freed memory (dangling pid_hash UAF).
-            // R33-pre: unlink from the hash BEFORE freeing the stack — while
-            // the slot is still hashed, a concurrent kill() can find and
-            // wake this task onto a stack we just returned to the heap
-            // (the wedge hunt traced form-A to a context switch onto a
-            // freed stack: trap entry stores faulted on a heap address).
             crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
             (*task_ptr).free_kernel_stack();
             crate::process::pid::free_pid((*task_ptr).pid());
             crate::sched::free_task_slot(task_ptr);
-            return None;
+            Err(err)
+        };
+
+        // Threads (CLONE_THREAD) are NOT children: they never join the
+        // parent's children list — wait4 only ever reaps process products.
+        let is_thread = args.flags & CLONE_THREAD != 0;
+        if !is_thread {
+            (*current_ptr).add_child(task_ptr);
+        }
+
+        // === copy_thread: Set up child's context ===
+        let parent_regs = &*parent_pt_regs;
+        if copy_thread(&mut *task_ptr, &args, parent_regs).is_none() {
+            return unwind(task_ptr, enomem());
         }
 
         // Copy signal mask
@@ -251,19 +330,46 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
         (*task_ptr).set_pgid((*current_ptr).pgid());
         (*task_ptr).set_sid((*current_ptr).sid());
 
+        // === CLONE_PARENT_SETTID / CLONE_CHILD_SETTID ===
+        // Both are written in the PARENT address space, BEFORE the mm copy
+        // below: with CLONE_VM the memories are identical anyway; without
+        // CLONE_VM the COW copy carries the CHILD_SETTID word into the
+        // child (child-context semantics). EFAULT fails the clone (Linux).
+        if args.flags & CLONE_PARENT_SETTID != 0 && !args.parent_tid.is_null() {
+            let tid_val = pid as i32;
+            if crate::arch::riscv64::uaccess::copy_to_user(
+                args.parent_tid as *mut u8,
+                &tid_val as *const i32 as *const u8,
+                core::mem::size_of::<i32>(),
+            ) != 0
+            {
+                return unwind(task_ptr, efault());
+            }
+        }
+        if args.flags & CLONE_CHILD_SETTID != 0 && !args.child_tid.is_null() {
+            let tid_val = pid as i32;
+            if crate::arch::riscv64::uaccess::copy_to_user(
+                args.child_tid as *mut u8,
+                &tid_val as *const i32 as *const u8,
+                core::mem::size_of::<i32>(),
+            ) != 0
+            {
+                return unwind(task_ptr, efault());
+            }
+        }
+
+        // === CLONE_CHILD_CLEARTID: Clear TID when child exits ===
+        if args.flags & CLONE_CHILD_CLEARTID != 0 && !args.child_tid.is_null() {
+            (*task_ptr).set_clear_child_tid(args.child_tid);
+        }
+
         // === copy_files: Copy/share file descriptor table ===
         if args.flags & CLONE_FILES != 0 {
-            // CLONE_FILES: Share file descriptor table (threads)
-            // Clone the Arc to share the same FdTable
+            // CLONE_FILES: Share file descriptor table (threads). A parent
+            // with NO table shares exactly that — the child also gets None
+            // ("share the absence"), matching Linux's Arc-clone semantics.
             if let Some(parent_fdtable) = (*current_ptr).fdtable_arc() {
                 (*task_ptr).set_fdtable(Some(parent_fdtable));
-            } else {
-                // Parent has no fdtable, create new one
-                let child_fdtable = alloc::sync::Arc::new(FdTable::new());
-                (*task_ptr).set_fdtable(Some(child_fdtable));
-                if let Some(fdtable) = (*task_ptr).try_fdtable() {
-                    crate::init::init_std_fds_for_task(fdtable);
-                }
             }
         } else {
             // Copy file descriptor table (fork semantics)
@@ -298,15 +404,7 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                 parent_as.mm_users_inc();
                 (*task_ptr).set_address_space(Some(parent_as));
             } else {
-                (*current_ptr).remove_child(task_ptr);
-                // R7-B3: full unwind — see copy_thread error path above
-                // (hash first, then the stack — see the R33-pre note there).
-                // R9-13: free the kernel stack too (was leaked).
-                crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
-                (*task_ptr).free_kernel_stack();
-                crate::process::pid::free_pid((*task_ptr).pid());
-                crate::sched::free_task_slot(task_ptr);
-                return None;
+                return unwind(task_ptr, enomem());
             }
         } else {
             // Copy address space (COW)
@@ -317,27 +415,11 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                         (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(child_as)));
                     }
                     Err(_e) => {
-                        (*current_ptr).remove_child(task_ptr);
-                        // R7-B3: full unwind — see copy_thread error path
-                        // (hash first, then the stack — see the R33-pre note).
-                        // R9-13: free the kernel stack too (was leaked).
-                        crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
-                        (*task_ptr).free_kernel_stack();
-                        crate::process::pid::free_pid((*task_ptr).pid());
-                        crate::sched::free_task_slot(task_ptr);
-                        return None;
+                        return unwind(task_ptr, enomem());
                     }
                 }
             } else {
-                (*current_ptr).remove_child(task_ptr);
-                // R7-B3: full unwind — see copy_thread error path above
-                // (hash first, then the stack — see the R33-pre note there).
-                // R9-13: free the kernel stack too (was leaked).
-                crate::process::pid_hash::pid_hash_remove((*task_ptr).pid());
-                (*task_ptr).free_kernel_stack();
-                crate::process::pid::free_pid((*task_ptr).pid());
-                crate::sched::free_task_slot(task_ptr);
-                return None;
+                return unwind(task_ptr, enomem());
             }
         }
 
@@ -358,47 +440,15 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             (*task_ptr).set_cwd(&parent_cwd);
         }
 
-        // === CLONE_PARENT_SETTID: Set child TID in parent ===
-        if args.flags & CLONE_PARENT_SETTID != 0 && !args.parent_tid.is_null() {
-            // Verify pointer is writable
-            if crate::arch::riscv64::uaccess::access_ok(args.parent_tid as usize, 4) {
-                let tid_val = pid as i32;
-                crate::arch::riscv64::uaccess::copy_to_user(
-                    args.parent_tid as *mut u8,
-                    &tid_val as *const i32 as *const u8,
-                    core::mem::size_of::<i32>(),
-                );
-            }
+        // === CLONE_THREAD: join the parent's thread group ===
+        if is_thread {
+            let leader = (*current_ptr).group_leader_ptr();
+            // SAFETY: leader's ring is well-formed (invariant maintained by
+            // thread_group_join/leave); task_ptr is fully constructed and
+            // not yet runnable.
+            (*leader).thread_group_join(task_ptr);
         }
-
-        // === CLONE_CHILD_SETTID: Set TID in child ===
-        if args.flags & CLONE_CHILD_SETTID != 0 && !args.child_tid.is_null() {
-            // Set TID in child's memory
-            // This will be written when child runs
-            // Simplified implementation: write directly here
-            if crate::arch::riscv64::uaccess::access_ok(args.child_tid as usize, 4) {
-                let tid_val = pid as i32;
-                crate::arch::riscv64::uaccess::copy_to_user(
-                    args.child_tid as *mut u8,
-                    &tid_val as *const i32 as *const u8,
-                    core::mem::size_of::<i32>(),
-                );
-            }
-        }
-
-        // === CLONE_CHILD_CLEARTID: Clear TID when child exits ===
-        if args.flags & CLONE_CHILD_CLEARTID != 0 && !args.child_tid.is_null() {
-            (*task_ptr).set_clear_child_tid(args.child_tid);
-        }
-
-        // === CLONE_THREAD: Same thread group ===
-        if args.flags & CLONE_THREAD != 0 {
-            // CLONE_THREAD: Same thread group
-            // Child shares the same tgid (thread group ID) as parent
-            let parent_tgid = (*current_ptr).tgid();
-            (*task_ptr).set_tgid(parent_tgid);
-        }
-        // else: tgid = pid (already set in Task::new)
+        // else: tgid = pid, single-member self-ring (already set at construction)
 
         // === CLONE_SIGHAND: Share signal handlers ===
         if args.flags & CLONE_SIGHAND != 0 {
@@ -415,8 +465,24 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                 let child_signal = alloc::sync::Arc::new((**parent_signal).clone());
                 (*task_ptr).signal = Some(child_signal);
             }
-            // Also copy signal mask
-            (*task_ptr).sigmask = (*current_ptr).sigmask;
+        }
+
+        // === Scheduling attributes and identity inheritance (Linux
+        // copy_process: sched_fork copies nice/policy/rt_priority/cpus_allowed;
+        // comm and sigaltstack are also inherited by clone) ===
+        {
+            let parent = &*current_ptr;
+            let child = &mut *task_ptr;
+            child.set_comm(parent.comm());
+            child.set_policy(parent.policy());
+            // set_nice derives static_prio/normal_prio/prio AND updates the
+            // CFS entity weight — must go through it, not raw field writes.
+            child.set_nice(parent.nice());
+            child.set_rt_priority(parent.rt_priority());
+            child.set_cpus_allowed(parent.cpus_allowed());
+            child.set_oom_score_adj(parent.oom_score_adj());
+            child.sigstack = parent.sigstack;
+            child.dumpable = parent.dumpable;
         }
 
         // Copy SEM_UNDO table (child inherits parent's adjustments)
@@ -466,12 +532,18 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
                 "fork: enqueue refused for child pid={} — unwinding (R52 tripwire)",
                 pid
             );
-            (*current_ptr).remove_child(task_ptr);
-            crate::process::pid_hash::pid_hash_remove(pid);
-            (*task_ptr).free_kernel_stack();
-            crate::process::pid::free_pid(pid);
-            crate::sched::free_task_slot(task_ptr);
-            return None;
+            if is_thread {
+                // Not a children-list member; undo the ring join instead.
+                // SAFETY: task_ptr is a live ring member (joined above).
+                Task::thread_group_leave(task_ptr);
+                crate::process::pid_hash::pid_hash_remove(pid);
+                (*task_ptr).free_kernel_stack();
+                crate::process::pid::free_pid(pid);
+                crate::sched::free_task_slot(task_ptr);
+            } else {
+                return unwind(task_ptr, enomem());
+            }
+            return Err(enomem());
         }
 
         if is_vfork {
@@ -497,6 +569,6 @@ pub fn do_clone(args: CloneArgs) -> Option<Pid> {
             // Parent resumes here after child exec'd or exited
         }
 
-        Some(pid)
+        Ok(pid)
     }
 }

@@ -148,6 +148,72 @@ fn rootfs_path_cache_stats() -> (u64, u64) {
     )
 }
 
+/// Drop every cached (path → node) binding (review 5.4: 路径缓存无失效 —
+/// unlink/rename left the cache serving the OLD node for the OLD path).
+/// Full flush, not per-key eviction: the cache is 64 slots and directory
+/// mutation is rare; anything finer needs reverse node→paths indexing.
+fn rootfs_path_cache_flush() {
+    rootfs_path_cache_init();
+    let mut cache = ROOTFS_PATH_CACHE.lock();
+    if let Some(inner) = cache.as_mut() {
+        for bucket in inner.buckets.iter_mut() {
+            bucket.path.clear();
+            bucket.node = None;
+        }
+    }
+}
+
+/// Seconds on the monotonic boot clock (rootfs timestamp source; see the
+/// note in rootfs_getattr for why wall-clock is not available yet).
+fn uptime_secs() -> u64 {
+    crate::fs::procfs::get_uptime_secs()
+}
+
+/// Count directory entries referencing `ino` (st_nlink for hard links).
+fn rootfs_count_links(ino: u64) -> u32 {
+    let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
+    if sb_ptr.is_null() {
+        return 1;
+    }
+    // SAFETY: sb_ptr was set once at rootfs init and lives for the boot.
+    unsafe {
+        let root = &*sb_ptr;
+        let mut count = 0u32;
+        count_links_in(&root.root_node, ino, &mut count);
+        count.max(1)
+    }
+}
+
+fn count_links_in(node: &Arc<RootFSNode>, ino: u64, count: &mut u32) {
+    if node.is_dir() {
+        for child in node.list_children() {
+            count_links_in(&child, ino, count);
+        }
+    } else if node.ino == ino {
+        *count += 1;
+    }
+}
+
+/// Report whether `candidate` is `node` itself or reachable from its
+/// subtree — used by rename to reject cycles. Identity is the node's ino +
+/// tree position; both sides come from the live tree, and a subtree walk
+/// visits every Arc child, so comparing raw addresses of the same nodes is
+/// stable while the tree is not being mutated (the VFS mutation lock
+/// serializes renames).
+fn rootfs_subtree_contains(node: &RootFSNode, candidate: &RootFSNode) -> bool {
+    if core::ptr::eq(node, candidate) {
+        return true;
+    }
+    if node.is_dir() {
+        for child in node.list_children() {
+            if rootfs_subtree_contains(&child, candidate) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn get_rootfs_sb() -> Option<*mut RootFSSuperBlock> {
     let ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -186,10 +252,18 @@ pub struct RootFSNode {
     pub(crate) name: UnsafeCell<Vec<u8>>,
     /// Node type
     pub node_type: RootFSType,
-    /// Node data (if it's a file) — Arc enables true hard links: multiple
-    /// directory entries share the same data.  Write operations use
-    /// Arc::make_mut for copy-on-write semantics (fixes H61).
-    pub data: Spinlock<Option<alloc::sync::Arc<Vec<u8>>>>,
+    /// Node data (if it's a file). The buffer lives behind its OWN lock so
+    /// hard links (multiple RootFSNodes sharing this Arc) get POSIX
+    /// shared-write visibility: a write through one link is immediately
+    /// visible through the others. The old Arc::make_mut design copied on
+    /// write, silently forking the file per link (review 5.4: 硬链接写用
+    /// Arc::make_mut COW，POSIX 应共享可见).
+    pub data: alloc::sync::Arc<Spinlock<Vec<u8>>>,
+    /// Permission + file-type bits (chmod support — review 5.4: chmod no-op).
+    pub mode: Spinlock<u32>,
+    /// Last modification time in seconds (monotonic boot clock — see the
+    /// timestamp note in rootfs_getattr).
+    pub mtime: AtomicU64,
     /// Symbolic link target (if it's a symlink)
     pub link_target: Option<Vec<u8>>,
     /// Child nodes (if it's a directory)
@@ -210,10 +284,17 @@ unsafe impl Sync for RootFSNode {}
 impl RootFSNode {
     /// Create new node
     pub fn new(name: Vec<u8>, node_type: RootFSType, ino: u64) -> Self {
+        let mode = match node_type {
+            RootFSType::Directory => InodeMode::S_IFDIR | 0o755,
+            RootFSType::RegularFile => InodeMode::S_IFREG | 0o644,
+            RootFSType::SymbolicLink => InodeMode::S_IFLNK | 0o777,
+        };
         Self {
             name: UnsafeCell::new(name),
             node_type,
-            data: Spinlock::new(None),
+            data: alloc::sync::Arc::new(Spinlock::new(Vec::new())),
+            mode: Spinlock::new(mode),
+            mtime: AtomicU64::new(0),
             link_target: None,
             children: Spinlock::new(Vec::new()),
             ref_count: AtomicU64::new(1),
@@ -236,7 +317,7 @@ impl RootFSNode {
     /// Create file node
     pub fn new_file(name: Vec<u8>, data: Vec<u8>, ino: u64) -> Self {
         let mut node = Self::new(name, RootFSType::RegularFile, ino);
-        node.data = Spinlock::new(Some(alloc::sync::Arc::new(data)));
+        *node.data.lock() = data;
         node
     }
 
@@ -338,43 +419,30 @@ impl RootFSNode {
 
     /// Read file data
     pub fn read_data(&self, offset: usize, buf: &mut [u8]) -> usize {
-        let data_guard = self.data.lock();
-        if let Some(ref data_arc) = *data_guard {
-            if offset >= data_arc.len() {
-                return 0;
-            }
-            let remaining = &data_arc[offset..];
-            let to_copy = core::cmp::min(remaining.len(), buf.len());
-            buf[..to_copy].copy_from_slice(&remaining[..to_copy]);
-            to_copy
-        } else {
-            0
+        let data = self.data.lock();
+        if offset >= data.len() {
+            return 0;
         }
+        let remaining = &data[offset..];
+        let to_copy = core::cmp::min(remaining.len(), buf.len());
+        buf[..to_copy].copy_from_slice(&remaining[..to_copy]);
+        to_copy
     }
 
     /// Write file data.
     ///
-    /// If the data Arc is shared (hard link exists), uses copy-on-write
-    /// via `Arc::make_mut` to avoid mutating other links' data.
+    /// POSIX hard-link semantics: the buffer is the SHARED Arc<Spinlock<Vec>>
+    /// installed at link(2) time — writes through one directory entry are
+    /// immediately visible through every other link to the same inode.
     pub fn write_data(&self, offset: usize, data: &[u8]) -> usize {
-        let mut data_guard = self.data.lock();
-        if data_guard.is_none() {
-            *data_guard = Some(alloc::sync::Arc::new(Vec::new()));
+        let mut buf = self.data.lock();
+        let required_size = offset + data.len();
+        if buf.len() < required_size {
+            buf.resize(required_size, 0);
         }
-
-        if let Some(ref mut data_arc) = *data_guard {
-            // COW: clone if shared (Arc::make_mut returns &mut Vec<u8>)
-            let buf = alloc::sync::Arc::make_mut(data_arc);
-            let required_size = offset + data.len();
-            if buf.len() < required_size {
-                buf.resize(required_size, 0);
-            }
-
-            buf[offset..offset + data.len()].copy_from_slice(data);
-            data.len()
-        } else {
-            0
-        }
+        buf[offset..offset + data.len()].copy_from_slice(data);
+        self.mtime.store(uptime_secs(), Ordering::Release);
+        data.len()
     }
 }
 
@@ -597,8 +665,8 @@ impl RootFSSuperBlock {
                 Vec::new(), // placeholder — will be replaced with shared data
                 old_node.ino,
             );
-            // Share the same data Arc
-            *node.data.lock() = old_node.data.lock().clone();
+            // Share the same data buffer (POSIX hard-link semantics)
+            node.data = old_node.data.clone();
             node.link_target = old_node.link_target.clone();
             Arc::new(node)
         };
@@ -1253,8 +1321,9 @@ unsafe fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<allo
     let new_dir = alloc::sync::Arc::new(RootFSNode::new_dir(name.to_vec(), ino));
     node.add_child(new_dir.clone());
 
-    // Create inode
-    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o755));
+    // Create inode using the node's stored mode (mkdir honors umask-ed mode
+    // via the node default; chmod through rootfs_setattr is now real).
+    let mut inode = Inode::new(ino, InodeMode::new(*new_dir.mode.lock()));
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_dir)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
@@ -1287,6 +1356,7 @@ unsafe fn rootfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
 
     // Remove child
     if node.remove_child(name) {
+        rootfs_path_cache_flush();
         0
     } else {
         errno::Errno::NoSuchFileOrDirectory.as_neg_i32()
@@ -1323,6 +1393,7 @@ unsafe fn rootfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
 
     // Remove child
     if node.remove_child(name) {
+        rootfs_path_cache_flush();
         0
     } else {
         errno::Errno::NoSuchFileOrDirectory.as_neg_i32()
@@ -1360,7 +1431,7 @@ unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<all
     node.add_child(new_file.clone());
 
     // Create inode
-    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o644));
+    let mut inode = Inode::new(ino, InodeMode::new(*new_file.mode.lock()));
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_file)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
@@ -1396,7 +1467,7 @@ unsafe fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<allo
     node.add_child(new_link.clone());
 
     // Create inode
-    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
+    let mut inode = Inode::new(ino, InodeMode::new(*new_link.mode.lock()));
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&new_link)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
@@ -1434,17 +1505,22 @@ unsafe fn rootfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
         return errno::Errno::FileExists.as_neg_i32();
     }
 
-    // Create new link sharing the same data Arc (fixes H61)
+    // Create new link SHARING the target's data buffer — POSIX hard-link
+    // semantics (review 5.4): both directory entries observe the same
+    // contents; no copy-on-write fork.
     let new_link = {
         let mut node = RootFSNode::new_file(
             name.to_vec(),
-            Vec::new(), // placeholder
+            Vec::new(), // placeholder — replaced by the shared buffer below
             target_node.ino,
         );
-        *node.data.lock() = target_node.data.lock().clone();
+        node.data = target_node.data.clone();
+        *node.mode.lock() = *target_node.mode.lock();
         alloc::sync::Arc::new(node)
     };
     dir_node.add_child(new_link);
+    // Directory contents changed — drop stale path-cache entries.
+    rootfs_path_cache_flush();
 
     0
 }
@@ -1480,6 +1556,16 @@ unsafe fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_n
         return errno::Errno::NotADirectory.as_neg_i32();
     }
 
+    // Cycle check (review 5.4: rename 祖先仅一层 — renaming a directory
+    // into its own subtree would orphan it): reject when the destination
+    // directory is inside the source's subtree.
+    if source.is_dir() && rootfs_subtree_contains(&source, new_dir_node) {
+        return errno::Errno::InvalidArgument.as_neg_i32();
+    }
+
+    // Replace an existing destination entry (POSIX rename overwrites).
+    new_dir_node.remove_child(new_name);
+
     // Remove from old directory
     if !old_dir_node.remove_child(old_name) {
         return errno::Errno::NoSuchFileOrDirectory.as_neg_i32();
@@ -1491,6 +1577,7 @@ unsafe fn rootfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_n
     // Add to new directory
     new_dir_node.add_child(source);
 
+    rootfs_path_cache_flush();
     0
 }
 
@@ -1528,27 +1615,29 @@ unsafe fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> 
     };
     let node = &*(node_ptr as *const RootFSNode);
     if attr == setattr_attr::ATTR_SIZE {
-        // O_TRUNC / ftruncate: resize the file content. Without this,
-        // `> file` redirection on a rootfs-rooted system returned EROFS
-        // for every open (review VFS-M2). Content is Arc<Vec<u8>> —
-        // build the replacement instead of mutating in place.
+        // O_TRUNC / ftruncate: resize the SHARED buffer in place (hard
+        // links must observe the truncation — review 5.4 + VFS-M2).
         let new_size = value as usize;
-        let mut data_guard = node.data.lock();
-        let new_vec = match data_guard.as_ref() {
-            Some(old) => {
-                let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-                let keep = new_size.min(old.len());
-                v.extend_from_slice(&old[..keep]);
-                v.resize(new_size, 0);
-                v
-            }
-            None => alloc::vec![0u8; new_size],
-        };
-        *data_guard = Some(alloc::sync::Arc::new(new_vec));
+        {
+            let mut buf = node.data.lock();
+            buf.resize(new_size, 0);
+        }
+        node.mtime.store(uptime_secs(), Ordering::Release);
         0
     } else if attr == setattr_attr::ATTR_MODE {
-        // Mode change on rootfs: accepted (permissions are not enforced
-        // beyond DAC checks that use the fixed mode).
+        // chmod: store the permission bits so later DAC checks and stat
+        // see them (review 5.4: chmod was a no-op).
+        let file_type = match node.node_type {
+            RootFSType::Directory => InodeMode::S_IFDIR,
+            RootFSType::RegularFile => InodeMode::S_IFREG,
+            RootFSType::SymbolicLink => InodeMode::S_IFLNK,
+        };
+        *node.mode.lock() = file_type | (value as u32 & 0o7777);
+        node.mtime.store(uptime_secs(), Ordering::Release);
+        0
+    } else if attr == setattr_attr::ATTR_UID_GID {
+        // rootfs is a boot-time memory filesystem owned by root; chown is
+        // accepted and ignored (uid/gid remain 0).
         0
     } else {
         -95
@@ -1564,15 +1653,12 @@ unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     let node = &*(node_ptr as *const RootFSNode);
 
     stat.st_ino = node.ino;
-    stat.st_mode = if node.is_dir() {
-        InodeMode::S_IFDIR | 0o755
-    } else if node.is_symlink() {
-        InodeMode::S_IFLNK | 0o777
-    } else {
-        InodeMode::S_IFREG | 0o644
-    };
-    stat.st_size = node.data.lock().as_ref().map(|d| d.len() as i64).unwrap_or(0);
-    stat.st_nlink = 1; // TODO: track actual hard link count
+    stat.st_mode = *node.mode.lock();
+    stat.st_size = node.data.lock().len() as i64;
+    // Hard links share the ino; count directory entries referencing it by
+    // walking the tree from the root (small in-memory fs — cheap enough,
+    // and link(2) is rare).
+    stat.st_nlink = rootfs_count_links(node.ino);
     stat.st_uid = 0;
     stat.st_gid = 0;
     stat.st_rdev = 0;
@@ -1603,17 +1689,13 @@ fn rootfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         };
         let node = &*(node_ptr as *const RootFSNode);
         let offset = file.get_pos() as usize;
-        let data_guard = node.data.lock();
-        if let Some(ref data_arc) = *data_guard {
-            let available = data_arc.len().saturating_sub(offset);
-            let to_read = buf.len().min(available);
-            if to_read > 0 {
-                buf[..to_read].copy_from_slice(&data_arc[offset..offset + to_read]);
-                file.set_pos((offset + to_read) as u64);
-                to_read as isize
-            } else {
-                0
-            }
+        let data = node.data.lock();
+        let available = data.len().saturating_sub(offset);
+        let to_read = buf.len().min(available);
+        if to_read > 0 {
+            buf[..to_read].copy_from_slice(&data[offset..offset + to_read]);
+            file.set_pos((offset + to_read) as u64);
+            to_read as isize
         } else {
             0
         }
@@ -1657,7 +1739,7 @@ fn rootfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
             None => return -9,
         };
         let node = &*(node_ptr as *const RootFSNode);
-        node.data.lock().as_ref().map_or(0isize, |d: &alloc::sync::Arc<alloc::vec::Vec<u8>>| d.len() as isize)
+        node.data.lock().len() as isize
     };
     let new_pos = match whence {
         0 => offset,
@@ -1771,14 +1853,8 @@ unsafe fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sy
     // Find child by name
     let child = node.find_child(name).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-    // Create VFS inode
-    let mode = if child.is_dir() {
-        InodeMode::new(InodeMode::S_IFDIR | 0o755)
-    } else if child.is_symlink() {
-        InodeMode::new(InodeMode::S_IFLNK | 0o777)
-    } else {
-        InodeMode::new(InodeMode::S_IFREG | 0o644)
-    };
+    // Create VFS inode using the node's STORED mode (chmod-visible)
+    let mode = InodeMode::new(*child.mode.lock());
 
     let mut inode = Inode::new(child.ino, mode);
     inode.fs_id = crate::fs::inode::FS_ID_ROOTFS;  // icache isolation (VFS-H8)

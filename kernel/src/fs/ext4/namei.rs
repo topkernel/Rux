@@ -424,6 +424,14 @@ pub fn ext4_add_entry(
     // Read directory inode
     let dir = super::inode::read_inode(fs, dir_ino)?;
 
+    // htree-indexed directory (EXT4_INDEX_FL): inserting without updating
+    // the dx index leaves real Linux unable to see the entry (and our own
+    // linear scan would fight the spanning rec_len of block 0). Refuse the
+    // write — reads still work via the linear scan fallback (review 5.5).
+    if dir.i_flags & super::features::EXT4_INDEX_FL != 0 {
+        return Err(-(crate::syscall::errno::EOPNOTSUPP as i32));
+    }
+
     // Read directory data blocks
     let block_size = fs.block_size as usize;
     let dir_size = dir.i_size as usize;
@@ -667,6 +675,13 @@ fn add_block_to_inode_extent(
         &mut *(inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
     };
 
+    // Depth>0 trees have internal (index) nodes in the root slot — treating
+    // the root as a leaf and appending corrupts the tree. Refuse
+    // (review 5.5: extent 深度>0 无条件当叶追加).
+    if header.eh_magic == EXT4_EXT_MAGIC && header.eh_depth > 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
     if header.eh_magic != EXT4_EXT_MAGIC {
         // Initialize extent header (shouldn't happen for properly created extent inodes)
         header.eh_magic = EXT4_EXT_MAGIC;
@@ -759,9 +774,13 @@ fn ext4_mkdir_no_journal(
     name: &[u8],
     mode: u16,
 ) -> Result<u32, i32> {
-    // Check name length
-    if name.is_empty() || name.len() > 255 {
+    // Check name length (NAME_MAX; Linux returns ENAMETOOLONG — review 5.5:
+    // name_len u8 截断无检查, the u8 field would silently truncate)
+    if name.is_empty() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    if name.len() > 255 {
+        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
     }
 
     // Check if parent link count would overflow
@@ -821,6 +840,10 @@ fn ext4_mkdir_no_journal(
     // fix, mkdir had not).
     let mut parent = super::inode::read_inode(fs, dir_ino)?;
     parent.i_links_count += 1;
+    let cycles = crate::drivers::intc::clint::read_time();
+    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+    parent.i_mtime = sec;
+    parent.i_ctime = sec;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
 
     // Sync all buffers to ensure directory is fully written
@@ -907,9 +930,13 @@ fn ext4_create_inner(
     name: &[u8],
     mode: u16,
 ) -> Result<u32, i32> {
-    // Check name length
-    if name.is_empty() || name.len() > 255 {
+    // Check name length (NAME_MAX; Linux returns ENAMETOOLONG — review 5.5:
+    // name_len u8 截断无检查, the u8 field would silently truncate)
+    if name.is_empty() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    if name.len() > 255 {
+        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
     }
 
     // Allocate new inode
@@ -921,6 +948,9 @@ fn ext4_create_inner(
 
     // Add entry to parent directory
     ext4_add_entry(fs, dir_ino, name, new_ino, file_type::EXT4_FT_REG_FILE)?;
+
+    // Parent directory timestamps (review 5.5)
+    touch_parent_dir(fs, dir_ino);
 
     Ok(new_ino)
 }
@@ -965,9 +995,13 @@ fn ext4_symlink_inner(
     name: &[u8],
     target: &[u8],
 ) -> Result<u32, i32> {
-    // Check name length
-    if name.is_empty() || name.len() > 255 {
+    // Check name length (NAME_MAX; Linux returns ENAMETOOLONG — review 5.5:
+    // name_len u8 截断无检查, the u8 field would silently truncate)
+    if name.is_empty() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    if name.len() > 255 {
+        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
     }
 
     // Allocate new inode with S_IFLNK mode
@@ -1004,6 +1038,9 @@ fn ext4_symlink_inner(
 
     // Add directory entry
     ext4_add_entry(fs, dir_ino, name, new_ino, file_type::EXT4_FT_SYMLINK)?;
+
+    // Parent directory timestamps (review 5.5)
+    touch_parent_dir(fs, dir_ino);
 
     Ok(new_ino)
 }
@@ -1048,9 +1085,12 @@ fn ext4_link_inner(
     target_ino: u32,
     name: &[u8],
 ) -> Result<(), i32> {
-    // Validate name
-    if name.is_empty() || name.len() > 255 {
+    // Validate name (NAME_MAX; ENAMETOOLONG per Linux)
+    if name.is_empty() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    if name.len() > 255 {
+        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
     }
 
     // Read target inode
@@ -1083,8 +1123,13 @@ fn ext4_link_inner(
     // Write updated inode back
     super::inode::write_inode_disk(fs, target_ino, &target_inode)?;
 
-    // Add directory entry
-    ext4_add_entry(fs, dir_ino, name, target_ino, file_type::EXT4_FT_REG_FILE)?;
+    // Add directory entry with the TARGET's real file type — a hard link
+    // to a symlink/device used to be recorded as a regular file
+    // (review 5.5 sibling: rename 保留原 file_type).
+    ext4_add_entry(fs, dir_ino, name, target_ino, file_type_from_mode(target_inode.i_mode))?;
+
+    // Parent directory timestamps (review 5.5: 父目录时间戳更新补全)
+    touch_parent_dir(fs, dir_ino);
 
     Ok(())
 }
@@ -1110,6 +1155,13 @@ pub fn ext4_delete_entry(
 ) -> Result<u32, i32> {
     // Read parent directory inode
     let dir_inode = super::inode::read_inode(fs, dir_ino)?;
+
+    // htree-indexed directory: entry removal must also update the dx tree;
+    // refusing is the only correct option for a linear-only writer
+    // (review 5.5: indexed 目录的创建/删除/改名返回 ENOTSUP).
+    if dir_inode.i_flags & super::features::EXT4_INDEX_FL != 0 {
+        return Err(-(crate::syscall::errno::EOPNOTSUPP as i32));
+    }
 
     // Find the entry
     let (block_nr, offset, entry_ino) = find_dir_entry(fs, &dir_inode, name)?;
@@ -1217,6 +1269,78 @@ fn find_dir_entry(
     Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
 }
 
+/// Update a directory's mtime/ctime (monotonic boot clock — see the
+/// ext4_setattr timestamp note; there is no wall clock yet).
+fn touch_parent_dir(fs: &Ext4FileSystem, dir_ino: u32) {
+    if let Ok(mut dir) = super::inode::read_inode(fs, dir_ino) {
+        let cycles = crate::drivers::intc::clint::read_time();
+        let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+        dir.i_mtime = sec;
+        dir.i_ctime = sec;
+        let _ = super::inode::write_inode_disk(fs, dir_ino, &dir);
+    }
+}
+
+/// Map an inode mode to the ext4 directory-entry file type.
+fn file_type_from_mode(mode: u16) -> u8 {
+    match mode & S_IFMT {
+        S_IFDIR => file_type::EXT4_FT_DIR,
+        S_IFREG => file_type::EXT4_FT_REG_FILE,
+        0o020000 => file_type::EXT4_FT_CHRDEV,
+        0o060000 => file_type::EXT4_FT_BLKDEV,
+        0o010000 => file_type::EXT4_FT_FIFO,
+        0o140000 => file_type::EXT4_FT_SOCK,
+        S_IFLNK => file_type::EXT4_FT_SYMLINK,
+        _ => file_type::EXT4_FT_UNKNOWN,
+    }
+}
+
+/// Walk the ".." chain starting at `dir_ino` and report whether
+/// `ancestor_ino` appears (bounded walk: corrupt trees cannot loop us).
+fn is_descendant_of(fs: &Ext4FileSystem, dir_ino: u32, ancestor_ino: u32) -> bool {
+    let mut current = dir_ino;
+    for _ in 0..64 {
+        if current == ancestor_ino {
+            return true;
+        }
+        let dir_inode = match super::inode::read_inode(fs, current) {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+        // Read the ".." entry from the first block.
+        let block_nr = match get_dir_block_nr(fs, &dir_inode, 0) {
+            Ok(b) if b != 0 => b,
+            _ => return false,
+        };
+        let block_data = unsafe {
+            match read_block_to_vec(fs.device, block_nr, fs.block_size as usize) {
+                Ok(d) => d,
+                Err(_) => return false,
+            }
+        };
+        if block_data.len() < 24 {
+            return false;
+        }
+        // "." at offset 0; ".." follows at dot_rec_len.
+        let dot_rec_len =
+            u16::from_le_bytes([block_data[4], block_data[5]]) as usize;
+        if dot_rec_len < 12 || dot_rec_len + 12 > block_data.len() {
+            return false;
+        }
+        let parent = u32::from_le_bytes([
+            block_data[dot_rec_len],
+            block_data[dot_rec_len + 1],
+            block_data[dot_rec_len + 2],
+            block_data[dot_rec_len + 3],
+        ]);
+        if parent == 0 || parent == current {
+            return false; // filesystem root
+        }
+        current = parent;
+    }
+    false
+}
+
 /// Find previous entry in directory block
 fn find_prev_entry(block_data: &[u8], target_offset: usize, block_size: usize) -> usize {
     let mut offset = 0;
@@ -1274,9 +1398,24 @@ fn ext4_unlink_inner(
     dir_ino: u32,
     name: &[u8],
 ) -> Result<(), i32> {
-    // Check name
-    if name.is_empty() || name.len() > 255 {
+    // Check name (NAME_MAX; ENAMETOOLONG per Linux)
+    if name.is_empty() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    if name.len() > 255 {
+        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+    }
+
+    // unlink(2) on a directory must fail EISDIR BEFORE the directory entry
+    // is removed (review 5.5: unlink 目录无 EISDIR — the old code tore the
+    // directory down and only then noticed).
+    {
+        let dir_inode = super::inode::read_inode(fs, dir_ino)?;
+        let (_, _, entry_ino) = find_dir_entry(fs, &dir_inode, name)?;
+        let target = super::inode::read_inode(fs, entry_ino)?;
+        if target.is_dir() {
+            return Err(errno::Errno::IsADirectory.as_neg_i32());
+        }
     }
 
     // Delete directory entry
@@ -1348,9 +1487,12 @@ fn ext4_rmdir_inner(
     dir_ino: u32,
     name: &[u8],
 ) -> Result<(), i32> {
-    // Check name
-    if name.is_empty() || name.len() > 255 {
+    // Check name (NAME_MAX; ENAMETOOLONG per Linux)
+    if name.is_empty() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    if name.len() > 255 {
+        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
     }
 
     // Find the directory entry first
@@ -1469,7 +1611,7 @@ fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     // - VFS icache: path_lookup resurrects cached VFS Inodes, and the
     //   stale sb block map made the new file read/write through the OLD
     //   file's blocks (reproduced via `ln -s x; rm x` + file readback).
-    crate::fs::page_cache::get_page_cache().invalidate_inode(ino);
+    crate::fs::page_cache::get_page_cache().invalidate_inode(fs as *const Ext4FileSystem as u64, ino as u64);
     crate::fs::inode::icache_remove(ino as u64, fs as *const Ext4FileSystem as u64);
 
     let inodes_per_group = fs.inodes_per_group;
@@ -1542,6 +1684,7 @@ pub(crate) fn free_indirect_block(
         if depth > 1 {
             free_indirect_block(fs, allocator, ptr, depth - 1)?;
         } else {
+            revoke_freed_block(fs, ptr as u64);
             allocator.free_block(ptr as u64)?;
         }
     }
@@ -1549,6 +1692,29 @@ pub(crate) fn free_indirect_block(
     // Free the indirect block itself
     allocator.free_block(blocknr as u64)?;
     Ok(())
+}
+
+/// Revoke a freed block through the CURRENT journal handle (if any).
+///
+/// Review 5.6 (revoke 最小实现): before a block returns to the free pool,
+/// record a jbd2 revoke so recovery cannot replay an OLDER journal entry
+/// for that block number over whatever file eventually reallocates it.
+/// Outside a transaction (no handle) this is a no-op — the same
+/// write-through property that makes our commits immediately checkpointed
+/// also means an unjournaled free has no log record to suppress.
+fn revoke_freed_block(fs: &Ext4FileSystem, block: u64) {
+    if fs.journal.is_none() {
+        return;
+    }
+    // SAFETY: reading the current task's journal handle slot is task-local;
+    // the handle lives on this task's stack for the duration of the
+    // enclosing ext4_* operation (set/clear bracket it).
+    if let Some(handle_ptr) = unsafe { get_current_handle() } {
+        // SAFETY: same stack-lifetime contract as above.
+        unsafe {
+            let _ = crate::fs::jbd2::jbd2_journal_revoke(&mut *handle_ptr, block, None);
+        }
+    }
 }
 
 /// Free all blocks associated with an inode
@@ -1584,6 +1750,7 @@ fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(),
             for ext in entries {
                 let start = ext.start_block();
                 for i in 0..ext.length() as u64 {
+                    revoke_freed_block(fs, start + i);
                     allocator.free_block(start + i)?;
                 }
             }
@@ -1594,6 +1761,7 @@ fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(),
     // Direct/indirect block mode: free direct blocks
     for i in 0..12 {
         if inode.i_block[i] != 0 {
+            revoke_freed_block(fs, inode.i_block[i] as u64);
             allocator.free_block(inode.i_block[i] as u64)?;
         }
     }
@@ -1657,9 +1825,12 @@ fn ext4_rename_inner(
     new_dir_ino: u32,
     new_name: &[u8],
 ) -> Result<(), i32> {
-    // Validate names
-    if old_name.is_empty() || old_name.len() > 255 || new_name.is_empty() || new_name.len() > 255 {
+    // Validate names (NAME_MAX; ENAMETOOLONG per Linux)
+    if old_name.is_empty() || new_name.is_empty() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    if old_name.len() > 255 || new_name.len() > 255 {
+        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
     }
 
     // Read parent directory inodes
@@ -1673,12 +1844,20 @@ fn ext4_rename_inner(
     let old_inode = super::inode::read_inode(fs, old_ino)?;
     let old_is_dir = (old_inode.i_mode & S_IFMT) == S_IFDIR;
 
-    // Determine file type for new directory entry
-    let new_file_type = if old_is_dir {
-        file_type::EXT4_FT_DIR
-    } else {
-        file_type::EXT4_FT_REG_FILE
-    };
+    // Determine file type for the new directory entry from the INODE MODE,
+    // not the old binary dir-or-file guess — symlinks, devices and fifos
+    // must keep their d_type (review 5.5: rename 保留原 file_type).
+    let new_file_type = file_type_from_mode(old_inode.i_mode);
+
+    // Renaming a directory into itself or its own subdirectory would
+    // create a ".." cycle (review 5.5: rename 环检查错 — the old check only
+    // compared names within the same directory). Walk the new parent's
+    // ancestor chain; if it reaches the renamed directory, refuse.
+    if old_is_dir && old_dir_ino != new_dir_ino {
+        if new_dir_ino == old_ino || is_descendant_of(fs, new_dir_ino, old_ino) {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
+    }
 
     // Check if new name already exists
     let target_exists = find_dir_entry(fs, &new_dir_inode, new_name).ok();

@@ -153,15 +153,16 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
 
     match cmd {
         IPC_RMID => {
-            // Owner check: only creator or CAP_IPC_OWNER can destroy
+            // Owner check (review IPC P2): uid OR cuid path, or CAP_SYS_ADMIN.
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
                     let cred = crate::sched::current().map(|t| t.cred());
                     let allowed = match cred {
                         Some(ref c) => {
-                            c.euid == entry.inner.perm.cuid
-                                || crate::security::capable(crate::security::CAP_IPC_OWNER)
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
                         }
                         None => false,
                     };
@@ -237,23 +238,63 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<MsqidDsUapi>()) {
                 return -(errno::EFAULT as i64);
             }
-            let idx2 = match MSG_IDS.find_with_perms(msqid, 0o6) {
+            let idx2 = match MSG_IDS.find_with_perms(msqid, 0o2) {
                 Ok(i) => i,
                 Err(e) => return e as i64,
             };
+            // Owner check (review IPC P2): euid == uid || cuid, or CAP_SYS_ADMIN.
+            {
+                let slots = MSG_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx2] {
+                    let cred = crate::sched::current().map(|t| t.cred());
+                    let allowed = match cred {
+                        Some(ref c) => {
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
+                        }
+                        None => false,
+                    };
+                    if !allowed {
+                        return -(errno::EPERM as i64);
+                    }
+                }
+            }
+            // Struct copy through the exception-table path (review IPC M).
+            let mut ds = MsqidDsUapi {
+                msg_perm: IpcPermUapi::default(),
+                msg_stime: 0,
+                msg_rtime: 0,
+                msg_ctime: 0,
+                __msg_cbytes: 0,
+                msg_qnum: 0,
+                msg_qbytes: 0,
+                msg_lspid: 0,
+                msg_lrpid: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            // SAFETY: buf_ptr was access_ok-validated above; ds is a
+            // stack-local repr(C) struct of exactly that size.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    &mut ds as *mut MsqidDsUapi as *mut u8,
+                    buf_ptr,
+                    core::mem::size_of::<MsqidDsUapi>(),
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
             let mut slots = MSG_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
-                // Read uid/gid/mode/msg_qbytes from user-supplied msg_perm via struct field access.
-                // SAFETY: buf_ptr was access_ok-validated for size_of::<MsqidDsUapi>();
-                // reading through a repr(C) struct pointer is well-defined.
-                let ds = unsafe { &*(buf_ptr as *const MsqidDsUapi) };
-                let new_uid = unsafe { core::ptr::read_volatile(&ds.msg_perm.uid) };
-                let new_gid = unsafe { core::ptr::read_volatile(&ds.msg_perm.gid) };
-                let new_mode = unsafe { core::ptr::read_volatile(&ds.msg_perm.mode) };
+                let new_uid = ds.msg_perm.uid;
+                let new_gid = ds.msg_perm.gid;
+                let new_mode = ds.msg_perm.mode;
                 entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
                 // Per Linux msgctl IPC_SET: raising msg_qbytes above the system
                 // default (MSGMNB) requires CAP_SYS_RESOURCE.
-                let new_qbytes = unsafe { core::ptr::read_volatile(&ds.msg_qbytes) };
+                let new_qbytes = ds.msg_qbytes;
                 if new_qbytes > 0 {
                     let old_qbytes = entry.inner.qbytes.load(Ordering::Relaxed) as u64;
                     if new_qbytes > 16384 && new_qbytes > old_qbytes {
@@ -389,8 +430,11 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
     data.resize(msgsz, 0);
     // SAFETY: data_ptr was access_ok-validated for msgsz bytes above;
     // data is a Vec with capacity msgsz, so the destination is valid.
-    unsafe {
-        copy_from_user(data.as_mut_ptr(), data_ptr, msgsz);
+    // The return value (uncopied byte count) MUST be checked — a partial
+    // copy would zero-fill the tail and corrupt the message (review IPC M:
+    // msgsnd 忽略 copy_from_user 返回值).
+    if unsafe { copy_from_user(data.as_mut_ptr(), data_ptr, msgsz) } != 0 {
+        return -(errno::EFAULT as i64);
     }
 
     let idx = match MSG_IDS.find_with_perms(msqid, 0o2) {
@@ -432,7 +476,9 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
                     return -(errno::EIDRM as i64);
                 }
             } else {
-                return -(errno::EINVAL as i64);
+                // Slot vanished mid-loop: an RMID freed it after waking us
+                // — EIDRM, not EINVAL (review IPC L: RMID 后 EIDRM 口径).
+                return -(errno::EIDRM as i64);
             }
         }
 
@@ -566,10 +612,9 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
 
     let msg_copy = (msgflg & super::util::MSG_COPY) != 0;
 
-    // MSG_COPY requires msgtyp == 0 (receive from position msgtyp)
-    if msg_copy && msgtyp != 0 {
-        return -(errno::EINVAL as i64);
-    }
+    // MSG_COPY (Linux CHECKPOINT_RESTORE semantics): msgtyp is the ORDINAL
+    // position in the queue (0-based), NOT a type filter. Negative values
+    // are invalid (review IPC M: MSG_COPY 仅队首).
 
     loop {
         // Try to find a matching message
@@ -584,7 +629,20 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                     return -(errno::EIDRM as i64);
                 }
                 let mut messages = entry.inner.messages.lock();
-                let match_idx = find_msg_match(&messages, msgtyp, msgflg);
+                // MSG_COPY: treat msgtyp as the ordinal index into the queue.
+                let match_idx = if msg_copy {
+                    if msgtyp < 0 {
+                        return -(errno::EINVAL as i64);
+                    }
+                    let ord = msgtyp as usize;
+                    if ord < messages.len() {
+                        Some(ord)
+                    } else {
+                        None
+                    }
+                } else {
+                    find_msg_match(&messages, msgtyp, msgflg)
+                };
 
                 if let Some(mi) = match_idx {
                     if msg_copy {
@@ -624,7 +682,8 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                     None
                 }
             } else {
-                return -(errno::EINVAL as i64);
+                // Slot vanished mid-loop (RMID) — EIDRM (review IPC L).
+                return -(errno::EIDRM as i64);
             }
         };
 

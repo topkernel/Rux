@@ -180,6 +180,21 @@ impl TcpTimerManager {
                     let _ = socket.send_ack_public(tx);
                     socket.timers.delack_deadline = 0;
                 }
+
+                // W3: zero-window persist probe — the peer advertised a
+                // zero window with data still queued; ask for an update
+                // with a 1-byte probe (its ACK carries the reopened
+                // window, which process_ack applies).
+                if socket.timers.persist_deadline > 0 && now >= socket.timers.persist_deadline {
+                    if socket.snd_wnd == 0 && !socket.send_buffer.is_empty() {
+                        socket.send_zero_window_probe(tx);
+                        socket.timers.persist_deadline =
+                            now + crate::net::tcp::TCP_PERSIST_INTERVAL_JIFFIES;
+                    } else {
+                        // Window reopened or nothing left to send — disarm.
+                        socket.timers.persist_deadline = 0;
+                    }
+                }
             }
             TcpState::TCP_SYN_SENT => {
                 // R32-N16: SYN retransmission. connect() arms
@@ -190,6 +205,9 @@ impl TcpTimerManager {
                     && now >= socket.timers.retransmit_deadline
                 {
                     if socket.timers.syn_retries >= TCP_MAX_RETRIES {
+                        // W3: record ETIMEDOUT for blocked connect()/send()
+                        // waiters and SO_ERROR readers.
+                        socket.pending_error = 110; // ETIMEDOUT
                         socket.state = TcpState::TCP_CLOSE;
                         socket.timers.stop_retransmit();
                         socket.timers.syn_retries = 0;
@@ -313,6 +331,13 @@ pub fn tcp_timer_tick() {
     // the loopback backlog (drained later by ethernet_poll) or straight
     // to the virtio device, never back into tcp_rcv on this CPU.
     tx.emit_all();
+
+    // W3: timer transitions (retransmit exhaustion → CLOSE + ETIMEDOUT,
+    // orphan CLOSE_WAIT reaping) are RX-invisible — wake every TCP
+    // socket's waiters so blocked readers/writers re-check and see the
+    // EOF/error instead of sleeping forever. Coarse by design: waiters
+    // re-validate; the table is bounded (TCP_SOCKET_TABLE_SIZE).
+    crate::net::socket::wake_all_tcp_sockets();
 }
 
 /// Timer softirq handler — deferred from clock interrupt via `raise_softirq_irqoff(Timer)`.

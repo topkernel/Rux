@@ -141,6 +141,27 @@ pub struct Ext4Inode {
 }
 
 impl Ext4Inode {
+    /// Convert the in-memory inode back to the on-disk layout (tracked
+    /// fields only; untracked bytes are re-merged by write_inode_disk's
+    /// read-modify-write).
+    pub fn to_on_disk(&self) -> Ext4InodeOnDisk {
+        let mut d = Ext4InodeOnDisk::default();
+        d.i_mode = self.mode;
+        d.i_uid = self.uid;
+        d.i_gid = self.gid;
+        d.i_size = self.size as u32;
+        d.i_size_high = (self.size >> 32) as u32;
+        d.i_atime = self.atime;
+        d.i_ctime = self.ctime;
+        d.i_mtime = self.mtime;
+        d.i_links_count = self.links_count;
+        d.i_blocks = self.blocks as u32;
+        d.set_blocks_high((self.blocks >> 32) as u16);
+        d.i_flags = self.flags;
+        d.i_block = self.block;
+        d
+    }
+
     /// Create from disk format
     pub fn from_disk(disk: &Ext4InodeOnDisk, ino: u32) -> Self {
         Self {
@@ -276,6 +297,22 @@ impl Ext4Inode {
 
             if block_index >= blocks.len() {
                 break;
+            }
+
+            // Sparse hole (block number 0 = unallocated): reads must return
+            // ZEROES, never the content of physical block 0 (superblock
+            // backup garbage) — review 5.5 (稀疏洞读盘块 0).
+            if blocks[block_index] == 0 {
+                let remaining = to_read - total_read;
+                let available_in_block = block_size - block_offset;
+                let zero_len = core::cmp::min(remaining, available_in_block);
+                for i in 0..zero_len {
+                    buf[buf_offset + i] = 0;
+                }
+                total_read += zero_len;
+                buf_offset += zero_len;
+                current_offset += zero_len;
+                continue;
             }
 
             // SAFETY: fs.device is a valid GenDisk pointer for the mounted filesystem;
@@ -443,9 +480,14 @@ pub fn write_inode(
     // SAFETY: bh is a valid BufferHead from bio::bread; b_data is block_size bytes.
     let data = unsafe { &mut (*bh).b_data };
 
-    // Bounds check: ensure inode data fits within the block
-    let inode_size = core::mem::size_of::<Ext4InodeOnDisk>();
-    if in_block_offset + inode_size > data.len() {
+    // Bounds check: copy length clamped to the on-disk slot size so the
+    // 172-byte in-memory struct never spills into the next inode's slot
+    // (review 5.5: write_inode 的 172B 布局按实际 inode_size 拷贝).
+    let copy_len = core::cmp::min(
+        core::mem::size_of::<Ext4InodeOnDisk>(),
+        fs.inode_size as usize,
+    );
+    if in_block_offset + copy_len > data.len() {
         bio::brelse(bh);
         return Err(errno::Errno::IOError.as_neg_i32());
     }
@@ -453,8 +495,8 @@ pub fn write_inode(
     // Convert Ext4Inode to on-disk format
     // Read existing on-disk inode first to preserve untracked fields
     let mut inode_on_disk = Ext4InodeOnDisk::default();
-    // SAFETY: bounds checked above; in_block_offset + inode_size <= data.len().
-    let src_ptr = data[in_block_offset..in_block_offset + inode_size].as_ptr() as *const Ext4InodeOnDisk;
+    // SAFETY: bounds checked above; in_block_offset + copy_len <= data.len().
+    let src_ptr = data[in_block_offset..in_block_offset + copy_len].as_ptr() as *const Ext4InodeOnDisk;
     unsafe { core::ptr::copy_nonoverlapping(src_ptr, &mut inode_on_disk, 1) };
 
     // Update tracked fields
@@ -473,14 +515,14 @@ pub fn write_inode(
     inode_on_disk.i_size_high = (inode.size >> 32) as u32;
 
     // Write inode to block buffer
-    // SAFETY: bounds checked above; in_block_offset + inode_size <= data.len().
+    // SAFETY: bounds checked above; in_block_offset + copy_len <= data.len().
     let inode_bytes = unsafe {
         core::slice::from_raw_parts(
             &inode_on_disk as *const _ as *const u8,
-            inode_size,
+            copy_len,
         )
     };
-    data[in_block_offset..in_block_offset + inode_size].copy_from_slice(inode_bytes);
+    data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
 
     // Mark buffer dirty and sync
     // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies
@@ -552,27 +594,30 @@ pub fn write_inode_disk(
     // mutable slice of block_size bytes containing the inode table block.
     let data = unsafe { &mut (*bh).b_data };
 
-    // Bounds check (R20-FS2): the 172-byte in-memory inode struct must fit in
-    // the block at the slot offset. With small on-disk inode sizes (e.g. the
-    // legal s_inode_size=128) the LAST slot of a block overruns the buffer
-    // and the slice write below panics — read_inode/write_inode already had
-    // this check; write_inode_disk did not.
-    let inode_size = core::mem::size_of::<Ext4InodeOnDisk>();
-    if in_block_offset + inode_size > data.len() {
+    // Bounds check (R20-FS2): the copy is clamped to the ON-DISK inode slot
+    // size (s_inode_size) AND to the block: with s_inode_size < 172 the full
+    // in-memory struct would spill into the NEXT inode's slot; with the last
+    // slot of the block it would overrun the buffer outright (review 5.5:
+    // 172B 布局按实际 inode_size 拷贝).
+    let copy_len = core::cmp::min(
+        core::mem::size_of::<Ext4InodeOnDisk>(),
+        fs.inode_size as usize,
+    );
+    if in_block_offset + copy_len > data.len() {
         bio::brelse(bh);
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
     // Write inode to block buffer
-    // SAFETY: inode is a reference to an Ext4InodeOnDisk; size_of fits within
-    // the block starting at in_block_offset (bounds-checked above).
+    // SAFETY: inode is a reference to an Ext4InodeOnDisk; copy_len bytes
+    // fit within the block starting at in_block_offset (bounds-checked above).
     let inode_bytes = unsafe {
         core::slice::from_raw_parts(
             inode as *const _ as *const u8,
-            core::mem::size_of::<Ext4InodeOnDisk>(),
+            copy_len,
         )
     };
-    data[in_block_offset..in_block_offset + inode_bytes.len()].copy_from_slice(inode_bytes);
+    data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
 
     // Mark buffer dirty and sync
     // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies

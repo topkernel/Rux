@@ -590,6 +590,13 @@ pub fn arp_rcv(skb: &SkBuff, eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(
         return Ok(());
     }
 
+    // W3: hln/pln must describe Ethernet(6)/IPv4(4) — the fixed-layout
+    // ArpPacket parse below is only valid for those widths; anything else
+    // (ATM 20-byte hardware addresses etc.) was parsed at wrong offsets.
+    if arp_pkt.hdr.ar_hln != (ETH_ALEN as u8) || arp_pkt.hdr.ar_pln != 4 {
+        return Ok(());
+    }
+
     let sender_ip = arp_pkt.sender_ip();
     let sender_mac = arp_pkt.sender_mac();
     arp_update(sender_ip, sender_mac);
@@ -619,19 +626,21 @@ pub fn arp_rcv(skb: &SkBuff, eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(
 
 /// Check if IP is local IP
 fn is_local_ip(ip: u32) -> bool {
-    let local_ip = get_local_ip();
-    ip == local_ip
+    ip == LOCAL_IP_ADDR
 }
 
-/// Get local IP address (host byte order)
+/// W3: the single local IPv4 address (host byte order) — QEMU slirp's
+/// fixed guest address 10.0.2.15 (10.0.2.0/24: .2 = gateway/host alias,
+/// .3 = virtual DNS).
 ///
-/// R34: 10.0.2.15 — the fixed guest address of QEMU slirp user networking
-/// (10.0.2.0/24: .2 = gateway/host alias, .3 = virtual DNS). The previous
-/// 192.168.1.100 made every outbound packet carry a source address slirp
-/// does not route back without an extra ARP round-trip for a foreign
-/// address; the slirp-standard address works out of the box.
+/// TODO(netdev): derive from the network device's address table instead
+/// of this constant (multiple addresses / DHCP are unsupported by design
+/// in this round).
+pub const LOCAL_IP_ADDR: u32 = 0x0A00020F;
+
+/// Get local IP address (host byte order)
 pub fn get_local_ip() -> u32 {
-    0x0A00020F
+    LOCAL_IP_ADDR
 }
 
 /// Get local MAC address

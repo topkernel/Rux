@@ -205,8 +205,23 @@ pub fn sys_shmget(args: [u64; 6]) -> i64 {
     let size = args[1] as u64;
     let shmflg = args[2] as i32;
 
-    // Round up size to page boundary
-    let size = if size == 0 { 0 } else { ((size + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1)) };
+    // SHMMAX (review IPC L: shmget SHMMAX) — 1 GiB cap, mirroring a typical
+    // Linux default; anything above is rejected with EINVAL.
+    const SHMMAX: u64 = 1 << 30;
+    if size > SHMMAX {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Round up to page boundary with overflow checking (review IPC L:
+    // shm size 回绕 checked — size near u64::MAX used to wrap to 0).
+    let size = if size == 0 {
+        0
+    } else {
+        match size.checked_add(PAGE_SIZE as u64 - 1) {
+            Some(rounded) => rounded & !(PAGE_SIZE as u64 - 1),
+            None => return -(errno::EINVAL as i64),
+        }
+    };
 
     // Validate size against existing segment (per Linux shmget): if key
     // already exists, the requested size must not exceed the existing size.
@@ -245,15 +260,16 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
 
     match cmd {
         IPC_RMID => {
-            // Owner check: only creator or CAP_IPC_OWNER can destroy
+            // Owner check (review IPC P2): uid OR cuid path, or CAP_SYS_ADMIN.
             {
                 let slots = SHM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
                     let cred = crate::sched::current().map(|t| t.cred());
                     let allowed = match cred {
                         Some(ref c) => {
-                            c.euid == entry.inner.perm.cuid
-                                || crate::security::capable(crate::security::CAP_IPC_OWNER)
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
                         }
                         None => false,
                     };
@@ -335,20 +351,60 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
                 return -(errno::EFAULT as i64);
             }
-            let idx2 = match SHM_IDS.find_with_perms(shmid, 0o6) {
+            let idx2 = match SHM_IDS.find_with_perms(shmid, 0o2) {
                 Ok(i) => i,
                 Err(e) => return e as i64,
             };
+            // Owner check (review IPC P2): euid == uid || cuid, or CAP_SYS_ADMIN.
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx2] {
+                    let cred = crate::sched::current().map(|t| t.cred());
+                    let allowed = match cred {
+                        Some(ref c) => {
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
+                        }
+                        None => false,
+                    };
+                    if !allowed {
+                        return -(errno::EPERM as i64);
+                    }
+                }
+            }
+            // Struct copy through the exception-table path (review IPC M).
+            let mut ds = ShmidDsUapi {
+                shm_perm: IpcPermUapi::default(),
+                shm_segsz: 0,
+                shm_atime: 0,
+                shm_dtime: 0,
+                shm_ctime: 0,
+                shm_cpid: 0,
+                shm_lpid: 0,
+                shm_nattch: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            // SAFETY: buf_ptr was access_ok-validated above; ds is a
+            // stack-local repr(C) struct of exactly that size.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    &mut ds as *mut ShmidDsUapi as *mut u8,
+                    buf_ptr,
+                    core::mem::size_of::<ShmidDsUapi>(),
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
             let mut slots = SHM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
-                // Read uid/gid/mode from user-supplied shm_perm via struct field access.
-                // SAFETY: buf_ptr was access_ok-validated for size_of::<ShmidDsUapi>();
-                // reading through a repr(C) struct pointer is well-defined.
-                let ds = unsafe { &*(buf_ptr as *const ShmidDsUapi) };
-                let new_uid = unsafe { core::ptr::read_volatile(&ds.shm_perm.uid) };
-                let new_gid = unsafe { core::ptr::read_volatile(&ds.shm_perm.gid) };
-                let new_mode = unsafe { core::ptr::read_volatile(&ds.shm_perm.mode) };
-                entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
+                entry.inner.perm.update_from_set(
+                    ds.shm_perm.uid,
+                    ds.shm_perm.gid,
+                    ds.shm_perm.mode,
+                );
                 entry.inner.shm_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
             0
@@ -551,83 +607,79 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
 
     let root_ppn = addr_space.root_ppn();
 
-    // Map physical pages from the shared segment
+    // Overlap handling (review IPC M: SHM_REMAP 未实现+重叠先破坏后报错 —
+    // the old code checked nothing and overwrote live mappings BEFORE any
+    // error could surface). With SHM_REMAP the overlapping portions are
+    // unmapped first (Linux do_shmat behaviour); without it, any overlap
+    // is EINVAL. Checked BEFORE a single PTE is written.
+    let shm_remap = (shmflg & super::SHM_REMAP) != 0;
+    loop {
+        let overlap: Option<(usize, usize)> = {
+            let vma_mgr = addr_space.vma_read();
+            let mut found = None;
+            for vma in vma_mgr.iter() {
+                let vs = vma.start().as_usize();
+                let ve = vma.end().as_usize();
+                if vs < attach_addr + size_aligned && ve > attach_addr {
+                    found = Some((vs, ve));
+                    break;
+                }
+            }
+            found
+        };
+        match overlap {
+            None => break,
+            Some((vs, ve)) => {
+                if !shm_remap {
+                    return -(errno::EINVAL as i64);
+                }
+                let s = vs.max(attach_addr);
+                let e = ve.min(attach_addr + size_aligned);
+                if e <= s {
+                    break;
+                }
+                if addr_space.munmap(VirtAddr::new(s), e - s).is_err() {
+                    return -(errno::ENOMEM as i64);
+                }
+                // VMA list changed — rescan from the top.
+            }
+        }
+    }
+
+    // Reserve the attachment and snapshot the page list under ONE lock
+    // hold, then map OUTSIDE the lock: the old rollback paths re-locked
+    // SHM_IDS.slots while still holding it — an instant self-deadlock on
+    // any allocation failure (review IPC P2: shmat 回滚路径潜伏自死锁).
+    let phys_pages: alloc::vec::Vec<usize>;
     {
         let slots = SHM_IDS.slots.lock();
-        if let Some(ref entry) = slots[idx] {
-            if entry.deleted {
-                return -(errno::EIDRM as i64);
-            }
-            // Reserve the attachment BEFORE mapping any page, in the same
-            // lock section IPC_RMID uses for its nattch==0 free decision:
-            // otherwise a concurrent RMID can free the pages while we are
-            // still mapping them (review IPC-C4 UAF). Failure paths below
-            // decrement symmetrically.
-            entry.inner.nattch.fetch_add(1, Ordering::Relaxed);
-            let pages_lock = entry.inner.pages.lock();
-            if let Some(ref shm_pages) = *pages_lock {
-                // Build PTE flags
-                let mut pte_flags = crate::arch::riscv64::mm::PageTableEntry::V
-                    | crate::arch::riscv64::mm::PageTableEntry::A
-                    | crate::arch::riscv64::mm::PageTableEntry::D
-                    | crate::arch::riscv64::mm::PageTableEntry::U
-                    | crate::arch::riscv64::mm::PageTableEntry::R;
-                if !shm_readonly {
-                    pte_flags |= crate::arch::riscv64::mm::PageTableEntry::W;
-                }
-
-                // Map each page
+        let entry = match slots[idx] {
+            Some(ref e) if !e.deleted => e,
+            Some(_) => return -(errno::EIDRM as i64),
+            None => return -(errno::EINVAL as i64),
+        };
+        // Reserve the attachment BEFORE mapping any page, in the same lock
+        // section IPC_RMID uses for its nattch==0 free decision (review
+        // IPC-C4 UAF). Failure paths below decrement symmetrically — under
+        // a FRESH lock hold.
+        entry.inner.nattch.fetch_add(1, Ordering::Relaxed);
+        let pages_lock = entry.inner.pages.lock();
+        match *pages_lock {
+            Some(ref shm_pages) => {
+                let mut v = alloc::vec::Vec::with_capacity(shm_pages.page_count());
                 for i in 0..shm_pages.page_count() {
-                    let phys = match shm_pages.get_page(i) {
-                        Some(p) => p,
-                        None => {
-                            // Rollback: unmap already mapped pages using munmap
-                            let rollback_size = i * PAGE_SIZE;
-                            if rollback_size > 0 {
-                                let _ = addr_space.munmap(
-                                    VirtAddr::new(attach_addr),
-                                    rollback_size,
-                                );
-                            }
-                            // Undo the early nattch reservation
-                            {
-                                let slots = SHM_IDS.slots.lock();
-                                if let Some(ref entry) = slots[idx] {
-                                    entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
-                                }
-                            }
-                            return -(errno::ENOMEM as i64);
-                        }
-                    };
-                    // SAFETY: attach_addr + i*PAGE_SIZE is page-aligned and within the
-                    // newly allocated VMA range; phys is a valid page from get_zeroed_page;
-                    // root_ppn is the current process's page table root.
-                    unsafe {
-                        // R7-A5: map+refcount under the PTE lock (same
-                        // discipline as the demand-fault paths).
-                        let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
-                        map_user_page(
-                            root_ppn,
-                            MmVirtAddr::new((attach_addr + i * PAGE_SIZE) as u64),
-                            MmPhysAddr::new(phys as u64),
-                            pte_flags,
-                        );
-                        // The new PTE references the segment page: take a
-                        // per-attachment reference so shmdt/exit's put_page
-                        // cannot free a page the segment still owns
-                        // (review 2R.6). Segments free their pages only
-                        // when every attachment is gone.
-                        let page = crate::mm::pfn_to_page_mut(
-                            crate::mm::phys_to_pfn(phys),
-                        );
-                        if !page.is_null() {
-                            (*page).get_page();
-                        }
-                        drop(_pte_guard);
+                    match shm_pages.get_page(i) {
+                        Some(p) => v.push(p),
+                        None => v.push(0), // hole marker handled below
                     }
                 }
-            } else {
-                // pages already torn down: undo the reservation
+                phys_pages = v;
+            }
+            None => {
+                drop(pages_lock);
+                drop(slots);
+                // pages already torn down: undo the reservation under a
+                // fresh lock (the old code deadlocked right here).
                 {
                     let slots = SHM_IDS.slots.lock();
                     if let Some(ref entry) = slots[idx] {
@@ -636,8 +688,58 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
                 }
                 return -(errno::EIDRM as i64);
             }
-        } else {
-            return -(errno::EINVAL as i64);
+        }
+    }
+
+    // Build PTE flags
+    let mut pte_flags = crate::arch::riscv64::mm::PageTableEntry::V
+        | crate::arch::riscv64::mm::PageTableEntry::A
+        | crate::arch::riscv64::mm::PageTableEntry::D
+        | crate::arch::riscv64::mm::PageTableEntry::U
+        | crate::arch::riscv64::mm::PageTableEntry::R;
+    if !shm_readonly {
+        pte_flags |= crate::arch::riscv64::mm::PageTableEntry::W;
+    }
+
+    // Map each page — OUTSIDE the SHM_IDS lock.
+    for (i, &phys) in phys_pages.iter().enumerate() {
+        if phys == 0 {
+            // Segment hole (snapshot raced a concurrent teardown of a
+            // sparse segment): treat as fatal and roll back.
+            let rollback_size = i * PAGE_SIZE;
+            if rollback_size > 0 {
+                let _ = addr_space.munmap(VirtAddr::new(attach_addr), rollback_size);
+            }
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx] {
+                    entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            return -(errno::ENOMEM as i64);
+        }
+        // SAFETY: attach_addr + i*PAGE_SIZE is page-aligned and within the
+        // newly allocated VMA range; phys is a valid page from get_zeroed_page;
+        // root_ppn is the current process's page table root.
+        unsafe {
+            // R7-A5: map+refcount under the PTE lock (same discipline as
+            // the demand-fault paths).
+            let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+            map_user_page(
+                root_ppn,
+                MmVirtAddr::new((attach_addr + i * PAGE_SIZE) as u64),
+                MmPhysAddr::new(phys as u64),
+                pte_flags,
+            );
+            // The new PTE references the segment page: take a
+            // per-attachment reference so shmdt/exit's put_page cannot free
+            // a page the segment still owns (review 2R.6). Segments free
+            // their pages only when every attachment is gone.
+            let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(phys));
+            if !page.is_null() {
+                (*page).get_page();
+            }
+            drop(_pte_guard);
         }
     }
 

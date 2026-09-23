@@ -4,7 +4,10 @@
 //!
 //! Page Cache — per-inode file data cache layering on top of bio block cache.
 //!
-//! Caches 4KB file data pages keyed by (inode_number, page_index).
+//! Caches 4KB file data pages keyed by ((fs_id, inode_number), page_index).
+//! The fs_id component (review 5.3: 页缓存键 ino:u32 截断/跨文件系统串页)
+//! separates inodes of different filesystem instances that would otherwise
+//! collide on the same small inode number.
 //! Reduces disk I/O for repeated reads and enables read-ahead population.
 //!
 //! Pages are allocated from the zone allocator as physical page frames,
@@ -53,12 +56,24 @@ struct InodePageCache {
     pages: BTreeMap<u64, CachedPage>,
 }
 
-/// Global page cache, keyed by inode number.
+/// Global page cache, keyed by the combined (fs_id, inode) cache key.
 pub struct PageCache {
     /// Per-inode caches.
-    inodes: Spinlock<BTreeMap<u32, InodePageCache>>,
+    inodes: Spinlock<BTreeMap<u64, InodePageCache>>,
     /// Total number of cached pages (for global limit).
     total_pages: AtomicU32,
+}
+
+/// Combine (fs_id, ino) into the single u64 map key. Distinct inputs map to
+/// distinct keys for all practical purposes (splitmix-style mixing); the
+/// fs_id for each filesystem is a stable instance tag (ext4: instance
+/// pointer; rootfs/procfs/devfs: their FS_ID_* constants).
+#[inline]
+fn cache_key(fs_id: u64, ino: u64) -> u64 {
+    fs_id
+        .rotate_left(17)
+        .wrapping_add(0x9E3779B97F4A7C15)
+        ^ ino.wrapping_mul(0xC2B2AE3D27D4EB4F)
 }
 
 /// Convert a physical address to a kernel-virtual pointer via the linear mapping.
@@ -76,12 +91,13 @@ impl PageCache {
         }
     }
 
-    /// Lookup a cached page for (ino, page_index).
+    /// Lookup a cached page for ((fs_id, ino), page_index).
     /// On hit: increments ref_count, sets Referenced flag, returns pointer.
     /// On miss: returns None.
-    pub fn get(&self, ino: u32, page_index: u64) -> Option<*const u8> {
+    pub fn get(&self, fs_id: u64, ino: u64, page_index: u64) -> Option<*const u8> {
+        let key = cache_key(fs_id, ino);
         let cache = self.inodes.lock();
-        let inode_cache = cache.get(&ino)?;
+        let inode_cache = cache.get(&key)?;
         let page = inode_cache.pages.get(&page_index)?;
         if page.invalidated {
             // Stale (a write invalidated it while pinned) — serve a miss so
@@ -104,7 +120,8 @@ impl PageCache {
 
     /// Insert a newly-read page into the cache.
     /// If the page already exists, just increments ref_count.
-    pub fn insert(&self, ino: u32, page_index: u64, _block_nr: u64, data: &[u8]) {
+    pub fn insert(&self, fs_id: u64, ino: u64, page_index: u64, _block_nr: u64, data: &[u8]) {
+        let key = cache_key(fs_id, ino);
         let mut cache = self.inodes.lock();
 
         // Evict if needed (with progress check to prevent infinite loop
@@ -118,7 +135,7 @@ impl PageCache {
             }
         }
 
-        let inode_cache = cache.entry(ino).or_insert_with(|| InodePageCache {
+        let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
             pages: BTreeMap::new(),
         });
 
@@ -151,8 +168,8 @@ impl PageCache {
             unsafe {
                 (*page_desc).set_page_type(PageType::PageCache);
                 (*page_desc).set_flag(PageFlag::UpToDate);
-                // Store reverse-lookup info for eviction
-                (*page_desc).set_mapping(ino as usize as *mut core::ffi::c_void);
+                // Store reverse-lookup info for eviction (the combined key)
+                (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
                 (*page_desc).set_index(page_index as usize);
             }
             // Add to LRU_INACTIVE_FILE — must happen after setting flags
@@ -179,9 +196,10 @@ impl PageCache {
     }
 
     /// Release a page reference (decrement ref_count).
-    pub fn put(&self, ino: u32, page_index: u64) {
+    pub fn put(&self, fs_id: u64, ino: u64, page_index: u64) {
+        let key = cache_key(fs_id, ino);
         let mut cache = self.inodes.lock();
-        if let Some(inode_cache) = cache.get_mut(&ino) {
+        if let Some(inode_cache) = cache.get_mut(&key) {
             if let Some(page) = inode_cache.pages.get_mut(&page_index) {
                 // Floor at 0: a get() miss (invalidated page) never
                 // incremented, so a stale put must not underflow.
@@ -215,7 +233,7 @@ impl PageCache {
                 }
             }
             if inode_cache.pages.is_empty() {
-                cache.remove(&ino);
+                cache.remove(&key);
             }
         }
     }
@@ -227,9 +245,10 @@ impl PageCache {
     /// `invalidated` instead of being freed under the reader's feet —
     /// the final put() releases them, and get() serves a miss meanwhile
     /// so no stale data is ever returned.
-    pub fn invalidate_inode(&self, ino: u32) {
+    pub fn invalidate_inode(&self, fs_id: u64, ino: u64) {
+        let key = cache_key(fs_id, ino);
         let mut cache = self.inodes.lock();
-        if let Some(inode_cache) = cache.get_mut(&ino) {
+        if let Some(inode_cache) = cache.get_mut(&key) {
             let mut freed: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
             for (_, page) in inode_cache.pages.iter_mut() {
                 if page.ref_count.load(Ordering::Acquire) == 0 {
@@ -262,7 +281,7 @@ impl PageCache {
                 self.total_pages.fetch_sub(freed_count, Ordering::Relaxed);
             }
             if inode_cache.pages.is_empty() {
-                cache.remove(&ino);
+                cache.remove(&key);
             }
         }
     }
@@ -300,7 +319,7 @@ impl PageCache {
     /// for a PageCache page with ref_count == 0 and no Referenced flag.
     /// Referenced pages are moved to the active list and skipped.
     fn evict_one(
-        cache: &mut BTreeMap<u32, InodePageCache>,
+        cache: &mut BTreeMap<u64, InodePageCache>,
         total_pages: &AtomicU32,
     ) {
         // Walk LRU_INACTIVE_FILE looking for an evictable page cache page
@@ -328,7 +347,7 @@ impl PageCache {
                 // Check ref_count — pages being read are not evictable.
                 // We need to find the CachedPage in the BTreeMap to check.
                 // Use mapping (inode) and index (page_index) for lookup.
-                let ino = page.mapping() as u32;
+                let ino = page.mapping() as u64;
                 let page_index = page.index() as u64;
 
                 let evictable = if let Some(inode_cache) = cache.get(&ino) {

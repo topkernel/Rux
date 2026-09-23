@@ -62,12 +62,9 @@ pub fn read_file_from_rootfs(filename: &str) -> Option<alloc::vec::Vec<u8>> {
         }
     };
 
-    // Read file data
-    let data_guard = node.data.lock();
-    if let Some(ref data) = *data_guard {
-        Some((**data).clone())
-    } else {
-        None
-    }
+    // Read file data (the shared buffer behind the node's lock — see the
+    // rootfs hard-link shared-semantics change)
+    let data = node.data.lock();
+    Some(data.clone())
 }
 

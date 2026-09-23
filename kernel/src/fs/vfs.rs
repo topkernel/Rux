@@ -72,6 +72,23 @@ pub struct VfsPath {
     pub inode: Option<Arc<Inode>>,
 }
 
+/// NAME_MAX (Linux): longest single path component we will ever look up.
+pub const NAME_MAX: usize = 255;
+
+/// Coarse-grained VFS namespace mutation lock (review 5.1: O_CREAT two-step
+/// race — SMP double-create of the same name).
+///
+/// Design note (minimal correct scheme): a single global lock serializes the
+/// lookup-then-mutate window of directory-modifying operations (create via
+/// O_CREAT, mkdir, symlink, link, unlink, rmdir, rename). Per-parent hashing
+/// would reduce contention but requires stable parent identity across the
+/// dentry/mount walk; until dentries are fully refcount-pinned for the whole
+/// operation, a single lock is the only scheme that cannot be defeated by a
+/// rename of an ancestor between hash and use. ext4 additionally takes
+/// EXT4_BIG_LOCK inside its ops, so mutual exclusion composes.
+pub static VFS_MUTATION_LOCK: Spinlock<()> = Spinlock::new(());
+
+
 impl VfsPath {
     /// Create empty path
     pub fn new() -> Self {
@@ -369,6 +386,13 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         .collect();
 
     for (ci, component) in components.iter().enumerate() {
+        // NAME_MAX check (review 5.5): components longer than 255 bytes can
+        // never exist on any of our filesystems — fail with ENAMETOOLONG
+        // instead of truncating into u8 name_len fields downstream.
+        if component.len() > NAME_MAX {
+            return Err(-(errno::constants::ENAMETOOLONG));
+        }
+
         // DAC: search (x) permission is required on every directory we
         // traverse through (Linux checks MAY_EXEC per component).
         if let Some(ref dir_inode) = current.get_inode() {
@@ -523,7 +547,9 @@ fn follow_symlink(
 
 
     *depth += 1;
-    if *depth > 8 {
+    // Linux MAXSYMLINKS = 40 (review 5.1: was 8, rejecting deep-but-legal
+    // symlink chains that glibc/coreutils happily create).
+    if *depth > crate::config::MAX_SYMLINKS {
         return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32());
     }
 
@@ -703,6 +729,69 @@ fn check_parent_write_permission(parent_inode: &Inode) -> Result<(), i32> {
     Ok(())
 }
 
+/// Check MAY_EXEC on a parent inode: directory modification ops on Linux
+/// require search permission on the parent in addition to write permission
+/// (may_create/may_delete check MAY_WRITE|MAY_EXEC). Review 5.1 (low):
+/// check_parent only checked MAY_WRITE.
+fn check_parent_exec_permission(parent_inode: &Inode) -> Result<(), i32> {
+    let inode_mode = parent_inode.mode.bits() as u16;
+    let inode_uid = parent_inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+    let inode_gid = parent_inode.gid.load(core::sync::atomic::Ordering::Relaxed);
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        crate::process::task::Cred::new_init()
+    };
+    if !crate::fs::permission::generic_permission(
+        inode_mode, inode_uid, inode_gid,
+        crate::fs::permission::MAY_EXEC, &cred,
+    ) {
+        return Err(errno::Errno::PermissionDenied.as_neg_i32());
+    }
+    Ok(())
+}
+
+/// Sticky bit (S_ISVTX) check for deleting/renaming an entry in a sticky
+/// directory (review 5.1 high: without this any user with write permission
+/// can unlink other users' files in /tmp).
+///
+/// Mirrors Linux may_delete() → check_sticky(): when the parent directory
+/// has the sticky bit, the caller may only remove/rename an entry it owns
+/// (entry uid == euid), or the entry's owner is the caller, or the caller
+/// holds CAP_FOWNER.
+fn check_sticky(parent_inode: &Inode, target_inode: Option<&Inode>) -> Result<(), i32> {
+    const S_ISVTX: u32 = 0o1000;
+    if parent_inode.mode.bits() & S_ISVTX == 0 {
+        return Ok(());
+    }
+
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        crate::process::task::Cred::new_init()
+    };
+
+    if crate::security::has_capability(&cred, crate::security::CAP_FOWNER) {
+        return Ok(());
+    }
+
+    // Owner of the parent directory may delete anything in it.
+    let parent_uid = parent_inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+    if cred.euid == parent_uid {
+        return Ok(());
+    }
+
+    // Otherwise the caller must own the entry itself.
+    if let Some(target) = target_inode {
+        let target_uid = target.uid.load(core::sync::atomic::Ordering::Relaxed);
+        if cred.euid == target_uid {
+            return Ok(());
+        }
+    }
+
+    Err(errno::Errno::PermissionDenied.as_neg_i32())
+}
+
 /// This helper function is used by operations that need to modify a directory
 /// (mkdir, rmdir, unlink, etc.)
 fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
@@ -725,6 +814,9 @@ fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
 /// 1. Resolving the parent directory path
 /// 2. Calling the parent's inode_operations->mkdir
 pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
+    // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
+    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
     // Get parent inode
@@ -732,6 +824,7 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
     check_parent_write_permission(parent_inode)?;
+    check_parent_exec_permission(parent_inode)?;
 
     // Get inode operations
     let ops = parent_inode.ops.as_ref()
@@ -762,12 +855,16 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 
 /// Create symbolic link - unified implementation using inode_operations
 pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
+    // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
+    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
     let parent_inode = parent_vpath.inode.as_ref()
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
     check_parent_write_permission(parent_inode)?;
+    check_parent_exec_permission(parent_inode)?;
 
     let ops = parent_inode.ops.as_ref()
         .ok_or(errno::Errno::ReadOnlyFileSystem.as_neg_i32())?;
@@ -795,9 +892,14 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
 
 /// Remove directory - unified implementation using inode_operations
 pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
+    // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
+    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+
     // Look up the target inode to get its ino for cache invalidation
-    let target_ino_and_fs_id = path_lookup(pathname, 0).ok().and_then(|vp| {
-        vp.inode.map(|i| (i.ino, i.fs_id))
+    // (and its owner for the sticky-bit check).
+    let target_vpath = path_lookup(pathname, 0).ok();
+    let target_ino_and_fs_id = target_vpath.as_ref().and_then(|vp| {
+        vp.inode.as_ref().map(|i| (i.ino, i.fs_id))
     });
 
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
@@ -807,6 +909,13 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
     check_parent_write_permission(parent_inode)?;
+    check_parent_exec_permission(parent_inode)?;
+
+    // Sticky bit: rmdir of another user's entry in a +t directory.
+    check_sticky(
+        parent_inode,
+        target_vpath.as_ref().and_then(|vp| vp.inode.as_ref().map(|a| a.as_ref())),
+    )?;
 
     // Get inode operations
     let ops = parent_inode.ops.as_ref()
@@ -841,9 +950,14 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
 
 /// Unlink file - unified implementation using inode_operations
 pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
+    // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
+    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+
     // Look up the target inode to get its ino for cache invalidation
-    let target_ino_and_fs_id = path_lookup(pathname, 0).ok().and_then(|vp| {
-        vp.inode.map(|i| (i.ino, i.fs_id))
+    // (and its owner for the sticky-bit check).
+    let target_vpath = path_lookup(pathname, 0).ok();
+    let target_ino_and_fs_id = target_vpath.as_ref().and_then(|vp| {
+        vp.inode.as_ref().map(|i| (i.ino, i.fs_id))
     });
 
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
@@ -853,6 +967,14 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
         .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
     check_parent_write_permission(parent_inode)?;
+    check_parent_exec_permission(parent_inode)?;
+
+    // Sticky bit: unlink of another user's entry in a +t directory
+    // (e.g. /tmp) must fail with EACCES (review 5.1 high).
+    check_sticky(
+        parent_inode,
+        target_vpath.as_ref().and_then(|vp| vp.inode.as_ref().map(|a| a.as_ref())),
+    )?;
 
     // Get inode operations
     let ops = parent_inode.ops.as_ref()
@@ -887,6 +1009,9 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
 
 /// Create hard link - unified implementation using inode_operations
 pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
+    // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
+    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+
     // Lookup the source file
     let src_vpath = path_lookup(oldpath, 0)?;
     let src_inode = src_vpath.inode.as_ref()
@@ -908,6 +1033,7 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     }
 
     check_parent_write_permission(parent_inode)?;
+    check_parent_exec_permission(parent_inode)?;
 
     // Get inode operations
     let ops = parent_inode.ops.as_ref()
@@ -935,6 +1061,11 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
 
 /// Rename file/directory
 pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
+    // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note):
+    // both the source and destination sequences must be atomic against a
+    // concurrent creator/unlinker.
+    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+
     // Lookup parent directories of both paths
     let (old_parent_vpath, old_name) = lookup_parent_dir(oldpath)?;
     let (new_parent_vpath, new_name) = lookup_parent_dir(newpath)?;
@@ -955,7 +1086,40 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
     }
 
     check_parent_write_permission(old_parent)?;
+    check_parent_exec_permission(old_parent)?;
     check_parent_write_permission(new_parent)?;
+    check_parent_exec_permission(new_parent)?;
+
+    // Sticky-bit checks on BOTH parents: renaming out of a sticky dir
+    // requires owning the source entry; renaming into a sticky dir
+    // requires owning the replaced entry (if any) — mirrors Linux
+    // may_delete() on both ends (review 5.1 high).
+    let source_vpath = path_lookup(oldpath, 0).ok();
+    check_sticky(old_parent, source_vpath.as_ref().and_then(|vp| vp.inode.as_ref().map(|a| a.as_ref())))?;
+    let replaced_vpath = path_lookup(newpath, 0).ok();
+    if replaced_vpath.is_some() {
+        check_sticky(new_parent, replaced_vpath.as_ref().and_then(|vp| vp.inode.as_ref().map(|a| a.as_ref())))?;
+    }
+
+    // Rename a directory into itself or its own subdirectory would create a
+    // ".." cycle — check the ancestor chain of the new parent (review 5.5:
+    // rename 环检查错). Only directories can form cycles.
+    if let Some(ref src_inode) = source_vpath.as_ref().and_then(|vp| vp.inode.as_ref()) {
+        if src_inode.mode.is_directory() {
+            // Renaming a dir to the same place is a no-op.
+            if let (Some(ref old_d), Some(ref new_d)) = (&old_parent_vpath.dentry, &new_parent_vpath.dentry) {
+                if Arc::ptr_eq(old_d, new_d) && old_name == new_name {
+                    return Ok(());
+                }
+            }
+            let new_parent_ino = new_parent.ino;
+            if new_parent_ino == src_inode.ino
+                || is_ancestor_of(Arc::clone(new_parent), src_inode.ino)
+            {
+                return Err(errno::Errno::InvalidArgument.as_neg_i32());
+            }
+        }
+    }
 
     // Use old_parent's inode ops for rename
     let result = old_parent.op_rename(old_name.as_bytes(), new_parent, new_name.as_bytes());
@@ -971,6 +1135,44 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
     } else {
         Err(result)
     }
+}
+
+/// Walk the ".." chain of `dir` and report whether `candidate_ino` is an
+/// ancestor of `dir` (bounded to 64 hops to survive corrupt trees).
+fn is_ancestor_of(start: Arc<Inode>, candidate_ino: u64) -> bool {
+    let mut current = start;
+    let mut guard_count = 0;
+    while guard_count < 64 {
+        guard_count += 1;
+        // Read ".." through the filesystem's lookup op.
+        match current.op_lookup(b"..") {
+            Ok(parent_ino) => {
+                if parent_ino == candidate_ino {
+                    return true;
+                }
+                if parent_ino == current.ino {
+                    return false; // reached filesystem root
+                }
+                // Materialize the parent inode through iget.
+                let ops = match current.ops {
+                    Some(o) => o,
+                    None => return false,
+                };
+                let iget = match ops.iget {
+                    Some(f) => f,
+                    None => return false,
+                };
+                // SAFETY: VFS callback contract; `current` is a valid Inode.
+                let parent_inode = match unsafe { iget(&current, b"..", parent_ino) } {
+                    Ok(i) => i,
+                    Err(_) => return false,
+                };
+                current = parent_inode;
+            }
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 /// Change file mode (chmod)
@@ -1163,6 +1365,17 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         let o_creat = (flags & FileFlags::O_CREAT) != 0;
         let o_excl = (flags & FileFlags::O_EXCL) != 0;
         let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
+
+        // O_CREAT atomicity (review 5.1 high): the existence check and the
+        // create below must be one atomic step on SMP, or two CPUs racing on
+        // the same non-existent name both allocate an inode / directory
+        // entry. Bracket the whole sequence with the coarse VFS mutation
+        // lock (see VFS_MUTATION_LOCK note for the design choice).
+        let _mutation_guard = if o_creat {
+            Some(VFS_MUTATION_LOCK.lock())
+        } else {
+            None
+        };
 
         // Step 1: Resolve path through dentry tree
         // O_NOFOLLOW (POSIX): refuse to follow a symlink FINAL component —
@@ -1557,17 +1770,18 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
 
-                // Only allow setting certain flags (O_NONBLOCK, O_APPEND, O_ASYNC, etc.)
-                // Cannot change access mode (O_RDONLY, O_WRONLY, O_RDWR)
+                // Linux semantics: F_SETFL can only modify O_NONBLOCK,
+                // O_APPEND, O_ASYNC and O_DIRECT/O_SYNC. EVERY other flag
+                // (access mode, O_DIRECTORY, O_NOFOLLOW, ...) keeps its
+                // current value — the old code rebuilt the word from just
+                // accmode|arg and cleared O_DIRECTORY et al (review 5.1).
                 const SETFL_FLAGS: u32 = crate::fs::file::FileFlags::O_APPEND
                     | crate::fs::file::FileFlags::O_NONBLOCK
                     | crate::fs::file::FileFlags::O_SYNC
                     | crate::fs::file::FileFlags::O_DSYNC;
 
-                // Preserve access mode
-                let accmode = file.flags().bits() & crate::fs::file::FileFlags::O_ACCMODE;
-                // Set new flags
-                let new_flags = accmode | (arg as u32 & SETFL_FLAGS);
+                let current = file.flags().bits();
+                let new_flags = (current & !SETFL_FLAGS) | (arg as u32 & SETFL_FLAGS);
 
                 file.set_flags(crate::fs::file::FileFlags::new(new_flags));
 
@@ -1580,16 +1794,6 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
             }
         }
     }
-}
-
-///
-pub fn io_poll(_fds: *mut u8, _nfds: usize, _timeout_ms: i32) -> Result<usize, i32> {
-    // TODO: Implement I/O multiplexing
-    // Need to implement:
-    // - Wait for file descriptor readiness
-    // - Support timeout
-    // - Return number of ready file descriptors
-    Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
 }
 
 ///
@@ -1741,7 +1945,7 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
         let mut bytes_written = 0usize;
         let mut current_idx = 0usize;
 
-        for entry in entries.iter().skip(start_pos) {
+        for (idx, entry) in entries.iter().enumerate().skip(start_pos) {
             let name = &entry.name;
             let name_len = name.len();
             let dirent_size = (19 + name_len + 1 + 7) & !7;
@@ -1762,6 +1966,16 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
 
             bytes_written += dirent_size;
             current_idx += 1;
+        }
+
+        // Linux behaviour: a buffer too small to hold even ONE entry is
+        // EINVAL, not a silent Ok(0) — the old code made telldir-style
+        // loops spin forever on a short buffer (review 5.1).
+        if bytes_written == 0
+            && current_idx == 0
+            && start_pos < entries.len()
+        {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
 
         file.set_pos((start_pos + current_idx) as u64);
@@ -1844,11 +2058,91 @@ static MEM_FILE_OPS: FileOps = FileOps {
 };
 
 // ============================================================================
+// fallocate / utimensat (fs-side helpers)
+// ============================================================================
+
+/// fallocate flags (UAPI)
+pub const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+pub const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
+
+/// Filesystem-side fallocate by fd. The syscall entry
+/// (sys_fallocate in syscall/file.rs) delegates here.
+///
+/// NOTE (wave-2 boundary): sys_fallocate currently returns success without
+/// calling this — wiring it is owned by the syscall-layer agent; the
+/// behaviour lives here so the change is one call away.
+#[allow(dead_code)]
+pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), i32> {
+    // SAFETY: get_file_fd returns a valid Arc<File> for the given fd
+    let file = unsafe { get_file_fd(fd) }
+        .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+
+    if !file.flags().is_writeonly() && file.flags().is_readonly() {
+        return Err(errno::Errno::BadFileNumber.as_neg_i32());
+    }
+
+    // SAFETY: inode is written once at open time; read-only access here.
+    let inode_opt = unsafe { &*file.inode.get() };
+    let inode = inode_opt.as_ref()
+        .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+
+    if !inode.mode.is_regular_file() {
+        return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+    }
+
+    // Route to the filesystem implementation (ext4).
+    let fs_ptr = inode.private_data
+        .ok_or(errno::Errno::FunctionNotImplemented.as_neg_i32())?;
+    // Only ext4 inodes carry a filesystem pointer we can dispatch through;
+    // verify via the ops table identity.
+    if !core::ptr::eq(inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _) {
+        return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
+    }
+    crate::fs::ext4::ext4_fallocate(inode.ino as u32, mode, offset, len)
+}
+
+/// Filesystem-side utimensat: update atime/mtime of a path. `times` carries
+/// (atime_sec, mtime_sec); UTIME_NOW is expressed by passing None for a
+/// component. Minimal mtime-first implementation (review 5.5: utimensat
+/// 实现——至少 mtime 更新); the syscall entry
+/// (sys_futimesat/sys_utimensat in syscall/file.rs) currently ignores
+/// timestamps — wiring is owned by the syscall-layer agent.
+#[allow(dead_code)]
+pub fn vfs_utimensat(pathname: &str, atime: Option<u64>, mtime: Option<u64>) -> Result<(), i32> {
+    let vpath = path_lookup(pathname, 0)?;
+    let inode = vpath.inode.as_ref()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // Permission: owner or CAP_FOWNER (Linux do_utimes).
+    let cred = if let Some(task) = crate::sched::current() {
+        task.cred().clone()
+    } else {
+        crate::process::task::Cred::new_init()
+    };
+    let inode_uid = inode.uid.load(Ordering::Relaxed);
+    if cred.euid != 0 && cred.euid != inode_uid
+        && !crate::security::has_capability(&cred, crate::security::CAP_FOWNER)
+    {
+        return Err(errno::Errno::PermissionDenied.as_neg_i32());
+    }
+
+    if let Some(m) = mtime {
+        let _ = inode.op_setattr(crate::fs::inode::setattr_attr::ATTR_MTIME, m, 0);
+    }
+    if let Some(a) = atime {
+        let _ = inode.op_setattr(crate::fs::inode::setattr_attr::ATTR_ATIME, a, 0);
+    }
+    Ok(())
+}
+
+// ============================================================================
 // ProcFS Directory (for /proc/[pid]/fd/ shortcut)
 // ============================================================================
 
 /// Synthetic INodeOps for procfs directory shortcuts (e.g., /proc/[pid]/fd/)
-static PROCFS_DIR_OPS: INodeOps = INodeOps {
+/// Synthetic INodeOps for procfs directory shortcuts (e.g. /proc/[pid]/fd/).
+/// pub(crate): procfs reuses it for the /proc/[pid]/fd lookup-layer inode.
+pub(crate) static PROCFS_DIR_OPS: INodeOps = INodeOps {
     lookup: None,
     create: None,
     link: None,

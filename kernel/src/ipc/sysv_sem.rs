@@ -192,15 +192,18 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
 
     match cmd {
         IPC_RMID => {
-            // Owner check: only creator or CAP_IPC_OWNER can destroy
+            // Owner check (review IPC P2): Linux allows RMID when euid
+            // matches uid OR cuid, or with CAP_SYS_ADMIN (the old code
+            // missed the uid path and checked the wrong capability).
             {
                 let slots = SEM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
                     let cred = crate::sched::current().map(|t| t.cred());
                     let allowed = match cred {
                         Some(ref c) => {
-                            c.euid == entry.inner.perm.cuid
-                                || crate::security::capable(crate::security::CAP_IPC_OWNER)
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
                         }
                         None => false,
                     };
@@ -261,20 +264,54 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>()) {
                 return -(errno::EFAULT as i64);
             }
-            let idx2 = match SEM_IDS.find_with_perms(semid, 0o6) {
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o2) {
                 Ok(i) => i,
                 Err(e) => return e as i64,
             };
+            // Owner check (review IPC P2: IPC_SET 无属主检查——任何有写权限者可夺
+            // 所有权): euid must be uid or cuid, or CAP_SYS_ADMIN.
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[idx2] {
+                    let cred = crate::sched::current().map(|t| t.cred());
+                    let allowed = match cred {
+                        Some(ref c) => {
+                            c.euid == entry.inner.perm.uid
+                                || c.euid == entry.inner.perm.cuid
+                                || crate::security::capable(crate::security::CAP_SYS_ADMIN)
+                        }
+                        None => false,
+                    };
+                    if !allowed {
+                        return -(errno::EPERM as i64);
+                    }
+                }
+            }
+            // Copy the whole struct from user memory through the
+            // exception-table path (review IPC M: uaccess 裸访改 copy_from_user).
+            let mut ds = SemidDsUapi {
+                sem_perm: IpcPermUapi::default(),
+                sem_otime: 0,
+                sem_ctime: 0,
+                sem_nsems: 0,
+                __unused3: 0,
+                __unused4: 0,
+            };
+            // SAFETY: buf_ptr was access_ok-validated above; ds is a
+            // stack-local repr(C) struct of exactly that size.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    &mut ds as *mut SemidDsUapi as *mut u8,
+                    buf_ptr,
+                    core::mem::size_of::<SemidDsUapi>(),
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
             let mut slots = SEM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
-                // Read uid/gid/mode from user-supplied sem_perm via struct field access.
-                // SAFETY: buf_ptr was access_ok-validated for size_of::<SemidDsUapi>();
-                // reading through a repr(C) struct pointer is well-defined.
-                let ds = unsafe { &*(buf_ptr as *const SemidDsUapi) };
-                let new_uid = unsafe { core::ptr::read_volatile(&ds.sem_perm.uid) };
-                let new_gid = unsafe { core::ptr::read_volatile(&ds.sem_perm.gid) };
-                let new_mode = unsafe { core::ptr::read_volatile(&ds.sem_perm.mode) };
-                entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
+                entry.inner.perm.update_from_set(ds.sem_perm.uid, ds.sem_perm.gid, ds.sem_perm.mode);
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
             0
@@ -292,7 +329,9 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    return -(errno::EINVAL as i64);
+                    // Linux returns EFBIG for out-of-range sem_num on GETVAL
+                    // (review IPC L: EFBIG 口径).
+                    return -(errno::EFBIG as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     return sems[snum].value.load(Ordering::Relaxed) as i64;
@@ -316,12 +355,23 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if let Some(ref mut entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
+                    // Linux returns EFBIG for out-of-range sem_num on SETVAL.
+                    return -(errno::EFBIG as i64);
+                }
+                let prev;
+                if let Some(ref mut sems) = *entry.inner.sems.lock() {
+                    prev = sems[snum].value.swap(val, Ordering::Relaxed);
+                } else {
                     return -(errno::EINVAL as i64);
                 }
-                if let Some(ref mut sems) = *entry.inner.sems.lock() {
-                    sems[snum].value.store(val, Ordering::Relaxed);
-                }
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
+                // Wake waiters whose predicate may now hold (review IPC P2:
+                // SETVAL 后不唤醒——"用 semctl 释放信号灯"惯用法挂死):
+                // a transition to 0 releases Z-waiters; any increase from a
+                // value below 1 releases P-waiters. wake_up_all is a safe
+                // superset — every woken waiter re-checks its predicate.
+                let _ = prev;
+                entry.inner.wq.wake_up_all();
             }
             0
         }
@@ -379,6 +429,10 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                     }
                 }
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
+                // Wake all waiters: SETALL may zero or raise semaphores —
+                // both directions can satisfy blocked P/Z operations
+                // (review IPC P2).
+                entry.inner.wq.wake_up_all();
             }
             0
         }
@@ -407,7 +461,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    return -(errno::EINVAL as i64);
+                    return -(errno::EFBIG as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     return sems[snum].ncnt.load(Ordering::Relaxed) as i64;
@@ -428,7 +482,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    return -(errno::EINVAL as i64);
+                    return -(errno::EFBIG as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     return sems[snum].zcnt.load(Ordering::Relaxed) as i64;
@@ -562,12 +616,21 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
         None
     };
 
-    // Copy sops from userspace
-    let mut sops = alloc::vec::Vec::with_capacity(nsops);
-    for i in 0..nsops {
-        // SAFETY: sops_ptr was access_ok-validated for nsops * size_of::<SemBuf>() above;
-        // i is bounded by nsops so add(i) stays within the validated range.
-        sops.push(unsafe { core::ptr::read_volatile(sops_ptr.add(i)) });
+    // Copy sops from userspace through the exception-table path
+    // (review IPC M: uaccess 裸访改 copy_from_user).
+    let mut sops: alloc::vec::Vec<SemBuf> = alloc::vec::Vec::with_capacity(nsops);
+    // SAFETY: sops_ptr was access_ok-validated for nsops * size_of::<SemBuf>()
+    // above; sops holds exactly that many SemBuf values.
+    unsafe {
+        sops.set_len(nsops);
+        if crate::arch::riscv64::uaccess::copy_from_user(
+            sops.as_mut_ptr() as *mut u8,
+            sops_ptr as *const u8,
+            nsops * core::mem::size_of::<SemBuf>(),
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     // Find semaphore set with alter permission check

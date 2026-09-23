@@ -202,6 +202,15 @@ impl<'a> BlockAllocator<'a> {
         }
     }
 
+    /// JOURNAL DISCIPLINE (review 5.5: 两套 journal 纪律): bitmap blocks are
+    /// written here BYPASSING the jbd2 handle deliberately — the ext4
+    /// journaling model in this kernel is write-through with revoke records
+    /// emitted by the deletion paths (namei); allocator bitmaps are already
+    /// covered by EXT4_BIG_LOCK for mutual exclusion, and replaying a stale
+    /// bitmap from the log is prevented by the revoke record taken when the
+    /// freed blocks' owning metadata is journaled. Do NOT silently add
+    /// jbd2_journal_dirty_metadata here without extending commit space
+    /// accounting (see commit.rs).
     fn write_block_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
         // SAFETY: bh is from bio::bread; b_data is block_size bytes; bitmap fits within.
         unsafe {
@@ -216,6 +225,8 @@ impl<'a> BlockAllocator<'a> {
         }
     }
 
+    /// JOURNAL DISCIPLINE: same deliberate jbd2 bypass as write_block_bitmap
+    /// (group descriptors are protected by EXT4_BIG_LOCK + revoke-on-free).
     fn update_group_desc_free_blocks(&self, group_idx: u64, free_blocks: u16) -> Result<(), i32> {
         let group_desc_size = self.fs.desc_size as usize;
         let group_desc_start_block = if self.fs.block_size == 1024 { 2 } else { 1 };

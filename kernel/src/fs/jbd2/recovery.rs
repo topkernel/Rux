@@ -143,6 +143,22 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                 next_block = wrap_block(next_block, journal_first, journal_last);
                 continue;
             }
+            JBD2_REVOKE_BLOCK => {
+                // Collect revoke records for the replay filter (review 5.6:
+                // recovery must not replay old metadata over blocks that
+                // were freed then reallocated).
+                // SAFETY: bh is a valid bio::BufferHead; b_data spans the block.
+                unsafe {
+                    let data = core::slice::from_raw_parts(
+                        (*bh).b_data.as_ptr(),
+                        (*bh).b_data.len(),
+                    );
+                    super::revoke::scan_revoke_block(journal, data, sequence);
+                }
+                bio::brelse(bh);
+                next_block = wrap_block(next_block, journal_first, journal_last);
+                continue;
+            }
             _ => { bio::brelse(bh); }
         }
         next_block = wrap_block(next_block, journal_first, journal_last);
@@ -188,6 +204,12 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
                     for blocknr in tags {
                         cur = wrap_block(cur, journal_first, journal_last);
                         scanned += 1;
+                        // Revoke filter: skip blocks revoked at tid >= this
+                        // transaction's sequence (a newer delete must win
+                        // over an older write in the log).
+                        if super::revoke::block_is_revoked_for(journal, blocknr, sequence) {
+                            continue;
+                        }
                         replay_data(device, blk_offset, cur, blocknr);
                     }
                 } else {
@@ -209,6 +231,8 @@ pub fn jbd2_journal_recover(journal: &Arc<Journal>) -> Result<RecoveryInfo, i32>
     }
 
     write_clean_sb(journal, info.end_transaction + 1)?;
+    // Recovery is done — the revoke set was replay-scoped.
+    journal.revoke_records.lock().clear();
     Ok(info)
 }
 

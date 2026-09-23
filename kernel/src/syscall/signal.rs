@@ -41,13 +41,8 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // Validate pointer alignment (u64 requires 8-byte alignment)
-    if !set_ptr.is_null() && (set_ptr as usize) % 8 != 0 {
-        return -(errno::EINVAL as i64);
-    }
-    if !oldset_ptr.is_null() && (oldset_ptr as usize) % 8 != 0 {
-        return -(errno::EINVAL as i64);
-    }
+    // Note: no alignment check — Linux performs none (get_user/put_user
+    // handle unaligned sigset pointers; musl passes stack pointers).
 
     // Read new signal mask
     let new_mask = if !set_ptr.is_null() {
@@ -228,12 +223,15 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             if uncopied > 0 {
                 return -(errno::EFAULT as i64);
             }
-            // SIGKILL/SIGSTOP stay uncatchable regardless of sa_mask.
-            let mask = user_action.sa_mask & !((1u64 << 8) | (1u64 << 18));
+            // sa_mask is stored verbatim: masking SIGKILL/SIGSTOP in a
+            // handler's sa_mask is LEGAL (POSIX) — the bits simply have no
+            // effect at delivery time (setup_frame re-strips the two
+            // unblockable bits when composing the runtime mask). Stripping
+            // here corrupted oldact round-trips (review batch-1).
             let new_action = SigAction {
                 sa_handler: user_action.sa_handler,
                 sa_flags: crate::signal::SigFlags::new(user_action.sa_flags),
-                sa_mask: mask,
+                sa_mask: user_action.sa_mask,
                 sa_restorer: user_action.sa_restorer,
             };
             match sig_struct.set_action(signum, new_action) {
@@ -329,7 +327,11 @@ pub fn sys_sigpending(args: SyscallArgs) -> i64 {
         // read as not-pending, breaking sigwait-style polling).
         let pending_and_blocked = pending & blocked;
 
-        *set_ptr = pending_and_blocked;
+        // Exception-table write (the old naked store could not produce
+        // EFAULT on a bad page — it took a kernel fault instead).
+        if !crate::arch::riscv64::uaccess::put_user(set_ptr, pending_and_blocked) {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     0  // Success
@@ -356,7 +358,8 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
     };
 
     // SAFETY: current is the running task's Task pointer; ss_ptr/old_ss_ptr validated
-    // with access_ok where non-null.
+    // with access_ok where non-null; all user copies go through the
+    // exception-table helpers.
     unsafe {
         // Save old signal stack configuration
         if !old_ss_ptr.is_null() {
@@ -364,7 +367,14 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
             if !crate::arch::riscv64::uaccess::access_ok(old_ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
                 return -(errno::EFAULT as i64);
             }
-            *old_ss_ptr = (*current).sigstack;
+            let old_ss = (*current).sigstack;
+            if crate::arch::riscv64::uaccess::copy_to_user(
+                old_ss_ptr as *mut u8,
+                &old_ss as *const SignalStack as *const u8,
+                core::mem::size_of::<SignalStack>(),
+            ) != 0 {
+                return -(errno::EFAULT as i64);
+            }
         }
 
         // Set new signal stack configuration
@@ -373,7 +383,16 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
             if !crate::arch::riscv64::uaccess::access_ok(ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
                 return -(errno::EFAULT as i64);
             }
-            let new_ss = *ss_ptr;
+            let mut new_ss = core::mem::MaybeUninit::<SignalStack>::zeroed();
+            if crate::arch::riscv64::uaccess::copy_from_user(
+                new_ss.as_mut_ptr() as *mut u8,
+                ss_ptr as *const u8,
+                core::mem::size_of::<SignalStack>(),
+            ) != 0 {
+                return -(errno::EFAULT as i64);
+            }
+            // SAFETY: fully initialized by the copy above.
+            let new_ss = new_ss.assume_init();
 
             // Check if currently executing on signal stack
             if (*current).sigstack.is_on_stack() {
@@ -542,9 +561,12 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // Send signal using the existing send_signal function
+    // Send signal using the existing send_signal function.
+    // tkill is THREAD-directed: no group spread. Err values from
+    // send_signal are already negative errnos — the old `-(e as i64)`
+    // double-negated them into positive garbage return values.
     match crate::signal::send_signal(tid, sig) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }

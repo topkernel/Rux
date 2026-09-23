@@ -332,6 +332,15 @@ pub fn sys_mq_unlink(args: [u64; 6]) -> i64 {
     for slot in table.iter_mut() {
         if let Some(ref mq) = slot {
             if !mq.is_unlinked() && mq.name == name {
+                // Permission check (review IPC: mq_unlink 无权限): the
+                // caller needs write access to the queue, or CAP_SYS_ADMIN.
+                let cred_ok = crate::sched::current().map(|t| {
+                    t.cred().euid == mq.uid
+                        || ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2)
+                }).unwrap_or(false);
+                if !cred_ok && !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+                    return -(errno::EACCES as i64);
+                }
                 mq.unlinked.store(1, Ordering::Relaxed);
                 // If refcount is 0, we can free immediately
                 if mq.refcount.load(Ordering::Relaxed) == 0 {
@@ -345,25 +354,32 @@ pub fn sys_mq_unlink(args: [u64; 6]) -> i64 {
 }
 
 /// Parse a timespec timeout pointer into a jiffies deadline.
-/// Returns None if timeout_ptr is null (block forever).
-fn parse_mq_timeout(timeout_ptr: *const u8) -> Option<u64> {
+/// Returns Ok(None) if timeout_ptr is null (block forever).
+///
+/// Review IPC (mq timeout EFAULT): an unreadable timespec used to be
+/// silently treated as "block forever" — the caller then hung on a queue
+/// that would never satisfy it. Faulty pointers are now EFAULT and
+/// negative/overflowing fields EINVAL.
+fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     if timeout_ptr.is_null() {
-        return None;
+        return Ok(None);
     }
     if !access_ok(timeout_ptr as usize, 16) {
-        // Caller should check EFAULT before calling; return None to block
-        return None;
+        return Err(-errno::EFAULT);
     }
     // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
     // casting to two consecutive i64 values (sec + nsec) is within bounds.
     let ts_sec = unsafe { *(timeout_ptr as *const i64) };
     let ts_nsec = unsafe { *((timeout_ptr as *const i64).add(1)) };
     if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
-        return None;
+        return Err(-errno::EINVAL);
     }
-    let timeout_jiffies = (ts_sec as u64) * crate::drivers::timer::HZ as u64
-        + (ts_nsec as u64) * crate::drivers::timer::HZ as u64 / 1_000_000_000;
-    Some(crate::drivers::timer::get_jiffies() + timeout_jiffies)
+    let timeout_jiffies = (ts_sec as u64)
+        .saturating_mul(crate::drivers::timer::HZ as u64)
+        .saturating_add(
+            (ts_nsec as u64) * crate::drivers::timer::HZ as u64 / 1_000_000_000,
+        );
+    Ok(Some(crate::drivers::timer::get_jiffies() + timeout_jiffies))
 }
 
 /// sys_mq_timedsend — Send a message to a message queue (NR 182)
@@ -414,10 +430,17 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
     data.resize(msg_len, 0);
     // SAFETY: msg_ptr was access_ok-validated for msg_len bytes above;
     // data is a Vec with capacity msg_len, so the destination is valid.
-    unsafe { copy_from_user(data.as_mut_ptr(), msg_ptr, msg_len); }
+    // The uncopied count MUST be checked — a partial copy would silently
+    // zero-fill the tail (review IPC M: mq_send 忽略 copy_from_user 返回值).
+    if unsafe { copy_from_user(data.as_mut_ptr(), msg_ptr, msg_len) } != 0 {
+        return -(errno::EFAULT as i64);
+    }
 
     // Parse timeout
-    let deadline = parse_mq_timeout(timeout_ptr);
+    let deadline = match parse_mq_timeout(timeout_ptr) {
+        Ok(d) => d,
+        Err(e) => return e as i64,
+    };
 
     // Check O_NONBLOCK_MQ and mq_maxmsg once (immutable during this call)
     let (nonblock, max_msgs) = {
@@ -436,6 +459,7 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
     loop {
         let mut messages = mq.messages.lock();
 
+        let was_empty = messages.is_empty();
         if (messages.len() as i64) < max_msgs {
             // Space available — insert message (sorted by priority)
             let insert_pos = messages.iter().position(|m| m.priority < msg_prio)
@@ -447,12 +471,21 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
             drop(messages);
             // Wake up receivers
             mq.wq_recv.wake_up_all();
-            // Send notification signal if registered (one-shot)
-            let notify_pid = mq.notify_pid.swap(0, Ordering::Relaxed);
-            if notify_pid != 0 {
-                let signo = mq.notify_signo.load(Ordering::Relaxed);
-                if signo > 0 {
-                    let _ = crate::signal::send_signal(notify_pid as u32, signo);
+            // Notification fires ONLY on the empty -> non-empty transition
+            // (review IPC P2: mq notify 每次入队触发 — POSIX delivers the
+            // signal exactly once per empty-queue episode; firing on every
+            // send defeated the receiver's "queue was empty" contract).
+            // The signal carries no siginfo payload yet: the kernel signal
+            // layer has no public sigqueue/SI_MESGQ API (tracked follow-up;
+            // wiring sigev_value needs signal-layer support owned by the
+            // sync agent).
+            if was_empty {
+                let notify_pid = mq.notify_pid.swap(0, Ordering::Relaxed);
+                if notify_pid != 0 {
+                    let signo = mq.notify_signo.load(Ordering::Relaxed);
+                    if signo > 0 {
+                        let _ = crate::signal::send_signal(notify_pid as u32, signo);
+                    }
                 }
             }
             return 0;
@@ -565,7 +598,10 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
     }
 
     // Parse timeout
-    let deadline = parse_mq_timeout(timeout_ptr);
+    let deadline = match parse_mq_timeout(timeout_ptr) {
+        Ok(d) => d,
+        Err(e) => return e as i64,
+    };
 
     // Check O_NONBLOCK_MQ once (immutable during this call)
     let nonblock = {

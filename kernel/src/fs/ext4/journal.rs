@@ -106,11 +106,20 @@ impl Ext4FileSystem {
         let j_first = u32::from_be(j_sb.s_first);
         let j_sequence = u32::from_be(j_sb.s_sequence);
         let j_start = u32::from_be(j_sb.s_start);
+        // Feature negotiation for the JOURNAL itself (review 5.6): capture
+        // s_feature_incompat so tag/record layouts match the on-disk format
+        // the image was created with (64-bit journals need the wide tags).
+        let j_features = u32::from_be(j_sb.s_feature_incompat);
+        if j_features & !(jbd2::types::JBD2_KNOWN_INCOMPAT_FEATURES) != 0 {
+            crate::pr_warn!("ext4: journal has unknown incompat features {:#x}", j_features);
+        }
 
         // Create Journal instance
         // j_last = j_first + j_maxlen (one past the last usable journal block)
         let j_last = (j_first as u64) + (j_maxlen as u64);
         let mut journal = jbd2::Journal::new(j_blocksize, j_maxlen);
+        journal.j_feature_incompat
+            .store(j_features, core::sync::atomic::Ordering::SeqCst);
         journal.j_blk_offset = journal_start_block as u64;
         journal.j_bio_device = self.device;
         journal.j_first = j_first as u64;

@@ -13,12 +13,15 @@ use crate::process::exec::do_execve_elf;
 
 /// sys_clone - Create child process/thread
 ///
-/// # Arguments
+/// RISC-V 64 ABI (Linux arch/riscv kernel/sys_riscv.c, musl __clone):
 /// - args[0]: flags - clone flags
 /// - args[1]: stack - new stack pointer
-/// - args[2]: parent_tid - parent TID pointer
-/// - args[3]: tls - TLS pointer
-/// - args[4]: child_tid - child TID pointer
+/// - args[2]: parent_tid - parent TID pointer (CLONE_PARENT_SETTID)
+/// - args[3]: child_tid - child TID pointer (CLONE_CHILD_SETTID/CLEARTID)
+/// - args[4]: tls - TLS pointer (CLONE_SETTLS → child tp register)
+///
+/// (The old code had a3/a4 swapped — pthread_create passed its TLS value
+/// as child_tid and the tid address as TLS, breaking every musl thread.)
 ///
 /// # Returns
 /// Returns child process PID in parent, 0 in child, negative error code on failure
@@ -28,8 +31,8 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     let flags = args[0];
     let stack = args[1];
     let parent_tid = args[2] as *mut i32;
-    let child_tid = args[4] as *mut i32;
-    let tls = args[3];
+    let child_tid = args[3] as *mut i32;
+    let tls = args[4];
 
     let clone_args = CloneArgs {
         flags,
@@ -40,8 +43,8 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     };
 
     match do_clone(clone_args) {
-        Some(pid) => pid as i64,
-        None => -(errno::ENOMEM as i64),
+        Ok(pid) => pid as i64,
+        Err(e) => e as i64,
     }
 }
 
@@ -98,16 +101,35 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
     }
 }
 
+/// ARG_MAX approximation for execve argument limits (Linux uses a 2MB-ish
+/// total with per-string 32-page caps; we take a middle road so real
+/// shells/python do not get silently truncated — the old 65-entry/1KB caps
+/// broke anything with a moderate environment):
+/// - per array (argv, envp): 2048 entries
+/// - per string: 8 KB
+/// - combined total (argv+envp bytes): 2 MB
+/// Exceeding a limit fails exec with E2BIG instead of silent truncation.
+const MAX_ARG_STRINGS: usize = 2048;
+const MAX_ARG_STRLEN: usize = 8192;
+const MAX_ARG_TOTAL: usize = 2 * 1024 * 1024;
+
 /// Read argv array from user space using fault-safe uaccess helpers.
-fn copy_argv_from_user(argv_ptr: *const *const u8) -> alloc::vec::Vec<alloc::string::String> {
+/// Returns Err(E2BIG) when a limit is exceeded (execve must fail, not
+/// truncate).
+fn copy_argv_from_user(argv_ptr: *const *const u8) -> Result<alloc::vec::Vec<alloc::string::String>, i64> {
     use alloc::string::String;
     let mut args = alloc::vec::Vec::new();
     if argv_ptr.is_null() {
-        return args;
+        return Ok(args);
     }
 
-    let mut buf = [0u8; 1024];
-    for i in 0..65 {
+    let mut total = 0usize;
+    let mut buf = [0u8; MAX_ARG_STRLEN];
+    for i in 0..MAX_ARG_STRINGS {
+        if i == MAX_ARG_STRINGS - 1 {
+            // Hit the entry cap with no NULL terminator seen.
+            return Err(-(errno::E2BIG as i64));
+        }
         // Read one pointer from the user argv array via get_user (handles SUM + exception table).
         let arg_ptr = match unsafe { crate::arch::riscv64::uaccess::get_user(argv_ptr.add(i)) } {
             Some(p) => p,
@@ -117,28 +139,36 @@ fn copy_argv_from_user(argv_ptr: *const *const u8) -> alloc::vec::Vec<alloc::str
             break;
         }
         // Read the null-terminated string via strncpy_from_user (byte-by-byte get_user).
-        match crate::arch::riscv64::uaccess::strncpy_from_user(arg_ptr, 1024, &mut buf) {
+        match crate::arch::riscv64::uaccess::strncpy_from_user(arg_ptr, MAX_ARG_STRLEN, &mut buf) {
             Ok(slice) => {
-                if let Ok(s) = core::str::from_utf8(slice) {
-                    args.push(String::from(s));
+                total = total.saturating_add(slice.len());
+                if total > MAX_ARG_TOTAL {
+                    return Err(-(errno::E2BIG as i64));
                 }
+                // Non-UTF-8 bytes become U+FFFD instead of silently
+                // dropping the entry (paths with stray bytes still exec).
+                args.push(String::from_utf8_lossy(slice).into_owned());
             }
             Err(_) => break, // page fault reading user string
         }
     }
-    args
+    Ok(args)
 }
 
 /// Read envp array from user space using fault-safe uaccess helpers.
-fn copy_envp_from_user(envp_ptr: *const *const u8) -> alloc::vec::Vec<alloc::string::String> {
+fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<alloc::string::String>, i64> {
     use alloc::string::String;
     let mut envs = alloc::vec::Vec::new();
     if envp_ptr.is_null() {
-        return envs;
+        return Ok(envs);
     }
 
-    let mut buf = [0u8; 4096];
-    for i in 0..257 {
+    let mut total = 0usize;
+    let mut buf = [0u8; MAX_ARG_STRLEN];
+    for i in 0..MAX_ARG_STRINGS {
+        if i == MAX_ARG_STRINGS - 1 {
+            return Err(-(errno::E2BIG as i64));
+        }
         // Read one pointer from the user envp array via get_user (handles SUM + exception table).
         let env_str_ptr = match unsafe { crate::arch::riscv64::uaccess::get_user(envp_ptr.add(i)) } {
             Some(p) => p,
@@ -147,16 +177,18 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> alloc::vec::Vec<alloc::str
         if env_str_ptr.is_null() {
             break;
         }
-        match crate::arch::riscv64::uaccess::strncpy_from_user(env_str_ptr, 4096, &mut buf) {
+        match crate::arch::riscv64::uaccess::strncpy_from_user(env_str_ptr, MAX_ARG_STRLEN, &mut buf) {
             Ok(slice) => {
-                if let Ok(s) = core::str::from_utf8(slice) {
-                    envs.push(String::from(s));
+                total = total.saturating_add(slice.len());
+                if total > MAX_ARG_TOTAL {
+                    return Err(-(errno::E2BIG as i64));
                 }
+                envs.push(String::from_utf8_lossy(slice).into_owned());
             }
             Err(_) => break,
         }
     }
-    envs
+    Ok(envs)
 }
 
 /// Core execve implementation: load and execute an ELF binary.
@@ -384,6 +416,17 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     } else {
         phdr_count as usize
     };
+
+    // ---- de_thread (Linux begin_new_exec): past this point any exec
+    // failure still leaves the process single-threaded, exactly like
+    // Linux. Must run BEFORE the address space is replaced: sibling
+    // threads sharing this mm would otherwise keep executing the OLD
+    // image against the NEW mm / already-cloexec'd fdtable. ----
+    // SAFETY: current is the running task (checked above).
+    unsafe {
+        crate::process::exit::de_thread(current);
+    }
+
     match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec) {
         Ok(()) => {
             crate::pr_info!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
@@ -424,9 +467,10 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Read pathname from user space safely
-    let mut kernel_buf = [0u8; 256];
-    let pathname = match strncpy_from_user(pathname_ptr, 256, &mut kernel_buf) {
+    // Read pathname from user space safely — PATH_MAX (4096) like Linux
+    // (the old 256-byte cap rejected perfectly legal long paths).
+    let mut kernel_buf = alloc::vec![0u8; 4096];
+    let pathname = match strncpy_from_user(pathname_ptr, 4096, &mut kernel_buf[..]) {
         Ok(s) => s,
         Err(e) => return e as i64,
     };
@@ -436,14 +480,20 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         Err(_) => return -(errno::EINVAL as i64),
     };
 
-    // Copy argv and envp from user space
-    let argv = copy_argv_from_user(argv_ptr);
-    let envp = copy_envp_from_user(envp_ptr);
+    // Copy argv and envp from user space (E2BIG on limit overflow)
+    let argv = match copy_argv_from_user(argv_ptr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let envp = match copy_envp_from_user(envp_ptr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     do_execve(pathname_str, &argv, &envp, 0) as i64
 }
 
-/// sys_exit - Exit process
+/// sys_exit - Exit the CALLING THREAD only (Linux exit(2) semantics)
 ///
 /// # Arguments
 /// - args[0]: status - exit status code
@@ -456,13 +506,34 @@ pub fn sys_exit(args: SyscallArgs) -> i64 {
     0 // unreachable
 }
 
+/// sys_exit_group - Exit the WHOLE thread group (Linux exit_group(2))
+///
+/// SIGKILLs every other member of the caller's thread group (leader and
+/// siblings alike) and then runs the caller's exit. musl's `_exit` /
+/// `exit` / return-from-main all come through here — without it a
+/// multi-threaded process kept running after "exit".
+pub fn sys_exit_group(args: SyscallArgs) -> i64 {
+    let status = args[0] as i32;
+    crate::process::exit::do_exit_group(status);
+    0 // unreachable
+}
+
+/// wait4 option bits (Linux wait.h)
+const WNOHANG_OPT: i32 = 0x00000001;
+const WUNTRACED_OPT: i32 = 0x00000002;
+const WCONTINUED_OPT: i32 = 0x00000008;
+const WEXITED_OPT: i32 = 0x00000004;
+const WNOWAIT_OPT: i32 = 0x01000000;
+
 /// sys_wait4 - Wait for child process
 ///
 /// # Arguments
-/// - args[0]: pid - process ID to wait for
+/// - args[0]: pid - process ID to wait for (>0 exact, 0 = caller's pgid,
+///   -1 = any, <-1 = pgid == -pid)
 /// - args[1]: status - pointer to store exit status
-/// - args[2]: options - wait options
-/// - args[3]: rusage - resource usage statistics pointer
+/// - args[2]: options - wait options (WNOHANG | WUNTRACED | WCONTINUED)
+/// - args[3]: rusage - resource usage statistics pointer (zero-filled,
+///   144-byte Linux layout)
 ///
 /// # Returns
 /// Returns child process PID on success, negative error code on failure
@@ -470,30 +541,55 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
     let pid = args[0] as i32;
     let wstatus = args[1] as *mut i32;
     let options = args[2] as i32;
-    let _rusage = args[3] as *mut u8;
+    let rusage = args[3] as *mut u8;
 
     // Validate wstatus pointer
     if !wstatus.is_null() && !crate::arch::riscv64::uaccess::access_ok(wstatus as usize, 4) {
         return -(errno::EFAULT as i64);
     }
 
-    // WNOHANG: If no child process has exited, return 0 immediately
-    const WNOHANG: i32 = 0x00000001;
+    // Unknown option bits → EINVAL (Linux)
+    if options & !(WNOHANG_OPT | WUNTRACED_OPT | WCONTINUED_OPT | WNOWAIT_OPT | WEXITED_OPT) != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
-    if options & WNOHANG != 0 {
-        // WNOHANG mode: non-blocking check
-        match crate::process::exit::do_wait_nonblock(pid, wstatus) {
-            Ok(child_pid) => child_pid as i64,
-            Err(e) if e == -11 => 0,  // EAGAIN -> return 0 means no child process exited
+    // Zero-fill rusage on every successful wait path (struct rusage is
+    // 144 bytes on riscv64; no accounting yet, but userspace parsers
+    // like `time`/`make` read the full struct).
+    let fill_rusage = || {
+        if !rusage.is_null() {
+            if crate::arch::riscv64::uaccess::access_ok(rusage as usize, 144) {
+                let zeros = [0u8; 144];
+                // SAFETY: access_ok-validated pointer; exception-table copy.
+                unsafe {
+                    let _ = crate::arch::riscv64::uaccess::copy_to_user(
+                        rusage, &zeros as *const u8, 144,
+                    );
+                }
+            }
+        }
+    };
+
+    if options & WNOHANG_OPT != 0 {
+        // WNOHANG mode: non-blocking check (options now honored: WUNTRACED
+        // reports eligible stopped children too)
+        match crate::process::exit::do_wait_nonblock(pid, wstatus, options) {
+            Ok(child_pid) => {
+                fill_rusage();
+                child_pid as i64
+            }
+            Err(e) if e == -11 => 0, // EAGAIN -> return 0 means no child process exited
             Err(e) => e as i32 as i64,
         }
     } else {
         // Blocking wait for child process to exit
-        let result = match crate::process::exit::do_wait(pid, wstatus, options) {
-            Ok(child_pid) => child_pid as i64,
+        match crate::process::exit::do_wait(pid, wstatus, options) {
+            Ok(child_pid) => {
+                fill_rusage();
+                child_pid as i64
+            }
             Err(e) => e as i32 as i64,
-        };
-        result
+        }
     }
 }
 
@@ -506,7 +602,8 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
 /// - options: WNOHANG | WEXITED | WSTOPPED | WCONTINUED | WNOWAIT
 /// - rusage: ignored
 ///
-/// Returns: 0 on success, negative errno on error
+/// Returns: 0 on success (including WNOHANG with no event — infop
+/// untouched, si_pid stays 0), negative errno on error
 pub fn sys_waitid(args: SyscallArgs) -> i64 {
     let idtype = args[0] as i32;
     let id = args[1] as i32;
@@ -528,22 +625,25 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
     }
 
     match crate::process::exit::do_waitid(idtype, id, infop, options) {
-        Ok(()) => 0,
+        // Ok(false) = WNOHANG, no event: Linux returns 0 and leaves
+        // infop untouched (the old -EAGAIN broke every poll loop).
+        Ok(_) => 0,
         Err(e) => e as i32 as i64,
     }
 }
 
-/// sys_getpid - Get process ID
+/// sys_getpid - Get process ID (== thread group ID; all threads of one
+/// process see the leader's pid)
 pub fn sys_getpid(_args: SyscallArgs) -> i64 {
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is guaranteed valid and non-null by sched::current().
-        unsafe { (*current).pid() as i64 }
+        unsafe { (*current).tgid() as i64 }
     } else {
         0
     }
 }
 
-/// sys_gettid - Get thread ID
+/// sys_gettid - Get thread ID (per-thread unique; == pid)
 ///
 /// In single-threaded processes, tid == pid.
 /// RISC-V syscall number: 178
@@ -556,12 +656,26 @@ pub fn sys_gettid(_args: SyscallArgs) -> i64 {
     }
 }
 
-/// sys_getppid - Get parent process ID
+/// sys_getppid - Get parent process ID (threads report the leader's
+/// parent — the whole group shares one real parent)
 pub fn sys_getppid(_args: SyscallArgs) -> i64 {
-    crate::process::current_ppid() as i64
+    if let Some(current) = crate::sched::current() {
+        // SAFETY: current is a valid task; group_leader_ptr() heals NULL.
+        unsafe {
+            let leader = (*current).group_leader_ptr();
+            (*leader).ppid() as i64
+        }
+    } else {
+        0
+    }
 }
 
 /// sys_kill - Send signal
+///
+/// Thread-group semantics: a positive pid targets the whole thread group
+/// of the task holding that pid (process-directed signal): every live
+/// member gets its own pending copy. kill(0)/kill(-pgid)/kill(-1)
+/// broadcasts skip the CALLER'S WHOLE GROUP (not just the calling thread).
 pub fn sys_kill(args: SyscallArgs) -> i64 {
     let pid = args[0] as i32;
     let sig = args[1] as i32;
@@ -576,9 +690,9 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         // except self and PID 1. Permission is checked per target
         // (Linux check_kill_permission); EPERM is returned when no target
         // accepted the signal but at least one denied it.
-        let my_pid = match crate::sched::current() {
+        let my_tgid = match crate::sched::current() {
             // SAFETY: task pointer from sched::current() is valid when Some.
-            Some(t) => unsafe { (*t).pid() },
+            Some(t) => unsafe { (*t).tgid() },
             None => return -(errno::ESRCH as i64),
         };
         let group_filter: Option<u32> = if pid == 0 {
@@ -593,11 +707,18 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         let found = core::cell::Cell::new(false);
         let denied = core::cell::Cell::new(false);
         // pid_hash_for_each_task covers sleeping tasks too (unlike the
-        // per-CPU for_each_task which only sees running/idle tasks).
+        // per-CPU for_each_task which only sees running/idle tasks) — and
+        // every THREAD is its own hash entry, so each live member of a
+        // multithreaded group receives its own copy.
         crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
             let tp = (*task).pid();
-            if tp == my_pid || tp == 1 {
-                return; // kill(-1) skips self and init
+            if tp == 1 {
+                return; // kill(-1) skips init
+            }
+            // Skip the caller's own thread GROUP (all its threads), not
+            // just the calling thread.
+            if (*task).tgid() == my_tgid {
+                return;
             }
             if let Some(g) = group_filter {
                 if (*task).pgid() != g {
@@ -622,7 +743,7 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // pid > 0: send to specific process
+    // pid > 0: process-directed send — spread over the target's thread group
     // SAFETY: find_task_by_pid returns a valid pointer when non-null; we check
     // null before dereferencing and verify permissions before sending signal.
     unsafe {
@@ -636,7 +757,18 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
             if !crate::security::can_send_signal(target_task.cred()) {
                 return -(errno::EPERM as i64);
             }
-            let _ = crate::signal::send_signal(pid as u32, sig);
+            // Collect the group's member pids (leader's ring), then send
+            // outside the ring lock. Skips dead members; zombies ignore.
+            let leader = (*target).group_leader_ptr();
+            let mut members: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
+            (*leader).for_each_group_member(|m| {
+                if !(*m).state().is_dead() {
+                    members.push((*m).pid());
+                }
+            });
+            for m in members {
+                let _ = crate::signal::send_signal(m, sig);
+            }
         }
     }
 
@@ -664,8 +796,32 @@ pub fn sys_set_tid_address(args: SyscallArgs) -> i64 {
 }
 
 /// sys_set_robust_list - Set robust list
-pub fn sys_set_robust_list(_args: SyscallArgs) -> i64 {
-    // Simplified implementation
+///
+/// args[0] = head pointer, args[1] = length. The length must equal
+/// sizeof(struct robust_list_head) == 24 on 64-bit (Linux check).
+/// The registered list is walked at thread exit: held futexes get
+/// FUTEX_OWNER_DIED + wake (see exit_robust_list).
+pub fn sys_set_robust_list(args: SyscallArgs) -> i64 {
+    let head = args[0] as *const u8;
+    let len = args[1] as usize;
+
+    if head.is_null() && len != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // Linux: len must be exactly sizeof(struct robust_list_head).
+    if len != 24 {
+        return -(errno::EINVAL as i64);
+    }
+    if !head.is_null() && !crate::arch::riscv64::uaccess::access_ok(head as usize, 24) {
+        return -(errno::EFAULT as i64);
+    }
+
+    if let Some(current) = crate::sched::current() {
+        // SAFETY: current is a valid task pointer from sched::current().
+        unsafe {
+            (*current).set_robust_list(head, len);
+        }
+    }
     0
 }
 
@@ -1590,18 +1746,18 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
     }
 }
 
-/// sys_tgkill - send signal to a thread group
+/// sys_tgkill - send signal to a specific thread of a thread group
 ///
 /// # Arguments
-/// - args[0]: tgid - thread group ID
-/// - args[1]: tid - thread ID
+/// - args[0]: tgid - thread group ID (must match the target's tgid)
+/// - args[1]: tid - thread ID (exact thread)
 /// - args[2]: sig - signal number
 pub fn sys_tgkill(args: SyscallArgs) -> i64 {
-    let _tgid = args[0] as i32;
+    let tgid = args[0] as u32;
     let tid = args[1] as u32;
     let sig = args[2] as i32;
 
-    if sig < 0 {
+    if sig < 0 || sig > 64 {
         return -(errno::EINVAL as i64);
     }
 
@@ -1613,6 +1769,10 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
     }
     // SAFETY: target validated non-null above.
     let target_task = unsafe { &*target };
+    // tgid must match: a stale tgid with a live tid is ESRCH (Linux).
+    if target_task.tgid() != tgid {
+        return -(errno::ESRCH as i64);
+    }
     if !crate::security::can_send_signal(target_task.cred()) {
         return -(errno::EPERM as i64);
     }
@@ -1622,23 +1782,21 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
         return 0;
     }
 
+    // Precise THREAD-directed delivery (no group spread).
     crate::signal::send_signal(tid, sig)
         .map(|_| 0)
         .unwrap_or(-(errno::EINVAL as i64))
 }
 
-/// sys_rt_sigqueueinfo - send signal with data
+/// sys_rt_sigqueueinfo - send signal with data to a PROCESS
 ///
-/// # Arguments
-/// - args[0]: tgid - thread group ID
-/// - args[1]: tid - thread ID
-/// - args[2]: sig - signal number
-/// - args[3]: uinfo - siginfo_t pointer (user)
+/// Linux ABI: exactly 3 parameters — (pid tgid, sig, siginfo_t *uinfo).
+/// The old 4-parameter decode fed garbage as uinfo and always missed the
+/// real pointer.
 pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
-    let _tgid = args[0] as i32;
-    let tid = args[1] as u32;
-    let sig = args[2] as i32;
-    let uinfo = args[3] as *const u8;
+    let tgid = args[0] as u32;
+    let sig = args[1] as i32;
+    let uinfo = args[2] as *const u8;
 
     if sig < 0 || sig > 64 {
         return -(errno::EINVAL as i64);
@@ -1650,21 +1808,97 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    if sig > 0 {
-        // SAFETY: find_task_by_pid returns valid pointer when non-null; we check null.
-        let target = unsafe { crate::sched::find_task_by_pid(tid) };
-        if target.is_null() {
-            return -(errno::ESRCH as i64);
-        }
-        // SAFETY: target validated non-null above.
-        let target_task = unsafe { &*target };
-        if !crate::security::can_send_signal(target_task.cred()) {
-            return -(errno::EPERM as i64);
-        }
+    // Target: the process whose tgid this is (the leader carries the pid
+    // == tgid). Deliver to the leader (Linux picks any unblocked thread;
+    // leader is the deterministic choice).
+    // SAFETY: find_task_by_pid returns valid pointer when non-null.
+    let target = unsafe { crate::sched::find_task_by_pid(tgid) };
+    if target.is_null() {
+        return -(errno::ESRCH as i64);
+    }
+    // SAFETY: target validated non-null above.
+    let target_task = unsafe { &*target };
+    if !crate::security::can_send_signal(target_task.cred()) {
+        return -(errno::EPERM as i64);
     }
 
-    // Send the signal (without siginfo data — simplified)
-    crate::signal::send_signal(tid, sig)
+    if sig == 0 {
+        return 0;
+    }
+
+    // Read si_code (offset 8) — user-sent siginfo must carry a NEGATIVE
+    // si_code (Linux: si_code >= 0 is reserved for the kernel → EPERM).
+    let mut code_buf = [0u8; 4];
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            code_buf.as_mut_ptr(),
+            uinfo.add(8),
+            4,
+        )
+    } != 0
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let si_code = i32::from_le_bytes(code_buf);
+    if si_code >= 0 {
+        return -(errno::EPERM as i64);
+    }
+
+    crate::signal::send_signal_info(tgid, sig, si_code)
+        .map(|_| 0)
+        .unwrap_or(-(errno::EINVAL as i64))
+}
+
+/// sys_rt_tgsigqueueinfo - send signal with data to a precise THREAD
+/// (Linux asm-generic NR 240: 3 parameters — tgid, tid, uinfo)
+pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
+    let tgid = args[0] as u32;
+    let tid = args[1] as u32;
+    let uinfo = args[2] as *const u8;
+
+    // Resolve the exact thread first.
+    // SAFETY: find_task_by_pid returns valid pointer when non-null.
+    let target = unsafe { crate::sched::find_task_by_pid(tid) };
+    if target.is_null() {
+        return -(errno::ESRCH as i64);
+    }
+    // SAFETY: target validated non-null above.
+    let target_task = unsafe { &*target };
+    if target_task.tgid() != tgid {
+        return -(errno::ESRCH as i64);
+    }
+    if !crate::security::can_send_signal(target_task.cred()) {
+        return -(errno::EPERM as i64);
+    }
+
+    if uinfo.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128) {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Read si_signo (offset 0) and si_code (offset 8).
+    let mut hdr = [0u8; 12];
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(hdr.as_mut_ptr(), uinfo, 12)
+    } != 0
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let sig = i32::from_le_bytes(hdr[0..4].try_into().unwrap());
+    if sig < 0 || sig > 64 {
+        return -(errno::EINVAL as i64);
+    }
+    if sig == 0 {
+        return 0;
+    }
+    let si_code = i32::from_le_bytes(hdr[8..12].try_into().unwrap());
+    if si_code >= 0 {
+        return -(errno::EPERM as i64);
+    }
+
+    crate::signal::send_signal_info(tid, sig, si_code)
         .map(|_| 0)
         .unwrap_or(-(errno::EINVAL as i64))
 }
@@ -1903,8 +2137,14 @@ pub fn sys_execveat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    let argv = copy_argv_from_user(argv_ptr);
-    let envp = copy_envp_from_user(envp_ptr);
+    let argv = match copy_argv_from_user(argv_ptr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let envp = match copy_envp_from_user(envp_ptr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     do_execve(&path, &argv, &envp, 0) as i64
 }
@@ -2434,8 +2674,11 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
 /// sys_getrusage - Get resource usage
 ///
 /// # Arguments
-/// - args[0]: who - RUSAGE_SELF (0), RUSAGE_CHILDREN (-1)
+/// - args[0]: who - RUSAGE_SELF (0), RUSAGE_CHILDREN (-1), RUSAGE_THREAD (1)
 /// - args[1]: rusage - pointer to struct rusage
+///
+/// struct rusage is 144 bytes on riscv64 (the old 136-byte write left the
+/// last fields — ru_maxrss etc. — as garbage for `time`/`make` parsers).
 pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     let _who = args[0] as i32;
     let rusage_ptr = args[1] as *mut u8;
@@ -2443,14 +2686,23 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     if rusage_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(rusage_ptr as usize, 136) {
+    if !crate::arch::riscv64::uaccess::access_ok(rusage_ptr as usize, 144) {
         return -(errno::EFAULT as i64);
     }
 
-    // Fill rusage with zeros (no resource tracking yet)
-    // SAFETY: rusage_ptr validated with access_ok; writing 136 bytes of zeros.
-    unsafe {
-        core::ptr::write_bytes(rusage_ptr, 0, 136);
+    // Fill rusage with zeros (no resource tracking yet) — via the
+    // exception-table copy so a bad pointer is EFAULT, not a kernel fault.
+    // SAFETY: rusage_ptr validated with access_ok; exception-table copy.
+    let zeros = [0u8; 144];
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_to_user(
+            rusage_ptr,
+            &zeros as *const u8,
+            144,
+        )
+    } != 0
+    {
+        return -(errno::EFAULT as i64);
     }
     0
 }
@@ -2807,8 +3059,67 @@ pub fn sys_io_uring_register(args: SyscallArgs) -> i64 {
 }
 
 /// sys_clone3 - Create child process (extended) (NR 435)
-pub fn sys_clone3(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// Reads `struct clone_args` (uapi, 64-byte v1 layout) from user memory:
+///   +0 flags, +8 pidfd, +16 child_tid, +24 parent_tid, +32 exit_signal,
+///   +40 stack, +48 stack_size, +56 tls
+/// and maps it onto the plain-clone machinery.
+pub fn sys_clone3(args: SyscallArgs) -> i64 {
+    use crate::process::fork::{do_clone, CloneArgs};
+
+    let uargs = args[0] as *const u8;
+    let size = args[1] as usize;
+
+    if uargs.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    // Linux requires size >= sizeof(struct clone_args) of the version it
+    // knows (88 as of 5.10; the first 64 bytes cover v1). Reject both
+    // too-small and absurdly-large with the ABI errors.
+    if size < 64 {
+        return -(errno::EINVAL as i64);
+    }
+    if size > 128 {
+        return -(errno::E2BIG as i64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(uargs as usize, 64) {
+        return -(errno::EFAULT as i64);
+    }
+
+    let mut buf = [0u8; 64];
+    // SAFETY: access_ok-validated pointer; exception-table copy.
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), uargs, 64)
+    } != 0
+    {
+        return -(errno::EFAULT as i64);
+    }
+
+    let rd64 = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+    let flags = rd64(0);
+    let child_tid = rd64(16) as *mut i32;
+    let parent_tid = rd64(24) as *mut i32;
+    let stack = rd64(40);
+    let stack_size = rd64(48);
+    let tls = rd64(56);
+
+    // The ABI expects `stack` to be the stack TOP (sp), matching plain
+    // clone's a1 semantics when stack_size is present; if a caller passes
+    // a range we honor sp = stack + size like musl's gcompat handling.
+    let sp = if stack_size > 0 { stack.wrapping_add(stack_size) } else { stack };
+
+    let clone_args = CloneArgs {
+        flags,
+        stack: sp,
+        parent_tid,
+        child_tid,
+        tls,
+    };
+
+    match do_clone(clone_args) {
+        Ok(pid) => pid as i64,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_close_range - Close file descriptors in range (NR 436)

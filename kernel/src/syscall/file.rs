@@ -78,9 +78,78 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         }
     }
 
+    // /proc/self/exe and /proc/[pid]/exe (review 5.7): opening the exe
+    // "symlink" must open the REAL executable file — the old path served a
+    // memory file whose CONTENT was the path string. Resolve the target's
+    // exe_path and fall through to the regular open path.
+    {
+        let parts: alloc::vec::Vec<&str> = full_path
+            .trim_end_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.len() == 3 && parts[0] == "proc" && parts[2] == "exe" && (flags & O_CREAT) == 0 {
+            let pid = if parts[1] == "self" {
+                (unsafe { crate::process::current_pid() }) as u64
+            } else {
+                match parts[1].parse::<u64>() {
+                    Ok(p) => p,
+                    Err(_) => u64::MAX,
+                }
+            };
+            let exe_path: alloc::vec::Vec<u8> = if pid != u64::MAX {
+                crate::fs::procfs::pid::generate_exe_link(pid)
+            } else {
+                alloc::vec::Vec::new()
+            };
+            if !exe_path.is_empty() {
+                let exe_str = core::str::from_utf8(&exe_path).unwrap_or("");
+                if !exe_str.is_empty() {
+                    let result = if (flags & O_DIRECTORY) != 0 {
+                        crate::fs::vfs::file_opendir(exe_str, flags)
+                    } else {
+                        crate::fs::vfs::file_open(exe_str, flags, mode)
+                    };
+                    return match result {
+                        Ok(fd) => {
+                            if (flags & O_CLOEXEC) != 0 {
+                                crate::fs::set_cloexec_fd(fd, true);
+                            }
+                            fd as i64
+                        }
+                        Err(e) => e as i64,
+                    };
+                }
+            }
+            return -(errno::ENOENT as i64);
+        }
+    }
+
     // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
     // because VFS inode lookup doesn't support PID subdirectories
     if (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
+        // ptrace_may_access gate for environ BEFORE generating content
+        // (review 5.7): self or CAP_SYS_PTRACE.
+        {
+            let parts: alloc::vec::Vec<&str> = full_path
+                .trim_end_matches('/')
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.len() == 3 && parts[0] == "proc" && parts[2] == "environ" {
+                let pid = if parts[1] == "self" {
+                    (unsafe { crate::process::current_pid() }) as u64
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(p) => p,
+                        Err(_) => 0,
+                    }
+                };
+                if !crate::fs::procfs::pid::environ_access_allowed(pid) {
+                    return -(errno::EACCES as i64);
+                }
+            }
+        }
         if let Some(content) = crate::fs::procfs::read_file(&full_path) {
             return match crate::fs::vfs::open_mem_file(content, flags) {
                 Ok(fd) => {

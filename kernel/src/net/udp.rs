@@ -88,6 +88,9 @@ pub struct UdpSocket {
     pub bound: bool,
     /// Whether connected
     pub connected: bool,
+    /// W3: pending protocol error (positive errno) — ICMP errors on a
+    /// connected UDP socket (udp_v4_err). Read-and-cleared via SO_ERROR.
+    pub pending_error: i32,
     /// Receive buffer
     pub recv_buffer: alloc::collections::VecDeque<UdpPacket>,
     /// R24 (MED-9): queued payload bytes — pairs with UDP_RCVBUF_BUDGET.
@@ -106,6 +109,7 @@ impl UdpSocket {
             local_ip: 0,
             bound: false,
             connected: false,
+            pending_error: 0,
             recv_buffer: alloc::collections::VecDeque::new(),
             recv_bytes: 0,
         }
@@ -251,7 +255,8 @@ pub fn udp_socket_alloc() -> Result<i32, i32> {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
         match UDP_SOCKET_TABLE.alloc() {
             Ok(fd) => Ok(fd as i32),
-            Err(_) => Err(-5), // EIO
+            // W3: protocol table exhausted → EMFILE (Linux), not EIO
+            Err(_) => Err(-24), // EMFILE
         }
     }
 }
@@ -304,7 +309,15 @@ pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
         // INADDR_ANY(0) bind on the same port only if this bind itself is
         // the ANY one (matching Linux's wildcard/exact precedence is not
         // implemented — first binder wins).
-        if port != 0 {
+        let effective_port = if port == 0 {
+            // W3: bind(0) assigns the ephemeral port IMMEDIATELY (Linux
+            // semantics — getsockname reports it right after bind) instead
+            // of leaving the socket unbound until the first sendto.
+            match udp_alloc_ephemeral_port() {
+                Some(p) => p,
+                None => return -99, // EADDRNOTAVAIL — ephemeral range exhausted
+            }
+        } else {
             for i in 0..UDP_SOCKET_TABLE.count {
                 if i == fd as usize {
                     continue;
@@ -315,14 +328,67 @@ pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
                     }
                 }
             }
-        }
+            port
+        };
         if let Some(socket) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
-            match socket.bind(ip, port) {
+            match socket.bind(ip, effective_port) {
                 Ok(()) => 0,
                 Err(()) => -5, // EIO
             }
         } else {
             -5 // EBADF
+        }
+    }
+}
+
+/// Next ephemeral port for UDP auto-bind (W3).
+static NEXT_UDP_EPHEMERAL_PORT: core::sync::atomic::AtomicU16 =
+    core::sync::atomic::AtomicU16::new(32768);
+const UDP_EPHEMERAL_PORT_MAX: u16 = 60999;
+
+/// Allocate an unused UDP local port in the ephemeral range.
+/// Caller must hold UDP_TABLE_LOCK.
+fn udp_alloc_ephemeral_port() -> Option<UdpPort> {
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    unsafe {
+        for _ in 0..(UDP_EPHEMERAL_PORT_MAX - 32768 + 1) {
+            let port = NEXT_UDP_EPHEMERAL_PORT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let port = if port > UDP_EPHEMERAL_PORT_MAX {
+                port % UDP_EPHEMERAL_PORT_MAX + 1024
+            } else {
+                port
+            };
+            let in_use = (0..UDP_SOCKET_TABLE.count).any(|i| {
+                UDP_SOCKET_TABLE
+                    .sockets
+                    .get(i)
+                    .and_then(|s| s.as_ref())
+                    .map(|s| s.bound && s.local_port == port)
+                    .unwrap_or(false)
+            });
+            if !in_use {
+                return Some(port);
+            }
+        }
+        None
+    }
+}
+
+/// W3: locked read of a slot's bound local port (ephemeral bind readback).
+pub fn udp_local_port(fd: i32) -> u16 {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    unsafe { UDP_SOCKET_TABLE.get(fd as usize).map(|s| s.local_port).unwrap_or(0) }
+}
+
+/// W3: read-and-clear the slot's pending error (SO_ERROR semantics).
+pub fn udp_take_pending_error(fd: i32) -> i32 {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    unsafe {
+        match UDP_SOCKET_TABLE.get_mut(fd as usize) {
+            Some(s) => core::mem::replace(&mut s.pending_error, 0),
+            None => 0,
         }
     }
 }
@@ -370,28 +436,7 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
         return -107; // ENOTCONN
     };
 
-    if buf.is_empty() {
-        return 0;
-    }
-
-    // Allocate SkBuff
-    let mut skb = match crate::net::buffer::alloc_skb(1500) {
-        Some(skb) => skb,
-        None => return -12, // ENOMEM
-    };
-
-    // Build UDP header + data (udp_build_packet puts data into skb)
-    if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
-        crate::net::buffer::kfree_skb(skb);
-        return -5; // EIO
-    }
-
-    // Send to IP layer (source = the socket's bound address; 0 = device)
-    let src_ip = socket.local_ip;
-    match crate::net::ipv4::ipv4_send_src(skb, src_ip, dest_ip, 17) { // IPPROTO_UDP = 17
-        Ok(()) => buf.len() as isize,
-        Err(_) => -5, // EIO
-    }
+    udp_send_locked(socket, buf, dest_ip, dest_port)
 }
 
 /// Send UDP packet to specified address
@@ -413,12 +458,38 @@ pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
         None => return -9, // EBADF
     };
 
+    udp_send_locked(socket, buf, dest_ip, dest_port)
+}
+
+/// Common UDP transmit path (W3). Caller holds UDP_TABLE_LOCK and provides
+/// the destination.
+///
+/// W3 fixes folded in:
+/// - implicit bind: an unbound socket gets an ephemeral local port at the
+///   first send (the old path left local_port 0 — the wire packet carried
+///   source port 0 and a reply could never be routed back);
+/// - the skb is sized for the whole datagram (the fixed 1500-byte alloc
+///   made every >1472-byte sendto fail skb_put and return EIO — larger
+///   datagrams now flow through IPv4 fragmentation);
+/// - the UDP checksum is computed on TX (it used to go out as 0).
+fn udp_send_locked(socket: &mut UdpSocket, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
     if buf.is_empty() {
         return 0;
     }
 
-    // Allocate SkBuff
-    let mut skb = match crate::net::buffer::alloc_skb(1500) {
+    // W3: implicit ephemeral bind at first send.
+    if !socket.bound {
+        match udp_alloc_ephemeral_port() {
+            Some(p) => {
+                socket.local_port = p;
+                socket.bound = true;
+            }
+            None => return -99, // EADDRNOTAVAIL
+        }
+    }
+
+    // W3: size the skb for the full datagram (max 65507 + 8 header fits u16).
+    let mut skb = match crate::net::buffer::alloc_skb((UDP_HLEN + buf.len()) as u32) {
         Some(skb) => skb,
         None => return -12, // ENOMEM
     };
@@ -430,7 +501,25 @@ pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
     }
 
     // Send to IP layer (source = the socket's bound address; 0 = device)
-    let src_ip = socket.local_ip;
+    let src_ip = if socket.local_ip == 0 {
+        crate::net::arp::get_local_ip()
+    } else {
+        socket.local_ip
+    };
+
+    // W3: compute the UDP checksum (TX used to be sent with checksum 0 —
+    // RFC 768 allows it, but strict peers/VMs drop those datagrams).
+    // SAFETY: skb.data holds UDP_HLEN valid header bytes; payload follows.
+    unsafe {
+        let hdr = &*(skb.data as *const UdpHdr);
+        let payload = core::slice::from_raw_parts(skb.data.add(UDP_HLEN), buf.len());
+        let mut csum = udp_checksum(src_ip.to_be(), dest_ip.to_be(), hdr, payload);
+        if csum == 0 {
+            csum = 0xFFFF; // 0 would mean "no checksum" on the wire
+        }
+        (*(skb.data as *mut UdpHdr)).check = csum.to_be();
+    }
+
     match crate::net::ipv4::ipv4_send_src(skb, src_ip, dest_ip, 17) { // IPPROTO_UDP = 17
         Ok(()) => buf.len() as isize,
         Err(_) => -5, // EIO
@@ -462,7 +551,14 @@ pub fn udp_recv(fd: i32, buf: &mut [u8], _len: usize) -> isize {
             buf[..copy_len].copy_from_slice(&packet.data[..copy_len]);
             copy_len as isize
         }
-        None => -11, // EAGAIN (no data to read)
+        None => {
+            // W3: a recorded ICMP error (connected UDP) beats EAGAIN.
+            if socket.pending_error != 0 {
+                -(socket.pending_error as isize)
+            } else {
+                -11 // EAGAIN (no data to read)
+            }
+        }
     }
 }
 
@@ -491,7 +587,14 @@ pub fn udp_recvfrom(fd: i32, buf: &mut [u8], _len: usize) -> Result<(isize, u32,
             buf[..copy_len].copy_from_slice(&packet.data[..copy_len]);
             Ok((copy_len as isize, packet.src_addr, packet.src_port))
         }
-        None => Err(-11), // EAGAIN
+        None => {
+            // W3: a recorded ICMP error (connected UDP) beats EAGAIN.
+            if socket.pending_error != 0 {
+                Err(-(socket.pending_error as isize))
+            } else {
+                Err(-11) // EAGAIN
+            }
+        }
     }
 }
 
@@ -506,6 +609,33 @@ pub fn udp_poll_readable(fd: i32) -> bool {
             .get(fd as usize)
             .map(|s| !s.recv_buffer.is_empty())
             .unwrap_or(false)
+    }
+}
+
+/// W3: length of the next queued datagram (None = empty). recvmsg uses it
+/// to report MSG_TRUNC precisely.
+pub fn udp_next_dgram_len(fd: i32) -> Option<usize> {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    unsafe {
+        UDP_SOCKET_TABLE
+            .get(fd as usize)
+            .and_then(|s| s.recv_buffer.front())
+            .map(|p| p.data.len())
+    }
+}
+
+/// W3: does this UDP slot carry a pending (ICMP) error? Part of the
+/// blocking-recv wake condition — without it an error that lands between
+/// the recv attempt and prepare_to_wait is a lost wakeup.
+pub fn udp_has_error(fd: i32) -> bool {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    unsafe {
+        UDP_SOCKET_TABLE
+            .get(fd as usize)
+            .map(|s| s.pending_error != 0)
+            .unwrap_or(true)
     }
 }
 
@@ -638,8 +768,8 @@ pub fn udp_parse_packet(skb: &SkBuff) -> Option<&UdpHdr> {
 ///
 /// # Arguments
 /// - `skb`: SkBuff (containing UDP packet)
-/// - `src_ip`: Source IP address
-/// - `dest_ip`: Destination IP address
+/// - `src_ip`: Source IP address (host order)
+/// - `dest_ip`: Destination IP address (host order)
 ///
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
@@ -691,29 +821,113 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // R24 (HIGH-6): serialize table iteration/enqueue against syscalls
     // (alloc/free/bind/send/recv) — the NetRx softirq runs concurrently on
     // the 4-CPU kernel. Leaf lock: nothing below re-enters UDP.
-    let _g = UDP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
-    unsafe {
-        for i in 0..UDP_SOCKET_TABLE.count {
-            if let Some(ref mut socket) = UDP_SOCKET_TABLE.sockets[i] {
-                if socket.bound && socket.local_port == dest_port
-                    && (socket.local_ip == 0 || socket.local_ip == dest_ip)
-                {
-                    // Put data into socket's receive buffer
-                    let packet = UdpPacket {
-                        data: alloc::vec::Vec::from(data),
-                        src_addr: src_ip,
-                        src_port: src_port,
-                    };
-                    socket.enqueue_packet(packet);
-                    return Ok(());
+    let mut delivered_fd: Option<i32> = None;
+    {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
+        // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+        unsafe {
+            for i in 0..UDP_SOCKET_TABLE.count {
+                if let Some(ref mut socket) = UDP_SOCKET_TABLE.sockets[i] {
+                    if socket.bound
+                        && socket.local_port == dest_port
+                        && (socket.local_ip == 0 || socket.local_ip == dest_ip)
+                        // W3: a CONNECTED socket only accepts datagrams from
+                        // its peer — anything else keeps scanning (Linux
+                        // filters remote (addr,port) for connected UDP).
+                        && (!socket.connected
+                            || (socket.remote_ip == src_ip && socket.remote_port == src_port))
+                    {
+                        // Put data into socket's receive buffer
+                        let packet = UdpPacket {
+                            data: alloc::vec::Vec::from(data),
+                            src_addr: src_ip,
+                            src_port: src_port,
+                        };
+                        socket.enqueue_packet(packet);
+                        delivered_fd = Some(i as i32);
+                        break;
+                    }
                 }
             }
         }
     }
 
-    // No socket found bound to this port, drop packet
+    if let Some(fd) = delivered_fd {
+        // W3: wake blocking recv waiters on this socket (after the lock).
+        crate::net::socket::wake_udp_socket(fd);
+        return Ok(());
+    }
+
+    // No socket found bound to this port. If the datagram was addressed to
+    // us (this stack does not forward), answer with ICMP port unreachable
+    // (W3 — the old code silently dropped, so peers' send-then-recv-echo
+    // patterns hung until their timeout).
+    let is_local = dest_ip == crate::net::arp::get_local_ip() || (dest_ip >> 24) == 127;
+    if is_local && !is_broadcast_addr(dest_ip) {
+        // SAFETY: skb.data holds the received UDP header (8 bytes) —
+        // udp_parse_packet validated at least UDP_HLEN bytes.
+        let udp_hdr8 = unsafe { core::slice::from_raw_parts(skb.data, UDP_HLEN) };
+        crate::net::icmp::icmp_send_port_unreach(dest_ip, src_ip, udp_hdr8);
+    }
+
     Ok(())
+}
+
+/// W3: 255.255.255.255 check (never answer port-unreach for broadcasts).
+fn is_broadcast_addr(ip: u32) -> bool {
+    ip == 0xFFFFFFFF
+}
+
+/// W3: ICMP error for a connected UDP socket (UDP counterpart of
+/// tcp_v4_err). The embedded original header is from OUR outbound
+/// datagram: orig_src_* is local, orig_dst_* is the remote peer.
+pub fn udp_v4_err(
+    icmp_type: u8,
+    icmp_code: u8,
+    orig_src_ip: u32,
+    orig_src_port: u16,
+    orig_dst_ip: u32,
+    orig_dst_port: u16,
+) {
+    let mut wake_fd: Option<i32> = None;
+    {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
+        // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+        unsafe {
+            'scan: for i in 0..UDP_SOCKET_TABLE.count {
+                let socket = match UDP_SOCKET_TABLE.sockets[i].as_mut() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if socket.connected
+                    && socket.local_port == orig_src_port
+                    && socket.remote_port == orig_dst_port
+                    && socket.remote_ip == orig_dst_ip
+                    && (socket.local_ip == 0 || socket.local_ip == orig_src_ip)
+                {
+                    if icmp_type == crate::net::icmp::icmp_type::DEST_UNREACH {
+                        match icmp_code {
+                            crate::net::icmp::icmp_code::PORT_UNREACH => {
+                                socket.pending_error = 111; // ECONNREFUSED
+                            }
+                            crate::net::icmp::icmp_code::HOST_UNREACH => {
+                                socket.pending_error = 113; // EHOSTUNREACH
+                            }
+                            crate::net::icmp::icmp_code::NET_UNREACH => {
+                                socket.pending_error = 101; // ENETUNREACH
+                            }
+                            _ => {}
+                        }
+                        wake_fd = Some(i as i32);
+                    }
+                    break 'scan;
+                }
+            }
+        }
+    }
+    if let Some(fd) = wake_fd {
+        crate::net::socket::wake_udp_socket(fd);
+    }
 }
 
 #[cfg(test)]

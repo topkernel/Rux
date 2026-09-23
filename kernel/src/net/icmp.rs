@@ -110,6 +110,13 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
         None => return Err(()),
     };
 
+    // W3: verify the ICMP checksum before acting on the message (the old
+    // code trusted it — a corrupted DEST_UNREACH could abort a healthy
+    // connection). A valid message sums (header+data incl. checksum) to 0.
+    if IcmpHdr::compute_checksum(data, &[]) != 0 {
+        return Ok(()); // silently drop
+    }
+
     let payload = &data[ICMP_HDR_LEN..];
 
     match icmp_hdr.type_ {
@@ -117,7 +124,7 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
             icmp_echo_reply(src_ip, icmp_hdr, payload);
         }
         icmp_type::DEST_UNREACH | icmp_type::TIME_EXCEEDED => {
-            // Pass to upper layer protocols (TCP)
+            // Pass to upper layer protocols (TCP/UDP)
             if payload.len() >= core::mem::size_of::<crate::net::ipv4::IpHdr>() + 8 {
                 // The payload starts with original IP header + 8 bytes of transport header
                 // SAFETY: payload length was checked to be >= IPHDR_LEN + 8 above,
@@ -136,6 +143,22 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
                         let orig_src_port = u16::from_be_bytes([transport_hdr[0], transport_hdr[1]]);
                         let orig_dst_port = u16::from_be_bytes([transport_hdr[2], transport_hdr[3]]);
                         crate::net::tcp::tcp_v4_err(
+                            icmp_hdr.type_,
+                            icmp_hdr.code,
+                            orig_src_ip,
+                            orig_src_port,
+                            orig_dst_ip,
+                            orig_dst_port,
+                        );
+                    }
+                } else if orig_proto == 17 {
+                    // W3: connected UDP sockets see ICMP errors too
+                    // (ECONNREFUSED from a closed peer port, etc.).
+                    let transport_hdr = &payload[core::mem::size_of::<crate::net::ipv4::IpHdr>()..];
+                    if transport_hdr.len() >= 8 {
+                        let orig_src_port = u16::from_be_bytes([transport_hdr[0], transport_hdr[1]]);
+                        let orig_dst_port = u16::from_be_bytes([transport_hdr[2], transport_hdr[3]]);
+                        crate::net::udp::udp_v4_err(
                             icmp_hdr.type_,
                             icmp_hdr.code,
                             orig_src_ip,
@@ -274,6 +297,111 @@ pub fn icmp_send_dest_unreach(orig_skb: &SkBuff, code: u8, _info: u32) {
         let orig_src_ip = u32::from_be(orig_ip_hdr.saddr);
         let _ = crate::net::ipv4::ipv4_send(skb, orig_src_ip, 1);
     }
+}
+
+/// W3: send ICMP port unreachable for an undeliverable UDP datagram.
+///
+/// udp_rcv's skb has already been pulled past the IP header, so the quoted
+/// packet is synthesized: a minimal IP header describing the original
+/// flow (saddr = our address, daddr = `remote_ip`, proto UDP) followed by
+/// the received UDP header's first 8 bytes.
+///
+/// - `local_ip`: the datagram's destination (our address the sender used)
+/// - `remote_ip`: the sender to answer
+/// - `udp_hdr8`: the first 8 bytes of the offending UDP header
+pub fn icmp_send_port_unreach(local_ip: u32, remote_ip: u32, udp_hdr8: &[u8]) {
+    if udp_hdr8.len() < 8 || remote_ip == 0 || (remote_ip >> 24) == 127 {
+        // Never answer loopback (the sender is on this machine — its own
+        // connected sockets would get a spurious ECONNREFUSED storm) or
+        // unicast to nobody.
+        return;
+    }
+
+    // Synthetic IP header of the quoted datagram.
+    let mut quoted_ip = [0u8; crate::net::ipv4::IPHDR_LEN];
+    // SAFETY: quoted_ip is exactly IPHDR_LEN bytes; writing repr(C) fields.
+    unsafe {
+        let h = &mut *(quoted_ip.as_mut_ptr() as *mut crate::net::ipv4::IpHdr);
+        h.version_ihl = 0x45;
+        h.tot_len = ((crate::net::ipv4::IPHDR_LEN + 8) as u16).to_be();
+        h.ttl = crate::net::ipv4::IP_DEFAULT_TTL;
+        h.protocol = 17; // UDP
+        h.saddr = local_ip.to_be();
+        h.daddr = remote_ip.to_be();
+    }
+
+    let mut hdr = IcmpHdr {
+        type_: icmp_type::DEST_UNREACH,
+        code: icmp_code::PORT_UNREACH,
+        checksum: 0,
+        id: 0, // unused bytes for dest-unreach
+        seq: 0,
+    };
+
+    // Checksum over header + quoted (IP hdr + 8 bytes UDP).
+    // SAFETY: &hdr is a valid stack-local reference; IcmpHdr is repr(C).
+    let hdr_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &hdr as *const IcmpHdr as *const u8,
+            core::mem::size_of::<IcmpHdr>(),
+        )
+    };
+    // Sum quote in two segments (compute_checksum takes hdr + data).
+    let mut sum: u32 = 0;
+    for chunk in [quoted_ip.as_slice(), udp_hdr8] {
+        let mut i = 0;
+        while i + 1 < chunk.len() {
+            sum += u16::from_be_bytes([chunk[i], chunk[i + 1]]) as u32;
+            i += 2;
+        }
+        if i < chunk.len() {
+            sum += (chunk[i] as u32) << 8;
+        }
+    }
+    // Fold into the header checksum computation.
+    let hdr_sum: u32 = {
+        let mut s = 0u32;
+        let mut i = 0;
+        while i + 1 < hdr_bytes.len() {
+            s += u16::from_be_bytes([hdr_bytes[i], hdr_bytes[i + 1]]) as u32;
+            i += 2;
+        }
+        s
+    };
+    let mut total = hdr_sum + sum;
+    while total >> 16 != 0 {
+        total = (total & 0xFFFF) + (total >> 16);
+    }
+    hdr.checksum = !total as u16;
+
+    let mut skb = match crate::net::buffer::alloc_skb(128) {
+        Some(s) => s,
+        None => return,
+    };
+    // Quoted packet = IP header followed by the 8 UDP bytes (skb_put
+    // appends at the tail — header first).
+    if skb.skb_put_data(&quoted_ip).is_err() || skb.skb_put_data(udp_hdr8).is_err() {
+        skb.free();
+        return;
+    }
+    let ptr = match skb.skb_push(ICMP_HDR_LEN as u32) {
+        Some(p) => p,
+        None => {
+            skb.free();
+            return;
+        }
+    };
+    // SAFETY: skb_push returned ICMP_HDR_LEN bytes of space; &hdr is a
+    // valid stack-local IcmpHdr of exactly that size.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &hdr as *const IcmpHdr as *const u8,
+            ptr as *mut u8,
+            ICMP_HDR_LEN,
+        );
+    }
+
+    let _ = crate::net::ipv4::ipv4_send(skb, remote_ip, 1); // IPPROTO_ICMP = 1
 }
 
 #[cfg(test)]

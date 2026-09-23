@@ -63,6 +63,13 @@ pub use uptime::get_uptime_ms;
 /// ProcFS magic number
 const PROCFS_MAGIC: u32 = 0x9fa0;
 
+/// Ino scheme for the synthetic /proc/[pid] entries:
+///   pid * 10000 + 100 + kind       — per-PID regular files / symlinks
+///   pid * 10000 + FD_DIR_INO_OFF   — the "fd" subdirectory
+///   pid * 10000 + FD_LINK_INO_OFF + fd — the "fd/<N>" symlinks
+pub(crate) const FD_DIR_INO_OFF: u64 = 200;
+pub(crate) const FD_LINK_INO_OFF: u64 = 300;
+
 /// Kind of file inside a /proc/[pid] directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PidFileKind {
@@ -750,7 +757,27 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
             b"environ" => PidFileKind::Environ,
             b"oom_score" => PidFileKind::OomScore,
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
-            _ => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+            _ => {
+                // /proc/[pid]/fd — the fd subdirectory (review 5.7: used to
+                // exist only behind a syscall-layer string special case, so
+                // generic VFS paths — fstatat, name_to_handle — missed it).
+                if name == b"fd" {
+                    return Ok(pid_val * 10000 + FD_DIR_INO_OFF);
+                }
+                // /proc/[pid]/fd/<N> — per-descriptor symlinks.
+                if name.len() <= 3
+                    && !name.is_empty()
+                    && name.iter().all(|b| b.is_ascii_digit())
+                {
+                    let fd_num: u64 = name
+                        .iter()
+                        .fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
+                    if fd_num < 1024 {
+                        return Ok(pid_val * 10000 + FD_LINK_INO_OFF + fd_num);
+                    }
+                }
+                return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+            }
         };
         // Use pid * stride + kind as inode number. Stride must exceed max kind value.
         let file_ino = pid_val * 10000 + (kind as u64) + 100;
@@ -806,6 +833,28 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         return 0;
     }
 
+    // Synthetic fd-link symlink (/proc/[pid]/fd/N): stat as a symlink.
+    if inode.private_data.is_none() {
+        let pid_val = inode.ino / 10000;
+        let rem = inode.ino % 10000;
+        if pid::is_valid_pid(pid_val) && rem >= FD_LINK_INO_OFF && rem < FD_LINK_INO_OFF + 1024 {
+            let target = pid::generate_fd_link(pid_val, (rem - FD_LINK_INO_OFF) as u32);
+            stat.st_ino = inode.ino;
+            stat.st_mode = InodeMode::S_IFLNK | 0o777;
+            stat.st_size = target.len() as i64;
+            stat.st_nlink = 1;
+            stat.st_uid = 0;
+            stat.st_gid = 0;
+            stat.st_rdev = 0;
+            stat.st_blksize = 4096;
+            stat.st_blocks = (stat.st_size + 511) / 512;
+            stat.st_atime = 0;
+            stat.st_mtime = 0;
+            stat.st_ctime = 0;
+            return 0;
+        }
+    }
+
     let node_ptr = match inode.private_data {
         Some(ptr) => ptr,
         None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
@@ -844,6 +893,25 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 /// ProcFS readlink operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+    // Synthetic fd-link inodes carry no ProcFSNode; the (pid, fd) pair is
+    // encoded in the ino (see procfs_iget). Review 5.7: /proc/self/fd/N
+    // used to resolve only through the syscall-layer string shortcut.
+    if inode.private_data.is_none() {
+        let pid_val = inode.ino / 10000;
+        let rem = inode.ino % 10000;
+        if pid::is_valid_pid(pid_val) && rem >= FD_LINK_INO_OFF && rem < FD_LINK_INO_OFF + 1024 {
+            let fd = (rem - FD_LINK_INO_OFF) as u32;
+            let target = pid::generate_fd_link(pid_val, fd);
+            if target.is_empty() {
+                return errno::Errno::NoSuchFileOrDirectory.as_neg_i32() as isize;
+            }
+            let len = target.len().min(buf.len());
+            buf[..len].copy_from_slice(&target[..len]);
+            return len as isize;
+        }
+        return errno::Errno::InvalidArgument.as_neg_i32() as isize;
+    }
+
     let node_ptr = match inode.private_data {
         Some(ptr) => ptr,
         None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
@@ -876,7 +944,32 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             b"environ" => PidFileKind::Environ,
             b"oom_score" => PidFileKind::OomScore,
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
-            _ => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+            _ => {
+                // /proc/[pid]/fd directory (review 5.7): a synthetic
+                // directory whose readdir lists the target's open fds —
+                // reuses the VFS-layer PROCFS_DIR_OPS (private_data = pid).
+                if name == b"fd" && ino == pid_val * 10000 + FD_DIR_INO_OFF {
+                    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+                    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+                    inode.ops = Some(&crate::fs::vfs::PROCFS_DIR_OPS);
+                    inode.private_data = Some(pid_val as usize as *mut u8);
+                    return Ok(Arc::new(inode));
+                }
+                // /proc/[pid]/fd/<N> symlink: readlink resolves through
+                // pid::generate_fd_link (decoded from the ino).
+                if ino >= pid_val * 10000 + FD_LINK_INO_OFF
+                    && ino < pid_val * 10000 + FD_LINK_INO_OFF + 1024
+                {
+                    let mut inode =
+                        Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
+                    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+                    inode.ops = Some(&PROCFS_INODE_OPS);
+                    // private_data None + ino encodes (pid, fd); handled by
+                    // procfs_readlink below.
+                    return Ok(Arc::new(inode));
+                }
+                return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+            }
         };
 
         let is_symlink = matches!(kind, PidFileKind::Exe | PidFileKind::Cwd);
@@ -1055,6 +1148,16 @@ unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         None => return 0,
     };
     let node = &*(node_ptr as *const ProcFSNode);
+
+    // ptrace_may_access gate for /proc/[pid]/environ (review 5.7: environ
+    // 无 ptrace 权限): self or CAP_SYS_PTRACE. (The syscall-layer /proc
+    // shortcut applies the same check before reaching here.)
+    if let (Some(pid), Some(PidFileKind::Environ)) = (node.pid, node.pid_file_kind) {
+        if !pid::environ_access_allowed(pid) {
+            return errno::Errno::PermissionDenied.as_neg_i32();
+        }
+    }
+
     let content = node.get_content();
     let file_content = alloc::boxed::Box::new(ProcfsFileContent {
         data: content,

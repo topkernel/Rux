@@ -592,6 +592,19 @@ pub struct Journal {
     pub j_commit_request: AtomicU32,
     /// Journal uuid
     pub j_uuid: [u8; 16],
+    /// Incompatible features of the ON-DISK journal superblock
+    /// (s_feature_incompat, host byte order). Stored as a value — the
+    /// j_superblock raw pointer cannot be kept alive past brelse().
+    /// Populated at journal load (ext4::journal::init_journal); drives
+    /// tag/record sizes so our descriptors match what a real jbd2 (and our
+    /// own recovery) expects (review 5.6: commit 的 v1 tag 与 superblock
+    /// 特性探测接通).
+    pub j_feature_incompat: AtomicU32,
+    /// Revoke records for the running transaction: (fs blocknr, tid).
+    /// Minimal revoke table (review 5.6 high: revoke 全空壳): a Vec-backed
+    /// store is fine at our transaction sizes and is fully serialized by
+    /// its spinlock.
+    pub revoke_records: Spinlock<alloc::vec::Vec<(u64, Tid)>>,
     /// Pointer to the current commit thread for this journal
     pub j_task: *mut core::ffi::c_void,
     /// Maximum number of metadata buffers in a single compound commit
@@ -678,6 +691,8 @@ impl Journal {
             j_commit_sequence: AtomicU32::new(0),
             j_commit_request: AtomicU32::new(0),
             j_uuid: [0; 16],
+            j_feature_incompat: AtomicU32::new(0),
+            revoke_records: Spinlock::new(alloc::vec::Vec::new()),
             j_task: core::ptr::null_mut(),
             j_max_transaction_buffers: (total_len / 4) as i32,
             j_revoke_records_per_block: (block_size / 16) as i32,
@@ -730,40 +745,25 @@ impl Journal {
 
     /// Check if journal has 64-bit feature
     pub fn has_64bit(&self) -> bool {
-        // SAFETY: `j_superblock` is null-checked above; when non-null it points
-        // to a valid, initialized `journal_superblock_t` (set during mount).
-        unsafe {
-            if self.j_superblock.is_null() {
-                return false;
-            }
-            let sb = &*self.j_superblock;
-            u32::from_be(sb.s_feature_incompat) & JBD2_FEATURE_INCOMPAT_64BIT != 0
-        }
+        self.j_feature_incompat.load(Ordering::SeqCst) & JBD2_FEATURE_INCOMPAT_64BIT != 0
     }
 
     /// Check if journal has checksum v3 feature
     pub fn has_csum_v3(&self) -> bool {
-        // SAFETY: `j_superblock` is null-checked above; when non-null it points
-        // to a valid, initialized `journal_superblock_t` (set during mount).
-        unsafe {
-            if self.j_superblock.is_null() {
-                return false;
-            }
-            let sb = &*self.j_superblock;
-            u32::from_be(sb.s_feature_incompat) & JBD2_FEATURE_INCOMPAT_CSUM_V3 != 0
-        }
+        self.j_feature_incompat.load(Ordering::SeqCst) & JBD2_FEATURE_INCOMPAT_CSUM_V3 != 0
     }
 
     /// Check if journal has checksum v2 feature
     pub fn has_csum_v2(&self) -> bool {
-        // SAFETY: `j_superblock` is null-checked above; when non-null it points
-        // to a valid, initialized `journal_superblock_t` (set during mount).
-        unsafe {
-            if self.j_superblock.is_null() {
-                return false;
-            }
-            let sb = &*self.j_superblock;
-            u32::from_be(sb.s_feature_incompat) & JBD2_FEATURE_INCOMPAT_CSUM_V2 != 0
+        self.j_feature_incompat.load(Ordering::SeqCst) & JBD2_FEATURE_INCOMPAT_CSUM_V2 != 0
+    }
+
+    /// Size of one revoke-table entry on disk (block number width).
+    pub fn revoke_entry_size(&self) -> usize {
+        if self.has_64bit() {
+            8
+        } else {
+            4
         }
     }
 }

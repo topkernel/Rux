@@ -41,3 +41,4 @@ pub use transaction::{
     is_handle_aborted,
 };
 pub use recovery::jbd2_journal_recover;
+pub use revoke::{jbd2_journal_revoke, jbd2_journal_test_revoke};

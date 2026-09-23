@@ -291,16 +291,17 @@ pub unsafe fn do_mount(
     flags: u64,
     _data: Option<&str>,
 ) -> Result<(), i32> {
-    // Find filesystem type
+    // Review 5.1 (低: do_mount 忽略 flags/source、三套 mount 并存): the
+    // unified mount path lives in fs::mount (the registry-based path here
+    // built a SuperBlock but never linked a mount into the namespace).
+    // Keep the registry lookup for type validation, then delegate the
+    // actual mount to the one implementation.
     let fs_type = get_fs_type(type_name).ok_or(-2_i32)?;  // ENOENT
+    let _ = fs_type; // existence check only — mount::do_mount dispatches by name
+    let _ = dev_name;
+    let target = dir_name.ok_or(-22_i32)?; // EINVAL
 
-    // Mount filesystem
-    let _sb = fs_type.mount_fs(dev_name, dir_name, flags)?;
-
-    // TODO: Create vfsmount structure
-    // TODO: Add mount point to namespace
-
-    Ok(())
+    crate::fs::mount::do_mount(target, type_name, flags)
 }
 
 pub unsafe fn do_umount(target: &str, _flags: u64) -> Result<(), i32> {

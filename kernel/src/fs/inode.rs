@@ -26,6 +26,10 @@ pub mod setattr_attr {
     pub const ATTR_GID: u32 = 3;
     pub const ATTR_SIZE: u32 = 4;
     pub const ATTR_UID_GID: u32 = 5; // set both uid and gid at once
+    /// Access time (seconds) — utimensat support (review 5.5)
+    pub const ATTR_ATIME: u32 = 6;
+    /// Modification time (seconds) — utimensat support (review 5.5)
+    pub const ATTR_MTIME: u32 = 7;
 }
 
 /// Directory entry file type constants (DT_*)
@@ -611,8 +615,12 @@ pub fn make_fifo_inode(ino: Ino) -> Inode {
 // Inode cache (icache)
 // ============================================================================
 
-/// Inode cache size - from config
-const ICACHE_SIZE: usize = crate::config::ICACHE_SIZE;
+/// Inode cache size - Was 256 (review 5.1: icache 冲突逐出后同文件双
+/// Inode) — enlarged and paired with the eviction fix in
+/// icache_evict_lru (never evict entries still referenced outside the
+/// cache). Defined locally: config.rs is concurrently edited by other
+/// repair agents.
+const ICACHE_SIZE: usize = 1024;
 
 /// Inode cache statistics
 #[derive(Debug)]
@@ -821,35 +829,49 @@ pub fn icache_add(inode: Arc<Inode>) {
     }
 }
 
-/// LRU eviction policy: evict least recently used entry
+/// LRU eviction policy: evict least recently used entry.
 ///
-fn icache_evict_lru(cache: &mut InodeCache) {
-    // Find least recently used entry (minimum access time)
-    let mut lru_index = 0;
+/// Review 5.1 (icache 冲突逐出后同文件双 Inode): entries still referenced
+/// outside the cache (strong_count > 1 — dentries, open files) are NEVER
+/// evicted. Dropping the cache's Arc while users still hold their own would
+/// make the next lookup instantiate a SECOND VFS Inode for the same
+/// on-disk inode, and the two copies' cached state (ext4 block map, size)
+/// diverge with every write. Combined with the larger cache (ICACHE_SIZE
+/// 1024) this closes the dual-instance window for working sets that fit.
+fn icache_evict_lru(cache: &mut InodeCache) -> bool {
+    // Find least recently used EVICTABLE entry (minimum access time).
+    let mut lru_index = usize::MAX;
     let mut lru_time = u64::MAX;
-    let mut found = false;
 
     for (i, bucket) in cache.buckets.iter().enumerate() {
-        if bucket.inode.is_some() {
+        if let Some(ref inode) = bucket.inode {
+            // Skip actively-referenced entries: the cache holds only one of
+            // possibly several Arc references; evicting a live one forks the
+            // inode identity.
+            if Arc::strong_count(inode) > 1 {
+                continue;
+            }
             let access_time = bucket.access_time.load(Ordering::Relaxed);
             if access_time < lru_time {
                 lru_time = access_time;
                 lru_index = i;
-                found = true;
             }
         }
     }
 
-    // Evict LRU entry
-    if found {
-        cache.buckets[lru_index].inode = None;
-        cache.buckets[lru_index].ino = 0;
-        cache.buckets[lru_index].access_time.store(0, Ordering::Relaxed);
-        cache.count -= 1;
-
-        // Record eviction
-        cache.stats.record_eviction();
+    if lru_index == usize::MAX {
+        return false; // nothing evictable
     }
+
+    // Evict LRU entry
+    cache.buckets[lru_index].inode = None;
+    cache.buckets[lru_index].ino = 0;
+    cache.buckets[lru_index].access_time.store(0, Ordering::Relaxed);
+    cache.count -= 1;
+
+    // Record eviction
+    cache.stats.record_eviction();
+    true
 }
 
 /// Remove from Inode cache

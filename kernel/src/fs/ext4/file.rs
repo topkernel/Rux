@@ -44,6 +44,22 @@ pub fn ext4_file_read(
             break;
         }
 
+        // Sparse hole (block 0 = unallocated): serve ZEROES, never physical
+        // block 0 (superblock-backup garbage) — review 5.5 (稀疏洞读盘块 0,
+        // 非缓存路径).
+        if blocks[block_index] == 0 {
+            let remaining = to_read - total_read;
+            let available_in_block = block_size - block_offset;
+            let zero_len = core::cmp::min(remaining, available_in_block);
+            for i in 0..zero_len {
+                buf[buf_offset + i] = 0;
+            }
+            total_read += zero_len;
+            buf_offset += zero_len;
+            current_offset += zero_len;
+            continue;
+        }
+
         // SAFETY: bio::bread returns a valid pinned BufferHead on success;
         // b_data points to a block-sized buffer aligned to block_size.
         unsafe {
@@ -90,7 +106,10 @@ fn ext4_file_read_cached(
     let block_size = fs.block_size as u64;
     let block_size_usize = fs.block_size as usize;
     let cache = page_cache::get_page_cache();
-    let ino = inode.ino;
+    let ino = inode.ino as u64;
+    // Filesystem identity for the page-cache key (review 5.3: cross-FS key
+    // collisions on small inode numbers).
+    let fs_id = fs as *const crate::fs::ext4::Ext4FileSystem as u64;
 
     let mut total_read = 0;
     let mut current_offset = offset;
@@ -101,7 +120,7 @@ fn ext4_file_read_cached(
         let page_offset = (current_offset % block_size) as usize;
 
         // Check page cache
-        if let Some(page_data) = cache.get(ino, page_index) {
+        if let Some(page_data) = cache.get(fs_id, ino, page_index) {
             // Cache hit: copy from cached page
             // SAFETY: page_data is a valid page-aligned pointer of block_size
             // bytes returned by the page cache; page_offset + copy_len is
@@ -119,7 +138,7 @@ fn ext4_file_read_cached(
                 buf_offset += copy_len;
                 current_offset += copy_len as u64;
             }
-            cache.put(ino, page_index);
+            cache.put(fs_id, ino, page_index);
         } else {
             // Cache miss: resolve single block and read from disk
             let block_nr = inode.get_data_block(fs, page_index)?;
@@ -152,7 +171,7 @@ fn ext4_file_read_cached(
                     .copy_from_slice(&data[page_offset..page_offset + copy_len]);
 
                 // Insert full page into page cache
-                cache.insert(ino, page_index, block_nr, &data);
+                cache.insert(fs_id, ino, page_index, block_nr, &data);
 
                 total_read += copy_len;
                 buf_offset += copy_len;
@@ -185,8 +204,8 @@ fn ext4_file_read_cached(
             if idx >= file_pages { break; }
 
             // Skip if already cached
-            if cache.get(ino, idx).is_some() {
-                cache.put(ino, idx);
+            if cache.get(fs_id, ino, idx).is_some() {
+                cache.put(fs_id, ino, idx);
                 continue;
             }
 
@@ -217,7 +236,7 @@ fn ext4_file_read_cached(
                 unsafe {
                     if status[i] == 0 {
                         let data = &(*bh_ptrs[i]).b_data;
-                        cache.insert(ino, ra_idx[i],
+                        cache.insert(fs_id, ino, ra_idx[i],
                             (*bh_ptrs[i]).b_blocknr, data);
                     }
                     bio::brelse(bh_ptrs[i]);
@@ -422,6 +441,19 @@ fn allocate_blocks_with_extents(
     use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
 
     let sectors_per_block = (fs.block_size / 512) as u64;
+
+    // Extent trees deeper than the root node: the code below only knows how
+    // to append inline (root) extents — appending to a deep tree's root as
+    // if it were a leaf corrupts the tree structure. Refuse (review 5.5:
+    // extent 深度>0 无条件当叶追加 → 破坏树+假满盘).
+    {
+        let header = unsafe {
+            &*(inode.block.as_ptr() as *const Ext4ExtentHeader)
+        };
+        if header.eh_magic == EXT4_EXT_MAGIC && header.eh_depth > 0 {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+    }
 
     // For simplicity, allocate blocks one by one and update/create extent
     for logical_block in current_blocks..needed_blocks {
@@ -672,6 +704,9 @@ pub fn ext4_sync_file(
     let blocks = inode.get_data_blocks(fs)?;
 
     for block in blocks {
+        if block == 0 {
+            continue; // sparse hole
+        }
         // SAFETY: bio::bread returns a valid BufferHead on success.
         unsafe {
             let bh = bio::bread(fs.device, block)
@@ -685,6 +720,18 @@ pub fn ext4_sync_file(
             bio::brelse(bh);
             sync_res?;
         }
+    }
+
+    // fsync semantics (review 5.5: ext4_sync_file/fsync 桩): with a journal
+    // present, durability requires the current transaction to COMMIT — the
+    // journal superblock's s_start then advances past this update, so a
+    // crash cannot replay older metadata over it. Without a journal the
+    // per-block sync above already wrote everything through.
+    if let Some(journal) = fs.journal.clone() {
+        let mut handle = super::journal::ext4_journal_start(fs, 0)?;
+        let res = super::journal::ext4_journal_stop(&mut handle);
+        let _ = journal; // Journal Arc retained for clarity
+        res?;
     }
 
     Ok(())
@@ -731,6 +778,24 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
         match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
             Ok(read_bytes) => {
                 file.set_pos(offset + read_bytes as u64);
+                // atime: keep the CACHED inode in sync with the read (no
+                // disk write — see the timestamp limitation note in
+                // ext4_setattr; there is no wall clock to store yet, so
+                // this records the monotonic boot seconds like mtime/ctime).
+                if read_bytes > 0 {
+                    let cycles = crate::drivers::intc::clint::read_time();
+                    let atime = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+                    // SAFETY: the cached Ext4Inode in inode.sb is a Box
+                    // owned by this VFS inode; the big lock above
+                    // serializes writers, and readers of atime tolerate
+                    // torn u32 values (advisory field).
+                    unsafe {
+                        core::ptr::write_volatile(
+                            &mut (*(inode.sb.unwrap() as *mut super::inode::Ext4Inode)).atime,
+                            atime,
+                        );
+                    }
+                }
                 read_bytes as isize
             }
             Err(e) => e as isize,
@@ -759,6 +824,12 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         };
         let fs = &*fs_ptr;
         let ext4_ino = inode.ino as u32;
+
+        // SMP serialization for the write path (review 5.5 high: 写路径/位图
+        // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group
+        // descriptor updates and the inode rewrite all happen under the
+        // ext4 big lock, same as namei.
+        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
 
         // Start a journal transaction for data=ordered semantics:
         // data blocks are synced during write, then the inode metadata is
@@ -820,7 +891,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                 match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
                     Ok(()) => {
                         // Invalidate page cache for this inode after write
-                        page_cache::get_page_cache().invalidate_inode(ext4_ino);
+                        page_cache::get_page_cache().invalidate_inode(fs as *const crate::fs::ext4::Ext4FileSystem as u64, ext4_ino as u64);
                         // Update file position
                         file.set_pos(offset + written_bytes as u64);
                         written_bytes as isize

@@ -101,7 +101,8 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
             Err(e) => e as i64,
         }
     } else {
-        -(errno::EBADF as i64)
+        // W3: fd resolves but is not a socket -> ENOTSOCK
+        -(errno::ENOTSOCK as i64)
     }
 }
 
@@ -129,7 +130,96 @@ pub fn sys_listen(args: SyscallArgs) -> i64 {
             Err(e) => e as i64,
         }
     } else {
-        -(errno::EBADF as i64)
+        // W3: fd resolves but is not a socket -> ENOTSOCK
+        -(errno::ENOTSOCK as i64)
+    }
+}
+
+/// W3: resolve a socket fd to (Arc<Socket>, nonblock-view of its file).
+fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
+    let fdtable = crate::sched::get_current_fdtable()?;
+    let file = fdtable.get_file(fd)?;
+    let nonblock = (file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
+    let socket = crate::net::socket::get_socket_from_fd(fd)?;
+    Some((socket, nonblock))
+}
+
+/// Common accept engine (sys_accept / sys_accept4).
+///
+/// W3: blocking semantics — with no pending connection, a BLOCKING socket
+/// sleeps on the listener's wait queue (the RX path wakes it when a child
+/// establishes) instead of returning EAGAIN; O_NONBLOCK / SOCK_NONBLOCK
+/// differentiates. `addr_ptr`/`addrlen_ptr` receive the peer address
+/// (Linux writes it on success; NULL skips).
+fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> i64 {
+    use crate::net::socket::SOCK_NONBLOCK_FLAG;
+
+    let (socket, file_nonblock) = match socket_file_of(fd) {
+        Some(s) => s,
+        None => return -(errno::ENOTSOCK as i64),
+    };
+    if socket.sock_type != crate::net::socket::SocketType::Tcp {
+        return -(errno::EOPNOTSUPP as i64);
+    }
+    if *socket.state.lock() != crate::net::socket::SocketState::Listening {
+        return -(errno::EINVAL as i64);
+    }
+    let tcp_fd = match *socket.tcp_fd.lock() {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
+
+    // W3: nonblocking when the file says so OR accept4 passed SOCK_NONBLOCK.
+    let nonblock = file_nonblock || (flags & SOCK_NONBLOCK_FLAG) != 0;
+    // SO_RCVTIMEO bounds the accept wait (Linux applies sk_rcvtimeo).
+    let deadline = socket.rcvtimeo_deadline();
+
+    loop {
+        // Loopback delivery is backlog-based: drain once from syscall context
+        // so each accept() attempt advances the handshake one step even if the
+        // NetRx softirq has not fired yet (safe now that loopback TX only
+        // queues — no RX re-entry).
+        crate::net::ethernet::ethernet_poll();
+        let ret = crate::net::tcp::tcp_accept(tcp_fd);
+        if ret >= 0 {
+            // tcp_accept returned a protocol-table index; wrap it into a
+            // process fd (Socket + File) so the caller can use it.
+            let new_fd = match crate::net::socket::socket_create_accepted(ret, flags) {
+                Ok(fd) => fd,
+                Err(e) => return e as i64,
+            };
+            // Linux accept(): write the peer address (and length) on success.
+            if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
+                // SAFETY: validated below via access_ok before any write.
+                if crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16)
+                    && crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4)
+                {
+                    // For an accepted connection the peer is the CHILD's
+                    // remote endpoint, not the listener's.
+                    let (paddr, pport) = crate::net::tcp::tcp_remote_endpoint(ret);
+                    // SAFETY: addr_ptr/addrlen_ptr validated with access_ok.
+                    unsafe {
+                        core::ptr::write(addr_ptr as *mut u16, 2u16); // AF_INET
+                        core::ptr::write(addr_ptr.add(2) as *mut u16, pport.to_be());
+                        core::ptr::write(addr_ptr.add(4) as *mut u32, paddr.to_be());
+                        core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
+                        core::ptr::write_volatile(addrlen_ptr, 16u32);
+                    }
+                }
+            }
+            return new_fd as i64;
+        }
+        if ret != -11 {
+            return ret as i64;
+        }
+        // EAGAIN: no completed connection.
+        if nonblock {
+            return -(errno::EAGAIN as i64);
+        }
+        // W3: blocking — wait for the RX path to establish a child.
+        if let Err(e) = crate::net::socket::socket_accept_wait_round(&socket, deadline) {
+            return e as i64;
+        }
     }
 }
 
@@ -144,33 +234,9 @@ pub fn sys_listen(args: SyscallArgs) -> i64 {
 /// Returns new socket file descriptor on success, negative error code on failure
 pub fn sys_accept(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
-    let _addr_ptr = args[1] as *mut u8;
-    let _addrlen_ptr = args[2] as *mut u32;
-
-    // Resolve through the per-process fd table (review NET-C3). The accept
-    // flow itself is reworked with NET-C4.
-    //
-    // Loopback delivery is backlog-based: drain once from syscall context
-    // so each accept() attempt advances the handshake one step even if the
-    // NetRx softirq has not fired yet (safe now that loopback TX only
-    // queues — no RX re-entry).
-    crate::net::ethernet::ethernet_poll();
-    match crate::net::socket::tcp_proto_fd(fd) {
-        Some(tcp_fd) => {
-            let new_fd = crate::net::tcp::tcp_accept(tcp_fd);
-            if new_fd < 0 {
-                new_fd as i64
-            } else {
-                // tcp_accept returned a protocol-table index; wrap it into a
-                // proper process fd (Socket + File) so the caller can use it.
-                match crate::net::socket::socket_create_accepted(new_fd) {
-                    Ok(fd) => fd as i64,
-                    Err(e) => e as i64,
-                }
-            }
-        }
-        None => -(errno::EBADF as i64),
-    }
+    let addr_ptr = args[1] as *mut u8;
+    let addrlen_ptr = args[2] as *mut u32;
+    sys_accept_common(fd, 0, addr_ptr, addrlen_ptr)
 }
 
 /// sys_connect - Connect to remote address
@@ -219,7 +285,8 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
             Err(e) => e as i64,
         }
     } else {
-        -(errno::EBADF as i64)
+        // W3: fd resolves but is not a socket -> ENOTSOCK
+        -(errno::ENOTSOCK as i64)
     }
 }
 
@@ -242,7 +309,6 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     let _flags = args[3] as i32;
     let addr_ptr = args[4] as *const u8;
     let _addrlen = args[5] as u32;
-
     // Check buffer pointer validity
     if buf_ptr.is_null() {
         return -(errno::EFAULT as i64);
@@ -268,7 +334,8 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     // namespaces.
     let socket = match crate::net::socket::get_socket_from_fd(fd) {
         Some(s) => s,
-        None => return -(errno::EBADF as i64),
+        // W3: fd resolves but is not a socket -> ENOTSOCK
+        None => return -(errno::ENOTSOCK as i64),
     };
 
     // R35: copy the user payload into a kernel buffer BEFORE the protocol
@@ -335,8 +402,21 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         None
     };
 
-    // Send data
-    match socket.send(data, dest_addr) {
+    // Send data (W3: through the blocking send engine — blocking sends
+    // complete the whole buffer; MSG_DONTWAIT / O_NONBLOCK differentiate).
+    let file_nonblock = {
+        let fdtable = match crate::sched::get_current_fdtable() {
+            Some(t) => t,
+            None => return -(errno::EBADF as i64),
+        };
+        match fdtable.get_file(fd) {
+            Some(f) => (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0,
+            None => return -(errno::EBADF as i64),
+        }
+    };
+    let nonblock = file_nonblock || (_flags & MSG_DONTWAIT) != 0;
+    let deadline = socket.sndtimeo_deadline();
+    match crate::net::socket::socket_send_ctl(&socket, data, dest_addr, nonblock, deadline) {
         Ok(bytes_sent) => bytes_sent as i64,
         Err(e) => e as i64,
     }
@@ -369,28 +449,44 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Try new socket layer first
-    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
-        let local_addr = *socket.local_addr.lock();
-        let local_port = *socket.local_port.lock();
-        // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; writing sockaddr_in layout.
-        unsafe {
-            core::ptr::write(addr_ptr as *mut u16, 2u16); // AF_INET
-            core::ptr::write(addr_ptr.add(2) as *mut u16, local_port.to_be());
-            core::ptr::write(addr_ptr.add(4) as *mut u32, local_addr.to_be());
-            core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
-            core::ptr::write_volatile(addrlen_ptr, 16u32);
+    // W3: non-socket fd → ENOTSOCK (matching getpeername). The old
+    // fallback fabricated 0.0.0.0:0 "success" for any non-socket fd —
+    // worse, get_socket_from_fd used to blindly reinterpret private_data,
+    // so a pipe fd produced a garbage Socket read.
+    let Some(socket) = crate::net::socket::get_socket_from_fd(fd) else {
+        return -(errno::ENOTSOCK as i64);
+    };
+
+    // UDP sockets that were implicitly bound report the assigned port;
+    // connect()-bound TCP sockets likewise (mirror the protocol table).
+    if *socket.local_port.lock() == 0 {
+        match socket.sock_type {
+            crate::net::socket::SocketType::Tcp => {
+                if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+                    let p = crate::net::tcp::tcp_local_port(tcp_fd);
+                    if p != 0 {
+                        *socket.local_port.lock() = p;
+                    }
+                }
+            }
+            crate::net::socket::SocketType::Udp => {
+                if let Some(udp_fd) = *socket.udp_fd.lock() {
+                    let p = crate::net::udp::udp_local_port(udp_fd);
+                    if p != 0 {
+                        *socket.local_port.lock() = p;
+                    }
+                }
+            }
         }
-        return 0;
     }
 
-    // Fallback: try old TCP/UDP tables
-    // No stored local address in old layer — return INADDR_ANY:port 0
+    let local_addr = *socket.local_addr.lock();
+    let local_port = *socket.local_port.lock();
     // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; writing sockaddr_in layout.
     unsafe {
-        core::ptr::write(addr_ptr as *mut u16, 2u16);
-        core::ptr::write(addr_ptr.add(2) as *mut u16, 0u16);
-        core::ptr::write(addr_ptr.add(4) as *mut u32, 0u32);
+        core::ptr::write(addr_ptr as *mut u16, 2u16); // AF_INET
+        core::ptr::write(addr_ptr.add(2) as *mut u16, local_port.to_be());
+        core::ptr::write(addr_ptr.add(4) as *mut u32, local_addr.to_be());
         core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
         core::ptr::write_volatile(addrlen_ptr, 16u32);
     }
@@ -463,7 +559,6 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
 
     // SOL_SOCKET = 1
     const SOL_SOCKET: i32 = 1;
-    // Common SO_* options we accept but ignore
     const SO_REUSEADDR: i32 = 2;
     const SO_TYPE: i32 = 3;
     const SO_ERROR: i32 = 4;
@@ -506,34 +601,128 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
         }
     }
 
-    // Validate fd is a socket
-    let is_socket = crate::net::socket::get_socket_from_fd(fd).is_some();
-    if !is_socket {
-        return -(errno::ENOTSOCK as i64);
-    }
+    // Validate fd is a socket (W3: get_socket_from_fd verifies the ops
+    // table — non-socket fds are ENOTSOCK, not type-confused pointers).
+    let socket = match crate::net::socket::get_socket_from_fd(fd) {
+        Some(s) => s,
+        None => return -(errno::ENOTSOCK as i64),
+    };
+
+    // Read one i32 (bool-style option value) via the exception-table path.
+    // SAFETY: optval range-checked with access_ok above (optlen >= 4 here).
+    let read_i32 = |need: u32| -> Option<i32> {
+        if optlen < need || optval.is_null() {
+            return None;
+        }
+        let mut b = [0u8; 4];
+        // SAFETY: access_ok(4) was verified (optlen >= need >= 4).
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(b.as_mut_ptr(), optval, 4)
+        } != 0
+        {
+            return None;
+        }
+        Some(i32::from_ne_bytes(b))
+    };
 
     match level {
         SOL_SOCKET => match optname {
-            SO_REUSEADDR | SO_REUSEPORT | SO_KEEPALIVE | SO_BROADCAST
-            | SO_DONTROUTE | SO_OOBINLINE | SO_NO_CHECK | SO_BSDCOMPAT
-            | SO_PASSCRED | SO_SNDBUF | SO_RCVBUF | SO_RCVLOWAT
-            | SO_SNDLOWAT | SO_PRIORITY | SO_LINGER | SO_RCVTIMEO
-            | SO_SNDTIMEO => 0, // Accept and ignore
-            SO_TYPE | SO_ERROR | SO_PEERCRED => {
-                return -(errno::ENOPROTOOPT as i64); // Read-only options
+            SO_RCVTIMEO | SO_SNDTIMEO => {
+                // W3: struct timeval { i64 tv_sec; i64 tv_usec } — the value
+                // now TAKES EFFECT (blocking recv/send bounded by it).
+                if optval.is_null() || optlen < 8 {
+                    return -(errno::EINVAL as i64);
+                }
+                let mut tv = [0u8; 16];
+                // SAFETY: optlen >= 8 and access_ok covered optlen bytes;
+                // copy 16 only when the buffer allows, else 8.
+                let cpy = core::cmp::min(optlen as usize, 16);
+                if cpy < 8 {
+                    return -(errno::EINVAL as i64);
+                }
+                if !crate::arch::riscv64::uaccess::access_ok(optval as usize, cpy) {
+                    return -(errno::EFAULT as i64);
+                }
+                // SAFETY: cpy <= 16, optval validated.
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(tv.as_mut_ptr(), optval, cpy)
+                } != 0
+                {
+                    return -(errno::EFAULT as i64);
+                }
+                let sec = i64::from_ne_bytes(tv[0..8].try_into().unwrap());
+                let usec = i64::from_ne_bytes(tv[8..16].try_into().unwrap());
+                if sec < 0 || usec < 0 {
+                    return -(errno::EINVAL as i64);
+                }
+                let us = (sec as u64)
+                    .saturating_mul(1_000_000)
+                    .saturating_add(usec as u64);
+                let mut opts = socket.options.lock();
+                if optname == SO_RCVTIMEO {
+                    opts.rcvtimeo_us = us;
+                } else {
+                    opts.sndtimeo_us = us;
+                }
+                0
             }
-            _ => 0, // Accept unknown options silently
+            SO_REUSEADDR => {
+                // W3: stored and CHECKED at bind (mirrored into the TCP
+                // protocol slot; both binders must opt in to coexist).
+                let v = match read_i32(4) {
+                    Some(v) => v,
+                    None => return -(errno::EFAULT as i64),
+                };
+                socket.options.lock().reuseaddr = v != 0;
+                if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+                    crate::net::tcp::tcp_set_reuseaddr(tcp_fd, v != 0);
+                }
+                0
+            }
+            SO_REUSEPORT => {
+                let v = match read_i32(4) {
+                    Some(v) => v,
+                    None => return -(errno::EFAULT as i64),
+                };
+                socket.options.lock().reuseport = v != 0;
+                0
+            }
+            SO_SNDBUF | SO_RCVBUF => {
+                // W3: stored (doubled like Linux) and reported by getsockopt.
+                let v = match read_i32(4) {
+                    Some(v) => v,
+                    None => return -(errno::EFAULT as i64),
+                };
+                let mut opts = socket.options.lock();
+                let doubled = (v.saturating_mul(2).max(2048)) as u32;
+                if optname == SO_SNDBUF {
+                    opts.sndbuf = doubled;
+                } else {
+                    opts.rcvbuf = doubled;
+                }
+                0
+            }
+            // Accepted-and-ignored (no operational effect in this stack):
+            SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE | SO_OOBINLINE
+            | SO_NO_CHECK | SO_BSDCOMPAT | SO_PASSCRED | SO_RCVLOWAT
+            | SO_SNDLOWAT | SO_PRIORITY | SO_LINGER => 0,
+            SO_TYPE | SO_ERROR | SO_PEERCRED => {
+                -(errno::ENOPROTOOPT as i64) // Read-only options
+            }
+            // W3: unknown options are no longer silently accepted.
+            _ => -(errno::ENOPROTOOPT as i64),
         },
         IPPROTO_TCP => match optname {
             TCP_NODELAY | TCP_CORK | TCP_KEEPIDLE | TCP_KEEPINTVL | TCP_KEEPCNT => 0,
-            _ => 0,
+            _ => -(errno::ENOPROTOOPT as i64),
         },
         IPPROTO_IP => match optname {
             IP_TOS | IP_TTL | IP_MULTICAST_TTL | IP_MULTICAST_LOOP
             | IP_ADD_MEMBERSHIP | IP_DROP_MEMBERSHIP => 0,
-            _ => 0,
+            _ => -(errno::ENOPROTOOPT as i64),
         },
-        _ => 0, // Accept unknown levels silently
+        // W3: unknown levels are no longer silently accepted.
+        _ => -(errno::ENOPROTOOPT as i64),
     }
 }
 
@@ -571,6 +760,8 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     const SO_SNDTIMEO: i32 = 21;
     const SO_PEERCRED: i32 = 17;
     const SO_DOMAIN: i32 = 39;
+    const SO_ACCEPTCONN: i32 = 30;
+    const SO_PROTOCOL: i32 = 38;
     const IPPROTO_TCP: i32 = 6;
     const TCP_NODELAY: i32 = 1;
     const TCP_INFO: i32 = 11;
@@ -599,97 +790,128 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     if sock.is_none() {
         return -(errno::ENOTSOCK as i64);
     }
+    let sock = sock.unwrap();
+
+    /// Write `val` (little-endian native i32) into optval, truncate to
+    /// min(optlen, 4), update optlen.
+    // SAFETY: optval/optlen_ptr validated with access_ok above.
+    unsafe fn write_int(optval: *mut u8, optlen: usize, optlen_ptr: *mut u32, val: i32) {
+        let write_len = core::cmp::min(optlen, 4);
+        core::ptr::write_bytes(optval, 0, optlen.min(write_len));
+        core::ptr::copy_nonoverlapping(
+            &val as *const i32 as *const u8,
+            optval,
+            write_len,
+        );
+        core::ptr::write_volatile(optlen_ptr, write_len as u32);
+    }
 
     // SAFETY: optval and optlen_ptr validated with access_ok; writes stay within
-    // validated lengths. sock may be None for fallback paths.
+    // validated lengths.
     unsafe {
         match level {
             SOL_SOCKET => match optname {
-                SO_TYPE => {
-                    // Return SOCK_STREAM or SOCK_DGRAM
-                    let val = match sock.as_ref().unwrap().sock_type {
-                        crate::net::socket::SocketType::Tcp => 1u32,  // SOCK_STREAM
-                        crate::net::socket::SocketType::Udp => 2u32,  // SOCK_DGRAM
-                    };
-                    let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::write_bytes(optval, 0, optlen);
-                    core::ptr::copy_nonoverlapping(
-                        &val as *const u32 as *const u8,
-                        optval,
-                        write_len,
-                    );
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
-                }
+                SO_TYPE => write_int(optval, optlen, optlen_ptr, match sock.sock_type {
+                    crate::net::socket::SocketType::Tcp => 1,  // SOCK_STREAM
+                    crate::net::socket::SocketType::Udp => 2,  // SOCK_DGRAM
+                }),
                 SO_ERROR => {
-                    // No pending error
-                    let val: i32 = 0;
-                    let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::write_bytes(optval, 0, optlen);
-                    core::ptr::copy_nonoverlapping(
-                        &val as *const i32 as *const u8,
-                        optval,
-                        write_len,
-                    );
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    // W3: the REAL pending error — socket-level connect()
+                    // failure first, then the protocol slot's error (RST /
+                    // ICMP / retransmit exhaustion). Reading clears it
+                    // (Linux semantics; non-blocking connect probes rely
+                    // on exactly this contract).
+                    let mut err = sock.options.lock().error;
+                    if err == 0 {
+                        match sock.sock_type {
+                            crate::net::socket::SocketType::Tcp => {
+                                if let Some(tcp_fd) = *sock.tcp_fd.lock() {
+                                    err = crate::net::tcp::tcp_take_pending_error(tcp_fd);
+                                }
+                            }
+                            crate::net::socket::SocketType::Udp => {
+                                if let Some(udp_fd) = *sock.udp_fd.lock() {
+                                    err = crate::net::udp::udp_take_pending_error(udp_fd);
+                                }
+                            }
+                        }
+                    } else {
+                        sock.options.lock().error = 0;
+                    }
+                    write_int(optval, optlen, optlen_ptr, err);
+                }
+                SO_ACCEPTCONN => {
+                    // W3: 1 when listening (Linux reports it here).
+                    let listening =
+                        *sock.state.lock() == crate::net::socket::SocketState::Listening;
+                    write_int(optval, optlen, optlen_ptr, listening as i32);
+                }
+                SO_PROTOCOL => {
+                    // W3: IPPROTO_TCP / IPPROTO_UDP.
+                    let proto = match sock.sock_type {
+                        crate::net::socket::SocketType::Tcp => 6,
+                        crate::net::socket::SocketType::Udp => 17,
+                    };
+                    write_int(optval, optlen, optlen_ptr, proto);
                 }
                 SO_DOMAIN => {
                     // AF_INET = 2
-                    let val: u32 = 2;
-                    let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::copy_nonoverlapping(
-                        &val as *const u32 as *const u8,
-                        optval,
-                        write_len,
-                    );
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    write_int(optval, optlen, optlen_ptr, 2);
                 }
-                SO_REUSEADDR | SO_REUSEPORT | SO_KEEPALIVE | SO_BROADCAST
-                | SO_OOBINLINE | SO_NO_CHECK | SO_PRIORITY => {
-                    let val: u32 = 0;
-                    let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::copy_nonoverlapping(
-                        &val as *const u32 as *const u8,
-                        optval,
-                        write_len,
-                    );
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                SO_REUSEADDR | SO_REUSEPORT => {
+                    // W3: report the stored value (was always 0).
+                    let opts = sock.options.lock();
+                    let v = if optname == SO_REUSEADDR { opts.reuseaddr } else { opts.reuseport };
+                    drop(opts);
+                    write_int(optval, optlen, optlen_ptr, v as i32);
+                }
+                SO_KEEPALIVE | SO_BROADCAST | SO_OOBINLINE | SO_NO_CHECK | SO_PRIORITY => {
+                    write_int(optval, optlen, optlen_ptr, 0);
                 }
                 SO_SNDBUF | SO_RCVBUF => {
-                    let val: i32 = 212992; // Default Linux socket buffer size
-                    let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::copy_nonoverlapping(
-                        &val as *const i32 as *const u8,
-                        optval,
-                        write_len,
-                    );
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    // W3: the actual stored value (setsockopt now records it).
+                    let opts = sock.options.lock();
+                    let v = if optname == SO_SNDBUF { opts.sndbuf } else { opts.rcvbuf };
+                    drop(opts);
+                    write_int(optval, optlen, optlen_ptr, v as i32);
                 }
                 SO_RCVLOWAT | SO_SNDLOWAT => {
-                    let val: i32 = 1; // Default: 1 byte
-                    let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::copy_nonoverlapping(
-                        &val as *const i32 as *const u8,
-                        optval,
-                        write_len,
-                    );
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    write_int(optval, optlen, optlen_ptr, 1); // Default: 1 byte
                 }
                 SO_RCVTIMEO | SO_SNDTIMEO => {
-                    // struct timeval { tv_sec: i64, tv_usec: i64 } = 16 bytes
+                    // W3: struct timeval { tv_sec, tv_usec } — the stored
+                    // value (0,0 = no timeout).
+                    let opts = sock.options.lock();
+                    let us = if optname == SO_RCVTIMEO { opts.rcvtimeo_us } else { opts.sndtimeo_us };
+                    drop(opts);
+                    let sec = (us / 1_000_000) as u64;
+                    let usec = (us % 1_000_000) as u64;
                     let write_len = core::cmp::min(optlen, 16);
-                    core::ptr::write_bytes(optval, 0, write_len); // Zero = no timeout
+                    core::ptr::write_bytes(optval, 0, optlen.min(write_len));
+                    if write_len >= 8 {
+                        core::ptr::copy_nonoverlapping(
+                            &sec as *const u64 as *const u8, optval, 8.min(write_len),
+                        );
+                    }
+                    if write_len >= 16 {
+                        core::ptr::copy_nonoverlapping(
+                            &usec as *const u64 as *const u8,
+                            optval.add(8),
+                            8,
+                        );
+                    }
                     core::ptr::write_volatile(optlen_ptr, write_len as u32);
                 }
                 SO_LINGER => {
                     // struct linger { l_onoff: i32, l_linger: i32 } = 8 bytes
                     let write_len = core::cmp::min(optlen, 8);
-                    core::ptr::write_bytes(optval, 0, write_len); // Linger off
+                    core::ptr::write_bytes(optval, 0, optlen.min(write_len)); // Linger off
                     core::ptr::write_volatile(optlen_ptr, write_len as u32);
                 }
                 SO_PEERCRED => {
                     // struct ucred { pid, uid, gid } = 12 bytes
                     let write_len = core::cmp::min(optlen, 12);
-                    core::ptr::write_bytes(optval, 0, write_len);
+                    core::ptr::write_bytes(optval, 0, optlen.min(write_len));
                     core::ptr::write_volatile(optlen_ptr, write_len as u32);
                 }
                 _ => {
@@ -698,18 +920,11 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
             },
             IPPROTO_TCP => match optname {
                 TCP_NODELAY => {
-                    let val: u32 = 1; // Nodelay enabled by default
-                    let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::copy_nonoverlapping(
-                        &val as *const u32 as *const u8,
-                        optval,
-                        write_len,
-                    );
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    write_int(optval, optlen, optlen_ptr, 1); // Nodelay enabled by default
                 }
                 TCP_CORK | TCP_INFO => {
                     let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::write_bytes(optval, 0, write_len);
+                    core::ptr::write_bytes(optval, 0, optlen.min(write_len));
                     core::ptr::write_volatile(optlen_ptr, write_len as u32);
                 }
                 _ => {
@@ -718,24 +933,10 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
             },
             IPPROTO_IP => match optname {
                 IP_TOS => {
-                    let val: u32 = 0;
-                    let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::copy_nonoverlapping(
-                        &val as *const u32 as *const u8,
-                        optval,
-                        write_len,
-                    );
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    write_int(optval, optlen, optlen_ptr, 0);
                 }
                 IP_TTL => {
-                    let val: u32 = 64; // Default TTL
-                    let write_len = core::cmp::min(optlen, 4);
-                    core::ptr::copy_nonoverlapping(
-                        &val as *const u32 as *const u8,
-                        optval,
-                        write_len,
-                    );
-                    core::ptr::write_volatile(optlen_ptr, write_len as u32);
+                    write_int(optval, optlen, optlen_ptr, 64); // Default TTL
                 }
                 _ => {
                     return -(errno::ENOPROTOOPT as i64);
@@ -803,10 +1004,14 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
 /// - args[0]: fd - socket file descriptor
 /// - args[1]: msg - pointer to msghdr
 /// - args[2]: flags - flags
+///
+/// W3: msg_name is honored (the old code read and DISCARDED it — a UDP
+/// sendmsg could never address its datagram); MSG_DONTWAIT /
+/// O_NONBLOCK / SO_SNDTIMEO participate in the send.
 pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msg_ptr = args[1] as *const u8;
-    let _flags = args[2] as i32;
+    let flags = args[2] as i32;
 
     if msg_ptr.is_null() {
         return -(errno::EFAULT as i64);
@@ -875,16 +1080,53 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // Get socket and send
-    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
-        match socket.send(&buf, None) {
-            Ok(n) => n as i64,
-            Err(e) => e as i64,
+    // W3: parse the destination from msg_name (same path as sendto's
+    // addr_ptr) — UDP sendmsg used to pass NULL and could never send a
+    // datagram; TCP ignores it.
+    let dest_addr = if !msg_name_ptr.is_null() && msg_namelen >= 16 {
+        if !crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, 16) {
+            return -(errno::EFAULT as i64);
         }
+        let mut saddr = [0u8; 16];
+        // SAFETY: msg_name_ptr validated with access_ok(16).
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(saddr.as_mut_ptr(), msg_name_ptr, 16)
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        crate::net::socket::SockAddrIn::from_bytes(&saddr)
+            .map(|sockaddr| (sockaddr.addr(), sockaddr.port()))
     } else {
-        -(errno::EBADF as i64)
+        None
+    };
+
+    // Get socket and send (W3: through the blocking send engine).
+    match socket_file_of(fd as usize) {
+        Some((socket, file_nonblock)) => {
+            // W3: a UDP datagram above 65507 bytes cannot be represented
+            // in the 16-bit length field — EMSGSIZE up front (not a late
+            // EIO from the packet builder).
+            if socket.sock_type == crate::net::socket::SocketType::Udp
+                && total_len > crate::net::udp::UDP_MAX_DATAGRAM
+            {
+                return -(errno::EMSGSIZE as i64);
+            }
+            let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+            let deadline = socket.sndtimeo_deadline();
+            match crate::net::socket::socket_send_ctl(&socket, &buf, dest_addr, nonblock, deadline) {
+                Ok(n) => n as i64,
+                Err(e) => e as i64,
+            }
+        }
+        None => -(errno::ENOTSOCK as i64),
     }
 }
+
+/// W3: MSG_DONTWAIT (recvfrom/sendto/recvmsg/sendmsg).
+const MSG_DONTWAIT: i32 = 0x40;
+/// W3: MSG_TRUNC (reported in recvmsg's msg_flags).
+const MSG_TRUNC: i32 = 0x20;
 
 /// sys_recvmsg - Receive message from socket
 ///
@@ -892,10 +1134,15 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
 /// - args[0]: fd - socket file descriptor
 /// - args[1]: msg - pointer to msghdr
 /// - args[2]: flags - flags
+///
+/// W3: the source address is written back to msg_name/msg_namelen (the
+/// old code discarded it — recvfrom-style callers on UDP never saw the
+/// peer), msg_flags reports MSG_TRUNC on truncated datagrams, and the
+/// receive honors blocking / O_NONBLOCK / MSG_DONTWAIT / SO_RCVTIMEO.
 pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msg_ptr = args[1] as *mut u8;
-    let _flags = args[2] as i32;
+    let flags = args[2] as i32;
 
     if msg_ptr.is_null() {
         return -(errno::EFAULT as i64);
@@ -906,6 +1153,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
 
     // Read iovec from msghdr
     // SAFETY: msg_ptr validated with access_ok(64); reading fields at known offsets.
+    let msg_name_ptr = unsafe { *(msg_ptr as *const *mut u8) };
+    let msg_namelen_ptr = unsafe { *(msg_ptr.add(8) as *const *mut u32) };
     let msg_iov_ptr = unsafe { *((msg_ptr.add(16)) as *const usize) };
     let msg_iovlen = unsafe { *((msg_ptr.add(24)) as *const usize) };
 
@@ -942,42 +1191,92 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // Allocate receive buffer
     let mut buf = alloc::vec![0u8; total_buf_len];
 
-    // Get socket and receive
-    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
-        match socket.recv(&mut buf) {
-                Ok((bytes_read, _src_addr)) => {
-                    // Scatter data back to iovecs
-                    let mut offset = 0usize;
-                    for i in 0..msg_iovlen {
-                        if offset >= bytes_read { break; }
-                        // SAFETY: iovec fields at validated user offset; copy_len bounds the write.
-                        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
-                        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
-                        let copy_len = core::cmp::min(iov_len, bytes_read - offset);
-                        if copy_len > 0 {
-                            // R20-3: exception-table copy — a raw
-                            // copy_nonoverlapping to an unmapped (or
-                            // COW-read-only) user page faulted the kernel.
-                            let uncopied = unsafe {
-                                crate::arch::riscv64::uaccess::copy_to_user(
-                                    iov_base as *mut u8,
-                                    buf.as_ptr().add(offset),
-                                    copy_len,
-                                )
-                            };
-                            if uncopied > 0 {
-                                return if offset > 0 { offset as i64 } else { -(errno::EFAULT as i64) };
-                            }
-                            offset += copy_len;
-                        }
-                    }
-                    bytes_read as i64
-                }
-            Err(e) => e as i64,
+    // Get socket and receive (W3: through the blocking recv engine).
+    let (socket, file_nonblock) = match socket_file_of(fd as usize) {
+        Some(s) => s,
+        None => return -(errno::ENOTSOCK as i64),
+    };
+    let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+    let deadline = socket.rcvtimeo_deadline();
+
+    // W3: MSG_TRUNC — measure the NEXT (about-to-be-received) datagram
+    // against the iovec space BEFORE consuming it.
+    let datagram_truncated = if socket.sock_type == crate::net::socket::SocketType::Udp {
+        match *socket.udp_fd.lock() {
+            Some(udp_fd) => crate::net::udp::udp_next_dgram_len(udp_fd)
+                .map(|l| l > total_buf_len)
+                .unwrap_or(false),
+            None => false,
         }
     } else {
-        -(errno::EBADF as i64)
+        false
+    };
+
+    let (bytes_read, src_addr) =
+        match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline) {
+            Ok(r) => r,
+            Err(e) => return e as i64,
+        };
+
+    // W3: MSG_TRUNC — a datagram longer than the iovec space was truncated.
+    let mut out_flags: u32 = 0;
+    if datagram_truncated && bytes_read > 0 {
+        out_flags |= MSG_TRUNC as u32;
     }
+    // Scatter data back to iovecs
+    let mut offset = 0usize;
+    for i in 0..msg_iovlen {
+        if offset >= bytes_read { break; }
+        // SAFETY: iovec fields at validated user offset; copy_len bounds the write.
+        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(i * 16)) as *const usize) };
+        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(i * 16 + 8)) as *const usize) };
+        let copy_len = core::cmp::min(iov_len, bytes_read - offset);
+        if copy_len > 0 {
+            // R20-3: exception-table copy — a raw
+            // copy_nonoverlapping to an unmapped (or COW-read-only) user
+            // page faulted the kernel.
+            let uncopied = unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    iov_base as *mut u8,
+                    buf.as_ptr().add(offset),
+                    copy_len,
+                )
+            };
+            if uncopied > 0 {
+                return if offset > 0 { offset as i64 } else { -(errno::EFAULT as i64) };
+            }
+            offset += copy_len;
+        }
+    }
+
+    // W3: write the source address into msg_name/msg_namelen (UDP peers
+    // are now visible; TCP reports the connected remote).
+    if let Some((addr, port)) = src_addr {
+        if !msg_name_ptr.is_null() && !msg_namelen_ptr.is_null() {
+            if crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, 16)
+                && crate::arch::riscv64::uaccess::access_ok(msg_namelen_ptr as usize, 4)
+            {
+                // SAFETY: pointers validated with access_ok; sockaddr_in layout.
+                unsafe {
+                    core::ptr::write(msg_name_ptr as *mut u16, 2u16); // AF_INET
+                    core::ptr::write(msg_name_ptr.add(2) as *mut u16, port.to_be());
+                    core::ptr::write(msg_name_ptr.add(4) as *mut u32, addr.to_be());
+                    core::ptr::write_bytes(msg_name_ptr.add(8), 0, 8);
+                    core::ptr::write_volatile(msg_namelen_ptr, 16u32);
+                }
+            }
+        }
+    }
+
+    // W3: msg_flags (offset 48 in msghdr) — MSG_TRUNC when a UDP datagram
+    // was longer than the provided buffer space.
+    // (datagram_truncated was measured pre-receive; see above.)
+    // SAFETY: msg_ptr validated with access_ok(64); offset 48..52 in range.
+    unsafe {
+        core::ptr::write_volatile(msg_ptr.add(48) as *mut u32, out_flags);
+    }
+
+    bytes_read as i64
 }
 
 /// sys_socketpair - Create pair of connected sockets (NR 199)
@@ -1021,11 +1320,15 @@ pub fn sys_socketpair(args: SyscallArgs) -> i64 {
 ///
 /// struct mmsghdr { struct msghdr msg; unsigned int len; }
 /// struct msghdr is 56 bytes on 64-bit; mmsghdr = 64 bytes (4-byte msg_len + 4 pad)
+///
+/// W3 (ABI): first-failure semantics — an error on the FIRST message is
+/// returned as the negative errno; after ≥1 successful sends the count is
+/// returned (returning 0 here lied "no messages" under the Linux ABI).
 pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msgvec = args[1] as *const u8;
     let vlen = args[2] as u32;
-    let _flags = args[3] as i32;
+    let flags = args[3] as i32;
 
     if msgvec.is_null() || vlen == 0 {
         return -(errno::EFAULT as i64);
@@ -1034,69 +1337,131 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
-        let mut total_sent = 0u32;
-        for i in 0..vlen as usize {
-            // mmsghdr: msghdr (56 bytes) + msg_len (4 bytes)
-            // SAFETY: msgvec validated with access_ok; mm offset within validated range.
-            let mm = unsafe { msgvec.add(i * 64) };
-            // msghdr layout: msg_name(8), msg_namelen(4), msg_iov(8), msg_iovlen(8),
-            //                 msg_control(8), msg_controllen(8), msg_flags(4) = 48 bytes
-            // SAFETY: mm validated; reading iovec fields at known offsets.
-            let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
-            let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
-            // R20-2: bound the iovec count (UIO_MAXIOV) — an unbounded
-            // user u64 here looped the kernel over wild pointers (each
-            // iteration a raw kernel deref of msg_iov_ptr+j*16). Stop the
-            // whole batch, mirroring Linux's -EMSGSIZE on __sys_sendmmsg.
-            if msg_iovlen > 1024 {
+    let (socket, file_nonblock) = match socket_file_of(fd as usize) {
+        Some(s) => s,
+        None => return -(errno::ENOTSOCK as i64),
+    };
+    let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+    let deadline = socket.sndtimeo_deadline();
+
+    let mut total_sent = 0u32;
+    for i in 0..vlen as usize {
+        // mmsghdr: msghdr (56 bytes) + msg_len (4 bytes)
+        // SAFETY: msgvec validated with access_ok; mm offset within validated range.
+        let mm = unsafe { msgvec.add(i * 64) };
+        // msghdr layout: msg_name(8), msg_namelen(4), msg_iov(8), msg_iovlen(8),
+        //                 msg_control(8), msg_controllen(8), msg_flags(4) = 48 bytes
+        // SAFETY: mm validated; reading iovec fields at known offsets.
+        let msg_name_ptr = unsafe { *(mm as *const *const u8) };
+        let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
+        let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
+        // R20-2: bound the iovec count (UIO_MAXIOV) — an unbounded
+        // user u64 here looped the kernel over wild pointers (each
+        // iteration a raw kernel deref of msg_iov_ptr+j*16). Stop the
+        // whole batch, mirroring Linux's -EMSGSIZE on __sys_sendmmsg.
+        if msg_iovlen > 1024 {
+            if total_sent == 0 {
+                return -(errno::EMSGSIZE as i64);
+            }
+            break;
+        }
+        // R20-3: range-check the iovec array before raw deref (see
+        // sys_sendmsg); return partial success on a bad one.
+        if !crate::arch::riscv64::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
+            if total_sent == 0 {
+                return -(errno::EFAULT as i64);
+            }
+            return total_sent as i64;
+        }
+
+        // Gather data from iovec
+        let mut buf = alloc::vec::Vec::new();
+        let mut total_len = 0usize;
+        for j in 0..msg_iovlen {
+            // SAFETY: iovec fields at validated offset; iov_base validated below.
+            let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
+            let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
+            if iov_len > 0 {
+                if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
+                    if total_sent == 0 {
+                        return -(errno::EFAULT as i64);
+                    }
+                    return total_sent as i64; // Return partial success
+                }
+                // R7-D4: bound the aggregate (see sys_sendmsg).
+                // R32-B2: check the RUNNING total inside the loop — the
+                // old per-iov-only check let each message gather up to
+                // 1024 × 256KB before sending (heap over-allocation).
+                if total_len.saturating_add(iov_len) > crate::syscall::io::RW_CHUNK.saturating_mul(4)
+                {
+                    if total_sent == 0 {
+                        return -(errno::EMSGSIZE as i64);
+                    }
+                    return total_sent as i64;
+                }
+                // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
+                buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
+                total_len += iov_len;
+            }
+        }
+
+        if total_len == 0 {
+            break;
+        }
+
+        // W3: UDP above 65507 → EMSGSIZE (first failure semantics).
+        if socket.sock_type == crate::net::socket::SocketType::Udp
+            && total_len > crate::net::udp::UDP_MAX_DATAGRAM
+        {
+            if total_sent == 0 {
+                return -(errno::EMSGSIZE as i64);
+            }
+            break;
+        }
+
+        // W3: per-message msg_name destination (same parse as sendmsg).
+        let dest_addr = if !msg_name_ptr.is_null()
+            && crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, 16)
+        {
+            let mut saddr = [0u8; 16];
+            // SAFETY: msg_name_ptr validated with access_ok(16).
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(saddr.as_mut_ptr(), msg_name_ptr, 16)
+            } == 0
+            {
+                crate::net::socket::SockAddrIn::from_bytes(&saddr)
+                    .map(|sa| (sa.addr(), sa.port()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let sent = match crate::net::socket::socket_send_ctl(
+            &socket,
+            &buf,
+            dest_addr,
+            nonblock,
+            deadline,
+        ) {
+            Ok(n) => n,
+            // W3: first failure with nothing sent returns the errno.
+            Err(e) => {
+                if total_sent == 0 {
+                    return e as i64;
+                }
                 break;
             }
-            // R20-3: range-check the iovec array before raw deref (see
-            // sys_sendmsg); return partial success on a bad one.
-            if !crate::arch::riscv64::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
-                return total_sent as i64;
-            }
-
-            // Gather data from iovec
-            let mut buf = alloc::vec::Vec::new();
-            let mut total_len = 0usize;
-            for j in 0..msg_iovlen {
-                // SAFETY: iovec fields at validated offset; iov_base validated below.
-                let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
-                let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
-                if iov_len > 0 {
-                    if !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
-                        return total_sent as i64; // Return partial success
-                    }
-                    // R7-D4: bound the aggregate (see sys_sendmsg).
-                    // R32-B2: check the RUNNING total inside the loop — the
-                    // old per-iov-only check let each message gather up to
-                    // 1024 × 256KB before sending (heap over-allocation).
-                    if total_len.saturating_add(iov_len) > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
-                        return total_sent as i64;
-                    }
-                    // SAFETY: iov_base validated with access_ok; iov_len bounds the slice.
-                    buf.extend_from_slice(unsafe { core::slice::from_raw_parts(iov_base as *const u8, iov_len) });
-                    total_len += iov_len;
-                }
-            }
-
-            let sent = match socket.send(&buf, None) {
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            // Write msg_len in mmsghdr
-            // SAFETY: mm offset within validated msgvec range; writing 4-byte u32.
-            unsafe {
-                core::ptr::write_volatile(mm.add(56) as *mut u32, sent as u32);
-            }
-            total_sent += 1;
+        };
+        // Write msg_len in mmsghdr
+        // SAFETY: mm offset within validated msgvec range; writing 4-byte u32.
+        unsafe {
+            core::ptr::write_volatile(mm.add(56) as *mut u32, sent as u32);
         }
-        return total_sent as i64;
+        total_sent += 1;
     }
-
-    -(errno::EBADF as i64)
+    total_sent as i64
 }
 
 /// sys_recvmmsg - Receive multiple messages (NR 243)
@@ -1107,12 +1472,17 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
 /// - args[2]: vlen - number of messages
 /// - args[3]: flags - flags
 /// - args[4]: timeout - pointer to timespec
+///
+/// W3 (ABI): first-failure semantics (error on message 0 returns the
+/// errno; ≥1 received returns the count — 0 stays reserved for "no
+/// messages"); the `timeout` timespec bounds the whole receive (Linux
+/// recvmmsg contract); blocking/O_NONBLOCK/MSG_DONTWAIT honored.
 pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let msgvec = args[1] as *mut u8;
     let vlen = args[2] as u32;
-    let _flags = args[3] as i32;
-    let _timeout = args[4] as *const u8;
+    let flags = args[3] as i32;
+    let timeout = args[4] as *const u8;
 
     if msgvec.is_null() || vlen == 0 {
         return -(errno::EFAULT as i64);
@@ -1121,86 +1491,135 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
-        let mut total_recv = 0u32;
-        for i in 0..vlen as usize {
-            // SAFETY: msgvec validated with access_ok; mm offset within validated range.
-            let mm = unsafe { msgvec.add(i * 64) };
-            // SAFETY: mm validated; reading iovec fields at known offsets.
-            let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
-            let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
+    let (socket, file_nonblock) = match socket_file_of(fd as usize) {
+        Some(s) => s,
+        None => return -(errno::ENOTSOCK as i64),
+    };
+    let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
 
-            // Calculate total buffer size
-            let mut total_buf_len = 0usize;
-            // R20-2: bound the iovec count (UIO_MAXIOV) — see sys_sendmmsg.
-            if msg_iovlen > 1024 {
-                break;
+    // W3: recvmmsg's own timeout overrides SO_RCVTIMEO for the batch.
+    let mut deadline = socket.rcvtimeo_deadline();
+    if !timeout.is_null() && crate::arch::riscv64::uaccess::access_ok(timeout as usize, 16) {
+        let mut ts = [0u8; 16];
+        // SAFETY: timeout validated with access_ok(16).
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(ts.as_mut_ptr(), timeout, 16)
+        } == 0
+        {
+            let sec = i64::from_ne_bytes(ts[0..8].try_into().unwrap());
+            let nsec = i64::from_ne_bytes(ts[8..16].try_into().unwrap());
+            if sec < 0 || nsec < 0 {
+                return -(errno::EINVAL as i64);
             }
-            // R20-3: range-check the iovec array before raw deref (see
-            // sys_sendmsg); return partial success on a bad one.
-            if !crate::arch::riscv64::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
-                return total_recv as i64;
-            }
-            for j in 0..msg_iovlen {
-                // SAFETY: iovec fields at validated offset; iov_base validated below.
-                let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
-                let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
-                if iov_len > 0 && !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
-                    return total_recv as i64;
-                }
-                total_buf_len += iov_len;
-                // R7-D4: bound the aggregate (see sys_recvmsg).
-                if total_buf_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
-                    return total_recv as i64;
-                }
-            }
-
-            if total_buf_len == 0 {
-                break;
-            }
-
-            let mut buf = alloc::vec![0u8; total_buf_len];
-            match socket.recv(&mut buf) {
-                Ok((bytes_read, _src_addr)) => {
-                    // Scatter data back to iovecs
-                    let mut offset = 0usize;
-                    for j in 0..msg_iovlen {
-                        if offset >= bytes_read { break; }
-                        // SAFETY: iovec fields at validated offset; copy_len bounds the write.
-                        let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
-                        let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
-                        let copy_len = core::cmp::min(iov_len, bytes_read - offset);
-                        if copy_len > 0 {
-                            // R20-3: exception-table copy — see sys_recvmsg.
-                            let uncopied = unsafe {
-                                crate::arch::riscv64::uaccess::copy_to_user(
-                                    iov_base as *mut u8,
-                                    buf.as_ptr().add(offset),
-                                    copy_len,
-                                )
-                            };
-                            if uncopied > 0 {
-                                return if total_recv > 0 { total_recv as i64 } else { -(errno::EFAULT as i64) };
-                            }
-                            offset += copy_len;
-                        }
-                    }
-                    // SAFETY: mm offset within validated msgvec range; writing 4-byte u32.
-                    unsafe {
-                        core::ptr::write_volatile(mm.add(56) as *mut u32, bytes_read as u32);
-                    }
-                    total_recv += 1;
-                    if bytes_read == 0 {
-                        break; // EOF
-                    }
-                }
-                Err(_) => break,
+            let us = (sec as u64).saturating_mul(1_000_000)
+                + (nsec as u64) / 1_000;
+            if us == 0 {
+                // Zero timeout = poll once (deadline already due).
+                deadline = Some(crate::drivers::timer::get_jiffies());
+            } else {
+                deadline = Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1));
             }
         }
-        return total_recv as i64;
     }
 
-    -(errno::EBADF as i64)
+    let mut total_recv = 0u32;
+    for i in 0..vlen as usize {
+        // SAFETY: msgvec validated with access_ok; mm offset within validated range.
+        let mm = unsafe { msgvec.add(i * 64) };
+        // SAFETY: mm validated; reading iovec fields at known offsets.
+        let msg_iov_ptr = unsafe { *((mm.add(16)) as *const usize) };
+        let msg_iovlen = unsafe { *((mm.add(24)) as *const usize) };
+
+        // Calculate total buffer size
+        let mut total_buf_len = 0usize;
+        // R20-2: bound the iovec count (UIO_MAXIOV) — see sys_sendmmsg.
+        if msg_iovlen > 1024 {
+            if total_recv == 0 {
+                return -(errno::EMSGSIZE as i64);
+            }
+            break;
+        }
+        // R20-3: range-check the iovec array before raw deref (see
+        // sys_sendmsg); return partial success on a bad one.
+        if !crate::arch::riscv64::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
+            if total_recv == 0 {
+                return -(errno::EFAULT as i64);
+            }
+            return total_recv as i64;
+        }
+        for j in 0..msg_iovlen {
+            // SAFETY: iovec fields at validated offset; iov_base validated below.
+            let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
+            let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
+            if iov_len > 0 && !crate::arch::riscv64::uaccess::access_ok(iov_base, iov_len) {
+                if total_recv == 0 {
+                    return -(errno::EFAULT as i64);
+                }
+                return total_recv as i64;
+            }
+            total_buf_len += iov_len;
+            // R7-D4: bound the aggregate (see sys_recvmsg).
+            if total_buf_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
+                if total_recv == 0 {
+                    return -(errno::EMSGSIZE as i64);
+                }
+                return total_recv as i64;
+            }
+        }
+
+        if total_buf_len == 0 {
+            break;
+        }
+
+        let mut buf = alloc::vec![0u8; total_buf_len];
+        let (bytes_read, _src) =
+            match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline) {
+                Ok(r) => r,
+                Err(e) => {
+                    // W3: first would-block/error with nothing received
+                    // returns the errno (0 stays "no messages").
+                    if total_recv == 0 {
+                        return e as i64;
+                    }
+                    break;
+                }
+            };
+        // Scatter data back to iovecs
+        let mut offset = 0usize;
+        for j in 0..msg_iovlen {
+            if offset >= bytes_read { break; }
+            // SAFETY: iovec fields at validated offset; copy_len bounds the write.
+            let iov_base = unsafe { *((msg_iov_ptr.wrapping_add(j * 16)) as *const usize) };
+            let iov_len = unsafe { *((msg_iov_ptr.wrapping_add(j * 16 + 8)) as *const usize) };
+            let copy_len = core::cmp::min(iov_len, bytes_read - offset);
+            if copy_len > 0 {
+                // R20-3: exception-table copy — see sys_recvmsg.
+                let uncopied = unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        iov_base as *mut u8,
+                        buf.as_ptr().add(offset),
+                        copy_len,
+                    )
+                };
+                if uncopied > 0 {
+                    if total_recv > 0 {
+                        return total_recv as i64;
+                    }
+                    return -(errno::EFAULT as i64);
+                }
+                offset += copy_len;
+            }
+        }
+        // SAFETY: mm offset within validated msgvec range; writing 4-byte u32.
+        unsafe {
+            core::ptr::write_volatile(mm.add(56) as *mut u32, bytes_read as u32);
+        }
+        total_recv += 1;
+        if bytes_read == 0 {
+            break; // EOF
+        }
+    }
+    total_recv as i64
 }
 
 /// sys_accept4 - Accept connection (with flags)
@@ -1210,10 +1629,22 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
 /// - args[1]: addr - pointer to sockaddr (output)
 /// - args[2]: addrlen - pointer to address length (input/output)
 /// - args[3]: flags - SOCK_CLOEXEC, SOCK_NONBLOCK
+///
+/// W3: SOCK_CLOEXEC / SOCK_NONBLOCK are honored (socket_create_accepted
+/// applies them to the new fd); unknown flag bits are EINVAL like Linux.
 pub fn sys_accept4(args: SyscallArgs) -> i64 {
-    let _flags = args[3] as i32;
-    // TODO: handle SOCK_CLOEXEC/SOCK_NONBLOCK flags
-    sys_accept(args)
+    let fd = args[0] as usize;
+    let addr_ptr = args[1] as *mut u8;
+    let addrlen_ptr = args[2] as *mut u32;
+    let flags = args[3] as i32;
+
+    const KNOWN_ACCEPT_FLAGS: i32 =
+        crate::net::socket::SOCK_CLOEXEC_FLAG | crate::net::socket::SOCK_NONBLOCK_FLAG;
+    if flags & !KNOWN_ACCEPT_FLAGS != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    sys_accept_common(fd, flags, addr_ptr, addrlen_ptr)
 }
 
 /// sys_recvfrom - Receive data (possibly getting source address)
@@ -1232,7 +1663,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let buf_ptr = args[1] as *mut u8;
     let len = args[2] as usize;
-    let _flags = args[3] as i32;
+    let flags = args[3] as i32;
     let addr_ptr = args[4] as *mut u8;
     let addrlen_ptr = args[5] as *mut u32;
 
@@ -1261,11 +1692,23 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     // Get socket through the per-process fd table (review NET-C3)
     let socket = match crate::net::socket::get_socket_from_fd(fd) {
         Some(s) => s,
-        None => return -(errno::EBADF as i64),
+        None => return -(errno::ENOTSOCK as i64),
     };
 
-    // Advance loopback delivery before reading (see sys_accept note).
-    crate::net::ethernet::ethernet_poll();
+    // W3: blocking / MSG_DONTWAIT / O_NONBLOCK semantics (the socket used
+    // to be permanently non-blocking — recvfrom returned EAGAIN forever).
+    let file_nonblock = {
+        let fdtable = match crate::sched::get_current_fdtable() {
+            Some(t) => t,
+            None => return -(errno::EBADF as i64),
+        };
+        match fdtable.get_file(fd) {
+            Some(f) => (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0,
+            None => return -(errno::EBADF as i64),
+        }
+    };
+    let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+    let deadline = socket.rcvtimeo_deadline();
 
     // R35: receive into a KERNEL buffer and copy to user after the socket
     // layer returns — the old raw `from_raw_parts_mut(buf_ptr, len)` ran
@@ -1281,40 +1724,44 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     }
     kbuf.resize(stage, 0);
 
-    match socket.recv(kbuf.as_mut_slice()) {
-        Ok((bytes_read, src_addr)) => {
-            if bytes_read > 0 {
-                // SAFETY: buf_ptr validated with access_ok(len) above;
-                // bytes_read <= stage <= len.
-                if unsafe {
-                    crate::arch::riscv64::uaccess::copy_to_user(
-                        buf_ptr,
-                        kbuf.as_ptr(),
-                        bytes_read,
-                    )
-                } != 0
-                {
-                    return -(errno::EFAULT as i64);
-                }
-            }
-            // If address pointer is provided, write source address
-            if let Some((addr, port)) = src_addr {
-                if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
-                    // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; writing sockaddr_in layout.
-                    unsafe {
-                        // Write sockaddr_in structure
-                        core::ptr::write(addr_ptr as *mut u16, 2);  // sin_family = AF_INET
-                        core::ptr::write(addr_ptr.add(2) as *mut u16, port.to_be());
-                        core::ptr::write(addr_ptr.add(4) as *mut u32, addr.to_be());
-                        // sin_zero remains 0
-                        core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
-                        // Write address length
-                        core::ptr::write(addrlen_ptr, 16);
-                    }
-                }
-            }
-            bytes_read as i64
+    // W3: the blocking engine also drains loopback between attempts (the
+    // explicit ethernet_poll the old code did is folded in).
+    let (bytes_read, src_addr) =
+        match crate::net::socket::socket_recv_ctl(&socket, kbuf.as_mut_slice(), nonblock, deadline)
+        {
+            Ok(r) => r,
+            Err(e) => return e as i64,
+        };
+
+    if bytes_read > 0 {
+        // SAFETY: buf_ptr validated with access_ok(len) above;
+        // bytes_read <= stage <= len.
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(
+                buf_ptr,
+                kbuf.as_ptr(),
+                bytes_read,
+            )
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
         }
-        Err(e) => e as i64,
     }
+    // If address pointer is provided, write source address
+    if let Some((addr, port)) = src_addr {
+        if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
+            // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; writing sockaddr_in layout.
+            unsafe {
+                // Write sockaddr_in structure
+                core::ptr::write(addr_ptr as *mut u16, 2);  // sin_family = AF_INET
+                core::ptr::write(addr_ptr.add(2) as *mut u16, port.to_be());
+                core::ptr::write(addr_ptr.add(4) as *mut u32, addr.to_be());
+                // sin_zero remains 0
+                core::ptr::write_bytes(addr_ptr.add(8), 0, 8);
+                // Write address length
+                core::ptr::write(addrlen_ptr, 16);
+            }
+        }
+    }
+    bytes_read as i64
 }

@@ -36,6 +36,74 @@ use crate::fs::superblock::{FileSystemType, FsContext, SuperBlock};
 
 pub const EXT4_SUPER_MAGIC: u16 = 0xEF53;
 
+/// ext4 on-disk feature flags we can safely operate on (review 5.5 high:
+/// 挂载不查 feature_incompat/ro_compat — bigalloc/metadata_csum were
+/// silently accepted and then mis-handled, corrupting the image).
+pub mod features {
+    /// s_feature_incompat bits
+    pub mod incompat {
+        pub const COMPRESSION: u32 = 0x0001;
+        pub const FILETYPE: u32 = 0x0002;
+        pub const RECOVER: u32 = 0x0004;
+        pub const JOURNAL_DEV: u32 = 0x0008;
+        pub const META_BG: u32 = 0x0010;
+        pub const EXTENTS: u32 = 0x0040;
+        pub const B64BIT: u32 = 0x0080;
+        pub const MMP: u32 = 0x0100;
+        pub const FLEX_BG: u32 = 0x0200;
+        pub const EA_INODE: u32 = 0x0400;
+        pub const DIRDATA: u32 = 0x1000;
+        pub const CSUM_SEED: u32 = 0x2000;
+        pub const LARGEDIR: u32 = 0x4000;
+        pub const INLINE_DATA: u32 = 0x8000;
+        pub const ENCRYPT: u32 = 0x10000;
+    }
+
+    /// s_feature_ro_compat bits
+    pub mod ro_compat {
+        pub const SPARSE_SUPER: u32 = 0x0001;
+        pub const LARGE_FILE: u32 = 0x0002;
+        pub const BTREE_DIR: u32 = 0x0004;
+        pub const HUGE_FILE: u32 = 0x0008;
+        pub const GDT_CSUM: u32 = 0x0010;
+        pub const DIR_NLINK: u32 = 0x0020;
+        pub const EXTRA_ISIZE: u32 = 0x0040;
+        pub const SNAPSHOT: u32 = 0x0080;
+        pub const QUOTA: u32 = 0x0100;
+        pub const BIGALLOC: u32 = 0x0200;
+        pub const METADATA_CSUM: u32 = 0x0400;
+        pub const REPLICA: u32 = 0x0800;
+    }
+
+    /// Incompatible features this implementation UNDERSTANDS. Any other
+    /// incompat bit means on-disk structures we would misparse — refuse
+    /// the mount (Linux does the same for unknown incompat features).
+    pub const KNOWN_INCOMPAT: u32 = incompat::FILETYPE | incompat::RECOVER
+        | incompat::EXTENTS | incompat::B64BIT | incompat::FLEX_BG;
+
+    /// Read-only-compat features that are safe for our (write-through,
+    /// no-checksum) metadata paths. Everything else — notably BIGALLOC
+    /// (cluster-bitmap geometry) and METADATA_CSUM (checksummed metadata)
+    /// — would be silently damaged by our writes: refuse the mount
+    /// outright rather than corrupt.
+    pub const KNOWN_RO_COMPAT: u32 = ro_compat::SPARSE_SUPER | ro_compat::LARGE_FILE
+        | ro_compat::HUGE_FILE | ro_compat::DIR_NLINK | ro_compat::EXTRA_ISIZE;
+
+    /// Incompatible features we know about but cannot handle correctly —
+    /// folded into the "unknown" test: either way the mount is refused.
+    pub const REJECTED_INCOMPAT: u32 = incompat::COMPRESSION | incompat::JOURNAL_DEV
+        | incompat::META_BG | incompat::MMP | incompat::EA_INODE
+        | incompat::DIRDATA | incompat::CSUM_SEED | incompat::LARGEDIR
+        | incompat::INLINE_DATA | incompat::ENCRYPT;
+
+    /// Per-directory flag: directory is htree-indexed (EXT4_INDEX_FL).
+    /// Our directory code is linear-scan; READING an indexed directory
+    /// still works (entries live in the linear blocks; block 0 holds the
+    /// index nodes behind a spanning ".." rec_len), but WRITING would
+    /// leave the index inconsistent — writers must refuse (EOPNOTSUPP).
+    pub const EXT4_INDEX_FL: u32 = 0x1000;
+}
+
 pub struct Ext4FileSystem {
     /// Block device
     pub device: *const blkdev::GenDisk,
@@ -149,6 +217,57 @@ impl Ext4FileSystem {
             if ext4_sb.s_magic != EXT4_SUPER_MAGIC {
                 bio::brelse(sb_bh);
                 return Err(errno::Errno::IOError.as_neg_i32());
+            }
+
+            // ------------------------------------------------------------------
+            // Feature negotiation (review 5.5 high). Before trusting any
+            // on-disk structure, verify the feature sets are within what
+            // this implementation handles. Unknown/unsupported features
+            // fail the mount with a loud, specific message instead of a
+            // silent mis-parse that corrupts the image.
+            // ------------------------------------------------------------------
+            {
+                let incompat = ext4_sb.s_feature_incompat;
+                let ro_compat = ext4_sb.s_feature_ro_compat;
+
+                let unknown_incompat = incompat & !(features::KNOWN_INCOMPAT | features::REJECTED_INCOMPAT);
+                if unknown_incompat != 0 {
+                    crate::pr_err!("ext4: unknown incompat features {:#x} — refusing mount", unknown_incompat);
+                    bio::brelse(sb_bh);
+                    return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
+                }
+                let rejected = incompat & features::REJECTED_INCOMPAT;
+                if rejected != 0 {
+                    crate::pr_err!("ext4: unsupported incompat features {:#x} (inline_data/meta_bg/encrypt/...) — refusing mount", rejected);
+                    bio::brelse(sb_bh);
+                    return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
+                }
+
+                let unknown_ro = ro_compat
+                    & !(features::KNOWN_RO_COMPAT
+                        | features::ro_compat::BIGALLOC | features::ro_compat::METADATA_CSUM
+                        | features::ro_compat::REPLICA | features::ro_compat::QUOTA
+                        | features::ro_compat::SNAPSHOT | features::ro_compat::GDT_CSUM
+                        | features::ro_compat::BTREE_DIR);
+                if unknown_ro != 0 {
+                    crate::pr_err!("ext4: unknown ro_compat features {:#x} — refusing mount", unknown_ro);
+                    bio::brelse(sb_bh);
+                    return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
+                }
+                // We mount read-write and do not maintain ANY metadata
+                // checksums or cluster geometry — accepting these features
+                // would write checksum-invalid or cluster-misaligned
+                // metadata. Reject explicitly (review: metadata_csum 直接拒绝挂载).
+                if ro_compat & features::ro_compat::METADATA_CSUM != 0 {
+                    crate::pr_err!("ext4: metadata_csum not supported — refusing mount");
+                    bio::brelse(sb_bh);
+                    return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
+                }
+                if ro_compat & features::ro_compat::BIGALLOC != 0 {
+                    crate::pr_err!("ext4: bigalloc not supported — refusing mount");
+                    bio::brelse(sb_bh);
+                    return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
+                }
             }
 
             // Parse superblock
@@ -1113,6 +1232,217 @@ pub fn create_file(path: &str, mode: u32) -> Result<alloc::sync::Arc<Inode>, i32
     }
 }
 
+/// fallocate flags (UAPI)
+pub const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+pub const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
+
+/// ext4 fallocate — minimal implementation (review 5.5).
+///
+/// * KEEP_SIZE (and the default mode): allocate blocks covering
+///   [offset, offset+len) WITHOUT changing i_size.
+/// * PUNCH_HOLE (must be combined with KEEP_SIZE per Linux): zeroes the
+///   range and FREES every root extent that lies entirely inside it
+///   (depth-0 trees only). Extents only partially covered are zeroed in
+///   place and kept — their release would require extent splitting.
+///   Reads over the whole range observe zeroes either way (hole
+///   semantics), so the observable behaviour matches; space reclamation
+///   is best-effort for partially-covered extents.
+pub fn ext4_fallocate(
+    ino: u32,
+    mode: i32,
+    offset: u64,
+    len: u64,
+) -> Result<(), i32> {
+    use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
+
+    if len == 0 {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    let end = match offset.checked_add(len) {
+        Some(e) => e,
+        None => return Err(errno::Errno::FileTooLarge.as_neg_i32()),
+    };
+
+    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+    if fs_ptr.is_null() {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // SAFETY: GLOBAL_EXT4_FS holds the mounted instance for the boot.
+    unsafe {
+        let fs = &*fs_ptr;
+        let _ext4_guard = EXT4_BIG_LOCK.lock();
+
+        let mut ext4_inode = fs.read_inode(ino)?;
+        if !ext4_inode.is_reg() {
+            return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32()); // EBADR-ish
+        }
+
+        let block_size = fs.block_size as u64;
+        let file_size = ext4_inode.size;
+
+        if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+            if mode & FALLOC_FL_KEEP_SIZE == 0 {
+                return Err(errno::Errno::InvalidArgument.as_neg_i32());
+            }
+            // Clamp the punch range to the file size.
+            let file_end = file_size.min(end);
+            if offset >= file_end {
+                return Ok(()); // nothing to punch
+            }
+            let punch_first = offset / block_size;
+            let punch_last = (file_end - offset).div_ceil(block_size) + punch_first; // exclusive
+
+            if ext4_inode.has_extent() {
+                const ROOT_MAX_ENTRIES: usize = 4;
+                let mut iblock_bytes = [0u8; 60];
+                core::ptr::copy_nonoverlapping(
+                    ext4_inode.block.as_ptr() as *const u8,
+                    iblock_bytes.as_mut_ptr(),
+                    60,
+                );
+                let header =
+                    &*(iblock_bytes.as_ptr() as *const Ext4ExtentHeader);
+                if header.eh_magic == EXT4_EXT_MAGIC {
+                    if header.eh_depth > 0 {
+                        // Deep trees: refuse rather than corrupt (same
+                        // conservative rule as truncate).
+                        return Err(errno::Errno::IOError.as_neg_i32());
+                    }
+                    let n_entries =
+                        core::cmp::min(header.eh_entries as usize, ROOT_MAX_ENTRIES);
+                    let entries = core::slice::from_raw_parts(
+                        (iblock_bytes.as_ptr()
+                            .add(core::mem::size_of::<Ext4ExtentHeader>()))
+                            as *const Ext4Extent,
+                        n_entries,
+                    );
+
+                    let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                    let mut kept: [(u32, u16, u64); ROOT_MAX_ENTRIES] =
+                        [(0, 0, 0); ROOT_MAX_ENTRIES];
+                    let mut kept_count = 0usize;
+
+                    for ext in entries {
+                        let ext_first = ext.ee_block as u64;
+                        let ext_len = ext.length() as u64;
+                        let ext_last = ext_first + ext_len; // exclusive
+                        let phys = ext.start_block();
+
+                        if ext_first >= punch_first && ext_last <= punch_last {
+                            // Entirely inside the punch range: free it all.
+                            for j in 0..ext_len {
+                                let _ = allocator.free_block(phys + j);
+                            }
+                            ext4_inode.blocks =
+                                ext4_inode.blocks.saturating_sub(ext_len * (block_size / 512));
+                            // dropped from the kept list
+                        } else if ext_first < punch_last && ext_last > punch_first {
+                            // Partially covered: ZERO the overlapped blocks in
+                            // place; allocation kept (documented above).
+                            let z_from = punch_first.max(ext_first);
+                            let z_to = punch_last.min(ext_last);
+                            for b in z_from..z_to {
+                                let phys_b = phys + (b - ext_first);
+                                if phys_b == 0 {
+                                    continue;
+                                }
+                                if let Some(bh) = crate::fs::bio::bread(fs.device, phys_b) {
+                                    for byte in (*bh).b_data.iter_mut() {
+                                        *byte = 0;
+                                    }
+                                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                                    let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                                    crate::fs::bio::brelse(bh);
+                                }
+                            }
+                            kept[kept_count] = (ext.ee_block, ext.length(), phys);
+                            kept_count += 1;
+                        } else {
+                            kept[kept_count] = (ext.ee_block, ext.length(), phys);
+                            kept_count += 1;
+                        }
+                    }
+
+                    // Rebuild the root extent array.
+                    let new_header = Ext4ExtentHeader {
+                        eh_magic: EXT4_EXT_MAGIC,
+                        eh_entries: kept_count as u16,
+                        eh_max: header.eh_max,
+                        eh_depth: 0,
+                        eh_generation: header.eh_generation,
+                    };
+                    *(iblock_bytes.as_mut_ptr() as *mut Ext4ExtentHeader) = new_header;
+                    for (i, &(blk, len2, phys)) in
+                        kept.iter().take(kept_count).enumerate()
+                    {
+                        let dst = (iblock_bytes
+                            .as_mut_ptr()
+                            .add(core::mem::size_of::<Ext4ExtentHeader>()
+                                + i * core::mem::size_of::<Ext4Extent>()))
+                            as *mut Ext4Extent;
+                        (*dst).ee_block = blk;
+                        (*dst).ee_len = len2;
+                        (*dst).ee_start_hi = (phys >> 32) as u16;
+                        (*dst).ee_start_lo = phys as u32;
+                    }
+                    core::ptr::copy_nonoverlapping(
+                        iblock_bytes.as_ptr(),
+                        ext4_inode.block.as_mut_ptr() as *mut u8,
+                        60,
+                    );
+                }
+            } else {
+                // Indirect-block files: zero the covered direct blocks in
+                // place (allocation retained) — conservative hole semantics.
+                let first = (offset / block_size) as usize;
+                let last = ((file_end.saturating_sub(1)) / block_size) as usize;
+                for i in first..=last.min(11) {
+                    let b = ext4_inode.block[i];
+                    if b != 0 {
+                        if let Some(bh) = crate::fs::bio::bread(fs.device, b as u64) {
+                            for byte in (*bh).b_data.iter_mut() {
+                                *byte = 0;
+                            }
+                            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                            let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                            crate::fs::bio::brelse(bh);
+                        }
+                    }
+                }
+            }
+
+            // Page cache may hold the old contents.
+            crate::fs::page_cache::get_page_cache()
+                .invalidate_inode(fs as *const Ext4FileSystem as u64, ino as u64);
+
+            let cycles = crate::drivers::intc::clint::read_time();
+            let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+            ext4_inode.mtime = sec;
+            ext4_inode.ctime = sec;
+            // write_inode_disk expects the on-disk layout; convert.
+            let on_disk = ext4_inode.to_on_disk();
+            inode::write_inode_disk(fs, ino, &on_disk)?;
+            return Ok(());
+        }
+
+        // KEEP_SIZE / default: preallocate blocks up to `end` without
+        // touching i_size.
+        let needed_blocks = (end + block_size - 1) / block_size;
+        let current_blocks = (file_size + block_size - 1) / block_size;
+        if needed_blocks > current_blocks {
+            file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks)?;
+            let cycles = crate::drivers::intc::clint::read_time();
+            let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+            ext4_inode.mtime = sec;
+            ext4_inode.ctime = sec;
+            let on_disk = ext4_inode.to_on_disk();
+            inode::write_inode_disk(fs, ino, &on_disk)?;
+        }
+        Ok(())
+    }
+}
+
 /// Split path into parent directory and filename
 fn split_path(path: &str) -> (&str, &str) {
     let trimmed = path.trim_end_matches('/');
@@ -1193,6 +1523,14 @@ fn add_dir_entry(
     file_type: u8,
 ) -> Result<(), i32> {
     use crate::fs::bio;
+
+    // htree-indexed directories (EXT4_INDEX_FL / dx_root magic): our
+    // directory writer is linear-only — inserting into an indexed
+    // directory without updating the dx tree leaves real Linux unable to
+    // find the entry. Conservatively refuse the write (review 5.5).
+    if parent.flags & features::EXT4_INDEX_FL != 0 {
+        return Err(-(crate::syscall::errno::EOPNOTSUPP as i32));
+    }
 
     // Get parent's data blocks
     let blocks = parent.get_data_blocks(fs)?;
@@ -1477,6 +1815,12 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
     use crate::drivers::intc::clint::read_time;
 
+    // ext4 has no internal concurrency protection on the block
+    // allocator / inode writer (review 5.5 high: EXT4_BIG_LOCK 仅覆盖
+    // namei): take the big lock for the whole setattr — truncate frees
+    // blocks (bitmap RMW) and rewrites the inode.
+    let _ext4_guard = EXT4_BIG_LOCK.lock();
+
     let fs = match get_ext4_fs_from_inode(inode) {
         Ok(fs) => fs,
         Err(e) => return e,
@@ -1499,6 +1843,13 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             ext4_inode.uid = arg1 as u16;
             ext4_inode.gid = arg2 as u16;
         }
+        setattr_attr::ATTR_ATIME => {
+            ext4_inode.atime = arg1 as u32;
+        }
+        setattr_attr::ATTR_MTIME => {
+            ext4_inode.mtime = arg1 as u32;
+            ext4_inode.ctime = arg1 as u32;
+        }
         setattr_attr::ATTR_SIZE => {
             // arg1 = new size (ftruncate). Upper-bounded to a sane maximum:
             // the extent code can only address 2^32 blocks so anything
@@ -1518,6 +1869,19 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 
                 if ext4_inode.has_extent() {
                     use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
+                    // Extent trees deeper than the root node are not
+                    // handled by the shrink code below — truncating such a
+                    // file would free blocks still mapped by internal nodes
+                    // (cross-file corruption). Conservatively refuse
+                    // (review 5.5: truncate 不处理深度>0 → 拒绝).
+                    {
+                        let hdr = unsafe {
+                            &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader)
+                        };
+                        if hdr.eh_magic == EXT4_EXT_MAGIC && hdr.eh_depth > 0 {
+                            return errno::Errno::IOError.as_neg_i32();
+                        }
+                    }
                     // Work on a byte copy of i_block so the on-disk extent
                     // entries can be SHRUNK/removed alongside the physical
                     // frees. The old code only freed blocks and left the
@@ -1666,7 +2030,15 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
         _ => return errno::Errno::InvalidArgument.as_neg_i32(),
     }
 
-    // Update timestamps
+    // Update timestamps.
+    //
+    // KNOWN LIMITATION (review 5.5: 时间戳非 epoch): the kernel has no wall
+    // clock — gettimeofday() itself reports monotonic boot time and no RTC
+    // driver exists — so mtime/ctime/atime store MONOTONIC boot seconds.
+    // They advance correctly and consistently (parent directories are
+    // touched by the same clock via namei::touch_parent_dir); converting to
+    // Unix epoch requires a wall-time base (settimeofday wiring + RTC),
+    // tracked as a follow-up.
     let cycles = read_time();
     let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
     ext4_inode.mtime = sec;
@@ -1678,7 +2050,7 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             // Refresh cached Ext4Inode so subsequent reads see the new state
             refresh_inode_cache(inode, fs);
             // Invalidate page cache after size change (truncate/extend)
-            crate::fs::page_cache::get_page_cache().invalidate_inode(inode.ino as u32);
+            crate::fs::page_cache::get_page_cache().invalidate_inode(fs as *const Ext4FileSystem as u64, inode.ino);
             0
         }
         Err(e) => e,

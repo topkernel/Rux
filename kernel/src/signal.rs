@@ -1093,10 +1093,21 @@ unsafe fn setup_frame(
     // Set user stack pointer to signal frame position
     regs.sp = frame_addr;
 
-    // Set return address to trampoline (for rt_sigreturn)
-    // ra points to trampoline code
-    let trampoline_addr = frame_addr + core::mem::size_of::<SignalFrame>() as u64 - 8;
-    regs.ra = trampoline_addr;
+    // Set return address for rt_sigreturn:
+    // - sa_restorer != 0 (musl/glibc always pass one — SA_RESTORER is
+    //   mandatory on RISC-V): the libc __restore_rt trampoline in the
+    //   executable's text. Returning into a W^X user STACK is not
+    //   executable, so the old stack-trampoline-only path SIGSEGV'd every
+    //   musl handler return.
+    // - sa_restorer == 0: legacy fallback — the in-frame stack trampoline
+    //   (frame_addr + size - 8), kept for old static binaries built
+    //   against the kernel-provided trampoline.
+    if action.sa_restorer != 0 {
+        regs.ra = action.sa_restorer as u64;
+    } else {
+        let trampoline_addr = frame_addr + core::mem::size_of::<SignalFrame>() as u64 - 8;
+        regs.ra = trampoline_addr;
+    }
 
     true  // Success
 }
@@ -1280,10 +1291,14 @@ fn handle_default_signal(sig: i32) {
         | 16 | 10 | 12           // SIGSTKFLT | SIGUSR1 | SIGUSR2
         | 24 | 25 | 26 | 27      // SIGXCPU | SIGXFSZ | SIGVTALRM | SIGPROF
         | 29 | 30 | 31 => {      // SIGIO | SIGPWR | SIGSYS
-            // Call do_exit to properly terminate process
-            // This releases mm, fdtable, kernel stack, removes from run queue, etc.
-            // Store negative signal number (do_wait encodes as waitpid status)
-            crate::process::exit::do_exit(-(sig as i32));
+            // Call do_group_exit to properly terminate the WHOLE thread
+            // group (Linux: a fatal signal in any thread runs
+            // do_group_exit — the surviving-leader model would leave a
+            // process running after e.g. a SIGSEGV in one thread).
+            // This releases mm, fdtable, kernel stack, removes from run
+            // queue, etc. Store negative signal number (do_wait encodes
+            // as waitpid status).
+            crate::process::exit::do_exit_group(-(sig as i32));
         }
         _ => {
             // Unknown signal, default ignore
@@ -1305,8 +1320,6 @@ fn handle_default_signal(sig: i32) {
 /// * `true` - Signal sent successfully
 /// * `false` - Signal send failed
 pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
-    use crate::signal::Signal;
-
     // Check if signal number is valid
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
@@ -1340,13 +1353,38 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
 /// SAFETY: `task_ptr` is pinned (task_refcnt held by the caller); it cannot
 /// be freed for the duration of this call.
 unsafe fn send_signal_locked(task_ptr: *mut crate::process::task::Task, _pid: u32, sig: i32) -> Result<(), i32> {
+    send_signal_locked_info(task_ptr, sig, None)
+}
+
+/// Signal-sending core with optional siginfo (rt_sigqueueinfo family).
+/// `si_code: Option<i32>` — queued for real-time signals when present.
+///
+/// The mask check uses the TARGET TASK's per-thread sigmask (Linux
+/// wants_signal): the shared SignalStruct's mask field is not per-thread,
+/// and threads routinely run with different blocked sets.
+///
+/// SAFETY: `task_ptr` is pinned (task_refcnt held by the caller).
+unsafe fn send_signal_locked_info(
+    task_ptr: *mut crate::process::task::Task,
+    sig: i32,
+    si_code: Option<i32>,
+) -> Result<(), i32> {
     use crate::signal::Signal;
 
     let task = &*task_ptr;
 
     // SIGKILL and SIGSTOP cannot be ignored
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
-        task.pending.add(sig);
+        if let Some(code) = si_code {
+            let my_pid = crate::process::current_pid();
+            let my_uid = match crate::sched::current() {
+                Some(c) => (*c).cred().uid,
+                None => 0,
+            };
+            task.pending.add_info(SigInfo::new(sig, code, my_pid, my_uid));
+        } else {
+            task.pending.add(sig);
+        }
         signal_wake_up(task_ptr);
         return Ok(());
     }
@@ -1375,17 +1413,50 @@ unsafe fn send_signal_locked(task_ptr: *mut crate::process::task::Task, _pid: u3
 
     // Add signal to pending set BEFORE checking mask.
     // Masked signals stay pending and will be delivered when unmasked.
-    task.pending.add(sig);
+    if let Some(code) = si_code {
+        let my_pid = crate::process::current_pid();
+        let my_uid = match crate::sched::current() {
+            Some(c) => (*c).cred().uid,
+            None => 0,
+        };
+        task.pending.add_info(SigInfo::new(sig, code, my_pid, my_uid));
+    } else {
+        task.pending.add(sig);
+    }
 
-    // Check if signal is masked — still pending, just not delivered now
-    if signal_ref.is_masked(sig) {
-        return Ok(());
+    // Check if the signal is blocked FOR THIS THREAD — still pending,
+    // just not delivered now.
+    if sig >= 1 && sig <= 64 {
+        let bit = 1u64 << (sig - 1);
+        if task.sigmask & bit != 0 {
+            return Ok(());
+        }
     }
 
     // Default or Handler disposition — wake the target so an
     // interruptible sleeper reaches the delivery point.
     signal_wake_up(task_ptr);
     Ok(())
+}
+
+/// Send a signal with a user-supplied si_code (rt_sigqueueinfo family).
+///
+/// Queues a full SigInfo for real-time signals (sigwaitinfo consumers)
+/// and falls back to the plain bitmap for standard signals.
+pub fn send_signal_info(pid: u32, sig: i32, si_code: i32) -> Result<(), i32> {
+    if sig < 1 || sig > 64 {
+        return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    // SAFETY: pinned lookup keeps the Task alive across the call.
+    unsafe {
+        let task_ptr = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
+        if task_ptr.is_null() {
+            return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32());
+        }
+        let result = send_signal_locked_info(task_ptr, sig, Some(si_code));
+        crate::process::task::Task::task_put(task_ptr);
+        result
+    }
 }
 
 /// Send a signal to all processes in a given process group.

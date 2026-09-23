@@ -124,12 +124,33 @@ impl VfsMount {
 // Unified mount entry point
 // ============================================================================
 
+/// Linux MS_* mount flags (UAPI subset).
+const MS_RDONLY: u64 = 1;
+const MS_NOSUID: u64 = 2;
+const MS_NODEV: u64 = 4;
+const MS_NOEXEC: u64 = 8;
+const MS_SYNCHRONOUS: u64 = 16;
+const MS_NOATIME: u64 = 1024;
+
+/// Translate Linux MS_* flags into the internal MntFlags (review 5.1:
+/// MNT_* flags 存储 — do_mount used to drop the flags entirely).
+fn translate_mnt_flags(ms_flags: u64) -> MntFlags {
+    let mut bits = 0u64;
+    if ms_flags & MS_RDONLY != 0 { bits |= MntFlags::MNT_READONLY; }
+    if ms_flags & MS_NOSUID != 0 { bits |= MntFlags::MNT_NOSUID; }
+    if ms_flags & MS_NODEV != 0 { bits |= MntFlags::MNT_NODEV; }
+    if ms_flags & MS_NOEXEC != 0 { bits |= MntFlags::MNT_NOEXEC; }
+    if ms_flags & MS_SYNCHRONOUS != 0 { bits |= MntFlags::MNT_SYNCHRONOUS; }
+    if ms_flags & MS_NOATIME != 0 { bits |= MntFlags::MNT_NOATIME; }
+    MntFlags::new(bits)
+}
+
 /// Perform a real mount: call the filesystem's mount callback, then build
 /// the dentry tree via `vfs_mount()`.
 ///
 /// This is the single entry point for both boot-time mounts and sys_mount().
-pub fn do_mount(target: &str, fs_type: &str, _flags: u64) -> Result<(), i32> {
-    let mnt_flags = MntFlags::new(0);
+pub fn do_mount(target: &str, fs_type: &str, flags: u64) -> Result<(), i32> {
+    let mnt_flags = translate_mnt_flags(flags);
 
     match fs_type {
         "ext4" => {
@@ -155,20 +176,20 @@ pub fn do_mount(target: &str, fs_type: &str, _flags: u64) -> Result<(), i32> {
             }
             let _ = fs; // already mounted
             crate::fs::vfs::vfs_mount(target, crate::fs::ext4::create_root_inode(), mnt_flags);
-            register_mount("/dev/vda", target, fs_type, "rw");
+            register_mount("/dev/vda", target, fs_type, if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
         "proc" | "procfs" => {
             crate::fs::procfs::mount_procfs()
                 .map_err(|e| e as i32)?;
             crate::fs::vfs::vfs_mount(target, crate::fs::procfs::create_root_inode(), mnt_flags);
-            register_mount(fs_type, target, "proc", "rw");
+            register_mount(fs_type, target, "proc", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
         "devfs" | "devtmpfs" => {
             crate::fs::devfs::init();
             if let Some(root_entry) = crate::fs::devfs::get_root_entry() {
                 crate::fs::vfs::vfs_mount(target,
                     crate::fs::devfs::create_root_inode(&root_entry), mnt_flags);
-                register_mount(fs_type, target, "devtmpfs", "rw");
+                register_mount(fs_type, target, "devtmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
             } else {
                 return Err(errno::Errno::NoSuchDevice.as_neg_i32());
             }

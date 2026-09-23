@@ -75,7 +75,11 @@ pub fn jbd2_journal_commit_transaction(
         .filter(|(_, data)| !data.is_empty())
         .collect();
 
-    if dirty_buffers.is_empty() {
+    // A transaction with NEITHER data NOR revoke records commits nothing.
+    // (A revoke-only transaction — e.g. a pure block-freeing operation —
+    // MUST still write its revoke block + commit block, or recovery would
+    // replay the stale records the revoke was meant to suppress.)
+    if dirty_buffers.is_empty() && journal.revoke_records.lock().is_empty() {
         *commit_transaction.t_state.lock() = TransactionState::Finished;
         return Ok(());
     }
@@ -102,10 +106,22 @@ pub fn jbd2_journal_commit_transaction(
 
     // Calculate total journal blocks needed:
     // For each group of tags_per_block buffers: 1 descriptor + N data blocks
-    // Plus 1 commit block
+    // Plus revoke descriptor blocks, plus 1 commit block
     let num_buffers = dirty_buffers.len();
     let num_desc_blocks = (num_buffers + tags_per_block - 1) / tags_per_block;
-    let total_journal_blocks = num_desc_blocks + num_buffers + 1;
+    let revoke_entries = journal.revoke_records.lock().len();
+    let revoke_entry_size = journal.revoke_entry_size();
+    let per_revoke_block = if revoke_entry_size > 0 {
+        (block_size - size_of::<journal_header_t>() - size_of::<u32>()) / revoke_entry_size
+    } else {
+        usize::MAX
+    };
+    let num_revoke_blocks = if revoke_entries == 0 || per_revoke_block == 0 {
+        0
+    } else {
+        (revoke_entries + per_revoke_block - 1) / per_revoke_block
+    };
+    let total_journal_blocks = num_desc_blocks + num_buffers + num_revoke_blocks + 1;
 
     let journal_head = journal.j_head.load(core::sync::atomic::Ordering::SeqCst);
     let journal_first = journal.j_first;
@@ -244,6 +260,16 @@ pub fn jbd2_journal_commit_transaction(
     // A full sync_buffers scan is redundant and causes SMP contention
     // on the block cache bucket spinlocks.
 
+    // Phase 2.6: revoke records (review 5.6 high: revoke 全空壳). Written
+    // BEFORE the commit block: a crash between data blocks and here simply
+    // replays everything (old behaviour); a crash after the commit block
+    // sees the revokes and skips the freed blocks.
+    let revoke_blocks = super::revoke::jbd2_journal_write_revoke_records(
+        journal,
+        commit_transaction,
+    )?;
+    let _ = revoke_blocks;
+
     // Phase 3: Write commit block
     {
         let mut state = commit_transaction.t_state.lock();
@@ -293,8 +319,20 @@ pub fn jbd2_journal_commit_transaction(
 
     // Phase 4: Update journal state
     journal.j_head.store(current_journal_block, core::sync::atomic::Ordering::SeqCst);
-    // Note: j_free was already decremented during handle reservation (add_reserved_credits),
-    // do NOT decrement again here or journal appears full prematurely.
+    // j_free recompute (review 5.6: j_free 失真): this implementation
+    // writes every journaled buffer THROUGH to its final location before
+    // the commit block lands (write-through + ordered data), i.e. the
+    // transaction is fully checkpointed the moment it commits. The log
+    // region [tail, head) is therefore immediately reusable: advance the
+    // tail to the head and recompute free space from the geometry instead
+    // of the never-restored reservation counter.
+    journal.j_tail.store(current_journal_block, core::sync::atomic::Ordering::SeqCst);
+    if journal.j_last > journal.j_first {
+        journal.j_free.store(
+            journal.j_last - journal.j_first,
+            core::sync::atomic::Ordering::SeqCst,
+        );
+    }
     journal.j_commit_sequence.store(tid, core::sync::atomic::Ordering::SeqCst);
     journal.j_tail_sequence.store(tid, core::sync::atomic::Ordering::SeqCst);
 

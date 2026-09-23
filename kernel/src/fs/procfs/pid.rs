@@ -147,9 +147,103 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     content.into_bytes()
 }
 
+/// Read a range of USER memory from an arbitrary task's address space.
+///
+/// Review 5.7 (high): cmdline/environ used copy_from_user, which walks the
+/// CURRENT task's page tables — reading another process's arg/env area
+/// returned whatever lived at the same VA in the reader (garbage in `ps`).
+/// This helper walks the TARGET's page tables directly (SV39, 3 levels,
+/// 4 KiB and 2 MiB leaves) and copies through the kernel linear mapping.
+///
+/// Returns the bytes actually readable (shorter than requested when the
+/// range runs into an unmapped page).
+fn read_target_user_mm(
+    addr_space: &crate::mm::mm_struct::AddressSpace,
+    start: usize,
+    len: usize,
+) -> Vec<u8> {
+    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
+
+    let root_ppn = addr_space.root_ppn();
+    if root_ppn == 0 || len == 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(len);
+    let mut remaining = len;
+    let mut va = start as u64;
+
+    while remaining > 0 {
+        // SV39 walk: level-2 → level-1 → level-0
+        let a2 = (root_ppn << 12) + ((va >> 30) & 0x1FF) * 8;
+        // SAFETY: a2 is the physical address of a valid PTE in the target's
+        // level-2 table (page-aligned base + in-table index).
+        let e2 = unsafe { core::ptr::read_volatile(phys_to_virt(PhysAddr::new(a2 as u64)).0 as *const u64) };
+        if e2 & 1 == 0 {
+            break; // unmapped
+        }
+        let mut pte = e2;
+        let mut level = 2u32;
+        loop {
+            let is_leaf = pte & 0xE != 0; // R|W|X
+            if is_leaf || level == 0 {
+                break;
+            }
+            let shift = 12 + 9 * (level - 1);
+            let next_table = ((pte >> 10) & 0xFFF_FFFF_FFFF) << 12;
+            let idx = (va >> shift) & 0x1FF;
+            // SAFETY: next_table is a valid page-table page in the target mm.
+            pte = unsafe {
+                core::ptr::read_volatile(
+                    phys_to_virt(PhysAddr::new(next_table + idx * 8)).0 as *const u64,
+                )
+            };
+            if pte & 1 == 0 {
+                return out; // unmapped
+            }
+            level -= 1;
+        }
+
+        // Compute the physical page base for this virtual page.
+        let (page_phys, page_len) = if level == 0 {
+            (((pte >> 10) & 0xFFF_FFFF_FFFF) << 12, 4096u64)
+        } else {
+            // 2 MiB (or 1 GiB) leaf: lower PPN bits are zero for the base.
+            let shift = 12 + 9 * level;
+            let mask: u64 = !((1u64 << shift) - 1);
+            ((((pte >> 10) & 0xFFF_FFFF_FFFF) << 12) & mask, 1u64 << shift)
+        };
+
+        let in_page_off = (va & (page_len - 1)) as usize;
+        let copy = core::cmp::min(remaining, page_len as usize - in_page_off);
+        // SAFETY: page_phys+off is a mapped user page of the target; the
+        // kernel linear mapping makes it readable here.
+        let src = phys_to_virt(PhysAddr::new(page_phys + in_page_off as u64)).0 as *const u8;
+        let chunk = unsafe { core::slice::from_raw_parts(src, copy) };
+        out.extend_from_slice(chunk);
+
+        remaining -= copy;
+        va += copy as u64;
+    }
+
+    out
+}
+
+/// ptrace_may_access (minimal form) for /proc/[pid]/environ: the caller
+/// must be the target itself or hold CAP_SYS_PTRACE (review 5.7).
+pub fn environ_access_allowed(pid: u64) -> bool {
+    use crate::process::current_pid;
+    if current_pid() as u64 == pid {
+        return true;
+    }
+    crate::security::capable(crate::security::CAP_SYS_PTRACE)
+}
+
 /// Generate /proc/[pid]/cmdline content
 ///
-/// Format: arguments separated by null bytes, read from user memory.
+/// Format: arguments separated by null bytes, read from the TARGET process's
+/// user memory via its own page tables (review 5.7: was read through the
+/// caller's address space — garbage for other processes).
 pub fn generate_cmdline(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
 
@@ -175,24 +269,8 @@ pub fn generate_cmdline(pid: u64) -> Vec<u8> {
         return Vec::new();
     }
 
-    let arg_len = arg_end - arg_start;
-    let mut result = alloc::vec::Vec::with_capacity(arg_len);
-    unsafe { result.set_len(arg_len); }
-
-    // Use copy_from_user for page-fault-safe access (has exception table entries).
-    let uncopied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
-            result.as_mut_ptr(),
-            arg_start as *const u8,
-            arg_len,
-        )
-    };
-    if uncopied > 0 {
-        // Partial copy: truncate to what was actually copied.
-        unsafe { result.set_len(arg_len - uncopied); }
-    }
-
-    result
+    let arg_len = core::cmp::min(arg_end - arg_start, 64 * 1024);
+    read_target_user_mm(&addr_space, arg_start, arg_len)
 }
 
 /// Generate /proc/[pid]/stat content
@@ -284,8 +362,17 @@ pub fn generate_cwd_link(pid: u64) -> Vec<u8> {
 /// Generate /proc/[pid]/environ content
 ///
 /// Format: VAR=value\0VAR=value\0...
+///
+/// Read through the TARGET's page tables (review 5.7) and gated behind a
+/// ptrace_may_access-style permission check (self or CAP_SYS_PTRACE) —
+/// unauthorized readers get an empty buffer; sys_openat's /proc shortcut
+/// additionally fails the open with EACCES.
 pub fn generate_environ(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    if !environ_access_allowed(pid) {
+        return Vec::new();
+    }
 
     let task = if current_pid() as u64 == pid {
         current_task()
@@ -309,22 +396,8 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
         return Vec::new();
     }
 
-    let env_len = env_end - env_start;
-    let mut result = alloc::vec::Vec::with_capacity(env_len);
-    unsafe { result.set_len(env_len); }
-
-    let uncopied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
-            result.as_mut_ptr(),
-            env_start as *const u8,
-            env_len,
-        )
-    };
-    if uncopied > 0 {
-        unsafe { result.set_len(env_len - uncopied); }
-    }
-
-    result
+    let env_len = core::cmp::min(env_end - env_start, 64 * 1024);
+    read_target_user_mm(&addr_space, env_start, env_len)
 }
 
 /// Generate /proc/[pid]/maps content

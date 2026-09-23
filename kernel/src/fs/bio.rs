@@ -207,8 +207,11 @@ impl BufferHead {
 struct CacheEntry {
     /// The actual buffer head (raw pointer, owned by this entry)
     bh: *mut BufferHead,
-    /// Key: (device_major, blocknr) for fast lookup
-    key: (u32, u64),
+    /// Key: (device_major, device_minor, blocknr) for fast lookup.
+    /// Minor included (review 5.3 low): two partitions of the same disk
+    /// share a major number — without the minor, block N of partition A
+    /// was served as block N of partition B.
+    key: (u32, u32, u64),
     /// Next entry in hash chain
     hash_next: Option<*mut CacheEntry>,
     /// Previous entry in LRU list (more recent)
@@ -222,10 +225,10 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    fn new(bh: Box<BufferHead>, device_major: u32, blocknr: u64) -> Self {
+    fn new(bh: Box<BufferHead>, device_major: u32, device_minor: u32, blocknr: u64) -> Self {
         Self {
             bh: Box::into_raw(bh),
-            key: (device_major, blocknr),
+            key: (device_major, device_minor, blocknr),
             hash_next: None,
             lru_prev: None,
             lru_next: None,
@@ -325,9 +328,10 @@ impl BlockCache {
     }
 
     #[inline]
-    fn hash_index(&self, device_major: u32, blocknr: u64) -> usize {
+    fn hash_index(&self, device_major: u32, device_minor: u32, blocknr: u64) -> usize {
         let hash = (device_major as u64)
             .wrapping_mul(2654435761)
+            .wrapping_add((device_minor as u64) << 32)
             .wrapping_add(blocknr);
         (hash as usize) & (self.hash_size - 1)
     }
@@ -458,7 +462,7 @@ impl BlockCache {
         // aborts the eviction if a pin arrived in this window.
 
         let victim_key = unsafe { (*victim).key };
-        let bucket_idx = self.hash_index(victim_key.0, victim_key.1);
+        let bucket_idx = self.hash_index(victim_key.0, victim_key.1, victim_key.2);
 
         unsafe {
             let mut bucket = self.buckets[bucket_idx].lock();
@@ -530,8 +534,8 @@ impl BlockCache {
         // SAFETY: device is a valid GenDisk pointer passed from the block device layer;
         // all CacheEntry pointers in the hash chain were created by Box::into_raw.
         unsafe {
-            let device_major = (*device).major;
-            let index = self.hash_index(device_major, blocknr);
+            let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+            let index = self.hash_index(device_major, device_minor, blocknr);
 
             // Phase 1: Lookup under bucket lock
             {
@@ -549,7 +553,7 @@ impl BlockCache {
                         current = entry.hash_next;
                         continue;
                     }
-                    if entry.key == (device_major, blocknr) {
+                    if entry.key == (device_major, device_minor, blocknr) {
                         // R9 tripwire: hand out only intact buffers. A len-0
                         // b_data is freed-and-reused memory (BufferHead::new
                         // always allocates block_size bytes); serving it
@@ -612,7 +616,7 @@ impl BlockCache {
             bh.set_state_bit(BufferState::BH_Uptodate);
 
             // Create cache entry
-            let entry = Box::new(CacheEntry::new(bh, device_major, blocknr));
+            let entry = Box::new(CacheEntry::new(bh, device_major, device_minor, blocknr));
             let entry_ptr = Box::into_raw(entry);
 
             // Phase 3: Insert into cache
@@ -622,7 +626,7 @@ impl BlockCache {
                 // Double-check for duplicate inserted by another thread
                 let mut current = bucket.head;
                 while let Some(cp) = current {
-                    if (*cp).key == (device_major, blocknr) {
+                    if (*cp).key == (device_major, device_minor, blocknr) {
                         // R9-8: apply the same integrity guard as Phase 1 —
                         // a dead (freed/reused) duplicate entry must not be
                         // handed out here after the fresh read.
@@ -824,9 +828,9 @@ pub fn bread_async(
     // SAFETY: device is a valid GenDisk pointer from the block device layer;
     // all CacheEntry pointers in the hash chain were created by Box::into_raw.
     unsafe {
-        let device_major = (*device).major;
+        let (device_major, device_minor) = ((*device).major, (*device).first_minor);
         let cache = get_block_cache();
-        let index = cache.hash_index(device_major, blocknr);
+        let index = cache.hash_index(device_major, device_minor, blocknr);
 
         // Phase 1: Lookup under bucket lock
         {
@@ -848,7 +852,7 @@ pub fn bread_async(
                     current = entry.hash_next;
                     continue;
                 }
-                if entry.key == (device_major, blocknr) {
+                if entry.key == (device_major, device_minor, blocknr) {
                     let state = (*entry.bh).get_state();
                     if !state.test(BufferState::BH_Uptodate)
                         && state.test(BufferState::BH_Req)
@@ -910,7 +914,7 @@ pub fn bread_async(
         }
 
         // Phase 3: Insert into cache
-        let entry = Box::new(CacheEntry::new(bh, device_major, blocknr));
+        let entry = Box::new(CacheEntry::new(bh, device_major, device_minor, blocknr));
         let entry_ptr = Box::into_raw(entry);
 
         {
@@ -920,7 +924,7 @@ pub fn bread_async(
             let mut dup_bh: Option<*mut BufferHead> = None;
             let mut current = bucket.head;
             while let Some(cp) = current {
-                if (*cp).key == (device_major, blocknr) {
+                if (*cp).key == (device_major, device_minor, blocknr) {
                     // R13-2: same dead/evicting guards as get() Phase 3.
                     if (*cp).evicting
                         || unsafe {

@@ -10,6 +10,12 @@
 //! - `struct pipe_inode_info`: Pipe information
 //! - `struct pipe_buffer`: Pipe buffer
 //! - Synchronous read/write operations
+//!
+//! POSIX guarantees implemented here:
+//! - Writes of at most PIPE_BUF (4096) bytes are ATOMIC: a blocking writer
+//!   waits until the WHOLE request fits, so chunks from concurrent writers
+//!   never interleave (review 5.2: PIPE_BUF atomicity was broken).
+//! - Pipe capacity is 64 KiB (Linux default, review 5.2: was 16 KiB).
 
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
@@ -17,8 +23,14 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::sync::Arc;
 use crate::process::wait::WaitQueueHead;
 
-/// Pipe buffer size - from config
-const PIPE_BUF_SIZE: usize = crate::config::PIPE_BUFFER_SIZE;
+/// Pipe buffer capacity (bytes). Linux default is 16 pages = 64 KiB.
+/// Was 16 KiB (review 5.2: pipe capacity below Linux default).
+/// NOTE: defined locally instead of config.rs — the shared config file is
+/// concurrently edited by other repair agents.
+const PIPE_BUF_SIZE: usize = 65536;
+
+/// POSIX PIPE_BUF: max write size guaranteed atomic
+const PIPE_BUF: usize = 4096;
 
 #[repr(C)]
 pub struct PipeBuffer {
@@ -187,33 +199,9 @@ impl Pipe {
     }
 }
 
-pub fn pipe_read(pipe: &Pipe, buf: &mut [u8]) -> isize {
-    let mut guard = pipe.buffer.lock();
-    if pipe.is_write_closed() && guard.available_read() == 0 {
-        return 0; // EOF
-    }
-
-    let count = guard.read(buf);
-    count as isize
-}
-
-pub fn pipe_write(pipe: &Pipe, buf: &[u8]) -> isize {
-    if pipe.is_read_closed() {
-        // Write to pipe with no readers -> SIGPIPE + EPIPE
-        if let Some(current) = crate::sched::current() {
-            let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
-        }
-        return -(crate::errno::constants::EPIPE) as isize;
-    }
-
-    let count = pipe.buffer.lock().write(buf);
-    if count == 0 {
-        // Buffer full, non-blocking mode returns EAGAIN
-        -11_i32 as isize // EAGAIN
-    } else {
-        count as isize
-    }
-}
+/// Dead code removed (review 5.2 low): the free-function pipe_read/pipe_write
+/// were never called and bypassed the wait-queue logic of the FileOps
+/// versions — keeping them invited misuse.
 
 use crate::fs::file::{File, FileOps, FileFlags};
 
@@ -335,14 +323,26 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
         while total_written < buf.len() {
             let remaining = &buf[total_written..];
 
+            // POSIX PIPE_BUF atomicity: a write of <= PIPE_BUF bytes must be
+            // atomic — never split across other writers. In blocking mode we
+            // wait until the ENTIRE remaining chunk fits before copying any
+            // of it (review 5.2: the old code partial-wrote whenever there
+            // was any space, interleaving chunks from concurrent writers).
+            let atomic = remaining.len() <= PIPE_BUF;
+
             // Acquire lock once for check + IO
             let mut guard = pipe.buffer.lock();
 
-            // Try to write data
-            let count = guard.write(remaining);
+            let space = guard.available_write();
+            let can_write = if atomic {
+                space >= remaining.len()
+            } else {
+                space > 0
+            };
 
-            if count > 0 {
+            if can_write {
                 // Write successful
+                let count = guard.write(remaining);
                 total_written += count;
                 // Release lock before waking waiters
                 drop(guard);
@@ -351,7 +351,8 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 continue;
             }
 
-            // Buffer full — release lock before blocking
+            // Buffer full (or not enough room for the atomic chunk) —
+            // release lock before blocking
             drop(guard);
 
             if nonblock {
@@ -377,7 +378,19 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 // Re-check the condition AFTER registering: if a reader
                 // drained the buffer between our check and prepare_to_wait,
                 // its wake_up_all() found an empty queue — don't sleep.
-                if pipe.buffer.lock().available_write() > 0 || pipe.is_read_closed() {
+                // The predicate must MATCH the write condition above: an
+                // atomic (<= PIPE_BUF) chunk needs space for the WHOLE
+                // chunk, otherwise the loop below spins without sleeping.
+                let recheck_ok = {
+                    let guard = pipe.buffer.lock();
+                    let space = guard.available_write();
+                    if remaining.len() <= PIPE_BUF {
+                        space >= remaining.len()
+                    } else {
+                        space > 0
+                    }
+                };
+                if recheck_ok || pipe.is_read_closed() {
                     pipe.write_queue().finish_wait(current);
                     // R36-B2 (R8-5 NEW-C2 discipline, missed here): undo a
                     // concurrent drain/close wake that enqueued us while we
@@ -446,18 +459,22 @@ fn pipe_file_poll(file: &File, events: u16) -> u16 {
             if pipe.buffer.lock().available_read() > 0 {
                 ready |= POLLIN | POLLRDNORM;
             }
-            if pipe.is_write_closed() {
-                ready |= POLLHUP;
-            }
         }
-
         if events & POLLOUT != 0 {
             if pipe.buffer.lock().available_write() > 0 {
                 ready |= POLLOUT | POLLWRNORM;
             }
-            if pipe.is_read_closed() {
-                ready |= POLLERR;
-            }
+        }
+
+        // POLLHUP/POLLERR are reported regardless of the requested events
+        // (Linux sets them unconditionally in pipe_poll) — review 5.2 low:
+        // they used to be masked behind POLLIN/POLLOUT requests, hiding
+        // EOF/reader-gone from callers that only polled the other direction.
+        if pipe.is_write_closed() {
+            ready |= POLLHUP;
+        }
+        if pipe.is_read_closed() {
+            ready |= POLLERR;
         }
     }
 
