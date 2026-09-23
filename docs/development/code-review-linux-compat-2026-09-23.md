@@ -377,12 +377,98 @@ split 精确/merge 保守/扩栈盲区；尾页 refcount 约定相反；RLIMIT_A
 结构对应完整但三类核心运行时语义缺席（S2 慢路径、S3 pcp、迁移类型）；S1 static mut 为全目录 soundness 缺口。疑似 bug 14 项优先：is_buddy_free 缺 OnFreelist、expand_downwards 重叠、NODE_DATA 别名、compact 迁移窗口、memblock 部分合并、slab kfree 校验。
 
 
+# 批次 5：fs 层（kernel/src/fs/）— Linux 对比全文件检视
+
+范围：54 文件/24,524 行（含 devfs/ext4/jbd2/procfs）。总体：VFS/ext4 骨架完整、musl 静态程序可跑通，但 ext4 写路径存在可造成数据损坏的组合缺陷，jbd2 崩溃一致性实质未达成，VFS 缺 sticky 位与原子创建。
+
+## 5.1 VFS 核心
+- [语义][高] vfs.rs:354 — 词法 ..折叠+尾斜杠丢失（open("regfile/") 不报 ENOTDIR；mount 根 ..停留原地与 Linux 相反）。
+- [安全][高] 无 S_ISVTX sticky 检查——多用户可删他人 /tmp 文件。
+- [并发][高] O_CREAT 两步无父目录锁——SMP 双创建双 inode。
+- [语义][中] 符号链接深度 8（Linux 40）；io_poll ENOSYS 桩；getdents64 首条放不下返 Ok(0)（Linux EINVAL）；目录 lseek ESPIPE（telldir 失效）；F_SETFL 清 O_DIRECTORY 位；chroot 不参与 path_lookup（无隔离）；do_mount 忽略 flags/source、三套 mount 并存；build_path>64 截断；icache 冲突逐出后同文件双 Inode。
+- [低] dcache 哈希零调用；目录 open 不查 EISDIR；check_parent 不查 MAY_EXEC；无 ACL；elf.rs p_filesz>p_memsz 未拒。
+
+## 5.2 fd/管道/字符设备
+- [中] dup2 close+install 非原子；O_APPEND 写与 pos 更新无锁（SMP 交叉）；管道容量 16KB（Linux 64KB）无 F_SETPIPE_SZ；PIPE_BUF 原子性破坏。
+- [低] poll 不恒置 POLLHUP；/dev/null poll 永不就绪；pipe_read/write 自由函数死代码。
+
+## 5.3 块层/页缓存
+- [中] 写穿缓存（每次 BH_Dirty 立即 sync——聚合失效，吞吐数量级劣化）；页缓存键 ino:u32 截断。
+- [低] 缓存键不含 minor（多盘串页）。
+
+## 5.4 rootfs/devfs
+- [中] 硬链接写用 Arc::make_mut COW（POSIX 应共享可见）；路径缓存无失效。
+- [低] chmod no-op、时间戳 0、rename 祖先仅一层；devfs lookup/readdir ino 不一致。
+
+## 5.5 ext4
+- [数据][高] 稀疏洞读盘块 0（垃圾数据——非缓存路径）；extent 深度>0 无条件当叶追加（破坏树+假满盘）；unlink 目录无 EISDIR；挂载不查 feature_incompat/ro_compat（bigalloc/metadata_csum 全静默——真实 Linux 判损坏）；目录项不更新 htree/checksum（Rux 建的文件对真实 Linux 不可见）。
+- [并发][高] EXT4_BIG_LOCK 仅覆盖 namei；写路径/位图 RMW 无锁——SMP 位图丢更新双分配。
+- [中] truncate 不处理深度>0；rename 环检查错（可建 ..循环）；name_len u8 截断无检查；时间戳非 epoch；两套 journal 纪律。
+- [低] 172B 固定 inode 布局（s_inode_size=128 越界）；ext4_sync_file/fsync 桩。
+
+## 5.6 jbd2
+- [高] revoke/checkpoint 全空壳——崩溃一致性名存实亡；j_free 失真。
+- [中] 无 tag/commit 校验和与屏障（与真实 Linux 日志互不兼容）；stop 自旋忙等。
+- [正面] recovery 两遍 scan/replay + 序列号窗口正确。
+
+## 5.7 procfs
+- [正确性][高] cmdline/environ 对其他进程用当前任务地址空间读（ps 显示垃圾）。
+- [中] environ 无 ptrace 权限；/proc/self/fd 靠 syscall 字符串特判（VFS 通用路径失败）；open("/proc/self/exe") 打开内容为路径文本的内存文件。
+- [低] stat 14+ 字段 0；mounts 硬编码未实现 fs。
+
+## 批次 5 统计
+高 11/中 27/低 22/信息 8 = 68 项。
+**优先**：①ext4 特性协商+htree/checksum ②extent 深度+稀疏洞 ③unlink EISDIR/rename 环 ④jbd2 空壳 ⑤sticky+/proc 跨进程读 ⑥ext4 写无锁。
+
+---
+
+# 批次 6：ipc + sync + security + io_uring — Linux 对比全文件检视
+
+范围：18 文件/约 8900 行/约 120 函数。总评：最严重集中在 futex 键语义与 io_uring mmap——**FutexKey 以 tid 作私有键与 Linux (mm,uaddr) 根本冲突，是 musl 多线程程序能否运行的总闸门**。
+
+## 6.1 sync/futex.rs（871 行）
+- **[P1] futex.rs:48-70 — 私有键=(uaddr,pid=tid)**：同进程线程间 waiter/waker 键永不匹配——musl pthread_mutex/cond/sem/join 全部丢失唤醒随机挂死；clear_child_tid 唤醒失配 join 永眠。共享键仅比虚拟地址（shm attach 地址不同即失配）。修复方向：私有键改 address_space()/tgid；共享键物理帧+页内偏移。
+- **[P2] requeue 后 waiter 的陈旧 bucket_idx**：信号/超时醒来去旧桶找节点静默失败——槽泄漏+多余唤醒。
+- [M] WAKE_OP 退化为普通 wake；PI/robust list 全 ENOSYS（robust 持有者死亡永久阻塞）；坏 timeout 指针→永久等待（Linux EFAULT）；无 4 字节对齐校验。
+- [L] WAITER_POOL 256 硬限；exit.rs 误传 FUTEX_PRIVATE_FLAG 当内部 flags。
+- [正面] 锁下重读/槽占位/R12-2/IPC-C3/H4 与 Linux 语义一致。
+
+## 6.2-6.6 SysV IPC + POSIX mq
+- **[P2] semctl SETVAL/SETALL 后不唤醒等待者**（"用 semctl 释放信号灯"惯用法挂死）。
+- **[P2] IPC_SET 无属主检查**（三处——任何有写权限者可夺所有权）；RMID 属主判定缺 uid 路径+cap 号错。
+- [P2] sysv_shmat 回滚路径潜伏自死锁；mq notify 每次入队触发（应仅空→非空）。
+- [M] msgsnd/mq_send 忽略 copy_from_user 返回值（零填充损坏）；MSG_COPY 仅队首；SHM_REMAP 未实现+重叠先破坏后报错；mq SIGEV_SIGNAL 无 siginfo、THREAD_ID 不支持；mq_unlink 无权限；MQ fd 表 512-575 段设计债。
+- [L] EFBIG/EIDRM 口径；shm size 回绕；CLONE_SYSVSEM 忽略。
+- [正面] ID 编码/seq 回绕/E2BIG 回插/生命周期引用配平/mq 名称与优先级边界——主体对齐。
+
+## 6.7 sync 其余
+- **[P2] RCU 宽限期机制整体失效**（call_rcu 即时执行+synchronize_rcu 实际 no-op——现有调用方靠 pin/毒化兜底）。
+- [M] seqlock try_write 计数净 -255（潜伏）；condvar 非中断版 interruptible=true 矛盾。
+- [L] rwlock 写饿死；semaphore IRQ 回退。
+- [正面] spinlock 变体映射 Linux 精确；semaphore 注册先行模型一致。
+
+## 6.8 security
+- [正面] 41 个 CAP 编号与 Linux UAPI 相符；can_send_signal 四元组一致。
+- [M] LSM 钩子全占位（实检在调用方）；无 userns。
+
+## 6.9 io_uring
+- **[P1] 通告 SINGLE_MMAP 但实现为分离区域**——liburing 单 mmap 读错环形指针。
+- **[P1] mmap addr=NULL 固定 MMAP_START**——第二次 mmap 必重叠失败。
+- [P2] 两处错误双重取负（ENOMEM 当 fd=12 返回）。
+- [M] enter(to_submit=0) 恒返 0；op 面窄（NOP/READ/WRITE/FSYNC/CLOSE/FADVISE）。
+- [正面] 生命周期/引用/校验防御扎实。
+
+## 批次 6 统计
+P1 3/P2 7/M 21/L 14/正面 12。
+**优先**：①futex 私有键改 mm ②io_uring 摘 SINGLE_MMAP+mmap 走 find_free_area+修取负 ③semctl 唤醒+IPC_SET/RMID 属主 ④mq notify 条件。
+
+
 ## 分批进度
 - [x] 批次 1：syscall 层（ABI 基准）
 - [x] 批次 2：arch/riscv64（含 3 个 .S）
 - [x] 批次 3：process（fork/exec/wait/signal）
 - [ ] 批次 4：mm
-- [x] 批次 5：fs（vfs/ext4/pipe）
-- [x] 批次 6：ipc + sync
+- [ ] 批次 5：fs（vfs/ext4/pipe）
+- [ ] 批次 6：ipc + sync
 - [x] 批次 7：net + drivers
 - [x] 批次 8：sched + timer + interrupt + 其余
