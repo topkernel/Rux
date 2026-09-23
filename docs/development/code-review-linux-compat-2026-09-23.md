@@ -575,3 +575,16 @@ BUG 13/ABI 6/LINUX-DIFF 19/TIMING 4/RACE 4/VISIBILITY 2/OVERFLOW 2/COMMENT 8/ARC
 - [x] 批次 6：ipc + sync
 - [x] 批次 7：net + drivers
 - [x] 批次 8：sched + timer + interrupt + 其余
+
+
+## 修复实施记录（2026-09-23/24，8 波全部落地）
+
+8 个提交（74ff805→05dc149）覆盖全部 18 主题的可修复项。三次"检视结论本身错误被实测纠正"：
+1. clone 参数序——批次 1 断言 a3=child_tid/a4=tls 有误，musl clone.s 实证 a3=tls/a4=ctid（05dc149 回正）；
+2. svpbmt IO 位——QEMU 默认 CPU 无此扩展，保留位使 PTE 无效（3c8ae4b 回退）；
+3. W6 NODE_DATA 发布模型破坏 boot 序（a6c3a9f 回退后 W6 以保持 init 序方式重做完成）。
+
+### musl pthread 实测（分级探针 test/pthread_min.c / pthread_staged.c）
+- 单线程：create=0 → 线程体运行（TLS 正确）→ join 返回正确退出值 ✓（create/TLS/clear_child_tid/futex-mm-键全链路）
+- 2 线程 plain：✓
+- 4 线程 + mutex：L0/L1 执行并退出后 L2/L3 与 join 挂起；周期快照显示唯一 RUNNING 任务 linked=1 在队却长期不被调度，其余全睡。已知遗留（疑非 leader 退出后的调度/唤醒细节）。
