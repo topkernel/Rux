@@ -9,7 +9,7 @@
 
 **类别**：LINUX-DIFF（语义差异）| ABI（POSIX/ABI）| BUG | OVERFLOW | RACE | TIMING | VISIBILITY | COMMENT | LICENSE | ARCH
 
-**统计**：（检视完成后填写）
+**统计**：278 文件 / 116,099 行 / 约 1,590 个函数符号 / **446 项发现**（P0-P1 级主题 18 组见总评审汇总）。
 
 # 批次 3：kernel/src/process/ — Linux 对比全文件检视
 
@@ -463,12 +463,115 @@ P1 3/P2 7/M 21/L 14/正面 12。
 **优先**：①futex 私有键改 mm ②io_uring 摘 SINGLE_MMAP+mmap 走 find_free_area+修取负 ③semctl 唤醒+IPC_SET/RMID 属主 ④mq notify 条件。
 
 
+# 批次 7：net + drivers — Linux 对比全文件检视
+
+范围：net/ 14 文件 + drivers/ 28 文件共 42 文件 17,332 行。
+
+## 关键发现（net）
+- [BUG][高] tcp.rs:2623 — **TCP RX 不校验校验和**（位翻转按有效入队；UDP 已验 TCP 未验）。
+- [BUG][高] tcp.rs:2724 — tcp_v4_err 四元组与 icmp 传入方向全部颠倒——ICMP 快速失败失效。
+- [BUG][高] tcp.rs:1671 — dup-ACK 判定错位（ack==snd_una 被忽略）——**fast retransmit 是死路径**，丢包恢复靠 RTO。
+- [LINUX-DIFF][高] snd_wnd 恒 65535 不更新（无视对端通告窗口，无零窗探测）。
+- [LINUX-DIFF][高] **IP 分片双向缺失**（入站分片段错乱、出站超 MTU 丢弃）；路由未接数据面（无网关概念，靠 slirp 代答）——"QEMU slirp 专用栈"结构性边界。
+- [ABI][高] socket.rs:684 — **SOCK_NONBLOCK/SOCK_CLOEXEC 型别被拒**（musl `SOCK_STREAM|SOCK_NONBLOCK` 直接 ESOCKTNOSUPPORT）。
+- [ABI][高] socket.rs:377 — **所有 socket 恒非阻塞**（无阻塞等待路径）——未自带重试循环的 musl 阻塞程序读即 EAGAIN。
+- [LINUX-DIFF][高] UDP >1472B 恒失败（无分片）且 65507 上限内长度截断陷阱；未 bind 的 sendto 源端口 0（无隐式 bind）。
+- [RACE][高] ROUTE_TABLE static mut 无锁。
+- [中] setsockopt 约 20 项接受即忽略（SO_RCVTIMEO 无效）；SO_ERROR 恒 0；SYN 选项不解析（MSS 恒 1460、无 timestamps→RTT 采样虚高）；ICMP 校验和不验；arp hln/pln 不查；本机 IP 硬编码 10.0.2.15。
+- [低] ephemeral 顺序可预测；表满 EIO（Linux EMFILE）；UDP 校验和恒 0 发送。
+
+## 关键发现（drivers）
+- [TIMING][高] virtio_net xmit 在 tx_queue 关中断内同步自旋 10M+50M 次（chain-2 根源仍在）；virtio-blk 同款 50M（锁外）。
+- [LINUX-DIFF][高] PLIC 只在 boot hart 启用——全部外部中断串行压 hart0，无亲和性。
+- [TIMING][高] **jiffies 每 hart 各自递增——4 CPU 下时间快 4 倍**（所有 jiffies 计的 TCP 超时实际缩至 1/4）。
+- [BUG][中] notify 地址多乘 2 且不读 queue_notify_off（当前只用 queue0 未爆）；PCI 探测步长 0x1000 错（应 0x8000）——slot≥4 全漏；virtio-input 从错误 BAR 读 config（键鼠分类失效全当键盘）；Flush 假成功（fsync 无持久化）；write_block desc 失败泄漏；feature 协商三路径三套口径。
+- [LINUX-DIFF][中] 无 MSI-X（INTx 共享+ISR 降沿）；queue 深恒 8；无 CTRL_VQ/offload；evdev 无 poll、时间戳恒 0（libinput 不可用）；FbFixScreeninfo 布局错位。
+- [低] fence i,ir 用反（弱序平台风险）；BAR 窗口 256MB 无越界检查；SIOCGIFCONF 缺失。
+
+## 批次 7 统计
+BUG 13/ABI 6/LINUX-DIFF 19/TIMING 4/RACE 4/VISIBILITY 2/OVERFLOW 2/COMMENT 8/ARCH 2 = **59 项**（高 12/中 21/低 26）。
+**优先复核**：tcp_v4_err 四元组、TCP RX 校验和、dup-ACK 判定、input config BAR。
+
+---
+
+# 批次 8：sched + timer + interrupt + 顶层 + dfx — Linux 对比全文件检视（收官）
+
+范围：sched/ 8 文件 4833 行 + timer.rs + interrupt/ 8 文件 + init/main/console/printk/print/config/dfx 约 10,700 行。
+
+## 关键发现
+- [语义][高] **SCHED_DEADLINE CBS 限流完全失效**（重入队即补满预算——单 DL 任务可 100% 霸占全部 CPU）。
+- [语义][高] **CFS 无唤醒抢占**（须等下个 tick 10ms；check_preempt 写了无调用者）。
+- [并发][高] **tasklet 跨 CPU 无互斥**（RUN 置位非 CAS——两 CPU 可并发同一回调，当前无使用者潜伏）。
+- [语义][高] **free_irq→request_irq 复用 IRQ 线静默失效**（depth 不复位，中断送达永不派发）。
+- [语义][高] **printk 无 console 输出路径**（只写 ring buffer——内核运行期错误默认不可见；syslog 6/7/8 空语义）。
+- [语义][高] **^C/^Z 只在 read 路径处理**（无人读 tty 时按键不发信号——失控进程无法 ^C 终止）。
+- [语义][高] init.rs RWX 整段映射（W^X 全缺失）；dfx softlockup 时间换算差 10 倍 + khungtaskd 无定时唤醒（检测器形同虚设）+ hung_task 以 pid<256 索引（真实 pid≥300 恒跳过）。
+- [中] min_vruntime 不含 curr+无睡眠补偿限幅；sched_yield 对 CFS 是 no-op；tick 抢占判 vruntime 差而非 slice 到期；RT 无 throttling；timer 单 BTreeMap 每 tick O(n) 扫描+周期漂移（不追名义到期点）；handler 在 action 锁内调用；IN_PRINTK 全局 flag 丢 CPU B 日志；cpu_id 恒 0。
+- [低] 注释矛盾多处（rt.rs:19 与实现相反等）；死代码（timer::init、overloaded、stop task、SchedClass 空壳）；find_idle_cpu 恒低位；panic 不停他 CPU；TASK_PAGE_OWNED 8192 页别名。
+
+## 批次 8 统计
+高 9/中 15/低 18/正面 7 = 42 项。
+正面：jiffies u64 无回绕、softirq/ksoftirqd/preempt_count 位布局对位、syslog 权限/kmsg 语义、taint 表与 Linux 一致、tests 门控正确。
+
+---
+
+# 总评审汇总（批次 1-8）
+
+## 总量统计
+| 批次 | 范围 | 发现数 |
+|---|---|---|
+| 1 | syscall 层（11 文件） | 78 |
+| 2 | arch/riscv64 含 3 汇编（24 文件） | 36 |
+| 3 | process（9 文件） | 33 |
+| 4 | mm（25 文件） | 85 |
+| 5 | fs（54 文件） | 68 |
+| 6 | ipc+sync+security+io_uring（18 文件） | 45 |
+| 7 | net+drivers（42 文件） | 59 |
+| 8 | sched+timer+interrupt+顶层+dfx | 42 |
+| **合计** | **278 文件 116K 行** | **446 项** |
+
+## 跨批次主题裁决清单（建议用户按此评审）
+
+### 主题 A：musl 多线程程序整体不可用（P0 级，4 项互锁）
+1. futex 私有键用 tid（批次 6 P1）——pthread_mutex/cond/join 全部随机丢失唤醒。
+2. clone a3/a4 参数对调（批次 1）——musl 直接 syscall 传参错位。
+3. CLONE_THREAD 无线程组（批次 3 P1）——kill(tgid) 不扩散。
+4. exit_group 不杀线程组（批次 3 P1）。
+**评审点**：这是"实现有 bug"（参数对调/键错误）与"设计不一致"（无线程组模型）的混合——前者必须修，后者需决策是否支持线程。
+
+### 主题 B：信号 ABI 断裂（P0-P1）
+5. sa_restorer 被忽略+栈上 trampoline 与 W^X 矛盾（批次 3）——musl 信号 handler 返回即 SIGSEGV。
+6. clock_nanosleep 返回负 errno（Linux 特例正 errno）（批次 1）。
+7. 240 号错位+rt_tgsigqueueinfo 3 参布局（批次 1）。
+
+### 主题 C：socket 行为面（P1）
+8. 所有 socket 恒非阻塞（批次 7）+ SOCK_NONBLOCK 型别被拒 + setsockopt 全忽略 + SO_ERROR 恒 0。
+9. TCP RX 无校验和/dup-ACK 死路径/四元组颠倒/窗口恒定（批次 7）。
+10. UDP >1472B 失败/无隐式 bind（批次 7）。
+
+### 主题 D：文件系统数据损坏（P1）
+11. ext4 特性协商缺失+htree/checksum 不维护（批次 5）——与真实 Linux 互通即损坏。
+12. extent 深度>0 写入破坏+稀疏洞读垃圾（批次 5）。
+13. jbd2 revoke/checkpoint 空壳（批次 5）。
+14. IPC：semctl 不唤醒等待者/IPC_SET 无属主检查（批次 6）。
+
+### 主题 E：安全类（P1-P2）
+15. SUM 常开（批次 1/2）——纵深防御丢失+裸用户指针 panic 面。
+16. FP 寄存器跨进程残留（批次 2）；copy_from_user 不清零（批次 2）；getrandom LCG（批次 1）；brk 无上界（批次 1）；sticky 位缺失（批次 5）；/proc 跨进程读（批次 5）。
+
+### 主题 F：性能/架构（待评审）
+17. switch_mm 无 ASID+每页全量 sfence（批次 2 双高）；全局 PTE_MODIFY_LOCK（批次 2/4）；NODE_DATA static mut 别名（批次 4）；无分配慢路径/pcp 死代码（批次 4）；xmit 关中断自旋（批次 7）；jiffies 4 倍速（批次 7）；DL CBS 失效/CFS 无唤醒抢占（批次 8）；printk 无 console/^C 仅读路径（批次 8）。
+
+### 主题 G：io_uring（P1×2，批次 6）
+18. SINGLE_MMAP 通告不实+mmap 固定地址必重叠+错误双取负。
+
+
 ## 分批进度
 - [x] 批次 1：syscall 层（ABI 基准）
 - [x] 批次 2：arch/riscv64（含 3 个 .S）
 - [x] 批次 3：process（fork/exec/wait/signal）
-- [ ] 批次 4：mm
-- [ ] 批次 5：fs（vfs/ext4/pipe）
-- [ ] 批次 6：ipc + sync
+- [x] 批次 4：mm
+- [x] 批次 5：fs（vfs/ext4/pipe）
+- [x] 批次 6：ipc + sync
 - [x] 批次 7：net + drivers
 - [x] 批次 8：sched + timer + interrupt + 其余
