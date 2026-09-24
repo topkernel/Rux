@@ -199,14 +199,25 @@ fn free_waiter(index: usize) {
 
 /// Calculate futex hash value
 fn futex_hash(key: &FutexKey) -> usize {
-    // R31-9: shared futexes match on uaddr alone (matches() ignores mm)
-    // — including mm in the hash put the waiter and waker in different
-    // buckets (cross-process lost wakeup over SysV shm / MAP_SHARED).
-    if key.flags & FLAGS_SHARED != 0 {
-        key.uaddr % HASH_SIZE
-    } else {
-        key.uaddr.wrapping_add(key.mm) % HASH_SIZE
-    }
+    // Hash by uaddr ALONE. matches() compares uaddr in BOTH branches
+    // (private: uaddr+mm; shared: uaddr-only), so every waiter a wake
+    // could possibly match shares the waiter's uaddr — a uaddr-keyed
+    // bucket guarantees they are all in the scanned chain, and matches()
+    // does the precise filtering.
+    //
+    // R31-9 fixed only the shared↔shared direction (mm excluded for
+    // shared keys); the 4-thread hang hunt caught the remaining
+    // shared-waiter ↔ private-waker split: musl's __thread_list_lock
+    // waiters park with priv=0 (shared key, bucket uaddr%H), while the
+    // kernel's CLONE_CHILD_CLEARTID exit wake (musl pthread_exit relies
+    // on it to "unlock" the list lock — it passes &__thread_list_lock as
+    // the clone ctid) hashed the private key (uaddr+mm)%H → a DIFFERENT
+    // bucket → the wake scanned an empty chain (woken=0 with three
+    // parked waiters) → every later exiter/joiner parked on the
+    // never-released lock word forever. Linux solves the same interop
+    // with FLAG_IMMUTABLE (the cleartid wake matches both key variants);
+    // uaddr-only bucketing gives this kernel the same reach.
+    key.uaddr % HASH_SIZE
 }
 
 /// Wake up waiters on a futex, keyed on the CURRENT task's mm.

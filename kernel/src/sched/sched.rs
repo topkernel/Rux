@@ -1791,6 +1791,51 @@ pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> bool {
     unsafe { (*grq()).cfs_rq.is_linked(task) }
 }
 
+/// DFX diagnostic (4-thread hang hunt): grq.nr_running (the global runnable
+/// counter the idle fast path trusts) versus the per-class queue depths it is
+/// supposed to mirror. A divergence pins the counter-drift engine in one shot.
+pub fn grq_diag_counts() -> (usize, u64, u64, u64) {
+    let g = grq();
+    (
+        g.nr_running.load(core::sync::atomic::Ordering::Relaxed),
+        g.cfs_rq.nr_running(),
+        g.rt_rq.nr_running() as u64,
+        g.dl_rq.nr_running() as u64,
+    )
+}
+
+/// DFX diagnostic: per-CPU current task pid (0 = idle) + idle bit + raw task
+/// pointer, to see which CPU (if any) is executing/spinning while a queued
+/// task goes unpicked. Hash-invisible currents (post-exit spinners) are
+/// identifiable by their pointer not resolving in the dump body.
+pub fn grq_diag_cpu_currents() -> [(
+    u32,
+    bool,
+    *mut crate::process::task::Task,
+); crate::config::MAX_CPUS] {
+    let mut out = [(0u32, false, core::ptr::null_mut()); crate::config::MAX_CPUS];
+    for c in 0..crate::config::MAX_CPUS {
+        let st = cpu_state(c);
+        let cur = st.current;
+        out[c] = (
+            if cur.is_null() {
+                u32::MAX
+            } else {
+                // SAFETY: per-CPU current is null or a valid Task set by the
+                // scheduler; read-only pid access for diagnostics.
+                unsafe { (*cur).pid() }
+            },
+            g_diag_idle_bit(c),
+            cur,
+        );
+    }
+    out
+}
+
+fn g_diag_idle_bit(cpu: usize) -> bool {
+    grq().idle_cpus.load(core::sync::atomic::Ordering::Relaxed) & (1u32 << cpu) != 0
+}
+
 /// Check if a newly-enqueued CFS task should preempt a running CFS task.
 ///
 /// Batch 8 (HIGH): CFS had NO wakeup preemption — check_preempt() in

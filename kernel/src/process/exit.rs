@@ -138,6 +138,10 @@ unsafe fn exit_clear_child_tid(task: *mut Task) {
     );
     // Wake any thread waiting on this futex (FUTEX_WAKE, 1 waiter).
     // Private semantics + the exiting task's mm as the key identity.
+    // musl pthread_exit holds __thread_list_lock across SYS_exit and
+    // passes &__thread_list_lock as the clone ctid — THIS wake is what
+    // "unlocks" it for every later exiter/joiner (see futex_hash: the
+    // wake must reach waiters that parked with shared semantics too).
     crate::sync::futex::futex_wake_in_mm(
         tid_ptr as usize,
         mm_id,
@@ -214,14 +218,38 @@ pub fn de_thread(current: *mut Task) {
 /// (signal/fs), free the kernel stack, and put the Task slot.
 ///
 /// # Safety
-/// `member` is a DEAD task parked on a leader's dead_threads list.
+/// `member` is a DEAD task parked on a leader's dead_threads list (callers
+/// guarantee the DEAD state — see sweep_dead_threads / release_task).
 unsafe fn free_dead_member(member: *mut Task) {
     // The member's final context switch-out may still be in flight —
     // on_cpu is cleared exactly when __switch_to has saved its context
     // (see release_task R9 for the full rationale).
     crate::arch::riscv64::cpu::restore_irq(true);
-    while (*member).on_cpu() {
-        core::hint::spin_loop();
+    // DFX (4-thread hang hunt): report a stuck wait loudly instead of
+    // spinning silently — a member whose on_cpu never clears wedges every
+    // later exiter (and their CPUs) here.
+    {
+        let mut spins: u32 = 0;
+        while (*member).on_cpu() {
+            if spins == 0 {
+                let cur_pid = crate::sched::current().map(|c| c.pid()).unwrap_or(0);
+                crate::dfx::taskdump::taskdump_raw_line(b"FDM-WAIT sweeper=");
+                crate::dfx::taskdump::taskdump_dec(cur_pid as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b" member=");
+                crate::dfx::taskdump::taskdump_dec((*member).pid() as u64);
+                crate::dfx::taskdump::taskdump_raw_line(b" state=0x");
+                let st = (*member).state().bits() as u64;
+                let mut sh: i32 = 32;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((st >> sh) & 0xF) as u8;
+                    crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+                }
+                crate::dfx::taskdump::taskdump_raw_line(b"\n");
+            }
+            spins = spins.wrapping_add(1);
+            core::hint::spin_loop();
+        }
     }
     crate::sync::rcu::synchronize_rcu();
 
@@ -250,16 +278,55 @@ unsafe fn free_dead_member(member: *mut Task) {
 /// whose context switch-out completed. The just-pushed member typically
 /// still shows on_cpu and stays parked; older entries are reclaimed,
 /// bounding the list across create/join churn.
+///
+/// 4-thread-hang root cause (fixed): this used to compute `pending` as
+/// `mem::replace(&mut *dl, still_running)` — the replace returns the ENTIRE
+/// old list, so every "kept" (still on_cpu) member was ALSO handed to
+/// free_dead_member. An exiting worker sweeping its own fresh entry then
+/// spun in free_dead_member's `while member.on_cpu()` on ITSELF — a
+/// permanent self-deadlock that pinned one CPU per exiting thread (4
+/// workers = all 4 CPUs; the linked-but-runnable main went permanently
+/// unpicked). Members that did not spin were freed while still linked on
+/// the dead list — the freed-while-referenced / double-free engine behind
+/// the phantom-running and double-execution morphologies. The partition is
+/// now exact: each member is either kept (stays on the list) or pending
+/// (freed exactly once, removed from the list), never both.
+///
+/// Liveness predicate: free only members whose state is DEAD (their do_exit
+/// passed the terminal store — a member parked but preempted mid-exit is
+/// still RUNNING and must NEVER be freed here; on_cpu alone was a broken
+/// proxy for that, since a preempted parked exiter sits queued with
+/// on_cpu==false while fully alive) AND whose final context switch-out
+/// completed (on_cpu==false — the window between `set_state(DEAD)` and
+/// __switch_to's clear).
 pub fn sweep_dead_threads(leader: *mut Task) {
     let pending: alloc::vec::Vec<*mut Task> = {
         // SAFETY: leader is a valid task; dead_threads is lock-guarded.
         let mut dl = unsafe { (*leader).dead_threads.lock() };
-        let still_running: alloc::vec::Vec<*mut Task> =
-            dl.iter().copied().filter(|m| unsafe { (**m).on_cpu() }).collect();
-        core::mem::replace(&mut *dl, still_running)
+        let old = core::mem::replace(&mut *dl, alloc::vec::Vec::new());
+        let mut still_running: alloc::vec::Vec<*mut Task> =
+            alloc::vec::Vec::with_capacity(old.len());
+        let mut reclaimable: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+        for m in old {
+            // SAFETY: m is a parked member pointer (pushed by its own do_exit
+            // while holding the task alive via the dead-list reference).
+            let dead_and_off_cpu = unsafe {
+                (*m).state().is_dead() && !(*m).on_cpu()
+            };
+            if dead_and_off_cpu {
+                reclaimable.push(m);
+            } else {
+                still_running.push(m);
+            }
+        }
+        // Put the survivors back; `reclaimable` is the exact complement —
+        // every member is in exactly one of the two vectors.
+        *dl = still_running;
+        reclaimable
     };
     for m in pending {
-        // SAFETY: m came from the leader's dead list (DEAD, hash-removed).
+        // SAFETY: m came from the leader's dead list (DEAD, hash-removed,
+        // final switch-out completed).
         unsafe { free_dead_member(m) };
     }
 }
@@ -287,13 +354,48 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // A reaped leader first drains its dead-members list — every exited
     // group member is fully released before the leader's own storage
     // goes away (their group_leader pointers name `task`).
-    {
-        let mut guard = (*task).dead_threads.lock();
-        let members = core::mem::replace(&mut *guard, alloc::vec::Vec::new());
-        drop(guard);
-        for m in members {
+    //
+    // A member still mid-exit (parked but preempted before its terminal
+    // DEAD store — RUNNING/queued, fully alive) must NOT be freed. The
+    // leader's ZOMBIE flow (wait_for_thread_group_death) normally
+    // guarantees every member is DEAD by now, but apply the same exact
+    // partition as sweep_dead_threads anyway: only genuinely DEAD members
+    // are freed; live stragglers are parked back on the list and retried
+    // (they are runnable and reach DEAD through their own do_exit —
+    // free_dead_member then waits out the final on_cpu window).
+    loop {
+        let (reclaim, stragglers) = {
+            let mut guard = (*task).dead_threads.lock();
+            let members = core::mem::replace(&mut *guard, alloc::vec::Vec::new());
+            drop(guard);
+            let mut reclaim = alloc::vec::Vec::new();
+            let mut stragglers = alloc::vec::Vec::new();
+            for m in members {
+                // SAFETY: m is a parked member pointer owned by this list.
+                if (*m).state().is_dead() {
+                    reclaim.push(m);
+                } else {
+                    stragglers.push(m);
+                }
+            }
+            (reclaim, stragglers)
+        };
+        for m in reclaim {
             free_dead_member(m);
         }
+        if stragglers.is_empty() {
+            break;
+        }
+        // Park stragglers back and let them run — mid-exit members are
+        // runnable (RUNNING) and will reach DEAD on their own CPU.
+        let mut guard = (*task).dead_threads.lock();
+        for m in stragglers {
+            guard.push(m);
+        }
+        drop(guard);
+        // Yield so the stragglers can progress (IRQs are on throughout).
+        crate::arch::riscv64::cpu::restore_irq(true);
+        core::hint::spin_loop();
     }
 
     // Remove from PID hash table before freeing resources
