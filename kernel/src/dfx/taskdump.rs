@@ -72,6 +72,17 @@ pub fn dump_all_tasks(reason: &str) {
     puts("\n=== DFX TASK DUMP (");
     puts(reason);
     puts(") ===\n");
+    // R56-diag: per-CPU slot currents (who each slot thinks is running).
+    {
+        let cs = crate::sched::sched::grq_diag_cpu_currents();
+        puts("cpu slots:");
+        for c in 0..crate::config::MAX_CPUS {
+            putc(b' ');
+            let cur = cs[c].2;
+            if cur.is_null() { put_dec(999999); } else { put_dec(unsafe { (*cur).pid() as u64 }); }
+        }
+        putc(b'\n');
+    }
 
     // 4-thread hang hunt: the idle fast path trusts grq_nr_running() (the
     // SUM of the per-class queue depths). Print it against the atomic and

@@ -982,7 +982,40 @@ unsafe fn __schedule() {
     crate::sync::rcu::rcu_note_context_switch();
 
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
-    let prev = this_cpu().current;
+    let mut prev = this_cpu().current;
+
+    // R55 (multi-mode form-B): the slot-resolved prev must be the task the
+    // hardware is actually executing (tp). A mismatch means ti_cpu was
+    // steered mid-execution (every in-tree steer is gated, but out-of-tree
+    // writes and residual windows remain — the multi-thread gate caught
+    // pid 323 frozen at trap_exit with RUNNING+on_cpu+unlinked and the
+    // slot still naming it). Healing here is one compare on the happy
+    // path; on mismatch we find tp's true home slot, resync ti_cpu, and
+    // proceed with the TRUE prev — so its dequeue/requeue bookkeeping
+    // lands on the task that is actually leaving the CPU (the misdirect
+    // shape that produced every phantom capture).
+    let tp: *mut Task;
+    core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack));
+    if !tp.is_null() && tp != prev {
+        // Locate the slot that still accounts tp (it was scheduled SOMEWHERE).
+        let home = {
+            let mut found = usize::MAX;
+            for c in 0..crate::config::MAX_CPUS {
+                if cpu_state(c).current == tp as *const Task as *mut Task {
+                    found = c;
+                    break;
+                }
+            }
+            found
+        };
+        if home != usize::MAX {
+            // Resync the poisoned identity: tp executes HERE, on cpu_id.
+            (*tp).set_ti_cpu(cpu_id as i32);
+            prev = tp;
+        }
+        // home == MAX: tp has no slot at all (exited?) — leave prev as the
+        // slot's task; the exit path owns that case.
+    }
 
     if prev.is_null() {
         return;
@@ -2489,6 +2522,55 @@ pub fn cpu_rq(_cpu_id: usize) -> Option<&'static crate::sync::spinlock::Spinlock
 
 // ==================== CPU Idle Loop ====================
 
+/// R56: re-link picked-but-lost tasks (multi-mode emulator-race orphan).
+/// Runs from the idle loop (nothing else to do on this CPU). A task is an
+/// orphan when it is RUNNING, not linked on any class queue, and the slot
+/// its ti_cpu names is NOT running it (slot current differs or is idle).
+/// Such a task will never be picked again and nothing will wake it — every
+/// recorded capture of the multi-thread pipe hang had exactly this shape.
+unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
+    // Cheap pre-check: only when the global count says the queue is empty
+    // (an idle CPU with queued work is about to schedule anyway).
+    if GlobalRunQueue::grq_nr_running() != 0 {
+        return;
+    }
+    crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+        if (*t).state().is_running()
+            && !(*t).sched_entity().is_on_rq()
+            && (*t).on_cpu()
+        {
+            let home = (*t).ti_cpu() as usize;
+            if home < crate::config::MAX_CPUS {
+                // R56b (slot-capture shape, gate mrun2): the slot's current
+                // can STILL name the orphan (pick set current=next, then the
+                // switch never ran) while every CPU actually idles. The
+                // decisive evidence: the home slot's IDLE BIT is set — a
+                // CPU running the orphan would not be marked idle. Both
+                // shapes (slot moved on / slot captured) are orphans.
+                let slot_idle = {
+                    let g = grq();
+                    g.idle_cpus.load(core::sync::atomic::Ordering::Acquire) & (1u32 << home) != 0
+                };
+                let slot_cur = cpu_state(home).current;
+                let slot_is_me = slot_cur == t as *const Task as *mut Task;
+                if !slot_is_me || slot_idle {
+                    // The slot moved on — the pick that marked on_cpu never
+                    // reached __switch_to. Re-link under the GRQ lock with a
+                    // one-shot tripwire; wake_up_enqueue refuses non-wakeable
+                    // states, so RUNNING passes its filter and the class
+                    // insert links it for the next pick.
+                    if wake_up_enqueue(t) {
+                        const MSG: &[u8] = b"R56-ORPHAN-HARVESTED\n";
+                        for &b in MSG {
+                            unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
@@ -2499,6 +2581,16 @@ pub fn cpu_idle_loop() -> ! {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
     loop {
+        // R56 orphan harvest: the multi-thread gate still produces (rarely)
+        // tasks left RUNNING + off-queue after pick — every in-tree
+        // pick→switch path is atomic under SIE=0, so the surviving suspects
+        // are emulator-model races (form-A family, now under true
+        // parallelism). An idle CPU has nothing to lose: re-link any such
+        // task whose owning slot is NOT actually running it (slot current
+        // is idle or someone else). Genuine on-CPU tasks are skipped by
+        // the slot check; re-linked ones print a one-shot tripwire.
+        unsafe { harvest_orphan_tasks(cpu_id); }
+
         // Ensure IRQs are enabled before each schedule() call.
         // When the idle task is switched back to (from a task that called
         // schedule() with SIE=0, e.g. from syscall context), __schedule's
