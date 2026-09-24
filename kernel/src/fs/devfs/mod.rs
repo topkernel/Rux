@@ -85,6 +85,19 @@ impl DevfsEntry {
         }
     }
 
+    /// Create block device node (P1 mknod): recorded major/minor, but no
+    /// block driver registry exists yet — open() on it returns ENXIO via
+    /// the VFS device-open gate until a driver claims the number.
+    pub fn new_block_device(name: &str, devno: DevNo, mode: u32) -> Self {
+        Self {
+            name: String::from(name),
+            entry_type: DevEntryType::BlockDevice,
+            children: Spinlock::new(BTreeMap::new()),
+            devno,
+            mode: mode & 0o777,
+        }
+    }
+
     /// Is directory
     pub fn is_dir(&self) -> bool {
         self.entry_type == DevEntryType::Directory
@@ -93,6 +106,11 @@ impl DevfsEntry {
     /// Is character device
     pub fn is_char_device(&self) -> bool {
         self.entry_type == DevEntryType::CharDevice
+    }
+
+    /// Is block device
+    pub fn is_block_device(&self) -> bool {
+        self.entry_type == DevEntryType::BlockDevice
     }
 }
 
@@ -238,9 +256,16 @@ pub fn mknod(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
         }
     }
 
-    // Create device node
+    // Create device node. P1 mknod: the S_IFCHR / S_IFBLK type bits select
+    // the entry kind (char devices open through the CharDev registry; block
+    // nodes are stat-able but have no driver registry yet).
     let device_name = components[ncomponents - 1];
-    let entry = Arc::new(DevfsEntry::new_char_device_with_mode(device_name, devno, mode));
+    let is_block = mode & 0o060000 != 0; // S_IFBLK
+    let entry = if is_block {
+        Arc::new(DevfsEntry::new_block_device(device_name, devno, mode))
+    } else {
+        Arc::new(DevfsEntry::new_char_device_with_mode(device_name, devno, mode))
+    };
     current.children.lock_irqsave().insert(String::from(device_name), entry);
 
     Ok(())
@@ -534,6 +559,8 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
         InodeMode::new(InodeMode::S_IFDIR | child.mode)
     } else if child.is_char_device() {
         InodeMode::new(InodeMode::S_IFCHR | child.mode)
+    } else if child.is_block_device() {
+        InodeMode::new(InodeMode::S_IFBLK | child.mode)
     } else {
         InodeMode::new(InodeMode::S_IFBLK | child.mode)
     };
@@ -622,6 +649,10 @@ unsafe fn devfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::
     } else if inode.mode.is_directory() {
         Some(&crate::fs::file::DIR_FILE_OPS)
     } else {
+        // Block device (or unknown): no block-driver registry exists —
+        // returning None makes the VFS open gate fail with ENXIO ("no
+        // such device or address"), the Linux behavior for a device node
+        // with no bound driver.
         None
     }
 }
@@ -643,6 +674,8 @@ unsafe fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inod
             file_type::DT_DIR
         } else if child.is_char_device() {
             file_type::DT_CHR
+        } else if child.is_block_device() {
+            file_type::DT_BLK
         } else {
             file_type::DT_UNKNOWN
         };

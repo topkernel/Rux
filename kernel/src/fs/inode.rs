@@ -299,6 +299,12 @@ pub struct Inode {
     /// For block-backed filesystems, this is None and data is read from disk
     pub data: Spinlock<Option<FileBuffer>>,
 
+    /// Extended attributes (P1 xattr minimal): name → value, allocated
+    /// lazily on the first set. In-memory only — ext4 does not persist
+    /// them and an icache eviction of the inode loses the set (documented
+    /// limitation; a real on-disk xattr block is future work).
+    pub xattrs: Spinlock<Option<alloc::collections::BTreeMap<alloc::vec::Vec<u8>, alloc::vec::Vec<u8>>>>,
+
     // ==================== Reference Counting ====================
 
     /// Reference count
@@ -341,6 +347,7 @@ impl Inode {
             sb: None,
             private_data: None,
             data: Spinlock::new(None),
+            xattrs: Spinlock::new(None),
             ref_count: AtomicU64::new(1),
         }
     }
@@ -361,6 +368,7 @@ impl Inode {
             sb: Some(sb),
             private_data: None,
             data: Spinlock::new(None),
+            xattrs: Spinlock::new(None),
             ref_count: AtomicU64::new(1),
         }
     }

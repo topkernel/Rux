@@ -542,6 +542,61 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
 /// Handle breakpoint
 fn handle_breakpoint(regs: &mut PtRegs) {
     if regs.user_mode() {
+        // PTRACE_SINGLESTEP (P1): the ebreak we displaced at epc fired —
+        // restore the original instruction and report the step to the
+        // tracer (or pend SIGTRAP when nobody traces). epc is NOT
+        // advanced: the restored instruction re-executes on resume.
+        if let Some(task) = crate::sched::current() {
+            if (*task).single_step_active() && regs.epc == (*task).single_step_addr() {
+                let saved = (*task).single_step_saved_insn();
+                let restored = crate::process::ptrace::write_target_word(
+                    task, regs.epc, saved,
+                );
+                (*task).clear_single_step();
+                if !restored {
+                    // Could not put the instruction back — the tracee's
+                    // text is gone (unmapped racing the step). Kill it.
+                    crate::process::exit::do_exit(
+                        -(crate::signal::Signal::SIGSEGV as i32));
+                }
+                if (*task).tracer_pid() != 0 {
+                    // SAFETY: task is the current task in its trap path.
+                    unsafe {
+                        crate::process::ptrace::ptrace_stop(
+                            task,
+                            crate::signal::Signal::SIGTRAP as i32,
+                            crate::signal::SigInfo::new(
+                                crate::signal::Signal::SIGTRAP as i32,
+                                crate::signal::si_code::SI_KERNEL,
+                                (*task).pid(), 0),
+                        );
+                    }
+                } else {
+                    // Untraced single-step (raced DETACH): plain SIGTRAP.
+                    (*task).pending.add(crate::signal::Signal::SIGTRAP as i32);
+                }
+                return;
+            }
+            // A real user ebreak under a tracer stops for the tracer
+            // instead of dying (gdb inserts/relies on breakpoints).
+            if (*task).tracer_pid() != 0 {
+                // Advance past the 4-byte ebreak so CONT resumes at the
+                // following instruction (Linux do_trap_break).
+                regs.epc += 4;
+                // SAFETY: task is the current task in its trap path.
+                unsafe {
+                    crate::process::ptrace::ptrace_stop(
+                        task,
+                        crate::signal::Signal::SIGTRAP as i32,
+                        crate::signal::SigInfo::new(
+                            crate::signal::Signal::SIGTRAP as i32,
+                            crate::signal::si_code::SI_KERNEL,
+                            (*task).pid(), 0),
+                    );
+                }
+                return;
+            }
+        }
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {

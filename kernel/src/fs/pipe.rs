@@ -178,6 +178,23 @@ impl Pipe {
         self.read_queue.wake_up_all();
     }
 
+    /// FIFO lifecycle (fs/fifo.rs): re-arm the read end after the last
+    /// reader closed and a NEW reader opened — the closed flags are sticky
+    /// for anonymous pipes (one File per end) but a FIFO's inode outlives
+    /// each open. Readers 0→1 transition clears the flag.
+    pub fn reopen_read(&self) {
+        self.read_closed.store(0, Ordering::Release);
+    }
+
+    /// FIFO lifecycle: writers 0→1 transition clears the write-closed
+    /// (EOF) flag so readers block for fresh data instead of seeing the
+    /// previous writer's EOF forever.
+    pub fn reopen_write(&self) {
+        self.write_closed.store(0, Ordering::Release);
+        // Data may already be buffered by this new writer — wake readers.
+        self.read_queue.wake_up_all();
+    }
+
     /// Check if read end is closed
     pub fn is_read_closed(&self) -> bool {
         self.read_closed.load(Ordering::Acquire) == 1
@@ -205,7 +222,10 @@ impl Pipe {
 
 use crate::fs::file::{File, FileOps, FileFlags};
 
-fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
+// The three data-path callbacks are `pub` so fs/fifo.rs (named pipes) can
+// reuse them verbatim — only the close op differs between the two.
+
+pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
@@ -301,7 +321,7 @@ fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     }
 }
 
-fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
+pub fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
@@ -448,7 +468,7 @@ fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     }
 }
 
-fn pipe_file_poll(file: &File, events: u16) -> u16 {
+pub fn pipe_file_poll(file: &File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     let mut ready = 0u16;
 

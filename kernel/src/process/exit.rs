@@ -493,6 +493,17 @@ pub fn do_exit(exit_code: i32) -> ! {
             (*leader).ppid()
         };
 
+        // ===== Core dump (P1) =====
+        // A negative exit code encodes death by signal; the core-dumping
+        // signals get a core file written BEFORE any resource is torn
+        // down. Runs in the dying task's context (its cwd/fdtable/mm are
+        // still intact). This is the single funnel for both the signal
+        // default-action path (handle_default_signal -> do_exit_group)
+        // and the direct trap paths (SIGSEGV/SIGILL/... -> do_exit).
+        if exit_code < 0 && crate::process::coredump::signal_makes_core(-exit_code) {
+            crate::process::coredump::do_coredump(current, -exit_code);
+        }
+
         crate::pr_debug!("exit: pid={}, tgid={}, exit_code={}, ppid={} ({})",
             current_pid, (*current).tgid(), exit_code, parent_pid,
             if is_leader { "leader" } else { "thread" });
@@ -908,10 +919,15 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // Encode exit status per waitpid ABI:
                 // - Normal exit: status = (exit_code & 0xFF) << 8  (WIFEXITED, WEXITSTATUS)
                 // - Killed by signal: status = |signal_number|      (WIFSIGNALED, WTERMSIG)
+                //   plus WCOREDUMP (0x80) when a core file was written.
                 let status: i32 = if raw_exit >= 0 {
                     (((raw_exit as u32) & 0xFF) << 8) as i32
                 } else {
-                    (-(raw_exit as i32) as u32 & 0x7F) as i32
+                    let mut s = (-(raw_exit as i32) as u32 & 0x7F) as i32;
+                    if child.core_dumped() {
+                        s |= 0x80; // WCOREDUMP
+                    }
+                    s
                 };
 
                 // Write exit status safely using copy_to_user
@@ -1080,7 +1096,11 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
             let status: i32 = if raw_exit >= 0 {
                 (((raw_exit as u32) & 0xFF) << 8) as i32
             } else {
-                (-(raw_exit as i32) as u32 & 0x7F) as i32
+                let mut s = (-(raw_exit as i32) as u32 & 0x7F) as i32;
+                if child.core_dumped() {
+                    s |= 0x80; // WCOREDUMP
+                }
+                s
             };
 
             if !status_ptr.is_null() {
@@ -1274,8 +1294,12 @@ pub fn do_waitid(
                     // Stopped
                     (CLD_STOPPED, result_code)
                 } else if result_kind == 3 {
-                    // Killed by signal
-                    (CLD_KILLED, result_code)
+                    // Killed by signal (CLD_DUMPED when a core was written)
+                    if child.core_dumped() {
+                        (CLD_DUMPED, result_code)
+                    } else {
+                        (CLD_KILLED, result_code)
+                    }
                 } else {
                     // Normal exit
                     (CLD_EXITED, result_code)

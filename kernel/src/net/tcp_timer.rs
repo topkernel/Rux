@@ -120,6 +120,8 @@ impl TcpTimerManager {
 
     /// Check timers for single socket
     fn check_socket_timers(&mut self, socket: &mut TcpSocket, now: u64, tx: &mut TcpTxBatch) {
+        // P2 IP_TTL: retransmitted/re-sent segments keep the socket's TTL.
+        tx.set_ttl(socket.ttl);
         // Only check established connections or connections being closed
         match socket.state {
             TcpState::TCP_ESTABLISHED
@@ -193,6 +195,46 @@ impl TcpTimerManager {
                     } else {
                         // Window reopened or nothing left to send — disarm.
                         socket.timers.persist_deadline = 0;
+                    }
+                }
+
+                // P2 SO_KEEPALIVE (RFC 1122 §4.2.3.6, minimal): when the
+                // connection is idle (nothing queued, nothing in flight),
+                // arm keepidle; then probe every keepintvl with an empty
+                // ACK at snd_una-1; keepcnt unanswered probes abort the
+                // connection with ETIMEDOUT. Any fresh ACK (process_ack)
+                // resets the cycle. Defaults: 2h idle / 75s interval / 9
+                // probes (Linux).
+                if socket.keepalive && socket.state == TcpState::TCP_ESTABLISHED {
+                    let idle =
+                        socket.retrans_queue.is_empty() && socket.send_buffer.is_empty();
+                    if idle {
+                        // 1 jiffy = 10ms → seconds × 100 jiffies.
+                        if socket.timers.keepalive_deadline == 0 {
+                            socket.timers.keepalive_deadline =
+                                now + (socket.ka_idle_s as u64) * 100;
+                        } else if now >= socket.timers.keepalive_deadline {
+                            if socket.timers.keepalive_probes >= socket.ka_cnt {
+                                // Peer dead: ETIMEDOUT + abort (Linux
+                                // tcp_keepalive_timer keepcnt exhaustion).
+                                socket.pending_error = 110; // ETIMEDOUT
+                                socket.state = TcpState::TCP_CLOSE;
+                                socket.send_buffer.clear();
+                                socket.retrans_queue.clear();
+                                socket.ooo_queue.clear();
+                                socket.timers.stop_retransmit();
+                                socket.timers.keepalive_deadline = 0;
+                                socket.timers.keepalive_probes = 0;
+                            } else {
+                                socket.timers.keepalive_probes += 1;
+                                socket.send_keepalive_probe(tx);
+                                socket.timers.keepalive_deadline =
+                                    now + (socket.ka_intvl_s as u64) * 100;
+                            }
+                        }
+                    } else {
+                        // Traffic in flight — disarm; re-arms once idle.
+                        socket.timers.keepalive_deadline = 0;
                     }
                 }
             }

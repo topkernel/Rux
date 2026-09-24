@@ -69,16 +69,22 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    // Shortcut: /proc/[pid]/fd with O_DIRECTORY
-    if (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) != 0 {
-        if let Some(pid) = parse_proc_fd_dir_path(&full_path) {
-            return match crate::fs::vfs::open_procfs_dir(pid, flags) {
-                Ok(fd) => {
-                    if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
-                    fd as i64
-                }
-                Err(e) => e as i64,
-            };
+    // Shortcut: /proc/[pid]/fd with O_DIRECTORY. P1 chroot: the string
+    // shortcuts below address the GLOBAL /proc namespace — under a chroot
+    // without a mounted /proc inside the jail they must NOT leak (they
+    // would break the isolation path_lookup now enforces), so they are
+    // limited to non-chrooted tasks.
+    if !crate::fs::vfs::chrooted() {
+        if (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) != 0 {
+            if let Some(pid) = parse_proc_fd_dir_path(&full_path) {
+                return match crate::fs::vfs::open_procfs_dir(pid, flags) {
+                    Ok(fd) => {
+                        if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
+                        fd as i64
+                    }
+                    Err(e) => e as i64,
+                };
+            }
         }
     }
 
@@ -86,7 +92,8 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // "symlink" must open the REAL executable file — the old path served a
     // memory file whose CONTENT was the path string. Resolve the target's
     // exe_path and fall through to the regular open path.
-    {
+    // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
+    if !crate::fs::vfs::chrooted() {
         let parts: alloc::vec::Vec<&str> = full_path
             .trim_end_matches('/')
             .split('/')
@@ -130,8 +137,9 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     }
 
     // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
-    // because VFS inode lookup doesn't support PID subdirectories
-    if (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
+    // because VFS inode lookup doesn't support PID subdirectories.
+    // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
+    if !crate::fs::vfs::chrooted() && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
         // ptrace_may_access gate for environ BEFORE generating content
         // (review 5.7): self or CAP_SYS_PTRACE.
         {
@@ -583,8 +591,9 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    // /proc/self/exe - return program path
-    if pathname == "/proc/self/exe" {
+    // /proc/self/exe - return program path (P1 chroot: global-namespace
+    // shortcut, non-chrooted tasks only).
+    if !crate::fs::vfs::chrooted() && pathname == "/proc/self/exe" {
         if let Some(current) = crate::sched::current() {
             // SAFETY: current is the running task's Task pointer from sched::current().
             let exe_path = unsafe { (*current).get_exe_path() };
@@ -606,18 +615,22 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
 
     // /proc/[pid]/fd/N - return fd symlink target
     // Supports both absolute and relative paths (already dirfd-resolved)
-    let full_path = resolve_proc_readlink_path(dirfd, &pathname);
-    if let Some(target) = handle_proc_fd_readlink(&full_path) {
-        // Same truncation semantics as above (Linux policy, not ENAMETOOLONG).
-        let copy_len = target.len().min(bufsize);
-        // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
-        unsafe {
-            if crate::arch::riscv64::uaccess::copy_to_user(buf, target.as_ptr(), copy_len) != 0 {
-                return -(errno::EFAULT as i64);
+    // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
+    if !crate::fs::vfs::chrooted() {
+        let full_path = resolve_proc_readlink_path(dirfd, &pathname);
+        if let Some(target) = handle_proc_fd_readlink(&full_path) {
+            // Same truncation semantics as above (Linux policy, not ENAMETOOLONG).
+            let copy_len = target.len().min(bufsize);
+            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
+            unsafe {
+                if crate::arch::riscv64::uaccess::copy_to_user(buf, target.as_ptr(), copy_len) != 0 {
+                    return -(errno::EFAULT as i64);
+                }
             }
+            return copy_len as i64;
         }
-        return copy_len as i64;
     }
+    let full_path = resolve_proc_readlink_path(dirfd, &pathname);
 
     // Generic path: look up the symlink itself (NOFOLLOW) and read its
     // target through the filesystem's readlink op.
@@ -1756,47 +1769,141 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
 /// - args[1]: pathname - path pointer
 /// - args[2]: mode - file mode (type + permissions)
 /// - args[3]: dev - device number (for block/char special files)
+///
+/// P1: FIFO (mkfifo) and device nodes implemented.
+/// - FIFO: regular create on the parent FS + retype to S_IFIFO + a live
+///   pipe peer registered by inode identity (fs/fifo.rs).
+/// - char/block devices: only inside devfs (/dev) — the entry records the
+///   major/minor; open() binds through the CharDev registry (ENXIO when no
+///   driver registered; no block-driver registry exists yet). Device node
+///   creation elsewhere (ext4/rootfs) is EPERM: those filesystems cannot
+///   store device-typed inodes yet.
 pub fn sys_mknodat(args: SyscallArgs) -> i64 {
     let _dirfd = args[0] as i32;
     let pathname = args[1] as *const u8;
     let mode = args[2] as u32;
-    let _dev = args[3] as u32;
+    let dev = args[3] as u32;
 
     let path = match resolve_user_path(_dirfd, pathname) {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
 
-    // Support regular files, directories, and FIFOs (review SYSA-M20 /
-    // VFS-M16: mkfifo was unusable, breaking shell pipeline setup).
-    // ftype == 0 means "no type bits" — Linux treats it as a regular file
-    // (`mknod(path, mode, dev)` with plain permission bits).
     let ftype = mode & 0o170000;
-    if ftype == 0o010000 {
-        // FIFO: neither ext4 nor rootfs preserves the S_IFIFO type (both
-        // create regular files), and file_open has no pipe binding —
-        // silently creating a regular file is worse than failing
-        // (regression round 6 HIGH).
-        return -(errno::ENOSYS as i64);
-    } else if ftype != 0o100000 && ftype != 0o040000 && ftype != 0 {
-        return -(errno::EINVAL as i64); // block/char devices: TODO (CAP_MKNOD)
-    } else if ftype == 0o040000 {
-        // Directory
-        match crate::fs::vfs::vfs_mkdir(&path, mode & 0o7777) {
-            Ok(_) => 0,
-            Err(e) => -(e as i64),
+    match ftype {
+        0o010000 => {
+            // FIFO: no capability required (POSIX mkfifo).
+            mkfifo_at(&path, mode & 0o7777)
         }
-    } else {
-        // Regular file - create with O_CREAT|O_EXCL (fail with EEXIST if already exists)
-        match crate::fs::file_open(&path, 0o100 | 0o200 | 0o1000, mode & 0o777) {
-            Ok(fd) => {
-                // Close the fd immediately
-                // SAFETY: fd was just opened by file_open; closing it is safe.
-                unsafe { crate::fs::close_file_fd(fd); }
-                0
+        0o020000 | 0o060000 => {
+            // Character / block device node: CAP_MKNOD (Linux).
+            if !crate::security::capable(crate::security::CAP_MKNOD) {
+                return -(errno::EPERM as i64);
             }
-            Err(e) => e as i64,
+            mknod_device(&path, ftype, dev, mode & 0o7777)
         }
+        0o100000 | 0o040000 | 0 => {
+            // Regular file / directory / bare mode bits.
+            if ftype == 0o040000 {
+                match crate::fs::vfs::vfs_mkdir(&path, mode & 0o7777) {
+                    Ok(_) => 0,
+                    Err(e) => -(e as i64),
+                }
+            } else {
+                // Regular file - create with O_CREAT|O_EXCL (fail with
+                // EEXIST if already exists)
+                match crate::fs::file_open(&path, 0o100 | 0o200 | 0o1000, mode & 0o777) {
+                    Ok(fd) => {
+                        // Close the fd immediately
+                        // SAFETY: fd was just opened by file_open; closing it is safe.
+                        unsafe { crate::fs::close_file_fd(fd); }
+                        0
+                    }
+                    Err(e) => e as i64,
+                }
+            }
+        }
+        0o140000 => {
+            // S_IFSOCK — no AF_UNIX filesystem binding yet.
+            -(errno::ENOSYS as i64)
+        }
+        _ => -(errno::EINVAL as i64), // S_IFLNK (use symlink(2)) / unknown types
+    }
+}
+
+/// Create a FIFO at `path`: create the file on the parent filesystem, then
+/// retype the inode to S_IFIFO and register the live pipe peer.
+fn mkfifo_at(path: &str, perm: u32) -> i64 {
+    // O_CREAT|O_EXCL|O_RDWR: the transient fd must be openable both ways
+    // (a bare O_WRONLY create is fine too, but RDWR avoids nothing here);
+    // it is closed immediately, so the accmode never reaches userspace.
+    match crate::fs::file_open(path, 0o100 | 0o200 | 0o1000 | 0o2, perm) {
+        Ok(fd) => {
+            // SAFETY: fd is a valid open descriptor from file_open above.
+            let file = match unsafe { crate::fs::get_file_fd(fd) } {
+                Some(f) => f,
+                None => {
+                    return -(errno::EIO as i64);
+                }
+            };
+            // SAFETY: inode is written once at open time; read-only access.
+            let inode = match unsafe { (*file.inode.get()).as_ref() } {
+                Some(i) => i.clone(),
+                None => {
+                    // SAFETY: fd validated above.
+                    unsafe { crate::fs::close_file_fd(fd); }
+                    return -(errno::EIO as i64);
+                }
+            };
+            // Retype: the mode word carries S_IFIFO from here on. setattr
+            // persists it where the FS supports mode updates (rootfs/
+            // tmpfs in-memory; ext4 chmod path).
+            let full_mode = crate::fs::inode::InodeMode::S_IFIFO | (perm & 0o777);
+            let ret = inode.op_setattr(
+                crate::fs::inode::setattr_attr::ATTR_MODE,
+                full_mode as u64,
+                0,
+            );
+            if ret != 0 {
+                // SAFETY: fd validated above.
+                unsafe { crate::fs::close_file_fd(fd); }
+                return ret as i64;
+            }
+            // Register the live pipe peer keyed by inode identity.
+            crate::fs::fifo::peer_for(inode.fs_id, inode.ino);
+            // SAFETY: fd validated above.
+            unsafe { crate::fs::close_file_fd(fd); }
+            0
+        }
+        Err(e) => e as i64,
+    }
+}
+
+/// Create a device node (char/block) — devfs (/dev) only.
+fn mknod_device(path: &str, ftype: u32, dev: u32, perm: u32) -> i64 {
+    // Only devfs supports device nodes; look for the /dev prefix (the
+    // dentry-mounted devfs instance).
+    let dev_path = match crate::fs::devfs::parse_dev_path(path) {
+        Some(p) => p,
+        None => {
+            // ext4/rootfs cannot persist device-typed inodes yet — a
+            // regular file wearing a device mode would be worse than
+            // failing (silent misbehavior on open).
+            return -(errno::EPERM as i64);
+        }
+    };
+    if dev_path.is_empty() {
+        return -(errno::ENOENT as i64); // mknod("/dev") itself
+    }
+    // Userspace dev_t encoding (kernel new_decode_dev): major in bits 8-19,
+    // minor split across bits 0-7 and 20-31.
+    let major = (dev & 0xfff00) >> 8;
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);
+    let type_bits = if ftype == 0o020000 { 0o020000 } else { 0o060000 };
+    let mode_bits = type_bits | (perm & 0o777);
+    match crate::fs::devfs::mknod(dev_path, crate::fs::dev_t::DevNo::new(major, minor), mode_bits) {
+        Ok(()) => 0,
+        Err(()) => -(errno::EACCES as i64), // missing parent dir inside /dev
     }
 }
 
@@ -1957,19 +2064,458 @@ pub fn sys_sync(_args: SyscallArgs) -> i64 {
     0
 }
 
-/// Extended attribute syscalls (NR 5-16) - all stubs returning -ENOSYS
-pub fn sys_setxattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_lsetxattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_fsetxattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_getxattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_lgetxattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_fgetxattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_listxattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_llistxattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_flistxattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_removexattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_lremovexattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
-pub fn sys_fremovexattr(_args: SyscallArgs) -> i64 { -(errno::ENOSYS as i64) }
+/// Extended attribute syscalls (NR 5-16) — P1 minimal implementation.
+///
+/// Storage is the per-inode in-memory map (see fs/xattr.rs): user.* is
+/// fully usable (get/set/list/remove); trusted.*/security.* store with
+/// CAP_SYS_ADMIN; system.* is read-only. ext4 does not persist xattrs
+/// (documented limitation).
+
+/// Resolve a path (or fd) to its inode for xattr operations.
+fn xattr_inode_by_path(path: &str, follow: bool) -> Result<alloc::sync::Arc<crate::fs::inode::Inode>, i32> {
+    let flags = if follow { 0 } else { crate::fs::vfs::LOOKUP_NOFOLLOW };
+    let vpath = crate::fs::vfs::path_lookup(path, flags)?;
+    vpath.inode.ok_or(-(errno::ENOENT as i32))
+}
+
+fn xattr_inode_by_fd(fd: u64) -> Result<alloc::sync::Arc<crate::fs::inode::Inode>, i32> {
+    // SAFETY: fd comes from the syscall args; get_file_fd validates it.
+    let file = unsafe { crate::fs::get_file_fd(fd as usize) }
+        .ok_or(-(errno::EBADF as i32))?;
+    // SAFETY: inode written once at open; read-only access.
+    unsafe { (*file.inode.get()).clone() }
+        .ok_or(-(errno::EBADF as i32))
+}
+
+/// Copy a NUL-terminated xattr name from user space (max XATTR_NAME_MAX).
+fn xattr_read_name(ptr: u64) -> Result<alloc::vec::Vec<u8>, i64> {
+    const NAME_MAX: usize = crate::fs::xattr::XATTR_NAME_MAX;
+    if ptr == 0 {
+        return Err(-(errno::EFAULT as i64));
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 1) {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let mut buf = [0u8; NAME_MAX + 1];
+    let name = match strncpy_from_user(ptr as *const u8, NAME_MAX + 1, &mut buf) {
+        Ok(s) => s,
+        Err(e) => return Err(-(e as i64)),
+    };
+    Ok(alloc::vec::Vec::from(name))
+}
+
+/// Copy `size` bytes of xattr value from user space (max XATTR_SIZE_MAX).
+fn xattr_read_value(ptr: u64, size: u64) -> Result<alloc::vec::Vec<u8>, i64> {
+    let size = size as usize;
+    if size > crate::fs::xattr::XATTR_SIZE_MAX {
+        return Err(-(errno::E2BIG as i64));
+    }
+    if size == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if ptr == 0 {
+        return Err(-(errno::EFAULT as i64));
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, size) {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let mut buf = alloc::vec![0u8; size];
+    // SAFETY: ptr/size validated with access_ok above.
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), ptr as *const u8, size)
+    } != 0
+    {
+        return Err(-(errno::EFAULT as i64));
+    }
+    Ok(buf)
+}
+
+/// setxattr core shared by the 4 set variants.
+fn do_setxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
+    let name = match xattr_read_name(args[1]) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let value = match xattr_read_value(args[2], args[3]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match crate::fs::xattr::set(inode, &name, &value, args[4] as i32) {
+        Ok(()) => 0,
+        Err(e) => -(e as i64),
+    }
+}
+
+/// getxattr core. size==0 → return required size.
+fn do_getxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
+    let name = match xattr_read_name(args[1]) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let value_ptr = args[2] as usize;
+    let size = args[3] as usize;
+    if size == 0 {
+        return match crate::fs::xattr::get(inode, &name, None) {
+            Ok(n) => n as i64,
+            Err(e) => -(e as i64),
+        };
+    }
+    if value_ptr == 0 || !crate::arch::riscv64::uaccess::access_ok(value_ptr, size) {
+        return -(errno::EFAULT as i64);
+    }
+    let mut buf = alloc::vec![0u8; size];
+    match crate::fs::xattr::get(inode, &name, Some(&mut buf)) {
+        Ok(n) => {
+            // SAFETY: value_ptr/size validated with access_ok above.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    value_ptr as *mut u8,
+                    buf.as_ptr(),
+                    n,
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
+            n as i64
+        }
+        Err(e) => -(e as i64),
+    }
+}
+
+/// listxattr core. size==0 → return required length.
+fn do_listxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
+    let list_ptr = args[1] as usize;
+    let size = args[2] as usize;
+    if size == 0 {
+        return match crate::fs::xattr::list(inode, None) {
+            Ok(n) => n as i64,
+            Err(e) => -(e as i64),
+        };
+    }
+    if list_ptr == 0 || !crate::arch::riscv64::uaccess::access_ok(list_ptr, size) {
+        return -(errno::EFAULT as i64);
+    }
+    let mut buf = alloc::vec![0u8; size];
+    match crate::fs::xattr::list(inode, Some(&mut buf)) {
+        Ok(n) => {
+            // SAFETY: list_ptr/size validated with access_ok above.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    list_ptr as *mut u8,
+                    buf.as_ptr(),
+                    n,
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
+            n as i64
+        }
+        Err(e) => -(e as i64),
+    }
+}
+
+/// removexattr core.
+fn do_removexattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
+    let name = match xattr_read_name(args[1]) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    match crate::fs::xattr::remove(inode, &name) {
+        Ok(()) => 0,
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_setxattr(args: SyscallArgs) -> i64 {
+    let path = match resolve_user_path(-100, args[0] as *const u8) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match xattr_inode_by_path(&path, true) {
+        Ok(inode) => do_setxattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_lsetxattr(args: SyscallArgs) -> i64 {
+    let path = match resolve_user_path(-100, args[0] as *const u8) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match xattr_inode_by_path(&path, false) {
+        Ok(inode) => do_setxattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_fsetxattr(args: SyscallArgs) -> i64 {
+    match xattr_inode_by_fd(args[0]) {
+        Ok(inode) => do_setxattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_getxattr(args: SyscallArgs) -> i64 {
+    let path = match resolve_user_path(-100, args[0] as *const u8) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match xattr_inode_by_path(&path, true) {
+        Ok(inode) => do_getxattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_lgetxattr(args: SyscallArgs) -> i64 {
+    let path = match resolve_user_path(-100, args[0] as *const u8) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match xattr_inode_by_path(&path, false) {
+        Ok(inode) => do_getxattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_fgetxattr(args: SyscallArgs) -> i64 {
+    match xattr_inode_by_fd(args[0]) {
+        Ok(inode) => do_getxattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_listxattr(args: SyscallArgs) -> i64 {
+    let path = match resolve_user_path(-100, args[0] as *const u8) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match xattr_inode_by_path(&path, true) {
+        Ok(inode) => do_listxattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_llistxattr(args: SyscallArgs) -> i64 {
+    let path = match resolve_user_path(-100, args[0] as *const u8) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match xattr_inode_by_path(&path, false) {
+        Ok(inode) => do_listxattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_flistxattr(args: SyscallArgs) -> i64 {
+    match xattr_inode_by_fd(args[0]) {
+        Ok(inode) => do_listxattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_removexattr(args: SyscallArgs) -> i64 {
+    let path = match resolve_user_path(-100, args[0] as *const u8) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match xattr_inode_by_path(&path, true) {
+        Ok(inode) => do_removexattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_lremovexattr(args: SyscallArgs) -> i64 {
+    let path = match resolve_user_path(-100, args[0] as *const u8) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match xattr_inode_by_path(&path, false) {
+        Ok(inode) => do_removexattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_fremovexattr(args: SyscallArgs) -> i64 {
+    match xattr_inode_by_fd(args[0]) {
+        Ok(inode) => do_removexattr(&inode, args),
+        Err(e) => -(e as i64),
+    }
+}
+
+/// *xattrat (NR 463-466, Linux 6.9): dirfd-relative variants with at_flags
+/// (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH). UAPI (fs/xattr.c):
+///   setxattrat(dfd, path, at_flags, name, struct xattr_args*)
+///   getxattrat(dfd, path, at_flags, name, struct xattr_args*)
+///   listxattrat(dfd, path, at_flags, struct xattr_args*)
+///   removexattrat(dfd, path, at_flags, name)
+/// struct xattr_args { u64 value; u64 size; u32 flags; } (24 bytes).
+fn xattrat_resolve(
+    dirfd: i32,
+    path_ptr: u64,
+    at_flags: u32,
+) -> Result<alloc::sync::Arc<crate::fs::inode::Inode>, i64> {
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    if at_flags & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) != 0 {
+        return Err(-(errno::EINVAL as i64));
+    }
+    if path_ptr == 0 && at_flags & AT_EMPTY_PATH != 0 && dirfd >= 0 {
+        return match xattr_inode_by_fd(dirfd as u64) {
+            Ok(i) => Ok(i),
+            Err(e) => Err(-(e as i64)),
+        };
+    }
+    let path = match resolve_user_path(dirfd, path_ptr as *const u8) {
+        Ok(p) => p,
+        Err(e) => return Err(e as i64),
+    };
+    match xattr_inode_by_path(&path, at_flags & AT_SYMLINK_NOFOLLOW == 0) {
+        Ok(i) => Ok(i),
+        Err(e) => Err(-(e as i64)),
+    }
+}
+
+/// Read struct xattr_args { value: u64, size: u64, flags: u32 } from user.
+fn xattrat_read_args(ptr: u64) -> Result<(u64, u64, i32), i64> {
+    if ptr == 0 || !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 24) {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let mut raw = [0u8; 24];
+    // SAFETY: ptr/24 validated with access_ok above.
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(raw.as_mut_ptr(), ptr as *const u8, 24)
+    } != 0
+    {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let value = u64::from_ne_bytes(raw[0..8].try_into().unwrap());
+    let size = u64::from_ne_bytes(raw[8..16].try_into().unwrap());
+    let flags = i32::from_ne_bytes(raw[16..20].try_into().unwrap());
+    Ok((value, size, flags))
+}
+
+pub fn sys_setxattrat(args: SyscallArgs) -> i64 {
+    let inode = match xattrat_resolve(args[0] as i32, args[1], args[2] as u32) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let name = match xattr_read_name(args[3]) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let (value_ptr, size, flags) = match xattrat_read_args(args[4]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let value = match xattr_read_value(value_ptr, size) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match crate::fs::xattr::set(&inode, &name, &value, flags) {
+        Ok(()) => 0,
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_getxattrat(args: SyscallArgs) -> i64 {
+    let inode = match xattrat_resolve(args[0] as i32, args[1], args[2] as u32) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let name = match xattr_read_name(args[3]) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let (value_ptr, size, _flags) = match xattrat_read_args(args[4]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if size == 0 {
+        return match crate::fs::xattr::get(&inode, &name, None) {
+            Ok(n) => n as i64,
+            Err(e) => -(e as i64),
+        };
+    }
+    if value_ptr == 0
+        || !crate::arch::riscv64::uaccess::access_ok(value_ptr as usize, size as usize)
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let mut buf = alloc::vec![0u8; size as usize];
+    match crate::fs::xattr::get(&inode, &name, Some(&mut buf)) {
+        Ok(n) => {
+            // SAFETY: value_ptr/size validated with access_ok above.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    value_ptr as *mut u8,
+                    buf.as_ptr(),
+                    n,
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
+            n as i64
+        }
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_listxattrat(args: SyscallArgs) -> i64 {
+    let inode = match xattrat_resolve(args[0] as i32, args[1], args[2] as u32) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let (list_ptr, size, _flags) = match xattrat_read_args(args[3]) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if size == 0 {
+        return match crate::fs::xattr::list(&inode, None) {
+            Ok(n) => n as i64,
+            Err(e) => -(e as i64),
+        };
+    }
+    if list_ptr == 0 || !crate::arch::riscv64::uaccess::access_ok(list_ptr as usize, size as usize)
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let mut buf = alloc::vec![0u8; size as usize];
+    match crate::fs::xattr::list(&inode, Some(&mut buf)) {
+        Ok(n) => {
+            // SAFETY: list_ptr/size validated with access_ok above.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    list_ptr as *mut u8,
+                    buf.as_ptr(),
+                    n,
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
+            n as i64
+        }
+        Err(e) => -(e as i64),
+    }
+}
+
+pub fn sys_removexattrat(args: SyscallArgs) -> i64 {
+    let inode = match xattrat_resolve(args[0] as i32, args[1], args[2] as u32) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let name = match xattr_read_name(args[3]) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    match crate::fs::xattr::remove(&inode, &name) {
+        Ok(()) => 0,
+        Err(e) => -(e as i64),
+    }
+}
 
 /// sys_chroot - Change root directory (NR 51)
 pub fn sys_chroot(args: SyscallArgs) -> i64 {
@@ -1993,12 +2539,17 @@ pub fn sys_chroot(args: SyscallArgs) -> i64 {
         return -(errno::ENOTDIR as i64);
     }
 
-    // TODO (VFS): the Rux path-lookup layer has no per-task root — chroot
-    // currently validates the directory but does NOT isolate path
-    // resolution (a process after chroot can still open absolute paths
-    // outside the new root). Enforcing this needs a root dentry on the task
-    // and VFS support; documented as a known limitation rather than a fake
-    // success with isolation.
+    // P1 chroot: store the (normalized, real-namespace) root in fs_struct.
+    // path_lookup interprets every subsequent absolute path against this
+    // prefix and clamps ".." at it (see vfs::normalize_with_root), so the
+    // jail is enforced for lookups, opens, creates and unlinks alike.
+    // Known boundary (matches historic Linux, not pivot_root): the cwd is
+    // NOT moved — relative paths from a cwd outside the jail still resolve
+    // there, and getcwd() reports real-namespace paths.
+    let normalized = crate::fs::path::path_normalize(&full_path);
+    if let Some(current) = crate::sched::current() {
+        current.set_root(normalized.as_bytes());
+    }
     0
 }
 
@@ -2571,25 +3122,8 @@ pub fn sys_mseal(_args: SyscallArgs) -> i64 {
     -(errno::ENOSYS as i64)
 }
 
-/// sys_setxattrat - Set extended attribute at path (NR 463)
-pub fn sys_setxattrat(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
-}
-
-/// sys_getxattrat - Get extended attribute at path (NR 464)
-pub fn sys_getxattrat(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
-}
-
-/// sys_listxattrat - List extended attributes at path (NR 465)
-pub fn sys_listxattrat(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
-}
-
-/// sys_removexattrat - Remove extended attribute at path (NR 466)
-pub fn sys_removexattrat(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
-}
+// sys_setxattrat / getxattrat / listxattrat / removexattrat (NR 463-466)
+// are implemented with the main xattr block earlier in this file.
 
 /// sys_open_tree_attr - Open directory tree with attributes (NR 467)
 pub fn sys_open_tree_attr(_args: SyscallArgs) -> i64 {

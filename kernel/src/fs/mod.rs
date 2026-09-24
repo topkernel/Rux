@@ -34,6 +34,9 @@ pub mod locks;
 pub mod inotify;
 pub mod tty;
 pub mod pty;
+pub mod xattr;
+pub mod memfd;
+pub mod fifo;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, set_cloexec_fd};
 pub use fs_struct::FsStruct;

@@ -55,6 +55,7 @@ pub mod loadavg;
 pub mod self_proc;
 pub mod pid;
 pub mod interrupts;
+pub mod sysctl;
 
 // Re-export uptime functions for other modules
 pub use uptime::get_uptime_secs;
@@ -124,6 +125,10 @@ pub struct ProcFSNode {
     pub pid: Option<u64>,
     /// File kind for per-process files
     pub pid_file_kind: Option<PidFileKind>,
+    /// P1 /proc/sys: write handler (None = read-only file). Presence also
+    /// upgrades the stat mode from 0444 to 0644 so the DAC write check
+    /// passes for root.
+    pub sysctl_write: Option<fn(&[u8]) -> i32>,
 }
 
 impl ProcFSNode {
@@ -142,6 +147,7 @@ impl ProcFSNode {
             cached_size: AtomicU64::new(0),
             pid: None,
             pid_file_kind: None,
+            sysctl_write: None,
         }
     }
 
@@ -160,6 +166,7 @@ impl ProcFSNode {
             cached_size: AtomicU64::new(0),
             pid: None,
             pid_file_kind: None,
+            sysctl_write: None,
         }
     }
 
@@ -179,6 +186,7 @@ impl ProcFSNode {
             cached_size: AtomicU64::new(sz),
             pid: None,
             pid_file_kind: None,
+            sysctl_write: None,
         }
     }
 
@@ -197,6 +205,32 @@ impl ProcFSNode {
             cached_size: AtomicU64::new(0),
             pid: None,
             pid_file_kind: None,
+            sysctl_write: None,
+        }
+    }
+
+    /// Create a sysctl file: dynamic read content + write handler
+    /// (P1 /proc/sys).
+    pub fn new_sysctl_file(
+        name: Vec<u8>,
+        generator: ContentGenerator,
+        write: fn(&[u8]) -> i32,
+        ino: u64,
+    ) -> Self {
+        Self {
+            name,
+            node_type: ProcFSType::RegularFile,
+            content_generator: Some(generator),
+            static_content: None,
+            link_generator: None,
+            link_target: None,
+            children: Spinlock::new(Vec::new()),
+            ref_count: AtomicU64::new(1),
+            ino,
+            cached_size: AtomicU64::new(0),
+            pid: None,
+            pid_file_kind: None,
+            sysctl_write: Some(write),
         }
     }
 
@@ -216,6 +250,7 @@ impl ProcFSNode {
             cached_size: AtomicU64::new(sz),
             pid: None,
             pid_file_kind: None,
+            sysctl_write: None,
         }
     }
 
@@ -402,7 +437,54 @@ impl ProcFSSuperBlock {
         // /proc/self - symlink to current process directory
         self.create_dynamic_symlink("self", self_proc::get_self_link);
 
+        // P1: /proc/sys minimal tree (fs/procfs/sysctl.rs for the storage).
+        self.init_sys_tree();
+
         // /proc/[pid] directories are handled dynamically
+    }
+
+    /// Build the /proc/sys/{kernel,vm,fs} tree with writable sysctl files.
+    fn init_sys_tree(&self) {
+        let sys = Arc::new(ProcFSNode::new_dir(b"sys".to_vec(), self.alloc_ino()));
+        self.root_node.add_child(sys.clone());
+
+        let kernel = Arc::new(ProcFSNode::new_dir(b"kernel".to_vec(), self.alloc_ino()));
+        sys.add_child(kernel.clone());
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"hostname".to_vec(),
+            sysctl::generate_hostname,
+            sysctl::write_hostname,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"pid_max".to_vec(),
+            sysctl::generate_pid_max,
+            sysctl::write_pid_max,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"ostype".to_vec(),
+            sysctl::generate_ostype,
+            self.alloc_ino(),
+        )));
+
+        let vm = Arc::new(ProcFSNode::new_dir(b"vm".to_vec(), self.alloc_ino()));
+        sys.add_child(vm.clone());
+        vm.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"overcommit_memory".to_vec(),
+            sysctl::generate_overcommit_memory,
+            sysctl::write_overcommit_memory,
+            self.alloc_ino(),
+        )));
+
+        let fsdir = Arc::new(ProcFSNode::new_dir(b"fs".to_vec(), self.alloc_ino()));
+        sys.add_child(fsdir.clone());
+        fsdir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"file-max".to_vec(),
+            sysctl::generate_file_max,
+            sysctl::write_file_max,
+            self.alloc_ino(),
+        )));
     }
 
     /// Create dynamic content file
@@ -866,6 +948,9 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         InodeMode::S_IFDIR | 0o555  // read-only directory
     } else if node.is_symlink() {
         InodeMode::S_IFLNK | 0o777
+    } else if node.sysctl_write.is_some() {
+        // P1 /proc/sys: root-owned writable sysctl (Linux 0644).
+        InodeMode::S_IFREG | 0o644
     } else {
         InodeMode::S_IFREG | 0o444  // read-only file
     };
@@ -993,6 +1078,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             cached_size: AtomicU64::new(0),
             pid: Some(pid_val),
             pid_file_kind: Some(kind),
+            sysctl_write: None,
         });
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
 
@@ -1029,6 +1115,9 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         InodeMode::new(InodeMode::S_IFDIR | 0o555)
     } else if child.is_symlink() {
         InodeMode::new(InodeMode::S_IFLNK | 0o777)
+    } else if child.sysctl_write.is_some() {
+        // P1 /proc/sys: writable sysctl files open O_RDWR for root.
+        InodeMode::new(InodeMode::S_IFREG | 0o644)
     } else {
         InodeMode::new(InodeMode::S_IFREG | 0o444)
     };
@@ -1072,9 +1161,32 @@ fn procfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     }
 }
 
-/// ProcFS file write operation (read-only)
-fn procfs_file_write(_file: &crate::fs::File, _buf: &[u8]) -> isize {
-    -22 // EINVAL — procfs is read-only, not a bad file descriptor
+/// ProcFS file write operation: /proc/sys sysctl files only (P1).
+/// Everything else stays EINVAL — procfs has no other writable nodes.
+fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
+    // SAFETY: inode is written once at open time; read-only access here.
+    let inode_opt = unsafe { (*file.inode.get()).clone() };
+    let inode = match inode_opt {
+        Some(i) => i,
+        None => return -22, // EINVAL
+    };
+    // procfs file inodes carry a ProcFSNode pointer in private_data.
+    let node_ptr = match inode.private_data {
+        Some(p) => p,
+        None => return -22,
+    };
+    let node = unsafe { &*(node_ptr as *const ProcFSNode) };
+    match node.sysctl_write {
+        Some(write_fn) => {
+            let ret = write_fn(buf);
+            if ret != 0 {
+                ret as isize
+            } else {
+                buf.len() as isize
+            }
+        }
+        None => -22, // EINVAL — read-only procfs node
+    }
 }
 
 /// ProcFS file lseek operation
@@ -1114,6 +1226,17 @@ fn procfs_file_close(file: &crate::fs::File) -> i32 {
         }
         0
     }
+}
+
+/// ProcFS setattr: ATTR_SIZE is a no-op (O_TRUNC on `echo x > file` must
+/// not fail; procfs files have no persistent size). Other attributes
+/// (chmod/chown/truncate-to-value) are EPERM — the tree is kernel-owned.
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
+unsafe fn procfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i32 {
+    if attr == crate::fs::inode::setattr_attr::ATTR_SIZE {
+        return 0;
+    }
+    errno::Errno::OperationNotPermitted.as_neg_i32()
 }
 
 /// ProcFS file operations table
@@ -1278,7 +1401,7 @@ pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
     open: Some(procfs_open),
     permission: None,  // Default: allow all
     getattr: Some(procfs_getattr),
-    setattr: None,     // ProcFS is read-only
+    setattr: Some(procfs_setattr), // P1: ATTR_SIZE no-op (O_TRUNC tolerance)
     iget: Some(procfs_iget),
     destroy_inode: None,
 };

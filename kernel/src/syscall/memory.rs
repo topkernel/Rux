@@ -1134,8 +1134,12 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
             }
         }
         MADV_WILLNEED => {
-            // MADV_WILLNEED: Prefault pages into memory
-            // Simplified implementation: do nothing since pages are already in memory or loaded on demand
+            // MADV_WILLNEED: prefault advice. Correct no-op semantics for
+            // this kernel: demand paging faults pages in on first touch
+            // anyway, there is no readahead window to trigger, and swap-in
+            // cannot apply (swap is not wired). P2 fake-success cleanup:
+            // this remains a no-op BY DESIGN (an advice), unlike the
+            // mlock family which now sets VM_LOCKED.
             0
         }
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL => {
@@ -1310,10 +1314,10 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
 /// mlock locks memory, preventing it from being swapped out
 pub fn sys_mlock(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
+    use crate::mm::vma::VmaFlags;
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
-
 
     // Validate arguments
     if length == 0 {
@@ -1325,16 +1329,46 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
         return -22_i64;  // EINVAL
     }
 
-    // Simplified implementation:
-    // In a real implementation, should:
-    // 1. Check process's RLIMIT_MEMLOCK limit
-    // 2. Find all VMAs covering [addr, addr+length)
-    // 3. Set VM_LOCKED flag
-    // 4. Ensure pages are resident in memory
-    // TODO: Implement complete mlock logic
+    // P2 mlock (fake-success cleanup): set VM_LOCKED on every VMA covering
+    // [addr, addr+len). The flag marks the range non-swappable for the
+    // reclaim/swap paths (like Linux's vm_flags bit). Granularity is the
+    // WHOLE VMA, not a split range — a partial mlock of a large mapping
+    // pins more than requested (documented approximation; VMA splitting is
+    // future work). RLIMIT_MEMLOCK is NOT enforced yet (rlimits are
+    // stored-but-inactive; see gap analysis). Pages are not prefaulted —
+    // with swap still unwired, nothing can evict them anyway.
+    let length_aligned = (length + crate::mm::page::PAGE_SIZE - 1)
+        & !(crate::mm::page::PAGE_SIZE - 1);
+    let end = match addr.checked_add(length_aligned) {
+        Some(e) => e,
+        None => return -22_i64,
+    };
 
+    let current_task = match crate::sched::current() {
+        Some(t) => t,
+        None => return -12_i64,
+    };
+    let address_space = match current_task.address_space_mut() {
+        Some(a) => a,
+        None => return -12_i64,
+    };
 
-    0  // Success
+    let mut cursor = addr;
+    loop {
+        let mut mgr = address_space.vma_write();
+        let vma = match mgr.find_mut(VirtAddr::new(cursor)) {
+            Some(v) => v,
+            None => return -12_i64, // ENOMEM: unmapped hole in the range
+        };
+        let vma_end = vma.end().as_usize();
+        let mut flags = vma.flags();
+        flags.insert(VmaFlags::LOCKED);
+        vma.set_flags(flags);
+        if vma_end >= end {
+            return 0;
+        }
+        cursor = vma_end;
+    }
 }
 /// sys_munlock - Unlock memory
 ///
@@ -1352,10 +1386,10 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
 /// munlock unlocks previously locked memory
 pub fn sys_munlock(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
+    use crate::mm::vma::VmaFlags;
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
-
 
     // Validate arguments
     if length == 0 {
@@ -1367,41 +1401,163 @@ pub fn sys_munlock(args: [u64; 6]) -> i64 {
         return -22_i64;  // EINVAL
     }
 
-    // Simplified implementation:
-    // In a real implementation, should:
-    // 1. Find all VMAs covering [addr, addr+length)
-    // 2. Clear VM_LOCKED flag
-    // TODO: Implement complete munlock logic
+    // P2 mlock: clear VM_LOCKED on every VMA covering the range (same
+    // whole-VMA granularity as sys_mlock).
+    let length_aligned = (length + crate::mm::page::PAGE_SIZE - 1)
+        & !(crate::mm::page::PAGE_SIZE - 1);
+    let end = match addr.checked_add(length_aligned) {
+        Some(e) => e,
+        None => return -22_i64,
+    };
 
+    let current_task = match crate::sched::current() {
+        Some(t) => t,
+        None => return -12_i64,
+    };
+    let address_space = match current_task.address_space_mut() {
+        Some(a) => a,
+        None => return -12_i64,
+    };
 
-    0  // Success
+    let mut cursor = addr;
+    loop {
+        let mut mgr = address_space.vma_write();
+        let vma = match mgr.find_mut(VirtAddr::new(cursor)) {
+            Some(v) => v,
+            None => return 0, // hole: nothing to unlock there (POSIX munlock is advisory)
+        };
+        let vma_end = vma.end().as_usize();
+        let mut flags = vma.flags();
+        flags.remove(VmaFlags::LOCKED);
+        vma.set_flags(flags);
+        if vma_end >= end {
+            return 0;
+        }
+        cursor = vma_end;
+    }
 }
 
 /// sys_mlockall - Lock all process memory (NR 230)
 pub fn sys_mlockall(args: [u64; 6]) -> i64 {
-    let _flags = args[0] as u32;
-    // Simplified: no swap support, all memory is always "locked"
-    0
+    use crate::mm::page::VirtAddr;
+    use crate::mm::vma::VmaFlags;
+
+    // MCL_CURRENT = 1, MCL_FUTURE = 2, MCL_ONFAULT = 4.
+    const MCL_CURRENT: u32 = 1;
+    const MCL_FUTURE: u32 = 2;
+    const MCL_ONFAULT: u32 = 4;
+    let flags = args[0] as u32;
+    if flags == 0 || flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
+        return -22_i64; // EINVAL
+    }
+
+    // P2 mlock: set VM_LOCKED on every CURRENT VMA (MCL_CURRENT).
+    // MCL_FUTURE (lock future mappings too) is accepted but not tracked —
+    // mmap does not consult a per-mm flag yet (documented limitation).
+    let current_task = match crate::sched::current() {
+        Some(t) => t,
+        None => return -12_i64,
+    };
+    let address_space = match current_task.address_space_mut() {
+        Some(a) => a,
+        None => return -12_i64,
+    };
+
+    let user_start = crate::arch::riscv64::mm::user_addr::USER_START;
+    let user_end = crate::arch::riscv64::mm::user_addr::USER_END;
+    let mut cursor = user_start;
+    loop {
+        let mut mgr = address_space.vma_write();
+        match mgr.find_mut(VirtAddr::new(cursor)) {
+            Some(vma) => {
+                let vma_end = vma.end().as_usize();
+                let mut f = vma.flags();
+                f.insert(VmaFlags::LOCKED);
+                vma.set_flags(f);
+                if vma_end >= user_end {
+                    return 0;
+                }
+                cursor = vma_end;
+            }
+            None => {
+                // Hole at cursor — jump to the next VMA's start.
+                let next = mgr
+                    .iter()
+                    .map(|v| v.start().as_usize())
+                    .find(|&s| s > cursor);
+                match next {
+                    Some(s) => cursor = s,
+                    None => return 0, // no VMAs left above cursor
+                }
+            }
+        }
+    }
 }
 
 /// sys_munlockall - Unlock all process memory (NR 231)
 pub fn sys_munlockall(_args: [u64; 6]) -> i64 {
-    0
+    use crate::mm::page::VirtAddr;
+    use crate::mm::vma::VmaFlags;
+
+    // P2 mlock: clear VM_LOCKED on every current VMA.
+    let current_task = match crate::sched::current() {
+        Some(t) => t,
+        None => return -12_i64,
+    };
+    let address_space = match current_task.address_space_mut() {
+        Some(a) => a,
+        None => return -12_i64,
+    };
+
+    let user_start = crate::arch::riscv64::mm::user_addr::USER_START;
+    let user_end = crate::arch::riscv64::mm::user_addr::USER_END;
+    let mut cursor = user_start;
+    loop {
+        let mut mgr = address_space.vma_write();
+        match mgr.find_mut(VirtAddr::new(cursor)) {
+            Some(vma) => {
+                let vma_end = vma.end().as_usize();
+                let mut f = vma.flags();
+                f.remove(VmaFlags::LOCKED);
+                vma.set_flags(f);
+                if vma_end >= user_end {
+                    return 0;
+                }
+                cursor = vma_end;
+            }
+            None => {
+                let next = mgr
+                    .iter()
+                    .map(|v| v.start().as_usize())
+                    .find(|&s| s > cursor);
+                match next {
+                    Some(s) => cursor = s,
+                    None => return 0,
+                }
+            }
+        }
+    }
 }
 
 /// sys_mlock2 - Lock memory with flags (NR 284)
 pub fn sys_mlock2(args: [u64; 6]) -> i64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
-    let _flags = args[2] as u32;
+    let flags = args[2] as u32;
 
+    // MLOCK_ONFAULT = 0x01 — the only definable flag; unknown bits EINVAL
+    // (accepted-and-ignored: we do not prefault anyway).
+    const MLOCK_ONFAULT: u32 = 0x01;
+    if flags & !MLOCK_ONFAULT != 0 {
+        return -22_i64;
+    }
     if length == 0 {
-        return -22_i64;  // EINVAL
+        return -22_i64;
     }
     if addr % crate::mm::page::PAGE_SIZE != 0 {
         return -22_i64;
     }
-    0
+    sys_mlock([addr as u64, length as u64, 0, 0, 0, 0])
 }
 
 /// sys_mbind - Set memory policy for a range (NR 235)

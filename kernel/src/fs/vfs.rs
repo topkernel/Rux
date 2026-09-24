@@ -345,6 +345,122 @@ fn make_absolute(path: &str) -> String {
     }
 }
 
+// ============================================================================
+// chroot (P1): per-task root prefix in path resolution
+// ============================================================================
+
+/// The current task's root path ("/" when not chrooted). The root is stored
+/// as a REAL (global-namespace) path in fs_struct; a chrooted task resolves
+/// absolute paths by prefixing it. Kernel threads / early boot see "/".
+pub fn get_process_root() -> String {
+    if let Some(current) = crate::sched::current() {
+        let root = current.get_root();
+        match core::str::from_utf8(&root) {
+            Ok(s) if !s.is_empty() => {
+                // Normalize (the stored root was normalized at chroot time,
+                // but be defensive against a stale FDT-shared value).
+                let n = path_normalize(s);
+                String::from(n)
+            }
+            _ => String::from("/"),
+        }
+    } else {
+        String::from("/")
+    }
+}
+
+/// Whether the current task runs under a chroot (root != "/").
+pub fn chrooted() -> bool {
+    get_process_root() != "/"
+}
+
+/// Interpret `path` in the current task's namespace: absolute paths get the
+/// chroot prefix prepended; relative paths stay cwd-joined (cwd is stored
+/// as a real path, so the result is always a real-namespace path).
+fn make_absolute_rooted(path: &str) -> String {
+    if !path.starts_with('/') {
+        return make_absolute(path);
+    }
+    let root = get_process_root();
+    if root == "/" {
+        return String::from(path);
+    }
+    let trimmed = root.trim_end_matches('/');
+    debug_assert!(!trimmed.is_empty());
+    format!("{}{}", trimmed, path)
+}
+
+/// Is `abs` (an unnormalized real-namespace path) at or under `root`?
+fn is_under_root(abs: &str, root: &str) -> bool {
+    if root == "/" {
+        return true;
+    }
+    let trimmed = root.trim_end_matches('/');
+    abs == trimmed || abs.starts_with(&format!("{}/", trimmed))
+}
+
+/// Lexical normalization with a chroot floor: ".." never pops above
+/// `root`'s component depth (Linux follow_dotdot stops at nd->root). When
+/// the path is not under the root (cwd outside the jail — allowed after
+/// chroot in Linux too, the classic fchdir escape) the floor is the real
+/// root, i.e. plain path_normalize semantics.
+fn normalize_with_root(abs: &str, root: &str) -> String {
+    if root == "/" || !abs.starts_with('/') {
+        return path_normalize(abs);
+    }
+
+    let floor_len = if is_under_root(abs, root) {
+        root.split('/').filter(|s| !s.is_empty()).count()
+    } else {
+        0
+    };
+
+    let mut stack: Vec<&str> = Vec::new();
+    for comp in abs.split('/').filter(|s| !s.is_empty() && *s != ".") {
+        if comp == ".." {
+            if stack.len() > floor_len {
+                stack.pop();
+            }
+            // else: at the chroot floor — ".." stays put (the clamp that
+            // makes `chroot("/jail"); open("/..") == "/jail"` hold).
+        } else {
+            stack.push(comp);
+        }
+    }
+
+    let mut out = String::from("/");
+    for (i, c) in stack.iter().enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        out.push_str(c);
+    }
+    out
+}
+
+/// Walk the dentry tree from the VFS root to `path` (a REAL-namespace,
+/// already-normalized path), no symlink following, ".." clamped at the
+/// process root. Used to find the task's root dentry for absolute-symlink
+/// resolution under chroot.
+fn dentry_walk_no_symlink(path: &str) -> Option<Arc<Dentry>> {
+    let mut current = follow_mount(
+        VFS_STATE.lock().root_dentry.clone()?,
+    );
+    for comp in path.split('/').filter(|s| !s.is_empty() && *s != ".") {
+        if comp == ".." {
+            let parent = current.parent.lock().clone()?;
+            current = follow_mount(parent);
+            continue;
+        }
+        let child = current.lookup_child(comp)?;
+        if child.is_negative() {
+            return None;
+        }
+        current = follow_mount(child);
+    }
+    Some(current)
+}
+
 /// Unified path lookup — dentry tree traversal with mount point crossing.
 ///
 /// This function resolves a pathname by walking the dentry tree.
@@ -367,17 +483,30 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
-    // Convert to absolute path and normalize
-    let abs_path = make_absolute(pathname);
-    let normalized = path_normalize(&abs_path);
+    // Convert to absolute path and normalize. P1 chroot: absolute paths are
+    // interpreted in the CURRENT TASK'S namespace (root prefix), and the
+    // normalization floor clamps ".." at that root — a chrooted process
+    // cannot lexically climb out of the jail.
+    let abs_path = make_absolute_rooted(pathname);
+    let normalized = normalize_with_root(&abs_path, &get_process_root());
 
     // Get VFS root dentry
     let vfs_root = VFS_STATE.lock().root_dentry.clone()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-    // Start from root, follow mount
-    let mut current = follow_mount(vfs_root);
+    // Start from root, follow mount. P1 chroot: also resolve the task's
+    // root dentry (when chrooted) for the ".." clamp below and for absolute
+    // symlink bases in follow_symlink.
+    let mut current = follow_mount(vfs_root.clone());
     let mut symlink_depth: usize = 0;
+    let task_root_dentry: Option<Arc<Dentry>> = {
+        let root = get_process_root();
+        if root == "/" {
+            None
+        } else {
+            dentry_walk_no_symlink(&root)
+        }
+    };
 
     // Split into path components, skip empty ones
     let components: Vec<&str> = normalized
@@ -406,8 +535,16 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             continue;
         }
 
-        // Handle ".." — parent directory
+        // Handle ".." — parent directory. The floor normalization above
+        // already removed ".." components, so this arm is defense-in-depth;
+        // it additionally clamps at the PROCESS root dentry (chroot) so a
+        // stray ".." can never walk out of the jail via the dentry tree.
         if *component == ".." {
+            if let Some(ref root_d) = task_root_dentry {
+                if Arc::ptr_eq(&current, root_d) {
+                    continue; // at (task) root, stay
+                }
+            }
             let parent_name = current.get_name();
             if parent_name == "/" {
                 // Already at root, stay
@@ -563,19 +700,33 @@ fn follow_symlink(
     let target = core::str::from_utf8(&target_buf[..target_len as usize])
         .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
 
-    // Resolve target path relative to the symlink's parent directory
+    // Resolve target path relative to the symlink's parent directory.
     let vfs_root = VFS_STATE.lock().root_dentry.clone()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
+    // P1 chroot: an ABSOLUTE symlink target is interpreted in the CURRENT
+    // TASK'S namespace (Linux: absolute symlinks resolve from nd->root, not
+    // the global root). Walk the (normalized) root prefix to its dentry;
+    // ".." inside the target is clamped at that dentry below.
+    let task_root_dentry: Arc<Dentry> = {
+        let root = get_process_root();
+        if root == "/" {
+            vfs_root.clone()
+        } else {
+            let rooted = normalize_with_root(&root, &root);
+            dentry_walk_no_symlink(&rooted).unwrap_or_else(|| vfs_root.clone())
+        }
+    };
+
     let base = if target.starts_with('/') {
-        // Absolute symlink — start from VFS root
-        follow_mount(vfs_root)
+        // Absolute symlink — start from the task's root
+        follow_mount(task_root_dentry.clone())
     } else {
         // Relative symlink — start from symlink's parent
         let parent_opt = dentry.parent.lock().clone();
         match parent_opt {
             Some(p) => follow_mount(p),
-            None => follow_mount(vfs_root),
+            None => follow_mount(task_root_dentry.clone()),
         }
     };
 
@@ -602,6 +753,11 @@ fn follow_symlink(
         }
 
         if *component == ".." {
+            // Clamp at the task root (chroot) — an absolute symlink like
+            // "/../../etc" must not climb out of the jail.
+            if Arc::ptr_eq(&current, &task_root_dentry) {
+                continue;
+            }
             let parent_opt = current.parent.lock().clone();
             match parent_opt {
                 Some(p) => current = follow_mount(p),
@@ -1078,6 +1234,18 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                 // Invalidate icache entry for the removed inode
                 if let Some((ino, fs_id)) = target_ino_and_fs_id {
                     crate::fs::inode::icache_remove(ino, fs_id);
+                }
+                // P1 FIFO: drop the named-pipe peer registered for this
+                // inode — the path is going away, and a future mknod of
+                // the same name allocates a NEW inode (fresh pipe). Fds
+                // that still hold the old pipe keep it alive via their
+                // private_data Arc (POSIX unlinked-FIFO semantics).
+                if let Some(ref vp) = target_vpath {
+                    if let Some(ref i) = vp.inode {
+                        if i.mode.is_fifo() {
+                            crate::fs::fifo::forget(i.fs_id, i.ino);
+                        }
+                    }
                 }
                 // Replace dentry with negative entry
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
@@ -1646,6 +1814,19 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             return file_opendir(filename, flags | 0o00200000);
         }
 
+        // Device nodes with no bound driver: Linux fails the open with
+        // ENXIO (no such device or address) — not a silent ops-less File
+        // whose read/write would return EBADF.
+        if inode.mode.is_char_device() || inode.mode.is_block_device() {
+            let has_ops = match inode.ops.and_then(|o| o.get_file_ops) {
+                Some(f) => unsafe { f(&*inode) }.is_some(),
+                None => false,
+            };
+            if !has_ops {
+                return Err(errno::Errno::NoSuchDeviceOrAddress.as_neg_i32());
+            }
+        }
+
         // DAC: check access mode against the target inode (Linux may_open).
         // O_RDONLY/O_RDWR → MAY_READ; O_WRONLY/O_RDWR/O_TRUNC → MAY_WRITE.
         {
@@ -1660,6 +1841,27 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             }
             if mask != 0 && !inode_permission(&inode, mask) {
                 return Err(errno::Errno::PermissionDenied.as_neg_i32());
+            }
+        }
+
+        // FIFO (P1 mknod/mkfifo): named-pipe open semantics — a blocking
+        // O_RDONLY waits for a writer, a blocking O_WRONLY waits for a
+        // reader, O_NONBLOCK applies per POSIX (ENXIO for a writer with no
+        // reader). Dispatch AFTER the DAC check, BEFORE the regular-file
+        // path, so the pipe data path (not the inode data) serves I/O.
+        if inode.mode.is_fifo() {
+            let peer = crate::fs::fifo::peer_for(inode.fs_id, inode.ino);
+            let file = crate::fs::fifo::fifo_open_file(&peer, flags)?;
+            file.set_inode(Arc::clone(&inode));
+            if let Some(d) = opened_dentry {
+                file.set_dentry(d);
+            }
+            match get_file_fd_install(Arc::clone(&file)) {
+                Some(fd) => {
+                    crate::fs::inotify::notify_file(&file, ino::IN_OPEN);
+                    return Ok(fd);
+                }
+                None => return Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
             }
         }
 
@@ -2063,10 +2265,14 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 // (access mode, O_DIRECTORY, O_NOFOLLOW, ...) keeps its
                 // current value — the old code rebuilt the word from just
                 // accmode|arg and cleared O_DIRECTORY et al (review 5.1).
+                // P2 O_DIRECT: the flag round-trips through F_SETFL (the
+                // I/O path does not differentiate buffered vs direct —
+                // flush semantics approximate it; documented limitation).
                 const SETFL_FLAGS: u32 = crate::fs::file::FileFlags::O_APPEND
                     | crate::fs::file::FileFlags::O_NONBLOCK
                     | crate::fs::file::FileFlags::O_SYNC
-                    | crate::fs::file::FileFlags::O_DSYNC;
+                    | crate::fs::file::FileFlags::O_DSYNC
+                    | crate::fs::file::FileFlags::O_DIRECT;
 
                 let current = file.flags().bits();
                 let new_flags = (current & !SETFL_FLAGS) | (arg as u32 & SETFL_FLAGS);

@@ -53,6 +53,26 @@ pub struct SocketOptions {
     pub rcvbuf: u32,
     /// Pending socket error (positive errno, cleared by SO_ERROR read)
     pub error: i32,
+    /// SO_KEEPALIVE (P2 fake-success cleanup): stored and mirrored into the
+    /// TCP protocol slot — the timer tick arms a 2h-idle probe cycle for
+    /// ESTABLISHED connections.
+    pub keepalive: bool,
+    /// TCP_KEEPIDLE seconds (default 7200 = 2h).
+    pub keepidle_s: u32,
+    /// TCP_KEEPINTVL seconds (default 75).
+    pub keepintvl_s: u32,
+    /// TCP_KEEPCNT probes before ETIMEDOUT (default 9).
+    pub keepcnt: u32,
+    /// SO_BROADCAST (P2): stored and enforced — a UDP sendto a broadcast
+    /// address without it fails with EACCES.
+    pub broadcast: bool,
+    /// IP_TTL (P2): 0 = system default (64); 1..=255 stored and pushed into
+    /// the IPv4 header on transmit.
+    pub ttl: u32,
+    /// SO_LINGER (P2): l_onoff.
+    pub linger_on: bool,
+    /// SO_LINGER: l_linger seconds.
+    pub linger_secs: u32,
 }
 
 impl SocketOptions {
@@ -65,6 +85,14 @@ impl SocketOptions {
             sndbuf: 212992,  // Linux default wmem
             rcvbuf: 212992,  // Linux default rmem
             error: 0,
+            keepalive: false,
+            keepidle_s: 7200,
+            keepintvl_s: 75,
+            keepcnt: 9,
+            broadcast: false,
+            ttl: 0,
+            linger_on: false,
+            linger_secs: 0,
         }
     }
 }
@@ -353,6 +381,9 @@ impl Socket {
                 let window_slack = crate::net::tcp::TCP_MAX_WINDOW as usize;
                 let stage_bytes = accept + window_slack;
                 let mut tx = crate::net::tcp::TcpTxBatch::new();
+                // P2 IP_TTL: stamp the per-socket TTL into every segment
+                // this batch records (0 = system default at the IP layer).
+                tx.set_ttl(self.options.lock().ttl as u8);
                 if !tx.reserve(
                     stage_bytes / crate::net::tcp::TCP_DEFAULT_MSS as usize + 2,
                     stage_bytes,
@@ -575,11 +606,39 @@ impl Socket {
                     // spin under TCP_TABLE_LOCK.
                     let mut free_now = false;
                     let mut tx = crate::net::tcp::TcpTxBatch::new();
+                    tx.set_ttl(self.options.lock().ttl as u8); // P2 IP_TTL
                     let _ = tx.reserve(1, 0);
                     {
                         let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
                         if let Some(socket) = crate::net::tcp::tcp_socket_get(tcp_fd) {
-                            socket.close(&mut tx);
+                            // P2 SO_LINGER, l_onoff && l_linger == 0:
+                            // ABORTIVE close — drop unsent/unacked data and
+                            // emit an RST instead of the orderly FIN (Linux
+                            // tcp_close SO_LINGER-zero path). The peer sees
+                            // the reset instead of a silent timeout.
+                            let (linger_on, linger_secs) = {
+                                let o = self.options.lock();
+                                (o.linger_on, o.linger_secs)
+                            };
+                            if linger_on && linger_secs == 0 {
+                                let _ = tx.push_ctl(
+                                    socket.local_ip,
+                                    socket.remote_ip,
+                                    socket.local_port,
+                                    socket.remote_port,
+                                    socket.snd_nxt,
+                                    socket.rcv_nxt,
+                                    0x0014, // RST + ACK
+                                    0,
+                                );
+                                socket.send_buffer.clear();
+                                socket.retrans_queue.clear();
+                                socket.ooo_queue.clear();
+                                socket.state = crate::net::tcp::TcpState::TCP_CLOSE;
+                                socket.timers.stop_retransmit();
+                            } else {
+                                socket.close(&mut tx);
+                            }
                             // Only free immediately if connection is fully closed.
                             if socket.state == crate::net::tcp::TcpState::TCP_CLOSE {
                                 // R21-N4: drop our pin; free only when the
@@ -617,6 +676,17 @@ impl Socket {
                         }
                     }
                     tx.emit_all();
+                    // P2 SO_LINGER, l_onoff && l_linger > 0: block until the
+                    // unsent/unACKed data drains (peer ACKs land through the
+                    // RX softirq and wake the socket wait queue) or the
+                    // linger timeout elapses (Linux tcp_close linger wait).
+                    let (linger_on, linger_secs) = {
+                        let o = self.options.lock();
+                        (o.linger_on, o.linger_secs)
+                    };
+                    if linger_on && linger_secs > 0 {
+                        linger_drain_wait(tcp_fd, linger_secs);
+                    }
                     if free_now {
                         crate::net::tcp::tcp_socket_free(tcp_fd);
                     }
@@ -1369,6 +1439,59 @@ pub fn udp_proto_fd(fd: usize) -> Option<i32> {
     }
     let proto = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
     if proto >= 0 { Some(proto) } else { None }
+}
+
+/// P2 SO_LINGER: block until the TCP slot's send path drains (send_buffer +
+/// retrans_queue empty, or the connection died) or `secs` elapse. Uses the
+/// nanosleep timer-wakeup discipline (one-shot timer + INTERRUPTIBLE sleep
+/// + re-check) so the deadline is guaranteed even without peer ACKs.
+fn linger_drain_wait(tcp_fd: i32, secs: u32) {
+    use crate::drivers::timer;
+
+    fn drained(tcp_fd: i32) -> bool {
+        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+        match crate::net::tcp::tcp_socket_get(tcp_fd) {
+            Some(s) => {
+                // All OUR data flushed and ACKed (retrans queue empty), or
+                // the connection is dead — FIN_WAIT2 with empty queues
+                // counts: the peer just hasn't double-FINed yet.
+                (s.send_buffer.is_empty() && s.retrans_queue.is_empty())
+                    || s.state == crate::net::tcp::TcpState::TCP_CLOSE
+            }
+            None => true, // slot gone — nothing to wait for
+        }
+    }
+
+    let target = timer::get_jiffies() + timer::msecs_to_jiffies(secs as u64 * 1000);
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut crate::process::task::Task,
+        None => return, // no task context: cannot sleep
+    };
+    // SAFETY: current is the running task's pointer (we are it).
+    let pid = unsafe { (*current).pid() };
+    let timer_id = crate::timer::add_timer_wakeup(target, pid);
+
+    loop {
+        if drained(tcp_fd) || timer::get_jiffies() >= target {
+            crate::timer::del_timer(timer_id);
+            return;
+        }
+        // SAFETY: current is the running task's pointer (see above).
+        unsafe {
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE,
+            ));
+        }
+        if drained(tcp_fd) || timer::get_jiffies() >= target {
+            // SAFETY: see above.
+            unsafe { crate::sched::dequeue_task(&*current); }
+            crate::timer::del_timer(timer_id);
+            return;
+        }
+        // R54: re-arm IRQs so the timer tick reaches this CPU.
+        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::sched::schedule();
+    }
 }
 
 // ============================================================================

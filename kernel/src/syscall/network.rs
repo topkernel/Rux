@@ -1216,10 +1216,69 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
                 }
                 0
             }
+            // SO_KEEPALIVE (P2 fake-success cleanup): stored, mirrored into
+            // the TCP protocol slot, and enforced — the timer tick arms a
+            // keepidle/keepintvl/keepcnt probe cycle (defaults 2h/75s/9).
+            SO_KEEPALIVE => {
+                let v = match read_i32(4) {
+                    Some(v) => v,
+                    None => return -(errno::EFAULT as i64),
+                };
+                let (idle, intvl, cnt) = {
+                    let mut opts = socket.options.lock();
+                    opts.keepalive = v != 0;
+                    (opts.keepidle_s, opts.keepintvl_s, opts.keepcnt)
+                };
+                let tcp_fd_v = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd_v >= 0 {
+                    crate::net::tcp::tcp_set_keepalive(tcp_fd_v, v != 0, idle, intvl, cnt);
+                }
+                0
+            }
+            // SO_BROADCAST (P2): stored and ENFORCED — a UDP sendto a
+            // broadcast address without it returns EACCES (udp_send_locked).
+            SO_BROADCAST => {
+                let v = match read_i32(4) {
+                    Some(v) => v,
+                    None => return -(errno::EFAULT as i64),
+                };
+                socket.options.lock().broadcast = v != 0;
+                let udp_fd_v = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd_v >= 0 {
+                    crate::net::udp::udp_set_broadcast(udp_fd_v, v != 0);
+                }
+                0
+            }
+            // SO_LINGER (P2): struct linger { int l_onoff; int l_linger }.
+            // Stored; close() honors it — l_onoff&&l_linger>0 blocks until
+            // the send path drains (bounded by l_linger seconds),
+            // l_onoff&&l_linger==0 aborts with RST + data drop.
+            SO_LINGER => {
+                if optval.is_null() || optlen < 8 {
+                    return -(errno::EINVAL as i64);
+                }
+                let mut raw = [0u8; 8];
+                // SAFETY: optlen >= 8 and access_ok covered optlen at entry.
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(raw.as_mut_ptr(), optval, 8)
+                } != 0
+                {
+                    return -(errno::EFAULT as i64);
+                }
+                let onoff = i32::from_ne_bytes(raw[0..4].try_into().unwrap());
+                let linger = i32::from_ne_bytes(raw[4..8].try_into().unwrap());
+                if linger < 0 {
+                    return -(errno::EINVAL as i64);
+                }
+                let mut opts = socket.options.lock();
+                opts.linger_on = onoff != 0;
+                opts.linger_secs = linger as u32;
+                0
+            }
             // Accepted-and-ignored (no operational effect in this stack):
-            SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE | SO_OOBINLINE
+            SO_DONTROUTE | SO_OOBINLINE
             | SO_NO_CHECK | SO_BSDCOMPAT | SO_PASSCRED | SO_RCVLOWAT
-            | SO_SNDLOWAT | SO_PRIORITY | SO_LINGER => 0,
+            | SO_SNDLOWAT | SO_PRIORITY => 0,
             SO_TYPE | SO_ERROR | SO_PEERCRED => {
                 -(errno::ENOPROTOOPT as i64) // Read-only options
             }
@@ -1227,11 +1286,57 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
             _ => -(errno::ENOPROTOOPT as i64),
         },
         IPPROTO_TCP => match optname {
-            TCP_NODELAY | TCP_CORK | TCP_KEEPIDLE | TCP_KEEPINTVL | TCP_KEEPCNT => 0,
+            // P2: keepalive tunables — stored, validated (>= 1 like Linux)
+            // and mirrored into the protocol slot.
+            TCP_KEEPIDLE | TCP_KEEPINTVL | TCP_KEEPCNT => {
+                let v = match read_i32(4) {
+                    Some(v) => v,
+                    None => return -(errno::EFAULT as i64),
+                };
+                if v < 1 {
+                    return -(errno::EINVAL as i64);
+                }
+                let (ka, idle, intvl, cnt) = {
+                    let mut opts = socket.options.lock();
+                    match optname {
+                        TCP_KEEPIDLE => opts.keepidle_s = v as u32,
+                        TCP_KEEPINTVL => opts.keepintvl_s = v as u32,
+                        _ => opts.keepcnt = v as u32,
+                    }
+                    (opts.keepalive, opts.keepidle_s, opts.keepintvl_s, opts.keepcnt)
+                };
+                let tcp_fd_v = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd_v >= 0 {
+                    crate::net::tcp::tcp_set_keepalive(tcp_fd_v, ka, idle, intvl, cnt);
+                }
+                0
+            }
+            TCP_NODELAY | TCP_CORK => 0,
             _ => -(errno::ENOPROTOOPT as i64),
         },
         IPPROTO_IP => match optname {
-            IP_TOS | IP_TTL | IP_MULTICAST_TTL | IP_MULTICAST_LOOP
+            // P2 IP_TTL: stored (1..=255 like Linux) and pushed into the
+            // IPv4 header on transmit (TCP and UDP paths).
+            IP_TTL => {
+                let v = match read_i32(4) {
+                    Some(v) => v,
+                    None => return -(errno::EFAULT as i64),
+                };
+                if !(1..=255).contains(&v) {
+                    return -(errno::EINVAL as i64);
+                }
+                socket.options.lock().ttl = v as u32;
+                let tcp_fd_v = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd_v >= 0 {
+                    crate::net::tcp::tcp_set_ttl(tcp_fd_v, v as u8);
+                }
+                let udp_fd_v = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd_v >= 0 {
+                    crate::net::udp::udp_set_ttl(udp_fd_v, v as u8);
+                }
+                0
+            }
+            IP_TOS | IP_MULTICAST_TTL | IP_MULTICAST_LOOP
             | IP_ADD_MEMBERSHIP | IP_DROP_MEMBERSHIP => 0,
             _ => -(errno::ENOPROTOOPT as i64),
         },
@@ -1280,6 +1385,9 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     const TCP_NODELAY: i32 = 1;
     const TCP_INFO: i32 = 11;
     const TCP_CORK: i32 = 3;
+    const TCP_KEEPIDLE: i32 = 4;
+    const TCP_KEEPINTVL: i32 = 5;
+    const TCP_KEEPCNT: i32 = 6;
     const IPPROTO_IP: i32 = 0;
     const IP_TOS: i32 = 1;
     const IP_TTL: i32 = 2;
@@ -1447,8 +1555,17 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                     drop(opts);
                     write_int(optval, optlen, optlen_ptr, v as i32);
                 }
-                SO_KEEPALIVE | SO_BROADCAST | SO_OOBINLINE | SO_NO_CHECK | SO_PRIORITY => {
-                    write_int(optval, optlen, optlen_ptr, 0);
+                SO_KEEPALIVE | SO_BROADCAST => {
+                    // P2: report the STORED value (used to be always 0,
+                    // hiding a fake success).
+                    let opts = sock.options.lock();
+                    let v = if optname == SO_KEEPALIVE {
+                        opts.keepalive
+                    } else {
+                        opts.broadcast
+                    };
+                    drop(opts);
+                    write_int(optval, optlen, optlen_ptr, v as i32);
                 }
                 SO_SNDBUF | SO_RCVBUF => {
                     // W3: the actual stored value (setsockopt now records it).
@@ -1488,8 +1605,27 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                 }
                 SO_LINGER => {
                     // struct linger { l_onoff: i32, l_linger: i32 } = 8 bytes
+                    // (P2: the STORED value — was always linger-off).
+                    let opts = sock.options.lock();
+                    let onoff = opts.linger_on as i32;
+                    let secs = opts.linger_secs as i32;
+                    drop(opts);
                     let write_len = core::cmp::min(optlen, 8);
-                    crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len)); // Linger off
+                    crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len));
+                    if write_len >= 4 {
+                        crate::arch::riscv64::uaccess::copy_to_user(
+                            optval,
+                            &onoff as *const i32 as *const u8,
+                            4,
+                        );
+                    }
+                    if write_len >= 8 {
+                        crate::arch::riscv64::uaccess::copy_to_user(
+                            optval.add(4),
+                            &secs as *const i32 as *const u8,
+                            4,
+                        );
+                    }
                     let _ = crate::arch::riscv64::uaccess::put_user(optlen_ptr, write_len as u32);
                 }
                 SO_PEERCRED => {
@@ -1511,6 +1647,17 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                     crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len));
                     let _ = crate::arch::riscv64::uaccess::put_user(optlen_ptr, write_len as u32);
                 }
+                TCP_KEEPIDLE | TCP_KEEPINTVL | TCP_KEEPCNT => {
+                    // P2: the stored tunables (Linux defaults 7200/75/9).
+                    let opts = sock.options.lock();
+                    let v = match optname {
+                        TCP_KEEPIDLE => opts.keepidle_s,
+                        TCP_KEEPINTVL => opts.keepintvl_s,
+                        _ => opts.keepcnt,
+                    };
+                    drop(opts);
+                    write_int(optval, optlen, optlen_ptr, v as i32);
+                }
                 _ => {
                     return -(errno::ENOPROTOOPT as i64);
                 }
@@ -1520,7 +1667,16 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                     write_int(optval, optlen, optlen_ptr, 0);
                 }
                 IP_TTL => {
-                    write_int(optval, optlen, optlen_ptr, 64); // Default TTL
+                    // P2: the per-socket TTL (0-stored = system default 64).
+                    let v = {
+                        let opts = sock.options.lock();
+                        if opts.ttl == 0 {
+                            crate::config::IP_DEFAULT_TTL as i32
+                        } else {
+                            opts.ttl as i32
+                        }
+                    };
+                    write_int(optval, optlen, optlen_ptr, v);
                 }
                 _ => {
                     return -(errno::ENOPROTOOPT as i64);
@@ -1573,6 +1729,7 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
             if tcp_fd_v >= 0 {
                 let tcp_fd = tcp_fd_v;
                 let mut tx = crate::net::tcp::TcpTxBatch::new();
+                tx.set_ttl(socket.options.lock().ttl as u8); // P2 IP_TTL
                 let _ = tx.reserve(1, 0);
                 {
                     let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();

@@ -280,6 +280,8 @@ pub struct TcpTxDesc {
     pub ack: TcpAck,
     /// TCP flags (SYN 0x02, RST 0x04, PSH 0x08, ACK 0x10, FIN 0x01)
     pub flags: u16,
+    /// IP_TTL for this segment (P2): 0 = system default (64).
+    pub ttl: u8,
     /// Advertised window
     pub window: u16,
     /// Payload offset into the batch arena
@@ -297,6 +299,8 @@ pub struct TcpTxDesc {
 pub struct TcpTxBatch {
     descs: alloc::vec::Vec<TcpTxDesc>,
     arena: alloc::vec::Vec<u8>,
+    /// P2 IP_TTL: stamped into every pushed descriptor (0 = default).
+    ttl: u8,
 }
 
 impl TcpTxBatch {
@@ -304,7 +308,16 @@ impl TcpTxBatch {
         Self {
             descs: alloc::vec::Vec::new(),
             arena: alloc::vec::Vec::new(),
+            ttl: 0,
         }
+    }
+
+    /// Set the IP TTL used for segments recorded from now on (P2 IP_TTL).
+    /// Callers holding the TcpSocket set the socket's mirrored value
+    /// before pushing; batches that never got a TTL use the system
+    /// default at the IPv4 layer.
+    pub fn set_ttl(&mut self, ttl: u8) {
+        self.ttl = ttl;
     }
 
     /// Reserve capacity for `ndesc` segments totaling <= `nbytes` of
@@ -348,6 +361,7 @@ impl TcpTxBatch {
             window,
             off,
             len: data.len(),
+            ttl: self.ttl,
         });
         true
     }
@@ -393,6 +407,7 @@ impl TcpTxBatch {
                   seq: TcpSeq, ack: TcpAck, flags: u16, window: u16, off: usize, len: usize) {
         self.descs.push(TcpTxDesc {
             src_ip, dst_ip, src_port, dst_port, seq, ack, flags, window, off, len,
+            ttl: self.ttl,
         });
     }
 
@@ -432,7 +447,7 @@ impl TcpTxBatch {
                 skb.free();
                 continue;
             }
-            let _ = crate::net::ipv4::ipv4_send_src(skb, d.src_ip, d.dst_ip, 6);
+            let _ = crate::net::ipv4::ipv4_send_src_ttl(skb, d.src_ip, d.dst_ip, 6, d.ttl);
         }
         self.arena.clear();
     }
@@ -647,6 +662,12 @@ pub struct TcpTimers {
     /// used to leave connect() hanging in SYN_SENT forever (the timer
     /// tick's catch-all arm did nothing for the state).
     pub syn_retries: u32,
+    /// P2 SO_KEEPALIVE: keepalive probe deadline (jiffies, 0 = disarmed;
+    /// armed by the timer tick for idle ESTABLISHED sockets).
+    pub keepalive_deadline: u64,
+    /// P2 SO_KEEPALIVE: probes sent without receiving an ACK (reset by
+    /// process_ack; keepcnt unanswered probes abort the connection).
+    pub keepalive_probes: u32,
 }
 
 impl TcpTimers {
@@ -658,6 +679,8 @@ impl TcpTimers {
             persist_deadline: 0,
             close_wait_since: 0,
             syn_retries: 0,
+            keepalive_deadline: 0,
+            keepalive_probes: 0,
         }
     }
 
@@ -758,6 +781,17 @@ pub struct TcpSocket {
     /// W3: SO_REUSEADDR mirrored from the VFS layer — participates in the
     /// bind-conflict decision (Linux: both binders opting in may coexist).
     pub reuseaddr: bool,
+    /// P2 SO_KEEPALIVE mirrored from the VFS layer (tcp_set_keepalive):
+    /// the timer tick arms the idle-probe cycle for ESTABLISHED sockets.
+    pub keepalive: bool,
+    /// TCP_KEEPIDLE in seconds (Linux default 7200).
+    pub ka_idle_s: u32,
+    /// TCP_KEEPINTVL in seconds (Linux default 75).
+    pub ka_intvl_s: u32,
+    /// TCP_KEEPCNT (Linux default 9).
+    pub ka_cnt: u32,
+    /// P2 IP_TTL mirrored from the VFS layer (tcp_set_ttl): 0 = default.
+    pub ttl: u8,
     /// Out-of-order reassembly queue (received but not yet deliverable)
     pub ooo_queue: alloc::collections::VecDeque<TcpOooSeg>,
 
@@ -808,6 +842,11 @@ impl TcpSocket {
             orphaned: false,
             pending_error: 0,
             reuseaddr: false,
+            keepalive: false,
+            ka_idle_s: 7200,
+            ka_intvl_s: 75,
+            ka_cnt: 9,
+            ttl: 0,
             ooo_queue: alloc::collections::VecDeque::new(),
 
             rtt_estimator: TcpRttEstimator::new(),
@@ -1796,6 +1835,14 @@ impl TcpSocket {
             if !self.send_buffer.is_empty() {
                 let _ = self.tx_packets(tx);
             }
+
+            // P2 SO_KEEPALIVE: a fresh ACK proves the peer is alive —
+            // reset the probe cycle; the timer tick re-arms a full idle
+            // window (keepidle) on the next quiet pass.
+            if self.keepalive {
+                self.timers.keepalive_probes = 0;
+                self.timers.keepalive_deadline = 0;
+            }
         } else if !has_data {
             // W3: ack == snd_una on a pure ACK = duplicate ACK (RFC 5681)
             // — typically triggered by the receiver buffering an
@@ -1913,6 +1960,24 @@ impl TcpSocket {
             });
             self.snd_nxt = self.snd_nxt.wrapping_add(1);
         }
+    }
+
+    /// P2 SO_KEEPALIVE: one keepalive probe (RFC 1122 §4.2.3.6, minimal) —
+    /// an empty ACK carrying sequence `snd_una - 1`, i.e. one byte BELOW
+    /// the lowest unacknowledged byte. A live peer cannot accept it and
+    /// answers with an ACK, which resets the probe cycle in process_ack.
+    pub fn send_keepalive_probe(&self, tx: &mut TcpTxBatch) {
+        let probe_seq = self.snd_una.wrapping_sub(1);
+        let _ = tx.push_ctl(
+            self.local_ip,
+            self.remote_ip,
+            self.local_port,
+            self.remote_port,
+            probe_seq,
+            self.rcv_nxt,
+            0x0010, // ACK, no payload
+            self.rcv_wnd,
+        );
     }
 
     /// Start retransmit timer
@@ -2759,6 +2824,39 @@ pub fn tcp_set_reuseaddr(fd: i32, on: bool) {
     unsafe {
         if let Some(s) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
             s.reuseaddr = on;
+        }
+    }
+}
+
+/// P2 SO_KEEPALIVE: mirror the socket-layer option triplet into the
+/// protocol slot (Linux tcp_keepalive_timer parameters). Also resets any
+/// in-flight probe cycle so a freshly-enabled socket starts a clean idle
+/// window.
+pub fn tcp_set_keepalive(fd: i32, on: bool, idle_s: u32, intvl_s: u32, cnt: u32) {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        if let Some(s) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+            s.keepalive = on;
+            s.ka_idle_s = idle_s;
+            s.ka_intvl_s = intvl_s;
+            s.ka_cnt = cnt;
+            if !on {
+                s.timers.keepalive_deadline = 0;
+                s.timers.keepalive_probes = 0;
+            }
+        }
+    }
+}
+
+/// P2 IP_TTL: mirror the per-socket TTL into the protocol slot (0 =
+/// system default 64).
+pub fn tcp_set_ttl(fd: i32, ttl: u8) {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        if let Some(s) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+            s.ttl = ttl;
         }
     }
 }

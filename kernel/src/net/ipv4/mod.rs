@@ -111,6 +111,7 @@ impl IpHdr {
 /// - `daddr`: Destination IP address (network byte order)
 /// - `protocol`: Protocol type
 /// - `tot_len`: Total length
+/// - `ttl`: Time To Live (P2 IP_TTL; 0 = system default IP_DEFAULT_TTL)
 ///
 /// # Notes
 /// Adds IPv4 header at the front of SkBuff
@@ -120,6 +121,7 @@ pub fn ip_push_header(
     daddr: u32,
     protocol: u8,
     tot_len: u16,
+    ttl: u8,
 ) -> Result<(), ()> {
     let ptr = skb.skb_push(IPHDR_LEN as u32).ok_or(())?;
 
@@ -138,7 +140,8 @@ pub fn ip_push_header(
 
         ip_hdr.frag_off = 0;
 
-        ip_hdr.ttl = IP_DEFAULT_TTL;
+        // P2 IP_TTL: the socket's per-connection TTL (0 = default).
+        ip_hdr.ttl = if ttl == 0 { IP_DEFAULT_TTL } else { ttl };
 
         ip_hdr.protocol = protocol;
 
@@ -206,7 +209,19 @@ pub fn ip_pull_header(skb: &mut SkBuff) -> Option<&'static IpHdr> {
 /// Transport layers must pass their bound local_ip — a fixed device
 /// address broke 4-tuple matching for any non-device source (loopback in
 /// particular; found via the nettest E2E run, NET-H5 family).
-pub fn ipv4_send_src(mut skb: SkBuff, src_ip: u32, dest_ip: u32, protocol: u8) -> Result<(), ()> {
+pub fn ipv4_send_src(skb: SkBuff, src_ip: u32, dest_ip: u32, protocol: u8) -> Result<(), ()> {
+    ipv4_send_src_ttl(skb, src_ip, dest_ip, protocol, 0)
+}
+
+/// ipv4_send_src with an explicit TTL (P2 IP_TTL): `ttl` 0 uses the system
+/// default (64); the socket layers pass their mirrored per-socket value.
+pub fn ipv4_send_src_ttl(
+    mut skb: SkBuff,
+    src_ip: u32,
+    dest_ip: u32,
+    protocol: u8,
+    ttl: u8,
+) -> Result<(), ()> {
     let ip_ptr = skb.skb_push(IPHDR_LEN as u32).ok_or(())?;
 
     // SAFETY: skb_push returned a valid, properly aligned pointer of at least
@@ -230,7 +245,8 @@ pub fn ipv4_send_src(mut skb: SkBuff, src_ip: u32, dest_ip: u32, protocol: u8) -
 
         ip_hdr.frag_off = 0;
 
-        ip_hdr.ttl = IP_DEFAULT_TTL;
+        // P2 IP_TTL: per-socket value (0 = system default).
+        ip_hdr.ttl = if ttl == 0 { IP_DEFAULT_TTL } else { ttl };
 
         ip_hdr.protocol = protocol;
 

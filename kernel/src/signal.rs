@@ -832,6 +832,30 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
             (*current).sigmask_restore_valid = false;
         }
 
+        // PTRACE interception (P1): a traced task does not run the
+        // disposition itself — it stops for its tracer instead. The
+        // signal is dequeued into task.ptrace_siginfo so PTRACE_CONT(0)
+        // swallows it and CONT(sig) re-injects it. A signal re-injected
+        // by CONT is marked ptrace_sigdeliver and delivered for real.
+        // SIGKILL is never intercepted (cannot be traced away).
+        if (*current).tracer_pid() != 0 && sig != Signal::SIGKILL as i32 {
+            // Peek first, consume only on match: a different signal
+            // arriving before the re-injected one must not eat the mark.
+            if (*current).ptrace_sigdeliver_peek() != sig as u32 {
+                // No handler frame is built for a traced stop, so convert
+                // any syscall-restart sentinel HERE (else the raw -512
+                // leaks to userspace as a bogus errno when the tracee
+                // resumes — same engine as review syscallb-H-06).
+                restart_syscall_no_handler(regs);
+                (*current).pending.remove(sig);
+                let info = SigInfo::new(sig, si_code::SI_KERNEL, (*current).pid(), 0);
+                // SAFETY: current is the running (about-to-stop) task.
+                crate::process::ptrace::ptrace_stop(current, sig, info);
+                return true;
+            }
+            (*current).take_ptrace_sigdeliver();
+        }
+
         // Get signal handling action (clone needed data)
         let action = (*current).signal.as_ref()
             .and_then(|s| s.get_action(sig));

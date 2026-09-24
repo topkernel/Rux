@@ -91,6 +91,11 @@ pub struct UdpSocket {
     /// W3: pending protocol error (positive errno) — ICMP errors on a
     /// connected UDP socket (udp_v4_err). Read-and-cleared via SO_ERROR.
     pub pending_error: i32,
+    /// P2 SO_BROADCAST mirrored from the VFS layer (udp_set_broadcast):
+    /// sendto to a broadcast address without it fails with EACCES.
+    pub broadcast: bool,
+    /// P2 IP_TTL mirrored from the VFS layer (udp_set_ttl): 0 = default.
+    pub ttl: u8,
     /// Receive buffer
     pub recv_buffer: alloc::collections::VecDeque<UdpPacket>,
     /// R24 (MED-9): queued payload bytes — pairs with UDP_RCVBUF_BUDGET.
@@ -110,6 +115,8 @@ impl UdpSocket {
             bound: false,
             connected: false,
             pending_error: 0,
+            broadcast: false,
+            ttl: 0,
             recv_buffer: alloc::collections::VecDeque::new(),
             recv_bytes: 0,
         }
@@ -477,6 +484,17 @@ fn udp_send_locked(socket: &mut UdpSocket, buf: &[u8], dest_ip: u32, dest_port: 
         return 0;
     }
 
+    // P2 SO_BROADCAST: sending to a broadcast address without the option
+    // fails with EACCES (Linux udp_sendmsg ip_mc_sf_allow / EACCES gate).
+    // Minimal broadcast set: the limited broadcast 255.255.255.255 and
+    // directed subnet broadcasts (host part all-ones, last octet 255) —
+    // we have no netmask model for the precise per-interface check.
+    if !socket.broadcast
+        && (dest_ip == 0xFFFF_FFFF || (dest_ip & 0xFF) == 0xFF)
+    {
+        return -13; // EACCES
+    }
+
     // W3: implicit ephemeral bind at first send.
     if !socket.bound {
         match udp_alloc_ephemeral_port() {
@@ -520,9 +538,32 @@ fn udp_send_locked(socket: &mut UdpSocket, buf: &[u8], dest_ip: u32, dest_port: 
         (*(skb.data as *mut UdpHdr)).check = csum.to_be();
     }
 
-    match crate::net::ipv4::ipv4_send_src(skb, src_ip, dest_ip, 17) { // IPPROTO_UDP = 17
+    match crate::net::ipv4::ipv4_send_src_ttl(skb, src_ip, dest_ip, 17, socket.ttl) { // IPPROTO_UDP = 17
         Ok(()) => buf.len() as isize,
         Err(_) => -5, // EIO
+    }
+}
+
+/// P2 SO_BROADCAST: mirror the socket-layer option into the protocol slot.
+pub fn udp_set_broadcast(fd: i32, on: bool) {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global; protected by UDP_TABLE_LOCK.
+    unsafe {
+        if let Some(s) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
+            s.broadcast = on;
+        }
+    }
+}
+
+/// P2 IP_TTL: mirror the per-socket TTL into the protocol slot (0 =
+/// system default 64).
+pub fn udp_set_ttl(fd: i32, ttl: u8) {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global; protected by UDP_TABLE_LOCK.
+    unsafe {
+        if let Some(s) = UDP_SOCKET_TABLE.get_mut(fd as usize) {
+            s.ttl = ttl;
+        }
     }
 }
 
