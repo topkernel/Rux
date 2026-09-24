@@ -71,6 +71,8 @@ pub struct UdpPacket {
     pub data: alloc::vec::Vec<u8>,
     pub src_addr: u32,
     pub src_port: u16,
+    /// P1 IPv6: source address for v6 datagrams (unspecified for v4)
+    pub src_addr6: crate::net::ipv6::Ipv6Addr,
 }
 
 /// UDP Socket structure
@@ -84,6 +86,13 @@ pub struct UdpSocket {
     pub remote_ip: u32,
     /// Local IP address
     pub local_ip: u32,
+    /// P1 IPv6: this socket operates on pure v6 addresses (a v4-mapped
+    /// peer is normalized to the v4 fields at the syscall boundary)
+    pub is_v6: bool,
+    /// P1 IPv6: local address (unspecified = IN6ADDR_ANY)
+    pub local_ip6: crate::net::ipv6::Ipv6Addr,
+    /// P1 IPv6: remote address
+    pub remote_ip6: crate::net::ipv6::Ipv6Addr,
     /// Whether bound
     pub bound: bool,
     /// Whether connected
@@ -112,6 +121,9 @@ impl UdpSocket {
             // INADDR_ANY: the old hardcoded 192.168.1.100 made the socket
             // match nothing in a slirp/QEMU environment (review NET-H6).
             local_ip: 0,
+            is_v6: false,
+            local_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
+            remote_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
             bound: false,
             connected: false,
             pending_error: 0,
@@ -436,6 +448,16 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
     };
 
     // Get destination address
+    // P1 IPv6: a v6-connected socket sends through the v6 wire path.
+    if socket.is_v6 {
+        if !socket.connected {
+            return -107; // ENOTCONN
+        }
+        let dest = socket.remote_ip6;
+        let port = socket.remote_port;
+        return udp_send_locked6(socket, buf, dest, port);
+    }
+
     let (dest_ip, dest_port) = if socket.connected {
         (socket.remote_ip, socket.remote_port)
     } else {
@@ -466,6 +488,272 @@ pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
     };
 
     udp_send_locked(socket, buf, dest_ip, dest_port)
+}
+
+// ============================================================================
+// P1 IPv6 UDP
+// ============================================================================
+
+/// Bind a UDP slot to a pure v6 local address/port. Mirrors udp_bind
+/// (ephemeral assignment, same-family conflict check).
+pub fn udp_bind6(fd: i32, ip6: crate::net::ipv6::Ipv6Addr, port: UdpPort) -> i32 {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    unsafe {
+        let effective_port = if port == 0 {
+            match udp_alloc_ephemeral_port() {
+                Some(p) => p,
+                None => return -99, // EADDRNOTAVAIL
+            }
+        } else {
+            // Conflict check within the same family (v4/wildcard v6 dual
+            // binding is out of scope — first binder wins, like udp_bind).
+            for i in 0..UDP_SOCKET_TABLE.count {
+                if i == fd as usize {
+                    continue;
+                }
+                if let Some(s) = UDP_SOCKET_TABLE.sockets[i].as_ref() {
+                    if s.bound && s.local_port == port && s.is_v6 {
+                        return -98; // EADDRINUSE
+                    }
+                }
+            }
+            port
+        };
+        match UDP_SOCKET_TABLE.get_mut(fd as usize) {
+            Some(socket) => {
+                socket.is_v6 = true;
+                socket.local_ip6 = ip6;
+                socket.local_port = effective_port;
+                socket.bound = true;
+                0
+            }
+            None => -5, // EBADF
+        }
+    }
+}
+
+/// Connect a UDP slot to a pure v6 remote (R24 discipline: locked entry).
+pub fn udp_connect6(fd: i32, ip6: crate::net::ipv6::Ipv6Addr, port: UdpPort) -> i32 {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    unsafe {
+        match UDP_SOCKET_TABLE.get_mut(fd as usize) {
+            Some(socket) => {
+                socket.is_v6 = true;
+                socket.remote_ip6 = ip6;
+                socket.remote_port = port;
+                socket.connected = true;
+                0
+            }
+            None => -9, // EBADF
+        }
+    }
+}
+
+/// Send a UDP datagram over IPv6 (family-aware variant of udp_sendto).
+pub fn udp_sendto6(
+    fd: i32,
+    buf: &[u8],
+    dest6: crate::net::ipv6::Ipv6Addr,
+    dest_port: u16,
+) -> isize {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
+    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
+    udp_send_locked6(socket, buf, dest6, dest_port)
+}
+
+/// Common v6 transmit path (caller holds UDP_TABLE_LOCK). The UDP checksum
+/// is MANDATORY over IPv6 (RFC 8200 §8.1) and covers the 128-bit
+/// pseudo-header addresses.
+fn udp_send_locked6(
+    socket: &mut UdpSocket,
+    buf: &[u8],
+    dest6: crate::net::ipv6::Ipv6Addr,
+    dest_port: u16,
+) -> isize {
+    use crate::net::ipv6::{self, next_header};
+
+    if buf.is_empty() {
+        return 0;
+    }
+
+    // Multicast / link-local requires no SO_BROADCAST gate (v6 has no
+    // broadcast; ff00::/8 is multicast).
+
+    // Implicit ephemeral bind at first send.
+    if !socket.bound {
+        match udp_alloc_ephemeral_port() {
+            Some(p) => {
+                socket.local_port = p;
+                socket.bound = true;
+            }
+            None => return -99, // EADDRNOTAVAIL
+        }
+    }
+    socket.is_v6 = true;
+
+    let mut skb = match crate::net::buffer::alloc_skb((UDP_HLEN + buf.len()) as u32) {
+        Some(skb) => skb,
+        None => return -12, // ENOMEM
+    };
+
+    if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
+        crate::net::buffer::kfree_skb(skb);
+        return -5; // EIO
+    }
+
+    // Source: the socket's bound v6 address, else our SLAAC link-local.
+    let src6 = if crate::net::ipv6::is_unspecified(&socket.local_ip6) {
+        match crate::net::ipv6::get_link_local() {
+            Some(ll) => ll,
+            None => {
+                crate::net::buffer::kfree_skb(skb);
+                return -99; // EADDRNOTAVAIL — no v6 source configured
+            }
+        }
+    } else {
+        socket.local_ip6
+    };
+
+    // Mandatory checksum over header + payload + v6 pseudo-header.
+    // SAFETY: skb.data holds UDP_HLEN valid header bytes; payload follows.
+    unsafe {
+        let hdr = &mut *(skb.data as *mut UdpHdr);
+        let total = (UDP_HLEN + buf.len()) as u32;
+        hdr.check = 0;
+        let seg = core::slice::from_raw_parts(skb.data as *const u8, total as usize);
+        let mut csum = ipv6::transport_checksum6(&src6, &dest6, next_header::UDP, seg);
+        if csum == 0 {
+            csum = 0xFFFF; // 0x0000 would read as "computed 0"
+        }
+        hdr.check = csum.to_be();
+    }
+
+    match ipv6::ipv6_send_hops(skb, &src6, &dest6, next_header::UDP, socket.ttl) {
+        Ok(()) => buf.len() as isize,
+        Err(_) => -5, // EIO (NS-triggered neighbor loss included)
+    }
+}
+
+/// Receive with a family-aware source address: v4 datagrams report
+/// IpAddr::V4, v6 datagrams report IpAddr::V6. Used by the VFS layer for
+/// recvfrom/recvmsg on AF_INET6 sockets.
+pub fn udp_recvfrom_ext(
+    fd: i32,
+    buf: &mut [u8],
+) -> Result<(isize, crate::net::ipv6::IpAddr, u16), isize> {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+        Some(s) => s,
+        None => return Err(-9), // EBADF
+    };
+
+    match socket.dequeue_packet() {
+        Some(packet) => {
+            let copy_len = packet.data.len().min(buf.len());
+            buf[..copy_len].copy_from_slice(&packet.data[..copy_len]);
+            // v6 sockets report the datagram's v6 source; a v4 datagram
+            // (cannot normally match a v6 slot) falls back to its u32.
+            let src = if socket.is_v6
+                && packet.src_addr6 != crate::net::ipv6::IPV6_ADDR_UNSPECIFIED
+            {
+                crate::net::ipv6::IpAddr::V6(packet.src_addr6)
+            } else {
+                crate::net::ipv6::IpAddr::V4(packet.src_addr)
+            };
+            Ok((copy_len as isize, src, packet.src_port))
+        }
+        None => {
+            if socket.pending_error != 0 {
+                Err(-(socket.pending_error as isize))
+            } else {
+                Err(-11) // EAGAIN
+            }
+        }
+    }
+}
+
+/// Receive and process an IPv6 UDP packet (called from ipv6_rcv with the
+/// base header pulled). Delivery mirrors udp_rcv: exact/wildcard local
+/// match, connected sockets filter the remote.
+pub fn udp_rcv6(
+    skb: &SkBuff,
+    src6: &crate::net::ipv6::Ipv6Addr,
+    dst6: &crate::net::ipv6::Ipv6Addr,
+) -> Result<(), ()> {
+    use crate::net::ipv6::{self, next_header};
+
+    let udp_hdr = udp_parse_packet(skb).ok_or(())?;
+
+    // Checksum is mandatory in v6 — a zero field is a protocol violation
+    // (RFC 8200 §8.1) and the datagram is dropped.
+    if udp_hdr.check() == 0 {
+        return Ok(());
+    }
+    let data_len = (udp_hdr.len() as usize).saturating_sub(UDP_HLEN);
+    // SAFETY: udp_parse_packet validated the length against skb.len.
+    let data = if data_len > 0 {
+        unsafe { core::slice::from_raw_parts(skb.data.add(UDP_HLEN), data_len) }
+    } else {
+        &[]
+    };
+    // Verify over the full segment (header with stored checksum + data):
+    // a valid datagram sums to zero.
+    // SAFETY: header bytes [0, UDP_HLEN) are validated.
+    let seg = unsafe {
+        core::slice::from_raw_parts(skb.data as *const u8, UDP_HLEN + data_len)
+    };
+    if ipv6::transport_checksum6(src6, dst6, next_header::UDP, seg) != 0 {
+        return Ok(()); // silently drop
+    }
+
+    let src_port = UdpPort::from_be(udp_hdr.source);
+    let dest_port = UdpPort::from_be(udp_hdr.dest);
+
+    let mut delivered_fd: Option<i32> = None;
+    {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
+        // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+        unsafe {
+            for i in 0..UDP_SOCKET_TABLE.count {
+                if let Some(ref mut socket) = UDP_SOCKET_TABLE.sockets[i] {
+                    if socket.is_v6
+                        && socket.bound
+                        && socket.local_port == dest_port
+                        && (crate::net::ipv6::is_unspecified(&socket.local_ip6)
+                            || socket.local_ip6 == *dst6)
+                        && (!socket.connected
+                            || (socket.remote_ip6 == *src6
+                                && socket.remote_port == src_port))
+                    {
+                        let packet = UdpPacket {
+                            data: alloc::vec::Vec::from(data),
+                            src_addr: 0,
+                            src_port: src_port,
+                            src_addr6: *src6,
+                        };
+                        socket.enqueue_packet(packet);
+                        delivered_fd = Some(i as i32);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(fd) = delivered_fd {
+        crate::net::socket::wake_udp_socket(fd);
+    }
+    // No ICMPv6 port-unreachable generation for undelivered datagrams
+    // (P2 — the echo/reply NS/NA core is what P1 needs).
+
+    Ok(())
 }
 
 /// Common UDP transmit path (W3). Caller holds UDP_TABLE_LOCK and provides
@@ -680,6 +968,47 @@ pub fn udp_has_error(fd: i32) -> bool {
     }
 }
 
+/// P1 /proc/net/udp(+udp6): one protocol-slot snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct UdpSlotInfo {
+    pub local_ip: u32,
+    pub local_port: u16,
+    pub remote_ip: u32,
+    pub remote_port: u16,
+    pub connected: bool,
+    pub is_v6: bool,
+    pub local_ip6: crate::net::ipv6::Ipv6Addr,
+    pub remote_ip6: crate::net::ipv6::Ipv6Addr,
+}
+
+/// P1 /proc/net/udp: snapshot every live UDP slot (bound ones only).
+pub fn udp_dump() -> alloc::vec::Vec<UdpSlotInfo> {
+    let _g = UDP_TABLE_LOCK.lock_irqsave();
+    let mut out = alloc::vec::Vec::new();
+    // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
+    unsafe {
+        let table = &UDP_SOCKET_TABLE;
+        for i in 0..table.count {
+            if let Some(s) = table.sockets[i].as_ref() {
+                if !s.bound {
+                    continue;
+                }
+                out.push(UdpSlotInfo {
+                    local_ip: s.local_ip,
+                    local_port: s.local_port,
+                    remote_ip: s.remote_ip,
+                    remote_port: s.remote_port,
+                    connected: s.connected,
+                    is_v6: s.is_v6,
+                    local_ip6: s.local_ip6,
+                    remote_ip6: s.remote_ip6,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Calculate UDP checksum
 ///
 /// # Arguments
@@ -883,6 +1212,7 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
                             data: alloc::vec::Vec::from(data),
                             src_addr: src_ip,
                             src_port: src_port,
+                            src_addr6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
                         };
                         socket.enqueue_packet(packet);
                         delivered_fd = Some(i as i32);

@@ -56,6 +56,7 @@ pub mod self_proc;
 pub mod pid;
 pub mod interrupts;
 pub mod sysctl;
+pub mod net;
 
 // Re-export uptime functions for other modules
 pub use uptime::get_uptime_secs;
@@ -440,7 +441,59 @@ impl ProcFSSuperBlock {
         // P1: /proc/sys minimal tree (fs/procfs/sysctl.rs for the storage).
         self.init_sys_tree();
 
+        // P1: /proc/net — network subsystem introspection (ss/netstat
+        // compatible formats).
+        self.init_net_tree();
+
         // /proc/[pid] directories are handled dynamically
+    }
+
+    /// Build the /proc/net tree (P1): dev, tcp, tcp6, udp, udp6, arp,
+    /// route, sockstat — Linux-aligned formats.
+    fn init_net_tree(&self) {
+        let net_dir = Arc::new(ProcFSNode::new_dir(b"net".to_vec(), self.alloc_ino()));
+        self.root_node.add_child(net_dir.clone());
+
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"dev".to_vec(),
+            net::generate_dev,
+            self.alloc_ino(),
+        )));
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"tcp".to_vec(),
+            net::generate_tcp,
+            self.alloc_ino(),
+        )));
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"tcp6".to_vec(),
+            net::generate_tcp6,
+            self.alloc_ino(),
+        )));
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"udp".to_vec(),
+            net::generate_udp,
+            self.alloc_ino(),
+        )));
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"udp6".to_vec(),
+            net::generate_udp6,
+            self.alloc_ino(),
+        )));
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"arp".to_vec(),
+            net::generate_arp,
+            self.alloc_ino(),
+        )));
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"route".to_vec(),
+            net::generate_route,
+            self.alloc_ino(),
+        )));
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"sockstat".to_vec(),
+            net::generate_sockstat,
+            self.alloc_ino(),
+        )));
     }
 
     /// Build the /proc/sys/{kernel,vm,fs} tree with writable sysctl files.

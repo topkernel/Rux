@@ -2826,6 +2826,14 @@ pub fn sys_setdomainname(args: SyscallArgs) -> i64 {
 /// - args[0]: magic1 - magic number (LINUX_REBOOT_MAGIC1 = 0xfee1dead)
 /// - args[1]: magic2 - magic number (LINUX_REBOOT_MAGIC2 or MAGIC2C)
 /// - args[2]: cmd - reboot command
+///
+/// P1 shutdown cascade (never returns to the caller on the happy path):
+/// 1. SIGTERM to PID 1 (systemd-style init shutdown sequence) — skipped
+///    when the caller IS PID 1;
+/// 2. wait for PID 1 to exit, bounded by a 5s timeout;
+/// 3. sync: flush the buffer cache and the disk's volatile cache, then
+///    mark the ext4 root superblock clean (minimal rootfs umount);
+/// 4. SBI: SRST warm reset for RESTART, legacy shutdown ecall otherwise.
 pub fn sys_reboot(args: SyscallArgs) -> i64 {
     let magic1 = args[0] as u32;
     let magic2 = args[1] as u32;
@@ -2849,40 +2857,127 @@ pub fn sys_reboot(args: SyscallArgs) -> i64 {
     }
 
     match cmd {
-        LINUX_REBOOT_CMD_RESTART => {
-            crate::println!("reboot: restarting system");
-            // SBI legacy shutdown ecall (0x8)
-            // SAFETY: This is a privileged SBI ecall; only reached after CAP_SYS_BOOT check.
-            unsafe {
-                core::arch::asm!(
-                    "ecall",
-                    in("a7") 0x8u64,
-                    out("a0") _,
-                    out("a1") _,
-                    options(nomem)
-                );
+        LINUX_REBOOT_CMD_RESTART
+        | LINUX_REBOOT_CMD_HALT
+        | LINUX_REBOOT_CMD_POWER_OFF => {
+            shutdown_cascade(cmd);
+            // shutdown_cascade only returns on a total SBI failure.
+            loop {
+                core::hint::spin_loop();
             }
-            // If SBI returns, halt in a loop
-            loop {}
         }
-        LINUX_REBOOT_CMD_HALT | LINUX_REBOOT_CMD_POWER_OFF => {
-            crate::println!("reboot: system halt/poweroff");
-            // SAFETY: This is a privileged SBI ecall; only reached after CAP_SYS_BOOT check.
-            unsafe {
-                core::arch::asm!(
-                    "ecall",
-                    in("a7") 0x8u64,
-                    out("a0") _,
-                    out("a1") _,
-                    options(nomem)
-                );
+        _ => -(errno::EINVAL as i64),
+    }
+}
+
+/// P1: how long to wait for PID 1 to exit after SIGTERM (5 seconds).
+const SHUTDOWN_PID1_TIMEOUT_SECS: u64 = 5;
+
+/// P1 shutdown cascade body. Performs the ordered teardown and drives the
+/// machine into the reset/shutdown SBI call; returns only if every SBI
+/// path failed (caller parks).
+fn shutdown_cascade(cmd: u32) {
+    const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
+    const LINUX_REBOOT_CMD_HALT: u32 = 0xCDEF0123;
+    const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
+
+    // --- 1. Tell init (PID 1) to shut down (SIGTERM, systemd sequence) ---
+    let my_pid = crate::sched::get_current_pid();
+    if my_pid != 1 {
+        crate::println!("reboot: sending SIGTERM to init (pid 1)");
+        let _ = crate::signal::send_signal(1, crate::signal::Signal::SIGTERM as i32);
+
+        // --- 2. Wait for PID 1 to exit (bounded) ---
+        let deadline = crate::drivers::timer::get_jiffies()
+            + crate::drivers::timer::msecs_to_jiffies(SHUTDOWN_PID1_TIMEOUT_SECS * 1000);
+        while crate::drivers::timer::get_jiffies() < deadline {
+            if crate::process::find_task_by_pid(1).is_none() {
+                crate::println!("reboot: init exited");
+                break;
             }
-            loop {}
+            sleep_one_tick();
         }
-        _ => return -(errno::EINVAL as i64),
+        if crate::process::find_task_by_pid(1).is_some() {
+            crate::println!("reboot: init did not exit in time, continuing");
+        }
     }
 
-    0 // unreachable
+    // --- 3. Sync filesystems + minimal rootfs umount (flush + clean) ---
+    crate::println!("reboot: syncing filesystems");
+    if let Err(e) = crate::fs::ext4::ext4_shutdown_sync() {
+        crate::pr_err!("reboot: filesystem sync failed, err={}", e);
+    }
+
+    // --- 4. Drive the machine down ---
+    match cmd {
+        LINUX_REBOOT_CMD_RESTART => {
+            crate::println!("reboot: Restarting system");
+            // SBI SRST warm reset (QEMU supports it); fall back to the
+            // legacy shutdown ecall when the SBI lacks SRST.
+            if !crate::sbi::sbi_system_reset(
+                crate::sbi::srst_type::WARM_REBOOT,
+                crate::sbi::srst_reason::NONE,
+            ) {
+                sbi_legacy_shutdown();
+            }
+        }
+        _ => {
+            // HALT / POWER_OFF: the legacy SBI shutdown ecall powers the
+            // machine down under QEMU.
+            if cmd == LINUX_REBOOT_CMD_HALT {
+                crate::println!("reboot: System halted");
+            } else {
+                crate::println!("reboot: Power down");
+            }
+            sbi_legacy_shutdown();
+        }
+    }
+}
+
+/// SBI legacy shutdown ecall (FID 0x8) — the pre-0.3 power-off path.
+fn sbi_legacy_shutdown() {
+    // SAFETY: privileged SBI ecall; reached only after the CAP_SYS_BOOT
+    // gate in sys_reboot.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") 0x8u64,
+            out("a0") _,
+            out("a1") _,
+            options(nomem)
+        );
+    }
+    // Some SBI implementations return instead of halting — park.
+    loop {
+        // SAFETY: wfi halts the hart until an interrupt.
+        unsafe { core::arch::asm!("wfi") };
+    }
+}
+
+/// P1: sleep ~1 jiffy (10ms) so PID 1 and the exit path can run while the
+/// reboot syscall waits for it (INTERRUPTIBLE sleep + one-shot timer, the
+/// nanosleep/linger discipline).
+fn sleep_one_tick() {
+    use crate::process::task::{Task, TaskState};
+
+    let current = match crate::sched::current() {
+        Some(t) => t as *mut Task,
+        None => return, // no task context: busy caller
+    };
+    // SAFETY: current is the running task's pointer (we are it).
+    let pid = unsafe { (*current).pid() };
+    let wake_at = crate::drivers::timer::get_jiffies() + 1;
+    let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
+    // SAFETY: setting our own task's state.
+    unsafe {
+        (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+    }
+    // R54: re-arm IRQs so the timer tick reaches this CPU.
+    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::sched::schedule();
+    if timer_id != 0 {
+        crate::timer::del_timer(timer_id);
+    }
 }
 
 /// sys_unshare - Create new namespace

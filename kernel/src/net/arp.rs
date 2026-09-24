@@ -494,6 +494,12 @@ pub fn arp_clear() {
     ARP_CACHE.lock_irqsave().clear();
 }
 
+/// P1 /proc/net/arp: snapshot of live (valid) ARP cache entries.
+pub fn arp_dump() -> alloc::vec::Vec<ArpEntry> {
+    let cache = ARP_CACHE.lock_irqsave();
+    cache.entries.iter().filter(|e| e.valid).copied().collect()
+}
+
 /// Build ARP request packet
 ///
 /// # Arguments

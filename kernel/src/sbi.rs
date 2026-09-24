@@ -17,6 +17,30 @@ pub const SBI_EXT_IPI: usize = 0x735049;  // "IPI"
 /// SBI IPI Extension Function IDs
 pub const SBI_EXT_IPI_SEND_IPI: usize = 0;
 
+/// SBI SRST (System Reset) extension: EID 0x53525354 ("SRST")
+pub const SBI_EXT_SRST: usize = 0x53525354;
+
+/// SBI SRST function IDs
+pub const SBI_SRST_FUNCTION_RESET: usize = 0;
+
+/// SBI SRST reset types (FID 0 / a0)
+pub mod srst_type {
+    /// Shutdown the system
+    pub const SHUTDOWN: usize = 0;
+    /// Cold reboot
+    pub const COLD_REBOOT: usize = 1;
+    /// Warm reboot
+    pub const WARM_REBOOT: usize = 2;
+}
+
+/// SBI SRST reset reasons (a1)
+pub mod srst_reason {
+    /// No reason
+    pub const NONE: usize = 0;
+    /// System failure
+    pub const FAILURE: usize = 1;
+}
+
 /// SBI error codes
 pub const SBI_SUCCESS: i64 = 0;
 pub const SBI_ERR_FAILURE: i64 = -1;
@@ -24,6 +48,41 @@ pub const SBI_ERR_NOT_SUPPORTED: i64 = -2;
 pub const SBI_ERR_INVALID_PARAM: i64 = -3;
 pub const SBI_ERR_DENIED: i64 = -4;
 pub const SBI_ERR_INVALID_ADDRESS: i64 = -5;
+
+/// Request a system reset through the SBI SRST extension (SBI 0.3+).
+///
+/// # Arguments
+/// * `reset_type` - srst_type::SHUTDOWN / COLD_REBOOT / WARM_REBOOT
+/// * `reason` - srst_reason::NONE / FAILURE
+///
+/// # Returns
+/// * `true` when the request was accepted (the system is going down —
+///   this call does not return on a compliant SBI implementation)
+pub fn sbi_system_reset(reset_type: usize, reason: usize) -> bool {
+    unsafe {
+        let mut error: u64 = reset_type as u64;
+        let mut value: u64 = reason as u64;
+
+        asm!(
+            "ecall",
+            in("a7") SBI_EXT_SRST as u64,
+            in("a6") SBI_SRST_FUNCTION_RESET as u64,
+            inout("a0") error,
+            inout("a1") value,
+            options(nomem)
+        );
+
+        if error as i64 != SBI_SUCCESS {
+            crate::println!(
+                "sbi: system reset failed, error={} (SRST not supported?)",
+                error as i64
+            );
+            false
+        } else {
+            true
+        }
+    }
+}
 
 /// Send IPI to specified hart
 ///

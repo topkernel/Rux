@@ -9,6 +9,7 @@ pub mod ethernet;
 pub mod arp;
 pub mod icmp;
 pub mod ipv4;
+pub mod ipv6;
 pub mod udp;
 pub mod tcp;
 pub mod tcp_timer;
@@ -26,3 +27,5 @@ pub use socket::{
     SockAddrIn, AF_INET, SOCK_STREAM, SOCK_DGRAM, IPPROTO_TCP, IPPROTO_UDP,
     get_socket, get_socket_from_fd,
 };
+
+pub use ipv6::{AF_INET6, IpAddr};

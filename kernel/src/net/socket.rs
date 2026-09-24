@@ -18,6 +18,8 @@ use crate::fs::file::{File, FileFlags, FileOps, FdTable};
 
 /// Address family
 pub const AF_INET: i32 = 2;
+/// Address family: IPv6 (P1)
+pub const AF_INET6: i32 = 10;
 
 /// Socket types
 pub const SOCK_STREAM: i32 = 1;  // TCP
@@ -147,13 +149,53 @@ impl SockAddrIn {
     }
 }
 
+/// P1 IPv6: sockaddr_in6 (28 bytes — family, port, flowinfo, 16-byte
+/// address, scope_id). Parsed at the syscall boundary; pure-v6 contents
+/// are handed to the protocol layers as [u8;16], v4-mapped contents are
+/// normalized to the v4 fast path.
+#[repr(C)]
+pub struct SockAddrIn6 {
+    pub sin6_family: u16,
+    pub sin6_port: u16,
+    pub sin6_flowinfo: u32,
+    pub sin6_addr: [u8; 16],
+    pub sin6_scope_id: u32,
+}
+
+/// P1 IPv6: sockaddr_in6 length
+pub const SOCKADDR_IN6_LEN: usize = 28;
+
+impl SockAddrIn6 {
+    /// Parse from raw bytes (at least 28 bytes)
+    pub fn from_bytes(data: &[u8]) -> Option<&Self> {
+        if data.len() < SOCKADDR_IN6_LEN {
+            return None;
+        }
+        // SAFETY: length checked above; natural alignment of the repr(C)
+        // fields (u16/u32) is satisfied by the copy-based caller path.
+        unsafe {
+            Some(&*(data.as_ptr() as *const SockAddrIn6))
+        }
+    }
+
+    /// Port (host byte order)
+    pub fn port(&self) -> u16 {
+        u16::from_be(self.sin6_port)
+    }
+
+    /// Address (network byte order)
+    pub fn addr(&self) -> [u8; 16] {
+        self.sin6_addr
+    }
+}
+
 /// Receive buffer packet
 #[derive(Clone)]
 pub struct RecvPacket {
     /// Data
     pub data: alloc::vec::Vec<u8>,
-    /// Source address
-    pub src_addr: u32,
+    /// Source address (P1: family-aware — v4 datagrams carry V4)
+    pub src_addr: crate::net::ipv6::IpAddr,
     /// Source port
     pub src_port: u16,
 }
@@ -177,16 +219,23 @@ pub enum SocketState {
 pub struct Socket {
     /// Socket type
     pub sock_type: SocketType,
+    /// P1 IPv6: creation family (AF_INET or AF_INET6). Immutable after
+    /// create — drives the sockaddr shape reported to userspace.
+    pub family: i32,
     /// Socket state
     pub state: Spinlock<SocketState>,
     /// Local port
     pub local_port: Spinlock<u16>,
     /// Local IP
     pub local_addr: Spinlock<u32>,
+    /// P1 IPv6: local address for pure-v6 sockets
+    pub local_addr6: Spinlock<crate::net::ipv6::Ipv6Addr>,
     /// Remote port
     pub remote_port: Spinlock<u16>,
     /// Remote IP
     pub remote_addr: Spinlock<u32>,
+    /// P1 IPv6: remote address for pure-v6 sockets
+    pub remote_addr6: Spinlock<crate::net::ipv6::Ipv6Addr>,
     /// Receive buffer
     pub recv_queue: Spinlock<VecDeque<RecvPacket>>,
     /// Whether bound
@@ -216,13 +265,21 @@ unsafe impl Sync for Socket {}
 impl Socket {
     /// Create a new Socket
     pub fn new(sock_type: SocketType) -> Self {
+        Self::new_family(sock_type, AF_INET)
+    }
+
+    /// P1 IPv6: create a Socket for a given address family.
+    pub fn new_family(sock_type: SocketType, family: i32) -> Self {
         Self {
             sock_type,
+            family,
             state: Spinlock::new(SocketState::Unconnected),
             local_port: Spinlock::new(0),
             local_addr: Spinlock::new(0),
+            local_addr6: Spinlock::new(crate::net::ipv6::IPV6_ADDR_UNSPECIFIED),
             remote_port: Spinlock::new(0),
             remote_addr: Spinlock::new(0),
+            remote_addr6: Spinlock::new(crate::net::ipv6::IPV6_ADDR_UNSPECIFIED),
             recv_queue: Spinlock::new(VecDeque::new()),
             bound: Spinlock::new(false),
             tcp_fd: core::sync::atomic::AtomicI32::new(-1),
@@ -231,6 +288,11 @@ impl Socket {
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
         }
+    }
+
+    /// P1 IPv6: is this an AF_INET6 socket?
+    pub fn is_ipv6(&self) -> bool {
+        self.family == AF_INET6
     }
 
     /// W3: SO_RCVTIMEO as an absolute jiffies deadline (None = infinite).
@@ -282,6 +344,48 @@ impl Socket {
         }
 
         *self.local_addr.lock() = addr;
+        if port != 0 {
+            *self.local_port.lock() = port;
+        }
+        *self.bound.lock() = true;
+        Ok(())
+    }
+
+    /// P1 IPv6: bind to a pure v6 address/port (same semantics as bind()).
+    pub fn bind6(&self, addr: crate::net::ipv6::Ipv6Addr, port: u16) -> Result<(), i32> {
+        match self.sock_type {
+            SocketType::Tcp => {
+                // TCP bind ignores the local address in this stack — but a
+                // v6 listener must mark its slot so inbound v6 SYNs match.
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 {
+                    return Err(-9);
+                }
+                let ret = crate::net::tcp::tcp_bind(tcp_fd, port);
+                if ret != 0 {
+                    return Err(ret);
+                }
+                crate::net::tcp::tcp_set_v6_local(tcp_fd, addr);
+                if port == 0 {
+                    *self.local_port.lock() = crate::net::tcp::tcp_local_port(tcp_fd);
+                }
+            }
+            SocketType::Udp => {
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 {
+                    return Err(-9);
+                }
+                let ret = crate::net::udp::udp_bind6(udp_fd, addr, port);
+                if ret != 0 {
+                    return Err(ret);
+                }
+                if port == 0 {
+                    *self.local_port.lock() = crate::net::udp::udp_local_port(udp_fd);
+                }
+            }
+        }
+
+        *self.local_addr6.lock() = addr;
         if port != 0 {
             *self.local_port.lock() = port;
         }
@@ -344,8 +448,51 @@ impl Socket {
         }
     }
 
+    /// P1 IPv6: connect to a pure v6 remote (same semantics as connect()).
+    pub fn connect6(&self, addr: crate::net::ipv6::Ipv6Addr, port: u16) -> Result<(), i32> {
+        *self.remote_addr6.lock() = addr;
+        *self.remote_port.lock() = port;
+
+        match self.sock_type {
+            SocketType::Tcp => {
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
+                *self.state.lock() = SocketState::Connecting;
+                let ret = crate::net::tcp::tcp_connect6(tcp_fd, &addr, port);
+                if ret == 0 {
+                    // Mirror the effective local v6 address back for
+                    // getsockname (tcp_connect6 filled the slot's source).
+                    let (local6, lport) = crate::net::tcp::tcp_local_endpoint6(tcp_fd);
+                    if !crate::net::ipv6::is_unspecified(&local6) {
+                        *self.local_addr6.lock() = local6;
+                    }
+                    if lport != 0 {
+                        *self.local_port.lock() = lport;
+                    }
+                    *self.state.lock() = SocketState::Connected;
+                    Ok(())
+                } else {
+                    *self.state.lock() = SocketState::Unconnected;
+                    self.options.lock().error = -ret;
+                    Err(ret)
+                }
+            }
+            SocketType::Udp => {
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
+                let _ = crate::net::udp::udp_connect6(udp_fd, addr, port);
+                *self.state.lock() = SocketState::Connected;
+                Ok(())
+            }
+        }
+    }
+
     /// Send data
-    pub fn send(&self, buf: &[u8], dest_addr: Option<(u32, u16)>) -> Result<usize, i32> {
+    pub fn send(
+        &self,
+        buf: &[u8],
+        dest_addr: Option<(crate::net::ipv6::IpAddr, u16)>,
+    ) -> Result<usize, i32> {
         match self.sock_type {
             SocketType::Tcp => {
                 let state = *self.state.lock();
@@ -425,13 +572,20 @@ impl Socket {
                 let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
                 if udp_fd < 0 { return Err(-9); }
 
-                if let Some((addr, port)) = dest_addr {
-                    // Explicit destination: use udp_sendto (review NET-M5 —
-                    // both branches used to call udp_send, which requires a
-                    // connected socket and always returned ENOTCONN).
-                    // R24 (HIGH-6): the raw udp_socket_get() presence probe
-                    // raced the table — udp_sendto already returns EBADF.
-                    let ret = crate::net::udp::udp_sendto(udp_fd, buf, addr, port);
+                if let Some((dest, port)) = dest_addr {
+                    // Explicit destination: use the family-aware sendto.
+                    // P1 IPv6: pure v6 destinations take the v6 wire path;
+                    // v4 (incl. v4-mapped, normalized at the syscall
+                    // boundary) takes the v4 path.
+                    // R24 (HIGH-6): udp_sendto already returns EBADF.
+                    let ret = match dest {
+                        crate::net::ipv6::IpAddr::V4(addr) => {
+                            crate::net::udp::udp_sendto(udp_fd, buf, addr, port)
+                        }
+                        crate::net::ipv6::IpAddr::V6(addr6) => {
+                            crate::net::udp::udp_sendto6(udp_fd, buf, addr6, port)
+                        }
+                    };
                     if ret >= 0 {
                         Ok(ret as usize)
                     } else {
@@ -450,7 +604,7 @@ impl Socket {
     }
 
     /// Receive data
-    pub fn recv(&self, buf: &mut [u8]) -> Result<(usize, Option<(u32, u16)>), i32> {
+    pub fn recv(&self, buf: &mut [u8]) -> Result<(usize, Option<(crate::net::ipv6::IpAddr, u16)>), i32> {
         match self.sock_type {
             SocketType::Tcp => {
                 let state = *self.state.lock();
@@ -511,7 +665,12 @@ impl Socket {
                             } else {
                                 match socket.recv(buf, buf.len(), &mut tx) {
                                     Ok(len) if len > 0 => {
-                                        Some(Ok((len, Some((socket.remote_ip, socket.remote_port)))))
+                                        let src = if socket.is_v6 {
+                                            crate::net::ipv6::IpAddr::V6(socket.remote_ip6)
+                                        } else {
+                                            crate::net::ipv6::IpAddr::V4(socket.remote_ip)
+                                        };
+                                        Some(Ok((len, Some((src, socket.remote_port)))))
                                     }
                                     // R22-4: zero-length read on a half/RST-closed
                                     // connection is EOF — returning EAGAIN here made
@@ -549,7 +708,9 @@ impl Socket {
                 if udp_fd < 0 { return Err(-9); }
                 // W3: take the source address too — recvfrom()/recvmsg() on a
                 // UDP socket used to always get None (no msg_name written).
-                match crate::net::udp::udp_recvfrom(udp_fd, buf, buf.len()) {
+                // P1 IPv6: family-aware source reporting (v6 sockets see the
+                // datagram's v6 address; v4 sockets see the u32).
+                match crate::net::udp::udp_recvfrom_ext(udp_fd, buf) {
                     Ok((len, src_addr, src_port)) => {
                         if len > 0 {
                             Ok((len as usize, Some((src_addr, src_port))))
@@ -621,16 +782,31 @@ impl Socket {
                                 (o.linger_on, o.linger_secs)
                             };
                             if linger_on && linger_secs == 0 {
-                                let _ = tx.push_ctl(
-                                    socket.local_ip,
-                                    socket.remote_ip,
-                                    socket.local_port,
-                                    socket.remote_port,
-                                    socket.snd_nxt,
-                                    socket.rcv_nxt,
-                                    0x0014, // RST + ACK
-                                    0,
-                                );
+                                // P1 IPv6: abortive RST honors the slot's
+                                // family (v6 slots carry v6 endpoints).
+                                if socket.is_v6 {
+                                    let _ = tx.push_ctl6(
+                                        &socket.local_ip6,
+                                        &socket.remote_ip6,
+                                        socket.local_port,
+                                        socket.remote_port,
+                                        socket.snd_nxt,
+                                        socket.rcv_nxt,
+                                        0x0014, // RST + ACK
+                                        0,
+                                    );
+                                } else {
+                                    let _ = tx.push_ctl(
+                                        socket.local_ip,
+                                        socket.remote_ip,
+                                        socket.local_port,
+                                        socket.remote_port,
+                                        socket.snd_nxt,
+                                        socket.rcv_nxt,
+                                        0x0014, // RST + ACK
+                                        0,
+                                    );
+                                }
                                 socket.send_buffer.clear();
                                 socket.retrans_queue.clear();
                                 socket.ooo_queue.clear();
@@ -844,7 +1020,7 @@ pub fn socket_recv_ctl(
     buf: &mut [u8],
     nonblock: bool,
     deadline: Option<u64>,
-) -> Result<(usize, Option<(u32, u16)>), i32> {
+) -> Result<(usize, Option<(crate::net::ipv6::IpAddr, u16)>), i32> {
     loop {
         // Loopback TX only queues; drain so in-machine peers' data lands
         // before the would-block decision (same rationale as sys_accept).
@@ -900,7 +1076,7 @@ fn socket_read(file: &File, buf: &mut [u8]) -> isize {
 pub fn socket_send_ctl(
     socket: &Socket,
     buf: &[u8],
-    dest: Option<(u32, u16)>,
+    dest: Option<(crate::net::ipv6::IpAddr, u16)>,
     nonblock: bool,
     deadline: Option<u64>,
 ) -> Result<usize, i32> {
@@ -1170,7 +1346,10 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
     if domain == crate::net::netlink::AF_NETLINK {
         return crate::net::netlink::netlink_socket_create(type_, protocol);
     }
-    if domain != AF_INET {
+    // P1 IPv6: AF_INET6 sockets share the TCP/UDP protocol tables; the
+    // family only shapes the sockaddr conversions at this layer (a
+    // v4-mapped peer address normalizes to the v4 fast path).
+    if domain != AF_INET && domain != AF_INET6 {
         return Err(-97); // EAFNOSUPPORT
     }
 
@@ -1206,7 +1385,7 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
         SocketType::Udp => crate::net::udp::udp_socket_alloc()?,
     };
 
-    let socket = Arc::new(Socket::new(sock_type));
+    let socket = Arc::new(Socket::new_family(sock_type, domain));
     match sock_type {
         SocketType::Tcp => socket.tcp_fd.store(proto_fd, core::sync::atomic::Ordering::Release),
         SocketType::Udp => socket.udp_fd.store(proto_fd, core::sync::atomic::Ordering::Release),
@@ -1290,7 +1469,19 @@ pub fn get_socket(fd: usize) -> Option<Arc<Socket>> {
 ///
 /// W3: `flags` carries accept4()'s SOCK_CLOEXEC / SOCK_NONBLOCK.
 pub fn socket_create_accepted(tcp_fd: i32, flags: i32) -> Result<usize, i32> {
-    let socket = Arc::new(Socket::new(SocketType::Tcp));
+    // P1 IPv6: family mirrors the protocol slot (children spawned by a v6
+    // listener carry is_v6).
+    let mut family = AF_INET;
+    {
+        let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
+        if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
+            if ts.is_v6 {
+                family = AF_INET6;
+            }
+        }
+    }
+
+    let socket = Arc::new(Socket::new_family(SocketType::Tcp, family));
     socket.tcp_fd.store(tcp_fd, core::sync::atomic::Ordering::Release);
     // R21-N4: pin the protocol slot against timer-side reaping, and copy
     // the endpoint fields — R24: both under TCP_TABLE_LOCK and revalidated,
@@ -1303,11 +1494,13 @@ pub fn socket_create_accepted(tcp_fd: i32, flags: i32) -> Result<usize, i32> {
             Some(ts) if ts.state != crate::net::tcp::TcpState::TCP_CLOSE => {
                 ts.user_refs.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
                 // Copy the connection's local/remote endpoints for
-                // getsockname/peername.
+                // getsockname/peername (P1: both families).
                 *socket.local_port.lock() = ts.local_port;
                 *socket.local_addr.lock() = ts.local_ip;
+                *socket.local_addr6.lock() = ts.local_ip6;
                 *socket.remote_port.lock() = ts.remote_port;
                 *socket.remote_addr.lock() = ts.remote_ip;
+                *socket.remote_addr6.lock() = ts.remote_ip6;
             }
             // Connection died (RST / timeout) between accept and pinning —
             // abort instead of wrapping a doomed/freed slot.

@@ -593,6 +593,9 @@ pub extern "C" fn rust_main() -> ! {
             crate::net::tcp::init_tcp_manager();
             crate::net::tcp_timer::init_tcp_timer_manager();
             crate::net::ipv4::route::route_init();
+            // P1 IPv6: SLAAC link-local (fe80::/64 + EUI-64) + Router
+            // Solicitation. No NIC is fine — the stack simply stays v4-only.
+            crate::net::ipv6::ipv6_init();
         }
 
         // Initialize security subsystem (before scheduler / process creation)

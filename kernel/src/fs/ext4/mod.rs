@@ -1067,6 +1067,50 @@ pub fn is_mounted() -> bool {
     !GLOBAL_EXT4_FS.load(Ordering::Acquire).is_null()
 }
 
+/// P1 shutdown cascade: flush and mark the ext4 root filesystem clean.
+///
+/// Minimal umount semantics:
+/// 1. flush the whole buffer cache (all dirty block buffers hit the disk),
+/// 2. rewrite the superblock's s_state to EXT4_VALID_FS (clean) through the
+///    same buffer cache and sync that block,
+/// 3. persist the device's volatile write cache.
+///
+/// The filesystem stays mounted in memory (full teardown would need to
+/// evict every inode/dentry reference); on the power-off path nothing runs
+/// afterwards anyway, and on the restart path the fresh boot re-reads the
+/// on-disk superblock and sees a clean unmount.
+pub fn ext4_shutdown_sync() -> Result<(), i32> {
+    use core::sync::atomic::Ordering;
+
+    // 1. All dirty data/metadata buffers.
+    crate::fs::bio::sync_buffers()?;
+
+    // 2. Superblock clean marking (block 0, byte offset 1024 + 58).
+    let fs_ptr = GLOBAL_EXT4_FS.load(Ordering::Acquire);
+    if fs_ptr.is_null() {
+        return Ok(()); // no ext4 root — nothing to mark
+    }
+    // SAFETY: fs_ptr was set by mount_ext4 (Box::into_raw) and the fs is
+    // still mounted; only the device pointer and block size are read.
+    unsafe {
+        let device = (*fs_ptr).device;
+        if let Some(bh) = crate::fs::bio::bread(device, 0) {
+            // s_state offset within the on-disk superblock: 13 u32 fields
+            // (52) + s_mnt_count(2) + s_max_mnt_count(2) + s_magic(2) = 58.
+            const SB_OFF: usize = 1024;
+            const S_STATE_OFF: usize = SB_OFF + 58;
+            const EXT4_VALID_FS: u16 = 1;
+            (*bh).write(S_STATE_OFF, &EXT4_VALID_FS.to_le_bytes());
+            let r = crate::fs::bio::sync_dirty_buffer(bh);
+            crate::fs::bio::brelse(bh);
+            r?;
+        }
+    }
+
+    // 3. Disk-side volatile cache.
+    crate::drivers::virtio::flush_pci_blk()
+}
+
 /// Create a VFS inode for the ext4 root directory (inode 2).
 /// Called during mount to set up the root dentry's inode.
 pub fn create_root_inode() -> alloc::sync::Arc<Inode> {

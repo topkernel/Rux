@@ -255,11 +255,31 @@ pub fn eth_addr_zero(addr: &mut [u8; ETH_ALEN]) {
 /// packet is parked on the bounded per-IP pending queue (R35) and the
 /// ARP request goes out immediately; the packet is flushed unicast when
 /// the reply lands.
+///
+/// P1 IPv6: frames starting with an IPv6 header (version nibble 6) are
+/// resolved through the NDP neighbor cache instead of ARP — multicast
+/// destinations map to 33:33:xx MACs directly, and an unresolved unicast
+/// neighbor triggers a Neighbor Solicitation (the triggering packet is
+/// dropped; upper-layer retransmits find the cache populated).
 pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
     let src_mac = match get_device_mac() {
         Some(mac) => mac,
         None => [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
     };
+
+    // SAFETY: skb.data and skb.len describe a valid byte range.
+    let first = unsafe {
+        if skb.len > 0 {
+            Some(*skb.data)
+        } else {
+            None
+        }
+    };
+
+    // ---- IPv6 path (P1) ----
+    if first.map(|b| b >> 4 == 6).unwrap_or(false) {
+        return ethernet_send_ipv6(skb, src_mac);
+    }
 
     // Parse the IPv4 destination once: the loopback short-circuit and the
     // ARP resolution below both need it.
@@ -300,6 +320,60 @@ pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
     };
 
     eth_push_header(&mut skb, dest_mac, src_mac, EthProtocol::ETH_P_IP)?;
+
+    match transmit_to_device(skb) {
+        0 => Ok(()),
+        _ => Err(()),
+    }
+}
+
+/// P1 IPv6 output: resolve the Ethernet destination from the IPv6 header's
+/// daddr (byte offset 24 in the base header) via the neighbor cache and
+/// transmit as an 0x86DD frame. Consumes `skb`.
+fn ethernet_send_ipv6(mut skb: SkBuff, src_mac: [u8; ETH_ALEN]) -> Result<(), ()> {
+    if (skb.len as usize) < crate::net::ipv6::IPV6_HDR_LEN {
+        return Err(());
+    }
+
+    // SAFETY: length checked above; daddr occupies bytes [24, 40) of the
+    // base header (repr(C) Ipv6Hdr field order validated by size 40).
+    let daddr = unsafe {
+        let mut d = [0u8; 16];
+        core::ptr::copy_nonoverlapping(skb.data.add(24), d.as_mut_ptr(), 16);
+        d
+    };
+
+    // Loopback: ::1 short-circuits to the loopback device (no MAC to
+    // resolve — mirrors the 127/8 v4 path).
+    if daddr == crate::net::ipv6::IPV6_ADDR_LOOPBACK {
+        eth_push_header(
+            &mut skb,
+            [0, 0, 0, 0, 0, 0],
+            src_mac,
+            EthProtocol::ETH_P_IPV6,
+        )?;
+        let _ = crate::drivers::net::loopback::loopback_send(skb);
+        return Ok(());
+    }
+
+    // Multicast destinations map deterministically to 33:33: MACs; unicast
+    // goes through the NDP neighbor cache, sending an NS on a miss.
+    let dest_mac = if crate::net::ipv6::is_multicast(&daddr) {
+        crate::net::ipv6::multicast_mac(&daddr)
+    } else {
+        match crate::net::ipv6::neigh_lookup(&daddr) {
+            Some(mac) => mac,
+            None => {
+                // Trigger resolution and drop this frame — the neighbor's
+                // NA populates the cache and the upper-layer retransmit
+                // (TCP RTO / UDP app retry / ping resend) succeeds.
+                crate::net::ipv6::icmpv6::send_ns(&daddr);
+                return Err(());
+            }
+        }
+    };
+
+    eth_push_header(&mut skb, dest_mac, src_mac, EthProtocol::ETH_P_IPV6)?;
 
     match transmit_to_device(skb) {
         0 => Ok(()),
@@ -404,8 +478,13 @@ pub fn ethernet_rcv(mut skb: SkBuff) -> Result<(), ()> {
         EthProtocol::ETH_P_ARP => {
             let _ = crate::net::arp::arp_rcv(&skb, eth_hdr);
         }
+        // P1 IPv6: dispatch to the v6 stack (base header still attached —
+        // ipv6_rcv pulls it itself, mirroring ip_rcv).
+        EthProtocol::ETH_P_IPV6 => {
+            let _ = crate::net::ipv6::ipv6_rcv(&mut skb);
+        }
         _ => {
-            // Unknown ethertype (VLAN, IPv6, ...): drop instead of the old
+            // Unknown ethertype (VLAN, ...): drop instead of the old
             // unwrap_or(ETH_P_IP) fallback that mis-parsed them as IPv4.
         }
     }

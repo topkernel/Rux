@@ -712,21 +712,24 @@ impl MmStruct {
         {
             // Snapshot VMA data under parent read-lock, then drop it before
             // acquiring child write-lock to avoid nested read-then-write deadlock.
-            let vma_snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64)> = {
+            let vma_snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)> = {
                 let vma_mgr = self.vma_read();
                 vma_mgr.iter().map(|vma| {
-                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size())
+                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset())
                 }).collect()
             };
             // Parent read-lock is now dropped.
 
             if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();
-                for (start, end, flags, vma_type, file_fd, file_size) in vma_snapshot {
+                for (start, end, flags, vma_type, file_fd, file_size, offset) in vma_snapshot {
                     let mut new_vma = Vma::new(start, end, flags);
                     new_vma.set_type(vma_type);
                     new_vma.set_file_fd(file_fd);
                     new_vma.set_file_size(file_size);
+                    // File-offset continuity across fork (P1: also needed by
+                    // the exec-image-backed segment VMAs' fd fallback path).
+                    new_vma.set_offset(offset);
                     // Increment nattch for shared memory attachments inherited by child
                     if vma_type == crate::mm::vma::VmaType::SharedMemory && file_fd >= 0 {
                         crate::ipc::sysv_shm::shm_attach_vma(file_fd);
@@ -735,6 +738,9 @@ impl MmStruct {
                 }
             }
         }
+
+        // P1 exec demand paging: the child's segment VMAs are unfaulted or
+        // COW-shared; their backing image is shared (Arc) with the parent.
 
         new_space.set_start_code(self.start_code());
         new_space.set_end_code(self.end_code());

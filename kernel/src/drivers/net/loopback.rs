@@ -149,6 +149,11 @@ pub fn loopback_reset_stats() {
     *stats = DeviceStats::default();
 }
 
+/// P1 /proc/net/dev: loopback statistics snapshot.
+pub fn loopback_stats() -> DeviceStats {
+    LO_STATS.read()
+}
+
 /// Send packet to loopback device
 ///
 /// # Parameters

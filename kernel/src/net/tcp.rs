@@ -23,6 +23,25 @@ fn generate_isn(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16) -> TcpSe
     TcpSeq::from_be(hash.wrapping_add(base))
 }
 
+/// P1 IPv6: ISN over the 128-bit 4-tuple (FNV-style fold, same shape).
+fn generate_isn6(
+    src6: &crate::net::ipv6::Ipv6Addr,
+    src_port: u16,
+    dst6: &crate::net::ipv6::Ipv6Addr,
+    dst_port: u16,
+) -> TcpSeq {
+    let base = ISN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut hash: u32 = 0x811c9dc5;
+    for &b in src6.iter().chain(dst6.iter()) {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash ^= (src_port as u32).wrapping_mul(41);
+    hash ^= (dst_port as u32).wrapping_mul(43);
+    hash = hash.wrapping_add(crate::drivers::timer::get_jiffies() as u32);
+    TcpSeq::from_be(hash.wrapping_add(base))
+}
+
 /// TCP header lengths
 pub const TCP_MIN_HLEN: usize = 20;
 pub const TCP_MAX_HLEN: usize = 60;
@@ -47,6 +66,52 @@ pub const TCP_PERSIST_INTERVAL_JIFFIES: u64 = 500;
 
 /// TCP port number
 pub type TcpPort = u16;
+
+/// P1 IPv6: family-aware segment recording on copied endpoints (used by
+/// TcpSocket::tx_record and by the retransmit path, which holds a &mut into
+/// self.retrans_queue and cannot borrow self again).
+#[allow(clippy::too_many_arguments)]
+fn tx_record_endpoints(
+    is_v6: bool,
+    local_ip: u32,
+    remote_ip: u32,
+    local_ip6: crate::net::ipv6::Ipv6Addr,
+    remote_ip6: crate::net::ipv6::Ipv6Addr,
+    local_port: u16,
+    remote_port: u16,
+    tx: &mut TcpTxBatch,
+    seq: TcpSeq,
+    ack: TcpAck,
+    flags: u16,
+    window: u16,
+    data: &[u8],
+) -> bool {
+    if is_v6 {
+        tx.push6(
+            &local_ip6,
+            &remote_ip6,
+            local_port,
+            remote_port,
+            seq,
+            ack,
+            flags,
+            window,
+            data,
+        )
+    } else {
+        tx.push(
+            local_ip,
+            remote_ip,
+            local_port,
+            remote_port,
+            seq,
+            ack,
+            flags,
+            window,
+            data,
+        )
+    }
+}
 
 /// TCP sequence number
 pub type TcpSeq = u32;
@@ -264,6 +329,10 @@ pub struct TcpOooSeg {
 /// One wire-ready TX decision (R35). Addresses/ports in host byte order;
 /// `tcp_build_packet`/`ipv4_send_src` convert at emit time exactly like
 /// the old inline senders did.
+///
+/// P1 IPv6: `is_v6` descriptors carry the endpoints in `src_ip6`/`dst_ip6`
+/// and are emitted through tcp_build_packet6 + ipv6_send; the u32 fields
+/// stay 0 for them.
 #[derive(Debug, Clone, Copy)]
 pub struct TcpTxDesc {
     /// Source IP (host order)
@@ -288,6 +357,12 @@ pub struct TcpTxDesc {
     pub off: usize,
     /// Payload length
     pub len: usize,
+    /// P1 IPv6: emit through the v6 path
+    pub is_v6: bool,
+    /// P1 IPv6: source address (network byte order)
+    pub src_ip6: crate::net::ipv6::Ipv6Addr,
+    /// P1 IPv6: destination address (network byte order)
+    pub dst_ip6: crate::net::ipv6::Ipv6Addr,
 }
 
 /// Batch of pending TX segments (R35).
@@ -362,6 +437,50 @@ impl TcpTxBatch {
             off,
             len: data.len(),
             ttl: self.ttl,
+            is_v6: false,
+            src_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
+            dst_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
+        });
+        true
+    }
+
+    /// P1 IPv6: record a segment with v6 endpoints (see push).
+    #[allow(clippy::too_many_arguments)]
+    pub fn push6(
+        &mut self,
+        src_ip6: &crate::net::ipv6::Ipv6Addr,
+        dst_ip6: &crate::net::ipv6::Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+        seq: TcpSeq,
+        ack: TcpAck,
+        flags: u16,
+        window: u16,
+        data: &[u8],
+    ) -> bool {
+        if self.descs.len() >= self.descs.capacity()
+            || self.arena.capacity() - self.arena.len() < data.len()
+        {
+            return false;
+        }
+        let off = self.arena.len();
+        // Within reserved capacity: pure memcpy, cannot allocate.
+        self.arena.extend_from_slice(data);
+        self.descs.push(TcpTxDesc {
+            src_ip: 0,
+            dst_ip: 0,
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            flags,
+            window,
+            off,
+            len: data.len(),
+            ttl: self.ttl,
+            is_v6: true,
+            src_ip6: *src_ip6,
+            dst_ip6: *dst_ip6,
         });
         true
     }
@@ -379,6 +498,22 @@ impl TcpTxBatch {
         window: u16,
     ) -> bool {
         self.push(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, window, &[])
+    }
+
+    /// P1 IPv6: record a header-only v6 segment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_ctl6(
+        &mut self,
+        src_ip6: &crate::net::ipv6::Ipv6Addr,
+        dst_ip6: &crate::net::ipv6::Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+        seq: TcpSeq,
+        ack: TcpAck,
+        flags: u16,
+        window: u16,
+    ) -> bool {
+        self.push6(src_ip6, dst_ip6, src_port, dst_port, seq, ack, flags, window, &[])
     }
 
     /// Remaining descriptor slots.
@@ -408,6 +543,23 @@ impl TcpTxBatch {
         self.descs.push(TcpTxDesc {
             src_ip, dst_ip, src_port, dst_port, seq, ack, flags, window, off, len,
             ttl: self.ttl,
+            is_v6: false,
+            src_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
+            dst_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
+        });
+    }
+
+    /// P1 IPv6: commit a v6 descriptor for arena-placed payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit6(&mut self, src_ip6: &crate::net::ipv6::Ipv6Addr, dst_ip6: &crate::net::ipv6::Ipv6Addr,
+                   src_port: u16, dst_port: u16,
+                   seq: TcpSeq, ack: TcpAck, flags: u16, window: u16, off: usize, len: usize) {
+        self.descs.push(TcpTxDesc {
+            src_ip: 0, dst_ip: 0, src_port, dst_port, seq, ack, flags, window, off, len,
+            ttl: self.ttl,
+            is_v6: true,
+            src_ip6: *src_ip6,
+            dst_ip6: *dst_ip6,
         });
     }
 
@@ -429,6 +581,34 @@ impl TcpTxBatch {
             };
             if !data.is_empty() && skb.skb_put_data(data).is_err() {
                 skb.free();
+                continue;
+            }
+            // P1 IPv6: v6 descriptors carry the 128-bit endpoints and use
+            // the v6 checksum + output path.
+            if d.is_v6 {
+                if tcp_build_packet6(
+                    &mut skb,
+                    d.src_port,
+                    d.dst_port,
+                    d.seq,
+                    d.ack,
+                    d.flags,
+                    d.window,
+                    &d.src_ip6,
+                    &d.dst_ip6,
+                )
+                .is_err()
+                {
+                    skb.free();
+                    continue;
+                }
+                let _ = crate::net::ipv6::ipv6_send_hops(
+                    skb,
+                    &d.src_ip6,
+                    &d.dst_ip6,
+                    crate::net::ipv6::next_header::TCP,
+                    d.ttl,
+                );
                 continue;
             }
             if tcp_build_packet(
@@ -727,6 +907,13 @@ pub struct TcpSocket {
     pub remote_ip: u32,
     /// Local IP address
     pub local_ip: u32,
+    /// P1 IPv6: pure v6 connection (v4-mapped peers normalize to the u32
+    /// fields at the syscall boundary)
+    pub is_v6: bool,
+    /// P1 IPv6: local address
+    pub local_ip6: crate::net::ipv6::Ipv6Addr,
+    /// P1 IPv6: remote address
+    pub remote_ip6: crate::net::ipv6::Ipv6Addr,
     /// TCP state
     pub state: TcpState,
     /// Whether bound
@@ -823,6 +1010,9 @@ impl TcpSocket {
             remote_port: 0,
             remote_ip: 0,
             local_ip: 0,
+            is_v6: false,
+            local_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
+            remote_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
             state: TcpState::TCP_CLOSE,
             bound: false,
             parent_fd: None,
@@ -871,6 +1061,50 @@ impl TcpSocket {
         Ok(())
     }
 
+    // ==================== P1 IPv6: family-aware TX recording ====================
+
+    /// Record a data/ctl segment honoring the socket's address family.
+    /// All internal senders route through this so v4 sockets and v6
+    /// sockets share one state machine.
+    #[allow(clippy::too_many_arguments)]
+    fn tx_record(
+        &self,
+        tx: &mut TcpTxBatch,
+        seq: TcpSeq,
+        ack: TcpAck,
+        flags: u16,
+        window: u16,
+        data: &[u8],
+    ) -> bool {
+        tx_record_endpoints(
+            self.is_v6,
+            self.local_ip,
+            self.remote_ip,
+            self.local_ip6,
+            self.remote_ip6,
+            self.local_port,
+            self.remote_port,
+            tx,
+            seq,
+            ack,
+            flags,
+            window,
+            data,
+        )
+    }
+
+    /// tx_record for a header-only segment.
+    fn tx_record_ctl(
+        &self,
+        tx: &mut TcpTxBatch,
+        seq: TcpSeq,
+        ack: TcpAck,
+        flags: u16,
+        window: u16,
+    ) -> bool {
+        self.tx_record(tx, seq, ack, flags, window, &[])
+    }
+
     /// Listen on port
     ///
     /// # Arguments
@@ -910,6 +1144,29 @@ impl TcpSocket {
         Ok(())
     }
 
+    /// P1 IPv6: active open to a pure v6 remote. Same state machine as
+    /// connect(); only the endpoints (and ISN hashing input) differ.
+    pub fn connect6(
+        &mut self,
+        ip6: &crate::net::ipv6::Ipv6Addr,
+        port: TcpPort,
+        tx: &mut TcpTxBatch,
+    ) -> Result<(), ()> {
+        self.is_v6 = true;
+        self.remote_ip6 = *ip6;
+        self.remote_port = port;
+
+        self.snd_nxt = generate_isn6(&self.local_ip6, self.local_port, ip6, port);
+        self.snd_una = self.snd_nxt;
+        self.rcv_nxt = 0;
+
+        self.send_syn(tx)?;
+        self.state = TcpState::TCP_SYN_SENT;
+        self.timers.start_retransmit(crate::config::TCP_RTO_DEFAULT_US);
+
+        Ok(())
+    }
+
     /// Re-send the initial SYN (R32-N16, called from the timer tick).
     /// `snd_nxt` still holds the SYN's sequence number in SYN_SENT, so
     /// send_syn() re-emits the identical segment.
@@ -922,11 +1179,8 @@ impl TcpSocket {
     /// R35: records into `tx` instead of emitting — the virtio TX spin
     /// must never run under TCP_TABLE_LOCK.
     fn send_syn(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
-        if tx.push_ctl(
-            self.local_ip,
-            self.remote_ip,
-            self.local_port,
-            self.remote_port,
+        if self.tx_record_ctl(
+            tx,
             self.snd_nxt,
             0, // ACK number is 0
             0x0002, // SYN flag
@@ -957,11 +1211,8 @@ impl TcpSocket {
     /// accounting (R32-N16). Used both by the handshake and by the
     /// SYN_RECV retransmission path — resending must NOT advance snd_nxt.
     fn send_synack_packet(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
-        if tx.push_ctl(
-            self.local_ip,
-            self.remote_ip,
-            self.local_port,
-            self.remote_port,
+        if self.tx_record_ctl(
+            tx,
             self.snd_nxt,
             self.rcv_nxt,
             0x0012, // SYN + ACK flags
@@ -975,11 +1226,8 @@ impl TcpSocket {
 
     /// Send ACK packet (third step of three-way handshake)
     fn send_ack(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
-        if tx.push_ctl(
-            self.local_ip,
-            self.remote_ip,
-            self.local_port,
-            self.remote_port,
+        if self.tx_record_ctl(
+            tx,
             self.snd_nxt,
             self.rcv_nxt,
             0x0010, // ACK flag
@@ -996,11 +1244,8 @@ impl TcpSocket {
     /// FIN consumes one sequence number per RFC 793, so snd_nxt is
     /// incremented after sending.
     fn send_fin(&mut self, tx: &mut TcpTxBatch) -> Result<(), ()> {
-        tx.push_ctl(
-            self.local_ip,
-            self.remote_ip,
-            self.local_port,
-            self.remote_port,
+        self.tx_record_ctl(
+            tx,
             self.snd_nxt,
             self.rcv_nxt,
             0x0011, // FIN + ACK flags
@@ -1693,18 +1938,33 @@ impl TcpSocket {
             rdata.extend_from_slice(tx.arena_slice(off, seg_size));
 
             // Record the segment for post-lock emission.
-            tx.commit(
-                self.local_ip,
-                self.remote_ip,
-                self.local_port,
-                self.remote_port,
-                self.snd_nxt,
-                self.rcv_nxt,
-                0x0018, // PSH + ACK
-                self.rcv_wnd,
-                off,
-                seg_size,
-            );
+            if self.is_v6 {
+                tx.commit6(
+                    &self.local_ip6,
+                    &self.remote_ip6,
+                    self.local_port,
+                    self.remote_port,
+                    self.snd_nxt,
+                    self.rcv_nxt,
+                    0x0018, // PSH + ACK
+                    self.rcv_wnd,
+                    off,
+                    seg_size,
+                );
+            } else {
+                tx.commit(
+                    self.local_ip,
+                    self.remote_ip,
+                    self.local_port,
+                    self.remote_port,
+                    self.snd_nxt,
+                    self.rcv_nxt,
+                    0x0018, // PSH + ACK
+                    self.rcv_wnd,
+                    off,
+                    seg_size,
+                );
+            }
 
             // Add segment to retransmit queue
             self.retrans_queue.push_back(TcpSendSeg {
@@ -1749,11 +2009,8 @@ impl TcpSocket {
         // copy must carry the FIN bit, not PSH.
         let is_fin_retrans = data.is_empty();
 
-        if tx.push(
-            self.local_ip,
-            self.remote_ip,
-            self.local_port,
-            self.remote_port,
+        if self.tx_record(
+            tx,
             seq,
             self.rcv_nxt,
             if is_fin_retrans { 0x0011 } else { 0x0018 }, // FIN+ACK vs PSH+ACK
@@ -1912,11 +2169,8 @@ impl TcpSocket {
     pub fn send_zero_window_probe(&mut self, tx: &mut TcpTxBatch) {
         if let Some(seg) = self.retrans_queue.front() {
             if !seg.data.is_empty() {
-                let _ = tx.push(
-                    self.local_ip,
-                    self.remote_ip,
-                    self.local_port,
-                    self.remote_port,
+                let _ = self.tx_record(
+                    tx,
                     seg.seq,
                     self.rcv_nxt,
                     0x0010, // ACK
@@ -1940,11 +2194,8 @@ impl TcpSocket {
         let byte = self.send_buffer.pop_front();
         if let Some(b) = byte {
             data.push(b);
-            tx.push(
-                self.local_ip,
-                self.remote_ip,
-                self.local_port,
-                self.remote_port,
+            self.tx_record(
+                tx,
                 self.snd_nxt,
                 self.rcv_nxt,
                 0x0018, // PSH + ACK
@@ -1968,11 +2219,8 @@ impl TcpSocket {
     /// answers with an ACK, which resets the probe cycle in process_ack.
     pub fn send_keepalive_probe(&self, tx: &mut TcpTxBatch) {
         let probe_seq = self.snd_una.wrapping_sub(1);
-        let _ = tx.push_ctl(
-            self.local_ip,
-            self.remote_ip,
-            self.local_port,
-            self.remote_port,
+        let _ = self.tx_record_ctl(
+            tx,
             probe_seq,
             self.rcv_nxt,
             0x0010, // ACK, no payload
@@ -2004,6 +2252,21 @@ impl TcpSocket {
         // First get needed info to avoid borrow conflicts
         let should_close;
 
+        // Copy the endpoint scalars out of self before the &mut borrow of
+        // the retrans queue (P1: family-aware recording needs them).
+        let (ep_v6, ep_lip, ep_rip, ep_lip6, ep_rip6, ep_lport, ep_rport, ep_rcv_nxt, ep_rcv_wnd) =
+            (
+                self.is_v6,
+                self.local_ip,
+                self.remote_ip,
+                self.local_ip6,
+                self.remote_ip6,
+                self.local_port,
+                self.remote_port,
+                self.rcv_nxt,
+                self.rcv_wnd,
+            );
+
         {
             if let Some(seg) = self.retrans_queue.front_mut() {
                 if seg.retries >= TCP_MAX_RETRIES {
@@ -2017,15 +2280,19 @@ impl TcpSocket {
                     // transmission). Failure (can't-happen staging
                     // overflow) skips only the emission; retries/backoff
                     // below still run, keeping the bounded lifetime.
-                    let _ = tx.push(
-                        self.local_ip,
-                        self.remote_ip,
-                        self.local_port,
-                        self.remote_port,
+                    let _ = tx_record_endpoints(
+                        ep_v6,
+                        ep_lip,
+                        ep_rip,
+                        ep_lip6,
+                        ep_rip6,
+                        ep_lport,
+                        ep_rport,
+                        tx,
                         seg.seq,
-                        self.rcv_nxt,
+                        ep_rcv_nxt,
                         if seg.data.is_empty() { 0x0011 } else { 0x0018 }, // R23-4 FIN vs PSH
-                        self.rcv_wnd,
+                        ep_rcv_wnd,
                         &seg.data,
                     );
                     // Increment retransmit count
@@ -2277,6 +2544,120 @@ impl TcpConnectionManager {
         }
 
         // No matching connection found
+        Err(())
+    }
+
+    /// P1 IPv6: handle a received v6 TCP segment. Mirrors
+    /// handle_tcp_packet's two-pass scan with v6 4-tuple matching; the
+    /// child-spawn path copies the v6 endpoints and family bit.
+    pub fn handle_tcp_packet6(
+        &mut self,
+        skb: &SkBuff,
+        src6: &crate::net::ipv6::Ipv6Addr,
+        dest6: &crate::net::ipv6::Ipv6Addr,
+        tx: &mut TcpTxBatch,
+    ) -> Result<Option<TcpRvWake>, ()> {
+        let tcp_hdr = match tcp_parse_packet(skb) {
+            Some(hdr) => hdr,
+            None => return Ok(None),
+        };
+
+        let src_port = TcpPort::from_be(tcp_hdr.source);
+        let dest_port = TcpPort::from_be(tcp_hdr.dest);
+
+        let is_syn = tcp_hdr.syn() && !tcp_hdr.ack();
+        let mut listen_parent: Option<i32> = None;
+
+        // SAFETY: TCP_SOCKET_TABLE mutations run under TCP_TABLE_LOCK
+        // (taken by tcp_rcv6 around this call).
+        unsafe {
+            let table = &mut TCP_SOCKET_TABLE;
+            for fd in 0..table.count {
+                let socket = match table.sockets[fd].as_mut() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if socket.state == TcpState::TCP_LISTEN {
+                    if socket.local_port == dest_port && socket.is_v6 {
+                        listen_parent = Some(fd as i32);
+                    }
+                    continue;
+                }
+                if socket.state == TcpState::TCP_CLOSE {
+                    continue;
+                }
+                if socket.is_v6
+                    && socket.local_port == dest_port
+                    && socket.remote_port == src_port
+                    && socket.remote_ip6 == *src6
+                    && (socket.local_ip6 == *dest6
+                        || crate::net::ipv6::is_unspecified(&socket.local_ip6))
+                {
+                    if crate::net::ipv6::is_unspecified(&socket.local_ip6) {
+                        socket.local_ip6 = *dest6;
+                    }
+                    if is_syn
+                        && matches!(
+                            socket.state,
+                            TcpState::TCP_FIN_WAIT1
+                                | TcpState::TCP_FIN_WAIT2
+                                | TcpState::TCP_CLOSING
+                                | TcpState::TCP_LAST_ACK
+                                | TcpState::TCP_TIME_WAIT
+                                | TcpState::TCP_CLOSE_WAIT
+                        )
+                    {
+                        socket.state = TcpState::TCP_CLOSE;
+                        socket.send_buffer.clear();
+                        socket.recv_buffer.clear();
+                        socket.retrans_queue.clear();
+                        socket.ooo_queue.clear();
+                        socket.timers.stop_retransmit();
+                        continue;
+                    }
+                    let payload = match tcp_payload_slice(skb, tcp_hdr.header_len()) {
+                        Some(p) => p,
+                        None => return Ok(None),
+                    };
+                    let _ = socket.handle_packet(tcp_hdr, payload, tx);
+                    return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
+                }
+            }
+
+            // Pass (b): inbound SYN for a v6 listener — spawn a v6 child.
+            if is_syn {
+                if let Some(parent) = listen_parent {
+                    let mut children = 0usize;
+                    for slot in table.sockets.iter().take(table.count) {
+                        if let Some(s) = slot.as_ref() {
+                            if s.parent_fd == Some(parent) && !s.accepted {
+                                children += 1;
+                            }
+                        }
+                    }
+                    if children >= MAX_BACKLOG_PER_LISTEN {
+                        return Ok(None);
+                    }
+
+                    let slot = match table.alloc_slot() {
+                        Ok(s) => s,
+                        Err(_) => return Ok(None),
+                    };
+                    let mut new_socket = TcpSocket::new();
+                    new_socket.is_v6 = true;
+                    new_socket.local_port = dest_port;
+                    new_socket.local_ip6 = *dest6;
+                    new_socket.remote_port = src_port;
+                    new_socket.remote_ip6 = *src6;
+                    new_socket.state = TcpState::TCP_LISTEN;
+                    new_socket.parent_fd = Some(parent);
+                    let _ = new_socket.handle_packet(tcp_hdr, &[], tx);
+                    let _ = table.install(slot, new_socket);
+                    return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
+                }
+            }
+        }
+
         Err(())
     }
 }
@@ -2667,6 +3048,47 @@ pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
     ret
 }
 
+/// P1 IPv6: connect to a pure v6 remote (family-aware tcp_connect).
+pub fn tcp_connect6(fd: i32, ip6: &crate::net::ipv6::Ipv6Addr, port: TcpPort) -> i32 {
+    let mut tx = TcpTxBatch::new();
+    if !tx.reserve(1, 0) {
+        return -12; // ENOMEM
+    }
+    let ret;
+    {
+        let _table_g = TCP_TABLE_LOCK.lock_irqsave();
+        // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
+        unsafe {
+            if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+                if socket.local_port == 0 {
+                    socket.local_port = alloc_ephemeral_port();
+                    socket.bound = true;
+                }
+                // v6 source: loopback for ::1, our SLAAC link-local
+                // otherwise (the v4 analogue of the ANY-local_ip trap).
+                if crate::net::ipv6::is_unspecified(&socket.local_ip6) {
+                    socket.local_ip6 = if *ip6 == crate::net::ipv6::IPV6_ADDR_LOOPBACK {
+                        crate::net::ipv6::IPV6_ADDR_LOOPBACK
+                    } else {
+                        match crate::net::ipv6::get_link_local() {
+                            Some(ll) => ll,
+                            None => return -99, // EADDRNOTAVAIL — no v6 source
+                        }
+                    };
+                }
+                ret = match socket.connect6(ip6, port, &mut tx) {
+                    Ok(()) => 0,
+                    Err(()) => -5, // EIO
+                };
+            } else {
+                ret = -5; // EBADF
+            }
+        }
+    }
+    tx.emit_all();
+    ret
+}
+
 /// Accept connection
 ///
 /// # Arguments
@@ -2803,6 +3225,116 @@ pub fn tcp_remote_endpoint(fd: i32) -> (u32, u16) {
             .map(|s| (s.remote_ip, s.remote_port))
             .unwrap_or((0, 0))
     }
+}
+
+/// P1 IPv6: locked read of a slot's v6 remote endpoint (accept's addr
+/// writeout on AF_INET6 sockets; unspecified for v4 slots).
+pub fn tcp_remote_endpoint6(fd: i32) -> (crate::net::ipv6::Ipv6Addr, u16) {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        TCP_SOCKET_TABLE
+            .get(fd as usize)
+            .map(|s| (s.remote_ip6, s.remote_port))
+            .unwrap_or((crate::net::ipv6::IPV6_ADDR_UNSPECIFIED, 0))
+    }
+}
+
+/// P1 IPv6: locked read of a slot's v6 local endpoint (getsockname mirror
+/// after tcp_connect6 filled the source).
+pub fn tcp_local_endpoint6(fd: i32) -> (crate::net::ipv6::Ipv6Addr, u16) {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        TCP_SOCKET_TABLE
+            .get(fd as usize)
+            .map(|s| (s.local_ip6, s.local_port))
+            .unwrap_or((crate::net::ipv6::IPV6_ADDR_UNSPECIFIED, 0))
+    }
+}
+
+/// P1 IPv6: locked read of a slot's family flag (accept's addr shape).
+pub fn tcp_is_v6(fd: i32) -> bool {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        TCP_SOCKET_TABLE
+            .get(fd as usize)
+            .map(|s| s.is_v6)
+            .unwrap_or(false)
+    }
+}
+
+/// P1 IPv6: mark a slot as v6 with its local address (bind path — a v6
+/// listener must match in handle_tcp_packet6's spawn pass).
+pub fn tcp_set_v6_local(fd: i32, addr6: crate::net::ipv6::Ipv6Addr) {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        if let Some(s) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+            s.is_v6 = true;
+            s.local_ip6 = addr6;
+        }
+    }
+}
+
+/// P1 /proc/net/tcp: one protocol-slot snapshot (under TCP_TABLE_LOCK).
+#[derive(Debug, Clone, Copy)]
+pub struct TcpSlotInfo {
+    pub local_ip: u32,
+    pub local_port: u16,
+    pub remote_ip: u32,
+    pub remote_port: u16,
+    /// Linux TCP state number (1 ESTABLISHED ... 10 LISTEN, 11 CLOSING)
+    pub linux_state: u8,
+    pub is_v6: bool,
+    pub local_ip6: crate::net::ipv6::Ipv6Addr,
+    pub remote_ip6: crate::net::ipv6::Ipv6Addr,
+}
+
+/// Linux state-number mapping (our enum order differs).
+fn tcp_linux_state(s: TcpState) -> u8 {
+    match s {
+        TcpState::TCP_ESTABLISHED => 1,
+        TcpState::TCP_SYN_SENT => 2,
+        TcpState::TCP_SYN_RECV => 3,
+        TcpState::TCP_FIN_WAIT1 => 4,
+        TcpState::TCP_FIN_WAIT2 => 5,
+        TcpState::TCP_TIME_WAIT => 6,
+        TcpState::TCP_CLOSE => 7,
+        TcpState::TCP_CLOSE_WAIT => 8,
+        TcpState::TCP_LAST_ACK => 9,
+        TcpState::TCP_LISTEN => 10,
+        TcpState::TCP_CLOSING => 11,
+    }
+}
+
+/// P1 /proc/net/tcp(+tcp6): snapshot every live TCP slot.
+pub fn tcp_dump() -> alloc::vec::Vec<TcpSlotInfo> {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    let mut out = alloc::vec::Vec::new();
+    // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
+    unsafe {
+        let table = &TCP_SOCKET_TABLE;
+        for slot in table.sockets.iter().take(table.count) {
+            if let Some(s) = slot.as_ref() {
+                if s.state == TcpState::TCP_CLOSE && !s.bound {
+                    continue; // never-used slot
+                }
+                out.push(TcpSlotInfo {
+                    local_ip: s.local_ip,
+                    local_port: s.local_port,
+                    remote_ip: s.remote_ip,
+                    remote_port: s.remote_port,
+                    linux_state: tcp_linux_state(s.state),
+                    is_v6: s.is_v6,
+                    local_ip6: s.local_ip6,
+                    remote_ip6: s.remote_ip6,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Read-and-clear the slot's pending protocol error (SO_ERROR semantics).
@@ -2998,6 +3530,55 @@ pub fn tcp_build_packet(
         let data_len = (skb.len as usize).saturating_sub(TCP_MIN_HLEN);
         let data_slice = core::slice::from_raw_parts(data_ptr as *const u8, data_len);
         tcp_hdr.check = tcp_checksum(src_ip, dest_ip, tcp_hdr, data_slice).to_be();
+    }
+
+    Ok(())
+}
+
+/// P1 IPv6: build a TCP segment with the RFC 8200 §8.1 pseudo-header
+/// checksum (128-bit endpoints). Mirrors tcp_build_packet.
+#[allow(clippy::too_many_arguments)]
+pub fn tcp_build_packet6(
+    skb: &mut SkBuff,
+    source: TcpPort,
+    dest: TcpPort,
+    seq: TcpSeq,
+    ack_seq: TcpAck,
+    flags: u16,
+    window: u16,
+    src_ip6: &crate::net::ipv6::Ipv6Addr,
+    dest_ip6: &crate::net::ipv6::Ipv6Addr,
+) -> Result<(), ()> {
+    let ptr = skb.skb_push(TCP_MIN_HLEN as u32).ok_or(())?;
+
+    // SAFETY: skb_push returned a valid, properly aligned pointer of at least
+    // TCP_MIN_HLEN bytes; writing fields of repr(C) TcpHdr is well-defined.
+    unsafe {
+        let tcp_hdr = &mut *(ptr as *mut TcpHdr);
+
+        tcp_hdr.source = source.to_be();
+        tcp_hdr.dest = dest.to_be();
+        tcp_hdr.seq = seq.to_be();
+        tcp_hdr.ack_seq = ack_seq.to_be();
+        tcp_hdr.set_dof(5);
+        tcp_hdr.set_window(window);
+        tcp_hdr.flags = (flags & 0xFF) as u8;
+        tcp_hdr.check = 0;
+        tcp_hdr.urg_ptr = 0;
+
+        let data_len = (skb.len as usize).saturating_sub(TCP_MIN_HLEN);
+        let mut csum = crate::net::ipv6::transport_checksum6(
+            src_ip6,
+            dest_ip6,
+            crate::net::ipv6::next_header::TCP,
+            // The checksum covers header + data with the field zeroed; the
+            // header is fully built above except check (already 0).
+            core::slice::from_raw_parts(ptr as *const u8, TCP_MIN_HLEN + data_len),
+        );
+        if csum == 0 {
+            csum = 0xFFFF;
+        }
+        tcp_hdr.check = csum.to_be();
     }
 
     Ok(())
@@ -3205,6 +3786,107 @@ fn tcp_send_reset(src_ip: u32, dest_ip: u32, tcp_hdr: &TcpHdr, tx: &mut TcpTxBat
     } else {
         Err(()) // dropped — peer times out / retransmits (recoverable)
     }
+}
+
+/// P1 IPv6: RST for a segment that matched no v6 connection (see
+/// tcp_send_reset).
+fn tcp_send_reset6(
+    src6: &crate::net::ipv6::Ipv6Addr,
+    dest6: &crate::net::ipv6::Ipv6Addr,
+    tcp_hdr: &TcpHdr,
+    tx: &mut TcpTxBatch,
+) -> Result<(), ()> {
+    let rst_seq = if tcp_hdr.ack() {
+        TcpSeq::from_be(tcp_hdr.ack_seq)
+    } else {
+        0
+    };
+    let rst_ack = if tcp_hdr.ack() {
+        0
+    } else {
+        let seg_len = if tcp_hdr.syn() { 1 } else { 0 }
+            + if tcp_hdr.fin() { 1 } else { 0 };
+        TcpSeq::from_be(tcp_hdr.seq).wrapping_add(seg_len)
+    };
+
+    let ok = tx.push_ctl6(
+        dest6,
+        src6,
+        TcpPort::from_be(tcp_hdr.dest),
+        TcpPort::from_be(tcp_hdr.source),
+        rst_seq,
+        rst_ack,
+        0x0014, // RST + ACK
+        TCP_MAX_WINDOW,
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+/// P1 IPv6: receive a TCP-over-IPv6 segment (checksum verified against the
+/// 128-bit pseudo-header; same deferred-TX/wake discipline as tcp_rcv).
+pub fn tcp_rcv6(
+    skb: &SkBuff,
+    src6: &crate::net::ipv6::Ipv6Addr,
+    dest6: &crate::net::ipv6::Ipv6Addr,
+) -> Result<(), ()> {
+    let manager = get_tcp_manager();
+
+    let tcp_hdr = match tcp_parse_packet(skb) {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+    {
+        // Verify with the v6 pseudo-header: a correct segment (computed
+        // over header+data INCLUDING the stored checksum) sums to zero.
+        let payload = tcp_payload_slice(skb, tcp_hdr.header_len()).unwrap_or(&[]);
+        let total = tcp_hdr.header_len() + payload.len();
+        // SAFETY: tcp_parse_packet validated header_len <= skb.len; the
+        // payload slice bounds the rest.
+        let seg = unsafe {
+            core::slice::from_raw_parts(skb.data as *const u8, total)
+        };
+        if crate::net::ipv6::transport_checksum6(
+            src6,
+            dest6,
+            crate::net::ipv6::next_header::TCP,
+            seg,
+        ) != 0
+        {
+            TCP_RX_CSUM_ERRORS.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+    }
+
+    let mut tx = TcpTxBatch::new();
+    let _ = tx.reserve(8, TCP_DEFAULT_MSS as usize);
+    let mut wake: Option<TcpRvWake> = None;
+
+    {
+        let _table_g = TCP_TABLE_LOCK.lock_irqsave();
+        match manager.handle_tcp_packet6(skb, src6, dest6, &mut tx) {
+            Ok(w) => wake = w,
+            Err(()) => {
+                if !tcp_hdr.rst() && !crate::net::ipv6::is_multicast(dest6) {
+                    let _ = tcp_send_reset6(src6, dest6, tcp_hdr, &mut tx);
+                }
+            }
+        }
+    }
+
+    tx.emit_all();
+
+    if let Some(w) = wake {
+        crate::net::socket::wake_tcp_socket(w.socket);
+        if let Some(parent) = w.parent {
+            crate::net::socket::wake_tcp_socket(parent);
+        }
+    }
+
+    Ok(())
 }
 
 /// Handle ICMP error for a TCP connection (soft error)

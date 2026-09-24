@@ -41,6 +41,70 @@ fn copy_sockaddr_in_from_user(addr_ptr: *const u8) -> Option<[u8; 16]> {
     if uncopied > 0 { None } else { Some(buf) }
 }
 
+/// Copy a 28-byte sockaddr_in6 from user memory (exception-table path).
+fn copy_sockaddr_in6_from_user(addr_ptr: *const u8) -> Option<[u8; 28]> {
+    let mut buf = [0u8; 28];
+    let uncopied = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), addr_ptr, 28)
+    };
+    if uncopied > 0 { None } else { Some(buf) }
+}
+
+/// P1 IPv6: a parsed user sockaddr, family-normalized.
+#[derive(Debug, Clone, Copy)]
+enum ParsedSockAddr {
+    /// sockaddr_in (or a v4-mapped sockaddr_in6 — normalized here)
+    V4 { addr: u32, port: u16 },
+    /// sockaddr_in6 with a pure (non-v4-mapped) v6 address
+    V6 { addr: crate::net::ipv6::Ipv6Addr, port: u16 },
+}
+
+impl ParsedSockAddr {
+    fn as_ip_addr(&self) -> crate::net::ipv6::IpAddr {
+        match self {
+            ParsedSockAddr::V4 { addr, .. } => crate::net::ipv6::IpAddr::V4(*addr),
+            ParsedSockAddr::V6 { addr, .. } => crate::net::ipv6::IpAddr::V6(*addr),
+        }
+    }
+}
+
+/// P1 IPv6: parse a sockaddr_in OR sockaddr_in6 from user memory.
+/// v4-mapped (::ffff:x.x.x.x) contents normalize to the v4 shape so the
+/// protocol layers keep their u32 fast path; pure v6 stays v6.
+/// Unix/netlink families are NOT handled here (callers dispatch earlier).
+fn parse_sockaddr_inet(addr_ptr: *const u8) -> Result<ParsedSockAddr, i64> {
+    use crate::net::socket::{AF_INET, AF_INET6};
+
+    let raw = match copy_sockaddr_in_from_user(addr_ptr) {
+        Some(b) => b,
+        None => return Err(-(errno::EFAULT as i64)),
+    };
+    let family = u16::from_le_bytes([raw[0], raw[1]]);
+
+    if family == AF_INET6 as u16 {
+        let raw6 = match copy_sockaddr_in6_from_user(addr_ptr) {
+            Some(b) => b,
+            None => return Err(-(errno::EFAULT as i64)),
+        };
+        let port = u16::from_be_bytes([raw6[2], raw6[3]]);
+        let mut addr6 = [0u8; 16];
+        addr6.copy_from_slice(&raw6[8..24]);
+        // v4-mapped normalization (::ffff:a.b.c.d -> v4).
+        if let Some(v4) = crate::net::ipv6::v6_to_v4_mapped(&addr6) {
+            return Ok(ParsedSockAddr::V4 { addr: v4, port });
+        }
+        return Ok(ParsedSockAddr::V6 { addr: addr6, port });
+    }
+
+    if family == AF_INET as u16 {
+        let port = u16::from_be_bytes([raw[2], raw[3]]);
+        let addr = u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]);
+        return Ok(ParsedSockAddr::V4 { addr, port });
+    }
+
+    Err(-(errno::EAFNOSUPPORT as i64))
+}
+
 /// sys_bind - Bind socket to address
 ///
 /// # Arguments
@@ -77,8 +141,6 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
         None => return -(errno::EFAULT as i64),
     };
     let sin_family = u16::from_le_bytes([sockaddr[0], sockaddr[1]]);
-    let sin_port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
-    let sin_addr = u32::from_be_bytes([sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]]);
 
     // P0-1: AF_UNIX — sockaddr_un (family + sun_path[108]) against the
     // unix name table. Dispatched before the inet privileged-port check
@@ -119,15 +181,20 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
         };
     }
 
+    // P1 IPv6: parse AF_INET or AF_INET6 (v4-mapped normalizes to v4).
+    let parsed = match parse_sockaddr_inet(addr_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let (sin_port, _sin_addr) = match parsed {
+        ParsedSockAddr::V4 { addr, port } => (port, addr),
+        ParsedSockAddr::V6 { port, .. } => (port, 0),
+    };
+
     // Permission check: privileged ports (< 1024) require CAP_NET_BIND_SERVICE.
     // Port 0 means "assign an ephemeral port" and must NOT be rejected.
     if sin_port != 0 && sin_port < 1024 && !crate::security::capable(crate::security::CAP_NET_BIND_SERVICE) {
         return -(errno::EACCES as i64);
-    }
-
-    // Currently only support AF_INET
-    if sin_family != 2 {
-        return -(errno::EAFNOSUPPORT as i64);
     }
 
     // Determine socket type via the VFS socket layer first, then delegate to
@@ -135,7 +202,19 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
     // when the caller created a UDP socket (or vice-versa), because the TCP
     // and UDP tables use independent fd spaces.
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
-        match socket.bind(sin_addr, sin_port) {
+        // P1 IPv6: pure v6 binds take the v6 entry point (AF_INET6 sockets
+        // reporting v4-mapped/v4 addresses keep the v4 path).
+        let result = match parsed {
+            ParsedSockAddr::V6 { addr, port } => {
+                if !socket.is_ipv6() {
+                    // A v4 socket cannot bind a pure v6 address.
+                    return -(errno::EAFNOSUPPORT as i64);
+                }
+                socket.bind6(addr, port)
+            }
+            ParsedSockAddr::V4 { addr, port } => socket.bind(addr, port),
+        };
+        match result {
             Ok(()) => 0,
             Err(e) => e as i64,
         }
@@ -200,6 +279,54 @@ unsafe fn put_sockaddr_in(addr_ptr: *mut u8, addrlen_ptr: *mut u32, port: u16, a
     let _ = put_user(addr_ptr.add(4) as *mut u32, addr.to_be());
     clear_user(addr_ptr.add(8), 8); // sin_zero
     let _ = put_user(addrlen_ptr, 16u32);
+}
+
+/// P1 IPv6: write a sockaddr_in6 { AF_INET6, port, 0 flowinfo, addr,
+/// scope_id } and *addrlen=28. Callers must access_ok-validate both
+/// pointers (28 / 4 bytes); failures are dropped, same visible semantics
+/// as put_sockaddr_in. Link-local addresses report the single-interface
+/// scope id 2 (eth0, Linux ifindex convention); everything else 0.
+unsafe fn put_sockaddr_in6(
+    addr_ptr: *mut u8,
+    addrlen_ptr: *mut u32,
+    port: u16,
+    addr: crate::net::ipv6::Ipv6Addr,
+) {
+    use crate::arch::riscv64::uaccess::{put_user};
+    let scope_id: u32 = if crate::net::ipv6::is_link_local(&addr) { 2 } else { 0 };
+    let _ = put_user(addr_ptr as *mut u16, 10u16); // sin6_family = AF_INET6
+    let _ = put_user(addr_ptr.add(2) as *mut u16, port.to_be());
+    let _ = put_user(addr_ptr.add(4) as *mut u32, 0u32); // sin6_flowinfo
+    let mut off = 8usize;
+    for i in 0..16 {
+        let _ = put_user(addr_ptr.add(off) as *mut u8, addr[i]);
+        off += 1;
+    }
+    let _ = put_user(addr_ptr.add(24) as *mut u32, scope_id);
+    let _ = put_user(addrlen_ptr, 28u32);
+}
+
+/// P1 IPv6: write a source/peer address honoring the socket's family —
+/// AF_INET sockets get sockaddr_in; AF_INET6 sockets get sockaddr_in6
+/// (v4 sources are reported v4-mapped). `want28` selects the access_ok
+/// bound the caller already validated.
+unsafe fn put_sockaddr_family(
+    socket: &crate::net::socket::Socket,
+    addr_ptr: *mut u8,
+    addrlen_ptr: *mut u32,
+    port: u16,
+    src: crate::net::ipv6::IpAddr,
+) {
+    if socket.is_ipv6() {
+        put_sockaddr_in6(addr_ptr, addrlen_ptr, port, src.as_v6());
+    } else {
+        put_sockaddr_in(
+            addr_ptr,
+            addrlen_ptr,
+            port,
+            src.as_v4().unwrap_or(0),
+        );
+    }
 }
 
 /// Read one usize field of a user iovec/msghdr through get_user.
@@ -463,17 +590,26 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
                 Err(e) => return e as i64,
             };
             // Linux accept(): write the peer address (and length) on success.
+            // P1 IPv6: v6 children report sockaddr_in6.
             if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
                 // SAFETY: validated below via access_ok before any write.
-                if crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16)
+                let want = if crate::net::tcp::tcp_is_v6(ret) { 28 } else { 16 };
+                if crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, want)
                     && crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4)
                 {
                     // For an accepted connection the peer is the CHILD's
                     // remote endpoint, not the listener's.
                     let (paddr, pport) = crate::net::tcp::tcp_remote_endpoint(ret);
+                    let (paddr6, _) = crate::net::tcp::tcp_remote_endpoint6(ret);
                     // SAFETY: addr_ptr/addrlen_ptr validated with access_ok;
-                    // put_sockaddr_in uses the exception-table copy path.
-                    unsafe { put_sockaddr_in(addr_ptr, addrlen_ptr, pport, paddr); }
+                    // put_sockaddr_* use the exception-table copy path.
+                    unsafe {
+                        if want == 28 {
+                            put_sockaddr_in6(addr_ptr, addrlen_ptr, pport, paddr6);
+                        } else {
+                            put_sockaddr_in(addr_ptr, addrlen_ptr, pport, paddr);
+                        }
+                    }
                 }
             }
             return new_fd as i64;
@@ -538,8 +674,6 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
         None => return -(errno::EFAULT as i64),
     };
     let sin_family = u16::from_le_bytes([sockaddr[0], sockaddr[1]]);
-    let sin_port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
-    let sin_addr = u32::from_be_bytes([sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]]);
 
     // P0-1: AF_UNIX connect — resolve the name in the unix table.
     if sin_family == crate::net::unix::AF_UNIX as u16 {
@@ -578,15 +712,25 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
         };
     }
 
-    // Currently only support AF_INET
-    if sin_family != 2 {
-        return -(errno::EAFNOSUPPORT as i64);
-    }
+    // P1 IPv6: parse AF_INET or AF_INET6 (v4-mapped normalizes to v4).
+    let parsed = match parse_sockaddr_inet(addr_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
     // Resolve through the per-process fd table — never index the global
     // protocol tables with a process fd (review NET-C3).
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
-        match socket.connect(sin_addr, sin_port) {
+        let result = match parsed {
+            ParsedSockAddr::V6 { addr, port } => {
+                if !socket.is_ipv6() {
+                    return -(errno::EAFNOSUPPORT as i64);
+                }
+                socket.connect6(addr, port)
+            }
+            ParsedSockAddr::V4 { addr, port } => socket.connect(addr, port),
+        };
+        match result {
             Ok(()) => 0,
             Err(e) => e as i64,
         }
@@ -762,19 +906,21 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         // from_raw_parts deref of the USER pointer faulted with SUM=0 in
         // syscall context (deterministic KERNPANIC at SockAddrIn::addr,
         // badaddr = the user sockaddr address).
-        let mut saddr = [0u8; 16];
-        if unsafe {
-            crate::arch::riscv64::uaccess::copy_from_user(
-                saddr.as_mut_ptr(),
-                addr_ptr,
-                16,
-            )
-        } != 0
-        {
-            return -(errno::EFAULT as i64);
+        // P1 IPv6: family-aware parse (sockaddr_in OR sockaddr_in6 with
+        // v4-mapped normalization).
+        match parse_sockaddr_inet(addr_ptr) {
+            Ok(ParsedSockAddr::V4 { addr, port }) => {
+                Some((crate::net::ipv6::IpAddr::V4(addr), port))
+            }
+            Ok(ParsedSockAddr::V6 { addr, port }) => {
+                Some((crate::net::ipv6::IpAddr::V6(addr), port))
+            }
+            Err(_) => {
+                // AF_UNIX msg destinations were dispatched above; anything
+                // else is not an inet destination.
+                return -(errno::EAFNOSUPPORT as i64);
+            }
         }
-        crate::net::socket::SockAddrIn::from_bytes(&saddr)
-            .map(|sockaddr| (sockaddr.addr(), sockaddr.port()))
     } else {
         None
     };
@@ -897,8 +1043,22 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
 
     let local_addr = *socket.local_addr.lock();
     let local_port = *socket.local_port.lock();
+    // P1 IPv6: v6 sockets report sockaddr_in6 (a v4 local address as
+    // v4-mapped).
     // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
-    unsafe { put_sockaddr_in(addr_ptr, addrlen_ptr, local_port, local_addr); }
+    unsafe {
+        if socket.is_ipv6() {
+            let local6 = *socket.local_addr6.lock();
+            let addr6 = if local6 == crate::net::ipv6::IPV6_ADDR_UNSPECIFIED {
+                crate::net::ipv6::v4_to_mapped(local_addr)
+            } else {
+                local6
+            };
+            put_sockaddr_in6(addr_ptr, addrlen_ptr, local_port, addr6);
+        } else {
+            put_sockaddr_in(addr_ptr, addrlen_ptr, local_port, local_addr);
+        }
+    }
     0
 }
 
@@ -964,7 +1124,13 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
             let peer_addr = *socket.remote_addr.lock();
             let peer_port = *socket.remote_port.lock();
             // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
-            unsafe { put_sockaddr_in(addr_ptr, addrlen_ptr, peer_port, peer_addr); }
+            unsafe {
+                if socket.is_ipv6() {
+                    put_sockaddr_in6(addr_ptr, addrlen_ptr, peer_port, *socket.remote_addr6.lock());
+                } else {
+                    put_sockaddr_in(addr_ptr, addrlen_ptr, peer_port, peer_addr);
+                }
+            }
             return 0;
         }
         return -(errno::ENOTCONN as i64);
@@ -1545,8 +1711,9 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                     write_int(optval, optlen, optlen_ptr, proto);
                 }
                 SO_DOMAIN => {
-                    // AF_INET = 2
-                    write_int(optval, optlen, optlen_ptr, 2);
+                    // P1 IPv6: report the creation family (AF_INET=2 /
+                    // AF_INET6=10).
+                    write_int(optval, optlen, optlen_ptr, sock.family);
                 }
                 SO_REUSEADDR | SO_REUSEPORT => {
                     // W3: report the stored value (was always 0).
@@ -1906,20 +2073,20 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     // W3: parse the destination from msg_name (same path as sendto's
     // addr_ptr) — UDP sendmsg used to pass NULL and could never send a
     // datagram; TCP ignores it.
+    // P1 IPv6: family-aware parse (v4-mapped normalizes to V4).
     let dest_addr = if !msg_name_ptr.is_null() && msg_namelen >= 16 {
         if !crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, 16) {
             return -(errno::EFAULT as i64);
         }
-        let mut saddr = [0u8; 16];
-        // SAFETY: msg_name_ptr validated with access_ok(16).
-        if unsafe {
-            crate::arch::riscv64::uaccess::copy_from_user(saddr.as_mut_ptr(), msg_name_ptr, 16)
-        } != 0
-        {
-            return -(errno::EFAULT as i64);
+        match parse_sockaddr_inet(msg_name_ptr) {
+            Ok(ParsedSockAddr::V4 { addr, port }) => {
+                Some((crate::net::ipv6::IpAddr::V4(addr), port))
+            }
+            Ok(ParsedSockAddr::V6 { addr, port }) => {
+                Some((crate::net::ipv6::IpAddr::V6(addr), port))
+            }
+            Err(_) => return -(errno::EAFNOSUPPORT as i64),
         }
-        crate::net::socket::SockAddrIn::from_bytes(&saddr)
-            .map(|sockaddr| (sockaddr.addr(), sockaddr.port()))
     } else {
         None
     };
@@ -2203,13 +2370,17 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
 
     // W3: write the source address into msg_name/msg_namelen (UDP peers
     // are now visible; TCP reports the connected remote).
+    // P1 IPv6: family-aware shape (v6 sockets get sockaddr_in6; a v4
+    // source is reported v4-mapped).
     if let Some((addr, port)) = src_addr {
         if !msg_name_ptr.is_null() && !msg_namelen_ptr.is_null() {
             if crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, 16)
                 && crate::arch::riscv64::uaccess::access_ok(msg_namelen_ptr as usize, 4)
             {
                 // SAFETY: pointers validated with access_ok; exception-table copy.
-                unsafe { put_sockaddr_in(msg_name_ptr, msg_namelen_ptr, port, addr); }
+                unsafe {
+                    put_sockaddr_family(&socket, msg_name_ptr, msg_namelen_ptr, port, addr);
+                }
             }
         }
     }
@@ -2430,19 +2601,18 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
         }
 
         // W3: per-message msg_name destination (same parse as sendmsg).
+        // P1 IPv6: family-aware parse (v4-mapped normalizes to V4).
         let dest_addr = if !msg_name_ptr.is_null()
             && crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, 16)
         {
-            let mut saddr = [0u8; 16];
-            // SAFETY: msg_name_ptr validated with access_ok(16).
-            if unsafe {
-                crate::arch::riscv64::uaccess::copy_from_user(saddr.as_mut_ptr(), msg_name_ptr, 16)
-            } == 0
-            {
-                crate::net::socket::SockAddrIn::from_bytes(&saddr)
-                    .map(|sa| (sa.addr(), sa.port()))
-            } else {
-                None
+            match parse_sockaddr_inet(msg_name_ptr) {
+                Ok(ParsedSockAddr::V4 { addr, port }) => {
+                    Some((crate::net::ipv6::IpAddr::V4(addr), port))
+                }
+                Ok(ParsedSockAddr::V6 { addr, port }) => {
+                    Some((crate::net::ipv6::IpAddr::V6(addr), port))
+                }
+                Err(_) => None,
             }
         } else {
             None
@@ -2884,7 +3054,10 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     if let Some((addr, port)) = src_addr {
         if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
             // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
-            unsafe { put_sockaddr_in(addr_ptr, addrlen_ptr, port, addr); }
+            // P1 IPv6: family-aware shape (v6 sockets get sockaddr_in6).
+            unsafe {
+                put_sockaddr_family(&socket, addr_ptr, addrlen_ptr, port, addr);
+            }
         }
     }
     bytes_read as i64
