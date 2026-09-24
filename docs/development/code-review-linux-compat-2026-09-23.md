@@ -588,3 +588,12 @@ BUG 13/ABI 6/LINUX-DIFF 19/TIMING 4/RACE 4/VISIBILITY 2/OVERFLOW 2/COMMENT 8/ARC
 - 单线程：create=0 → 线程体运行（TLS 正确）→ join 返回正确退出值 ✓（create/TLS/clear_child_tid/futex-mm-键全链路）
 - 2 线程 plain：✓
 - 4 线程 + mutex：L0/L1 执行并退出后 L2/L3 与 join 挂起；周期快照显示唯一 RUNNING 任务 linked=1 在队却长期不被调度，其余全睡。已知遗留（疑非 leader 退出后的调度/唤醒细节）。
+
+
+## 4 线程挂起收口（2026-09-24，e57ab8c）
+
+双根因叠加，全部实测确证：
+1. **sweep_dead_threads 的 filter+replace 语义误用**：保留成员同时出现在链表与释放列表——每个退出 worker 对自己 park 的条目自旋等自己的 on_cpu，烧光全部 CPU（"在队不被 pick"之谜的答案：pick/affinity/计数全部正常，是没有 CPU 空出来）。同源历史幻影/双执行（"alive 打两次"）的供给源。修复：DEAD∧!on_cpu 精确分区。
+2. **futex shared/private 分桶不一致**：musl pthread_exit 持 __thread_list_lock 跨 SYS_exit，靠 cleartid 的私有键唤醒解锁，而等待方以 shared 键 park——两边落不同桶，woken=0 而邻桶有 3 个 waiter（Linux 用 FLAG_IMMUTABLE 解决同一互操作）。修复：futex_hash 仅按 uaddr 分桶（matches() 保持精确过滤）。
+
+musl 实测全绿：4 线程 mutex+join 8/8+6/6、单线程干净收尾、cond broadcast+先信号后等待 4/4+2/2、复合 soak 全过、标准门禁 4/4。
