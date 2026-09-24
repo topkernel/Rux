@@ -164,9 +164,14 @@ pub struct Socket {
     /// Whether bound
     pub bound: Spinlock<bool>,
     /// TCP index (for TCP socket table lookup)
-    pub tcp_fd: Spinlock<Option<i32>>,
+    /// Protocol slot number (-1 = none). Atomic: wake hooks read it under
+    /// SOCKET_TABLE (irqsave) and must not take a second (non-irqsave) lock
+    /// there — the fd side held tcp_fd across paths that take SOCKET_TABLE
+    /// (close/accept), an ABBA the multi-thread gate caught (3 CPUs stuck).
+    pub tcp_fd: core::sync::atomic::AtomicI32,
     /// UDP index (for UDP socket table lookup)
-    pub udp_fd: Spinlock<Option<i32>>,
+    /// UDP slot number (-1 = none). Same atomic discipline as tcp_fd.
+    pub udp_fd: core::sync::atomic::AtomicI32,
     /// Slot index in SOCKET_TABLE (for cleanup on close)
     table_slot: Spinlock<Option<usize>>,
     /// W3: wait queue for blocking recv/send/accept. RX-path hooks
@@ -192,8 +197,8 @@ impl Socket {
             remote_addr: Spinlock::new(0),
             recv_queue: Spinlock::new(VecDeque::new()),
             bound: Spinlock::new(false),
-            tcp_fd: Spinlock::new(None),
-            udp_fd: Spinlock::new(None),
+            tcp_fd: core::sync::atomic::AtomicI32::new(-1),
+            udp_fd: core::sync::atomic::AtomicI32::new(-1),
             table_slot: Spinlock::new(None),
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
@@ -223,7 +228,8 @@ impl Socket {
             SocketType::Tcp => {
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
                 let ret = crate::net::tcp::tcp_bind(tcp_fd, port);
                 if ret != 0 {
                     return Err(ret);
@@ -235,7 +241,8 @@ impl Socket {
             SocketType::Udp => {
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let udp_fd = self.udp_fd.lock().ok_or(-9)?;
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
                 let ret = crate::net::udp::udp_bind(udp_fd, addr, port);
                 if ret != 0 {
                     return Err(ret);
@@ -260,7 +267,8 @@ impl Socket {
             return Err(-95); // EOPNOTSUPP
         }
 
-        let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
+        let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
         let ret = crate::net::tcp::tcp_listen(tcp_fd, backlog as u32);
         if ret == 0 {
             *self.state.lock() = SocketState::Listening;
@@ -279,7 +287,8 @@ impl Socket {
             SocketType::Tcp => {
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
                 *self.state.lock() = SocketState::Connecting;
                 let ret = crate::net::tcp::tcp_connect(tcp_fd, addr, port);
                 if ret == 0 {
@@ -296,7 +305,8 @@ impl Socket {
             SocketType::Udp => {
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let udp_fd = self.udp_fd.lock().ok_or(-9)?;
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
                 // R24 (HIGH-6): go through the locked entry point — the raw
                 // udp_socket_get() &mut raced the NetRx softirq's udp_rcv.
                 let _ = crate::net::udp::udp_connect(udp_fd, addr, port);
@@ -316,7 +326,8 @@ impl Socket {
                 }
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
                 // R23-3 (send-only, leaf-scoped): the table lock protects
                 // the send_buffer/retrans_queue mutation against the RX
                 // softirq's process_ack on the same socket. NOT taken at
@@ -380,7 +391,8 @@ impl Socket {
             SocketType::Udp => {
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let udp_fd = self.udp_fd.lock().ok_or(-9)?;
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
 
                 if let Some((addr, port)) = dest_addr {
                     // Explicit destination: use udp_sendto (review NET-M5 —
@@ -426,7 +438,8 @@ impl Socket {
                 }
                 // SAFETY: tcp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
+                let tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd < 0 { return Err(-9); }
 
                 // R34: irqsave — this plain lock is also taken by
                 // enqueue_packet() from the NetRx softirq; a timer IRQ at
@@ -501,7 +514,8 @@ impl Socket {
 
                 // SAFETY: udp_fd is only written once during socket creation and
                 // read only from this single-threaded socket context.
-                let udp_fd = self.udp_fd.lock().ok_or(-9)?;
+                let udp_fd = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd < 0 { return Err(-9); }
                 // W3: take the source address too — recvfrom()/recvmsg() on a
                 // UDP socket used to always get None (no msg_name written).
                 match crate::net::udp::udp_recvfrom(udp_fd, buf, buf.len()) {
@@ -529,7 +543,7 @@ impl Socket {
             return Err(-22); // EINVAL
         }
 
-        let _tcp_fd = self.tcp_fd.lock().ok_or(-9)?;
+        let _tcp_fd = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
 
         Err(-11) // EAGAIN
     }
@@ -546,7 +560,8 @@ impl Socket {
     pub fn close(&self) -> i32 {
         match self.sock_type {
             SocketType::Tcp => {
-                if let Some(tcp_fd) = *self.tcp_fd.lock() {
+                let tcp_fd_v = self.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd_v >= 0 { let tcp_fd = tcp_fd_v;
                     // R24 (R23-3 completion): close() mutates the protocol
                     // state machine (send_fin changes state and pushes the
                     // retrans_queue) — serialize against tcp_rcv/timer_tick
@@ -608,7 +623,8 @@ impl Socket {
                 }
             }
             SocketType::Udp => {
-                if let Some(udp_fd) = *self.udp_fd.lock() {
+                let udp_fd_v = self.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd_v >= 0 { let udp_fd = udp_fd_v;
                     crate::net::udp::udp_socket_free(udp_fd);
                 }
             }
@@ -648,16 +664,16 @@ pub fn socket_recv_ready(socket: &Socket) -> bool {
         return true;
     }
     match socket.sock_type {
-        SocketType::Tcp => match *socket.tcp_fd.lock() {
-            Some(fd) => crate::net::tcp::tcp_readable(fd),
-            None => true,
-        },
-        SocketType::Udp => match *socket.udp_fd.lock() {
-            Some(fd) => {
+        SocketType::Tcp => {
+            let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if fd >= 0 { crate::net::tcp::tcp_readable(fd) } else { true }
+        }
+        SocketType::Udp => {
+            let fd = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if fd >= 0 {
                 crate::net::udp::udp_poll_readable(fd) || crate::net::udp::udp_has_error(fd)
-            }
-            None => true,
-        },
+            } else { true }
+        }
     }
 }
 
@@ -665,10 +681,10 @@ pub fn socket_recv_ready(socket: &Socket) -> bool {
 /// terminal state whose error returns immediately)?
 fn socket_send_ready(socket: &Socket) -> bool {
     match socket.sock_type {
-        SocketType::Tcp => match *socket.tcp_fd.lock() {
-            Some(fd) => crate::net::tcp::tcp_send_ready(fd),
-            None => true,
-        },
+        SocketType::Tcp => {
+            let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if fd >= 0 { crate::net::tcp::tcp_send_ready(fd) } else { true }
+        }
         // UDP send never blocks (datagram accepted, or EMSGSIZE).
         SocketType::Udp => true,
     }
@@ -676,10 +692,8 @@ fn socket_send_ready(socket: &Socket) -> bool {
 
 /// W3: does this listener have an established, not-yet-accepted child?
 fn socket_accept_ready(socket: &Socket) -> bool {
-    match *socket.tcp_fd.lock() {
-        Some(fd) => crate::net::tcp::tcp_accept_pending(fd),
-        None => true,
-    }
+    let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if fd >= 0 { crate::net::tcp::tcp_accept_pending(fd) } else { true }
 }
 
 /// One blocking wait round (pipe discipline: prepare → re-check → sleep →
@@ -928,7 +942,8 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
         // under it, and this read raced both (leaf-scoped, nothing below
         // re-enters tcp_rcv, same shape as Socket::send).
         if !readable {
-            if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+            let tfd_v = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if tfd_v >= 0 { let tcp_fd = tfd_v;
                 let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
                 if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                     readable = !ts.recv_buffer.is_empty();
@@ -947,8 +962,9 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
         // protocol table (UdpSocket.recv_buffer), so UDP poll was always
         // not-ready and poll-based readers spun or slept forever.
         if !readable {
-            if let Some(udp_fd) = *socket.udp_fd.lock() {
-                readable = crate::net::udp::udp_poll_readable(udp_fd);
+            let ufd = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if ufd >= 0 {
+                readable = crate::net::udp::udp_poll_readable(ufd);
             }
         }
         if readable {
@@ -1019,7 +1035,7 @@ impl SocketTable {
     fn wake_tcp_matches(&self, tcp_fd: i32) {
         for slot in self.sockets.iter() {
             if let Some(s) = slot {
-                if *s.tcp_fd.lock() == Some(tcp_fd) {
+                if s.tcp_fd.load(core::sync::atomic::Ordering::Acquire) == tcp_fd {
                     s.wait_queue.wake_up_all();
                 }
             }
@@ -1030,7 +1046,7 @@ impl SocketTable {
     fn wake_udp_matches(&self, udp_fd: i32) {
         for slot in self.sockets.iter() {
             if let Some(s) = slot {
-                if *s.udp_fd.lock() == Some(udp_fd) {
+                if s.udp_fd.load(core::sync::atomic::Ordering::Acquire) == udp_fd {
                     s.wait_queue.wake_up_all();
                 }
             }
@@ -1114,8 +1130,8 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
 
     let socket = Arc::new(Socket::new(sock_type));
     match sock_type {
-        SocketType::Tcp => *socket.tcp_fd.lock() = Some(proto_fd),
-        SocketType::Udp => *socket.udp_fd.lock() = Some(proto_fd),
+        SocketType::Tcp => socket.tcp_fd.store(proto_fd, core::sync::atomic::Ordering::Release),
+        SocketType::Udp => socket.udp_fd.store(proto_fd, core::sync::atomic::Ordering::Release),
     }
 
     // W3: SOCK_NONBLOCK becomes the file's O_NONBLOCK (fcntl F_SETFL and
@@ -1197,7 +1213,7 @@ pub fn get_socket(fd: usize) -> Option<Arc<Socket>> {
 /// W3: `flags` carries accept4()'s SOCK_CLOEXEC / SOCK_NONBLOCK.
 pub fn socket_create_accepted(tcp_fd: i32, flags: i32) -> Result<usize, i32> {
     let socket = Arc::new(Socket::new(SocketType::Tcp));
-    *socket.tcp_fd.lock() = Some(tcp_fd);
+    socket.tcp_fd.store(tcp_fd, core::sync::atomic::Ordering::Release);
     // R21-N4: pin the protocol slot against timer-side reaping, and copy
     // the endpoint fields — R24: both under TCP_TABLE_LOCK and revalidated,
     // closing the window where tcp_accept returned an index, the peer then
@@ -1333,8 +1349,8 @@ pub fn tcp_proto_fd(fd: usize) -> Option<i32> {
     if socket.sock_type != SocketType::Tcp {
         return None;
     }
-    let proto = *socket.tcp_fd.lock();
-    proto
+    let proto = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if proto >= 0 { Some(proto) } else { None }
 }
 
 /// Resolve a process fd to its UDP protocol-table index.
@@ -1343,8 +1359,8 @@ pub fn udp_proto_fd(fd: usize) -> Option<i32> {
     if socket.sock_type != SocketType::Udp {
         return None;
     }
-    let proto = *socket.udp_fd.lock();
-    proto
+    let proto = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if proto >= 0 { Some(proto) } else { None }
 }
 
 // ============================================================================

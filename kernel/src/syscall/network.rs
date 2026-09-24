@@ -191,10 +191,10 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
     if *socket.state.lock() != crate::net::socket::SocketState::Listening {
         return -(errno::EINVAL as i64);
     }
-    let tcp_fd = match *socket.tcp_fd.lock() {
-        Some(f) => f,
-        None => return -(errno::EBADF as i64),
-    };
+    let tcp_fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if tcp_fd < 0 {
+        return -(errno::EBADF as i64);
+    }
 
     // W3: nonblocking when the file says so OR accept4 passed SOCK_NONBLOCK.
     let nonblock = file_nonblock || (flags & SOCK_NONBLOCK_FLAG) != 0;
@@ -487,7 +487,9 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     if *socket.local_port.lock() == 0 {
         match socket.sock_type {
             crate::net::socket::SocketType::Tcp => {
-                if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+                let tcp_fd_v = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd_v >= 0 {
+                    let tcp_fd = tcp_fd_v;
                     let p = crate::net::tcp::tcp_local_port(tcp_fd);
                     if p != 0 {
                         *socket.local_port.lock() = p;
@@ -495,7 +497,9 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
                 }
             }
             crate::net::socket::SocketType::Udp => {
-                if let Some(udp_fd) = *socket.udp_fd.lock() {
+                let udp_fd_v = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd_v >= 0 {
+                    let udp_fd = udp_fd_v;
                     let p = crate::net::udp::udp_local_port(udp_fd);
                     if p != 0 {
                         *socket.local_port.lock() = p;
@@ -690,7 +694,9 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
                     None => return -(errno::EFAULT as i64),
                 };
                 socket.options.lock().reuseaddr = v != 0;
-                if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+                let tcp_fd_v = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tcp_fd_v >= 0 {
+                    let tcp_fd = tcp_fd_v;
                     crate::net::tcp::tcp_set_reuseaddr(tcp_fd, v != 0);
                 }
                 0
@@ -844,12 +850,16 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                     if err == 0 {
                         match sock.sock_type {
                             crate::net::socket::SocketType::Tcp => {
-                                if let Some(tcp_fd) = *sock.tcp_fd.lock() {
+                                let tcp_fd_v = sock.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                    if tcp_fd_v >= 0 {
+                        let tcp_fd = tcp_fd_v;
                                     err = crate::net::tcp::tcp_take_pending_error(tcp_fd);
                                 }
                             }
                             crate::net::socket::SocketType::Udp => {
-                                if let Some(udp_fd) = *sock.udp_fd.lock() {
+                                let udp_fd_v = sock.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                    if udp_fd_v >= 0 {
+                        let udp_fd = udp_fd_v;
                                     err = crate::net::udp::udp_take_pending_error(udp_fd);
                                 }
                             }
@@ -998,7 +1008,9 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
             // TcpTxBatch reserved outside the lock and emitted after it
             // drops — send_fin used to run the virtio completion spin
             // under TCP_TABLE_LOCK.
-            if let Some(tcp_fd) = *socket.tcp_fd.lock() {
+            let tcp_fd_v = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if tcp_fd_v >= 0 {
+                let tcp_fd = tcp_fd_v;
                 let mut tx = crate::net::tcp::TcpTxBatch::new();
                 let _ = tx.reserve(1, 0);
                 {
@@ -1250,11 +1262,13 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // W3: MSG_TRUNC — measure the NEXT (about-to-be-received) datagram
     // against the iovec space BEFORE consuming it.
     let datagram_truncated = if socket.sock_type == crate::net::socket::SocketType::Udp {
-        match *socket.udp_fd.lock() {
-            Some(udp_fd) => crate::net::udp::udp_next_dgram_len(udp_fd)
+        let proto = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+        if proto >= 0 {
+            crate::net::udp::udp_next_dgram_len(proto)
                 .map(|l| l > total_buf_len)
-                .unwrap_or(false),
-            None => false,
+                .unwrap_or(false)
+        } else {
+            false
         }
     } else {
         false
