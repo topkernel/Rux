@@ -80,6 +80,45 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
     let sin_port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
     let sin_addr = u32::from_be_bytes([sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]]);
 
+    // P0-1: AF_UNIX — sockaddr_un (family + sun_path[108]) against the
+    // unix name table. Dispatched before the inet privileged-port check
+    // (sin_port is path bytes for unix sockets).
+    if sin_family == crate::net::unix::AF_UNIX as u16 {
+        const SOCKADDR_UN_LEN: usize = crate::net::unix::SOCKADDR_UN_LEN;
+        let want = ((_addrlen as usize).min(SOCKADDR_UN_LEN)).max(2);
+        if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, want) {
+            return -(errno::EFAULT as i64);
+        }
+        let mut ubuf = [0u8; SOCKADDR_UN_LEN];
+        // SAFETY: addr_ptr/want validated with access_ok; exception-table copy.
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(ubuf.as_mut_ptr(), addr_ptr, want)
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        let uaddr = match crate::net::unix::parse_sockaddr_un(&ubuf[..want]) {
+            Some(a) => a,
+            None => return -(errno::EINVAL as i64),
+        };
+        return match crate::net::unix::unix_socket_from_fd(fd as usize) {
+            Some(sock) => match crate::net::unix::unix_bind(&sock, &uaddr) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            },
+            None => -(errno::ENOTSOCK as i64),
+        };
+    }
+
+    // P0-2: AF_NETLINK bind — sockaddr_nl { family, pid, groups }; the
+    // port id is accepted (kernel-side portid tracking is implicit).
+    if sin_family == crate::net::netlink::AF_NETLINK as u16 {
+        return match crate::net::netlink::netlink_socket_from_fd(fd as usize) {
+            Some(_) => 0,
+            None => -(errno::ENOTSOCK as i64),
+        };
+    }
+
     // Permission check: privileged ports (< 1024) require CAP_NET_BIND_SERVICE.
     // Port 0 means "assign an ephemeral port" and must NOT be rejected.
     if sin_port != 0 && sin_port < 1024 && !crate::security::capable(crate::security::CAP_NET_BIND_SERVICE) {
@@ -121,6 +160,13 @@ pub fn sys_listen(args: SyscallArgs) -> i64 {
     // Resolve through the per-process fd table (review NET-C3): the old
     // code indexed the global TCP table with the process fd, so listen()
     // hit EBADF (or another process's socket) for every real socket.
+    // P0-1: AF_UNIX listeners.
+    if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
+        return match crate::net::unix::unix_listen(&usock, backlog) {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        };
+    }
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
         if socket.sock_type != crate::net::socket::SocketType::Tcp {
             return -(errno::EOPNOTSUPP as i64);
@@ -163,6 +209,144 @@ unsafe fn get_user_usize(addr: usize) -> usize {
     crate::arch::riscv64::uaccess::get_user(addr as *const usize).unwrap_or(0)
 }
 
+/// P0-1 (SCM_RIGHTS): parse the cmsg buffer of a user msghdr and resolve
+/// every SCM_RIGHTS (SOL_SOCKET/SCM_RIGHTS) payload fd into an Arc<File>
+/// from the CURRENT (sending) process's fd table. Returns EBADF for
+/// unknown fds, EFAULT/EINVAL on malformed control data.
+fn parse_scm_rights(
+    msg_ptr: *const u8,
+) -> Result<alloc::vec::Vec<alloc::sync::Arc<crate::fs::file::File>>, i64> {
+    use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, get_user};
+
+    // msghdr layout (64-bit): msg_control @32, msg_controllen @40.
+    // SAFETY: msg_ptr was access_ok(64)-validated by the caller.
+    let control = unsafe { get_user::<usize>(msg_ptr.add(32) as *const usize).unwrap_or(0) };
+    let controllen = unsafe { get_user::<usize>(msg_ptr.add(40) as *const usize).unwrap_or(0) };
+    let mut files = alloc::vec::Vec::new();
+    if control == 0 || controllen == 0 {
+        return Ok(files);
+    }
+    // Bound the control buffer — a handful of fds needs tens of bytes; a
+    // wild controllen must not drive a kernel-heap allocation.
+    const MAX_CONTROL: usize = 1024;
+    if controllen > MAX_CONTROL {
+        return Err(-(errno::EINVAL as i64));
+    }
+    if !access_ok(control, controllen) {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let mut cbuf = alloc::vec![0u8; controllen];
+    // SAFETY: control/controllen validated with access_ok above.
+    if unsafe { copy_from_user(cbuf.as_mut_ptr(), control as *const u8, controllen) } != 0 {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(t) => t,
+        None => return Err(-(errno::EBADF as i64)),
+    };
+    // Walk cmsghdrs: { usize cmsg_len; i32 cmsg_level; i32 cmsg_type; }
+    // aligned to 8 (CMSG_ALIGN(sizeof(size_t))).
+    let mut off = 0usize;
+    while off + 16 <= controllen {
+        let cmsg_len = usize::from_ne_bytes(cbuf[off..off + 8].try_into().unwrap());
+        if cmsg_len < 16 || off + cmsg_len > controllen {
+            break; // malformed tail — stop walking
+        }
+        let level = i32::from_ne_bytes(cbuf[off + 8..off + 12].try_into().unwrap());
+        let ctype = i32::from_ne_bytes(cbuf[off + 12..off + 16].try_into().unwrap());
+        if level == crate::net::unix::SOL_SOCKET && ctype == crate::net::unix::SCM_RIGHTS {
+            let data = &cbuf[off + 16..off + cmsg_len];
+            for chunk in data.chunks_exact(4) {
+                let fd = i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if fd < 0 {
+                    return Err(-(errno::EBADF as i64));
+                }
+                match fdtable.get_file(fd as usize) {
+                    Some(f) => files.push(f),
+                    None => return Err(-(errno::EBADF as i64)),
+                }
+            }
+        }
+        off += (cmsg_len + 7) & !7;
+    }
+    Ok(files)
+}
+
+/// P0-1 (SCM_RIGHTS): install the files attached to a received message
+/// into the CURRENT (receiving) process's fd table and write an
+/// SCM_RIGHTS cmsg into the user msghdr's msg_control. Returns the number
+/// of control bytes written (0 when there is no room — the fds are then
+/// closed, mirroring Linux's drop-on-no-control-buffer), or EFAULT/EMFILE.
+unsafe fn deliver_scm_rights(
+    msg_ptr: *mut u8,
+    files: &[alloc::sync::Arc<crate::fs::file::File>],
+) -> Result<usize, i64> {
+    use crate::arch::riscv64::uaccess::{access_ok, copy_to_user, get_user, put_user};
+
+    if files.is_empty() {
+        return Ok(0);
+    }
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(t) => t,
+        None => return Err(-(errno::EBADF as i64)),
+    };
+    let mut new_fds = alloc::vec::Vec::new();
+    let mut unwind = |new_fds: &mut alloc::vec::Vec<i32>, e: i64| -> i64 {
+        for nfd in new_fds.drain(..) {
+            let _ = fdtable.close_fd(nfd as usize);
+        }
+        e
+    };
+    for f in files {
+        let fd = match fdtable.alloc_fd() {
+            Some(f) => f,
+            None => return Err(unwind(&mut new_fds, -(errno::EMFILE as i64))),
+        };
+        if fdtable.install_fd(fd, f.clone()).is_err() {
+            return Err(unwind(&mut new_fds, -(errno::EMFILE as i64)));
+        }
+        new_fds.push(fd as i32);
+    }
+
+    // SAFETY: msg_ptr was access_ok(64)-validated by the caller.
+    let control = get_user::<usize>(msg_ptr.add(32) as *const usize).unwrap_or(0);
+    let controllen = get_user::<usize>(msg_ptr.add(40) as *const usize).unwrap_or(0);
+    let data_len = new_fds.len() * 4;
+    let cmsg_len = 16 + data_len;
+    let aligned = (cmsg_len + 7) & !7;
+    if control == 0 || controllen < aligned {
+        // No control buffer room: the fds cannot be reported — close them.
+        for nfd in new_fds {
+            let _ = fdtable.close_fd(nfd as usize);
+        }
+        return Ok(0);
+    }
+    if !access_ok(control, aligned) {
+        for nfd in new_fds {
+            let _ = fdtable.close_fd(nfd as usize);
+        }
+        return Err(-(errno::EFAULT as i64));
+    }
+    let mut cmsg = alloc::vec![0u8; aligned];
+    cmsg[0..8].copy_from_slice(&cmsg_len.to_ne_bytes());
+    cmsg[8..12].copy_from_slice(&crate::net::unix::SOL_SOCKET.to_ne_bytes());
+    cmsg[12..16].copy_from_slice(&crate::net::unix::SCM_RIGHTS.to_ne_bytes());
+    for (i, fd) in new_fds.iter().enumerate() {
+        cmsg[16 + i * 4..20 + i * 4].copy_from_slice(&fd.to_ne_bytes());
+    }
+    // SAFETY: control/aligned validated with access_ok above.
+    if copy_to_user(control as *mut u8, cmsg.as_ptr(), aligned) != 0 {
+        for nfd in new_fds {
+            let _ = fdtable.close_fd(nfd as usize);
+        }
+        return Err(-(errno::EFAULT as i64));
+    }
+    // Update msg_controllen to the cmsg size actually written.
+    // SAFETY: msg_ptr validated by the caller.
+    let _ = put_user(msg_ptr.add(40) as *mut usize, aligned);
+    Ok(aligned)
+}
+
 fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
@@ -180,6 +364,69 @@ fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Soc
 /// (Linux writes it on success; NULL skips).
 fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut u32) -> i64 {
     use crate::net::socket::SOCK_NONBLOCK_FLAG;
+
+    // P0-1: AF_UNIX listener — same blocking contract as the TCP path.
+    if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
+        if usock.kind != crate::net::unix::UnixKind::Stream {
+            return -(errno::EOPNOTSUPP as i64);
+        }
+        if *usock.state.lock() != crate::net::unix::UnixState::Listening {
+            return -(errno::EINVAL as i64);
+        }
+        let file_nonblock = {
+            let fdtable = match crate::sched::get_current_fdtable() {
+                Some(t) => t,
+                None => return -(errno::EBADF as i64),
+            };
+            match fdtable.get_file(fd) {
+                Some(f) => (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0,
+                None => return -(errno::EBADF as i64),
+            }
+        };
+        let nonblock = file_nonblock || (flags & SOCK_NONBLOCK_FLAG) != 0;
+        let deadline = usock.rcvtimeo_deadline();
+        loop {
+            match crate::net::unix::unix_accept(&usock) {
+                Ok(child) => {
+                    let new_fd = match crate::net::unix::unix_install_accepted(&child, flags) {
+                        Ok(fd) => fd,
+                        Err(e) => return e as i64,
+                    };
+                    // Write the peer (client) address on success.
+                    if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
+                        if crate::arch::riscv64::uaccess::access_ok(
+                            addr_ptr as usize,
+                            crate::net::unix::SOCKADDR_UN_LEN,
+                        ) && crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4)
+                        {
+                            // The child's peer is the connecting client.
+                            let peer_name = crate::net::unix::unix_peer_bound_name(&child);
+                            // SAFETY: pointers validated with access_ok;
+                            // exception-table copy inside.
+                            unsafe {
+                                crate::net::unix::put_sockaddr_un(
+                                    addr_ptr,
+                                    addrlen_ptr,
+                                    peer_name.as_deref(),
+                                );
+                            }
+                        }
+                    }
+                    return new_fd as i64;
+                }
+                Err(e) if e != -11 => return e as i64,
+                Err(_) => {}
+            }
+            if nonblock {
+                return -(errno::EAGAIN as i64);
+            }
+            // Blocking: wait on the listener's queue (client connect wakes).
+            let s = usock.clone();
+            if let Err(e) = crate::net::unix::unix_accept_wait(&s, deadline) {
+                return e as i64;
+            }
+        }
+    }
 
     let (socket, file_nonblock) = match socket_file_of(fd) {
         Some(s) => s,
@@ -294,6 +541,43 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
     let sin_port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
     let sin_addr = u32::from_be_bytes([sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]]);
 
+    // P0-1: AF_UNIX connect — resolve the name in the unix table.
+    if sin_family == crate::net::unix::AF_UNIX as u16 {
+        const SOCKADDR_UN_LEN: usize = crate::net::unix::SOCKADDR_UN_LEN;
+        let want = ((_addrlen as usize).min(SOCKADDR_UN_LEN)).max(2);
+        if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, want) {
+            return -(errno::EFAULT as i64);
+        }
+        let mut ubuf = [0u8; SOCKADDR_UN_LEN];
+        // SAFETY: addr_ptr/want validated with access_ok; exception-table copy.
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(ubuf.as_mut_ptr(), addr_ptr, want)
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        let uaddr = match crate::net::unix::parse_sockaddr_un(&ubuf[..want]) {
+            Some(a) => a,
+            None => return -(errno::EINVAL as i64),
+        };
+        return match crate::net::unix::unix_socket_from_fd(fd as usize) {
+            Some(sock) => match crate::net::unix::unix_connect(&sock, &uaddr) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            },
+            None => -(errno::ENOTSOCK as i64),
+        };
+    }
+
+    // P0-2: AF_NETLINK connect — the default peer is the kernel (pid 0);
+    // accepted without further state.
+    if sin_family == crate::net::netlink::AF_NETLINK as u16 {
+        return match crate::net::netlink::netlink_socket_from_fd(fd as usize) {
+            Some(_) => 0,
+            None => -(errno::ENOTSOCK as i64),
+        };
+    }
+
     // Currently only support AF_INET
     if sin_family != 2 {
         return -(errno::EAFNOSUPPORT as i64);
@@ -348,6 +632,77 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     // Validate optional address pointer
     if !addr_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
         return -(errno::EFAULT as i64);
+    }
+
+    // P0-1: AF_UNIX sendto — stage the payload and route through the unix
+    // send engine (sendto cannot carry cmsg data; SCM_RIGHTS is sendmsg).
+    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd) {
+        let stage = len.min(crate::syscall::io::RW_CHUNK);
+        let mut kbuf = alloc::vec::Vec::new();
+        if kbuf.try_reserve_exact(stage).is_err() {
+            return -(errno::ENOMEM as i64);
+        }
+        kbuf.resize(stage, 0);
+        // SAFETY: buf_ptr validated with access_ok(len) above; stage <= len.
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf_ptr, stage)
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        let dest = if !addr_ptr.is_null() {
+            const SOCKADDR_UN_LEN: usize = crate::net::unix::SOCKADDR_UN_LEN;
+            let want = ((_addrlen as usize).min(SOCKADDR_UN_LEN)).max(2);
+            if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, want) {
+                return -(errno::EFAULT as i64);
+            }
+            let mut ubuf = [0u8; SOCKADDR_UN_LEN];
+            // SAFETY: validated with access_ok above.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(ubuf.as_mut_ptr(), addr_ptr, want)
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
+            crate::net::unix::parse_sockaddr_un(&ubuf[..want])
+        } else {
+            None
+        };
+        let nonblock = file_nonblock || (_flags & MSG_DONTWAIT) != 0;
+        let deadline = usock.sndtimeo_deadline();
+        return match crate::net::unix::unix_send(
+            &usock,
+            &kbuf,
+            alloc::vec::Vec::new(),
+            dest.as_ref(),
+            nonblock,
+            deadline,
+        ) {
+            Ok(n) => n as i64,
+            Err(e) => e as i64,
+        };
+    }
+
+    // P0-2: AF_NETLINK — the buffer is/are rtnetlink request message(s);
+    // execution queues the responses for the matching recv.
+    if let Some((nlsock, _)) = crate::net::netlink::netlink_file_of(fd) {
+        let stage = len.min(crate::syscall::io::RW_CHUNK);
+        let mut kbuf = alloc::vec::Vec::new();
+        if kbuf.try_reserve_exact(stage).is_err() {
+            return -(errno::ENOMEM as i64);
+        }
+        kbuf.resize(stage, 0);
+        // SAFETY: buf_ptr validated with access_ok(len) above; stage <= len.
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf_ptr, stage)
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        return match crate::net::netlink::netlink_send(&nlsock, &kbuf) {
+            Ok(n) => n as i64,
+            Err(e) => e as i64,
+        };
     }
 
     // Get socket through the per-process fd table (review NET-C3). The old
@@ -462,6 +817,29 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // W3: non-socket fd → ENOTSOCK (matching getpeername). The old
+    // fallback fabricated 0.0.0.0:0 "success" for any non-socket fd —
+    // worse, get_socket_from_fd used to blindly reinterpret private_data,
+    // so a pipe fd produced a garbage Socket read.
+    // P0-1: AF_UNIX — report the bound (or peer) path; dispatched before
+    // the inet addrlen<16 check because a sockaddr_un can legitimately be
+    // shorter than a sockaddr_in.
+    if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
+        if !crate::arch::riscv64::uaccess::access_ok(
+            addr_ptr as usize,
+            crate::net::unix::SOCKADDR_UN_LEN,
+        ) {
+            return -(errno::EFAULT as i64);
+        }
+        let name = usock.bound_name.lock().clone();
+        // SAFETY: addr_ptr validated with access_ok; exception-table copy.
+        unsafe {
+            crate::net::unix::put_sockaddr_un(addr_ptr, addrlen_ptr, name.as_deref());
+        }
+        return 0;
+    }
+
+    // Inet path: a sockaddr_in needs the full 16 bytes.
     // SAFETY: addrlen_ptr validated with access_ok(4); get_user is the
     // exception-table copy path (SUM=0 safe).
     let addrlen = unsafe {
@@ -474,10 +852,18 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // W3: non-socket fd → ENOTSOCK (matching getpeername). The old
-    // fallback fabricated 0.0.0.0:0 "success" for any non-socket fd —
-    // worse, get_socket_from_fd used to blindly reinterpret private_data,
-    // so a pipe fd produced a garbage Socket read.
+    // P0-2: AF_NETLINK — sockaddr_nl { family, portid, groups }.
+    if let Some(nlsock) = crate::net::netlink::netlink_socket_from_fd(fd) {
+        if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 12) {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: addr_ptr validated with access_ok; exception-table copy.
+        unsafe {
+            crate::net::netlink::put_sockaddr_nl_bound(addr_ptr, addrlen_ptr, nlsock.portid);
+        }
+        return 0;
+    }
+
     let Some(socket) = crate::net::socket::get_socket_from_fd(fd) else {
         return -(errno::ENOTSOCK as i64);
     };
@@ -534,7 +920,32 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // SAFETY: addrlen_ptr validated with access_ok; get_user is the
+    // P0-1: AF_UNIX — the peer's bound path (or the connected DGRAM name).
+    // Dispatched before the inet addrlen<16 check: a sockaddr_un can be
+    // shorter than a sockaddr_in.
+    if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
+        if *usock.state.lock() != crate::net::unix::UnixState::Connected {
+            return -(errno::ENOTCONN as i64);
+        }
+        if !crate::arch::riscv64::uaccess::access_ok(
+            addr_ptr as usize,
+            crate::net::unix::SOCKADDR_UN_LEN,
+        ) {
+            return -(errno::EFAULT as i64);
+        }
+        let name = match usock.kind {
+            crate::net::unix::UnixKind::Stream => crate::net::unix::unix_peer_bound_name(&usock),
+            crate::net::unix::UnixKind::Dgram => usock.dgram_peer.lock().clone(),
+        };
+        // SAFETY: addr_ptr validated with access_ok; exception-table copy.
+        unsafe {
+            crate::net::unix::put_sockaddr_un(addr_ptr, addrlen_ptr, name.as_deref());
+        }
+        return 0;
+    }
+
+    // Inet path: a sockaddr_in needs the full 16 bytes.
+    // SAFETY: addrlen_ptr validated with access_ok(4); get_user is the
     // exception-table copy path (SUM=0 safe).
     let addrlen = unsafe {
         crate::arch::riscv64::uaccess::get_user::<u32>(addrlen_ptr).unwrap_or(0)
@@ -623,13 +1034,8 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
 
     // Validate fd is a socket (W3: get_socket_from_fd verifies the ops
     // table — non-socket fds are ENOTSOCK, not type-confused pointers).
-    let socket = match crate::net::socket::get_socket_from_fd(fd) {
-        Some(s) => s,
-        None => return -(errno::ENOTSOCK as i64),
-    };
-
-    // Read one i32 (bool-style option value) via the exception-table path.
-    // SAFETY: optval range-checked with access_ok above (optlen >= 4 here).
+    // P0-1/P0-2: AF_UNIX / AF_NETLINK sockets never resolve through
+    // get_socket_from_fd (different ops tables) — dispatch them first.
     let read_i32 = |need: u32| -> Option<i32> {
         if optlen < need || optval.is_null() {
             return None;
@@ -643,6 +1049,92 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
             return None;
         }
         Some(i32::from_ne_bytes(b))
+    };
+
+    if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
+        let read_tv = || -> Option<u64> {
+            if optval.is_null() || optlen < 8 {
+                return None;
+            }
+            let mut tv = [0u8; 16];
+            let cpy = core::cmp::min(optlen as usize, 16);
+            // SAFETY: access_ok covered optlen bytes at fn entry.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(tv.as_mut_ptr(), optval, cpy)
+            } != 0
+            {
+                return None;
+            }
+            let sec = i64::from_ne_bytes(tv[0..8].try_into().unwrap());
+            let usec = i64::from_ne_bytes(tv[8..16].try_into().unwrap());
+            if sec < 0 || usec < 0 {
+                return None;
+            }
+            Some((sec as u64).saturating_mul(1_000_000).saturating_add(usec as u64))
+        };
+        return crate::net::unix::unix_setsockopt(
+            &usock,
+            level,
+            optname,
+            &|| read_i32(4),
+            &read_tv,
+        ) as i64;
+    }
+    if let Some(nlsock) = crate::net::netlink::netlink_socket_from_fd(fd) {
+        return match level {
+            SOL_SOCKET => match optname {
+                SO_RCVTIMEO | SO_SNDTIMEO => {
+                    let mut tv = [0u8; 16];
+                    if optval.is_null() || optlen < 8 {
+                        return -(errno::EINVAL as i64);
+                    }
+                    let cpy = core::cmp::min(optlen as usize, 16);
+                    // SAFETY: access_ok covered optlen bytes at fn entry.
+                    if unsafe {
+                        crate::arch::riscv64::uaccess::copy_from_user(tv.as_mut_ptr(), optval, cpy)
+                    } != 0
+                    {
+                        return -(errno::EFAULT as i64);
+                    }
+                    let sec = i64::from_ne_bytes(tv[0..8].try_into().unwrap());
+                    let usec = i64::from_ne_bytes(tv[8..16].try_into().unwrap());
+                    if sec < 0 || usec < 0 {
+                        return -(errno::EINVAL as i64);
+                    }
+                    let us = (sec as u64)
+                        .saturating_mul(1_000_000)
+                        .saturating_add(usec as u64);
+                    let mut opts = nlsock.options.lock();
+                    if optname == SO_RCVTIMEO {
+                        opts.rcvtimeo_us = us;
+                    } else {
+                        opts.sndtimeo_us = us;
+                    }
+                    0
+                }
+                SO_SNDBUF | SO_RCVBUF => {
+                    let v = match read_i32(4) {
+                        Some(v) => v,
+                        None => return -(errno::EFAULT as i64),
+                    };
+                    let mut opts = nlsock.options.lock();
+                    let doubled = (v.saturating_mul(2).max(2048)) as u32;
+                    if optname == SO_SNDBUF {
+                        opts.sndbuf = doubled;
+                    } else {
+                        opts.rcvbuf = doubled;
+                    }
+                    0
+                }
+                _ => 0, // accepted-and-ignored
+            },
+            _ => -(errno::ENOPROTOOPT as i64),
+        };
+    }
+
+    let socket = match crate::net::socket::get_socket_from_fd(fd) {
+        Some(s) => s,
+        None => return -(errno::ENOTSOCK as i64),
     };
 
     match level {
@@ -808,6 +1300,67 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     }
     if !crate::arch::riscv64::uaccess::access_ok(optval as usize, optlen) {
         return -(errno::EFAULT as i64);
+    }
+
+    // P0-1/P0-2: AF_UNIX / AF_NETLINK option reporting. Dispatched before
+    // the AF_INET resolution (unix/netlink fds never resolve there).
+    if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
+        const SO_RCVTIMEO_GET: i32 = 20;
+        const SO_SNDTIMEO_GET: i32 = 21;
+        const SOL_SOCKET_GET: i32 = 1;
+        if level == SOL_SOCKET_GET && (optname == SO_RCVTIMEO_GET || optname == SO_SNDTIMEO_GET) {
+            let opts = usock.options.lock();
+            let us = if optname == SO_RCVTIMEO_GET {
+                opts.rcvtimeo_us
+            } else {
+                opts.sndtimeo_us
+            };
+            drop(opts);
+            let sec = us / 1_000_000;
+            let usec = us % 1_000_000;
+            let write_len = core::cmp::min(optlen, 16);
+            // SAFETY: optval validated with access_ok(optlen) at entry.
+            unsafe {
+                crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len));
+                if write_len >= 8 {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        optval,
+                        &sec as *const u64 as *const u8,
+                        8.min(write_len),
+                    );
+                }
+                if write_len >= 16 {
+                    crate::arch::riscv64::uaccess::copy_to_user(optval.add(8), &usec as *const u64 as *const u8, 8);
+                }
+                let _ = crate::arch::riscv64::uaccess::put_user(optlen_ptr, write_len as u32);
+            }
+            return 0;
+        }
+        return match crate::net::unix::unix_getsockopt(&usock, level, optname) {
+            Ok(v) => {
+                // SAFETY: optval/optlen_ptr validated with access_ok above.
+                unsafe { write_int(optval, optlen, optlen_ptr, v) };
+                0
+            }
+            Err(e) => e as i64,
+        };
+    }
+    if let Some(_nlsock) = crate::net::netlink::netlink_socket_from_fd(fd) {
+        const SOL_SOCKET_GET: i32 = 1;
+        const SO_TYPE_GET: i32 = 3;
+        const SO_ERROR_GET: i32 = 4;
+        const SO_DOMAIN_GET: i32 = 39;
+        const SO_PROTOCOL_GET: i32 = 38;
+        let val = match (level, optname) {
+            (SOL_SOCKET_GET, SO_TYPE_GET) => 3,        // SOCK_RAW
+            (SOL_SOCKET_GET, SO_ERROR_GET) => 0,
+            (SOL_SOCKET_GET, SO_DOMAIN_GET) => 16,     // AF_NETLINK
+            (SOL_SOCKET_GET, SO_PROTOCOL_GET) => 0,    // NETLINK_ROUTE
+            _ => return -(errno::ENOPROTOOPT as i64),
+        };
+        // SAFETY: optval/optlen_ptr validated with access_ok above.
+        unsafe { write_int(optval, optlen, optlen_ptr, val) };
+        return 0;
     }
 
     // Validate fd is a socket
@@ -994,6 +1547,14 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // P0-1: AF_UNIX — mark the peer's EOF / our shut-write state.
+    if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
+        return match crate::net::unix::unix_shutdown(&usock, how) {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        };
+    }
+
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
         if how == 1 || how == 2 {
             // SHUT_WR or SHUT_RDWR: send FIN for TCP (review NET-M12 — the
@@ -1132,6 +1693,59 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         return 0;
     }
 
+    // P0-1: AF_UNIX sendmsg — full path with SCM_RIGHTS support.
+    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd as usize) {
+        // Parse SCM_RIGHTS cmsg(s) from msg_control (msghdr offsets 32/40).
+        let scm_files = match parse_scm_rights(msg_ptr) {
+            Ok(f) => f,
+            Err(e) => return e,
+        };
+        // Destination: a sockaddr_un msg_name for DGRAM.
+        let udest = if !msg_name_ptr.is_null() && msg_namelen >= 3 {
+            const SOCKADDR_UN_LEN: usize = crate::net::unix::SOCKADDR_UN_LEN;
+            let want = (msg_namelen as usize).min(SOCKADDR_UN_LEN);
+            if !crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, want) {
+                return -(errno::EFAULT as i64);
+            }
+            let mut ubuf = [0u8; SOCKADDR_UN_LEN];
+            // SAFETY: msg_name_ptr/want validated with access_ok.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    ubuf.as_mut_ptr(),
+                    msg_name_ptr,
+                    want,
+                )
+            } != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
+            crate::net::unix::parse_sockaddr_un(&ubuf[..want])
+        } else {
+            None
+        };
+        let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        let deadline = usock.sndtimeo_deadline();
+        return match crate::net::unix::unix_send(
+            &usock,
+            &buf,
+            scm_files,
+            udest.as_ref(),
+            nonblock,
+            deadline,
+        ) {
+            Ok(n) => n as i64,
+            Err(e) => e as i64,
+        };
+    }
+
+    // P0-2: AF_NETLINK — execute the rtnetlink request(s) in the buffer.
+    if let Some((nlsock, _)) = crate::net::netlink::netlink_file_of(fd as usize) {
+        return match crate::net::netlink::netlink_send(&nlsock, &buf) {
+            Ok(n) => n as i64,
+            Err(e) => e as i64,
+        };
+    }
+
     // W3: parse the destination from msg_name (same path as sendto's
     // addr_ptr) — UDP sendmsg used to pass NULL and could never send a
     // datagram; TCP ignores it.
@@ -1251,6 +1865,125 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // Allocate receive buffer
     let mut buf = alloc::vec![0u8; total_buf_len];
 
+    // P0-1: AF_UNIX recvmsg — one receive with SCM_RIGHTS delivery and a
+    // sockaddr_un source address.
+    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd as usize) {
+        let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        let deadline = usock.rcvtimeo_deadline();
+        let r = match crate::net::unix::unix_recv_ctl(&usock, &mut buf, nonblock, deadline) {
+            Ok(r) => r,
+            Err(e) => return e as i64,
+        };
+        // Scatter data back to iovecs.
+        let mut offset = 0usize;
+        for i in 0..msg_iovlen {
+            if offset >= r.len {
+                break;
+            }
+            // SAFETY: iovec fields at validated user offset (the array was
+            // access_ok-checked above).
+            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
+            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
+            let copy_len = core::cmp::min(iov_len, r.len - offset);
+            if copy_len > 0 {
+                // SAFETY: iov_base validated with access_ok above.
+                let uncopied = unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        iov_base as *mut u8,
+                        buf.as_ptr().add(offset),
+                        copy_len,
+                    )
+                };
+                if uncopied > 0 {
+                    return if offset > 0 { offset as i64 } else { -(errno::EFAULT as i64) };
+                }
+                offset += copy_len;
+            }
+        }
+        // SCM_RIGHTS: install the attached files + write the cmsg.
+        if !r.files.is_empty() {
+            // SAFETY: msg_ptr was access_ok(64)-validated at fn entry.
+            if let Err(e) = unsafe { deliver_scm_rights(msg_ptr, &r.files) } {
+                return e;
+            }
+        }
+        // Source address.
+        if let Some(src) = r.src {
+            if !msg_name_ptr.is_null() && !msg_namelen_ptr.is_null() {
+                if crate::arch::riscv64::uaccess::access_ok(
+                    msg_name_ptr as usize,
+                    crate::net::unix::SOCKADDR_UN_LEN,
+                ) && crate::arch::riscv64::uaccess::access_ok(msg_namelen_ptr as usize, 4)
+                {
+                    // SAFETY: pointers validated with access_ok.
+                    unsafe {
+                        crate::net::unix::put_sockaddr_un(
+                            msg_name_ptr,
+                            msg_namelen_ptr,
+                            Some(&src),
+                        );
+                    }
+                }
+            }
+        }
+        // msg_flags (offset 48): MSG_TRUNC for truncated datagrams.
+        let mut out_flags: u32 = 0;
+        if r.truncated {
+            out_flags |= MSG_TRUNC as u32;
+        }
+        // SAFETY: msg_ptr validated with access_ok(64) at entry.
+        unsafe {
+            let _ = crate::arch::riscv64::uaccess::put_user(msg_ptr.add(48) as *mut u32, out_flags);
+        }
+        return r.len as i64;
+    }
+
+    // P0-2: AF_NETLINK recvmsg — exactly one rtnetlink message per call,
+    // source address = kernel sockaddr_nl.
+    if let Some((nlsock, file_nonblock)) = crate::net::netlink::netlink_file_of(fd as usize) {
+        let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        let deadline = nlsock.rcvtimeo_deadline();
+        let n = match crate::net::netlink::netlink_recv(&nlsock, &mut buf, nonblock, deadline) {
+            Ok(n) => n,
+            Err(e) => return e as i64,
+        };
+        let mut offset = 0usize;
+        for i in 0..msg_iovlen {
+            if offset >= n {
+                break;
+            }
+            // SAFETY: iovec fields at validated user offset.
+            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
+            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
+            let copy_len = core::cmp::min(iov_len, n - offset);
+            if copy_len > 0 {
+                // SAFETY: iov_base validated with access_ok above.
+                let uncopied = unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        iov_base as *mut u8,
+                        buf.as_ptr().add(offset),
+                        copy_len,
+                    )
+                };
+                if uncopied > 0 {
+                    return if offset > 0 { offset as i64 } else { -(errno::EFAULT as i64) };
+                }
+                offset += copy_len;
+            }
+        }
+        if !msg_name_ptr.is_null() && !msg_namelen_ptr.is_null() {
+            if crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, 12)
+                && crate::arch::riscv64::uaccess::access_ok(msg_namelen_ptr as usize, 4)
+            {
+                // SAFETY: pointers validated with access_ok.
+                unsafe {
+                    crate::net::netlink::put_sockaddr_nl(msg_name_ptr, msg_namelen_ptr);
+                }
+            }
+        }
+        return n as i64;
+    }
+
     // Get socket and receive (W3: through the blocking recv engine).
     let (socket, file_nonblock) = match socket_file_of(fd as usize) {
         Some(s) => s,
@@ -1361,10 +2094,19 @@ pub fn sys_socketpair(args: SyscallArgs) -> i64 {
         return -(errno::EAFNOSUPPORT as i64);
     }
 
-    // TODO: implement AF_UNIX socketpair with connected socket pair
-    // For now, return -EOPNOTSUPP to indicate the feature is not yet available
-    // This is better than -ENOSYS which prevents libc fallback
-    -(errno::EOPNOTSUPP as i64)
+    // P0-1: real AF_UNIX socketpair — two pre-connected fds (STREAM pairs
+    // get a bidirectional buffer pair, DGRAM pairs per-message delivery).
+    let (fd0, fd1) = match crate::net::unix::unix_socketpair(_type_) {
+        Ok(pair) => pair,
+        Err(e) => return e as i64,
+    };
+    // SAFETY: sv was access_ok(8)-validated above; put_user is the
+    // exception-table copy path.
+    unsafe {
+        let _ = crate::arch::riscv64::uaccess::put_user(sv as *mut i32, fd0 as i32);
+        let _ = crate::arch::riscv64::uaccess::put_user(sv.add(1) as *mut i32, fd1 as i32);
+    }
+    0
 }
 
 /// sys_sendmmsg - Send multiple messages (NR 269)
@@ -1392,6 +2134,42 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
     }
     if !crate::arch::riscv64::uaccess::access_ok(msgvec as usize, vlen as usize * 64) {
         return -(errno::EFAULT as i64);
+    }
+
+    // P0-1/P0-2: AF_UNIX / AF_NETLINK — route each mmsghdr through the
+    // single-message sys_sendmsg (an mmsghdr's first 56 bytes ARE an
+    // msghdr; msg_len is written back at offset 56).
+    if crate::net::unix::unix_file_of(fd as usize).is_some()
+        || crate::net::netlink::netlink_file_of(fd as usize).is_some()
+    {
+        let mut total_sent = 0u32;
+        for i in 0..vlen as usize {
+            // SAFETY: msgvec access_ok-validated above; mm within range.
+            let mm = unsafe { msgvec.add(i * 64) };
+            let ret = sys_sendmsg([
+                fd as u64,
+                mm as usize as u64,
+                flags as u64,
+                0,
+                0,
+                0,
+            ]);
+            if ret < 0 {
+                if total_sent == 0 {
+                    return ret;
+                }
+                break;
+            }
+            // SAFETY: mm within validated range; put_user copies 4 bytes.
+            unsafe {
+                let _ = crate::arch::riscv64::uaccess::put_user(mm.add(56) as *mut u32, ret as u32);
+            }
+            total_sent += 1;
+            if ret == 0 {
+                break;
+            }
+        }
+        return total_sent as i64;
     }
 
     let (socket, file_nonblock) = match socket_file_of(fd as usize) {
@@ -1565,6 +2343,42 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
     }
     if !crate::arch::riscv64::uaccess::access_ok(msgvec as usize, vlen as usize * 64) {
         return -(errno::EFAULT as i64);
+    }
+
+    // P0-1/P0-2: AF_UNIX / AF_NETLINK — route each mmsghdr through the
+    // single-message sys_recvmsg (msg_len written back at offset 56; the
+    // recvmmsg batch timeout is approximated by SO_RCVTIMEO here).
+    if crate::net::unix::unix_file_of(fd as usize).is_some()
+        || crate::net::netlink::netlink_file_of(fd as usize).is_some()
+    {
+        let mut total_recv = 0u32;
+        for i in 0..vlen as usize {
+            // SAFETY: msgvec access_ok-validated above; mm within range.
+            let mm = unsafe { msgvec.add(i * 64) };
+            let ret = sys_recvmsg([
+                fd as u64,
+                mm as usize as u64,
+                flags as u64,
+                0,
+                0,
+                0,
+            ]);
+            if ret < 0 {
+                if total_recv == 0 {
+                    return ret;
+                }
+                break;
+            }
+            // SAFETY: mm within validated range; put_user copies 4 bytes.
+            unsafe {
+                let _ = crate::arch::riscv64::uaccess::put_user(mm.add(56) as *mut u32, ret as u32);
+            }
+            total_recv += 1;
+            if ret == 0 {
+                break; // EOF
+            }
+        }
+        return total_recv as i64;
     }
 
     let (socket, file_nonblock) = match socket_file_of(fd as usize) {
@@ -1764,6 +2578,91 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
 
     if len == 0 {
         return 0;
+    }
+
+    // P0-1: AF_UNIX — receive into a kernel buffer, report the sender path.
+    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd) {
+        let stage = len.min(crate::syscall::io::RW_CHUNK);
+        let mut kbuf = alloc::vec::Vec::new();
+        if kbuf.try_reserve_exact(stage).is_err() {
+            return -(errno::ENOMEM as i64);
+        }
+        kbuf.resize(stage, 0);
+        let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        let deadline = usock.rcvtimeo_deadline();
+        return match crate::net::unix::unix_recv_ctl(&usock, kbuf.as_mut_slice(), nonblock, deadline)
+        {
+            Ok(r) => {
+                if r.len > 0 {
+                    // SAFETY: buf_ptr validated with access_ok(len) above;
+                    // r.len <= stage <= len.
+                    if unsafe {
+                        crate::arch::riscv64::uaccess::copy_to_user(buf_ptr, kbuf.as_ptr(), r.len)
+                    } != 0
+                    {
+                        return -(errno::EFAULT as i64);
+                    }
+                }
+                if let Some(src) = r.src {
+                    if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
+                        if crate::arch::riscv64::uaccess::access_ok(
+                            addr_ptr as usize,
+                            crate::net::unix::SOCKADDR_UN_LEN,
+                        ) && crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4)
+                        {
+                            // SAFETY: pointers validated with access_ok.
+                            unsafe {
+                                crate::net::unix::put_sockaddr_un(
+                                    addr_ptr,
+                                    addrlen_ptr,
+                                    Some(&src),
+                                );
+                            }
+                        }
+                    }
+                }
+                r.len as i64
+            }
+            Err(e) => e as i64,
+        };
+    }
+
+    // P0-2: AF_NETLINK — one rtnetlink message + sockaddr_nl source.
+    if let Some((nlsock, file_nonblock)) = crate::net::netlink::netlink_file_of(fd) {
+        let stage = len.min(crate::syscall::io::RW_CHUNK);
+        let mut kbuf = alloc::vec::Vec::new();
+        if kbuf.try_reserve_exact(stage).is_err() {
+            return -(errno::ENOMEM as i64);
+        }
+        kbuf.resize(stage, 0);
+        let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        let deadline = nlsock.rcvtimeo_deadline();
+        return match crate::net::netlink::netlink_recv(&nlsock, kbuf.as_mut_slice(), nonblock, deadline)
+        {
+            Ok(n) => {
+                if n > 0 {
+                    // SAFETY: buf_ptr validated with access_ok(len) above.
+                    if unsafe {
+                        crate::arch::riscv64::uaccess::copy_to_user(buf_ptr, kbuf.as_ptr(), n)
+                    } != 0
+                    {
+                        return -(errno::EFAULT as i64);
+                    }
+                }
+                if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
+                    if crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 12)
+                        && crate::arch::riscv64::uaccess::access_ok(addrlen_ptr as usize, 4)
+                    {
+                        // SAFETY: pointers validated with access_ok.
+                        unsafe {
+                            crate::net::netlink::put_sockaddr_nl(addr_ptr, addrlen_ptr);
+                        }
+                    }
+                }
+                n as i64
+            }
+            Err(e) => e as i64,
+        };
     }
 
     // Get socket through the per-process fd table (review NET-C3)

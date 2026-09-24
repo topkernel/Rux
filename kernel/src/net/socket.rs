@@ -1092,6 +1092,14 @@ pub fn wake_all_tcp_sockets() {
 
 /// Create socket and return file descriptor
 pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize, i32> {
+    // P0-1/P0-2: AF_UNIX and AF_NETLINK live in their own modules with
+    // their own file ops (identity-checked in *_socket_from_fd).
+    if domain == crate::net::unix::AF_UNIX {
+        return crate::net::unix::unix_socket_create(type_, protocol);
+    }
+    if domain == crate::net::netlink::AF_NETLINK {
+        return crate::net::netlink::netlink_socket_create(type_, protocol);
+    }
     if domain != AF_INET {
         return Err(-97); // EAFNOSUPPORT
     }

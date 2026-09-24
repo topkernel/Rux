@@ -638,9 +638,20 @@ fn is_local_ip(ip: u32) -> bool {
 /// in this round).
 pub const LOCAL_IP_ADDR: u32 = 0x0A00020F;
 
+/// P0-2 (netlink/ioctl): the LIVE local IPv4 address — starts at the slirp
+/// default and is updated by RTM_NEWADDR / SIOCSIFADDR. Atomic so the TX
+/// data path (every CPU) reads it lock-free.
+static LOCAL_IP: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(LOCAL_IP_ADDR);
+
 /// Get local IP address (host byte order)
 pub fn get_local_ip() -> u32 {
-    LOCAL_IP_ADDR
+    LOCAL_IP.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// P0-2: set local IP address (host byte order) — rtnetlink/SIOCSIFADDR.
+pub fn set_local_ip(ip: u32) {
+    LOCAL_IP.store(ip, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Get local MAC address

@@ -7,7 +7,7 @@
 //! Includes: read, write,writev, dup, dup2, fcntl, ioctl, flock, pipe2
 
 use super::*;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::Ordering;
 
 /// iovec structure (for writev/readv)
 #[repr(C)]
@@ -38,43 +38,26 @@ pub fn clamp_rw_count(count: usize) -> usize {
 // ============================================================================
 // Terminal (TTY) state
 // ============================================================================
+//
+// The console terminal's termios/winsize/fg-pgrp state lives in
+// fs::tty::console() (a TtyDevice shared with the pty layer). The helpers
+// below are thin delegates kept for the console.rs RX-IRQ path (ISIG/echo
+// decisions) and legacy callers; pty fds carry their own per-pair TtyDevice.
 
-/// Termios local flags ( c_lflag)
-const L_ISIG: u32   = 0x0001;   // Signal handling enabled
-const L_ICANON: u32 = 0x0002;   // Canonical mode (R7-D7: was 0x0100, which
-                                // is TOSTOP in the asm-generic ABI — libc
-                                // canonical-mode checks misfired)
-const L_ECHO: u32   = 0x0008;   // Echo enabled
-const L_ECHOE: u32  = 0x0010;   // Echo erase
-const L_ECHOK: u32 = 0x0020;   // Echo kill
-
-/// Global terminal settings ( simplified - single console)
-/// c_lflag stores the local mode flags
-static TTY_LFLAG: AtomicU32 = AtomicU32::new(L_ISIG | L_ICANON | L_ECHO | L_ECHOE | L_ECHOK);
-
-/// Foreground process group ID for the console terminal
-/// 0 means no foreground group has been set (kernel init owns the terminal)
-static TTY_FG_PGRP: AtomicU32 = AtomicU32::new(0);
-
-/// Check if terminal echo is enabled
+/// Check if the console terminal echo is enabled
 pub fn tty_echo_enabled() -> bool {
-    (TTY_LFLAG.load(Ordering::Relaxed) & L_ECHO) != 0
+    crate::fs::tty::console().echo_enabled()
 }
 
-/// Get terminal c_lflag
+/// Get the console terminal c_lflag
 pub fn tty_get_lflag() -> u32 {
-    TTY_LFLAG.load(Ordering::Relaxed)
-}
-
-/// Set terminal c_lflag
-pub fn tty_set_lflag(lflag: u32) {
-    TTY_LFLAG.store(lflag, Ordering::Release);
+    crate::fs::tty::console().lflag()
 }
 
 /// Get the console terminal's foreground process group (0 = none set).
 /// Used by the tty ISIG (^C/^Z/^\) delivery path.
 pub fn tty_get_fg_pgrp() -> u32 {
-    TTY_FG_PGRP.load(Ordering::Acquire)
+    crate::fs::tty::console().fg_pgrp.load(Ordering::Acquire)
 }
 
 /// sys_read - Read data from file descriptor
@@ -663,6 +646,48 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         // fall through to the generic path
     }
 
+    // Per-fd terminal ioctls (pty master/slave): dispatch on the File's ops
+    // identity. Non-pty files (or pty-unhandled requests like FIONBIO)
+    // return None here and fall through to the console-global handling
+    // below — the terminal state must follow the fd, not the system.
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) = crate::fs::pty::pty_ioctl(&file, request, arg) {
+                return ret;
+            }
+        }
+    }
+
+    // P0-2: interface-management ioctls (SIOCGIFCONF / SIOCGIFADDR /
+    // SIOCSIFADDR / SIOCGIFFLAGS / SIOCSIFFLAGS / SIOCGIFHWADDR / ...) —
+    // forwarded to the network layer when the fd is a socket (any family).
+    if crate::net::netlink::is_if_ioctl(request) {
+        let is_socket = unsafe { crate::fs::file::get_file_fd(fd as usize) }
+            .map(|file| {
+                let ops = file.get_ops();
+                match ops {
+                    Some(ops) => {
+                        core::ptr::eq(ops as *const _, &crate::net::socket::SOCKET_OPS as *const _)
+                            || core::ptr::eq(
+                                ops as *const _,
+                                &crate::net::unix::UNIX_SOCKET_OPS as *const _,
+                            )
+                            || core::ptr::eq(
+                                ops as *const _,
+                                &crate::net::netlink::NETLINK_OPS as *const _,
+                            )
+                    }
+                    None => false,
+                }
+            })
+            .unwrap_or(false);
+        if is_socket {
+            return crate::net::netlink::net_if_ioctl(request, arg);
+        }
+        return -errno::ENOTTY as i64;
+    }
+
     // TTY ioctl commands
     match request {
         // TCGETS - Get terminal attributes (0x5401)
@@ -670,43 +695,20 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if arg == 0 {
                 return -errno::EFAULT as i64;
             }
-            // Check address validity (termios struct ~60 bytes)
+            // Check address validity (termios struct 52 bytes)
             if !crate::arch::riscv64::uaccess::access_ok(arg, 52) {
                 return -errno::EFAULT as i64;
             }
-            // Fill termios structure with current settings
-            let lflag = tty_get_lflag();
-
-            // Build termios structure in kernel buffer first
-            let mut termios_buf = [0u8; 52]; // R9-15: asm-generic termios is 52 bytes (4x u32 + c_line + c_cc[32] + pad); 60 overwrote 8 bytes past the user struct
-            // SAFETY: termios_buf is a stack-allocated 60-byte buffer; all offsets stay within bounds.
-            unsafe {
-                let ptr = termios_buf.as_mut_ptr() as *mut u32;
-                // c_iflag: ICRNL | IXON
-                *ptr.offset(0) = 0x0100 | 0x0400;
-                // c_oflag: OPOST | ONLCR
-                *ptr.offset(1) = 0x0001 | 0x0004;
-                // c_cflag: B38400 | CS8 | CREAD | HUPCL
-                *ptr.offset(2) = 0x000F | 0x0030 | 0x0080 | 0x0400;
-                // c_lflag: use current settings
-                *ptr.offset(3) = lflag;
-                // R7-D7: musl (asm-generic) layout is c_line: 1 BYTE at 16,
-                // c_cc[32] at 17 — the old u32-at-16/c_cc-at-20 shifted
-                // every control character 3 slots (VINTR's 3 landed in the
-                // VKILL position).
-                *termios_buf.as_mut_ptr().add(16) = 0; // c_line (cc_t = u8)
-                let cc_ptr = termios_buf.as_mut_ptr().add(17);
-                cc_ptr.add(0).write(3);   // VINTR = ^C
-                cc_ptr.add(1).write(28);  // VQUIT = ^\
-                cc_ptr.add(2).write(127); // VERASE = DEL
-                cc_ptr.add(3).write(21);  // VKILL = ^U
-                cc_ptr.add(4).write(4);   // VEOF = ^D
-                cc_ptr.add(5).write(0);   // VTIME
-                cc_ptr.add(6).write(1);   // VMIN
-            }
+            // Fill termios structure from the shared console tty state
+            // (fs::tty — full termios persistence; the c_lflag half is what
+            // console.rs consults for ISIG/echo).
+            let tio = crate::fs::tty::console().get_termios();
+            // SAFETY: termios_buf is a stack-allocated 52-byte buffer.
+            let mut termios_buf = [0u8; 52]; // R9-15: asm-generic termios is 52 bytes (4x u32 + c_line + c_cc[32] + pad)
+            crate::fs::tty::termios_to_user_bytes(&tio, &mut termios_buf);
 
             // Copy to user space with SUM bit properly set
-            // SAFETY: arg validated with access_ok(60); copy_to_user handles user writes.
+            // SAFETY: arg validated with access_ok(52); copy_to_user handles user writes.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     arg as *mut u8,
@@ -729,7 +731,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             // Read termios structure from user space using copy_from_user
-            let mut termios_buf = [0u8; 52]; // R9-15: asm-generic termios is 52 bytes (4x u32 + c_line + c_cc[32] + pad); 60 overwrote 8 bytes past the user struct
+            let mut termios_buf = [0u8; 52]; // R9-15: asm-generic termios is 52 bytes (4x u32 + c_line + c_cc[32] + pad)
             // R20-1: copy exactly 52 — the old 60-byte length overflowed the
             // 52-byte kernel buffer by 8 bytes (stale length from before the
             // R9-15 buffer shrink; TCGETS was fixed, TCSETS was not).
@@ -744,12 +746,56 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
-            // Read c_lflag from buffer and update global state
-            // SAFETY: termios_buf is a stack-allocated buffer; offset 3 reads a u32 at byte 12.
-            unsafe {
-                let ptr = termios_buf.as_ptr() as *const u32;
-                let lflag = *ptr.offset(3);
-                tty_set_lflag(lflag);
+            // Store the full termios into the shared console tty state
+            // (console.rs reads the c_lflag half for ISIG/echo decisions).
+            let tio = crate::fs::tty::termios_from_user_bytes(&termios_buf);
+            if request == 0x5404 {
+                crate::fs::tty::console().flush_input();
+            }
+            crate::fs::tty::console().set_termios(tio);
+            0
+        }
+        // TCGETA / TCSETA / TCSETAW / TCSETAF - termio (BSD-style) variants
+        0x5405 | 0x5406 | 0x5407 | 0x5408 => {
+            let set = request != 0x5405;
+            if arg == 0 {
+                return -errno::EFAULT as i64;
+            }
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 17) {
+                return -errno::EFAULT as i64;
+            }
+            let console_tty = crate::fs::tty::console();
+            let mut kbuf = [0u8; 17]; // struct termio: 4x u16 + c_line + c_cc[8]
+            if set {
+                // SAFETY: arg validated with access_ok(17); copy_from_user safely reads from user.
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(
+                        kbuf.as_mut_ptr(),
+                        arg as *const u8,
+                        17
+                    )
+                } > 0 {
+                    return -errno::EFAULT as i64;
+                }
+                let base = console_tty.get_termios();
+                let tio = crate::fs::tty::termios_from_termio_bytes(&kbuf, &base);
+                if request == 0x5408 {
+                    console_tty.flush_input();
+                }
+                console_tty.set_termios(tio);
+            } else {
+                let tio = console_tty.get_termios();
+                crate::fs::tty::termios_to_termio_bytes(&tio, &mut kbuf);
+                // SAFETY: arg validated with access_ok(17); copy_to_user handles user writes.
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        arg as *mut u8,
+                        kbuf.as_ptr(),
+                        17
+                    )
+                } > 0 {
+                    return -errno::EFAULT as i64;
+                }
             }
             0
         }
@@ -761,7 +807,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
                 return -errno::EFAULT as i64;
             }
-            let pgid = TTY_FG_PGRP.load(Ordering::Relaxed);
+            let pgid = crate::fs::tty::console().fg_pgrp.load(Ordering::Acquire);
             let pgid_bytes = (pgid as u32).to_le_bytes();
             // SAFETY: arg validated with access_ok(4); copy_to_user handles user writes.
             let uncopied = unsafe {
@@ -797,7 +843,9 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let pgid = u32::from_le_bytes(pgid_bytes);
-            TTY_FG_PGRP.store(pgid, Ordering::Release);
+            crate::fs::tty::console()
+                .fg_pgrp
+                .store(pgid, Ordering::Release);
             0
         }
         // TIOCGWINSZ - Get window size (0x5413)
@@ -810,13 +858,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
 
-            // Build winsize structure in kernel buffer first
-            let winsize_buf: [u8; 8] = [
-                25, 0,   // ws_row = 25 (little-endian)
-                80, 0,   // ws_col = 80 (little-endian)
-                0, 0,    // ws_xpixel
-                0, 0,    // ws_ypixel
-            ];
+            // Read the shared console tty window size (default 25x80)
+            let winsize_buf = crate::fs::tty::console().get_winsize().to_le_bytes();
 
             // Copy to user space with SUM bit properly set
             // SAFETY: arg validated with access_ok(8); copy_to_user handles user writes.
@@ -834,7 +877,29 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
         // TIOCSWINSZ - Set window size (0x5414)
         0x5414 => {
-            0  // Ignore setting
+            if arg == 0 {
+                return -errno::EFAULT as i64;
+            }
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 8) {
+                return -errno::EFAULT as i64;
+            }
+            let mut kbuf = [0u8; 8];
+            // SAFETY: arg validated with access_ok(8); copy_from_user safely reads from user.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    kbuf.as_mut_ptr(),
+                    arg as *const u8,
+                    8
+                )
+            } > 0 {
+                return -errno::EFAULT as i64;
+            }
+            let ws = crate::fs::tty::WinSize::from_le_bytes(&kbuf);
+            let console_tty = crate::fs::tty::console();
+            if console_tty.set_winsize(ws) {
+                console_tty.send_sigwinch();
+            }
+            0
         }
         // FIONREAD - Get readable byte count (0x541B)
         0x541B => {

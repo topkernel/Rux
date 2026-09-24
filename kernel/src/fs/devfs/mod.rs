@@ -153,6 +153,28 @@ pub fn init() {
         .lock_irqsave()
         .insert(String::from("null"), null_entry);
 
+    // /dev/ptmx: every open allocates a new pty pair (fs/pty.rs ptmx_open).
+    let ptmx_entry = Arc::new(DevfsEntry::new_char_device_with_mode(
+        "ptmx",
+        crate::fs::pty::DEV_PTMX,
+        0o666 | 0o020000, // S_IFCHR | rw-rw-rw-
+    ));
+    root_entry
+        .children
+        .lock_irqsave()
+        .insert(String::from("ptmx"), ptmx_entry);
+
+    // /dev/pts: pty slave nodes appear at /dev/pts/N on posix_openpt and
+    // are removed when the pair's last fd closes.
+    let pts_dir = Arc::new(DevfsEntry::new_dir("pts"));
+    root_entry
+        .children
+        .lock_irqsave()
+        .insert(String::from("pts"), pts_dir);
+
+    // Register the ptmx device ops (slave ops are registered per-pair).
+    crate::fs::pty::devfs_register();
+
     // Create /dev/input directory
     let input_dir = Arc::new(DevfsEntry::new_dir("input"));
 
@@ -222,6 +244,72 @@ pub fn mknod(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
     current.children.lock_irqsave().insert(String::from(device_name), entry);
 
     Ok(())
+}
+
+/// Remove a device node (dynamic entries, e.g. /dev/pts/N when a pty pair
+/// is destroyed). Traversal rules match mknod(); removing a directory or a
+/// missing node fails.
+pub fn remove_node(path: &str) -> Result<(), ()> {
+    // Remove leading /
+    let path = path.strip_prefix('/').unwrap_or(path);
+
+    if path.is_empty() {
+        return Err(());
+    }
+
+    let root = DEVFS_ROOT.lock_irqsave();
+    let root = match root.as_ref() {
+        Some(r) => r,
+        None => return Err(()),
+    };
+
+    // Collect path components into stack array (avoid Vec allocation)
+    const MAX_COMPONENTS: usize = 16;
+    let mut components: [&str; MAX_COMPONENTS] = [""; MAX_COMPONENTS];
+    let mut ncomponents: usize = 0;
+    for part in path.split('/').filter(|s| !s.is_empty()) {
+        if ncomponents >= MAX_COMPONENTS {
+            return Err(());
+        }
+        components[ncomponents] = part;
+        ncomponents += 1;
+    }
+    if ncomponents == 0 {
+        return Err(());
+    }
+
+    // Traverse to parent of last component
+    let mut current = root.clone();
+    let parent_count = ncomponents - 1;
+    for i in 0..parent_count {
+        let component = components[i];
+        let children = current.children.lock_irqsave();
+        match children.get(component) {
+            Some(child) => {
+                let child = child.clone();
+                drop(children);
+                current = child;
+            }
+            None => return Err(()),
+        }
+    }
+
+    let node_name = components[ncomponents - 1];
+    let removed = current.children.lock_irqsave().remove(node_name);
+    match removed {
+        Some(entry) => {
+            if entry.is_dir() {
+                // Re-insert directories: only leaf device nodes may be removed.
+                current
+                    .children
+                    .lock_irqsave()
+                    .insert(String::from(node_name), entry);
+                return Err(());
+            }
+            Ok(())
+        }
+        None => Err(()),
+    }
 }
 
 /// Create directory
@@ -503,6 +591,27 @@ fn devfs_ino_hash(name: &str) -> u64 {
     if hash == 0 { 1 } else { hash }
 }
 
+/// DevFS open hook: allocate per-open device state.
+/// - /dev/ptmx → allocate a NEW pty pair for this open file description
+/// - /dev/pts/N → attach to the live pair N
+/// - everything else → no-op (0)
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
+unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
+    let entry_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return 0,
+    };
+    let entry = &*(entry_ptr as *const DevfsEntry);
+
+    if entry.devno == crate::fs::pty::DEV_PTMX {
+        return crate::fs::pty::ptmx_open(file);
+    }
+    if entry.devno.major == crate::fs::pty::PTY_SLAVE_MAJOR {
+        return crate::fs::pty::slave_open(file, entry.devno.minor);
+    }
+    0
+}
+
 /// DevFS get_file_ops: return device-specific ops for char devices, DIR_FILE_OPS for directories
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn devfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
@@ -573,7 +682,7 @@ pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     readlink: None,
     get_file_ops: Some(devfs_get_file_ops),
     readdir: Some(devfs_readdir),
-    open: None,
+    open: Some(devfs_open),
     permission: None,
     getattr: Some(devfs_getattr),
     setattr: None,

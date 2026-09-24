@@ -218,6 +218,13 @@ pub fn route_clear() {
     unsafe { ROUTE_TABLE.clear() }
 }
 
+/// P0-2 (rtnetlink RTM_GETROUTE dump): snapshot of every route entry.
+pub fn route_dump() -> alloc::vec::Vec<RouteEntry> {
+    let _g = ROUTE_LOCK.lock_irqsave();
+    // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
+    unsafe { ROUTE_TABLE.entries[..ROUTE_TABLE.count].iter().flatten().cloned().collect() }
+}
+
 /// Initialize default routes
 ///
 /// Adds local loopback route and directly connected route
