@@ -2455,23 +2455,41 @@ pub fn sys_userfaultfd(_args: SyscallArgs) -> i64 {
 }
 
 /// sys_kcmp - Compare two processes
+///
+/// Minimal stub (U2): returns 0 ("identical"). Nothing in Rux shares
+/// kernel objects that kcmp could distinguish; callers (systemd's
+/// PID reuse detection, ltrace) treat 0 as "same resource" and proceed.
 pub fn sys_kcmp(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+    0
 }
 
 /// sys_finit_module - Load kernel module from file descriptor
-pub fn sys_finit_module(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// U2 kmod support: reads the blob from the fd and registers it in the
+/// module table (no relocation/execution — see kernel/src/module/mod.rs).
+/// This is the syscall kmod's modprobe actually issues at udev coldboot.
+pub fn sys_finit_module(args: SyscallArgs) -> i64 {
+    let fd = args[0] as usize;
+    let flags = args[2] as u64;
+    crate::module::sys_finit_module_impl(fd, flags)
 }
 
 /// sys_init_module - Load kernel module
-pub fn sys_init_module(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// U2 kmod support: blob passed inline from user memory.
+pub fn sys_init_module(args: SyscallArgs) -> i64 {
+    let umod = args[0] as usize;
+    let len = args[1] as usize;
+    crate::module::sys_init_module_impl(umod, len)
 }
 
 /// sys_delete_module - Unload kernel module
-pub fn sys_delete_module(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// U2 kmod support: removes the registration (refcount-gated).
+pub fn sys_delete_module(args: SyscallArgs) -> i64 {
+    let name_user = args[0] as usize;
+    let flags = args[1] as u64;
+    crate::module::sys_delete_module_impl(name_user, flags)
 }
 
 /// sys_kexec_load - Load new kernel for reboot
@@ -2480,13 +2498,19 @@ pub fn sys_kexec_load(_args: SyscallArgs) -> i64 {
 }
 
 /// sys_process_vm_readv - Read from another process memory
+///
+/// Minimal stub (U2): EOPNOTSUPP rather than ENOSYS. Tools probe the
+/// errno to decide whether the operation is unsupported (and fall back
+/// to /proc/[pid]/mem or ptrace) versus the syscall being absent.
 pub fn sys_process_vm_readv(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+    -(errno::EOPNOTSUPP as i64)
 }
 
 /// sys_process_vm_writev - Write to another process memory
+///
+/// Minimal stub (U2): see sys_process_vm_readv.
 pub fn sys_process_vm_writev(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+    -(errno::EOPNOTSUPP as i64)
 }
 
 /// sys_perf_event_open - Open performance event

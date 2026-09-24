@@ -88,6 +88,13 @@ pub enum PidFileKind {
     Environ,
     OomScore,
     OomScoreAdj,
+    /// /proc/[pid]/comm — the task's comm (basename of exe, 15 chars
+    /// like TASK_COMM_LEN). systemd compares /proc/1/comm against
+    /// "systemd" to detect PID 1.
+    Comm,
+    /// /proc/[pid]/cgroup — cgroups v2 membership ("0::/"). systemd's
+    /// boot probe parses this to place itself in the unified hierarchy.
+    Cgroup,
 }
 
 /// ProcFS node type
@@ -286,6 +293,8 @@ impl ProcFSNode {
                 PidFileKind::Environ => pid::generate_environ(pid),
                 PidFileKind::OomScore => pid::generate_oom_score(pid),
                 PidFileKind::OomScoreAdj => pid::generate_oom_score_adj(pid),
+                PidFileKind::Comm => pid::generate_comm(pid),
+                PidFileKind::Cgroup => pid::generate_cgroup(pid),
                 // Symlinks handled by get_link_target()
                 PidFileKind::Exe | PidFileKind::Cwd => Vec::new(),
             };
@@ -435,6 +444,9 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("filesystems", mounts::generate_filesystems);
         self.create_dynamic_file("mountinfo", mounts::generate_mountinfo);
         self.create_dynamic_file("interrupts", interrupts::generate);
+
+        // U2 kmod: registered loadable modules (kernel/src/module).
+        self.create_dynamic_file("modules", crate::module::generate_proc_modules);
 
         // Kernel log buffer
         self.create_dynamic_file("kmsg", crate::printk::generate_kmsg);
@@ -728,6 +740,8 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "environ" => Some(pid::generate_environ(pid)),
                 "oom_score" => Some(pid::generate_oom_score(pid)),
                 "oom_score_adj" => Some(pid::generate_oom_score_adj(pid)),
+                "comm" => Some(pid::generate_comm(pid)),
+                "cgroup" => Some(pid::generate_cgroup(pid)),
                 _ => None,
             };
         }
@@ -770,6 +784,8 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "environ" => Some(pid::generate_environ(pid)),
                 "oom_score" => Some(pid::generate_oom_score(pid)),
                 "oom_score_adj" => Some(pid::generate_oom_score_adj(pid)),
+                "comm" => Some(pid::generate_comm(pid)),
+                "cgroup" => Some(pid::generate_cgroup(pid)),
                 _ => None,
             };
         }
@@ -896,6 +912,8 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
             b"environ" => PidFileKind::Environ,
             b"oom_score" => PidFileKind::OomScore,
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
+            b"comm" => PidFileKind::Comm,
+            b"cgroup" => PidFileKind::Cgroup,
             _ => {
                 // /proc/[pid]/fd — the fd subdirectory (review 5.7: used to
                 // exist only behind a syscall-layer string special case, so
@@ -1124,6 +1142,8 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             b"environ" => PidFileKind::Environ,
             b"oom_score" => PidFileKind::OomScore,
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
+            b"comm" => PidFileKind::Comm,
+            b"cgroup" => PidFileKind::Cgroup,
             _ => {
                 // /proc/[pid]/fd directory (review 5.7): a synthetic
                 // directory whose readdir lists the target's open fds —
@@ -1422,6 +1442,8 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
         (b"stat", file_type::DT_REG),
         (b"maps", file_type::DT_REG),
         (b"environ", file_type::DT_REG),
+        (b"comm", file_type::DT_REG),
+        (b"cgroup", file_type::DT_REG),
         (b"exe", file_type::DT_LNK),
         (b"cwd", file_type::DT_LNK),
         (b"fd", file_type::DT_DIR),

@@ -2775,13 +2775,19 @@ pub fn sys_remap_file_pages(_args: SyscallArgs) -> i64 {
 }
 
 /// sys_name_to_handle_at - Get file handle (NR 264)
+///
+/// Minimal stub (U2): EOPNOTSUPP instead of ENOSYS — file handles are
+/// not implemented, but callers probing support distinguish "unsupported
+/// here" from "syscall absent".
 pub fn sys_name_to_handle_at(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+    -(errno::EOPNOTSUPP as i64)
 }
 
 /// sys_open_by_handle_at - Open by file handle (NR 265)
+///
+/// Minimal stub (U2): EOPNOTSUPP — see sys_name_to_handle_at.
 pub fn sys_open_by_handle_at(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+    -(errno::EOPNOTSUPP as i64)
 }
 
 /// sys_copy_file_range - Copy data between files (NR 285)

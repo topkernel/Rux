@@ -13,6 +13,7 @@ pub mod registry;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use alloc::format;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use crate::sync::spinlock::Spinlock;
@@ -151,6 +152,322 @@ static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     poll: Some(nulldev_poll),
 };
 
+// ============================================================================
+// devtmpfs node stock: console/tty, mem(1) devices, random
+// (U2 — Ubuntu boot needs /dev/console writable by PID 1 and the
+//  zero/random family present before udev takes over /dev)
+// ============================================================================
+
+/// /dev/console, /dev/tty, /dev/ttyS0 — the UART-backed terminal.
+///
+/// read goes through the shared console TtyDevice (canonical-mode line
+/// discipline, termios settings shared with the pty layer); write does
+/// OPOST/ONLCR translation then hits the UART atomically per chunk.
+fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+    let nonblock = (file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
+    crate::fs::tty::console().read_input(buf, nonblock)
+}
+
+fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
+    let onlcr = crate::fs::tty::console().output_translates_nl();
+    // Translate \n -> \r\n (OPOST|ONLCR) in 256-byte chunks so a single
+    // console write stays atomic per chunk (R20-4 discipline).
+    let mut chunk = [0u8; 256];
+    let mut chunk_len = 0usize;
+    let mut flush = |chunk: &mut [u8], len: &mut usize| -> isize {
+        if *len == 0 {
+            return 0;
+        }
+        // SAFETY-free slice call; uart_write only reads the slice.
+        let n = unsafe {
+            crate::fs::char_dev::uart_write(chunk.as_ptr(), *len)
+        };
+        *len = 0;
+        n
+    };
+    for &b in buf {
+        if onlcr && b == b'\n' {
+            if chunk_len + 2 > chunk.len() {
+                let n = flush(&mut chunk, &mut chunk_len);
+                if n < 0 {
+                    return n;
+                }
+            }
+            chunk[chunk_len] = b'\r';
+            chunk[chunk_len + 1] = b'\n';
+            chunk_len += 2;
+        } else {
+            if chunk_len + 1 > chunk.len() {
+                let n = flush(&mut chunk, &mut chunk_len);
+                if n < 0 {
+                    return n;
+                }
+            }
+            chunk[chunk_len] = b;
+            chunk_len += 1;
+        }
+    }
+    let n = flush(&mut chunk, &mut chunk_len);
+    if n < 0 {
+        return n;
+    }
+    buf.len() as isize
+}
+
+fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut ready = 0u16;
+    if events & POLLIN != 0 && crate::fs::tty::console().input_poll_ready() {
+        ready |= POLLIN | POLLRDNORM;
+    }
+    if events & POLLOUT != 0 {
+        ready |= POLLOUT | POLLWRNORM;
+    }
+    ready
+}
+
+static CONDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+    read: Some(condev_read),
+    write: Some(condev_write),
+    lseek: None,
+    close: None,
+    poll: Some(condev_poll),
+};
+
+/// /dev/zero — reads return zeros, writes discard.
+fn zerodev_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+    buf.fill(0);
+    buf.len() as isize
+}
+
+fn zerodev_write(file: &crate::fs::file::File, buf: &[u8]) -> isize {
+    let _ = file;
+    buf.len() as isize
+}
+
+fn zerodev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
+}
+
+static ZERODEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+    read: Some(zerodev_read),
+    write: Some(zerodev_write),
+    lseek: None,
+    close: None,
+    poll: Some(zerodev_poll),
+};
+
+/// /dev/full — reads return zeros, writes fail with ENOSPC.
+fn fulldev_write(_file: &crate::fs::file::File, _buf: &[u8]) -> isize {
+    -(crate::errno::constants::ENOSPC as isize)
+}
+
+static FULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+    read: Some(zerodev_read),
+    write: Some(fulldev_write),
+    lseek: None,
+    close: None,
+    poll: Some(zerodev_poll),
+};
+
+/// xorshift* PRNG state for /dev/random + /dev/urandom nodes (the real
+/// CRNG lives behind the getrandom(2) syscall; this node-side source
+/// only needs to exist and never block).
+static RNG_STATE: Spinlock<u64> = Spinlock::new(0x9e3779b97f4a7c15);
+
+fn rng_fill(buf: &mut [u8]) {
+    let mut state = RNG_STATE.lock_irqsave();
+    if *state == 0 {
+        // Seed from the cycle counter (differs per call site/CPU/time).
+        let cycles: u64;
+        // SAFETY: rdcycle is a plain CSR read on this hart.
+        unsafe { core::arch::asm!("rdcycle {0}", out(reg) cycles, options(nomem, nostack)) };
+        *state = cycles ^ 0xa0761d6478bd642f;
+    }
+    for b in buf.iter_mut() {
+        let mut x = *state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *state = x;
+        *b = (x.wrapping_mul(0x2545F4914F6CDD1D)) as u8;
+    }
+}
+
+fn randdev_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+    rng_fill(buf);
+    buf.len() as isize
+}
+
+fn randdev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
+}
+
+static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+    read: Some(randdev_read),
+    write: Some(zerodev_write),
+    lseek: None,
+    close: None,
+    poll: Some(randdev_poll),
+};
+
+/// virtio-blk major on this platform (matches sysfs /sys/class/block/vda).
+pub const VIRTIO_BLK_MAJOR: u32 = 254;
+
+/// virtio-blk root disk name.
+const ROOT_DISK_NAME: &str = "vda";
+
+/// Is a virtio-blk GenDisk present (MMIO or PCI)?
+fn root_disk_present() -> bool {
+    crate::drivers::virtio::get_pci_gen_disk().is_some()
+        || crate::drivers::virtio::get_device().is_some()
+}
+
+/// Populate the devtmpfs node set that Ubuntu's early boot expects
+/// (called from init() AFTER the block-device probes — main.rs probes
+/// virtio-blk before devfs comes up).
+///
+/// Nodes:
+/// - /dev/console, /dev/tty, /dev/ttyS0  (char 5:1 / 5:0 / 4:64)
+/// - /dev/zero, /dev/full, /dev/random, /dev/urandom (mem major 1)
+/// - /dev/vda (block 254:0) when a virtio-blk disk was probed — THE
+///   node the root= boot argument and systemd's root-device wait
+///   resolve. Whole-disk only: no partition table is scanned, so
+///   /dev/vdaN sub-devices do not appear.
+///
+/// Network interfaces correctly have NO /dev node (socket-only).
+fn devtmpfs_populate() {
+    use crate::fs::dev_t::{DevNo, MEM_MAJOR, TTY_MAJOR};
+
+    // --- terminal devices (UART-backed) ---
+    let _ = registry::register_char_device(DevNo::new(TTY_MAJOR, 1), &CONDEV_OPS); // console
+    let _ = registry::register_char_device(DevNo::new(TTY_MAJOR, 0), &CONDEV_OPS); // tty
+    let _ = registry::register_char_device(DevNo::new(TTY_MAJOR, 64), &CONDEV_OPS); // ttyS0
+
+    // --- mem devices ---
+    let _ = registry::register_char_device(crate::fs::dev_t::DEV_ZERO, &ZERODEV_OPS);
+    let _ = registry::register_char_device(DevNo::new(MEM_MAJOR, 7), &FULLDEV_OPS);
+    let _ = registry::register_char_device(crate::fs::dev_t::DEV_RANDOM, &RANDDEV_OPS);
+    let _ = registry::register_char_device(crate::fs::dev_t::DEV_URANDOM, &RANDDEV_OPS);
+
+    let mut root = DEVFS_ROOT.lock_irqsave();
+    let root_entry = match root.as_ref() {
+        Some(r) => r.clone(),
+        None => return,
+    };
+    drop(root);
+
+    let mut children = root_entry.children.lock_irqsave();
+    // S_IFCHR = 0o020000.
+    let char_nodes: &[(&str, DevNo, u32)] = &[
+        ("console", DevNo::new(TTY_MAJOR, 1), 0o600),
+        ("tty", DevNo::new(TTY_MAJOR, 0), 0o666),
+        ("ttyS0", DevNo::new(TTY_MAJOR, 64), 0o600),
+        ("zero", crate::fs::dev_t::DEV_ZERO, 0o666),
+        ("full", DevNo::new(MEM_MAJOR, 7), 0o666),
+        ("random", crate::fs::dev_t::DEV_RANDOM, 0o666),
+        ("urandom", crate::fs::dev_t::DEV_URANDOM, 0o666),
+    ];
+    for (name, devno, mode) in char_nodes.iter() {
+        children.insert(
+            String::from(*name),
+            Arc::new(DevfsEntry::new_char_device_with_mode(
+                name,
+                *devno,
+                0o020000 | mode,
+            )),
+        );
+    }
+
+    // --- root block device (whole disk) ---
+    if root_disk_present() {
+        children.insert(
+            String::from(ROOT_DISK_NAME),
+            Arc::new(DevfsEntry::new_block_device(
+                ROOT_DISK_NAME,
+                DevNo::new(VIRTIO_BLK_MAJOR, 0),
+                0o060000 | 0o660, // S_IFBLK | brw-rw----
+            )),
+        );
+    }
+    drop(children);
+}
+
+// ============================================================================
+// devtmpfs dynamic device node API (U2)
+// ============================================================================
+
+/// Evict a cached dentry (negative OR positive) under /dev so freshly
+/// created/removed nodes are visible — mirrors the pty layer's
+/// evict_pts_dentry discipline. Accepts a devfs-relative path ("sda" or
+/// "pts/3").
+fn evict_dev_dentry(rel_path: &str) {
+    let (parent, name) = match rel_path.rfind('/') {
+        Some(i) => (format!("/dev/{}", &rel_path[..i]), &rel_path[i + 1..]),
+        None => (String::from("/dev"), rel_path),
+    };
+    if let Ok(vpath) = crate::fs::vfs::path_lookup(&parent, 0) {
+        if let Some(parent_dentry) = vpath.dentry {
+            parent_dentry.remove_child(name);
+        }
+    }
+}
+
+/// Register a device node dynamically (devtmpfs discipline): create the
+/// /dev/<path> node and broadcast an "add" uevent for udev.
+///
+/// - `path`: devfs-relative path ("sda", "pts/3", "net/tun")
+/// - `is_block`: block vs character device
+///
+/// Network devices do NOT get /dev nodes — callers must not use this
+/// for netdevs (class/net lives in sysfs only).
+pub fn devtmpfs_register_device(path: &str, devno: DevNo, is_block: bool) -> Result<(), ()> {
+    let mode = if is_block {
+        0o060000 | 0o660
+    } else {
+        0o020000 | 0o666
+    };
+    mknod(path, devno, mode)?;
+    evict_dev_dentry(path);
+
+    // uevent: DEVPATH relative to /sys (block devices live in
+    // /sys/class/block/<name>).
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let subsystem = if is_block { "block" } else { "tty" };
+    let maj = format!("{}", devno.major);
+    let min = format!("{}", devno.minor);
+    let extra: [(&str, &str); 2] = [("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+    let devpath = if is_block {
+        format!("/class/block/{}", name)
+    } else {
+        format!("/class/tty/{}", name)
+    };
+    crate::fs::sysfs::uevent_send_full(&devpath, "add", subsystem, &extra);
+    Ok(())
+}
+
+/// Unregister a dynamic device node: remove /dev/<path> and broadcast a
+/// "remove" uevent.
+pub fn devtmpfs_unregister_device(path: &str, devno: DevNo, is_block: bool) -> Result<(), ()> {
+    remove_node(path)?;
+    evict_dev_dentry(path);
+
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let subsystem = if is_block { "block" } else { "tty" };
+    let maj = format!("{}", devno.major);
+    let min = format!("{}", devno.minor);
+    let extra: [(&str, &str); 2] = [("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+    let devpath = if is_block {
+        format!("/class/block/{}", name)
+    } else {
+        format!("/class/tty/{}", name)
+    };
+    crate::fs::sysfs::uevent_send_full(&devpath, "remove", subsystem, &extra);
+    Ok(())
+}
+
 pub fn init() {
     // Register /dev/null before creating the tree
     let _ = registry::register_char_device(crate::fs::dev_t::DEV_NULL, &NULLDEV_OPS);
@@ -200,6 +517,12 @@ pub fn init() {
     root_entry.children.lock_irqsave().insert(String::from("input"), input_dir);
 
     *root = Some(root_entry);
+    drop(root);
+
+    // U2 devtmpfs dynamic population: terminal/mem/random nodes and the
+    // /dev/vda root-disk node (block devices are probed before devfs
+    // comes up in the main.rs boot sequence).
+    devtmpfs_populate();
 }
 
 /// Create device node

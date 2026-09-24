@@ -27,8 +27,9 @@ static CMDLINE_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::Atomic
 /// Maximum command line argument length - from config
 const MAX_CMDLINE_LEN: usize = crate::config::MAX_CMDLINE_LEN;
 
-/// Default command line arguments
-const DEFAULT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 init=/bin/sh";
+/// Default command line arguments (U2: init defaults to /sbin/init for
+/// systemd-style userspace; boot loaders that pass init= override it).
+const DEFAULT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 init=/sbin/init";
 
 /// Device tree header structure
 #[repr(C)]
@@ -412,6 +413,19 @@ pub fn init(dtb_ptr: u64) {
     let ptr = cmdline.as_ptr() as *mut u8;
     CMDLINE_LEN.store(len, Ordering::Release);
     CMDLINE_PTR.store(ptr, Ordering::Release);
+
+    // U2 console loglevel boot parameters (quiet / loglevel=N), applied
+    // to printk immediately so early-boot noise matches the operator's
+    // wish. `quiet` lowers the console to KERN_WARNING (4) like Linux;
+    // an explicit `loglevel=` (1-8, clamped) overrides it.
+    if let Some(level_str) = get_param("loglevel") {
+        if let Ok(level) = level_str.parse::<u8>() {
+            let clamped = level.clamp(1, 8);
+            crate::printk::set_console_loglevel(clamped);
+        }
+    } else if has_param("quiet") {
+        crate::printk::set_console_loglevel(crate::printk::loglevel::KERN_WARNING);
+    }
 }
 
 /// Get command line argument string (returns static reference to avoid allocation)
@@ -545,9 +559,35 @@ pub fn get_root_device() -> String {
 /// Get init program path
 ///
 /// # Returns
-/// - Init program path (e.g. "/hello_world", "/sbin/init")
+/// - Init program path (e.g. "/sbin/init", "/bin/sh")
+///
+/// U2: the default is /sbin/init (systemd) per the Ubuntu boot
+/// convention; a bare `init=` on the command line still wins.
 pub fn get_init_program() -> String {
-    get_param("init").unwrap_or_else(|| String::from("/bin/sh"))
+    get_param("init").unwrap_or_else(|| String::from("/sbin/init"))
+}
+
+/// Get the root filesystem type (U2 boot-parameter parsing).
+///
+/// `rootfstype=ext4` → "ext4". Default "ext4" (the only root fs Rux
+/// mounts today).
+pub fn get_root_fs_type() -> String {
+    get_param("rootfstype").unwrap_or_else(|| String::from("ext4"))
+}
+
+/// Get the root mount options (U2 boot-parameter parsing).
+///
+/// `rootflags=<opts>` wins; otherwise "rw" unless the bare `ro` token
+/// is present ("rw" token → "rw").
+pub fn get_root_flags() -> String {
+    if let Some(flags) = get_param("rootflags") {
+        return flags;
+    }
+    if is_root_readonly() {
+        String::from("ro")
+    } else {
+        String::from("rw")
+    }
 }
 
 /// Check if root filesystem is read-only

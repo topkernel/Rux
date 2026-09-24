@@ -9,14 +9,16 @@ use alloc::format;
 
 /// Generate /proc/version content
 ///
-/// Format matches Linux: <os> version <release> (<who@arch>) (<compiler>) #<build>
+/// U2: `Linux version <release> (buildd@host) (compiler) #<build>` —
+/// the exact prefix systemd/dpkg-style parsers tokenize on. The release
+/// matches uname -r (KERNEL_VERSION-rux) so the two sources agree.
 pub fn generate() -> Vec<u8> {
-    use crate::config;
-
-    format!("Rux version {} (root@riscv64) (rustc {}) #1 SMP\n",
-        config::KERNEL_VERSION,
+    format!(
+        "Linux version {} (buildd@rux) (rustc {}) #1 SMP\n",
+        get_release_string(),
         option_env!("RUSTC_VERSION").unwrap_or("unknown"),
-    ).into_bytes()
+    )
+    .into_bytes()
 }
 
 /// Get short version string (for uname)

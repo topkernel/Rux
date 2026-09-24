@@ -190,6 +190,10 @@ pub mod constants {
     pub const EWOULDBLOCK: i32 = 11;
     pub const ENOMSG: i32 = 42;
     pub const EOVERFLOW: i32 = 75;
+    /// Operation not supported (EOPNOTSUPP/ENOTSUP, 95) — used by the
+    /// U2 minimal stubs (name_to_handle_at, process_vm_*) so callers can
+    /// distinguish "unsupported here" from "syscall absent" (ENOSYS).
+    pub const EOPNOTSUPP: i32 = 95;
 }
 
 #[cfg(test)]

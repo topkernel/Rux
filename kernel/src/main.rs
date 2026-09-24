@@ -131,6 +131,7 @@ mod dfx;
 mod ipc;
 mod io_uring;
 mod timer;
+mod module;
 
 #[cfg(feature = "unit-test")]
 mod tests;
@@ -751,6 +752,16 @@ pub extern "C" fn rust_main() -> ! {
             {
                 let shm_result = fs::mount::do_mount("/dev/shm", "tmpfs", 0);
                 print_status("fs", "tmpfs mounted /dev/shm", shm_result.is_ok());
+            }
+
+            // Mount tmpfs at /run (U2): systemd's runtime-state
+            // directory (/run/systemd, /run/udev, pidfiles). systemd
+            // requires a writable /run very early — without it the boot
+            // degrades to emergency mode. Mirrors the /dev/shm approach
+            // (independent tmpfs instance via do_mount).
+            {
+                let run_result = fs::mount::do_mount("/run", "tmpfs", 0);
+                print_status("fs", "tmpfs mounted /run", run_result.is_ok());
             }
 
             // Initialize VirtIO Input devices

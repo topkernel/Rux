@@ -83,6 +83,55 @@ fn task_state_str(task: &crate::process::Task) -> &'static str {
     else { "sleeping" }
 }
 
+/// The task's comm: basename of the exe path, truncated to 15 characters
+/// (Linux TASK_COMM_LEN - 1). Used for /proc/[pid]/comm, the "Name:" line
+/// of /proc/[pid]/status and field 2 of /proc/[pid]/stat — systemd's PID 1
+/// check compares /proc/1/comm against "systemd".
+fn task_comm(task: &crate::process::Task) -> alloc::borrow::Cow<'_, str> {
+    let path = task.get_exe_path();
+    // Basename: everything after the last '/'.
+    let base = match path.iter().rposition(|&b| b == b'/') {
+        Some(i) => &path[i + 1..],
+        None => path,
+    };
+    let s = core::str::from_utf8(base).unwrap_or("unknown");
+    let mut len = s.len().min(15);
+    // Do not split a multi-byte UTF-8 character.
+    while len > 0 && !s.is_char_boundary(len) {
+        len -= 1;
+    }
+    alloc::borrow::Cow::Borrowed(&s[..len])
+}
+
+/// Generate /proc/[pid]/comm content (U2): "<comm>\n".
+pub fn generate_comm(pid: u64) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        find_task_by_pid(pid as u32)
+    };
+
+    match task {
+        Some(t) => {
+            let mut out: Vec<u8> = task_comm(&t).as_bytes().to_vec();
+            out.push(b'\n');
+            out
+        }
+        None => b"\n".to_vec(),
+    }
+}
+
+/// Generate /proc/[pid]/cgroup content (U2).
+///
+/// Rux exposes a single cgroups v2 unified hierarchy with every task in
+/// the root group — exactly what Linux reports for a v2-only system:
+/// `0::/\n` (one line per hierarchy; here just the unified one).
+pub fn generate_cgroup(_pid: u64) -> Vec<u8> {
+    b"0::/\n".to_vec()
+}
+
 /// Generate /proc/[pid]/status content
 pub fn generate_status(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
@@ -105,8 +154,7 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
         }
     };
 
-    let name = task.get_exe_path();
-    let name_str = core::str::from_utf8(name).unwrap_or("unknown");
+    let name_str = task_comm(&task);
     let state_str = task_state_str(task);
     let state_char = task_state_char(task) as char;
     let ppid = task.ppid();
@@ -306,18 +354,18 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
         find_task_by_pid(pid as u32)
     };
 
-    let (name, ppid, state_ch, vsize_pages, sig_mask, exit_code) = match task {
+    let (name_str, ppid, state_ch, vsize_pages, sig_mask, exit_code) = match task {
         Some(t) => {
             let ch = task_state_char(&t) as char;
             let vsize = t.address_space().map(|mm| mm.total_vm()).unwrap_or(0);
             let sigmask = t.sigmask;
             let ec = t.exit_code();
-            (t.get_exe_path(), t.ppid(), ch, vsize, sigmask, ec)
+            // comm (basename, like Linux), not the full exe path. Owned:
+            // the Cow would borrow from the match-local binding.
+            (task_comm(&t).into_owned(), t.ppid(), ch, vsize, sigmask, ec)
         }
-        None => (b"unknown".as_slice(), 0, 'X', 0, 0, 0),
+        None => (alloc::string::String::from("unknown"), 0, 'X', 0, 0, 0),
     };
-
-    let name_str = core::str::from_utf8(name).unwrap_or("unknown");
 
     // Key fields filled: pid(1), comm(2), state(3), ppid(4), pgrp(5), session(6),
     // vsize(23) in bytes, signal block mask(30), exit_code(52).
