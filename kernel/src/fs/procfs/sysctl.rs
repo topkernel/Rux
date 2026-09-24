@@ -27,7 +27,9 @@ use crate::sync::spinlock::Spinlock;
 pub static HOSTNAME: Spinlock<alloc::vec::Vec<u8>> = Spinlock::new(alloc::vec::Vec::new());
 
 /// /proc/sys/kernel/pid_max — Linux default 32768 (riscv64 max 4194304).
-pub static PID_MAX: AtomicU32 = AtomicU32::new(32768);
+/// P2: stored in the PID allocator (process::pid) and consulted by
+/// alloc_pid — the sysctl file is the read/write face of the live value.
+pub use crate::process::pid::{pid_max_live as read_pid_max, set_pid_max_live};
 pub const PID_MAX_MIN: u32 = 2;
 pub const PID_MAX_MAX: u32 = 4 * 1024 * 1024;
 
@@ -53,7 +55,7 @@ pub fn generate_hostname() -> Vec<u8> {
 }
 
 pub fn generate_pid_max() -> Vec<u8> {
-    alloc::format!("{}\n", PID_MAX.load(Ordering::Relaxed)).into_bytes()
+    alloc::format!("{}\n", read_pid_max()).into_bytes()
 }
 
 pub fn generate_ostype() -> Vec<u8> {
@@ -115,7 +117,9 @@ pub fn write_pid_max(input: &[u8]) -> i32 {
             if v < PID_MAX_MIN as u64 || v > PID_MAX_MAX as u64 {
                 return -(crate::errno::constants::EINVAL as i32);
             }
-            PID_MAX.store(v as u32, Ordering::Release);
+            // P2: the value is live in the PID allocator; alloc_pid
+            // clamps it to the bitmap capacity (32768) at use time.
+            set_pid_max_live(v as u32);
             0
         }
         Err(e) => e,

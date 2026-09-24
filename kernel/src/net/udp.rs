@@ -105,6 +105,10 @@ pub struct UdpSocket {
     pub broadcast: bool,
     /// P2 IP_TTL mirrored from the VFS layer (udp_set_ttl): 0 = default.
     pub ttl: u8,
+    /// P2 multicast: joined group addresses (host byte order) — populated
+    /// by IP_ADD_MEMBERSHIP, drained by IP_DROP_MEMBERSHIP, consulted by
+    /// the receive path to decide multicast delivery.
+    pub memberships: alloc::vec::Vec<u32>,
     /// Receive buffer
     pub recv_buffer: alloc::collections::VecDeque<UdpPacket>,
     /// R24 (MED-9): queued payload bytes — pairs with UDP_RCVBUF_BUDGET.
@@ -129,6 +133,7 @@ impl UdpSocket {
             pending_error: 0,
             broadcast: false,
             ttl: 0,
+            memberships: alloc::vec::Vec::new(),
             recv_buffer: alloc::collections::VecDeque::new(),
             recv_bytes: 0,
         }
@@ -855,6 +860,102 @@ pub fn udp_set_ttl(fd: i32, ttl: u8) {
     }
 }
 
+/// P2 multicast: is `ip` inside 224.0.0.0/4 (host byte order)?
+pub fn is_ipv4_multicast(ip: u32) -> bool {
+    (ip >> 28) == 0xE
+}
+
+/// P2 multicast: join a group. Stores the membership and emits an IGMPv2
+/// membership report (RFC 2236, type 0x16) addressed to the group itself
+/// so a local multicast router starts forwarding it to us. Returns
+/// negative errno.
+pub fn udp_add_membership(fd: i32, group: u32) -> i32 {
+    if !is_ipv4_multicast(group) {
+        return -22; // EINVAL (not a multicast address)
+    }
+    {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
+        // SAFETY: UDP_SOCKET_TABLE is a global; protected by UDP_TABLE_LOCK.
+        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
+        if !socket.memberships.contains(&group) {
+            if socket.memberships.len() >= 64 {
+                return -12; // ENOMEM (bounded per-socket group list)
+            }
+            socket.memberships.push(group);
+        }
+    }
+    igmp_send(0x16, group);
+    0
+}
+
+/// P2 multicast: leave a group. Emits an IGMPv2 leave group (type 0x17)
+/// to 224.0.0.2 (ALL-ROUTERS) when the last member departs. Returns
+/// negative errno.
+pub fn udp_drop_membership(fd: i32, group: u32) -> i32 {
+    if !is_ipv4_multicast(group) {
+        return -22; // EINVAL
+    }
+    let removed = {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
+        // SAFETY: UDP_SOCKET_TABLE is a global; protected by UDP_TABLE_LOCK.
+        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
+        match socket.memberships.iter().position(|&g| g == group) {
+            Some(i) => {
+                socket.memberships.swap_remove(i);
+                true
+            }
+            None => false,
+        }
+    };
+    if removed {
+        igmp_send(0x17, 0xE000_0002); // leave goes to ALL-ROUTERS
+    }
+    0
+}
+
+/// P2 IGMPv2 (RFC 2236): emit one 8-byte IGMP message. `igmp_type` 0x16
+/// = v2 membership report, 0x17 = leave group. Reports carry the group
+/// in both the IGMP body and the IP destination; leaves go to
+/// 224.0.0.2. TTL is 1 (link-local, never forwarded).
+fn igmp_send(igmp_type: u8, group: u32) {
+    let mut msg = [0u8; 8];
+    msg[0] = igmp_type;
+    msg[1] = 0; // Max Resp Time (unused on TX)
+    msg[2..4].copy_from_slice(&0u16.to_ne_bytes()); // checksum filled below
+    msg[4..8].copy_from_slice(&group.to_be_bytes());
+    // Checksum covers the IGMP message only (RFC 2236 §2.2).
+    let mut sum: u32 = 0;
+    for chunk in msg.chunks_exact(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    let csum = !(sum as u16);
+    msg[2..4].copy_from_slice(&csum.to_be_bytes());
+
+    // Report destinations are the group itself; the leave caller passes
+    // 224.0.0.2 (ALL-ROUTERS) as `group`.
+    let dst = group;
+    let mut skb = match crate::net::buffer::alloc_skb(8) {
+        Some(s) => s,
+        None => return,
+    };
+    if skb.skb_put_data(&msg).is_err() {
+        skb.free();
+        return;
+    }
+    // IPPROTO_IGMP = 2, TTL 1 — ethernet_send maps the 224/4 destination
+    // to the 01:00:5e:xx:xx:xx multicast MAC.
+    let _ = crate::net::ipv4::ipv4_send_src_ttl(skb, 0, dst, 2, 1);
+}
+
 /// Receive UDP packet
 ///
 /// # Arguments
@@ -1201,6 +1302,11 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
                     if socket.bound
                         && socket.local_port == dest_port
                         && (socket.local_ip == 0 || socket.local_ip == dest_ip)
+                        // P2 multicast: a datagram to a group address is
+                        // only delivered to sockets that JOINED that group
+                        // (Linux ip_mc_sf_allow semantics, socket-level).
+                        && (!is_ipv4_multicast(dest_ip)
+                            || socket.memberships.contains(&dest_ip))
                         // W3: a CONNECTED socket only accepts datagrams from
                         // its peer — anything else keeps scanning (Linux
                         // filters remote (addr,port) for connected UDP).

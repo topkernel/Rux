@@ -336,13 +336,16 @@ unsafe fn get_user_usize(addr: usize) -> usize {
     crate::arch::riscv64::uaccess::get_user(addr as *const usize).unwrap_or(0)
 }
 
-/// P0-1 (SCM_RIGHTS): parse the cmsg buffer of a user msghdr and resolve
-/// every SCM_RIGHTS (SOL_SOCKET/SCM_RIGHTS) payload fd into an Arc<File>
-/// from the CURRENT (sending) process's fd table. Returns EBADF for
-/// unknown fds, EFAULT/EINVAL on malformed control data.
-fn parse_scm_rights(
+/// P0-1 (SCM_RIGHTS) / P2 (SCM_CREDENTIALS): parse the cmsg buffer of a
+/// user msghdr and resolve every SCM_RIGHTS (SOL_SOCKET/SCM_RIGHTS)
+/// payload fd into an Arc<File> from the CURRENT (sending) process's fd
+/// table, and report whether an SCM_CREDENTIALS cmsg was present (the
+/// kernel fills in the sender's own {pid,uid,gid} — the payload values
+/// are ignored, matching Linux's kernel-overrides behavior). Returns
+/// EBADF for unknown fds, EFAULT/EINVAL on malformed control data.
+fn parse_unix_cmsgs(
     msg_ptr: *const u8,
-) -> Result<alloc::vec::Vec<alloc::sync::Arc<crate::fs::file::File>>, i64> {
+) -> Result<(alloc::vec::Vec<alloc::sync::Arc<crate::fs::file::File>>, bool), i64> {
     use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, get_user};
 
     // msghdr layout (64-bit): msg_control @32, msg_controllen @40.
@@ -350,8 +353,9 @@ fn parse_scm_rights(
     let control = unsafe { get_user::<usize>(msg_ptr.add(32) as *const usize).unwrap_or(0) };
     let controllen = unsafe { get_user::<usize>(msg_ptr.add(40) as *const usize).unwrap_or(0) };
     let mut files = alloc::vec::Vec::new();
+    let mut want_cred = false;
     if control == 0 || controllen == 0 {
-        return Ok(files);
+        return Ok((files, want_cred));
     }
     // Bound the control buffer — a handful of fds needs tens of bytes; a
     // wild controllen must not drive a kernel-heap allocation.
@@ -393,24 +397,33 @@ fn parse_scm_rights(
                     None => return Err(-(errno::EBADF as i64)),
                 }
             }
+        } else if level == crate::net::unix::SOL_SOCKET
+            && ctype == crate::net::unix::SCM_CREDENTIALS
+            && cmsg_len >= 28
+        {
+            // struct ucred is 12 bytes of payload.
+            want_cred = true;
         }
         off += (cmsg_len + 7) & !7;
     }
-    Ok(files)
+    Ok((files, want_cred))
 }
 
-/// P0-1 (SCM_RIGHTS): install the files attached to a received message
-/// into the CURRENT (receiving) process's fd table and write an
-/// SCM_RIGHTS cmsg into the user msghdr's msg_control. Returns the number
-/// of control bytes written (0 when there is no room — the fds are then
-/// closed, mirroring Linux's drop-on-no-control-buffer), or EFAULT/EMFILE.
-unsafe fn deliver_scm_rights(
+/// P0-1 (SCM_RIGHTS) / P2 (SCM_CREDENTIALS): install the files attached
+/// to a received message into the CURRENT (receiving) process's fd table
+/// and write an SCM_RIGHTS cmsg into the user msghdr's msg_control,
+/// followed by an SCM_CREDENTIALS cmsg when the segment carries one.
+/// Returns the number of control bytes written (0 when there is no
+/// room — the fds are then closed, mirroring Linux's
+/// drop-on-no-control-buffer), or EFAULT/EMFILE.
+unsafe fn deliver_unix_cmsgs(
     msg_ptr: *mut u8,
     files: &[alloc::sync::Arc<crate::fs::file::File>],
+    cred: Option<crate::net::unix::UnixCred>,
 ) -> Result<usize, i64> {
     use crate::arch::riscv64::uaccess::{access_ok, copy_to_user, get_user, put_user};
 
-    if files.is_empty() {
+    if files.is_empty() && cred.is_none() {
         return Ok(0);
     }
     let fdtable = match crate::sched::get_current_fdtable() {
@@ -438,40 +451,64 @@ unsafe fn deliver_scm_rights(
     // SAFETY: msg_ptr was access_ok(64)-validated by the caller.
     let control = get_user::<usize>(msg_ptr.add(32) as *const usize).unwrap_or(0);
     let controllen = get_user::<usize>(msg_ptr.add(40) as *const usize).unwrap_or(0);
-    let data_len = new_fds.len() * 4;
-    let cmsg_len = 16 + data_len;
-    let aligned = (cmsg_len + 7) & !7;
-    if control == 0 || controllen < aligned {
+
+    // Build the cmsg chain: [SCM_RIGHTS (if any fds)] [SCM_CREDENTIALS].
+    let mut cmsg = alloc::vec::Vec::new();
+    let mut write_cmsg = |buf: &mut alloc::vec::Vec<u8>, ctype: i32, payload: &[u8]| {
+        let cmsg_len = 16 + payload.len();
+        let aligned = (cmsg_len + 7) & !7;
+        let start = buf.len();
+        buf.resize(start + aligned, 0);
+        buf[start..start + 8].copy_from_slice(&cmsg_len.to_ne_bytes());
+        buf[start + 8..start + 12].copy_from_slice(&crate::net::unix::SOL_SOCKET.to_ne_bytes());
+        buf[start + 12..start + 16].copy_from_slice(&ctype.to_ne_bytes());
+        buf[start + 16..start + 16 + payload.len()].copy_from_slice(payload);
+    };
+    let mut rights_len = 0usize;
+    if !new_fds.is_empty() {
+        let start = cmsg.len();
+        let mut payload = alloc::vec![0u8; new_fds.len() * 4];
+        for (i, fd) in new_fds.iter().enumerate() {
+            payload[i * 4..i * 4 + 4].copy_from_slice(&fd.to_ne_bytes());
+        }
+        write_cmsg(&mut cmsg, crate::net::unix::SCM_RIGHTS, &payload);
+        rights_len = cmsg.len() - start;
+    }
+    if let Some(c) = cred {
+        let payload = [
+            c.pid.to_ne_bytes(),
+            c.uid.to_ne_bytes(),
+            c.gid.to_ne_bytes(),
+        ]
+        .concat();
+        write_cmsg(&mut cmsg, crate::net::unix::SCM_CREDENTIALS, &payload);
+    }
+
+    if control == 0 || controllen < cmsg.len() {
         // No control buffer room: the fds cannot be reported — close them.
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
         }
         return Ok(0);
     }
-    if !access_ok(control, aligned) {
+    if !access_ok(control, cmsg.len()) {
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
         }
         return Err(-(errno::EFAULT as i64));
     }
-    let mut cmsg = alloc::vec![0u8; aligned];
-    cmsg[0..8].copy_from_slice(&cmsg_len.to_ne_bytes());
-    cmsg[8..12].copy_from_slice(&crate::net::unix::SOL_SOCKET.to_ne_bytes());
-    cmsg[12..16].copy_from_slice(&crate::net::unix::SCM_RIGHTS.to_ne_bytes());
-    for (i, fd) in new_fds.iter().enumerate() {
-        cmsg[16 + i * 4..20 + i * 4].copy_from_slice(&fd.to_ne_bytes());
-    }
-    // SAFETY: control/aligned validated with access_ok above.
-    if copy_to_user(control as *mut u8, cmsg.as_ptr(), aligned) != 0 {
+    // SAFETY: control/cmsg.len() validated with access_ok above.
+    if copy_to_user(control as *mut u8, cmsg.as_ptr(), cmsg.len()) != 0 {
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
         }
         return Err(-(errno::EFAULT as i64));
     }
+    let _ = rights_len;
     // Update msg_controllen to the cmsg size actually written.
     // SAFETY: msg_ptr validated by the caller.
-    let _ = put_user(msg_ptr.add(40) as *mut usize, aligned);
-    Ok(aligned)
+    let _ = put_user(msg_ptr.add(40) as *mut usize, cmsg.len());
+    Ok(cmsg.len())
 }
 
 fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
@@ -818,6 +855,7 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
             &usock,
             &kbuf,
             alloc::vec::Vec::new(),
+            None,
             dest.as_ref(),
             nonblock,
             deadline,
@@ -1502,8 +1540,40 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
                 }
                 0
             }
-            IP_TOS | IP_MULTICAST_TTL | IP_MULTICAST_LOOP
-            | IP_ADD_MEMBERSHIP | IP_DROP_MEMBERSHIP => 0,
+            // P2 multicast (IPPROTO_IP): IP_ADD_MEMBERSHIP /
+            // IP_DROP_MEMBERSHIP carry struct ip_mreq { imr_multiaddr,
+            // imr_interface } (8 bytes). The group is stored on the UDP
+            // protocol slot and an IGMPv2 report/leave is emitted; the
+            // interface address is accepted but ignored (single NIC).
+            IP_ADD_MEMBERSHIP | IP_DROP_MEMBERSHIP => {
+                if optlen < 8 {
+                    return -(errno::EINVAL as i64);
+                }
+                let mut raw = [0u8; 8];
+                // SAFETY: optlen >= 8 and access_ok covered optval at entry.
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(raw.as_mut_ptr(), optval, 8)
+                } != 0
+                {
+                    return -(errno::EFAULT as i64);
+                }
+                let group = u32::from_be_bytes(raw[0..4].try_into().unwrap());
+                let udp_fd_v = socket.udp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if udp_fd_v < 0 {
+                    return -(errno::EINVAL as i64); // not a UDP socket
+                }
+                let r = if optname == IP_ADD_MEMBERSHIP {
+                    crate::net::udp::udp_add_membership(udp_fd_v, group)
+                } else {
+                    crate::net::udp::udp_drop_membership(udp_fd_v, group)
+                };
+                if r != 0 {
+                    -(r.abs() as i64)
+                } else {
+                    0
+                }
+            }
+            IP_TOS | IP_MULTICAST_TTL | IP_MULTICAST_LOOP => 0,
             _ => -(errno::ENOPROTOOPT as i64),
         },
         // W3: unknown levels are no longer silently accepted.
@@ -2019,10 +2089,26 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
 
     // P0-1: AF_UNIX sendmsg — full path with SCM_RIGHTS support.
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd as usize) {
-        // Parse SCM_RIGHTS cmsg(s) from msg_control (msghdr offsets 32/40).
-        let scm_files = match parse_scm_rights(msg_ptr) {
+        // Parse SCM_RIGHTS / SCM_CREDENTIALS cmsg(s) from msg_control
+        // (msghdr offsets 32/40).
+        let (scm_files, want_cred) = match parse_unix_cmsgs(msg_ptr) {
             Ok(f) => f,
             Err(e) => return e,
+        };
+        // P2 SCM_CREDENTIALS: the kernel fills the sender's own
+        // {pid,uid,gid} (Linux semantics — user-supplied values would be
+        // a spoofing vector).
+        let cred = if want_cred {
+            crate::process::current_task().map(|t| {
+                let c = t.cred();
+                crate::net::unix::UnixCred {
+                    pid: t.tgid() as i32,
+                    uid: c.uid,
+                    gid: c.gid,
+                }
+            })
+        } else {
+            None
         };
         // Destination: a sockaddr_un msg_name for DGRAM.
         let udest = if !msg_name_ptr.is_null() && msg_namelen >= 3 {
@@ -2053,6 +2139,7 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
             &usock,
             &buf,
             scm_files,
+            cred,
             udest.as_ref(),
             nonblock,
             deadline,
@@ -2224,10 +2311,11 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 offset += copy_len;
             }
         }
-        // SCM_RIGHTS: install the attached files + write the cmsg.
-        if !r.files.is_empty() {
+        // SCM_RIGHTS / SCM_CREDENTIALS: install the attached files and
+        // write the cmsg chain.
+        if !r.files.is_empty() || r.cred.is_some() {
             // SAFETY: msg_ptr was access_ok(64)-validated at fn entry.
-            if let Err(e) = unsafe { deliver_scm_rights(msg_ptr, &r.files) } {
+            if let Err(e) = unsafe { deliver_unix_cmsgs(msg_ptr, &r.files, r.cred) } {
                 return e;
             }
         }

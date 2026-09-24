@@ -84,6 +84,12 @@ struct EpollEntry {
     file_id: u64,
     events: u32,
     data: u64,
+    /// EPOLLET state (P2): the full readiness set reported by the last
+    /// epoll_wait that included this fd. An edge-triggered registration
+    /// only reports when the current readiness set DIFFERS from this
+    /// snapshot (a new edge), and readiness going fully idle resets it
+    /// so the next arrival reports again. 0 = nothing reported yet.
+    last_reported: u32,
 }
 
 /// Epoll file structure (stored as File private_data)
@@ -910,6 +916,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                     existing.file_id = file_id;
                     existing.events = event.events;
                     existing.data = event.data;
+                    existing.last_reported = 0;
                     epoll_wake_register(file_id, &epoll.wait_queue as *const _);
                 }
                 None => {
@@ -918,6 +925,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                         file_id,
                         events: event.events,
                         data: event.data,
+                        last_reported: 0,
                     });
                     epoll_wake_register(file_id, &epoll.wait_queue as *const _);
                 }
@@ -947,6 +955,9 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             if let Some(entry) = entries.iter_mut().find(|e| e.fd == fd) {
                 entry.events = event.events;
                 entry.data = event.data;
+                // Re-arming via MOD resets the edge-triggered snapshot
+                // (Linux: MOD re-injects the fd into the ready list).
+                entry.last_reported = 0;
             } else {
                 return -(errno::ENOENT as i64);
             }
@@ -1017,10 +1028,10 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
     };
 
     loop {
-        let entries = epoll.entries.lock();
+        let mut entries = epoll.entries.lock();
         let mut ready_events: alloc::vec::Vec<EPollEvent> = alloc::vec::Vec::new();
 
-        for entry in entries.iter() {
+        for entry in entries.iter_mut() {
             // R32-B9: the registration binds to the open file description
             // recorded at ADD time (entry.file_id). The fd NUMBER alone is
             // not enough: after close(fd) and reuse of the number by an
@@ -1064,6 +1075,20 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                 if revents & POLLERR != 0 { ep_events |= EPOLLERR; }
                 if revents & POLLHUP != 0 { ep_events |= EPOLLHUP; }
 
+                // EPOLLET (P2): edge-triggered registrations only report
+                // on a readiness TRANSITION. The readiness snapshot is
+                // the full converted event set (pre-mask): a repeated
+                // wait with unchanged readiness reports nothing until
+                // the fd goes fully idle (resetting the snapshot, so the
+                // next arrival is a fresh edge) or a new event bit
+                // appears (e.g. EPOLLOUT joins EPOLLIN).
+                if entry.events & EPOLLET != 0 {
+                    if ep_events == entry.last_reported {
+                        continue; // same edge — already reported
+                    }
+                    entry.last_reported = ep_events;
+                }
+
                 // Linux always reports EPOLLERR/EPOLLHUP even when the
                 // registration did not subscribe to them — they are not
                 // maskable. Only the I/O readiness bits honor entry.events.
@@ -1072,6 +1097,10 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                     events: ep_events & report_mask,
                     data: entry.data,
                 });
+            } else if entry.events & EPOLLET != 0 {
+                // Readiness fully drained: arm the trigger for the next
+                // arrival.
+                entry.last_reported = 0;
             }
         }
         drop(entries);

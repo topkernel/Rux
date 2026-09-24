@@ -82,6 +82,18 @@ pub fn wfi() {
     }
 }
 
+/// Read the wall-clock cycle counter (mtime as seen through rdtime).
+#[inline]
+pub fn read_time() -> u64 {
+    let cycles: u64;
+    // SAFETY: rdtime is a pure register read (CSR-less Zicsr-free form);
+    // no memory access, no side effects.
+    unsafe {
+        core::arch::asm!("rdtime {}", out(reg) cycles, options(nostack, readonly));
+    }
+    cycles
+}
+
 /// Instruction serialization barrier
 #[inline]
 pub fn isb() {

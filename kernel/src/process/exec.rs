@@ -119,7 +119,7 @@ pub(crate) fn do_execve_elf(
     let phsize = (phnum * phent) as usize;
 
     // Calculate stack layout size (same as below)
-    let auxv_slots: usize = 30;  // 15 auxv entries * 2
+    let auxv_slots: usize = 32;  // 16 auxv entries * 2 (incl. AT_SYSINFO_EHDR)
     let envp_count = envp.len();
     let mut string_space: usize = 0;
     for arg in argv.iter() {
@@ -286,9 +286,39 @@ pub(crate) fn do_execve_elf(
         }
     }
 
+    // P2 vDSO: map the shared time-data page (RW) and the vDSO ELF page
+    // (RX) at the fixed VDSO_BASE, two pages total. The mapping aliases
+    // GLOBAL kernel pages — the data page stays live (tick-refreshed) in
+    // every process; a fork that copies the page tables keeps either the
+    // shared frame (no CoW fault ever fires — users only read it) or a
+    // snapshot, both of which interpolate correctly from rdcycle.
+    {
+        let (data_paddr, code_paddr) = crate::mm::vdso::vdso_pages_phys();
+        // SAFETY: user_ppn is the freshly created page-table root; the
+        // physical frames are the aligned 4 KiB vDSO statics; flags are
+        // valid user PTE bits.
+        unsafe {
+            crate::arch::riscv64::mm::mm_ops::map_user_region(
+                user_ppn,
+                crate::mm::vdso::VDSO_BASE,
+                data_paddr,
+                4096,
+                PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
+                    | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D,
+            );
+            crate::arch::riscv64::mm::mm_ops::map_user_region(
+                user_ppn,
+                crate::mm::vdso::VDSO_BASE + 4096,
+                code_paddr,
+                4096,
+                PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
+                    | PageTableEntry::X | PageTableEntry::A,
+            );
+        }
+    }
+
     // Load interpreter (dynamic linker) if present
-    let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {
-        let interp_base: u64 = INTERP_BASE as u64;  // mmap_start - 16MB
+    let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {        let interp_base: u64 = INTERP_BASE as u64;  // mmap_start - 16MB
 
         // SAFETY: interp_bytes is a validated ELF interpreter file loaded earlier.
         let interp_ehdr = unsafe { crate::fs::elf::Elf64Ehdr::from_bytes(interp_bytes) }
@@ -407,13 +437,15 @@ pub(crate) fn do_execve_elf(
     const AT_SECURE: u64 = 23;
     const AT_RANDOM: u64 = 25;
     const AT_EXECFN: u64 = 31;
+    /// P2 vDSO: address of the mapped vDSO ELF header page.
+    const AT_SYSINFO_EHDR: u64 = 33;
 
     let phent = ehdr.e_phentsize as u64;
     let phnum = ehdr.e_phnum as u64;
     let phsize = (phnum * phent) as usize;
 
     // Calculate stack layout
-    let auxv_slots: usize = 30;  // 15 auxv entries * 2
+    let auxv_slots: usize = 32;  // 16 auxv entries * 2 (incl. AT_SYSINFO_EHDR)
     let envp_count = envp.len();
     let mut string_space: usize = 0;
     for arg in argv.iter() {
@@ -587,6 +619,9 @@ pub(crate) fn do_execve_elf(
             (AT_SECURE, secure_exec as u64),
             (AT_RANDOM, random_vaddr),
             (AT_EXECFN, execfn_vaddr),
+            // P2 vDSO: libc resolves __vdso_clock_gettime & co. through
+            // this ELF mapping and skips the syscall for gettime paths.
+            // (AT_SYSINFO_EHDR, crate::mm::vdso::vdso_ehdr()), // P2-fix: vDSO data page is outside the linear mapping — disable until the page is allocated from linear-mapped memory
         ];
 
         for (typ, val) in auxv {

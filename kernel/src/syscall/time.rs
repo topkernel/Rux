@@ -15,6 +15,7 @@ const CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
 const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
 const CLOCK_MONOTONIC_RAW: u32 = 4;
 const CLOCK_BOOTTIME: u32 = 7;
+const CLOCK_TAI: u32 = 11;
 
 /// Read the monotonic clock as (seconds, nanoseconds) from the CLINT.
 fn monotonic_time() -> (u64, u64) {
@@ -89,11 +90,16 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
     }
 
     match clk_id {
-        CLOCK_REALTIME => {
+        CLOCK_REALTIME | CLOCK_TAI => {
             // Wall clock = monotonic + epoch offset (settimeofday-adjustable;
             // zero until set — no RTC on this platform).
+            // CLOCK_TAI is REALTIME + TAI-UTC offset. No clock_adjtime
+            // (ADJ_TAI) support, so use the current real-world constant
+            // 37 s (2017+ offset) as the fixed boot default.
+            let tai_offset: u64 = 37;
             let (mono_sec, mono_nsec) = monotonic_time();
-            let sec = mono_sec + wall_epoch_offset_secs();
+            let sec = mono_sec + wall_epoch_offset_secs()
+                + if clk_id == CLOCK_TAI { tai_offset } else { 0 };
             // SAFETY: tp_ptr validated with access_ok; put_user is the
             // exception-table copy path (SUM=0 safe).
             unsafe {
@@ -369,7 +375,7 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
 
     // Validate clock ID
     match clk_id as u32 {
-        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME
+        CLOCK_REALTIME | CLOCK_TAI | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME
         | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {}
         _ => return -(errno::EINVAL as i64),
     }
@@ -435,8 +441,27 @@ pub fn sys_getitimer(args: SyscallArgs) -> i64 {
             (0i64, 0i64, 0i64, 0i64)
         }
     } else {
-        // ITIMER_VIRTUAL, ITIMER_PROF — not supported
-        (0i64, 0i64, 0i64, 0i64)
+        // ITIMER_VIRTUAL / ITIMER_PROF — CPU-time timers tracked against
+        // the sched entity's sum_exec_runtime. Remaining = deadline - now;
+        // interval is stored verbatim at setitimer time.
+        let state = if which == 1 { &task.itimer_virt } else { &task.itimer_prof };
+        let deadline_ns = state[0].load(core::sync::atomic::Ordering::Acquire);
+        if deadline_ns == 0 {
+            (0i64, 0i64, 0i64, 0i64)
+        } else {
+            let interval_ns = state[1].load(core::sync::atomic::Ordering::Acquire);
+            let now_ns = task
+                .sched_entity()
+                .sum_exec_runtime
+                .load(core::sync::atomic::Ordering::Acquire);
+            let remaining_ns = deadline_ns.saturating_sub(now_ns);
+            (
+                (interval_ns / 1_000_000_000) as i64,
+                ((interval_ns % 1_000_000_000) / 1_000) as i64,
+                (remaining_ns / 1_000_000_000) as i64,
+                ((remaining_ns % 1_000_000_000) / 1_000) as i64,
+            )
+        }
     };
 
     // Write struct itimerval
@@ -513,7 +538,30 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
         // ITIMER_REAL — arm using kernel timer wheel
         set_itimer_real(interval_sec, interval_usec, value_sec, value_usec);
     } else if which == 1 || which == 2 {
-        // ITIMER_VIRTUAL, ITIMER_PROF — not supported, silently accept
+        // ITIMER_VIRTUAL / ITIMER_PROF — CPU-time timers checked in
+        // scheduler_tick against sum_exec_runtime. value_ns is counted
+        // from the CURRENT cumulative CPU time (Linux arms from now).
+        let task = match crate::process::current_task() {
+            Some(t) => t,
+            None => return -(errno::ESRCH as i64),
+        };
+        let state = if which == 1 { &task.itimer_virt } else { &task.itimer_prof };
+        let value_ns = (value_sec.saturating_mul(1_000_000_000)
+            .saturating_add(value_usec.saturating_mul(1_000)))
+            .max(0) as u64;
+        let interval_ns = (interval_sec.saturating_mul(1_000_000_000)
+            .saturating_add(interval_usec.saturating_mul(1_000)))
+            .max(0) as u64;
+        let deadline = if value_ns != 0 {
+            task.sched_entity()
+                .sum_exec_runtime
+                .load(core::sync::atomic::Ordering::Acquire)
+                .saturating_add(value_ns)
+        } else {
+            0 // disarm
+        };
+        state[0].store(deadline, core::sync::atomic::Ordering::Release);
+        state[1].store(interval_ns, core::sync::atomic::Ordering::Release);
     }
 
     0
@@ -1247,4 +1295,7 @@ pub fn wall_epoch_offset_secs() -> u64 {
 /// Set the wall-clock epoch offset (settimeofday path).
 pub fn set_wall_epoch_offset_secs(secs: u64) {
     WALL_EPOCH_OFFSET_SECS.store(secs, core::sync::atomic::Ordering::Release);
+    // P2 vDSO: refresh the shared data page immediately so REALTIME
+    // readers do not wait for the next timer tick.
+    crate::mm::vdso::vdso_data_tick();
 }

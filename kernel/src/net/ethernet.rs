@@ -309,7 +309,18 @@ pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
     // as a proper unicast frame. This replaces the old broadcast fallback
     // that lost the first packet to every new destination and relied on
     // upper-layer retries to mask it.
+    // P2 multicast: 224.0.0.0/4 destinations map directly to the
+    // 01:00:5e:xx:xx:xx MAC (RFC 1112 §6.4 — low 23 bits of the group
+    // address with the top bit cleared); ARP is never consulted.
     let dest_mac = match dest_ip {
+        Some(ip) if (ip >> 28) == 0xE => [
+            0x01,
+            0x00,
+            0x5E,
+            ((ip >> 16) & 0x7F) as u8,
+            ((ip >> 8) & 0xFF) as u8,
+            (ip & 0xFF) as u8,
+        ],
         Some(ip) => match crate::net::arp::arp_lookup(ip) {
             Some(mac) => mac,
             None => return crate::net::arp::arp_pending_send(ip, skb),

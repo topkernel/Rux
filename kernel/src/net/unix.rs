@@ -54,6 +54,16 @@ pub const SOCKADDR_UN_LEN: usize = 110;
 /// SOL_SOCKET / SCM_RIGHTS (cmsg)
 pub const SOL_SOCKET: i32 = 1;
 pub const SCM_RIGHTS: i32 = 1;
+/// SOL_SOCKET / SCM_CREDENTIALS (cmsg): sender's {pid, uid, gid} triple.
+pub const SCM_CREDENTIALS: i32 = 2;
+
+/// struct ucred — the SCM_CREDENTIALS cmsg payload (12 bytes on LP64).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnixCred {
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
+}
 
 /// Socket states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +97,8 @@ pub struct UnixSeg {
     /// SCM_RIGHTS payload — consumed by the first recv touching this
     /// segment (delivered as cmsg, then cleared from the remainder)
     pub files: Vec<Arc<File>>,
+    /// SCM_CREDENTIALS payload — same first-touch delivery as `files`.
+    pub cred: Option<UnixCred>,
     /// Sender's bound name (for recvfrom address reporting)
     pub src: Option<String>,
 }
@@ -540,11 +552,13 @@ fn target_has_room(target: &Arc<UnixSocket>, len: usize, cap: usize) -> bool {
 
 /// Send one message (segment). `dest` overrides the connected destination
 /// (DGRAM sendto). `files` is the SCM_RIGHTS payload (already resolved
-/// from the sender's fd table).
+/// from the sender's fd table). `cred` is the SCM_CREDENTIALS triple
+/// (kernel-filled from the sending task).
 pub fn unix_send(
     sock: &Arc<UnixSocket>,
     data: &[u8],
     files: Vec<Arc<File>>,
+    cred: Option<UnixCred>,
     dest: Option<&UnixAddr>,
     nonblock: bool,
     deadline: Option<u64>,
@@ -600,6 +614,7 @@ pub fn unix_send(
                 q.push_back(UnixSeg {
                     data: data.to_vec(),
                     files,
+                    cred,
                     src,
                 });
                 drop(q);
@@ -619,12 +634,14 @@ pub fn unix_send(
 }
 
 /// Result of a receive: bytes copied, full length of the record (DGRAM
-/// truncation reporting), sender name, and SCM_RIGHTS files.
+/// truncation reporting), sender name, and SCM_RIGHTS files /
+/// SCM_CREDENTIALS triple.
 pub struct UnixRecvResult {
     pub len: usize,
     pub orig_len: usize,
     pub src: Option<String>,
     pub files: Vec<Arc<File>>,
+    pub cred: Option<UnixCred>,
     pub truncated: bool,
 }
 
@@ -634,6 +651,7 @@ fn unix_recv_eof() -> UnixRecvResult {
         orig_len: 0,
         src: None,
         files: Vec::new(),
+        cred: None,
         truncated: false,
     }
 }
@@ -646,6 +664,7 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
         UnixKind::Stream => {
             if let Some(mut seg) = q.pop_front() {
                 let mut files = Vec::new();
+                let mut cred: Option<UnixCred> = None;
                 let mut src: Option<String> = None;
                 let mut copied = 0usize;
                 let mut orig_total = 0usize;
@@ -656,6 +675,9 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                     buf[copied..copied + take].copy_from_slice(&seg.data[..take]);
                     copied += take;
                     files.extend(seg.files.drain(..));
+                    if cred.is_none() {
+                        cred = seg.cred.take();
+                    }
                     if let Some(s) = seg.src.take() {
                         src = Some(s);
                     }
@@ -682,6 +704,7 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                     orig_len: orig_total,
                     src,
                     files,
+                    cred,
                     truncated: false,
                 });
             }
@@ -692,6 +715,7 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                 let take = orig_len.min(buf.len());
                 buf[..take].copy_from_slice(&seg.data[..take]);
                 let files = seg.files;
+                let cred = seg.cred;
                 let src = seg.src;
                 drop(q);
                 sock.wait_queue.wake_up_all();
@@ -700,6 +724,7 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                     orig_len,
                     src,
                     files,
+                    cred,
                     truncated: take < orig_len,
                 });
             }
@@ -816,7 +841,7 @@ fn unix_file_write(file: &File, buf: &[u8]) -> isize {
     }
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.sndtimeo_deadline();
-    match unix_send(&socket, buf, Vec::new(), None, nonblock, deadline) {
+    match unix_send(&socket, buf, Vec::new(), None, None, nonblock, deadline) {
         Ok(n) => n as isize,
         Err(e) => e as isize,
     }

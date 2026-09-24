@@ -327,6 +327,88 @@ pub struct TcpOooSeg {
 // TCP_TABLE_LOCK acquisition is possible.
 
 /// One wire-ready TX decision (R35). Addresses/ports in host byte order;
+/// P2 TCP option template for one outbound segment.
+///
+/// `kind` bits select what `tcp_build_packet*` appends after the 20-byte
+/// header: bit0 MSS, bit1 window scale (SYN only), bit2 timestamps.
+/// Batch-wide template — set right before pushing the descriptor(s),
+/// mirrored into each TcpTxDesc at push time, reset by emit_all.
+#[derive(Debug, Clone, Copy)]
+pub struct TcpOptOut {
+    pub kind: u8,
+    pub mss: u16,
+    pub ws_shift: u8,
+    pub tsval: u32,
+    pub tsecr: u32,
+}
+
+impl Default for TcpOptOut {
+    fn default() -> Self {
+        Self { kind: 0, mss: 0, ws_shift: 0, tsval: 0, tsecr: 0 }
+    }
+}
+
+impl TcpOptOut {
+    pub const KIND_MSS: u8 = 1 << 0;
+    pub const KIND_WS: u8 = 1 << 1;
+    pub const KIND_TS: u8 = 1 << 2;
+
+    /// Wire length of the enabled options in bytes (SYN layout:
+    /// MSS(4) + WS(3)+NOP pad(1) + NOPNOP(2)+TS(10) = 20; data layout:
+    /// NOPNOP(2)+TS(10) = 12; padded to a 4-byte multiple).
+    fn wire_len(&self, syn: bool) -> usize {
+        let mut n = 0usize;
+        if syn && self.kind & Self::KIND_MSS != 0 {
+            n += 4;
+        }
+        if syn && self.kind & Self::KIND_WS != 0 {
+            n += 4;
+        }
+        if self.kind & Self::KIND_TS != 0 {
+            n += 12;
+        }
+        (n + 3) & !3
+    }
+
+    /// Serialize the options into `buf`; returns the byte count written
+    /// (0 when nothing is enabled). `syn` gates MSS/WS to handshake
+    /// segments only (RFC 793/1323).
+    fn encode(&self, buf: &mut [u8], syn: bool) -> usize {
+        let mut n = 0usize;
+        let mut put = |buf: &mut [u8], n: &mut usize, b: u8| {
+            buf[*n] = b;
+            *n += 1;
+        };
+        if syn && self.kind & Self::KIND_MSS != 0 {
+            put(buf, &mut n, 2); // kind: MSS
+            put(buf, &mut n, 4); // len
+            put(buf, &mut n, (self.mss >> 8) as u8);
+            put(buf, &mut n, self.mss as u8);
+        }
+        if syn && self.kind & Self::KIND_WS != 0 {
+            put(buf, &mut n, 3); // kind: WS
+            put(buf, &mut n, 3); // len
+            put(buf, &mut n, self.ws_shift);
+            put(buf, &mut n, 1); // NOP pad to 4
+        }
+        if self.kind & Self::KIND_TS != 0 {
+            put(buf, &mut n, 1); // NOP
+            put(buf, &mut n, 1); // NOP
+            put(buf, &mut n, 8); // kind: TS
+            put(buf, &mut n, 10); // len
+            buf[n..n + 4].copy_from_slice(&self.tsval.to_be_bytes());
+            n += 4;
+            buf[n..n + 4].copy_from_slice(&self.tsecr.to_be_bytes());
+            n += 4;
+        }
+        // Pad with EOL to the 4-byte multiple the caller reserved.
+        while n % 4 != 0 {
+            put(buf, &mut n, 0);
+        }
+        n
+    }
+}
+
 /// `tcp_build_packet`/`ipv4_send_src` convert at emit time exactly like
 /// the old inline senders did.
 ///
@@ -363,6 +445,8 @@ pub struct TcpTxDesc {
     pub src_ip6: crate::net::ipv6::Ipv6Addr,
     /// P1 IPv6: destination address (network byte order)
     pub dst_ip6: crate::net::ipv6::Ipv6Addr,
+    /// P2 TCP options to append (see TcpOptOut).
+    pub opts: TcpOptOut,
 }
 
 /// Batch of pending TX segments (R35).
@@ -376,6 +460,9 @@ pub struct TcpTxBatch {
     arena: alloc::vec::Vec<u8>,
     /// P2 IP_TTL: stamped into every pushed descriptor (0 = default).
     ttl: u8,
+    /// P2 TCP options: template stamped into every pushed descriptor.
+    /// Set by SYN/TS senders right before their push; emit_all resets it.
+    opts: TcpOptOut,
 }
 
 impl TcpTxBatch {
@@ -384,6 +471,7 @@ impl TcpTxBatch {
             descs: alloc::vec::Vec::new(),
             arena: alloc::vec::Vec::new(),
             ttl: 0,
+            opts: TcpOptOut { kind: 0, mss: 0, ws_shift: 0, tsval: 0, tsecr: 0 },
         }
     }
 
@@ -393,6 +481,34 @@ impl TcpTxBatch {
     /// default at the IPv4 layer.
     pub fn set_ttl(&mut self, ttl: u8) {
         self.ttl = ttl;
+    }
+
+    /// P2 TCP options: arm the handshake template (MSS + window scale +
+    /// timestamps) for the descriptor(s) pushed next.
+    pub fn set_opts_syn(&mut self, mss: u16, ws_shift: u8, tsval: u32) {
+        self.opts = TcpOptOut {
+            kind: TcpOptOut::KIND_MSS | TcpOptOut::KIND_WS | TcpOptOut::KIND_TS,
+            mss,
+            ws_shift,
+            tsval,
+            tsecr: 0,
+        };
+    }
+
+    /// P2 TCP options: arm the data-segment timestamp template.
+    pub fn set_opts_ts(&mut self, tsval: u32, tsecr: u32) {
+        self.opts = TcpOptOut {
+            kind: TcpOptOut::KIND_TS,
+            mss: 0,
+            ws_shift: 0,
+            tsval,
+            tsecr,
+        };
+    }
+
+    /// P2 TCP options: clear the template (default = no options).
+    pub fn clear_opts(&mut self) {
+        self.opts = TcpOptOut::default();
     }
 
     /// Reserve capacity for `ndesc` segments totaling <= `nbytes` of
@@ -440,6 +556,7 @@ impl TcpTxBatch {
             is_v6: false,
             src_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
             dst_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
+            opts: self.opts,
         });
         true
     }
@@ -481,6 +598,7 @@ impl TcpTxBatch {
             is_v6: true,
             src_ip6: *src_ip6,
             dst_ip6: *dst_ip6,
+            opts: self.opts,
         });
         true
     }
@@ -546,6 +664,7 @@ impl TcpTxBatch {
             is_v6: false,
             src_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
             dst_ip6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
+            opts: self.opts,
         });
     }
 
@@ -560,6 +679,7 @@ impl TcpTxBatch {
             is_v6: true,
             src_ip6: *src_ip6,
             dst_ip6: *dst_ip6,
+            opts: self.opts,
         });
     }
 
@@ -596,6 +716,7 @@ impl TcpTxBatch {
                     d.window,
                     &d.src_ip6,
                     &d.dst_ip6,
+                    &d.opts,
                 )
                 .is_err()
                 {
@@ -621,6 +742,7 @@ impl TcpTxBatch {
                 d.window,
                 d.src_ip.to_be(),
                 d.dst_ip.to_be(),
+                &d.opts,
             )
             .is_err()
             {
@@ -630,6 +752,7 @@ impl TcpTxBatch {
             let _ = crate::net::ipv4::ipv4_send_src_ttl(skb, d.src_ip, d.dst_ip, 6, d.ttl);
         }
         self.arena.clear();
+        self.opts = TcpOptOut::default();
     }
 }
 
@@ -979,6 +1102,14 @@ pub struct TcpSocket {
     pub ka_cnt: u32,
     /// P2 IP_TTL mirrored from the VFS layer (tcp_set_ttl): 0 = default.
     pub ttl: u8,
+    /// P2 TCP options: peer's window-scale shift parsed from its SYN
+    /// (0 = none offered — inbound window used verbatim).
+    pub peer_wscale: u8,
+    /// P2 TCP options: timestamps negotiated (both SYNs offered TS).
+    pub ts_enabled: bool,
+    /// P2 TCP options: most recent TSval received from the peer — echoed
+    /// back as TSecr on our segments (RFC 7323 §3.2).
+    pub ts_recent: u32,
     /// Out-of-order reassembly queue (received but not yet deliverable)
     pub ooo_queue: alloc::collections::VecDeque<TcpOooSeg>,
 
@@ -1037,6 +1168,9 @@ impl TcpSocket {
             ka_intvl_s: 75,
             ka_cnt: 9,
             ttl: 0,
+            peer_wscale: 0,
+            ts_enabled: false,
+            ts_recent: 0,
             ooo_queue: alloc::collections::VecDeque::new(),
 
             rtt_estimator: TcpRttEstimator::new(),
@@ -1066,6 +1200,9 @@ impl TcpSocket {
     /// Record a data/ctl segment honoring the socket's address family.
     /// All internal senders route through this so v4 sockets and v6
     /// sockets share one state machine.
+    ///
+    /// P2 TCP timestamps: negotiated connections stamp every outbound
+    /// segment (TSval = now, TSecr = ts_recent).
     #[allow(clippy::too_many_arguments)]
     fn tx_record(
         &self,
@@ -1076,6 +1213,11 @@ impl TcpSocket {
         window: u16,
         data: &[u8],
     ) -> bool {
+        if self.ts_enabled {
+            tx.set_opts_ts(tcp_ts_now(), self.ts_recent);
+        } else {
+            tx.clear_opts();
+        }
         tx_record_endpoints(
             self.is_v6,
             self.local_ip,
@@ -1178,13 +1320,29 @@ impl TcpSocket {
     ///
     /// R35: records into `tx` instead of emitting — the virtio TX spin
     /// must never run under TCP_TABLE_LOCK.
+    ///
+    /// P2: the SYN carries MSS + window scale + timestamps options.
     fn send_syn(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
-        if self.tx_record_ctl(
+        // Our window field stays unscaled (rcv_wnd is a plain u16), so the
+        // advertised shift is 0 — offering the option still lets a scaled
+        // peer know our window ceiling is exactly 64 KiB.
+        // Bypasses tx_record (which resets the option template for data
+        // segments — the SYN template set here must survive).
+        tx.set_opts_syn(self.mss, 0, tcp_ts_now());
+        if tx_record_endpoints(
+            self.is_v6,
+            self.local_ip,
+            self.remote_ip,
+            self.local_ip6,
+            self.remote_ip6,
+            self.local_port,
+            self.remote_port,
             tx,
             self.snd_nxt,
             0, // ACK number is 0
             0x0002, // SYN flag
             self.rcv_wnd,
+            &[],
         ) {
             Ok(())
         } else {
@@ -1210,13 +1368,26 @@ impl TcpSocket {
     /// Emit the SYN-ACK segment itself without touching sequence
     /// accounting (R32-N16). Used both by the handshake and by the
     /// SYN_RECV retransmission path — resending must NOT advance snd_nxt.
+    ///
+    /// P2: carries MSS + window scale + timestamps options like the SYN.
     fn send_synack_packet(&self, tx: &mut TcpTxBatch) -> Result<(), ()> {
-        if self.tx_record_ctl(
+        // Bypasses tx_record — the option template set here must survive
+        // (see send_syn).
+        tx.set_opts_syn(self.mss, 0, tcp_ts_now());
+        if tx_record_endpoints(
+            self.is_v6,
+            self.local_ip,
+            self.remote_ip,
+            self.local_ip6,
+            self.remote_ip6,
+            self.local_port,
+            self.remote_port,
             tx,
             self.snd_nxt,
             self.rcv_nxt,
             0x0012, // SYN + ACK flags
             self.rcv_wnd,
+            &[],
         ) {
             Ok(())
         } else {
@@ -1313,11 +1484,33 @@ impl TcpSocket {
         // handshake counterpart's) — the peer's advertised MSS below our
         // 1460 default must be adopted or every segment we send above it
         // gets dropped by the peer (SYN options were ignored entirely).
+        // P2: also adopt the peer's window-scale shift and negotiate
+        // timestamps (RFC 7323: TS is on only when BOTH SYNs offered it).
         if tcp_hdr.syn() {
             if let Some(mss) = tcp_parse_mss(tcp_hdr) {
                 if mss < self.mss {
                     self.mss = mss;
                 }
+            }
+            match tcp_parse_wscale(tcp_hdr) {
+                Some(ws) => self.peer_wscale = ws,
+                None => self.peer_wscale = 0,
+            }
+            if let Some(tsval) = tcp_parse_tsval(tcp_hdr) {
+                self.ts_recent = tsval;
+                // ts_enabled stays true only if our SYN also offered TS
+                // (we always do); a peer that skipped the option gets no
+                // stamped segments from us.
+                self.ts_enabled = true;
+            } else {
+                self.ts_enabled = false;
+            }
+        } else if self.ts_enabled {
+            // RFC 7323: refresh ts_recent from every in-order segment's
+            // TSval (PAWS ordering checks are not implemented — minimal
+            // echo only).
+            if let Some(tsval) = tcp_parse_tsval(tcp_hdr) {
+                self.ts_recent = tsval;
             }
         }
 
@@ -2053,7 +2246,10 @@ impl TcpSocket {
         // closing its window black-holed nothing but reopening it never
         // released a stalled sender either, and large-advertising peers
         // were under-used).
-        self.snd_wnd = window;
+        // P2 window scale: the 16-bit field carries window >> shift when
+        // the peer offered WS in its SYN — reconstruct the true size
+        // (saturating at the u16 storage).
+        self.snd_wnd = ((window as u32) << self.peer_wscale).min(u16::MAX as u32) as u16;
 
         // Calculate acknowledged bytes
         let acked_bytes = ack.wrapping_sub(self.snd_una);
@@ -3487,12 +3683,19 @@ pub fn tcp_build_packet(
     window: u16,
     src_ip: u32,
     dest_ip: u32,
+    opts: &TcpOptOut,
 ) -> Result<(), ()> {
+    // P2 TCP options: SYN segments carry MSS + WS + TS (20 bytes), data
+    // segments TS only (12 bytes) — wire_len pads to a 4-byte multiple.
+    let is_syn = flags & 0x0002 != 0;
+    let opt_len = opts.wire_len(is_syn);
+    let hdr_len = TCP_MIN_HLEN + opt_len;
+
     // Allocate space for TCP header
-    let ptr = skb.skb_push(TCP_MIN_HLEN as u32).ok_or(())?;
+    let ptr = skb.skb_push(hdr_len as u32).ok_or(())?;
 
     // SAFETY: skb_push returned a valid, properly aligned pointer of at least
-    // TCP_MIN_HLEN bytes; writing fields of repr(C) TcpHdr is well-defined.
+    // hdr_len bytes; writing fields of repr(C) TcpHdr is well-defined.
     unsafe {
         let tcp_hdr = &mut *(ptr as *mut TcpHdr);
 
@@ -3508,8 +3711,8 @@ pub fn tcp_build_packet(
         // Acknowledgment number
         tcp_hdr.ack_seq = ack_seq.to_be();
 
-        // Data offset (20 bytes = 5 32-bit words)
-        tcp_hdr.set_dof(5);
+        // Data offset (20 bytes = 5 32-bit words, plus options)
+        tcp_hdr.set_dof(5 + (opt_len / 4) as u8);
 
         // Window size
         tcp_hdr.set_window(window);
@@ -3523,11 +3726,17 @@ pub fn tcp_build_packet(
         // Urgent pointer
         tcp_hdr.urg_ptr = 0;
 
+        // P2: serialize the option bytes after the fixed header.
+        if opt_len > 0 {
+            let opt_bytes = core::slice::from_raw_parts_mut(ptr.add(TCP_MIN_HLEN), opt_len);
+            let _ = opts.encode(opt_bytes, is_syn);
+        }
+
         // Compute TCP checksum (RFC 793). The field is big-endian on the
         // wire — store the network-order value (review NEW: missing .to_be()
         // byte-swapped every outbound segment's checksum).
-        let data_ptr = ptr.add(TCP_MIN_HLEN);
-        let data_len = (skb.len as usize).saturating_sub(TCP_MIN_HLEN);
+        let data_ptr = ptr.add(hdr_len);
+        let data_len = (skb.len as usize).saturating_sub(hdr_len);
         let data_slice = core::slice::from_raw_parts(data_ptr as *const u8, data_len);
         tcp_hdr.check = tcp_checksum(src_ip, dest_ip, tcp_hdr, data_slice).to_be();
     }
@@ -3548,11 +3757,17 @@ pub fn tcp_build_packet6(
     window: u16,
     src_ip6: &crate::net::ipv6::Ipv6Addr,
     dest_ip6: &crate::net::ipv6::Ipv6Addr,
+    opts: &TcpOptOut,
 ) -> Result<(), ()> {
-    let ptr = skb.skb_push(TCP_MIN_HLEN as u32).ok_or(())?;
+    // P2 TCP options (see tcp_build_packet).
+    let is_syn = flags & 0x0002 != 0;
+    let opt_len = opts.wire_len(is_syn);
+    let hdr_len = TCP_MIN_HLEN + opt_len;
+
+    let ptr = skb.skb_push(hdr_len as u32).ok_or(())?;
 
     // SAFETY: skb_push returned a valid, properly aligned pointer of at least
-    // TCP_MIN_HLEN bytes; writing fields of repr(C) TcpHdr is well-defined.
+    // hdr_len bytes; writing fields of repr(C) TcpHdr is well-defined.
     unsafe {
         let tcp_hdr = &mut *(ptr as *mut TcpHdr);
 
@@ -3560,20 +3775,25 @@ pub fn tcp_build_packet6(
         tcp_hdr.dest = dest.to_be();
         tcp_hdr.seq = seq.to_be();
         tcp_hdr.ack_seq = ack_seq.to_be();
-        tcp_hdr.set_dof(5);
+        tcp_hdr.set_dof(5 + (opt_len / 4) as u8);
         tcp_hdr.set_window(window);
         tcp_hdr.flags = (flags & 0xFF) as u8;
         tcp_hdr.check = 0;
         tcp_hdr.urg_ptr = 0;
 
-        let data_len = (skb.len as usize).saturating_sub(TCP_MIN_HLEN);
+        if opt_len > 0 {
+            let opt_bytes = core::slice::from_raw_parts_mut(ptr.add(TCP_MIN_HLEN), opt_len);
+            let _ = opts.encode(opt_bytes, is_syn);
+        }
+
+        let data_len = (skb.len as usize).saturating_sub(hdr_len);
         let mut csum = crate::net::ipv6::transport_checksum6(
             src_ip6,
             dest_ip6,
             crate::net::ipv6::next_header::TCP,
             // The checksum covers header + data with the field zeroed; the
             // header is fully built above except check (already 0).
-            core::slice::from_raw_parts(ptr as *const u8, TCP_MIN_HLEN + data_len),
+            core::slice::from_raw_parts(ptr as *const u8, hdr_len + data_len),
         );
         if csum == 0 {
             csum = 0xFFFF;
@@ -3661,6 +3881,89 @@ pub fn tcp_parse_mss(tcp_hdr: &TcpHdr) -> Option<u16> {
         }
     }
     None
+}
+
+/// P2 TCP options: raw option-bytes accessor shared by the parsers.
+/// SAFETY contract mirrors tcp_parse_mss (caller-validated header).
+fn tcp_option_bytes(tcp_hdr: &TcpHdr) -> &'static [u8] {
+    let hlen = tcp_hdr.header_len();
+    if hlen <= TCP_MIN_HLEN || hlen > TCP_MAX_HLEN {
+        return &[];
+    }
+    // SAFETY: tcp_hdr aliases the skb data buffer; the option bytes occupy
+    // [TCP_MIN_HLEN, header_len) of the same buffer, which
+    // tcp_parse_packet validated against the packet length.
+    unsafe {
+        core::slice::from_raw_parts(
+            (tcp_hdr as *const TcpHdr as *const u8).add(TCP_MIN_HLEN),
+            hlen - TCP_MIN_HLEN,
+        )
+    }
+}
+
+/// P2: parse the window-scale option (kind 3, len 3) from a SYN.
+/// Returns the peer's advertised shift (0..=14), or None when absent.
+pub fn tcp_parse_wscale(tcp_hdr: &TcpHdr) -> Option<u8> {
+    let opts = tcp_option_bytes(tcp_hdr);
+    let mut i = 0;
+    while i < opts.len() {
+        match opts[i] {
+            0 => break,
+            1 => { i += 1; }
+            kind => {
+                if i + 1 >= opts.len() {
+                    break;
+                }
+                let len = opts[i + 1] as usize;
+                if len < 2 || i + len > opts.len() {
+                    break;
+                }
+                if kind == 3 && len == 3 {
+                    return Some(opts[i + 2].min(14));
+                }
+                i += len;
+            }
+        }
+    }
+    None
+}
+
+/// P2: parse the timestamps option (kind 8, len 10) from a segment.
+/// Returns the peer's TSval.
+pub fn tcp_parse_tsval(tcp_hdr: &TcpHdr) -> Option<u32> {
+    let opts = tcp_option_bytes(tcp_hdr);
+    let mut i = 0;
+    while i < opts.len() {
+        match opts[i] {
+            0 => break,
+            1 => { i += 1; }
+            kind => {
+                if i + 1 >= opts.len() {
+                    break;
+                }
+                let len = opts[i + 1] as usize;
+                if len < 2 || i + len > opts.len() {
+                    break;
+                }
+                if kind == 8 && len == 10 && i + 6 <= opts.len() {
+                    return Some(u32::from_be_bytes([
+                        opts[i + 2],
+                        opts[i + 3],
+                        opts[i + 4],
+                        opts[i + 5],
+                    ]));
+                }
+                i += len;
+            }
+        }
+    }
+    None
+}
+
+/// P2 TCP timestamps: the TSval clock — milliseconds since boot (jiffies
+/// × 10 ms), truncated to 32 bits like Linux's jiffies-based TS clock.
+fn tcp_ts_now() -> u32 {
+    (crate::drivers::timer::get_jiffies().wrapping_mul(10)) as u32
 }
 
 /// W3: RX segments dropped for TCP checksum mismatch (observability).

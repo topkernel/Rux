@@ -460,6 +460,32 @@ pub fn get_param(key: &str) -> Option<String> {
     None
 }
 
+/// P2: parse a dotted-decimal IPv4 address ("a.b.c.d") into host byte
+/// order. Returns None on malformed input (wrong octet count, non-digit,
+/// or an octet above 255).
+pub fn parse_ipv4_addr(s: &str) -> Option<u32> {
+    let mut ip: u32 = 0;
+    let mut octets = 0;
+    for part in s.split('.') {
+        octets += 1;
+        if octets > 4 {
+            return None;
+        }
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let v: u32 = part.parse().ok()?;
+        if v > 255 {
+            return None;
+        }
+        ip = (ip << 8) | v;
+    }
+    if octets != 4 {
+        return None;
+    }
+    Some(ip)
+}
+
 /// Check if parameter exists (boolean flag)
 ///
 /// # Arguments

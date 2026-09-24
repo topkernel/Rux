@@ -464,6 +464,23 @@ impl SignalStruct {
         Some(actions[(sig - 1) as usize])
     }
 
+    /// Compute the /proc/[pid]/status SigIgn and SigCgt mask pair in one
+    /// lock hold: SigIgn has a bit per signal disposed to SIG_IGN, SigCgt
+    /// a bit per signal with a user handler installed.
+    pub fn ign_cgt_masks(&self) -> (u64, u64) {
+        let actions = self.action.read();
+        let mut ign = 0u64;
+        let mut cgt = 0u64;
+        for (i, a) in actions.iter().enumerate() {
+            match a.action() {
+                SigActionKind::Ignore => ign |= 1u64 << i,
+                SigActionKind::Handler => cgt |= 1u64 << i,
+                SigActionKind::Default => {}
+            }
+        }
+        (ign, cgt)
+    }
+
     /// Add signal mask
     pub fn add_mask(&self, sig: i32) {
         if sig < 1 || sig > 64 {
@@ -868,6 +885,15 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
                 if !setup_frame(current, sig, &action, regs) {
                     // Setup failed, execute default action
                     handle_default_signal(sig);
+                } else if action.sa_flags.bits() & SigFlags::SA_RESETHAND != 0 {
+                    // POSIX SA_RESETHAND (System V semantics): the
+                    // disposition resets to SIG_DFL once delivery has
+                    // started, so a second occurrence of the signal takes
+                    // the default action unless re-armed. Reset the stored
+                    // action (flags included — glibc readback expects it).
+                    if let Some(sig_struct) = (*current).signal.as_ref() {
+                        let _ = sig_struct.set_action(sig, SigAction::new());
+                    }
                 }
             } else if action.action() == SigActionKind::Ignore {
                 // SIG_IGN disposition: nothing to execute. Do NOT fall
@@ -1106,10 +1132,18 @@ unsafe fn setup_frame(
     }
 
     // Set signal handler arguments (RISC-V calling convention: a0-a7)
-    // int sigaction_handler(int sig, siginfo_t *info, void *uc)
-    regs.a0 = sig as u64;                      // a0 = sig
-    regs.a1 = frame_addr + core::mem::offset_of!(SignalFrame, info) as u64;  // a1 = &info
-    regs.a2 = frame_addr + core::mem::offset_of!(SignalFrame, uc) as u64;    // a2 = &uc
+    // SA_SIGINFO: void handler(int sig, siginfo_t *info, void *uc)
+    // otherwise:  void handler(int sig) — only a0 is defined; a1/a2 are
+    // zeroed so a sloppy libc wrapper never dereferences a stale pointer.
+    if action.sa_flags.bits() & SigFlags::SA_SIGINFO != 0 {
+        regs.a0 = sig as u64;                      // a0 = sig
+        regs.a1 = frame_addr + core::mem::offset_of!(SignalFrame, info) as u64;  // a1 = &info
+        regs.a2 = frame_addr + core::mem::offset_of!(SignalFrame, uc) as u64;    // a2 = &uc
+    } else {
+        regs.a0 = sig as u64;                      // a0 = sig
+        regs.a1 = 0;
+        regs.a2 = 0;
+    }
 
     // Set return address to signal handler
     regs.epc = action.sa_handler as u64;

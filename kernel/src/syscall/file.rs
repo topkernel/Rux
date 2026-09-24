@@ -2004,6 +2004,14 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
                 Some(inode) => {
+                    // Linux do_fsync → vfs_fsync: only file types with an
+                    // fsync method (regular files) can be synced. FIFOs,
+                    // sockets, and device nodes report EINVAL instead of
+                    // flushing an unrelated global cache and claiming
+                    // success.
+                    if !inode.mode.is_regular_file() {
+                        return -(errno::EINVAL as i64);
+                    }
                     // ext4 files: flush data blocks + journal commit via the
                     // W2-exposed ext4_sync_file. Other filesystems (rootfs,
                     // pipes, ...) have no fsync op — flush the shared buffer
@@ -3165,12 +3173,12 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
     const RENAME_WHITEOUT: u32 = 1 << 2;
     const KNOWN_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT;
 
-    // Unknown flag bits are EINVAL; EXCHANGE/WHITEOUT need VFS support we
-    // do not have (return EINVAL rather than silently mis-replacing).
+    // Unknown flag bits are EINVAL; WHITEOUT needs VFS support we do not
+    // have (return EINVAL rather than silently mis-replacing).
     if flags & !KNOWN_FLAGS != 0 {
         return -(errno::EINVAL as i64);
     }
-    if flags & (RENAME_EXCHANGE | RENAME_WHITEOUT) != 0 {
+    if flags & RENAME_WHITEOUT != 0 {
         return -(errno::EINVAL as i64);
     }
 
@@ -3182,6 +3190,16 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
+
+    // RENAME_EXCHANGE: atomically swap the two paths (both must exist).
+    // Mutually exclusive with NOREPLACE by definition (the target must
+    // exist). Implemented in the VFS under the mutation lock.
+    if flags & RENAME_EXCHANGE != 0 {
+        return match crate::fs::vfs::vfs_rename_exchange(&old, &new) {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        };
+    }
 
     // RENAME_NOREPLACE: fail with EEXIST if the destination exists instead
     // of silently replacing it (the old code ignored the flag entirely).

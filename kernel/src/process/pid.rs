@@ -15,6 +15,7 @@
 //! cyclic PID reuse semantics.
 
 use crate::sync::spinlock::Spinlock;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Absolute maximum PID value (from config, kept for compatibility).
 pub const PID_MAX_LIMIT: u32 = crate::config::PID_MAX_LIMIT as u32;
@@ -27,6 +28,30 @@ pub const RESERVED_PIDS: u32 = crate::config::RESERVED_PIDS as u32;
 
 pub const PID_SWAPPER: u32 = 0;  // idle process
 pub const PID_INIT: u32 = 1;     // init process
+
+/// P2 /proc/sys/kernel/pid_max: the LIVE allocation ceiling.
+/// Writable via sysctl (write_pid_max); clamped into
+/// [RESERVED_PIDS+1, PID_MAX_DEFAULT] at use time — the bitmap only
+/// covers PID_MAX_DEFAULT bits, so a sysctl value above it lowers
+/// effectively to the bitmap size (documented clamp).
+static PID_MAX_LIVE: AtomicU32 = AtomicU32::new(PID_MAX_DEFAULT);
+
+/// Effective ceiling for allocation (clamped to the bitmap capacity).
+pub fn pid_max_effective() -> u32 {
+    PID_MAX_LIVE.load(Ordering::Acquire).clamp(RESERVED_PIDS + 1, PID_MAX_DEFAULT)
+}
+
+/// Set the live pid_max sysctl value (used by /proc/sys/kernel/pid_max).
+/// Values are stored verbatim; the clamp to the bitmap range happens at
+/// allocation time (pid_max_effective).
+pub fn set_pid_max_live(v: u32) {
+    PID_MAX_LIVE.store(v, Ordering::Release);
+}
+
+/// Read the live pid_max sysctl value (unclamped).
+pub fn pid_max_live() -> u32 {
+    PID_MAX_LIVE.load(Ordering::Acquire)
+}
 
 /// Number of u64 words in the PID bitmap.
 /// Covers [0, PID_MAX_DEFAULT).
@@ -90,14 +115,17 @@ impl PidAllocator {
 
     /// Find the next zero bit starting from `start`, wrapping around.
     fn find_next_zero(&self, start: u32) -> Option<u32> {
+        // P2 pid_max: the sysctl-live ceiling (clamped to the bitmap).
+        let ceiling = pid_max_effective();
+
         // Fast path: all allocatable PIDs in use.
-        let allocatable = PID_MAX_DEFAULT - RESERVED_PIDS;
+        let allocatable = ceiling - RESERVED_PIDS;
         if self.nr_allocated >= allocatable {
             return None;
         }
 
-        // Scan [start, PID_MAX_DEFAULT).
-        if let Some(pid) = self.scan_range(start, PID_MAX_DEFAULT) {
+        // Scan [start, ceiling).
+        if let Some(pid) = self.scan_range(start, ceiling) {
             return Some(pid);
         }
 
@@ -128,8 +156,9 @@ pub fn alloc_pid() -> Option<u32> {
     alloc.bitmap[word_idx] |= 1u64 << bit_idx;
     alloc.nr_allocated += 1;
 
-    // Advance cursor.
-    alloc.next = if pid + 1 >= PID_MAX_DEFAULT {
+    // Advance cursor (bounded by the live ceiling).
+    let ceiling = pid_max_effective();
+    alloc.next = if pid + 1 >= ceiling {
         RESERVED_PIDS
     } else {
         pid + 1

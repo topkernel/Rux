@@ -2345,6 +2345,11 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: cmd - MEMBARRIER_CMD_QUERY, MEMBARRIER_CMD_GLOBAL, etc.
 /// - args[1]: flags - 0 or MEMBARRIER_FLAG_SYNC_CORE
+///
+/// MEMBARRIER_CMD_GLOBAL serializes caller vs every CPU running a Rux
+/// task: each remote CPU is IPI'd (smp_call_function) into a full
+/// read/write fence and the caller waits for completion — a local-only
+/// fence would not order the caller's stores against a peer CPU's loads.
 pub fn sys_membarrier(args: SyscallArgs) -> i64 {
     let cmd = args[0] as i32;
     let _flags = args[1] as u32;
@@ -2359,7 +2364,21 @@ pub fn sys_membarrier(args: SyscallArgs) -> i64 {
             MEMBARRIER_CMD_GLOBAL as i64 | MEMBARRIER_CMD_GLOBAL_EXPEDITED as i64
         }
         MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED => {
-            // Full memory barrier
+            // Remote fence on every other started CPU, then fence locally.
+            // smp_call_function spins for completion, so the caller returns
+            // only after all peers have fenced.
+            fn remote_fence(_arg: *mut core::ffi::c_void) {
+                // SAFETY: fence.i not needed (no SYNC_CORE flag); the
+                // read/write fence orders this CPU's memory operations.
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            }
+            let online = crate::arch::riscv64::smp::num_started_cpus().max(1);
+            let me = crate::arch::cpu_id() as usize;
+            for cpu in 0..online.min(crate::config::MAX_CPUS) {
+                if cpu != me {
+                    crate::arch::riscv64::ipi::smp_call_function(cpu, remote_fence, core::ptr::null_mut());
+                }
+            }
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             0
         }

@@ -771,11 +771,31 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
         // Get current file position
         let offset = file.get_pos() as u64;
 
-        // Get or create read-ahead state from file.private_data
-        let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
+        // P2 O_DIRECT: bypass the page cache entirely and serve straight
+        // from the block layer (ext4_file_read walks bio::bread). The
+        // write side already runs uncached-synchronous (ext4_file_write),
+        // so only the read path needs the branch. Simplification vs Linux:
+        // offset/length block alignment is not enforced.
+        if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
+            match ext4_file_read(fs, ext4_inode, offset, buf) {
+                Ok(read_bytes) => {
+                    file.set_pos(offset + read_bytes as u64);
+                    if read_bytes > 0 {
+                        crate::fs::inotify::notify_file(
+                            file,
+                            crate::fs::inotify::inotify_events::IN_ACCESS,
+                        );
+                    }
+                    read_bytes as isize
+                }
+                Err(e) => e as isize,
+            }
+        } else {
+            // Get or create read-ahead state from file.private_data
+            let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
 
-        // Call cached read function
-        match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
+            // Call cached read function
+            match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
             Ok(read_bytes) => {
                 file.set_pos(offset + read_bytes as u64);
                 // atime: keep the CACHED inode in sync with the read (no
@@ -799,6 +819,7 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
                 read_bytes as isize
             }
             Err(e) => e as isize,
+            }
         }
     }
 }

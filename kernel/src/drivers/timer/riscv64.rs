@@ -165,6 +165,10 @@ pub fn timer_interrupt_handler() {
     // 1. Update jiffies counter
     increment_jiffies();
 
+    // 1.5 P2 vDSO: refresh the shared time-data page under its seqlock
+    // so user-space __vdso_clock_gettime readers keep a recent base.
+    crate::mm::vdso::vdso_data_tick();
+
     // 2. Raise Timer softirq for TCP timer processing
     //    (retransmission, delayed ACK, etc. — deferred to bottom half)
     crate::interrupt::softirq::raise_softirq_irqoff(

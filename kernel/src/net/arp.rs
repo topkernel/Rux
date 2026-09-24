@@ -632,7 +632,10 @@ pub fn arp_rcv(skb: &SkBuff, eth_hdr: &crate::net::ethernet::EthHdr) -> Result<(
 
 /// Check if IP is local IP
 fn is_local_ip(ip: u32) -> bool {
-    ip == LOCAL_IP_ADDR
+    // P2 boot ip=: compare against the LIVE address, not the compile-time
+    // slirp default — a boot-parameter override would otherwise stop
+    // local-delivery classification from matching.
+    ip == get_local_ip()
 }
 
 /// W3: the single local IPv4 address (host byte order) — QEMU slirp's

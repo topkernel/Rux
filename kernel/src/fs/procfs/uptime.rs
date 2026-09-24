@@ -7,6 +7,30 @@
 use alloc::vec::Vec;
 use alloc::format;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Per-CPU cumulative cycles spent in the idle loop's WFI (P2: real idle
+/// accounting for /proc/uptime). Charged by cpu_idle_loop() around each
+/// wfi; the sum across CPUs is the second /proc/uptime column.
+static IDLE_WFI_CYCLES: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+/// Charge `cycles` of idle time to the calling CPU (idle loop only).
+pub fn account_idle_cycles(cpu: usize, cycles: u64) {
+    if cpu < crate::config::MAX_CPUS {
+        IDLE_WFI_CYCLES[cpu].fetch_add(cycles, Ordering::Relaxed);
+    }
+}
+
+/// Total idle cycles summed across all CPUs.
+pub fn total_idle_cycles() -> u64 {
+    let mut sum = 0u64;
+    for c in IDLE_WFI_CYCLES.iter() {
+        sum = sum.saturating_add(c.load(Ordering::Relaxed));
+    }
+    sum
+}
+
 /// Generate /proc/uptime content
 ///
 /// Format: "<uptime> <idle_time>"
@@ -23,9 +47,10 @@ pub fn generate() -> Vec<u8> {
     let secs_x100 = cycles / (TIMER_FREQ / 100);
     let (up_w, up_f) = (secs_x100 / 100, secs_x100 % 100);
 
-    // TODO: Track actual idle time per CPU. Approximate as uptime * ncpus.
-    let ncpus = crate::arch::riscv64::smp::num_started_cpus() as u64;
-    let idle_x100 = secs_x100 * ncpus;
+    // Real per-CPU idle accounting: cumulative WFI cycles charged by the
+    // idle loop, summed across all CPUs (Linux's second column is the
+    // sum over CPUs, so it can exceed the uptime on SMP).
+    let idle_x100 = total_idle_cycles() / (TIMER_FREQ / 100);
     let (id_w, id_f) = (idle_x100 / 100, idle_x100 % 100);
 
     let content = format!("{}.{} {}.{}\n", up_w, up_f, id_w, id_f);

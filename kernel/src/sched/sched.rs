@@ -2283,6 +2283,40 @@ pub fn scheduler_tick() {
         }
     }
 
+    // ITIMER_VIRTUAL / ITIMER_PROF (P2): CPU-time interval timers fire
+    // against the sched entity's sum_exec_runtime (ns). VIRTUAL counts
+    // only user execution — approximated by the task's own runtime; PROF
+    // would add system time, which the single accounting counter cannot
+    // split, so both track the same total. Delivery follows the
+    // RLIMIT_CPU / posix-timer precedent (send_signal from tick context).
+    // A one-shot (interval==0) disarms after firing.
+    unsafe {
+        let se = (*current).sched_entity();
+        let now = se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire);
+        let virt_deadline = (*current).itimer_virt[0].load(core::sync::atomic::Ordering::Acquire);
+        if virt_deadline != 0 && now >= virt_deadline {
+            let interval =
+                (*current).itimer_virt[1].load(core::sync::atomic::Ordering::Acquire);
+            let next = if interval != 0 { now + interval } else { 0 };
+            (*current).itimer_virt[0].store(next, core::sync::atomic::Ordering::Release);
+            let _ = crate::signal::send_signal(
+                (*current).pid() as u32,
+                crate::signal::Signal::SIGVTALRM as i32,
+            );
+        }
+        let prof_deadline = (*current).itimer_prof[0].load(core::sync::atomic::Ordering::Acquire);
+        if prof_deadline != 0 && now >= prof_deadline {
+            let interval =
+                (*current).itimer_prof[1].load(core::sync::atomic::Ordering::Acquire);
+            let next = if interval != 0 { now + interval } else { 0 };
+            (*current).itimer_prof[0].store(next, core::sync::atomic::Ordering::Release);
+            let _ = crate::signal::send_signal(
+                (*current).pid() as u32,
+                crate::signal::Signal::SIGPROF as i32,
+            );
+        }
+    }
+
     // RT bandwidth accounting / throttle (batch 8) — runs every tick on
     // every CPU, before the class-specific work.
     rt_bandwidth_tick(current);
@@ -2668,7 +2702,14 @@ pub fn cpu_idle_loop() -> ! {
 
             // Enter WFI to halt CPU until next interrupt (timer, UART, IPI).
             // IRQs must be enabled (SIE=1) so timer ticks and wake-ups arrive.
+            // Charge the WFI residency to the per-CPU idle accounting that
+            // feeds /proc/uptime's second column (P2: real idle stats).
+            let idle_t0 = crate::arch::riscv64::cpu::read_time();
             unsafe { crate::arch::riscv64::cpu::wfi(); }
+            crate::fs::procfs::uptime::account_idle_cycles(
+                cpu_id,
+                crate::arch::riscv64::cpu::read_time().wrapping_sub(idle_t0),
+            );
 
             grq().clear_idle(cpu_id);
         }

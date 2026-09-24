@@ -123,7 +123,7 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     content.push_str(&format!("TracerPid:\t0\n"));
     content.push_str(&format!("Uid:\t{}\t{}\t{}\t{}\n", cred.uid, cred.euid, cred.suid, cred.fsuid));
     content.push_str(&format!("Gid:\t{}\t{}\t{}\t{}\n", cred.gid, cred.egid, cred.sgid, cred.fsgid));
-    content.push_str("FDSize:\t64\n");
+    content.push_str(&format!("FDSize:\t64\n"));
     content.push_str("Groups:\t\n");
     content.push_str("VmSize:\t0 kB\n");
     content.push_str("VmRSS:\t0 kB\n");
@@ -131,13 +131,33 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     content.push_str("VmStk:\t0 kB\n");
     content.push_str("VmExe:\t0 kB\n");
     content.push_str("VmLib:\t0 kB\n");
-    content.push_str("Threads:\t1\n");
+
+    // Threads: live thread count from the thread-group leader (P2: real
+    // count — single-threaded processes report 1, CLONE_THREAD groups
+    // report the leader's nr_threads).
+    let threads = {
+        let leader = unsafe { &*task.group_leader_ptr() };
+        leader.nr_threads().max(1)
+    };
+    content.push_str(&format!("Threads:\t{}\n", threads));
+
+    // Signal masks (P2: real values). SigPnd = this task's private
+    // pending set; ShdPnd shares it (no separate shared queue yet).
+    // SigBlk = the task's blocked mask. SigIgn/SigCgt are computed from
+    // the signal-handling table (SIG_IGN dispositions / user handlers).
+    let sig_pnd = task.pending.get_all();
+    let sig_blk = task.sigmask;
+    let (sig_ign, sig_cgt) = task
+        .signal
+        .as_ref()
+        .map(|s| s.ign_cgt_masks())
+        .unwrap_or((0, 0));
     content.push_str("SigQ:\t0/0\n");
-    content.push_str("SigPnd:\t0000000000000000\n");
-    content.push_str("ShdPnd:\t0000000000000000\n");
-    content.push_str("SigBlk:\t0000000000000000\n");
-    content.push_str("SigIgn:\t0000000000000000\n");
-    content.push_str("SigCgt:\t0000000000000000\n");
+    content.push_str(&format!("SigPnd:\t{:016x}\n", sig_pnd));
+    content.push_str(&format!("ShdPnd:\t{:016x}\n", sig_pnd));
+    content.push_str(&format!("SigBlk:\t{:016x}\n", sig_blk));
+    content.push_str(&format!("SigIgn:\t{:016x}\n", sig_ign));
+    content.push_str(&format!("SigCgt:\t{:016x}\n", sig_cgt));
     content.push_str("CapInh:\t0000000000000000\n");
     content.push_str("CapPrm:\t0000000000000000\n");
     content.push_str("CapEff:\t0000000000000000\n");

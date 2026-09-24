@@ -1354,7 +1354,13 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // both the source and destination sequences must be atomic against a
     // concurrent creator/unlinker.
     let _mutation_guard = VFS_MUTATION_LOCK.lock();
+    vfs_rename_locked(oldpath, newpath)
+}
 
+/// Lock-free rename core — caller must hold VFS_MUTATION_LOCK (either
+/// directly via vfs_rename, or across a multi-step sequence such as
+/// vfs_rename_exchange that must not interleave with other mutations).
+fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Lookup parent directories of both paths
     let (old_parent_vpath, old_name) = lookup_parent_dir(oldpath)?;
     let (new_parent_vpath, new_name) = lookup_parent_dir(newpath)?;
@@ -1500,7 +1506,80 @@ fn is_ancestor_of(start: Arc<Inode>, candidate_ino: u64) -> bool {
     false
 }
 
-/// Change file mode (chmod)
+/// renameat2(RENAME_EXCHANGE): atomically swap the two paths.
+///
+/// Both paths must exist (ENOENT otherwise). The swap runs under one
+/// VFS_MUTATION_LOCK hold as a three-rename ballet through a unique
+/// hidden temp name in the NEW path's parent directory:
+///   A → tmp, B → A, tmp → B
+/// The whole sequence is serialized against every other VFS mutation
+/// (create/unlink/rename take the same lock), so no concurrent mutation
+/// can interleave. Concurrent READS can observe the intermediate
+/// A-missing window — a full directory-entry-level swap would need
+/// per-filesystem support; documented approximation, final state and
+/// crash-window-mates are correct.
+pub fn vfs_rename_exchange(oldpath: &str, newpath: &str) -> Result<(), i32> {
+    use alloc::format;
+    use alloc::string::ToString;
+
+    if oldpath == newpath {
+        // Exchanging a path with itself is a no-op (Linux returns 0).
+        // But it must still exist.
+        let mut st = crate::fs::Stat::new();
+        return stat_file_by_path(oldpath, &mut st);
+    }
+
+    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+
+    // Both endpoints must exist.
+    let old_vpath = path_lookup(oldpath, 0)
+        .map_err(|_| errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    let new_vpath = path_lookup(newpath, 0)
+        .map_err(|_| errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+
+    // A directory swap across an ancestor relationship would create a
+    // ".." cycle — reject like plain rename does.
+    if let (Some(ref oi), Some(ref ni)) = (&old_vpath.inode, &new_vpath.inode) {
+        if oi.mode.is_directory() || ni.mode.is_directory() {
+            if is_ancestor_of(Arc::clone(oi), ni.ino) || is_ancestor_of(Arc::clone(ni), oi.ino) {
+                return Err(errno::Errno::InvalidArgument.as_neg_i32());
+            }
+        }
+    }
+
+    // Unique hidden temp name in the new path's parent directory (same
+    // filesystem as B by construction, so the renames cannot hit EXDEV).
+    static EXCHANGE_COUNTER: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    let n = EXCHANGE_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let tmp_name = format!(
+        ".rux-rex-{:x}-{:x}",
+        crate::drivers::timer::get_jiffies(),
+        n
+    );
+    let new_parent_str = match newpath.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(idx) => newpath[..idx].to_string(),
+        None => ".".to_string(),
+    };
+    let tmp_path = format!("{}/{}", new_parent_str.trim_end_matches('/'), tmp_name);
+
+    // A → tmp (B's directory), B → A, tmp → B.
+    vfs_rename_locked(oldpath, &tmp_path)?;
+    if let Err(e) = vfs_rename_locked(newpath, oldpath) {
+        // Roll back: tmp → A restores the original state.
+        let _ = vfs_rename_locked(&tmp_path, oldpath);
+        return Err(e);
+    }
+    if let Err(e) = vfs_rename_locked(&tmp_path, newpath) {
+        // B already sits at A's name; restore by moving it back and
+        // unwinding the first rename.
+        let _ = vfs_rename_locked(oldpath, newpath);
+        let _ = vfs_rename_locked(&tmp_path, oldpath);
+        return Err(e);
+    }
+    Ok(())
+}
 ///
 /// # Arguments
 /// - `pathname`: file path
@@ -1662,6 +1741,14 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
 
     if inode.mode.is_directory() {
         return Err(errno::Errno::IsADirectory.as_neg_i32());
+    }
+
+    // Linux do_ftruncate: only regular files (and dirs, which we already
+    // rejected with EISDIR above) are truncatable. A FIFO, socket, or
+    // device node must fail with EINVAL instead of running a generic
+    // setattr that would fake success.
+    if !inode.mode.is_regular_file() {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);

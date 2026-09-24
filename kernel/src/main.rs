@@ -593,6 +593,29 @@ pub extern "C" fn rust_main() -> ! {
             crate::net::tcp::init_tcp_manager();
             crate::net::tcp_timer::init_tcp_timer_manager();
             crate::net::ipv4::route::route_init();
+            // P2 vDSO: build the vDSO ELF page and prime the time-data
+            // page — must run before the first execve maps it.
+            crate::mm::vdso::vdso_init();
+            print_status("vdso", "clock_gettime fast path", true);
+            // P2 boot ip=a.b.c.d: override the hardcoded slirp default
+            // (10.0.2.15) with the address given on the kernel command
+            // line — replaces hardcoding for non-default QEMU networks.
+            if let Some(ip_str) = cmdline::get_param("ip") {
+                if let Some(ip) = cmdline::parse_ipv4_addr(&ip_str) {
+                    crate::net::arp::set_local_ip(ip);
+                    let a = (ip >> 24) & 0xFF;
+                    let b = (ip >> 16) & 0xFF;
+                    let c = (ip >> 8) & 0xFF;
+                    let d = ip & 0xFF;
+                    print_status(
+                        "net",
+                        &format!("boot ip={}.{}.{}.{}", a, b, c, d),
+                        true,
+                    );
+                } else {
+                    print_status("net", "bad ip= ignored (keep 10.0.2.15)", false);
+                }
+            }
             // P1 IPv6: SLAAC link-local (fe80::/64 + EUI-64) + Router
             // Solicitation. No NIC is fine — the stack simply stays v4-only.
             crate::net::ipv6::ipv6_init();

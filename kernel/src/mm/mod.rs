@@ -28,6 +28,7 @@ pub mod hugepage;
 pub mod vmemmap;
 pub mod swap;
 pub mod compact;
+pub mod vdso;
 
 // pcp.rs (per-CPU pages) REMOVED (wave-6, review 4.6 / batch-4 S3): the
 // module had zero live call sites on the alloc/free paths — every

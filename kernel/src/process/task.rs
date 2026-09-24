@@ -764,6 +764,14 @@ pub struct Task {
     /// Each stores the kernel timer ID (0 = disarmed).
     pub itimer_ids: [core::sync::atomic::AtomicU64; 3],
 
+    /// ITIMER_VIRTUAL (SIGVTALRM) CPU-time state: (deadline_ns,
+    /// interval_ns) against the sched entity's sum_exec_runtime.
+    /// deadline==0 disarms. Atomics only — touched from scheduler_tick
+    /// (IRQ context). POSIX: not inherited across fork, cleared on exec.
+    pub itimer_virt: [AtomicU64; 2],
+    /// ITIMER_PROF (SIGPROF) CPU-time state: (deadline_ns, interval_ns).
+    pub itimer_prof: [AtomicU64; 2],
+
     /// POSIX timers created via timer_create.
     /// Stores (timer_id, clock_id, interval_jiffies, sigev_signo, sigev_notify, overrun_count).
     pub posix_timers: Spinlock<alloc::vec::Vec<PosixTimerState>>,
@@ -959,6 +967,8 @@ impl Task {
                 core::sync::atomic::AtomicU64::new(0),
                 core::sync::atomic::AtomicU64::new(0),
             ],
+            itimer_virt: [AtomicU64::new(0), AtomicU64::new(0)],
+            itimer_prof: [AtomicU64::new(0), AtomicU64::new(0)],
             posix_timers: Spinlock::new(alloc::vec::Vec::new()),
             rlimits: Spinlock::new(default_rlimits()),
             cpu_time_last_sigxcpu: AtomicU64::new(0),
@@ -1282,6 +1292,14 @@ impl Task {
                 core::sync::atomic::AtomicU64::new(0),
                 core::sync::atomic::AtomicU64::new(0),
             ],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_virt)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_prof)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,
@@ -1645,6 +1663,14 @@ impl Task {
                 core::sync::atomic::AtomicU64::new(0),
                 core::sync::atomic::AtomicU64::new(0),
             ],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_virt)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, itimer_prof)) as *mut [AtomicU64; 2],
+            [AtomicU64::new(0), AtomicU64::new(0)],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,

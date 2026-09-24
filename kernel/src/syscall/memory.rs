@@ -242,6 +242,20 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     // description without mmap-capable ops (e.g. a device node with no
     // driver backing) fails with ENODEV, matching Linux.
 
+    // P2 vm.overcommit_memory (mode 2, "strict"): a mapping larger than
+    // physical RAM cannot possibly be backed — reject with ENOMEM before
+    // any address-space work. Modes 0 (heuristic) and 1 (always) are
+    // accepted without limit (simplified: no commit accounting exists).
+    // MAP_NORESERVE bypasses the check (Linux: never charged).
+    if crate::fs::procfs::sysctl::OVERCOMMIT_MEMORY
+        .load(core::sync::atomic::Ordering::Acquire)
+        == 2
+        && map_flags & map::MAP_NORESERVE == 0
+        && actual_length > crate::mm::layout::phys_memory_size()
+    {
+        return mmap_error::ENOMEM;
+    }
+
     // Check if this is an io_uring fd
     if fd >= 0 {
         // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
