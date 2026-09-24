@@ -98,6 +98,19 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     return current_brk as i64; // Linux: keep old brk on failure
                 }
 
+                // RLIMIT_DATA: the data segment is [start_brk, brk); growth
+                // beyond the soft limit keeps the old brk (Linux sys_brk
+                // behavior — brk(2) returns the current break, not ENOMEM).
+                // RLIM_INFINITY (u64::MAX) disables the check.
+                let (data_cur, _) = current_task.rlimit(
+                    crate::process::task::rlimit_res::DATA,
+                );
+                if data_cur != u64::MAX
+                    && new_brk.saturating_sub(brk_floor) > data_cur
+                {
+                    return current_brk as i64;
+                }
+
                 // Calculate page range to map
                 let current_page_start = current_brk & !(PAGE_SIZE as u64 - 1);
                 let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
@@ -268,6 +281,33 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     // Get current process
     match crate::sched::current() {
         Some(current_task) => {
+            // RLIMIT_AS: the process's total mapped VM (mm.total_vm, in
+            // pages, maintained by add_vma/remove_vma accounting) plus
+            // this new mapping must stay under the soft limit (Linux
+            // checks rlimit(RLIMIT_AS) in mmap_region → ENOMEM).
+            // RLIM_INFINITY (u64::MAX) disables the check. Read before the
+            // mutable address_space borrow below.
+            {
+                let (as_cur, _) = current_task.rlimit(
+                    crate::process::task::rlimit_res::AS,
+                );
+                if as_cur != u64::MAX {
+                    let page = crate::mm::page::PAGE_SIZE as u64;
+                    let len_pages = (actual_length as u64 + page - 1) / page;
+                    let total = current_task
+                        .address_space()
+                        .map(|a| a.total_vm())
+                        .unwrap_or(0);
+                    let total_after = total + len_pages;
+                    let exceeds = total_after
+                        .checked_mul(page)
+                        .map_or(true, |bytes| bytes > as_cur);
+                    if exceeds {
+                        return mmap_error::ENOMEM;
+                    }
+                }
+            }
+
             // Check if address space exists
             match current_task.address_space_mut() {
                 Some(address_space) => {

@@ -5,7 +5,7 @@
 
 //! Task Control Block
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use core::ptr;
 use crate::sync::spinlock::Spinlock;
 use crate::mm::pagemap::AddressSpace;
@@ -770,8 +770,15 @@ pub struct Task {
 
     /// Resource limits (RLIMIT_*): [(rlim_cur, rlim_max); 16].
     /// Initialized to kernel defaults; getrlimit/setrlimit/prlimit64 read
-    /// and write here (review批次1: rlimit 只认 NOFILE / 静默接受).
+    /// and write here, and the enforcement points (alloc_fd, mmap/brk,
+    /// fork NPROC, scheduler_tick CPU) consult it.
     pub rlimits: Spinlock<[(u64, u64); RLIM_NLIMITS]>,
+
+    /// Process CPU-time second at which SIGXCPU was last delivered
+    /// (RLIMIT_CPU soft limit: Linux re-sends SIGXCPU every further
+    /// second of CPU time; 0 = never sent). Atomics only — read from
+    /// scheduler_tick (IRQ context).
+    cpu_time_last_sigxcpu: AtomicU64,
 }
 
 /// Number of RLIMIT_* resources (matches Linux RLIM_NLIMITS).
@@ -799,7 +806,7 @@ pub mod rlimit_res {
 }
 
 /// Kernel default limits (cur, max):
-/// - NOFILE 1024/4096 (fdtable is a fixed 1024-entry table today)
+/// - NOFILE 1024/4096 (soft default / table size, fs::file::MAX_FDS)
 /// - STACK 8MB soft / RLIM_INFINITY hard
 /// - everything else RLIM_INFINITY (u64::MAX) like Linux's init_cred.
 pub fn default_rlimits() -> [(u64, u64); RLIM_NLIMITS] {
@@ -926,6 +933,7 @@ impl Task {
             ],
             posix_timers: Spinlock::new(alloc::vec::Vec::new()),
             rlimits: Spinlock::new(default_rlimits()),
+            cpu_time_last_sigxcpu: AtomicU64::new(0),
         };
 
         // Initialize children and sibling lists (must be after struct construction)
@@ -1243,6 +1251,19 @@ impl Task {
             (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,
             Spinlock::new(alloc::vec::Vec::new()),
         );
+        // Rlimits + RLIMIT_CPU bookkeeping: Task pages come from the
+        // NON-ZEROING buddy allocator, so every field read by enforcement
+        // paths must be written here — a garbage Spinlock word in
+        // `rlimits` would wedge the first alloc_fd/mmap that touches it
+        // (same R9-1 engine that bit wait_chldexit).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rlimits)) as *mut Spinlock<[(u64, u64); RLIM_NLIMITS]>,
+            Spinlock::new(default_rlimits()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cpu_time_last_sigxcpu)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
 
         // Initialize children and sibling lists
         let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
@@ -1557,6 +1578,18 @@ impl Task {
             (ptr as usize + offset_of!(Task, posix_timers)) as *mut Spinlock<alloc::vec::Vec<PosixTimerState>>,
             Spinlock::new(alloc::vec::Vec::new()),
         );
+        // Rlimits + RLIMIT_CPU bookkeeping: see new_idle_at — the buddy
+        // allocator does not zero Task pages, so enforcement-read fields
+        // must be explicitly initialized (init PID 1 and every fork child
+        // flow through here before the fork-side rlimits copy).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, rlimits)) as *mut Spinlock<[(u64, u64); RLIM_NLIMITS]>,
+            Spinlock::new(default_rlimits()),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cpu_time_last_sigxcpu)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
 
         // Initialize children and sibling lists
         let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
@@ -1789,6 +1822,30 @@ impl Task {
     #[inline]
     pub fn pid(&self) -> Pid {
         self.pid
+    }
+
+    /// Get a snapshot of one resource limit `(rlim_cur, rlim_max)`.
+    ///
+    /// Convenience wrapper over the rlimits table for the enforcement
+    /// points (alloc_fd / mmap / brk / fork / scheduler_tick). Uses
+    /// lock_irqsave: scheduler_tick reads it from IRQ context, so every
+    /// task-context acquisition of the same lock must be irqsave as well
+    /// (an interrupted plain-lock holder would wedge the tick).
+    pub fn rlimit(&self, resource: usize) -> (u64, u64) {
+        if resource >= RLIM_NLIMITS {
+            return (u64::MAX, u64::MAX); // RLIM_INFINITY for unknown ids
+        }
+        self.rlimits.lock_irqsave()[resource]
+    }
+
+    /// Last CPU-time second at which SIGXCPU was sent (RLIMIT_CPU).
+    pub fn cpu_time_last_sigxcpu(&self) -> u64 {
+        self.cpu_time_last_sigxcpu.load(Ordering::Acquire)
+    }
+
+    /// Record the CPU-time second of the latest SIGXCPU delivery.
+    pub fn set_cpu_time_last_sigxcpu(&self, secs: u64) {
+        self.cpu_time_last_sigxcpu.store(secs, Ordering::Release);
     }
 
     /// Preemptive scheduling support

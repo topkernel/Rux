@@ -2086,13 +2086,76 @@ pub fn sys_readahead(_args: SyscallArgs) -> i64 {
 }
 
 /// sys_swapon - Start swap (NR 224)
-pub fn sys_swapon(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// swapon(const char *path, int swapflags)
+///
+/// Resolves `path`, then activates the kernel-managed swap area (tail
+/// carve of the root block device — devfs has no block-device nodes and
+/// there is no partition layer, so the root disk is the only swappable
+/// backend; the path itself currently serves as the authorization token
+/// naming an existing object). A mkswap-style header ("SWAPSPACE2",
+/// version 1) at the carve start, when present, fixes the usable page
+/// count. Refuses when the carve would overlap the ext4 filesystem
+/// (see mm::swap::swap_activate).
+pub fn sys_swapon(args: SyscallArgs) -> i64 {
+    let pathname_ptr = args[0] as *const u8;
+    let _swapflags = args[1] as i32;
+
+    // Linux: CAP_SYS_ADMIN required.
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return -(errno::EPERM as i64);
+    }
+    if pathname_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Only one swap area exists (SWAP_DEVICES[0]); refuse double-enable.
+    if crate::mm::swap::nr_active_swap() {
+        return -(errno::EBUSY as i64);
+    }
+
+    // Resolve the path — a nonexistent name must fail, not fake-success.
+    // resolve_user_path reports negative errnos in a u64; the cast back
+    // to i64 preserves the sign.
+    let full_path = match resolve_user_path(-100, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+
+    // The named object must exist (block-device nodes and swap FILES both
+    // land on the root disk; there is no other GenDisk in the system).
+    if let Err(e) = crate::fs::vfs::path_lookup(&full_path, 0) {
+        return e as i64;
+    }
+
+    // Find the backing disk: first registered GenDisk (virtio-blk root).
+    let disk = match crate::mm::swap::swap_boot_disk() {
+        Some(d) => d,
+        None => return -(errno::ENODEV as i64),
+    };
+
+    match crate::mm::swap::swap_activate(disk) {
+        Ok(_) => 0,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_swapoff - Stop swap (NR 225)
+///
+/// swapoff(const char *path)
+///
+/// Disables the active swap area. Refuses EBUSY while pages are still
+/// swapped out (swap-in-before-disable is not implemented — dropping the
+/// backing store would make the data unreachable).
 pub fn sys_swapoff(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+    // Linux: CAP_SYS_ADMIN required.
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return -(errno::EPERM as i64);
+    }
+    match crate::mm::swap::swap_deactivate() {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_remap_file_pages - Remap file pages (NR 234, deprecated)

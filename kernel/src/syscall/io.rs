@@ -933,10 +933,37 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     }
 }
 
-/// sys_flock - File lock (simplified implementation)
-pub fn sys_flock(_args: SyscallArgs) -> i64 {
-    // Simplified implementation: always return success
-    0
+/// sys_flock - File lock (BSD semantics, real implementation — P0-5)
+///
+/// # Arguments
+/// - args[0]: fd - file descriptor
+/// - args[1]: operation - LOCK_SH/LOCK_EX/LOCK_UN [| LOCK_NB]
+///
+/// # Returns
+/// 0 on success, negative errno on failure
+///
+/// - RISC-V: 32
+///
+/// Locks are owned by the open file description (dup'd fds share them,
+/// fork copies keep them alive, a second open() of the same path gets an
+/// independent, CONFLICTING lock). Released automatically when the last
+/// fd of the description closes. Conflicting requests block unless
+/// LOCK_NB, in which case -EWOULDBLOCK (-EAGAIN) is returned.
+pub fn sys_flock(args: SyscallArgs) -> i64 {
+    use crate::fs::file::get_file_fd;
+
+    let fd = args[0] as usize;
+    let operation = args[1] as i32;
+
+    let file = match unsafe { get_file_fd(fd) } {
+        Some(f) => f,
+        None => return -errno::EBADF as i64,
+    };
+
+    match crate::fs::locks::flock_lock(&file, operation) {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_pwrite64 - Write to file descriptor at a given offset

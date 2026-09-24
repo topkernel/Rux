@@ -1571,12 +1571,30 @@ pub fn sys_getsid(args: SyscallArgs) -> i64 {
     unsafe { (*target).sid() as i64 }
 }
 
-/// sys_prlimit64 - Get/set resource limits
+/// sys_prlimit64 - Get/set resource limits (NR 261)
+///
+/// prlimit64(pid, resource, const struct rlimit64 *new, struct rlimit64 *old)
+///
+/// Real per-task storage (task.rlimits) with Linux semantics:
+///  - EINVAL: resource out of range or new rlim_cur > rlim_max
+///  - EPERM:  raising rlim_max (or rlim_cur above the old max) without
+///            CAP_SYS_RESOURCE; targeting another process (no ptrace
+///            infrastructure yet, so only self is permitted)
+///  - EFAULT: bad user pointers
+/// RLIMIT_STACK stores also reprogram the mm stack-limit (GROWSDOWN
+/// fault bound), keeping try_expand_stack in sync with the rlimit.
 pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
-    let _pid = args[0] as i32;
+    use crate::process::task::{rlimit_res, RLIM_NLIMITS};
+
+    let pid = args[0] as i32;
     let resource = args[1] as i32;
     let new_rlim = args[2] as *const u8;
     let old_rlim = args[3] as *mut u8;
+
+    if resource < 0 || resource as usize >= RLIM_NLIMITS {
+        return -(errno::EINVAL as i64);
+    }
+    let resource = resource as usize;
 
     // Validate pointers
     if !new_rlim.is_null() && !crate::arch::riscv64::uaccess::access_ok(new_rlim as usize, 16) {
@@ -1586,54 +1604,68 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // RLIMIT_NOFILE = 7
-    if resource != 7 {
-        return -(errno::EINVAL as i64);
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+
+    // Cross-process prlimit64 needs PTRACE_MODE_ATTACH; ptrace is not
+    // implemented, so only self (pid 0 or own pid) is accepted.
+    if pid != 0 && pid != current.pid() as i32 {
+        return -(errno::EPERM as i64);
     }
 
-    // Current limits: rlim_cur=1024, rlim_max=1024*1024
-    let mut rlim_cur: u64 = 1024;
-    let rlim_max: u64 = 1024 * 1024;
+    // Snapshot old values (and apply the set below while holding the lock).
+    // lock_irqsave: scheduler_tick reads rlimits from IRQ context — an
+    // interrupted holder would wedge the tick (see Task::rlimit).
+    let old_vals = *current.rlimits.lock_irqsave();
 
-    // Handle set operation: allow setting within hard limits
     if !new_rlim.is_null() {
-        // SAFETY: new_rlim validated with access_ok(16); reads two u64 values.
+        // SAFETY: new_rlim validated with access_ok(16); reads two u64s.
         let new_vals = unsafe {
             let mut buf = [0u64; 2];
-            let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+            if crate::arch::riscv64::uaccess::copy_from_user(
                 buf.as_mut_ptr() as *mut u8,
                 new_rlim,
-                core::mem::size_of::<[u64; 2]>()
-            );
-            if uncopied != 0 {
+                core::mem::size_of::<[u64; 2]>(),
+            ) != 0 {
                 return -(errno::EFAULT as i64);
             }
             buf
         };
-        let requested_cur = new_vals[0];
-        let requested_max = new_vals[1];
+        let (req_cur, req_max) = (new_vals[0], new_vals[1]);
 
-        // Validate: rlim_cur must not exceed rlim_max, rlim_max must not exceed hard limit
-        if requested_cur > requested_max {
+        if req_cur > req_max {
             return -(errno::EINVAL as i64);
         }
-        if requested_max > rlim_max {
-            // Would need CAP_SYS_RESOURCE to raise hard limit
+
+        // Raising the hard limit — or the soft above the old hard —
+        // needs CAP_SYS_RESOURCE (kernel/fork.c / do_prlimit).
+        let (_, old_max) = old_vals[resource];
+        let privileged = current.cred().euid == 0
+            || crate::security::capable(crate::security::CAP_SYS_RESOURCE);
+        if (req_max > old_max || req_cur > old_max) && !privileged {
             return -(errno::EPERM as i64);
         }
-        rlim_cur = requested_cur;
+
+        current.rlimits.lock_irqsave()[resource] = (req_cur, req_max);
+
+        // Side effect: keep the mm stack bound in sync with RLIMIT_STACK
+        // (try_expand_stack faults on addresses below mm.stack_limit).
+        if resource == rlimit_res::STACK {
+            sync_stack_limit(current, req_cur);
+        }
     }
 
     // Return old/current limits
     if !old_rlim.is_null() {
-        let rlimit: [u64; 2] = [rlim_cur, rlim_max];
-        // SAFETY: old_rlim validated non-null and access_ok above; copy_to_user handles
-        // user pointer writes safely.
+        let rlimit: [u64; 2] = [old_vals[resource].0, old_vals[resource].1];
+        // SAFETY: old_rlim validated non-null and access_ok above.
         let uncopied = unsafe {
             crate::arch::riscv64::uaccess::copy_to_user(
-                old_rlim as *mut u8,
+                old_rlim,
                 rlimit.as_ptr() as *const u8,
-                core::mem::size_of::<[u64; 2]>()
+                core::mem::size_of::<[u64; 2]>(),
             )
         };
         if uncopied != 0 {
@@ -1642,6 +1674,21 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
     }
 
     0
+}
+
+/// Reprogram the address space's stack growth bound from an
+/// RLIMIT_STACK soft limit (used by setrlimit/prlimit64 and exec).
+fn sync_stack_limit(task: &crate::process::task::Task, rlim_cur: u64) {
+    use crate::arch::riscv64::mm::user_addr::STACK_MAX_SIZE;
+
+    if let Some(aspace) = task.address_space() {
+        let stack_top = aspace.start_stack();
+        if stack_top != 0 {
+            let size = (rlim_cur.min(STACK_MAX_SIZE as u64)) as usize;
+            let limit = stack_top.saturating_sub(size) + crate::mm::page::PAGE_SIZE;
+            aspace.set_stack_limit(limit);
+        }
+    }
 }
 
 /// sys_prctl - manipulate process attributes
@@ -2599,10 +2646,17 @@ pub fn sys_setns(_args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: resource - resource type (RLIMIT_*)
 /// - args[1]: rlim - pointer to struct rlimit
+///
+/// Reads the real per-task values from task.rlimits.
 pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
-    let resource = args[0] as u32;
+    use crate::process::task::RLIM_NLIMITS;
+
+    let resource = args[0] as i32;
     let rlim_ptr = args[1] as *mut u64;
 
+    if resource < 0 || resource as usize >= RLIM_NLIMITS {
+        return -(errno::EINVAL as i64);
+    }
     if rlim_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
@@ -2610,11 +2664,9 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // struct rlimit { rlim_cur: u64, rlim_max: u64 }
-    const RLIMIT_NOFILE: u32 = 7;
-    let (cur, max) = match resource {
-        RLIMIT_NOFILE => (1024u64, 1024 * 1024),
-        _ => return -(errno::EINVAL as i64),
+    let (cur, max) = match crate::sched::current() {
+        Some(task) => task.rlimit(resource as usize),
+        None => return -(errno::ESRCH as i64),
     };
 
     // SAFETY: rlim_ptr validated with access_ok above; put_user is the
@@ -2631,10 +2683,19 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: resource - resource type (RLIMIT_*)
 /// - args[1]: rlim - pointer to struct rlimit
+///
+/// Stores into task.rlimits with the same validation as prlimit64
+/// (see there); RLIMIT_STACK also reprograms the mm stack bound.
 pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
-    let resource = args[0] as u32;
+    use crate::process::task::{rlimit_res, RLIM_NLIMITS};
+
+    let resource = args[0] as i32;
     let rlim_ptr = args[1] as *const u64;
 
+    if resource < 0 || resource as usize >= RLIM_NLIMITS {
+        return -(errno::EINVAL as i64);
+    }
+    let resource = resource as usize;
     if rlim_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
@@ -2647,47 +2708,30 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
     let rlim_cur = unsafe { crate::arch::riscv64::uaccess::get_user(rlim_ptr).unwrap_or(0) };
     let rlim_max = unsafe { crate::arch::riscv64::uaccess::get_user(rlim_ptr.add(1)).unwrap_or(0) };
 
-    const RLIMIT_NOFILE: u32 = 7;
-    const RLIMIT_DATA: u32 = 2;
-    const RLIMIT_STACK: u32 = 3;
-    const RLIMIT_CORE: u32 = 4;
-    const RLIMIT_RSS: u32 = 5;
-    const RLIMIT_NPROC: u32 = 6;
-    const RLIMIT_MEMLOCK: u32 = 8;
-    const RLIMIT_AS: u32 = 9;
-    const RLIMIT_LOCKS: u32 = 10;
-    const RLIMIT_SIGPENDING: u32 = 11;
-    const RLIMIT_MSGQUEUE: u32 = 12;
-    const RLIMIT_NICE: u32 = 13;
-    const RLIMIT_RTPRIO: u32 = 14;
-    const RLIMIT_RTTIME: u32 = 15;
-
     if rlim_cur > rlim_max {
         return -(errno::EINVAL as i64);
     }
 
-    // Only root can raise hard limits
-    let is_root = if let Some(task) = crate::sched::current() {
-        task.cred().euid == 0
-    } else {
-        false
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
     };
 
-    match resource {
-        RLIMIT_NOFILE | RLIMIT_DATA | RLIMIT_STACK | RLIMIT_CORE
-        | RLIMIT_RSS | RLIMIT_NPROC | RLIMIT_MEMLOCK | RLIMIT_AS
-        | RLIMIT_LOCKS | RLIMIT_SIGPENDING | RLIMIT_MSGQUEUE
-        | RLIMIT_NICE | RLIMIT_RTPRIO | RLIMIT_RTTIME => {
-            // CAP_SYS_RESOURCE required to raise hard limits
-            if !is_root && !crate::security::capable(crate::security::CAP_SYS_RESOURCE) {
-                // Would need to check if new hard limit > old hard limit
-                // but no per-task storage yet; just allow
-            }
-            // Silently accept — no per-task storage yet
-            0
-        }
-        _ => -(errno::EINVAL as i64),
+    let old_max = current.rlimit(resource).1;
+    let privileged = current.cred().euid == 0
+        || crate::security::capable(crate::security::CAP_SYS_RESOURCE);
+    if (rlim_max > old_max || rlim_cur > old_max) && !privileged {
+        return -(errno::EPERM as i64);
     }
+
+    current.rlimits.lock_irqsave()[resource] = (rlim_cur, rlim_max);
+
+    // Keep the mm stack growth bound in sync with RLIMIT_STACK.
+    if resource == rlimit_res::STACK {
+        sync_stack_limit(current, rlim_cur);
+    }
+
+    0
 }
 
 /// sys_getrusage - Get resource usage

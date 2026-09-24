@@ -43,7 +43,9 @@ impl KernelMemoryLayout {
         let slab_size = DEFAULT_SLAB_SIZE;
 
         let remaining_after_slab = phys_base + phys_size - slab_start - slab_size;
-        let user_phys_size = (remaining_after_slab / 4).min(64 * 1024 * 1024);
+        // P0-7 (2026-09): 75% of remaining is user-physical (25% stays for
+        // kernel structures); the old min(25%, 64MB) truncation is gone.
+        let user_phys_size = remaining_after_slab * 3 / 4;
         let user_phys_start = slab_start + slab_size;
 
         let frame_alloc_start = user_phys_start + user_phys_size;
@@ -82,28 +84,29 @@ proptest! {
     }
 
     #[test]
-    fn test_user_phys_capped(kernel_end in 0x80200000usize..0x80A00000usize) {
-        let layout = KernelMemoryLayout::init_from_memblock(
-            PHYS_MEMORY_BASE, 2048 * 1024 * 1024, 0x80200000, kernel_end
-        );
-        assert!(layout.user_phys_size <= 64 * 1024 * 1024,
-            "user_phys_size {} exceeds 64MB cap", layout.user_phys_size);
-    }
-
-    #[test]
-    fn test_user_phys_is_quarter_rule(kernel_end in 0x80200000usize..0x80A00000usize) {
+    fn test_user_phys_is_three_quarters_rule(kernel_end in 0x80200000usize..0x80A00000usize) {
         let phys_size = 512 * 1024 * 1024usize;
         let layout = KernelMemoryLayout::init_from_memblock(
             PHYS_MEMORY_BASE, phys_size, 0x80200000, kernel_end
         );
         let remaining = PHYS_MEMORY_BASE + phys_size - layout.slab_start - layout.slab_size;
-        let quarter = remaining / 4;
-        // user_phys_size is min(quarter, 64MB)
-        if quarter < 64 * 1024 * 1024 {
-            assert_eq!(layout.user_phys_size, quarter);
-        } else {
-            assert_eq!(layout.user_phys_size, 64 * 1024 * 1024);
-        }
+        // user_phys_size is 75% of remaining (kernel keeps 25%)
+        assert_eq!(layout.user_phys_size, remaining * 3 / 4);
+        // kernel reservation stays the final quarter
+        let mem_end = PHYS_MEMORY_BASE + phys_size;
+        let reserved = mem_end - layout.frame_alloc_start;
+        assert_eq!(reserved, remaining / 4);
+    }
+
+    #[test]
+    fn test_user_phys_uncapped(kernel_end in 0x80200000usize..0x80A00000usize) {
+        // On a 2GB machine the user region must far exceed the old 64MB
+        // cap (P0-7): ~75% of remaining after heap+slab.
+        let layout = KernelMemoryLayout::init_from_memblock(
+            PHYS_MEMORY_BASE, 2048 * 1024 * 1024, 0x80200000, kernel_end
+        );
+        assert!(layout.user_phys_size > 1024 * 1024 * 1024,
+            "user_phys_size {} still truncated (expected >1GB on 2GB)", layout.user_phys_size);
     }
 
     #[test]

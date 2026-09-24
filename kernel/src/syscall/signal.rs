@@ -418,21 +418,12 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: fd - existing signalfd (or -1 to create new)
 /// - args[1]: mask - pointer to signal mask
-/// - args[2]: flags - SFD_CLOEXEC, SFD_NONBLOCK
+/// - args[2]: sizemask - size of signal mask (must be 8)
+/// - args[3]: flags - SFD_CLOEXEC, SFD_NONBLOCK
 pub fn sys_signalfd4(args: SyscallArgs) -> i64 {
-    let _fd = args[0] as i32;
-    let mask_ptr = args[1] as *const u64;
-    let _flags = args[2] as i32;
-
-    if mask_ptr.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, 8) {
-        return -(errno::EFAULT as i64);
-    }
-
-    // signalfd requires full signal fd infrastructure
-    -(errno::ENOSYS as i64)
+    // P1: implemented in syscall::misc (SignalFd file ops + wake registry);
+    // this wrapper keeps the dispatch table entry stable.
+    crate::syscall::misc::sys_signalfd4_impl(args)
 }
 
 /// sys_restart_syscall - Restart a system call after interruption

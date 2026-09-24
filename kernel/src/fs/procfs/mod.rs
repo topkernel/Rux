@@ -772,7 +772,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                     let fd_num: u64 = name
                         .iter()
                         .fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
-                    if fd_num < 1024 {
+                    if (fd_num as usize) < crate::fs::file::MAX_FDS {
                         return Ok(pid_val * 10000 + FD_LINK_INO_OFF + fd_num);
                     }
                 }

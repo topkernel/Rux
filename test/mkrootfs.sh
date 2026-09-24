@@ -214,6 +214,16 @@ echo "Creating image $IMAGE_FILE ($IMAGE_SIZE) from staging tree..."
 rm -f "$IMAGE_FILE"
 mkfs.ext4 -q -F -O ^metadata_csum,^flex_bg -d "$STAGING" "$IMAGE_FILE" "$IMAGE_SIZE"
 
+# Append the swap area beyond the filesystem end (swap wiring, 2026-09).
+# The kernel carves its swap space from the TAIL of the disk
+# (Kernel.toml swap_size_mb) and refuses to enable swap when the carve
+# would overlap the ext4 filesystem. Appending unformatted space here
+# keeps the fs 1G and gives the kernel a dedicated tail to swap into.
+SWAP_SIZE_MB=256
+TOTAL_SIZE_MB=$((1024 + SWAP_SIZE_MB))
+truncate -s "${TOTAL_SIZE_MB}M" "$IMAGE_FILE"
+echo "Appended ${SWAP_SIZE_MB}MB swap tail (image now ${TOTAL_SIZE_MB}MB, fs still ${IMAGE_SIZE})"
+
 # Display image contents summary
 echo ""
 echo "========================================"

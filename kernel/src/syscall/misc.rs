@@ -63,6 +63,14 @@ pub mod epoll_ctl_ops {
 // Global epoll instance counter (simplified implementation)
 static EPOLL_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
 
+/// epoll_wait re-check interval (P1 busy-yield elimination): waiters sleep
+/// on the instance's wait queue and are re-woken at least every 10ms to
+/// re-poll readiness (one jiffy at the default HZ=100).
+const EPOLL_RECHECK_JIFFIES: u64 = {
+    let j = crate::drivers::timer::msecs_to_jiffies(10);
+    if j == 0 { 1 } else { j }
+};
+
 /// Epoll monitored fd entry
 struct EpollEntry {
     fd: i32,
@@ -81,6 +89,75 @@ struct EpollEntry {
 /// Epoll file structure (stored as File private_data)
 struct EpollFile {
     entries: crate::sync::spinlock::Spinlock<alloc::vec::Vec<EpollEntry>>,
+    /// Waiters blocked in epoll_wait (P1: busy-yield elimination). Woken by
+    /// the re-check timer, signal delivery, or `epoll_notify_file` once
+    /// fd-side producers (pipe/socket/...) are wired to call it.
+    wait_queue: crate::process::wait::WaitQueueHead,
+}
+
+// ============================================================================
+// Epoll wake registry (groundwork for fd-side callback wakeups)
+// ============================================================================
+
+/// Monitored-file identity → epoll wait queues registered for it.
+///
+/// `epoll_ctl(ADD)` binds (file_id, &epoll.wait_queue); `epoll_notify_file`
+/// wakes every epoll instance watching that open file description. This is
+/// the "correct" wake path: fd-side data-arrival points (pipe write, socket
+/// receive, timerfd/eventfd/signalfd expiry) call
+/// `epoll_notify_file(file.file_id)` instead of relying on the 10ms re-check
+/// timer. The producer-side call sites live in files owned by other repair
+/// waves (pipe.rs / net/socket.rs), so until they land the registry is
+/// dormant machinery and the timer below bounds wakeup latency.
+/// Wrapper so the raw-pointer registry is `Send` (entries are only touched
+/// under the registry lock; queue pointers are unregistered before the
+/// owning EpollFile is freed).
+struct EpollWakeRegistry {
+    bindings: alloc::vec::Vec<(u64, *const crate::process::wait::WaitQueueHead)>,
+}
+// SAFETY: pointers are only compared/dereferenced under the lock and are
+// removed in the owning epoll's close op before the box is freed.
+unsafe impl Send for EpollWakeRegistry {}
+
+static EPOLL_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<EpollWakeRegistry> =
+    crate::sync::spinlock::Spinlock::new(EpollWakeRegistry {
+        bindings: alloc::vec::Vec::new(),
+    });
+
+/// Wake every epoll instance monitoring `file_id` (fd-side arrival hook).
+///
+/// Safe against stale pointers: entries for an epoll instance are removed
+/// in its close op, which only runs on the last Arc reference — no
+/// epoll_wait can still be blocked on the queue at that point.
+pub fn epoll_notify_file(file_id: u64) {
+    let registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
+    for (id, wq) in registry.bindings.iter() {
+        if *id == file_id {
+            // SAFETY: wq points into a boxed EpollFile whose close op has
+            // not run (entries are unregistered there first).
+            unsafe { (**wq).wake_up_all(); }
+        }
+    }
+}
+
+/// Bind (file_id → epoll wait queue). Idempotent per pair.
+fn epoll_wake_register(file_id: u64, wq: *const crate::process::wait::WaitQueueHead) {
+    let mut registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
+    if !registry.bindings.iter().any(|(id, q)| *id == file_id && *q == wq) {
+        registry.bindings.push((file_id, wq));
+    }
+}
+
+/// Drop every binding for `wq` (epoll instance teardown).
+fn epoll_wake_unregister_all(wq: *const crate::process::wait::WaitQueueHead) {
+    let mut registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
+    registry.bindings.retain(|(_, q)| *q != wq);
+}
+
+/// Drop bindings for (file_id, wq) (epoll_ctl DEL).
+fn epoll_wake_unregister(file_id: u64, wq: *const crate::process::wait::WaitQueueHead) {
+    let mut registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
+    registry.bindings.retain(|(id, q)| !(*id == file_id && *q == wq));
 }
 
 /// Epoll file close callback
@@ -93,9 +170,13 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
     // SAFETY: private_data is an UnsafeCell; we hold &File for the last
     // reference, so no concurrent mutable access.
     if let Some(ptr) = unsafe { *file.private_data.get() } {
+        // P1: purge this instance's wake-registry bindings BEFORE freeing
+        // so epoll_notify_file can never touch a dangling queue.
         // SAFETY: ptr came from Box::into_raw in sys_epoll_create and is
         // uniquely owned by this File.
         unsafe {
+            let epoll = &mut *(ptr as *mut EpollFile);
+            epoll_wake_unregister_all(&epoll.wait_queue as *const _);
             let _ = alloc::boxed::Box::from_raw(ptr as *mut EpollFile);
         }
         unsafe { *file.private_data.get() = None; }
@@ -671,6 +752,7 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
 
     let epoll = alloc::boxed::Box::new(EpollFile {
         entries: crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new()),
+        wait_queue: crate::process::wait::WaitQueueHead::new(),
     });
     let epoll_ptr = alloc::boxed::Box::into_raw(epoll) as *mut u8;
 
@@ -824,9 +906,11 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                     // gone from this fd — rebind the entry to the new one
                     // instead of returning EEXIST for a file that is not
                     // actually registered.
+                    epoll_wake_unregister(existing.file_id, &epoll.wait_queue as *const _);
                     existing.file_id = file_id;
                     existing.events = event.events;
                     existing.data = event.data;
+                    epoll_wake_register(file_id, &epoll.wait_queue as *const _);
                 }
                 None => {
                     entries.push(EpollEntry {
@@ -835,13 +919,15 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                         events: event.events,
                         data: event.data,
                     });
+                    epoll_wake_register(file_id, &epoll.wait_queue as *const _);
                 }
             }
         }
         EPOLL_CTL_DEL => {
             let mut entries = epoll.entries.lock();
             if let Some(pos) = entries.iter().position(|e| e.fd == fd) {
-                entries.remove(pos);
+                let removed = entries.remove(pos);
+                epoll_wake_unregister(removed.file_id, &epoll.wait_queue as *const _);
             } else {
                 return -(errno::ENOENT as i64);
             }
@@ -1019,7 +1105,63 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             return -(errno::EINTR as i64);
         }
 
-        crate::sched::yield_cpu();
+        // P1 (busy-yield elimination): block for one re-check interval
+        // instead of yield_cpu()-ing around the poll loop (which burned a
+        // full CPU per waiter under SMP). Wake sources:
+        //   - the 10ms re-check timer armed below — readiness is re-polled
+        //     on every wake, so this timer bounds event latency until
+        //     fd-side producers call epoll_notify_file (registry above),
+        //   - signal delivery (INTERRUPTIBLE + signal_wake_up → EINTR),
+        //   - epoll_notify_file via EPOLL_WAKE_REGISTRY (dormant until the
+        //     pipe/socket write paths are wired by a later wave).
+        let current = match crate::sched::current() {
+            Some(t) => t,
+            None => return 0, // no task context: cannot block
+        };
+        epoll.wait_queue.prepare_to_wait(current, false, true);
+        // Re-check for signals after prepare_to_wait (lost-wake discipline —
+        // a signal landing between the check above and the state transition
+        // must not be slept through).
+        if crate::signal::signal_pending() {
+            epoll.wait_queue.finish_wait(current);
+            // SAFETY: current is the running task's pointer; undo a
+            // concurrent wake enqueue (NEW-C2 discipline).
+            unsafe { crate::sched::dequeue_task(&*current); }
+            return -(errno::EINTR as i64);
+        }
+        // One slice = min(remaining timeout, 10ms re-check interval).
+        let slice = if timeout_ms > 0 {
+            let now = crate::drivers::timer::get_jiffies();
+            let deadline = start_jiffies + timeout_jiffies;
+            let remaining = deadline.saturating_sub(now).max(1);
+            remaining.min(EPOLL_RECHECK_JIFFIES)
+        } else {
+            EPOLL_RECHECK_JIFFIES
+        };
+        // SAFETY: current is the running task's pointer.
+        let my_pid = unsafe { (*current).pid() };
+        let timer_id = crate::timer::add_timer_wakeup(
+            crate::drivers::timer::get_jiffies() + slice,
+            my_pid,
+        );
+        if timer_id == 0 {
+            // Timer pool exhausted: degrade to a single yield rather than
+            // sleep forever (nothing else is guaranteed to wake us).
+            epoll.wait_queue.finish_wait(current);
+            // SAFETY: current is the running task's pointer.
+            unsafe { crate::sched::dequeue_task(&*current); }
+            crate::sched::yield_cpu();
+            continue;
+        }
+        // Enable interrupts before schedule(): syscall context runs with
+        // SIE=0; __schedule must save SIE=1 so the switched-back task has
+        // interrupts enabled (same contract as wait_event!).
+        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::sched::schedule();
+        epoll.wait_queue.finish_wait(current);
+        // Spurious/early wake (signal before expiry): drop the timer so it
+        // cannot enqueue us again while running.
+        crate::timer::del_timer(timer_id);
     }
 }
 
@@ -1437,6 +1579,341 @@ static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     poll: Some(timerfd_poll),
 };
 
+// ==================== signalfd (P1) ====================
+
+/// signalfd flags (UAPI).
+const SFD_CLOEXEC: i32 = 0x80000;
+const SFD_NONBLOCK: i32 = 0x800;
+
+/// signalfd_siginfo size (Linux uapi).
+const SIGNALFD_SIGINFO_SIZE: usize = 128;
+
+/// signalfd backend: the readable signal set + reader wait queue.
+///
+/// Semantics boundary (documented simplification): reads consume signals
+/// from the READING task's pending set (like rt_sigtimedwait) — the normal
+/// usage pattern blocks the mask with sigprocmask first (musl/systemd do),
+/// so in-mask signals stay pending in the kernel and are ONLY observable
+/// via this fd. If the app does not block them, the normal delivery path
+/// may run a handler first and the fd sees nothing ("observer copy"
+/// polarity). Signals are NOT hijacked from the handler path.
+struct SignalFd {
+    /// Signals readable through this fd (bit i-1 = signal i).
+    mask: crate::sync::spinlock::Spinlock<u64>,
+    /// Readers blocked waiting for a masked signal to arrive.
+    wait_queue: crate::process::wait::WaitQueueHead,
+}
+
+/// Owning-task → signalfd wait queue registry for signal-arrival wakeups.
+/// Task pointers are compared for identity only (never dereferenced), so a
+/// recycled task address causes at worst a spurious wake (readers re-check
+/// readiness); entries are removed in the fd's close op.
+///
+/// Wrapper so the raw-pointer registry is `Send` (access under the lock).
+struct SignalfdWakeRegistry {
+    bindings: alloc::vec::Vec<
+        (*mut crate::process::task::Task, *const crate::process::wait::WaitQueueHead),
+    >,
+}
+// SAFETY: task pointers are only compared for identity; queue pointers are
+// unregistered in the owning fd's close op before the box is freed.
+unsafe impl Send for SignalfdWakeRegistry {}
+
+static SIGNALFD_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<SignalfdWakeRegistry> =
+    crate::sync::spinlock::Spinlock::new(SignalfdWakeRegistry {
+        bindings: alloc::vec::Vec::new(),
+    });
+
+/// Wake every signalfd whose reading task is `task` (send_signal hook).
+/// Called from `signal::send_signal_locked_info` after the signal is added
+/// to the target's pending set, so a blocked `read(sfd)` returns promptly
+/// instead of waiting out the poll interval.
+pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
+    let registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
+    for (owner, wq) in registry.bindings.iter() {
+        if *owner == task {
+            // SAFETY: wq points into a boxed SignalFd alive until its close
+            // op unregisters it (close runs only on the last Arc ref).
+            unsafe { (**wq).wake_up_all(); }
+        }
+    }
+}
+
+fn signalfd_register(
+    task: *mut crate::process::task::Task,
+    wq: *const crate::process::wait::WaitQueueHead,
+) {
+    let mut registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
+    if !registry.bindings.iter().any(|(t, q)| *t == task && *q == wq) {
+        registry.bindings.push((task, wq));
+    }
+}
+
+fn signalfd_unregister(wq: *const crate::process::wait::WaitQueueHead) {
+    let mut registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
+    registry.bindings.retain(|(_, q)| *q != wq);
+}
+
+/// signalfd read: consume the lowest-numbered pending signal in the fd's
+/// mask and return it as a 128-byte `struct signalfd_siginfo`.
+///
+/// Blocking semantics: with no pending in-mask signal, block on the fd's
+/// wait queue (woken by signalfd_notify_task / signals) or return EAGAIN
+/// for O_NONBLOCK fds. The consumed signal is removed from pending, so it
+/// never reaches a handler (sigtimedwait-style consumption).
+fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    if buf.len() < SIGNALFD_SIGINFO_SIZE {
+        return -errno::EINVAL as isize;
+    }
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent
+    // mutable access.
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return -errno::EBADF as isize,
+    };
+    // SAFETY: ptr came from Box::into_raw in sys_signalfd4_impl; valid and
+    // uniquely owned by this File.
+    let sfd = unsafe { &*(ptr as *const SignalFd) };
+
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -errno::EAGAIN as isize,
+    };
+
+    loop {
+        let mask = *sfd.mask.lock();
+        // SAFETY: current is the running task's pointer.
+        let pending = unsafe { (*current).pending.get_all() };
+        let ready = pending & mask;
+        if ready != 0 {
+            let sig = ready.trailing_zeros() as i32 + 1;
+            // Consume (sigtimedwait semantics): clear the bitmap bit and
+            // take the queued info when present.
+            // SAFETY: current is the running task's pointer.
+            let info = unsafe { (*current).pending.remove_one(sig) }
+                .unwrap_or_else(|| crate::signal::SigInfo::new(
+                    sig, crate::signal::si_code::SI_USER, 0, 0));
+
+            // struct signalfd_siginfo (128B), host-endian like Linux:
+            //   ssi_signo @0 u32, ssi_errno @4 i32, ssi_code @8 i32,
+            //   ssi_pid   @12 u32, ssi_uid  @16 u32, rest zeroed.
+            buf[..SIGNALFD_SIGINFO_SIZE].fill(0);
+            buf[0..4].copy_from_slice(&(info.si_signo as u32).to_le_bytes());
+            buf[4..8].copy_from_slice(&info.si_errno.to_le_bytes());
+            buf[8..12].copy_from_slice(&info.si_code.to_le_bytes());
+            buf[12..16].copy_from_slice(&(info.si_pid as u32).to_le_bytes());
+            buf[16..20].copy_from_slice(&info.si_uid.to_le_bytes());
+            return SIGNALFD_SIGINFO_SIZE as isize;
+        }
+
+        // Nothing readable.
+        if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
+            return -errno::EAGAIN as isize;
+        }
+
+        // Block until a signal arrives (prepare → re-check → schedule).
+        sfd.wait_queue.prepare_to_wait(current, false, true);
+        let mask2 = *sfd.mask.lock();
+        // SAFETY: current is the running task's pointer.
+        if unsafe { (*current).pending.get_all() } & mask2 != 0 {
+            sfd.wait_queue.finish_wait(current);
+            // SAFETY: current is the running task's pointer; undo a
+            // concurrent wake enqueue (NEW-C2 discipline).
+            unsafe { crate::sched::dequeue_task(&*current); }
+            continue;
+        }
+        if crate::signal::signal_pending() {
+            sfd.wait_queue.finish_wait(current);
+            // SAFETY: see above.
+            unsafe { crate::sched::dequeue_task(&*current); }
+            return -(errno::EINTR) as isize;
+        }
+        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::sched::schedule();
+        sfd.wait_queue.finish_wait(current);
+        if crate::signal::signal_pending() {
+            return -(errno::EINTR) as isize;
+        }
+    }
+}
+
+/// signalfd poll: POLLIN iff a pending signal intersects the fd mask.
+fn signalfd_poll(file: &crate::fs::File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent
+    // mutable access.
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return POLLERR,
+    };
+    // SAFETY: ptr came from Box::into_raw in sys_signalfd4_impl.
+    let sfd = unsafe { &*(ptr as *const SignalFd) };
+
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return 0,
+    };
+    // SAFETY: current is the running task's pointer.
+    let pending = unsafe { (*current).pending.get_all() };
+    let mut ready = 0u16;
+    if events & POLLIN != 0 && pending & *sfd.mask.lock() != 0 {
+        ready |= POLLIN | POLLRDNORM;
+    }
+    ready
+}
+
+fn signalfd_close(file: &crate::fs::File) -> i32 {
+    // Runs only on the last Arc reference: no blocked reader can hold the
+    // box. Purge the wake-registry entry BEFORE freeing (identity-keyed on
+    // the queue address).
+    // SAFETY: private_data is an UnsafeCell; we hold &File for the last
+    // reference.
+    if let Some(ptr) = unsafe { *file.private_data.get() } {
+        // SAFETY: ptr came from Box::into_raw in sys_signalfd4_impl.
+        unsafe {
+            let sfd = &*(ptr as *const SignalFd);
+            signalfd_unregister(&sfd.wait_queue as *const _);
+            let _ = alloc::boxed::Box::from_raw(ptr as *mut SignalFd);
+        }
+        unsafe { *file.private_data.get() = None; }
+    }
+    0
+}
+
+/// SignalFd file operations
+static SIGNALFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
+    read: Some(signalfd_read),
+    write: None,
+    lseek: None,
+    close: Some(signalfd_close),
+    poll: Some(signalfd_poll),
+};
+
+/// signalfd4 core (NR 74): create a new signalfd, or re-arm the mask of an
+/// existing one (fd >= 0).
+///
+/// # Arguments
+/// - args[0]: fd — -1 to create; otherwise an existing signalfd to update
+/// - args[1]: mask — pointer to the sigset_t (u64) readable through the fd
+/// - args[2]: sizemask — must equal sizeof(sigset_t) == 8
+/// - args[3]: flags — SFD_CLOEXEC | SFD_NONBLOCK
+pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
+    let fd = args[0] as i32;
+    let mask_ptr = args[1] as *const u64;
+    let sizemask = args[2] as usize;
+    let flags = args[3] as i32;
+
+    if sizemask != core::mem::size_of::<u64>() {
+        return -(errno::EINVAL as i64);
+    }
+    if flags & !(SFD_CLOEXEC | SFD_NONBLOCK) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if mask_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, 8) {
+        return -(errno::EFAULT as i64);
+    }
+    // SAFETY: mask_ptr validated with access_ok; get_user is the
+    // exception-table copy path (SUM=0 safe).
+    let mut mask = match unsafe { crate::arch::riscv64::uaccess::get_user(mask_ptr) } {
+        Some(v) => v,
+        None => return -(errno::EFAULT as i64),
+    };
+    // SIGKILL(9)/SIGSTOP(19) can never be observed via signalfd — drop them
+    // from the set like Linux does.
+    mask &= !((1u64 << (9 - 1)) | (1u64 << (19 - 1)));
+
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -(errno::EBADF as i64),
+    };
+
+    if fd >= 0 {
+        // Update path: fd must resolve to an existing signalfd.
+        let file = match fdtable.get_file(fd as usize) {
+            Some(f) => f,
+            None => return -(errno::EBADF as i64),
+        };
+        // Type-confusion guard before treating private_data as SignalFd.
+        if !file.get_ops().is_some_and(|o| core::ptr::eq(o, &SIGNALFD_OPS as *const _)) {
+            return -(errno::EINVAL as i64);
+        }
+        // SAFETY: private_data is an UnsafeCell; we hold &File so no
+        // concurrent mutable access.
+        let ptr = match unsafe { *file.private_data.get() } {
+            Some(p) => p,
+            None => return -(errno::EBADF as i64),
+        };
+        // SAFETY: ptr came from Box::into_raw in the create path.
+        let sfd = unsafe { &*(ptr as *const SignalFd) };
+        *sfd.mask.lock() = mask;
+        // Readiness may have changed (mask widened): wake blocked readers
+        // so they re-check.
+        sfd.wait_queue.wake_up_all();
+        return fd as i64;
+    }
+
+    if fd != -1 {
+        return -(errno::EBADF as i64);
+    }
+
+    // Create path.
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::EPERM as i64),
+    };
+    let sfd = alloc::boxed::Box::new(SignalFd {
+        mask: crate::sync::spinlock::Spinlock::new(mask),
+        wait_queue: crate::process::wait::WaitQueueHead::new(),
+    });
+    let sfd_ptr = alloc::boxed::Box::into_raw(sfd) as *mut u8;
+
+    let mut file_flags = crate::fs::file::FileFlags::O_RDWR;
+    if flags & SFD_NONBLOCK != 0 {
+        file_flags |= crate::fs::file::FileFlags::O_NONBLOCK;
+    }
+    let file = alloc::sync::Arc::new(crate::fs::File::new(
+        crate::fs::file::FileFlags::new(file_flags),
+    ));
+    file.set_ops(&SIGNALFD_OPS);
+    file.set_private_data(sfd_ptr);
+
+    // SAFETY: sfd_ptr came from Box::into_raw above; queue address stable
+    // for the box's lifetime.
+    unsafe {
+        signalfd_register(current, &(*(sfd_ptr as *const SignalFd)).wait_queue as *const _);
+    }
+
+    let new_fd = match fdtable.alloc_fd() {
+        Some(f) => f,
+        None => {
+            // SAFETY: sfd_ptr was created via Box::into_raw above; reclaim.
+            unsafe {
+                signalfd_unregister(&(*(sfd_ptr as *const SignalFd)).wait_queue as *const _);
+                let _ = alloc::boxed::Box::from_raw(sfd_ptr as *mut SignalFd);
+            }
+            return -(errno::EMFILE as i64);
+        }
+    };
+    if flags & SFD_CLOEXEC != 0 {
+        crate::fs::set_cloexec_fd(new_fd, true);
+    }
+    match fdtable.install_fd(new_fd, file) {
+        Ok(()) => new_fd as i64,
+        Err(_) => {
+            // SAFETY: sfd_ptr was created via Box::into_raw above; reclaim.
+            unsafe {
+                signalfd_unregister(&(*(sfd_ptr as *const SignalFd)).wait_queue as *const _);
+                let _ = alloc::boxed::Box::from_raw(sfd_ptr as *mut SignalFd);
+            }
+            -(errno::ENOMEM as i64)
+        }
+    }
+}
+
 /// sys_eventfd - Create eventfd object (legacy, no flags)
 pub fn sys_eventfd(args: SyscallArgs) -> i64 {
     sys_eventfd2([args[0], 0, 0, 0, 0, 0])
@@ -1510,11 +1987,15 @@ pub fn sys_eventfd2(args: SyscallArgs) -> i64 {
 ///
 /// # Arguments
 /// - args[0]: flags - IN_CLOEXEC, IN_NONBLOCK
+///
+/// Real implementation (P0-4): the instance (event queue + watch table)
+/// lives in kernel/src/fs/inotify.rs; the fd is backed by INOTIFY_OPS.
 pub fn sys_inotify_init1(args: SyscallArgs) -> i64 {
-    let _flags = args[0] as i32;
-    // inotify requires full filesystem monitoring infrastructure
-    // Return -EMFILE to indicate resource limit rather than ENOSYS
-    -(errno::EMFILE as i64)
+    let flags = args[0] as u32;
+    match crate::fs::inotify::inotify_init1(flags) {
+        Ok(fd) => fd as i64,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_inotify_add_watch - Add watch to inotify instance
@@ -1523,8 +2004,23 @@ pub fn sys_inotify_init1(args: SyscallArgs) -> i64 {
 /// - args[0]: fd - inotify file descriptor
 /// - args[1]: pathname - path to watch
 /// - args[2]: mask - event mask
-pub fn sys_inotify_add_watch(_args: SyscallArgs) -> i64 {
-    -(errno::EBADF as i64)
+pub fn sys_inotify_add_watch(args: SyscallArgs) -> i64 {
+    let fd = args[0] as usize;
+    let pathname_ptr = args[1] as *const u8;
+    let mask = args[2] as u32;
+
+    // Read the path from user space (CWD-relative allowed — Linux resolves
+    // it against the caller's working directory).
+    let mut buf = [0u8; 4096];
+    let path = match read_inotify_path(pathname_ptr, &mut buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    match crate::fs::inotify::inotify_add_watch(fd, &path, mask) {
+        Ok(wd) => wd as i64,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_inotify_rm_watch - Remove watch from inotify instance
@@ -1532,8 +2028,50 @@ pub fn sys_inotify_add_watch(_args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: fd - inotify file descriptor
 /// - args[1]: wd - watch descriptor
-pub fn sys_inotify_rm_watch(_args: SyscallArgs) -> i64 {
-    -(errno::EBADF as i64)
+pub fn sys_inotify_rm_watch(args: SyscallArgs) -> i64 {
+    let fd = args[0] as usize;
+    let wd = args[1] as i32;
+    match crate::fs::inotify::inotify_rm_watch(fd, wd) {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
+}
+
+/// NUL-terminated user-path reader for inotify_add_watch. Returns the
+/// (absolute) path or the negative errno as i64.
+fn read_inotify_path(ptr: *const u8, buf: &mut [u8; 4096]) -> Result<alloc::string::String, i64> {
+    use crate::arch::riscv64::uaccess::{access_ok, strncpy_from_user};
+
+    if ptr.is_null() {
+        return Err(-(errno::EFAULT as i64));
+    }
+    if !access_ok(ptr as usize, 4096) {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let bytes = match strncpy_from_user(ptr, 4096, buf) {
+        Ok(b) => b,
+        Err(e) => return Err(e),
+    };
+    let s = core::str::from_utf8(bytes).map_err(|_| -(errno::EINVAL as i64))?;
+    if s.starts_with('/') {
+        Ok(alloc::string::String::from(s))
+    } else {
+        // Relative: resolve against the CWD.
+        let cwd = if let Some(current) = crate::sched::current() {
+            let cwd_bytes = unsafe { (*current).get_cwd() };
+            core::str::from_utf8(&cwd_bytes)
+                .map(alloc::string::String::from)
+                .unwrap_or_else(|_| alloc::string::String::from("/"))
+        } else {
+            alloc::string::String::from("/")
+        };
+        let mut path = cwd;
+        if !path.ends_with('/') {
+            path.push('/');
+        }
+        path.push_str(s);
+        Ok(path)
+    }
 }
 
 /// sys_timerfd_create - Create timer file descriptor

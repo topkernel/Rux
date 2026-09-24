@@ -551,6 +551,31 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
+        // Initialize swap on the root block device (tail carve).
+        //
+        // Boot-order constraints (P1 swap wiring, 2026-09):
+        //  - AFTER bio::init() and the block-device probes above (the
+        //    activation path reads the swap header and ext4 superblock
+        //    via blkdev_read — the same sync-poll I/O the ext4 mount
+        //    above already uses, proven safe with SEIE still off);
+        //  - AFTER the zone allocator (mm::init_zone_system, earlier):
+        //    swap only matters once pages can be allocated/reclaimed;
+        //  - BEFORE kswapd::init() below, so no reclaim path can observe
+        //    the subsystem half-initialized, and before init (PID 1).
+        // Note: the plan originally said "before rootfs mount", but block
+        // devices only appear after the rootfs/ext4 mount in this boot
+        // sequence, so this is the earliest safe point.
+        // swap_init refuses to enable when the tail carve would overlap
+        // the ext4 filesystem (see the ext4 guard in mm/swap.rs).
+        {
+            mm::swap::swap_init();
+            print_status_ex(
+                "mm",
+                &format!("swap {} MB tail carve", crate::config::SWAP_SIZE_MB),
+                if mm::swap::nr_active_swap() { Some(true) } else { None },
+            );
+        }
+
         // Initialize persistent kernel log (write kmsg to /var/log/kmsg on disk)
         // Disabled: ext4 write operations corrupt filesystem
         // printk::persistent_log_init();
@@ -666,6 +691,15 @@ pub extern "C" fn rust_main() -> ! {
             if let Some(root_entry) = fs::devfs::get_root_entry() {
                 fs::vfs::vfs_mount("/dev", fs::devfs::create_root_inode(&root_entry),
                     fs::mount::MntFlags::new(0));
+            }
+
+            // Mount tmpfs at /dev/shm (P0-6): backing store for POSIX
+            // shm_open — musl's libc maps shm_open("/name") onto
+            // /dev/shm/name, so a working tmpfs there is all the kernel
+            // needs to provide. Independent instance per do_mount.
+            {
+                let shm_result = fs::mount::do_mount("/dev/shm", "tmpfs", 0);
+                print_status("fs", "tmpfs mounted /dev/shm", shm_result.is_ok());
             }
 
             // Initialize VirtIO Input devices

@@ -1386,6 +1386,8 @@ unsafe fn send_signal_locked_info(
             task.pending.add(sig);
         }
         signal_wake_up(task_ptr);
+        // P1 signalfd hook: wake signalfd readers of this task.
+        crate::syscall::misc::signalfd_notify_task(task_ptr);
         return Ok(());
     }
 
@@ -1395,6 +1397,8 @@ unsafe fn send_signal_locked_info(
         None => {
             task.pending.add(sig);
             signal_wake_up(task_ptr);
+            // P1 signalfd hook: wake signalfd readers of this task.
+            crate::syscall::misc::signalfd_notify_task(task_ptr);
             return Ok(());
         }
     };
@@ -1429,6 +1433,11 @@ unsafe fn send_signal_locked_info(
     if sig >= 1 && sig <= 64 {
         let bit = 1u64 << (sig - 1);
         if task.sigmask & bit != 0 {
+            // P1 signalfd hook: a BLOCKED signal is exactly the signalfd
+            // use case (the app blocks the mask and reads via the fd) —
+            // no handler path will run, so this wake is the only thing
+            // that unblocks a read(sfd) on this signal.
+            crate::syscall::misc::signalfd_notify_task(task_ptr);
             return Ok(());
         }
     }
@@ -1436,6 +1445,10 @@ unsafe fn send_signal_locked_info(
     // Default or Handler disposition — wake the target so an
     // interruptible sleeper reaches the delivery point.
     signal_wake_up(task_ptr);
+    // P1 signalfd hook: wake signalfd readers of this task (in-mask
+    // signals are typically blocked, so they stay pending and are only
+    // observable through the fd — this wake is what unblocks read(sfd)).
+    crate::syscall::misc::signalfd_notify_task(task_ptr);
     Ok(())
 }
 

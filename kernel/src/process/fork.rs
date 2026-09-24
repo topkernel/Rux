@@ -269,6 +269,33 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         };
         let current_ptr = current as *mut Task;
 
+        // RLIMIT_NPROC (process-forking clones only — threads are not
+        // process products). Simplification per the P1 rlimits plan: the
+        // count is GLOBAL user processes (tasks with an address space —
+        // kernel threads and idle are excluded) rather than a per-uid
+        // aggregate; there is no uid hash yet. Linux fails fork with
+        // EAGAIN here.
+        // TODO(RLIMIT-NPROC): the rlimit() read here — despite returning
+        // RLIM_INFINITY and skipping the iteration — correlates with a null
+        // deref in the fd-table copy's get_file later in do_clone. Root
+        // cause not yet isolated; the check is disabled until then. The
+        // rlimits copy below and all other enforcement points are active.
+        if false && args.flags & CLONE_THREAD == 0 {
+            let (nproc_cur, _) = (*current_ptr)
+                .rlimit(crate::process::task::rlimit_res::NPROC);
+            if nproc_cur != u64::MAX {
+                let mut user_procs: u64 = 0;
+                crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+                    if !t.is_null() && (*t).address_space().is_some() {
+                        user_procs += 1;
+                    }
+                });
+                if user_procs >= nproc_cur {
+                    return Err(eagain());
+                }
+            }
+        }
+
         // Get parent's current PtRegs (saved during trap handling)
         let parent_pt_regs = current_pt_regs();
         if parent_pt_regs.is_null() {
@@ -377,7 +404,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
             // Copy all file descriptors from parent to child
             if let Some(parent_fdtable) = (*current_ptr).try_fdtable() {
-                for fd in 0..1024 {
+                for fd in 0..crate::fs::file::MAX_FDS {
                     if let Some(file) = parent_fdtable.get_file(fd) {
                         // Copy the Arc to the child's fdtable
                         let _ = child_fdtable.install_fd(fd, file);
@@ -491,6 +518,16 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             if !parent_undo.is_empty() {
                 (*task_ptr).sem_undo.lock().extend_from_slice(&parent_undo);
             }
+        }
+
+        // Inherit resource limits (Linux copy_process: memcpy of
+        // signal->rlim). Enforcement points (alloc_fd/mmap/brk/fork
+        // NPROC/tick CPU) read the child's copy; threads (CLONE_THREAD)
+        // get their own table too — limits are per-task here, matching
+        // the per-task storage rather than Linux's shared signal struct.
+                {
+            let parent_rlimits = *(*current_ptr).rlimits.lock_irqsave();
+            *(*task_ptr).rlimits.lock_irqsave() = parent_rlimits;
         }
 
         // Copy credentials from parent

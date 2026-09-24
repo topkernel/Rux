@@ -194,6 +194,15 @@ pub fn do_mount(target: &str, fs_type: &str, flags: u64) -> Result<(), i32> {
                 return Err(errno::Errno::NoSuchDevice.as_neg_i32());
             }
         }
+        "tmpfs" | "shm" => {
+            // P0-6: each mount creates an INDEPENDENT tmpfs instance
+            // (own inode number space + icache fs_id). Register the fs type
+            // so the registry-based mount path also accepts "tmpfs".
+            crate::fs::tmpfs::ensure_registered();
+            let root_inode = crate::fs::tmpfs::create_mount_instance();
+            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+            register_mount("tmpfs", target, "tmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
         _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
     }
 

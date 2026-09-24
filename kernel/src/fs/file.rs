@@ -215,12 +215,18 @@ impl File {
     pub unsafe fn read(&self, buf: *mut u8, count: usize) -> isize {
         // f_mode enforcement: read on an O_WRONLY fd is EBADF (Linux)
         if self.flags().is_writeonly() {
-            return -9; // EBADF
+            return -9;  // EBADF
         }
         if let Some(ops) = *self.ops.get() {
             if let Some(read_fn) = ops.read {
                 let slice = core::slice::from_raw_parts_mut(buf, count);
-                return read_fn(self, slice);
+                let result = read_fn(self, slice);
+                if result > 0 {
+                    // inotify IN_ACCESS (P0-4): one atomic load when no
+                    // watches exist.
+                    crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_ACCESS);
+                }
+                return result;
             }
         }
         -9  // EBADF
@@ -230,12 +236,17 @@ impl File {
     pub unsafe fn write(&self, buf: *const u8, count: usize) -> isize {
         // f_mode enforcement: write on an O_RDONLY fd is EBADF (Linux)
         if self.flags().is_readonly() {
-            return -9; // EBADF
+            return -9;  // EBADF
         }
         if let Some(ops) = *self.ops.get() {
             if let Some(write_fn) = ops.write {
                 let slice = core::slice::from_raw_parts(buf, count);
-                return write_fn(self, slice);
+                let result = write_fn(self, slice);
+                if result > 0 {
+                    // inotify IN_MODIFY (P0-4): sqlite/editors/build tools.
+                    crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_MODIFY);
+                }
+                return result;
             }
         }
         -9  // EBADF
@@ -278,6 +289,10 @@ impl File {
             return -29; // ESPIPE
         }
         let n = inode.read_data(offset as usize, slice);
+        if n > 0 {
+            // inotify IN_ACCESS on the pread(2) path (P0-4).
+            crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_ACCESS);
+        }
         n as isize
     }
 
@@ -302,6 +317,11 @@ impl File {
         // does (O_APPEND/pos race class, review 5.2).
         let _write_guard = self.write_lock.lock();
         let n = inode.write_data(offset as usize, slice);
+        if n > 0 {
+            // inotify IN_MODIFY on the pwrite(2) path (P0-4) — sqlite's
+            // journal/WAL writes all go through pwrite.
+            crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_MODIFY);
+        }
         n as isize
     }
 
@@ -361,6 +381,16 @@ impl File {
 // mem-file Box never freed).
 impl Drop for File {
     fn drop(&mut self) {
+        // P0-5 flock(2): the open file description is dying — its flock
+        // (if any) is released. File::drop is the single moment that
+        // covers close(2), dup2(2) displacement, fdtable teardown and the
+        // deferred close_pending path alike, across fork's shared
+        // descriptions.
+        crate::fs::locks::flock_release_file(self.file_id);
+        // P0-4 inotify: IN_CLOSE_WRITE / IN_CLOSE_NOWRITE fires when the
+        // last reference to the description goes away (Linux fires it
+        // from fput, i.e. dup'd fds defer it — same discipline).
+        crate::fs::inotify::notify_file_close(self);
         if self.close_pending.load(Ordering::Acquire) {
             // SAFETY: we own the File exclusively (refcount reached 0) and
             // close_fd already committed this close; ops.close was installed
@@ -374,9 +404,22 @@ impl Drop for File {
 // FdTable - Using Box allocation
 // ============================================================================
 
+/// Maximum number of file descriptors per table (P1 rlimits, 2026-09).
+/// Raised 1024 → 4096 to match the default RLIMIT_NOFILE hard ceiling;
+/// per-process enforcement against task.rlimits happens in
+/// alloc_fd_from, so unprivileged tasks still get the 1024 soft default
+/// and only see more after raising it.
+pub const MAX_FDS: usize = 1024;
+// TODO(rlimits-dynamic-fds): raising this to 4096 overflows the 64KB
+// kernel stack during FdTable::new() — Box::new constructs the ~33KB
+// FdTableEntry on the STACK before moving it to the heap. A dynamic
+// Vec-backed table (or heap-then-write construction) is needed to
+// honor RLIMIT_NOFILE > 1024; until then the hard cap stays 1024
+// (the NOFILE soft default, matching the pre-rlimits behavior).
+
 /// FdTable entry stored on the heap
 struct FdTableEntry {
-    fds: [Option<Arc<File>>; 1024],
+    fds: [Option<Arc<File>>; MAX_FDS],
     /// Per-descriptor close-on-exec bits. FD_CLOEXEC belongs to the
     /// DESCRIPTOR in POSIX, not the underlying description: a file opened
     /// O_CLOEXEC at fd N and dup2'd to fd M must leave M WITHOUT the flag.
@@ -384,7 +427,7 @@ struct FdTableEntry {
     /// shells open redirections O_CLOEXEC, dup2 to stdio, exec, and lost
     /// their stdio fds (found via musl __init_libc's deliberate NULL-crash
     /// on POLLNVAL + missing /dev/null).
-    cloexec_bits: [u64; 16], // 1024 bits
+    cloexec_bits: [u64; MAX_FDS / 64],
     next_fd: usize,
     count: usize,
 }
@@ -399,13 +442,23 @@ impl FdTable {
     /// Create new file descriptor table
     pub fn new() -> Self {
         let entry = Box::new(FdTableEntry {
-            fds: [const { None }; 1024],
-            cloexec_bits: [0; 16],
+            fds: [const { None }; MAX_FDS],
+            cloexec_bits: [0; MAX_FDS / 64],
             next_fd: 0,
             count: 0,
         });
 
         Self { entry: crate::sync::spinlock::Spinlock::new(entry) }
+    }
+
+    /// RLIMIT_NOFILE ceiling for the calling task: the table size, or the
+    /// task's soft limit when lower (RLIM_INFINITY = u64::MAX is masked by
+    /// the min). Tasks without a Task context (early boot) are unlimited.
+    fn nofile_ceiling() -> usize {
+        let rlim = crate::sched::current()
+            .map(|t| t.rlimit(crate::process::task::rlimit_res::NOFILE).0)
+            .unwrap_or(u64::MAX);
+        MAX_FDS.min(rlim as usize)
     }
 
     /// Allocate file descriptor
@@ -414,22 +467,27 @@ impl FdTable {
     }
 
     /// Allocate file descriptor >= min_fd
+    ///
+    /// Honors RLIMIT_NOFILE: returns None for the first free fd at or
+    /// above the soft limit, so callers translate it to EMFILE exactly
+    /// like a full table (Linux alloc_fd).
     pub fn alloc_fd_from(&self, min_fd: usize) -> Option<usize> {
+        let ceiling = Self::nofile_ceiling();
         let mut entry = self.entry.lock_irqsave();
         let start = if min_fd > entry.next_fd { min_fd } else { entry.next_fd };
 
-        // Search from start to 1024
-        for fd in start..1024 {
+        // Search from start up to the RLIMIT_NOFILE/table ceiling
+        for fd in start..ceiling {
             if entry.fds[fd].is_none() {
-                entry.next_fd = (fd + 1) % 1024;
+                entry.next_fd = (fd + 1) % MAX_FDS;
                 return Some(fd);
             }
         }
         // Wrap around: search from min_fd to start (if start > min_fd due to next_fd)
         if start > min_fd {
-            for fd in min_fd..start {
+            for fd in min_fd..start.min(ceiling) {
                 if entry.fds[fd].is_none() {
-                    entry.next_fd = (fd + 1) % 1024;
+                    entry.next_fd = (fd + 1) % MAX_FDS;
                     return Some(fd);
                 }
             }
@@ -440,7 +498,7 @@ impl FdTable {
 
     /// Install file to file descriptor table
     pub fn install_fd(&self, fd: usize, file: Arc<File>) -> Result<(), ()> {
-        if fd >= 1024 {
+        if fd >= MAX_FDS {
             return Err(());
         }
 
@@ -459,7 +517,7 @@ impl FdTable {
 
     /// Get file object for file descriptor
     pub fn get_file(&self, fd: usize) -> Option<Arc<File>> {
-        if fd >= 1024 {
+        if fd >= MAX_FDS {
             return None;
         }
         self.entry.lock_irqsave().fds[fd].clone()
@@ -467,7 +525,7 @@ impl FdTable {
 
     /// Close file descriptor
     pub fn close_fd(&self, fd: usize) -> Result<(), ()> {
-        if fd >= 1024 {
+        if fd >= MAX_FDS {
             return Err(());
         }
 
@@ -505,6 +563,15 @@ impl FdTable {
             };
             file_opt
         };
+        // P0-5 POSIX record locks: closing ANY fd referring to the file
+        // releases ALL of the closing process's record locks on it (the
+        // classic POSIX semantic) — even when other fds (dup'd or
+        // separately opened) stay open. Runs on every close, before the
+        // close op, outside the entry lock.
+        if let Some(ref file) = file_opt {
+            crate::fs::locks::posix_release_for_file(file);
+        }
+
         // R31-B3 (v2): if we hold the last reference, run the op now; if an
         // in-flight syscall holds a clone (count was 2), set close_pending
         // so the FINAL drop runs it — the flag lives on the File itself.
@@ -539,7 +606,7 @@ impl FdTable {
 
     /// Duplicate file descriptor
     pub fn dup_fd(&self, oldfd: usize) -> Option<usize> {
-        if oldfd >= 1024 {
+        if oldfd >= MAX_FDS {
             return None;
         }
 
@@ -559,7 +626,7 @@ impl FdTable {
     /// op of the displaced file runs after the lock is released (R14-5
     /// discipline: never run close ops with IRQs off under the entry lock).
     pub fn dup2_fd(&self, oldfd: usize, newfd: usize) -> Option<usize> {
-        if oldfd >= 1024 || newfd >= 1024 {
+        if oldfd >= MAX_FDS || newfd >= MAX_FDS {
             return None;
         }
 
@@ -587,6 +654,9 @@ impl FdTable {
         // Run the displaced file's close decision outside the entry lock,
         // mirroring close_fd's last-reference discipline.
         if let Some(file) = displaced {
+            // P0-5: dup2 displacing an fd IS a close of that fd — the
+            // POSIX record-lock release rule applies (see close_fd).
+            crate::fs::locks::posix_release_for_file(&file);
             let run_close = Arc::strong_count(&file) == 1;
             if run_close {
                 unsafe {
@@ -612,7 +682,7 @@ impl FdTable {
 
     /// Per-descriptor close-on-exec flag (FD_CLOEXEC).
     pub fn set_fd_cloexec(&self, fd: usize, on: bool) {
-        if fd >= 1024 { return; }
+        if fd >= MAX_FDS { return; }
         let mut entry = self.entry.lock_irqsave();
         if on {
             entry.cloexec_bits[fd / 64] |= 1u64 << (fd % 64);
@@ -622,7 +692,7 @@ impl FdTable {
     }
 
     pub fn get_fd_cloexec(&self, fd: usize) -> bool {
-        if fd >= 1024 { return false; }
+        if fd >= MAX_FDS { return false; }
         let entry = self.entry.lock_irqsave();
         entry.cloexec_bits[fd / 64] & (1u64 << (fd % 64)) != 0
     }
@@ -632,7 +702,7 @@ impl FdTable {
         // Collect cloexec fds under lock, then close outside lock
         let cloexec_fds: alloc::vec::Vec<usize> = {
             let entry = self.entry.lock_irqsave();
-            (0..1024).filter(|&fd| {
+            (0..MAX_FDS).filter(|&fd| {
                 entry.cloexec_bits[fd / 64] & (1u64 << (fd % 64)) != 0
             }).collect()
         };
@@ -653,11 +723,18 @@ impl Drop for FdTable {
         let mut to_close: alloc::vec::Vec<Arc<File>> = alloc::vec::Vec::new();
         {
             let mut entry = self.entry.lock_irqsave();
-            for fd in 0..1024 {
+            for fd in 0..MAX_FDS {
                 if entry.fds[fd].is_some() {
                     let file_opt = core::mem::replace(&mut entry.fds[fd], None);
                     entry.count -= 1;
                     if let Some(file) = file_opt {
+                        // P0-5: process teardown drops every fd — release
+                        // the dying task's record locks on each file (the
+                        // fdtable is normally dropped in the exiting task's
+                        // own context, so the tgid is correct; locks of
+                        // owners that somehow survive this path are reaped
+                        // as stale on the next conflict check anyway).
+                        crate::fs::locks::posix_release_for_file(&file);
                         // R10-2: last-reference-only release — see close_fd.
                         // R31-B3 (v2 completion): dup'd files live in several
                         // slots of the SAME table, so a count>1 here means a

@@ -628,7 +628,17 @@ pub(crate) fn do_execve_elf(
 
     // Set up stack VMA with GROWSDOWN flag and stack limit
     let stack_bottom = virt_end;
-    let stack_limit = stack_top.saturating_sub(STACK_MAX_SIZE) + PAGE_SIZE;
+    // RLIMIT_STACK: the stack growth bound is the exec'ing task's soft
+    // limit, capped at the architectural 8MB default. setrlimit/prlimit64
+    // keep mm.stack_limit in sync afterwards (sync_stack_limit in
+    // syscall/process.rs uses the same formula).
+    let stack_size_limit = {
+        let rlim_cur = crate::sched::current()
+            .map(|t| t.rlimit(crate::process::task::rlimit_res::STACK).0)
+            .unwrap_or(STACK_MAX_SIZE);
+        rlim_cur.min(STACK_MAX_SIZE)
+    };
+    let stack_limit = stack_top.saturating_sub(stack_size_limit) + PAGE_SIZE;
     new_addr_space.set_start_stack(stack_top as usize);
     new_addr_space.set_stack_limit(stack_limit as usize);
 

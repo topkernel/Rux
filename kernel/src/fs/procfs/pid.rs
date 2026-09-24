@@ -515,7 +515,7 @@ pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
     };
 
     let mut fds = Vec::new();
-    for fd in 0..1024 {
+    for fd in 0..crate::fs::file::MAX_FDS {
         if let Some(file) = fdtable.get_file(fd) {
             let path = get_fd_path(&file);
             fds.push((fd as u32, path));

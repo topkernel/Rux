@@ -106,10 +106,21 @@ impl KernelMemoryLayout {
         let slab_start = heap_start + heap_size;
         let slab_size = DEFAULT_SLAB_SIZE;
 
-        // Calculate user physical memory region
-        // Use 25% of remaining memory for user processes, max 64MB
+        // Calculate user physical memory region.
+        //
+        // P0-7 (2026-09): the old `min(25% of remaining, 64MB)` cap starved
+        // every resident-heavy program (JVM/CPython/rustc — anything above
+        // 64MB resident hit a hard OOM). This region is ACCOUNTING ONLY —
+        // the zone allocator (mm/page_alloc.rs) hands out all memblock-free
+        // memory regardless of this split; user_phys has no allocator
+        // consumer (audited: only print_kernel_layout and the verify crate
+        // read it). New policy: 75% of the memory remaining after
+        // heap+slab is user-physical, 25% stays reserved for kernel
+        // structures (page tables, page descriptors, slab growth). No
+        // 64MB truncation. Boot order is unchanged (layout init runs at the
+        // same main.rs point as before).
         let remaining_after_slab = phys_base + phys_size - slab_start - slab_size;
-        let user_phys_size = (remaining_after_slab / 4).min(64 * 1024 * 1024);
+        let user_phys_size = remaining_after_slab * 3 / 4;
         let user_phys_start = slab_start + slab_size;
 
         // Frame allocator starts after user physical region

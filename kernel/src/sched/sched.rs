@@ -2252,6 +2252,37 @@ pub fn scheduler_tick() {
         return;
     }
 
+    // RLIMIT_CPU enforcement (P1 rlimits): CPU seconds beyond the soft
+    // limit earn SIGXCPU once per further second (Linux re-arms it every
+    // second), the hard limit earns SIGKILL. CPU time comes from the
+    // sched entity's sum_exec_runtime (ns). Signal delivery from tick
+    // context follows the posix-timer precedent (timer.rs softirq calls
+    // send_signal directly). Kernel threads and idle carry RLIM_INFINITY
+    // and skip the check entirely.
+    unsafe {
+        let (soft, hard) =
+            (*current).rlimit(crate::process::task::rlimit_res::CPU);
+        if soft != u64::MAX || hard != u64::MAX {
+            let secs = (*current)
+                .sched_entity()
+                .sum_exec_runtime
+                .load(core::sync::atomic::Ordering::Acquire)
+                / 1_000_000_000;
+            if hard != u64::MAX && secs >= hard {
+                let _ = crate::signal::send_signal(
+                    (*current).pid() as u32,
+                    crate::signal::Signal::SIGKILL as i32,
+                );
+            } else if soft != u64::MAX && secs >= soft && secs > (*current).cpu_time_last_sigxcpu() {
+                (*current).set_cpu_time_last_sigxcpu(secs);
+                let _ = crate::signal::send_signal(
+                    (*current).pid() as u32,
+                    crate::signal::Signal::SIGXCPU as i32,
+                );
+            }
+        }
+    }
+
     // RT bandwidth accounting / throttle (batch 8) — runs every tick on
     // every CPU, before the class-specific work.
     rt_bandwidth_tick(current);

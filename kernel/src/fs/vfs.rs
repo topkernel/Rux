@@ -792,6 +792,48 @@ fn check_sticky(parent_inode: &Inode, target_inode: Option<&Inode>) -> Result<()
     Err(errno::Errno::PermissionDenied.as_neg_i32())
 }
 
+// ============================================================================
+// inotify notification helpers (P0-4)
+//
+// Every VFS change point below calls inotify::notify at its tail so
+// registered watches see {IN_CREATE, IN_DELETE, IN_MOVED_FROM/TO,
+// IN_MODIFY, IN_ATTRIB, IN_DELETE_SELF, IN_MOVE_SELF} events. Directory
+// watches receive the events tagged with the entry name; direct inode
+// watches receive them name-less. IN_OPEN/IN_ACCESS/IN_CLOSE_* come from
+// the open/read/write/close paths (file.rs / file_open / file_opendir).
+// ============================================================================
+
+use crate::fs::inotify::inotify_events as ino;
+
+/// Parent inode of a dentry (for directory-watch name events).
+fn dentry_parent_inode(d: &Dentry) -> Option<Arc<Inode>> {
+    d.parent.lock().clone().and_then(|p| p.get_inode())
+}
+
+/// Notify a change on `inode`, also reaching watches on the parent
+/// directory of `dentry` with the entry `name`.
+fn notify_about(
+    dentry: Option<&Arc<Dentry>>,
+    inode: Option<&Inode>,
+    mask: u32,
+    name: Option<&[u8]>,
+    cookie: u32,
+) {
+    let parent = dentry.and_then(|d| dentry_parent_inode(d));
+    crate::fs::inotify::notify(parent.as_deref(), inode, mask, name, cookie);
+}
+
+/// Link count of an inode (for IN_DELETE_SELF suppression on hard-linked
+/// files: deleting one link does not delete the inode).
+fn inode_nlink(inode: &Inode) -> u32 {
+    let mut st = crate::fs::Stat::default();
+    if inode.op_getattr(&mut st) == 0 {
+        st.st_nlink
+    } else {
+        1
+    }
+}
+
 /// This helper function is used by operations that need to modify a directory
 /// (mkdir, rmdir, unlink, etc.)
 fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
@@ -841,10 +883,19 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
             if let Some(ref parent_dentry) = parent_vpath.dentry {
                 parent_dentry.remove_child(&name);
                 let d = Arc::new(Dentry::new(name.clone()));
-                d.set_inode(new_inode);
+                d.set_inode(new_inode.clone());
                 d.set_parent(parent_dentry.clone());
-                parent_dentry.add_child(name, d);
+                parent_dentry.add_child(name.clone(), d);
             }
+
+            // inotify: IN_CREATE|IN_ISDIR on the parent (named).
+            crate::fs::inotify::notify(
+                Some(parent_inode),
+                Some(&new_inode),
+                ino::IN_CREATE | ino::IN_ISDIR,
+                Some(name.as_bytes()),
+                0,
+            );
 
             Ok(())
         } else {
@@ -880,8 +931,17 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
                 let d = Arc::new(Dentry::new(name.clone()));
                 d.set_inode(new_inode);
                 d.set_parent(parent_dentry.clone());
-                parent_dentry.add_child(name, d);
+                parent_dentry.add_child(name.clone(), d);
             }
+
+            // inotify: IN_CREATE on the parent (named).
+            crate::fs::inotify::notify(
+                Some(parent_inode),
+                None,
+                ino::IN_CREATE,
+                Some(name.as_bytes()),
+                0,
+            );
 
             Ok(())
         } else {
@@ -938,6 +998,26 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
                         *child.inode.lock() = None;
                     }
                 }
+                // inotify: IN_DELETE|IN_ISDIR on the parent (named) and
+                // IN_DELETE_SELF on the directory itself (auto-removes its
+                // watches, delivering IN_IGNORED).
+                let target_inode = target_vpath.as_ref().and_then(|vp| vp.inode.clone());
+                crate::fs::inotify::notify(
+                    Some(parent_inode),
+                    None,
+                    ino::IN_DELETE | ino::IN_ISDIR,
+                    Some(name.as_bytes()),
+                    0,
+                );
+                if let Some(ref ti) = target_inode {
+                    crate::fs::inotify::notify(
+                        None,
+                        Some(ti),
+                        ino::IN_DELETE_SELF | ino::IN_ISDIR,
+                        None,
+                        0,
+                    );
+                }
                 Ok(())
             } else {
                 Err(result)
@@ -986,6 +1066,15 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
         if let Some(unlink_fn) = ops.unlink {
             let result = unlink_fn(parent_inode.as_ref(), name.as_bytes());
             if result == 0 {
+                // inotify: capture the target inode before the caches drop
+                // it — IN_DELETE on the parent (named); IN_DELETE_SELF on
+                // the inode itself only when the last link went away.
+                let target_inode = target_vpath.as_ref().and_then(|vp| vp.inode.clone());
+                let last_link = target_inode
+                    .as_ref()
+                    .map(|i| inode_nlink(i) <= 1)
+                    .unwrap_or(true);
+
                 // Invalidate icache entry for the removed inode
                 if let Some((ino, fs_id)) = target_ino_and_fs_id {
                     crate::fs::inode::icache_remove(ino, fs_id);
@@ -995,6 +1084,27 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                     if let Some(child) = parent_dentry.lookup_child(&name) {
                         child.set_negative();
                         *child.inode.lock() = None;
+                    }
+                }
+
+                // IN_DELETE goes to the parent watch (named); a direct
+                // watch on the file gets IN_DELETE_SELF below.
+                crate::fs::inotify::notify(
+                    Some(parent_inode),
+                    None,
+                    ino::IN_DELETE,
+                    Some(name.as_bytes()),
+                    0,
+                );
+                if last_link {
+                    if let Some(ref ti) = target_inode {
+                        crate::fs::inotify::notify(
+                            None,
+                            Some(ti),
+                            ino::IN_DELETE_SELF,
+                            None,
+                            0,
+                        );
                     }
                 }
                 Ok(())
@@ -1049,6 +1159,17 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     parent_dentry.remove_child(&name);
                 }
+                // inotify: a hard link appearing is IN_CREATE in the
+                // destination directory (named); the linked inode itself
+                // sees IN_ATTRIB (its link count changed).
+                crate::fs::inotify::notify(
+                    Some(parent_inode),
+                    None,
+                    ino::IN_CREATE,
+                    Some(name.as_bytes()),
+                    0,
+                );
+                crate::fs::inotify::notify(None, Some(src_inode), ino::IN_ATTRIB, None, 0);
                 Ok(())
             } else {
                 Err(result)
@@ -1131,6 +1252,42 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
         if let Some(ref new_pd) = new_parent_vpath.dentry {
             new_pd.remove_child(&new_name);
         }
+
+        // inotify: IN_MOVED_FROM on the old parent and IN_MOVED_TO on the
+        // new parent share a nonzero cookie so watchers can correlate the
+        // halves; the inode itself gets IN_MOVE_SELF.
+        let src_inode = source_vpath.as_ref().and_then(|vp| vp.inode.clone());
+        let isdir = src_inode
+            .as_ref()
+            .map(|i| i.mode.is_directory())
+            .unwrap_or(false);
+        let dir_bit = if isdir { ino::IN_ISDIR } else { 0 };
+        let cookie = crate::fs::inotify::alloc_cookie();
+        // MOVED_FROM/MOVED_TO go to parent-directory watches (named); a
+        // direct watch on the file sees only IN_MOVE_SELF below.
+        crate::fs::inotify::notify(
+            Some(old_parent),
+            None,
+            ino::IN_MOVED_FROM | dir_bit,
+            Some(old_name.as_bytes()),
+            cookie,
+        );
+        crate::fs::inotify::notify(
+            Some(new_parent),
+            None,
+            ino::IN_MOVED_TO | dir_bit,
+            Some(new_name.as_bytes()),
+            cookie,
+        );
+        if let Some(ref si) = src_inode {
+            crate::fs::inotify::notify(
+                None,
+                Some(si),
+                ino::IN_MOVE_SELF | dir_bit,
+                None,
+                0,
+            );
+        }
         Ok(())
     } else {
         Err(result)
@@ -1197,7 +1354,14 @@ pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
     }
 
     let result = inode.op_setattr(setattr_attr::ATTR_MODE, mode as u64, 0);
-    if result == 0 { Ok(()) } else { Err(result) }
+    if result == 0 {
+        // inotify: mode change → IN_ATTRIB.
+        let name = vpath.dentry.as_ref().map(|d| d.get_name().into_bytes());
+        notify_about(vpath.dentry.as_ref(), Some(inode), ino::IN_ATTRIB, name.as_deref(), 0);
+        Ok(())
+    } else {
+        Err(result)
+    }
 }
 
 /// Change file ownership (chown)
@@ -1244,7 +1408,14 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32) -> Result<(), i32> {
     }
 
     let result = inode.op_setattr(setattr_attr::ATTR_UID_GID, actual_uid as u64, actual_gid as u64);
-    if result == 0 { Ok(()) } else { Err(result) }
+    if result == 0 {
+        // inotify: owner change → IN_ATTRIB.
+        let name = vpath.dentry.as_ref().map(|d| d.get_name().into_bytes());
+        notify_about(vpath.dentry.as_ref(), Some(inode), ino::IN_ATTRIB, name.as_deref(), 0);
+        Ok(())
+    } else {
+        Err(result)
+    }
 }
 
 /// Truncate file by path (truncate)
@@ -1282,7 +1453,21 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
     }
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
-    if result == 0 { Ok(()) } else { Err(result) }
+    if result == 0 {
+        // inotify: truncate is a size change → IN_MODIFY (and metadata
+        // change → IN_ATTRIB) on the file and on parent watches (named).
+        let name = vpath.dentry.as_ref().map(|d| d.get_name().into_bytes());
+        notify_about(
+            vpath.dentry.as_ref(),
+            Some(inode),
+            ino::IN_MODIFY | ino::IN_ATTRIB,
+            name.as_deref(),
+            0,
+        );
+        Ok(())
+    } else {
+        Err(result)
+    }
 }
 
 /// Truncate open file by fd (ftruncate)
@@ -1312,7 +1497,14 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     }
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
-    if result == 0 { Ok(()) } else { Err(result) }
+    if result == 0 {
+        // inotify: ftruncate → IN_MODIFY | IN_ATTRIB (through the File so
+        // parent watches get the named event).
+        crate::fs::inotify::notify_file(&file, ino::IN_MODIFY | ino::IN_ATTRIB);
+        Ok(())
+    } else {
+        Err(result)
+    }
 }
 
 /// Get file/directory status using inode_operations
@@ -1435,6 +1627,15 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     parent_dentry.add_child(name, d.clone());
                     new_d = Some(d);
                 }
+                // inotify: file creation via open(O_CREAT) → IN_CREATE on
+                // the parent directory (named).
+                crate::fs::inotify::notify(
+                    Some(&parent_inode),
+                    None,
+                    ino::IN_CREATE,
+                    Some(child_name.as_bytes()),
+                    0,
+                );
                 (new_inode, new_d)
             }
             Err(e) => return Err(e),
@@ -1496,10 +1697,17 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             if result != 0 {
                 return Err(result);
             }
+            // inotify: O_TRUNC truncation → IN_MODIFY | IN_ATTRIB.
+            crate::fs::inotify::notify_file(&file, ino::IN_MODIFY | ino::IN_ATTRIB);
         }
 
-        match get_file_fd_install(file) {
-            Some(fd) => Ok(fd),
+        match get_file_fd_install(Arc::clone(&file)) {
+            Some(fd) => {
+                // inotify: successful open → IN_OPEN (parent watches get
+                // the named event through the File's dentry).
+                crate::fs::inotify::notify_file(&file, ino::IN_OPEN);
+                Ok(fd)
+            }
             None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
         }
     }
@@ -1660,11 +1868,91 @@ pub mod fcntl {
     /// Set file status flags
     pub const F_SETFL: usize = 4;
 
+    /// Get record lock info (struct flock *)
+    pub const F_GETLK: usize = 5;
+
+    /// Set record lock (non-blocking)
+    pub const F_SETLK: usize = 6;
+
+    /// Set record lock (blocking)
+    pub const F_SETLKW: usize = 7;
+
+    /// 64-bit aliases — on RV64 off_t is already 64-bit and the struct
+    /// layout is identical (glibc may use either number).
+    pub const F_GETLK64: usize = 12;
+    pub const F_SETLK64: usize = 13;
+    pub const F_SETLKW64: usize = 14;
+
     /// Duplicate file descriptor with close-on-exec
     pub const F_DUPFD_CLOEXEC: usize = 1030;
 
     /// FD_CLOEXEC flag value
     pub const FD_CLOEXEC: usize = 1;
+}
+
+/// flock lock types (struct flock::l_type).
+mod flock_types {
+    pub const F_RDLCK: i16 = 0;
+    pub const F_WRLCK: i16 = 1;
+    pub const F_UNLCK: i16 = 2;
+}
+
+/// Resolve a `struct flock` region (l_whence/l_start/l_len) into an
+/// absolute byte range `[start, end)`; `end == u64::MAX` means "to EOF"
+/// (and tracks EOF as it grows, per POSIX). Returns negative errno on
+/// malformed input.
+fn resolve_lock_region(
+    file: &File,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+) -> Result<(u64, u64), i32> {
+    let base: i64 = match l_whence {
+        0 => 0, // SEEK_SET
+        1 => file.get_pos() as i64, // SEEK_CUR
+        2 => {
+            // SAFETY: inode is written once at open time; read-only access.
+            let inode_opt = unsafe { &*file.inode.get() };
+            match inode_opt.as_ref() {
+                Some(inode) => inode.get_size() as i64, // SEEK_END
+                None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+            }
+        }
+        _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+    };
+
+    let start = match base.checked_add(l_start) {
+        Some(s) if s >= 0 => s as u64,
+        _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+    };
+
+    let end = if l_len == 0 {
+        // l_len == 0: lock from start to EOF (and beyond, if it grows).
+        u64::MAX
+    } else if l_len > 0 {
+        match start.checked_add(l_len as u64) {
+            Some(e) => e,
+            None => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+        }
+    } else {
+        // Negative l_len: region ends at l_start and extends backwards.
+        match (start as i64).checked_add(l_len) {
+            Some(s) if s >= 0 => {
+                let end = start;
+                let start = s as u64;
+                if start >= end {
+                    return Err(errno::Errno::InvalidArgument.as_neg_i32());
+                }
+                return Ok((start, end));
+            }
+            _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+        }
+    };
+
+    if end <= start {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    Ok((start, end))
 }
 
 ///
@@ -1788,6 +2076,151 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 Ok(0)  // Return 0 on success
             }
 
+            // ==================== POSIX record locks (P0-5) ====================
+            //
+            // struct flock (LP64): { i16 l_type; i16 l_whence; off_t
+            // l_start; off_t l_len; pid_t l_pid; } = 32 bytes.
+            fcntl::F_GETLK | fcntl::F_GETLK64 => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                if arg == 0 || !crate::arch::riscv64::uaccess::access_ok(arg, 32) {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                let mut fl = [0u8; 32];
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(
+                        fl.as_mut_ptr(),
+                        arg as *const u8,
+                        32,
+                    )
+                } > 0
+                {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                let l_type = i16::from_le_bytes([fl[0], fl[1]]);
+                let l_whence = i16::from_le_bytes([fl[2], fl[3]]);
+                let l_start = i64::from_le_bytes(fl[8..16].try_into().unwrap());
+                let l_len = i64::from_le_bytes(fl[16..24].try_into().unwrap());
+
+                let exclusive = match l_type {
+                    flock_types::F_RDLCK => false,
+                    flock_types::F_WRLCK => true,
+                    _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+                };
+                // Access-mode check mirrors F_SETLK's (Linux may_setlk).
+                if exclusive && file.flags().is_readonly()
+                    || !exclusive && file.flags().is_writeonly()
+                {
+                    return Err(errno::Errno::BadFileNumber.as_neg_i32());
+                }
+
+                let (start, end) = resolve_lock_region(&file, l_whence, l_start, l_len)?;
+                let owner_pid = crate::sched::current()
+                    .map(|t| t.tgid())
+                    .unwrap_or(0);
+
+                let out = {
+                    let mut out = fl;
+                    match crate::fs::locks::posix_test_lock(
+                        &file, owner_pid, exclusive, start, end,
+                    ) {
+                        // First conflicting lock: report it with ABSOLUTE
+                        // start (l_whence = SEEK_SET) and l_len = 0 for a
+                        // to-EOF tail (POSIX).
+                        Some(c) => {
+                            let ltype = if c.exclusive {
+                                flock_types::F_WRLCK
+                            } else {
+                                flock_types::F_RDLCK
+                            };
+                            let len: i64 = if c.end == u64::MAX {
+                                0
+                            } else {
+                                (c.end - c.start) as i64
+                            };
+                            out[0..2].copy_from_slice(&ltype.to_le_bytes());
+                            out[2..4].copy_from_slice(&0i16.to_le_bytes()); // SEEK_SET
+                            out[8..16].copy_from_slice(&(c.start as i64).to_le_bytes());
+                            out[16..24].copy_from_slice(&len.to_le_bytes());
+                            out[24..28].copy_from_slice(&(c.pid as i32).to_le_bytes());
+                        }
+                        // No conflict: l_type = F_UNLCK, other fields
+                        // untouched (POSIX); l_pid = 0 to be explicit.
+                        None => {
+                            out[0..2].copy_from_slice(&flock_types::F_UNLCK.to_le_bytes());
+                            out[24..28].copy_from_slice(&0i32.to_le_bytes());
+                        }
+                    }
+                    out
+                };
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        arg as *mut u8,
+                        out.as_ptr(),
+                        32,
+                    )
+                } > 0
+                {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                Ok(0)
+            }
+
+            fcntl::F_SETLK | fcntl::F_SETLK64 | fcntl::F_SETLKW | fcntl::F_SETLKW64 => {
+                let wait = cmd == fcntl::F_SETLKW || cmd == fcntl::F_SETLKW64;
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                if arg == 0 || !crate::arch::riscv64::uaccess::access_ok(arg, 32) {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                let mut fl = [0u8; 32];
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(
+                        fl.as_mut_ptr(),
+                        arg as *const u8,
+                        32,
+                    )
+                } > 0
+                {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                let l_type = i16::from_le_bytes([fl[0], fl[1]]);
+                let l_whence = i16::from_le_bytes([fl[2], fl[3]]);
+                let l_start = i64::from_le_bytes(fl[8..16].try_into().unwrap());
+                let l_len = i64::from_le_bytes(fl[16..24].try_into().unwrap());
+
+                let kind = match l_type {
+                    flock_types::F_RDLCK => {
+                        // Read lock needs a readable fd.
+                        if file.flags().is_writeonly() {
+                            return Err(errno::Errno::BadFileNumber.as_neg_i32());
+                        }
+                        crate::fs::locks::F_RDLCK_KIND
+                    }
+                    flock_types::F_WRLCK => {
+                        // Write lock needs a writeable fd.
+                        if file.flags().is_readonly() {
+                            return Err(errno::Errno::BadFileNumber.as_neg_i32());
+                        }
+                        crate::fs::locks::F_WRLCK_KIND
+                    }
+                    flock_types::F_UNLCK => crate::fs::locks::F_UNLCK_KIND,
+                    _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+                };
+
+                let (start, end) = resolve_lock_region(&file, l_whence, l_start, l_len)?;
+                let owner_pid = crate::sched::current()
+                    .map(|t| t.tgid())
+                    .unwrap_or(0);
+
+                crate::fs::locks::posix_set_lock(&file, owner_pid, kind, start, end, wait)
+                    .map(|_| 0)
+            }
+
             // Unsupported command
             _ => {
                 Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
@@ -1895,8 +2328,13 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
             }
         }
 
-        match get_file_fd_install(file) {
-            Some(fd) => Ok(fd),
+        match get_file_fd_install(Arc::clone(&file)) {
+            Some(fd) => {
+                // inotify: directory open → IN_OPEN|IN_ISDIR (notify_file
+                // adds the IN_ISDIR modifier for directories).
+                crate::fs::inotify::notify_file(&file, ino::IN_OPEN);
+                Ok(fd)
+            }
             None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
         }
     }
@@ -2132,6 +2570,9 @@ pub fn vfs_utimensat(pathname: &str, atime: Option<u64>, mtime: Option<u64>) -> 
     if let Some(a) = atime {
         let _ = inode.op_setattr(crate::fs::inode::setattr_attr::ATTR_ATIME, a, 0);
     }
+    // inotify: timestamp change → IN_ATTRIB.
+    let name = vpath.dentry.as_ref().map(|d| d.get_name().into_bytes());
+    notify_about(vpath.dentry.as_ref(), Some(inode), ino::IN_ATTRIB, name.as_deref(), 0);
     Ok(())
 }
 
