@@ -357,6 +357,13 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         (*task_ptr).set_pgid((*current_ptr).pgid());
         (*task_ptr).set_sid((*current_ptr).sid());
 
+        // cgroup v2 (U1b): the child joins the parent's cgroup. The pids
+        // controller limit is checked here (every ancestor with a limit
+        // must have headroom — Linux fails fork with EAGAIN).
+        if let Err(e) = crate::sched::cgroup::cgroup_on_fork(current_ptr, task_ptr) {
+            return unwind(task_ptr, e);
+        }
+
         // === CLONE_PARENT_SETTID / CLONE_CHILD_SETTID ===
         // Both are written in the PARENT address space, BEFORE the mm copy
         // below: with CLONE_VM the memories are identical anyway; without
@@ -532,6 +539,22 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // Copy credentials from parent
         *(*task_ptr).cred_mut() = (*current_ptr).cred().clone();
+
+        // === U1c namespaces: default share the parent's namespace objects
+        // (Arc clone); CLONE_NEW* bits give the child fresh ones. Fails the
+        // clone with EPERM when a non-user ns was requested without
+        // CAP_SYS_ADMIN. ===
+        if let Err(e) = crate::process::ns::copy_namespaces(current_ptr, task_ptr, args.flags) {
+            return unwind(task_ptr, e);
+        }
+
+        // === U1c seccomp: mode and filter are inherited across fork
+        // (Linux copy_process → seccomp_dup). ===
+        (*task_ptr).set_seccomp_mode((*current_ptr).seccomp_mode());
+        if (*current_ptr).seccomp_mode() == 2 {
+            let parent_filter = (*current_ptr).seccomp_filter.lock();
+            *(*task_ptr).seccomp_filter.lock() = parent_filter.clone();
+        }
 
         // Handle CLONE_VFORK: block parent until child execs/exits.
         // The child shares parent's address space (CLONE_VM is expected

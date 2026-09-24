@@ -815,6 +815,62 @@ pub struct Task {
     /// WCOREDUMP bookkeeping: a core file was written for this task's
     /// death (wait4 sets the 0x80 status bit when this is set).
     pub core_dumped: core::sync::atomic::AtomicBool,
+
+    // ==================== namespaces (U1c) ====================
+
+    /// Mount namespace (None == initial namespace).
+    pub ns_mount: Option<alloc::sync::Arc<crate::process::ns::MountNamespace>>,
+    /// UTS namespace (None == initial namespace).
+    pub ns_uts: Option<alloc::sync::Arc<crate::process::ns::UtsNamespace>>,
+    /// IPC namespace (None == initial namespace; stub).
+    pub ns_ipc: Option<alloc::sync::Arc<crate::process::ns::IpcNamespace>>,
+    /// PID namespace (None == initial namespace).
+    pub ns_pid: Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+    /// PID namespace that future children are created in (unshare/setns
+    /// CLONE_NEWPID target; None == same as ns_pid).
+    pub ns_pid_for_children: Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+    /// Network namespace (None == initial namespace; stub).
+    pub ns_net: Option<alloc::sync::Arc<crate::process::ns::NetNamespace>>,
+    /// User namespace (None == initial namespace; stub).
+    pub ns_user: Option<alloc::sync::Arc<crate::process::ns::UserNamespace>>,
+    /// PID of this task inside its pid namespace (== pid for the initial
+    /// namespace; 1 for a CLONE_NEWPID namespace init).
+    pub ns_local_pid: u32,
+
+    // ==================== seccomp (U1c) ====================
+
+    /// Seccomp mode: 0 = SECCOMP_MODE_DISABLED, 1 = STRICT, 2 = FILTER.
+    pub seccomp_mode: AtomicU32,
+    /// Loaded classic-BPF filter program (single program; loading a new one
+    /// replaces it — Linux stacks filters, recorded divergence).
+    pub seccomp_filter: Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
+
+    // ==================== cgroup v2 (U1b) ====================
+
+    /// cgroup membership (Linux task_struct::cgroups analogue). NULL =
+    /// implicit root — kernel threads and early-boot tasks carry no
+    /// limits (Linux kthreads bypass cgroup limits too). The pointee is
+    /// a `CgroupNode` inside an Arc allocation that is NEVER freed
+    /// (rmdir only unlinks it), so the raw pointer needs no refcount.
+    cgroup_ptr: *mut crate::sched::cgroup::CgroupNode,
+
+    /// cgroup v2 memory controller: bytes this task has charged to its
+    /// cgroup chain via mmap(2). Charges and uncharges (munmap / exit /
+    /// cgroup.procs migration) all flow through this counter so the
+    /// cgroup's memory.current can never over-subtract: execve's
+    /// internal ELF mappings and brk never charge, so they never
+    /// uncharge either (documented RSS-approximation simplification).
+    cgroup_mem_charged: AtomicU64,
+}
+
+/// One classic BPF instruction (struct sock_filter): { code, jt, jf, k }.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SockFilter {
+    pub code: u16,
+    pub jt: u8,
+    pub jf: u8,
+    pub k: u32,
 }
 
 /// Number of RLIMIT_* resources (matches Linux RLIM_NLIMITS).
@@ -980,6 +1036,18 @@ impl Task {
             ss_active: core::sync::atomic::AtomicBool::new(false),
             ss_saved_insn: AtomicU64::new(0),
             core_dumped: core::sync::atomic::AtomicBool::new(false),
+            ns_mount: None,
+            ns_uts: None,
+            ns_ipc: None,
+            ns_pid: None,
+            ns_pid_for_children: None,
+            ns_net: None,
+            ns_user: None,
+            ns_local_pid: pid,
+            seccomp_mode: AtomicU32::new(0),
+            seccomp_filter: Spinlock::new(None),
+            cgroup_ptr: ptr::null_mut(),
+            cgroup_mem_charged: AtomicU64::new(0),
         };
 
         // Initialize children and sibling lists (must be after struct construction)
@@ -1355,6 +1423,63 @@ impl Task {
             core::sync::atomic::AtomicBool::new(false),
         );
 
+        // cgroup v2 (U1b): NULL = implicit root. The buddy allocator does
+        // not zero Task pages — a garbage pointer here would be
+        // dereferenced by every cgroup enforcement point.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cgroup_ptr)) as *mut *mut crate::sched::cgroup::CgroupNode,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cgroup_mem_charged)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+
+        // Namespaces + seccomp (U1c): None/0 defaults. The buddy allocator
+        // does not zero Task pages — garbage Option<Arc> words would be
+        // Arc-cloned by ns accessors and a garbage filter lock would
+        // deadlock the syscall-entry gate (R9-1 class).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_mount)) as *mut Option<alloc::sync::Arc<crate::process::ns::MountNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_uts)) as *mut Option<alloc::sync::Arc<crate::process::ns::UtsNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_ipc)) as *mut Option<alloc::sync::Arc<crate::process::ns::IpcNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_pid)) as *mut Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_pid_for_children)) as *mut Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_net)) as *mut Option<alloc::sync::Arc<crate::process::ns::NetNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_user)) as *mut Option<alloc::sync::Arc<crate::process::ns::UserNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, seccomp_mode)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, seccomp_filter)) as *mut Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
+            Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
+            0,
+        );
+
         // Initialize children and sibling lists
         let children_ptr = (ptr as usize + offset_of!(Task, children)) as *mut ListHead;
         (*children_ptr).init();
@@ -1721,6 +1846,63 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, core_dumped)) as *mut core::sync::atomic::AtomicBool,
             core::sync::atomic::AtomicBool::new(false),
+        );
+
+        // cgroup v2 (U1b): NULL = implicit root. The buddy allocator does
+        // not zero Task pages — a garbage pointer here would be
+        // dereferenced by every cgroup enforcement point.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cgroup_ptr)) as *mut *mut crate::sched::cgroup::CgroupNode,
+            ptr::null_mut(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cgroup_mem_charged)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+
+        // Namespaces + seccomp (U1c): None/0 defaults. The buddy allocator
+        // does not zero Task pages — garbage Option<Arc> words would be
+        // Arc-cloned by ns accessors and a garbage filter lock would
+        // deadlock the syscall-entry gate (R9-1 class).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_mount)) as *mut Option<alloc::sync::Arc<crate::process::ns::MountNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_uts)) as *mut Option<alloc::sync::Arc<crate::process::ns::UtsNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_ipc)) as *mut Option<alloc::sync::Arc<crate::process::ns::IpcNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_pid)) as *mut Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_pid_for_children)) as *mut Option<alloc::sync::Arc<crate::process::ns::PidNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_net)) as *mut Option<alloc::sync::Arc<crate::process::ns::NetNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_user)) as *mut Option<alloc::sync::Arc<crate::process::ns::UserNamespace>>,
+            None,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, seccomp_mode)) as *mut AtomicU32,
+            AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, seccomp_filter)) as *mut Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
+            Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
+            pid,
         );
 
         // Initialize children and sibling lists
@@ -3324,6 +3506,83 @@ impl Task {
             fs.set_umask(mask)
         } else {
             0o022
+        }
+    }
+
+    // ==================== namespaces / seccomp (U1c) ====================
+
+    /// Seccomp mode (0 disabled / 1 strict / 2 filter).
+    pub fn seccomp_mode(&self) -> u32 {
+        self.seccomp_mode.load(Ordering::Acquire)
+    }
+
+    /// Set seccomp mode.
+    pub fn set_seccomp_mode(&self, mode: u32) {
+        self.seccomp_mode.store(mode, Ordering::Release);
+    }
+
+    /// Seccomp kill helper (signal.rs): force-queue SIGKILL to this task
+    /// bypassing disposition/mask checks. Used by the STRICT mode gate and
+    /// SECCOMP_RET_KILL — the default action of SIGKILL terminates the task
+    /// on return to user mode.
+    pub fn seccomp_kill(&self) {
+        self.pending.add(crate::signal::Signal::SIGKILL as i32);
+        self.set_ti_flag(TIF_SIGPENDING);
+        // SAFETY: signal_wake_up takes a valid task pointer; this method is
+        // called with &self of a live task.
+        unsafe {
+            crate::signal::signal_wake_up(self as *const Task as *mut Task);
+        }
+    }
+
+    /// This task's pid inside its own pid namespace (gettid view).
+    pub fn ns_pid_local(&self) -> u32 {
+        self.ns_local_pid
+    }
+
+    /// cgroup v2: membership pointer (NULL = implicit root, no limits).
+    #[inline]
+    pub fn cgroup_ptr(&self) -> *mut crate::sched::cgroup::CgroupNode {
+        self.cgroup_ptr
+    }
+
+    /// cgroup v2: set membership pointer (fork inherit / cgroup.procs
+    /// migration). The pointee must come from a never-freed
+    /// `Arc<CgroupNode>` allocation.
+    #[inline]
+    pub fn set_cgroup_ptr(&mut self, ptr: *mut crate::sched::cgroup::CgroupNode) {
+        self.cgroup_ptr = ptr;
+    }
+
+    /// cgroup v2 memory controller: bytes currently charged on behalf of
+    /// this task (see field docs).
+    #[inline]
+    pub fn cgroup_mem_charged(&self) -> u64 {
+        self.cgroup_mem_charged.load(Ordering::Acquire)
+    }
+
+    /// cgroup v2 memory controller: add to the task's charge ledger.
+    #[inline]
+    pub fn add_cgroup_mem_charged(&self, bytes: u64) {
+        self.cgroup_mem_charged.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    /// cgroup v2 memory controller: subtract from the task's charge
+    /// ledger, saturating at zero.
+    #[inline]
+    pub fn sub_cgroup_mem_charged(&self, bytes: u64) {
+        let mut current = self.cgroup_mem_charged.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_sub(bytes);
+            match self.cgroup_mem_charged.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
         }
     }
 

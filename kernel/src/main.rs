@@ -482,6 +482,20 @@ pub extern "C" fn rust_main() -> ! {
                     }
                 }
             }
+
+            // cgroup v2 unified hierarchy (U1b) — systemd's hard
+            // dependency: mount cgroup2 at /sys/fs/cgroup after the
+            // sysfs/procfS boot mounts. The hierarchy root exposes
+            // cgroup.controllers ("cpu memory pids") and a writable
+            // cgroup.procs, which systemd's boot probe requires.
+            {
+                let cg_init = fs::cgroup::init_cgroupfs();
+                print_status("cgroup", "v2 unified hierarchy init", cg_init.is_ok());
+                if cg_init.is_ok() {
+                    let cg_mount = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+                    print_status("cgroup", "cgroup2 mounted /sys/fs/cgroup", cg_mount.is_ok());
+                }
+            }
         }
 
         // Initialize block devices (for rootfs)
@@ -523,6 +537,12 @@ pub extern "C" fn rust_main() -> ! {
                                 fs::mount::MntFlags::new(0));
                         }
                     }
+
+                    // Re-link cgroup2 after ext4 overlay (U1b, same
+                    // defensive re-mount as procfs above).
+                    if mount_result.is_ok() {
+                        let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+                    }
                 } else if let Some(virtio_dev) = drivers::virtio::get_device() {
                     // Try mounting from MMIO device
                     let disk_ptr = &virtio_dev.disk as *const drivers::blkdev::GenDisk;
@@ -546,6 +566,11 @@ pub extern "C" fn rust_main() -> ! {
                             fs::vfs::vfs_mount("/proc", fs::procfs::create_root_inode(),
                                 fs::mount::MntFlags::new(0));
                         }
+                    }
+
+                    // Re-link cgroup2 after ext4 overlay (U1b).
+                    if mount_result.is_ok() {
+                        let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
                     }
                 }
             }

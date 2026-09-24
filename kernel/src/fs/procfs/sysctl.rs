@@ -21,10 +21,10 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::sync::spinlock::Spinlock;
-
 /// /proc/sys/kernel/hostname — Linux __NEW_UTS_LEN = 64 (65 with NUL).
-pub static HOSTNAME: Spinlock<alloc::vec::Vec<u8>> = Spinlock::new(alloc::vec::Vec::new());
+/// U1c: superseded by the per-UTS-namespace storage
+/// (process::ns::current_uts_ns()); retained only as the boot seed
+/// compatibility symbol.
 
 /// /proc/sys/kernel/pid_max — Linux default 32768 (riscv64 max 4194304).
 /// P2: stored in the PID allocator (process::pid) and consulted by
@@ -48,8 +48,9 @@ pub static FILE_MAX: AtomicU64 = AtomicU64::new(64 * 1024);
 // ============================================================================
 
 pub fn generate_hostname() -> Vec<u8> {
-    let hn = HOSTNAME.lock();
-    let mut out = hn.clone();
+    // U1c: hostname lives in the caller's UTS namespace (global sysctl
+    // surface, per-namespace storage — Linux semantic).
+    let mut out = crate::process::ns::current_uts_ns().get_hostname();
     out.push(b'\n');
     out
 }
@@ -99,6 +100,7 @@ fn parse_u64(input: &[u8]) -> Result<u64, i32> {
 pub fn write_hostname(input: &[u8]) -> i32 {
     // Linux: ≤ __NEW_UTS_LEN (64) bytes, NUL not stored, empty allowed
     // (sets the hostname to ""). Trailing newline is accepted by sysctl(8).
+    // U1c: the write affects the CALLER's UTS namespace only.
     let s: &[u8] = if input.last() == Some(&b'\n') {
         &input[..input.len() - 1]
     } else {
@@ -107,7 +109,9 @@ pub fn write_hostname(input: &[u8]) -> i32 {
     if s.len() > 64 {
         return -(crate::errno::constants::EINVAL as i32);
     }
-    *HOSTNAME.lock() = Vec::from(s);
+    if !crate::process::ns::current_uts_ns().set_hostname(s) {
+        return -(crate::errno::constants::EINVAL as i32);
+    }
     0
 }
 

@@ -26,7 +26,7 @@
 //! a small settable table (eth0 mirrors arp::get_local_ip()).
 
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -45,6 +45,11 @@ pub const AF_NETLINK: i32 = 16;
 
 /// NETLINK_USERSOCK etc. — only ROUTE is implemented.
 pub const NETLINK_ROUTE: i32 = 0;
+
+/// NETLINK_KOBJECT_UEVENT (15) — uevent hotplug broadcast protocol (U1a).
+/// Sockets bound to this protocol receive `action@devpath\0KEY=VALUE\0...`
+/// blobs with NO nlmsghdr (Linux kobject_uevent wire format).
+pub const NETLINK_KOBJECT_UEVENT: i32 = 15;
 
 /// Socket types accepted for netlink
 pub const SOCK_RAW: i32 = 3;
@@ -182,11 +187,14 @@ fn iface_set_up(index: u32, up: bool) {
         _ => return,
     };
     if let Some(dev) = dev {
+        let name = alloc::string::String::from(dev.get_name());
         if up {
             dev.up();
         } else {
             dev.down();
         }
+        // U1a uevent: notify udev of the link state change.
+        crate::fs::sysfs::netdev_uevent(&name, "change");
     }
 }
 
@@ -805,6 +813,31 @@ pub fn netlink_close(sock: &Arc<NetlinkSocket>) {
 }
 
 // ============================================================================
+// NETLINK_KOBJECT_UEVENT (U1a)
+// ============================================================================
+
+/// Live uevent listener sockets (Weak: close drops them silently).
+static UEVENT_LISTENERS: Spinlock<Vec<Weak<NetlinkSocket>>> = Spinlock::new(Vec::new());
+
+/// Broadcast a kernel-originated uevent payload to every listener socket.
+///
+/// The payload is pushed verbatim onto each socket's receive queue (one
+/// recvmsg per message, matching the rtnetlink one-message-per-call ABI);
+/// no nlmsghdr is prepended, exactly like Linux's
+/// kobject_uevent_net_broadcast().
+pub fn uevent_broadcast(payload: &[u8]) {
+    let mut listeners = UEVENT_LISTENERS.lock();
+    listeners.retain(|weak| match weak.upgrade() {
+        Some(sock) => {
+            sock.recv_queue.lock().push_back(payload.to_vec());
+            sock.wait_queue.wake_up_all();
+            true
+        }
+        None => false, // socket closed — drop the listener
+    });
+}
+
+// ============================================================================
 // File operations
 // ============================================================================
 
@@ -939,13 +972,19 @@ pub fn netlink_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
         SOCK_RAW | crate::net::socket::SOCK_DGRAM => {}
         _ => return Err(-94), // ESOCKTNOSUPPORT
     }
-    if protocol != NETLINK_ROUTE {
+    if protocol != NETLINK_ROUTE && protocol != NETLINK_KOBJECT_UEVENT {
         return Err(-93); // EPROTONOSUPPORT
     }
     let nonblock = (type_ & SOCK_NONBLOCK_FLAG) != 0;
     let cloexec = (type_ & SOCK_CLOEXEC_FLAG) != 0;
     let socket = Arc::new(NetlinkSocket::new(protocol));
-    netlink_socket_install(&socket, nonblock, cloexec)
+    let fd = netlink_socket_install(&socket, nonblock, cloexec)?;
+    // U1a: uevent sockets are broadcast receivers — track them so
+    // uevent_broadcast() can fan kernel uevents out to udev.
+    if protocol == NETLINK_KOBJECT_UEVENT {
+        UEVENT_LISTENERS.lock().push(Arc::downgrade(&socket));
+    }
+    Ok(fd)
 }
 
 /// Resolve a process fd to its NetlinkSocket (identity-checked).

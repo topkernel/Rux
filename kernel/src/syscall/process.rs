@@ -577,27 +577,45 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
         }
     };
 
+    // U1c pid-namespace semantics: the wait target pid is interpreted in
+    // the CALLER's pid namespace, and the reaped child is REPORTED in it.
+    let wait_pid: i32 = if pid > 0 {
+        match crate::process::ns::resolve_vpid(pid as u32) {
+            Some(g) => g as i32,
+            None => return -(errno::ECHILD as i64),
+        }
+    } else {
+        pid
+    };
+
     if options & WNOHANG_OPT != 0 {
         // WNOHANG mode: non-blocking check (options now honored: WUNTRACED
         // reports eligible stopped children too)
-        match crate::process::exit::do_wait_nonblock(pid, wstatus, options) {
+        match crate::process::exit::do_wait_nonblock(wait_pid, wstatus, options) {
             Ok(child_pid) => {
                 fill_rusage();
-                child_pid as i64
+                report_wait_pid(child_pid)
             }
             Err(e) if e == -11 => 0, // EAGAIN -> return 0 means no child process exited
             Err(e) => e as i32 as i64,
         }
     } else {
         // Blocking wait for child process to exit
-        match crate::process::exit::do_wait(pid, wstatus, options) {
+        match crate::process::exit::do_wait(wait_pid, wstatus, options) {
             Ok(child_pid) => {
                 fill_rusage();
-                child_pid as i64
+                report_wait_pid(child_pid)
             }
             Err(e) => e as i32 as i64,
         }
     }
+}
+
+/// Report a reaped child's pid in the CALLER's pid namespace (U1c).
+/// Falls back to the global pid when the task is already gone from the
+/// hash (reaped) or lives in another namespace.
+fn report_wait_pid(global_pid: u32) -> i64 {
+    crate::process::ns::wait_vpid(global_pid) as i64
 }
 
 /// sys_waitid - wait for child process state change (Linux ABI)
@@ -640,11 +658,17 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
 }
 
 /// sys_getpid - Get process ID (== thread group ID; all threads of one
-/// process see the leader's pid)
+/// process see the leader's pid). U1c: reported in the caller's pid
+/// namespace (ns-local pid).
 pub fn sys_getpid(_args: SyscallArgs) -> i64 {
     if let Some(current) = crate::sched::current() {
-        // SAFETY: current is guaranteed valid and non-null by sched::current().
-        unsafe { (*current).tgid() as i64 }
+        // SAFETY: current is guaranteed valid and non-null by
+        // sched::current(); group_leader_ptr() heals NULL. The LEADER's
+        // ns-local pid is the process's pid in the caller's namespace.
+        unsafe {
+            let leader = (*current).group_leader_ptr();
+            (*leader).ns_pid_local() as i64
+        }
     } else {
         0
     }
@@ -653,24 +677,42 @@ pub fn sys_getpid(_args: SyscallArgs) -> i64 {
 /// sys_gettid - Get thread ID (per-thread unique; == pid)
 ///
 /// In single-threaded processes, tid == pid.
+/// U1c: reported in the caller's pid namespace.
 /// RISC-V syscall number: 178
 pub fn sys_gettid(_args: SyscallArgs) -> i64 {
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is guaranteed valid and non-null by sched::current().
-        unsafe { (*current).pid() as i64 }
+        unsafe { (*current).ns_pid_local() as i64 }
     } else {
         0
     }
 }
 
 /// sys_getppid - Get parent process ID (threads report the leader's
-/// parent — the whole group shares one real parent)
+/// parent — the whole group shares one real parent).
+/// U1c: when the parent lives in a different (ancestor) pid namespace it
+/// is invisible — the namespace init reports 0, like Linux.
 pub fn sys_getppid(_args: SyscallArgs) -> i64 {
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is a valid task; group_leader_ptr() heals NULL.
         unsafe {
             let leader = (*current).group_leader_ptr();
-            (*leader).ppid() as i64
+            let ppid = (*leader).ppid();
+            if ppid == 0 {
+                return 0;
+            }
+            match crate::process::find_task_by_pid(ppid) {
+                Some(p) => {
+                    if crate::process::ns::task_same_pid_ns(&*current, p) {
+                        p.ns_pid_local() as i64
+                    } else {
+                        // Parent in another namespace: invisible from here.
+                        // Only the ns init legitimately sees this.
+                        0
+                    }
+                }
+                None => 0,
+            }
         }
     } else {
         0
@@ -750,11 +792,17 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // pid > 0: process-directed send — spread over the target's thread group
+    // pid > 0: process-directed send — spread over the target's thread group.
+    // U1c pid-namespace translation: the target pid is interpreted in the
+    // CALLER's pid namespace (init ns: identity).
+    let global_pid = match crate::process::ns::resolve_vpid(pid as u32) {
+        Some(g) => g,
+        None => return -(errno::ESRCH as i64),
+    };
     // SAFETY: find_task_by_pid returns a valid pointer when non-null; we check
     // null before dereferencing and verify permissions before sending signal.
     unsafe {
-        let target = crate::sched::find_task_by_pid(pid as u32);
+        let target = crate::sched::find_task_by_pid(global_pid);
         if target.is_null() {
             return -(errno::ESRCH as i64);
         }
@@ -864,9 +912,11 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
             a
         },
         nodename: {
+            // U1c: nodename comes from the caller's UTS namespace.
             let mut a = [0u8; 65];
-            let s = b"rux\0";
-            a[..s.len()].copy_from_slice(s);
+            let hn = crate::process::ns::current_uts_ns().get_hostname();
+            let n = hn.len().min(64);
+            a[..n].copy_from_slice(&hn[..n]);
             a
         },
         release: {
@@ -888,8 +938,11 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
             a
         },
         domainname: {
+            // U1c: domainname comes from the caller's UTS namespace.
             let mut a = [0u8; 65];
-            a[0] = 0;
+            let dn = crate::process::ns::current_uts_ns().get_domainname();
+            let n = dn.len().min(64);
+            a[..n].copy_from_slice(&dn[..n]);
             a
         },
     };
@@ -1803,6 +1856,16 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                 }
             }
         }
+        21 => {
+            // PR_GET_SECCOMP (U1c): current seccomp mode.
+            // SAFETY: current is a valid task pointer.
+            unsafe { (*current).seccomp_mode() as i64 }
+        }
+        22 => {
+            // PR_SET_SECCOMP (U1c): arg2 = mode (1 strict / 2 filter with
+            // arg3 = struct sock_fprog *).
+            prctl_set_seccomp(arg2, arg3)
+        }
         _ => -(errno::EINVAL as i64),
     }
 }
@@ -2431,9 +2494,424 @@ pub fn sys_perf_event_open(_args: SyscallArgs) -> i64 {
     -(errno::ENOSYS as i64)
 }
 
-/// sys_seccomp - Operate on seccomp state
-pub fn sys_seccomp(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+// ============================================================================
+// seccomp (U1c)
+// ============================================================================
+
+/// Seccomp modes (uapi/linux/seccomp.h).
+pub const SECCOMP_MODE_DISABLED: u32 = 0;
+pub const SECCOMP_MODE_STRICT: u32 = 1;
+pub const SECCOMP_MODE_FILTER: u32 = 2;
+
+/// seccomp(2) operations.
+const SECCOMP_SET_MODE_STRICT: u32 = 0;
+const SECCOMP_SET_MODE_FILTER: u32 = 1;
+const SECCOMP_GET_ACTION_AVAIL: u32 = 2;
+const SECCOMP_GET_NOTIF_SIZES: u32 = 3;
+
+/// SECCOMP_FILTER_FLAG_* (accepted and ignored except TSYNC semantics).
+#[allow(dead_code)]
+const SECCOMP_FILTER_FLAG_TSYNC: u32 = 1;
+#[allow(dead_code)]
+const SECCOMP_FILTER_FLAG_LOG: u32 = 2;
+#[allow(dead_code)]
+const SECCOMP_FILTER_FLAG_SPEC_ALLOW: u32 = 4;
+#[allow(dead_code)]
+const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 8;
+#[allow(dead_code)]
+const SECCOMP_FILTER_FLAG_TSYNC_ESRCH: u32 = 16;
+
+/// SECCOMP_RET_* action values.
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+#[allow(dead_code)]
+const SECCOMP_RET_KILL_THREAD: u32 = 0x0000_0000;
+const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+#[allow(dead_code)]
+const SECCOMP_RET_TRACE: u32 = 0x7ff0_0000;
+#[allow(dead_code)]
+const SECCOMP_RET_LOG: u32 = 0x7ffc_0000;
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+
+/// AUDIT_ARCH_RISCV64: __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE | EM_RISCV(243).
+const AUDIT_ARCH_RISCV64: u32 = 0x8000_0000 | 0x4000_0000 | 243;
+
+/// Classic-BPF instruction classes/ops (uapi/linux/filter.h subset).
+const BPF_LD: u16 = 0x00;
+const BPF_W: u16 = 0x00;
+#[allow(dead_code)]
+const BPF_H: u16 = 0x08;
+#[allow(dead_code)]
+const BPF_B: u16 = 0x10;
+const BPF_IMM: u16 = 0x00;
+const BPF_ABS: u16 = 0x20;
+const BPF_JMP: u16 = 0x05;
+const BPF_JEQ: u16 = 0x10;
+const BPF_JGT: u16 = 0x20;
+const BPF_JGE: u16 = 0x30;
+const BPF_JSET: u16 = 0x40;
+const BPF_RET: u16 = 0x06;
+const BPF_K: u16 = 0x00;
+
+/// BPF_MAXINSNS.
+const BPF_MAXINSNS: usize = 4096;
+
+/// seccomp_data size: nr + arch + ip + 6 args = 64 bytes.
+const SECCOMP_DATA_SIZE: u32 = 4 + 4 + 8 + 6 * 8;
+
+/// User sock_fprog layout (riscv64): { u16 len; pad; sock_filter *filter; }.
+#[repr(C)]
+struct SockFprogUser {
+    len: u16,
+    _pad: u16,
+    _pad2: u32,
+    filter: *const crate::process::task::SockFilter,
+}
+
+/// sys_seccomp - Operate on seccomp state (NR 277, U1c)
+///
+/// seccomp(operation, flags, args):
+/// - SECCOMP_SET_MODE_STRICT(0): switch to STRICT mode (read/write/exit/
+///   exit_group/rt_sigreturn only; anything else kills the task).
+/// - SECCOMP_SET_MODE_FILTER(1): load the classic-BPF program pointed to by
+///   args (struct sock_fprog) and switch to FILTER mode.
+/// - SECCOMP_GET_ACTION_AVAIL(2) / GET_NOTIF_SIZES(3): accepted minimal.
+pub fn sys_seccomp(args: SyscallArgs) -> i64 {
+    use crate::arch::riscv64::uaccess::copy_from_user;
+
+    let operation = args[0] as u32;
+    let flags = args[1] as u32;
+    let uargs = args[2] as usize;
+
+    match operation {
+        SECCOMP_SET_MODE_STRICT => {
+            if flags != 0 || uargs != 0 {
+                return -(errno::EINVAL as i64);
+            }
+            match seccomp_set_strict() {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
+        }
+        SECCOMP_SET_MODE_FILTER => {
+            // Only the benign flag bits are accepted (TSYNC has no thread
+            // scope here; NEW_LISTENER has no notification support).
+            if flags & !(SECCOMP_FILTER_FLAG_TSYNC
+                | SECCOMP_FILTER_FLAG_LOG
+                | SECCOMP_FILTER_FLAG_SPEC_ALLOW
+                | SECCOMP_FILTER_FLAG_TSYNC_ESRCH)
+                != 0
+            {
+                return -(errno::EINVAL as i64);
+            }
+            if uargs == 0 {
+                return -(errno::EFAULT as i64);
+            }
+
+            // Copy the sock_fprog header.
+            let mut fprog = [0u8; 16];
+            // SAFETY: uargs validated non-zero; copy_from_user uses the
+            // exception-table path and fails cleanly on bad pointers.
+            unsafe {
+                if copy_from_user(fprog.as_mut_ptr(), uargs as *const u8, 16) != 0 {
+                    return -(errno::EFAULT as i64);
+                }
+            }
+            let prog: SockFprogUser = unsafe { core::ptr::read_unaligned(fprog.as_ptr() as *const SockFprogUser) };
+            if prog.len == 0 || prog.len as usize > BPF_MAXINSNS {
+                return -(errno::EINVAL as i64);
+            }
+            if prog.filter.is_null() {
+                return -(errno::EFAULT as i64);
+            }
+
+            // Copy the filter program.
+            let count = prog.len as usize;
+            let mut filter =
+                alloc::vec::Vec::<crate::process::task::SockFilter>::with_capacity(count);
+            let mut raw = alloc::vec![0u8; count * 8];
+            // SAFETY: prog.filter is a user pointer validated non-null and
+            // the length is bounded by BPF_MAXINSNS; copy_from_user uses
+            // the exception-table path and fails cleanly on bad pointers.
+            unsafe {
+                if copy_from_user(raw.as_mut_ptr(), prog.filter as *const u8, count * 8) != 0 {
+                    return -(errno::EFAULT as i64);
+                }
+            }
+            for chunk in raw.chunks_exact(8) {
+                filter.push(crate::process::task::SockFilter {
+                    code: u16::from_ne_bytes([chunk[0], chunk[1]]),
+                    jt: chunk[2],
+                    jf: chunk[3],
+                    k: u32::from_ne_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
+                });
+            }
+
+            match seccomp_set_filter(filter) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
+        }
+        SECCOMP_GET_ACTION_AVAIL => {
+            // args[0] holds the action pointer in Linux; we accept the
+            // known actions.
+            let mut val = [0u8; 4];
+            if uargs == 0 {
+                return -(errno::EFAULT as i64);
+            }
+            // SAFETY: validated non-null; exception-table copy.
+            unsafe {
+                if copy_from_user(val.as_mut_ptr(), uargs as *const u8, 4) != 0 {
+                    return -(errno::EFAULT as i64);
+                }
+            }
+            let action = u32::from_ne_bytes(val);
+            match action {
+                SECCOMP_RET_KILL_PROCESS
+                | SECCOMP_RET_ERRNO
+                | SECCOMP_RET_LOG
+                | SECCOMP_RET_ALLOW => 0,
+                _ => -(errno::EOPNOTSUPP as i64),
+            }
+        }
+        SECCOMP_GET_NOTIF_SIZES => {
+            // struct seccomp_notif_sizes { u16 notif, id, pidfd; } = 0,0,0.
+            if uargs == 0 {
+                return -(errno::EFAULT as i64);
+            }
+            // SAFETY: validated non-null; exception-table zero-write.
+            unsafe {
+                let zeros = [0u8; 6];
+                if crate::arch::riscv64::uaccess::copy_to_user(uargs as *mut u8, zeros.as_ptr(), 6) != 0 {
+                    return -(errno::EFAULT as i64);
+                }
+            }
+            0
+        }
+        _ => -(errno::EINVAL as i64),
+    }
+}
+
+/// Enter STRICT mode. Cannot be entered once FILTER mode is active
+/// (Linux: EPERM — filters cannot be detached).
+fn seccomp_set_strict() -> Result<(), i32> {
+    let Some(task) = crate::sched::current() else {
+        return Err(-(errno::ESRCH as i32));
+    };
+    if task.seccomp_mode() == SECCOMP_MODE_FILTER {
+        return Err(-(errno::EPERM as i32));
+    }
+    task.set_seccomp_mode(SECCOMP_MODE_STRICT);
+    Ok(())
+}
+
+/// Validate and install a BPF filter program, entering FILTER mode.
+/// Supported instruction subset: BPF_LD|BPF_W|BPF_ABS (load seccomp_data
+/// word), BPF_LD|BPF_W|BPF_IMM (A = k), BPF_JMP|BPF_{JEQ,JGT,JGE,JSET}|BPF_K
+/// (compare), BPF_RET|BPF_K (return action). Anything else → EINVAL.
+fn seccomp_set_filter(filter: alloc::vec::Vec<crate::process::task::SockFilter>) -> Result<(), i32> {
+    let Some(task) = crate::sched::current() else {
+        return Err(-(errno::ESRCH as i32));
+    };
+
+    // Walk once for validation: opcodes supported, jump targets in range.
+    for (pc, ins) in filter.iter().enumerate() {
+        let class = ins.code & 0x07;
+        match class {
+            x if x == BPF_LD => {
+                let size = ins.code & 0x18;
+                let mode = ins.code & 0xe0;
+                if size != BPF_W || (mode != BPF_ABS && mode != BPF_IMM) {
+                    return Err(-(errno::EINVAL as i32));
+                }
+            }
+            x if x == BPF_JMP => {
+                let op = ins.code & 0xf0;
+                let src = ins.code & 0x08;
+                if src != BPF_K
+                    || (op != BPF_JEQ && op != BPF_JGT && op != BPF_JGE && op != BPF_JSET)
+                {
+                    return Err(-(errno::EINVAL as i32));
+                }
+                // A nonzero offset must land strictly inside the program.
+                let end = filter.len() as u32;
+                let base = pc as u32;
+                if ins.jt != 0 && base + ins.jt as u32 + 1 >= end {
+                    return Err(-(errno::EINVAL as i32));
+                }
+                if ins.jf != 0 && base + ins.jf as u32 + 1 >= end {
+                    return Err(-(errno::EINVAL as i32));
+                }
+            }
+            x if x == BPF_RET => {
+                if ins.code & 0x18 != BPF_K {
+                    return Err(-(errno::EINVAL as i32));
+                }
+            }
+            _ => return Err(-(errno::EINVAL as i32)),
+        }
+    }
+    // A program must return eventually — require at least one RET.
+    if !filter.iter().any(|i| i.code & 0x07 == BPF_RET) {
+        return Err(-(errno::EINVAL as i32));
+    }
+
+    // Single-filter model: the new program replaces the old one (Linux
+    // stacks multiple programs — recorded divergence).
+    *task.seccomp_filter.lock() = Some(filter);
+
+    task.set_seccomp_mode(SECCOMP_MODE_FILTER);
+    Ok(())
+}
+
+/// Syscalls allowed in STRICT mode (riscv64 numbers).
+const STRICT_ALLOWED: [u64; 5] = [
+    63,  // read
+    64,  // write
+    93,  // exit
+    94,  // exit_group
+    139, // rt_sigreturn
+];
+
+/// seccomp gate result: None = allow, Some(rv) = block with syscall return
+/// value rv. Kill actions queue SIGKILL on the current task (terminated on
+/// return to user) and report -ENOSYS — the dying task never observes it.
+pub fn seccomp_syscall_gate(nr: u64, regs: &crate::arch::riscv64::pt_regs::PtRegs) -> Option<i64> {
+    let task = crate::sched::current()?;
+    match task.seccomp_mode() {
+        SECCOMP_MODE_STRICT => {
+            if STRICT_ALLOWED.contains(&nr) {
+                None
+            } else {
+                crate::pr_warn!(
+                    "seccomp: STRICT violation pid={} nr={} — SIGKILL",
+                    task.pid(),
+                    nr
+                );
+                task.seccomp_kill();
+                Some(-(errno::ENOSYS as i64))
+            }
+        }
+        SECCOMP_MODE_FILTER => {
+            let guard = task.seccomp_filter.lock();
+            let Some(prog) = guard.as_ref() else {
+                return None; // no program loaded — treat as allow
+            };
+            let action = seccomp_run(prog, nr, regs);
+            drop(guard);
+            match action & 0xffff_0000 {
+                SECCOMP_RET_ALLOW => None,
+                SECCOMP_RET_ERRNO => Some(-((action & 0xffff) as i64)),
+                SECCOMP_RET_KILL_PROCESS | _ => {
+                    crate::pr_warn!(
+                        "seccomp: filter kill pid={} nr={} action={:#x}",
+                        task.pid(),
+                        nr,
+                        action
+                    );
+                    task.seccomp_kill();
+                    Some(-(errno::ENOSYS as i64))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Classic-BPF interpreter over the seccomp_data pseudo-packet:
+///   offset  0: nr (u32)           offset  4: arch (u32)
+///   offset  8: instruction_pointer offset 16: args[0..6] (u64 each)
+/// Returns the RET value (default KILL on malformed access — Linux kills
+/// the task for out-of-bounds loads).
+fn seccomp_run(
+    prog: &[crate::process::task::SockFilter],
+    nr: u64,
+    regs: &crate::arch::riscv64::pt_regs::PtRegs,
+) -> u32 {
+    let mut a: u32 = 0;
+    let mut pc: usize = 0;
+
+    // seccomp_data as u32 words (little-endian layout).
+    let mut data = [0u32; 16];
+    data[0] = nr as u32;
+    data[1] = AUDIT_ARCH_RISCV64;
+    data[2] = regs.epc as u32;
+    data[3] = (regs.epc >> 32) as u32;
+    let arg_words = [
+        regs.orig_a0, regs.a1, regs.a2, regs.a3, regs.a4, regs.a5,
+    ];
+    for (i, w) in arg_words.iter().enumerate() {
+        data[4 + i * 2] = *w as u32;
+        data[5 + i * 2] = (*w >> 32) as u32;
+    }
+
+    let load_word = |off: u32| -> Option<u32> {
+        if off % 4 != 0 || off + 4 > SECCOMP_DATA_SIZE {
+            return None;
+        }
+        Some(data[(off / 4) as usize])
+    };
+
+    while pc < prog.len() {
+        let ins = &prog[pc];
+        let class = ins.code & 0x07;
+        match class {
+            x if x == BPF_LD => {
+                let mode = ins.code & 0xe0;
+                if mode == BPF_IMM {
+                    a = ins.k;
+                } else if mode == BPF_ABS {
+                    match load_word(ins.k) {
+                        Some(v) => a = v,
+                        // Out-of-bounds load → kill (RET 0).
+                        None => return 0,
+                    }
+                } else {
+                    return 0;
+                }
+                pc += 1;
+            }
+            x if x == BPF_JMP => {
+                let op = ins.code & 0xf0;
+                let cond = match op {
+                    o if o == BPF_JEQ => a == ins.k,
+                    o if o == BPF_JGT => a > ins.k,
+                    o if o == BPF_JGE => a >= ins.k,
+                    o if o == BPF_JSET => a & ins.k != 0,
+                    _ => return 0,
+                };
+                pc += if cond { ins.jt as usize } else { ins.jf as usize } + 1;
+            }
+            x if x == BPF_RET => {
+                return ins.k;
+            }
+            _ => return 0,
+        }
+    }
+    // Fell off the end: kill.
+    0
+}
+
+/// prctl PR_SET_SECCOMP(22) / PR_GET_SECCOMP(21) helpers (U1c).
+fn prctl_set_seccomp(mode: u64, prog_ptr: u64) -> i64 {
+    match mode as u32 {
+        SECCOMP_MODE_STRICT => match seccomp_set_strict() {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        },
+        SECCOMP_MODE_FILTER => {
+            // PR_SET_SECCOMP(2, prog): prog points at sock_fprog.
+            let args: SyscallArgs = [
+                SECCOMP_SET_MODE_FILTER as u64,
+                0,
+                prog_ptr,
+                0,
+                0,
+                0,
+            ];
+            sys_seccomp(args)
+        }
+        _ => -(errno::EINVAL as i64),
+    }
 }
 
 /// sys_bpf - BPF system call
@@ -2645,19 +3123,181 @@ pub fn sys_personality(args: SyscallArgs) -> i64 {
     0
 }
 
-/// sys_pivot_root - Change root filesystem (NR 41)
-pub fn sys_pivot_root(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+/// sys_pivot_root - Change root filesystem (NR 41, U1c)
+///
+/// pivot_root(new_root, put_old):
+/// - new_root must be a directory AND a mountpoint of the current mount
+///   namespace (a tmpfs/procfs/... mounted there via mount(2));
+/// - put_old must be a directory underneath new_root and different from it;
+/// - both must be on the same filesystem (minimal: both resolvable);
+/// - new_root must not be "/".
+///
+/// Minimal implementation (recorded divergence from Linux): the VFS dentry
+/// tree is global and shared, so instead of moving the root mount object
+/// the kernel (a) reparents the fs_struct root prefix to new_root — every
+/// subsequent absolute lookup resolves inside the new root, exactly like
+/// the post-pivot view, (b) records the OLD root as a mount-table row at
+/// put_old (so /proc/mounts shows the old root there and umount(put_old)
+/// can drop it), and (c) rewrites the remaining mount-table rows relative
+/// to the new root, and (d) resets the cwd to the new root when it now
+/// lies outside the jail.
+pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
+    use crate::arch::riscv64::uaccess::strncpy_from_user;
+
+    // CAP_SYS_ADMIN required (Linux).
+    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+        return -(errno::EPERM as i64);
+    }
+
+    let new_root_ptr = args[0] as *const u8;
+    let put_old_ptr = args[1] as *const u8;
+    if new_root_ptr.is_null() || put_old_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+
+    let mut nr_buf = [0u8; 256];
+    let mut po_buf = [0u8; 256];
+    let new_root = match strncpy_from_user(new_root_ptr, 255, &mut nr_buf) {
+        Ok(s) => core::str::from_utf8(s).unwrap_or(""),
+        Err(_) => return -(errno::EFAULT as i64),
+    };
+    let put_old = match strncpy_from_user(put_old_ptr, 255, &mut po_buf) {
+        Ok(s) => core::str::from_utf8(s).unwrap_or(""),
+        Err(_) => return -(errno::EFAULT as i64),
+    };
+
+    let new_root = crate::fs::path::path_normalize(new_root);
+    let put_old = crate::fs::path::path_normalize(put_old);
+    if !new_root.starts_with('/') || !put_old.starts_with('/') {
+        return -(errno::EINVAL as i64);
+    }
+    if new_root == "/" {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Both must exist and be directories.
+    let mut st = crate::fs::Stat::new();
+    if let Err(e) = crate::fs::vfs::stat_file_by_path(&new_root, &mut st) {
+        return e as i64;
+    }
+    if st.st_mode & 0o170000 != 0o040000 {
+        return -(errno::ENOTDIR as i64);
+    }
+    let mut st2 = crate::fs::Stat::new();
+    if let Err(e) = crate::fs::vfs::stat_file_by_path(&put_old, &mut st2) {
+        return e as i64;
+    }
+    if st2.st_mode & 0o170000 != 0o040000 {
+        return -(errno::ENOTDIR as i64);
+    }
+
+    // put_old must be strictly underneath new_root.
+    let under = if put_old == new_root {
+        false
+    } else {
+        put_old.starts_with(&if new_root == "/" {
+            alloc::string::String::from("/")
+        } else {
+            alloc::format!("{}/", new_root)
+        })
+    };
+    if !under {
+        return -(errno::EINVAL as i64);
+    }
+
+    // new_root must be a mountpoint of the current mount namespace.
+    if !crate::process::ns::ns_is_mountpoint(&new_root) {
+        return -(errno::EINVAL as i64);
+    }
+
+    let Some(current) = crate::sched::current() else {
+        return -(errno::ESRCH as i64);
+    };
+
+    // (a) jail: fs root prefix → new_root (chroot-style, ".." clamped).
+    current.set_root(new_root.as_bytes());
+    // (d) cwd: move into the new root when the old cwd fell outside it.
+    let cwd = current.get_cwd();
+    let cwd_str = core::str::from_utf8(&cwd).unwrap_or("/");
+    let cwd_norm = crate::fs::path::path_normalize(cwd_str);
+    let inside = cwd_norm == "/" || cwd_norm.starts_with(&new_root);
+    if !inside {
+        current.set_cwd(b"/");
+    }
+
+    // (b) + (c) mount-namespace bookkeeping: the old root becomes a row at
+    // put_old (new-root-relative), other rows are rebased onto new_root.
+    {
+        use crate::process::ns::MountEntry;
+        let ns = crate::process::ns::current_mnt_ns();
+        let mut table = ns.mounts.lock();
+        // Old root row ("/" or the previous root device) moves to put_old.
+        let old_root_entry = table
+            .iter()
+            .find(|e| e.mount_point == "/")
+            .cloned()
+            .unwrap_or(MountEntry {
+                device: alloc::string::String::from("rootfs"),
+                mount_point: alloc::string::String::from("/"),
+                fs_type: alloc::string::String::from("rootfs"),
+                flags: alloc::string::String::from("rw"),
+            });
+        let rel_put_old = put_old
+            .strip_prefix(&new_root)
+            .unwrap_or("")
+            .trim_start_matches('/');
+        table.retain(|e| e.mount_point != "/");
+        // Rebase rows that live under new_root.
+        let prefix = if new_root == "/" {
+            alloc::string::String::from("/")
+        } else {
+            new_root.clone()
+        };
+        for e in table.iter_mut() {
+            if e.mount_point.starts_with(&prefix) && e.mount_point.len() >= prefix.len() {
+                let rel = e.mount_point[prefix.len()..].trim_start_matches('/');
+                e.mount_point = if rel.is_empty() {
+                    alloc::string::String::from("/")
+                } else {
+                    alloc::format!("/{}", rel)
+                };
+            }
+        }
+        // The old root at put_old (relative to the NEW root).
+        table.push(MountEntry {
+            device: old_root_entry.device,
+            mount_point: if rel_put_old.is_empty() {
+                alloc::string::String::from("/oldroot")
+            } else {
+                alloc::format!("/{}", rel_put_old)
+            },
+            fs_type: old_root_entry.fs_type,
+            flags: old_root_entry.flags,
+        });
+        // Update the namespace root anchor.
+        *ns.root.lock() = crate::fs::vfs::get_vfs_root();
+    }
+
+    crate::pr_info!("pivot_root: new root '{}' (old root at '{}')", new_root, put_old);
+    0
 }
 
-/// sys_setns - reassociate thread with a namespace
+/// sys_setns - reassociate thread with a namespace (U1c)
 ///
 /// # Arguments
 /// - args[0]: fd - namespace file descriptor
-/// - args[1]: nstype - namespace type
-pub fn sys_setns(_args: SyscallArgs) -> i64 {
-    // TODO: implement namespace support
-    -(errno::ENOSYS as i64)
+/// - args[1]: nstype - namespace type (0 = any; CLONE_NEW* otherwise)
+///
+/// The fd comes from opening /proc/[pid]/ns/{uts,mnt,pid,net,ipc,user}.
+/// PID ns fds only change where future children are created.
+pub fn sys_setns(args: SyscallArgs) -> i64 {
+    let fd = args[0] as i32;
+    let nstype = args[1];
+
+    match crate::process::ns::setns(fd, nstype) {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_getrlimit - Get resource limits (deprecated, use prlimit64)
@@ -2789,7 +3429,7 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     0
 }
 
-/// sys_sethostname - Set hostname
+/// sys_sethostname - Set hostname (U1c: writes the CALLER's UTS namespace)
 ///
 /// # Arguments
 /// - args[0]: name - pointer to hostname string
@@ -2803,18 +3443,26 @@ pub fn sys_sethostname(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    if name_ptr.is_null() || len == 0 || len > 65 {
+    if name_ptr.is_null() || len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);
     }
 
-    // TODO: implement hostname storage
+    let mut buf = [0u8; 64];
+    // SAFETY: name_ptr validated with access_ok(len); exception-table copy.
+    unsafe {
+        if crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), name_ptr, len) != 0 {
+            return -(errno::EFAULT as i64);
+        }
+    }
+    // Only the current UTS namespace is affected (isolation contract).
+    crate::process::ns::current_uts_ns().set_hostname(&buf[..len]);
     0
 }
 
-/// sys_setdomainname - Set NIS domain name
+/// sys_setdomainname - Set NIS domain name (U1c: caller's UTS namespace)
 ///
 /// # Arguments
 /// - args[0]: name - pointer to domain name string
@@ -2828,14 +3476,21 @@ pub fn sys_setdomainname(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    if name_ptr.is_null() || len == 0 || len > 65 {
+    if name_ptr.is_null() || len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);
     }
 
-    // TODO: implement domain name storage
+    let mut buf = [0u8; 64];
+    // SAFETY: name_ptr validated with access_ok(len); exception-table copy.
+    unsafe {
+        if crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), name_ptr, len) != 0 {
+            return -(errno::EFAULT as i64);
+        }
+    }
+    crate::process::ns::current_uts_ns().set_domainname(&buf[..len]);
     0
 }
 
@@ -2999,13 +3654,45 @@ fn sleep_one_tick() {
     }
 }
 
-/// sys_unshare - Create new namespace
+/// sys_unshare - Create new namespace (U1c)
 ///
 /// # Arguments
 /// - args[0]: flags - CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, etc.
-pub fn sys_unshare(_args: SyscallArgs) -> i64 {
-    // TODO: implement namespace support
-    -(errno::ENOSYS as i64)
+///
+/// Namespace semantics (the only unshare domains implemented):
+/// - CLONE_NEWUTS/NEWNS/NEWNET/NEWIPC/NEWUSER: the caller itself moves into
+///   a fresh namespace (mount table copy-on-write, UTS names copied).
+/// - CLONE_NEWPID: only future children are created in the new pid
+///   namespace (Linux semantics — the caller keeps its current pids).
+/// - CLONE_NEWCGROUP: accepted, no-op (no cgroup subsystem).
+///
+/// CAP_SYS_ADMIN is required unless CLONE_NEWUSER is the only ns bit.
+pub fn sys_unshare(args: SyscallArgs) -> i64 {
+    let flags = args[0];
+
+    // Only CLONE_* bits are meaningful; unknown bits (outside the CSIGNAL
+    // byte) are EINVAL like clone.
+    const UNSHARE_KNOWN: u64 = crate::process::ns::CLONE_NEWMASK
+        | 0x00000200 /* CLONE_FS */
+        | 0x00000400 /* CLONE_FILES */
+        | 0x00010000 /* CLONE_THREAD (refused below, Linux EINVAL) */
+        | 0x00400000 /* CLONE_DETACHED legacy */
+        | 0x00800000 /* CLONE_UNTRACED legacy */;
+    if flags & !UNSHARE_KNOWN & !0xff != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if flags & 0x00010000 != 0 {
+        // CLONE_THREAD cannot be unshared.
+        return -(errno::EINVAL as i64);
+    }
+
+    // CLONE_FS/CLONE_FILES unsharing is not implemented (the fs struct and
+    // fd table are already per-fork); accept as a no-op.
+
+    match crate::process::ns::unshare_namespaces(flags) {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_syncfs - Sync filesystem of a file descriptor

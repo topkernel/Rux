@@ -136,6 +136,16 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         }
     }
 
+    // /proc/[pid]/ns/<kind> — namespace magic links (U1c): opening one
+    // yields a namespace fd usable by setns(2). Handled before the generic
+    // procfs read_file shortcut (which would follow the "uts:[N]" target).
+    // (Global-namespace shortcut, non-chrooted tasks only.)
+    if !crate::fs::vfs::chrooted() && (flags & O_CREAT) == 0 {
+        if let Some(rv) = crate::process::ns::try_open_ns_path(&full_path, flags) {
+            return rv;
+        }
+    }
+
     // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
     // because VFS inode lookup doesn't support PID subdirectories.
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
@@ -632,6 +642,24 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     }
     let full_path = resolve_proc_readlink_path(dirfd, &pathname);
 
+    // /proc/[pid]/ns/<kind> — namespace magic links (U1c): readlink returns
+    // "<kind>:[<inum>]" exactly like Linux. (Global-namespace shortcut,
+    // non-chrooted tasks only.)
+    if !crate::fs::vfs::chrooted() {
+        let ns_full_path = resolve_proc_readlink_path(dirfd, &pathname);
+        if let Some(target) = handle_proc_ns_readlink(&ns_full_path) {
+            // Linux truncates to bufsiz and returns the truncated length.
+            let copy_len = target.len().min(bufsize);
+            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
+            unsafe {
+                if crate::arch::riscv64::uaccess::copy_to_user(buf, target.as_ptr(), copy_len) != 0 {
+                    return -(errno::EFAULT as i64);
+                }
+            }
+            return copy_len as i64;
+        }
+    }
+
     // Generic path: look up the symlink itself (NOFOLLOW) and read its
     // target through the filesystem's readlink op.
     match crate::fs::vfs::path_lookup(&full_path, crate::fs::vfs::LOOKUP_NOFOLLOW) {
@@ -698,6 +726,23 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
     }
 
     alloc::string::String::from(pathname)
+}
+
+/// Handle /proc/[pid]/ns/<kind> readlink (U1c), returns the magic-link
+/// target "<kind>:[<inum>]" or None when the path is not an ns link.
+fn handle_proc_ns_readlink(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    let path = path.trim_start_matches('/');
+    let parts: alloc::vec::Vec<&str> = path.split('/').collect();
+    if parts.len() != 4 || parts[0] != "proc" || parts[2] != "ns" {
+        return None;
+    }
+    let pid: u32 = if parts[1] == "self" {
+        crate::process::current_pid()
+    } else {
+        parts[1].parse().ok()?
+    };
+    let kind = crate::process::ns::NsKind::from_name(parts[3].as_bytes())?;
+    Some(crate::process::ns::ns_link_target(pid, kind))
 }
 
 /// Handle /proc/[pid]/fd/N readlink, returns symlink target or None
@@ -976,6 +1021,13 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         Ok(s) => s,
         Err(e) => return e as i64,
     };
+
+    // U1c: drop the mount row from the CALLER's mount namespace (the
+    // dentry-level unmount below is global — recorded divergence).
+    {
+        let norm = crate::fs::path::path_normalize(target);
+        crate::process::ns::ns_unregister_mount(&norm);
+    }
 
     match crate::fs::vfs::vfs_umount(target) {
         Ok(()) => 0,

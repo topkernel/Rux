@@ -69,8 +69,12 @@ const PROCFS_MAGIC: u32 = 0x9fa0;
 ///   pid * 10000 + 100 + kind       — per-PID regular files / symlinks
 ///   pid * 10000 + FD_DIR_INO_OFF   — the "fd" subdirectory
 ///   pid * 10000 + FD_LINK_INO_OFF + fd — the "fd/<N>" symlinks
+///   pid * 10000 + NS_DIR_INO_OFF   — the "ns" subdirectory (U1c)
+///   pid * 10000 + NS_LINK_INO_OFF + kind_idx — the "ns/<kind>" links (U1c)
 pub(crate) const FD_DIR_INO_OFF: u64 = 200;
 pub(crate) const FD_LINK_INO_OFF: u64 = 300;
+pub(crate) const NS_DIR_INO_OFF: u64 = 400;
+pub(crate) const NS_LINK_INO_OFF: u64 = 410;
 
 /// Kind of file inside a /proc/[pid] directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -899,6 +903,10 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                 if name == b"fd" {
                     return Ok(pid_val * 10000 + FD_DIR_INO_OFF);
                 }
+                // /proc/[pid]/ns — the namespace magic-link directory (U1c).
+                if name == b"ns" {
+                    return Ok(pid_val * 10000 + NS_DIR_INO_OFF);
+                }
                 // /proc/[pid]/fd/<N> — per-descriptor symlinks.
                 if name.len() <= 3
                     && !name.is_empty()
@@ -988,6 +996,30 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
             stat.st_ctime = 0;
             return 0;
         }
+        // Synthetic ns magic link (/proc/[pid]/ns/<kind>, U1c).
+        if pid::is_valid_pid(pid_val)
+            && rem >= NS_LINK_INO_OFF
+            && rem < NS_LINK_INO_OFF + 6
+        {
+            let kind = crate::process::ns::NsKind::from_index(rem - NS_LINK_INO_OFF);
+            let size = match kind {
+                Some(k) => crate::process::ns::ns_link_target(pid_val as u32, k).len() as i64,
+                None => 0,
+            };
+            stat.st_ino = inode.ino;
+            stat.st_mode = InodeMode::S_IFLNK | 0o777;
+            stat.st_size = size;
+            stat.st_nlink = 1;
+            stat.st_uid = 0;
+            stat.st_gid = 0;
+            stat.st_rdev = 0;
+            stat.st_blksize = 4096;
+            stat.st_blocks = (stat.st_size + 511) / 512;
+            stat.st_atime = 0;
+            stat.st_mtime = 0;
+            stat.st_ctime = 0;
+            return 0;
+        }
     }
 
     let node_ptr = match inode.private_data {
@@ -1047,6 +1079,16 @@ unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
             buf[..len].copy_from_slice(&target[..len]);
             return len as isize;
         }
+        // Synthetic ns magic link (/proc/[pid]/ns/<kind>, U1c): readlink
+        // yields "<kind>:[<inum>]".
+        if pid::is_valid_pid(pid_val) && rem >= NS_LINK_INO_OFF && rem < NS_LINK_INO_OFF + 6 {
+            if let Some(kind) = crate::process::ns::NsKind::from_index(rem - NS_LINK_INO_OFF) {
+                let target = crate::process::ns::ns_link_target(pid_val as u32, kind);
+                let len = target.len().min(buf.len());
+                buf[..len].copy_from_slice(&target[..len]);
+                return len as isize;
+            }
+        }
         return errno::Errno::InvalidArgument.as_neg_i32() as isize;
     }
 
@@ -1090,6 +1132,16 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
                     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
                     inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
                     inode.ops = Some(&crate::fs::vfs::PROCFS_DIR_OPS);
+                    inode.private_data = Some(pid_val as usize as *mut u8);
+                    return Ok(Arc::new(inode));
+                }
+                // /proc/[pid]/ns directory (U1c): synthetic directory whose
+                // children are the six namespace magic links; lookups and
+                // readdir run through PROCFS_NS_DIR_OPS.
+                if name == b"ns" && ino == pid_val * 10000 + NS_DIR_INO_OFF {
+                    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+                    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+                    inode.ops = Some(&PROCFS_NS_DIR_OPS);
                     inode.private_data = Some(pid_val as usize as *mut u8);
                     return Ok(Arc::new(inode));
                 }
@@ -1373,6 +1425,7 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
         (b"exe", file_type::DT_LNK),
         (b"cwd", file_type::DT_LNK),
         (b"fd", file_type::DT_DIR),
+        (b"ns", file_type::DT_DIR),
         (b"oom_score", file_type::DT_REG),
         (b"oom_score_adj", file_type::DT_REG),
     ];
@@ -1456,5 +1509,106 @@ pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
     getattr: Some(procfs_getattr),
     setattr: Some(procfs_setattr), // P1: ATTR_SIZE no-op (O_TRUNC tolerance)
     iget: Some(procfs_iget),
+    destroy_inode: None,
+};
+
+// ============================================================================
+// /proc/[pid]/ns — namespace magic links (U1c)
+// ============================================================================
+
+/// Lookup inside the ns directory: "<kind>" → ns-link ino.
+/// SAFETY: VFS callback contract; private_data stores the PID.
+unsafe fn procfs_ns_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+    let pid_val = match dir.private_data {
+        Some(p) => p as usize as u64,
+        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
+    };
+    match crate::process::ns::NsKind::from_name(name) {
+        Some(kind) => Ok(pid_val * 10000 + NS_LINK_INO_OFF + kind.index()),
+        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+    }
+}
+
+/// Instantiate the ns-link inode: a symlink whose (pid, kind) pair is
+/// encoded in the ino (readlink/getattr dispatch on that range).
+/// SAFETY: VFS callback contract.
+unsafe fn procfs_ns_dir_iget(
+    _parent: &Inode,
+    _name: &[u8],
+    ino: Ino,
+) -> Result<Arc<Inode>, i32> {
+    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+    inode.ops = Some(&PROCFS_INODE_OPS);
+    // private_data None + ino encodes (pid, kind); handled by
+    // procfs_readlink / procfs_getattr.
+    Ok(Arc::new(inode))
+}
+
+/// Readdir of the ns directory: ".", ".." and the six kind links.
+/// SAFETY: VFS callback contract; private_data stores the PID.
+unsafe fn procfs_ns_dir_readdir(
+    inode: &Inode,
+) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
+    use crate::fs::inode::file_type;
+    let pid_val = inode.private_data? as usize as u64;
+    let mut entries = alloc::vec::Vec::new();
+    entries.push(crate::fs::inode::VfsDirEntry {
+        ino: inode.ino,
+        name: alloc::vec![b'.'],
+        file_type: file_type::DT_DIR,
+    });
+    entries.push(crate::fs::inode::VfsDirEntry {
+        ino: 1,
+        name: alloc::vec![b'.', b'.'],
+        file_type: file_type::DT_DIR,
+    });
+    for kind in crate::process::ns::NsKind::ALL {
+        entries.push(crate::fs::inode::VfsDirEntry {
+            ino: pid_val * 10000 + NS_LINK_INO_OFF + kind.index(),
+            name: kind.name().as_bytes().to_vec(),
+            file_type: file_type::DT_LNK,
+        });
+    }
+    Some(entries)
+}
+
+/// Getattr of the ns directory itself.
+/// SAFETY: VFS callback contract.
+unsafe fn procfs_ns_dir_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+    stat.st_ino = inode.ino;
+    stat.st_mode = InodeMode::S_IFDIR | 0o555;
+    stat.st_size = 0;
+    stat.st_nlink = 2;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = 0;
+    stat.st_blksize = 4096;
+    stat.st_blocks = 0;
+    stat.st_atime = 0;
+    stat.st_mtime = 0;
+    stat.st_ctime = 0;
+    0
+}
+
+/// Synthetic INodeOps for the /proc/[pid]/ns directory (U1c).
+static PROCFS_NS_DIR_OPS: INodeOps = INodeOps {
+    lookup: Some(procfs_ns_dir_lookup),
+    create: None,
+    link: None,
+    unlink: None,
+    symlink: None,
+    mkdir: None,
+    rmdir: None,
+    mknod: None,
+    rename: None,
+    readlink: None, // handled on the ns-link inodes (PROCFS_INODE_OPS)
+    get_file_ops: None,
+    readdir: Some(procfs_ns_dir_readdir),
+    open: None,
+    permission: None,
+    getattr: Some(procfs_ns_dir_getattr),
+    setattr: None,
+    iget: Some(procfs_ns_dir_iget),
     destroy_inode: None,
 };

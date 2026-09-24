@@ -336,8 +336,12 @@ impl RtRunQueue {
                     // pick would resume a STALE thread.sp — NEW2 root
                     // cause), except the switching CPU's own prev (fast
                     // path: next == prev early-returns without a restore).
+                    // cgroup v2 (U1b): skip cpu-throttled cgroup chains —
+                    // see the fair-class twin for the unthrottle story.
                     let allowed = unsafe {
-                        (*task).cpu_allowed(cpu_id) && (!(*task).on_cpu() || task == prev)
+                        (*task).cpu_allowed(cpu_id)
+                            && (!(*task).on_cpu() || task == prev)
+                            && !crate::sched::cgroup::task_cgroup_throttled(task)
                     };
 
                     // Save next before potential dequeue

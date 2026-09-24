@@ -38,6 +38,7 @@ pub fn generate_filesystems() -> Vec<u8> {
     content.push_str("nodev\tdevpts\n");
     content.push_str("\text4\n");
     content.push_str("nodev\tsysfs\n");
+    content.push_str("nodev\tcgroup2\n");
     content.push_str("nodev\ttmpfs\n");
 
     content.into_bytes()

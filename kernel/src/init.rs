@@ -116,6 +116,12 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
 
         (*task_ptr).set_parent(core::ptr::null_mut());
 
+        // cgroup v2 (U1b): track PID 1 in the root cgroup so its (and its
+        // children's) membership and memory usage are visible from
+        // /sys/fs/cgroup from the first moment; systemd later moves itself
+        // into /init.scope by writing cgroup.procs.
+        crate::sched::cgroup::attach_init_to_root(task_ptr);
+
         // Create and initialize file descriptor table
         let fdtable = alloc::sync::Arc::new(FdTable::new());
         (*task_ptr).set_fdtable(Some(fdtable));

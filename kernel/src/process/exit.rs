@@ -524,6 +524,13 @@ pub fn do_exit(exit_code: i32) -> ! {
         exit_robust_list(current);
         exit_clear_child_tid(current);
 
+        // ===== cgroup v2 (U1b): leave the cgroup + settle memory =====
+        // Drops cgroup membership (pids.current / cgroup.procs) and
+        // uncharges the task's mmap(2) memory ledger — see
+        // sched::cgroup::cgroup_exit for why the ledger, not total_vm,
+        // is the uncharge unit.
+        crate::sched::cgroup::cgroup_exit(current);
+
         // ===== exit_mm: drop THIS task's mm reference =====
         // Shared-mm teardown rules:
         // - shm detach: only the LAST reference holder (threads must not

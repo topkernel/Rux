@@ -438,6 +438,18 @@ fn handle_syscall(regs: &mut PtRegs) {
     };
     regs.epc = orig_epc + instr_size;
 
+    // U1c seccomp gate: check the syscall against the current task's
+    // seccomp policy BEFORE any dispatch. STRICT mode allows only
+    // read/write/exit/exit_group/rt_sigreturn (anything else queues SIGKILL
+    // — the task terminates on return to user). FILTER mode runs the
+    // classic-BPF program; ERRNO actions replace the return value, KILL
+    // actions queue SIGKILL. Returns Some(rv) when the syscall is blocked
+    // (rv is reported to user), None when dispatch may proceed.
+    if let Some(rv) = crate::syscall::process::seccomp_syscall_gate(syscall_num, regs) {
+        regs.a0 = rv as u64;
+        return;
+    }
+
     // Call syscall handler
     crate::syscall::syscall_handler(regs);
 }

@@ -322,6 +322,16 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                 }
             }
 
+            // cgroup v2 memory controller (U1b): charge the mapping length
+            // to the task's cgroup chain (memory.current semantics —
+            // ancestors see descendant usage). memory.max overrun fails
+            // with ENOMEM, like Linux's memcg charge failure here.
+            // Simplification: virtual mapping length is the charge unit
+            // (an RSS approximation); uncharge happens at munmap/exit.
+            if !crate::sched::cgroup::cgroup_memory_charge(actual_length) {
+                return mmap_error::ENOMEM;
+            }
+
             // Check if address space exists
             match current_task.address_space_mut() {
                 Some(address_space) => {
@@ -406,6 +416,9 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                             mapped_addr.as_usize() as i64
                         },
                         Err(e) => {
+                            // cgroup v2 (U1b): the pre-charge above must be
+                            // returned when the mapping never happened.
+                            crate::sched::cgroup::cgroup_memory_uncharge(actual_length);
                             let err = match e {
                                 crate::mm::pagemap::MapError::OutOfMemory => mmap_error::ENOMEM,
                                 crate::mm::pagemap::MapError::Invalid => mmap_error::EINVAL,
@@ -417,6 +430,9 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                     }
                 }
                 None => {
+                    // cgroup v2 (U1b): no address space → no mapping; the
+                    // pre-charge must go back.
+                    crate::sched::cgroup::cgroup_memory_uncharge(actual_length);
                     mmap_error::ENOMEM
                 }
             }
@@ -462,7 +478,12 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
                 Some(address_space) => {
                     // Call AddressSpace::munmap
                     match address_space.munmap(VirtAddr::new(addr), length) {
-                        Ok(()) => 0,
+                        Ok(()) => {
+                            // cgroup v2 (U1b): give the unmapped length
+                            // back to the cgroup memory charge.
+                            crate::sched::cgroup::cgroup_memory_uncharge(length);
+                            0
+                        }
                         Err(e) => {
                             let err = match e {
                                 crate::mm::pagemap::MapError::Invalid => mmap_error::EINVAL,

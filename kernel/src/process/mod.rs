@@ -20,6 +20,7 @@ pub mod exec;
 pub mod kthread;
 pub mod ptrace;
 pub mod coredump;
+pub mod ns;
 
 pub use task::Task;
 pub use fork::do_fork;

@@ -658,8 +658,14 @@ impl CfsRunQueue {
             // picking one would resume a STALE thread.sp) UNLESS it is the
             // switching CPU's own prev, which re-picks itself only via the
             // next == prev early return (no context restore happens).
+            // cgroup v2 (U1b): skip tasks whose cgroup chain is
+            // cpu-throttled — they stay on the timeline and become
+            // pickable again when the period rolls over (the same
+            // affinity-style skip machinery above).
             let allowed = unsafe {
-                (*task).cpu_allowed(cpu_id) && (!(*task).on_cpu() || task == prev)
+                (*task).cpu_allowed(cpu_id)
+                    && (!(*task).on_cpu() || task == prev)
+                    && !crate::sched::cgroup::task_cgroup_throttled(task)
             };
             if allowed {
                 // Found a match — remove and return it

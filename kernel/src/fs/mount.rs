@@ -16,23 +16,32 @@ use alloc::string::String;
 use crate::errno;
 use crate::sync::spinlock::Spinlock;
 
-/// Global mount registry: (device, mount_point, fs_type, flags_str)
+/// Global mount registry: (device, mount_point, fs_type, flags_str).
+/// U1c: still maintained (boot-time bookkeeping and init-ns seeding) but
+/// the AUTHORITATIVE per-namespace view lives in the mount namespace
+/// (process::ns::MountNamespace); get_mounts() reads that.
 static MOUNT_TABLE: Spinlock<Vec<(String, String, String, String)>> = Spinlock::new(Vec::new());
 
-/// Register a mount in the global table
+/// Register a mount in the current mount namespace AND the global registry.
+/// U1c: callers in a private (CLONE_NEWNS) namespace only mutate their own
+/// table; the global registry stays the init-namespace baseline.
 pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &str) {
-    let mut table = MOUNT_TABLE.lock_irqsave();
-    table.retain(|(_, mp, _, _)| mp != mount_point);
-    table.push((
-        String::from(device),
-        String::from(mount_point),
-        String::from(fs_type),
-        String::from(flags),
-    ));
+    {
+        let mut table = MOUNT_TABLE.lock_irqsave();
+        table.retain(|(_, mp, _, _)| mp != mount_point);
+        table.push((
+            String::from(device),
+            String::from(mount_point),
+            String::from(fs_type),
+            String::from(flags),
+        ));
+    }
+    crate::process::ns::ns_register_mount(device, mount_point, fs_type, flags);
 }
 
-/// Get all registered mounts (includes hardcoded rootfs)
-pub fn get_mounts() -> Vec<(String, String, String, String)> {
+/// Raw global registry snapshot + the hardcoded rootfs row (init-namespace
+/// seed for process::ns::init_mnt_ns).
+pub fn get_global_mounts() -> Vec<(String, String, String, String)> {
     let mut result = Vec::new();
     // Always include rootfs (registered before allocator is fully stable)
     result.push((String::from("rootfs"), String::from("/"), String::from("rootfs"), String::from("rw")));
@@ -42,6 +51,15 @@ pub fn get_mounts() -> Vec<(String, String, String, String)> {
         result.push((d.clone(), m.clone(), f.clone(), fl.clone()));
     }
     result
+}
+
+/// Get the mounts visible to the CALLER (U1c: the current mount namespace;
+/// the init namespace table is seeded from the boot registry).
+pub fn get_mounts() -> Vec<(String, String, String, String)> {
+    crate::process::ns::ns_get_mounts()
+        .into_iter()
+        .map(|e| (e.device, e.mount_point, e.fs_type, e.flags))
+        .collect()
 }
 
 #[repr(C)]
@@ -193,6 +211,25 @@ pub fn do_mount(target: &str, fs_type: &str, flags: u64) -> Result<(), i32> {
             } else {
                 return Err(errno::Errno::NoSuchDevice.as_neg_i32());
             }
+        }
+        "sysfs" => {
+            // U1a: sysfs device model + uevent. Build the KObject tree
+            // (idempotent), prepare the /sys mountpoint, then link the
+            // dentry tree.
+            crate::fs::sysfs::init_sysfs()
+                .map_err(|e| e as i32)?;
+            crate::fs::sysfs::mount_sysfs()
+                .map_err(|e| e as i32)?;
+            crate::fs::vfs::vfs_mount(target, crate::fs::sysfs::create_root_inode(), mnt_flags);
+            register_mount("sysfs", target, "sysfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
+        "cgroup2" => {
+            // U1b: cgroup v2 unified hierarchy. init is idempotent;
+            // mount_cgroupfs links the dentry tree at the target.
+            crate::fs::cgroup::init_cgroupfs()
+                .map_err(|e| e as i32)?;
+            crate::fs::cgroup::mount_cgroupfs(target)
+                .map_err(|e| e as i32)?;
         }
         "tmpfs" | "shm" => {
             // P0-6: each mount creates an INDEPENDENT tmpfs instance

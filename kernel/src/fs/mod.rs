@@ -23,6 +23,7 @@ pub mod tmpfs;
 pub mod ext4;
 pub mod stat;
 pub mod procfs;
+pub mod sysfs;
 pub mod dev_t;
 pub mod devfs;
 pub mod fs_struct;
@@ -37,6 +38,7 @@ pub mod pty;
 pub mod xattr;
 pub mod memfd;
 pub mod fifo;
+pub mod cgroup;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, set_cloexec_fd};
 pub use fs_struct::FsStruct;

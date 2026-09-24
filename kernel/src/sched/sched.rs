@@ -2321,6 +2321,14 @@ pub fn scheduler_tick() {
     // every CPU, before the class-specific work.
     rt_bandwidth_tick(current);
 
+    // cgroup v2 cpu controller (U1b): charge this tick into the current
+    // task's cgroup chain, roll quota periods over / unthrottle, and
+    // force a resched when the chain is (or was) throttled so the CPU
+    // switches away from / reconsiders affected tasks.
+    if crate::sched::cgroup::cgroup_cpu_tick(current) {
+        set_need_resched();
+    }
+
     // SAFETY: current is this_cpu().current, a valid Task pointer set during CPU init;
     // null check above; we only touch fields appropriate for the current CPU's task.
     unsafe {

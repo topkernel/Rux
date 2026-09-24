@@ -25,6 +25,7 @@ pub mod deadline;
 pub mod stop_task;
 pub mod idle;
 pub mod fair;
+pub mod cgroup;
 
 pub use sched::{
     current,

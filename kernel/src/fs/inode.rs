@@ -253,6 +253,8 @@ pub enum InodeState {
 pub const FS_ID_ROOTFS: u64 = 0x525F_4653_0001;
 pub const FS_ID_PROCFS: u64 = 0x5052_4F43_0002;
 pub const FS_ID_DEVFS: u64 = 0x4445_5646_0003;
+/// cgroup2 (unified cgroup hierarchy) — "CGRP"
+pub const FS_ID_CGROUPFS: u64 = 0x4347_5250_0004;
 
 #[repr(C)]
 pub struct Inode {
