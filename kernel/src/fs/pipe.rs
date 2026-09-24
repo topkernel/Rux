@@ -27,7 +27,9 @@ use crate::process::wait::WaitQueueHead;
 /// Was 16 KiB (review 5.2: pipe capacity below Linux default).
 /// NOTE: defined locally instead of config.rs — the shared config file is
 /// concurrently edited by other repair agents.
-const PIPE_BUF_SIZE: usize = 65536;
+pub const PIPE_BUF_SIZE: usize = 65536;
+/// Public alias for the pipe capacity (F_GETPIPE_SZ).
+pub const PIPE_CAPACITY: usize = PIPE_BUF_SIZE;
 
 /// POSIX PIPE_BUF: max write size guaranteed atomic
 const PIPE_BUF: usize = 4096;

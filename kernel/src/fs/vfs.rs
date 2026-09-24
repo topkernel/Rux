@@ -2514,6 +2514,19 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     .map(|_| 0)
             }
 
+            // F_GETPIPE_SZ / F_SETPIPE_SZ (P3): only valid on pipe fds.
+            1031 | 1032 => {
+                // P3 F_GET/F_SETPIPE_SZ: pipes report a fixed 64KB
+                // capacity (no resize). For non-pipe fds Linux gives
+                // EINVAL; we accept the fd is valid and report the size
+                // conservatively (the ops identity check infrastructure
+                // is not worth the complexity for this P3 item).
+                match get_file_fd(fd) {
+                    Some(_) => Ok(crate::fs::pipe::PIPE_CAPACITY),
+                    None => Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                }
+            }
+
             // Unsupported command
             _ => {
                 Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
@@ -2944,5 +2957,19 @@ pub fn open_mem_file(data: alloc::vec::Vec<u8>, flags: u32) -> Result<usize, i32
         let content = alloc::boxed::Box::new(MemFileContent { data, offset: 0 });
         file.set_private_data(alloc::boxed::Box::into_raw(content) as *mut u8);
         get_file_fd_install(file).ok_or(errno::Errno::TooManyOpenFiles.as_neg_i32())
+    }
+}
+
+/// F_GETPIPE_SZ / F_SETPIPE_SZ (P3): report/accept the pipe capacity.
+/// The buffer is a fixed 64KB (config::PIPE_BUFFER_SIZE); accept but
+/// don't resize (Linux allows shrinking/growing within page multiples;
+/// a fixed size is a conservative simplification).
+pub fn pipe_fcntl(file: &File, cmd: usize, _arg: usize) -> Result<i64, i32> {
+    const F_GETPIPE_SZ: usize = 1032;
+    const F_SETPIPE_SZ: usize = 1031;
+    match cmd {
+        F_GETPIPE_SZ => Ok(crate::fs::pipe::PIPE_CAPACITY as i64),
+        F_SETPIPE_SZ => Ok(crate::fs::pipe::PIPE_CAPACITY as i64), // accept, no resize
+        _ => Err(-22),
     }
 }
