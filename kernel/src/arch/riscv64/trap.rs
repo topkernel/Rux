@@ -599,7 +599,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             // this CPU holds (that is exactly how the earlier wedges lost
             // their diagnostics). Then halt.
             unsafe {
-                let mut put = |b: u8| sbi_rt::legacy::console_putchar(b as usize);
+                let mut put = |b: u8| crate::console::putchar_no_lock(b);
                 for &b in b"trap: KERNPANIC pfault badaddr=0x" { put(b); }
                 for sh in (0..64).step_by(4).rev() {
                     let n = ((fault_addr >> sh) & 0xF) as u8;

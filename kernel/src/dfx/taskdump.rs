@@ -17,7 +17,7 @@ use core::sync::atomic::Ordering;
 
 fn putc(c: u8) {
     // SAFETY: SBI legacy console_putchar is safe to call from any context.
-    unsafe { sbi_rt::legacy::console_putchar(c as usize); }
+    unsafe { crate::console::putchar_no_lock(c); }
 }
 
 fn puts(s: &str) {

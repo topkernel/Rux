@@ -127,7 +127,7 @@ impl RawSpinlock {
         let cpu = crate::arch::riscv64::smp::cpu_id();
         let msg = b"DEADLOCK: spinlock stuck cpu=";
         for &b in msg {
-            unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+            unsafe { crate::console::putchar_no_lock(b); }
         }
         // Print CPU id as decimal digit
         if cpu < 10 {
@@ -136,7 +136,7 @@ impl RawSpinlock {
         // Print lock address in hex
         let msg2 = b" lock=0x";
         for &b in msg2 {
-            unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+            unsafe { crate::console::putchar_no_lock(b); }
         }
         let addr = lock_addr as usize;
         let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
@@ -144,20 +144,20 @@ impl RawSpinlock {
             shift -= 4;
             let nibble = (addr >> (shift as usize)) & 0xF;
             let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            unsafe { sbi_rt::legacy::console_putchar(c as usize); }
+            unsafe { crate::console::putchar_no_lock(c); }
         }
 
         // Print caller return address (ra) for debugging
         let msg3 = b" ra=0x";
         for &b in msg3 {
-            unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+            unsafe { crate::console::putchar_no_lock(b); }
         }
         let mut shift = (core::mem::size_of::<usize>() * 8) as i32;
         while shift > 0 {
             shift -= 4;
             let nibble = (caller_ra >> shift) & 0xF;
             let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
-            unsafe { sbi_rt::legacy::console_putchar(c as usize); }
+            unsafe { crate::console::putchar_no_lock(c); }
         }
 
         // Holder identity: owner = hart+1 (0 = free / mid-handoff).
@@ -165,24 +165,24 @@ impl RawSpinlock {
         {
             let msg4 = b" holder=";
             for &b in msg4 {
-                unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+                unsafe { crate::console::putchar_no_lock(b); }
             }
             // SAFETY: lock_addr is a valid RawSpinlock pointer (from lock()).
             let holder = unsafe { (&*lock_addr).owner.load(Ordering::Relaxed) };
             if holder == 0 {
                 let msg5 = b"switching";
                 for &b in msg5 {
-                    unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+                    unsafe { crate::console::putchar_no_lock(b); }
                 }
             } else {
                 let h = holder - 1;
                 if h < 10 {
-                    unsafe { sbi_rt::legacy::console_putchar(b'0' as usize + h as usize); }
+                    unsafe { crate::console::putchar_no_lock(b'0' + h as u8); }
                 }
             }
         }
 
-        unsafe { sbi_rt::legacy::console_putchar(b'\n' as usize); }
+        unsafe { crate::console::putchar_no_lock(b'\n'); }
 
         // dfx=watchdog: follow the warning with a full task-state snapshot
         // (silent-wedge diagnosis — CPUs idle + sleepers never woken).

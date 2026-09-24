@@ -563,14 +563,14 @@ impl BlockCache {
                         if unsafe { entry.bh.is_null() || (*entry.bh).b_data.len() != self.block_size as usize } {
                             let msg = b"bio: dead bh in chain blk=";
                             unsafe {
-                                for &b in msg { sbi_rt::legacy::console_putchar(b as usize); }
+                                for &b in msg { crate::console::putchar_no_lock(b); }
                                 let mut v = blocknr;
                                 let mut digs = [0u8; 20];
                                 let mut n = 0;
                                 if v == 0 { digs[0] = b'0'; n = 1; }
                                 while v > 0 { digs[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
                                 while n > 0 { n -= 1; sbi_rt::legacy::console_putchar(digs[n] as usize); }
-                                sbi_rt::legacy::console_putchar(b'\n' as usize);
+                                crate::console::putchar_no_lock(b'\n');
                             }
                             prev = Some(entry_ptr);
                             current = entry.hash_next;

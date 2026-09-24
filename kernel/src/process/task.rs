@@ -2792,21 +2792,21 @@ impl Task {
         if let Some(old) = (*child).parent {
             if old as *const Task != self as *const Task {
                 let msg = b"TREE: DOUBLE add_child old=0x";
-                for &b in msg { unsafe { sbi_rt::legacy::console_putchar(b as usize); } }
+                for &b in msg { unsafe { crate::console::putchar_no_lock(b); } }
                 let mut sh = 64;
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((old as usize >> sh) & 0xF) as u8;
                     unsafe { sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize); }
                 }
-                for &b in b" new=0x" { unsafe { sbi_rt::legacy::console_putchar(b as usize); } }
+                for &b in b" new=0x" { unsafe { crate::console::putchar_no_lock(b); } }
                 sh = 64;
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((self as *const Task as usize >> sh) & 0xF) as u8;
                     unsafe { sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize); }
                 }
-                unsafe { sbi_rt::legacy::console_putchar(b'\n' as usize); }
+                unsafe { crate::console::putchar_no_lock(b'\n'); }
             }
         }
 

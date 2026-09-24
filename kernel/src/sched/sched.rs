@@ -1326,7 +1326,7 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
     {
         const MSG: &[u8] = b"R41-STALE-ONRQ healed pid=0x";
         for &b in MSG {
-            sbi_rt::legacy::console_putchar(b as usize);
+            crate::console::putchar_no_lock(b);
         }
         let v = (*task).pid() as u64;
         let mut sh = 64;
@@ -1337,7 +1337,7 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
                 (if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize,
             );
         }
-        sbi_rt::legacy::console_putchar(b'\n' as usize);
+        crate::console::putchar_no_lock(b'\n');
     }
     match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
@@ -1418,7 +1418,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             // (same discipline as RawSpinlock::deadlock_warn and the buddy
             // double-free tripwire).
             const MSG: &[u8] = b"ENQ-POISONED-TASK dropped pid=0x";
-            for &b in MSG { sbi_rt::legacy::console_putchar(b as usize); }
+            for &b in MSG { crate::console::putchar_no_lock(b); }
             let mut sh = 64;
             let v = pid as u64;
             while sh > 0 {
@@ -1426,7 +1426,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
                 let nb = ((v >> sh) & 0xF) as u8;
                 sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
             }
-            sbi_rt::legacy::console_putchar(b'\n' as usize);
+            crate::console::putchar_no_lock(b'\n');
             return false;
         }
     }
@@ -1448,7 +1448,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             // R34: SBI direct write — under the GRQ lock (was console::putchar,
             // which nests the UART lock inside GRQ).
             const MSG: &[u8] = b"ENQ-DEAD-TASK dropped\n";
-            for &b in MSG { sbi_rt::legacy::console_putchar(b as usize); }
+            for &b in MSG { crate::console::putchar_no_lock(b); }
             return false;
         }
     }
@@ -1727,7 +1727,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 {
                     const MSG: &[u8] = b"R49-ONCPU-ORPHAN healed pid=0x";
                     for &b in MSG {
-                        sbi_rt::legacy::console_putchar(b as usize);
+                        crate::console::putchar_no_lock(b);
                     }
                     let v = (*task).pid() as u64;
                     let mut sh = 64;
@@ -1738,7 +1738,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                             (if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize,
                         );
                     }
-                    sbi_rt::legacy::console_putchar(b'\n' as usize);
+                    crate::console::putchar_no_lock(b'\n');
                 }
                 // No CPU owns this mark (curr_on == false under the lock):
                 // clearing it cannot break the NEW2 pick-skip protocol.
@@ -1748,7 +1748,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
             {
                 const MSG: &[u8] = b"R46-RUNNING-PHANTOM healed pid=0x";
                 for &b in MSG {
-                    sbi_rt::legacy::console_putchar(b as usize);
+                    crate::console::putchar_no_lock(b);
                 }
                 let v = (*task).pid() as u64;
                 let mut sh = 64;
@@ -1759,7 +1759,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                         (if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize,
                     );
                 }
-                sbi_rt::legacy::console_putchar(b'\n' as usize);
+                crate::console::putchar_no_lock(b'\n');
             }
             // Fall through: enqueue_task_locked links the task (its
             // set_state(RUNNING) is a no-op re-write; nr_running pairs with
@@ -2562,7 +2562,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                     if wake_up_enqueue(t) {
                         const MSG: &[u8] = b"R56-ORPHAN-HARVESTED\n";
                         for &b in MSG {
-                            unsafe { sbi_rt::legacy::console_putchar(b as usize); }
+                            unsafe { crate::console::putchar_no_lock(b); }
                         }
                     }
                 }
