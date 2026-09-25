@@ -143,7 +143,13 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         }
 
         // Load ELF program into memory and set up user context
-        if load_and_setup_elf(task_ptr, program_data, init_path).is_err() {
+        if let Err(e) = load_and_setup_elf(task_ptr, program_data, init_path) {
+            println!("init: ELF load failed err={:?} path={} len={} first8={:02x}{:02x}{:02x}{:02x}",
+                e, init_path, program_data.len(),
+                program_data.get(0).copied().unwrap_or(0),
+                program_data.get(1).copied().unwrap_or(0),
+                program_data.get(2).copied().unwrap_or(0),
+                program_data.get(3).copied().unwrap_or(0));
             return None;
         }
 
@@ -253,6 +259,29 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     // Verify phys_base is within valid range
     if phys_base < 0x80000000 {
         return Err(ElfError::OutOfMemory);
+    }
+
+    // Signal-return trampoline page (see process/exec.rs for rationale):
+    // li a7,139 (rt_sigreturn); ecall, mapped R+X at a fixed user address.
+    {
+        // SAFETY: user_ppn is a fresh user page-table root created above;
+        // flags are valid user PTE bits and the frame is exclusively owned.
+        let tp = unsafe {
+            mm::alloc_and_map_to_user_table(
+                user_ppn,
+                crate::signal::SIGTRAMP_BASE,
+                4096,
+                PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
+                    | PageTableEntry::X | PageTableEntry::A,
+            )
+        };
+        if let Some(tp) = tp {
+            let kva = mm::phys_to_virt(mm::PhysAddr::new(tp)).bits() as usize;
+            unsafe {
+                core::ptr::write_volatile(kva as *mut u32, 0x08b0_0893);
+                core::ptr::write_volatile((kva + 4) as *mut u32, 0x0000_0073);
+            }
+        }
     }
 
     // Second pass: load each segment's data

@@ -228,7 +228,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             // effect at delivery time (setup_frame re-strips the two
             // unblockable bits when composing the runtime mask). Stripping
             // here corrupted oldact round-trips (review batch-1).
-            let new_action = SigAction {
+let new_action = SigAction {
                 sa_handler: user_action.sa_handler,
                 sa_flags: crate::signal::SigFlags::new(user_action.sa_flags),
                 sa_mask: user_action.sa_mask,

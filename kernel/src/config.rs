@@ -20,7 +20,7 @@ pub const TARGET_PLATFORM: &str = "riscv64";
 // ============================================================
 
 /// Kernel heap size (bytes)
-pub const KERNEL_HEAP_SIZE: usize = 33554432;
+pub const KERNEL_HEAP_SIZE: usize = 134217728;
 
 /// Physical memory size (bytes)
 pub const PHYS_MEMORY_SIZE: usize = 2147483648;

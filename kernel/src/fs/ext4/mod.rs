@@ -820,7 +820,6 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
         if fs.init().is_err() {
             return None;
         }
-
         // Parse path - filter out empty strings and "." (current directory)
         let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
 
@@ -857,20 +856,31 @@ fn read_file_internal(device: *const blkdev::GenDisk, path: &str, depth: u32) ->
                 // Read symbolic link target
                 let link_target = read_symlink_target(&fs, &target_inode)?;
 
-                // Resolve target path
-                let resolved_path = if link_target.starts_with('/') {
-                    // Absolute path
+                // Build the REPLACEMENT path: the symlink target takes the
+                // place of THIS component; remaining components must be
+                // preserved (the old code replaced the WHOLE path, losing
+                // everything after the link: "/bin/dash" with bin->usr/bin
+                // resolved to "/usr/bin" instead of "/usr/bin/dash" —
+                // returning the DIRECTORY's 8192 bytes as "file data").
+                let part_index = path_parts.iter()
+                    .position(|p| core::ptr::eq(p, part))
+                    .unwrap_or(0);
+                let mut resolved_path = if link_target.starts_with('/') {
                     link_target
                 } else {
-                    // Relative path, resolve based on current directory
-                    let mut resolved = String::from("/");
+                    // Relative: prepend the walked directory components
+                    let mut r = String::from("/");
                     for dir_part in &current_dir_parts {
-                        resolved.push_str(dir_part);
-                        resolved.push('/');
+                        r.push_str(dir_part);
+                        r.push('/');
                     }
-                    resolved.push_str(&link_target);
-                    resolved
+                    r.push_str(&link_target);
+                    r
                 };
+                for remaining in path_parts.iter().skip(part_index + 1) {
+                    resolved_path.push('/');
+                    resolved_path.push_str(remaining);
+                }
 
                 // Recursively read target file
                 return read_file_internal(device, &resolved_path, depth + 1);

@@ -177,6 +177,32 @@ pub(crate) fn do_execve_elf(
         alloc_and_map_to_user_table(user_ppn, virt_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
+    // Signal-return trampoline (R+X page): RISC-V glibc installs handlers
+    // without sa_restorer and returns through this fixed page (the Linux
+    // kernel uses the vDSO __vdso_rt_sigreturn stub for the same purpose;
+    // Rux's vDSO is disabled). Contents: li a7,139 (rt_sigreturn); ecall.
+    {
+        // SAFETY: user_ppn is a fresh user page-table root; RX U flags are
+        // valid PTE bits. The returned frame is freshly allocated and
+        // exclusively owned by this address space.
+        let tp = unsafe {
+            alloc_and_map_to_user_table(
+                user_ppn,
+                crate::signal::SIGTRAMP_BASE,
+                4096,
+                PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
+                    | PageTableEntry::X | PageTableEntry::A,
+            )
+        };
+        if let Some(tp) = tp {
+            let kva = phys_to_virt(PhysAddr::new(tp)).bits() as usize;
+            unsafe {
+                core::ptr::write_volatile(kva as *mut u32, 0x08b0_0893);
+                core::ptr::write_volatile((kva + 4) as *mut u32, 0x0000_0073);
+            }
+        }
+    }
+
     // Load each segment
     for i in 0..phdr_count {
         // SAFETY: Same as above — i < phdr_count and program_data is a valid ELF slice.
@@ -629,6 +655,7 @@ pub(crate) fn do_execve_elf(
             core::ptr::write_volatile(stack_ptr.offset(offset + 1), *val);
             offset += 2;
         }
+
 
         // AT_NULL
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);

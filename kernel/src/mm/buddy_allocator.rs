@@ -461,8 +461,13 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let align = layout.align();
 
         let order = self.size_to_order(size.max(align));
+
         let _guard = self.lock.lock_irqsave();
-        self.alloc_blocks(order)
+        let ptr = self.alloc_blocks(order);
+        if ptr.is_null() && size > 4 * 1024 * 1024 {
+            crate::pr_err!("bigalloc: FAILED size={:#x}", size);
+        }
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {

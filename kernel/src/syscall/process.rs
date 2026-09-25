@@ -907,7 +907,11 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
     let uname = Utsname {
         sysname: {
             let mut a = [0u8; 65];
-            let s = b"Rux\0";
+            // Report "Linux": glibc's minimum-kernel check (dl-osinfo)
+            // and dpkg/apt build-id logic key off the sysname and a
+            // parseable release "x.y.z"; a novel name/version fails the
+            // glibc gate with "FATAL: kernel too old" before main runs.
+            let s = b"Linux\0";
             a[..s.len()].copy_from_slice(s);
             a
         },
@@ -921,13 +925,16 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
         },
         release: {
             let mut a = [0u8; 65];
-            let s = b"0.1.0\0";
+            // x.y.z prefix must satisfy glibc's __LINUX_KERNEL_VERSION
+            // floor (>= 3.2.0 for glibc 2.35+); the -rux suffix keeps
+            // the Rux identity visible.
+            let s = b"6.8.0-rux\0";
             a[..s.len()].copy_from_slice(s);
             a
         },
         version: {
             let mut a = [0u8; 65];
-            let s = b"Rux OS v0.1.0\0";
+            let s = b"#1 SMP Rux 6.8.0\0";
             a[..s.len()].copy_from_slice(s);
             a
         },

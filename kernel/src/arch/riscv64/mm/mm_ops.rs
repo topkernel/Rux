@@ -311,18 +311,72 @@ impl MmStruct {
         };
 
         if is_fixed {
-            let mut vma_mgr = self.vma_write();
-            let mut vmas_to_remove = Vec::new();
-            for vma in vma_mgr.iter() {
-                if vma.overlaps(&Vma::new(start, PageVirtAddr::new(start.as_usize() + aligned_size), flags)) {
-                    vmas_to_remove.push(vma.start());
+            // Linux semantics: MAP_FIXED replaces only the covered range.
+            // Overlapping VMAs are SPLIT — their non-overlapping head/tail
+            // must survive with type/flags/fd/offset preserved. Removing
+            // whole overlapping VMAs destroyed the rest of the span when a
+            // dynamic linker mapped a DSO's whole range and then overlaid
+            // the individual segments with MAP_FIXED (glibc
+            // _dl_map_object_from_fd): every page outside the final
+            // segment lost its VMA and faulted with SIGSEGV (Ubuntu
+            // dash/libc load).
+            let fixed_end = PageVirtAddr::new(start.as_usize() + aligned_size);
+            let test_vma = Vma::new(start, fixed_end, flags);
+
+            // Snapshot full-attribute VMAs that overlap the fixed range,
+            // along with their pinned backing files (the pin is keyed by
+            // VMA start; split pieces must re-pin or lose the file when
+            // the mapping fd is closed).
+            let overlapping: Vec<(Vma, Option<alloc::sync::Arc<crate::fs::file::File>>)> = {
+                let vma_mgr = self.vma_read();
+                vma_mgr.iter()
+                    .filter(|v| v.overlaps(&test_vma))
+                    .map(|v| (v.clone(), self.get_vma_file(v.start().as_usize())))
+                    .collect()
+            };
+
+            // Compute the preserved head/tail pieces.
+            let mut kept: Vec<(Vma, Option<alloc::sync::Arc<crate::fs::file::File>>)> = Vec::new();
+            for (vma, file) in overlapping.iter() {
+                if vma.start().as_usize() < start.as_usize() {
+                    if let Some((head, _)) =
+                        vma.split(PageVirtAddr::new(start.as_usize()))
+                    {
+                        kept.push((head, file.clone()));
+                    }
+                }
+                if vma.end().as_usize() > fixed_end.as_usize() {
+                    let mut tail =
+                        Vma::new(fixed_end, vma.end(), vma.flags());
+                    tail.set_type(vma.vma_type());
+                    tail.set_file_fd(vma.file_fd());
+                    tail.set_file_size(vma.file_size());
+                    tail.set_offset(
+                        vma.offset() + (fixed_end.as_usize() - vma.start().as_usize()),
+                    );
+                    kept.push((tail, file.clone()));
                 }
             }
-            drop(vma_mgr);
 
-            for vma_start in vmas_to_remove {
+            // Remove the overlapped VMAs, then re-add the preserved pieces.
+            {
                 let mut vma_mgr = self.vma_write();
-                let _ = vma_mgr.remove(vma_start);
+                let overlap_starts: Vec<PageVirtAddr> = vma_mgr
+                    .iter()
+                    .filter(|v| v.overlaps(&test_vma))
+                    .map(|v| v.start())
+                    .collect();
+                for vma_start in overlap_starts {
+                    let _ = vma_mgr.remove(vma_start);
+                    self.unpin_vma_file(vma_start.as_usize());
+                }
+                drop(vma_mgr);
+                for (piece, file) in kept {
+                    let _ = self.vma_write().add(piece.clone());
+                    if let Some(f) = file {
+                        self.pin_vma_file(piece.start().as_usize(), f);
+                    }
+                }
             }
 
             // Route through unmap_pages so the teardown (walk, rmap,
@@ -730,6 +784,13 @@ impl MmStruct {
                     // File-offset continuity across fork (P1: also needed by
                     // the exec-image-backed segment VMAs' fd fallback path).
                     new_vma.set_offset(offset);
+                    // Clone the parent's pinned vm_file so the child's
+                    // demand faults read the file even after fd close.
+                    if vma_type == crate::mm::vma::VmaType::FileBacked {
+                        if let Some(f) = self.get_vma_file(start.as_usize()) {
+                            new_space.pin_vma_file(start.as_usize(), f);
+                        }
+                    }
                     // Increment nattch for shared memory attachments inherited by child
                     if vma_type == crate::mm::vma::VmaType::SharedMemory && file_fd >= 0 {
                         crate::ipc::sysv_shm::shm_attach_vma(file_fd);

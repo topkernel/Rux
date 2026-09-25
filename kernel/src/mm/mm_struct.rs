@@ -58,6 +58,16 @@ pub struct MmStruct {
     /// VMA manager (protected by RwLock for interior mutability)
     vma_manager: RwSpinlock<VmaManager>,
 
+    /// Pinned file references for file-backed VMAs, keyed by VMA start
+    /// address. Linux's VMA holds vm_file (a refcounted struct file) that
+    /// keeps the file alive after the mapping fd is closed; Rux VMAs only
+    /// store the fd NUMBER, and demand faults resolved it through the
+    /// process fd table — after the dynamic linker maps a DSO and closes
+    /// its fd, every later demand fill silently produced ZERO pages (the
+    /// get_file_fd lookup failed) and ld.so died parsing zero ELF data.
+    /// This pin table is the vm_file equivalent.
+    vma_files: RwSpinlock<alloc::collections::BTreeMap<usize, alloc::sync::Arc<crate::fs::file::File>>>,
+
     /// Address space type
     space_type: PageTableType,
 
@@ -202,6 +212,7 @@ impl MmStruct {
             asid: AtomicU16::new(0),  // Will be allocated on first use
             pgd_lock: RwSpinlock::new(()),
             vma_manager: RwSpinlock::new(vma_manager),
+            vma_files: RwSpinlock::new(alloc::collections::BTreeMap::new()),
             space_type,
             // Segment ranges
             start_code: AtomicUsize::new(0),
@@ -751,6 +762,22 @@ impl MmStruct {
 
     /// Acquire VMA write lock
     #[inline]
+    /// Pin a file reference for a file-backed VMA (Linux vm_file hold).
+    pub fn pin_vma_file(&self, vma_start: usize, file: alloc::sync::Arc<crate::fs::file::File>) {
+        self.vma_files.write().insert(vma_start, file);
+    }
+
+    /// Drop the pinned file reference for a VMA being removed.
+    pub fn unpin_vma_file(&self, vma_start: usize) {
+        self.vma_files.write().remove(&vma_start);
+    }
+
+    /// Fetch the pinned file for a VMA (demand-fault fill source). The pin
+    /// keeps the file alive even after the mapping fd was closed.
+    pub fn get_vma_file(&self, vma_start: usize) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+        self.vma_files.read().get(&vma_start).cloned()
+    }
+
     pub fn vma_write(&self) -> crate::sync::rwlock::RwSpinlockWriteGuard<'_, VmaManager> {
         self.vma_manager.write()
     }

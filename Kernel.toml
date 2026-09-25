@@ -21,7 +21,7 @@ enable_riscv64 = true
 
 [memory]
 # Kernel heap size (MB) - must be power of 2 (16, 32, 64...)
-kernel_heap_size = 32
+kernel_heap_size = 128
 # Physical memory size (MB)
 physical_memory = 2048
 # Page size

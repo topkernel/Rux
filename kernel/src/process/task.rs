@@ -900,11 +900,15 @@ pub mod rlimit_res {
 /// Kernel default limits (cur, max):
 /// - NOFILE 1024/4096 (soft default / table size, fs::file::MAX_FDS)
 /// - STACK 8MB soft / RLIM_INFINITY hard
+/// - CORE 0 (Ubuntu/systemd ship RLIMIT_CORE=0; an unbounded soft limit
+///   made every user crash stream a full core dump — under TCG the dump
+///   I/O wedged the machine on real workloads)
 /// - everything else RLIM_INFINITY (u64::MAX) like Linux's init_cred.
 pub fn default_rlimits() -> [(u64, u64); RLIM_NLIMITS] {
     let mut t = [(u64::MAX, u64::MAX); RLIM_NLIMITS];
     t[rlimit_res::NOFILE] = (1024, 4096);
     t[rlimit_res::STACK] = (8 * 1024 * 1024, u64::MAX);
+    t[rlimit_res::CORE] = (0, u64::MAX);
     t
 }
 

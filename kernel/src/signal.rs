@@ -980,6 +980,14 @@ unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::riscv64::pt_regs::P
 ///
 /// * `true` - Setup successful
 /// * `false` - Setup failed
+/// Fixed virtual address of the per-process signal-return trampoline page.
+/// RISC-V glibc installs handlers WITHOUT sa_restorer (the kernel normally
+/// points ra at the vDSO __vdso_rt_sigreturn stub); Rux's vDSO is disabled,
+/// so the old stack-trampoline fallback returned into an NX stack page and
+/// every glibc signal handler died with SIGSEGV (dash exiting status=11
+/// the moment a child sent SIGCHLD was this bug).
+pub const SIGTRAMP_BASE: u64 = 0x3FBE_0000_0000;
+
 unsafe fn setup_frame(
     task: *mut crate::process::task::Task,
     sig: i32,
@@ -1163,8 +1171,10 @@ unsafe fn setup_frame(
     if action.sa_restorer != 0 {
         regs.ra = action.sa_restorer as u64;
     } else {
-        let trampoline_addr = frame_addr + core::mem::size_of::<SignalFrame>() as u64 - 8;
-        regs.ra = trampoline_addr;
+        // No sa_restorer (RISC-V glibc): return through the fixed
+        // trampoline page mapped read+execute in every user address space.
+        // The old in-frame stack trampoline faulted on NX stacks.
+        regs.ra = SIGTRAMP_BASE;
     }
 
     true  // Success

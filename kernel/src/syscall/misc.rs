@@ -2387,22 +2387,33 @@ pub fn sys_getrandom(args: SyscallArgs) -> i64 {
 
     // ChaCha20-based CRNG (review批次1: the old LCG was trivially
     // predictable — a fatal weakness for TLS/SSH seeding).
-    // SAFETY: buf_ptr validated with access_ok(buflen); writes buflen bytes.
-    unsafe {
-        let mut guard = GETRANDOM_CRNG.lock();
-        let rng = guard.get_or_insert_with(ChaCha20Crng::new);
-        let mut filled = 0usize;
-        while filled < buflen {
-            let (block, used) = rng.next_bytes();
-            let chunk = (buflen - filled).min(64 - used);
-            core::ptr::copy_nonoverlapping(
-                block.as_ptr().add(used),
+    // Stage each block in a kernel buffer and go through copy_to_user:
+    // a raw memcpy to a U-bit page faults in S-mode (SUM=0) and the
+    // unannotated fault escalates to a kernel panic (Ubuntu boot hit).
+    let mut guard = GETRANDOM_CRNG.lock();
+    let rng = guard.get_or_insert_with(ChaCha20Crng::new);
+    let mut filled = 0usize;
+    while filled < buflen {
+        let (block, used) = rng.next_bytes();
+        let chunk = (buflen - filled).min(64 - used);
+        // SAFETY: buf_ptr validated with access_ok(buflen); copy_to_user
+        // is exception-table fault-safe and returns uncopied count.
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(
                 buf_ptr.add(filled),
+                block.as_ptr().add(used),
                 chunk,
-            );
-            rng.consume(chunk);
-            filled += chunk;
+            )
+        };
+        if uncopied != 0 {
+            return if filled > 0 {
+                filled as i64
+            } else {
+                -(errno::EFAULT as i64)
+            };
         }
+        rng.consume(chunk);
+        filled += chunk;
     }
 
     buflen as i64

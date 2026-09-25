@@ -314,6 +314,45 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // AT_EMPTY_PATH + empty pathname: fstat(dirfd) semantics. glibc's
+    // dynamic linker identifies DSOs via newfstatat(fd, "", AT_EMPTY_PATH)
+    // (dl-file-id); routing that down the path resolver returned ENOTDIR
+    // and every dynamically linked binary died with "cannot stat shared
+    // object" before ld.so finished loading libc.
+    let mut stat = Stat::new();
+    let empty_path = {
+        let mut probe = [0u8; 1];
+        !pathname_ptr.is_null()
+            && crate::arch::riscv64::uaccess::access_ok(pathname_ptr as usize, 1)
+            && unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    probe.as_mut_ptr(),
+                    pathname_ptr,
+                    1,
+                )
+            } == 0
+            && probe[0] == 0
+    };
+    if empty_path && (flags & AT_EMPTY_PATH) != 0 {
+        // fstat(dirfd)
+        if dirfd < 0 {
+            return -(errno::EBADF as i64);
+        }
+        if let Err(e) = crate::fs::file_stat(dirfd as usize, &mut stat) {
+            return -(e as i64);
+        }
+        let stat_size = core::mem::size_of::<Stat>();
+        // SAFETY: statbuf validated with access_ok; copies stat_size bytes to user.
+        let result = unsafe {
+            crate::arch::riscv64::uaccess::copy_to_user(
+                statbuf as *mut u8,
+                &stat as *const Stat as *const u8,
+                stat_size
+            )
+        };
+        return if result != 0 { -(errno::EFAULT as i64) } else { 0 };
+    }
+
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
@@ -325,8 +364,6 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     } else {
         0
     };
-
-    let mut stat = Stat::new();
 
     let ret = match crate::fs::vfs::stat_file_by_path_with_flags(&full_path, &mut stat, lookup_flags) {
         Ok(()) => {

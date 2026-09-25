@@ -430,8 +430,15 @@ pub fn handle_mm_fault(
 
                             // Read from file if within file bounds
                             if file_offset < vma_file_size as usize {
-                                if let Some(file) = crate::fs::get_file_fd(vma_file_fd as usize) {
-                                    let saved_pos = file.get_pos();
+                                // Prefer the VMA's pinned file (Linux vm_file):
+                                // the mapping fd may already be closed —
+                                // resolving by fd number failed silently and
+                                // produced zero pages (Ubuntu ld.so).
+                                let file = addr_space
+                                    .get_vma_file(vma_start)
+                                    .or_else(|| unsafe { crate::fs::get_file_fd(vma_file_fd as usize) });
+                                if let Some(file) = file {
+                                        let saved_pos = file.get_pos();
                                     file.set_pos(file_offset as u64);
 
                                     let bytes_to_read = core::cmp::min(
@@ -440,7 +447,7 @@ pub fn handle_mm_fault(
                                     );
                                     let bytes_read = file.read(page_ptr, bytes_to_read);
 
-                                    file.set_pos(saved_pos);
+file.set_pos(saved_pos);
 
                                     // Zero remaining bytes after file data (partial last page)
                                     if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {

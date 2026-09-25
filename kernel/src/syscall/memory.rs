@@ -111,21 +111,47 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     return current_brk as i64;
                 }
 
-                // Calculate page range to map
-                let current_page_start = current_brk & !(PAGE_SIZE as u64 - 1);
+                // Calculate page range to map. Only FULL NEW pages may be
+                // mapped: the page containing current_brk was already
+                // mapped by the previous growth (or by exec for the bss
+                // tail). Mapping from the page FLOOR of a mid-page brk
+                // replaced that live page's PTE with a fresh zero page —
+                // glibc keeps its static TLS/TCB block in the first brk
+                // page, so the next sbrk round silently wiped pd->list and
+                // every fork() crashed in __libc_fork dereferencing NULL.
+                let brk_page_floor = current_brk & !(PAGE_SIZE as u64 - 1);
+                let brk_page_ceil = brk_page_floor + PAGE_SIZE as u64;
                 let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
 
-                // If need to map new pages
-                if new_page_end > current_page_start {
-                    // Get root page table of address space
-                    let root_ppn = if let Some(addr_space) = current_task.address_space() {
-                        addr_space.root_ppn()
-                    } else {
-                        return current_brk as i64;
-                    };
+                // Get root page table of address space
+                let root_ppn = if let Some(addr_space) = current_task.address_space() {
+                    addr_space.root_ppn()
+                } else {
+                    return current_brk as i64;
+                };
 
+                // Mid-page brk: the partial page must already be mapped;
+                // verify via page-table walk so an unexpected hole still
+                // gets mapped instead of silently skipped.
+                let map_start = if current_brk == brk_page_floor {
+                    current_brk
+                } else {
+                    // SAFETY: root_ppn is the current task's page-table
+                    // root; walk is a read-only page-table inspection.
+                    let partial_mapped = unsafe {
+                        crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                            root_ppn,
+                            brk_page_floor as u64,
+                        )
+                    }
+                    .is_some();
+                    if partial_mapped { brk_page_ceil } else { brk_page_floor }
+                };
+
+                // If need to map new pages
+                if new_page_end > map_start {
                     // Map new heap pages
-                    let size = new_page_end - current_page_start;
+                    let size = new_page_end - map_start;
 
                     // Permissions: User + Read + Write + Valid + Accessed + Dirty
                     let pte_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
@@ -134,7 +160,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     // SAFETY: root_ppn is a valid page table root; alloc_and_map_user_memory
                     // handles page allocation and mapping within user address space.
                     unsafe {
-                        let result = alloc_and_map_user_memory(root_ppn, current_page_start, size, pte_flags);
+                        let result = alloc_and_map_user_memory(root_ppn, map_start, size, pte_flags);
                         if result.is_none() {
                             return current_brk as i64;
                         }
@@ -394,7 +420,7 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                     );
                     match result {
                         Ok(mapped_addr) => {
-                            // For file-backed mappings, store fd and file size in VMA for demand paging
+// For file-backed mappings, store fd and file size in VMA for demand paging
                             if map_flags & map::MAP_ANONYMOUS == 0 && fd >= 0 {
                                 // Get file size from stat
                                 // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File;
@@ -410,6 +436,13 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                                     vma.set_file_fd(fd);
                                     vma.set_file_size(file_sz);
                                     vma.set_offset(offset as usize);
+                                }
+
+                                // Pin the file itself (Linux vm_file): demand
+                                // faults after the caller closes the fd must
+                                // still read the mapped file, not zero-fill.
+                                if let Some(file) = unsafe { crate::fs::get_file_fd(fd as usize) } {
+                                    address_space.pin_vma_file(mapped_addr.as_usize(), file);
                                 }
                             }
 
@@ -651,27 +684,128 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             }
             drop(_pte_guard);
 
-            // Update VMA flags to reflect new permissions — for EVERY VMA
-            // overlapping the range (R7-A10: only the VMA containing `addr`
-            // was updated, so later demand faults in sibling VMAs silently
-            // remapped pages with the old permissions).
+            // Update VMA flags to reflect new permissions. Linux
+            // mprotect_fixup semantics: the range must be SPLIT out of any
+            // overlapping VMA and only the covered portion's permission
+            // bits changed. Setting flags on whole overlapping VMAs
+            // (R7-A10's earlier fix) leaked the change across the whole
+            // VMA: glibc deliberately PROT_NONEs single guard pages
+            // between DSO segments (dl-load.c), which stripped READ from
+            // the entire executable segment and killed every dynamically
+            // linked binary with SIGSEGV on its first library read.
             if let Some(addr_space) = current_task.address_space() {
+                let range_start = addr;
+                let range_end = addr + length;
                 let mut vma_mgr = addr_space.vma_write();
+
+                // Snapshot overlapping VMAs (start addresses).
                 let mut starts: alloc::vec::Vec<crate::mm::page::VirtAddr> = alloc::vec::Vec::new();
                 for v in vma_mgr.iter() {
-                    if v.end().as_usize() > addr && v.start().as_usize() < addr + length {
+                    if v.end().as_usize() > range_start && v.start().as_usize() < range_end {
                         starts.push(v.start());
                     }
                 }
+
                 for start in starts {
-                    if let Some(vma) = vma_mgr.find_mut(start) {
-                        let perm_bits = (prot & 0x1 != 0) as u32      // PROT_READ
-                            | ((prot & 0x2 != 0) as u32) << 1         // PROT_WRITE
-                            | ((prot & 0x4 != 0) as u32) << 2;        // PROT_EXEC
-                        // Preserve non-permission flags (SHARED, PRIVATE, GROWS*)
-                        let old_flags = vma.flags().bits();
-                        let new_flags = (old_flags & !(0x7)) | perm_bits;
-                        vma.set_flags(crate::mm::vma::VmaFlags::from_bits(new_flags));
+                    // The pin is keyed by VMA start; splits below re-pin
+                    // the pieces so a closed mapping fd still reads.
+                    let pinned_file = addr_space.get_vma_file(start.as_usize());
+
+                    // Re-fetch under the write lock (split below may have
+                    // altered the set).
+                    let vma = match vma_mgr.find_mut(start) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+
+                    let v_start = vma.start().as_usize();
+                    let v_end = vma.end().as_usize();
+                    if v_end <= range_start || v_start >= range_end {
+                        continue; // no longer overlapping (split by a prior iteration)
+                    }
+
+                    // Permissions for the covered portion.
+                    let perm_bits = (prot & 0x1 != 0) as u32      // PROT_READ
+                        | ((prot & 0x2 != 0) as u32) << 1         // PROT_WRITE
+                        | ((prot & 0x4 != 0) as u32) << 2;        // PROT_EXEC
+
+                    let full_flags = vma.flags();
+                    let old_type = vma.vma_type();
+                    let old_fd = vma.file_fd();
+                    let old_fsz = vma.file_size();
+                    let old_off = vma.offset();
+
+                    // Head piece [v_start, range_start): keep original flags.
+                    let head = if v_start < range_start {
+                        let mut h = crate::mm::vma::Vma::new(
+                            crate::mm::page::VirtAddr::new(v_start),
+                            crate::mm::page::VirtAddr::new(range_start),
+                            full_flags,
+                        );
+                        h.set_type(old_type);
+                        h.set_file_fd(old_fd);
+                        h.set_file_size(old_fsz);
+                        h.set_offset(old_off);
+                        Some(h)
+                    } else {
+                        None
+                    };
+
+                    // Tail piece [range_end, v_end): keep original flags.
+                    let tail = if v_end > range_end {
+                        let mut t = crate::mm::vma::Vma::new(
+                            crate::mm::page::VirtAddr::new(range_end),
+                            crate::mm::page::VirtAddr::new(v_end),
+                            full_flags,
+                        );
+                        t.set_type(old_type);
+                        t.set_file_fd(old_fd);
+                        t.set_file_size(old_fsz);
+                        t.set_offset(old_off + (range_end - v_start));
+                        Some(t)
+                    } else {
+                        None
+                    };
+
+                    // Covered piece [max(v_start,range_start), min(v_end,range_end)):
+                    // new permission bits, non-permission flags preserved.
+                    let cov_start = v_start.max(range_start);
+                    let cov_end = v_end.min(range_end);
+                    let mut cov = crate::mm::vma::Vma::new(
+                        crate::mm::page::VirtAddr::new(cov_start),
+                        crate::mm::page::VirtAddr::new(cov_end),
+                        crate::mm::vma::VmaFlags::from_bits(
+                            (full_flags.bits() & !0x7) | perm_bits,
+                        ),
+                    );
+                    cov.set_type(old_type);
+                    cov.set_file_fd(old_fd);
+                    cov.set_file_size(old_fsz);
+                    cov.set_offset(old_off + (cov_start - v_start));
+
+                    // Swap: remove original, re-add pieces (with pins).
+                    let _ = vma_mgr.remove(crate::mm::page::VirtAddr::new(v_start));
+                    addr_space.unpin_vma_file(v_start);
+                    if let Some(h) = head {
+                        let hs = h.start().as_usize();
+                        let _ = vma_mgr.add(h);
+                        if let Some(f) = pinned_file.as_ref() {
+                            addr_space.pin_vma_file(hs, f.clone());
+                        }
+                    }
+                    {
+                        let cs = cov.start().as_usize();
+                        let _ = vma_mgr.add(cov);
+                        if let Some(f) = pinned_file.as_ref() {
+                            addr_space.pin_vma_file(cs, f.clone());
+                        }
+                    }
+                    if let Some(t) = tail {
+                        let ts = t.start().as_usize();
+                        let _ = vma_mgr.add(t);
+                        if let Some(f) = pinned_file.as_ref() {
+                            addr_space.pin_vma_file(ts, f.clone());
+                        }
                     }
                 }
             }
