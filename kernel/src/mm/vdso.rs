@@ -42,7 +42,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Fixed user mapping address (INTERP_BASE - 4 MiB, clear of the dynamic
 /// linker's base).
-pub const VDSO_BASE: u64 = 0x3FBE_C000_0000;
+pub const VDSO_BASE: u64 = 0x3FBE_C000_00;
 
 /// auxv AT_SYSINFO_EHDR value: the code (ELF) page.
 pub fn vdso_ehdr() -> u64 {

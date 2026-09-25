@@ -671,9 +671,22 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
         return fail(errno::EFAULT);
     }
 
-    // Read requested sleep time
-    // SAFETY: rqtp validated with access_ok; reads Timespec (two i64 fields).
-    let req = unsafe { *rqtp };
+    // Read requested sleep time. copy_from_user (exception-table): a raw
+    // dereference faults in S-mode on every U page (SUM=0) and panics the
+    // kernel — glibc sleep() hits this on its first call.
+    let mut req = Timespec { tv_sec: 0, tv_nsec: 0 };
+    {
+        let uncopied = unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(
+                &mut req as *mut Timespec as *mut u8,
+                rqtp as *const u8,
+                core::mem::size_of::<Timespec>(),
+            )
+        };
+        if uncopied != 0 {
+            return fail(errno::EFAULT);
+        }
+    }
 
     if req.tv_nsec < 0 || req.tv_nsec > 999_999_999 {
         return fail(errno::EINVAL);

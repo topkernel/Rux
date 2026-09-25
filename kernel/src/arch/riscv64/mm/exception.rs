@@ -239,6 +239,16 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
 
     // User mode page fault handling
 
+    // Non-canonical Sv39 address: bits 63..39 of a user VA must be zero.
+    // The hardware faults BEFORE any page-table walk, but the kernel's own
+    // walkers MASK the index to 39 bits — a page mapped at the truncated
+    // position would make every fault resolve as "already mapped, perms
+    // OK", retrying the same non-canonical fetch forever: a silent
+    // machine-wide trap loop (bit us with an out-of-range SIGTRAMP_BASE).
+    if (fault_addr.bits() >> 39) != 0 {
+        return bad_area(regs, access_type, fault_addr);
+    }
+
     // 1. Call handle_mm_fault to handle
     let result = handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
 

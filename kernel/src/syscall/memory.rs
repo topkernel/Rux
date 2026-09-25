@@ -1460,8 +1460,14 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
                 pte_virt = get_page_table_virt(pte.ppn() << PAGE_SHIFT) as *const PageTableEntry;
             }
 
-            // Set result: lowest bit indicates if page is in memory
-            *vec_ptr.add(i) = if page_in_memory { 1 } else { 0 };
+            // Set result: lowest bit indicates if page is in memory.
+            // put_user (exception-table): a raw store faults in S-mode on
+            // every U page (SUM=0) and panics the kernel — glibc's malloc
+            // probes with mincore, so any allocator-heavy program hit this.
+            let _ = crate::arch::riscv64::uaccess::put_user(
+                vec_ptr.add(i),
+                if page_in_memory { 1u8 } else { 0u8 },
+            );
         }
     }
 

@@ -283,6 +283,24 @@ impl File {
             Some(i) => i,
             None => return -9,
         };
+
+        // Disk-backed files (ext4) serve reads through their file ops;
+        // inode.read_data only holds the in-memory FileBuffer of mem
+        // files and returns 0 for on-disk inodes — pread on any ext4
+        // file used to return 0 bytes (glibc's regcomp mmap'd locale
+        // tables fine but every pread-based reader saw zeros).
+        if let Some(ops) = *self.ops.get() {
+            // lseek presence marks the file seekable (pipes/sockets have
+            // none); pread on them must stay ESPIPE.
+            if ops.read.is_some() && ops.lseek.is_some() {
+                let saved = self.get_pos();
+                self.set_pos(offset);
+                let n = self.read(buf, count);
+                self.set_pos(saved);
+                return n;
+            }
+        }
+
         let slice = core::slice::from_raw_parts_mut(buf, count);
         // Only seekable (inode-backed) files support offset reads.
         if inode.ops.is_none() {
@@ -300,7 +318,7 @@ impl File {
     ///
     /// O_APPEND is ignored by pwrite per POSIX (the explicit offset wins).
     pub unsafe fn write_at(&self, offset: u64, buf: *const u8, count: usize) -> isize {
-        // f_mode enforcement, same as write().
+        // f_mode enforcement, same as read().
         if self.flags().is_readonly() {
             return -9; // EBADF
         }
@@ -309,6 +327,20 @@ impl File {
             Some(i) => i,
             None => return -9,
         };
+
+        // Disk-backed files (ext4) must write through their file ops;
+        // inode.write_data targets the in-memory FileBuffer and would
+        // desynchronize disk-backed files (pwrite silently lost).
+        if let Some(ops) = *self.ops.get() {
+            if ops.write.is_some() && ops.lseek.is_some() {
+                let saved = self.get_pos();
+                self.set_pos(offset);
+                let n = self.write(buf, count);
+                self.set_pos(saved);
+                return n;
+            }
+        }
+
         let slice = core::slice::from_raw_parts(buf, count);
         if inode.ops.is_none() {
             return -29; // ESPIPE

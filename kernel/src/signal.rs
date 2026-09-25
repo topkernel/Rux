@@ -986,7 +986,7 @@ unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::riscv64::pt_regs::P
 /// so the old stack-trampoline fallback returned into an NX stack page and
 /// every glibc signal handler died with SIGSEGV (dash exiting status=11
 /// the moment a child sent SIGCHLD was this bug).
-pub const SIGTRAMP_BASE: u64 = 0x3FBE_0000_0000;
+pub const SIGTRAMP_BASE: u64 = 0x3FBE_0000_00;
 
 unsafe fn setup_frame(
     task: *mut crate::process::task::Task,
@@ -1316,6 +1316,7 @@ pub mod frame_offsets {
 /// Handle default signal action
 ///
 fn handle_default_signal(sig: i32) {
+
     use crate::sched;
 
     match sig {

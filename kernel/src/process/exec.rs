@@ -146,8 +146,13 @@ pub(crate) fn do_execve_elf(
     // Maximum stack size (8MB)
     const STACK_MAX_SIZE: u64 = 8 * 1024 * 1024;
 
-    // Total size to allocate: ELF segments + initial stack
-    let total_size = match virt_end.checked_sub(virt_start).and_then(|v| v.checked_add(initial_stack_size)) {
+    // Image size only. The stack is mapped separately near the top of the
+    // user address space — Linux-style. The old layout placed the stack
+    // directly above the image (virt_end + 128KB); for small PIEs the brk
+    // heap starts right below it, so glibc's first malloc sbrk grew
+    // straight into the stack and smashed canaries in every dynamically
+    // linked heap user (ls/grep/dpkg "*** stack smashing detected ***").
+    let total_size = match virt_end.checked_sub(virt_start) {
         Some(v) => v,
         None => return Err(crate::errno::Errno::InvalidArgument.as_neg_i32()),
     };
@@ -176,6 +181,15 @@ pub(crate) fn do_execve_elf(
     let phys_base = unsafe {
         alloc_and_map_to_user_table(user_ppn, virt_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
+
+    // Initial stack at the top of user space (one guard page below
+    // USER_END). Mapped RW here; the VMA below marks it GROWSDOWN.
+    let user_end = crate::arch::riscv64::mm::user_addr::USER_END as u64;
+    let stack_top = user_end - PAGE_SIZE as u64;
+    let stack_bottom = stack_top - initial_stack_size;
+    let stack_phys_base = unsafe {
+        alloc_and_map_to_user_table(user_ppn, stack_bottom, initial_stack_size, flags)
+    }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())? as usize;
 
     // Signal-return trampoline (R+X page): RISC-V glibc installs handlers
     // without sa_restorer and returns through this fixed page (the Linux
@@ -312,6 +326,13 @@ pub(crate) fn do_execve_elf(
         }
     }
 
+    // P2 vDSO mapping is DISABLED (data page lives outside the linear
+    // map; see vdso.rs). The block below tried to map anyway and spewed
+    // virt_to_phys warnings on every exec while AT_SYSINFO_EHDR stays
+    // commented out — skipped until the vDSO pages come from linear-mapped
+    // memory.
+    #[allow(unused_variables)]
+    if false {
     // P2 vDSO: map the shared time-data page (RW) and the vDSO ELF page
     // (RX) at the fixed VDSO_BASE, two pages total. The mapping aliases
     // GLOBAL kernel pages — the data page stays live (tick-refreshed) in
@@ -341,6 +362,8 @@ pub(crate) fn do_execve_elf(
                     | PageTableEntry::X | PageTableEntry::A,
             );
         }
+    }
+
     }
 
     // Load interpreter (dynamic linker) if present
@@ -439,10 +462,9 @@ pub(crate) fn do_execve_elf(
         (entry, 0)
     };
 
-    // Set up stack
-    let stack_top = virt_end + initial_stack_size - 256;
-    let virt_offset = stack_top - virt_start;
-    let phys_stack_top = (phys_base + virt_offset) as usize;
+    // Set up stack (Linux reserves 256 bytes of slop below the raw top).
+    let stack_top = stack_top - 256;
+    let phys_stack_top = stack_phys_base + (initial_stack_size as usize - 256);
 
     let stack_virt_addr = phys_to_virt(PhysAddr::new(phys_stack_top as u64)).bits();
 
@@ -497,8 +519,8 @@ pub(crate) fn do_execve_elf(
     let total_slots: usize = execfn_string_offset + (execfn_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_slots * 8) as u64);
 
-    let adjusted_virt_offset = adjusted_stack_top - virt_start;
-    let adjusted_phys_stack_top = (phys_base + adjusted_virt_offset) as usize;
+    let adjusted_phys_stack_top =
+        stack_phys_base + (adjusted_stack_top - stack_bottom) as usize;
 
     let adjusted_stack_virt_addr = phys_to_virt(PhysAddr::new(adjusted_phys_stack_top as u64)).bits();
 
@@ -688,8 +710,9 @@ pub(crate) fn do_execve_elf(
         new_addr_space.setup_envp(env_start_addr as usize, env_end_addr as usize);
     }
 
-    // Set up stack VMA with GROWSDOWN flag and stack limit
-    let stack_bottom = virt_end;
+    // Set up stack VMA with GROWSDOWN flag and stack limit.
+    // stack_bottom here is the mapped bottom of the high stack (see the
+    // stack mapping above); the GROWSDOWN VMA lets it extend further down.
     // RLIMIT_STACK: the stack growth bound is the exec'ing task's soft
     // limit, capped at the architectural 8MB default. setrlimit/prlimit64
     // keep mm.stack_limit in sync afterwards (sync_stack_limit in

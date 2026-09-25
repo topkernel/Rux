@@ -113,17 +113,24 @@ static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 
 /// Allocate a kernel stack (with caching)
 fn stack_cache_alloc() -> *mut u8 {
+    // TEMP DIAG: stack-cache reuse DISABLED — hunting a task-lifetime bug
+    // where a stack freed too early (reaper/sweep family) gets handed to a
+    // new task while the old owner still runs, merging two tasks' kernel
+    // contexts (observed: a child's saved pt_regs containing the PARENT's
+    // later wait4 frame — ls/grep canary smashes).
     let mut cache = STACK_CACHE.lock();
-    if let Some(bottom) = cache.pop() {
-        // Zero stack before reuse
-        // SAFETY: bottom was returned by a previous alloc() and is KERNEL_STACK_SIZE bytes.
-        unsafe {
-            core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE);
-            // R18-2: place the overflow canary at the very bottom (below
-            // any legitimate frame — the deepest legal sp stays above it).
-            core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY);
+    if false {
+        if let Some(bottom) = cache.pop() {
+            // Zero stack before reuse
+            // SAFETY: bottom was returned by a previous alloc() and is KERNEL_STACK_SIZE bytes.
+            unsafe {
+                core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE);
+                // R18-2: place the overflow canary at the very bottom (below
+                // any legitimate frame — the deepest legal sp stays above it).
+                core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY);
+            }
+            return bottom;
         }
-        return bottom;
     }
     // fresh alloc also gets a canary
     // SAFETY: Layout is valid; null check follows.
