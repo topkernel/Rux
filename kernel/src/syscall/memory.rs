@@ -409,6 +409,62 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                         VmaType::FileBacked
                     };
 
+                    // Framebuffer mmap: /dev/fb0 maps the GPU framebuffer's
+                    // own physical pages into the caller (no anonymous
+                    // backing, no demand paging — writes land in the
+                    // scanout buffer; userspace flushes via FBIO_FLUSH).
+                    if fd >= 0 {
+                        let is_fb = unsafe { crate::fs::file::get_file_fd(fd as usize) }
+                            .map(|f| crate::drivers::gpu::fbdev::is_fb_file(&f))
+                            .unwrap_or(false);
+                        if is_fb {
+                            let info = match crate::drivers::gpu::get_framebuffer_info() {
+                                Some(i) => i,
+                                None => return mmap_error::EINVAL,
+                            };
+                            let fb_len = info.size as usize;
+                            if actual_length > fb_len {
+                                return mmap_error::EINVAL;
+                            }
+                            let hint = if addr == 0 { None } else { Some(addr) };
+                            let placement = match hint {
+                                Some(a) => a,
+                                None => match address_space.find_free_area(actual_length) {
+                                    Ok(v) => v.as_usize(),
+                                    Err(_) => return mmap_error::ENOMEM,
+                                },
+                            };
+                            let root = address_space.root_ppn();
+                            // SAFETY: root is the task's page-table root;
+                            // info.addr..+len is the linear-mapped framebuffer.
+                            unsafe {
+                                crate::arch::riscv64::mm::mm_ops::map_user_region(
+                                    root,
+                                    placement as u64,
+                                    info.addr,
+                                    actual_length as u64,
+                                    crate::arch::riscv64::mm::PageTableEntry::V
+                                        | crate::arch::riscv64::mm::PageTableEntry::R
+                                        | crate::arch::riscv64::mm::PageTableEntry::W
+                                        | crate::arch::riscv64::mm::PageTableEntry::U
+                                        | crate::arch::riscv64::mm::PageTableEntry::A
+                                        | crate::arch::riscv64::mm::PageTableEntry::D,
+                                );
+                            }
+                            // Device VMA: faults never touch it (pages are
+                            // already present), unmap only clears PTEs.
+                            let vma_end = placement + actual_length;
+                            let mut dv = crate::mm::vma::Vma::new(
+                                VirtAddr::new(placement),
+                                VirtAddr::new(vma_end),
+                                vma_flags,
+                            );
+                            dv.set_type(crate::mm::vma::VmaType::Device);
+                            let _ = address_space.vma_write().add(dv);
+                            return placement as i64;
+                        }
+                    }
+
                     // Call AddressSpace::mmap
                     let result = address_space.mmap(
                         VirtAddr::new(addr),

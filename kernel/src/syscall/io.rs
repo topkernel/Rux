@@ -629,21 +629,15 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     let request = args[1] as u32;
     let arg = args[2] as usize;
 
-    // R22-2: dispatch framebuffer ioctls on the FILE's identity, not the
-    // fd number — FdTable legally allocates 1000-1023, and the old
-    // heuristic hijacked regular ioctls on high fds into fbdev.
-    if fd >= 1000 {
-        let is_fbdev = unsafe { crate::fs::file::get_file_fd(fd as usize) }
-            .map(|file| {
-                let p = file.path();
-                p.starts_with("/dev/fb") || p.starts_with("/dev/fb0")
-            })
-            .unwrap_or(false);
-        if is_fbdev {
-            let result = crate::drivers::gpu::fbdev_ioctl(request, arg) as i64;
-            return result as i64;
+    // Framebuffer ioctls dispatch on the FILE's ops identity (R22-2
+    // spirit, minus the fd>=1000 heuristic that only worked for the
+    // side-namespace fd range).
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if crate::drivers::gpu::fbdev::is_fb_file(&file) {
+                return crate::drivers::gpu::fbdev_ioctl(request, arg) as i64;
+            }
         }
-        // fall through to the generic path
     }
 
     // Per-fd terminal ioctls (pty master/slave): dispatch on the File's ops

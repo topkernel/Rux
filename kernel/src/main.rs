@@ -711,7 +711,6 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // ========== Graphics System Initialization (VirtIO-GPU) ==========
-        /*
         {
             // Probe VirtIO-GPU device
             if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
@@ -726,9 +725,10 @@ pub extern "C" fn rust_main() -> ! {
                 } else {
                     print_status("gpu", "framebuffer init failed", false);
                 }
+            } else {
+                print_status("driver", "virtio-gpu not found", false);
             }
         }
-        */
 
         // ========== Initialize Input System ==========
         {
@@ -739,6 +739,15 @@ pub extern "C" fn rust_main() -> ! {
             fs::devfs::init();
             printk::init_kmsg_device();
             print_status("fs", "devfs mounted /dev", true);
+            // /dev/fb0 — framebuffer char device (registered when the GPU
+            // initialized successfully above)
+            if drivers::gpu::get_framebuffer_info().is_some() {
+                match drivers::gpu::fbdev::init_fbdev() {
+                    Ok(()) => print_status("driver", "/dev/fb0 registered", true),
+                    Err(()) => print_status("driver", "/dev/fb0 registration failed", false),
+                }
+            }
+
             // Build dentry tree for devfs
             if let Some(root_entry) = fs::devfs::get_root_entry() {
                 fs::vfs::vfs_mount("/dev", fs::devfs::create_root_inode(&root_entry),

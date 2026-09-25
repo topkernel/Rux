@@ -384,7 +384,10 @@ impl VirtioGpuDevice {
 
         // Save framebuffer information
         self.fb_info = Some(FrameBufferInfo {
-            addr: fb_ptr as u64,
+            // PHYSICAL address — userspace mmap maps these frames; the
+            // old VA here built PTEs pointing outside RAM and every
+            // store faulted in an unbreakable handled-fault loop.
+            addr: fb_phys,
             size: fb_size as u32,
             width,
             height,

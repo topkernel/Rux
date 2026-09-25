@@ -229,6 +229,42 @@ pub fn create_var_screeninfo(info: &FrameBufferInfo) -> FbVarScreeninfo {
     var
 }
 
+/// /dev/fb0 file operations: a real char device so ioctls and mmap
+/// dispatch on the FILE's ops identity (no fd-number heuristics).
+pub static FB_OPS: crate::fs::FileOps = crate::fs::FileOps {
+    read: Some(fb_read),
+    write: Some(fb_write),
+    lseek: None,
+    close: None,
+    poll: None,
+};
+
+fn fb_read(_file: &crate::fs::File, _buf: &mut [u8]) -> isize {
+    -29 // ESPIPE-like: reads unsupported (mmap instead)
+}
+
+fn fb_write(_file: &crate::fs::File, _buf: &[u8]) -> isize {
+    -29
+}
+
+/// True when the File is the /dev/fb0 char device.
+pub fn is_fb_file(file: &crate::fs::File) -> bool {
+    match file.get_ops() {
+        Some(ops) => core::ptr::eq(ops as *const _, &FB_OPS as *const _),
+        None => false,
+    }
+}
+
+/// Register the fb char device and create /dev/fb0 (called from boot
+/// after devfs is up and the GPU framebuffer exists).
+pub fn init_fbdev() -> Result<(), ()> {
+    crate::fs::devfs::registry::register_char_device(
+        crate::fs::dev_t::DEV_FB0,
+        &FB_OPS,
+    )?;
+    crate::fs::devfs::mknod("/fb0", crate::fs::dev_t::DEV_FB0, 0o666)
+}
+
 /// Handle framebuffer ioctl commands
 /// Returns: 0 on success, negative error code on failure
 pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
@@ -245,8 +281,12 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             }
             // SAFETY: access_ok validated the user pointer; fix is a properly initialized value.
             unsafe {
-                let dest = arg as *mut FbFixScreeninfo;
-                core::ptr::write_volatile(dest, fix);
+                let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    &fix as *const FbFixScreeninfo as *const u8,
+                    core::mem::size_of::<FbFixScreeninfo>(),
+                );
+                if uncopied != 0 { return -14; }
             }
             0
         }
@@ -257,8 +297,12 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             }
             // SAFETY: access_ok validated the user pointer; var is a properly initialized value.
             unsafe {
-                let dest = arg as *mut FbVarScreeninfo;
-                core::ptr::write_volatile(dest, var);
+                let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    &var as *const FbVarScreeninfo as *const u8,
+                    core::mem::size_of::<FbVarScreeninfo>(),
+                );
+                if uncopied != 0 { return -14; }
             }
             0
         }
