@@ -220,11 +220,14 @@ pub fn create_var_screeninfo(info: &FrameBufferInfo) -> FbVarScreeninfo {
     var.yres_virtual = info.height;
     var.bits_per_pixel = 32;
 
-    // xRGB format (little-endian)
-    var.red = FbBitfield { offset: 16, length: 8, msb_right: 0 };
-    var.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
-    var.blue = FbBitfield { offset: 0, length: 8, msb_right: 0 };
-    var.transp = FbBitfield { offset: 24, length: 8, msb_right: 0 };
+    // Bitfields measured empirically against QEMU's virtio-gpu (resource
+    // created with format 3): on-screen R comes from V[15:8], G from
+    // V[23:16], B from V[31:24]; V[7:0] is ignored. Advertising these
+    // offsets lets generic fbdev programs build correct pixels.
+    var.red = FbBitfield { offset: 8, length: 8, msb_right: 0 };
+    var.green = FbBitfield { offset: 16, length: 8, msb_right: 0 };
+    var.blue = FbBitfield { offset: 24, length: 8, msb_right: 0 };
+    var.transp = FbBitfield { offset: 0, length: 0, msb_right: 0 };
 
     var
 }
