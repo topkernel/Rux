@@ -30,7 +30,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use crate::fs::dev_t::DevNo;
 use crate::fs::file::{File, FileOps, FileFlags};
-use crate::fs::tty::{
+use crate::fs::tty::{termios_to_kernel_bytes, termios_from_kernel_bytes, TERMIOS_KERNEL_SIZE, 
     termios_from_termio_bytes, termios_from_user_bytes, termios_to_termio_bytes,
     termios_to_user_bytes, TtyDevice, TERMIOS_USER_SIZE, TERMIO_USER_SIZE,
 };
@@ -676,29 +676,31 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
     unsafe {
         match request {
             TCGETS => {
-                if arg == 0 || !access_ok(arg, TERMIOS_USER_SIZE) {
+                // Kernel-ABI termios = 36 bytes (c_cc[19]); the 52-byte
+                // wire copy overflowed glibc tcgetattr's stack buffer.
+                if arg == 0 || !access_ok(arg, TERMIOS_KERNEL_SIZE) {
                     return Some(-(EFAULT as i64));
                 }
                 let tio = pair.tty.get_termios();
-                let mut kbuf = [0u8; TERMIOS_USER_SIZE];
-                termios_to_user_bytes(&tio, &mut kbuf);
-                if copy_to_user(arg as *mut u8, kbuf.as_ptr(), TERMIOS_USER_SIZE) > 0 {
+                let mut kbuf = [0u8; TERMIOS_KERNEL_SIZE];
+                termios_to_kernel_bytes(&tio, &mut kbuf);
+                if copy_to_user(arg as *mut u8, kbuf.as_ptr(), TERMIOS_KERNEL_SIZE) > 0 {
                     return Some(-(EFAULT as i64));
                 }
                 Some(0)
             }
             TCSETS | TCSETSW | TCSETSF => {
-                if arg == 0 || !access_ok(arg, TERMIOS_USER_SIZE) {
+                if arg == 0 || !access_ok(arg, TERMIOS_KERNEL_SIZE) {
                     return Some(-(EFAULT as i64));
                 }
-                let mut kbuf = [0u8; TERMIOS_USER_SIZE];
-                if copy_from_user(kbuf.as_mut_ptr(), arg as *const u8, TERMIOS_USER_SIZE) > 0 {
+                let mut kbuf = [0u8; TERMIOS_KERNEL_SIZE];
+                if copy_from_user(kbuf.as_mut_ptr(), arg as *const u8, TERMIOS_KERNEL_SIZE) > 0 {
                     return Some(-(EFAULT as i64));
                 }
                 if request == TCSETSF {
                     pair.tty.flush_input();
                 }
-                pair.tty.set_termios(termios_from_user_bytes(&kbuf));
+                pair.tty.set_termios(termios_from_kernel_bytes(&kbuf));
                 Some(0)
             }
             TCGETA => {

@@ -689,25 +689,27 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if arg == 0 {
                 return -errno::EFAULT as i64;
             }
-            // Check address validity (termios struct 52 bytes)
-            if !crate::arch::riscv64::uaccess::access_ok(arg, 52) {
+            // Check address validity (kernel-ABI termios = 36 bytes)
+            if !crate::arch::riscv64::uaccess::access_ok(arg, crate::fs::tty::TERMIOS_KERNEL_SIZE) {
                 return -errno::EFAULT as i64;
             }
             // Fill termios structure from the shared console tty state
             // (fs::tty — full termios persistence; the c_lflag half is what
             // console.rs consults for ISIG/echo).
             let tio = crate::fs::tty::console().get_termios();
-            // SAFETY: termios_buf is a stack-allocated 52-byte buffer.
-            let mut termios_buf = [0u8; 52]; // R9-15: asm-generic termios is 52 bytes (4x u32 + c_line + c_cc[32] + pad)
-            crate::fs::tty::termios_to_user_bytes(&tio, &mut termios_buf);
+            // Kernel-ABI termios = 36 bytes (c_cc[19]); glibc's tcgetattr
+            // stack buffer is exactly that size — the old 52-byte copy
+            // smashed its canary (the ls/grep/dpkg abort family).
+            let mut termios_buf = [0u8; crate::fs::tty::TERMIOS_KERNEL_SIZE];
+            crate::fs::tty::termios_to_kernel_bytes(&tio, &mut termios_buf);
 
             // Copy to user space with SUM bit properly set
-            // SAFETY: arg validated with access_ok(52); copy_to_user handles user writes.
+            // SAFETY: arg validated with access_ok(36); copy_to_user handles user writes.
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     arg as *mut u8,
                     termios_buf.as_ptr(),
-                    52
+                    crate::fs::tty::TERMIOS_KERNEL_SIZE
                 )
             };
             if uncopied > 0 {
@@ -720,21 +722,19 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if arg == 0 {
                 return -errno::EFAULT as i64;
             }
-            // Check address validity
-            if !crate::arch::riscv64::uaccess::access_ok(arg, 52) {
+            // Check address validity (kernel-ABI termios = 36 bytes)
+            if !crate::arch::riscv64::uaccess::access_ok(arg, crate::fs::tty::TERMIOS_KERNEL_SIZE) {
                 return -errno::EFAULT as i64;
             }
             // Read termios structure from user space using copy_from_user
-            let mut termios_buf = [0u8; 52]; // R9-15: asm-generic termios is 52 bytes (4x u32 + c_line + c_cc[32] + pad)
-            // R20-1: copy exactly 52 — the old 60-byte length overflowed the
-            // 52-byte kernel buffer by 8 bytes (stale length from before the
-            // R9-15 buffer shrink; TCGETS was fixed, TCSETS was not).
-            // SAFETY: arg validated with access_ok(52); copy_from_user safely reads from user.
+            // (kernel-ABI 36-byte layout, c_cc[19]).
+            // SAFETY: arg validated with access_ok(36); copy_from_user safely reads from user.
+            let mut termios_buf = [0u8; crate::fs::tty::TERMIOS_KERNEL_SIZE];
             let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_from_user(
                     termios_buf.as_mut_ptr(),
                     arg as *const u8,
-                    52
+                    crate::fs::tty::TERMIOS_KERNEL_SIZE
                 )
             };
             if uncopied > 0 {
@@ -742,7 +742,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             }
             // Store the full termios into the shared console tty state
             // (console.rs reads the c_lflag half for ISIG/echo decisions).
-            let tio = crate::fs::tty::termios_from_user_bytes(&termios_buf);
+            let tio = crate::fs::tty::termios_from_kernel_bytes(&termios_buf);
             if request == 0x5404 {
                 crate::fs::tty::console().flush_input();
             }

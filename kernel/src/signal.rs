@@ -662,12 +662,19 @@ pub struct UContext {
     pub uc_link: u64,
     /// Signal stack (stack_t layout: ss_sp, ss_flags, ss_size)
     pub uc_stack: SignalStack,
-    /// Signal mask (sigset_t = 1 × u64 on RV64 with 64 signals)
-    pub uc_sigmask: u64,
-    /// Padding: 1024/8 - sizeof(sigset_t) = 128 - 8 = 120 bytes
-    __unused: [u8; 120],
-    /// Signal context (RISC-V registers)
+    /// Signal context (RISC-V registers) — MUST sit at uc+40: the kernel
+    /// ABI (asm/ucontext.h) puts uc_mcontext directly after uc_stack;
+    /// glibc SA_SIGINFO handlers and libgcc unwinders read registers at
+    /// this fixed offset. The old field order inserted uc_sigmask+padding
+    /// between them, so every handler saw the signal MASK where the
+    /// register array should be (garbage pointers → the whole abort
+    /// family).
     pub uc_mcontext: SigContext,
+    /// Signal mask (sigset_t = 1 × u64 on RV64 with 64 signals) — after
+    /// mcontext per the ABI.
+    pub uc_sigmask: u64,
+    /// Padding to 1024 bits of sigset space.
+    __unused: [u8; 120],
 }
 
 impl UContext {

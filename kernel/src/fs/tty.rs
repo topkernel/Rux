@@ -157,6 +157,50 @@ impl Termios {
     }
 }
 
+/// Size of the KERNEL-ABI struct termios (asm-generic/termbits.h):
+/// 4 tcflag_t + c_line + c_cc[19] = 36 bytes. This is what TCGETS/TCSETS
+/// move — glibc's tcgetattr allocates exactly 36 bytes on its stack; the
+/// old 52-byte wire copy smashed 16 bytes past it (the ls/grep/dpkg
+/// "stack smashing detected" family).
+pub const TERMIOS_KERNEL_SIZE: usize = 36;
+/// Kernel-ABI NCCS (c_cc[19]).
+pub const NCCS_KERNEL: usize = 19;
+
+/// Serialize a Termios into the 36-byte kernel-ABI layout (TCGETS).
+pub fn termios_to_kernel_bytes(t: &Termios, out: &mut [u8; TERMIOS_KERNEL_SIZE]) {
+    // SAFETY: out is a 36-byte buffer; unaligned u32 writes at 0/4/8/12
+    // are in bounds.
+    unsafe {
+        let p = out.as_mut_ptr() as *mut u32;
+        p.add(0).write_unaligned(t.c_iflag);
+        p.add(1).write_unaligned(t.c_oflag);
+        p.add(2).write_unaligned(t.c_cflag);
+        p.add(3).write_unaligned(t.c_lflag);
+    }
+    out[16] = t.c_line;
+    out[17..17 + NCCS_KERNEL].copy_from_slice(&t.c_cc[..NCCS_KERNEL]);
+}
+
+/// Parse a Termios from the 36-byte kernel-ABI layout (TCSETS).
+pub fn termios_from_kernel_bytes(buf: &[u8; TERMIOS_KERNEL_SIZE]) -> Termios {
+    // SAFETY: buf is a 36-byte buffer; unaligned u32 reads at 0/4/8/12.
+    unsafe {
+        let p = buf.as_ptr() as *const u32;
+        Termios {
+            c_iflag: p.add(0).read_unaligned(),
+            c_oflag: p.add(1).read_unaligned(),
+            c_cflag: p.add(2).read_unaligned(),
+            c_lflag: p.add(3).read_unaligned(),
+            c_line: buf[16],
+            c_cc: {
+                let mut cc = [0u8; NCCS];
+                cc[..NCCS_KERNEL].copy_from_slice(&buf[17..17 + NCCS_KERNEL]);
+                cc
+            },
+        }
+    }
+}
+
 /// Serialize a Termios into the 52-byte asm-generic user layout.
 pub fn termios_to_user_bytes(t: &Termios, out: &mut [u8; TERMIOS_USER_SIZE]) {
     out.fill(0);
