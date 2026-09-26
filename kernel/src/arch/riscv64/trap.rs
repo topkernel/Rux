@@ -639,11 +639,17 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             // Page handled, re-execute instruction
         }
         MmFaultResult::Segfault => {
-            crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, sp={:#x}, pid={}, mode={}",
-                fault_addr, regs.epc, regs.sp,
+            crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, pid={}, mode={}",
+                fault_addr, regs.epc, regs.ra, regs.sp,
                 crate::sched::get_current_pid(),
                 if regs.kernel_mode() { "kernel" } else { "user" });
             if regs.user_mode() {
+                // Linux semantics: route user-mode faults through normal
+                // signal delivery (force_sig_fault) — an installed
+                // SIGSEGV handler (debuggers, crash catchers) must run;
+                // the direct do_exit bypassed every handler.
+                let pid = crate::process::current_pid();
+                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }
         }
