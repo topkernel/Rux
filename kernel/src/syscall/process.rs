@@ -396,12 +396,17 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                     cred.cap_ambient = Cap::EMPTY;
                 }
 
-                // AT_SECURE / secureexec: setuid/setgid exec, processes with
-                // euid != uid, or any exec keeping capabilities — loaders and
-                // libc use it to lock down the environment.
+                // AT_SECURE / secureexec. Linux semantics: 1 only when the
+                // exec CHANGES the effective ids (setuid/setgid bits taken,
+                // or euid != uid / egid != gid). Capabilities alone do NOT
+                // make an exec secure — the old `!cap_effective.is_empty()`
+                // clause marked EVERY root process AT_SECURE=1 (root keeps
+                // its caps across exec), so ld.so scrubbed LD_PRELOAD for
+                // all root binaries and glibc entered secure mode globally
+                // (LD_*, tunables, $ORIGIN all disabled).
                 secure_exec = is_setuid || is_setgid
                     || cred.euid != cred.uid
-                    || !cred.cap_effective.is_empty();
+                    || cred.egid != cred.gid;
             }
         }
     }
