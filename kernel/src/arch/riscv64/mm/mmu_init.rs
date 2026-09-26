@@ -160,6 +160,10 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             // Fixmap stage: use memblock allocation
             let phys_addr = crate::mm::memblock::memblock_phys_alloc()?;
 
+            // FORENSIC→FIX: boot-stage tables are shared by early mms —
+            // mark permanent so teardown never frees them.
+            PT_LEDGER.stamp_boot(phys_addr as u64 >> PAGE_SHIFT);
+
             // Use linear mapping (must be available at this point)
             let virt_addr = phys_to_virt(PhysAddr::new(phys_addr as u64));
             core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize);
@@ -199,6 +203,9 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
                 return None;
             }
 
+            // FORENSIC ledger: stamp every Late-stage table allocation.
+            PT_LEDGER.stamp(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid());
+
             let virt_addr = phys_to_virt(PhysAddr::new(phys_addr));
             core::ptr::write_bytes(virt_addr.bits() as *mut u8, 0, PAGE_SIZE as usize);
             Some(phys_addr)
@@ -231,11 +238,24 @@ pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
     }
 }
 
+unsafe fn free_page_table_checked(phys_addr: u64, site: &str) {
+    if get_alloc_stage() == AllocStage::Late {
+        if !PT_LEDGER.take_returns(phys_addr >> PAGE_SHIFT) {
+            return; // boot-shared table: never free, never reuse
+        }
+        PT_LEDGER.take(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid(), site);
+    }
+    free_page_table(phys_addr)
+}
+
 /// Free a page table (only valid for late stage allocations)
 unsafe fn free_page_table(phys_addr: u64) {
     if get_alloc_stage() != AllocStage::Late {
         return;
     }
+
+    // FORENSIC ledger: detect double-free / free-of-unallocated table frames.
+    PT_LEDGER.take(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid(), "free_page_table");
 
     // Check if it's from early static region
     // Early tables live in BSS at KERNEL_LINK_ADDR; convert VA→PA using
@@ -255,6 +275,71 @@ unsafe fn free_page_table(phys_addr: u64) {
     // Use zone allocator to free
     crate::mm::page_alloc::free_pages(phys_addr as usize, 0);
 }
+
+// FORENSIC (temporary): page-table frame ledger — every Late-stage
+// alloc_page_table stamps the PPN; free_page_table clears it. A stamp on
+// an already-stamped PPN = double allocation; clearing an unstamped or
+// already-cleared PPN = double free / foreign free. Both are silent
+// address-space corruptors under concurrent fork/exec.
+pub struct PtLedger {
+    // Direct-hash: slot = ppn & MASK, value = ppn+1 (0 = empty). O(1),
+    // no eviction churn; a slot is reused only when the previous ppn was
+    // freed (cleared) or a genuine double-alloc collides.
+    slots: [core::sync::atomic::AtomicU64; 16384],
+    // Boot-permanent tables (Early static + Fixmap/memblock): referenced
+    // by every early mm — freeing them per-mm tears down shared state and
+    // feeds the frames back for reuse as live page tables (the concurrent
+    // fork/exec corruption family).
+    boot: [core::sync::atomic::AtomicBool; 16384],
+    reported: core::sync::atomic::AtomicUsize,
+}
+impl PtLedger {
+    const fn new() -> Self {
+        Self {
+            slots: [const { core::sync::atomic::AtomicU64::new(0) }; 16384],
+            boot: [const { core::sync::atomic::AtomicBool::new(false) }; 16384],
+            reported: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+    fn stamp_boot(&self, ppn: u64) {
+        self.boot[(ppn as usize) & (self.boot.len() - 1)]
+            .store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+    fn take_returns(&self, ppn: u64) -> bool {
+        if self.boot[(ppn as usize) & (self.boot.len() - 1)]
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        true
+    }
+    fn stamp(&self, ppn: u64, pid: u32) {
+        use core::sync::atomic::Ordering::Relaxed;
+        let slot = &self.slots[(ppn as usize) & (self.slots.len() - 1)];
+        let v = slot.load(Relaxed);
+        if v != 0 && v - 1 == ppn {
+            crate::pr_err!(
+                "PTLEDGER: DOUBLE-ALLOC ppn={:#x} by pid={} (still live)",
+                ppn, pid
+            );
+        }
+        slot.store(ppn + 1, Relaxed);
+    }
+    fn take(&self, ppn: u64, pid: u32, site: &str) {
+        use core::sync::atomic::Ordering::Relaxed;
+        let slot = &self.slots[(ppn as usize) & (self.slots.len() - 1)];
+        let v = slot.load(Relaxed);
+        if v != 0 && v - 1 == ppn {
+            slot.store(0, Relaxed);
+        } else if self.reported.fetch_add(1, Relaxed) < 8 {
+            crate::pr_err!(
+                "PTLEDGER: DOUBLE-FREE ppn={:#x} at {} by pid={} (no live stamp)",
+                ppn, site, pid
+            );
+        }
+    }
+}
+pub static PT_LEDGER: PtLedger = PtLedger::new();
 
 /// Free all page tables and user data pages used by a user address space
 ///
@@ -382,13 +467,13 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     free_pages(phys_addr as usize, 0);
                 }
             }
-            free_page_table(table0_phys);
+            free_page_table_checked(table0_phys, "l0");
         }
-        free_page_table(table1_phys);
+        free_page_table_checked(table1_phys, "l1");
     }
 
     // Free root table (L2)
-    free_page_table(root_phys);
+    free_page_table_checked(root_phys, "root");
 }
 
 // ==================== Page Mapping Functions ====================
