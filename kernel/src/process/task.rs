@@ -113,25 +113,19 @@ static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 
 /// Allocate a kernel stack (with caching)
 fn stack_cache_alloc() -> *mut u8 {
-    // TEMP DIAG: stack-cache reuse DISABLED — hunting a task-lifetime bug
-    // where a stack freed too early (reaper/sweep family) gets handed to a
-    // new task while the old owner still runs, merging two tasks' kernel
-    // contexts (observed: a child's saved pt_regs containing the PARENT's
-    // later wait4 frame — ls/grep canary smashes).
     let mut cache = STACK_CACHE.lock();
-    if false {
-        if let Some(bottom) = cache.pop() {
-            // Zero stack before reuse
-            // SAFETY: bottom was returned by a previous alloc() and is KERNEL_STACK_SIZE bytes.
-            unsafe {
-                core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE);
-                // R18-2: place the overflow canary at the very bottom (below
-                // any legitimate frame — the deepest legal sp stays above it).
-                core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY);
-            }
-            return bottom;
-        }
-    }
+    // Reuse is DISABLED: freed stacks re-enter the cache while the dying
+    // task can still be executing its final sret/exit path on that stack
+    // (reaper/sweep races), and a pop hands the SAME memory to a new task —
+    // merging two tasks' kernel contexts. Fingerprint (reproduced twice,
+    // incl. dash-parallel): user-mode SIGSEGV with epc/ra pointing into
+    // kernel uaccess code (__copy_to_user/__clear_user fixup stubs) — a
+    // user sret restored a pt_regs that was a KERNEL-mode fault frame
+    // written by the new owner of the reused stack. Cost of disabling:
+    // bounded memory (cache grows with peak task churn); cost of enabling
+    // with the early-free unfixed: cross-task context corruption.
+    let _ = &mut cache;
+    // fresh alloc also gets a canary
     // fresh alloc also gets a canary
     // SAFETY: Layout is valid; null check follows.
     unsafe {

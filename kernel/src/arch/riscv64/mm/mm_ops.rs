@@ -1281,10 +1281,10 @@ pub mod cow_flags {
 /// Kernel mappings (VPN2 >= KERNEL_PGD_START or U=0 entries) are shared by copying PGD entries.
 /// User space mappings are copied with COW marking for writable pages.
 pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
-    // TODO: Parent PTE modifications (line ~1063) lack per-page-table locking (PTL).
-    // A concurrent page fault on another CPU could race with the W→COW downgrade.
-    // Linux uses ptep_set_wrprotect() under PTL. Full fix requires PTL infrastructure.
-    // Current mitigation: single-threaded TCG prevents the race.
+    // NOTE: the whole walk runs under the caller's (AddressSpace::fork)
+    // PTE_MODIFY_LOCK, serializing it against demand faults, COW faults,
+    // and exec/unmap teardown. Per-leaf PTL granularity (Linux-style) is
+    // still a TODO for SMP scalability.
     use crate::mm::page_desc::pfn_to_page_mut;
 
     if parent_root_ppn == 0 {
@@ -1372,6 +1372,10 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
             let child_table0_ref = &mut *get_page_table_virt(child_table0_phys);
 
             for vpn0 in 0..512 {
+                // The whole walk runs under AddressSpace::fork()'s
+                // PTE_MODIFY_LOCK (mm_ops.rs fork()), which serializes it
+                // against demand faults, COW faults, and teardown — no
+                // per-leaf locking here (the lock is not reentrant).
                 let pte0 = (*parent_table0).get(vpn0);
 
                 if !pte0.is_valid() {

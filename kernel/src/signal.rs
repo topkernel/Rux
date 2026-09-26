@@ -149,6 +149,10 @@ pub type SigHandler = unsafe extern "C" fn(i32);
 
 /// sigaction structure
 ///
+/// RISC-V has no SA_RESTORER: the rt_sigaction user ABI carries no
+/// sa_restorer field at all, and the kernel ALWAYS returns from handlers
+/// through its own trampoline (Linux uses the vDSO stub; we map a fixed
+/// SIGTRAMP_BASE page).
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SigAction {
@@ -158,10 +162,6 @@ pub struct SigAction {
     pub sa_flags: SigFlags,
     /// Signal mask
     pub sa_mask: u64,
-    /// sa_restorer from the user ABI layout (round-tripped verbatim; the
-    /// kernel returns through its own in-frame trampoline, so the value is
-    /// unused internally — kept so oldact queries stay faithful).
-    pub sa_restorer: usize,
 }
 
 impl SigAction {
@@ -171,7 +171,6 @@ impl SigAction {
             sa_handler: SigAction::default_handler() as usize,
             sa_flags: SigFlags::new(0),
             sa_mask: 0,
-            sa_restorer: 0,
         }
     }
 
@@ -181,7 +180,6 @@ impl SigAction {
             sa_handler: SigAction::ignore_handler() as usize,
             sa_flags: SigFlags::new(0),
             sa_mask: 0,
-            sa_restorer: 0,
         }
     }
 
@@ -191,7 +189,6 @@ impl SigAction {
             sa_handler: handler as usize,
             sa_flags: flags,
             sa_mask: 0,
-            sa_restorer: 0,
         }
     }
 
@@ -1166,23 +1163,15 @@ unsafe fn setup_frame(
     // Set user stack pointer to signal frame position
     regs.sp = frame_addr;
 
-    // Set return address for rt_sigreturn:
-    // - sa_restorer != 0 (musl/glibc always pass one — SA_RESTORER is
-    //   mandatory on RISC-V): the libc __restore_rt trampoline in the
-    //   executable's text. Returning into a W^X user STACK is not
-    //   executable, so the old stack-trampoline-only path SIGSEGV'd every
-    //   musl handler return.
-    // - sa_restorer == 0: legacy fallback — the in-frame stack trampoline
-    //   (frame_addr + size - 8), kept for old static binaries built
-    //   against the kernel-provided trampoline.
-    if action.sa_restorer != 0 {
-        regs.ra = action.sa_restorer as u64;
-    } else {
-        // No sa_restorer (RISC-V glibc): return through the fixed
-        // trampoline page mapped read+execute in every user address space.
-        // The old in-frame stack trampoline faulted on NX stacks.
-        regs.ra = SIGTRAMP_BASE;
-    }
+    // Return address for rt_sigreturn: RISC-V userspace passes NO
+    // sa_restorer (the ABI has no SA_RESTORER — glibc's sigaction wrapper
+    // doesn't even write that field, verified against jammy's
+    // libc.so.6 __libc_sigaction disassembly). The kernel-owned fixed
+    // trampoline page (li a7,139; ecall) is the ONLY return path, exactly
+    // like Linux returning into the vDSO stub. Returning into the W^X
+    // user stack is not executable, so an in-frame trampoline would
+    // SIGSEGV every handler return.
+    regs.ra = SIGTRAMP_BASE;
 
     true  // Success
 }

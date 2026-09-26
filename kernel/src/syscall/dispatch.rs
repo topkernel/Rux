@@ -34,11 +34,6 @@ fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
 ///
 /// Called by trap.rs, dispatches to specific system call handlers
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
-    // TEMP DIAG: log every stat-family syscall with args+ret
-    let diag_stat: bool = {
-        let n = syscall_get_nr(regs);
-        n == 79 || n == 80 || n == 291
-    };
     let syscall_no = syscall_get_nr(regs);
     let args = syscall_get_arguments(regs);
 

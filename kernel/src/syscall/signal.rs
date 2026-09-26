@@ -121,16 +121,19 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
 ///
 /// # Returns
 /// Returns 0 on success, negative error code on failure
-/// User-space `struct sigaction` on the RISC-V 64 ABI: 32 bytes with
-/// sa_restorer at offset 16 and sa_mask at offset 24. The kernel's
-/// internal SigAction (24 bytes, mask at 16) used to be copied verbatim,
-/// so libc's sa_mask reads landed on the restorer pointer and oldact
-/// wrote the kernel mask into the user sa_restorer field (review 5.4b).
+/// User-space `struct sigaction` of the rt_sigaction ABI on RISC-V 64:
+/// 24 bytes — {sa_handler +0, sa_flags +8, sa_mask +16}. There is NO
+/// sa_restorer field (RISC-V has no SA_RESTORER; the kernel always returns
+/// from handlers through its own trampoline). Verified against jammy
+/// glibc's __libc_sigaction: it stores handler at kact+0, flags (lw/sd)
+/// at kact+8, then memcpy's the sigset to kact+16 and never writes a
+/// restorer. A 32-byte parse with restorer at +16 misread libc's sa_mask
+/// (e.g. dash's sigfillset mask 0xfffffffe_7fffffff) as a return address
+/// and jumped execution into it on handler return.
 #[repr(C)]
 struct SigActionUser {
     sa_handler: usize,
     sa_flags: u64,
-    sa_restorer: usize,
     sa_mask: u64,
 }
 
@@ -183,7 +186,6 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             let user_action = SigActionUser {
                 sa_handler: old_action.sa_handler,
                 sa_flags: old_action.sa_flags.bits(),
-                sa_restorer: old_action.sa_restorer,
                 sa_mask: old_action.sa_mask,
             };
             let src = &user_action as *const SigActionUser as *const u8;
@@ -209,7 +211,6 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             let mut user_action = SigActionUser {
                 sa_handler: 0,
                 sa_flags: 0,
-                sa_restorer: 0,
                 sa_mask: 0,
             };
             let dst = &mut user_action as *mut SigActionUser as *mut u8;
@@ -232,7 +233,6 @@ let new_action = SigAction {
                 sa_handler: user_action.sa_handler,
                 sa_flags: crate::signal::SigFlags::new(user_action.sa_flags),
                 sa_mask: user_action.sa_mask,
-                sa_restorer: user_action.sa_restorer,
             };
             match sig_struct.set_action(signum, new_action) {
                 Ok(_) => 0,  // Success
