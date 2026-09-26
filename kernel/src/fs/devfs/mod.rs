@@ -165,6 +165,10 @@ static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
 /// OPOST/ONLCR translation then hits the UART atomically per chunk.
 fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
     let nonblock = (file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
+    // Feed the tty queue from the UART RX ring first (see
+    // console::uart_rx_bridge_to_tty): the IRQ only fills the ring that
+    // exec-provided stdin drains.
+    crate::console::uart_rx_bridge_to_tty();
     crate::fs::tty::console().read_input(buf, nonblock)
 }
 

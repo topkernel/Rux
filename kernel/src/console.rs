@@ -468,6 +468,26 @@ pub fn uart_data_ready() -> bool {
 ///
 /// Returns Some(c) if data is available (from ring buffer or hardware),
 /// otherwise None. Handles ISIG and echo processing.
+/// Task-context bridge: move pending UART RX bytes into the tty console's
+/// input queue (line discipline). The RX IRQ fills only the char_dev ring
+/// (UART_RX_BUF) that exec-provided stdin (UART_OPS) drains; /dev/console
+/// and /dev/ttyS0 (CONDEV_OPS) read the tty queue — without this bridge
+/// those readers starved while bytes sat in the ring.
+pub fn uart_rx_bridge_to_tty() {
+    // Bounded so a flood cannot hold the CPU forever in task context.
+    for _ in 0..256 {
+        let head = UART_RX_BUF.head.load(Ordering::Relaxed);
+        let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
+        if head == tail {
+            break;
+        }
+        match UART_RX_BUF.get() {
+            Some(c) => crate::fs::tty::console().receive_byte(c),
+            None => break,
+        }
+    }
+}
+
 pub fn getchar() -> Option<u8> {
     #[cfg(feature = "riscv64")]
     {
