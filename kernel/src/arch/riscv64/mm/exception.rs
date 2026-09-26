@@ -227,6 +227,35 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 current.pid(), fault_addr_usize, regs.sp);
         }
 
+        // Kernel-mode access to a USER address whose VMA covers it: demand-
+        // fill the page and RETRY the instruction (Linux semantics — the
+        // kernel's copy_from_user on a not-yet-faulted user page, e.g.
+        // glibc's fstatat(fd, "", buf, AT_EMPTY_PATH) reading the "" con-
+        // stant off an untouched .rodata page, must fault the page in, not
+        // EFAULT through the exception table — that starved every stdio
+        // buffer allocation and NSS lookup in dynamically linked binaries).
+        if fault_addr.bits() < crate::arch::riscv64::mm::user_addr::USER_END as u64 {
+            let covered = addr_space
+                .vma_read()
+                .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                .is_some();
+            if covered {
+                let result = handle_mm_fault(
+                    &addr_space,
+                    fault_addr,
+                    access_type | FaultFlags::USER,
+                );
+                if matches!(result, MmFaultResult::Handled)
+                    || matches!(result, MmFaultResult::Fixed)
+                {
+                    // Re-execute the faulting kernel load/store.
+                    return MmFaultResult::Handled;
+                }
+                // Unresolvable (bad perms etc.): fall through to the
+                // exception-table fixup so the copy reports a short copy.
+            }
+        }
+
         // Check exception table (copy_to_user/copy_from_user etc.)
         if let Some(fixup) = fixup_exception(regs.epc) {
             regs.epc = fixup;

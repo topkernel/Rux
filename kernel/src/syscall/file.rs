@@ -338,8 +338,9 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         if dirfd < 0 {
             return -(errno::EBADF as i64);
         }
-        if let Err(e) = crate::fs::file_stat(dirfd as usize, &mut stat) {
-            return -(e as i64);
+        match crate::fs::file_stat(dirfd as usize, &mut stat) {
+            Ok(()) => {}
+            Err(e) => return -(e as i64),
         }
         let stat_size = core::mem::size_of::<Stat>();
         // SAFETY: statbuf validated with access_ok; copies stat_size bytes to user.
