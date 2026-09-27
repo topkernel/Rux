@@ -819,6 +819,8 @@ pub(crate) fn do_execve_elf(
     // SAFETY: task_ptr is the current task, valid throughout this execve operation.
     // We are replacing the task's address space and trap frame for the new program.
     unsafe {
+        // Capture the new mm's ASID before the Arc takes ownership.
+        let new_asid = new_addr_space.asid();
         // Set new address space (this will drop old Arc if no other references)
         (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(new_addr_space)));
 
@@ -828,14 +830,16 @@ pub(crate) fn do_execve_elf(
         // Set user stack pointer
         (*task_ptr).set_user_sp(adjusted_stack_top);
 
-        // Switch to new address space
-        let satp = (8u64 << 60) | (user_ppn);  // MODE=8 (Sv39), PPN=user_ppn
-        core::arch::asm!(
-            "csrw satp, {}",
-            "sfence.vma",
-            in(reg) satp,
-            options(nostack)
-        );
+        // Switch to new address space. MUST go through switch_mm so the
+        // satp carries the new mm's ASID: the old raw `8<<60 | ppn` write
+        // used ASID 0 for EVERY freshly exec'd task, parking their TLB
+        // entries in the shared ASID-0 namespace — TLB lookup matches by
+        // ASID, so two exec'd tasks on one hart (concurrent fork+exec)
+        // aliased each other's translations (executing the parent image
+        // while task->mm pointed at the new one). switch_mm's ASID-scoped
+        // sfence also clears any stale entries from the ASID's previous
+        // owner.
+        crate::arch::riscv64::context::switch_mm(user_ppn, new_asid);
 
         // ===== Return to user mode immediately after successful execve =====
         // After execve returns, sret will jump to new program entry
