@@ -326,6 +326,27 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     satp_val & 0xFFF_FFFF_FFFF,
                     if (satp_val & 0xFFF_FFFF_FFFF) == pgd { "" } else { " MISMATCH" }
                 );
+                // Replay this pid's full mmap history from the ring.
+                {
+                    use core::sync::atomic::Ordering::Relaxed;
+                    use crate::syscall::memory::{MMAP_RING, MMAP_CURSOR};
+                    let pid = crate::sched::get_current_pid();
+                    let cur = MMAP_CURSOR.load(Relaxed);
+                    crate::pr_err!("  MMAP ring cursor={}", cur);
+                    // replay the last 8 entries regardless of pid: a mis-attributed
+                    // mmap (recorded under a neighbor's pid) is visible this way
+                    for k in 0..8usize {
+                        if k >= cur.min(MMAP_RING.len()) { break; }
+                        let i = (cur - 1 - k) % MMAP_RING.len();
+                        let e = &MMAP_RING[i];
+                        crate::pr_err!(
+                            "  MMAP[-{}] pid={} addr={:#x} len={:#x} flags={:#x} fd={} off={:#x} ret={:#x}",
+                            k, e.pid.load(Relaxed), e.addr.load(Relaxed), e.len.load(Relaxed),
+                            e.flags.load(Relaxed), e.fd.load(Relaxed),
+                            e.off.load(Relaxed), e.ret.load(Relaxed)
+                        );
+                    }
+                }
             }
             return bad_area(regs, access_type, fault_addr);
         }

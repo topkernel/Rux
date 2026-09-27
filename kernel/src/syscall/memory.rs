@@ -191,7 +191,51 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
 /// Returns mapped starting address on success, negative error code on failure
 ///
 /// - RISC-V: 222
+// FORENSIC ring: every mmap call (all sizes — ld.so's second-segment
+// mapping is <1MB and was a blind spot of serial-print tracing).
+pub struct MmapEntry {
+    pub pid: core::sync::atomic::AtomicU32,
+    pub addr: core::sync::atomic::AtomicU64,
+    pub len: core::sync::atomic::AtomicU64,
+    pub flags: core::sync::atomic::AtomicU32,
+    pub fd: core::sync::atomic::AtomicI32,
+    pub off: core::sync::atomic::AtomicU64,
+    pub ret: core::sync::atomic::AtomicU64,
+}
+impl MmapEntry {
+    const fn new() -> Self {
+        Self {
+            pid: core::sync::atomic::AtomicU32::new(0),
+            addr: core::sync::atomic::AtomicU64::new(0),
+            len: core::sync::atomic::AtomicU64::new(0),
+            flags: core::sync::atomic::AtomicU32::new(0),
+            fd: core::sync::atomic::AtomicI32::new(0),
+            off: core::sync::atomic::AtomicU64::new(0),
+            ret: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+const MMAP_NEW: MmapEntry = MmapEntry::new();
+pub static MMAP_RING: [MmapEntry; 1024] = [MMAP_NEW; 1024];
+pub static MMAP_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 pub fn sys_mmap(args: [u64; 6]) -> i64 {
+    let ret = sys_mmap_inner(args);
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let idx = MMAP_CURSOR.fetch_add(1, Relaxed) % MMAP_RING.len();
+        MMAP_RING[idx].pid.store(crate::process::current_pid(), Relaxed);
+        MMAP_RING[idx].addr.store(args[0], Relaxed);
+        MMAP_RING[idx].len.store(args[1], Relaxed);
+        MMAP_RING[idx].flags.store(args[3] as u32, Relaxed);
+        MMAP_RING[idx].fd.store(args[4] as i32, Relaxed);
+        MMAP_RING[idx].off.store(args[5], Relaxed);
+        MMAP_RING[idx].ret.store(ret as u64, Relaxed);
+    }
+    ret
+}
+
+fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
