@@ -326,6 +326,59 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     satp_val & 0xFFF_FFFF_FFFF,
                     if (satp_val & 0xFFF_FFFF_FFFF) == pgd { "" } else { " MISMATCH" }
                 );
+                // Dump the exec-built stack top (argv/envp/auxv area):
+                // the victim dies in ld.so's pure-memory phase, so a bad
+                // value on this stack is the remaining candidate source.
+                {
+                    use crate::arch::riscv64::uaccess::copy_from_user;
+                    let base = 0x3fffffe_a80u64; // exec-built argv/envp/auxv zone (fixed layout for this rootfs)
+                    let mut buf = [0u8; 128];
+                    let unc = unsafe { copy_from_user(buf.as_mut_ptr(), base as *const u8, 128) };
+                    // refcount of the stack page: must be exclusively 1 —
+                    // a higher count means a fork/teardown lost an update and
+                    // someone else still maps (and zeroes) this frame.
+                    {
+                        use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+                        if let Some((ppn, bits)) = unsafe { PageTableWalker::walk(addr_space.pgd() as u64, 0x3fffffe000u64) } {
+                            use crate::mm::page_desc::pfn_to_page_mut;
+                            let page = pfn_to_page_mut(ppn as usize);
+                            if !page.is_null() {
+                                crate::pr_err!("  STACKPG ppn={:#x} pte={:#x} refcount={} mapcount={}",
+                                    ppn, bits,
+                                    unsafe { (*page).refcount() },
+                                    unsafe { (*page).mapcount() });
+                            }
+                        }
+                    }
+                    if unc == 0 {
+                        for w in 0..16 {
+                            crate::pr_err!("  STACK[{:#x}] = {:#018x}",
+                                base + (w*8) as u64,
+                                u64::from_le_bytes(buf[w*8..w*8+8].try_into().unwrap()));
+                        }
+                    }
+                }
+                // Replay this pid's final syscalls from the global ring.
+                {
+                    use core::sync::atomic::Ordering::Relaxed;
+                    use crate::syscall::dispatch::{SYSCALL_RING, SYSCALL_CURSOR};
+                    let pid = crate::sched::get_current_pid();
+                    let cur = SYSCALL_CURSOR.load(Relaxed);
+                    let mut shown = 0;
+                    for k in 0..SYSCALL_RING.len() {
+                        if shown >= 28 { break; }
+                        let i = (cur + SYSCALL_RING.len() - 1 - k) % SYSCALL_RING.len();
+                        let e = &SYSCALL_RING[i];
+                        if e.pid.load(Relaxed) == pid {
+                            shown += 1;
+                            crate::pr_err!(
+                                "  SYSCALL[-{}] pid={} nr={} a0={:#x} a1={:#x} ret={:#x}",
+                                shown, pid, e.nr.load(Relaxed),
+                                e.a0.load(Relaxed), e.a1.load(Relaxed), e.ret.load(Relaxed)
+                            );
+                        }
+                    }
+                }
                 // Replay this pid's full mmap history from the ring.
                 {
                     use core::sync::atomic::Ordering::Relaxed;

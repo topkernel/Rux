@@ -24,6 +24,38 @@ fn syscall_get_arguments(regs: &PtRegs) -> SyscallArgs {
     [regs.orig_a0, regs.a1, regs.a2, regs.a3, regs.a4, regs.a5]
 }
 
+// FORENSIC: global syscall ring — replayed at NOVMA crashes to reconstruct
+// the victim's final syscall sequence.
+pub struct SyscallEntry {
+    pub pid: core::sync::atomic::AtomicU32,
+    pub nr: core::sync::atomic::AtomicU32,
+    pub a0: core::sync::atomic::AtomicU64,
+    pub a1: core::sync::atomic::AtomicU64,
+    pub ret: core::sync::atomic::AtomicU64,
+}
+impl SyscallEntry {
+    const fn new() -> Self {
+        Self {
+            pid: core::sync::atomic::AtomicU32::new(0),
+            nr: core::sync::atomic::AtomicU32::new(0),
+            a0: core::sync::atomic::AtomicU64::new(0),
+            a1: core::sync::atomic::AtomicU64::new(0),
+            ret: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    fn record(&self, pid: u32, nr: u32, a0: u64, a1: u64, ret: u64) {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.pid.store(pid, Relaxed);
+        self.nr.store(nr, Relaxed);
+        self.a0.store(a0, Relaxed);
+        self.a1.store(a1, Relaxed);
+        self.ret.store(ret, Relaxed);
+    }
+}
+const SYSCALL_NEW: SyscallEntry = SyscallEntry::new();
+pub static SYSCALL_RING: [SyscallEntry; 2048] = [SYSCALL_NEW; 2048];
+pub static SYSCALL_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 /// Set system call return value
 #[inline]
 fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
@@ -429,6 +461,10 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     };
 
     syscall_set_return_value(regs, result);
+
+    // FORENSIC ring: last N syscalls per boot (pid, nr, a0, a1, ret).
+    SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
+        .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
 
     crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
         crate::process::current_pid(), syscall_no, result,
