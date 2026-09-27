@@ -610,12 +610,17 @@ trap_exit:
     j .Lcheck_signals_and_resched
 
 .Lrestore_and_exit:
-    // CRITICAL: Reload sp from ti_kernel_sp before restoring registers.
-    // This is necessary because schedule() may have been called from Rust code
-    // (e.g., do_wait()), and when schedule() returns, sp is not at pt_regs.
-    // We need to restore sp = ti_kernel_sp - PT_SIZE to access pt_regs.
-    ld t0, TASK_TI_KERNEL_SP(tp)
-    addi sp, t0, -PT_SIZE
+    // NOTE: sp is ALREADY at the pt_regs slot on every entry path:
+    //   - direct from .Lcheck_signals_and_resched (no resched): sp == pt_regs
+    //   - post-schedule: reloaded right after asm_schedule above
+    //   - from .Lrestore_kernel_and_exit's SPP re-check: reloaded there
+    // The old unconditional `ld sp = ti_kernel_sp - PT_SIZE` here reloaded a
+    // STALE-DEEP ksp left behind by a nested kernel-mode trap exit
+    // (.Lrestore_kernel_and_exit stores its own frame position before a
+    // schedule-out and nothing restores the outer value on unwind) — the
+    // user sret then restored a FORK-ERA frame from deep stack residue:
+    // rep2-context registers on a /bin/sleep mm (the long-standing
+    // concurrent fork+exec crash fingerprint).
 
     // Restore CSR (restore sstatus first to check SPP)
     // NOTE: sstatus is restored verbatim, including SUM. Masking SUM here
@@ -690,17 +695,17 @@ trap_exit:
     li t0, TASK_STRUCT_THRESHOLD
     bltu tp, t0, .Lrestore_kernel_csrs
 
-    // Save pt_regs pointer to ti_kernel_sp before calling schedule().
-    // schedule() may context_switch, changing sp to the new task's stack.
-    // After returning, sp no longer points to our pt_regs, so we must
-    // reload from ti_kernel_sp.  This matches the .Lreturn_user pattern.
-    addi t0, sp, PT_SIZE
-    sd   t0, TASK_TI_KERNEL_SP(tp)
-
     // Check need_resched for kernel preemption.
     // This is critical for idle tasks: when a timer interrupt wakes WFI,
     // the timer handler cannot call schedule() (preemptible()=false in IRQ).
     // Without this check, idle loops in WFI forever even though tasks are runnable.
+    //
+    // ti_kernel_sp is stored ONLY on the schedule() path. Storing it on
+    // EVERY kernel-mode trap exit left a STALE-DEEP value after the nested
+    // context unwound (nothing restores the outer position); the next
+    // user trap entry then pushed its frame at that deep slot — over
+    // live kernel frames — and user srets restored fork-era residue (the
+    // 0x1cbc0/.Lcopy_exception fingerprint family).
 .Lcheck_resched_kernel:
     call asm_need_resched
     beqz a0, .Lrestore_kernel_csrs
@@ -708,6 +713,11 @@ trap_exit:
     // Check preempt_count — only preempt if not in IRQ/softirq context
     ld t0, TASK_TI_PREEMPT(tp)
     bnez t0, .Lrestore_kernel_csrs
+
+    // About to schedule(): save the pt_regs pointer so the post-schedule
+    // reload can find it (schedule() context-switches sp away).
+    addi t0, sp, PT_SIZE
+    sd   t0, TASK_TI_KERNEL_SP(tp)
 
     // Need reschedule — call schedule().
     //
