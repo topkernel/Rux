@@ -981,7 +981,14 @@ unsafe fn devfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::
     if inode.mode.is_char_device() {
         let entry_ptr = inode.private_data?;
         let entry = &*(entry_ptr as *const DevfsEntry);
-        registry::get_char_device_ops(entry.devno)
+        let ops = registry::get_char_device_ops(entry.devno);
+        if ops.is_none() {
+            crate::pr_err!(
+                "DEVFS: char dev major={} minor={} has NO registered ops",
+                entry.devno.major, entry.devno.minor
+            );
+        }
+        ops
     } else if inode.mode.is_directory() {
         Some(&crate::fs::file::DIR_FILE_OPS)
     } else {
