@@ -639,8 +639,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             // Page handled, re-execute instruction
         }
         MmFaultResult::Segfault => {
-            crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, pid={}, mode={}",
-                fault_addr, regs.epc, regs.ra, regs.sp,
+            crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
+                fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
                 crate::sched::get_current_pid(),
                 if regs.kernel_mode() { "kernel" } else { "user" });
             if regs.user_mode() {
