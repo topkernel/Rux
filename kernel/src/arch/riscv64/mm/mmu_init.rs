@@ -268,6 +268,15 @@ unsafe fn stamp_kernel_tree_boot() {
         return;
     }
     BOOT_TREE_STAMPED.store(true, Ordering::Release);
+    // Every frame the early boot allocator (memblock) ever handed out is
+    // boot-permanent: kernel image, early page-table blocks (e.g. the
+    // contiguous 0x8cf6x trees), fixmap, dtb. mms forked from the initial
+    // template can reference these; teardown must never free them.
+    for region in crate::mm::memblock::memblock().reserved().iter() {
+        for ppn in region.base_pfn()..region.end_pfn() {
+            PT_LEDGER.stamp_boot(ppn as u64);
+        }
+    }
     let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
     let root_phys = root_virt.wrapping_sub(KERNEL_MAP.va_kernel_pa_offset as u64);
     for vpn2 in 0..512usize {
@@ -394,11 +403,35 @@ impl PtLedger {
                 "PTLEDGER: DOUBLE-FREE ppn={:#x} at {} by pid={} REFUSED (prev-free pid={})",
                 ppn, site, pid, self.freed_by[i].load(Relaxed)
             );
+            let cur = FUT_RING_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+            for k in 0..FUT_RING.len() {
+                let idx = (cur + FUT_RING.len() - 1 - k) % FUT_RING.len();
+                let r = FUT_RING[idx].root.load(core::sync::atomic::Ordering::Relaxed);
+                let p = FUT_RING[idx].pid.load(core::sync::atomic::Ordering::Relaxed);
+                if r != 0 {
+                    crate::pr_err!("  FUT ring[{}] root={:#x} pid={}", idx, r, p);
+                }
+            }
         }
         false
     }
 }
 pub static PT_LEDGER: PtLedger = PtLedger::new();
+pub struct FutEntry {
+    pub root: core::sync::atomic::AtomicU64,
+    pub pid: core::sync::atomic::AtomicU64,
+}
+impl FutEntry {
+    const fn new() -> Self {
+        Self {
+            root: core::sync::atomic::AtomicU64::new(0),
+            pid: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+const FUT_NEW: FutEntry = FutEntry::new();
+pub static FUT_RING: [FutEntry; 32] = [FUT_NEW; 32];
+pub static FUT_RING_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Free all page tables and user data pages used by a user address space
 ///
@@ -409,6 +442,14 @@ pub static PT_LEDGER: PtLedger = PtLedger::new();
 /// We must walk all valid user-space L2 entries, not skip them based on U bit.
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
     use crate::mm::{pfn_to_page, pfn_to_page_mut, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
+    // FORENSIC: record teardown events so a refused double-free can name
+    // the two trees involved.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let idx = FUT_RING_CURSOR.fetch_add(1, Relaxed) % FUT_RING.len();
+        FUT_RING[idx].root.store(root_ppn, Relaxed);
+        FUT_RING[idx].pid.store(crate::sched::get_current_pid() as u64, Relaxed);
+    }
     // Serialize against concurrent fork copies / COW faults on ANY mm: the
     // pages freed here can be immediately reallocated as page tables or
     // COW copies by another CPU (PTE_MODIFY_LOCK, NEW2 class).
