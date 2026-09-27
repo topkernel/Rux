@@ -963,6 +963,15 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if entry.devno.major == crate::fs::pty::PTY_SLAVE_MAJOR {
         return crate::fs::pty::slave_open(file, entry.devno.minor);
     }
+    // evdev nodes: stash the DevNo in file.private_data — evdev's
+    // read/poll dispatch on it (the hook the comments promised but no
+    // one ever wired: reads returned EBADF before reaching the queue).
+    if entry.devno == crate::fs::dev_t::DEV_EVDEV_KEYBOARD
+        || entry.devno == crate::fs::dev_t::DEV_EVDEV_POINTER
+    {
+        let b = alloc::boxed::Box::new(entry.devno);
+        file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
+    }
     0
 }
 

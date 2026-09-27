@@ -174,8 +174,13 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 /// evdev close function
-fn evdev_file_close(_file: &File) -> i32 {
-    // No special handling needed currently
+fn evdev_file_close(file: &File) -> i32 {
+    // Free the DevNo boxed by devfs_open.
+    unsafe {
+        if let Some(ptr) = *file.private_data.get() {
+            drop(alloc::boxed::Box::from_raw(ptr as *mut crate::fs::dev_t::DevNo));
+        }
+    }
     0
 }
 
