@@ -914,6 +914,13 @@ pub(crate) fn do_execve_elf(
             r.a1 = 0; r.a2 = 0; r.a3 = 0; r.a4 = 0;
             r.a5 = 0; r.a6 = 0; r.a7 = 0;
 
+            // Pin ti_kernel_sp to THIS frame: exec defines the task's only
+            // user context from here on. If the syscall entered with a
+            // stale ksp (frame pushed off-slot), every later user trap
+            // and the final sret must anchor to the exec-updated frame,
+            // not to wherever the entry slot happened to land.
+            (*task_ptr).set_ti_kernel_sp(current_regs as u64 + core::mem::size_of::<crate::arch::riscv64::pt_regs::PtRegs>() as u64);
+
             // FORENSIC: verify the entry-captured frame is still the live
             // trap slot the sret will use. A divergence means the final
             // sret restores a STALE frame (observed: exec completed, exe=
