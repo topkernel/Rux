@@ -191,6 +191,19 @@ pub(crate) fn do_execve_elf(
         alloc_and_map_to_user_table(user_ppn, stack_bottom, initial_stack_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())? as usize;
 
+    // Zero the WHOLE initial stack: the frames come from the recycler and
+    // carry the previous owner's data (old stack residue: pointers, saved
+    // frames). argv/envp/auxv only overwrite part of the top area; gaps
+    // kept residue that ld.so parsed as garbage auxv/link_map state —
+    // observed as jumps to parent-image addresses (0x1cbc0) and the
+    // "main_map == _ns_loaded" assertion right after a successful exec.
+    // SAFETY: stack_phys_base..+initial_stack_size is the freshly mapped,
+    // exclusively owned stack region of this new address space.
+    unsafe {
+        let base_kva = phys_to_virt(PhysAddr::new(stack_phys_base as u64)).bits() as usize;
+        core::ptr::write_bytes(base_kva as *mut u8, 0, initial_stack_size as usize);
+    }
+
     // Signal-return trampoline (R+X page): RISC-V glibc installs handlers
     // without sa_restorer and returns through this fixed page (the Linux
     // kernel uses the vDSO __vdso_rt_sigreturn stub for the same purpose;
@@ -882,6 +895,40 @@ pub(crate) fn do_execve_elf(
             (*current_regs).status = SR_SPIE;          // Clear SPP, set SPIE
             (*current_regs).tp = 0;                   // Clear TLS pointer - musl libc will reinitialize
             (*current_regs).a0 = argc;                 // argc for C runtime
+
+            // ELF_PLAT_INIT discipline: a fresh image must not inherit the
+            // old image's register state. The old frame carried the CALLER's
+            // ra (e.g. 0x10706), gp, and temporaries; startup code that
+            // consumes an unsaved slot (rtld_fini passed in a5 to
+            // __libc_start_main, lazy prologues, assertion backtraces)
+            // jumps through them — observed as fetch faults at parent-image
+            // addresses right after a successful exec. Zero everything
+            // except the ABI-defined inputs: epc, sp, tp=0, a0=argc.
+            let r = &mut *current_regs;
+            r.ra = 0;
+            r.gp = 0;
+            r.t0 = 0; r.t1 = 0; r.t2 = 0; r.t3 = 0; r.t4 = 0; r.t5 = 0; r.t6 = 0;
+            r.s0 = 0; r.s1 = 0;
+            r.s2 = 0; r.s3 = 0; r.s4 = 0; r.s5 = 0;
+            r.s6 = 0; r.s7 = 0; r.s8 = 0; r.s9 = 0; r.s10 = 0; r.s11 = 0;
+            r.a1 = 0; r.a2 = 0; r.a3 = 0; r.a4 = 0;
+            r.a5 = 0; r.a6 = 0; r.a7 = 0;
+
+            // FORENSIC: verify the entry-captured frame is still the live
+            // trap slot the sret will use. A divergence means the final
+            // sret restores a STALE frame (observed: exec completed, exe=
+            // /bin/sleep, satp=new, yet the CPU resumed REP2 code).
+            {
+                let live = crate::arch::riscv64::trap::current_pt_regs() as usize;
+                if live != current_regs as usize {
+                    crate::pr_err!(
+                        "EXECFRAME: pid={} captured={:#x} live={:#x}",
+                        crate::process::current_pid(),
+                        current_regs as usize,
+                        live
+                    );
+                }
+            }
             // Other registers remain 0
 
         }

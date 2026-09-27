@@ -306,6 +306,27 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         }
         crate::arch::riscv64::mm::MmFaultResult::Segfault => {
             // Address not in any VMA
+            // FORENSIC: identify mixed-state tasks — exe_path tells whether
+            // exec completed for THIS task; satp vs pgd tells whether the
+            // active root matches task->mm.
+            if access_type & FaultFlags::EXEC != 0 {
+                let satp_val: u64;
+                unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp_val); }
+                let exe = crate::sched::current()
+                    .map(|t| unsafe { (*t).get_exe_path() })
+                    .unwrap_or(&[]);
+                let exe_str = core::str::from_utf8(exe).unwrap_or("?");
+                let pgd = addr_space.pgd() as u64;
+                crate::pr_err!(
+                    "NOVMA-EXEC: addr={:#x} pid={} exe={} pgd={:#x} satp_ppn={:#x}{}",
+                    fault_addr.bits(),
+                    crate::sched::get_current_pid(),
+                    exe_str,
+                    pgd,
+                    satp_val & 0xFFF_FFFF_FFFF,
+                    if (satp_val & 0xFFF_FFFF_FFFF) == pgd { "" } else { " MISMATCH" }
+                );
+            }
             return bad_area(regs, access_type, fault_addr);
         }
         crate::arch::riscv64::mm::MmFaultResult::PermissionDenied => {
