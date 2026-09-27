@@ -240,12 +240,59 @@ pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
 
 unsafe fn free_page_table_checked(phys_addr: u64, site: &str) {
     if get_alloc_stage() == AllocStage::Late {
+        stamp_kernel_tree_boot();
         if !PT_LEDGER.take_returns(phys_addr >> PAGE_SHIFT) {
             return; // boot-shared table: never free, never reuse
         }
-        PT_LEDGER.take(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid(), site);
+        if !PT_LEDGER.take(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid(), site) {
+            return; // double/foreign free: refuse, keep the frame leaked
+                    // rather than wired into two live trees
+        }
     }
     free_page_table(phys_addr)
+}
+
+static BOOT_TREE_STAMPED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// One-time: mark every page-table frame wired into the kernel's ROOT page
+/// table as boot-permanent. Early boot builds tables by hand (not through
+/// alloc_page_table), and user mms forked from the initial template can
+/// inherit references to them; their teardown then freed those SHARED
+/// frames (observed: the 0x8cf62+ consecutive "no live stamp" double-free
+/// block). Called from the teardown path (PTE_MODIFY_LOCK held) before any
+/// table bookkeeping.
+unsafe fn stamp_kernel_tree_boot() {
+    use core::sync::atomic::Ordering;
+    use crate::mm::phys_valid;
+    if BOOT_TREE_STAMPED.load(Ordering::Acquire) {
+        return;
+    }
+    BOOT_TREE_STAMPED.store(true, Ordering::Release);
+    let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
+    let root_phys = root_virt.wrapping_sub(KERNEL_MAP.va_kernel_pa_offset as u64);
+    for vpn2 in 0..512usize {
+        let pte2 = ROOT_PAGE_TABLE.get(vpn2);
+        if !pte2.is_valid() || pte2.is_leaf() {
+            continue;
+        }
+        let t1_phys = pte2.ppn() << PAGE_SHIFT;
+        if !phys_valid(t1_phys as usize) || t1_phys == root_phys {
+            continue;
+        }
+        PT_LEDGER.stamp_boot(pte2.ppn());
+        let t1 = get_page_table_virt(t1_phys);
+        for vpn1 in 0..512usize {
+            let pte1 = (*t1).get(vpn1);
+            if !pte1.is_valid() || pte1.is_leaf() {
+                continue;
+            }
+            let t0_phys = pte1.ppn() << PAGE_SHIFT;
+            if !phys_valid(t0_phys as usize) || t0_phys == root_phys {
+                continue;
+            }
+            PT_LEDGER.stamp_boot(pte1.ppn());
+        }
+    }
 }
 
 /// Free a page table (only valid for late stage allocations)
@@ -292,6 +339,7 @@ pub struct PtLedger {
     // fork/exec corruption family).
     boot: [core::sync::atomic::AtomicBool; 16384],
     reported: core::sync::atomic::AtomicUsize,
+    freed_by: [core::sync::atomic::AtomicU32; 16384],
 }
 impl PtLedger {
     const fn new() -> Self {
@@ -299,6 +347,7 @@ impl PtLedger {
             slots: [const { core::sync::atomic::AtomicU64::new(0) }; 16384],
             boot: [const { core::sync::atomic::AtomicBool::new(false) }; 16384],
             reported: core::sync::atomic::AtomicUsize::new(0),
+            freed_by: [const { core::sync::atomic::AtomicU32::new(0) }; 16384],
         }
     }
     fn stamp_boot(&self, ppn: u64) {
@@ -325,18 +374,28 @@ impl PtLedger {
         }
         slot.store(ppn + 1, Relaxed);
     }
-    fn take(&self, ppn: u64, pid: u32, site: &str) {
+    /// Returns true if the frame had a live stamp (a legitimate first
+    /// free) and was cleared; false for double/foreign frees — the caller
+    /// must then REFUSE to return the frame to the zone. A table frame
+    /// entering the free list twice is what wires one physical page into
+    /// two live page-table trees (the shared-pgd corruption family).
+    fn take(&self, ppn: u64, pid: u32, site: &str) -> bool {
         use core::sync::atomic::Ordering::Relaxed;
-        let slot = &self.slots[(ppn as usize) & (self.slots.len() - 1)];
+        let i = (ppn as usize) & (self.slots.len() - 1);
+        let slot = &self.slots[i];
         let v = slot.load(Relaxed);
         if v != 0 && v - 1 == ppn {
             slot.store(0, Relaxed);
-        } else if self.reported.fetch_add(1, Relaxed) < 8 {
+            self.freed_by[i].store(pid, Relaxed);
+            return true;
+        }
+        if self.reported.fetch_add(1, Relaxed) < 8 {
             crate::pr_err!(
-                "PTLEDGER: DOUBLE-FREE ppn={:#x} at {} by pid={} (no live stamp)",
-                ppn, site, pid
+                "PTLEDGER: DOUBLE-FREE ppn={:#x} at {} by pid={} REFUSED (prev-free pid={})",
+                ppn, site, pid, self.freed_by[i].load(Relaxed)
             );
         }
+        false
     }
 }
 pub static PT_LEDGER: PtLedger = PtLedger::new();

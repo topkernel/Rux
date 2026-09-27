@@ -852,6 +852,13 @@ pub(crate) fn do_execve_elf(
         if current_regs.is_null() {
             // No trap frame, this is the init process case
             // Need to return via ret_from_fork
+            // Success path: the new address space is now owned by the init
+            // task — the RAII guard MUST be defused here too. Its drop was
+            // freeing PID 1's freshly built page tables straight back to
+            // the zone; the frames then got reused by the first kernel/user
+            // allocations while init kept executing on them (stale TLB),
+            // seeding the whole recycled-frame corruption family.
+            core::mem::forget(_guard);
             return Ok(());
         }
 
