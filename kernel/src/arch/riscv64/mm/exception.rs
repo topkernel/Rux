@@ -317,14 +317,16 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     .unwrap_or(&[]);
                 let exe_str = core::str::from_utf8(exe).unwrap_or("?");
                 let pgd = addr_space.pgd() as u64;
-                crate::pr_err!(
-                    "NOVMA-EXEC: addr={:#x} pid={} exe={} pgd={:#x} satp_ppn={:#x}{}",
+crate::pr_err!(
+                    "NOVMA-EXEC: addr={:#x} pid={} exe={} pgd={:#x} satp_ppn={:#x}{} frame={:#x} ksp={:#x}",
                     fault_addr.bits(),
                     crate::sched::get_current_pid(),
                     exe_str,
                     pgd,
                     satp_val & 0xFFF_FFFF_FFFF,
-                    if (satp_val & 0xFFF_FFFF_FFFF) == pgd { "" } else { " MISMATCH" }
+                    if (satp_val & 0xFFF_FFFF_FFFF) == pgd { "" } else { " MISMATCH" },
+                    regs as *mut _ as usize,
+                    crate::sched::current().map(|t| unsafe { (*t).ti_kernel_sp() } as usize).unwrap_or(0)
                 );
                 // Dump the exec-built stack top (argv/envp/auxv area):
                 // the victim dies in ld.so's pure-memory phase, so a bad

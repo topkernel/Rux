@@ -61,17 +61,16 @@ pub(crate) fn do_execve_elf(
         PAGE_SIZE, PageTableEntry, phys_to_virt, PhysAddr,
     };
 
-    // R11-5: capture the trap frame ONCE, before any blocking I/O below.
-    // current_pt_regs() is a PER-CPU slot holding the frame of the LAST
-    // trap on THIS cpu — exec does bread() -> schedule() and can migrate;
-    // re-reading it at the end wrote {epc,sp,status,...} into whatever
-    // foreign task trapped on the landing CPU. The captured pointer is
-    // this task's own kernel-stack frame and stays valid across migration.
-    let current_regs = {
-        use crate::arch::riscv64::trap::current_pt_regs;
-        use crate::arch::riscv64::pt_regs::PtRegs;
-        current_pt_regs() as *mut PtRegs
-    };
+    // Capture the trap frame ONCE, before any blocking I/O below — but
+    // derive it from THE TASK, never from the per-CPU current_pt_regs()
+    // slot. That slot can be STALE for the syscall frame (observed:
+    // ENTRY2 wrote the new-image entry into a frame on a DIFFERENT task's
+    // kernel stack 0x...16afee0 while this task's stack top was
+    // 0x...1690000; the real syscall frame at 0x...168fee0 kept the OLD
+    // image's epc and sret resumed the parent image on the new mm — the
+    // 0x1c29c NOVMA family). task.pt_regs() is the canonical outermost
+    // user frame on THIS task's stack.
+    let current_regs = unsafe { (*task_ptr).pt_regs() };
 
     // Close file descriptors with close-on-exec flag
     // SAFETY: task_ptr points to the current task which is valid throughout execve.
@@ -451,6 +450,32 @@ pub(crate) fn do_execve_elf(
         }.map_err(|_| crate::errno::Errno::ExecFormatError.as_neg_i32())?;
 
         let interp_entry = interp_base + entry_offset;
+
+        // DIVERGENCE CHECK for the interpreter image: read the just-copied
+        // entry word back through the USER PTE path and compare with the
+        // linear-map view. A mismatch means ld.so executes different bytes
+        // than we verified.
+        {
+            use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+            let entry_va = interp_base + entry_offset;
+            let lin = unsafe {
+                core::ptr::read_volatile((interp_kva + entry_offset) as *const u64)
+            };
+            match unsafe { PageTableWalker::walk(user_ppn, entry_va) } {
+                Some((ppn, _)) => {
+                    let pva = phys_to_virt(PhysAddr::new(ppn as u64 * 4096)).bits()
+                        + (entry_va & 0xFFF);
+                    let ptev = unsafe { core::ptr::read_volatile(pva as *const u64) };
+                    if ptev != lin {
+                        crate::pr_err!(
+                            "IDIVERGE pid={} entry={:#x} lin={:#x} pte={:#x} ppn={:#x}",
+                            crate::process::current_pid(), entry_va, lin, ptev, ppn
+                        );
+                    }
+                }
+                None => crate::pr_err!("IDIVERGE pid={} entry UNMAPPED", crate::process::current_pid()),
+            }
+        }
 
         // Tighten PTE permissions for interpreter segments.
         for i in 0..interp_ehdr.e_phnum as usize {
@@ -1000,21 +1025,6 @@ pub(crate) fn do_execve_elf(
             // not to wherever the entry slot happened to land.
             (*task_ptr).set_ti_kernel_sp(current_regs as u64 + core::mem::size_of::<crate::arch::riscv64::pt_regs::PtRegs>() as u64);
 
-            // FORENSIC: verify the entry-captured frame is still the live
-            // trap slot the sret will use. A divergence means the final
-            // sret restores a STALE frame (observed: exec completed, exe=
-            // /bin/sleep, satp=new, yet the CPU resumed REP2 code).
-            {
-                let live = crate::arch::riscv64::trap::current_pt_regs() as usize;
-                if live != current_regs as usize {
-                    crate::pr_err!(
-                        "EXECFRAME: pid={} captured={:#x} live={:#x}",
-                        crate::process::current_pid(),
-                        current_regs as usize,
-                        live
-                    );
-                }
-            }
             // Other registers remain 0
 
         }
