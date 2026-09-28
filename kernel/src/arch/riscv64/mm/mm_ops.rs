@@ -586,6 +586,17 @@ impl MmStruct {
             let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
 
             if let Some((ppn_val, _pte_bits)) = ppn {
+                // Device frames (virtio-gpu framebuffer) are not RAM pages —
+                // never put_page/free them (accounting corruption otherwise).
+                {
+                    let phys = (ppn_val as u64) << 12;
+                    if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
+                        if phys >= info.addr && phys < info.addr + info.size as u64 {
+                            unsafe { self.clear_pte(addr as u64); }
+                            continue;
+                        }
+                    }
+                }
                 // Remove reverse mapping before clearing PTE, then drop this
                 // mapping's reference; the last reference frees the page.
                 use crate::mm::page_desc::pfn_to_page_mut;

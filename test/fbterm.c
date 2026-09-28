@@ -98,16 +98,24 @@ int main(void){
         char *ev[]={"HOME=/root","PATH=/bin:/usr/bin:/sbin","TERM=dumb",NULL};
         execve(av[0],av,ev); _exit(127); }
     close(in_pipe[0]); close(out_pipe[1]);
-    fcntl(m,F_SETFL,O_NONBLOCK); fcntl(0,F_SETFL,O_NONBLOCK);
+    // 结构：父进程=渲染器（阻塞读 shell 输出）；fork 输入子进程=阻塞读控制台并转发+本地回显。
+    // 完全避开 fcntl(F_SETFL)（上个版本在此停摆）。
     putch('R');putch('u');putch('x');putch(' ');putch('T');putch('e');putch('r');putch('m');putch('\n');
+    pid_t ipid=fork();
+    if(ipid==0){
+        uint8_t k;
+        for(;;){
+            ssize_t kn=read(0,&k,1);
+            if(kn!=1) _exit(0);
+            if(k=='\n'||k=='\r'){ write(fwd,"\n",1); putch('\n'); }
+            else if(k==0x7f||k==8){ write(fwd,"\b",1); putch('\b'); }
+            else { write(fwd,&k,1); putch(k); }
+        }
+    }
     uint8_t ob[512];
     for(;;){
         ssize_t n=read(m,ob,sizeof ob);
         if(n>0){ write(2,ob,n); for(ssize_t i=0;i<n;i++) term_out(ob[i]); }
-        uint8_t k;
-        ssize_t kn=read(0,&k,1);
-        if(kn==1){ if(k=='\n'||k=='\r'){ write(fwd,"\n",1); putch('\n'); } else { write(fwd,&k,1); putch(k); } }
-        int st; if(waitpid(pid,&st,WNOHANG)==pid){printf("fbterm: shell exited\n");return 0;}
-        usleep(15000);
+        else if(n==0){ printf("fbterm: shell exited\n"); _exit(0); }
     }
 }

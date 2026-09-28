@@ -440,6 +440,18 @@ pub static FUT_RING_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic
 ///
 /// IMPORTANT: For non-leaf L2 entries, U bit is not meaningful (R/W/X=0).
 /// We must walk all valid user-space L2 entries, not skip them based on U bit.
+#[inline]
+fn is_framebuffer_frame(phys: u64) -> bool {
+    // Device frames (virtio-gpu framebuffer) are NOT RAM pages: tearing
+    // them down through put_page/free_pages corrupts the page_desc
+    // accounting (mapcount/refcount of an unrelated descriptor) — the
+    // recycled-frame family's amplifier.
+    if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
+        return phys >= info.addr && phys < info.addr + info.size as u64;
+    }
+    false
+}
+
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
     use crate::mm::{pfn_to_page, pfn_to_page_mut, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
     // FORENSIC: record teardown events so a refused double-free can name
@@ -477,6 +489,9 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 
         if is_l2_leaf {
             let phys_addr = pte2.ppn() << PAGE_SHIFT;
+            if is_framebuffer_frame(phys_addr) {
+                continue;
+            }
             let pfn = phys_to_pfn(phys_addr as usize);
             let page = pfn_to_page(pfn);
             if !page.is_null() {
@@ -516,6 +531,9 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     continue;
                 }
                 let phys_addr = pte1.ppn() << PAGE_SHIFT;
+                if is_framebuffer_frame(phys_addr) {
+                    continue;
+                }
                 let pfn = phys_to_pfn(phys_addr as usize);
                 let page = pfn_to_page(pfn);
                 if !page.is_null() {
@@ -549,8 +567,10 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 if !pte0.is_user() {
                     continue;
                 }
-
                 let phys_addr = pte0.ppn() << PAGE_SHIFT;
+                if is_framebuffer_frame(phys_addr) {
+                    continue;
+                }
                 let pfn = phys_to_pfn(phys_addr as usize);
                 let page = pfn_to_page(pfn);
 
