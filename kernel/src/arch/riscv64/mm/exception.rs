@@ -472,7 +472,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 // Read the victim's PLTGOT through its page tables.
                 {
                     use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
-                    for probe in [0x17330usize, 0x176b0usize, 0x1c29cusize] {
+                    for probe in [0x17208usize, 0x17210usize, 0x17218usize, 0x17330usize, 0x1c29cusize] {
                         match unsafe { PageTableWalker::walk(addr_space.pgd() as u64, probe as u64) } {
                             Some((ppn, bits)) => {
                                 let va = crate::arch::riscv64::mm::phys_to_virt(
