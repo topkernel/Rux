@@ -348,6 +348,62 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                                     unsafe { (*page).refcount() },
                                     unsafe { (*page).mapcount() });
                             }
+                            // Zone-ledger replay: alloc/free history of this ppn.
+                            {
+                                use core::sync::atomic::Ordering::Relaxed;
+                                use crate::mm::zone::{ZTRACE_ALLOC, ZALLOC_CUR, ZTRACE_FREE, ZFREE_CUR};
+                                let mut na = 0; let mut nf = 0;
+                                for i in 0..ZTRACE_ALLOC.len() {
+                                    if ZTRACE_ALLOC[i].load(Relaxed) == ppn as u64 { na += 1; }
+                                }
+                                for i in 0..ZTRACE_FREE.len() {
+                                    if ZTRACE_FREE[i].load(Relaxed) == ppn as u64 { nf += 1; }
+                                }
+                                crate::pr_err!(
+                                    "  ZLEDGER ppn={:#x}: allocs={} frees={} (cursor a={}/f={})",
+                                    ppn, na, nf,
+                                    ZALLOC_CUR.load(Relaxed), ZFREE_CUR.load(Relaxed)
+                                );
+                            }
+                            // PTE-rewrite discriminator: the victim's OWN exec
+                            // recorded its stack phys base — compare with the
+                            // currently-walked stack ppn.
+                            {
+                                use core::sync::atomic::Ordering::Relaxed;
+                                use crate::process::exec::STACKZERO_RING;
+                                let me = crate::sched::get_current_pid();
+                                for i in 0..STACKZERO_RING.len() {
+                                    let zp = STACKZERO_RING[i].pid.load(Relaxed);
+                                    if zp != me { continue; }
+                                    let b = STACKZERO_RING[i].base.load(Relaxed);
+                                    let l = STACKZERO_RING[i].len.load(Relaxed);
+                                    let pa = ppn as u64 * 4096;
+                                    let inside = pa >= b && pa < b + l;
+                                    crate::pr_err!(
+                                        "  OWNSTACK: pid={} exec base={:#x}+{:#x}; walked ppn pa={:#x} inside={}",
+                                        me, b, l, pa, inside
+                                    );
+                                }
+                            }
+                            // Correlate with the exec stack-zeroing ledger.
+                            {
+                                use core::sync::atomic::Ordering::Relaxed;
+                                use crate::process::exec::STACKZERO_RING;
+                                let me = crate::sched::get_current_pid();
+                                let pa = ppn as u64 * 4096;
+                                for i in 0..STACKZERO_RING.len() {
+                                    let b = STACKZERO_RING[i].base.load(Relaxed);
+                                    if b == 0 { continue; }
+                                    let l = STACKZERO_RING[i].len.load(Relaxed);
+                                    let zp = STACKZERO_RING[i].pid.load(Relaxed);
+                                    if pa >= b && pa < b + l && zp != me {
+                                        crate::pr_err!(
+                                            "  ZEROCOLLIDE: victim pid={} stack ppn={:#x} ZEROED by exec of pid={} (range {:#x}+{:#x})",
+                                            me, ppn, zp, b, l
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     if unc == 0 {

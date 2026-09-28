@@ -12,6 +12,25 @@ use core::slice;
 /// Base virtual address for loading the ELF interpreter (dynamic linker)
 const INTERP_BASE: usize = 0x3FBF000000;
 
+// FORENSIC: initial-stack zeroing ledger (see the zeroing site below).
+pub struct ZeroEntry {
+    pub pid: core::sync::atomic::AtomicU32,
+    pub base: core::sync::atomic::AtomicU64,
+    pub len: core::sync::atomic::AtomicU64,
+}
+impl ZeroEntry {
+    const fn new() -> Self {
+        Self {
+            pid: core::sync::atomic::AtomicU32::new(0),
+            base: core::sync::atomic::AtomicU64::new(0),
+            len: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+const ZERO_NEW: ZeroEntry = ZeroEntry::new();
+pub static STACKZERO_RING: [ZeroEntry; 128] = [ZERO_NEW; 128];
+pub static STACKZERO_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 /// Execute ELF loading (execve internal function)
 ///
 /// This function will:
@@ -202,6 +221,16 @@ pub(crate) fn do_execve_elf(
     unsafe {
         let base_kva = phys_to_virt(PhysAddr::new(stack_phys_base as u64)).bits() as usize;
         core::ptr::write_bytes(base_kva as *mut u8, 0, initial_stack_size as usize);
+        // FORENSIC ring: every initial-stack zeroing (pid, phys range). At a
+        // crash, a victim stack page whose PPN falls in ANOTHER pid's range
+        // proves the frame was handed out twice.
+        {
+            use core::sync::atomic::Ordering::Relaxed;
+            let i = STACKZERO_CURSOR.fetch_add(1, Relaxed) % STACKZERO_RING.len();
+            STACKZERO_RING[i].pid.store(crate::process::current_pid(), Relaxed);
+            STACKZERO_RING[i].base.store(stack_phys_base as u64, Relaxed);
+            STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
+        }
     }
 
     // Signal-return trampoline (R+X page): RISC-V glibc installs handlers

@@ -361,6 +361,9 @@ impl Zone {
                     // protection is the member-state check in free_pages()
                     // (an order>0 block is only released when every member
                     // is unreferenced).
+                    // FORENSIC alloc ledger (atomic ring; crash-time replay).
+                    ZTRACE_ALLOC[ZALLOC_CUR.fetch_add(1, Ordering::Relaxed) % ZTRACE_ALLOC.len()]
+                        .store(pfn as u64, Ordering::Relaxed);
                     let count = 1usize << order;
                     for i in 0..count {
                         let page = pfn_to_page_mut(pfn + i);
@@ -435,6 +438,10 @@ impl Zone {
     /// - `pfn`: Page frame number of the block to free
     /// - `order`: Order of the block
     pub fn free_pages(&self, pfn: usize, order: usize) {
+        // FORENSIC free ledger.
+        ZTRACE_FREE[ZFREE_CUR.fetch_add(1, Ordering::Relaxed) % ZTRACE_FREE.len()]
+            .store(pfn as u64, Ordering::Relaxed);
+
         if order > MAX_ORDER {
             return;
         }
@@ -896,3 +903,11 @@ pub fn print_zone_info(zone: &Zone) {
         }
     }
 }
+
+// FORENSIC zone alloc/free ledgers for crash-time replay.
+pub static ZTRACE_ALLOC: [core::sync::atomic::AtomicU64; 4096] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 4096];
+pub static ZALLOC_CUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static ZTRACE_FREE: [core::sync::atomic::AtomicU64; 4096] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 4096];
+pub static ZFREE_CUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
