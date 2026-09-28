@@ -440,6 +440,7 @@ pub static FUT_RING_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic
 ///
 /// IMPORTANT: For non-leaf L2 entries, U bit is not meaningful (R/W/X=0).
 /// We must walk all valid user-space L2 entries, not skip them based on U bit.
+
 #[inline]
 fn is_framebuffer_frame(phys: u64) -> bool {
     // Device frames (virtio-gpu framebuffer) are NOT RAM pages: tearing

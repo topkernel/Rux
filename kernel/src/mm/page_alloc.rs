@@ -122,37 +122,6 @@ pub fn free_pages(addr: usize, order: usize) {
 
     let pfn = phys_to_pfn(addr);
 
-    // Refuse-to-return guard (data-frame face of the recycled-frame family):
-    // a frame whose mapcount went NEGATIVE has corrupted accounting — it may
-    // still be mapped in a live mm (observed: a victim's exec-built stack
-    // page, mapcount=-1, refcount=1, whose argv/auxv got zeroed when the
-    // recycled frame was re-used as the next exec's initial stack). Return
-    // the frame LEAKED instead of wiring it into two owners.
-    {
-        use crate::mm::page_desc::pfn_to_page;
-        let pd = pfn_to_page(pfn);
-        if !pd.is_null() {
-            let mc = unsafe { (*pd).mapcount() };
-            if mc < 0 {
-                static REPORTED: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                if REPORTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
-                    crate::pr_err!(
-                        "FREEGUARD: refusing free of ppn={:#x} mapcount={} refcount={} — leaking",
-                        pfn, mc, unsafe { (*pd).refcount() }
-                    );
-                }
-                return;
-            }
-        }
-    }
-
-
-    // NOTE: descriptor reset (refcount→0 etc.) happens inside zone.free_pages
-    // under the zone lock — resetting here, before the lock, used to expose a
-    // window where the block looked free and could be double-allocated
-    // (review MM-H2).
-
     // Try to free to the Zone system first
     // SAFETY: exclusive node access — caller must ensure no concurrent mutation.
     if let Some(node) = unsafe { first_online_node_mut() } {
