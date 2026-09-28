@@ -757,11 +757,33 @@ impl MmStruct {
 
     /// Copy address space using Copy-on-Write mechanism
     pub fn fork(&self) -> Result<MmStruct, MapError> {
+        // COW-exempt VMA regions (MAP_SHARED / device mappings). fork's COW
+        // walk historically write-protected EVERY user-writable PTE — in the
+        // PARENT too. A MAP_SHARED mapping (the /dev/fb0 framebuffer under
+        // fbterm) then COW-faulted on the first post-fork store: the fault
+        // handler allocated a private copy and every subsequent pixel write
+        // landed there, never in the scanout backing — the screen froze on
+        // its pre-fork content while the program believed it was drawing
+        // (kernel-side writes to the same buffer DID reach the display, so
+        // the virtio-gpu path was exonerated). Shared and device VMAs must
+        // be inherited as-is: bump the refcount, keep the write permission.
+        let cow_exempt: Vec<(u64, u64)> = {
+            let vma_mgr = self.vma_read();
+            vma_mgr
+                .iter()
+                .filter(|vma| {
+                    vma.flags().contains(crate::mm::vma::VmaFlags::SHARED)
+                        || vma.vma_type() == crate::mm::vma::VmaType::Device
+                })
+                .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
+                .collect()
+        };
+
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
         let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
         let new_root_ppn = unsafe {
-            copy_page_table_cow(self.pgd).ok_or(MapError::OutOfMemory)?
+            copy_page_table_cow(self.pgd, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
         drop(_pte_guard);
 
@@ -1291,7 +1313,10 @@ pub mod cow_flags {
 ///
 /// Kernel mappings (VPN2 >= KERNEL_PGD_START or U=0 entries) are shared by copying PGD entries.
 /// User space mappings are copied with COW marking for writable pages.
-pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
+pub unsafe fn copy_page_table_cow(
+    parent_root_ppn: u64,
+    cow_exempt: &[(u64, u64)],
+) -> Option<u64> {
     // NOTE: the whole walk runs under the caller's (AddressSpace::fork)
     // PTE_MODIFY_LOCK, serializing it against demand faults, COW faults,
     // and exec/unmap teardown. Per-leaf PTL granularity (Linux-style) is
@@ -1396,6 +1421,17 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                 let is_user = pte0.bits() & PageTableEntry::U != 0;
                 let is_writable = pte0.is_writable();
 
+                // COW exemption (see MmStruct::fork): MAP_SHARED and
+                // device VMA pages are inherited as-is — write-protecting
+                // them in the PARENT would COW-divert every later store
+                // (the fbterm framebuffer-freeze root cause).
+                let leaf_va = ((vpn2 as u64) << 30)
+                    | ((vpn1 as u64) << 21)
+                    | ((vpn0 as u64) << 12);
+                let cow_exempt_leaf = cow_exempt
+                    .iter()
+                    .any(|(s, e)| leaf_va >= *s && leaf_va < *e);
+
                 let new_pte = if is_user {
                     let phys_ppn = pte0.ppn() as usize;
                     let page = pfn_to_page_mut(phys_ppn);
@@ -1405,7 +1441,7 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                         (*page).get_page();
                         (*page).inc_mapcount();
 
-                        if is_writable {
+                        if is_writable && !cow_exempt_leaf {
                             // COW: mark both parent and child PTEs as read-only
                             (*page).set_flag(crate::mm::page_desc::PageFlag::Cow);
 
