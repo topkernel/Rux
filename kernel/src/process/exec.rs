@@ -737,6 +737,35 @@ pub(crate) fn do_execve_elf(
         core::ptr::write_volatile(stack_ptr.offset(random_offset as isize + 1), rand1);
     }
 
+    // DIVERGENCE CHECK: read the just-written stack back through the USER
+    // PTE path and compare with the phys-pointer view.
+    let probe = |vaddr: u64, label: &str| unsafe {
+        use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+        let phys_view = core::ptr::read_volatile(
+            (adjusted_stack_virt_addr + (vaddr - adjusted_stack_top)) as *const u64
+        );
+        match PageTableWalker::walk(user_ppn, vaddr) {
+            Some((ppn, _)) => {
+                let va = phys_to_virt(PhysAddr::new(ppn as u64 * 4096)).bits();
+                let v = core::ptr::read_volatile((va + (vaddr & 0xFFF)) as *const u64);
+                if v != phys_view {
+                    crate::pr_err!(
+                        "DIVERGE pid={} {}: phys={:#x} pte={:#x} mapped_ppn={:#x} block={:#x}",
+                        crate::process::current_pid(), label, phys_view, v, ppn, stack_phys_base
+                    );
+                }
+            }
+            None => {
+                crate::pr_err!("DIVERGE pid={} {}: walk FAILED {:#x}",
+                    crate::process::current_pid(), label, vaddr);
+            }
+        }
+    };
+    probe(adjusted_stack_top, "argc");
+    probe(adjusted_stack_top + (random_offset * 8) as u64, "at_random");
+    probe(adjusted_stack_top + (execfn_string_offset * 8) as u64, "at_execfn");
+
+
     // Create new address space structure
     // SAFETY: user_ppn is a freshly allocated page table root with no prior users.
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
