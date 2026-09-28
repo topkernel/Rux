@@ -48,6 +48,24 @@ static LAST_TOTAL: AtomicU32 = AtomicU32::new(0);
 
 /// Update load average from scheduler_tick().
 /// Call this from the timer tick path; it auto-throttles to LOAD_FREQ.
+///
+/// IRQ-CONTEXT CONSTRAINT (the fbterm-input wedge): scheduler_tick() runs
+/// from handle_timer_interrupt() with SIE=0. The old implementation walked
+/// the PID hash here (pid_hash_collect_all + find_task_by_pid per pid),
+/// taking pid-hash bucket spinlocks. On the single-CPU QEMU virt setup,
+/// any task-context holder of a bucket lock (fork insert, wait4/kill
+/// lookup, send_signal_to_pgid broadcast — the fbterm boot exercises all
+/// of them) that is interrupted by the 5-second sample boundary wedges
+/// the whole machine: the tick spins on lock_bucket forever with
+/// interrupts off, so the holder can never be resumed — no more timer
+/// ticks, no UART RX IRQs, every task frozen (screen stuck on the fbterm
+/// banner, serial input dead). GDB proof: pc spinning in lock_bucket,
+/// backtrace scheduler_tick -> update_load_avg -> pid_hash_collect_all.
+///
+/// The sample therefore reads ONLY scheduler-owned atomic state. /proc
+/// semantics are unaffected: `running` feeds the EMA and the display
+/// field, and generate() re-counts `total`/`last_pid` in the read
+/// (task) path, where taking bucket locks is legal.
 pub fn update_load_avg() {
     let now = crate::drivers::timer::riscv64::get_jiffies();
     let last = LAST_LOAD_JIFFIES.load(Ordering::Relaxed);
@@ -60,22 +78,12 @@ pub fn update_load_avg() {
         return;
     }
 
-    // Count running tasks and total tasks.
-    let (pids, count, _truncated) = crate::process::pid_hash::pid_hash_collect_all();
-    let total = count as u64;
-
-    let mut running: u64 = 0;
-    for i in 0..count {
-        let task = unsafe { crate::sched::find_task_by_pid(pids[i]) };
-        if !task.is_null() {
-            if unsafe { (*task).state().bits() == crate::process::task::TaskState::RUNNING } {
-                running += 1;
-            }
-        }
-    }
+    // Runnable+running tasks across all scheduling classes — lock-free
+    // atomic reads (per-class nr_running counters), safe in IRQ context.
+    let running = crate::sched::sched::GlobalRunQueue::grq_nr_running() as u64;
 
     LAST_RUNNING.store(running as u32, Ordering::Relaxed);
-    LAST_TOTAL.store(total as u32, Ordering::Relaxed);
+    LAST_TOTAL.store(running as u32, Ordering::Relaxed);
 
     // Exponential moving average: avenrun = avenrun * exp + nrun * (1 - exp)
     // In fixed-point: avenrun = avenrun * exp >> 32 + nrun * ((1<<32 - exp) >> 32)
