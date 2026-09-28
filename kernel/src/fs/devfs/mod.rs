@@ -230,7 +230,7 @@ fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
     ready
 }
 
-static CONDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+pub(crate) static CONDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     read: Some(condev_read),
     write: Some(condev_write),
     lseek: None,

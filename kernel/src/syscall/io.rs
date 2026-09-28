@@ -682,7 +682,33 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         return -errno::ENOTTY as i64;
     }
 
-    // TTY ioctl commands
+    // TTY ioctl commands — but only on fds that ARE terminals.
+    //
+    // This whole block used to run the CONSOLE-GLOBAL tty state for any fd,
+    // with no per-fd type check: a PIPE fd answered TCGETS (isatty!) and
+    // TIOCGPGRP with success. An interactive shell wired to pipes then took
+    // the job-control path forever — observed with dash under fbterm
+    // (stdin/stdout/stderr = pipes): isatty(0)=true -> setjobctl ->
+    // TIOCGPGRP returned the console's foreign fg_pgrp, kill(-pgrp, SIGTTIN)
+    // returned ESRCH, and dash spun in the tcsetpgrp retry loop at 100%
+    // CPU, freezing the screen on the banner and starving everything else
+    // (syscall trace: kill/ioctl(0x540F)/getpid x N forever).
+    // FIONREAD (0x541B) and FIONBIO (0x5421) work on any fd on Linux and
+    // stay ungated.
+    if matches!(request,
+        0x5401..=0x540F | 0x5410 | 0x5413 | 0x5414)
+        || (request & 0xFF00) == 0x5400 && !matches!(request, 0x541B | 0x5421)
+    {
+        match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            None => return -errno::EBADF as i64,
+            Some(file) => {
+                if !crate::fs::tty::file_is_tty(&file) {
+                    return -errno::ENOTTY as i64;
+                }
+            }
+        }
+    }
+
     match request {
         // TCGETS - Get terminal attributes (0x5401)
         0x5401 => {

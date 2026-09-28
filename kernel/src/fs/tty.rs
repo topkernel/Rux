@@ -790,3 +790,34 @@ static CONSOLE_TTY: TtyDevice = TtyDevice::new(console_output, 0);
 pub fn console() -> &'static TtyDevice {
     &CONSOLE_TTY
 }
+
+// ============================================================================
+// TTY fd classification
+// ============================================================================
+
+/// Does this file point at a terminal device?
+///
+/// The terminal ioctls in syscall::io::sys_ioctl historically ran the
+/// CONSOLE-GLOBAL tty state for ANY fd — a pipe answered TCGETS and
+/// TIOCGPGRP with success, so isatty() returned true on pipes. An
+/// interactive shell dup'd onto pipes (fbterm: dash's stdin/stdout) then
+/// took the job-control path and spun forever in the tcsetpgrp/SIGTTIN
+/// retry loop (kill(-fg_pgrp, SIGTTIN) -> ESRCH, TIOCGPGRP -> foreign
+/// console fg_pgrp). Terminal files are exactly these four ops sets:
+/// the kernel-provided UART stdio (char_dev::UART_OPS), /dev/console +
+/// /dev/tty + /dev/ttyS0 (devfs::CONDEV_OPS), and the two pty ends.
+pub fn file_is_tty(file: &crate::fs::file::File) -> bool {
+    let ops = file.get_ops();
+    match ops {
+        Some(ops) => {
+            core::ptr::eq(ops as *const _, &crate::fs::char_dev::UART_OPS as *const _)
+                || core::ptr::eq(
+                    ops as *const _,
+                    &crate::fs::devfs::CONDEV_OPS as *const _,
+                )
+                || core::ptr::eq(ops as *const _, &crate::fs::pty::PTMX_OPS as *const _)
+                || core::ptr::eq(ops as *const _, &crate::fs::pty::PTY_SLAVE_OPS as *const _)
+        }
+        None => false,
+    }
+}
