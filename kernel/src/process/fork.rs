@@ -296,8 +296,20 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             }
         }
 
-        // Get parent's current PtRegs (saved during trap handling)
-        let parent_pt_regs = current_pt_regs();
+        // Get parent's current PtRegs.
+        //
+        // SMP fix (same family as the exec trap-frame fix): derive the frame
+        // from THE TASK, never from the per-CPU current_pt_regs() slot. That
+        // slot is indexed by tp->ti_cpu and is only valid for the exact trap
+        // that last stored it; a fork racing a nested interrupt (or a task
+        // whose ti_cpu was steered) read ANOTHER task's / a stale frame —
+        // the child then resumed userspace with foreign registers (observed:
+        // pipeline children issuing wait4/sigsuspend they never called, dash
+        // passing a garbage sigsuspend mask pointer 0x26, and the resulting
+        // permanent sigsuspend wedge). task.pt_regs() is the canonical
+        // outermost user frame on THIS task's kernel stack; for a
+        // syscall-context fork it is exactly the clone syscall's frame.
+        let parent_pt_regs = (*current_ptr).pt_regs();
         if parent_pt_regs.is_null() {
             return Err(enomem());
         }

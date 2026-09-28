@@ -815,42 +815,52 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
             None => return false,
         };
 
-        // If a handler is already active (sigframe set up), don't deliver
-        // more signals — they would overwrite the current handler's frame.
-        // Stale-frame detection: the signal frame sits at the TOP of the
-        // region the handler runs in (stack grows down), so while the
-        // handler executes sp <= frame_addr. A longjmp/siglongjmp out of
-        // the handler lands on an OLDER frame, i.e. ABOVE our frame — only
-        // then is the frame abandoned (review 2R.8: the old condition
-        // required sp >= frame_addr, which is never true while the handler
-        // runs, so the gate never held and nested delivery clobbered the
-        // kernel's sigframe backup).
-        if (*current).sigframe.is_some() {
-            let frame_addr = (*current).sigframe_addr;
-            let sp = (*regs).sp;
-            let frame_live = frame_addr != 0 && sp <= frame_addr;
-            if frame_live {
-                return false;
-            }
-            // Frame abandoned by the handler — drop it and deliver normally
-            (*current).sigframe = None;
-            (*current).sigframe_addr = 0;
-        }
-
-        // Check for pending signals (respecting signal mask)
+        // SMP lost-wait fix (Linux restore_saved_sigmask discipline):
+        // rt_sigsuspend parks the task with a TEMPORARY mask and arms
+        // sigmask_restore. The restore must happen on EVERY trip back to
+        // userspace, delivered or not — the old code never restored when
+        // no signal was selected, leaking the suspend mask PERMANENTLY
+        // (dash's SIGCHLD left blocked, `wait` wedged). Ordering matters:
+        // signal SELECTION uses the mask that was active when the syscall
+        // decided to return (for a sigsuspend return that is the SUSPEND
+        // mask — POSIX), so the restore runs AFTER selection: right before
+        // the handler frame is built (uc_sigmask and the during-handler
+        // mask then derive from the REAL mask) and on every no-delivery
+        // exit. This mirrors Linux's get_signal()/restore_saved_sigmask()
+        // split; restoring before the filter re-blocked the very signal
+        // that made sigsuspend return, turning every wait into a hot
+        // EINTR livelock (observed with dash).
         let blocked = (*current).sigmask;
         let sig = match (*current).pending.first_unmasked(blocked) {
             Some(s) => s,
-            None => return false,
+            None => {
+                if (*current).sigmask_restore_valid {
+                    (*current).sigmask = (*current).sigmask_restore;
+                    (*current).sigmask_restore_valid = false;
+                }
+                return false;
+            }
         };
-
-        // sigsuspend contract: reinstate the pre-suspend mask right before
-        // the handler runs. setup_frame saves THIS (old) mask into the
-        // frame, so sigreturn restores it and the suspended mask is not
-        // leaked past the handler (review syscallb-H-06).
         if (*current).sigmask_restore_valid {
             (*current).sigmask = (*current).sigmask_restore;
             (*current).sigmask_restore_valid = false;
+        }
+
+        // If a handler is already active (sigframe armed), a recorded
+        // frame whose region the current sp sits inside MIGHT be live.
+        // SMP livelock fix: do NOT drop the delivery on this heuristic.
+        // setup_frame always places the new frame BELOW the current sp,
+        // so a nested delivery can never overwrite the recorded frame;
+        // blocking delivery instead wedged any task whose sp stayed below
+        // a stale (abandoned) frame_addr forever — the pending signal was
+        // never consumed, and rt_sigsuspend hot-looped on EINTR with the
+        // zombies unreapable (observed with dash `wait`). sigreturn reads
+        // its restore data from the user-side frame it returns through,
+        // so arming a newer frame is safe. This mirrors Linux, which
+        // allows nested signal delivery.
+        if (*current).sigframe.is_some() {
+            (*current).sigframe = None;
+            (*current).sigframe_addr = 0;
         }
 
         // PTRACE interception (P1): a traced task does not run the
@@ -1118,7 +1128,15 @@ unsafe fn setup_frame(
         new_sigmask |= 1u64 << ((sig as u32) - 1);
     }
     new_sigmask &= !((1u64 << 8) | (1u64 << 18));
-    frame.uc.uc_sigmask = new_sigmask;
+    // SMP lost-wait root fix: the frame's uc_sigmask is what rt_sigreturn
+    // reinstates — it must hold the PRE-handler mask (the interrupted
+    // context), not the during-handler mask. The old code saved
+    // `new_sigmask` there, so every completed handler leaked its
+    // during-handler block set permanently: after one SIGCHLD handler run
+    // the shell kept SIGCHLD (plus sa_mask bits) blocked forever, `wait`
+    // then parked in an unsatisfiable sigsuspend with the children
+    // unreapable — the -smp pipeline wedge.
+    frame.uc.uc_sigmask = (*task).sigmask;
     (*task).sigmask = new_sigmask;
 
     // Save signal stack info
@@ -1579,6 +1597,21 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_
             // If there are pending signals, process them
             if pending != 0 {
                 do_signal(regs);
+            } else {
+                // SMP lost-wait fix: no deliverable signal on this trip to
+                // userspace — still reinstate a mask saved by rt_sigsuspend.
+                // do_signal performs this restore on ITS paths, but it only
+                // runs when something is pending; without this branch a
+                // sigsuspend that returned EINTR while its triggering
+                // signal was consumed elsewhere leaked the temporary
+                // suspend mask PERMANENTLY (observed: dash's SIGCHLD left
+                // blocked forever — `wait` wedged, whole system hung).
+                // Mirrors Linux's restore_saved_sigmask() tail in
+                // arch_do_signal_or_restart, which runs unconditionally.
+                if (*current).sigmask_restore_valid {
+                    (*current).sigmask = (*current).sigmask_restore;
+                    (*current).sigmask_restore_valid = false;
+                }
             }
         }
     }

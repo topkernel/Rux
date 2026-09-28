@@ -263,7 +263,30 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> i64
     // SAFETY: current is the running task's Task pointer; sigframe_addr was set by
     // signal delivery and restore_sigcontext expects a valid Task pointer.
     unsafe {
-        let frame_addr = (*current).sigframe_addr;
+        // Frame location follows the Linux/RISC-V contract: setup_frame
+        // enters the handler with user sp == frame_addr, and the
+        // 2-instruction kernel trampoline (li a7,139; ecall) never moves
+        // sp, so the frame being returned through is AT the current user
+        // sp. Deriving it from sp (not the single kernel-side
+        // sigframe_addr record) is what makes NESTED signal delivery
+        // work: after an inner handler returns and clears the record, an
+        // outer handler's rt_sigreturn still finds ITS own frame — with
+        // only the record, the outer return saw 0 and was treated as a
+        // forged ecall (SIGSEGV). The record stays as a fallback for a
+        // frame whose page turned unreadable (restore_sigcontext then
+        // uses the kernel backup copy).
+        let sp = regs.sp as usize;
+        let sp_ok = sp != 0
+            && sp % 16 == 0 // setup_frame aligns frames to 16
+            && crate::arch::riscv64::uaccess::access_ok(
+                sp,
+                core::mem::size_of::<crate::signal::SignalFrame>(),
+            );
+        let frame_addr = if sp_ok {
+            sp as u64
+        } else {
+            (*current).sigframe_addr
+        };
 
         // A zero frame address means rt_sigreturn was invoked without an
         // active signal frame (forged/direct ecall). Treat it exactly like

@@ -43,6 +43,16 @@ fn mark_cpu_started(hart_id: usize) {
     }
 }
 
+/// Whether hart `cpu` has entered secondary_cpu_entry (or is the boot hart).
+///
+/// Callers must use this instead of indexing 0..MAX_CPUS blindly: QEMU may be
+/// started with fewer harts than the compile-time MAX_CPUS (-smp 2 with
+/// MAX_CPUS=4). Hart_start for a nonexistent hart fails with SBI_INVALID_PARAM
+/// and the CPU never comes online.
+pub fn cpu_started(cpu: usize) -> bool {
+    cpu < MAX_CPUS && CPU_STARTED[cpu].load(Ordering::Acquire) == 1
+}
+
 /// Get current CPU's hardware thread ID
 ///
 /// Design:
@@ -165,6 +175,15 @@ pub fn start_secondaries() {
     let my_hart = cpu_id();
     println!("smp: boot hart={}, start_addr={:#x}, starting secondaries...", my_hart, start_addr);
 
+    // Number of CPUs we expect to come online: the boot hart plus every hart
+    // whose SBI hart_start succeeded. QEMU may expose fewer harts than the
+    // compile-time MAX_CPUS (-smp 2 with MAX_CPUS=4): hart_start then fails
+    // with SBI_INVALID_PARAM and that CPU can NEVER come online. The old wait
+    // loop compared against MAX_CPUS unconditionally, so every -smp<MAX_CPUS
+    // boot spun the full 50M-iteration timeout (~a minute under TCG) with all
+    // secondaries parked in the BOOT_COMPLETE wfi — the "boot-time hang".
+    let mut expected_cpus = 1usize; // the boot hart itself
+
     for hart in 0..MAX_CPUS {
         if hart == my_hart { continue; }
 
@@ -176,13 +195,15 @@ pub fn start_secondaries() {
         if ret.error != 0 {
             println!("smp: hart {} start failed (error={})", hart, ret.error);
         } else {
+            expected_cpus += 1;
             println!("smp: hart {} started", hart);
         }
     }
 
-    // Wait for secondaries to come online
+    // Wait for secondaries to come online (bounded: a hart that started but
+    // never reaches secondary_cpu_entry would otherwise wedge boot forever).
     for _ in 0..50_000_000 {
-        if num_started_cpus() == MAX_CPUS {
+        if num_started_cpus() >= expected_cpus {
             break;
         }
         core::hint::spin_loop();

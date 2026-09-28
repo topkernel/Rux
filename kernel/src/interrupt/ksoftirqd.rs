@@ -137,8 +137,24 @@ pub fn wakeup_ksoftirqd() {
 ///
 /// Must be called after `sched::init()` since it uses `kthread_run()`.
 /// Should be called before interrupts are enabled.
+///
+/// SMP fix: only CPUs that actually came online get a thread. The old loop
+/// created one per compile-time MAX_CPUS and kthread_bind()d it to that CPU —
+/// with -smp 2 (MAX_CPUS=4) the threads for harts 2/3 were bound to CPUs
+/// that do not exist. They were enqueued with state RUNNING and an affinity
+/// mask naming no online CPU, so they sat on the CFS queue FOREVER:
+///   - grq.nr_running never dropped to 0, defeating __schedule's idle
+///     fast path — every idle-CPU schedule() then took the GRQ irqsave
+///     lock, multiplying global lock contention (the "spinlock stuck
+///     ra=GlobalRunQueue::lock_irqsave" DEADLOCK warnings under load);
+///   - every pick_next_cpu scan walked them;
+///   - enqueue_task's find_idle_cpu/IPI machinery targeted dead harts
+///     (sbi send_ipi error=-3 spam).
 pub fn init() {
     for cpu in 0..MAX_CPUS {
+        if !crate::arch::riscv64::smp::cpu_started(cpu) {
+            continue;
+        }
         let name = match cpu {
             0 => "ksoftirqd/0",
             1 => "ksoftirqd/1",

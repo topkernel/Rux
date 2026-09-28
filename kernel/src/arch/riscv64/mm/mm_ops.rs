@@ -1471,7 +1471,18 @@ pub unsafe fn copy_page_table_cow(
         }
     }
 
-    asm!("sfence.vma", options(nostack, preserves_flags));
+    // SMP coherence fix: the walk above DOWNGRADED the parent's writable
+    // PTEs to read-only+COW. The old single LOCAL sfence left every OTHER
+    // hart's stale WRITABLE entries live — a parent store issued from
+    // another hart after the fork then bypassed COW and landed in the
+    // frame now shared with the child (a silently LOST private write —
+    // observed as the rt_sigprocmask old-mask write-back vanishing and
+    // dash resuming a stale sigsuspend mask, wedging `wait`), and stale
+    // reads resurrected pre-fork page contents. PTE permission changes on
+    // a live mm require a TLB shootdown on ALL harts (Linux
+    // flush_tlb_mm-style): IPI the peers, full-flush locally.
+    crate::arch::riscv64::ipi::flush_tlb_others();
+    asm!("sfence.vma zero, zero", options(nostack, preserves_flags));
 
     Some(child_root_ppn)
 }
@@ -1543,7 +1554,14 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
         (*table0).set(vpn0, new_pte);
 
-        // Flush TLB for this address
+        // SMP coherence fix: the fast-path PTE replacement (RO+COW → RW)
+        // must be visible to EVERY hart that may hold the old entry —
+        // the task can migrate, and a remote stale entry turns the retry
+        // into a permanent fault or serves stale page contents. Shoot the
+        // entry down on all peers (the local flush below covers this hart;
+        // the remote handler takes no locks, so doing this under
+        // PTE_MODIFY_LOCK cannot deadlock).
+        crate::arch::riscv64::ipi::flush_tlb_others();
         let vaddr = virt_addr;
         asm!(
             "fence",
@@ -1589,6 +1607,13 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     // Install new PTE before dropping our reference to the old page
     (*table0).set(vpn0, new_pte);
 
+    // SMP coherence fix: this replacement (old frame → private copy) is
+    // exactly the stale-entry hazard — without a shootdown, a hart the
+    // task migrated from keeps translating the VA onto the OLD frame,
+    // splitting the task's memory view (kernel writes reach the new page,
+    // user reads/writes from the stale hart hit the old one — the
+    // lost-write/stale-read family behind the sigsuspend mask corruption).
+    crate::arch::riscv64::ipi::flush_tlb_others();
     asm!("sfence.vma zero, zero");
 
     // Now safe to release our share of the old page.
