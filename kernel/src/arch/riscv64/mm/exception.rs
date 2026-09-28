@@ -352,16 +352,31 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
                                 use crate::mm::zone::{ZTRACE_ALLOC, ZALLOC_CUR, ZTRACE_FREE, ZFREE_CUR};
+                                let covers = |entry: u64| -> bool {
+                                    let b = entry >> 4;
+                                    let o = (entry & 0xF) as u64;
+                                    (ppn as u64) >= b && (ppn as u64) < b + (1u64 << o)
+                                };
                                 let mut na = 0; let mut nf = 0;
+                                let mut fa: [u64; 6] = [0; 6];
+                                let mut ff: [u64; 6] = [0; 6];
                                 for i in 0..ZTRACE_ALLOC.len() {
-                                    if ZTRACE_ALLOC[i].load(Relaxed) == ppn as u64 { na += 1; }
+                                    let e = ZTRACE_ALLOC[i].load(Relaxed);
+                                    if e != 0 && covers(e) {
+                                        if na < 6 { fa[na] = i as u64; }
+                                        na += 1;
+                                    }
                                 }
                                 for i in 0..ZTRACE_FREE.len() {
-                                    if ZTRACE_FREE[i].load(Relaxed) == ppn as u64 { nf += 1; }
+                                    let e = ZTRACE_FREE[i].load(Relaxed);
+                                    if e != 0 && covers(e) {
+                                        if nf < 6 { ff[nf] = i as u64; }
+                                        nf += 1;
+                                    }
                                 }
                                 crate::pr_err!(
-                                    "  ZLEDGER ppn={:#x}: allocs={} frees={} (cursor a={}/f={})",
-                                    ppn, na, nf,
+                                    "  ZLEDGER ppn={:#x}: allocs={}@{:?} frees={}@{:?} (cursors a={}/f={})",
+                                    ppn, na, fa, nf, ff,
                                     ZALLOC_CUR.load(Relaxed), ZFREE_CUR.load(Relaxed)
                                 );
                             }
@@ -407,6 +422,22 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         }
                     }
                     if unc == 0 {
+                        // 整页首 256B：判别"整页清零"(fill/预零) vs "定点清零"
+                        let page_va = {
+                            use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+                            match unsafe { PageTableWalker::walk(addr_space.pgd() as u64, 0x3fffffe000u64) } {
+                                Some(p) => crate::arch::riscv64::mm::phys_to_virt(
+                                    crate::arch::riscv64::mm::PhysAddr::new(p.0 as u64 * 4096)
+                                ).bits() as usize,
+                                None => 0,
+                            }
+                        };
+                        if page_va != 0 {
+                        for w in 0..16 {
+                            let v = unsafe { core::ptr::read_volatile((page_va + w*8) as *const u64) };
+                            crate::pr_err!("  PAGE[+{:#04x}] = {:#018x}", w*8, v);
+                        }
+                        }
                         for w in 0..16 {
                             crate::pr_err!("  STACK[{:#x}] = {:#018x}",
                                 base + (w*8) as u64,

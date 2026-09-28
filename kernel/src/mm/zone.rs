@@ -363,7 +363,7 @@ impl Zone {
                     // is unreferenced).
                     // FORENSIC alloc ledger (atomic ring; crash-time replay).
                     ZTRACE_ALLOC[ZALLOC_CUR.fetch_add(1, Ordering::Relaxed) % ZTRACE_ALLOC.len()]
-                        .store(pfn as u64, Ordering::Relaxed);
+                        .store((pfn as u64) << 4 | (order as u64 & 0xF), Ordering::Relaxed);
                     let count = 1usize << order;
                     for i in 0..count {
                         let page = pfn_to_page_mut(pfn + i);
@@ -440,7 +440,7 @@ impl Zone {
     pub fn free_pages(&self, pfn: usize, order: usize) {
         // FORENSIC free ledger.
         ZTRACE_FREE[ZFREE_CUR.fetch_add(1, Ordering::Relaxed) % ZTRACE_FREE.len()]
-            .store(pfn as u64, Ordering::Relaxed);
+            .store((pfn as u64) << 4 | (order as u64 & 0xF), Ordering::Relaxed);
 
         if order > MAX_ORDER {
             return;
