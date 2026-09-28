@@ -279,11 +279,15 @@ fn devfs_remove_slave_node(index: u32) {
 /// Evict any cached (negative OR positive) dentry named "N" under /dev/pts:
 /// a negative entry would mask the freshly created node, and a positive
 /// entry would outlive the removed one.
+///
+/// Uses the shallow dentry walk (NOT a nested path_lookup): this runs inside
+/// the open()/close() syscall chain, whose debug-build frames already reach
+/// the bottom of the kernel stack — a nested full lookup multiplied that
+/// depth and spilled frames into the adjacent heap page (TICK-CANARY r18-3
+/// diagnosis in sched.rs), zeroing a live kernel object allocated there.
 fn evict_pts_dentry(index: u32) {
-    if let Ok(vpath) = crate::fs::vfs::path_lookup("/dev/pts", 0) {
-        if let Some(pts_dentry) = vpath.dentry {
-            pts_dentry.remove_child(&format!("{}", index));
-        }
+    if let Some(pts_dentry) = crate::fs::vfs::shallow_dentry_walk(&["dev", "pts"]) {
+        pts_dentry.remove_child(&format!("{}", index));
     }
 }
 

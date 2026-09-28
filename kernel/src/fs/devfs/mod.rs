@@ -407,15 +407,23 @@ fn devtmpfs_populate() {
 /// created/removed nodes are visible — mirrors the pty layer's
 /// evict_pts_dentry discipline. Accepts a devfs-relative path ("sda" or
 /// "pts/3").
+///
+/// Walks the dentry tree shallowly instead of a nested path_lookup(): this
+/// can run deep inside other syscall paths, and nested full lookups
+/// multiply debug-build stack frames past the kernel-stack bottom into the
+/// adjacent heap page (TICK-CANARY r18-3 diagnosis in sched.rs).
 fn evict_dev_dentry(rel_path: &str) {
-    let (parent, name) = match rel_path.rfind('/') {
-        Some(i) => (format!("/dev/{}", &rel_path[..i]), &rel_path[i + 1..]),
-        None => (String::from("/dev"), rel_path),
+    // Split into parent components and the leaf name (devfs-relative).
+    let mut components: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
+    let name = match components.pop() {
+        Some(n) => n,
+        None => return, // empty path — nothing to evict
     };
-    if let Ok(vpath) = crate::fs::vfs::path_lookup(&parent, 0) {
-        if let Some(parent_dentry) = vpath.dentry {
-            parent_dentry.remove_child(name);
-        }
+    // Shallow walk: root → dev (mount point → devfs root) → parents...
+    let mut walk: Vec<&str> = alloc::vec!["dev"];
+    walk.extend_from_slice(&components);
+    if let Some(parent_dentry) = crate::fs::vfs::shallow_dentry_walk(&walk) {
+        parent_dentry.remove_child(name);
     }
 }
 
@@ -583,11 +591,19 @@ pub fn mknod(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
         }
     }
 
-    // Create device node. P1 mknod: the S_IFCHR / S_IFBLK type bits select
-    // the entry kind (char devices open through the CharDev registry; block
-    // nodes are stat-able but have no driver registry yet).
+    // Create device node. P1 mknod: the full S_IFMT field selects the entry
+    // kind (char devices open through the CharDev registry; block nodes are
+    // stat-able but have no driver registry yet).
+    //
+    // NOTE: compare the WHOLE S_IFMT (0o170000), never a bare bit test —
+    // S_IFCHR (0o20000) shares its top bit with S_IFBLK (0o60000), so the
+    // old `mode & 0o060000 != 0` classified every char node (e.g. dynamic
+    // /dev/pts/N) as a BLOCK device. devfs_iget then built the inode with
+    // S_IFBLK, devfs_get_file_ops returned None for it, and open() failed
+    // with ENXIO ("No such device or address") despite the CharDev registry
+    // having the ops.
     let device_name = components[ncomponents - 1];
-    let is_block = mode & 0o060000 != 0; // S_IFBLK
+    let is_block = mode & 0o170000 == 0o060000; // S_IFMT == S_IFBLK
     let entry = if is_block {
         Arc::new(DevfsEntry::new_block_device(device_name, devno, mode))
     } else {

@@ -147,6 +147,28 @@ pub fn follow_mount(dentry: Arc<Dentry>) -> Arc<Dentry> {
     }
 }
 
+/// Shallow dentry-tree walk (root → components) crossing mount points.
+///
+/// Unlike `path_lookup()` this does no path normalization, DAC checks,
+/// negative-dentry handling, or icache refreshes — it only follows cached
+/// child dentries. Intended for kernel-internal cache maintenance (e.g.
+/// evicting a stale /dev/pts/N dentry after a dynamic node is created or
+/// removed) that runs NESTED INSIDE a deep syscall path: a nested full
+/// `path_lookup()` there multiplies the debug-build frame depth, and the
+/// scheduler's TICK-CANARY (sched.rs, r18-3) already diagnosed such nested
+/// chains as spilling past the bottom of the 64KB kernel stack into the
+/// adjacent heap page — zeroing whatever object lives there.
+pub fn shallow_dentry_walk(components: &[&str]) -> Option<Arc<Dentry>> {
+    let mut current = follow_mount(get_vfs_root()?);
+    for component in components {
+        if *component == "/" || component.is_empty() {
+            continue;
+        }
+        current = follow_mount(current.lookup_child(component)?);
+    }
+    Some(current)
+}
+
 /// Mount a filesystem at the given path, building the dentry tree.
 ///
 /// This replaces the old `mount_at()` string-based routing with dentry tree
