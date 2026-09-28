@@ -770,6 +770,17 @@ pub(crate) fn do_execve_elf(
     // SAFETY: user_ppn is a freshly allocated page table root with no prior users.
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
+    // Reset the heap to the NEW image: exec used to leave the task's brk
+    // (and the mm default) inherited from the PARENT image, so the first
+    // malloc in the exec'd program extended a heap at the old image's
+    // break — a mapped-but-wrong region (observed crash: dash jumping
+    // through a function pointer at 0x1c29c, a parent-brk heap address).
+    // Linux resets start_brk/brk to the page-aligned end of the new
+    // image's highest PT_LOAD.
+    new_addr_space.set_start_brk(virt_end as usize);
+    new_addr_space.set_brk_val(virt_end as usize);
+    unsafe { (*task_ptr).set_brk(virt_end); };
+
     // Record envp range for /proc/pid/environ
     if !envp.is_empty() {
         let env_start_addr = adjusted_stack_top + (env_string_offset * 8) as u64;

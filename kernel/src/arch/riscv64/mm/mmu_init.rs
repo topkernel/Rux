@@ -453,6 +453,35 @@ fn is_framebuffer_frame(phys: u64) -> bool {
     false
 }
 
+// FORENSIC: PTE-install ledger — every user PTE installation records
+// (root, va, ppn). At a crash we replay which roots EVER mapped the
+// victim's frame: an alias installed without a matching allocation.
+pub struct PteInstall {
+    pub root: core::sync::atomic::AtomicU64,
+    pub va: core::sync::atomic::AtomicU64,
+    pub ppn: core::sync::atomic::AtomicU64,
+}
+impl PteInstall {
+    const fn new() -> Self {
+        Self {
+            root: core::sync::atomic::AtomicU64::new(0),
+            va: core::sync::atomic::AtomicU64::new(0),
+            ppn: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+const PTEI_NEW: PteInstall = PteInstall::new();
+pub static PTEI_RING: [PteInstall; 65536] = [PTEI_NEW; 65536];
+pub static PTEI_CUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[inline]
+pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let i = PTEI_CUR.fetch_add(1, Relaxed) % PTEI_RING.len();
+    PTEI_RING[i].root.store(root_ppn, Relaxed);
+    PTEI_RING[i].va.store(va, Relaxed);
+    PTEI_RING[i].ppn.store(ppn, Relaxed);
+}
+
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
     use crate::mm::{pfn_to_page, pfn_to_page_mut, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
     // FORENSIC: record teardown events so a refused double-free can name
@@ -659,6 +688,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     let pte_bits: u64 = (ppn << 10) | flags;
 
     table0_ref.set(vpn0, PageTableEntry::from_bits(pte_bits));
+    pte_install_log(root_ppn, virt_addr, ppn);
 }
 
 /// Map a single page in page table

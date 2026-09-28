@@ -165,6 +165,27 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                             return current_brk as i64;
                         }
                     }
+
+                    // Register the heap growth as an anonymous VMA. Mapping
+                    // PTEs without a VMA left every access past the initial
+                    // brk page as NOVMA — glibc malloc's first sbrk region
+                    // (TCB, arenas, function pointers) faulted on touch
+                    // (observed: dash jumping through a heap pointer at
+                    // 0x1c29c with tp already in the brk heap).
+                    if let Some(addr_space) = current_task.address_space() {
+                        use crate::mm::vma::{Vma, VmaFlags, VmaType};
+                        let heap_vma = Vma::new(
+                            crate::mm::page::VirtAddr::new(map_start as usize),
+                            crate::mm::page::VirtAddr::new(new_page_end as usize),
+                            VmaFlags::from_bits(
+                                VmaFlags::READ | VmaFlags::WRITE | VmaFlags::PRIVATE,
+                            ),
+                        );
+                        // Vma::new starts with no type — set it explicitly.
+                        let mut heap_vma = heap_vma;
+                        heap_vma.set_type(VmaType::Anonymous);
+                        let _ = addr_space.vma_write().add(heap_vma);
+                    }
                 }
 
                 current_task.set_brk(new_brk);

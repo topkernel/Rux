@@ -348,6 +348,30 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                                     unsafe { (*page).refcount() },
                                     unsafe { (*page).mapcount() });
                             }
+                            // PTE-install replay: which roots EVER mapped this ppn.
+                            {
+                                use core::sync::atomic::Ordering::Relaxed;
+                                use crate::arch::riscv64::mm::mmu_init::{PTEI_RING, PTEI_CUR};
+                                let my_root = addr_space.pgd() as u64;
+                                let mut n = 0;
+                                for i in 0..PTEI_RING.len() {
+                                    let e = &PTEI_RING[i];
+                                    if e.ppn.load(Relaxed) == ppn as u64 {
+                                        let r = e.root.load(Relaxed);
+                                        let v = e.va.load(Relaxed);
+                                        if n < 6 {
+                                            crate::pr_err!(
+                                                "  PTEI: ppn={:#x} root={:#x}{} va={:#x}",
+                                                ppn, r,
+                                                if r == my_root { " (SELF)" } else { " ALIEN!" },
+                                                v
+                                            );
+                                        }
+                                        n += 1;
+                                    }
+                                }
+                                crate::pr_err!("  PTEI total installs of ppn={:#x}: {}", ppn, n);
+                            }
                             // Zone-ledger replay: alloc/free history of this ppn.
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
@@ -442,6 +466,22 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                             crate::pr_err!("  STACK[{:#x}] = {:#018x}",
                                 base + (w*8) as u64,
                                 u64::from_le_bytes(buf[w*8..w*8+8].try_into().unwrap()));
+                        }
+                    }
+                }
+                // Read the victim's PLTGOT through its page tables.
+                {
+                    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+                    for probe in [0x17330usize, 0x176b0usize, 0x1c29cusize] {
+                        match unsafe { PageTableWalker::walk(addr_space.pgd() as u64, probe as u64) } {
+                            Some((ppn, bits)) => {
+                                let va = crate::arch::riscv64::mm::phys_to_virt(
+                                    crate::arch::riscv64::mm::PhysAddr::new(ppn as u64 * 4096)
+                                ).bits() as usize + (probe & 0xFFF);
+                                let v = unsafe { core::ptr::read_volatile(va as *const u64) };
+                                crate::pr_err!("  GPROBE {:#x} -> ppn={:#x} pte={:#x} val={:#x}", probe, ppn, bits, v);
+                            }
+                            None => crate::pr_err!("  GPROBE {:#x} UNMAPPED", probe),
                         }
                     }
                 }

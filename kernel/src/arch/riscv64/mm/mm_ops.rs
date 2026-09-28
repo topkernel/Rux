@@ -1426,6 +1426,11 @@ pub unsafe fn copy_page_table_cow(parent_root_ppn: u64) -> Option<u64> {
                 };
 
                 (*child_table0_ref).set(vpn0, new_pte);
+                crate::arch::riscv64::mm::mmu_init::pte_install_log(
+                    child_root_ppn,
+                    (vpn2 << 30) as u64 | ((vpn1 as u64) << 21) | ((vpn0 as u64) << 12),
+                    new_pte.ppn(),
+                );
             }
         }
     }
