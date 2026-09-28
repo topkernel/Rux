@@ -281,7 +281,30 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             Ok(s) => s,
             Err(_) => return -errno::ENOEXEC as u64,
         };
-        read_exec_file(interp_str)
+        // A dynamic executable MUST have its interpreter. The old code fell
+        // back to running the image STATICALLY when this read failed
+        // transiently — main() then jumped through file-initial PLTGOT
+        // entries (0x4710 -> unresolved resolver path) and died at an
+        // unmapped heap address (the 0x1c29c family). Retry a few times
+        // for transient block-I/O failures, then fail the exec with
+        // ENOENT, exactly like Linux.
+        let mut data = read_exec_file(interp_str);
+        let mut attempt = 1;
+        while data.is_none() && attempt < 3 {
+            data = read_exec_file(interp_str);
+            attempt += 1;
+        }
+        match data {
+            Some(d) => Some(d),
+            None => {
+                crate::pr_err!(
+                    "exec: interpreter read failed for {} (pid {}) — ENOENT",
+                    interp_str,
+                    crate::process::current_pid()
+                );
+                return -errno::ENOENT as u64;
+            }
+        }
     } else {
         None
     };

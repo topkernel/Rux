@@ -12,6 +12,10 @@ use core::slice;
 /// Base virtual address for loading the ELF interpreter (dynamic linker)
 const INTERP_BASE: usize = 0x3FBF000000;
 
+// FORENSIC: ppn of the just-exec'd image's GOT page (0x17208), recorded
+// at exec completion for crash/watchpoint correlation.
+pub static LAST_GOT_PPN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 // FORENSIC: initial-stack zeroing ledger (see the zeroing site below).
 pub struct ZeroEntry {
     pub pid: core::sync::atomic::AtomicU32,
@@ -983,7 +987,13 @@ pub(crate) fn do_execve_elf(
             r.a1 = 0; r.a2 = 0; r.a3 = 0; r.a4 = 0;
             r.a5 = 0; r.a6 = 0; r.a7 = 0;
 
-            // Pin ti_kernel_sp to THIS frame: exec defines the task's only
+            {
+            use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+            if let Some((gp, _)) = unsafe { PageTableWalker::walk(user_ppn, 0x17208) } {
+                LAST_GOT_PPN.store(gp, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        // Pin ti_kernel_sp to THIS frame: exec defines the task's only
             // user context from here on. If the syscall entered with a
             // stale ksp (frame pushed off-slot), every later user trap
             // and the final sret must anchor to the exec-updated frame,

@@ -472,7 +472,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 // Read the victim's PLTGOT through its page tables.
                 {
                     use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
-                    for probe in [0x17208usize, 0x17210usize, 0x17218usize, 0x17330usize, 0x1c29cusize] {
+                    for probe in [0x1842usize, 0x184eusize, 0x17208usize, 0x17210usize, 0x17218usize, 0x17330usize] {
                         match unsafe { PageTableWalker::walk(addr_space.pgd() as u64, probe as u64) } {
                             Some((ppn, bits)) => {
                                 let va = crate::arch::riscv64::mm::phys_to_virt(
@@ -483,6 +483,29 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                             }
                             None => crate::pr_err!("  GPROBE {:#x} UNMAPPED", probe),
                         }
+                    }
+                }
+                // GOT-page PTE history: if relocation results live on a
+                // different ppn than the crash-time PTE, a post-relocation
+                // page replacement reset the file-initial contents.
+                {
+                    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+                    if let Some((gppn, _)) = unsafe { PageTableWalker::walk(addr_space.pgd() as u64, 0x17208) } {
+                        use core::sync::atomic::Ordering::Relaxed;
+                        use crate::arch::riscv64::mm::mmu_init::{PTEI_RING, PTEI_CUR};
+                        let mut n = 0;
+                        for i in 0..PTEI_RING.len() {
+                            let e = &PTEI_RING[i];
+                            if e.ppn.load(Relaxed) == gppn as u64 {
+                                if n < 6 {
+                                    crate::pr_err!("  GOTPTE ppn={:#x} root={:#x} va={:#x}",
+                                        gppn, e.root.load(Relaxed), e.va.load(Relaxed));
+                                }
+                                n += 1;
+                            }
+                        }
+                        crate::pr_err!("  GOTPTE installs of ppn={:#x}: {} (cursor={})",
+                            gppn, n, PTEI_CUR.load(Relaxed));
                     }
                 }
                 // Replay this pid's final syscalls from the global ring.
