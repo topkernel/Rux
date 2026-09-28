@@ -123,6 +123,15 @@ impl UartRxBuf {
 /// Global UART RX ring buffer
 static UART_RX_BUF: UartRxBuf = UartRxBuf::new();
 
+/// Set once init_irq() has registered the RX IRQ handler. While clear,
+/// task-context code may poll RBR directly (early boot); once set, the
+/// IRQ handler is the ONLY context allowed to consume hardware RX —
+/// a task-context RBR read racing the handler on another CPU pops bytes
+/// out of order (getchar got 'c' while 'e' went to the ring →
+/// "echo" arriving as "ceho") or duplicates the stale RBR value.
+static UART_IRQ_ARMED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Rolling match position for the DFX "DUMP!" magic (RX IRQ context only).
 static mut DUMP_MAGIC_POS: usize = 0;
 
@@ -201,10 +210,27 @@ pub fn early_init() {
     // character generates an interrupt. QEMU does not implement
     // the character timeout interrupt, so higher trigger levels
     // can lose short inputs.
-    // Do NOT clear RX FIFO — preserve any input that arrived before
-    // the kernel booted (e.g., piped stdin data).
     let base = get_uart_base();
     unsafe {
+        // RESCUE any byte already sitting in RBR before the FIFO switch.
+        //
+        // Enabling the FIFOs (FCR bit 0, 0->1) FORCE-CLEARS the receiver:
+        // QEMU's serial.c turns the enable-flag change into an RX-FIFO
+        // reset (RFR), and a real 16550A behaves the same. With the FIFO
+        // still off at most ONE byte can be pending in RBR (QEMU's
+        // chardev back-pressures the rest into the host socket), so
+        // without this drain the FIRST character of the first serial
+        // input after boot is destroyed exactly here ("ls" -> "s",
+        // "for i in..." -> "or i in..."). Read it into the kernel ring
+        // so the first reader still gets it — the byte ordering is
+        // preserved (ring first, then the FIFO bytes drained later).
+        //
+        // Producer-safety: at this point IRQs are off, the UART RX
+        // interrupt is not armed, and only the boot hart runs — the
+        // ring's single-producer invariant holds.
+        if read_reg(base, UART_LSR) & LSR_DR != 0 {
+            UART_RX_BUF.put(read_reg(base, UART_RBR));
+        }
         write_reg(base, UART_FCR, FCR_ENABLE_FIFO);
     }
 }
@@ -223,8 +249,21 @@ pub fn init() {
 #[cfg(feature = "riscv64")]
 pub fn init_irq() {
     let base = get_uart_base();
-    // SAFETY: base is a valid UART MMIO base address; writing to UART_IER enables RX interrupt.
+    // SAFETY: base is a valid UART MMIO base address; the register accesses
+    // below are safe in this single-hart, IRQs-off boot context.
     unsafe {
+        // Drain bytes that accumulated in the 16-byte RX FIFO between
+        // early_init() and now (the RX IRQ was not armed yet, so nothing
+        // else moved them) into the ring. Without this, input sent during
+        // that window is capped by the FIFO depth and overrun-lost beyond
+        // 16 bytes — the same cold-boot first-command family as the
+        // early_init() rescue above. External IRQs are still masked at
+        // this point on every hart (SEIE is enabled later, secondaries
+        // are not up yet), so the drain cannot race the IRQ handler.
+        while read_reg(base, UART_LSR) & LSR_DR != 0 {
+            UART_RX_BUF.put(read_reg(base, UART_RBR));
+        }
+
         // Enable RX data available interrupt
         write_reg(base, UART_IER, IER_RX_ENABLE);
 
@@ -239,14 +278,18 @@ pub fn init_irq() {
         }
     }
 
-    // Register UART IRQ handler
-    crate::interrupt::request_irq(
+    // Register UART IRQ handler. From here on the handler owns hardware RX:
+    // arm the flag only on success so a failed registration keeps the
+    // (safe) task-context polling fallback.
+    if crate::interrupt::request_irq(
         UART_IRQ,
         uart_irq_handler,
         0, // Not shared
         "UART",
         0,
-    ).ok();
+    ).is_ok() {
+        UART_IRQ_ARMED.store(true, Ordering::Release);
+    }
 }
 
 #[cfg(not(feature = "riscv64"))]
@@ -506,14 +549,23 @@ pub fn getchar() -> Option<u8> {
             }
         }
 
-        // Fall back to hardware polling (for early boot or if IRQ not enabled)
-        let uart_base = get_uart_base();
-        // SAFETY: uart_base is a valid UART MMIO base address; polling LSR/RBR is safe.
-        unsafe {
-            let lsr = read_reg(uart_base, UART_LSR);
-            if lsr & LSR_DR != 0 {
-                let c = read_reg(uart_base, UART_RBR);
-                return process_input(c);
+        // Hardware polling fallback — ONLY before the RX IRQ is armed.
+        // After init_irq(), the IRQ handler owns RBR: a concurrent
+        // task-context RBR read steals bytes the handler is about to move
+        // to the ring (out-of-order delivery, e.g. "echo" → "ceho") or
+        // re-reads a stale RBR while the real byte waits in the ring.
+        // Armed ⇒ empty ring ⇒ sleep on the wait queue; the handler will
+        // fill the ring and wake us.
+        if !UART_IRQ_ARMED.load(Ordering::Acquire) {
+            let uart_base = get_uart_base();
+            // SAFETY: uart_base is a valid UART MMIO base address; polling
+            // LSR/RBR is safe while no interrupt handler competes for RBR.
+            unsafe {
+                let lsr = read_reg(uart_base, UART_LSR);
+                if lsr & LSR_DR != 0 {
+                    let c = read_reg(uart_base, UART_RBR);
+                    return process_input(c);
+                }
             }
         }
     }
@@ -541,7 +593,13 @@ pub fn uart_has_data() -> bool {
     if head != tail {
         return true;
     }
-    // Check hardware
+    // Check hardware — only while the RX IRQ is not armed. Once armed, a
+    // DR=1 byte is about to be moved to the ring by the IRQ handler;
+    // reporting it here would busy-spin readers that can no longer take
+    // it from RBR themselves (see getchar()).
+    if UART_IRQ_ARMED.load(Ordering::Acquire) {
+        return false;
+    }
     let uart_base = get_uart_base();
     // SAFETY: uart_base is a valid UART MMIO base address; reading LSR is safe.
     unsafe {
