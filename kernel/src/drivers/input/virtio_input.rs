@@ -455,6 +455,71 @@ impl VirtioInputDevice {
     pub fn is_pointer(&self) -> bool {
         self.is_pointer
     }
+
+    /// Read a code bitmap from the device config (VIRTIO_INPUT_CFG_EV_BITS).
+    ///
+    /// `ev_type` selects the event type (EV_SYN/EV_KEY/EV_REL/EV_ABS/...);
+    /// the device answers with the bitmap of codes it can emit for that
+    /// type. This is the authoritative capability source — exactly what a
+    /// Linux virtio-input guest reports back through EVIOCGBIT(ev, len).
+    ///
+    /// Returns the number of valid bytes written to `out` (0 = the device
+    /// does not support this event type).
+    pub fn read_ev_bitmap(&mut self, ev_type: u8, out: &mut [u8]) -> usize {
+        let config_base = self.pci.device_cfg_bar;
+        if config_base == 0 {
+            return 0;
+        }
+        unsafe {
+            write_volatile((config_base) as *mut u8, VIRTIO_INPUT_CFG_EV_BITS);
+            write_volatile((config_base + 1) as *mut u8, ev_type);
+            fence(Ordering::SeqCst);
+
+            // u.size = bitmap size in bytes (spec: 5.10.6.2)
+            let size = read_volatile((config_base + 2) as *const u8) as usize;
+            if size == 0 {
+                return 0;
+            }
+            let n = size.min(out.len()).min(128);
+            let payload = (config_base + 8) as *const u8;
+            for i in 0..n {
+                out[i] = read_volatile(payload.add(i));
+            }
+            n
+        }
+    }
+
+    /// Read absolute-axis info from the device config
+    /// (VIRTIO_INPUT_CFG_ABS_INFO): { min, max, fuzz, flat, res } as LE u32s
+    /// (virtio_absinfo layout). Mirrors what Linux reports via
+    /// EVIOCGABS(axis) — xf86-input-evdev reads ABS min/max to scale the
+    /// tablet's absolute coordinates to the screen.
+    pub fn read_absinfo(&mut self, axis: u8) -> Option<[u32; 5]> {
+        let config_base = self.pci.device_cfg_bar;
+        if config_base == 0 {
+            return None;
+        }
+        unsafe {
+            write_volatile((config_base) as *mut u8, VIRTIO_INPUT_CFG_ABS_INFO);
+            write_volatile((config_base + 1) as *mut u8, axis);
+            fence(Ordering::SeqCst);
+
+            let size = read_volatile((config_base + 2) as *const u8) as usize;
+            if size < 20 {
+                return None;
+            }
+            let payload = (config_base + 8) as *const u8;
+            let mut vals = [0u32; 5];
+            for (i, v) in vals.iter_mut().enumerate() {
+                let mut b = [0u8; 4];
+                for (j, bj) in b.iter_mut().enumerate() {
+                    *bj = read_volatile(payload.add(i * 4 + j));
+                }
+                *v = u32::from_le_bytes(b);
+            }
+            Some(vals)
+        }
+    }
 }
 
 /// Used ring element

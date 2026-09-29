@@ -21,7 +21,7 @@ pub mod evdev;
 
 // Re-export common types
 pub use event::*;
-pub use evdev::{EvdevDevice, evdev_ioctl, evdev_read};
+pub use evdev::{EvdevDevice, evdev_file_ioctl};
 pub use virtio_input::{VirtioInputDevice, probe_virtio_input};
 
 // ============================================================================
@@ -50,44 +50,30 @@ pub fn init_virtio_input() -> (usize, usize) {
     let mut keyboard_count = 0;
     let mut pointer_count = 0;
 
-    // Probe VirtIO Input devices
-    for device in 0..32u8 {
-        let ecam_addr = crate::drivers::pci::RISCV_PCIE_ECAM_BASE
-            + ((device as u64) * crate::drivers::pci::PCIE_ECAM_SIZE);
+    // Probe VirtIO Input devices via the shared ECAM walker (0x8000 stride
+    // per slot + all 8 functions). The old inline walk here enumerated
+    // ECAM slot bases only (function 0 of the first slots) — QEMU's virt
+    // machine places virtio-keyboard-pci and virtio-tablet-pci on later
+    // slots/functions, so the tablet was silently never probed and the
+    // guest ended up with a keyboard but no pointer (review BUG:
+    // "tablet 从未被探测").
+    for ecam_addr in crate::drivers::pci::find_ecam_devices(0x1AF4, &[0x1052]) {
+        if let Ok(virtio_pci) = crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
+            if let Some(input_dev) = VirtioInputDevice::new(virtio_pci) {
+                let is_pointer = input_dev.is_pointer();
 
-        let vendor_id = unsafe { core::ptr::read_volatile((ecam_addr as *const u16)) };
-
-        // Skip non-existent devices (0xFFFF means no device)
-        if vendor_id == 0xFFFF {
-            continue;
-        }
-
-        let device_id = unsafe { core::ptr::read_volatile((ecam_addr as *const u16).add(1)) };
-
-        // VirtIO Input: Vendor 0x1AF4, Device 0x1052
-        if vendor_id == 0x1AF4 && device_id == 0x1052 {
-            if let Ok(virtio_pci) = crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
-                if let Some(input_dev) = VirtioInputDevice::new(virtio_pci) {
-                    let is_pointer = input_dev.is_pointer();
-
-                    if is_pointer {
-                        if INPUT_POINTER.lock().is_none() {
-                            *INPUT_POINTER.lock() = Some(input_dev);
-                            pointer_count += 1;
-                        }
-                    } else {
-                        if INPUT_KEYBOARD.lock().is_none() {
-                            *INPUT_KEYBOARD.lock() = Some(input_dev);
-                            keyboard_count += 1;
-                        }
+                if is_pointer {
+                    if INPUT_POINTER.lock().is_none() {
+                        *INPUT_POINTER.lock() = Some(input_dev);
+                        pointer_count += 1;
+                    }
+                } else {
+                    if INPUT_KEYBOARD.lock().is_none() {
+                        *INPUT_KEYBOARD.lock() = Some(input_dev);
+                        keyboard_count += 1;
                     }
                 }
             }
-        }
-
-        // If both devices found, stop probing
-        if INPUT_KEYBOARD.lock().is_some() && INPUT_POINTER.lock().is_some() {
-            break;
         }
     }
 

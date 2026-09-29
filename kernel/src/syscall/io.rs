@@ -640,6 +640,21 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
     }
 
+    // Per-fd evdev ioctls (EVIOCG*/EVIOCGBIT/EVIOCGRAB on
+    // /dev/input/eventX): dispatch on the File's ops identity. Without
+    // this, input-capability queries (EVIOCGBIT above all) failed with
+    // ENOTTY and every input stack (xf86-input-evdev/libinput/evtest)
+    // aborted its device probe.
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) = crate::drivers::input::evdev::evdev_file_ioctl(&file, request, arg)
+            {
+                return ret;
+            }
+        }
+    }
+
     // Per-fd terminal ioctls (pty master/slave): dispatch on the File's ops
     // identity. Non-pty files (or pty-unhandled requests like FIONBIO)
     // return None here and fall through to the console-global handling

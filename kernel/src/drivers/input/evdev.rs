@@ -5,30 +5,66 @@
 //! evdev character device interface
 //!
 //! Provides compatible /dev/input/eventX device
+//!
+//! Linux-parity checklist (xf86-input-evdev / libevdev / evtest probe path):
+//! - EVIOCGVERSION / EVIOCGID / EVIOCGNAME(len) / EVIOCGPROP(len)
+//! - EVIOCGBIT(ev, len) from the virtio device's own capability bitmaps
+//! - EVIOCGABS(abs) from the virtio device's ABS_INFO config
+//! - EVIOCGRAB (exclusive access) / EVIOCGKEY / EVIOCGLED / EVIOCGSW
+//! - blocking read (sleep until an event arrives) and poll reporting POLLIN
+//! - 24-byte input_event passthrough including EV_SYN/SYN_REPORT packets
 
 use super::event::*;
-use super::{INPUT_KEYBOARD, INPUT_POINTER};
 use alloc::collections::vec_deque::VecDeque;
 use alloc::boxed::Box;
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::fs::file::{File, FileOps};
 use crate::fs::dev_t::{DevNo, DEV_EVDEV_KEYBOARD, DEV_EVDEV_POINTER};
 use crate::fs::devfs;
 
 // ============================================================================
-// evdev ioctl commands
+// evdev ioctl command decoding
 // ============================================================================
 
-/// Get driver version
-pub const EVIOCGVERSION: u32 = 0x80044501;
-/// Get device ID
-pub const EVIOCGID: u32 = 0x80084502;
-/// Get device name
-pub const EVIOCGNAME: u32 = 0x80004506;
-/// Get supported event type bitmap
-pub const EVIOCGBIT: u32 = 0x80004520;
-/// Get device properties
-pub const EVIOCGPROP: u32 = 0x80004509;
+/// ioctl NR (command byte) base values from <uapi/linux/input.h>. The size
+/// field of EVIOCGNAME/EVIOCGBIT-style commands carries the user buffer
+/// length and must be honored, so commands are decoded by NR + DIR instead
+/// of compared as whole u32s.
+const NR_VERSION: u32 = 0x01; // EVIOCGVERSION
+const NR_ID: u32 = 0x02; // EVIOCGID
+const NR_REP_GET: u32 = 0x03; // EVIOCGREP
+const NR_REP_SET: u32 = 0x04; // EVIOCSREP
+const NR_NAME: u32 = 0x06; // EVIOCGNAME(len)
+const NR_PHYS: u32 = 0x07; // EVIOCGPHYS(len)
+const NR_UNIQ: u32 = 0x08; // EVIOCGUNIQ(len)
+const NR_PROP: u32 = 0x09; // EVIOCGPROP(len)
+const NR_KEY_STATE: u32 = 0x18; // EVIOCGKEY(len)
+const NR_LED_STATE: u32 = 0x19; // EVIOCGLED(len)
+const NR_SND_STATE: u32 = 0x1a; // EVIOCGSND(len)
+const NR_SW_STATE: u32 = 0x1b; // EVIOCGSW(len)
+const NR_BIT_BASE: u32 = 0x20; // EVIOCGBIT(ev, len): 0x20 + ev
+const NR_ABS_BASE: u32 = 0x40; // EVIOCGABS(abs): 0x40 + abs
+const NR_GRAB: u32 = 0x90; // EVIOCGRAB
+const NR_SCLOCKID: u32 = 0xa0; // EVIOCSCLOCKID
+
+const IOC_READ: u32 = 2; // _IOC_WRITE/_IOC_READ from asm-generic/ioctl.h
+const IOC_WRITE: u32 = 1;
+
+#[inline]
+fn ioc_nr(cmd: u32) -> u32 {
+    cmd & 0xff
+}
+
+#[inline]
+fn ioc_size(cmd: u32) -> usize {
+    ((cmd >> 16) & 0x3fff) as usize
+}
+
+#[inline]
+fn ioc_dir(cmd: u32) -> u32 {
+    cmd >> 30
+}
 
 // ============================================================================
 // Input device ID structure
@@ -48,6 +84,47 @@ pub struct InputId {
     pub version: u16,
 }
 
+/// input_absinfo (uapi layout): current value + the five virtio_absinfo
+/// fields.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct InputAbsinfo {
+    pub value: i32,
+    pub minimum: i32,
+    pub maximum: i32,
+    pub fuzz: i32,
+    pub flat: i32,
+    pub resolution: i32,
+}
+
+// ============================================================================
+// Capability bitmaps
+// ============================================================================
+
+/// KEY_CNT = 768 bits = 96 bytes; uniform storage for every event type's
+/// code bitmap (SYN/REL/ABS use far less).
+const BITS_LEN: usize = 96;
+/// Number of event types we carry code bitmaps for: EV_SYN..EV_ABS.
+const BIT_TYPES: usize = 4;
+
+/// Fill `out` with the derived "supported event types" bitmap (what Linux
+/// reports for EVIOCGBIT(0, len)): a type is supported when its code bitmap
+/// is non-empty; EV_SYN is always present (input core guarantees it).
+fn evtype_bitmap(bits: &[[u8; BITS_LEN]; BIT_TYPES]) -> [u8; BITS_LEN] {
+    let mut out = [0u8; BITS_LEN];
+    out[0] |= 1 << (EV_SYN & 7); // bit 0
+    if bits[1].iter().any(|&b| b != 0) {
+        out[0] |= 1 << (EV_KEY & 7); // bit 1
+    }
+    if bits[2].iter().any(|&b| b != 0) {
+        out[0] |= 1 << (EV_REL & 7); // bit 2
+    }
+    if bits[3].iter().any(|&b| b != 0) {
+        out[0] |= 1 << (EV_ABS & 7); // bit 3
+    }
+    out
+}
+
 // ============================================================================
 // evdev device
 // ============================================================================
@@ -63,6 +140,14 @@ pub struct EvdevDevice {
     pub id: InputId,
     /// Whether it is a pointer device
     pub is_pointer: bool,
+    /// Code bitmaps for EV_SYN(0)/EV_KEY(1)/EV_REL(2)/EV_ABS(3), read from
+    /// the virtio device config (VIRTIO_INPUT_CFG_EV_BITS) at init.
+    ev_bits: [[u8; BITS_LEN]; BIT_TYPES],
+    /// ABS axis info for ABS_X/ABS_Y (min/max/fuzz/flat/res from
+    /// VIRTIO_INPUT_CFG_ABS_INFO) — reported through EVIOCGABS.
+    absinfo: [InputAbsinfo; 2],
+    /// EVIOCGRAB state (device-level; we have a single client in practice).
+    grabbed: AtomicBool,
     /// Event queue
     pub event_queue: Spinlock<VecDeque<InputEvent>>,
 }
@@ -83,7 +168,31 @@ impl EvdevDevice {
                 version: 0x0001,
             },
             is_pointer,
+            ev_bits: [[0u8; BITS_LEN]; BIT_TYPES],
+            absinfo: [InputAbsinfo::default(); 2],
+            grabbed: AtomicBool::new(false),
             event_queue: Spinlock::new(VecDeque::with_capacity(EVENT_QUEUE_SIZE)),
+        }
+    }
+
+    /// Install a capability bitmap for event type `ev` (0..=3).
+    pub fn set_ev_bits(&mut self, ev: usize, bits: &[u8; BITS_LEN]) {
+        if ev < BIT_TYPES {
+            self.ev_bits[ev] = *bits;
+        }
+    }
+
+    /// Install ABS axis info for ABS_X (0) / ABS_Y (1).
+    pub fn set_absinfo(&mut self, axis: usize, min: i32, max: i32, fuzz: i32, flat: i32, res: i32) {
+        if axis < 2 {
+            self.absinfo[axis] = InputAbsinfo {
+                value: 0,
+                minimum: min,
+                maximum: max,
+                fuzz,
+                flat,
+                resolution: res,
+            };
         }
     }
 
@@ -117,37 +226,107 @@ pub static mut EVDEV_KEYBOARD: Option<EvdevDevice> = None;
 /// Pointer evdev device
 pub static mut EVDEV_POINTER: Option<EvdevDevice> = None;
 
+/// Resolve the EvdevDevice a file was opened against. Returns None for
+/// non-evdev files (caller falls through to other ioctl handlers).
+// SAFETY: EVDEV_KEYBOARD / EVDEV_POINTER are initialized by init_evdev()
+// before any file operations can occur; private_data holds a valid DevNo
+// boxed by devfs_open for as long as the file lives.
+unsafe fn device_of_file(file: &File) -> Option<&'static EvdevDevice> {
+    let ptr = match *(file.private_data.get()) {
+        Some(p) => p,
+        None => return None,
+    };
+    let devno = *(ptr as *const DevNo);
+    if devno == DEV_EVDEV_KEYBOARD {
+        EVDEV_KEYBOARD.as_ref()
+    } else if devno == DEV_EVDEV_POINTER {
+        EVDEV_POINTER.as_ref()
+    } else {
+        None
+    }
+}
+
 // ============================================================================
 // FileOps implementation
 // ============================================================================
 
+/// Interruptible timed sleep (milliseconds) used by the blocking read —
+/// the task actually sleeps (yields the CPU) instead of busy-polling and
+/// wakes early on signals.
+///
+/// Returns false if no task context / timer was available (caller should
+/// fall back to a yield-style retry).
+fn sleep_ms_interruptible(ms: u64) -> bool {
+    use crate::process::task::{Task, TaskState};
+
+    let target =
+        crate::drivers::timer::get_jiffies() + crate::drivers::timer::msecs_to_jiffies(ms);
+
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => return false,
+    };
+    // SAFETY: current is the running task (we are it); pid() is a const read.
+    let pid = unsafe { (*current).pid() };
+
+    // One-shot timer is the only waker (no IRQ path is registered for the
+    // input queues), so registration failure means we must NOT sleep.
+    let timer_id = crate::timer::add_timer_wakeup(target, pid);
+    if timer_id == 0 {
+        return false;
+    }
+
+    loop {
+        let jiffies_now = crate::drivers::timer::get_jiffies();
+        if jiffies_now >= target || crate::signal::signal_pending() {
+            crate::timer::del_timer(timer_id);
+            return true;
+        }
+
+        // Mark INTERRUPTIBLE BEFORE the final re-check (state-first lost-
+        // wakeup discipline, same as sys_nanosleep).
+        // SAFETY: current is the running task's pointer.
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        let jiffies_now = crate::drivers::timer::get_jiffies();
+        if jiffies_now >= target || crate::signal::signal_pending() {
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                (*current).set_state(TaskState::new(TaskState::RUNNING));
+            }
+            // A racing wake may have enqueued us while still executing —
+            // take ourselves back off (NEW-C2 discipline).
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                crate::sched::dequeue_task(&*current);
+            }
+            crate::timer::del_timer(timer_id);
+            return true;
+        }
+
+        // Syscall context runs with SIE=0 — re-arm so the timer tick can
+        // reach this CPU and wake us.
+        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::sched::schedule();
+        // Woke up (timer expiry or signal): loop tail re-checks and exits.
+    }
+}
+
 /// evdev read function
+///
+/// Linux semantics: a blocking fd sleeps until at least one event is
+/// available (returning exactly one input_event per read); O_NONBLOCK
+/// returns -EAGAIN when the queue is empty. Events are drained from the
+/// virtio queues before every check because the input path has no IRQ —
+/// the reader itself is the poller.
 fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
-    // Get device number
-    // SAFETY: private_data contains a valid DevNo pointer set during device open.
-    let devno = unsafe {
-        match *file.private_data.get() {
-            Some(ptr) => *(ptr as *const DevNo),
-            None => return -9, // EBADF
-        }
-    };
-
-    // Select device based on device number
-    // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev()
-    // before any file operations can occur.
-    let device = unsafe {
-        if devno == DEV_EVDEV_KEYBOARD {
-            EVDEV_KEYBOARD.as_ref()
-        } else if devno == DEV_EVDEV_POINTER {
-            EVDEV_POINTER.as_ref()
-        } else {
-            return -19; // ENODEV
-        }
-    };
-
-    let device = match device {
+    // SAFETY: private_data contains a valid DevNo pointer set during device
+    // open; the EVDEV_* statics are initialized by init_evdev() before any
+    // file operations can occur.
+    let device = match unsafe { device_of_file(file) } {
         Some(d) => d,
-        None => return -19, // ENODEV
+        None => return -9, // EBADF
     };
 
     let event_size = core::mem::size_of::<InputEvent>();
@@ -155,30 +334,60 @@ fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
         return -22; // EINVAL
     }
 
-    // Poll for new events
-    poll_virtio_events();
+    let nonblock = file.flags_bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
 
-    match device.pop_event() {
-        Some(event) => {
-            // Copy event to buffer
-            let src = &event as *const InputEvent as *const u8;
-            // SAFETY: src points to a valid InputEvent on the stack; buf is
-            // guaranteed to be at least event_size bytes by the check above.
-            unsafe {
-                core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), event_size);
+    loop {
+        // Poll for new events
+        poll_virtio_events();
+
+        match device.pop_event() {
+            Some(event) => {
+                // Copy event to buffer
+                let src = &event as *const InputEvent as *const u8;
+                // SAFETY: src points to a valid InputEvent on the stack; buf is
+                // guaranteed to be at least event_size bytes by the check above.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), event_size);
+                }
+                return event_size as isize;
             }
-            event_size as isize
+            None => {
+                if nonblock {
+                    return -11; // EAGAIN
+                }
+                if crate::signal::signal_pending() {
+                    return -4; // EINTR
+                }
+                if !sleep_ms_interruptible(EVDEV_READ_POLL_MS) {
+                    // No timer slot: yield rather than burn the CPU.
+                    crate::sched::yield_cpu();
+                }
+            }
         }
-        None => -11, // EAGAIN (non-blocking mode)
     }
 }
 
+/// Backstop poll interval for the blocking read sleep.
+const EVDEV_READ_POLL_MS: u64 = 10;
+
 /// evdev close function
 fn evdev_file_close(file: &File) -> i32 {
-    // Free the DevNo boxed by devfs_open.
+    // Release a grab held through this fd and free the DevNo boxed by
+    // devfs_open.
+    // SAFETY: private_data contains a valid DevNo pointer set during open.
     unsafe {
         if let Some(ptr) = *file.private_data.get() {
-            drop(alloc::boxed::Box::from_raw(ptr as *mut crate::fs::dev_t::DevNo));
+            let devno = *(ptr as *const DevNo);
+            if devno == DEV_EVDEV_KEYBOARD {
+                if let Some(ref d) = EVDEV_KEYBOARD {
+                    d.grabbed.store(false, Ordering::Release);
+                }
+            } else if devno == DEV_EVDEV_POINTER {
+                if let Some(ref d) = EVDEV_POINTER {
+                    d.grabbed.store(false, Ordering::Release);
+                }
+            }
+            drop(Box::from_raw(ptr as *mut DevNo));
         }
     }
     0
@@ -186,34 +395,16 @@ fn evdev_file_close(file: &File) -> i32 {
 
 /// evdev poll function
 ///
-/// Review LINUX-DIFF ("evdev 无 poll"): select/poll on /dev/input/eventX
-/// used to hit the FileOps default (never ready), so libinput-style
-/// pollers spun or misdetected the device. Report readable whenever the
-/// queue holds an event (drain the virtio queues first so a keystroke
-/// that has not raised an IRQ yet still wakes the poller).
+/// Report readable whenever the queue holds an event (drain the virtio
+/// queues first so a keystroke that has not raised an IRQ yet still wakes
+/// the poller).
 fn evdev_file_poll(file: &File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
 
-    // Get the device (same dispatch as evdev_file_read)
     // SAFETY: private_data contains a valid DevNo pointer set during open;
     // the EVDEV_* statics are initialized by init_evdev() before any file
     // operations can occur.
-    let device = unsafe {
-        match *file.private_data.get() {
-            Some(ptr) => {
-                let devno = *(ptr as *const DevNo);
-                if devno == DEV_EVDEV_KEYBOARD {
-                    EVDEV_KEYBOARD.as_ref()
-                } else if devno == DEV_EVDEV_POINTER {
-                    EVDEV_POINTER.as_ref()
-                } else {
-                    return 0
-                }
-            }
-            None => return POLLERR,
-        }
-    };
-    let device = match device {
+    let device = match unsafe { device_of_file(file) } {
         Some(d) => d,
         None => return POLLERR,
     };
@@ -242,6 +433,178 @@ pub static EVDEV_OPS: FileOps = FileOps {
 };
 
 // ============================================================================
+// ioctl (per-file, dispatched from sys_ioctl via ops identity)
+// ============================================================================
+
+/// evdev ioctl entry — returns None when `file` is not an evdev node so the
+/// generic ioctl path can continue.
+///
+/// Mirrors drivers/input/evdev.c: data-returning ioctls succeed with 0
+/// (put_user/copy_to_user style), unknown requests get ENOTTY.
+pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
+    // Dispatch on the file's ops identity (pty_ioctl / is_fb_file pattern).
+    if !file.get_ops().map_or(false, |ops| {
+        core::ptr::eq(ops as *const _, &EVDEV_OPS as *const _)
+    }) {
+        return None;
+    }
+
+    // SAFETY: the EVDEV_* statics are initialized by init_evdev() before
+    // any file operations can occur; device_of_file validates the DevNo.
+    let device = match unsafe { device_of_file(file) } {
+        Some(d) => d,
+        None => return Some(-9), // EBADF
+    };
+
+    /// Copy `data` out honoring the length encoded in the ioctl command.
+    /// Returns the ioctl return value.
+    fn copy_out(arg: usize, cmd: u32, data: &[u8]) -> i64 {
+        use crate::arch::riscv64::uaccess::{access_ok, copy_to_user};
+        let len = ioc_size(cmd).min(data.len());
+        if len == 0 {
+            return 0;
+        }
+        if !access_ok(arg, len) {
+            return -14; // EFAULT
+        }
+        // SAFETY: arg validated with access_ok(len); data is a kernel buffer.
+        if unsafe { copy_to_user(arg as *mut u8, data.as_ptr(), len) } > 0 {
+            return -14; // EFAULT
+        }
+        0
+    }
+
+    let nr = ioc_nr(cmd);
+    let dir = ioc_dir(cmd);
+
+    let ret: i64 = match (nr, dir) {
+        (NR_VERSION, IOC_READ) => copy_out(arg, cmd, &0x010001u32.to_ne_bytes()), // EV_VERSION
+        (NR_ID, IOC_READ) => copy_out(
+            arg,
+            cmd,
+            &{
+                // SAFETY: InputId is repr(C), Copy; transmute-free byte view.
+                let id = device.id;
+                let mut b = [0u8; 8];
+                b[0..2].copy_from_slice(&id.bustype.to_ne_bytes());
+                b[2..4].copy_from_slice(&id.vendor.to_ne_bytes());
+                b[4..6].copy_from_slice(&id.product.to_ne_bytes());
+                b[6..8].copy_from_slice(&id.version.to_ne_bytes());
+                b
+            },
+        ),
+        (NR_NAME, IOC_READ) => {
+            // NUL-terminated device name, truncated to the caller's buffer.
+            let len = ioc_size(cmd);
+            let name_len = device.name.iter().position(|&c| c == 0).unwrap_or(31) + 1;
+            if len == 0 {
+                0
+            } else {
+                copy_out(arg, cmd, &device.name[..name_len.min(32)])
+            }
+        }
+        (NR_PHYS, IOC_READ) | (NR_UNIQ, IOC_READ) => {
+            // No physical path / unique id on virtio-input: empty string.
+            let len = ioc_size(cmd);
+            if len == 0 {
+                0
+            } else {
+                copy_out(arg, cmd, &[0u8])
+            }
+        }
+        (NR_PROP, IOC_READ) => {
+            // No INPUT_PROP_* flags.
+            let len = ioc_size(cmd);
+            if len == 0 {
+                0
+            } else {
+                copy_out(arg, cmd, &[0u8; 32][..len.min(32)])
+            }
+        }
+        (NR_REP_GET, IOC_READ) => {
+            // Repeat settings {delay, period} in ms (kernel defaults).
+            let rep = [250u32, 33u32];
+            let mut b = [0u8; 8];
+            b[0..4].copy_from_slice(&rep[0].to_ne_bytes());
+            b[4..8].copy_from_slice(&rep[1].to_ne_bytes());
+            copy_out(arg, cmd, &b)
+        }
+        (NR_REP_SET, IOC_WRITE) => 0,
+        (NR_KEY_STATE, IOC_READ) | (NR_LED_STATE, IOC_READ) | (NR_SND_STATE, IOC_READ)
+        | (NR_SW_STATE, IOC_READ) => {
+            // Current key/led/sound/switch state: report "all clear" (the
+            // kernel does not track it). Consumers treat this as advisory.
+            let len = ioc_size(cmd);
+            if len == 0 {
+                0
+            } else {
+                copy_out(arg, cmd, &[0u8; 32][..len.min(32)])
+            }
+        }
+        (NR_GRAB, IOC_WRITE) => {
+            // arg is the grab flag passed by value (not a pointer).
+            if arg != 0 {
+                if device.grabbed.swap(true, Ordering::AcqRel) {
+                    // Already grabbed by another client.
+                    -16 // EBUSY
+                } else {
+                    0
+                }
+            } else {
+                device.grabbed.store(false, Ordering::Release);
+                0
+            }
+        }
+        (NR_SCLOCKID, IOC_WRITE) => {
+            // Accept the clock switch request; timestamps already come from
+            // the monotonic CLINT timer.
+            0
+        }
+        _ => {
+            if (NR_BIT_BASE..NR_BIT_BASE + 0x20).contains(&nr) && dir == IOC_READ {
+                // EVIOCGBIT(ev, len) for ev in 0..=0x1f (EV_MAX). Types we
+                // carry bitmaps for answer from the virtio config; the rest
+                // return an all-zero bitmap (success) like Linux — libevdev
+                // probes every type and treats ENOTTY as an error.
+                let ev = (nr - NR_BIT_BASE) as usize;
+                if ev == 0 {
+                    let types = evtype_bitmap(&device.ev_bits);
+                    copy_out(arg, cmd, &types)
+                } else if ev < BIT_TYPES {
+                    copy_out(arg, cmd, &device.ev_bits[ev])
+                } else {
+                    let len = ioc_size(cmd);
+                    if len == 0 {
+                        0
+                    } else {
+                        copy_out(arg, cmd, &[0u8; 32][..len.min(32)])
+                    }
+                }
+            } else if (NR_ABS_BASE..NR_ABS_BASE + 8).contains(&nr) && dir == IOC_READ {
+                // EVIOCGABS(abs)
+                let abs = (nr - NR_ABS_BASE) as usize;
+                let info = if abs < 2 {
+                    device.absinfo[abs]
+                } else {
+                    InputAbsinfo::default()
+                };
+                let mut b = [0u8; 24];
+                b[0..4].copy_from_slice(&info.value.to_ne_bytes());
+                b[4..8].copy_from_slice(&info.minimum.to_ne_bytes());
+                b[8..12].copy_from_slice(&info.maximum.to_ne_bytes());
+                b[12..16].copy_from_slice(&info.fuzz.to_ne_bytes());
+                b[16..20].copy_from_slice(&info.flat.to_ne_bytes());
+                b[20..24].copy_from_slice(&info.resolution.to_ne_bytes());
+                copy_out(arg, cmd, &b)
+            } else {
+                -25 // ENOTTY
+            }
+        }
+    };
+    Some(ret)
+}
+
+// ============================================================================
 // Initialization and registration
 // ============================================================================
 
@@ -254,6 +617,17 @@ pub fn init_evdev() {
 
         // Create pointer device
         EVDEV_POINTER = Some(EvdevDevice::new(b"VirtIO Tablet", true));
+
+        // Pull the capability bitmaps straight from the virtio devices'
+        // config space (what a Linux guest would register), with the
+        // previously-hardcoded bitmaps as fallback when the config read
+        // yields nothing.
+        if let Some(ref mut dev) = EVDEV_KEYBOARD {
+            fill_capabilities(dev, &super::INPUT_KEYBOARD, false);
+        }
+        if let Some(ref mut dev) = EVDEV_POINTER {
+            fill_capabilities(dev, &super::INPUT_POINTER, true);
+        }
     }
 
     // Register device operations
@@ -267,6 +641,57 @@ pub fn init_evdev() {
         .expect("Failed to create /dev/input/event0");
     devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
         .expect("Failed to create /dev/input/event1");
+}
+
+/// Fill an evdev device's capability bitmaps from the backing virtio
+/// device (locks the INPUT_* static and reads its config space).
+fn fill_capabilities(
+    dev: &mut EvdevDevice,
+    virt_dev: &Spinlock<Option<super::VirtioInputDevice>>,
+    is_pointer: bool,
+) {
+    let mut bits = [[0u8; BITS_LEN]; BIT_TYPES];
+    let mut have_any = false;
+    {
+        let mut guard = virt_dev.lock();
+        if let Some(ref mut vd) = *guard {
+            for ev in 0..BIT_TYPES {
+                if vd.read_ev_bitmap(ev as u8, &mut bits[ev]) > 0 {
+                    have_any = true;
+                }
+            }
+            // Absolute axes: read ABS_INFO for X/Y.
+            if let Some([min, max, fuzz, flat, res]) = vd.read_absinfo(ABS_X as u8) {
+                dev.set_absinfo(0, min as i32, max as i32, fuzz as i32, flat as i32, res as i32);
+            }
+            if let Some([min, max, fuzz, flat, res]) = vd.read_absinfo(ABS_Y as u8) {
+                dev.set_absinfo(1, min as i32, max as i32, fuzz as i32, flat as i32, res as i32);
+            }
+        }
+    }
+
+    if !have_any {
+        // Config space unreadable: report what the driver actually emits.
+        bits[0][0] = 1; // EV_SYN/SYN_REPORT
+        if is_pointer {
+            // BTN_LEFT/RIGHT/MIDDLE = 0x110..0x112
+            bits[1][0x110 / 8] = 0b0000_0111;
+            bits[2][0] = 0x03; // REL_X | REL_Y
+            bits[2][1] = 0x01; // REL_WHEEL (0x08)
+            bits[3][0] = 0x03; // ABS_X | ABS_Y
+            dev.set_absinfo(0, 0, 32767, 0, 0, 0);
+            dev.set_absinfo(1, 0, 32767, 0, 0, 0);
+        } else {
+            // Standard keyboard keys 0x01..=0x58.
+            for code in 1u16..=0x58 {
+                bits[1][(code / 8) as usize] |= 1 << (code % 8);
+            }
+        }
+    }
+
+    for (ev, b) in bits.iter().enumerate() {
+        dev.set_ev_bits(ev, b);
+    }
 }
 
 /// Push event to evdev device
@@ -306,171 +731,5 @@ fn poll_virtio_events() {
                 push_input_event(true, event);
             }
         }
-    }
-}
-
-// ============================================================================
-// Legacy interface compatibility (for ioctl)
-// ============================================================================
-
-/// Handle evdev ioctl (via fd)
-pub fn evdev_ioctl(fd: i32, cmd: u32, arg: usize) -> i64 {
-    // Compatible with old fd-based approach
-    // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev().
-    const EVDEV_KEYBOARD_FD: i32 = 2000;
-    const EVDEV_POINTER_FD: i32 = 2001;
-    let device = unsafe {
-        if fd == EVDEV_KEYBOARD_FD {
-            EVDEV_KEYBOARD.as_ref()
-        } else if fd == EVDEV_POINTER_FD {
-            EVDEV_POINTER.as_ref()
-        } else {
-            return -22; // EINVAL
-        }
-    };
-
-    let device = match device {
-        Some(d) => d,
-        None => return -19, // ENODEV
-    };
-
-    match cmd {
-        EVIOCGVERSION => {
-            let version: u32 = 0x010001;
-            // SAFETY: arg is a valid kernel pointer from the ioctl caller.
-            unsafe {
-                core::ptr::write(arg as *mut u32, version);
-            }
-            0
-        }
-
-        EVIOCGID => {
-            // SAFETY: arg is a valid kernel pointer; InputId is repr(C) and Copy.
-            unsafe {
-                core::ptr::write(arg as *mut InputId, device.id);
-            }
-            0
-        }
-
-        EVIOCGNAME => {
-            // SAFETY: arg is a valid kernel pointer; name is a fixed-size [u8; 32] array;
-            // copy length is bounded by min(256).
-            unsafe {
-                let name_ptr = arg as *mut u8;
-                let name = &device.name;
-                let len = name.iter().position(|&c| c == 0).unwrap_or(31) + 1;
-                core::ptr::copy_nonoverlapping(name.as_ptr(), name_ptr, len.min(256));
-            }
-            0
-        }
-
-        EVIOCGBIT => {
-            // EVIOCGBIT(ev, len) encodes ev in the ioctl nr: nr = 0x20 + ev.
-            // Review BUG ("EVIOCG* 真实数据"): the old bitmaps were wrong —
-            // the ev-type bitmap had EV_MSC/EV_REL bits set where EV_KEY
-            // belongs, the key bitmap claimed every bit 0..255 for BOTH
-            // device kinds, and REL_WHEEL was missing. Report what the
-            // virtio devices actually emit:
-            //   keyboard: EV_SYN|EV_KEY (keys 0x01..=0x58)
-            //   pointer:  EV_SYN|EV_KEY|EV_REL|EV_ABS
-            //             (BTN_LEFT/RIGHT/MIDDLE, REL_X/Y/WHEEL, ABS_X/Y)
-            let event_type = (cmd & 0xFF) as usize - 0x20;
-            // User buffer length is encoded in bits 29..16 of the ioctl.
-            let out_len = ((cmd >> 16) & 0x3FFF) as usize;
-            let out_len = if out_len == 0 { 32 } else { out_len.min(256) };
-            // SAFETY: arg is a valid kernel pointer; writes are bounded to
-            // min(ioctl size, 256) bytes.
-            unsafe {
-                let bits_ptr = arg as *mut u8;
-                core::ptr::write_bytes(bits_ptr, 0, out_len);
-                let set_bit = |byte_idx: usize, bit: u16| {
-                    if byte_idx < out_len {
-                        // SAFETY: byte_idx < out_len bounds the write.
-                        unsafe {
-                            *bits_ptr.add(byte_idx) |= 1 << (bit & 7);
-                        }
-                    }
-                };
-                match event_type {
-                    0 => {
-                        // Supported event types bitmap.
-                        set_bit(0, EV_SYN as u16);
-                        set_bit(0, EV_KEY as u16);
-                        if device.is_pointer {
-                            set_bit(0, EV_REL as u16);
-                            set_bit(0, EV_ABS as u16);
-                        }
-                    }
-                    1 => {
-                        if device.is_pointer {
-                            // BTN_LEFT/RIGHT/MIDDLE = 0x110..0x112
-                            set_bit(0x110 / 8, BTN_LEFT & 7);
-                            set_bit(0x110 / 8, BTN_RIGHT & 7);
-                            set_bit(0x110 / 8, BTN_MIDDLE & 7);
-                        } else {
-                            // Standard keyboard keys 0x01..=0x58.
-                            for code in 1u16..=0x58 {
-                                set_bit((code / 8) as usize, code % 8);
-                            }
-                        }
-                    }
-                    2 => {
-                        if device.is_pointer {
-                            set_bit(REL_X as usize / 8, REL_X & 7);
-                            set_bit(REL_Y as usize / 8, REL_Y & 7);
-                            set_bit(REL_WHEEL as usize / 8, REL_WHEEL & 7);
-                        }
-                    }
-                    3 => {
-                        if device.is_pointer {
-                            set_bit(ABS_X as usize / 8, ABS_X & 7);
-                            set_bit(ABS_Y as usize / 8, ABS_Y & 7);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            0
-        }
-
-        _ => -25, // ENOTTY
-    }
-}
-
-/// Handle evdev read (via fd) - kept for compatibility
-pub fn evdev_read(fd: i32, buf: usize, count: usize) -> i64 {
-    // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev().
-    let device = unsafe {
-        if fd == 2000 {
-            EVDEV_KEYBOARD.as_ref()
-        } else if fd == 2001 {
-            EVDEV_POINTER.as_ref()
-        } else {
-            return -22;
-        }
-    };
-
-    let device = match device {
-        Some(d) => d,
-        None => return -19,
-    };
-
-    let event_size = core::mem::size_of::<InputEvent>();
-    if count < event_size {
-        return -22;
-    }
-
-    poll_virtio_events();
-
-    match device.pop_event() {
-        Some(event) => {
-            // SAFETY: buf is a valid kernel pointer from the read syscall;
-            // count >= event_size was verified above.
-            unsafe {
-                core::ptr::write(buf as *mut InputEvent, event);
-            }
-            event_size as i64
-        }
-        None => -11,
     }
 }
