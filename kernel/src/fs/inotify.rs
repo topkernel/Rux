@@ -547,10 +547,10 @@ fn inotify_read(file: &File, buf: &mut [u8]) -> isize {
     };
     let nonblock = file.flags().bits() & FileFlags::O_NONBLOCK != 0;
 
-    // A buffer too small for even the event header is EINVAL (Linux).
-    if buf.len() < 16 {
-        return -crate::errno::constants::EINVAL as isize;
-    }
+    // Linux checks the queue FIRST: an empty queue reports EAGAIN (or
+    // blocks) regardless of the buffer size; the buffer is only validated
+    // against an event that is actually about to be copied out (a buffer
+    // smaller than the 16-byte header then yields EINVAL, see below).
 
     loop {
         let mut total = 0usize;

@@ -1188,10 +1188,13 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
                     0,
                 );
                 if let Some(ref ti) = target_inode {
+                    // IN_ISDIR is NOT set on IN_DELETE_SELF (Linux
+                    // fsnotify_nameremove / inotify(7): the flag belongs
+                    // to the parent's named IN_DELETE above).
                     crate::fs::inotify::notify(
                         None,
                         Some(ti),
-                        ino::IN_DELETE_SELF | ino::IN_ISDIR,
+                        ino::IN_DELETE_SELF,
                         None,
                         0,
                     );
@@ -1476,10 +1479,12 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
             cookie,
         );
         if let Some(ref si) = src_inode {
+            // IN_ISDIR is NOT set on IN_MOVE_SELF (Linux fsnotify_move
+            // tags only the parent's named MOVED_FROM/MOVED_TO records).
             crate::fs::inotify::notify(
                 None,
                 Some(si),
-                ino::IN_MOVE_SELF | dir_bit,
+                ino::IN_MOVE_SELF,
                 None,
                 0,
             );
@@ -1723,13 +1728,13 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
     if result == 0 {
-        // inotify: truncate is a size change → IN_MODIFY (and metadata
-        // change → IN_ATTRIB) on the file and on parent watches (named).
+        // inotify: truncate → IN_MODIFY (Linux reports it for every
+        // successful truncate, even a size no-op; never IN_ATTRIB).
         let name = vpath.dentry.as_ref().map(|d| d.get_name().into_bytes());
         notify_about(
             vpath.dentry.as_ref(),
             Some(inode),
-            ino::IN_MODIFY | ino::IN_ATTRIB,
+            ino::IN_MODIFY,
             name.as_deref(),
             0,
         );
@@ -1775,9 +1780,10 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
     if result == 0 {
-        // inotify: ftruncate → IN_MODIFY | IN_ATTRIB (through the File so
-        // parent watches get the named event).
-        crate::fs::inotify::notify_file(&file, ino::IN_MODIFY | ino::IN_ATTRIB);
+        // inotify: ftruncate → IN_MODIFY (through the File so parent
+        // watches get the named event; Linux reports it for every
+        // successful ftruncate, even a size no-op).
+        crate::fs::inotify::notify_file(&file, ino::IN_MODIFY);
         Ok(())
     } else {
         Err(result)
@@ -1856,6 +1862,10 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         } else {
             0
         };
+        // inotify: O_TRUNC on a file that already existed fires IN_MODIFY
+        // (Linux handle_truncate runs only when the open did NOT create
+        // the file — a fresh O_CREAT inode starts empty and stays silent).
+        let mut existed_before_trunc = false;
         let (inode, opened_dentry) = match path_lookup(filename, lookup_flags) {
             Ok(vpath) => {
                 if o_excl && o_creat {
@@ -1865,6 +1875,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 if flags & FileFlags::O_NOFOLLOW != 0 && inode.mode.is_symlink() {
                     return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32()); // ELOOP
                 }
+                existed_before_trunc = true;
                 (inode, vpath.dentry)
             }
             Err(_e) if o_creat => {
@@ -2001,6 +2012,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         }
 
         // Handle O_TRUNC via setattr
+        let mut trunc_modified = false;
         if o_trunc && inode.mode.is_regular_file() {
             let result = inode.op_setattr(
                 crate::fs::inode::setattr_attr::ATTR_SIZE, 0, 0
@@ -2008,15 +2020,21 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             if result != 0 {
                 return Err(result);
             }
-            // inotify: O_TRUNC truncation → IN_MODIFY | IN_ATTRIB.
-            crate::fs::inotify::notify_file(&file, ino::IN_MODIFY | ino::IN_ATTRIB);
+            // inotify: O_TRUNC of an existing inode → IN_MODIFY (Linux
+            // fires it even when the size was already 0; only a file this
+            // same open created stays silent — hence the existed flag).
+            trunc_modified = existed_before_trunc;
         }
 
         match get_file_fd_install(Arc::clone(&file)) {
             Some(fd) => {
                 // inotify: successful open → IN_OPEN (parent watches get
-                // the named event through the File's dentry).
+                // the named event through the File's dentry). Linux emits
+                // IN_OPEN before the O_TRUNC IN_MODIFY of the same open.
                 crate::fs::inotify::notify_file(&file, ino::IN_OPEN);
+                if trunc_modified {
+                    crate::fs::inotify::notify_file(&file, ino::IN_MODIFY);
+                }
                 Ok(fd)
             }
             None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
