@@ -66,6 +66,190 @@ pub fn taskdump_dec(v: u64) {
     put_dec(v);
 }
 
+/// DFX: replay the forensic syscall ring for one pid (last 48 entries).
+#[cfg(feature = "dfx-futex-trace")]
+pub fn dump_syscall_ring_for(pid: u32) {    use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
+    let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+    let len = SYSCALL_RING.len();
+    taskdump_raw_line(b"FTX-RING pid=");
+    taskdump_dec(pid as u64);
+    taskdump_raw_line(b"\n");
+    // Walk backwards from the oldest surviving entry to the newest.
+    let start = if cur > len { cur - len } else { 0 };
+    let mut shown = 0;
+    for i in start..cur {
+        let e = &SYSCALL_RING[i % len];
+        let (p, nr, a0, a1, ret) = (
+            e.pid.load(core::sync::atomic::Ordering::Relaxed),
+            e.nr.load(core::sync::atomic::Ordering::Relaxed),
+            e.a0.load(core::sync::atomic::Ordering::Relaxed),
+            e.a1.load(core::sync::atomic::Ordering::Relaxed),
+            e.ret.load(core::sync::atomic::Ordering::Relaxed),
+        );
+        if p == 0 || p != pid {
+            continue;
+        }
+        taskdump_raw_line(b"FTX-SYS nr=");
+        taskdump_dec(nr as u64);
+        taskdump_raw_line(b" a0=");
+        taskdump_dec(a0);
+        taskdump_raw_line(b" ret=");
+        taskdump_dec(ret as i64 as u64);
+        taskdump_raw_line(b"\n");
+        shown += 1;
+        if shown >= 48 {
+            break;
+        }
+    }
+    if shown == 0 {
+        taskdump_raw_line(b"FTX-RING-EMPTY\n");
+    }
+}
+
+/// DFX: read one user u32 through a task's page tables (diagnostic).
+#[cfg(feature = "dfx-futex-trace")]
+fn dfx_task_read_u32(t: &crate::process::Task, va: u64) -> Option<u32> {
+    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+    use crate::arch::riscv64::mm::memory_layout::phys_to_virt;
+    let as_arc = t.address_space_arc()?;
+    let root = as_arc.root_ppn();
+    // SAFETY: diagnostic walk + linear-map read of the task's own mm.
+    unsafe {
+        let (ppn, _) = PageTableWalker::walk(root, va)?;
+        let base = phys_to_virt(crate::arch::riscv64::mm::memory_layout::PhysAddr(
+            (ppn << 12) as u64,
+        ));
+        Some(core::ptr::read_volatile(
+            (base.as_usize() + (va & 0xfff) as usize) as *const u32,
+        ))
+    }
+}
+
+/// DFX: one-line periodic snapshot of a tracked user word.
+#[cfg(feature = "dfx-futex-trace")]
+fn dfx_track_word(t: &crate::process::Task, va: u64) {
+    match dfx_task_read_u32(t, va) {
+        Some(v) => {
+            taskdump_raw_line(b"FTX-TRACK u=");
+            taskdump_dec(va);
+            taskdump_raw_line(b" v=");
+            taskdump_dec(v as u64);
+            taskdump_raw_line(b"\n");
+        }
+        None => {}
+    }
+}
+
+/// DFX: dump a parked task's user stack words that look like code pointers,
+/// read through the task's own page tables (its mm is not active here).
+#[cfg(feature = "dfx-futex-trace")]
+fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
+    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+    use crate::arch::riscv64::mm::memory_layout::phys_to_virt;
+    taskdump_raw_line(b"FTX-USTACK sp=");
+    taskdump_dec(usp);
+    taskdump_raw_line(b"\n");
+    let as_arc = match t.address_space_arc() {
+        Some(a) => a,
+        None => {
+            taskdump_raw_line(b"FTX-USTACK no-mm\n");
+            return;
+        }
+    };
+    let root = as_arc.root_ppn();
+    // Read one user u32 through the task's page tables.
+    // SAFETY: diagnostic walk + linear-map read of the task's own mm.
+    let read_u32 = |va: u64| -> Option<u32> {
+        unsafe {
+            let (ppn, _) = PageTableWalker::walk(root, va)?;
+            let base = phys_to_virt(crate::arch::riscv64::mm::memory_layout::PhysAddr(
+                (ppn << 12) as u64,
+            ));
+            Some(core::ptr::read_volatile(
+                (base.as_usize() + (va & 0xfff) as usize) as *const u32,
+            ))
+        }
+    };
+    let read_u64 = |va: u64| -> Option<u64> {
+        unsafe {
+            let (ppn, _) = PageTableWalker::walk(root, va)?;
+            let base = phys_to_virt(crate::arch::riscv64::mm::memory_layout::PhysAddr(
+                (ppn << 12) as u64,
+            ));
+            Some(core::ptr::read_volatile(
+                (base.as_usize() + (va & 0xfff) as usize) as *const u64,
+            ))
+        }
+    };
+    // Xorg input-thread globals: guard ptr @0x1c9a58, input_mutex @0x1c81f0,
+    // lock counter @0x206598.
+    if let Some(p) = read_u64(0x1c9a58) {
+        taskdump_raw_line(b"FTX-GUARDPTR=");
+        taskdump_dec(p);
+        if let Some(v) = read_u32(p) {
+            taskdump_raw_line(b" *p=");
+            taskdump_dec(v as u64);
+        }
+        taskdump_raw_line(b"\n");
+    }
+    if let Some(v) = read_u32(0x1c81f0) {
+        taskdump_raw_line(b"FTX-MUTEXVAL=");
+        taskdump_dec(v as u64);
+        taskdump_raw_line(b"\n");
+    }
+    if let Some(v) = read_u32(0x206598) {
+        taskdump_raw_line(b"FTX-LOCKCOUNT=");
+        taskdump_dec(v as u64);
+        taskdump_raw_line(b"\n");
+    }
+    let lo = usp.saturating_sub(0x200) & !0xfu64;
+    let hi = usp + 0x900;
+    let mut addr = lo;
+    let mut shown = 0;
+    while addr < hi && shown < 60 {
+        // SAFETY: diagnostic page-table walk of the task's own mm.
+        let found = unsafe { PageTableWalker::walk(root, addr) };
+        let (ppn, _) = match found {
+            Some(x) => x,
+            None => {
+                addr = (addr + 0x1000) & !0xfffu64;
+                continue;
+            }
+        };
+        let page_va = phys_to_virt(crate::arch::riscv64::mm::memory_layout::PhysAddr(
+            (ppn << 12) as u64,
+        ));
+        let mut off = (addr & 0xfff) as usize;
+        while off < 0x1000 && addr < hi && shown < 60 {
+            // SAFETY: linear-mapped physical page; read-only diagnostic.
+            let v = unsafe {
+                core::ptr::read_volatile((page_va.as_usize() + off) as *const u64)
+            };
+            // User code pointers: Xorg image (< 0x1d0000) or shared libs
+            // (0x0000_3000_xxxx_xxxx) or any canonical user text pointer.
+            let is_user_ptr = (v > 0x1000 && v < 0x4000_0000_0000)
+                && (v < 0x00d0_0000 || (v >> 32) == 0x3000 || (v >> 32) == 0x3fff);
+            if is_user_ptr {
+                taskdump_raw_line(b"FTX-US +");
+                taskdump_dec(addr.wrapping_sub(usp) as i64 as u64);
+                taskdump_raw_line(b" =");
+                taskdump_dec(v);
+                taskdump_raw_line(b"\n");
+                shown += 1;
+            }
+            addr += 8;
+            off += 8;
+            if off >= 0x1000 {
+                break;
+            }
+        }
+    }
+    if shown == 0 {
+        taskdump_raw_line(b"FTX-USTACK none\n");
+    }
+    drop(as_arc);
+}
+
 /// Snapshot every task in the PID hash. One line per task, plus a header
 /// so the dump is self-describing in a log full of interleaved output.
 pub fn dump_all_tasks(reason: &str) {
@@ -273,6 +457,18 @@ pub fn dump_all_tasks(reason: &str) {
                             put_hex(a1);
                             puts(" a2=");
                             put_hex(a2);
+                        }
+                        // Futex sleeper: dump the word + waiter chain truth.
+                        if a7 == 98 && a0 > 0x1000 && (a0 & 0x3) == 0 {
+                            if t.state().is_sleeping() {
+                                crate::sync::futex::dfx_dump_futex_state(a0 as usize, t.pid());
+                                dfx_dump_user_stack(&t, usp);
+                            }
+                        }
+                        // Xorg hunt: track the input_mutex word for pid 307
+                        // even before it parks (when did 0 become nonzero?).
+                        if t.pid() == 307 {
+                            dfx_track_word(&t, 0x1c81f0);
                         }
                     }
                 }

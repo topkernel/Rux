@@ -518,6 +518,9 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             }
                             // Device VMA: faults never touch it (pages are
                             // already present), unmap only clears PTEs.
+                            // Kick the auto-flush presenter awake: this
+                            // mapper may be a flush-less renderer (Xorg).
+                            crate::drivers::gpu::fbdev::mark_fb_user_mapped();
                             let vma_end = placement + actual_length;
                             let mut dv = crate::mm::vma::Vma::new(
                                 VirtAddr::new(placement),

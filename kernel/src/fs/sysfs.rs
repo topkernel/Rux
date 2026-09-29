@@ -616,6 +616,28 @@ fn build_tree() -> Arc<KObject> {
     // /sys/class; this symlink keeps DEVPATH-style walks working).
     mk_link(&devices, "virtual", "../../class");
 
+    // /sys/class/graphics/fb0 → ../../devices/graphics/fb0 — Xorg's
+    // fbdevhw fbdev_open() readlinks /sys/class/graphics/fb0 and
+    // SILENTLY refuses the framebuffer when the readlink fails (no
+    // sysfs entry) or the target contains "devices/pci" (a PCI fbdev,
+    // owned by the PCI probe path). A virtual (non-PCI) class entry
+    // with a real backing dir under /sys/devices satisfies the check.
+    let graphics = mk_dir(&class, "graphics", KType::Generic);
+    let dev_graphics = mk_dir(&devices, "graphics", KType::Generic);
+    let fb0 = mk_dir(&dev_graphics, "fb0", KType::Generic);
+    // FB major 29, minor 0 (matches fs::dev_t::DEV_FB0).
+    attr_ro(&fb0, "dev", move || b"29:0\n".to_vec());
+    attr_ro(&fb0, "name", move || b"virtio-gpu\n".to_vec());
+    attr_ro(&fb0, "modes", move || {
+        match crate::drivers::gpu::get_framebuffer_info() {
+            Some(info) => {
+                format!("U:{}x{}p-0\n", info.width, info.height).into_bytes()
+            }
+            None => Vec::new(),
+        }
+    });
+    mk_link(&graphics, "fb0", "../../devices/graphics/fb0");
+
     // ---------------- /sys/kernel ----------------
     let kernel = mk_dir(&root, "kernel", KType::Kernel);
     attr_ro(&kernel, "uevent_seqnum", move || {
@@ -969,8 +991,18 @@ unsafe fn entry_of(inode: &Inode) -> Option<&'static SysfsEntryData> {
         .map(|p| &*(p as *const SysfsEntryData))
 }
 
-/// Resolve a child of `dir` to (ino, kind) for lookup/iget.
-fn resolve_child(dir: &SysfsEntryData, name: &[u8]) -> Option<(u64, Option<Arc<Attribute>>, Option<String>)> {
+/// Resolve a child of `dir` to (kobj, attr, link) for lookup/iget.
+///
+/// The child kobject travels WITH the result: directory children must
+/// carry their OWN kobj into the new inode. The old signature returned
+/// only the ino, so `sysfs_iget` cloned the PARENT's kobj for directory
+/// children — /sys/class then behaved like /sys itself and every
+/// second-level lookup (/sys/class/net, /sys/class/graphics/...) failed
+/// with ENOENT (sysfs had never been exercised by userland below level 1).
+fn resolve_child(
+    dir: &SysfsEntryData,
+    name: &[u8],
+) -> Option<(Arc<KObject>, Option<Arc<Attribute>>, Option<String>)> {
     if dir.kobj.kind != NodeKind::Directory {
         return None;
     }
@@ -981,11 +1013,11 @@ fn resolve_child(dir: &SysfsEntryData, name: &[u8]) -> Option<(u64, Option<Arc<A
         } else {
             None
         };
-        return Some((child.ino, None, link));
+        return Some((child.clone(), None, link));
     }
-    // then attributes
+    // then attributes (attribute files belong to the parent kobject)
     if let Some(attr) = dir.kobj.find_attr(name) {
-        return Some((attr.ino, Some(attr), None));
+        return Some((dir.kobj.clone(), Some(attr), None));
     }
     None
 }
@@ -995,7 +1027,7 @@ fn resolve_child(dir: &SysfsEntryData, name: &[u8]) -> Option<(u64, Option<Arc<A
 unsafe fn sysfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
     let entry = entry_of(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     match resolve_child(entry, name) {
-        Some((ino, _, _)) => Ok(ino),
+        Some((kobj, _, _)) => Ok(kobj.ino),
         None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
     }
 }
@@ -1004,7 +1036,7 @@ unsafe fn sysfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
 /// SAFETY: VFS callback contract.
 unsafe fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
     let parent_entry = entry_of(parent).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
-    let (_, attr, link) = resolve_child(parent_entry, name)
+    let (kobj, attr, link) = resolve_child(parent_entry, name)
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
     let (mode, node_ino) = if let Some(attr) = attr.as_ref() {
@@ -1016,7 +1048,7 @@ unsafe fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>
     };
 
     let entry = Box::new(SysfsEntryData {
-        kobj: parent_entry.kobj.clone(),
+        kobj,
         attr,
         link,
     });

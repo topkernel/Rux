@@ -343,8 +343,78 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
             return -(errno::EINTR as i64);
         }
 
-        // Yield CPU and retry
+        // P1 (busy-yield elimination, same discipline as sys_epoll_wait):
+        // block for one 10 ms re-check slice instead of yield_cpu()-ing.
+        // The tight yield loop livelocked the machine under SMP — every
+        // iteration took the global runqueue lock against every CPU's
+        // scheduler_tick (xkbcomp's ppoll ground three harts into a GRQ
+        // spinlock storm and Xorg never progressed past XKB init).
+        poll_sleep_slice(if timeout_ms > 0 {
+            Some(start_jiffies + timeout_jiffies)
+        } else {
+            None
+        });
+    }
+}
+
+/// Block the calling task for one poll/select re-check slice (min of
+/// remaining timeout and EPOLL_RECHECK_JIFFIES), timer-woken. Degrades to
+/// a single schedule() round when the timer pool is exhausted.
+fn poll_sleep_slice(deadline_jiffies: Option<u64>) {
+    use crate::process::task::TaskState;
+
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => {
+            crate::sched::yield_cpu();
+            return;
+        }
+    };
+    // SAFETY: current is the running task's pointer.
+    let my_pid = unsafe { (*current).pid() };
+    let slice = match deadline_jiffies {
+        Some(deadline) => {
+            let remaining = deadline
+                .saturating_sub(crate::drivers::timer::get_jiffies())
+                .max(1);
+            remaining.min(EPOLL_RECHECK_JIFFIES)
+        }
+        None => EPOLL_RECHECK_JIFFIES,
+    };
+    let target = crate::drivers::timer::get_jiffies() + slice;
+    let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
+    if timer_id == 0 {
+        // Timer pool exhausted: degrade to one scheduling round rather
+        // than sleeping forever (nothing else is guaranteed to wake us).
         crate::sched::yield_cpu();
+        return;
+    }
+    // SAFETY: current is the running task's pointer.
+    unsafe {
+        (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+    }
+    // Lost-wake discipline (khungtaskd pattern): the timer may have fired
+    // between arming and the state transition — either its wake captured
+    // the INTERRUPTIBLE state, or the deadline is already visible.
+    if crate::drivers::timer::get_jiffies() >= target {
+        // SAFETY: current is the running task's pointer; a racing wake may
+        // have enqueued us while still executing — take ourselves back off.
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::RUNNING));
+            crate::sched::dequeue_task(&*current);
+        }
+        crate::timer::del_timer(timer_id);
+    } else {
+        // Enable interrupts so the tick can reach us, then sleep. Syscall
+        // context runs with SIE=0; __schedule must see SIE=1 (same
+        // contract as wait_event! / sys_epoll_wait).
+        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::sched::schedule();
+        // Spurious wake before expiry: drop the timer so it cannot enqueue
+        // us again while running.
+        if crate::timer::timer_pending(timer_id) {
+            crate::timer::del_timer(timer_id);
+        }
     }
 }
 
@@ -737,7 +807,13 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
             return -(errno::EINTR as i64);
         }
 
-        crate::sched::yield_cpu();
+        // P1 (busy-yield elimination): block for one re-check slice
+        // instead of yield_cpu()-ing — see sys_poll / poll_sleep_slice.
+        poll_sleep_slice(if has_timeout && timeout_ms > 0 {
+            Some(start_jiffies + timeout_jiffies)
+        } else {
+            None
+        });
     }
 }
 

@@ -9,14 +9,91 @@
 
 use super::FrameBufferInfo;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Set once userspace has mmap'ed /dev/fb0 (Xorg's fbdev driver maps the
+/// scanout and then NEVER issues FBIO_FLUSH — virtio-gpu needs an explicit
+/// TRANSFER_TO_HOST_2D + RESOURCE_FLUSH to show the pixels). The
+/// kfbflush thread keys off this flag so idle systems pay nothing.
+static FB_USER_MAPPED: AtomicBool = AtomicBool::new(false);
+
+/// Record that a userspace process mapped /dev/fb0 (called from the fbdev
+/// mmap path in syscall::memory).
+pub fn mark_fb_user_mapped() {
+    FB_USER_MAPPED.store(true, Ordering::Release);
+}
+
+/// kfbflush: periodically push the framebuffer to the virtio-gpu scanout.
+///
+/// Rux's virtio-gpu framebuffer is guest memory: user writes via the /dev/fb0
+/// mapping land in RAM, but the host only re-reads them after a flush. Native
+/// Rux apps call FBIO_FLUSH themselves; stock Xorg (xf86-video-fbdev) never
+/// does — without a periodic flush its output would stay invisible forever.
+extern "C" fn kfbflush_fn(_arg: *mut core::ffi::c_void) -> i32 {
+    use crate::process::task::TaskState;
+
+    // 3 jiffies = 30 ms @ KERNEL_HZ=100 (≈33 fps presentation).
+    let interval_jiffies: u64 = 3;
+
+    loop {
+        if crate::process::kthread::kthread_should_stop() {
+            break;
+        }
+
+        // --- Periodic sleep with a real waker (khungtaskd discipline). ---
+        let current = match crate::sched::current() {
+            Some(t) => t as *mut crate::process::task::Task,
+            None => break,
+        };
+        // SAFETY: current is this kthread's own task pointer.
+        let my_pid = unsafe { (*current).pid() };
+        let target = crate::drivers::timer::get_jiffies() + interval_jiffies;
+        let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
+
+        if timer_id != 0 {
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+            }
+            if crate::drivers::timer::get_jiffies() >= target {
+                // SAFETY: current is the running task's pointer.
+                unsafe {
+                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                    crate::sched::dequeue_task(&*current);
+                }
+                crate::timer::del_timer(timer_id);
+            } else {
+                crate::arch::riscv64::cpu::restore_irq(true);
+                crate::sched::schedule();
+                if crate::timer::timer_pending(timer_id) {
+                    crate::timer::del_timer(timer_id);
+                }
+            }
+        } else {
+            crate::sched::schedule();
+        }
+
+        if FB_USER_MAPPED.load(Ordering::Acquire) {
+            super::flush_framebuffer();
+        }
+    }
+    0
+}
+
 /// ioctl command codes
 /// Get variable screen information
 pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
+/// Set variable screen information
+pub const FBIOPUT_VSCREENINFO: u32 = 0x4601;
 /// Get fixed screen information
 pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
+/// Pan/display offset control
+pub const FBIOPAN_DISPLAY: u32 = 0x4604;
 /// Flush framebuffer (VirtIO-GPU specific)
 /// VirtIO-GPU requires explicit flush to display updated content
 pub const FBIO_FLUSH: u32 = 0x4610;
+/// Blank/unblank the screen
+pub const FBIOBLANK: u32 = 0x4611;
 
 /// Framebuffer type
 pub const FB_TYPE_PACKED_PIXELS: u32 = 0;
@@ -265,8 +342,29 @@ pub fn init_fbdev() -> Result<(), ()> {
         crate::fs::dev_t::DEV_FB0,
         &FB_OPS,
     )?;
-    crate::fs::devfs::mknod("/fb0", crate::fs::dev_t::DEV_FB0, 0o666)
+    crate::fs::devfs::mknod("/fb0", crate::fs::dev_t::DEV_FB0, 0o666)?;
+
+    // Auto-flush presenter for flush-less renderers (stock Xorg).
+    let started = crate::process::kthread::kthread_run(
+        kfbflush_fn,
+        core::ptr::null_mut(),
+        "kfbflush",
+    )
+    .is_some();
+    if !started {
+        crate::pr_warn!("fbdev: failed to start kfbflush (auto-flush off; only FBIO_FLUSH apps will display)");
+    }
+
+    Ok(())
 }
+
+/// FBIOPUTCMAP (Linux 0x4605): the color map is meaningless on a
+/// truecolor scanout, but Xorg's fbdev driver programs its gamma ramp
+/// through it during screen setup and hits this constantly — answering
+/// ENOTTY produced an (EE) storm in Xorg.0.log and slowed setup under
+/// TCG. Accept the write and drop it (Linux fbdev accepts cmap ioctls
+/// on truecolor frames by ignoring the content).
+const FBIOPUTCMAP: u32 = 0x4605;
 
 /// Handle framebuffer ioctl commands
 /// Returns: 0 on success, negative error code on failure
@@ -309,6 +407,84 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             }
             0
         }
+        FBIOPUT_VSCREENINFO => {
+            // Xorg's fbdevHWSetMode programs the "current" (builtin) mode
+            // via FBIOPUT_VSCREENINFO and requires the ioctl to succeed
+            // AND copy back a var equal to what it requested (it compares
+            // set_var == req_var, "FBIOPUT_VSCREENINFO succeeded but
+            // modified mode" otherwise). The scanout geometry cannot be
+            // reprogrammed (QEMU virtio-gpu fixed mode): accept the
+            // current geometry/format verbatim (echo the request back),
+            // reject anything that would change it.
+            if !crate::arch::riscv64::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
+                return -14; // EFAULT
+            }
+            let mut req = FbVarScreeninfo::default();
+            // SAFETY: access_ok validated the user pointer; req is a local.
+            unsafe {
+                let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                    &mut req as *mut FbVarScreeninfo as *mut u8,
+                    arg as *const u8,
+                    core::mem::size_of::<FbVarScreeninfo>(),
+                );
+                if uncopied != 0 { return -14; }
+            }
+            let cur = create_var_screeninfo(&info);
+            let same_geometry = req.xres == cur.xres
+                && req.yres == cur.yres
+                && req.xres_virtual == cur.xres_virtual
+                && req.yres_virtual == cur.yres_virtual
+                && req.bits_per_pixel == cur.bits_per_pixel
+                && req.red.offset == cur.red.offset
+                && req.red.length == cur.red.length
+                && req.green.offset == cur.green.offset
+                && req.green.length == cur.green.length
+                && req.blue.offset == cur.blue.offset
+                && req.blue.length == cur.blue.length;
+            if !same_geometry {
+                return -22; // EINVAL: mode change not supported
+            }
+            // Echo the accepted request back verbatim.
+            // SAFETY: access_ok validated the user pointer.
+            unsafe {
+                let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    &req as *const FbVarScreeninfo as *const u8,
+                    core::mem::size_of::<FbVarScreeninfo>(),
+                );
+                if uncopied != 0 { return -14; }
+            }
+            0
+        }
+        FBIOPAN_DISPLAY => {
+            // No hardware panning (single scanout); accept the ioctl and
+            // report the only pannable offset (0,0). Xorg's
+            // fbdevHWAdjustFrame only warns on failure, but echoing back
+            // keeps the log clean.
+            if !crate::arch::riscv64::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
+                return -14; // EFAULT
+            }
+            let mut var = create_var_screeninfo(&info);
+            var.xoffset = 0;
+            var.yoffset = 0;
+            // SAFETY: access_ok validated the user pointer.
+            unsafe {
+                let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    &var as *const FbVarScreeninfo as *const u8,
+                    core::mem::size_of::<FbVarScreeninfo>(),
+                );
+                if uncopied != 0 { return -14; }
+            }
+            0
+        }
+        FBIOBLANK => {
+            // Screen blanking is not implemented (single fixed scanout);
+            // DPMS-blank requests are accepted as no-ops. Xorg's
+            // fbdevHWSaveScreen downgrades to a warning on failure, but
+            // success keeps fbdevHW from disabling its blank path.
+            0
+        }
         FBIO_FLUSH => {
             // Flush framebuffer to display device
             // VirtIO-GPU requires explicit flush to display updated content
@@ -317,6 +493,15 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             } else {
                 -6 // ENXIO: device does not exist
             }
+        }
+        FBIOPUTCMAP => {
+            // fb_cmap is {start, len, red*, green*, blue*, transp*} = 4+4+6*8
+            // bytes with pointer-ABI padding — only the header is validated;
+            // the palette itself is dropped (see the const's doc comment).
+            if !crate::arch::riscv64::uaccess::access_ok(arg, 48) {
+                return -14; // EFAULT
+            }
+            0
         }
         _ => -25, // ENOTTY: unsupported ioctl command
     }

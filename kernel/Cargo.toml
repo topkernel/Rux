@@ -33,6 +33,9 @@ dfx-lock-owner = []
 # Off by default: the extra code shifts layout and measurably widens the
 # heap-lock race window; enable only when a wedge is being hunted.
 dfx-taskdump-bt = []
+# DFX: futex protocol tracer (one serial line per futex op / wake / return).
+# Diagnostic builds only.
+dfx-futex-trace = []
 
 [[bin]]
 name = "rux"
