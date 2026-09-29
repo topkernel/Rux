@@ -234,7 +234,21 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         // stant off an untouched .rodata page, must fault the page in, not
         // EFAULT through the exception table — that starved every stdio
         // buffer allocation and NSS lookup in dynamically linked binaries).
-        if fault_addr.bits() < crate::arch::riscv64::mm::user_addr::USER_END as u64 {
+        //
+        // EXEC faults are EXCLUDED: an S-mode instruction fetch can NEVER be
+        // satisfied by a user page (U-pages are unfetchable in S-mode even
+        // when mapped), so "fixing" the VMA and retrying just refaults
+        // forever — a jump through a garbage function pointer in kernel
+        // context (value landing inside any user VMA) then wedges the CPU
+        // in an unbounded fault/retry loop (100% CPU, no output, no
+        // panic). Route kernel EXEC faults straight to the exception table
+        // / KernelPanic so the bug is loud and the CPU halts instead of
+        // looping. Verified by GDB-forced S-mode pc injection into a
+        // user RWX page: unfixed loops forever; fixed panics.
+        let kernel_data_fill = fault_addr.bits()
+            < crate::arch::riscv64::mm::user_addr::USER_END as u64
+            && (access_type & FaultFlags::EXEC) == 0;
+        if kernel_data_fill {
             let covered = addr_space
                 .vma_read()
                 .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
