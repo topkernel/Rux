@@ -3358,10 +3358,54 @@ impl Task {
         });
     }
 
+    /// Iterate the children of EVERY member of the caller's thread group.
+    ///
+    /// Linux do_wait(): any thread of a process can wait for a child
+    /// forked by ANY member of its thread group (kernel/exit.c walks
+    /// `while_each_thread(tsk)` unless __WNOTHREAD). glib's "gmain"
+    /// worker thread reaps children the main thread spawned
+    /// (GChildWatchSource / GSubprocess), so a per-thread children scan
+    /// makes those waitpid()s fail with ECHILD before the child is
+    /// reaped. Only process products (fork / clone without
+    /// CLONE_THREAD) are ever linked, so each child sits on exactly one
+    /// member's list and no child is visited twice.
+    ///
+    /// # Safety
+    /// Caller must ensure self is valid. PROCESS_TREE_LOCK is acquired
+    /// internally; it serializes ring joins/leaves and children-list
+    /// mutations, so every member we walk is still linked (members
+    /// unhook from the ring before their task memory is released).
+    pub unsafe fn for_each_group_child<F>(&self, mut f: F)
+    where
+        F: FnMut(*mut Task),
+    {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let start = self as *const Task as *mut Task;
+        let mut member = start;
+        let mut guard = 0u32;
+        loop {
+            let head = &(*member).children as *const _ as *mut ListHead;
+            ListHead::for_each(head, |node| {
+                let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
+                f(task_ptr);
+            });
+            // Ring walk (next_thread_ptr heals a NULL to self — a
+            // single-threaded task terminates on the first step).
+            member = (*member).next_thread_ptr();
+            if member == start || member.is_null() {
+                break;
+            }
+            guard += 1;
+            if guard > 65536 {
+                break;
+            }
+        }
+    }
+
     /// Find child by PID
     ///
     /// # Arguments
-    /// - `pid`: Process ID to find
+    /// - `pid`: Process ID to find child by PID
     ///
     /// # Returns
     /// Some(child pointer) if found, None otherwise

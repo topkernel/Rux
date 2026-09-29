@@ -492,7 +492,10 @@ fn process_deferred_exit_pid(parent_pid: u32) {
     let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
     let parent = crate::process::pid_hash::pid_hash_lookup_pinned(parent_pid);
     if !parent.is_null() {
-        let _woken = unsafe { (*parent).wait_chldexit.wake_up_all() };
+        // Group-wide wake: Linux's wait_chldexit queue is shared by the
+        // whole thread group — a sibling blocked in wait4/waitid (e.g.
+        // glib's gmain worker) must also observe the child exit.
+        unsafe { crate::process::exit::wake_group_chldexit(parent) };
         crate::process::task::Task::task_put(parent);
     }
 }

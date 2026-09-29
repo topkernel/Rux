@@ -614,7 +614,8 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::ipc::sysv_sem::sem_undo_exit(current);
 
         // ===== Orphan reparenting (review PROC-P03) =====
-        // Children of a dying task must be re-attached to init (PID 1),
+        // Children of a dying task must be re-attached (a surviving
+        // thread-group member first, else the subreaper/init (PID 1)),
         // otherwise their parent pointers dangle after our Task slot is
         // freed (ppid()/for_each_child UAF) and orphaned ZOMBIEs are
         // never reaped — the PID space leaks monotonically.
@@ -765,7 +766,32 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
     // subreaper over init (prctl stores the flag on the shared
     // SignalStruct). Bounded walk to stay safe against parent loops.
     let mut dest = init;
+    // A dying THREAD's children go to a surviving member of its own
+    // thread group first (Linux find_new_reaper): the group's remaining
+    // threads keep group-wide wait visibility, so wait4/waitid callers
+    // in this process can still reap them. Only when no sibling
+    // survives do we fall through to the subreaper/init walk.
     {
+        let _lock = crate::process::task::PROCESS_TREE_LOCK.lock();
+        let mut member = (*dying).next_thread_ptr();
+        let mut guard = 0u32;
+        while (member as *const Task) != (dying as *const Task)
+            && !member.is_null()
+            && guard < 65536
+        {
+            // Skip members that are already gone from the scheduler's
+            // view; anything still linked in the ring is pre-leave and
+            // therefore valid memory.
+            let st = (*member).state();
+            if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
+                dest = member;
+                break;
+            }
+            member = (*member).next_thread_ptr();
+            guard += 1;
+        }
+    }
+    if dest as *const Task == init as *const Task {
         let mut p = (*dying).parent_ptr();
         let mut hops = 0;
         while let Some(pp) = p {
@@ -822,11 +848,13 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
             // child-exit wait queue directly (same queue the deferred
             // exit-notify path uses) or a blocked wait4 there never
             // re-checks its children and the orphaned zombie leaks.
+            // Group-wide: any member of dest's group may hold the
+            // blocking wait (Linux wait_chldexit is group-shared).
             let dest_pinned = crate::process::pid_hash::pid_hash_lookup_pinned(dest_pid);
             if !dest_pinned.is_null() {
                 // SAFETY: dest_pinned is pinned (refcount held).
                 unsafe {
-                    let _ = (*dest_pinned).wait_chldexit.wake_up_all();
+                    wake_group_chldexit(dest_pinned);
                 }
                 crate::process::task::Task::task_put(dest_pinned);
             }
@@ -837,6 +865,47 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
 // ============================================================================
 // wait4 / waitpid / waitid
 // ============================================================================
+
+/// Linux's internal syscall-restart sentinel. Interrupted blocking waits
+/// return this instead of -EINTR; the signal-delivery path converts it —
+/// `setup_frame` restarts the ecall when the handler has SA_RESTART, and
+/// `restart_syscall_no_handler` restarts it on the no-handler path, so
+/// userspace only ever sees EINTR when the disposition really wants it.
+/// wait4/waitid carry no timeout, so the rewind-and-reexecute restart is
+/// always correct (glib's SIGCHLD handler is installed SA_RESTART; a bare
+/// EINTR here broke g_spawn_sync-style waitpid loops).
+const ERESTARTSYS: i32 = -512;
+
+/// Wake every thread of `task`'s group on a child exit.
+///
+/// Linux hangs wait4/waitid off `signal->wait_chldexit`, a wait queue
+/// SHARED by the whole thread group — any member blocked in a wait must
+/// be woken when a child (of any member) exits. Our wait_chldexit queue
+/// is per-Task, so the exit-notify paths must walk the ring and wake
+/// each member's queue. The tree lock serializes ring joins/leaves, so
+/// every member we touch is still linked (and hence not yet freed).
+///
+/// # Safety
+/// `task` is a valid, pinned Task.
+pub(crate) unsafe fn wake_group_chldexit(task: *mut Task) {
+    use crate::process::task::PROCESS_TREE_LOCK;
+
+    let _lock = PROCESS_TREE_LOCK.lock();
+    let start = task;
+    let mut member = task;
+    let mut guard = 0u32;
+    loop {
+        let _ = (*member).wait_chldexit.wake_up_all();
+        member = (*member).next_thread_ptr();
+        if member == start || member.is_null() {
+            break;
+        }
+        guard += 1;
+        if guard > 65536 {
+            break;
+        }
+    }
+}
 
 /// wait4 pid-selector semantics (Linux wait_tasktype):
 /// - pid > 0 : that exact child
@@ -895,9 +964,13 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
             const WUNTRACED: i32 = 0x00000002;
 
-            // Iterate over children (threads are never on this list —
-            // only fork()/clone-without-CLONE_THREAD products are).
-            (*current).for_each_child(|child_ptr| {
+            // Iterate over the children of EVERY thread-group member
+            // (Linux do_wait walks while_each_thread — any thread can
+            // wait for any member's child; glib's gmain worker thread
+            // reaps children the main thread spawned). Threads are never
+            // on these lists — only fork()/clone-without-CLONE_THREAD
+            // products are.
+            (*current).for_each_group_child(|child_ptr| {
                 let child = &*child_ptr;
 
                 if !wait_pid_matches(child, pid, caller_pgid) {
@@ -992,7 +1065,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // state and we reap it immediately — no schedule() needed.
                 {
                     let mut found_zombie = false;
-                    (*current).for_each_child(|child_ptr| {
+                    (*current).for_each_group_child(|child_ptr| {
                         if !wait_pid_matches(&*child_ptr, pid, caller_pgid) {
                             return;
                         }
@@ -1016,7 +1089,10 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 if signal::signal_pending() {
                     (*current).wait_chldexit.finish_wait(current);
                     crate::sched::dequeue_if_enqueued(&*current);
-                    return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
+                    // ERESTARTSYS, not EINTR: the signal-delivery path
+                    // restarts the wait when the handler is SA_RESTART
+                    // (Linux semantics — glib's SIGCHLD handler is).
+                    return Err(ERESTARTSYS);
                 }
 
                 // Enable interrupts before schedule(). We're in syscall context
@@ -1073,9 +1149,11 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         let mut zombie_ptr: Option<*mut Task> = None;
         let mut stopped_ptr: Option<*mut Task> = None;
 
-        // Scan children to find a zombie / WUNTRACED stop — do NOT modify
-        // the list during iteration.
-        (*current).for_each_child(|child_ptr| {
+        // Scan the children of every thread-group member to find a
+        // zombie / WUNTRACED stop — do NOT modify the list during
+        // iteration. (Group-wide: glib's gmain worker thread polls
+        // waitpid(WNOHANG) for children the main thread spawned.)
+        (*current).for_each_group_child(|child_ptr| {
             let child = &*child_ptr;
 
             if !wait_pid_matches(child, pid, caller_pgid) {
@@ -1241,7 +1319,9 @@ pub fn do_waitid(
             let mut result_code: i32 = 0;
             let mut result_kind: i32 = 0; // 0=zombie, 1=stopped, 2=continued
 
-            (*current).for_each_child(|child_ptr| {
+            // Group-wide scan (same as do_wait): any thread of the
+            // process may waitid for any member's child.
+            (*current).for_each_group_child(|child_ptr| {
                 let child = &*child_ptr;
 
                 // idtype filter
@@ -1349,7 +1429,7 @@ pub fn do_waitid(
                 // kernel-space busy hang.
                 {
                     let mut found_zombie = false;
-                    (*current).for_each_child(|child_ptr| {
+                    (*current).for_each_group_child(|child_ptr| {
                         if idtype == P_PID && (*child_ptr).pid() != id as u32 {
                             return;
                         }
@@ -1371,7 +1451,9 @@ pub fn do_waitid(
                     (*current).wait_chldexit.finish_wait(current);
                     // R8-5 (NEW-C2): undo the signal's concurrent enqueue.
                     crate::sched::dequeue_task(&*current);
-                    return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
+                    // ERESTARTSYS, not EINTR: the signal-delivery path
+                    // restarts the wait when the handler is SA_RESTART.
+                    return Err(ERESTARTSYS);
                 }
 
                 // Enable interrupts before schedule() — we're in syscall
