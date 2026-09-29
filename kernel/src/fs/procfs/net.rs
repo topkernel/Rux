@@ -321,3 +321,14 @@ pub fn generate_sockstat() -> Vec<u8> {
 
     out.into_bytes()
 }
+
+// ============================================================================
+// /proc/net/unix
+// ============================================================================
+
+/// Generate /proc/net/unix content — one line per named AF_UNIX socket
+/// (path or abstract). Abstract names print with '@' in place of the
+/// leading NUL, matching Linux. gnome-shell/gsd/lsof/ss scan this file.
+pub fn generate_unix() -> Vec<u8> {
+    crate::net::unix::proc_net_unix_snapshot()
+}

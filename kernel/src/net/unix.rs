@@ -5,15 +5,23 @@
 //! AF_UNIX (local IPC) sockets — P0-1 (desktop IPC base).
 //!
 //! Supported semantics:
-//! - SOCK_STREAM (byte stream; SOCK_SEQPACKET is served by the same path
-//!   and reports SO_TYPE = SOCK_STREAM)
+//! - SOCK_STREAM (byte stream)
+//! - SOCK_SEQPACKET (connection-mode, record boundaries preserved,
+//!   SO_TYPE = SOCK_SEQPACKET, MSG_TRUNC on short recvs)
 //! - SOCK_DGRAM (connectionless datagrams with per-message boundaries)
 //! - bind()/listen()/connect()/accept() against the global name table
+//! - abstract names (sun_path[0] == 0): address IS the name, no
+//!   filesystem node, visible in /proc/net/unix as "@name"
+//! - Linux autobind: an unbound socket that connects() (or a DGRAM that
+//!   sends) is bound to a unique abstract name "\0%05x"
 //! - socketpair() — a pre-connected pair (two fds, no name-table entry)
 //! - SCM_RIGHTS fd passing through sendmsg/recvmsg cmsg data
+//! - SCM_CREDENTIALS: kernel-filled {pid,uid,gid} of the sender
 //! - blocking send/recv/accept via the W3 wait-queue discipline
 //!   (prepare_to_wait → re-check → schedule → finish_wait)
-//! - poll: POLLIN (readable) / POLLOUT (writable) / POLLHUP (peer gone)
+//! - poll: Linux semantics — listeners report only POLLIN (never
+//!   POLLHUP); a connected STREAM/SEQPACKET socket whose peer CLOSED
+//!   reports POLLHUP plus a readable POLLIN while data remains
 //!
 //! Locking model:
 //! - UNIX_TABLE guards the namespace (bind/connect/close).
@@ -78,8 +86,12 @@ pub enum UnixState {
 /// Socket kind (internal)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnixKind {
-    /// Byte stream (SOCK_STREAM and SOCK_SEQPACKET)
+    /// Byte stream (SOCK_STREAM)
     Stream,
+    /// Connection-mode record stream (SOCK_SEQPACKET): send requires a
+    /// connection like STREAM, but receive preserves record boundaries
+    /// like DGRAM.
+    Seqpacket,
     /// Datagram (SOCK_DGRAM)
     Dgram,
 }
@@ -125,6 +137,10 @@ pub struct UnixSocket {
     recv_queue: Spinlock<VecDeque<UnixSeg>>,
     /// Peer performed close()/shutdown — drain then EOF
     eof: Spinlock<bool>,
+    /// This socket's close() ran (poll: peer sees POLLHUP — the Linux
+    /// sk_shutdown = SHUTDOWN_MASK condition, distinct from a mere
+    /// peer shutdown(SHUT_WR) which only yields EOF-readable).
+    dead: Spinlock<bool>,
     /// Our write half was shut (shutdown(SHUT_WR) / SHUT_RDWR)
     shut_wr: Spinlock<bool>,
     /// W3-style wait queue for blocking recv/send/accept
@@ -152,6 +168,7 @@ impl UnixSocket {
             backlog: Spinlock::new(16),
             recv_queue: Spinlock::new(VecDeque::new()),
             eof: Spinlock::new(false),
+            dead: Spinlock::new(false),
             shut_wr: Spinlock::new(false),
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
@@ -200,18 +217,45 @@ impl UnixSocket {
     /// Can send() accept more bytes now (or fail with a real error)?
     fn send_ready(&self) -> bool {
         match self.kind {
-            UnixKind::Stream => match self.peer_arc() {
-                Some(peer) => {
-                    let cap = self.options.lock().sndbuf as usize;
-                    peer.queued_bytes() < cap
+            UnixKind::Stream | UnixKind::Seqpacket => {
+                // Linux unix_writable(): SHUTDOWN (either our SHUT_WR or
+                // the peer's close setting SHUTDOWN_MASK) silences EPOLLOUT.
+                if *self.shut_wr.lock() || self.peer_gone() {
+                    return false;
                 }
-                // Peer gone: send() returns EPIPE immediately — "ready".
-                None => true,
-            },
+                match self.peer_arc() {
+                    Some(peer) => {
+                        let cap = self.options.lock().sndbuf as usize;
+                        peer.queued_bytes() < cap
+                    }
+                    // No peer link (listener/unconnected): send() would
+                    // return ENOTCONN/EPIPE immediately — "ready".
+                    None => true,
+                }
+            }
             // Datagram send never blocks on this socket's own state (the
             // target's queue is checked at send time; a dead target is an
             // immediate error).
             UnixKind::Dgram => true,
+        }
+    }
+
+    /// Did the connected peer fully CLOSE (poll POLLHUP condition)?
+    ///
+    /// Linux sets the surviving socket's sk_shutdown to SHUTDOWN_MASK when
+    /// the peer of a SOCK_STREAM/SOCK_SEQPACKET socket is released; that is
+    /// exactly the EPOLLHUP condition. A mere peer shutdown(SHUT_WR) is NOT
+    /// "gone" — only EOF-readable. The `dead` flag distinguishes the two;
+    /// a dead Weak link (fd dropped entirely) counts as gone too.
+    fn peer_gone(&self) -> bool {
+        match self.peer.lock().as_ref() {
+            // No peer link (listener / unconnected): not "gone", just alone.
+            None => false,
+            Some(w) => match w.upgrade() {
+                Some(peer) => *peer.dead.lock(),
+                // Freed — the last fd of the peer dropped: gone.
+                None => true,
+            },
         }
     }
 
@@ -288,6 +332,41 @@ fn name_key(sun_path: &[u8]) -> Option<String> {
 /// Look up a socket by registry key.
 fn lookup(name: &str) -> Option<Arc<UnixSocket>> {
     UNIX_TABLE.lock().get(name).cloned()
+}
+
+/// /proc/net/unix snapshot: one line per named socket, Linux layout
+/// `Num RefCount Protocol Flags Type St Path` where abstract names are
+/// printed with a leading '@' in place of the NUL.
+pub fn proc_net_unix_snapshot() -> Vec<u8> {
+    let mut out = String::from("Num       RefCount Protocol Flags    Type St Path\n");
+    let table = UNIX_TABLE.lock();
+    for (name, sock) in table.iter() {
+        let typ: u16 = match sock.kind {
+            UnixKind::Stream => 1,
+            UnixKind::Seqpacket => 5,
+            UnixKind::Dgram => 2,
+        };
+        let st: u8 = match *sock.state.lock() {
+            UnixState::Unconnected => 1,  // SS_UNCONNECTED
+            UnixState::Connecting => 2,   // SS_CONNECTING
+            UnixState::Connected => 3,    // SS_CONNECTED
+            UnixState::Listening => 7,    // SS_LISTENING (sk_state TCP_LISTEN)
+            UnixState::Closed => 4,       // SS_DISCONNECTING
+        };
+        let path = if let Some(rest) = name.strip_prefix('\0') {
+            alloc::format!("@{}", rest)
+        } else {
+            name.clone()
+        };
+        out += &alloc::format!(
+            "{:016x}: 00000002 00000000 00000000 {:04x} {:02x} {}\n",
+            Arc::as_ptr(sock) as usize,
+            typ,
+            st,
+            path
+        );
+    }
+    out.into_bytes()
 }
 
 // ============================================================================
@@ -536,13 +615,14 @@ fn create_socket_node(path: &str) -> Result<(), i32> {
     }
 }
 
-/// listen(): mark a STREAM socket as a listener.
+/// listen(): mark a STREAM/SEQPACKET socket as a listener.
 pub fn unix_listen(sock: &Arc<UnixSocket>, backlog: i32) -> Result<(), i32> {
-    if sock.kind != UnixKind::Stream {
+    if !matches!(sock.kind, UnixKind::Stream | UnixKind::Seqpacket) {
         return Err(-95); // EOPNOTSUPP
     }
+    // Linux autobinds an unbound listener to a unique abstract name.
     if sock.bound_name.lock().is_none() {
-        return Err(-22); // EINVAL — Linux autobinds; we require a name
+        autobind(sock);
     }
     if backlog > 0 {
         *sock.backlog.lock() = backlog as usize;
@@ -551,14 +631,14 @@ pub fn unix_listen(sock: &Arc<UnixSocket>, backlog: i32) -> Result<(), i32> {
     Ok(())
 }
 
-/// connect(): STREAM — hook up with a listener; DGRAM — set the default
-/// destination.
+/// connect(): STREAM/SEQPACKET — hook up with a listener; DGRAM — set the
+/// default destination.
 pub fn unix_connect(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
     if *sock.shut_wr.lock() {
         return Err(-32); // EPIPE
     }
     match sock.kind {
-        UnixKind::Stream => {
+        UnixKind::Stream | UnixKind::Seqpacket => {
             if *sock.state.lock() == UnixState::Connected {
                 return Err(-106); // EISCONN
             }
@@ -570,8 +650,13 @@ pub fn unix_connect(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> 
             if server.accept_queue.lock().len() >= *server.backlog.lock() {
                 return Err(-111); // ECONNREFUSED (Linux blocks; simplified)
             }
+            // Linux autobind: an unbound connecting client gets a unique
+            // abstract name so the server can address/report it.
+            if sock.bound_name.lock().is_none() {
+                autobind(sock);
+            }
             // Server-side child: connected to us, queued for accept().
-            let child = Arc::new(UnixSocket::new(UnixKind::Stream));
+            let child = Arc::new(UnixSocket::new(sock.kind));
             *child.state.lock() = UnixState::Connected;
             *child.peer.lock() = Some(Arc::downgrade(sock));
             // The child inherits the server's bound name for
@@ -607,13 +692,13 @@ pub fn unix_connect(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> 
     }
 }
 
-/// Autobind an abstract address (counter-based unique name).
+/// Autobind an abstract address (Linux format: "\0" + 5 hex digits).
 fn autobind(sock: &Arc<UnixSocket>) {
     static ABSTRACT_COUNTER: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(1);
     loop {
         let n = ABSTRACT_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let key = String::from(alloc::format!("\0{:x}", n));
+        let key = String::from(alloc::format!("\0{:05x}", n));
         let mut table = UNIX_TABLE.lock();
         if !table.contains_key(&key) {
             table.insert(key.clone(), sock.clone());
@@ -625,7 +710,7 @@ fn autobind(sock: &Arc<UnixSocket>) {
 
 /// accept(): pop one established child (EAGAIN when none pending).
 pub fn unix_accept(sock: &Arc<UnixSocket>) -> Result<Arc<UnixSocket>, i32> {
-    if sock.kind != UnixKind::Stream {
+    if !matches!(sock.kind, UnixKind::Stream | UnixKind::Seqpacket) {
         return Err(-95); // EOPNOTSUPP
     }
     if *sock.state.lock() != UnixState::Listening {
@@ -675,7 +760,11 @@ pub fn unix_send(
         // Resolve the receiving end fresh each round (the peer may have
         // closed while we were blocked).
         let target: Arc<UnixSocket> = match sock.kind {
-            UnixKind::Stream => {
+            UnixKind::Stream | UnixKind::Seqpacket => {
+                // Connection-mode: an explicit destination is EISCONN.
+                if dest.is_some() {
+                    return Err(-106); // EISCONN
+                }
                 let state = *sock.state.lock();
                 if state != UnixState::Connected {
                     return Err(-107); // ENOTCONN
@@ -686,6 +775,11 @@ pub fn unix_send(
                 }
             }
             UnixKind::Dgram => {
+                // Linux autobinds an unbound DGRAM sender so the receiver
+                // has a reply address.
+                if sock.bound_name.lock().is_none() {
+                    autobind(sock);
+                }
                 if let Some(a) = dest {
                     match lookup(&a.key) {
                         Some(t) => t,
@@ -812,7 +906,9 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                 });
             }
         }
-        UnixKind::Dgram => {
+        UnixKind::Dgram | UnixKind::Seqpacket => {
+            // One record per recv (boundaries preserved); a short buffer
+            // truncates and reports MSG_TRUNC.
             if let Some(seg) = q.pop_front() {
                 let orig_len = seg.data.len();
                 let take = orig_len.min(buf.len());
@@ -840,7 +936,7 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
         return Ok(unix_recv_eof());
     }
     match sock.kind {
-        UnixKind::Stream => {
+        UnixKind::Stream | UnixKind::Seqpacket => {
             let state = *sock.state.lock();
             if state == UnixState::Unconnected || state == UnixState::Listening {
                 return Err(-107); // ENOTCONN
@@ -875,6 +971,9 @@ pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
 /// close(): release the name, mark the peer's EOF, wake waiters.
 pub fn unix_close(sock: &Arc<UnixSocket>) {
     *sock.state.lock() = UnixState::Closed;
+    // Peer's poll() starts reporting POLLHUP (Linux SHUTDOWN_MASK on peer
+    // release) — set before the wake below so a racing poll sees it.
+    *sock.dead.lock() = true;
     // Remove our name-table entry.
     if let Some(name) = sock.bound_name.lock().take() {
         let mut table = UNIX_TABLE.lock();
@@ -985,7 +1084,9 @@ fn unix_file_poll(file: &File, events: u16) -> u16 {
         if socket.recv_ready() {
             ready |= POLLIN | POLLRDNORM;
         }
-        // Listener with pending connections is readable.
+        // Listener with pending connections is readable. A listener NEVER
+        // reports POLLHUP (Linux: no sk_pair, no SHUTDOWN_MASK) — GNOME
+        // main loops treat an unexpected POLLHUP as fatal.
         if *socket.state.lock() == UnixState::Listening && socket.accept_ready() {
             ready |= POLLIN | POLLRDNORM;
         }
@@ -995,18 +1096,15 @@ fn unix_file_poll(file: &File, events: u16) -> u16 {
             ready |= POLLOUT | POLLWRNORM;
         }
     }
-    // Peer gone and queue drained: EOF readable + HUP.
-    if socket.kind == UnixKind::Stream
-        && *socket.eof.lock()
-        && socket.recv_queue.lock().is_empty()
-    {
+    // Peer of a connection-mode socket fully CLOSED (or its fd dropped):
+    // POLLHUP — unconditionally, while queued data stays readable through
+    // POLLIN (Linux sets SHUTDOWN_MASK at peer release time, not after the
+    // queue drains). POLLHUP/POLLERR are reported regardless of `events`.
+    if matches!(socket.kind, UnixKind::Stream | UnixKind::Seqpacket) && socket.peer_gone() {
         ready |= POLLHUP;
         if events & POLLIN != 0 {
-            ready |= POLLIN | POLLRDNORM; // EOF is readable
+            ready |= POLLIN | POLLRDNORM; // data/EOF still readable
         }
-    }
-    if *socket.shut_wr.lock() {
-        ready |= POLLERR;
     }
     ready
 }
@@ -1077,7 +1175,8 @@ pub fn unix_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
         return Err(-22); // EINVAL
     }
     let kind = match type_ & SOCK_TYPE_MASK {
-        SOCK_STREAM | SOCK_SEQPACKET => UnixKind::Stream,
+        SOCK_STREAM => UnixKind::Stream,
+        SOCK_SEQPACKET => UnixKind::Seqpacket,
         SOCK_DGRAM => UnixKind::Dgram,
         _ => return Err(-94), // ESOCKTNOSUPPORT
     };
@@ -1098,7 +1197,8 @@ pub fn unix_socketpair(type_: i32) -> Result<(usize, usize), i32> {
         return Err(-22); // EINVAL
     }
     let kind = match type_ & SOCK_TYPE_MASK {
-        SOCK_STREAM | SOCK_SEQPACKET => UnixKind::Stream,
+        SOCK_STREAM => UnixKind::Stream,
+        SOCK_SEQPACKET => UnixKind::Seqpacket,
         SOCK_DGRAM => UnixKind::Dgram,
         _ => return Err(-94), // ESOCKTNOSUPPORT
     };
@@ -1256,6 +1356,7 @@ pub fn unix_getsockopt(sock: &Arc<UnixSocket>, level: i32, optname: i32) -> Resu
     match optname {
         SO_TYPE => Ok(match sock.kind {
             UnixKind::Stream => SOCK_STREAM,
+            UnixKind::Seqpacket => SOCK_SEQPACKET,
             UnixKind::Dgram => SOCK_DGRAM,
         }),
         SO_ERROR => Ok(sock.options.lock().error),

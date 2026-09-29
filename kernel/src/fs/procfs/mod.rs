@@ -510,6 +510,11 @@ impl ProcFSSuperBlock {
             net::generate_sockstat,
             self.alloc_ino(),
         )));
+        net_dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"unix".to_vec(),
+            net::generate_unix,
+            self.alloc_ino(),
+        )));
     }
 
     /// Build the /proc/sys/{kernel,vm,fs} tree with writable sysctl files.

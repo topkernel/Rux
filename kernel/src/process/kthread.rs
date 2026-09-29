@@ -24,6 +24,8 @@ struct KthreadInfo {
     should_stop: AtomicBool,
     /// Return value from the thread function
     result: AtomicI32,
+    /// Thread name (shown as "Name:"/comm in /proc like Linux kthreads)
+    name: &'static str,
 }
 
 /// Static map: PID → KthreadInfo
@@ -114,6 +116,7 @@ pub fn kernel_thread(
         map.insert(pid, KthreadInfo {
             should_stop: AtomicBool::new(false),
             result: AtomicI32::new(0),
+            name: _name,
         });
     }
 
@@ -177,6 +180,13 @@ pub fn kthread_should_stop() -> bool {
         Some(info) => info.should_stop.load(Ordering::Acquire),
         None => false,
     }
+}
+
+/// A kernel thread's name (procfs comm: /proc/[pid]/status "Name:",
+/// /proc/[pid]/comm and field 2 of /proc/[pid]/stat).
+pub fn kthread_name(pid: u32) -> Option<&'static str> {
+    let map = KTHREAD_MAP.lock();
+    map.get(&pid).map(|info| info.name)
 }
 
 /// Signal a kernel thread to stop and wait for it to exit.

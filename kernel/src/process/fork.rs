@@ -365,6 +365,12 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // Copy signal mask
         (*task_ptr).sigmask = (*current_ptr).sigmask;
 
+        // Inherit the executable path: a fork WITHOUT exec (daemon style)
+        // keeps reporting the parent's program in /proc/[pid]/comm,
+        // "Name:" of status and /proc/[pid]/exe — like Linux, where the
+        // child's mm->exe_file ref is duplicated at fork.
+        (*task_ptr).set_exe_path((*current_ptr).get_exe_path());
+
         // Inherit process group and session from parent
         (*task_ptr).set_pgid((*current_ptr).pgid());
         (*task_ptr).set_sid((*current_ptr).sid());

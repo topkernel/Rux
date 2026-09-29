@@ -86,9 +86,19 @@ fn task_state_str(task: &crate::process::Task) -> &'static str {
 /// The task's comm: basename of the exe path, truncated to 15 characters
 /// (Linux TASK_COMM_LEN - 1). Used for /proc/[pid]/comm, the "Name:" line
 /// of /proc/[pid]/status and field 2 of /proc/[pid]/stat — systemd's PID 1
-/// check compares /proc/1/comm against "systemd".
+/// check compares /proc/1/comm against "systemd". Kernel threads (no exe)
+/// report their kthread name like Linux.
 fn task_comm(task: &crate::process::Task) -> alloc::borrow::Cow<'_, str> {
     let path = task.get_exe_path();
+    if path.is_empty() {
+        if let Some(name) = crate::process::kthread::kthread_name(task.pid()) {
+            let mut len = name.len().min(15);
+            while len > 0 && !name.is_char_boundary(len) {
+                len -= 1;
+            }
+            return alloc::borrow::Cow::Borrowed(&name[..len]);
+        }
+    }
     // Basename: everything after the last '/'.
     let base = match path.iter().rposition(|&b| b == b'/') {
         Some(i) => &path[i + 1..],

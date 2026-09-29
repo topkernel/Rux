@@ -485,10 +485,14 @@ unsafe fn deliver_unix_cmsgs(
     }
 
     if control == 0 || controllen < cmsg.len() {
-        // No control buffer room: the fds cannot be reported — close them.
+        // No control buffer room: the fds cannot be reported — close them
+        // and zero msg_controllen (Linux semantics: the caller's CMSG walk
+        // must not see stale user-memory cmsg_len values).
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
         }
+        // SAFETY: msg_ptr validated by the caller.
+        let _ = put_user(msg_ptr.add(40) as *mut usize, 0);
         return Ok(0);
     }
     if !access_ok(control, cmsg.len()) {
@@ -531,7 +535,10 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
 
     // P0-1: AF_UNIX listener — same blocking contract as the TCP path.
     if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
-        if usock.kind != crate::net::unix::UnixKind::Stream {
+        if !matches!(
+            usock.kind,
+            crate::net::unix::UnixKind::Stream | crate::net::unix::UnixKind::Seqpacket
+        ) {
             return -(errno::EOPNOTSUPP as i64);
         }
         if *usock.state.lock() != crate::net::unix::UnixState::Listening {
@@ -1132,7 +1139,9 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
         let name = match usock.kind {
-            crate::net::unix::UnixKind::Stream => crate::net::unix::unix_peer_bound_name(&usock),
+            crate::net::unix::UnixKind::Stream | crate::net::unix::UnixKind::Seqpacket => {
+                crate::net::unix::unix_peer_bound_name(&usock)
+            }
             crate::net::unix::UnixKind::Dgram => usock.dgram_peer.lock().clone(),
         };
         // SAFETY: addr_ptr validated with access_ok; exception-table copy.
@@ -2111,11 +2120,10 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         }
     }
 
-    if total_len == 0 {
-        return 0;
-    }
-
-    // P0-1: AF_UNIX sendmsg — full path with SCM_RIGHTS support.
+    // P0-1: AF_UNIX sendmsg — full path with SCM_RIGHTS support. Runs
+    // BEFORE the total_len==0 early return: a zero-length payload with
+    // ancillary data (SCM_RIGHTS/SCM_CREDENTIALS) is a legal message and
+    // must be delivered, not silently dropped.
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd as usize) {
         // Parse SCM_RIGHTS / SCM_CREDENTIALS cmsg(s) from msg_control
         // (msghdr offsets 32/40).
@@ -2185,6 +2193,10 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         };
     }
 
+    if total_len == 0 {
+        return 0;
+    }
+
     // W3: parse the destination from msg_name (same path as sendto's
     // addr_ptr) — UDP sendmsg used to pass NULL and could never send a
     // datagram; TCP ignores it.
@@ -2232,6 +2244,9 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
 const MSG_DONTWAIT: i32 = 0x40;
 /// W3: MSG_TRUNC (reported in recvmsg's msg_flags).
 const MSG_TRUNC: i32 = 0x20;
+/// Ancillary data was dropped (control buffer too small) — reported in
+/// recvmsg's msg_flags like Linux.
+const MSG_CTRUNC: i32 = 0x08;
 
 /// sys_recvmsg - Receive message from socket
 ///
@@ -2341,10 +2356,12 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         }
         // SCM_RIGHTS / SCM_CREDENTIALS: install the attached files and
         // write the cmsg chain.
+        let mut cmsg_bytes = 0usize;
         if !r.files.is_empty() || r.cred.is_some() {
             // SAFETY: msg_ptr was access_ok(64)-validated at fn entry.
-            if let Err(e) = unsafe { deliver_unix_cmsgs(msg_ptr, &r.files, r.cred) } {
-                return e;
+            match unsafe { deliver_unix_cmsgs(msg_ptr, &r.files, r.cred) } {
+                Ok(n) => cmsg_bytes = n,
+                Err(e) => return e,
             }
         }
         // Source address.
@@ -2366,10 +2383,16 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 }
             }
         }
-        // msg_flags (offset 48): MSG_TRUNC for truncated datagrams.
+        // msg_flags (offset 48): MSG_TRUNC for truncated datagrams,
+        // MSG_CTRUNC when the control buffer could not hold the cmsg
+        // chain (the fds were dropped — caller only reaches here with
+        // content to deliver, so 0 bytes = truncated).
         let mut out_flags: u32 = 0;
         if r.truncated {
             out_flags |= MSG_TRUNC as u32;
+        }
+        if (!r.files.is_empty() || r.cred.is_some()) && cmsg_bytes == 0 {
+            out_flags |= MSG_CTRUNC as u32;
         }
         // SAFETY: msg_ptr validated with access_ok(64) at entry.
         unsafe {
