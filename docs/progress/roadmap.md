@@ -1,18 +1,56 @@
 # Rux Development Roadmap
 
+## Current Phase (2026-09-29): Ubuntu on Rux → GNOME
+
+**Milestone reached: a complete Ubuntu 22.04 (riscv64) userland boots on Rux.**
+
+- Ubuntu graphical desktop session (native framebuffer, keyboard + mouse via
+  virtio-input/evdev), pixel-verified end to end (23 checks/boot, `-smp 4`)
+- Real command execution in Ubuntu's own `/bin/dash`; interactive `bash -i`;
+  D-Bus system + session buses working end to end (dbus-send / dbus-monitor);
+  pty (ptmx/pts), System V IPC, POSIX MQ
+- 4-CPU SMP stable under stress with cross-core TLB shootdowns on COW; full
+  rt_sig* semantics (nesting, sigsuspend mask discipline, kernel-owned
+  trampoline, sp-based rt_sigreturn)
+- Major root causes fixed this phase: trap-entry routing on `sstatus.SPP`
+  (S-origin traps corrupting the live pt_regs), 128KB kernel stacks (64KB
+  overflowed in deep debug-build paths), exec/fork trap-frame ownership,
+  corrupted 8x8 font table, printk record interleaving on SMP, evdev ioctl
+  parity (EVIOCGBIT was unreachable) and virtio-tablet never probing
+
+**In flight (toward full GNOME):**
+
+| Workstream | Status |
+|---|---|
+| Xorg completion (pthread futex/robust-list exit protocol) | root-caused to thread-exit wake; fix in progress — Xorg parses config, loads fbdev/GLX, reaches extension init without panic |
+| unix-socket hardening (SCM_RIGHTS fd passing, abstract addresses, poll semantics) | in progress |
+| GLib/GTK runtime gap audit | in progress |
+| X input drivers (xf86-input-evdev + libevdev, udev-less xorg.conf) | ready in test image; awaiting Xorg completion for xev verification |
+| GNOME session image (322 packages, gnome-session 42 + openbox fallback) | ready — `gnome-session` already starts and spawns gnome-shell/gsd once the futex fix lands |
+
+**Next milestones:**
+
+1. Xorg completes initialization → xterm window on screen (acceptance: QMP screendump non-black, keyboard via xev)
+2. GNOME session (gnome-shell on X11 + llvmpipe, openbox fallback) with working input
+3. udev/hotplug minimal path, network bring-up for full desktop services
+4. Long-run stability soak (24h boot), performance pass, upstream cleanup
+
+---
+
 ## Project Overview
 
 | | |
 |---|---|
-| **Architecture** | RISC-V 64-bit (RV64GC) |
-| **Source Files** | 278 (274 Rust + 3 Assembly + 1 Linker Scripts) |
-| **Code Lines** | ~102,400 |
-| **Syscall Numbers** | 348 dispatched |
-| **Unit Tests** | 825 cases across 58 test files |
+| **Architecture** | RISC-V 64-bit (RV64GC), 4-CPU SMP |
+| **Source Files** | 300 (297 Rust + 3 Assembly) |
+| **Code Lines** | ~148,900 |
+| **Syscall Numbers** | 346 dispatched |
+| **Unit Tests** | 995 cases across 60 test files |
 | **Formal Verification** | 1,088 proptest cases (98 modules), 157 Kani proofs (22 modules), 4 SPIN models (8 LTL), Miri CI |
 | **Linux LTP** | 1,838 official tests |
 | **Smoke Tests** | 15/15 passing |
-| **Current Phase** | Phase 52 — Process Exit Race & Defensive Checks |
+| **GUI Gate** | 23 pixel-level checks per boot (login → desktop → apps → real commands) |
+| **Current Phase** | Ubuntu userland complete; X11/GNOME bring-up |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 

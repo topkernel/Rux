@@ -234,22 +234,22 @@ This document records important changes and fixes to the Rux kernel.
 
 ### 2026-04-05 — Phase 38: select/poll + IPC Integration Tests
 
-**FdSet ABI 兼容** (`syscall/mod.rs`, `config.rs`, `Kernel.toml`):
-- `FdSet.fds_bits` 从 `[u64; 1]` 扩展为 `[u64; 16]`（128 字节，1024 fd）
-- `FD_SETSIZE` 从 64 提升到 1024，匹配 Linux 标准
-- `set/clear/is_set/zero` 方法更新为 1024 fd 索引计算
+**FdSet ABI compatibility** (`syscall/mod.rs`, `config.rs`, `Kernel.toml`):
+- `FdSet.fds_bits` widened from `[u64; 1]` to `[u64; 16]` (128 bytes, 1024 fds)
+- `FD_SETSIZE` raised from 64 to 1024, matching the Linux standard
+- `set/clear/is_set/zero` methods updated for 1024-fd index arithmetic
 
-**select/poll 信号掩码** (`syscall/misc.rs`):
-- `sys_ppoll`: 支持 args[3] sigmask 参数（保存/应用/恢复）
-- `sys_pselect6`: 支持 args[5] sigmask 参数，使用 RAII `SigmaskGuard` 确保所有返回路径恢复掩码
+**select/poll signal masks** (`syscall/misc.rs`):
+- `sys_ppoll`: supports the args[3] sigmask parameter (save/apply/restore)
+- `sys_pselect6`: supports the args[5] sigmask parameter, with an RAII `SigmaskGuard` ensuring the mask is restored on every return path
 
-**IPC 集成测试** (`tests/ipc_sysv.rs`, 新建):
-- IPC 常量验证（IPC_CREAT/EXCL/NOWAIT/RMID/SET/STAT, GETVAL/SETVAL 等）
-- IpcPermUapi 布局验证（48 字节，字段偏移）
-- KernIpcPerm 操作测试（update_mode 掩码、to_uapi 转换）
-- IPC ID 编解码往返测试（ipc_build_id/id_to_index/id_seq）
-- UAPI 结构体尺寸验证（SemidDsUapi=88, MsqidDsUapi=120, ShmidDsUapi=112, MqAttr=64, SemBuf=6）
-- 消息匹配逻辑测试（msgtyp 三种场景）
+**IPC integration tests** (`tests/ipc_sysv.rs`, new):
+- IPC constant verification (IPC_CREAT/EXCL/NOWAIT/RMID/SET/STAT, GETVAL/SETVAL, etc.)
+- `IpcPermUapi` layout verification (48 bytes, field offsets)
+- `KernIpcPerm` operation tests (update_mode masking, to_uapi conversion)
+- IPC ID encode/decode round-trip tests (ipc_build_id/id_to_index/id_seq)
+- UAPI struct size verification (SemidDsUapi=88, MsqidDsUapi=120, ShmidDsUapi=112, MqAttr=64, SemBuf=6)
+- Message matching logic tests (three msgtyp scenarios)
 
 ### 2026-04-05 — Phase 37: IPC Subsystem (System V + POSIX MQ)
 

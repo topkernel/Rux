@@ -1,63 +1,106 @@
-# Rux 内核 Linux 特性缺失分析（2026-09-24）
+# Rux Kernel — Missing Linux Features Analysis (2026-09-24)
 
-**检视目标**：系统性盘点相比 Linux 整块缺失的重要特性，按"运行真实世界软件的阻碍度"排序。全部结论经 grep/读码验证。
+> **Status note (2026-09-29)**: several P0 items below have since been
+> implemented — AF_UNIX (with socket files and SO_PEERCRED), pty/devpts,
+> tmpfs, and the 64MB user-memory cap are all in main now. This document is
+> kept as the original gap analysis for reference.
 
-**基线**：code-review-linux-compat-2026-09-23.md 的 446 项偏差已全部修复（8 波，17 提交）。本报告只列**整块缺失**，不含已修复的实现偏差。
+**Scope**: a systematic inventory of whole features missing relative to Linux,
+ranked by how much they block real-world software. Every conclusion was
+verified by grep / code reading.
 
-## 总览
+**Baseline**: the 446 deviations from
+`code-review-linux-compat-2026-09-23.md` were all fixed (8 waves, 17 commits).
+This report lists only **whole missing features**, not already-fixed
+implementation deviations.
 
-| 级别 | 数量 | 定义 |
+## Summary
+
+| Level | Count | Definition |
 |---|---|---|
-| **P0** | 7 | 挡住整类真实软件（桌面/容器/网络配置/数据库） |
-| **P1** | 19 | 重要软件核心路径受损 |
-| **P2** | 35 | 功能可用但退化/专用场景受阻 |
-| **P3** | 20 | 边缘/可长期后排 |
+| **P0** | 7 | Blocks entire classes of real software (desktop / containers / network config / databases) |
+| **P1** | 19 | Core paths of important software degraded |
+| **P2** | 35 | Usable but degraded / specialized scenarios blocked |
+| **P3** | 20 | Edge cases, can wait long-term |
 
 ---
 
-## P0：挡住整类软件（7 项）
+## P0: blocking whole classes of software (7 items)
 
-| # | 特性 | 受影响的真实软件 | Rux 现状 |
+| # | Feature | Affected real software | Rux status at the time |
 |---|---|---|---|
-| 1 | **AF_UNIX 整块缺失** | X11/Wayland/docker daemon/D-Bus/syslog/tmux/sshd 本地转发 | socket 仅 AF_INET（socket.rs:1095）；socketpair EOPNOTSUPP |
-| 2 | **netlink/rtnetlink + 接口管理 ioctl + DHCP** | ip/ifconfig/NetworkManager/udev——**用户态完全无法配置网络** | 全仓库零 netlink；ioctl 仅 tty 类 |
-| 3 | **pty/devpts** | sshd/tmux/screen/script/X terminal——一切交互式子进程 | 无 pty 层（无 tty_driver/n_tty，仅 console 直通） |
-| 4 | **inotify** | vim/cargo/webpack HMR/桌面文件管理器/systemd path 单元 | init1 返回 EMFILE、add/rm ENOSYS |
-| 5 | **fcntl 记录锁 + flock 假成功** | sqlite（**静默数据损坏**）/apt/rpm 包管理器 | flock 恒返 0；F_SETLK 落入默认拒绝 |
-| 6 | **tmpfs** | shm_open/容器 /tmp /dev/shm | do_mount 仅 ext4/proc/devfs |
-| 7 | **用户物理内存 64MB 全局硬顶** | 任何驻留>64MB 程序：JVM/CPython/rustc 大项目/chromium——直接 OOM | layout.rs:112 min(25%, 64MB) |
+| 1 | **AF_UNIX entirely missing** | X11/Wayland/docker daemon/D-Bus/syslog/tmux/sshd local forwarding | socket supported AF_INET only (socket.rs:1095); socketpair EOPNOTSUPP |
+| 2 | **netlink/rtnetlink + interface-management ioctls + DHCP** | ip/ifconfig/NetworkManager/udev — **userspace could not configure networking at all** | zero netlink in the tree; ioctls were tty-class only |
+| 3 | **pty/devpts** | sshd/tmux/screen/script/X terminals — every interactive subprocess | no pty layer (no tty_driver/n_tty, console passthrough only) |
+| 4 | **inotify** | vim/cargo/webpack HMR/desktop file managers/systemd path units | init1 returned EMFILE, add/rm ENOSYS |
+| 5 | **fcntl record locks + fake-success flock** | sqlite (**silent data corruption**)/apt/rpm package managers | flock always returned 0; F_SETLK fell into default-deny |
+| 6 | **tmpfs** | shm_open/container /tmp and /dev/shm | do_mount only supported ext4/proc/devfs |
+| 7 | **64MB global hard cap on user physical memory** | anything resident >64MB: JVM/CPython/rustc on large projects/chromium — immediate OOM | layout.rs:112 min(25%, 64MB) |
 
-## P1：核心路径受损（19 项）
+## P1: degraded core paths (19 items)
 
-**进程/系统**：ptrace（strace/gdb）；core dump+/proc/sys 整树；namespaces 七种全缺；cgroups v1/v2；rlimits 存储但零执行（fdtable 1024 硬顶）；signalfd（systemd 主循环）；exec 无 demand paging（全文件预分配）
+**Process/system**: ptrace (strace/gdb); core dumps + the whole /proc/sys
+tree; all seven namespaces missing; cgroups v1/v2; rlimits stored but never
+enforced (fdtable hard-capped at 1024); signalfd (systemd main loop); exec
+without demand paging (whole-file pre-allocation)
 
-**文件/存储**：xattr 全 stub（capability 标记）；sendfile/splice 非零拷贝+tee/vmsplice ENOSYS；io_uring 仅 6 opcode；procfs 只读无 /proc/sys；mknod 禁用（**mkfifo 不可用**）；sysfs/uevent 热插拔；swap 426 行写完未接线（swapon ENOSYS，匿名页无回收）；chroot 无隔离+pivot_root ENOSYS
+**Files/storage**: xattr fully stubbed (capability markers);
+sendfile/splice not zero-copy + tee/vmsplice ENOSYS; io_uring with 6 opcodes
+only; procfs read-only without /proc/sys; mknod disabled (**mkfifo
+unusable**); sysfs/uevent hotplug; swap: 426 lines written but never wired up
+(swapon ENOSYS, no anonymous-page reclaim); chroot without isolation +
+pivot_root ENOSYS
 
-**网络**：IPv6 整块（ethertype 直接丢包）；/proc/net/*；epoll 等待是 busy-yield（**SMP4 下空转烧 CPU**）无等待队列；SCM_RIGHTS；memfd_create；墙钟无 RTC（启动 epoch 0）
+**Network**: IPv6 entirely (ethertype dropped outright); /proc/net/*; epoll
+waiting was busy-yield (**spinning CPU under SMP4**) with no wait queues;
+SCM_RIGHTS; memfd_create; no RTC for wall clock (boot at epoch 0)
 
-## P2：退化/专用受阻（35 项，代表性）
+## P2: degraded / specialized blocked (35 items, representative)
 
-- **假成功类**（最危险——比 ENOSYS 更具欺骗性）：SO_KEEPALIVE/SO_LINGER/SO_BROADCAST；TCP_NODELAY 假；IP_TTL/MULTICAST 假；mlock 三空壳；THP（MAP_HUGETLB 校验后给普通页）；madvise 10 种 no-op；prctl SECCOMP 返回 EINVAL 而非 ENOSYS
-- **性能类**：vDSO 缺失（每取时走 syscall）；O_DIRECT 无区分；块层无合并调度；TCP 无 SACK/wscale/timestamps 协商；拥塞控制单一
-- **安全类**：ASLR 全缺；文件 capabilities（xattr 依赖）；seccomp/NO_NEW_PRIVS
-- **设施类**：POSIX AIO 全 ENOSYS；AF_PACKET；UDP multicast/IGMP；getrusage 全 0；ITIMER_VIRTUAL/PROF；SIGEV_THREAD_ID；分区表；USB/mmc；GPU DRM；initramfs；kmod；shutdown 级联缺失；mount API v2
+- **Fake-success class** (most dangerous — more deceptive than ENOSYS):
+  SO_KEEPALIVE/SO_LINGER/SO_BROADCAST; fake TCP_NODELAY; fake IP_TTL/MULTICAST;
+  three empty mlock stubs; THP (MAP_HUGETLB validated then given normal
+  pages); 10 no-op madvise hints; prctl SECCOMP returning EINVAL instead of
+  ENOSYS
+- **Performance**: no vDSO (a syscall per time read); no O_DIRECT
+  distinction; no block-layer merging/scheduling; TCP without SACK/wscale/
+  timestamps negotiation; single congestion control
+- **Security**: ASLR entirely absent; file capabilities (xattr-dependent);
+  seccomp/NO_NEW_PRIVS
+- **Facilities**: POSIX AIO all ENOSYS; AF_PACKET; UDP multicast/IGMP;
+  getrusage all zeros; ITIMER_VIRTUAL/PROF; SIGEV_THREAD_ID; partition
+  tables; USB/mmc; GPU DRM; initramfs; kmod; missing shutdown cascade; mount
+  API v2
 
-## 最反直觉的发现
+## Most counter-intuitive findings
 
-1. **swap.rs 426 行完整实现但 `swap_init()` 全仓库零调用者**——swapon 又是 ENOSYS。处于"写完未接线"状态。
-2. **flock 假成功 + fcntl 锁缺失 = 静默数据损坏**：sqlite 在并发写时无锁保护，比返回 ENOSYS 危害更大。
-3. **epoll 等待是 busy-yield**：nginx/redis/node 等一切事件循环程序在 SMP 下空转烧 CPU（功能兼容但功耗/延迟劣化）。
+1. **swap.rs: a complete 426-line implementation with zero callers of
+   `swap_init()` in the tree** — and swapon was ENOSYS. "Written but never
+   wired up."
+2. **Fake-success flock + missing fcntl locks = silent data corruption**:
+   sqlite had no lock protection under concurrent writers — more dangerous
+   than returning ENOSYS.
+3. **epoll waiting was busy-yield**: every event-loop program (nginx/redis/
+   node) spun CPU under SMP (functionally compatible, power/latency
+   degraded).
 
-## 已正确实现的亮点（避免误伤）
+## Correctly implemented highlights (do not "fix" these)
 
-eventfd 含 EFD_SEMAPHORE、POSIX mq 优先级、SysV IPC 三件套、TCP 半关闭、IPv4 分片重组、ICMP echo/unreach、中断共享 action 链、FLUSH 真下发、/proc/self/exe 真实重开、getrandom ChaCha20、renameat2 NOREPLACE、五集合 capabilities 模型、sigaltstack、CPU affinity 真执行面、wall clock offset 模型
+eventfd with EFD_SEMAPHORE, POSIX mq priorities, the three SysV IPC
+facilities, TCP half-close, IPv4 fragment reassembly, ICMP echo/unreach,
+shared interrupt action chains, real FLUSH propagation, /proc/self/exe
+reopening the real file, getrandom ChaCha20, renameat2 NOREPLACE, the
+five-set capabilities model, sigaltstack, actually-enforced CPU affinity,
+wall clock offset model
 
-## 建议实施优先级（按解锁软件面）
+## Suggested implementation priority (by software unlocked)
 
-1. **P0-7（64MB 内存顶）**——最小改动解锁最大软件面：layout.rs 一行改 + zone 已有 2GB
-2. **P0-5（fcntl 记录锁 + flock 真实现）**——sqlite/包管理器数据安全
-3. **P0-4（inotify）**——编辑器/构建工具/桌面
-4. **P0-6（tmpfs）**——/dev/shm + 容器基础
-5. **P0-3（pty）**——tmux/sshd 交互
-6. **P0-1（AF_UNIX）**——桌面 IPC 底座
-7. **P0-2（netlink+ioctl+DHCP）**——网络配置
+1. **P0-7 (64MB memory cap)** — smallest change unlocking the most software:
+   one line in layout.rs + zones already had 2GB
+2. **P0-5 (fcntl record locks + real flock)** — data safety for sqlite and
+   package managers
+3. **P0-4 (inotify)** — editors/build tools/desktop
+4. **P0-6 (tmpfs)** — /dev/shm + container foundation
+5. **P0-3 (pty)** — tmux/sshd interactivity
+6. **P0-1 (AF_UNIX)** — the desktop IPC foundation
+7. **P0-2 (netlink+ioctl+DHCP)** — network configuration

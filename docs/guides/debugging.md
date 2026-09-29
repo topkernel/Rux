@@ -241,45 +241,52 @@ make build RELEASE=1
 | `kernel/src/arch/riscv64/trap.rs` | Trap/exception handling |
 | `kernel/src/arch/riscv64/pt_regs.rs` | PtRegs structure (register layout) |
 
-## DFX 可开关诊断特性
+## Toggleable DFX Diagnostics
 
-内核的可观测性手段沉淀在 `kernel/src/dfx/`，分两类开关：**编译期 feature**（热路径钩子，关闭时零开销）与**运行时 boot 参数开关**（`dfx=...`，逐项启用）。
+The kernel's observability facilities live in `kernel/src/dfx/` and come in
+two flavors: **compile-time Cargo features** (hot-path hooks, zero overhead
+when off) and **runtime boot-parameter switches** (`dfx=...`, enable
+individually).
 
-### 编译期 feature（Cargo.toml）
+### Compile-time features (Cargo.toml)
 
-| Feature | 开销 | 用途 |
+| Feature | Cost | Purpose |
 |---|---|---|
-| `dfx-lock-owner` | 每次锁/解锁各 1 次原子 store | 自旋锁持有者跟踪；死锁告警打印 `holder=<cpu>` |
+| `dfx-lock-owner` | One atomic store per lock/unlock | Spinlock holder tracking; deadlock warnings print `holder=<cpu>` |
 
 ```bash
-# 平时构建（零 DFX 开销）
+# Regular build (zero DFX overhead)
 cargo build --target riscv64gc-unknown-none-elf --features riscv64
-# 追锁死锁时
+# When hunting lock deadlocks
 cargo build --target riscv64gc-unknown-none-elf --features riscv64,dfx-lock-owner
 ```
 
-### 运行时开关（boot 参数 `dfx=`，逗号分隔）
+### Runtime switches (boot parameter `dfx=`, comma-separated)
 
-| 开关 | 用途 |
+| Switch | Purpose |
 |---|---|
-| `watchdog` | 自旋锁死锁告警之后自动打印全任务状态快照（SBI 直写，不依赖 printk） |
-| `taskdump` | 预留：按需任务快照触发钩 |
+| `watchdog` | After a spinlock-deadlock warning, automatically print a full task-state snapshot (written directly via SBI, independent of printk) |
+| `taskdump` | Reserved: on-demand task snapshot trigger hook |
 
 ```bash
 -append "root=/dev/vda rw console=ttyS0 dfx=watchdog"
 ```
 
-### 死锁/挂起现场捕获工具
+### Deadlock / hang capture tool
 
-`test/hunt-wedge.sh` 自动构建带 `dfx-lock-owner` 的内核，循环跑
-smoke+nettest+管道轰炸，检测两类挂起（A 型：锁死锁告警；B 型：管道静默无输出
->30s），任一触发即通过 QEMU monitor 抓取每 CPU 寄存器/栈/反汇编到
-`/tmp/rux-hunt/`，并保留当轮 `kernel.elf` 供 `addr2line` 符号化。
+`test/hunt-wedge.sh` automatically builds a kernel with `dfx-lock-owner`,
+then loops smoke + nettest + pipe-bomb workloads watching for two classes of
+hangs (type A: lock-deadlock warning; type B: a pipe going silent with no
+output for >30s). When either fires, it captures per-CPU registers / stacks /
+disassembly through the QEMU monitor into `/tmp/rux-hunt/` and preserves that
+round's `kernel.elf` for `addr2line` symbolization.
 
 ```bash
-./test/hunt-wedge.sh [轮数]   # 默认 6 轮；捕获即停，exit 0=捕获, 2=未复现
+./test/hunt-wedge.sh [rounds]   # default 6; stops on capture, exit 0=caught, 2=not reproduced
 ```
 
-现场分析方法：`hunt.log` 判型（DEADLOCK 行/管道输出断流），`hunt.dump` 中
-`pc=`/`ra=` 用 `riscv64-linux-gnu-addr2line -e /tmp/rux-hunt/kernel.elf -f -C <addr>`
-符号化；栈字按内核 `ra` 惯例扫描（返回地址列表逐一符号化即得调用链）。
+Analyzing a capture: classify the hang from `hunt.log` (a DEADLOCK line vs.
+pipe output stopping), symbolize `pc=`/`ra=` in `hunt.dump` with
+`riscv64-linux-gnu-addr2line -e /tmp/rux-hunt/kernel.elf -f -C <addr>`, and
+scan stack words for kernel `ra` values (symbolize the return-address list to
+recover the call chain).
