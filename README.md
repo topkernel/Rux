@@ -23,9 +23,9 @@
 
 | | |
 |---|---|
-| ![Ubuntu login](docs/images/ubuntu-login.png) | ![Ubuntu desktop](docs/images/ubuntu-desktop.png) |
+| ![Ubuntu login](docs/images/ubuntu-login-2026-09-29.png) | ![Ubuntu desktop](docs/images/ubuntu-desktop-2026-09-29.png) |
 | *Login screen (native framebuffer session)* | *Desktop with dock, top panel and windows* |
-| ![Apps](docs/images/ubuntu-apps.png) | ![Terminal](docs/images/ubuntu-terminal.png) |
+| ![Apps](docs/images/ubuntu-sysinfo-rux.png) | ![Terminal](docs/images/ubuntu-terminal-2026-09-29.png) |
 | *System Info — kernel row shows the Rux identity* | *Terminal running a real `/bin/dash` shell — real commands, real output* |
 
 What is running in these screenshots, all on the Rux kernel:
