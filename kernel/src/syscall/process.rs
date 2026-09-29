@@ -4110,12 +4110,25 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
 }
 
 /// sys_close_range - Close file descriptors in range (NR 436)
+///
+/// Linux clamps the upper bound to the fdtable ceiling, so
+/// close_range(3, ~0U, 0) — what GLib's g_spawn uses between fork and
+/// exec — must not walk the whole u32 space. Flags: bit 0
+/// CLOSE_RANGE_CLOEXEC sets FD_CLOEXEC instead of closing; bit 1
+/// CLOSE_RANGE_UNSHARE only matters for CLONE_FILES threads (no-op
+/// here). Unknown flags are EINVAL like Linux.
 pub fn sys_close_range(args: SyscallArgs) -> i64 {
+    const CLOSE_RANGE_CLOEXEC: u32 = 1 << 0;
+    const CLOSE_RANGE_UNSHARE: u32 = 1 << 1;
+
     let fd = args[0] as u32;
     let max_fd = args[1] as u32;
-    let _flags = args[2] as u32;
+    let flags = args[2] as u32;
 
     if fd > max_fd {
+        return -(errno::EINVAL as i64);
+    }
+    if flags & !(CLOSE_RANGE_CLOEXEC | CLOSE_RANGE_UNSHARE) != 0 {
         return -(errno::EINVAL as i64);
     }
 
@@ -4124,16 +4137,22 @@ pub fn sys_close_range(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    let mut closed = 0u32;
-    for target_fd in fd..=max_fd {
-        if fdtable.close_fd(target_fd as usize).is_err() {
-            // fd not open, skip
-        } else {
-            closed += 1;
+    // The table cannot hold fds >= MAX_FDS: clamp once instead of
+    // spinning through billions of always-EBADF close_fd() calls.
+    let upper = (max_fd as usize).min(crate::fs::file::MAX_FDS - 1);
+
+    if flags & CLOSE_RANGE_CLOEXEC != 0 {
+        for target_fd in (fd as usize)..=upper {
+            fdtable.set_fd_cloexec(target_fd, true);
         }
+        return 0;
+    }
+
+    for target_fd in (fd as usize)..=upper {
+        // fd not open → skip (Linux semantics: silently ignore)
+        let _ = fdtable.close_fd(target_fd);
     }
     // Linux returns 0 (not the number of closed fds).
-    let _ = closed;
     0
 }
 
