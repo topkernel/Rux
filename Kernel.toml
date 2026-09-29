@@ -38,8 +38,25 @@ user_heap_max_size = 134217728
 enable_swap = true
 # Swap size (MB) — carved from end of block device
 swap_size_mb = 256
-# Kernel stack size (bytes) - 32KB
-kernel_stack_size = 65536
+# Kernel stack size (bytes) - 128KB.
+#
+# Was 64KB: the open("/dev/ptmx") chain (sys_openat → file_open →
+# devfs_open → ptmx_open → alloc_pty → PtyPair::new → TtyDevice::new)
+# moves the ~12KB PtyPair through by-value construction frames and ran
+# ~71KB deep in the debug build — spilling frames ~2 pages PAST the
+# stack bottom into the adjacent buddy-heap page. The spill zeroed
+# whatever object lived there (reproduced deterministically with
+# virtio-gpu: PID 1's FsStruct.root Vec buffer sat one page below the
+# stack; after the zeroing every path lookup was prefixed with a
+# garbage root byte ("\0/dev/pts/0") and all /dev opens failed ENOENT —
+# the "pty create/destroy race"; other heap draws zeroed File/PtyPair
+# objects instead: stale TIOCGPTN index, ENXIO slave opens, wild-jump
+# panics). A GDB hardware-watchpoint on the victim page caught the
+# writer: the Spinlock<TtyInput>::new memcpy executing at sp 0x1CC0
+# BELOW the stack bottom. 128KB restores ~57KB of headroom; the pty
+# layer additionally boxes its 8KB master_rx buffer (see fs/pty.rs) so
+# pair construction no longer shuffles 8KB through every frame.
+kernel_stack_size = 131072
 # Buddy allocator max order
 buddy_max_order = 20
 # Slab cache count

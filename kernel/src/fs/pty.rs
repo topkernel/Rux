@@ -76,8 +76,15 @@ const TIOCSPTLCK: u32 = 0x4004_5431;
 /// Master-side buffer capacity (Linux uses one 8K buffer per pty).
 const MASTER_RX_BUF: usize = 8192;
 
+/// Master read buffer. The 8KB storage is Boxed, NOT inline: PtyPair is
+/// constructed by value (PtyPair::new → return value → Arc::new copy) and an
+/// 8KB inline array made every one of those moves shuffle 8KB through
+/// debug-build stack frames — the open("/dev/ptmx") chain then ran past the
+/// kernel stack bottom into the adjacent heap page (see the KERNEL_STACK_SIZE
+/// note in config.rs). With the buffer boxed, PtyPair shrinks to ~4.5KB and
+/// the deepest pty frame drops by ~16KB across the construction chain.
 struct MasterRx {
-    data: [u8; MASTER_RX_BUF],
+    data: alloc::boxed::Box<[u8; MASTER_RX_BUF]>,
     /// read position (master read side)
     head: usize,
     /// write position (slave write / echo side)
@@ -85,9 +92,9 @@ struct MasterRx {
 }
 
 impl MasterRx {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
-            data: [0; MASTER_RX_BUF],
+            data: alloc::boxed::Box::new([0u8; MASTER_RX_BUF]),
             head: 0,
             tail: 0,
         }
