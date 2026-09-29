@@ -40,6 +40,11 @@ What is running in these screenshots, all on the Rux kernel:
 - **Interactive bash, D-Bus (system + session bus) end to end**, pty, SysV IPC,
   POSIX signals with full nesting semantics, 4-CPU SMP with cross-core TLB
   shootdowns
+- **Linux ABI by design**: `uname` and `/proc/version` intentionally report
+  Linux-compatible strings — that identity is what lets unmodified
+  Ubuntu/glibc binaries run without patches; the desktop's System Info
+  panel surfaces the Rux identity over the same data
+  (`Rux 6.8.0-rux (buildd@rux) (rustc …) #1 SMP`)
 - X11/Xorg brings-up and a full GNOME session image are in active development
   (see the [Roadmap](docs/progress/roadmap.md))
 
