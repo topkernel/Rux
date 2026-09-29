@@ -99,3 +99,4 @@ kernel/verify/kani-output.txt
 # Generated test artifacts (make ubuntu-image / verify.py outputs)
 /work/
 *.out
+.x11work/

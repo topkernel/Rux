@@ -306,6 +306,17 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                     }
                 };
 
+                // Linux do_pollfd(): revents are MASKED to the requested
+                // events plus the always-reportable ERR/HUP/NVAL. Drivers
+                // return readiness in the *NORM companions (e.g. a unix
+                // socket reports POLLIN|POLLRDNORM) and the mask strips
+                // the bits the caller never asked for. libxcb treats any
+                // revents bit outside its requested set as a fatal poll
+                // error, so leaking POLLRDNORM here killed every X client
+                // handshake ("Can't open display").
+                let revents =
+                    revents & (pollfd.events | POLLERR | POLLHUP | POLLNVAL);
+
                 if revents != 0 {
                     pollfd.revents = revents;
                     ready_count += 1;

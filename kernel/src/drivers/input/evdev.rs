@@ -17,7 +17,7 @@
 use super::event::*;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::fs::file::{File, FileOps};
 use crate::fs::dev_t::{DevNo, DEV_EVDEV_KEYBOARD, DEV_EVDEV_POINTER};
@@ -148,6 +148,10 @@ pub struct EvdevDevice {
     absinfo: [InputAbsinfo; 2],
     /// EVIOCGRAB state (device-level; we have a single client in practice).
     grabbed: AtomicBool,
+    /// LED state bitmap (bit N = LED_N), maintained from EV_LED writes the
+    /// way Linux's evdev_write → input_inject_event does; readable back via
+    /// EVIOCGLED(len).
+    led_state: AtomicU32,
     /// Event queue
     pub event_queue: Spinlock<VecDeque<InputEvent>>,
 }
@@ -171,6 +175,7 @@ impl EvdevDevice {
             ev_bits: [[0u8; BITS_LEN]; BIT_TYPES],
             absinfo: [InputAbsinfo::default(); 2],
             grabbed: AtomicBool::new(false),
+            led_state: AtomicU32::new(0),
             event_queue: Spinlock::new(VecDeque::with_capacity(EVENT_QUEUE_SIZE)),
         }
     }
@@ -423,10 +428,63 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
     ready
 }
 
+/// Event type constants from <uapi/linux/input.h> needed by the write path.
+const EV_SYN: u16 = 0x00;
+const EV_LED: u16 = 0x11;
+
+/// evdev write function
+///
+/// Linux semantics (drivers/input/evdev.c evdev_write): the buffer must be
+/// a positive multiple of sizeof(struct input_event); each record is handed
+/// to the input core, which silently drops events the device cannot take
+/// and keeps LED/SND state for EVIOCGLED/EVIOCGSND. X servers write EV_LED
+/// + SYN_REPORT packets here whenever core keyboard LED state changes —
+/// returning an error (the old no-write-op EBADF) made every
+/// xf86-input-evdev LED update log "(EE) Failed to set keyboard controls:
+/// Bad file descriptor".
+fn evdev_file_write(file: &File, buf: &[u8]) -> isize {
+    // SAFETY: private_data contains a valid DevNo pointer set during device
+    // open; the EVDEV_* statics are initialized by init_evdev() before any
+    // file operations can occur.
+    let device = match unsafe { device_of_file(file) } {
+        Some(d) => d,
+        None => return -9, // EBADF
+    };
+
+    let event_size = core::mem::size_of::<InputEvent>();
+    if buf.is_empty() || buf.len() % event_size != 0 {
+        return -22; // EINVAL
+    }
+
+    for chunk in buf.chunks(event_size) {
+        // InputEvent is repr(C) with no padding: the byte view parses
+        // in place.
+        let (sec, rest) = chunk.split_at(8);
+        let (usec, rest) = rest.split_at(8);
+        let (tycode, val) = rest.split_at(4);
+        let type_ = u16::from_ne_bytes([tycode[0], tycode[1]]);
+        let code = u16::from_ne_bytes([tycode[2], tycode[3]]);
+        let value = i32::from_ne_bytes([val[0], val[1], val[2], val[3]]);
+        let _ = (sec, usec); // client-supplied timestamps are advisory
+
+        if type_ == EV_LED && code < 32 {
+            if value != 0 {
+                device.led_state.fetch_or(1 << code, Ordering::AcqRel);
+            } else {
+                device.led_state.fetch_and(!(1 << code), Ordering::AcqRel);
+            }
+        }
+        // Everything else (including the trailing EV_SYN/SYN_REPORT) needs
+        // no action: there is no hardware to inject into, and Linux's input
+        // core equally ignores events without a capable handler.
+    }
+    buf.len() as isize
+}
+
 /// evdev FileOps
 pub static EVDEV_OPS: FileOps = FileOps {
     read: Some(evdev_file_read),
-    write: None,
+    write: Some(evdev_file_write),
     lseek: None,
     close: Some(evdev_file_close),
     poll: Some(evdev_file_poll),
@@ -532,13 +590,22 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
         (NR_REP_SET, IOC_WRITE) => 0,
         (NR_KEY_STATE, IOC_READ) | (NR_LED_STATE, IOC_READ) | (NR_SND_STATE, IOC_READ)
         | (NR_SW_STATE, IOC_READ) => {
-            // Current key/led/sound/switch state: report "all clear" (the
-            // kernel does not track it). Consumers treat this as advisory.
+            // Live state bitmap. LED bits track EV_LED writes (Linux
+            // input-core semantics); key/sound/switch are not tracked and
+            // report "all clear" — advisory, as on any kernel without
+            // stateful drivers.
             let len = ioc_size(cmd);
             if len == 0 {
                 0
             } else {
-                copy_out(arg, cmd, &[0u8; 32][..len.min(32)])
+                let state = if nr == NR_LED_STATE {
+                    device.led_state.load(Ordering::Acquire)
+                } else {
+                    0
+                };
+                let mut b = [0u8; 32];
+                b[..4].copy_from_slice(&state.to_ne_bytes());
+                copy_out(arg, cmd, &b[..len.min(32)])
             }
         }
         (NR_GRAB, IOC_WRITE) => {
