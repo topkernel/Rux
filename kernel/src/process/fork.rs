@@ -401,10 +401,22 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         }
 
         // === CLONE_PARENT_SETTID / CLONE_CHILD_SETTID ===
-        // Both are written in the PARENT address space, BEFORE the mm copy
-        // below: with CLONE_VM the memories are identical anyway; without
-        // CLONE_VM the COW copy carries the CHILD_SETTID word into the
-        // child (child-context semantics). EFAULT fails the clone (Linux).
+        // CLONE_PARENT_SETTID is a PARENT-memory store (Linux put_user in
+        // the parent) — done here, before the mm copy.
+        // CLONE_CHILD_SETTID must land in the CHILD's memory only. With
+        // CLONE_VM the two share one mm, so a parent-side store is the
+        // child store; WITHOUT CLONE_VM (fork) the write is deferred to
+        // after the COW mm copy below, where it goes through the child's
+        // own page tables (see child_settid_pending). Writing it here in
+        // the parent — as this code did before — mutated the PARENT's
+        // copy of the word: glibc's fork() passes child_tidptr =
+        // &THREAD_SELF->tid, so the parent's TCB tid field was overwritten
+        // with the CHILD's pid. Every later recursive-mutex owner check in
+        // the parent (glibc compares __owner against that TCB field)
+        // mismatched, and any recursive re-lock of a mutex still held
+        // across the fork took the contended slow path and slept forever
+        // (Xorg's input_mutex around the xkbcomp System() call — the
+        // permanent futex_wait(2) wedge).
         if args.flags & CLONE_PARENT_SETTID != 0 && !args.parent_tid.is_null() {
             let tid_val = pid as i32;
             if crate::arch::riscv64::uaccess::copy_to_user(
@@ -416,16 +428,139 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 return unwind(task_ptr, efault());
             }
         }
+        let mut child_settid_pending = false;
         if args.flags & CLONE_CHILD_SETTID != 0 && !args.child_tid.is_null() {
-            let tid_val = pid as i32;
-            if crate::arch::riscv64::uaccess::copy_to_user(
-                args.child_tid as *mut u8,
-                &tid_val as *const i32 as *const u8,
-                core::mem::size_of::<i32>(),
-            ) != 0
-            {
-                return unwind(task_ptr, efault());
+            if args.flags & CLONE_VM != 0 {
+                // Shared address space: the child's memory IS this memory.
+                let tid_val = pid as i32;
+                if crate::arch::riscv64::uaccess::copy_to_user(
+                    args.child_tid as *mut u8,
+                    &tid_val as *const i32 as *const u8,
+                    core::mem::size_of::<i32>(),
+                ) != 0
+                {
+                    return unwind(task_ptr, efault());
+                }
+            } else {
+                // Separate mm (fork): write after the COW copy, through
+                // the child's page tables.
+                child_settid_pending = true;
             }
+        }
+
+        /// Store the child's TID at `child_tid` in the CHILD's address
+        /// space (Linux CLONE_CHILD_SETTID semantics). The child just got
+        /// a COW copy of the parent's mm, so a parent-side copy_to_user
+        /// would hit the PARENT's mapping. If the target leaf is still
+        /// COW-shared, break the COW first (private copy for the child,
+        /// bookkeeping charged to the child's mm), then write through the
+        /// child's PTE via the linear map.
+        ///
+        /// # Safety
+        /// `child_root` must be the root ppn of the new child's page
+        /// tables; the child task has not run yet (no TLB entries).
+        unsafe fn write_child_settid(
+            child_root: u64,
+            child_tid: *mut i32,
+            tid: i32,
+            child_task: *mut Task,
+        ) -> bool {
+            use crate::arch::riscv64::mm::memory_layout::{phys_to_virt, PhysAddr, PAGE_SIZE};
+            use crate::arch::riscv64::mm::mmu_init::get_page_table_virt;
+            use crate::arch::riscv64::mm::pagetable::PageTableEntry;
+            use crate::arch::riscv64::mm::cow_flags;
+            use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+
+            let va = child_tid as u64;
+            let vpn2 = ((va >> 30) & 0x1ff) as usize;
+            let vpn1 = ((va >> 21) & 0x1ff) as usize;
+            let vpn0 = ((va >> 12) & 0x1ff) as usize;
+            let root = get_page_table_virt(child_root << 12);
+            let pte2 = (*root).get(vpn2);
+            if !pte2.is_valid() {
+                return false;
+            }
+            let t1 = get_page_table_virt(pte2.ppn() << 12);
+            let pte1 = (*t1).get(vpn1);
+            if !pte1.is_valid() {
+                return false;
+            }
+            let t0 = get_page_table_virt(pte1.ppn() << 12);
+            let mut pte0 = (*t0).get(vpn0);
+            if !pte0.is_valid() {
+                return false;
+            }
+
+            // Break COW if the leaf is write-protected and COW-marked
+            // (same mechanics as handle_cow_fault, but the copy is charged
+            // to the CHILD's mm — that function books against
+            // sched::current(), which here is the parent).
+            if pte0.bits() & PageTableEntry::W == 0
+                && pte0.bits() & cow_flags::COW != 0
+            {
+                let old_ppn = pte0.ppn();
+                let old_page = pfn_to_page_mut(old_ppn as usize);
+                let new_phys = match crate::arch::riscv64::mm::mm_ops::alloc_user_phys_page() {
+                    Some(p) => p,
+                    None => return false,
+                };
+                let new_ppn = (new_phys >> 12) as u64;
+                let old_virt = phys_to_virt(PhysAddr((old_ppn << 12) as u64));
+                let new_virt = phys_to_virt(PhysAddr(new_phys));
+                core::ptr::copy_nonoverlapping(
+                    old_virt.bits() as *const u8,
+                    new_virt.bits() as *mut u8,
+                    PAGE_SIZE as usize,
+                );
+                // W requires R (SV39 reserved encoding otherwise).
+                let flags = pte0.bits()
+                    & (PageTableEntry::V
+                        | PageTableEntry::R
+                        | PageTableEntry::X
+                        | PageTableEntry::U
+                        | PageTableEntry::G
+                        | PageTableEntry::A
+                        | PageTableEntry::D)
+                    | PageTableEntry::W
+                    | PageTableEntry::R;
+                (*t0).set(vpn0, PageTableEntry::from_bits((new_ppn << 10) | flags));
+                // Release the child's share of the old page.
+                if !old_page.is_null() {
+                    (*old_page).put_page();
+                    (*old_page).dec_mapcount();
+                }
+                let new_page = pfn_to_page_mut(new_ppn as usize);
+                if !new_page.is_null() {
+                    (*new_page).set_flag(PageFlag::Anonymous);
+                    (*new_page).set_index(va as usize / (PAGE_SIZE as usize));
+                    (*new_page).inc_mapcount();
+                }
+                // Charge the copy to the CHILD's mm (not current()).
+                if let Some(mm) = (*child_task).address_space() {
+                    if !new_page.is_null() {
+                        crate::mm::rmap::page_record_mapping(
+                            &*new_page,
+                            mm as *const _ as usize,
+                            va as usize,
+                        );
+                    }
+                    mm.add_rss(1);
+                }
+                pte0 = (*t0).get(vpn0);
+            }
+
+            if pte0.bits() & PageTableEntry::W == 0 {
+                return false;
+            }
+            let base = phys_to_virt(PhysAddr((pte0.ppn() << 12) as u64));
+            core::ptr::write_volatile(
+                (base.as_usize() + (va & 0xfff) as usize) as *mut i32,
+                tid,
+            );
+            // The child has never run, so no TLB can hold a stale entry;
+            // fence for ordering only.
+            core::arch::asm!("fence rw, rw");
+            true
         }
 
         // === CLONE_CHILD_CLEARTID: Clear TID when child exits ===
@@ -487,8 +622,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                             use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
                             let child_arc = alloc::sync::Arc::new(child_as);
                             let p_root = parent_as.root_ppn();
-                            let c_root = child_arc.root_ppn();
-                            for va in [0x1c8000u64, 0x1c9000, 0x100000] {
+                            let c_root = child_arc.root_ppn();                            for va in [0x1c8000u64, 0x1c9000, 0x100000] {
                                 unsafe {
                                     let p = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(p_root, va);
                                     let c = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(c_root, va);
@@ -516,9 +650,26 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                                 }
                             }
                             (*task_ptr).set_address_space(Some(child_arc));
+                            // CLONE_CHILD_SETTID (fork path): store the
+                            // child's TID through the child's OWN page
+                            // tables — see the comment at the flag check.
+                            if child_settid_pending
+                                && !unsafe { write_child_settid(c_root, args.child_tid, pid as i32, task_ptr) }
+                            {
+                                return unwind(task_ptr, efault());
+                            }
                         }
                         #[cfg(not(feature = "dfx-futex-trace"))]
-                        (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(child_as)));
+                        {
+                            let child_arc = alloc::sync::Arc::new(child_as);
+                            let c_root = child_arc.root_ppn();
+                            (*task_ptr).set_address_space(Some(child_arc));
+                            if child_settid_pending
+                                && !unsafe { write_child_settid(c_root, args.child_tid, pid as i32, task_ptr) }
+                            {
+                                return unwind(task_ptr, efault());
+                            }
+                        }
                     }
                     Err(_e) => {
                         return unwind(task_ptr, enomem());
