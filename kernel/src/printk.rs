@@ -224,18 +224,33 @@ pub fn printk(level: u8, args: fmt::Arguments) {
     emit_to_console(&buf[..text_len]);
 }
 
+/// Whole-record console atomicity flag: with several harts printing
+/// concurrently, per-byte lock-free emission interleaved records
+/// mid-line (garbled boot log). Holders only push bytes to the UART
+/// (bounded work, no other locks taken), and same-CPU re-entry is
+/// already excluded by the per-CPU IN_PRINTK guard — so spinning here
+/// cannot deadlock.
+static CONSOLE_EMIT_LOCK: AtomicBool = AtomicBool::new(false);
+
 /// Console (UART) emission path for printk records.
 ///
 /// Uses the LOCK-FREE MMIO writer (putchar_no_lock), never the UART
 /// spinlock: printk can run with arbitrary locks held or in IRQ context.
 /// Re-entrancy is already excluded by the IN_PRINTK guard in the callers.
 fn emit_to_console(text: &[u8]) {
+    while CONSOLE_EMIT_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
     for &b in text {
         if b == b'\n' {
             crate::console::putchar_no_lock(b'\r');
         }
         crate::console::putchar_no_lock(b);
     }
+    CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
 }
 
 /// Write a formatted message with trailing newline to the kernel log.
@@ -961,7 +976,7 @@ pub fn init_kmsg_device() {
 #[macro_export]
 macro_rules! pr_emerg {
     ($($arg:tt)*) => ({
-        $crate::printk::printk($crate::printk::loglevel::KERN_EMERG, format_args!($($arg)*))
+        $crate::printk::printk_ln($crate::printk::loglevel::KERN_EMERG, format_args!($($arg)*))
     });
 }
 
@@ -969,7 +984,7 @@ macro_rules! pr_emerg {
 #[macro_export]
 macro_rules! pr_alert {
     ($($arg:tt)*) => ({
-        $crate::printk::printk($crate::printk::loglevel::KERN_ALERT, format_args!($($arg)*))
+        $crate::printk::printk_ln($crate::printk::loglevel::KERN_ALERT, format_args!($($arg)*))
     });
 }
 
@@ -977,7 +992,7 @@ macro_rules! pr_alert {
 #[macro_export]
 macro_rules! pr_crit {
     ($($arg:tt)*) => ({
-        $crate::printk::printk($crate::printk::loglevel::KERN_CRIT, format_args!($($arg)*))
+        $crate::printk::printk_ln($crate::printk::loglevel::KERN_CRIT, format_args!($($arg)*))
     });
 }
 
@@ -985,7 +1000,7 @@ macro_rules! pr_crit {
 #[macro_export]
 macro_rules! pr_err {
     ($($arg:tt)*) => ({
-        $crate::printk::printk($crate::printk::loglevel::KERN_ERR, format_args!($($arg)*))
+        $crate::printk::printk_ln($crate::printk::loglevel::KERN_ERR, format_args!($($arg)*))
     });
 }
 
@@ -993,7 +1008,7 @@ macro_rules! pr_err {
 #[macro_export]
 macro_rules! pr_warn {
     ($($arg:tt)*) => ({
-        $crate::printk::printk($crate::printk::loglevel::KERN_WARNING, format_args!($($arg)*))
+        $crate::printk::printk_ln($crate::printk::loglevel::KERN_WARNING, format_args!($($arg)*))
     });
 }
 
@@ -1001,7 +1016,7 @@ macro_rules! pr_warn {
 #[macro_export]
 macro_rules! pr_notice {
     ($($arg:tt)*) => ({
-        $crate::printk::printk($crate::printk::loglevel::KERN_NOTICE, format_args!($($arg)*))
+        $crate::printk::printk_ln($crate::printk::loglevel::KERN_NOTICE, format_args!($($arg)*))
     });
 }
 
@@ -1009,7 +1024,7 @@ macro_rules! pr_notice {
 #[macro_export]
 macro_rules! pr_info {
     ($($arg:tt)*) => ({
-        $crate::printk::printk($crate::printk::loglevel::KERN_INFO, format_args!($($arg)*))
+        $crate::printk::printk_ln($crate::printk::loglevel::KERN_INFO, format_args!($($arg)*))
     });
 }
 
@@ -1019,7 +1034,7 @@ macro_rules! pr_info {
 #[macro_export]
 macro_rules! pr_debug {
     ($($arg:tt)*) => ({
-        $crate::printk::printk($crate::printk::loglevel::KERN_DEBUG, format_args!($($arg)*))
+        $crate::printk::printk_ln($crate::printk::loglevel::KERN_DEBUG, format_args!($($arg)*))
     });
 }
 
