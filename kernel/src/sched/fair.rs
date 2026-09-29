@@ -572,7 +572,12 @@ impl CfsRunQueue {
     /// entity's on_rq flag claims. Used by __schedule's prev requeue to
     /// distinguish a legitimately-linked prev (racing wake during a
     /// prepare-to-wait recheck window) from a stale on_rq=true flag.
-    /// Called with the GRQ lock held; only on the enqueue-refused path.
+    ///
+    /// INVARIANT: the timeline BTreeMap (including this read-only scan)
+    /// is only touched with the GRQ lock held. The DFX taskdump calls it
+    /// via grq_diag_cfs_linked's try-lock (busy lock → linkage reported
+    /// unknown); a lockless scan would race structural insert/remove on
+    /// other CPUs and corrupt the stdlib iterator.
     pub fn is_linked(&self, task: *mut crate::process::Task) -> bool {
         if task.is_null() {
             return false;

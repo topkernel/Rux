@@ -363,6 +363,7 @@ pub fn dump_all_tasks(reason: &str) {
     }
 
     let mut count: usize = 0;
+    let mut linked_unknown: usize = 0;
     // Non-blocking iteration: this dump runs from the spinlock deadlock
     // watchdog (spinning, IRQs off) or the UART RX magic — exactly the
     // contexts where another CPU may be stuck HOLDING a pid-hash bucket
@@ -392,13 +393,21 @@ pub fn dump_all_tasks(reason: &str) {
             puts(" on_cpu=");
             put_dec(t.on_cpu() as u64);
             // Authoritative linked-state (tree/list scan, not the flag) —
-            // settles flag-desync vs really-off-queue in one shot.
-            let linked = unsafe {
-                let g = crate::sched::sched::grq_diag_cfs_linked(task_ptr);
-                g
-            };
-            puts(" linked=");
-            put_dec(linked as u64);
+            // settles flag-desync vs really-off-queue in one shot. The scan
+            // runs under the GRQ try-lock; a busy lock reports '?' (counted
+            // below) — never a lockless tree walk, which races structural
+            // mutation on other CPUs and corrupts the iterator.
+            let linked = crate::sched::sched::grq_diag_cfs_linked(task_ptr);
+            match linked {
+                Some(b) => {
+                    puts(" linked=");
+                    put_dec(b as u64);
+                }
+                None => {
+                    puts(" linked=?");
+                    linked_unknown += 1;
+                }
+            }
             puts(" on_rq=");
             put_dec(t.sched_entity().on_rq.load(Ordering::Relaxed) as u64);
             puts(" affinity=0x");
@@ -501,6 +510,11 @@ pub fn dump_all_tasks(reason: &str) {
         puts("warning: ");
         put_dec(skipped as u64);
         puts(" pid-hash buckets were locked (stuck holder?) and skipped\n");
+    }
+    if linked_unknown > 0 {
+        puts("warning: ");
+        put_dec(linked_unknown as u64);
+        puts(" linked= probes skipped (GRQ lock busy)\n");
     }
 }
 

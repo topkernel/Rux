@@ -103,6 +103,33 @@ impl GlobalRunQueue {
         GrqPlainGuard { grq: self as *const Self as *mut Self, _marker: core::marker::PhantomData }
     }
 
+    /// Try-lock with the full lock_irqsave protocol (IRQ save + preempt
+    /// count + lock), returning None instead of spinning when the GRQ is
+    /// held. For diagnostic paths that must never block on a possibly
+    /// wedged holder (the DFX taskdump runs from the spinlock deadlock
+    /// watchdog with IRQs off) but still need the lock to legally read the
+    /// per-class queue trees.
+    #[inline]
+    pub fn try_lock_irqsave(&self) -> Option<GrqGuard<'_>> {
+        let flags = crate::arch::riscv64::cpu::save_and_disable_irq();
+        crate::interrupt::preempt::preempt_count_add(
+            crate::interrupt::preempt::PREEMPT_OFFSET,
+        );
+        if self.lock.try_lock() {
+            Some(GrqGuard {
+                grq: self as *const Self as *mut Self,
+                flags,
+                _marker: core::marker::PhantomData,
+            })
+        } else {
+            crate::interrupt::preempt::preempt_count_sub(
+                crate::interrupt::preempt::PREEMPT_OFFSET,
+            );
+            crate::arch::riscv64::cpu::restore_irq(flags);
+            None
+        }
+    }
+
     // ---- idle CPU bitmap ----
 
     /// Mark a CPU as idle.
@@ -1817,14 +1844,28 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
     }
 }
 
-/// DFX diagnostic: authoritative CFS linked-state by pointer scan (no locks —
-/// a racing tree is acceptable for a diagnostic; the scan mirrors dequeue's
-/// own lookup). Used by taskdump to distinguish flag-desync from
-/// really-off-queue phantoms.
-pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> bool {
-    // SAFETY: GRQ is initialized before the first task exists; the CFS map
-    // scan treats the pointer as a key comparison only.
-    unsafe { (*grq()).cfs_rq.is_linked(task) }
+/// DFX diagnostic: authoritative CFS linked-state by pointer scan, used by
+/// taskdump to distinguish flag-desync from really-off-queue phantoms.
+///
+/// The scan mirrors dequeue's own lookup, but the CFS `tasks_timeline`
+/// BTreeMap may ONLY be iterated under the GRQ lock — including from
+/// diagnostics. The old lockless scan ("a racing tree is acceptable for a
+/// diagnostic") was unsound: std BTreeMap iteration concurrent with
+/// structural insert/remove on another CPU walks nodes that are being
+/// split/merged/freed, and the iterator's `next_unchecked` contract breaks
+/// (observed: `navigate.rs` `next_kv().ok().unwrap()` panic under GLib
+/// multi-threaded scheduling churn). The GRQ is therefore acquired with
+/// try_lock semantics so a wedged holder can never wedge the diagnostic
+/// itself; a busy lock reports linkage as unknown (None) and the dump
+/// labels it, exactly like the skipped pid-hash buckets.
+pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> Option<bool> {
+    if task.is_null() {
+        return Some(false);
+    }
+    // SAFETY: GRQ is initialized before the first task exists; the scan
+    // treats the pointer as a key comparison only and runs under the lock.
+    let guard = grq().try_lock_irqsave()?;
+    Some(guard.cfs_rq.is_linked(task))
 }
 
 /// DFX diagnostic (4-thread hang hunt): grq.nr_running (the global runnable
