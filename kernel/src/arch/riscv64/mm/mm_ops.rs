@@ -1145,56 +1145,93 @@ pub unsafe fn map_user_region(
 }
 
 /// Allocate and map user memory
+///
+/// Serves the request with power-of-two buddy blocks capped at order 10
+/// (4 MiB). A single block used to be allocated here even when smaller
+/// than the request while `map_user_region` still mapped the FULL size:
+/// every mapping larger than 4 MiB walked past the allocated block into
+/// arbitrary neighbouring physical frames. A 16 MiB heap growth (glibc
+/// raises its mmap threshold after large frees, so later big requests are
+/// served from the main arena via one large sbrk) then memset over other
+/// tasks' page tables — observed downstream as glibc "double free or
+/// corruption (!prev)", bogus swap-in entries and random pagefault OOM
+/// kills. Chunking the allocation keeps the mapped range inside pages we
+/// own.
 pub unsafe fn alloc_and_map_user_memory(
     user_root_ppn: u64,
     virt_addr: u64,
     size: u64,
     flags: u64,
 ) -> Option<u64> {
+    if size == 0 { return None; }
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
-    if size == 0 { return None; }
+    let mut first_phys = 0u64;
+    let mut mapped_pages = 0usize;
 
-    let order = if page_count == 1 {
-        0
-    } else {
-        (page_count.next_power_of_two().trailing_zeros() as usize).min(10)
-    };
-    let alloc_size = (1usize << order) * PAGE_SIZE as usize;
-
-    let phys_addr = alloc_pages(GfpFlags::GFP_USER, order);
-
-    if phys_addr == 0 {
-        return None;
-    }
-
-    // Zero BEFORE mapping: the pages are reachable through the linear map
-    // regardless. Mapping first exposed stale page contents (old freed
-    // data) to user space for the duration of the memset — an information
-    // leak window on every execve.
-    let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
-
-    map_user_region(user_root_ppn, virt_addr, phys_addr as u64, size, flags);
-
-    // R7-C5: the rounded-up block allocated 2^order pages but the mapping
-    // only covers page_count — the unmapped excess has no PTE, so no
-    // teardown path would ever free it (~192KB leaked per execve; a shell
-    // loop drove the machine to OOM). Free the excess as order-0 pages
-    // right away; buddy coalescing rebuilds larger blocks lazily. The
-    // mapped prefix stays physically contiguous (exec writes via
-    // phys_base + vaddr offset).
-    {
+    while mapped_pages < page_count {
+        let remain = page_count - mapped_pages;
+        let order = if remain == 1 {
+            0
+        } else {
+            (remain.next_power_of_two().trailing_zeros() as usize).min(10)
+        };
         let block_pages = 1usize << order;
-        if block_pages > page_count {
+        // block_pages >= remain whenever remain <= 1024 (ceil-log2), so the
+        // last chunk covers the rest exactly; bigger remain takes 1024-page
+        // (4 MiB) blocks.
+        let chunk_pages = remain.min(block_pages);
+        let chunk_bytes = chunk_pages * PAGE_SIZE as usize;
+
+        let phys_addr = alloc_pages(GfpFlags::GFP_USER, order);
+
+        if phys_addr == 0 {
+            // Keep the pre-failure all-or-nothing semantics of the old
+            // single-block path: report failure; sys_brk then leaves the
+            // break unchanged (chunks mapped so far are zeroed anonymous
+            // pages that a retry re-maps over).
+            return None;
+        }
+
+        // Zero BEFORE mapping: the pages are reachable through the linear
+        // map regardless. Mapping first exposed stale page contents (old
+        // freed data) to user space for the duration of the memset — an
+        // information leak window on every execve.
+        let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+        core::ptr::write_bytes(
+            virt_addr_ptr.bits() as *mut u8,
+            0,
+            block_pages * PAGE_SIZE as usize,
+        );
+
+        map_user_region(
+            user_root_ppn,
+            virt_addr + (mapped_pages * PAGE_SIZE as usize) as u64,
+            phys_addr as u64,
+            chunk_bytes as u64,
+            flags,
+        );
+
+        // R7-C5: the rounded-up block allocated 2^order pages but the
+        // mapping only covers chunk_pages — the unmapped excess has no
+        // PTE, so no teardown path would ever free it (~192KB leaked per
+        // execve; a shell loop drove the machine to OOM). Free the excess
+        // as order-0 pages right away; buddy coalescing rebuilds larger
+        // blocks lazily.
+        if block_pages > chunk_pages {
             let base_pfn = phys_addr >> PAGE_SHIFT;
-            for pfn in (base_pfn + page_count)..(base_pfn + block_pages) {
+            for pfn in (base_pfn + chunk_pages)..(base_pfn + block_pages) {
                 crate::mm::page_alloc::free_pages(pfn << PAGE_SHIFT, 0);
             }
         }
+
+        if mapped_pages == 0 {
+            first_phys = phys_addr as u64;
+        }
+        mapped_pages += chunk_pages;
     }
 
-    Some(phys_addr as u64)
+    Some(first_phys)
 }
 
 /// Allocate and map to kernel table
