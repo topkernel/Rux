@@ -1,274 +1,273 @@
-# Rux 内核 Linux 对比与全文件检视报告（2026-09-23）
+# Rux Kernel Linux-Comparison Full-File Review Report (2026-09-23)
 
-**检视目标**：全仓库 278 个源文件（含 3 个 .S 汇编）逐文件、逐函数、逐数据结构、逐行检视；以 Linux 为基准对比语义差异；重点考察 POSIX/ABI 兼容性（目标：musl 静态编译的 Linux 软件可直接运行）。
+**Review goal**: all 278 source files in the repository (including 3 .S assembly files) reviewed file by file, function by function, data structure by data structure, line by line; semantic differences compared against Linux as the baseline; focus on POSIX/ABI compatibility (goal: statically compiled musl Linux software runs directly).
 
-**评审约定**：每项发现的"初判"标注三类——
-- `设计不一致`：有意简化/取舍，语义自洽（用户评审是否接受）
-- `疑似 bug`：与 Linux 差异且引发错误行为
-- `待评审`：无法单方面判定
+**Review conventions**: each finding's "initial verdict" is annotated with one of three classes —
+- `Design inconsistency`: deliberate simplification/trade-off, self-consistent semantics (for user review to accept or not)
+- `Suspected bug`: differs from Linux and causes incorrect behavior
+- `Pending review`: cannot be adjudicated unilaterally
 
-**类别**：LINUX-DIFF（语义差异）| ABI（POSIX/ABI）| BUG | OVERFLOW | RACE | TIMING | VISIBILITY | COMMENT | LICENSE | ARCH
+**Categories**: LINUX-DIFF (semantic difference) | ABI (POSIX/ABI) | BUG | OVERFLOW | RACE | TIMING | VISIBILITY | COMMENT | LICENSE | ARCH
 
-**统计**：278 文件 / 116,099 行 / 约 1,590 个函数符号 / **446 项发现**（P0-P1 级主题 18 组见总评审汇总）。
+**Statistics**: 278 files / 116,099 lines / ~1,590 function symbols / **446 findings** (18 P0-P1 theme groups, see the master review summary).
 
-# 批次 3：kernel/src/process/ — Linux 对比全文件检视
+# Batch 3: kernel/src/process/ — Linux-comparison full-file review
 
-范围：task.rs(2840)、fork.rs(502)、exec.rs(787)、exit.rs(809)、wait.rs(356)、pid.rs(160)、pid_hash.rs(262)、kthread.rs(231)、mod.rs(62)，共 6009 行。佐证交叉引用：syscall/process.rs、syscall/signal.rs、signal.rs、sync/futex.rs、fs/elf.rs、config.rs。
+Scope: task.rs(2840), fork.rs(502), exec.rs(787), exit.rs(809), wait.rs(356), pid.rs(160), pid_hash.rs(262), kthread.rs(231), mod.rs(62), 6,009 lines total. Corroborating cross-references: syscall/process.rs, syscall/signal.rs, signal.rs, sync/futex.rs, fs/elf.rs, config.rs.
 
-## 3.1 fork.rs（clone 语义）
+## 3.1 fork.rs (clone semantics)
 
-函数清单：`CloneArgs` 定义；`do_fork`；`copy_thread`；`do_clone`。
+Function list: `CloneArgs` definition; `do_fork`; `copy_thread`; `do_clone`.
 
-**发现**
-- [ABI][P1] fork.rs:238-257 + futex.rs:48-70 — 现状：exit 路径确有 `put_user(0)`+`futex_wake`（形式齐备），但 `FutexKey::matches` 对私有 futex 要求 `pid` 相等，key 的 pid 取 `current.pid()`（每线程不同）；Linux：私有 futex key 是 mm 指针（同 CLONE_VM 线程共享）。影响：join 等待者（另一线程）的 wait key 与退出线程的 wake key 恒不匹配 → musl `pthread_join` 永眠；同进程线程间一切私有 futex（mutex 竞争/cond）同理断裂。本批最重的 ABI 断点（sync 批次应复查 key 定义）。
-- [ABI][P1] fork.rs:394-400 — CLONE_THREAD 仅 `set_tgid`，无 thread_group 链/group_leader/nr_threads，且 sys_kill 正 pid 只单目标；Linux kill(tgid) 遍历线程组。影响：多线程程序的进程定向信号（SIGINT/SIGTERM）只命中一个线程；配合 exit_group 缺失（3.4），多线程 musl 程序整体不可用。
-- [语义][高] fork.rs:150-157 — CLONE_CHILD_SETTID/CLONE_PARENT_SETTID 写在父进程地址空间且在 mm 拷贝之后（Linux 在子上下文）；EFAULT 被忽略。
-- [语义][中] fork.rs:188-201 — 非法 flag 组合返回 None → 统一 -ENOMEM（Linux -EINVAL）；PID 耗尽 ENOMEM 而非 EAGAIN。
-- [语义][中] 子任务不继承 comm、nice、policy、rt_priority、cpus_allowed、oom_score_adj、sigaltstack。
-- [语义][中] fork.rs:255-267 — CLONE_FILES 且父无 fdtable 时子新建表+std fds，违背共享语义（边缘）。
-- [语义][低] sigmask 复制两次；CLONE_VFORK 用 UNINTERRUPTIBLE+手工 schedule 近似；CLONE_PARENT 未实现；CSIGNAL 低 8 位被忽略（恒 SIGCHLD 恰好等价）。
-- [正确性][低] fork.rs:226 `add_child` 早于 copy_thread：TASK_NEW 防住了并发 wake（正面），do_wait 可观测半构建子进程（非僵尸，无害）。
+**Findings**
+- [ABI][P1] fork.rs:238-257 + futex.rs:48-70 — Current state: the exit path does have `put_user(0)`+`futex_wake` (formally complete), but `FutexKey::matches` requires `pid` equality for private futexes, and the key's pid is taken from `current.pid()` (different per thread); Linux: the private futex key is the mm pointer (shared by threads of the same CLONE_VM). Impact: a join waiter's (another thread) wait key never matches the exiting thread's wake key → musl `pthread_join` sleeps forever; every private futex between threads of the same process (mutex contention/cond) likewise breaks. The heaviest ABI break of this batch (the sync batch should re-review the key definition).
+- [ABI][P1] fork.rs:394-400 — CLONE_THREAD only does `set_tgid`, with no thread_group chain/group_leader/nr_threads, and sys_kill with a positive pid only targets one; Linux's kill(tgid) iterates the thread group. Impact: process-directed signals of multithreaded programs (SIGINT/SIGTERM) hit only one thread; combined with the missing exit_group (3.4), multithreaded musl programs are wholly unusable.
+- [Semantics][High] fork.rs:150-157 — CLONE_CHILD_SETTID/CLONE_PARENT_SETTID written into the parent's address space after the mm copy (Linux in the child context); EFAULT ignored.
+- [Semantics][Medium] fork.rs:188-201 — Illegal flag combinations return None → a uniform -ENOMEM (Linux -EINVAL); PID exhaustion gives ENOMEM instead of EAGAIN.
+- [Semantics][Medium] The child task does not inherit comm, nice, policy, rt_priority, cpus_allowed, oom_score_adj, sigaltstack.
+- [Semantics][Medium] fork.rs:255-267 — With CLONE_FILES and the parent having no fdtable, the child creates a new table + std fds, violating the sharing semantics (an edge case).
+- [Semantics][Low] sigmask copied twice; CLONE_VFORK approximated with UNINTERRUPTIBLE + manual schedule; CLONE_PARENT unimplemented; the CSIGNAL low 8 bits ignored (happens to be equivalent since it's always SIGCHLD).
+- [Correctness][Low] fork.rs:226 `add_child` before copy_thread: TASK_NEW guards against concurrent wake (positive), do_wait can observe a half-built child (not a zombie, harmless).
 
-**正面**：flag 前置校验与 Linux 一致；失败路径全量 unwind；vfork 双竞态已修；CLONE_SETTLS 时机正确。
+**Positives**: the up-front flag validation matches Linux; the failure path fully unwinds; the vfork double race fixed; the CLONE_SETTLS timing correct.
 
-## 3.2 exec.rs（execve vs load_elf_binary）
+## 3.2 exec.rs (execve vs load_elf_binary)
 
-函数清单：`do_execve_elf`（含 UserAddrSpaceGuard、auxv/栈构建、PTE 收紧、解释器装载、VMA 登记）。
+Function list: `do_execve_elf` (including UserAddrSpaceGuard, auxv/stack construction, PTE tightening, interpreter loading, VMA registration).
 
-**发现**
-- [ABI][高] exec.rs:170-172 + 629-644 + signal.rs:1096-1099 — 信号返回 ra 指向**用户栈**上的 2 指令 trampoline，sa_restorer 存而不用；栈 PTE 无 X、栈 VMA 仅 RW，page_fault 按 VMA 拒绝 EXEC。Linux：rt_sigaction 强制 SA_RESTORER，返回经 libc __restore_rt（文本段）。影响：musl 信号处理器返回跳栈上不可执行代码 → SIGSEGV；W^X 与"内核 trampoline"设计矛盾（建议尊重 sa_restorer）。
-- [ABI][高] syscall/process.rs:110/141 — argv 上限 65 条/1024B、envp 257 条/4096B，超限静默截断，非 UTF-8 丢弃；Linux 131072 条/32 页单串/RLIMIT_STACK/4 总量，超限 E2BIG。影响：稍大 env 的 shell/python 行为损坏。
-- [ABI][高] exec.rs 全文 — 多线程 exec 无 de_thread：兄弟线程继续跑旧映像但共享 fdtable 已被 close_cloexec、SignalStruct 已 flush。影响：线程进程 exec 后语义未定义。
-- [语义][中] exec.rs:55-81 — cloexec/handler/pending 清理在镜像加载成功前，失败不回滚（Linux 仅在不可返回点后提交）。
-- [语义][中] exec.rs:574-590 — auxv 15 对自洽但**缺 AT_PLATFORM(15)**，AT_HWCAP=0 无 ISA 探测；AT_CLKTCK=100 硬编码与 config HZ 双源。
-- [正确性][中] exec.rs:474-475 — 无 PT_PHDR 时 AT_PHDR 回退栈上副本（musl ld.so 推 bias 得栈地址）；Linux 用 load_bias+e_phoff。
-- [安全][低] 解释器基址固定 0x3FBF000000、PIE bias 0，无 ASLR。
-- [正确性][低] 同页跨 RX/RW 段 PTE 收紧"后写者胜"；phdr 表拷贝不自防（pub(crate) 复用有险）。
-- [设计][低] 全文件读入+全物理页预分配（无 demand paging）；itimer/posix_timers 未随 exec 重置。
+**Findings**
+- [ABI][High] exec.rs:170-172 + 629-644 + signal.rs:1096-1099 — The signal-return ra points to a 2-instruction trampoline **on the user stack**, with sa_restorer stored but unused; the stack PTE has no X and the stack VMA is RW only, page_fault rejects EXEC by VMA. Linux: rt_sigaction mandates SA_RESTORER, returning via the libc __restore_rt (in the text segment). Impact: musl signal handlers return by jumping to non-executable code on the stack → SIGSEGV; the W^X and "kernel trampoline" designs contradict (recommend honoring sa_restorer).
+- [ABI][High] syscall/process.rs:110/141 — argv capped at 65 entries/1024B, envp 257/4096B, silently truncated beyond, non-UTF-8 dropped; Linux 131072 entries/32 pages per single string/RLIMIT_STACK/4 total, E2BIG beyond. Impact: shells/python with slightly larger env break.
+- [ABI][High] exec.rs whole file — Multithreaded exec has no de_thread: sibling threads keep running the old image but the shared fdtable was already close_cloexec'd and the SignalStruct flushed. Impact: a threaded process's exec semantics undefined afterward.
+- [Semantics][Medium] exec.rs:55-81 — The cloexec/handler/pending cleanup happens before the image loads successfully, with no rollback on failure (Linux commits only after the point of no return).
+- [Semantics][Medium] exec.rs:574-590 — The auxv's 15 pairs are self-consistent but **missing AT_PLATFORM(15)**; AT_HWCAP=0 with no ISA probing; AT_CLKTCK=100 hardcoded, a second source against config's HZ.
+- [Correctness][Medium] exec.rs:474-475 — Without PT_PHDR, AT_PHDR falls back to the stack copy (musl ld.so derives the bias as a stack address); Linux uses load_bias+e_phoff.
+- [Security][Low] The interpreter base fixed at 0x3FBF000000, PIE bias 0, no ASLR.
+- [Correctness][Low] PTE tightening for same-page straddling RX/RW segments is "last writer wins"; the phdr-table copy isn't self-protected (pub(crate) reuse is risky).
+- [Design][Low] The whole file read in + all physical pages pre-allocated (no demand paging); itimer/posix_timers not reset across exec.
 
-**正面**：BSS 清零、段边界校验、RAII guard、tp=0 留给 musl TLS 重初始化、cred 快照回滚、vfork 唤醒在成功路径末尾。
+**Positives**: BSS zeroing, segment bounds validation, the RAII guard, tp=0 left for musl TLS reinitialization, the credential snapshot rollback, the vfork wakeup at the end of the success path.
 
-## 3.3 exit.rs + wait 语义
+## 3.3 exit.rs + wait semantics
 
-函数清单：`release_task`；`reparent_children_to_init`；`do_exit`；`do_wait`；`do_wait_nonblock`；`write_siginfo`；`do_waitid`；W*/P_*/CLD_* 常量。
+Function list: `release_task`; `reparent_children_to_init`; `do_exit`; `do_wait`; `do_wait_nonblock`; `write_siginfo`; `do_waitid`; the W*/P_*/CLD_* constants.
 
-- [ABI][P1] dispatch.rs:142-143 — exit(93) 与 exit_group(94) 同映射 sys_exit→do_exit：只终止调用线程，无线程组击杀（Linux zap_other_threads）。多线程进程 exit_group 后其余线程存活。
-- [语义][高] exit.rs:370-372/535-537 — wait4/waitpid 的 pid==0（同 pgid）与 pid<-1（pgid==-pid）一律当"任意子进程"；Linux 三段语义。shell 作业控制收错进程。
-- [语义][高] exit.rs:752-754 — waitid+WNOHANG 无事件返回 -EAGAIN；Linux/POSIX 返回 0 且不动 infop。
-- [语义][中] do_wait_nonblock 忽略 options（WUNTRACED 失效）；wait4 无 WCONTINUED；未知 options 不报 EINVAL。
-- [语义][中] wait4 的 rusage 完全忽略；无 RUSAGE_CHILDREN 累计（bash time/make 统计为 0）。
-- [语义][中] 过继只找 init(1)，不查 PR_SET_CHILD_SUBREAPER（prctl 存了不用）；pdeath_signal 存而不发。
-- [并发][中] exit.rs:437 vs 743 — wait4 用 stop_reported、waitid 用 stop_signal()!=0 两套一次性报告机制不互斥（同一停止事件双报）。
-- [正确性][低] 信号死 wstatus 无 WCOREDUMP 位；status 写失败忽略（与 nonblock 版不一致）。
-- [清理][低] exit.rs:64-74 — 释放堆 PtRegs 是旧 fork 路径遗留死代码（两套 copy_thread 并存是隐患）。
+- [ABI][P1] dispatch.rs:142-143 — exit(93) and exit_group(94) both mapped to sys_exit→do_exit: only the calling thread terminates, no thread-group kill (Linux zap_other_threads). After a multithreaded process's exit_group, the other threads survive.
+- [Semantics][High] exit.rs:370-372/535-537 — wait4/waitpid's pid==0 (same pgid) and pid<-1 (pgid==-pid) are always treated as "any child"; Linux has the three-way semantics. Shell job control reaps the wrong process.
+- [Semantics][High] exit.rs:752-754 — waitid+WNOHANG with no event returns -EAGAIN; Linux/POSIX return 0 and leave infop untouched.
+- [Semantics][Medium] do_wait_nonblock ignores options (WUNTRACED ineffective); wait4 without WCONTINUED; unknown options don't report EINVAL.
+- [Semantics][Medium] wait4's rusage entirely ignored; no RUSAGE_CHILDREN accumulation (bash time/make statistics are 0).
+- [Semantics][Medium] Reparenting only finds init(1), never checking PR_SET_CHILD_SUBREAPER (prctl stores but never uses it); pdeath_signal stored but never sent.
+- [Concurrency][Medium] exit.rs:437 vs 743 — wait4 uses stop_reported, waitid uses stop_signal()!=0; the two one-shot report mechanisms don't exclude each other (a single stop event double-reported).
+- [Correctness][Low] No WCOREDUMP bit in the signal-death wstatus; a status write failure ignored (inconsistent with the nonblock version).
+- [Cleanup][Low] exit.rs:64-74 — Freeing the heap PtRegs is legacy dead code of the old fork path (two copy_thread implementations coexisting is a hazard).
 
-**正面**：wstatus 位布局与 musl 宏一致；release_task 顺序正确；僵尸过继补发 SIGCHLD+直唤 init；do_waitid 过滤一致性重查。
+**Positives**: the wstatus bit layout matches the musl macros; the release_task ordering correct; the zombie reparenting sends a supplementary SIGCHLD + directly wakes init; do_waitid's filter-consistency re-check.
 
-## 3.4 wait.rs（等待队列基础设施）
+## 3.4 wait.rs (wait-queue infrastructure)
 
-- [语义][低] wake_up 忽略 mode 过滤（由 wake_up_process 兜底）；nr_exclusive 近似。
-- [设计][低] Vec 头插/retain O(n)（Linux 双链表 O(1)）；add 按值拷入的 API 陷阱。
-- 正面：R12-1 锁内唤醒；prepare_to_wait 同锁设状态+入队；两宏 re-check+dequeue 纪律。
+- [Semantics][Low] wake_up ignores the mode filter (backstopped by wake_up_process); nr_exclusive approximated.
+- [Design][Low] Vec head-insert/retain is O(n) (Linux's doubly linked list is O(1)); an API trap of copying in by value on add.
+- Positives: R12-1 wakeup inside the lock; prepare_to_wait sets state + enqueues under the same lock; both macros' re-check + dequeue discipline.
 
 ## 3.5 pid.rs
 
-- [语义][低] PID 耗尽 ENOMEM（Linux EAGAIN）；PID_MAX_LIMIT(4M) 仅导出未用；循环扫描+游标与 Linux 一致（正面）。
+- [Semantics][Low] PID exhaustion gives ENOMEM (Linux EAGAIN); PID_MAX_LIMIT(4M) exported but unused; the cyclic scan + cursor matches Linux (positive).
 
 ## 3.6 pid_hash.rs
 
-- [并发][高] pid_hash_lookup 在 rcu_read_unlock 之后返回裸指针——56 个未 pin 调用点在解锁后解引用期间可被并发 reap 释放 → UAF 窗口（pinned 版已具备未全面换用）。
-- [并发][中] pid_hash_remove 的 *prev = next 为普通写（Linux rcu_assign_pointer）。
-- [语义][低] LIFO 序（procfs 列表不稳定）；collect_all 固定 64 条截断。
+- [Concurrency][High] pid_hash_lookup returns a raw pointer after rcu_read_unlock — the 56 unpinned call sites can have the object freed by a concurrent reap during the post-unlock dereference → a UAF window (the pinned version exists but isn't universally adopted).
+- [Concurrency][Medium] pid_hash_remove's *prev = next is a plain write (Linux rcu_assign_pointer).
+- [Semantics][Low] LIFO order (procfs listing unstable); collect_all truncates at a fixed 64 entries.
 
 ## 3.7 kthread.rs
 
-- [资源][中] 内核线程自行退出无人清 KTHREAD_MAP → 条目泄漏 + PID 复用错配。
-- [语义][低] kthread_stop 忙等轮询（Linux completion）；注释称存 name 但未存；kthread_bind 仅 cpu<32。
+- [Resource][Medium] A kernel thread exiting on its own has nobody cleaning KTHREAD_MAP → entry leak + PID-reuse mismatch.
+- [Semantics][Low] kthread_stop busy-wait polls (Linux completion); the comment says the name is stored but it isn't; kthread_bind only cpu<32.
 
-## 3.8 task.rs（PCB）
+## 3.8 task.rs (PCB)
 
-函数清单（分组）：StackCache 系列；TaskState 系列；SchedPolicy/TaskFlags/Cred；Task::new/new_idle_at/new_task_at；sleep/wake_up；时间片系列；调度访问器系列；进程树系列（add_child/remove_child/for_each_child 等）；地址空间系列；vfork 系列；thread_info 组（ti_flags/preempt_count/ti_kernel_sp/ti_cpu/on_cpu 等内核）；内核栈系列；杂项（oom/fdtable/signal/exit_code/stop_signal/comm/pgid/pending/clear_child_tid/robust_list/brk/cwd/umask/exe_path 等）；HZ 常量、task_offsets、get_current_fdtable。
+Function list (grouped): the StackCache family; the TaskState family; SchedPolicy/TaskFlags/Cred; Task::new/new_idle_at/new_task_at; sleep/wake_up; the time-slice family; the scheduler-accessor family; the process-tree family (add_child/remove_child/for_each_child etc.); the address-space family; the vfork family; the thread_info group (ti_flags/preempt_count/ti_kernel_sp/ti_cpu/on_cpu etc. kernel-side); the kernel-stack family; misc (oom/fdtable/signal/exit_code/stop_signal/comm/pgid/pending/clear_child_tid/robust_list/brk/cwd/umask/exe_path etc.); the HZ constants, task_offsets, get_current_fdtable.
 
-- [清理][低] stack_cache_alloc 的 return 后第二个 unsafe 块为不可达死代码。
-- [注释][低] "32KB" 实为 64KB；"O(log N)" 实为哈希 O(1)。
-- [一致性][低] new_task_at 写 time_slice=HZ(100)，Task::new 用 TIME_SLICE_TICKS=10：双源不一致。
-- [并发][中] add_child 双链 tripwire 只打印不阻止，旧父链表悬空（无防御效果）。
-- [一致性][低] new_idle_at 以 *mut u64 直写 AtomicU64；Task::new 与 new_task_at 双轨。
-- [安全][低] 新任务以 Cred::new_init()（FULL caps）出生靠随后覆盖：漏拷即提权，模式脆弱。
-- [结构][信息] 缺 exit_signal、thread_group/group_leader、真实 rlimit、namespace、io_context——多线程/容器语义地基缺口。
+- [Cleanup][Low] In stack_cache_alloc, the second unsafe block after the return is unreachable dead code.
+- [Comment][Low] "32KB" is actually 64KB; "O(log N)" is actually hash O(1).
+- [Consistency][Low] new_task_at writes time_slice=HZ(100), Task::new uses TIME_SLICE_TICKS=10: an inconsistent dual source.
+- [Concurrency][Medium] add_child's double-link tripwire only prints without preventing; the old parent's list is left dangling (no defensive effect).
+- [Consistency][Low] new_idle_at writes an AtomicU64 directly via *mut u64; Task::new and new_task_at on dual tracks.
+- [Security][Low] A new task is born with Cred::new_init() (FULL caps) relying on subsequent overwriting: a missed copy is an escalation — a fragile pattern.
+- [Structure][Info] Missing exit_signal, thread_group/group_leader, real rlimits, namespaces, io_context — the groundwork gaps for multithreading/container semantics.
 
 ## 3.9 mod.rs
 
-- [语义][低] find_task_by_pid 返回 &'static mut（别名 UB 风险，全内核既定风格）；注释 O(log N) 错。
+- [Semantics][Low] find_task_by_pid returns &'static mut (aliasing-UB risk, the kernel-wide established style); the O(log N) comment wrong.
 
-## 3.10 佐证快照（syscall 对接）
+## 3.10 Corroborating snapshot (syscall integration)
 
-sys_clone 参数序正确、错误统一 ENOMEM；sys_set_tid_address 语义正确；sys_rt_sigaction 按 RISC-V ABI（restorer@16）正确往返 sa_restorer 但投递路径不用（3.2）；sys_wait4 WNOHANG 丢 options、-11 硬编码；sys_kill 权限近似到位但正 pid 无线程组扩散（3.1）。
+sys_clone's parameter order correct, errors uniformly ENOMEM; sys_set_tid_address semantics correct; sys_rt_sigaction per the RISC-V ABI (restorer@16) correctly round-trips sa_restorer but the delivery path doesn't use it (3.2); sys_wait4 drops options on WNOHANG, -11 hardcoded; sys_kill's permissions approximately in place but a positive pid has no thread-group propagation (3.1).
 
-## 批次 3 统计
+## Batch 3 statistics
 
-| 级别 | 数量 | 条目 |
+| Level | Count | Items |
 |---|---|---|
-| P1 | 3 | CLEARTID futex key 断裂（join 永眠）；无线程组信号扩散；exit_group 不杀线程组 |
-| 高 | 5 | sa_restorer 忽略+栈 trampoline 与 W^X 冲突；argv/envp 截断；多线程 exec 无 de_thread；waitpid pid==0/<-1 语义错；waitid WNOHANG 返回 -EAGAIN |
-| 中 | 11 | SETTID 写父空间；EINVAL/ENOMEM 混淆；调度属性不继承；CLONE_FILES 边缘；exec 前置破坏；auxv 缺 AT_PLATFORM；AT_PHDR 回退；WUNTRACED×WNOHANG；rusage 忽略；subreaper/PDEATHSIG；双停止报告；pid_hash 非原子 unlink；kthread map 泄漏；add_child 无防御 |
-| 低 | 14 | 死代码、注释漂移、time_slice 双源、WCOREDUMP、EFAULT 不一致、PID EAGAIN、双轨构造、cred 全权、procfs 64 截断、LIFO 序、O(n) 队列、API 陷阱、无 ASLR、后写者胜 |
+| P1 | 3 | The CLEARTID futex key break (join sleeps forever); no thread-group signal propagation; exit_group doesn't kill the thread group |
+| High | 5 | sa_restorer ignored + the stack trampoline conflicting with W^X; argv/envp truncation; multithreaded exec without de_thread; waitpid pid==0/<-1 semantics wrong; waitid WNOHANG returning -EAGAIN |
+| Medium | 11 | SETTID written into the parent's space; EINVAL/ENOMEM confusion; scheduling attributes not inherited; the CLONE_FILES edge; the pre-exec destruction; auxv missing AT_PLATFORM; the AT_PHDR fallback; WUNTRACED×WNOHANG; rusage ignored; subreaper/PDEATHSIG; double stop reporting; pid_hash non-atomic unlink; the kthread map leak; add_child without defense |
+| Low | 14 | Dead code, comment drift, the time_slice dual source, WCOREDUMP, EFAULT inconsistency, PID EAGAIN, dual-track construction, cred full powers, the procfs 64 truncation, LIFO order, the O(n) queue, the API trap, no ASLR, last-writer-wins |
 
-**结论**：单线程静态 musl 程序的 fork/exec/wait 主链路可用且多处对齐 Linux；但**线程 ABI 三处断裂**（futex 私有 key 用 tid、无线程组信号扩散、exit_group 空转）与**信号返回的 sa_restorer/W^X 矛盾**是运行真实 musl 动态程序前的必障。
+**Conclusion**: the fork/exec/wait main chain is usable for single-threaded static musl programs and aligns with Linux in many places; but the **three thread-ABI breaks** (the private futex key using tid, no thread-group signal propagation, exit_group being a no-op) and the **sa_restorer/W^X contradiction in signal return** are mandatory obstacles before running real musl dynamic programs.
 
 
-# 批次 1：syscall 层 Linux 对比检视报告
+# Batch 1: syscall layer Linux-comparison review report
 
-基准：Linux riscv64（asm-generic syscall 表 / musl ABI），逐文件逐函数全量检视。共 11 文件、约 372 个函数/方法。
+Baseline: Linux riscv64 (the asm-generic syscall table / the musl ABI), reviewed file by file, function by function, in full. 11 files, ~372 functions/methods total.
 
-**总体架构性发现（影响多个文件）**
-- [ARCH][疑似bug] trap.rs:135 经 enable_external_interrupt() 全局置 SUM=1 —— Linux 仅在 copy 窗口置 SUM。后果：syscall 层大量"裸访问用户指针"代码在 SUM=1 下能工作但绕过异常表：坏指针触发内核态 fault → panic 而非 EFAULT。
-- [LINUX-DIFF][设计不一致] 返回约定正确，但 resolve_user_path/do_execve 用 u64 传负 errno 等符号 hack 脆弱。
+**Overall architectural findings (affecting multiple files)**
+- [ARCH][Suspected bug] trap.rs:135 globally sets SUM=1 via enable_external_interrupt() — Linux sets SUM only inside copy windows. Consequence: large amounts of "raw user-pointer access" code in the syscall layer work under SUM=1 but bypass the exception table: a bad pointer triggers a kernel-mode fault → panic instead of EFAULT.
+- [LINUX-DIFF][Design inconsistency] The return convention is correct, but resolve_user_path/do_execve using u64 to pass negative errnos and similar sign hacks are fragile.
 
 ## 1. dispatch.rs
-- [ABI][疑似bug] dispatch.rs:296 — 240 号映射 sys_perf_event_open；Linux asm-generic **240=rt_tgsigqueueinfo，241=perf_event_open**。错号 + rt_tgsigqueueinfo 缺失。
-- [LINUX-DIFF][设计不一致] musl 启动必需号全部在表且正确（除 240）。
-- [COMMENT][待评审] 模块归属错置（rseq/fanotify 归 time.rs 等）。
-- [COMMENT][待评审] exit(93)/exit_group(94) 共用 sys_exit。
+- [ABI][Suspected bug] dispatch.rs:296 — Number 240 maps sys_perf_event_open; in Linux asm-generic, **240=rt_tgsigqueueinfo, 241=perf_event_open**. Wrong number + rt_tgsigqueueinfo missing.
+- [LINUX-DIFF][Design inconsistency] All the musl-startup-required numbers are present and correct in the table (except 240).
+- [COMMENT][Pending review] Module attribution misplaced (rseq/fanotify in time.rs etc.).
+- [COMMENT][Pending review] exit(93)/exit_group(94) share sys_exit.
 
 ## 2. mod.rs
-- [COMMENT][疑似bug] mod.rs:238-240 — Select=280/Pselect6=281/Eventfd=290 全错（280=bpf、281=execveat、290=pkey_free）；249 应为 Dup3；156-159 号值错。枚举为污染源。
-- [LINUX-DIFF][待评审] errno 值核对无误；缺 ENOLCK(37)/EPROTO(71)/EOVERFLOW(75)/ECANCELED(125)/EOWNERDEAD(130)/ENOTRECOVERABLE(131) 等常用。
-- [LINUX-DIFF][待评审] FdSet 1024 位 ✓ 但 FD_SETSIZE 取自 config（若 ≠1024 静默不一致）。
+- [COMMENT][Suspected bug] mod.rs:238-240 — Select=280/Pselect6=281/Eventfd=290 are all wrong (280=bpf, 281=execveat, 290=pkey_free); 249 should be Dup3; 156-159 values wrong. The enum is a contamination source.
+- [LINUX-DIFF][Pending review] errno values checked error-free; missing ENOLCK(37)/EPROTO(71)/EOVERFLOW(75)/ECANCELED(125)/EOWNERDEAD(130)/ENOTRECOVERABLE(131) and other common ones.
+- [LINUX-DIFF][Pending review] FdSet 1024 bits ✓ but FD_SETSIZE taken from config (silently inconsistent if ≠1024).
 
-## 3. file.rs（100 函数，清单略见 git 历史）
-- [ABI][疑似bug] file.rs:492 — /proc readlink bufsiz 不足返回 ENAMETOOLONG；Linux 截断返回长度（从不 ENAMETOOLONG）。
-- [ABI][疑似bug] file.rs:1501-1509 — mknodat ftype==0 返回 EINVAL；Linux 视为普通文件。
-- [ABI][疑似bug] file.rs:1998-2031 — futex2 FUTEX2_PRIVATE 用 bit0；Linux = FUTEX_PRIVATE_FLAG = 0x80。标准 flags 判定颠倒。
-- [BUG][疑似bug] file.rs:2012-2030 — futex_wait(455) 相对 timeout 透传给绝对语义的 WAIT_BITSET；mask 忽略。
-- [LINUX-DIFF][设计不一致] utimensat 空壳（不读 times 不更新）；renameat2 忽略 flags（NOREPLACE 覆盖）；statx 忽略 flags/attributes。
-- [BUG][疑似bug] file.rs:1183-1214 — statfs 不查路径存在性（任意路径返回假数据）。
-- [BUG][疑似bug] file.rs:1807-1846 — copy_file_range 忽略 off 指针；首败返 0 假成功。
-- [LINUX-DIFF][待评审] linkat/unlinkat/fchmodat 等 flags 不校验；openat2 size>24 应 E2BIG；faccessat 用 euid（Linux 无 AT_EACCESS 用 real uid）；fallocate 假成功；mount 忽略参数；fsync 为 stub。
-- [RACE][待评审] dirfd 相对路径基于 path 字符串快照（rename 后语义漂移）。
+## 3. file.rs (100 functions, list omitted, see git history)
+- [ABI][Suspected bug] file.rs:492 — /proc readlink with insufficient bufsiz returns ENAMETOOLONG; Linux truncates and returns the length (never ENAMETOOLONG).
+- [ABI][Suspected bug] file.rs:1501-1509 — mknodat with ftype==0 returns EINVAL; Linux treats it as a regular file.
+- [ABI][Suspected bug] file.rs:1998-2031 — futex2's FUTEX2_PRIVATE uses bit0; Linux = FUTEX_PRIVATE_FLAG = 0x80. The standard flag determination inverted.
+- [BUG][Suspected bug] file.rs:2012-2030 — futex_wait(455) passes a relative timeout through to the absolute-semantics WAIT_BITSET; the mask ignored.
+- [LINUX-DIFF][Design inconsistency] utimensat an empty shell (doesn't read times, doesn't update); renameat2 ignores flags (NOREPLACE overwrites); statx ignores flags/attributes.
+- [BUG][Suspected bug] file.rs:1183-1214 — statfs doesn't check path existence (any path returns fake data).
+- [BUG][Suspected bug] file.rs:1807-1846 — copy_file_range ignores the off pointers; returns 0 false success on first failure.
+- [LINUX-DIFF][Pending review] linkat/unlinkat/fchmodat etc. flags not validated; openat2 size>24 should be E2BIG; faccessat uses euid (Linux without AT_EACCESS uses the real uid); fallocate false success; mount ignores parameters; fsync a stub.
+- [RACE][Pending review] dirfd-relative paths based on a path-string snapshot (semantics drift after a rename).
 
 ## 4. io.rs
-- [OVERFLOW][疑似bug] io.rs:386/460/951/1013 — iovcnt 无 IOV_MAX(1024) 检查且 size_of×iovcnt 可溢出。
-- [BUG][疑似bug] io.rs:1179-1212/1289/1326 — splice/sendfile 裸解引用用户 off 指针；splice 改 fd 位置不恢复。
-- [RACE][疑似bug] io.rs:184-227/885-927 — pread/pwrite 用 get_pos/set_pos 模拟：多线程共享 fd 位置被破坏（Linux 原子）。
-- [LINUX-DIFF][待评审] readv/writev 逐 iov 非原子；ioctl 0x5400 族恒 0（FIONBIO 假成功、TCSETS 丢失）；flock 恒成功；write fd1/2 绕过文件层直写 MMIO。
+- [OVERFLOW][Suspected bug] io.rs:386/460/951/1013 — iovcnt without an IOV_MAX(1024) check and size_of×iovcnt can overflow.
+- [BUG][Suspected bug] io.rs:1179-1212/1289/1326 — splice/sendfile raw-dereference the user off pointer; splice changes the fd position without restoring it.
+- [RACE][Suspected bug] io.rs:184-227/885-927 — pread/pwrite simulated with get_pos/set_pos: a multithreaded shared fd position gets corrupted (Linux is atomic).
+- [LINUX-DIFF][Pending review] readv/writev per-iov non-atomic; the ioctl 0x5400 family always 0 (FIONBIO false success, TCSETS lost); flock always succeeds; write to fd1/2 bypasses the file layer and writes MMIO directly.
 
 ## 5. memory.rs
-- [BUG][疑似bug] memory.rs:1330/1489/1501 — mincore/get_mempolicy 裸写用户指针。
-- [ARCH][疑似bug] memory.rs:29-131 — sys_brk 对 new_brk 无上界检查（USER_END）：内核区映射 U 页即提权面。
-- [LINUX-DIFF][疑似bug] memory.rs:1160-1167 — MADV_DONTNEED/FREE 不释放页（glibc/jemalloc 堆收缩失效）。
-- [LINUX-DIFF][待评审] munmap 未映射区间 EINVAL（Linux 0）；mmap PROT_EXEC 简化为 RWX（W^X 失效）；fd>=1000 按 framebuffer 处理（合法 fd 误 ENXIO）；mremap 限制；mprotect 未映射返 0；mincore 溢出。
+- [BUG][Suspected bug] memory.rs:1330/1489/1501 — mincore/get_mempolicy raw-write user pointers.
+- [ARCH][Suspected bug] memory.rs:29-131 — sys_brk has no upper-bound check on new_brk (USER_END): mapping a U page in the kernel region is an escalation surface.
+- [LINUX-DIFF][Suspected bug] memory.rs:1160-1167 — MADV_DONTNEED/FREE don't free pages (glibc/jemalloc heap shrinking ineffective).
+- [LINUX-DIFF][Pending review] munmap of an unmapped range gives EINVAL (Linux 0); PROT_EXEC mmap simplified to RWX (W^X defeated); fd>=1000 treated as framebuffer (a legal fd wrongly ENXIO); mremap restrictions; mprotect on unmapped returns 0; mincore overflow.
 
 ## 6. misc.rs
-- [ABI][疑似bug] misc.rs:348-356 — pselect6 timeout 按 timeval 解析；**Linux 是 timespec**——量纲放大 1000 倍。
-- [LINUX-DIFF][疑似bug] misc.rs:132-145 — poll(NULL,0,ms) 合法 sleep 惯用法被拒；nfds>1024 EINVAL（Linux 无限）。
-- [ARCH][疑似bug] misc.rs:1504-1538 — getrandom 用 CLINT+LCG：非 CSPRNG（ssh/tls 依赖）。
-- [LINUX-DIFF][待评审] epoll ERR/HUP 被掩码滤掉；close 后 epoll 条目不删；sigmask 全忽略；eventfd/timerfd 阻塞语义缺失（EAGAIN busy-loop）。
+- [ABI][Suspected bug] misc.rs:348-356 — The pselect6 timeout parsed as timeval; **Linux uses timespec** — the magnitude 1000× too large.
+- [LINUX-DIFF][Suspected bug] misc.rs:132-145 — poll(NULL,0,ms), a legal sleep idiom, rejected; nfds>1024 EINVAL (Linux unlimited).
+- [ARCH][Suspected bug] misc.rs:1504-1538 — getrandom uses CLINT+LCG: not a CSPRNG (ssh/tls depend on it).
+- [LINUX-DIFF][Pending review] epoll ERR/HUP masked out by the filter; epoll entries not deleted after close; sigmask entirely ignored; eventfd/timerfd blocking semantics missing (an EAGAIN busy-loop).
 
 ## 7. process.rs
-- [ABI][疑似bug] process.rs:30-32 — **clone 参数 args[3]=tls, args[4]=child_tid；Linux riscv64 为 a3=child_tidptr, a4=tls**——pthread 创建即错位。
-- [ABI][疑似bug] process.rs:1637-1641 — rt_sigqueueinfo 按 4 参解析；**Linux 3 参 (tgid,sig,uinfo)**。
-- [BUG][疑似bug] process.rs:2453 — getrusage 写 136B；Linux rusage=144B。
-- [BUG][疑似bug] process.rs:2815-2838/2747 — close_range/riscv_hwprobe 返回 count；Linux 返回 0。
-- [BUG][疑似bug] signal.rs:546-549 — sys_tkill Err 双重取负返回正值。
-- [LINUX-DIFF][设计不一致] prlimit64 只认 NOFILE；setrlimit 静默接受；execve pathname 限 256B（PATH_MAX 4096）。
-- [LINUX-DIFF][待评审] gettid 返回 pid；tgkill 忽略 tgid；getgroups EFAULT 丢失；setpgid 空块；sysinfo 裸写+假数据；setuid cap 清空。
+- [ABI][Suspected bug] process.rs:30-32 — **clone's args[3]=tls, args[4]=child_tid; Linux riscv64 has a3=child_tidptr, a4=tls** — pthread creation is misaligned from the start.
+- [ABI][Suspected bug] process.rs:1637-1641 — rt_sigqueueinfo parsed as 4 arguments; **Linux uses 3 (tgid,sig,uinfo)**.
+- [BUG][Suspected bug] process.rs:2453 — getrusage writes 136B; Linux's rusage=144B.
+- [BUG][Suspected bug] process.rs:2815-2838/2747 — close_range/riscv_hwprobe return count; Linux returns 0.
+- [BUG][Suspected bug] signal.rs:546-549 — sys_tkill's Err double-negated and returned positive.
+- [LINUX-DIFF][Design inconsistency] prlimit64 only recognizes NOFILE; setrlimit silently accepted; the execve pathname limited to 256B (PATH_MAX 4096).
+- [LINUX-DIFF][Pending review] gettid returns pid; tgkill ignores tgid; getgroups EFAULT lost; setpgid an empty block; sysinfo raw-write + fake data; setuid clears caps.
 
 ## 8. sched.rs
-- [LINUX-DIFF][待评审] getpriority PRIO_PGRP/USER EINVAL；**renice 提优先级无 CAP_SYS_NICE**；sched_setaffinity 不存储；sched_setattr 不按 size 截读。
+- [LINUX-DIFF][Pending review] getpriority PRIO_PGRP/USER EINVAL; **renice raising priority without CAP_SYS_NICE**; sched_setaffinity doesn't store; sched_setattr doesn't truncate the read by size.
 
 ## 9. signal.rs
-- [BUG][疑似bug] signal.rs:332 — sigpending 裸写。
-- [LINUX-DIFF][待评审] rt_sigprocmask 对齐检查（Linux 不要求）；sa_mask 剥 KILL/STOP；sigaltstack 裸读写；restart_syscall 恒 0；signalfd4 ENOSYS。
-- 正面：SigActionUser 32B 布局与 asm-generic 一致；sigsuspend mask 交接正确。
+- [BUG][Suspected bug] signal.rs:332 — sigpending a raw write.
+- [LINUX-DIFF][Pending review] rt_sigprocmask's alignment check (Linux doesn't require it); sa_mask strips KILL/STOP; sigaltstack raw read/write; restart_syscall always 0; signalfd4 ENOSYS.
+- Positive: the SigActionUser 32B layout matches asm-generic; the sigsuspend mask handoff correct.
 
 ## 10. time.rs
-- [ABI][疑似bug] time.rs:553-601 — clock_nanosleep 返回负 errno；**Linux 特例返回正 errno**。
-- [LINUX-DIFF][设计不一致] clock_gettime REALTIME==MONOTONIC（无 wall clock）；CPUTIME 恒 0。
-- [BUG][疑似bug] time.rs:652/899 — POSIX timer 用 Vec::remove——删除中间 timer 后 id 错位。
-- [LINUX-DIFF][待评审] getitimer/setitimer 恒 0；nanosleep 负值不 EINVAL。
+- [ABI][Suspected bug] time.rs:553-601 — clock_nanosleep returns a negative errno; **Linux exceptionally returns a positive errno**.
+- [LINUX-DIFF][Design inconsistency] clock_gettime REALTIME==MONOTONIC (no wall clock); CPUTIME always 0.
+- [BUG][Suspected bug] time.rs:652/899 — The POSIX timer uses Vec::remove — deleting a middle timer misaligns ids.
+- [LINUX-DIFF][Pending review] getitimer/setitimer always 0; nanosleep negative values not EINVAL.
 
 ## 11. network.rs
-- [BUG][疑似bug] network.rs:879-886 — sendmsg 读 msg_name 但丢弃：**UDP sendmsg 永远发 NULL 目标**。
-- [BUG][疑似bug] network.rs:948 — recvmsg 丢弃源地址。
-- [BUG][疑似bug] network.rs:387-397 — getsockname 非 socket fd 假成功（getpeername 正确 ENOTSOCK）。
-- [BUG][疑似bug] network.rs:1085-1163 — sendmmsg/recvmmsg 首败返 0（Linux ABI 0=无消息）。
-- [LINUX-DIFF][设计不一致] setsockopt 全忽略（**SO_RCVTIMEO 无效 → 超时网络程序永久阻塞**）；getsockopt SO_ERROR 恒 0（非阻塞 connect 探测失效）。
-- [LINUX-DIFF][待评审] bind/connect 忽略 addrlen；AF_UNIX EAFNOSUPPORT；accept 不写 addr；accept4 忽略 CLOEXEC；MSG_PEEK/DONTWAIT 缺失；SHUT_RD 无操作。
+- [BUG][Suspected bug] network.rs:879-886 — sendmsg reads msg_name but discards it: **UDP sendmsg always sends a NULL destination**.
+- [BUG][Suspected bug] network.rs:948 — recvmsg discards the source address.
+- [BUG][Suspected bug] network.rs:387-397 — getsockname false success on a non-socket fd (getpeername correctly ENOTSOCK).
+- [BUG][Suspected bug] network.rs:1085-1163 — sendmmsg/recvmmsg return 0 on first failure (in the Linux ABI 0=no messages).
+- [LINUX-DIFF][Design inconsistency] setsockopt entirely ignored (**SO_RCVTIMEO ineffective → timeout network programs block forever**); getsockopt SO_ERROR always 0 (non-blocking connect probing broken).
+- [LINUX-DIFF][Pending review] bind/connect ignore addrlen; AF_UNIX EAFNOSUPPORT; accept doesn't write addr; accept4 ignores CLOEXEC; MSG_PEEK/DONTWAIT missing; SHUT_RD a no-op.
 
-## 批次 1 统计
-11 文件/约 372 函数/14197 行；**78 项发现**（LINUX-DIFF 44/ABI 8/BUG 13/OVERFLOW 3/RACE 3/ARCH 3/COMMENT 12）。License 11/11 齐全。
-**Top 10 修复优先**：①clone a3/a4 对调 ②rt_sigqueueinfo 3 参 ③FUTEX2_PRIVATE=0x80 ④pselect6 timespec ⑤240 号错位 ⑥futex_wait 相对 timeout ⑦sendmsg/recvmsg msg_name ⑧getrandom LCG ⑨tkill 双取负 ⑩rusage 144B。
+## Batch 1 statistics
+11 files/~372 functions/14,197 lines; **78 findings** (LINUX-DIFF 44/ABI 8/BUG 13/OVERFLOW 3/RACE 3/ARCH 3/COMMENT 12). Licenses present in 11/11.
+**Top 10 fix priorities**: (1) clone a3/a4 swapped (2) rt_sigqueueinfo 3 args (3) FUTEX2_PRIVATE=0x80 (4) pselect6 timespec (5) number 240 misplaced (6) futex_wait relative timeout (7) sendmsg/recvmsg msg_name (8) getrandom LCG (9) tkill double negation (10) rusage 144B.
 
 ---
 
-# 批次 2：arch/riscv64（含全部汇编）对比 Linux 检视报告
+# Batch 2: arch/riscv64 (including all assembly) Linux-comparison review report
 
-基准：Linux riscv64。范围：24 文件约 10.2k 行，三汇编逐指令。格式：[类别][初判] file:line — 现状；Linux；影响。
+Baseline: Linux riscv64. Scope: 24 files ~10.2k lines, the three assembly files instruction by instruction. Format: [category][initial verdict] file:line — current state; Linux; impact.
 
-## 2.1 trap.S（vs entry.S）
-已检符号 21 项（trap_entry 全部标签/宏/常量）。
-- [OK] 保存集与 Linux handle_exception 一致（31 GPR+sstatus/sepc/stval/scause）；sscratch 协议等价。
-- [DESIGN][中] trap.S:234-236 — 内核态 trap 不切 IRQ 栈（16KB×4 的 IRQ 栈实际闲置）；Linux 切 per-CPU hardirq 栈。
-- [缺陷][低] .Learly_boot 未从 sscratch 恢复 tp（防御路径）；boot.S:389 .Lsecondary_hang 注释与行为不符。
-- [RISK][低] .Lrestore_and_exit 先写 sstatus 再恢复 GPR（依赖 PT_STATUS.SIE=0 前提）；sc.d 清 LR 非标准。
-- [CONS][低] TASK_TI_* 偏移硬编码双份维护（无 asm-offsets 生成）。
+## 2.1 trap.S (vs entry.S)
+21 symbols reviewed (all of trap_entry's labels/macros/constants).
+- [OK] The save set matches Linux's handle_exception (31 GPRs + sstatus/sepc/stval/scause); the sscratch protocol equivalent.
+- [DESIGN][Medium] trap.S:234-236 — Kernel-mode traps don't switch to the IRQ stack (the 16KB×4 IRQ stacks actually idle); Linux switches to a per-CPU hardirq stack.
+- [Defect][Low] .Learly_boot doesn't restore tp from sscratch (a defensive path); boot.S:389's .Lsecondary_hang comment contradicts the behavior.
+- [RISK][Low] .Lrestore_and_exit writes sstatus before restoring the GPRs (relies on the PT_STATUS.SIE=0 premise); sc.d clearing LR is nonstandard.
+- [CONS][Low] TASK_TI_* offsets hardcoded and maintained in duplicate (no asm-offsets generation).
 
 ## 2.2 uaccess.S / uaccess.rs
-已检符号 16 项。
-- [OK] SUM 仪式与旧版 Linux __copy_user 一致；extable 16B 条目用法相同。
-- [SEC][中] uaccess.rs:230-243 — copy_from_user 失败不清零尾缓冲（Linux memset 0）——内核信息泄露面。
-- [缺陷][低] strncpy_from_user 空串误 EFAULT；shift-copy 尾字可越源端 7B 误报。
-- [CONS][低] extable 线性扫描（Linux 二分）；无 MAX_RW_COUNT。
+16 symbols reviewed.
+- [OK] The SUM ritual matches old Linux __copy_user; the extable 16B entry used the same way.
+- [SEC][Medium] uaccess.rs:230-243 — copy_from_user doesn't zero the tail buffer on failure (Linux memsets 0) — a kernel information-leak surface.
+- [Defect][Low] strncpy_from_user wrongly EFAULTs on an empty string; the shift-copy tail word can over-read the source by 7B (false positives).
+- [CONS][Low] The extable linearly scanned (Linux binary search); no MAX_RW_COUNT.
 
 ## 2.3 boot.S / smp.rs
-已检符号 18 项。
-- [DESIGN][低] MMU 开启借取指 fault 跳转技巧（Linux fixmap trampoline）；早映射固定 8MB 窗口假设。
-- [DOC][低] 0xC7 注释含 G 位错误（实无 G）。
-- [CONS][低] 设备 PTE 未用 SVPBMT IO 位（真机风险）。
-- [OK] 次核 SBI HSM 协议正确；tp 预载 idle；Acquire/Release 序对正确。
+18 symbols reviewed.
+- [DESIGN][Low] Enabling the MMU uses the instruction-fetch-fault jump trick (Linux uses a fixmap trampoline); the fixed 8MB early-mapping window assumption.
+- [DOC][Low] The 0xC7 comment wrongly includes the G bit (there is actually no G).
+- [CONS][Low] Device PTEs don't use the SVPBMT IO bits (a real-hardware risk).
+- [OK] The secondary-core SBI HSM protocol correct; tp preloaded with idle; the Acquire/Release ordering pairs correct.
 
 ## 2.4 context.rs / thread.rs
-已检符号 14 项。
-- [PERF][高] context.rs:203-234 — switch_mm 恒 ASID=0 + 双份全量 sfence.vma；**asid.rs 全套分配器已实现但零消费者（死机制）**；内核线程切换还多刷两遍（Linux lazy TLB）。
-- [SEC][中] thread.rs:163-184 — execve 后 FS=OFF 期间 FP 寄存器跨进程残留（fpu_init 无调用者）——信息泄露+数值污染。
-- [OK] __switch_to 保存集/SUM 清序/on_cpu release 序正确。
+14 symbols reviewed.
+- [PERF][High] context.rs:203-234 — switch_mm always ASID=0 + duplicated full sfence.vma; **asid.rs's full allocator suite implemented but with zero consumers (a dead mechanism)**; kernel-thread switches flush twice more (Linux lazy TLB).
+- [SEC][Medium] thread.rs:163-184 — After execve, during FS=OFF, the FP registers persist across processes (fpu_init has no callers) — information leak + numeric pollution.
+- [OK] __switch_to's save set/SUM clear ordering/on_cpu release ordering correct.
 
 ## 2.5 trap.rs / pt_regs.rs / process.rs
-已检符号 30+ 项。
-- [OK] **pt_regs 布局与 Linux uapi 逐字节一致**（0x00-0x118）；syscall restart 语义一致。
-- [SEC][中] trap.rs:124-142 — enable_external_interrupt 夹带 csrs SUM → 内核常态 SUM=1（纵深防御丢失）。
-- [RISK][低] 每次内核 trap 读指令判 WFI（QEMU workaround）；handle_syscall 压缩判定裸读用户 epc 无 extable。
-- [DESIGN][低] KERNPANIC 死 wfi 不停他 CPU（锁死锁）；SR-PROBE 诊断留生产路径。
-- [缺陷][低] process.rs:87-158 arch copy_thread 死代码携隐患（活路径是 fork.rs 版）。
+30+ symbols reviewed.
+- [OK] **The pt_regs layout byte-for-byte identical to the Linux uapi** (0x00-0x118); the syscall restart semantics consistent.
+- [SEC][Medium] trap.rs:124-142 — enable_external_interrupt sneaks in csrs SUM → the kernel's steady-state SUM=1 (defense in depth lost).
+- [RISK][Low] Every kernel trap reads the instruction to detect WFI (a QEMU workaround); handle_syscall's compressed determination raw-reads the user epc without an extable.
+- [DESIGN][Low] KERNPANIC's dead wfi doesn't stop the other CPUs (a locked-up deadlock); SR-PROBE diagnostics left in the production path.
+- [Defect][Low] process.rs:87-158's arch copy_thread dead code carries hazards (the live path is the fork.rs version).
 
 ## 2.6 cpu.rs / mod.rs / ipi.rs / linker.ld
-已检符号 30+ 项。
-- [缺陷][中] ipi.rs:85-101 — send_ipi_type"已置不重发"丢 IPI 竞态 → smp_call_function 死锁（Linux 无条件发送）。
-- [DESIGN][低] cpu_id 三处实现（mod.rs 硬编码 0x18 双维护）。
-- [OK] save_and_disable_irq 用 csrrci 原子；linker 布局自洽。
+30+ symbols reviewed.
+- [Defect][Medium] ipi.rs:85-101 — send_ipi_type's "already set, don't resend" loses an IPI race → smp_call_function deadlock (Linux sends unconditionally).
+- [DESIGN][Low] cpu_id implemented in three places (mod.rs hardcodes 0x18, dual maintenance).
+- [OK] save_and_disable_irq uses atomic csrrci; the linker layout self-consistent.
 
 ## 2.7 mm/
-已检符号 60+ 项。
-- [PERF][高] mmu_init.rs:412-462 — map_page 每页无条件全量 sfence.vma（启动 2GB=1024 次；Linux mmu_gather 聚合）。
-- [DESIGN][中] mm_ops.rs:921 — PTE_MODIFY_LOCK 全局单例串行所有 mm 的 PTE 写+长关中断窗（Linux per-mm lock+per-PTL）。
-- [CONS][中] mm_ops.rs:669-695 — perm_to_flags(None)→V|R|A|D：**mmap(PROT_NONE) 匿名页实际可读**；mprotect 的 PROT_NONE 却正确——同内核语义割裂。
-- [OK] Sv39 布局常量与 Linux 完全同构；COW-fork 加锁协议正确；page_fault 骨架对应 Linux。
-- [RISK][低] virt_to_phys 线性区外原样返回；asid.rs/TRAP_STACKS/__switch_mm_linear 均死代码。
+60+ symbols reviewed.
+- [PERF][High] mmu_init.rs:412-462 — map_page does an unconditional full sfence.vma per page (2GB at boot = 1024 of them; Linux aggregates via mmu_gather).
+- [DESIGN][Medium] mm_ops.rs:921 — PTE_MODIFY_LOCK, a global singleton, serializes all mm's PTE writes + a long interrupts-off window (Linux per-mm lock + per-PTL).
+- [CONS][Medium] mm_ops.rs:669-695 — perm_to_flags(None)→V|R|A|D: **an mmap(PROT_NONE) anonymous page is actually readable**; mprotect's PROT_NONE however is correct — a semantic split within the same kernel.
+- [OK] The Sv39 layout constants fully isomorphic to Linux; the COW-fork locking protocol correct; the page_fault skeleton corresponds to Linux.
+- [RISK][Low] virt_to_phys returns as-is outside the linear region; asid.rs/TRAP_STACKS/__switch_mm_linear all dead code.
 
-## 批次 2 统计
-24/24 文件、214 符号；**36 项发现**（缺陷 6/安全 3/性能 2 高/设计 4/一致性 5/风险 7/文档 1/死代码 4）；确认正确 13 项（pt_regs 逐字节一致等）。
-**Top 风险**：①无 ASID+每页全量 sfence（性能双高）②copy_from_user 不清零（安全）③FP 跨进程残留（安全）④SUM 常开 ⑤全局 PTE 锁 ⑥ipi 丢 IPI 死锁。
+## Batch 2 statistics
+24/24 files, 214 symbols; **36 findings** (defects 6/security 3/performance 2 High/design 4/consistency 5/risk 7/docs 1/dead code 4); 13 confirmed correct (pt_regs byte-for-byte identical etc.).
+**Top risks**: (1) no ASID + full sfence per page (a double-High performance issue) (2) copy_from_user not zeroing (security) (3) FP persisting across processes (security) (4) SUM always on (5) the global PTE lock (6) ipi losing IPIs (deadlock).
 
 
+# Batch 4: kernel/src/mm/ — Linux-comparison full-file review
 
-# 批次 4：kernel/src/mm/ — Linux 对比全文件检视
+Scope: 25 .rs files, ~10,618 lines. Method: reading each file through + grep cross-validation of key suspicions.
 
-范围：25 个 .rs 约 10,618 行。方法：逐文件通读 + 关键疑点 grep 交叉验证。
+## 4.0 Statistics
 
-## 4.0 统计
-
-| 类别 | 设计不一致 | 疑似bug | 待评审 | 小计 |
+| Category | Design inconsistency | Suspected bug | Pending review | Subtotal |
 |---|---|---|---|---|
 | LINUX-DIFF | 21 | 2 | 13 | 36 |
 | BUG | 1 | 5 | 6 | 12 |
@@ -277,323 +276,325 @@ sys_clone 参数序正确、错误统一 ENOMEM；sys_set_tid_address 语义正�
 | OVERFLOW | 0 | 0 | 3 | 3 |
 | COMMENT | 0 | 1 | 14 | 15 |
 | ARCH | 1 | 0 | 1 | 2 |
-| **合计** | **24** | **14** | **47** | **85** |
+| **Total** | **24** | **14** | **47** | **85** |
 
-**三条系统性主线**：
-- S1 全局 &mut 别名 UB：pglist.rs 的 NODE_DATA（static mut）经 first_online_node_mut() 在每次 alloc/free/lru/vmscan/kswapd 取 &'static mut——4 CPU 并发多独占引用同时存活（page_alloc.rs:42/135、lru.rs、vmscan.rs:89、kswapd.rs:103/152）。
-- S2 分配无慢路径：alloc_pages 失败仅异步 wake kswapd + 单次 compact 即返回 0；try_to_free_pages/is_memory_low/should_trigger_oom 全部零调用方——Linux __alloc_pages_slowpath 的重试/水位等待/直接回收/OOM 链整体缺失。
-- S3 per-CPU pageset 未接线：pcp.rs 全模块零存活调用方，所有分配直接打 zone 全局锁。
+**Three systemic threads**:
+- S1 global &mut aliasing UB: pglist.rs's NODE_DATA (static mut), via first_online_node_mut(), takes a &'static mut on every alloc/free/lru/vmscan/kswapd — on 4 CPUs, multiple exclusive references alive concurrently (page_alloc.rs:42/135, lru.rs, vmscan.rs:89, kswapd.rs:103/152).
+- S2 allocation has no slow path: on alloc_pages failure, only an async wake of kswapd + a single compact pass before returning 0; try_to_free_pages/is_memory_low/should_trigger_oom all have zero callers — Linux's __alloc_pages_slowpath chain of retry/watermark wait/direct reclaim/OOM is wholesale missing.
+- S3 the per-CPU pageset not wired: the pcp.rs module has zero live callers; all allocations hit the zone's global lock directly.
 
-## 4.1 vma.rs（829 行，已检函数 40+）
-- [BUG][疑似bug] vma.rs:627-660 — expand_downwards 只查前驱重叠，不查 (new_start, vma_start) 区间内已有 VMA：栈下有映射时扩栈直接重叠。
-- [LINUX-DIFF][设计不一致] can_merge 要求 offset 全等（Linux 匿名只要求连续）；add 仅单侧合并（Linux 三段链式）。
-- [LINUX-DIFF][设计不一致] find_stack_vma 线性扫描 + 扩栈窗口仅 1 页（Linux rlimit 内任意更低+guard gap）。
-- [COMMENT][待评审] count AtomicU32 死代码漂移；SHARED/PRIVATE 双位无校验；注释陈旧。
+## 4.1 vma.rs (829 lines, 40+ functions reviewed)
+- [BUG][Suspected bug] vma.rs:627-660 — expand_downwards only checks the predecessor for overlap, not whether VMAs already exist within (new_start, vma_start): with mappings below the stack, expanding the stack directly overlaps them.
+- [LINUX-DIFF][Design inconsistency] can_merge requires the offsets to be fully equal (Linux's anonymous case only requires contiguity); add merges on one side only (Linux chains three ways).
+- [LINUX-DIFF][Design inconsistency] find_stack_vma is a linear scan + the expansion window only 1 page (Linux allows anything lower within rlimit + a guard gap).
+- [COMMENT][Pending review] count AtomicU32 dead-code drift; SHARED/PRIVATE dual bits without validation; stale comments.
 
-## 4.2 mm_struct.rs（794 行，已检函数 60+）
-- [RACE][疑似bug] alloc_asid check-then-set 非原子（ASID 池泄漏）。
-- [RACE][待评审] update_highest_vm_end 非原子。
-- [COMMENT][待评审] mm_users_dec 下溢仅 warn 可变负。
-- [LINUX-DIFF] OOM_SCORE_ADJ 建模为标志位（Linux 10-bit 字段）；Drop 不遍历 VMA；统计松散无快照一致性。
+## 4.2 mm_struct.rs (794 lines, 60+ functions reviewed)
+- [RACE][Suspected bug] alloc_asid check-then-set non-atomic (an ASID-pool leak).
+- [RACE][Pending review] update_highest_vm_end non-atomic.
+- [COMMENT][Pending review] mm_users_dec underflow only warns, can go negative.
+- [LINUX-DIFF] OOM_SCORE_ADJ modeled as a flag bit (Linux a 10-bit field); Drop doesn't iterate the VMAs; statistics loose without snapshot consistency.
 
 ## 4.3 page.rs/pagemap.rs/allocator.rs
-- [OVERFLOW][待评审] ceil() 近 MAX 溢出；new 静默截断。
-- [LINUX-DIFF] VmaError::Overlap→AlreadyMapped（非 FIXED 应挪地址）；Perm 枚举与 PTE 位无对应。
+- [OVERFLOW][Pending review] ceil() overflows near MAX; new silently truncates.
+- [LINUX-DIFF] VmaError::Overlap→AlreadyMapped (without FIXED, should relocate the address); the Perm enum has no correspondence to the PTE bits.
 
-## 4.4 page_desc.rs（897 行，已检函数 50+）
-- [BUG][疑似bug] init_mem_map 范围外页零值=_mapcount 0（偏置约定等价"已映射一次"）。
-- [LINUX-DIFF] 无复合页元数据：尾页 refcount=1（Linux 恒 0 由 head 管）——put 尾页触发错误释放。
-- [RACE][待评审] flags/refcount 顺序散点约定无集中文档。
+## 4.4 page_desc.rs (897 lines, 50+ functions reviewed)
+- [BUG][Suspected bug] init_mem_map zeroes out-of-range pages with _mapcount 0 (the bias convention is equivalent to "already mapped once").
+- [LINUX-DIFF] No compound-page metadata: a tail page's refcount=1 (Linux always 0, managed by the head) — putting a tail page triggers a wrong free.
+- [RACE][Pending review] flags/refcount ordering conventions scattered, with no centralized documentation.
 
-## 4.5 zone.rs（917 行，已检函数 40+）
-- [BUG][疑似bug] zone.rs:561-584 — **is_buddy_free 不检查 OnFreelist**："refcount==0 但不在链"的页被误判可合并 → 使用中 PFN 重新挂链双重所有权（Linux page_is_buddy 必查 PageBuddy）。
-- [LINUX-DIFF] alloc_pages 无水位/预留准入；每 order 单链无 MIGRATE 类型（反碎片缺失）。
-- [TIMING] remove_from_free_list O(n)。
-- [COMMENT][疑似bug] if false 死调试 30 行；free_pages 内嵌原始 putchar。
+## 4.5 zone.rs (917 lines, 40+ functions reviewed)
+- [BUG][Suspected bug] zone.rs:561-584 — **is_buddy_free doesn't check OnFreelist**: pages that are "refcount==0 but not on the list" get wrongly judged mergeable → an in-use PFN re-linked, double ownership (Linux's page_is_buddy always checks PageBuddy).
+- [LINUX-DIFF] alloc_pages has no watermark/reservation admission; a single list per order with no MIGRATE types (anti-fragmentation missing).
+- [TIMING] remove_from_free_list is O(n).
+- [COMMENT][Suspected bug] An `if false` 30-line dead debug block; raw putchar embedded in free_pages.
 
-## 4.6 pcp.rs（381 行）
-- [LINUX-DIFF][疑似bug] 全模块零调用方（主线 S3）；接线后 PCP 驻留页落入 is_buddy_free 误判面。
-- [RACE] this_cpu_pcp 无抢占保护 &mut 别名。
+## 4.6 pcp.rs (381 lines)
+- [LINUX-DIFF][Suspected bug] The whole module has zero callers (main thread S3); once wired, PCP-resident pages fall into the is_buddy_free misjudgment surface.
+- [RACE] this_cpu_pcp without preemption protection, &mut aliasing.
 
-## 4.7 page_alloc.rs（664 行）
-- [RACE][疑似bug] first_online_node_mut 别名（S1）；[BUG] ZoneMovable 页释放静默泄漏。
-- [LINUX-DIFF] 无慢路径（S2）；[COMMENT] 第二套 KERNEL_BUDDY 零调用方（三套 buddy 并存）。
+## 4.7 page_alloc.rs (664 lines)
+- [RACE][Suspected bug] first_online_node_mut aliasing (S1); [BUG] ZoneMovable page frees silently leak.
+- [LINUX-DIFF] No slow path (S2); [COMMENT] a second KERNEL_BUDDY with zero callers (three buddies coexisting).
 
-## 4.8 buddy_allocator.rs（631 行）
-- [BUG][待评审] CombinedAllocator 以 heap_end+硬编码 4MB 判 slab 区（双源）。
-- [COMMENT] order 超 MAX 大块压链统计少认一半；探针残留。
+## 4.8 buddy_allocator.rs (631 lines)
+- [BUG][Pending review] CombinedAllocator decides the slab region by heap_end + a hardcoded 4MB (dual source).
+- [COMMENT] Over-MAX-order large blocks pressed onto the list under-count the statistics by half; probe residue.
 
-## 4.9 pglist.rs（381 行）
-- [RACE][疑似bug] NODE_DATA static mut（S1 根源）；add_zone 同型二次 add 覆盖+nr_zones 重复递增。
+## 4.9 pglist.rs (381 lines)
+- [RACE][Suspected bug] NODE_DATA static mut (the S1 root); add_zone's same-type second add overwrites + nr_zones double-incremented.
 
-## 4.10 rmap.rs（373 行）
-- [LINUX-DIFF] try_to_unmap 以单 index 反查+全任务扫描（无 anon_vma 树）：MAP_FIXED 跨 vaddr 漏删 PTE。
-- [RACE][疑似bug][ARCH] unmap 后仅本 hart sfence.vma（缺远程 shootdown）——跨进程读写窗口。
+## 4.10 rmap.rs (373 lines)
+- [LINUX-DIFF] try_to_unmap reverse-looks-up by a single index + scans all tasks (no anon_vma tree): MAP_FIXED across vaddrs misses deleting PTEs.
+- [RACE][Suspected bug][ARCH] After unmapping, only a local hart sfence.vma (no remote shootdown) — a cross-process read/write window.
 
-## 4.11 lru.rs（333 行）
-- [TIMING][疑似bug] del/move_tail 线性扫描 O(n²) 回收热路径（Linux O(1) 双链）。
-- [LINUX-DIFF] 无 active 链消费、无 PTE A 位回填——双链 aging 名存实亡。
+## 4.11 lru.rs (333 lines)
+- [TIMING][Suspected bug] del/move_tail linear scans, O(n²) on the reclaim hot path (Linux O(1) doubly linked).
+- [LINUX-DIFF] No active-list consumption, no PTE A-bit write-back — the two-list aging exists in name only.
 
-## 4.12 vmscan.rs（319 行）
-- [LINUX-DIFF] reclaim_anonymous_pages 线性扫描全部页描述符（不走 LRU）；swap 写无页锁（撕裂写）。
+## 4.12 vmscan.rs (319 lines)
+- [LINUX-DIFF] reclaim_anonymous_pages linearly scans all page descriptors (not via the LRU); swap writes without a page lock (torn writes).
 
-## 4.13 kswapd.rs（217 行）
-- [LINUX-DIFF] OOM 由 kswapd 16 轮失败触发（Linux 分配慢路径触发）；无 oom_lock 序列化。
+## 4.13 kswapd.rs (217 lines)
+- [LINUX-DIFF] OOM triggered by kswapd failing 16 rounds (Linux triggers in the allocation slow path); no oom_lock serialization.
 
-## 4.14 oom_kill.rs（287 行）
-- [LINUX-DIFF] badness 用 total_vm（Linux rss+pgtables+swap）：mmap 大而驻留小的进程被误杀。
-- [TIMING] 仅发 SIGKILL 无 OOM reaper/保留配额。
+## 4.14 oom_kill.rs (287 lines)
+- [LINUX-DIFF] badness uses total_vm (Linux rss+pgtables+swap): a process with a large mmap but small resident set gets wrongly killed.
+- [TIMING] Only sends SIGKILL, no OOM reaper/reserved quota.
 
-## 4.15 swap.rs（373 行）
-- [ARCH][设计不一致] swap entry 自定义编码（内核自洽，与 Linux 编码不同）；无 swap cache。
-- [BUG][待评审] 超容量打印 truncating 实为禁用；swap 区与 fs 不查重叠。
+## 4.15 swap.rs (373 lines)
+- [ARCH][Design inconsistency] A custom swap-entry encoding (self-consistent within the kernel, different from Linux's); no swap cache.
+- [BUG][Pending review] Over-capacity prints "truncating" but actually disables; the swap area's overlap with the fs unchecked.
 
-## 4.16 compact.rs（450 行）
-- [RACE][疑似bug] migrate_page 无 migration entry 保护：窗口期缺页装零页+remap 覆写（用户写丢失+零页泄漏）。
-- [RACE][疑似bug] find_free_page "偷任意无主页"与 pcp/put_page 所有权冲突面。
-- [LINUX-DIFF] 权限遍历全任务任一命中（fallback 0xD7 授 W）。
+## 4.16 compact.rs (450 lines)
+- [RACE][Suspected bug] migrate_page without migration-entry protection: page faults install the zero page during the window + remap overwrites (user writes lost + a zero-page leak).
+- [RACE][Suspected bug] find_free_page's "steal any unowned page" conflicts with pcp/put_page ownership.
+- [LINUX-DIFF] The permission walk hits on any task (the fallback 0xD7 grants W).
 
-## 4.17 memblock.rs（637 行）
-- [BUG][疑似bug] add 仅与第一个相邻区合并：横跨两区时重叠条目（total 虚高、重复让渡）。
-- [RACE] memblock_phys_alloc 依赖启动序无锁。
+## 4.17 memblock.rs (637 lines)
+- [BUG][Suspected bug] add merges only with the first adjacent region: when spanning two regions, overlapping entries (total inflated, double handover).
+- [RACE] memblock_phys_alloc relies on boot ordering, lockless.
 
-## 4.18 meminfo.rs（265 行）
-- [LINUX-DIFF] mem_available==mem_free；is_memory_low/should_trigger_oom 零调用方。
+## 4.18 meminfo.rs (265 lines)
+- [LINUX-DIFF] mem_available==mem_free; is_memory_low/should_trigger_oom zero callers.
 
-## 4.19 slab.rs（722 行）
-- [BUG][疑似bug] free 不校验 obj_idx 落界；kfree 回退不验证 cache 归属（挂错尺寸链）。
-- [COMMENT][疑似bug] 自由链越界"标记满并返回该指针"（应返回 null）。
-- [LINUX-DIFF] 空闲 slab 永不归还；无 per-CPU freelist。
+## 4.19 slab.rs (722 lines)
+- [BUG][Suspected bug] free doesn't validate obj_idx bounds; the kfree fallback doesn't verify cache ownership (hung on the wrong size list).
+- [COMMENT][Suspected bug] On a free-list overrun it "marks full and returns that pointer" (should return null).
+- [LINUX-DIFF] Free slabs never returned; no per-CPU freelist.
 
-## 4.20 layout/vmemmap/hugepage.rs（800 行）
-- [LINUX-DIFF] 堆/slab/user_phys 硬编码比例与 zone 双口径（64MB 用户上限封顶驻留）。
-- [BUG][待评审] init_vmemmap 先置标志后 Err（谎报初始化）；pfn<start 减法下溢。
-- [LINUX-DIFF] 大页无预留池；USER_HUGE 默认含 X。
+## 4.20 layout/vmemmap/hugepage.rs (800 lines)
+- [LINUX-DIFF] Heap/slab/user_phys hardcoded ratios with a dual zone accounting (a 64MB user cap ceilings residency).
+- [BUG][Pending review] init_vmemmap sets flags first then Err (falsely reporting initialization); pfn<start subtraction underflow.
+- [LINUX-DIFF] Huge pages without a reserved pool; USER_HUGE defaults to including X.
 
-## 4.22 musl 焦点结论
-split 精确/merge 保守/扩栈盲区；尾页 refcount 约定相反；RLIMIT_AS/DATA 未执行（ulimit -v 无效，仅 MEMLOCK 有一处）；TLB shootdown 缺失为最大并发风险。
+## 4.22 musl focus conclusions
+split exact/merge conservative/stack-expansion blind spot; the tail-page refcount convention inverted; RLIMIT_AS/DATA unenforced (ulimit -v ineffective, only MEMLOCK has one spot); the missing TLB shootdown is the biggest concurrency risk.
 
-## 4.23 结论
-结构对应完整但三类核心运行时语义缺席（S2 慢路径、S3 pcp、迁移类型）；S1 static mut 为全目录 soundness 缺口。疑似 bug 14 项优先：is_buddy_free 缺 OnFreelist、expand_downwards 重叠、NODE_DATA 别名、compact 迁移窗口、memblock 部分合并、slab kfree 校验。
+## 4.23 Conclusions
+The structure corresponds completely, but three core runtime semantics are absent (the S2 slow path, S3 pcp, migration types); S1's static mut is the whole directory's soundness gap. The 14 suspected bugs take priority: is_buddy_free missing OnFreelist, expand_downwards overlap, the NODE_DATA alias, the compact migration window, memblock partial merging, the slab kfree validation.
 
 
-# 批次 5：fs 层（kernel/src/fs/）— Linux 对比全文件检视
+# Batch 5: the fs layer (kernel/src/fs/) — Linux-comparison full-file review
 
-范围：54 文件/24,524 行（含 devfs/ext4/jbd2/procfs）。总体：VFS/ext4 骨架完整、musl 静态程序可跑通，但 ext4 写路径存在可造成数据损坏的组合缺陷，jbd2 崩溃一致性实质未达成，VFS 缺 sticky 位与原子创建。
+Scope: 54 files/24,524 lines (including devfs/ext4/jbd2/procfs). Overall: the VFS/ext4 skeletons complete and musl static programs can run, but the ext4 write path has combinational defects that can cause data corruption, jbd2's crash consistency is substantively unachieved, and the VFS lacks the sticky bit and atomic creation.
 
-## 5.1 VFS 核心
-- [语义][高] vfs.rs:354 — 词法 ..折叠+尾斜杠丢失（open("regfile/") 不报 ENOTDIR；mount 根 ..停留原地与 Linux 相反）。
-- [安全][高] 无 S_ISVTX sticky 检查——多用户可删他人 /tmp 文件。
-- [并发][高] O_CREAT 两步无父目录锁——SMP 双创建双 inode。
-- [语义][中] 符号链接深度 8（Linux 40）；io_poll ENOSYS 桩；getdents64 首条放不下返 Ok(0)（Linux EINVAL）；目录 lseek ESPIPE（telldir 失效）；F_SETFL 清 O_DIRECTORY 位；chroot 不参与 path_lookup（无隔离）；do_mount 忽略 flags/source、三套 mount 并存；build_path>64 截断；icache 冲突逐出后同文件双 Inode。
-- [低] dcache 哈希零调用；目录 open 不查 EISDIR；check_parent 不查 MAY_EXEC；无 ACL；elf.rs p_filesz>p_memsz 未拒。
+## 5.1 VFS core
+- [Semantics][High] vfs.rs:354 — Lexical .. folding + trailing-slash loss (open("regfile/") doesn't report ENOTDIR; at a mount root .. stays in place, opposite to Linux).
+- [Security][High] No S_ISVTX sticky check — multiple users can delete each other's /tmp files.
+- [Concurrency][High] O_CREAT's two steps without a parent-directory lock — SMP double-create, double inode.
+- [Semantics][Medium] Symlink depth 8 (Linux 40); the io_poll ENOSYS stub; getdents64 returning Ok(0) when the first entry doesn't fit (Linux EINVAL); directory lseek ESPIPE (telldir broken); F_SETFL clearing the O_DIRECTORY bit; chroot not participating in path_lookup (no isolation); do_mount ignoring flags/source with three mount implementations coexisting; build_path truncating >64; icache eviction on collision leaving two Inodes for the same file.
+- [Low] The dcache hash has zero calls; directory open doesn't check EISDIR; check_parent doesn't check MAY_EXEC; no ACL; elf.rs not rejecting p_filesz>p_memsz.
 
-## 5.2 fd/管道/字符设备
-- [中] dup2 close+install 非原子；O_APPEND 写与 pos 更新无锁（SMP 交叉）；管道容量 16KB（Linux 64KB）无 F_SETPIPE_SZ；PIPE_BUF 原子性破坏。
-- [低] poll 不恒置 POLLHUP；/dev/null poll 永不就绪；pipe_read/write 自由函数死代码。
+## 5.2 fd/pipes/char devices
+- [Medium] dup2's close+install non-atomic; O_APPEND writes and pos updates unlocked (SMP interleaving); pipe capacity 16KB (Linux 64KB) without F_SETPIPE_SZ; PIPE_BUF atomicity broken.
+- [Low] poll doesn't always set POLLHUP; /dev/null poll never ready; the pipe_read/write free functions dead code.
 
-## 5.3 块层/页缓存
-- [中] 写穿缓存（每次 BH_Dirty 立即 sync——聚合失效，吞吐数量级劣化）；页缓存键 ino:u32 截断。
-- [低] 缓存键不含 minor（多盘串页）。
+## 5.3 Block layer/page cache
+- [Medium] Write-through cache (an immediate sync per BH_Dirty — aggregation lost, throughput degraded by orders of magnitude); the page-cache key ino:u32 truncated.
+- [Low] The cache key lacks minor (multiple disks cross pages).
 
 ## 5.4 rootfs/devfs
-- [中] 硬链接写用 Arc::make_mut COW（POSIX 应共享可见）；路径缓存无失效。
-- [低] chmod no-op、时间戳 0、rename 祖先仅一层；devfs lookup/readdir ino 不一致。
+- [Medium] Hardlink writes use Arc::make_mut COW (POSIX requires shared visibility); the path cache has no invalidation.
+- [Low] chmod a no-op, timestamps 0, rename ancestors only one level; devfs lookup/readdir ino inconsistent.
 
 ## 5.5 ext4
-- [数据][高] 稀疏洞读盘块 0（垃圾数据——非缓存路径）；extent 深度>0 无条件当叶追加（破坏树+假满盘）；unlink 目录无 EISDIR；挂载不查 feature_incompat/ro_compat（bigalloc/metadata_csum 全静默——真实 Linux 判损坏）；目录项不更新 htree/checksum（Rux 建的文件对真实 Linux 不可见）。
-- [并发][高] EXT4_BIG_LOCK 仅覆盖 namei；写路径/位图 RMW 无锁——SMP 位图丢更新双分配。
-- [中] truncate 不处理深度>0；rename 环检查错（可建 ..循环）；name_len u8 截断无检查；时间戳非 epoch；两套 journal 纪律。
-- [低] 172B 固定 inode 布局（s_inode_size=128 越界）；ext4_sync_file/fsync 桩。
+- [Data][High] Sparse holes read disk block 0 (garbage data — the non-cache path); extent depth>0 unconditionally appended as a leaf (destroying the tree + a fake-full disk); unlink of a directory without EISDIR; mount not checking feature_incompat/ro_compat (bigalloc/metadata_csum all silent — real Linux judges them corrupt); directory entries not updating htree/checksum (files created by Rux invisible to real Linux).
+- [Concurrency][High] EXT4_BIG_LOCK covers only namei; the write path/bitmap RMW unlocked — SMP bitmap lost updates, double allocation.
+- [Medium] truncate doesn't handle depth>0; the rename cycle check wrong (can create .. loops); name_len u8 truncation unchecked; timestamps not epoch; two journal disciplines.
+- [Low] The 172B fixed inode layout (s_inode_size=128 out of bounds); ext4_sync_file/fsync stubs.
 
 ## 5.6 jbd2
-- [高] revoke/checkpoint 全空壳——崩溃一致性名存实亡；j_free 失真。
-- [中] 无 tag/commit 校验和与屏障（与真实 Linux 日志互不兼容）；stop 自旋忙等。
-- [正面] recovery 两遍 scan/replay + 序列号窗口正确。
+- [High] revoke/checkpoint entirely empty shells — crash consistency exists in name only; j_free inaccurate.
+- [Medium] No tag/commit checksums and barriers (mutually incompatible with real Linux journals); stop spins busy-waiting.
+- [Positive] recovery's two-pass scan/replay + the sequence-number window correct.
 
 ## 5.7 procfs
-- [正确性][高] cmdline/environ 对其他进程用当前任务地址空间读（ps 显示垃圾）。
-- [中] environ 无 ptrace 权限；/proc/self/fd 靠 syscall 字符串特判（VFS 通用路径失败）；open("/proc/self/exe") 打开内容为路径文本的内存文件。
-- [低] stat 14+ 字段 0；mounts 硬编码未实现 fs。
+- [Correctness][High] cmdline/environ read other processes using the current task's address space (ps shows garbage).
+- [Medium] environ without ptrace permission; /proc/self/fd relying on a syscall string special case (the VFS generic path fails); open("/proc/self/exe") opening an in-memory file whose content is the path text.
+- [Low] 14+ stat fields 0; mounts hardcoding unimplemented file systems.
 
-## 批次 5 统计
-高 11/中 27/低 22/信息 8 = 68 项。
-**优先**：①ext4 特性协商+htree/checksum ②extent 深度+稀疏洞 ③unlink EISDIR/rename 环 ④jbd2 空壳 ⑤sticky+/proc 跨进程读 ⑥ext4 写无锁。
+## Batch 5 statistics
+High 11/Medium 27/Low 22/Info 8 = 68 items.
+**Priorities**: (1) ext4 feature negotiation + htree/checksum (2) extent depth + sparse holes (3) unlink EISDIR/rename cycles (4) the jbd2 empty shells (5) sticky + the /proc cross-process read (6) ext4 writes unlocked.
 
 ---
 
-# 批次 6：ipc + sync + security + io_uring — Linux 对比全文件检视
+# Batch 6: ipc + sync + security + io_uring — Linux-comparison full-file review
 
-范围：18 文件/约 8900 行/约 120 函数。总评：最严重集中在 futex 键语义与 io_uring mmap——**FutexKey 以 tid 作私有键与 Linux (mm,uaddr) 根本冲突，是 musl 多线程程序能否运行的总闸门**。
+Scope: 18 files/~8,900 lines/~120 functions. Overall assessment: the most severe issues concentrate in the futex key semantics and io_uring mmap — **FutexKey using tid as the private key fundamentally conflicts with Linux's (mm,uaddr); it is the master gate deciding whether musl multithreaded programs can run at all**.
 
-## 6.1 sync/futex.rs（871 行）
-- **[P1] futex.rs:48-70 — 私有键=(uaddr,pid=tid)**：同进程线程间 waiter/waker 键永不匹配——musl pthread_mutex/cond/sem/join 全部丢失唤醒随机挂死；clear_child_tid 唤醒失配 join 永眠。共享键仅比虚拟地址（shm attach 地址不同即失配）。修复方向：私有键改 address_space()/tgid；共享键物理帧+页内偏移。
-- **[P2] requeue 后 waiter 的陈旧 bucket_idx**：信号/超时醒来去旧桶找节点静默失败——槽泄漏+多余唤醒。
-- [M] WAKE_OP 退化为普通 wake；PI/robust list 全 ENOSYS（robust 持有者死亡永久阻塞）；坏 timeout 指针→永久等待（Linux EFAULT）；无 4 字节对齐校验。
-- [L] WAITER_POOL 256 硬限；exit.rs 误传 FUTEX_PRIVATE_FLAG 当内部 flags。
-- [正面] 锁下重读/槽占位/R12-2/IPC-C3/H4 与 Linux 语义一致。
+## 6.1 sync/futex.rs (871 lines)
+- **[P1] futex.rs:48-70 — the private key = (uaddr, pid=tid)**: between threads of the same process, waiter/waker keys never match — musl pthread_mutex/cond/sem/join all lose wakeups and hang at random; the clear_child_tid wakeup mismatch makes join sleep forever. The shared key compares only the virtual address (mismatch as soon as shm attach addresses differ). Fix direction: the private key switched to address_space()/tgid; the shared key to physical frame + in-page offset.
+- **[P2] the waiter's stale bucket_idx after requeue**: on a signal/timeout wake it goes to the old bucket to find its node and silently fails — a slot leak + spurious wakeups.
+- [M] WAKE_OP degenerates to a plain wake; PI/robust list all ENOSYS (robust holder-death blocks forever); a bad timeout pointer → waiting forever (Linux EFAULT); no 4-byte alignment validation.
+- [L] WAITER_POOL's 256 hard cap; exit.rs mistakenly passing FUTEX_PRIVATE_FLAG as internal flags.
+- [Positive] re-read under the lock/slot placeholders/R12-2/IPC-C3/H4 consistent with Linux semantics.
 
 ## 6.2-6.6 SysV IPC + POSIX mq
-- **[P2] semctl SETVAL/SETALL 后不唤醒等待者**（"用 semctl 释放信号灯"惯用法挂死）。
-- **[P2] IPC_SET 无属主检查**（三处——任何有写权限者可夺所有权）；RMID 属主判定缺 uid 路径+cap 号错。
-- [P2] sysv_shmat 回滚路径潜伏自死锁；mq notify 每次入队触发（应仅空→非空）。
-- [M] msgsnd/mq_send 忽略 copy_from_user 返回值（零填充损坏）；MSG_COPY 仅队首；SHM_REMAP 未实现+重叠先破坏后报错；mq SIGEV_SIGNAL 无 siginfo、THREAD_ID 不支持；mq_unlink 无权限；MQ fd 表 512-575 段设计债。
-- [L] EFBIG/EIDRM 口径；shm size 回绕；CLONE_SYSVSEM 忽略。
-- [正面] ID 编码/seq 回绕/E2BIG 回插/生命周期引用配平/mq 名称与优先级边界——主体对齐。
+- **[P2] semctl not waking waiters after SETVAL/SETALL** (the "release a semaphore with semctl" idiom hangs).
+- **[P2] IPC_SET without an owner check** (three spots — anyone with write permission can seize ownership); RMID's owner determination missing the uid path + the cap number wrong.
+- [P2] sysv_shmat's rollback path harbors a self-deadlock; mq notify firing on every enqueue (should be only empty→non-empty).
+- [M] msgsnd/mq_send ignoring copy_from_user's return value (zero-filled corruption); MSG_COPY only the queue head; SHM_REMAP unimplemented + overlap destroying first then erroring; mq SIGEV_SIGNAL without siginfo, THREAD_ID unsupported; mq_unlink without permissions; the MQ fd table's 512-575 segment design debt.
+- [L] EFBIG/EIDRM calibers; shm size wraparound; CLONE_SYSVSEM ignored.
+- [Positive] ID encoding/seq wraparound/E2BIG re-insertion/lifecycle reference balancing/mq name and priority boundaries — the main body aligned.
 
-## 6.7 sync 其余
-- **[P2] RCU 宽限期机制整体失效**（call_rcu 即时执行+synchronize_rcu 实际 no-op——现有调用方靠 pin/毒化兜底）。
-- [M] seqlock try_write 计数净 -255（潜伏）；condvar 非中断版 interruptible=true 矛盾。
-- [L] rwlock 写饿死；semaphore IRQ 回退。
-- [正面] spinlock 变体映射 Linux 精确；semaphore 注册先行模型一致。
+## 6.7 the rest of sync
+- **[P2] The RCU grace-period mechanism wholesale ineffective** (call_rcu executes immediately + synchronize_rcu actually a no-op — the existing callers survive via pin/poisoning stopgaps).
+- [M] seqlock's try_write netting -255 counts (latent); the condvar's non-interruptible version contradicting with interruptible=true.
+- [L] rwlock writer starvation; the semaphore IRQ fallback.
+- [Positive] The spinlock variants map Linux precisely; the semaphore's register-first model consistent.
 
 ## 6.8 security
-- [正面] 41 个 CAP 编号与 Linux UAPI 相符；can_send_signal 四元组一致。
-- [M] LSM 钩子全占位（实检在调用方）；无 userns。
+- [Positive] The 41 CAP numbers match the Linux UAPI; can_send_signal's four-tuple consistent.
+- [M] The LSM hooks all placeholders (the real checks at the callers); no userns.
 
 ## 6.9 io_uring
-- **[P1] 通告 SINGLE_MMAP 但实现为分离区域**——liburing 单 mmap 读错环形指针。
-- **[P1] mmap addr=NULL 固定 MMAP_START**——第二次 mmap 必重叠失败。
-- [P2] 两处错误双重取负（ENOMEM 当 fd=12 返回）。
-- [M] enter(to_submit=0) 恒返 0；op 面窄（NOP/READ/WRITE/FSYNC/CLOSE/FADVISE）。
-- [正面] 生命周期/引用/校验防御扎实。
+- **[P1] Advertises SINGLE_MMAP but implemented as separate regions** — liburing's single mmap reads wrong ring pointers.
+- **[P1] mmap with addr=NULL fixed at MMAP_START** — a second mmap necessarily overlaps and fails.
+- [P2] Two spots double-negating errors (ENOMEM returned as fd=12).
+- [M] enter(to_submit=0) always returns 0; a narrow op surface (NOP/READ/WRITE/FSYNC/CLOSE/FADVISE).
+- [Positive] The lifecycle/references/validation defenses solid.
 
-## 批次 6 统计
-P1 3/P2 7/M 21/L 14/正面 12。
-**优先**：①futex 私有键改 mm ②io_uring 摘 SINGLE_MMAP+mmap 走 find_free_area+修取负 ③semctl 唤醒+IPC_SET/RMID 属主 ④mq notify 条件。
-
-
-# 批次 7：net + drivers — Linux 对比全文件检视
-
-范围：net/ 14 文件 + drivers/ 28 文件共 42 文件 17,332 行。
-
-## 关键发现（net）
-- [BUG][高] tcp.rs:2623 — **TCP RX 不校验校验和**（位翻转按有效入队；UDP 已验 TCP 未验）。
-- [BUG][高] tcp.rs:2724 — tcp_v4_err 四元组与 icmp 传入方向全部颠倒——ICMP 快速失败失效。
-- [BUG][高] tcp.rs:1671 — dup-ACK 判定错位（ack==snd_una 被忽略）——**fast retransmit 是死路径**，丢包恢复靠 RTO。
-- [LINUX-DIFF][高] snd_wnd 恒 65535 不更新（无视对端通告窗口，无零窗探测）。
-- [LINUX-DIFF][高] **IP 分片双向缺失**（入站分片段错乱、出站超 MTU 丢弃）；路由未接数据面（无网关概念，靠 slirp 代答）——"QEMU slirp 专用栈"结构性边界。
-- [ABI][高] socket.rs:684 — **SOCK_NONBLOCK/SOCK_CLOEXEC 型别被拒**（musl `SOCK_STREAM|SOCK_NONBLOCK` 直接 ESOCKTNOSUPPORT）。
-- [ABI][高] socket.rs:377 — **所有 socket 恒非阻塞**（无阻塞等待路径）——未自带重试循环的 musl 阻塞程序读即 EAGAIN。
-- [LINUX-DIFF][高] UDP >1472B 恒失败（无分片）且 65507 上限内长度截断陷阱；未 bind 的 sendto 源端口 0（无隐式 bind）。
-- [RACE][高] ROUTE_TABLE static mut 无锁。
-- [中] setsockopt 约 20 项接受即忽略（SO_RCVTIMEO 无效）；SO_ERROR 恒 0；SYN 选项不解析（MSS 恒 1460、无 timestamps→RTT 采样虚高）；ICMP 校验和不验；arp hln/pln 不查；本机 IP 硬编码 10.0.2.15。
-- [低] ephemeral 顺序可预测；表满 EIO（Linux EMFILE）；UDP 校验和恒 0 发送。
-
-## 关键发现（drivers）
-- [TIMING][高] virtio_net xmit 在 tx_queue 关中断内同步自旋 10M+50M 次（chain-2 根源仍在）；virtio-blk 同款 50M（锁外）。
-- [LINUX-DIFF][高] PLIC 只在 boot hart 启用——全部外部中断串行压 hart0，无亲和性。
-- [TIMING][高] **jiffies 每 hart 各自递增——4 CPU 下时间快 4 倍**（所有 jiffies 计的 TCP 超时实际缩至 1/4）。
-- [BUG][中] notify 地址多乘 2 且不读 queue_notify_off（当前只用 queue0 未爆）；PCI 探测步长 0x1000 错（应 0x8000）——slot≥4 全漏；virtio-input 从错误 BAR 读 config（键鼠分类失效全当键盘）；Flush 假成功（fsync 无持久化）；write_block desc 失败泄漏；feature 协商三路径三套口径。
-- [LINUX-DIFF][中] 无 MSI-X（INTx 共享+ISR 降沿）；queue 深恒 8；无 CTRL_VQ/offload；evdev 无 poll、时间戳恒 0（libinput 不可用）；FbFixScreeninfo 布局错位。
-- [低] fence i,ir 用反（弱序平台风险）；BAR 窗口 256MB 无越界检查；SIOCGIFCONF 缺失。
-
-## 批次 7 统计
-BUG 13/ABI 6/LINUX-DIFF 19/TIMING 4/RACE 4/VISIBILITY 2/OVERFLOW 2/COMMENT 8/ARCH 2 = **59 项**（高 12/中 21/低 26）。
-**优先复核**：tcp_v4_err 四元组、TCP RX 校验和、dup-ACK 判定、input config BAR。
+## Batch 6 statistics
+P1 3/P2 7/M 21/L 14/Positives 12.
+**Priorities**: (1) the futex private key switched to mm (2) io_uring dropping the SINGLE_MMAP claim + mmap going through find_free_area + fixing the double negation (3) the semctl wakeup + IPC_SET/RMID ownership (4) the mq notify condition.
 
 ---
 
-# 批次 8：sched + timer + interrupt + 顶层 + dfx — Linux 对比全文件检视（收官）
+# Batch 7: net + drivers — Linux-comparison full-file review
 
-范围：sched/ 8 文件 4833 行 + timer.rs + interrupt/ 8 文件 + init/main/console/printk/print/config/dfx 约 10,700 行。
+Scope: net/ 14 files + drivers/ 28 files, 42 files and 17,332 lines total.
 
-## 关键发现
-- [语义][高] **SCHED_DEADLINE CBS 限流完全失效**（重入队即补满预算——单 DL 任务可 100% 霸占全部 CPU）。
-- [语义][高] **CFS 无唤醒抢占**（须等下个 tick 10ms；check_preempt 写了无调用者）。
-- [并发][高] **tasklet 跨 CPU 无互斥**（RUN 置位非 CAS——两 CPU 可并发同一回调，当前无使用者潜伏）。
-- [语义][高] **free_irq→request_irq 复用 IRQ 线静默失效**（depth 不复位，中断送达永不派发）。
-- [语义][高] **printk 无 console 输出路径**（只写 ring buffer——内核运行期错误默认不可见；syslog 6/7/8 空语义）。
-- [语义][高] **^C/^Z 只在 read 路径处理**（无人读 tty 时按键不发信号——失控进程无法 ^C 终止）。
-- [语义][高] init.rs RWX 整段映射（W^X 全缺失）；dfx softlockup 时间换算差 10 倍 + khungtaskd 无定时唤醒（检测器形同虚设）+ hung_task 以 pid<256 索引（真实 pid≥300 恒跳过）。
-- [中] min_vruntime 不含 curr+无睡眠补偿限幅；sched_yield 对 CFS 是 no-op；tick 抢占判 vruntime 差而非 slice 到期；RT 无 throttling；timer 单 BTreeMap 每 tick O(n) 扫描+周期漂移（不追名义到期点）；handler 在 action 锁内调用；IN_PRINTK 全局 flag 丢 CPU B 日志；cpu_id 恒 0。
-- [低] 注释矛盾多处（rt.rs:19 与实现相反等）；死代码（timer::init、overloaded、stop task、SchedClass 空壳）；find_idle_cpu 恒低位；panic 不停他 CPU；TASK_PAGE_OWNED 8192 页别名。
+## Key findings (net)
+- [BUG][High] tcp.rs:2623 — **TCP RX doesn't validate the checksum** (bit flips enqueued as valid; UDP checked, TCP not).
+- [BUG][High] tcp.rs:2724 — tcp_v4_err's four-tuple and the icmp-passed direction all inverted — ICMP fast-fail ineffective.
+- [BUG][High] tcp.rs:1671 — The dup-ACK determination misplaced (ack==snd_una ignored) — **fast retransmit is a dead path**; loss recovery relies on RTO.
+- [LINUX-DIFF][High] snd_wnd always 65535, never updated (ignoring the peer's advertised window, no zero-window probing).
+- [LINUX-DIFF][High] **IP fragmentation missing in both directions** (inbound fragments scrambled, outbound over-MTU dropped); routing not connected to the data plane (no gateway concept, relying on slirp to answer) — the structural boundary of a "QEMU slirp-specific stack".
+- [ABI][High] socket.rs:684 — **SOCK_NONBLOCK/SOCK_CLOEXEC type bits rejected** (musl's `SOCK_STREAM|SOCK_NONBLOCK` gets ESOCKTNOSUPPORT outright).
+- [ABI][High] socket.rs:377 — **All sockets always non-blocking** (no blocking wait path) — musl blocking programs without their own retry loops read and get EAGAIN immediately.
+- [LINUX-DIFF][High] UDP >1472B always fails (no fragmentation) and a length-truncation trap within the 65507 cap; an unbound sendto with source port 0 (no implicit bind).
+- [RACE][High] ROUTE_TABLE static mut without a lock.
+- [Medium] ~20 setsockopt options accepted then ignored (SO_RCVTIMEO ineffective); SO_ERROR always 0; SYN options not parsed (MSS always 1460, no timestamps → RTT samples inflated); the ICMP checksum unverified; arp hln/pln unchecked; the local IP hardcoded 10.0.2.15.
+- [Low] The ephemeral order predictable; table full gives EIO (Linux EMFILE); the UDP checksum always sent as 0.
 
-## 批次 8 统计
-高 9/中 15/低 18/正面 7 = 42 项。
-正面：jiffies u64 无回绕、softirq/ksoftirqd/preempt_count 位布局对位、syslog 权限/kmsg 语义、taint 表与 Linux 一致、tests 门控正确。
+## Key findings (drivers)
+- [TIMING][High] virtio_net xmit synchronously spins 10M+50M times inside the tx_queue with interrupts off (the chain-2 root cause remains); virtio-blk has the same 50M (outside the lock).
+- [LINUX-DIFF][High] The PLIC enabled only on the boot hart — all external interrupts pile serialized onto hart0, no affinity.
+- [TIMING][High] **jiffies incremented independently per hart — time runs 4× fast on 4 CPUs** (all jiffies-based TCP timeouts effectively cut to 1/4).
+- [BUG][Medium] The notify address multiplied by 2 extra and not reading queue_notify_off (currently harmless since only queue0 is used); the PCI probe stride 0x1000 wrong (should be 0x8000) — slot≥4 all missed; virtio-input reading config from the wrong BAR (keyboard/mouse classification fails, everything treated as a keyboard); Flush false success (fsync without persistence); a write_block desc failure leaking; feature negotiation with three paths and three calibers.
+- [LINUX-DIFF][Medium] No MSI-X (shared INTx + ISR level-falling); queue depth always 8; no CTRL_VQ/offload; evdev without poll, timestamps always 0 (libinput unusable); the FbFixScreeninfo layout misaligned.
+- [Low] fence i,ir swapped (a weakly-ordered platform risk); the BAR window 256MB without bounds checks; SIOCGIFCONF missing.
+
+## Batch 7 statistics
+BUG 13/ABI 6/LINUX-DIFF 19/TIMING 4/RACE 4/VISIBILITY 2/OVERFLOW 2/COMMENT 8/ARCH 2 = **59 items** (High 12/Medium 21/Low 26).
+**Priority re-checks**: tcp_v4_err's four-tuple, the TCP RX checksum, the dup-ACK determination, the input config BAR.
 
 ---
 
-# 总评审汇总（批次 1-8）
+# Batch 8: sched + timer + interrupt + top level + dfx — Linux-comparison full-file review (the finale)
 
-## 总量统计
-| 批次 | 范围 | 发现数 |
+Scope: sched/ 8 files, 4,833 lines + timer.rs + interrupt/ 8 files + init/main/console/printk/print/config/dfx, ~10,700 lines.
+
+## Key findings
+- [Semantics][High] **SCHED_DEADLINE's CBS throttling wholly ineffective** (the budget refilled on every re-enqueue — a single DL task can monopolize 100% of all CPUs).
+- [Semantics][High] **CFS has no wakeup preemption** (must wait for the next 10ms tick; check_preempt written but with no callers).
+- [Concurrency][High] **tasklets without cross-CPU mutual exclusion** (RUN set non-CAS — two CPUs can run the same callback concurrently; currently latent with no users).
+- [Semantics][High] **free_irq→request_irq reusing an IRQ line silently fails** (depth not reset; delivered interrupts never dispatched).
+- [Semantics][High] **printk has no console output path** (only writes the ring buffer — kernel runtime errors invisible by default; syslog 6/7/8 empty semantics).
+- [Semantics][High] **^C/^Z handled only on the read path** (key presses send no signal when nobody reads the tty — a runaway process can't be terminated with ^C).
+- [Semantics][High] init.rs maps the whole RWX segment (W^X entirely absent); dfx softlockup's time conversion off by 10× + khungtaskd without periodic wakeup (the detectors exist in name only) + hung_task indexing by pid<256 (real pids ≥300 always skipped).
+- [Medium] min_vruntime excluding curr + no sleep-compensation clamp; sched_yield a no-op for CFS; tick preemption judged by the vruntime difference rather than slice expiry; RT without throttling; the timer's single BTreeMap scanned O(n) per tick + period drift (not chasing the nominal expiry point); handlers invoked inside the action lock; the IN_PRINTK global flag losing CPU B's logs; cpu_id always 0.
+- [Low] Contradictory comments in several places (rt.rs:19 opposite the implementation etc.); dead code (timer::init, overloaded, stop task, the SchedClass empty shell); find_idle_cpu always the lowest bit; panic doesn't stop the other CPUs; TASK_PAGE_OWNED aliasing 8192 pages.
+
+## Batch 8 statistics
+High 9/Medium 15/Low 18/Positives 7 = 42 items.
+Positives: jiffies u64 without wraparound, the softirq/ksoftirqd/preempt_count bit layouts on target, syslog permissions/kmsg semantics, the taint table matching Linux, the tests gating correct.
+
+---
+
+# Master review summary (batches 1-8)
+
+## Totals
+| Batch | Scope | Findings |
 |---|---|---|
-| 1 | syscall 层（11 文件） | 78 |
-| 2 | arch/riscv64 含 3 汇编（24 文件） | 36 |
-| 3 | process（9 文件） | 33 |
-| 4 | mm（25 文件） | 85 |
-| 5 | fs（54 文件） | 68 |
-| 6 | ipc+sync+security+io_uring（18 文件） | 45 |
-| 7 | net+drivers（42 文件） | 59 |
-| 8 | sched+timer+interrupt+顶层+dfx | 42 |
-| **合计** | **278 文件 116K 行** | **446 项** |
+| 1 | The syscall layer (11 files) | 78 |
+| 2 | arch/riscv64 including 3 assembly files (24 files) | 36 |
+| 3 | process (9 files) | 33 |
+| 4 | mm (25 files) | 85 |
+| 5 | fs (54 files) | 68 |
+| 6 | ipc+sync+security+io_uring (18 files) | 45 |
+| 7 | net+drivers (42 files) | 59 |
+| 8 | sched+timer+interrupt+top level+dfx | 42 |
+| **Total** | **278 files, 116K lines** | **446 items** |
 
-## 跨批次主题裁决清单（建议用户按此评审）
+## Cross-batch theme adjudication list (suggested for user review along these lines)
 
-### 主题 A：musl 多线程程序整体不可用（P0 级，4 项互锁）
-1. futex 私有键用 tid（批次 6 P1）——pthread_mutex/cond/join 全部随机丢失唤醒。
-2. clone a3/a4 参数对调（批次 1）——musl 直接 syscall 传参错位。
-3. CLONE_THREAD 无线程组（批次 3 P1）——kill(tgid) 不扩散。
-4. exit_group 不杀线程组（批次 3 P1）。
-**评审点**：这是"实现有 bug"（参数对调/键错误）与"设计不一致"（无线程组模型）的混合——前者必须修，后者需决策是否支持线程。
+### Theme A: musl multithreaded programs wholly unusable (P0, 4 interlocking items)
+1. The futex private key uses tid (batch 6 P1) — pthread_mutex/cond/join all randomly losing wakeups.
+2. clone's a3/a4 parameters swapped (batch 1) — musl's direct syscall arguments misaligned.
+3. CLONE_THREAD without a thread group (batch 3 P1) — kill(tgid) doesn't propagate.
+4. exit_group doesn't kill the thread group (batch 3 P1).
+**Review point**: this is a mix of "implementation bugs" (parameter swap/wrong key) and "design inconsistencies" (no thread-group model) — the former must be fixed; the latter needs a decision on whether to support threads.
 
-### 主题 B：信号 ABI 断裂（P0-P1）
-5. sa_restorer 被忽略+栈上 trampoline 与 W^X 矛盾（批次 3）——musl 信号 handler 返回即 SIGSEGV。
-6. clock_nanosleep 返回负 errno（Linux 特例正 errno）（批次 1）。
-7. 240 号错位+rt_tgsigqueueinfo 3 参布局（批次 1）。
+### Theme B: signal ABI breaks (P0-P1)
+5. sa_restorer ignored + the stack trampoline contradicting W^X (batch 3) — musl signal handlers SIGSEGV on return.
+6. clock_nanosleep returning a negative errno (Linux's exceptional positive errno) (batch 1).
+7. Number 240 misplaced + rt_tgsigqueueinfo's 3-argument layout (batch 1).
 
-### 主题 C：socket 行为面（P1）
-8. 所有 socket 恒非阻塞（批次 7）+ SOCK_NONBLOCK 型别被拒 + setsockopt 全忽略 + SO_ERROR 恒 0。
-9. TCP RX 无校验和/dup-ACK 死路径/四元组颠倒/窗口恒定（批次 7）。
-10. UDP >1472B 失败/无隐式 bind（批次 7）。
+### Theme C: the socket behavior surface (P1)
+8. All sockets always non-blocking (batch 7) + SOCK_NONBLOCK type bits rejected + setsockopt entirely ignored + SO_ERROR always 0.
+9. TCP RX without checksums/dup-ACK dead path/four-tuple inverted/constant window (batch 7).
+10. UDP >1472B failing/no implicit bind (batch 7).
 
-### 主题 D：文件系统数据损坏（P1）
-11. ext4 特性协商缺失+htree/checksum 不维护（批次 5）——与真实 Linux 互通即损坏。
-12. extent 深度>0 写入破坏+稀疏洞读垃圾（批次 5）。
-13. jbd2 revoke/checkpoint 空壳（批次 5）。
-14. IPC：semctl 不唤醒等待者/IPC_SET 无属主检查（批次 6）。
+### Theme D: file-system data corruption (P1)
+11. ext4 feature negotiation missing + htree/checksum not maintained (batch 5) — corruption upon interop with real Linux.
+12. extent depth>0 writes destroying + sparse holes reading garbage (batch 5).
+13. jbd2 revoke/checkpoint empty shells (batch 5).
+14. IPC: semctl not waking waiters/IPC_SET without an owner check (batch 6).
 
-### 主题 E：安全类（P1-P2）
-15. SUM 常开（批次 1/2）——纵深防御丢失+裸用户指针 panic 面。
-16. FP 寄存器跨进程残留（批次 2）；copy_from_user 不清零（批次 2）；getrandom LCG（批次 1）；brk 无上界（批次 1）；sticky 位缺失（批次 5）；/proc 跨进程读（批次 5）。
+### Theme E: security class (P1-P2)
+15. SUM always on (batches 1/2) — defense in depth lost + the raw-user-pointer panic surface.
+16. FP registers persisting across processes (batch 2); copy_from_user not zeroing (batch 2); getrandom LCG (batch 1); brk without an upper bound (batch 1); the sticky bit missing (batch 5); the /proc cross-process read (batch 5).
 
-### 主题 F：性能/架构（待评审）
-17. switch_mm 无 ASID+每页全量 sfence（批次 2 双高）；全局 PTE_MODIFY_LOCK（批次 2/4）；NODE_DATA static mut 别名（批次 4）；无分配慢路径/pcp 死代码（批次 4）；xmit 关中断自旋（批次 7）；jiffies 4 倍速（批次 7）；DL CBS 失效/CFS 无唤醒抢占（批次 8）；printk 无 console/^C 仅读路径（批次 8）。
+### Theme F: performance/architecture (pending review)
+17. switch_mm without ASID + full sfence per page (batch 2, double High); the global PTE_MODIFY_LOCK (batches 2/4); the NODE_DATA static mut alias (batch 4); no allocation slow path/dead pcp code (batch 4); xmit spinning with interrupts off (batch 7); jiffies 4× speed (batch 7); DL CBS broken/CFS without wakeup preemption (batch 8); printk without a console/^C only on the read path (batch 8).
 
-### 主题 G：io_uring（P1×2，批次 6）
-18. SINGLE_MMAP 通告不实+mmap 固定地址必重叠+错误双取负。
-
-
-## 分批进度
-- [x] 批次 1：syscall 层（ABI 基准）
-- [x] 批次 2：arch/riscv64（含 3 个 .S）
-- [x] 批次 3：process（fork/exec/wait/signal）
-- [x] 批次 4：mm
-- [x] 批次 5：fs（vfs/ext4/pipe）
-- [x] 批次 6：ipc + sync
-- [x] 批次 7：net + drivers
-- [x] 批次 8：sched + timer + interrupt + 其余
+### Theme G: io_uring (P1×2, batch 6)
+18. The SINGLE_MMAP advertisement false + mmap's fixed address necessarily overlapping + errors double-negated.
 
 
-## 修复实施记录（2026-09-23/24，8 波全部落地）
-
-8 个提交（74ff805→05dc149）覆盖全部 18 主题的可修复项。三次"检视结论本身错误被实测纠正"：
-1. clone 参数序——批次 1 断言 a3=child_tid/a4=tls 有误，musl clone.s 实证 a3=tls/a4=ctid（05dc149 回正）；
-2. svpbmt IO 位——QEMU 默认 CPU 无此扩展，保留位使 PTE 无效（3c8ae4b 回退）；
-3. W6 NODE_DATA 发布模型破坏 boot 序（a6c3a9f 回退后 W6 以保持 init 序方式重做完成）。
-
-### musl pthread 实测（分级探针 test/pthread_min.c / pthread_staged.c）
-- 单线程：create=0 → 线程体运行（TLS 正确）→ join 返回正确退出值 ✓（create/TLS/clear_child_tid/futex-mm-键全链路）
-- 2 线程 plain：✓
-- 4 线程 + mutex：L0/L1 执行并退出后 L2/L3 与 join 挂起；周期快照显示唯一 RUNNING 任务 linked=1 在队却长期不被调度，其余全睡。已知遗留（疑非 leader 退出后的调度/唤醒细节）。
+## Batch progress
+- [x] Batch 1: the syscall layer (the ABI baseline)
+- [x] Batch 2: arch/riscv64 (including the 3 .S files)
+- [x] Batch 3: process (fork/exec/wait/signal)
+- [x] Batch 4: mm
+- [x] Batch 5: fs (vfs/ext4/pipe)
+- [x] Batch 6: ipc + sync
+- [x] Batch 7: net + drivers
+- [x] Batch 8: sched + timer + interrupt + the rest
 
 
-## 4 线程挂起收口（2026-09-24，e57ab8c）
+## Fix implementation record (2026-09-23/24, all 8 waves landed)
 
-双根因叠加，全部实测确证：
-1. **sweep_dead_threads 的 filter+replace 语义误用**：保留成员同时出现在链表与释放列表——每个退出 worker 对自己 park 的条目自旋等自己的 on_cpu，烧光全部 CPU（"在队不被 pick"之谜的答案：pick/affinity/计数全部正常，是没有 CPU 空出来）。同源历史幻影/双执行（"alive 打两次"）的供给源。修复：DEAD∧!on_cpu 精确分区。
-2. **futex shared/private 分桶不一致**：musl pthread_exit 持 __thread_list_lock 跨 SYS_exit，靠 cleartid 的私有键唤醒解锁，而等待方以 shared 键 park——两边落不同桶，woken=0 而邻桶有 3 个 waiter（Linux 用 FLAG_IMMUTABLE 解决同一互操作）。修复：futex_hash 仅按 uaddr 分桶（matches() 保持精确过滤）。
+8 commits (74ff805→05dc149) covering all 18 themes' fixable items. Three cases of "the review conclusion itself was wrong and corrected by testing":
+1. The clone parameter order — batch 1's assertion that a3=child_tid/a4=tls was wrong; musl's clone.s proves a3=tls/a4=ctid (05dc149 corrected);
+2. The svpbmt IO bits — QEMU's default CPU lacks this extension; the reserved bits invalidate the PTE (3c8ae4b reverted);
+3. W6's NODE_DATA publication model broke the boot sequence (a6c3a9f reverted; W6 redone preserving the init order and completed).
 
-musl 实测全绿：4 线程 mutex+join 8/8+6/6、单线程干净收尾、cond broadcast+先信号后等待 4/4+2/2、复合 soak 全过、标准门禁 4/4。
+### musl pthread live testing (graded probes test/pthread_min.c / pthread_staged.c)
+- Single thread: create=0 → the thread body runs (TLS correct) → join returns the correct exit value ✓ (the create/TLS/clear_child_tid/futex-mm-key full chain)
+- 2 threads plain: ✓
+- 4 threads + mutex: after L0/L1 execute and exit, L2/L3 and join hang; the periodic snapshot shows the sole RUNNING task linked=1, queued yet long unscheduled, all others asleep. Known leftover (suspected scheduling/wakeup detail after a non-leader exits).
+
+
+## 4-thread hang closed out (2026-09-24, e57ab8c)
+
+Two root causes stacked, both confirmed by testing:
+1. **sweep_dead_threads' misuse of filter+replace semantics**: retained members appearing in both the list and the free list — each exiting worker spins waiting for its own on_cpu on its own parked entry, burning all CPUs (the answer to the "queued but never picked" mystery: pick/affinity/counting all normal, there simply was no CPU free). The supply source of the same-family historical phantoms/double-execution ("alive printed twice"). Fix: the precise DEAD∧!on_cpu partition.
+2. **The futex shared/private bucket split inconsistent**: musl's pthread_exit holds __thread_list_lock across SYS_exit, relying on cleartid's private-key wakeup to unlock, while the waiter parks with the shared key — the two sides land in different buckets, woken=0 while the neighboring bucket has 3 waiters (Linux solves the same interop with FLAG_IMMUTABLE). Fix: futex_hash buckets by uaddr only (matches() keeps the precise filtering).
+
+musl live tests all green: 4-thread mutex+join 8/8+6/6, single-thread clean finish, cond broadcast + signal-before-wait 4/4+2/2, the composite soak all passing, the standard gates 4/4.
+
