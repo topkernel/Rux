@@ -26,7 +26,7 @@
 | ![Ubuntu login](docs/images/ubuntu-login.png) | ![Ubuntu desktop](docs/images/ubuntu-desktop.png) |
 | *Login screen (native framebuffer session)* | *Desktop with dock, top panel and windows* |
 | ![Apps](docs/images/ubuntu-apps.png) | ![Terminal](docs/images/ubuntu-terminal.png) |
-| *About / SysInfo applications* | *Terminal running a real `/bin/dash` shell — real commands, real output* |
+| *System Info — kernel row shows the Rux identity* | *Terminal running a real `/bin/dash` shell — real commands, real output* |
 
 What is running in these screenshots, all on the Rux kernel:
 
@@ -44,7 +44,7 @@ What is running in these screenshots, all on the Rux kernel:
   Linux-compatible strings — that identity is what lets unmodified
   Ubuntu/glibc binaries run without patches; the desktop's System Info
   panel surfaces the Rux identity over the same data
-  (`Rux 6.8.0-rux (buildd@rux) (rustc …) #1 SMP`)
+  (`Rux 0.1.0-rux (buildd@rux) (rustc …) #1 SMP`)
 - X11/Xorg brings-up and a full GNOME session image are in active development
   (see the [Roadmap](docs/progress/roadmap.md))
 
