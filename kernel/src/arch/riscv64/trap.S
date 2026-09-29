@@ -179,6 +179,7 @@
 .set TASK_TI_KERNEL_SP,  0x08    // ti_kernel_sp offset
 .set TASK_TI_USER_SP,    0x10    // ti_user_sp offset
 .set TASK_TI_CPU,        0x18    // ti_cpu offset (next field is cpus_allowed, NOT state)
+.set TASK_TI_A0,         0x40    // ti_a0 offset (thread_info scratch register)
 .set TASK_STATE,         0x50    // state offset (unused here; see task_offsets)
 .set TASK_PID,           0x54    // pid offset   (unused here; see task_offsets)
 
@@ -388,6 +389,32 @@ trap_entry:
     // time and here; nothing reads it between traps).
     sd sp, TASK_TI_USER_SP(tp)
 
+    // ROUTING FIX (the bash -i KERNPANIC engine): the sscratch-swap test
+    // above assumes "sscratch = task pointer" implies the trap came from
+    // user mode. That assumption is FALSE in the return-to-user window
+    // (csrw sscratch, tp runs several instructions before the final sret)
+    // and in any state where a corrupted frame made an sret land in
+    // S-mode while sscratch still held the task pointer. Such a
+    // kernel-origin trap entering here reloaded sp from ti_kernel_sp and
+    // pushed its frame ONTO the live outermost pt_regs at the top of the
+    // kernel stack — photographied live (GDB watchpoint on PT_EPC): a
+    // cause=9 frame with sepc inside __schedule written by this path at
+    // the top slot, followed by an sret into kernel code with a mixed
+    // register set and finally a `ret` through a never-written stack slot
+    // → "KERNPANIC pfault badaddr=0 epc=0 ra=0".
+    //
+    // sstatus.SPP is the authoritative origin indicator (hardware-set on
+    // every trap). If SPP=1 the trap came from S-mode: treat it exactly
+    // like .Lfrom_kernel — nest the new frame BELOW the current (kernel)
+    // sp instead of reloading sp from ti_kernel_sp. t0 holds a live user
+    // register here, so stash it in the thread_info scratch slot first
+    // (same discipline as ARCH-C2: no register value is lost).
+    sd t0, TASK_TI_A0(tp)
+    csrr t0, sstatus
+    andi t0, t0, SR_SPP
+    bnez t0, .Lfrom_user_kernel_origin
+    ld t0, TASK_TI_A0(tp)
+
     // Switch to the task kernel stack (safe: sp's user value is stashed)
     ld sp, TASK_TI_KERNEL_SP(tp)
     // No kernel stack (idle task during bringup) — defensive fallback
@@ -464,6 +491,19 @@ trap_entry:
     // are never observable.
     GET_PER_CPU_INTR_STACK sp
     j .Lfrom_user_frame
+
+// Kernel-origin trap that arrived through the sscratch=tp window (see the
+// ROUTING FIX comment above). tp already holds the task pointer (correct
+// kernel tp) and the live sp is a KERNEL sp: save the frame nested BELOW it,
+// reusing the .Lfrom_kernel save sequence. The in-flight outer pt_regs at
+// the top of the kernel stack stays untouched.
+.Lfrom_user_kernel_origin:
+    ld t0, TASK_TI_A0(tp)
+    // Restore the kernel-mode sscratch protocol: this entry swapped the
+    // task pointer into tp, leaving sscratch = old tp (also the task
+    // pointer). .Lfrom_kernel expects sscratch=0 while in the kernel.
+    csrw sscratch, zero
+    j .Lsave_kernel_frame
 
 // ============================================================================
 // Call Rust trap handler
