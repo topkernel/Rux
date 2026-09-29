@@ -313,10 +313,15 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Validate flags: only AT_SYMLINK_NOFOLLOW (0x100) and AT_EMPTY_PATH (0x1000) allowed
+    // Validate flags: AT_SYMLINK_NOFOLLOW (0x100), AT_EMPTY_PATH (0x1000)
+    // and AT_NO_AUTOMOUNT (0x800) are the Linux-legal at-flags here.
+    // AT_NO_AUTOMOUNT is required: glibc's stat()/statx() wrappers and
+    // gio (GFile query-info / enumerate-children) always pass it —
+    // rejecting it made every GFileInfo query fail with EINVAL.
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
     const AT_EMPTY_PATH: u32 = 0x1000;
-    const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+    const AT_NO_AUTOMOUNT: u32 = 0x800;
+    const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT;
     if flags & !VALID_FLAGS != 0 {
         return -(errno::EINVAL as i64);
     }
@@ -1655,8 +1660,12 @@ pub fn sys_statx(args: SyscallArgs) -> i64 {
 
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
     const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_NO_AUTOMOUNT: u32 = 0x800;
     const AT_STATX_SYNC_TYPE: u32 = 0x6000; // SYNC_AS_STAT/FSYNC/NOATIME family
-    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE) != 0 {
+    // AT_NO_AUTOMOUNT is legal here (Linux): glibc's stat family and
+    // gio's statx wrapper always pass it alongside AT_SYMLINK_NOFOLLOW
+    // and AT_STATX_SYNC_AS_STAT — rejecting it broke GFile query-info.
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE) != 0 {
         return -(errno::EINVAL as i64);
     }
 
