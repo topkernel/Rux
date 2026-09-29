@@ -125,6 +125,40 @@ fn current_futex_mm_id() -> usize {
     }
 }
 
+/// DFX futex protocol tracer (feature `dfx-futex-trace`).
+#[cfg(feature = "dfx-futex-trace")]
+fn ftx_trace(tag: &[u8], uaddr: usize, a: u64, b: u64) {
+    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    let pid = crate::sched::current().map(|t| unsafe { (*t).pid() as u64 }).unwrap_or(0);
+    taskdump_raw_line(b"FTX ");
+    taskdump_raw_line(tag);
+    taskdump_raw_line(b" pid=");
+    taskdump_dec(pid);
+    taskdump_raw_line(b" u=");
+    taskdump_dec(uaddr as u64);
+    taskdump_raw_line(b" a=");
+    taskdump_dec(a);
+    taskdump_raw_line(b" b=");
+    taskdump_dec(b);
+    taskdump_raw_line(b"\n");
+}
+
+#[cfg(feature = "dfx-futex-trace")]
+fn ftx_opname(op: i32) -> &'static [u8] {
+    match op & FUTEX_CMD_MASK {
+        FUTEX_WAIT => b"WAIT",
+        FUTEX_WAKE => b"WAKE",
+        FUTEX_WAIT_BITSET => b"WAITBS",
+        FUTEX_WAKE_BITSET => b"WAKEBS",
+        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => b"REQUEUE",
+        FUTEX_WAKE_OP => b"WAKEOP",
+        _ => b"OTHER",
+    }
+}
+
+#[cfg(not(feature = "dfx-futex-trace"))]
+fn ftx_trace(_tag: &[u8], _uaddr: usize, _a: u64, _b: u64) {}
+
 /// Waiter information
 struct Waiter {
     /// Futex key
@@ -243,6 +277,8 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
 
     let key = FutexKey::new(uaddr, mm, flags);
     let bucket_idx = futex_hash(&key);
+    #[cfg(feature = "dfx-futex-trace")]
+    ftx_trace(b"WAKE-IN", uaddr, mm as u64, nr_wake as u64);
 
     let mut ret = 0i64;
     let mut prev_idx: Option<usize> = None;
@@ -319,12 +355,16 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     // it cannot have passed its unlink-under-this-lock and exited. Bucket
     // -> GRQ order is safe (no GRQ-held path takes a futex bucket). The
     // old drop-then-wake window was the deferred-wake UAF.
+    let woken_n = wake_list.len();
     for task in wake_list {
         if !task.is_null() {
             Task::wake_up(task);
         }
     }
     drop(head);
+
+    #[cfg(feature = "dfx-futex-trace")]
+    ftx_trace(b"WAKE-OUT", uaddr, ret as u64, woken_n as u64);
 
     ret
 }
@@ -376,6 +416,8 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         Some(v) => v,
         None => return -EFAULT as i64,
     };
+    #[cfg(feature = "dfx-futex-trace")]
+    ftx_trace(b"WAIT-VAL", uaddr, uval as u64, val as u64);
     if uval != val {
         return -EAGAIN as i64;
     }
@@ -441,6 +483,8 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
     if timer_id != 0 {
         crate::timer::del_timer(timer_id);
     }
+    #[cfg(feature = "dfx-futex-trace")]
+    ftx_trace(b"WAIT-RET", uaddr, val as u64, 0);
 
     // The waiter's bucket may have changed while we slept (FUTEX_REQUEUE
     // moved us to uaddr2's bucket). Re-read it from the slot so the
@@ -978,6 +1022,78 @@ pub fn futex_wake_op(
     woken
 }
 
+/// DFX: dump the live state of a futex word + its waiter chain.
+#[cfg(feature = "dfx-futex-trace")]
+pub fn dfx_dump_futex_state(uaddr: usize, parked_pid: u32) {
+    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::dfx::taskdump::dump_syscall_ring_for;
+    let bucket = uaddr % HASH_SIZE;
+    taskdump_raw_line(b"FTX-STATE u=");
+    taskdump_dec(uaddr as u64);
+    // The user word and its neighbours (16 words starting uaddr-16).
+    for i in 0..4 {
+        let a = uaddr + 16 * i;
+        match unsafe { crate::arch::riscv64::uaccess::get_user(a as *const u32) } {
+            Some(v) => {
+                taskdump_raw_line(b" +");
+                taskdump_dec(i as u64 * 4);
+                taskdump_raw_line(b"=");
+                taskdump_dec(v as u64);
+            }
+            None => {
+                taskdump_raw_line(b" EFAULT");
+                break;
+            }
+        }
+    }
+    // The bucket chain.
+    taskdump_raw_line(b" bucket=");
+    taskdump_dec(bucket as u64);
+    taskdump_raw_line(b" chain:");
+    let head = HASH_HEADS[bucket].lock_irqsave();
+    let mut idx = *head;
+    let mut n = 0;
+    while let Some(i) = idx {
+        let (t, ua, wk) = {
+            let slot = WAITER_POOL[i].lock_irqsave();
+            match slot.as_ref() {
+                Some(w) => (w.task, w.key.uaddr, w.woken),
+                None => (core::ptr::null_mut(), 0, false),
+            }
+        };
+        taskdump_raw_line(b" [slot=");
+        taskdump_dec(i as u64);
+        if !t.is_null() {
+            taskdump_raw_line(b" pid=");
+            taskdump_dec(unsafe { (*t).pid() as u64 });
+        }
+        taskdump_raw_line(b" u=");
+        taskdump_dec(ua as u64);
+        if wk {
+            taskdump_raw_line(b" WOKEN");
+        }
+        taskdump_raw_line(b"]");
+        idx = {
+            let slot = WAITER_POOL[i].lock_irqsave();
+            slot.as_ref().and_then(|w| w.next)
+        };
+        n += 1;
+        if n > 8 {
+            taskdump_raw_line(b" ...");
+            break;
+        }
+    }
+    drop(head);
+    taskdump_raw_line(b"\n");
+    // Also replay this task's recent syscalls (completed ones) from the
+    // forensic ring — the parked wait never records, so the tail shows
+    // exactly what led up to it. One-shot: the ring is global/boot-long.
+    static RING_DUMPED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if !RING_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        dump_syscall_ring_for(parked_pid);
+    }
+}
+
 /// do_futex - main dispatch function
 pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _val2: u32, val3: u32) -> i64 {
     let flags = futex_to_flags(op as u32);
@@ -986,6 +1102,23 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // All futex words must be 4-byte aligned (Linux get_futex_key).
     if uaddr & 0x3 != 0 {
         return -EINVAL as i64;
+    }
+
+    #[cfg(feature = "dfx-futex-trace")]
+    {
+        let pid = crate::sched::current().map(|t| unsafe { (*t).pid() as u64 }).unwrap_or(0);
+        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        taskdump_raw_line(b"FTX ENTER pid=");
+        taskdump_dec(pid);
+        taskdump_raw_line(b" op=");
+        taskdump_raw_line(ftx_opname(op));
+        taskdump_raw_line(b" priv=");
+        taskdump_dec(((op & FUTEX_PRIVATE_FLAG) != 0) as u64);
+        taskdump_raw_line(b" u=");
+        taskdump_dec(uaddr as u64);
+        taskdump_raw_line(b" val=");
+        taskdump_dec(val as u64);
+        taskdump_raw_line(b"\n");
     }
 
     match cmd {

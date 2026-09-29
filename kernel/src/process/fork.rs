@@ -261,6 +261,24 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
     // SAFETY: current is the parent task's raw pointer, valid throughout clone.
     // task_ptr is freshly allocated by alloc_task_slot(). All modifications to
     // child task fields are done before it is enqueued, so no concurrent access.
+    #[cfg(feature = "dfx-futex-trace")]
+    {
+        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        let pid = crate::sched::current().map(|c| unsafe { (*c).pid() as u64 }).unwrap_or(0);
+        taskdump_raw_line(b"FTX CLONE pid=");
+        taskdump_dec(pid);
+        taskdump_raw_line(b" flags=");
+        let f = args.flags;
+        let mut sh: i32 = 64;
+        while sh > 0 {
+            sh -= 4;
+            let nb = ((f >> sh) & 0xF) as u8;
+            taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+        }
+        taskdump_raw_line(b" stack=");
+        taskdump_dec(args.stack);
+        taskdump_raw_line(b"\n");
+    }
     unsafe {
         // Get current task (parent process)
         let current = match crate::sched::current() {
@@ -464,6 +482,42 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             if let Some(parent_as) = parent_addr_space {
                 match parent_as.fork() {
                     Ok(child_as) => {
+                        #[cfg(feature = "dfx-futex-trace")]
+                        {
+                            use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+                            let child_arc = alloc::sync::Arc::new(child_as);
+                            let p_root = parent_as.root_ppn();
+                            let c_root = child_arc.root_ppn();
+                            for va in [0x1c8000u64, 0x1c9000, 0x100000] {
+                                unsafe {
+                                    let p = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(p_root, va);
+                                    let c = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(c_root, va);
+                                    taskdump_raw_line(b"FTX-COWCHK parent=");
+                                    taskdump_dec((*current_ptr).pid() as u64);
+                                    taskdump_raw_line(b" child=");
+                                    taskdump_dec((*task_ptr).pid() as u64);
+                                    taskdump_raw_line(b" va=");
+                                    taskdump_dec(va);
+                                    taskdump_raw_line(b" p=");
+                                    taskdump_dec(p.map(|x| x.0).unwrap_or(0));
+                                    taskdump_raw_line(b"/pte:");
+                                    taskdump_dec(p.map(|x| x.1).unwrap_or(0));
+                                    taskdump_raw_line(b" c=");
+                                    taskdump_dec(c.map(|x| x.0).unwrap_or(0));
+                                    taskdump_raw_line(b"/pte:");
+                                    taskdump_dec(c.map(|x| x.1).unwrap_or(0));
+                                    taskdump_raw_line(b" refcnt=");
+                                    let rf = p.and_then(|x| {
+                                        let pg = crate::mm::page_desc::pfn_to_page(x.0 as usize);
+                                        if pg.is_null() { None } else { Some(unsafe { (*pg).refcount() }) }
+                                    });
+                                    taskdump_dec(rf.unwrap_or(-1i32) as i64 as u64);
+                                    taskdump_raw_line(b"\n");
+                                }
+                            }
+                            (*task_ptr).set_address_space(Some(child_arc));
+                        }
+                        #[cfg(not(feature = "dfx-futex-trace"))]
                         (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(child_as)));
                     }
                     Err(_e) => {
@@ -626,9 +680,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         if is_vfork {
             crate::pr_debug!("vfork: parent={} blocked, child={}",
-                (*current_ptr).pid(), pid);
-
-            (*current).set_state(TaskState::new(TaskState::UNINTERRUPTIBLE));
+                (*current_ptr).pid(), pid);            (*current).set_state(TaskState::new(TaskState::UNINTERRUPTIBLE));
 
             // Re-check AFTER marking ourselves sleeping: if the child already
             // exec'd/exited above, its wake_up saw us RUNNING and was a
@@ -645,6 +697,14 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 crate::sched::schedule();
             }
             // Parent resumes here after child exec'd or exited
+        }
+
+        #[cfg(feature = "dfx-futex-trace")]
+        {
+            use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+            taskdump_raw_line(b"FTX CLONE-OK child=");
+            taskdump_dec(pid as u64);
+            taskdump_raw_line(b"\n");
         }
 
         Ok(pid)

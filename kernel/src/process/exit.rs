@@ -49,6 +49,15 @@ unsafe fn exit_robust_list(task: *mut Task) {
     if head == 0 || (*task).robust_list_len() != ROBUST_LIST_HEAD_SIZE {
         return; // not registered / legacy len — nothing to do
     }
+    #[cfg(feature = "dfx-futex-trace")]
+    {
+        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        taskdump_raw_line(b"FTX ROBUST-EXIT pid=");
+        taskdump_dec((*task).pid() as u64);
+        taskdump_raw_line(b" head=");
+        taskdump_dec(head as u64);
+        taskdump_raw_line(b"\n");
+    }
     let my_tid = (*task).pid();
     let mm_id = crate::sync::futex::task_futex_mm_id(task);
 
@@ -128,6 +137,15 @@ unsafe fn exit_clear_child_tid(task: *mut Task) {
         return;
     }
     let mm_id = crate::sync::futex::task_futex_mm_id(task);
+    #[cfg(feature = "dfx-futex-trace")]
+    {
+        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        taskdump_raw_line(b"FTX CLEARTID-EXIT pid=");
+        taskdump_dec((*task).pid() as u64);
+        taskdump_raw_line(b" u=");
+        taskdump_dec(tid_ptr as usize as u64);
+        taskdump_raw_line(b"\n");
+    }
 
     // Write 0 to the tid pointer in user memory.
     let zero: i32 = 0;
@@ -507,6 +525,18 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::pr_debug!("exit: pid={}, tgid={}, exit_code={}, ppid={} ({})",
             current_pid, (*current).tgid(), exit_code, parent_pid,
             if is_leader { "leader" } else { "thread" });
+
+        #[cfg(feature = "dfx-futex-trace")]
+        {
+            use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+            taskdump_raw_line(b"FTX EXIT pid=");
+            taskdump_dec(current_pid as u64);
+            taskdump_raw_line(b" code=");
+            taskdump_dec(exit_code as i64 as u64);
+            taskdump_raw_line(b" threads=");
+            taskdump_dec((*current).nr_threads() as u64);
+            taskdump_raw_line(b"\n");
+        }
 
         // Set exit code
         (*current).set_exit_code(exit_code);
