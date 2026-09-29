@@ -237,7 +237,8 @@ def run_boot(idx, args, outdir):
     img = args.img or os.path.join(WT, "work", "ubuntu-gui.img")
     cmd = [
         "qemu-system-riscv64", "-M", "virt", "-accel", "tcg,thread=single",
-        "-cpu", "rv64", "-m", "2G", "-smp", "1", "-display", "none",
+        "-cpu", "rv64", "-m", "2G", "-smp", str(getattr(args, "smp", 1)),
+        "-display", "none",
         "-serial", f"unix:{ser_sock},server,nowait",
         "-qmp", f"unix:{qmp_sock},server,nowait",
         "-drive", f"file={img},if=none,id=rootfs,format=raw",
@@ -345,6 +346,7 @@ def run_boot(idx, args, outdir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=1)
     ap.add_argument("--kernel")
     ap.add_argument("--img")
     ap.add_argument("--outdir", default=os.path.join(WT, "work", "verify"))
