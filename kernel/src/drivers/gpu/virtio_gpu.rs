@@ -684,8 +684,14 @@ impl VirtioGpuDevice {
             queue.notify();
             fence(Ordering::SeqCst);
 
-            // Wait for response (simple polling)
-            for _ in 0..100000 {
+            // Wait for response (simple polling). The bound must be generous:
+            // under a host display backend (SDL/GTK) QEMU realizes the
+            // window before answering GET_DISPLAY_INFO, which can take
+            // seconds under load — the old 100k-iteration cap expired first
+            // and framebuffer init failed ("no /dev/fb0", garbled screen).
+            // The fast path returns as soon as used.idx advances, so the
+            // larger bound only costs time on a genuinely dead device.
+            for _ in 0..100_000_000 {
                 fence(Ordering::SeqCst);
                 let used = &*queue.used;
                 if used.idx as usize >= idx + 1 {

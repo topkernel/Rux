@@ -193,7 +193,15 @@ pub fn start_secondaries() {
 
         let ret = sbi_rt::hart_start(hart, start_addr, stack_top_pa);
         if ret.error != 0 {
-            println!("smp: hart {} start failed (error={})", hart, ret.error);
+            // SBI_INVALID_PARAM (-3) is the expected answer for a hart the
+            // platform does not have (-smp N with N < MAX_CPUS) — not an
+            // error; report it quietly so single-CPU boots don't look
+            // like failures.
+            if ret.error == (-3isize) as usize {
+                println!("smp: hart {} not present (skipping)", hart);
+            } else {
+                println!("smp: hart {} start failed (error={})", hart, ret.error);
+            }
         } else {
             expected_cpus += 1;
             println!("smp: hart {} started", hart);
