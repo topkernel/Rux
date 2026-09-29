@@ -482,7 +482,14 @@ pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
         return Err(-98); // EADDRINUSE (raced — see fast-path note above)
     }
     *sock.bound_name.lock() = Some(addr.key.clone());
-    table.insert(addr.key.clone(), sock.clone());    Ok(())
+    table.insert(addr.key.clone(), sock.clone());
+    Ok(())
+}
+
+/// Filesystem paths are registry keys without the leading NUL marker that
+/// abstract addresses carry.
+fn is_fs_path(key: &str) -> bool {
+    !key.starts_with('\0')
 }
 
 /// Create a socket node (S_IFSOCK) at `path`, the way Linux bind(2) does.
@@ -879,6 +886,12 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
             .unwrap_or(false)
         {
             table.remove(&name);
+            // Unlink the filesystem node we created at bind() (Linux
+            // removes the socket path when the last fd closes). Best
+            // effort: a vanished node is fine.
+            if is_fs_path(&name) {
+                let _ = crate::fs::vfs::file_unlink(&name);
+            }
         }
     }
     // Peer gets drain-then-EOF semantics.

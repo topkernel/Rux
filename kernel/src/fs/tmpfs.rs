@@ -786,14 +786,26 @@ unsafe fn tmpfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
     }
     let mut entries = Vec::new();
     for child in node.list_children() {
-        let dt = if child.is_dir() {
-            file_type::DT_DIR
-        } else if child.is_file() {
-            file_type::DT_REG
-        } else if child.is_symlink() {
-            file_type::DT_LNK
-        } else {
-            file_type::DT_UNKNOWN
+        // d_type from the MODE word, not the node type: FIFOs and unix
+        // sockets are created as RegularFile nodes and retyped through
+        // chmod-style ATTR_MODE (mkfifo / AF_UNIX bind). Deriving from
+        // node_type would hide them as DT_REG — readdir on /run must show
+        // bound sockets (DT_SOCK) and named pipes (DT_FIFO).
+        let mode = *child.mode.lock();
+        let dt = match mode & InodeMode::S_IFMT {
+            InodeMode::S_IFDIR => file_type::DT_DIR,
+            InodeMode::S_IFLNK => file_type::DT_LNK,
+            InodeMode::S_IFIFO => file_type::DT_FIFO,
+            InodeMode::S_IFSOCK => file_type::DT_SOCK,
+            _ => {
+                if child.is_dir() {
+                    file_type::DT_DIR
+                } else if child.is_symlink() {
+                    file_type::DT_LNK
+                } else {
+                    file_type::DT_REG
+                }
+            }
         };
         entries.push(VfsDirEntry {
             ino: child.ino,
