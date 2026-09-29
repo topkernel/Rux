@@ -146,7 +146,6 @@ pub fn kernel_thread(
         return None;
     }
 
-    crate::pr_info!("kthread: created kernel thread '{}' pid={}", _name, pid);
 
     // SAFETY: task_ptr still points to the valid Task allocated above;
     // enqueue_task consumed the mutable borrow but the allocation persists.

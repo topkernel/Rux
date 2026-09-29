@@ -36,7 +36,6 @@ static KSOFTIRQD_WAKE: [AtomicBool; MAX_CPUS] = [
 extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
     let cpu = arg as usize;
 
-    crate::pr_info!("ksoftirqd/{} started", cpu);
 
     loop {
         // Check if we should stop

@@ -292,5 +292,4 @@ pub fn init() {
         crate::timer::timer_softirq_handler,
     );
 
-    crate::pr_info!("softirq: {} vectors registered", NR_SOFTIRQS);
 }

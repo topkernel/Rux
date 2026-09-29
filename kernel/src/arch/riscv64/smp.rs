@@ -173,7 +173,6 @@ pub fn start_secondaries() {
     // SBI HSM hart_start, which jumps to this physical address in M-mode.
     let start_addr = unsafe { secondary_start as usize - VA_OFFSET };
     let my_hart = cpu_id();
-    println!("smp: boot hart={}, start_addr={:#x}, starting secondaries...", my_hart, start_addr);
 
     // Number of CPUs we expect to come online: the boot hart plus every hart
     // whose SBI hart_start succeeded. QEMU may expose fewer harts than the
@@ -183,6 +182,7 @@ pub fn start_secondaries() {
     // boot spun the full 50M-iteration timeout (~a minute under TCG) with all
     // secondaries parked in the BOOT_COMPLETE wfi — the "boot-time hang".
     let mut expected_cpus = 1usize; // the boot hart itself
+    let mut failed_harts = 0usize;
 
     for hart in 0..MAX_CPUS {
         if hart == my_hart { continue; }
@@ -195,16 +195,14 @@ pub fn start_secondaries() {
         if ret.error != 0 {
             // SBI_INVALID_PARAM (-3) is the expected answer for a hart the
             // platform does not have (-smp N with N < MAX_CPUS) — not an
-            // error; report it quietly so single-CPU boots don't look
-            // like failures.
-            if ret.error == (-3isize) as usize {
-                println!("smp: hart {} not present (skipping)", hart);
-            } else {
+            // error, folded into the online count below. Anything else is a
+            // real failure worth a row.
+            if ret.error != (-3isize) as usize {
+                failed_harts += 1;
                 println!("smp: hart {} start failed (error={})", hart, ret.error);
             }
         } else {
             expected_cpus += 1;
-            println!("smp: hart {} started", hart);
         }
     }
 
@@ -218,8 +216,19 @@ pub fn start_secondaries() {
     }
 
     let cpu_count = num_started_cpus();
-    if cpu_count > 1 {
-        println!("smp: {} CPUs online", cpu_count);
+    if failed_harts == 0 {
+        crate::print_status(
+            "smp",
+            &alloc::format!("{} CPU{} online (boot hart {})",
+                            cpu_count, if cpu_count > 1 { "s" } else { "" }, my_hart),
+            cpu_count == expected_cpus,
+        );
+    } else {
+        crate::print_status(
+            "smp",
+            &alloc::format!("{} CPUs online, {} hart-start failure(s)", cpu_count, failed_harts),
+            false,
+        );
     }
 }
 
@@ -251,7 +260,6 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     // Enable external interrupts (sie.SEIE) for this hart
     crate::arch::riscv64::trap::enable_external_interrupt();
 
-    crate::pr_info!("sched: cpu {} online", hart_id);
 
     // Enter scheduler idle loop (timer interrupts enabled inside the loop)
     crate::sched::cpu_idle_loop();

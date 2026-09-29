@@ -265,7 +265,6 @@ pub fn init() {
         rcu_softirq_handler,
     );
 
-    crate::pr_info!("rcu: tiny RCU initialized (max {} CPUs)", MAX_CPUS);
 }
 
 // ============================================================================

@@ -185,49 +185,75 @@ For detailed instructions: [Getting Started Guide](docs/guides/getting-started.m
 ## 🏆 Boot Log (Ubuntu desktop, `-smp 4`)
 
 ```
-██████  ██    ██ ██   ██
-██   ██ ██    ██  ██ ██
-██████  ██    ██   ███
-██   ██ ██    ██  ██ ██
-██   ██  ██████  ██   ██
-  [ RISC-V 64-bit | POSIX Compatible | v0.1.0 ]
-
-Kernel starting...
-
 Module            Description                        Status
 ----------------  --------------------------------   --------
 console:          UART ns16550a driver               [ok]
 trap:             stvec handler installed            [ok]
 trap:             ecall syscall handler              [ok]
 mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
 mm:               buddy allocator order 0-12         [ok]
 mm:               heap region 128MB @ 0x80a00000     [ok]
+mm:               slab allocator 4MB                 [ok]
 boot:             FDT/DTB parsed                     [ok]
+boot:             cmd: root=/dev/vda rw init=...     [ok]
+mm:               linear mapping 2048 MB             [ok]
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x80200000-0x80a0   [ok]
+mm:               layout: heap=0x80a00000-0x88a000   [ok]
+mm:               524288 page descriptors            [ok]
+mm:               zone allocator initialized         [ok]
+memblock:         total 2048MB, available 1841MB     [ok]
+mm:               device mappings created            [ok]
+irq:              irq_desc array initialized         [ok]
+intc:             PLIC @ 0x0C000000                  [ok]
+intc:             IRQ domain + chip registered       [ok]
+ipi:              SSIP software IRQ + bitmap multi   [ok]
+console:          UART interrupt-driven RX           [ok]
+bio:              buffer cache layer                 [ok]
 fs:               ext4 driver loaded                 [ok]
 fs:               ramfs mounted /                    [ok]
+fs:               procfs initialized                 [ok]
 fs:               procfs mounted /proc               [ok]
+cgroup:           v2 unified hierarchy init          [ok]
+cgroup:           cgroup2 mounted /sys/fs/cgroup     [ok]
 driver:           virtio-blk PCI x1                  [ok]
+driver:           GenDisk registered                 [ok]
 fs:               ext4 mounted /                     [ok]
+fs:               procfs remounted /proc             [ok]
+mm:               swap 256 MB tail carve             [done]
 driver:           virtio-net x1                      [ok]
+vdso:             clock_gettime fast path            [ok]
+security:         capability LSM initialized         [ok]
 sched:            CFS scheduler v1                   [ok]
+sched:            runqueue per-CPU                   [ok]
+sched:            PID allocator init                 [ok]
+sched:            idle task (PID 0)                  [ok]
+mm:               kswapd reclaim thread              [ok]
+dfx:              diagnostic subsystem               [ok]
 ipc:              System V + POSIX MQ                [ok]
-smp: hart 1 started
-smp: hart 2 started
-smp: hart 3 started
-smp:              4 CPUs online                      [ok]
+smp:              4 CPUs online (boot hart 0)        [ok]
+softirq:          ksoftirqd per-CPU threads          [ok]
+dfx:              khungtaskd hung-task detector      [ok]
 trap:             sie.SEIE enabled                   [ok]
 driver:           virtio-gpu probed                  [ok]
 gpu:              1280x800 32bpp framebuffer         [ok]
 fs:               devfs mounted /dev                 [ok]
 driver:           /dev/fb0 registered                [ok]
+fs:               tmpfs mounted /dev/shm             [ok]
+fs:               tmpfs mounted /run                 [ok]
 driver:           evdev /dev/input/event0            [ok]
 driver:           evdev /dev/input/event1            [ok]
 driver:           virtio-keyboard                    [ok]
 driver:           virtio-tablet                      [ok]
 init:             loading /sbin/init                 [ok]
+init:             ELF loaded to user space           [ok]
 init:             init task (PID 1) enqueued         [ok]
+Welcome to Rux OS (RISC-V 64)
+- mrsh (POSIX shell) | A minimal POSIX-compatible shell
 
 udesk-init: boot ok
+udesk-init: warmup st=0
 [udesk] fb 1280x800
 [udesk] login screen up
 ```

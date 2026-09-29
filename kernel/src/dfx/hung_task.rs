@@ -56,8 +56,7 @@ pub fn init() {
 
     if result.is_some() {
         RUNNING.store(true, Ordering::Release);
-        crate::pr_info!("dfx: khungtaskd started");
-    } else {
+        } else {
         crate::pr_warn!("dfx: failed to start khungtaskd");
     }
 }

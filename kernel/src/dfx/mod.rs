@@ -46,7 +46,6 @@ pub fn init() {
     // hung_task detector is deferred — it requires kthread infrastructure
     // that may not be fully ready during early boot. Enable after testing.
     // hung_task::init();
-    crate::pr_info!("dfx: diagnostic subsystem initialized");
 }
 
 // ============================================================================

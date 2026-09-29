@@ -685,8 +685,8 @@ pub extern "C" fn rust_main() -> ! {
         // Secondary CPUs call init_secondary() which does kmalloc (pid_hash_insert),
         // but they do NOT enable timer interrupts until cpu_idle_loop(),
         // so they won't participate in scheduling until boot CPU is ready.
+        // (start_secondaries emits its own structured status row.)
         arch::smp::start_secondaries();
-        print_status("smp", &format!("{} CPUs online", arch::smp::num_started_cpus()), true);
 
         // Initialize ksoftirqd per-CPU threads (must be after start_secondaries
         // because wake_up sends IPIs to target CPUs, which must be online).

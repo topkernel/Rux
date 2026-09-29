@@ -57,7 +57,6 @@ pub fn enable_oom() {
 ///  2. Run balance_pgdat() to reclaim pages
 ///  3. Repeat
 extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
-    crate::pr_info!("kswapd started");
 
     loop {
         if crate::process::kthread::kthread_should_stop() {
@@ -210,7 +209,6 @@ pub fn init() {
         let t_ptr = t as *mut _;
         KSWAPD_TASK.store(t_ptr, Ordering::Release);
         KSWAPD_INIT.store(true, Ordering::Release);
-        crate::pr_info!("kswapd: thread created");
     } else {
         crate::pr_err!("kswapd: failed to create thread");
     }

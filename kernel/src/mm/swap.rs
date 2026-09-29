@@ -185,7 +185,7 @@ pub fn swap_init() {
 
     match swap_activate(disk) {
         Ok((start_sector, max_slots)) => {
-            crate::println!(
+            crate::pr_debug!(
                 "swap: enabled on disk at sector {}, {} MB, {} slots",
                 start_sector,
                 crate::config::SWAP_SIZE_MB,
@@ -193,10 +193,7 @@ pub fn swap_init() {
             );
         }
         Err(e) => {
-            crate::println!(
-                "swap: activation refused (errno {}), swap disabled",
-                e
-            );
+            crate::pr_debug!("swap: activation refused (errno {}), swap disabled", e);
         }
     }
 }
@@ -238,9 +235,10 @@ pub fn swap_activate(
     // swap pages into live fs blocks would corrupt it.
     if let Some(fs_end_sector) = ext4_fs_end_sector(disk) {
         if start_sector < fs_end_sector {
-            crate::println!(
-                "swap: tail carve at sector {} overlaps ext4 fs (ends sector {}); \
-                 grow the disk image past the fs to enable swap",
+            // Expected configuration outcome (image sized to the fs): the
+            // structured boot row already reports swap as not-active.
+            crate::pr_debug!(
+                "swap: tail carve at sector {} overlaps ext4 fs (ends sector {})",
                 start_sector,
                 fs_end_sector
             );
