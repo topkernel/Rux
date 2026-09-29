@@ -242,7 +242,7 @@ def run_boot(idx, args, outdir):
         "-display", "none",
         "-serial", f"unix:{ser_sock},server,nowait",
         "-qmp", f"unix:{qmp_sock},server,nowait",
-        "-drive", f"file={img},if=none,id=rootfs,format=raw",
+        "-drive", f"file={img},if=none,id=rootfs,format=raw,file.locking=off",
         "-device", "virtio-blk-pci,drive=rootfs",
         "-device", "virtio-gpu-pci",
         "-kernel", kernel,
