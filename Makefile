@@ -2,7 +2,15 @@
 # Provides quick access from project root directory
 
 .PHONY: all build clean run test debug help smp user rootfs gui verify miri kani
-.PHONY: toybox mrsh sdk ltp
+.PHONY: toybox mrsh sdk ltp ubuntu-image ubuntu-run
+
+# ---- Ubuntu native desktop (udesk) ----
+# Image and kernel artifacts
+UBUNTU_IMG ?= work/ubuntu-gui.img
+KERNEL_BIN ?= target/riscv64gc-unknown-none-elf/debug/rux
+# The distro QEMU build has the SDL display backend; the custom 10.2.2 in
+# /usr/local/bin is compiled without display backends (none/dbus only).
+UBUNTU_QEMU ?= /usr/bin/qemu-system-riscv64
 
 # Default target: forward to build/Makefile
 all:
@@ -64,6 +72,34 @@ run:
 gui:
 	@echo "Starting QEMU (GUI - desktop)..."
 	@./test/run.sh gui /app/desktop
+
+# ---- Ubuntu native desktop (udesk on Ubuntu 22.04 rootfs) ----
+# Build (or rebuild) the Ubuntu GUI disk image: work/ubuntu-gui.img.
+# Requires riscv64-linux-gnu-gcc and the shared Ubuntu rootfs (see
+# test/ubuntu-gui/build-img.sh, override with SRC=/path CC=...).
+ubuntu-image:
+	@bash test/ubuntu-gui/build-img.sh
+
+# Run the Ubuntu desktop in a native SDL window (via WSLg). Keyboard
+# works BOTH in the SDL window itself (virtio-keyboard -> /dev/input/
+# event0) and in this terminal (serial console). Login: root / rux.
+# Ctrl-S SysInfo, Ctrl-A About, Tab cycle focus, Ctrl-W close window.
+# NOTE: plain `-serial stdio` — NOT mon:stdio: the chardev mux would
+# swallow Ctrl-A as its monitor-escape key, but Ctrl-A opens About.
+ubuntu-run: build $(UBUNTU_IMG)
+	@echo "Starting Ubuntu desktop (SDL window + keyboard in window or this terminal)..."
+	$(UBUNTU_QEMU) -M virt -accel tcg,thread=single -cpu rv64 -m 2G -smp 1 \
+	  -snapshot -display sdl -serial stdio -monitor none \
+	  -device virtio-keyboard-pci -device virtio-tablet-pci \
+	  -drive file=$(UBUNTU_IMG),if=none,id=rootfs,format=raw \
+	  -device virtio-blk-pci,drive=rootfs \
+	  -device virtio-gpu-pci \
+	  -kernel $(KERNEL_BIN) \
+	  -append "root=/dev/vda rw init=/sbin/init console=ttyS0"
+
+# Image rule: built on demand by ubuntu-run, refreshed by `make ubuntu-image`.
+$(UBUNTU_IMG):
+	@bash test/ubuntu-gui/build-img.sh
 
 # Run kernel test script
 test:
@@ -135,6 +171,8 @@ help:
 	@echo "  make clean           - Clean build"
 	@echo "  make run             - Run kernel (mrsh)"
 	@echo "  make gui             - Run GUI mode (desktop)"
+	@echo "  make ubuntu-run      - Run Ubuntu desktop in an SDL window (root/rux)"
+	@echo "  make ubuntu-image    - (Re)build the Ubuntu GUI disk image"
 	@echo "  make test            - Run tests"
 	@echo "  make verify          - Run formal verification (sync check + proptest)"
 	@echo "  make miri            - Run Miri UB detection on verify crate"

@@ -394,6 +394,50 @@ static void helper_key(int evw) {
         if (write(evw, m, 3) != 3) _exit(0);
     }
 }
+
+// Graphical-keyboard input: translate Linux EV_KEY events from
+// /dev/input/event0 (virtio-keyboard, fed by the host display window)
+// into the same byte stream the serial helper produces, so the desktop
+// is operable from the SDL/VNC window itself. US layout, shift+ctrl
+// tracking; key events only — pointer events are ignored for now.
+// Tables are indexed by Linux keycode (2..56); 0x01 marks "no mapping".
+struct kdevent { uint64_t sec, usec; uint16_t type, code; int32_t value; };
+static int kb_shift, kb_ctrl;
+static int kd_ascii(uint16_t c) {
+    static const char lo[] =
+        "\x01\x01" "1234567890" "-=" "\b\t" "qwertyuiop" "[]" "\n"
+        "\x01" "asdfghjkl" ";'`" "\x01\\" "zxcvbnm" ",./" "\x01*\x01";
+    static const char hi[] =
+        "\x01\x01" "!@#$%^&*()" "_+" "\b\t" "QWERTYUIOP" "{}" "\n"
+        "\x01" "ASDFGHJKL" ":\"~" "\x01|" "ZXCVBNM" "<>?" "\x01*\x01";
+    if (c == 57) return ' ';
+    if (c < 2 || c > 56) return 0;
+    const char *t = kb_shift ? hi : lo;
+    return (unsigned char)t[c] != 0x01 ? (unsigned char)t[c] : 0;
+}
+static void helper_evdev(int evw) {
+    int fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
+    if (fd < 0) { for (;;) pause(); }
+    uint8_t m[3] = {EV_KEY, 1, 0};
+    for (;;) {
+        struct kdevent e;
+        ssize_t n = read(fd, &e, sizeof e);
+        if (n != (ssize_t)sizeof e) { sleep(1); continue; }
+        if (e.type != 1) continue;              // EV_KEY
+        if (e.code == 42 || e.code == 54) { kb_shift = e.value != 0; continue; }
+        if (e.code == 29 || e.code == 97) { kb_ctrl = e.value != 0; continue; }
+        if (e.value != 1 && e.value != 2) continue; // press / autorepeat
+        int ch = kd_ascii(e.code);
+        if (!ch) continue;
+        if (kb_ctrl) {
+            if (ch >= 'a' && ch <= 'z') ch = ch - 'a' + 1;
+            else if (ch >= 'A' && ch <= 'Z') ch = ch - 'A' + 1;
+            else continue;
+        }
+        m[2] = (uint8_t)ch;
+        if (write(evw, m, 3) != 3) _exit(0);
+    }
+}
 static void helper_tick(int evw) {
     uint8_t m[2] = {EV_TICK, 0}; // framed like every other event: type+len+data
     for (;;) { sleep(1); if (write(evw, m, 2) != 2) _exit(0); }
@@ -526,6 +570,7 @@ int main(void) {
     shell_in = in_p[1];
     if (fork() == 0) { close(ev[0]); close(in_p[1]); helper_shell(out_p[0], ev[1]); _exit(0); }
     if (fork() == 0) { close(ev[0]); helper_key(ev[1]); _exit(0); }
+    if (fork() == 0) { close(ev[0]); helper_evdev(ev[1]); _exit(0); }
     if (fork() == 0) { close(ev[0]); helper_tick(ev[1]); _exit(0); }
     close(ev[1]);
 
