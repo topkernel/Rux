@@ -238,6 +238,7 @@ def run_boot(idx, args, outdir):
     cmd = [
         "qemu-system-riscv64", "-M", "virt", "-accel", "tcg,thread=single",
         "-cpu", "rv64", "-m", "2G", "-smp", str(getattr(args, "smp", 1)),
+        "-snapshot",
         "-display", "none",
         "-serial", f"unix:{ser_sock},server,nowait",
         "-qmp", f"unix:{qmp_sock},server,nowait",
