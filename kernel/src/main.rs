@@ -484,6 +484,27 @@ pub extern "C" fn rust_main() -> ! {
                 }
             }
 
+            // Auto-mount sysfs at /sys (same rationale as procfs above):
+            // stock userland — Xorg's fbdevhw fbdev_open() readlinks
+            // /sys/class/graphics/fb0 and silently refuses /dev/fb0 when
+            // the lookup fails; udev's DEVPATH walks need it too. runit
+            // and other minimal inits never mount it themselves.
+            {
+                let sysfs_init = fs::sysfs::init_sysfs();
+                let sysfs_mount = sysfs_init.and_then(|_| fs::sysfs::mount_sysfs());
+                let ok = sysfs_mount
+                    .map(|_| {
+                        fs::vfs::vfs_mount(
+                            "/sys",
+                            fs::sysfs::create_root_inode(),
+                            fs::mount::MntFlags::new(0),
+                        );
+                        fs::mount::register_mount("sysfs", "/sys", "sysfs", "rw");
+                    })
+                    .is_ok();
+                print_status("fs", "sysfs mounted /sys", ok);
+            }
+
             // cgroup v2 unified hierarchy (U1b) — systemd's hard
             // dependency: mount cgroup2 at /sys/fs/cgroup after the
             // sysfs/procfS boot mounts. The hierarchy root exposes

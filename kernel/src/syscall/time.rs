@@ -386,14 +386,18 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
         if !crate::arch::riscv64::uaccess::access_ok(res as usize, 16) {  // 2 * sizeof(u64)
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: res validated with access_ok(16); put_user is the
-        // exception-table (SUM=0 safe) path — a raw deref of the user
-        // pointer page-faults in S-mode (0x3fff... badaddr panic seen
-        // from glibc's clock_getres in dbus-daemon).
+        // SAFETY: res validated with access_ok; put_user is the
+        // exception-table copy path with SUM managed by uaccess.S. A raw
+        // `*res = ...` store faults on the U-bit user page with SUM=0 and,
+        // having no exception-table entry, panicked the kernel (Xorg's
+        // clock_getres on its main stack, badaddr=0x3fffffe5a8).
         unsafe {
             // timespec structure: tv_sec (8 bytes) + tv_nsec (8 bytes)
-            let _ = crate::arch::riscv64::uaccess::put_user(res, 0u64); // tv_sec = 0
-            let _ = crate::arch::riscv64::uaccess::put_user(res.offset(1), 100u64); // tv_nsec = 100
+            let ok_sec = crate::arch::riscv64::uaccess::put_user(res, 0u64);          // tv_sec = 0
+            let ok_nsec = crate::arch::riscv64::uaccess::put_user(res.offset(1), 100u64);  // tv_nsec = 100ns
+            if !ok_sec || !ok_nsec {
+                return -(errno::EFAULT as i64);
+            }
         }
     }
 
