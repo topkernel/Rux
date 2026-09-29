@@ -95,3 +95,7 @@ kernel/verify/spin/*.tmp
 
 # Kani verification generated files
 kernel/verify/kani-output.txt
+
+# Generated test artifacts (make ubuntu-image / verify.py outputs)
+/work/
+*.out
