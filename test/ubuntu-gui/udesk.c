@@ -252,6 +252,14 @@ static void sysinfo_refresh(void) {
     char buf[128];
     read_line_from("/proc/version", kver, sizeof kver);
     if (!kver[0]) strcpy(kver, "Rux OS (RISC-V 64)");
+    else if (!strncmp(kver, "Linux version ", 14)) {
+        // Brand the display: the kernel keeps the Linux-ABI string in
+        // /proc/version (parsers tokenize the "Linux version" prefix);
+        // the desktop shows the Rux identity over the same data.
+        memmove(kver, kver + 14, strlen(kver + 14) + 1);
+        memmove(kver + 4, kver, strlen(kver) + 1);
+        memcpy(kver, "Rux ", 4);
+    }
     read_line_from("/proc/uptime", buf, sizeof buf);
     if (buf[0]) {
         char *sp = strchr(buf, ' '); if (sp) *sp = 0;
