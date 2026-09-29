@@ -746,12 +746,18 @@ unsafe fn tmpfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i
             0
         }
         setattr_attr::ATTR_MODE => {
-            let file_type = match node.node_type {
-                TmpfsType::Directory => InodeMode::S_IFDIR,
-                TmpfsType::RegularFile => InodeMode::S_IFREG,
-                TmpfsType::SymbolicLink => InodeMode::S_IFLNK,
+            // Honor type bits in `value` — AF_UNIX bind(2) and mkfifo(3)
+            // create their special nodes by create-regular-then-retype
+            // (the mknod pattern). A perm-only word (chmod) preserves the
+            // current file type from the stored mode word, like Linux.
+            let v = value as u32;
+            let vtype = v & InodeMode::S_IFMT;
+            let file_type = if vtype != 0 {
+                vtype
+            } else {
+                *node.mode.lock() & InodeMode::S_IFMT
             };
-            *node.mode.lock() = file_type | (value as u32 & 0o7777);
+            *node.mode.lock() = file_type | (v & 0o7777);
             node.mtime.store(uptime_secs(), Ordering::Release);
             0
         }

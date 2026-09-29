@@ -131,6 +131,10 @@ pub struct UnixSocket {
     pub wait_queue: WaitQueueHead,
     /// Stored socket options (shared shape with the AF_INET layer)
     pub options: Spinlock<SocketOptions>,
+    /// Creator's credentials — reported to the peer by SO_PEERCRED /
+    /// SCM_CREDENTIALS. Snapshot at socket creation (like Linux
+    /// sk_peer_cred semantics for the connecting side).
+    pub creds: Spinlock<UnixCred>,
 }
 
 // SAFETY: all mutable state is behind Spinlocks.
@@ -151,7 +155,16 @@ impl UnixSocket {
             shut_wr: Spinlock::new(false),
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
+            creds: Spinlock::new(current_unix_cred()),
         }
+    }
+
+    /// SO_PEERCRED: the connected peer's {pid, uid, gid}.
+    /// None = not connected (Linux fails getsockopt with ENOTCONN).
+    pub fn peer_cred(&self) -> Option<UnixCred> {
+        let peer = self.peer_arc()?;
+        let c = *peer.creds.lock();
+        Some(c)
     }
 
     /// W3: SO_RCVTIMEO as an absolute jiffies deadline (None = infinite).
@@ -215,6 +228,21 @@ fn timeout_to_deadline(us: u64) -> Option<u64> {
         return None;
     }
     Some(crate::drivers::timer::get_jiffies() + (us / 10_000).max(1))
+}
+
+/// Snapshot the current task's credentials for SO_PEERCRED/SCM_CREDENTIALS.
+fn current_unix_cred() -> UnixCred {
+    match crate::sched::current() {
+        Some(task) => {
+            let c = task.cred();
+            UnixCred {
+                pid: crate::process::current_pid() as i32,
+                uid: c.uid,
+                gid: c.gid,
+            }
+        }
+        None => UnixCred { pid: 0, uid: 0, gid: 0 },
+    }
 }
 
 // ============================================================================
@@ -430,12 +458,75 @@ pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
     if sock.bound_name.lock().is_some() {
         return Err(-22); // EINVAL — already bound
     }
+    // Filesystem-path bind: Linux bind(2) creates a S_IFSOCK inode at
+    // sun_path (visible to stat/chmod/ls; abstract names skip this).
+    // dbus-daemon chmod()s the socket path after bind — without the node
+    // the daemon fails its setup.
+    if !addr.key.starts_with('\0') {
+        // Fast path: name already taken in the kernel table?
+        {
+            let table = UNIX_TABLE.lock();
+            if table.contains_key(&addr.key) {
+                return Err(-98); // EADDRINUSE
+            }
+        }
+        match create_socket_node(&addr.key) {
+            Ok(()) => {}
+            // EEXIST on the path = EADDRINUSE (stale socket file).
+            Err(-17) => return Err(-98),
+            Err(e) => return Err(e),
+        }
+    }
     let mut table = UNIX_TABLE.lock();
     if table.contains_key(&addr.key) {
-        return Err(-98); // EADDRINUSE
+        return Err(-98); // EADDRINUSE (raced — see fast-path note above)
     }
     *sock.bound_name.lock() = Some(addr.key.clone());
     table.insert(addr.key.clone(), sock.clone());    Ok(())
+}
+
+/// Create a socket node (S_IFSOCK) at `path`, the way Linux bind(2) does.
+/// Same create-and-retype pattern as FIFO mknod: create a regular file,
+/// then set its mode word to S_IFSOCK|perm via setattr.
+fn create_socket_node(path: &str) -> Result<(), i32> {
+    // O_WRONLY|O_CREAT|O_EXCL — the transient fd is closed immediately.
+    match crate::fs::file_open(path, 0o1 | 0o100 | 0o200 | 0o1000, 0o777) {
+        Ok(fd) => {
+            // SAFETY: fd is a valid open descriptor from file_open above.
+            let inode = unsafe {
+                let file = match crate::fs::get_file_fd(fd) {
+                    Some(f) => f,
+                    None => {
+                        crate::fs::close_file_fd(fd);
+                        return Err(-5); // EIO
+                    }
+                };
+                match (*file.inode.get()).as_ref() {
+                    Some(i) => i.clone(),
+                    None => {
+                        crate::fs::close_file_fd(fd);
+                        return Err(-5); // EIO
+                    }
+                }
+            };
+            // Retype to S_IFSOCK (mode bits: 0777 & ~umask was applied at
+            // create; keep the permission bits, swap the type field).
+            let full_mode =
+                crate::fs::inode::InodeMode::S_IFSOCK | (inode.mode.bits() & 0o777);
+            let ret = inode.op_setattr(
+                crate::fs::inode::setattr_attr::ATTR_MODE,
+                full_mode as u64,
+                0,
+            );
+            // SAFETY: fd is a valid open descriptor from file_open above.
+            unsafe { crate::fs::close_file_fd(fd); }
+            if ret != 0 {
+                return Err(ret);
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// listen(): mark a STREAM socket as a listener.
@@ -479,6 +570,11 @@ pub fn unix_connect(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> 
             // The child inherits the server's bound name for
             // getsockname/recvfrom reporting.
             *child.bound_name.lock() = server.bound_name.lock().clone();
+            // SO_PEERCRED: the child IS the server endpoint, so clients
+            // asking for the peer's creds must see the server's, not the
+            // connecting client's (the child was allocated inside the
+            // client's connect() syscall context).
+            *child.creds.lock() = *server.creds.lock();
             // Client side: point at the child. The child's Arc is owned by
             // the server's accept queue until accept() installs it as an fd.
             *sock.peer.lock() = Some(Arc::downgrade(&child));

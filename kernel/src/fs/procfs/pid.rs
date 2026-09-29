@@ -206,10 +206,13 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     content.push_str(&format!("SigBlk:\t{:016x}\n", sig_blk));
     content.push_str(&format!("SigIgn:\t{:016x}\n", sig_ign));
     content.push_str(&format!("SigCgt:\t{:016x}\n", sig_cgt));
-    content.push_str("CapInh:\t0000000000000000\n");
-    content.push_str("CapPrm:\t0000000000000000\n");
-    content.push_str("CapEff:\t0000000000000000\n");
-    content.push_str("CapBnd:\t0000000000000000\n");
+    // Capability sets (real values — libcap-ng's capng_get_caps_process()
+    // parses CapBnd from here; all-zero values made capng_change_id() fail
+    // and killed dbus-daemon startup).
+    content.push_str(&format!("CapInh:\t{:016x}\n", cred.cap_inheritable.bits()));
+    content.push_str(&format!("CapPrm:\t{:016x}\n", cred.cap_permitted.bits()));
+    content.push_str(&format!("CapEff:\t{:016x}\n", cred.cap_effective.bits()));
+    content.push_str(&format!("CapBnd:\t{:016x}\n", cred.cap_bounding.bits()));
     content.push_str("Seccomp:\t0\n");
 
     content.into_bytes()

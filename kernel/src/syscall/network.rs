@@ -1652,6 +1652,34 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
         const SO_RCVTIMEO_GET: i32 = 20;
         const SO_SNDTIMEO_GET: i32 = 21;
         const SOL_SOCKET_GET: i32 = 1;
+        const SO_PEERCRED_GET: i32 = 17;
+        if level == SOL_SOCKET_GET && optname == SO_PEERCRED_GET {
+            // struct ucred { pid_t pid; uid_t uid; gid_t gid; } = 12 bytes.
+            // dbus EXTERNAL auth reads the connecting client's identity
+            // here; ENOTCONN when there is no peer (Linux behavior).
+            let cred = match usock.peer_cred() {
+                Some(c) => c,
+                None => return -(errno::ENOTCONN as i64),
+            };
+            let write_len = core::cmp::min(optlen, 12);
+            let mut payload = [0u8; 12];
+            payload[0..4].copy_from_slice(&cred.pid.to_le_bytes());
+            payload[4..8].copy_from_slice(&cred.uid.to_le_bytes());
+            payload[8..12].copy_from_slice(&cred.gid.to_le_bytes());
+            // SAFETY: optval validated with access_ok(optlen) at entry;
+            // copy_to_user/put_user are the exception-table (SUM=0 safe)
+            // paths.
+            unsafe {
+                crate::arch::riscv64::uaccess::clear_user(optval, optlen.min(write_len));
+                crate::arch::riscv64::uaccess::copy_to_user(
+                    optval,
+                    payload.as_ptr(),
+                    write_len,
+                );
+                let _ = crate::arch::riscv64::uaccess::put_user(optlen_ptr, write_len as u32);
+            }
+            return 0;
+        }
         if level == SOL_SOCKET_GET && (optname == SO_RCVTIMEO_GET || optname == SO_SNDTIMEO_GET) {
             let opts = usock.options.lock();
             let us = if optname == SO_RCVTIMEO_GET {

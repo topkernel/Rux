@@ -536,6 +536,12 @@ impl ProcFSSuperBlock {
             sysctl::generate_ostype,
             self.alloc_ino(),
         )));
+        // Highest supported capability number (read by libcap-ng init()).
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"cap_last_cap".to_vec(),
+            sysctl::generate_cap_last_cap,
+            self.alloc_ino(),
+        )));
 
         let vm = Arc::new(ProcFSNode::new_dir(b"vm".to_vec(), self.alloc_ino()));
         sys.add_child(vm.clone());

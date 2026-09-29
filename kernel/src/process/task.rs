@@ -374,6 +374,10 @@ pub struct Cred {
     pub cap_effective:   crate::security::capability::Cap,
     pub cap_bounding:    crate::security::capability::Cap,
     pub cap_ambient:     crate::security::capability::Cap,
+    /// PR_SET_KEEPCAPS: keep capability sets across a uid transition away
+    /// from 0 (libcap-ng's capng_change_id() sets this before dropping to
+    /// the daemon user, then clears it).
+    pub keepcaps: bool,
 }
 
 impl Cred {
@@ -391,6 +395,7 @@ impl Cred {
             cap_effective:   crate::security::capability::Cap::FULL,
             cap_bounding:    crate::security::capability::Cap::FULL,
             cap_ambient:     crate::security::capability::Cap::EMPTY,
+            keepcaps: false,
         }
     }
 
@@ -407,6 +412,7 @@ impl Cred {
             cap_effective:   crate::security::capability::Cap::EMPTY,
             cap_bounding:    crate::security::capability::Cap::FULL,
             cap_ambient:     crate::security::capability::Cap::EMPTY,
+            keepcaps: false,
         }
     }
 

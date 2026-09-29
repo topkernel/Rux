@@ -63,6 +63,12 @@ pub fn generate_ostype() -> Vec<u8> {
     Vec::from(&b"Linux\n"[..])
 }
 
+/// /proc/sys/kernel/cap_last_cap — highest supported capability number
+/// (read by libcap-ng init() to size the capability bounding set).
+pub fn generate_cap_last_cap() -> Vec<u8> {
+    alloc::format!("{}\n", crate::security::capability::CAP_LAST_CAP).into_bytes()
+}
+
 pub fn generate_overcommit_memory() -> Vec<u8> {
     alloc::format!("{}\n", OVERCOMMIT_MEMORY.load(Ordering::Relaxed)).into_bytes()
 }

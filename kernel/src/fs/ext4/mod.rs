@@ -1888,9 +1888,19 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 
     match attr {
         setattr_attr::ATTR_MODE => {
-            // arg1 = new mode (permission bits only, file type preserved)
-            let new_mode = (arg1 as u32) & 0o777;
-            ext4_inode.mode = (ext4_inode.mode & 0xF000) | (new_mode as u16);
+            // arg1 = new mode. A full mode word (type bits present) RETYPES
+            // the inode — that is how AF_UNIX bind(2) and mkfifo(3) create
+            // their special nodes (create-regular-then-retype, mirroring
+            // the kernel mknod path). A perm-only word (chmod) preserves
+            // the existing file type, exactly like Linux chmod.
+            let v = arg1 as u32;
+            let vtype = v & 0o170000;
+            let new_mode = if vtype != 0 {
+                vtype | (v & 0o777)
+            } else {
+                ((ext4_inode.mode as u32) & 0o170000) | (v & 0o777)
+            };
+            ext4_inode.mode = new_mode as u16;
         }
         setattr_attr::ATTR_UID_GID => {
             // arg1 = uid, arg2 = gid

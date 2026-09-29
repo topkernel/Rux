@@ -1057,8 +1057,9 @@ pub fn sys_setuid(args: SyscallArgs) -> i64 {
             } else {
                 return -(errno::EPERM as i64);
             }
-            // Leaving euid 0 drops all capabilities (Linux commit_creds).
-            if cred.euid != 0 {
+            // Leaving euid 0 drops all capabilities (Linux commit_creds)
+            // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id).
+            if cred.euid != 0 && !cred.keepcaps {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             }
@@ -1141,8 +1142,9 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
             if ruid != -1 {
                 cred.suid = new_euid;
             }
-            // Leaving euid 0 drops all capabilities (Linux commit_creds).
-            if cred.euid != 0 {
+            // Leaving euid 0 drops all capabilities (Linux commit_creds)
+            // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id).
+            if cred.euid != 0 && !cred.keepcaps {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             }
@@ -1260,8 +1262,9 @@ pub fn sys_setresuid(args: SyscallArgs) -> i64 {
             cred.euid = new_euid;
             cred.suid = new_suid;
             cred.fsuid = new_euid;
-            // Leaving euid 0 drops all capabilities (Linux commit_creds).
-            if cred.euid != 0 {
+            // Leaving euid 0 drops all capabilities (Linux commit_creds)
+            // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id).
+            if cred.euid != 0 && !cred.keepcaps {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             }
@@ -1900,6 +1903,48 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             // PR_SET_SECCOMP (U1c): arg2 = mode (1 strict / 2 filter with
             // arg3 = struct sock_fprog *).
             prctl_set_seccomp(arg2, arg3)
+        }
+        7 => {
+            // PR_GET_KEEPCAPS
+            // SAFETY: current is a valid task pointer.
+            unsafe { (*current).cred().keepcaps as i64 }
+        }
+        8 => {
+            // PR_SET_KEEPCAPS: arg2 must be 0 or 1. Setting the flag keeps
+            // the capability sets across a uid transition away from 0
+            // (used by libcap-ng capng_change_id before setuid).
+            if arg2 > 1 {
+                return -(errno::EINVAL as i64);
+            }
+            // SAFETY: current is a valid task pointer; cred_mut() returns
+            // a mutable reference to the task's credential structure.
+            unsafe { (*current).cred_mut().keepcaps = arg2 != 0; }
+            0
+        }
+        23 => {
+            // PR_CAPBSET_READ: is capability arg2 in the bounding set?
+            if arg2 as u32 > crate::security::capability::CAP_LAST_CAP {
+                return -(errno::EINVAL as i64);
+            }
+            // SAFETY: current is a valid task pointer.
+            unsafe {
+                (*current).cred().cap_bounding.has(arg2 as u32) as i64
+            }
+        }
+        24 => {
+            // PR_CAPBSET_DROP: remove capability arg2 from the bounding
+            // set. Requires CAP_SETPCAP (Linux cap_capable check).
+            if arg2 as u32 > crate::security::capability::CAP_LAST_CAP {
+                return -(errno::EINVAL as i64);
+            }
+            if !crate::security::capable(crate::security::CAP_SETPCAP) {
+                return -(errno::EPERM as i64);
+            }
+            // SAFETY: current is a valid task pointer.
+            unsafe {
+                (*current).cred_mut().cap_bounding.clear(arg2 as u32);
+            }
+            0
         }
         _ => -(errno::EINVAL as i64),
     }
@@ -2993,10 +3038,6 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
     let hdr_ptr = args[0] as usize;
     let data_ptr = args[1] as usize;
 
-    // Both pointers are required
-    if hdr_ptr == 0 || data_ptr == 0 {
-        return -(errno::EFAULT as i64);
-    }
     // Header is 8 bytes: version (u32) + pid (i32)
     if !crate::arch::riscv64::uaccess::access_ok(hdr_ptr, 8) {
         return -(errno::EFAULT as i64);
@@ -3012,6 +3053,26 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
     }
     let version = hdr[0];
     let pid = hdr[1] as i32;
+
+    // Version probe (Linux capget semantics): version == 0 asks the
+    // kernel to report the highest supported capability ABI version —
+    // written back into the header, returning EINVAL. This runs BEFORE
+    // the data-pointer check: libcap-ng's init() calls capget(&hdr, NULL)
+    // and classifies by the version written back (an EFAULT there broke
+    // capng_change_id and killed dbus-daemon startup).
+    if version == 0 {
+        let supported = _LINUX_CAPABILITY_VERSION_3;
+        // SAFETY: hdr_ptr validated with access_ok; copy_to_user handles user writes.
+        unsafe {
+            copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
+        }
+        return -(errno::EINVAL as i64);
+    }
+
+    // A real query needs the data array
+    if data_ptr == 0 {
+        return -(errno::EFAULT as i64);
+    }
 
     // Determine the target task
     let target = if pid == 0 {
