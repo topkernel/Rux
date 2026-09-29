@@ -64,6 +64,7 @@ struct fb_var { uint32_t xres, yres, xres_v, yres_v, xoff, yoff, bpp, pad[6]; };
 #define EV_KEY   'K'
 #define EV_TICK  'T'
 #define EV_SHELL 'S'
+#define EV_MOUSE 'M'   // 5 bytes: x_lo x_hi y_lo y_hi btn
 #define EV_MAX   256
 
 // public-domain font8x8 (ASCII 32..126)
@@ -178,6 +179,36 @@ static char user[40], pass[40];
 static int ulen, plen, field; // 0=username 1=password
 static int authfail, blink;
 static unsigned ticks; // seconds since session start
+static int mx = -1, my = -1, mbtn; // pointer position/button (mx<0: never moved)
+
+// Arrow cursor painted last on every full repaint (the session repaints
+// the whole frame per event, so no backing-store save/restore is needed).
+static const char *CUR[] = {
+    "X.........",
+    "XX........",
+    "X%X.......",
+    "X%%X......",
+    "X%%%X.....",
+    "X%%%%X....",
+    "X%%%%%X...",
+    "X%%%%%%X..",
+    "X%%%%%%%X.",
+    "X%%%%XXXXX",
+    "X%%X......",
+    "XX%X......",
+    "X..XX.....",
+};
+static void draw_cursor(void) {
+    if (mx < 0) return;
+    for (size_t r = 0; r < sizeof CUR / sizeof CUR[0]; r++)
+        for (int c = 0; c < 10; c++) {
+            char ch = CUR[r][c];
+            if (ch == '.') continue;
+            uint32_t col = (ch == 'X') ? 0x000000U : 0xFFFFFFU;
+            if (c == 0 && r > 0) { px(mx + c + 1, my + (int)r + 1, rgb(0x000000U)); }
+            px(mx + c, my + (int)r, rgb(col));
+        }
+}
 
 static int win_open[NAPPS], focus = APP_TERM;
 
@@ -294,6 +325,7 @@ static void paint_login(void) {
     draw_text_ctr_t(W / 2, H - 24, "[type] text    [Tab] switch field    [Enter] next / log in",
                     rgb(C_TEXT_DIM), 1, 1);
     draw_text_t(8, 8, "udesk session", rgb(C_TEXT_DIM), 1, 1);
+    draw_cursor();
     flushfb();
 }
 
@@ -377,6 +409,7 @@ static void paint_desktop(void) {
     int order[NAPPS] = {APP_TERM, APP_INFO, APP_ABOUT}; // focused paints last (z-order)
     for (int i = 0; i < NAPPS; i++) if (order[i] == focus) { order[i] = order[NAPPS - 1]; order[NAPPS - 1] = focus; }
     for (int i = 0; i < NAPPS; i++) if (win_open[order[i]]) paint_window(order[i]);
+    draw_cursor();
     flushfb();
 }
 
@@ -438,6 +471,32 @@ static void helper_evdev(int evw) {
 static void helper_tick(int evw) {
     uint8_t m[2] = {EV_TICK, 0}; // framed like every other event: type+len+data
     for (;;) { sleep(1); if (write(evw, m, 2) != 2) _exit(0); }
+}
+
+// Graphical-pointer input: /dev/input/event1 (virtio-tablet, fed by the
+// host display window). Absolute axes (EV_ABS 0..32767) are scaled to the
+// framebuffer captured before fork(); left button follows. Sends {EV_MOUSE,
+// 5, x_lo, x_hi, y_lo, y_hi, btn} frames — moves and clicks alike.
+static void helper_pointer(int evw) {
+    int fd = open("/dev/input/event1", O_RDONLY | O_NONBLOCK);
+    if (fd < 0) { for (;;) pause(); }
+    int ax = -1, ay = -1, btn = 0;
+    for (;;) {
+        struct kdevent e;
+        ssize_t n = read(fd, &e, sizeof e);
+        if (n != (ssize_t)sizeof e) { sleep(1); continue; }
+        int send = 0;
+        if (e.type == 3 && e.code == 0 && e.value >= 0) { ax = e.value; send = 1; }      // ABS_X
+        else if (e.type == 3 && e.code == 1 && e.value >= 0) { ay = e.value; send = 1; } // ABS_Y
+        else if (e.type == 1 && e.code == 0x110) { btn = e.value != 0; send = 1; }       // BTN_LEFT
+        if (!send || ax < 0 || ay < 0) continue;
+        int sx = ax * (W - 1) / 32767, sy = ay * (H - 1) / 32767;
+        uint8_t m[7] = {EV_MOUSE, 5,
+                        (uint8_t)(sx & 0xff), (uint8_t)(sx >> 8),
+                        (uint8_t)(sy & 0xff), (uint8_t)(sy >> 8),
+                        (uint8_t)btn};
+        if (write(evw, m, 7) != 7) _exit(0);
+    }
 }
 static void helper_shell(int out_r, int evw) {
     uint8_t m[EV_MAX];
@@ -532,6 +591,57 @@ static void handle_key(uint8_t k) {
     }
 }
 
+// Pointer click routing (login fields; dock launch; title-bar focus and
+// the close box; body click focuses a window). Only the press edge acts.
+static void handle_mouse(int x, int y, int btn) {
+    if (!btn || mbtn) return; // act on press edge only
+    printf("[udesk] mouse click %d,%d\n", x, y);
+    if (state_login) {
+        int cw = 340, cx = W / 2 - cw / 2, cy = H * 45 / 100;
+        if (x >= cx + 14 && x <= cx + cw - 14) {
+            if (y >= cy + 14 && y <= cy + 52 && field != 0) {
+                field = 0; printf("[udesk] login field -> username\n");
+            } else if (y >= cy + 64 && y <= cy + 102 && field != 1) {
+                field = 1; printf("[udesk] login field -> password\n");
+            }
+        }
+        return;
+    }
+    // dock launch buttons (44x44 frames at x 6..50)
+    if (x >= 6 && x <= 50) {
+        for (int a = 0; a < NAPPS; a++) {
+            int by = PANEL_H + 20 + a * 64;
+            if (y >= by && y <= by + 56) {
+                if (!win_open[a]) open_app(a);
+                else { focus = a; printf("[udesk] focus -> %d\n", focus); }
+                if (a == APP_INFO) sysinfo_refresh();
+                return;
+            }
+        }
+    }
+    // windows, focused (topmost) first: title bar focus + close box
+    int order[NAPPS] = {APP_TERM, APP_INFO, APP_ABOUT};
+    for (int i = 0; i < NAPPS; i++) if (order[i] == focus) { order[i] = order[NAPPS - 1]; order[NAPPS - 1] = focus; }
+    for (int i = NAPPS - 1; i >= 0; i--) {
+        int a = order[i];
+        if (!win_open[a]) continue;
+        struct wingeo *g = &WGE[a];
+        if (x < g->x || x >= g->x + g->w || y < g->y || y >= g->y + g->h) continue;
+        if (y < g->y + TITLE_H) {
+            if (x >= g->x + g->w - 18 && x <= g->x + g->w - 4 && y >= g->y + 4 && y <= g->y + 18) {
+                win_open[a] = 0; // the drawn close box
+                printf("[udesk] close win %d\n", a);
+                if (focus == a) cycle_focus();
+            } else if (focus != a) {
+                focus = a; printf("[udesk] focus -> %d\n", focus);
+            }
+        } else if (focus != a) {
+            focus = a; printf("[udesk] focus -> %d\n", focus);
+        }
+        return;
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     fbfd = open("/dev/fb0", O_RDWR);
@@ -568,6 +678,7 @@ int main(void) {
     if (fork() == 0) { close(ev[0]); close(in_p[1]); helper_shell(out_p[0], ev[1]); _exit(0); }
     if (fork() == 0) { close(ev[0]); helper_key(ev[1]); _exit(0); }
     if (fork() == 0) { close(ev[0]); helper_evdev(ev[1]); _exit(0); }
+    if (fork() == 0) { close(ev[0]); helper_pointer(ev[1]); _exit(0); }
     if (fork() == 0) { close(ev[0]); helper_tick(ev[1]); _exit(0); }
     close(ev[1]);
 
@@ -581,6 +692,14 @@ int main(void) {
             uint8_t k = data[0];
             printf("[udesk] key 0x%02x '%c'\n", k, k >= 32 && k < 127 ? (char)k : '.');
             handle_key(k);
+            if (state_login) paint_login(); else paint_desktop();
+        } else if (type == EV_MOUSE) {
+            if (len >= 5) {
+                int x = data[0] | (data[1] << 8), y = data[2] | (data[3] << 8);
+                int btn = data[4] != 0;
+                handle_mouse(x, y, btn);
+                mbtn = btn; mx = x; my = y;
+            }
             if (state_login) paint_login(); else paint_desktop();
         } else if (type == EV_TICK) {
             ticks++; blink = !blink;
