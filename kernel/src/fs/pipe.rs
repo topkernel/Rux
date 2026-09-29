@@ -563,6 +563,44 @@ impl Pipe {
     }
 }
 
+/// Synthetic st_dev for anonymous pipe file descriptions (Linux keeps
+/// pipes on an in-kernel "pipefs"; no other Rux filesystem uses this id).
+const PIPE_STAT_DEV: u64 = 0x7069_7066_7300_0001;
+
+/// fstat(2) for pipe file descriptions (no backing VFS inode).
+///
+/// Pipe Files are anonymous — `file.inode` is None — so fstat used to
+/// fail with EBADF (worse: the syscall layer re-negated that into +9,
+/// which glibc treats as success and leaves the caller's stat buffer
+/// untouched). Fill a Linux-pipefs-style identity instead: both ends of
+/// one pipe share the Arc<Pipe> address, so same-file comparisons see
+/// the two ends as ONE inode (like Linux) and a pipe never collides
+/// with the console or a real file.
+///
+/// Returns `Some(0)` when `file` is a pipe File, `None` otherwise.
+pub fn pipe_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity confirms this is a pipe File; private_data was
+    // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
+    // while the File exists.
+    let ptr = unsafe { *file.private_data.get() }?;
+    stat.st_dev = PIPE_STAT_DEV;
+    stat.st_ino = ptr as usize as u64;
+    stat.st_nlink = 1;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = 0;
+    stat.st_size = 0;
+    stat.st_blocks = 0;
+    stat.st_blksize = 4096;
+    stat.set_fifo();
+    stat.st_mode |= 0o600;
+    Some(0)
+}
+
 pub fn create_pipe() -> (Arc<File>, Arc<File>) {
     // Create pipe wrapped in Arc so both ends share ownership.
     // The Pipe is freed when the last Arc drops.

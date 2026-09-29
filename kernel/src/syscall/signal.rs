@@ -69,21 +69,37 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
     // SAFETY: current from sched::current() is a valid Task pointer for the running task.
     let old_mask = unsafe { (*current).sigmask };
 
-    // Set new signal mask
-    let result_mask = match how {
-        sigprocmask_how::SIG_BLOCK => {
-            // Add signals to blocked mask
-            old_mask | new_mask
+    // Set new signal mask.
+    //
+    // POSIX/Linux: a NULL `set` is a pure QUERY — the mask is only reported
+    // through `oldset`, never changed. The old code ran the how-match with
+    // new_mask=0 unconditionally, so every glibc read
+    // (sigprocmask(SIG_SETMASK, NULL, &old) — exactly what libc's
+    // sigsuspend diagnostics, dash's wait loop, and every mask CHECK use)
+    // stored SIG_SETMASK(0) and CLEARED the mask. The b795fda sigsuspend
+    // mask discipline was silently undone by the very calls observing it:
+    // after one query the task ran with everything unblocked (and the
+    // outer check read the mask AFTER the store — old_mask was still
+    // reported correctly, so userspace saw a plausible value and the
+    // corruption stayed invisible).
+    let result_mask = if set_ptr.is_null() {
+        old_mask
+    } else {
+        match how {
+            sigprocmask_how::SIG_BLOCK => {
+                // Add signals to blocked mask
+                old_mask | new_mask
+            }
+            sigprocmask_how::SIG_UNBLOCK => {
+                // Remove signals from blocked mask
+                old_mask & !new_mask
+            }
+            sigprocmask_how::SIG_SETMASK => {
+                // Set new blocked mask
+                new_mask
+            }
+            _ => old_mask, // Should not reach here
         }
-        sigprocmask_how::SIG_UNBLOCK => {
-            // Remove signals from blocked mask
-            old_mask & !new_mask
-        }
-        sigprocmask_how::SIG_SETMASK => {
-            // Set new blocked mask
-            new_mask
-        }
-        _ => old_mask, // Should not reach here
     };
 
     // SIGKILL (9) and SIGSTOP (19) can never be blocked (POSIX/Linux):

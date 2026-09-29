@@ -2124,7 +2124,22 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
         let inode_opt = &*file.inode.get();
         let inode = match inode_opt.as_ref() {
             Some(i) => i,
-            None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+            None => {
+                // Anonymous file description (pipe ends, kernel console):
+                // no VFS inode, but fstat(2) must still succeed with a
+                // real, distinct identity — Linux stats pipes on pipefs
+                // and the console on devfs. Without this, fstat failed
+                // with EBADF and userspace same-file checks misbehaved
+                // (coreutils cat: "input file is output file" on every
+                // `x | cat` pipeline, silently dropping the data).
+                if crate::fs::pipe::pipe_file_stat(&file, stat).is_some() {
+                    return Ok(());
+                }
+                if crate::fs::char_dev::char_dev_file_stat(&file, stat).is_some() {
+                    return Ok(());
+                }
+                return Err(errno::Errno::BadFileNumber.as_neg_i32());
+            }
         };
         let result = inode.op_getattr(stat);
         if result == 0 {

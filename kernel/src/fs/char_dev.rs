@@ -125,6 +125,43 @@ pub static UART_OPS: crate::fs::FileOps = crate::fs::FileOps {
     poll: Some(uart_file_poll),
 };
 
+/// Synthetic st_dev for kernel-console char-device Files (no other Rux
+/// filesystem uses this id, so it can never alias a pipe or a real file).
+const CHAR_DEV_STAT_DEV: u64 = 0x636f_6e73_6f6c_6501;
+
+/// fstat(2) for console char-device file descriptions (no backing inode).
+///
+/// The std fds created by `init_std_fds_for_task` are inode-less UART
+/// Files; fstat on them used to fail (and the re-negated +9 made glibc
+/// skip writing the buffer entirely — the cat "input file is output
+/// file" false positive). Report a stable S_IFCHR identity keyed on the
+/// CharDev itself: all console fds are the same device, and never equal
+/// to a pipe or a regular file.
+///
+/// Returns `Some(0)` when `file` is a UART File, `None` otherwise.
+pub fn char_dev_file_stat(file: &crate::fs::File, stat: &mut crate::fs::Stat) -> Option<i32> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &UART_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity confirms a UART File; private_data points at the
+    // static CharDev installed by init_std_fds_for_task (or equivalent).
+    let ptr = unsafe { *file.private_data.get() }?;
+    let dev = unsafe { &*(ptr as *const CharDev) };
+    stat.st_dev = CHAR_DEV_STAT_DEV;
+    stat.st_ino = ptr as usize as u64;
+    stat.st_nlink = 1;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = dev.dev;
+    stat.st_size = 0;
+    stat.st_blocks = 0;
+    stat.st_blksize = 1024;
+    stat.set_char_device();
+    stat.st_mode |= 0o620;
+    Some(0)
+}
+
 fn uart_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // Check O_NONBLOCK flag
     let nonblock = (file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;

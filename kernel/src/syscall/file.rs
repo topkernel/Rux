@@ -279,7 +279,14 @@ pub fn sys_fstat(args: SyscallArgs) -> i64 {
             }
         }
         Err(errno) => {
-            -(errno as i64)
+            // file_stat returns ALREADY-NEGATIVE errnos (as_neg_i32). The
+            // old re-negation turned EBADF(-9) into +9 — a POSITIVE return
+            // that glibc passes through as "success" without writing the
+            // caller's stat buffer, so userspace compared untouched
+            // (all-equal) buffers: coreutils cat then refused every
+            // `x | cat` pipeline with "input file is output file" and
+            // dropped its data.
+            errno as i64
         }
     }
 }
@@ -340,7 +347,8 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         }
         match crate::fs::file_stat(dirfd as usize, &mut stat) {
             Ok(()) => {}
-            Err(e) => return -(e as i64),
+            // Already-negative errno (see sys_fstat): don't re-negate.
+            Err(e) => return e as i64,
         }
         let stat_size = core::mem::size_of::<Stat>();
         // SAFETY: statbuf validated with access_ok; copies stat_size bytes to user.
@@ -383,7 +391,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
                 0
             }
         }
-        Err(errno) => -(errno as i64),
+        Err(errno) => errno as i64, // already negative (see sys_fstat)
     };
     ret
 }
