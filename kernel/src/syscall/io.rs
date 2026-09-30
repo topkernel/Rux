@@ -686,6 +686,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                                 ops as *const _,
                                 &crate::net::netlink::NETLINK_OPS as *const _,
                             )
+                            || core::ptr::eq(
+                                ops as *const _,
+                                &crate::net::raw::RAW_OPS as *const _,
+                            )
                     }
                     None => false,
                 }

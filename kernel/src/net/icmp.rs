@@ -119,6 +119,12 @@ pub fn icmp_rcv(skb: &SkBuff, src_ip: u32, _dest_ip: u32) -> Result<(), ()> {
 
     let payload = &data[ICMP_HDR_LEN..];
 
+    // P0-2: raw ICMP sockets (busybox ping) receive every validated ICMP
+    // message whole — header + payload — with the peer as source. This
+    // happens before the internal handling so echo replies (type 0),
+    // which the switch below ignores, still reach ping.
+    crate::net::raw::icmp_input(skb, src_ip);
+
     match icmp_hdr.type_ {
         icmp_type::ECHO_REQUEST => {
             icmp_echo_reply(src_ip, icmp_hdr, payload);

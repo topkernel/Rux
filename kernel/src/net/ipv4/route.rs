@@ -104,16 +104,19 @@ impl RouteTable {
         }
     }
 
-    /// Look up route
+    /// Look up route (longest prefix match; a mask-0 default route is a
+    /// valid fallback — the old `best_mask = 0` init never let it win).
     fn lookup(&self, dst: u32) -> Option<RouteEntry> {
         let mut best_match: Option<RouteEntry> = None;
+        let mut have_match = false;
         let mut best_mask = 0u32;
 
         for entry in self.entries.iter() {
             if let Some(route) = entry {
-                if route.matches(dst) && route.mask > best_mask {
+                if route.matches(dst) && (!have_match || route.mask > best_mask) {
                     best_match = Some(*route);
                     best_mask = route.mask;
+                    have_match = true;
                 }
             }
         }
@@ -121,10 +124,20 @@ impl RouteTable {
         best_match
     }
 
-    /// Add route
+    /// Add route (replaces an identical dst/mask entry — `route add`
+    /// twice / SIOCADDRT + RTM_NEWROUTE must not duplicate rows)
     fn add(&mut self, route: RouteEntry) -> Result<(), ()> {
         if self.count >= ROUTE_TABLE_SIZE {
             return Err(());
+        }
+
+        for entry in self.entries[..self.count].iter_mut() {
+            if let Some(e) = entry {
+                if e.dst == route.dst && e.mask == route.mask {
+                    *e = route; // idempotent replace
+                    return Ok(());
+                }
+            }
         }
 
         self.entries[self.count] = Some(route);
@@ -191,7 +204,24 @@ pub fn route_lookup(dst: u32) -> Option<RouteEntry> {
 /// # Returns
 /// Ok(()) on success, Err(()) on failure
 pub fn route_add(dst: u32, mask: u32, gateway: u32, oif: u32, mtu: u32) -> Result<(), ()> {
-    let route = RouteEntry::new(dst, mask, gateway, oif, mtu);
+    // P0-2: derive the net-tools flag set Linux reports in
+    // /proc/net/route — RTF_UP always, RTF_GATEWAY for via-routes,
+    // RTF_HOST for /32s (`route -n` prints U / UG / UH).
+    let mut flags = RouteFlags(RouteFlags::RTF_UP);
+    if gateway != 0 {
+        flags.0 |= RouteFlags::RTF_GATEWAY;
+    }
+    if mask == 0xFFFF_FFFF {
+        flags.0 |= RouteFlags::RTF_HOST;
+    }
+    let route = RouteEntry {
+        dst,
+        mask,
+        gateway,
+        oif,
+        mtu,
+        flags,
+    };
     let _g = ROUTE_LOCK.lock_irqsave();
     // SAFETY: ROUTE_TABLE is a global static accessed under ROUTE_LOCK.
     unsafe { ROUTE_TABLE.add(route) }
@@ -227,22 +257,17 @@ pub fn route_dump() -> alloc::vec::Vec<RouteEntry> {
 
 /// Initialize default routes
 ///
-/// Adds local loopback route and directly connected route
+/// Adds the loopback route only. P0-2: the connected per-interface route
+/// is installed when the address is configured (SIOCSIFADDR /
+/// RTM_NEWADDR) — a hardcoded 192.168.1.0/24 never matched a real
+/// network and polluted `ip route` / `route -n` dumps.
 pub fn route_init() {
     let _ = route_add(
         0x7F000000,
         0xFF000000,
         0,
-        0,
+        1, // lo (presented ifindex)
         16436,
-    );
-
-    let _ = route_add(
-        0xC0A80100,
-        0xFFFFFF00,
-        0,
-        1,
-        1500,
     );
 }
 

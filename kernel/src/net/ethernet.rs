@@ -312,6 +312,12 @@ pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
     // P2 multicast: 224.0.0.0/4 destinations map directly to the
     // 01:00:5e:xx:xx:xx MAC (RFC 1112 §6.4 — low 23 bits of the group
     // address with the top bit cleared); ARP is never consulted.
+    // P0-2 DHCP: the limited broadcast 255.255.255.255 maps directly to
+    // the broadcast MAC — ARP for it is never answered by anyone (slirp
+    // included), so DHCPDISCOVER must not take the ARP path.
+    // P0-2 routing: an off-link destination whose best route has a
+    // gateway resolves the GATEWAY's MAC, not the destination's
+    // (`ip route add default via G` / `route add default gw G`).
     let dest_mac = match dest_ip {
         Some(ip) if (ip >> 28) == 0xE => [
             0x01,
@@ -321,10 +327,19 @@ pub fn ethernet_send(mut skb: SkBuff) -> Result<(), ()> {
             ((ip >> 8) & 0xFF) as u8,
             (ip & 0xFF) as u8,
         ],
-        Some(ip) => match crate::net::arp::arp_lookup(ip) {
-            Some(mac) => mac,
-            None => return crate::net::arp::arp_pending_send(ip, skb),
-        },
+        Some(ip) if ip == 0xFFFF_FFFF => ETH_BROADCAST,
+        Some(ip) => {
+            let next_hop = match crate::net::ipv4::route::route_lookup(ip) {
+                // Gateway route: resolve the GATEWAY's MAC unless the
+                // destination IS the gateway (on-link).
+                Some(r) if r.gateway != 0 && r.gateway != ip => r.gateway,
+                _ => ip,
+            };
+            match crate::net::arp::arp_lookup(next_hop) {
+                Some(mac) => mac,
+                None => return crate::net::arp::arp_pending_send(next_hop, skb),
+            }
+        }
         // Not IPv4 (or unparseable): nothing to resolve — keep the legacy
         // broadcast behavior for these rare frames.
         None => ETH_BROADCAST,
@@ -442,6 +457,11 @@ pub(crate) fn transmit_to_device(skb: SkBuff) -> i32 {
     0
 }
 
+/// P0-2: the eth0 MAC (raw/packet socket TX source address).
+pub fn eth_dev_mac() -> [u8; ETH_ALEN] {
+    get_device_mac().unwrap_or([0x52, 0x54, 0x00, 0x12, 0x34, 0x56])
+}
+
 /// Convert Ethernet MAC address to string (for debugging)
 ///
 /// # Arguments
@@ -518,11 +538,15 @@ pub fn ethernet_poll() {
     // descriptor-handling defects (review DRIV NEW) and must not be able to
     // block loopback delivery.
     while let Some(skb) = crate::drivers::net::loopback::loopback_poll() {
+        // P0-2: AF_PACKET cooked fanout (peek only — rcv still owns the skb).
+        crate::net::raw::packet_input(1, &skb);
         let _ = ethernet_rcv(skb);
     }
 
     if let Some(device) = crate::drivers::net::virtio_net::get_device() {
         while let Some(skb) = device.poll() {
+            // P0-2: AF_PACKET cooked fanout (eth0 = presented ifindex 2).
+            crate::net::raw::packet_input(2, &skb);
             let _ = ethernet_rcv(skb);
         }
     }

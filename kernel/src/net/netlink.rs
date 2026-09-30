@@ -117,6 +117,11 @@ struct IfaceEntry {
     name: &'static str,
     /// (ip host byte order, prefix length)
     addrs: Vec<(u32, u8)>,
+    /// Per-interface netmask (host byte order; /24 default for eth0).
+    netmask: u32,
+    /// The connected route installed for the current address
+    /// (network, mask) — refreshed on every address/netmask change.
+    connected: Option<(u32, u32)>,
 }
 
 static IFACES: Spinlock<Vec<IfaceEntry>> = Spinlock::new(Vec::new());
@@ -136,17 +141,52 @@ fn iface_init_locked() {
         index: LO_INDEX,
         name: "lo",
         addrs: vec![(0x7F000001, 8)],
+        netmask: 0xFF00_0000,
+        connected: None,
     });
     ifaces.push(IfaceEntry {
         index: ETH0_INDEX,
         name: "eth0",
         addrs: vec![(crate::net::arp::get_local_ip(), 24)],
+        netmask: 0xFFFF_FF00,
+        connected: None,
     });
 }
 
 /// Count prefix bits of a netmask.
 fn mask_to_prefix(mask: u32) -> u8 {
     mask.count_ones() as u8
+}
+
+/// Prefix length -> netmask.
+fn prefix_to_mask(prefix: u8) -> u32 {
+    if prefix == 0 {
+        return 0;
+    }
+    if prefix >= 32 {
+        return 0xFFFF_FFFF;
+    }
+    (!0u32) << (32 - prefix)
+}
+
+/// (Re)install the connected route of an interface: the previous one is
+/// removed first so `ip addr` changes never leave stale entries.
+fn refresh_connected(entry: &mut IfaceEntry) {
+    if let Some((net, mask)) = entry.connected.take() {
+        crate::net::ipv4::route::route_remove(net, mask);
+    }
+    if entry.index == LO_INDEX {
+        return; // route_init owns the 127/8 route
+    }
+    if let Some(&(ip, _)) = entry.addrs.first() {
+        if ip != 0 {
+            let mask = entry.netmask;
+            let net = ip & mask;
+            if crate::net::ipv4::route::route_add(net, mask, 0, entry.index, 1500).is_ok() {
+                entry.connected = Some((net, mask));
+            }
+        }
+    }
 }
 
 /// Live flags/mtu/mac for a presented index. Defaults mirror the drivers'
@@ -214,17 +254,49 @@ pub fn iface_get_addr(index: u32) -> Option<u32> {
         .and_then(|i| i.addrs.first().map(|a| a.0))
 }
 
+/// Get the netmask of an interface (host byte order).
+pub fn iface_get_netmask(index: u32) -> Option<u32> {
+    iface_init_locked();
+    IFACES.lock().iter().find(|i| i.index == index).map(|i| i.netmask)
+}
+
 /// Set the address of an interface (replaces the primary). eth0 also
-/// updates the live local IP used by the TX path.
+/// updates the live local IP used by the TX path and installs the
+/// connected route. `prefix` 0 keeps the interface's current netmask.
 pub fn iface_set_addr(index: u32, ip: u32, prefix: u8) -> bool {
     iface_init_locked();
     let mut ifaces = IFACES.lock();
     if let Some(entry) = ifaces.iter_mut().find(|i| i.index == index) {
+        let prefix = if prefix == 0 {
+            mask_to_prefix(entry.netmask)
+        } else {
+            entry.netmask = prefix_to_mask(prefix);
+            prefix
+        };
         entry.addrs.clear();
         entry.addrs.push((ip, prefix));
         if index == ETH0_INDEX {
             crate::net::arp::set_local_ip(ip);
         }
+        refresh_connected(entry);
+        true
+    } else {
+        false
+    }
+}
+
+/// Set the netmask of an interface (ifconfig SIOCSIFNETMASK): address
+/// prefixes and the connected route follow.
+pub fn iface_set_netmask(index: u32, netmask: u32) -> bool {
+    iface_init_locked();
+    let mut ifaces = IFACES.lock();
+    if let Some(entry) = ifaces.iter_mut().find(|i| i.index == index) {
+        entry.netmask = netmask;
+        let prefix = mask_to_prefix(netmask);
+        for a in entry.addrs.iter_mut() {
+            a.1 = prefix;
+        }
+        refresh_connected(entry);
         true
     } else {
         false
@@ -298,7 +370,7 @@ fn build_addr_msg(seq: u32, index: u32, ip: u32, prefix: u8, name: &str, multi: 
     let mut ifaddr = Vec::new();
     ifaddr.push(2u8); // family = AF_INET
     ifaddr.push(prefix);
-    ifaddr.push(0u8); // flags
+    ifaddr.push(0x80); // flags = IFA_F_PERMANENT (static — `ip` prints no "dynamic")
     ifaddr.push(if index == LO_INDEX { 254u8 } else { RT_SCOPE_UNIVERSE }); // scope
     ifaddr.extend_from_slice(&index.to_le_bytes());
 
@@ -671,6 +743,7 @@ fn netlink_exec(sock: &Arc<NetlinkSocket>, msg: &[u8]) {
             let mut ifaces = IFACES.lock();
             if let Some(entry) = ifaces.iter_mut().find(|i| i.index == ifindex) {
                 entry.addrs.clear();
+                refresh_connected(entry);
                 drop(ifaces);
                 if ack_requested {
                     sock.push_response(build_error_msg(seq, 0, orig_hdr));
@@ -1051,15 +1124,47 @@ const SIOCSIFFLAGS: u32 = 0x8914;
 const SIOCGIFADDR: u32 = 0x8915;
 /// SIOCSIFADDR (0x8916)
 const SIOCSIFADDR: u32 = 0x8916;
+/// SIOCGIFDSTADDR (0x8917)
+const SIOCGIFDSTADDR: u32 = 0x8917;
+/// SIOCSIFDSTADDR (0x8918)
+const SIOCSIFDSTADDR: u32 = 0x8918;
+/// SIOCGIFBRDADDR (0x8919)
+const SIOCGIFBRDADDR: u32 = 0x8919;
+/// SIOCSIFBRDADDR (0x891a)
+const SIOCSIFBRDADDR: u32 = 0x891A;
+/// SIOCGIFNETMASK (0x891b)
+const SIOCGIFNETMASK: u32 = 0x891B;
+/// SIOCSIFNETMASK (0x891c)
+const SIOCSIFNETMASK: u32 = 0x891C;
+/// SIOCGIFMETRIC (0x891d)
+const SIOCGIFMETRIC: u32 = 0x891D;
+/// SIOCSIFMETRIC (0x891e)
+const SIOCSIFMETRIC: u32 = 0x891E;
 /// SIOCGIFMTU (0x8921)
 const SIOCGIFMTU: u32 = 0x8921;
 /// SIOCGIFHWADDR (0x8927)
 const SIOCGIFHWADDR: u32 = 0x8927;
 /// SIOCGIFINDEX (0x8933)
 const SIOCGIFINDEX: u32 = 0x8933;
+/// SIOCDIFADDR (0x8936) — ifconfig `del`
+const SIOCDIFADDR: u32 = 0x8936;
+/// SIOCGIFTXQLEN (0x8942)
+const SIOCGIFTXQLEN: u32 = 0x8942;
+/// SIOCSIFTXQLEN (0x8943)
+const SIOCSIFTXQLEN: u32 = 0x8943;
+/// SIOCGIFMAP (0x8970)
+const SIOCGIFMAP: u32 = 0x8970;
+/// SIOCSIFMAP (0x8971)
+const SIOCSIFMAP: u32 = 0x8971;
+/// SIOCADDRT (0x890b) — rtentry-based route add (busybox/net-tools route)
+const SIOCADDRT: u32 = 0x890B;
+/// SIOCDELRT (0x890c)
+const SIOCDELRT: u32 = 0x890C;
 
 /// sizeof(struct ifreq) on 64-bit Linux/musl (name[16] + 24-byte union).
 const IFREQ_SIZE: usize = 40;
+/// sizeof(struct rtentry) on LP64 (see net_if_ioctl's SIOCADDRT comment).
+const RTENTRY_SIZE: usize = 112;
 
 /// Is this request one of the interface-management ioctls we handle?
 pub fn is_if_ioctl(request: u32) -> bool {
@@ -1070,9 +1175,24 @@ pub fn is_if_ioctl(request: u32) -> bool {
             | SIOCSIFFLAGS
             | SIOCGIFADDR
             | SIOCSIFADDR
+            | SIOCGIFDSTADDR
+            | SIOCSIFDSTADDR
+            | SIOCGIFBRDADDR
+            | SIOCSIFBRDADDR
+            | SIOCGIFNETMASK
+            | SIOCSIFNETMASK
+            | SIOCGIFMETRIC
+            | SIOCSIFMETRIC
             | SIOCGIFMTU
             | SIOCGIFHWADDR
             | SIOCGIFINDEX
+            | SIOCDIFADDR
+            | SIOCGIFTXQLEN
+            | SIOCSIFTXQLEN
+            | SIOCGIFMAP
+            | SIOCSIFMAP
+            | SIOCADDRT
+            | SIOCDELRT
     )
 }
 
@@ -1083,6 +1203,87 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
 
     if arg == 0 {
         return -(constants::EINVAL as i64);
+    }
+
+    // ---- rtentry-based route ioctls (busybox/net-tools `route`) ----
+    // struct rtentry (LP64):
+    //   unsigned long rt_pad1;       // +0
+    //   struct sockaddr rt_dst;      // +8
+    //   struct sockaddr rt_gateway;  // +24
+    //   struct sockaddr rt_genmask;  // +40
+    //   unsigned short rt_flags;     // +56
+    //   short rt_pad2;               // +58
+    //   unsigned long rt_pad3;       // +60
+    //   void *rt_pad4;               // +68
+    //   short rt_metric;             // +76
+    //   char *rt_dev;                // +80 (user pointer to ifname)
+    //   unsigned long rt_mtu;        // +88
+    //   unsigned long rt_window;     // +96
+    //   unsigned short rt_irtt;      // +104
+    if request == SIOCADDRT || request == SIOCDELRT {
+        if !access_ok(arg, RTENTRY_SIZE) {
+            return -(constants::EFAULT as i64);
+        }
+        let mut rt = [0u8; RTENTRY_SIZE];
+        // SAFETY: access_ok(RTENTRY_SIZE) validated; exception-table copy.
+        if unsafe { copy_from_user(rt.as_mut_ptr(), arg as *const u8, RTENTRY_SIZE) } != 0 {
+            return -(constants::EFAULT as i64);
+        }
+        // sockaddr IPv4 payload: family(2B) at +0, address at +4 (BE).
+        let sa_ip = |off: usize| -> Option<u32> {
+            if off + 8 > RTENTRY_SIZE {
+                return None;
+            }
+            Some(u32::from_be_bytes([rt[off + 4], rt[off + 5], rt[off + 6], rt[off + 7]]))
+        };
+        let dst = sa_ip(8).unwrap_or(0);
+        let gateway = sa_ip(24).unwrap_or(0);
+        let genmask = sa_ip(40).unwrap_or(0);
+        let flags = u16::from_le_bytes([rt[56], rt[57]]);
+        const RTF_HOST_FLAG: u16 = 0x0004;
+        const RTF_GATEWAY_FLAG: u16 = 0x0002;
+
+        // Output device: rt_dev names it (user pointer); default eth0.
+        let mut oif = ETH0_INDEX;
+        // SAFETY: checked via get_user below before any dereference.
+        let dev_ptr = unsafe { get_user::<usize>((arg + 80) as *const usize).unwrap_or(0) };
+        if dev_ptr != 0 {
+            let mut buf = [0u8; 16];
+            match crate::arch::riscv64::uaccess::strncpy_from_user(
+                dev_ptr as *const u8,
+                15,
+                &mut buf,
+            ) {
+                Ok(bytes) => {
+                    if let Ok(name) = core::str::from_utf8(bytes) {
+                        if name == "lo" {
+                            oif = LO_INDEX;
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        let mask = if flags & RTF_HOST_FLAG != 0 {
+            0xFFFF_FFFF
+        } else if genmask == 0xFFFF_FFFF {
+            0xFFFF_FFFF
+        } else {
+            genmask
+        };
+        let gateway = if flags & RTF_GATEWAY_FLAG != 0 { gateway } else { 0 };
+
+        if request == SIOCADDRT {
+            return match crate::net::ipv4::route::route_add(dst, mask, gateway, oif, 1500) {
+                Ok(()) => 0,
+                Err(()) => -(constants::ENOMEM as i64),
+            };
+        } else if crate::net::ipv4::route::route_remove(dst, mask) {
+            return 0;
+        } else {
+            return -(constants::ESRCH as i64);
+        }
     }
 
     if request == SIOCGIFCONF {
@@ -1182,10 +1383,84 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
             let ip = u32::from_be_bytes([
                 ifreq[20], ifreq[21], ifreq[22], ifreq[23],
             ]);
-            if !iface_set_addr(index, ip, 24) {
+            // prefix 0: keep the interface's netmask (ifconfig applies the
+            // netmask separately via SIOCSIFNETMASK).
+            if !iface_set_addr(index, ip, 0) {
                 return -(constants::ENODEV as i64);
             }
             0
+        }
+        SIOCGIFNETMASK => {
+            let mask = iface_get_netmask(index).unwrap_or(0);
+            ifreq[16] = 2; // AF_INET
+            let be = mask.to_be_bytes();
+            ifreq[20..24].copy_from_slice(&be);
+            put_ifreq(&ifreq)
+        }
+        SIOCSIFNETMASK => {
+            if ifreq[16] != 2 {
+                return -(constants::EINVAL as i64);
+            }
+            let mask = u32::from_be_bytes([
+                ifreq[20], ifreq[21], ifreq[22], ifreq[23],
+            ]);
+            if !iface_set_netmask(index, mask) {
+                return -(constants::ENODEV as i64);
+            }
+            0
+        }
+        SIOCGIFBRDADDR => {
+            let ip = iface_get_addr(index).unwrap_or(0);
+            let mask = iface_get_netmask(index).unwrap_or(0);
+            let bcast = ip | !mask;
+            ifreq[16] = 2; // AF_INET
+            let be = bcast.to_be_bytes();
+            ifreq[20..24].copy_from_slice(&be);
+            put_ifreq(&ifreq)
+        }
+        SIOCSIFBRDADDR => 0, // stored model derives broadcast; accept
+        SIOCGIFDSTADDR => {
+            // Not a point-to-point device: report an unspecified sockaddr
+            // (busybox only prints P-t-P when IFF_POINTOPOINT is set).
+            ifreq[16] = 0;
+            ifreq[17] = 0;
+            put_ifreq(&ifreq)
+        }
+        SIOCSIFDSTADDR => 0, // accepted-and-ignored
+        SIOCGIFMETRIC => {
+            // int metric at the union start
+            ifreq[16..20].copy_from_slice(&0i32.to_le_bytes());
+            put_ifreq(&ifreq)
+        }
+        SIOCSIFMETRIC => 0, // accepted-and-ignored
+        SIOCGIFTXQLEN => {
+            ifreq[16..20].copy_from_slice(&1000i32.to_le_bytes());
+            put_ifreq(&ifreq)
+        }
+        SIOCSIFTXQLEN => 0, // accepted-and-ignored
+        SIOCGIFMAP => {
+            // struct ifmap (24 bytes, zeroed) at the union start
+            for b in ifreq[16..40].iter_mut() {
+                *b = 0;
+            }
+            put_ifreq(&ifreq)
+        }
+        SIOCSIFMAP => 0, // accepted-and-ignored
+        SIOCDIFADDR => {
+            iface_init_locked();
+            let mut ifaces = IFACES.lock();
+            match ifaces.iter_mut().find(|i| i.index == index) {
+                Some(entry) => {
+                    entry.addrs.clear();
+                    refresh_connected(entry);
+                    drop(ifaces);
+                    0
+                }
+                None => {
+                    drop(ifaces);
+                    -(constants::ENODEV as i64)
+                }
+            }
         }
         SIOCGIFFLAGS => {
             let (flags, _, _, _) = iface_hw(index);

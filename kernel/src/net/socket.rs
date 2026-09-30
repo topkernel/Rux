@@ -1346,6 +1346,14 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
     if domain == crate::net::netlink::AF_NETLINK {
         return crate::net::netlink::netlink_socket_create(type_, protocol);
     }
+    // P0-2: AF_PACKET (cooked packet sockets — busybox udhcpc) and
+    // AF_INET SOCK_RAW (ICMP ping / ioctl carrier).
+    if domain == crate::net::raw::AF_PACKET {
+        return crate::net::raw::packet_socket_create(type_, protocol);
+    }
+    if domain == AF_INET && type_ & SOCK_TYPE_MASK == crate::net::raw::SOCK_RAW {
+        return crate::net::raw::raw_socket_create(type_, protocol);
+    }
     // P1 IPv6: AF_INET6 sockets share the TCP/UDP protocol tables; the
     // family only shapes the sockaddr conversions at this layer (a
     // v4-mapped peer address normalizes to the v4 fast path).

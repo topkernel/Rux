@@ -16,6 +16,7 @@ pub mod tcp_timer;
 pub mod socket;
 pub mod unix;
 pub mod netlink;
+pub mod raw;
 
 pub use buffer::{
     SkBuff, PacketType, EthProtocol, IpProtocol,

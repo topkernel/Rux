@@ -265,7 +265,8 @@ pub fn generate_route() -> Vec<u8> {
         "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n",
     );
     for r in crate::net::ipv4::route::route_dump() {
-        let iface = if r.oif == 1 { "lo" } else { "eth0" };
+        // Presented interface indices: lo=1, eth0=2 (P0-2 netlink space).
+        let iface = if r.oif == 2 { "eth0" } else { "lo" };
         out.push_str(&alloc::format!(
             "{}\t{}\t{}\t{:04X}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             iface,

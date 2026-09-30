@@ -105,6 +105,86 @@ fn parse_sockaddr_inet(addr_ptr: *const u8) -> Result<ParsedSockAddr, i64> {
     Err(-(errno::EAFNOSUPPORT as i64))
 }
 
+/// P0-2: parse a sendto destination for a raw/packet socket from user
+/// memory — sockaddr_in (AF_INET raw) or sockaddr_ll (AF_PACKET).
+fn parse_raw_send_dest(
+    sock: &crate::net::raw::RawSocket,
+    addr_ptr: *const u8,
+) -> Result<crate::net::raw::RawDest, i64> {
+    use crate::net::raw::{RawDest, RawKind};
+
+    if addr_ptr.is_null() {
+        return Err(-(errno::EINVAL as i64));
+    }
+    match sock.kind {
+        RawKind::Inet => {
+            let raw = match copy_sockaddr_in_from_user(addr_ptr) {
+                Some(b) => b,
+                None => return Err(-(errno::EFAULT as i64)),
+            };
+            let family = u16::from_le_bytes([raw[0], raw[1]]);
+            if family != 2 {
+                return Err(-(errno::EAFNOSUPPORT as i64));
+            }
+            let ip = u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]);
+            Ok(RawDest::Inet(ip))
+        }
+        RawKind::Packet => {
+            const SOCKADDR_LL_LEN: usize = 20;
+            if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, SOCKADDR_LL_LEN) {
+                return Err(-(errno::EFAULT as i64));
+            }
+            let mut sll = [0u8; SOCKADDR_LL_LEN];
+            // SAFETY: access_ok(SOCKADDR_LL_LEN) validated; exception copy.
+            if unsafe {
+                crate::arch::riscv64::uaccess::copy_from_user(
+                    sll.as_mut_ptr(),
+                    addr_ptr,
+                    SOCKADDR_LL_LEN,
+                )
+            } != 0
+            {
+                return Err(-(errno::EFAULT as i64));
+            }
+            let family = u16::from_le_bytes([sll[0], sll[1]]);
+            if family != 17 {
+                return Err(-(errno::EAFNOSUPPORT as i64));
+            }
+            let mut mac = [0u8; 6];
+            mac.copy_from_slice(&sll[12..18]);
+            let wire_proto = u16::from_be_bytes([sll[2], sll[3]]);
+            Ok(RawDest::Packet {
+                mac,
+                proto: if wire_proto != 0 { Some(wire_proto) } else { None },
+            })
+        }
+    }
+}
+
+/// P0-2: parse a bind sockaddr_ll for an AF_PACKET socket.
+fn parse_sockaddr_ll(addr_ptr: *const u8) -> Result<(i32, i32), i64> {
+    const SOCKADDR_LL_LEN: usize = 20;
+    if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, SOCKADDR_LL_LEN) {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let mut sll = [0u8; SOCKADDR_LL_LEN];
+    // SAFETY: access_ok(SOCKADDR_LL_LEN) validated; exception copy.
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(sll.as_mut_ptr(), addr_ptr, SOCKADDR_LL_LEN)
+    } != 0
+    {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let family = u16::from_le_bytes([sll[0], sll[1]]);
+    if family != 17 {
+        return Err(-(errno::EAFNOSUPPORT as i64));
+    }
+    // sll_protocol is network order; normalize to host order.
+    let wire = u16::from_be_bytes([sll[2], sll[3]]);
+    let ifindex = i32::from_le_bytes([sll[4], sll[5], sll[6], sll[7]]);
+    Ok((ifindex, wire as i32))
+}
+
 /// sys_bind - Bind socket to address
 ///
 /// # Arguments
@@ -179,6 +259,20 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
             Some(_) => 0,
             None => -(errno::ENOTSOCK as i64),
         };
+    }
+
+    // P0-2: AF_PACKET bind — sockaddr_ll { family, protocol, ifindex }.
+    if sin_family == 17 {
+        if let Some(rsock) = crate::net::raw::raw_socket_from_fd(fd as usize) {
+            return match parse_sockaddr_ll(addr_ptr) {
+                Ok((ifindex, proto)) => {
+                    crate::net::raw::raw_bind(&rsock, ifindex, proto);
+                    0
+                }
+                Err(e) => e,
+            };
+        }
+        return -(errno::ENOTSOCK as i64);
     }
 
     // P1 IPv6: parse AF_INET or AF_INET6 (v4-mapped normalizes to v4).
@@ -894,6 +988,32 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         };
     }
 
+    // P0-2: AF_INET SOCK_RAW / AF_PACKET — the buffer is a complete
+    // ICMP/IP packet; the sockaddr supplies the destination.
+    if let Some((rsock, _)) = crate::net::raw::raw_file_of(fd) {
+        let stage = len.min(crate::syscall::io::RW_CHUNK);
+        let mut kbuf = alloc::vec::Vec::new();
+        if kbuf.try_reserve_exact(stage).is_err() {
+            return -(errno::ENOMEM as i64);
+        }
+        kbuf.resize(stage, 0);
+        // SAFETY: buf_ptr validated with access_ok(len) above; stage <= len.
+        if unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf_ptr, stage)
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        let dest = match parse_raw_send_dest(&rsock, addr_ptr) {
+            Ok(d) => d,
+            Err(e) => return e,
+        };
+        return match crate::net::raw::raw_send(&rsock, &kbuf, Some(dest)) {
+            Ok(n) => n as i64,
+            Err(e) => e as i64,
+        };
+    }
+
     // Get socket through the per-process fd table (review NET-C3). The old
     // code first indexed the GLOBAL socket table with the process fd and
     // then "fell back" to indexing the protocol tables with it — both wrong
@@ -1051,6 +1171,19 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
         // SAFETY: addr_ptr validated with access_ok; exception-table copy.
         unsafe {
             crate::net::netlink::put_sockaddr_nl_bound(addr_ptr, addrlen_ptr, nlsock.portid);
+        }
+        return 0;
+    }
+
+    // P0-2: AF_INET SOCK_RAW / AF_PACKET — sockaddr_in / sockaddr_ll.
+    if let Some(rsock) = crate::net::raw::raw_socket_from_fd(fd) {
+        let want = if rsock.kind == crate::net::raw::RawKind::Packet { 20 } else { 16 };
+        if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, want) {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: addr_ptr validated with access_ok; exception-table copy.
+        unsafe {
+            crate::net::raw::put_sockaddr_raw(&rsock, addr_ptr, addrlen_ptr);
         }
         return 0;
     }
@@ -1345,6 +1478,64 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
         };
     }
 
+    // P0-2: AF_INET SOCK_RAW / AF_PACKET socket options — SO_RCVTIMEO
+    // real, IP_TTL stored, the tool-relevant SOL_SOCKET set accepted.
+    if let Some(rsock) = crate::net::raw::raw_socket_from_fd(fd) {
+        const SO_RCVTIMEO_RAW: i32 = 20;
+        const SO_SNDBUF_RAW: i32 = 7;
+        const SO_RCVBUF_RAW: i32 = 8;
+        const SO_BROADCAST_RAW: i32 = 6;
+        const SO_BINDTODEVICE_RAW: i32 = 25;
+        const IP_TTL_RAW: i32 = 2;
+        return match (level, optname) {
+            (1, SO_RCVTIMEO_RAW) => {
+                if optval.is_null() || optlen < 8 {
+                    return -(errno::EINVAL as i64);
+                }
+                let mut tv = [0u8; 16];
+                let cpy = core::cmp::min(optlen as usize, 16);
+                // SAFETY: access_ok covered optlen bytes at fn entry.
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(tv.as_mut_ptr(), optval, cpy)
+                } != 0
+                {
+                    return -(errno::EFAULT as i64);
+                }
+                let sec = i64::from_ne_bytes(tv[0..8].try_into().unwrap());
+                let usec = i64::from_ne_bytes(tv[8..16].try_into().unwrap());
+                if sec < 0 || usec < 0 {
+                    return -(errno::EINVAL as i64);
+                }
+                let us = (sec as u64)
+                    .saturating_mul(1_000_000)
+                    .saturating_add(usec as u64);
+                rsock.rcvtimeo_us.store(us, core::sync::atomic::Ordering::Relaxed);
+                0
+            }
+            (1, SO_BROADCAST_RAW) => {
+                let v = read_i32(4).unwrap_or(0);
+                rsock.options.lock().broadcast = v != 0;
+                0
+            }
+            // SO_BINDTODEVICE takes an ifname string; with a single eth0
+            // the bind is a no-op but must SUCCEED (udhcpc hard-fails).
+            (1, SO_BINDTODEVICE_RAW) => 0,
+            (1, SO_SNDBUF_RAW | SO_RCVBUF_RAW | 26 /* SO_ATTACH_FILTER */) => 0,
+            (0, IP_TTL_RAW) => {
+                match read_i32(4) {
+                    Some(v) if (1..=255).contains(&v) => {
+                        *rsock.ttl.lock() = v as u8;
+                        0
+                    }
+                    _ => -(errno::EINVAL as i64),
+                }
+            }
+            (0, 1 /* IP_TOS */ | 33 /* IP_MULTICAST_TTL */ | 34 /* IP_MULTICAST_LOOP */) => 0,
+            (263, _) => 0, // SOL_PACKET (PACKET_AUXDATA)
+            _ => -(errno::ENOPROTOOPT as i64),
+        };
+    }
+
     let socket = match crate::net::socket::get_socket_from_fd(fd) {
         Some(s) => s,
         None => return -(errno::ENOTSOCK as i64),
@@ -1492,6 +1683,10 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
             SO_DONTROUTE | SO_OOBINLINE
             | SO_NO_CHECK | SO_BSDCOMPAT | SO_PASSCRED | SO_RCVLOWAT
             | SO_SNDLOWAT | SO_PRIORITY => 0,
+            // P0-2: SO_BINDTODEVICE (25) takes an ifname string; with one
+            // eth0 the bind is a no-op but must SUCCEED — udhcpc's
+            // udhcp_listen_socket hard-fails (xfunc_die) when it errors.
+            25 => 0,
             SO_TYPE | SO_ERROR | SO_PEERCRED => {
                 -(errno::ENOPROTOOPT as i64) // Read-only options
             }
@@ -1737,6 +1932,34 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
             (SOL_SOCKET_GET, SO_ERROR_GET) => 0,
             (SOL_SOCKET_GET, SO_DOMAIN_GET) => 16,     // AF_NETLINK
             (SOL_SOCKET_GET, SO_PROTOCOL_GET) => 0,    // NETLINK_ROUTE
+            _ => return -(errno::ENOPROTOOPT as i64),
+        };
+        // SAFETY: optval/optlen_ptr validated with access_ok above.
+        unsafe { write_int(optval, optlen, optlen_ptr, val) };
+        return 0;
+    }
+
+    // P0-2: AF_INET SOCK_RAW / AF_PACKET getsockopt — the small SO_*
+    // subset tools probe.
+    if let Some(rsock) = crate::net::raw::raw_socket_from_fd(fd) {
+        const SOL_SOCKET_GET: i32 = 1;
+        const SO_TYPE_GET: i32 = 3;
+        const SO_ERROR_GET: i32 = 4;
+        const SO_DOMAIN_GET: i32 = 39;
+        const SO_PROTOCOL_GET: i32 = 38;
+        const SO_RCVBUF_GET: i32 = 8;
+        let val = match (level, optname) {
+            (SOL_SOCKET_GET, SO_TYPE_GET) => {
+                if rsock.kind == crate::net::raw::RawKind::Packet { 2 } else { 3 }
+            }
+            (SOL_SOCKET_GET, SO_ERROR_GET) => 0,
+            (SOL_SOCKET_GET, SO_DOMAIN_GET) => {
+                if rsock.kind == crate::net::raw::RawKind::Packet { 17 } else { 2 }
+            }
+            (SOL_SOCKET_GET, SO_PROTOCOL_GET) => {
+                rsock.protocol.load(core::sync::atomic::Ordering::Relaxed)
+            }
+            (SOL_SOCKET_GET, SO_RCVBUF_GET) => 64 * 1500,
             _ => return -(errno::ENOPROTOOPT as i64),
         };
         // SAFETY: optval/optlen_ptr validated with access_ok above.
@@ -2193,6 +2416,23 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         };
     }
 
+    // P0-2: AF_INET SOCK_RAW / AF_PACKET — complete ICMP/IP packet in the
+    // iovs; msg_name is the destination (sockaddr_in / sockaddr_ll).
+    if let Some((rsock, _)) = crate::net::raw::raw_file_of(fd as usize) {
+        let dest = if !msg_name_ptr.is_null() && msg_namelen >= 16 {
+            match parse_raw_send_dest(&rsock, msg_name_ptr) {
+                Ok(d) => Some(d),
+                Err(e) => return e,
+            }
+        } else {
+            None
+        };
+        return match crate::net::raw::raw_send(&rsock, &buf, dest) {
+            Ok(n) => n as i64,
+            Err(e) => e as i64,
+        };
+    }
+
     if total_len == 0 {
         return 0;
     }
@@ -2441,6 +2681,70 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 // SAFETY: pointers validated with access_ok.
                 unsafe {
                     crate::net::netlink::put_sockaddr_nl(msg_name_ptr, msg_namelen_ptr);
+                }
+            }
+        }
+        return n as i64;
+    }
+
+    // P0-2: AF_INET SOCK_RAW / AF_PACKET recvmsg — one datagram per call
+    // with the peer sockaddr (sockaddr_in / sockaddr_ll) as msg_name.
+    if let Some((rsock, file_nonblock)) = crate::net::raw::raw_file_of(fd as usize) {
+        let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        let deadline = rsock.rcvtimeo_deadline();
+        let (n, src) =
+            match crate::net::raw::raw_recv(&rsock, &mut buf, nonblock, deadline) {
+                Ok(r) => r,
+                Err(e) => return e as i64,
+            };
+        let mut offset = 0usize;
+        for i in 0..msg_iovlen {
+            if offset >= n {
+                break;
+            }
+            // SAFETY: iovec fields at validated user offset.
+            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
+            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
+            let copy_len = core::cmp::min(iov_len, n - offset);
+            if copy_len > 0 {
+                // SAFETY: iov_base validated with access_ok above.
+                let uncopied = unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        iov_base as *mut u8,
+                        buf.as_ptr().add(offset),
+                        copy_len,
+                    )
+                };
+                if uncopied > 0 {
+                    return if offset > 0 { offset as i64 } else { -(errno::EFAULT as i64) };
+                }
+                offset += copy_len;
+            }
+        }
+        if let Some(src) = src {
+            if !msg_name_ptr.is_null() && !msg_namelen_ptr.is_null() {
+                let want = {
+                    // SAFETY: msg_namelen_ptr validated with access_ok(4) at
+                    // entry; get_user is the exception-table copy path.
+                    let nl = unsafe {
+                        crate::arch::riscv64::uaccess::get_user::<u32>(msg_namelen_ptr)
+                            .unwrap_or(0)
+                    }
+                    .min(20);
+                    nl as usize
+                };
+                if want > 0
+                    && crate::arch::riscv64::uaccess::access_ok(msg_name_ptr as usize, want)
+                {
+                    // SAFETY: pointers validated with access_ok.
+                    unsafe {
+                        crate::net::raw::copy_src_to_user(
+                            src,
+                            msg_name_ptr,
+                            want as u32,
+                            msg_namelen_ptr,
+                        );
+                    }
                 }
             }
         }
@@ -3122,6 +3426,61 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
                         // SAFETY: pointers validated with access_ok.
                         unsafe {
                             crate::net::netlink::put_sockaddr_nl(addr_ptr, addrlen_ptr);
+                        }
+                    }
+                }
+                n as i64
+            }
+            Err(e) => e as i64,
+        };
+    }
+
+    // P0-2: AF_INET SOCK_RAW / AF_PACKET — one datagram + source sockaddr.
+    if let Some((rsock, file_nonblock)) = crate::net::raw::raw_file_of(fd) {
+        let stage = len.min(crate::syscall::io::RW_CHUNK);
+        let mut kbuf = alloc::vec::Vec::new();
+        if kbuf.try_reserve_exact(stage).is_err() {
+            return -(errno::ENOMEM as i64);
+        }
+        kbuf.resize(stage, 0);
+        let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        let deadline = rsock.rcvtimeo_deadline();
+        return match crate::net::raw::raw_recv(&rsock, kbuf.as_mut_slice(), nonblock, deadline) {
+            Ok((n, src)) => {
+                if n > 0 {
+                    // SAFETY: buf_ptr validated with access_ok(len) above.
+                    if unsafe {
+                        crate::arch::riscv64::uaccess::copy_to_user(buf_ptr, kbuf.as_ptr(), n)
+                    } != 0
+                    {
+                        return -(errno::EFAULT as i64);
+                    }
+                }
+                if let Some(src) = src {
+                    if !addr_ptr.is_null() {
+                        let want = if addrlen_ptr.is_null() {
+                            20
+                        } else {
+                            // SAFETY: addrlen_ptr validated with access_ok(4);
+                            // get_user is the exception-table copy path.
+                            unsafe {
+                                crate::arch::riscv64::uaccess::get_user::<u32>(addrlen_ptr)
+                                    .unwrap_or(0)
+                            }
+                            .min(20) as usize
+                        };
+                        if want > 0
+                            && crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, want)
+                        {
+                            // SAFETY: pointers validated with access_ok.
+                            unsafe {
+                                crate::net::raw::copy_src_to_user(
+                                    src,
+                                    addr_ptr,
+                                    want as u32,
+                                    addrlen_ptr,
+                                );
+                            }
                         }
                     }
                 }
