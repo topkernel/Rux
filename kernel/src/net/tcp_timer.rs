@@ -359,6 +359,27 @@ pub fn tcp_timer_tick() {
     let n = table
         .count()
         .min(TCP_SOCKET_TABLE_SIZE);
+    // R50 (heap-lock livelock): with an empty table this tick has nothing
+    // to do — manager.tick would sweep 0 sockets, emit_all would send
+    // nothing, and wake_all_tcp_sockets would wake nobody. Returning here
+    // is not just an optimization: the reserve below used to run
+    // unconditionally, so EVERY timer softirq on EVERY CPU allocated and
+    // freed a 352-byte TcpTxDesc staging Vec from the global buddy heap
+    // (400 alloc+free pairs per second at 100 Hz x 4 CPUs) even on
+    // systems that never open a TCP socket. Under heap fragmentation
+    // (observed: Xorg+xterm/xkbcomp churn consolidating the free space
+    // into one order-14 block) each of those order-0 allocs paid the full
+    // 14-level split + merge cascade through the single irqsave buddy
+    // lock, saturating it for seconds — every CPU's timer softirq piled
+    // up behind the lock, the interrupted task never returned from
+    // irq_exit (soft lockup), and the RawSpinlock waiter crossed its
+    // 100M-spin DEADLOCK threshold (the "GLOBAL_ALLOCATOR lock stuck"
+    // wedge). count() is a high-water mark: it stays > 0 once any TCP
+    // socket has existed, so live TCP traffic keeps the original
+    // per-tick staging behavior.
+    if n == 0 {
+        return;
+    }
     let mut tx = TcpTxBatch::new();
     let _ = tx.reserve(2 * n + 4, n * TCP_DEFAULT_MSS as usize);
 
