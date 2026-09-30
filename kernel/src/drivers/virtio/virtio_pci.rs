@@ -1139,6 +1139,9 @@ fn read_block_once(
         used_ring_ptr,
         crate::drivers::virtio::get_pci_blk_wait_queue(),
         prev_expected,
+        // SAFETY: resp_ptr was allocated above and stays owned by this
+        // frame until the wait returns; the wait only reads its status.
+        unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
     );
 
     // Phase 3: Check response
@@ -1149,7 +1152,7 @@ fn read_block_once(
         // index (R8-M2 discipline); a true timeout leaks the 64B block
         // instead of freeing in-flight DMA targets.
         let mut late = false;
-        for _ in 0..50_000_000u64 {
+        for _ in 0..2_000_000u64 {
             let idx = unsafe {
                 core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
             };
@@ -1348,6 +1351,9 @@ fn write_block_once(
         used_ring_ptr,
         crate::drivers::virtio::get_pci_blk_wait_queue(),
         prev_expected,
+        // SAFETY: resp_ptr was allocated above and stays owned by this
+        // frame until the wait returns; the wait only reads its status.
+        unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
     );
 
     // Phase 3: Check response
@@ -1358,7 +1364,7 @@ fn write_block_once(
         // index (R8-M2 discipline); a true timeout leaks the 64B block
         // instead of freeing in-flight DMA targets.
         let mut late = false;
-        for _ in 0..50_000_000u64 {
+        for _ in 0..2_000_000u64 {
             let idx = unsafe {
                 core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
             };
@@ -1512,6 +1518,9 @@ fn flush_block_once() -> Result<usize, &'static str> {
         used_ring_ptr,
         crate::drivers::virtio::get_pci_blk_wait_queue(),
         prev_expected,
+        // SAFETY: resp_ptr was allocated above and stays owned by this
+        // frame until the wait returns; the wait only reads its status.
+        unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
     );
 
     if new_used == prev_expected {
@@ -1519,7 +1528,7 @@ fn flush_block_once() -> Result<usize, &'static str> {
         // submitted, late-drain bounded; a true timeout leaks the 64B
         // block instead of freeing in-flight DMA targets.
         let mut late = false;
-        for _ in 0..5_000_000u64 {
+        for _ in 0..2_000_000u64 {
             let idx = unsafe {
                 core::ptr::read_volatile((used_ring_ptr as usize + 2) as *const u16)
             };

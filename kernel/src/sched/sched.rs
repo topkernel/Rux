@@ -1053,6 +1053,27 @@ unsafe fn __schedule() {
 
     let prev_pid = (*prev).pid();
 
+    // Preempt discipline enforcement: a task holding preempt-disable state
+    // (spinlock guards add PREEMPT_OFFSET) must never be switched out —
+    // parking it mid-critical-section strands every lock it holds (the
+    // jchurn wedge: an O_CREAT holder slept in the virtio used-ring wait
+    // with VFS_MUTATION_LOCK + EXT4_BIG_LOCK held, and the CPUs spinning
+    // on the mutation lock with preemption disabled could never
+    // reschedule it back). Refuse the switch: restore RUNNING, unwind any
+    // enqueue a racing wake may have done while we were in prepare_to_wait,
+    // and return to the caller, whose wait loop re-checks its condition —
+    // it degenerates into a poll loop, which is the correct behavior for a
+    // lock holder. Terminal states (ZOMBIE/DEAD) are exempt: the exit
+    // path's final schedule() must always switch away.
+    {
+        let prev_state = (*prev).state();
+        if !prev_state.is_dead() && (*prev).preempt_count() != 0 {
+            (*prev).set_state(TaskState::new(TaskState::RUNNING));
+            crate::sched::dequeue_if_enqueued(&*prev);
+            return;
+        }
+    }
+
     // Fast path: if current task is idle and no tasks are runnable,
     // skip the GRQ lock entirely.  This avoids idle CPUs spinning on
     // the lock with IRQs disabled (via lock_irqsave), which would

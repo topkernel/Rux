@@ -374,16 +374,48 @@ impl VirtQueue {
     /// and is woken by the VirtIO interrupt handler when the device completes
     /// the request. The BKL is released during sleep and re-acquired on wakeup.
     ///
+    /// Completion is tracked through THIS request's response byte
+    /// (`resp_status`, initialized to 0xFF at submit and written by the
+    /// device on completion). Waiting on the shared used-ring index alone is
+    /// wrong with concurrent submitters: ANY other request's completion
+    /// advances it, releasing this waiter while its own response is still
+    /// 0xFF — the caller then reads a garbage status and frees the response
+    /// buffer while the device still DMAs into it.
+    ///
+    /// Callers that hold preempt-disable state (spinlocks — e.g. the VFS
+    /// mutation lock over an O_CREAT that reaches here through the journal
+    /// write path) never sleep: switching such a task out parks it with the
+    /// lock held, and every later acquirer spins with preemption disabled,
+    /// so the sleeping holder can never be rescheduled — the jchurn VFS
+    /// wedge. They poll instead; the device writes the response via DMA
+    /// regardless of CPU IRQ state.
+    ///
     /// # Safety
     /// - `used_ring` must point to a valid VirtIO used ring
     /// - `wait_queue` must be the correct wait queue for this device's interrupt
+    /// - `resp_status` must point to this request's response status byte and
+    ///   stay valid until this returns
     pub fn wait_for_used_interruptible(
         used_ring: *const UsedRing,
         wait_queue: &crate::process::wait::WaitQueueHead,
         prev_used: u16,
+        resp_status: *const u8,
     ) -> u16 {
         if used_ring.is_null() {
             return prev_used;
+        }
+
+        /// True once the device has written THIS request's response.
+        ///
+        /// # Safety
+        /// `resp_status` points to the caller's response byte which the
+        /// device writes (DMA) exactly once, on completion of THIS request.
+        unsafe fn resp_done(resp_status: *const u8) -> bool {
+            if resp_status.is_null() {
+                return false;
+            }
+            // SAFETY: see above; volatile so each poll re-reads DMA memory.
+            core::ptr::read_volatile(resp_status) != 0xFF
         }
 
         // Detect early boot phase: no current task or PID 0 (idle/boot thread).
@@ -397,24 +429,32 @@ impl VirtQueue {
             _ => true,
         };
 
-        // Early boot: large timeout for reliable synchronous polling.
+        // Early boot and preempt-disabled callers both poll.
+        let poll_only =
+            is_early_boot || crate::interrupt::preempt::preempt_count() != 0;
+
+        // Early boot / lock holders: large timeout for reliable synchronous
+        // polling. Under TCG a completion lands within ~10-20ms (device BH
+        // runs on the timer cadence); the budget must comfortably exceed
+        // that or the poll times out just before completion and the CALLER's
+        // late-drain (which runs with the caller's locks held) burns seconds.
         // Normal: small timeout — relies on interrupt wakeup via wait queue.
-        let max_iterations = if is_early_boot {
-            1_000_000
+        let max_iterations = if poll_only {
+            5_000_000
         } else {
             5000
         };
 
         for _iteration in 0..max_iterations {
-            // Early boot: pure spin-poll (no scheduler, no interrupts).
-            if is_early_boot {
-                // SAFETY: used_ring offset 2 is the idx field.
-                let used_idx = unsafe {
-                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                    core::ptr::read_volatile(used_idx_ptr)
-                };
-                if used_idx != prev_used {
-                    return used_idx;
+            // Early boot / lock holder: pure spin-poll (no scheduler).
+            if poll_only {
+                // SAFETY: resp_done reads the caller-owned response byte.
+                if unsafe { resp_done(resp_status) } {
+                    // SAFETY: used_ring offset 2 is the idx field.
+                    return unsafe {
+                        let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                        core::ptr::read_volatile(used_idx_ptr)
+                    };
                 }
                 core::hint::spin_loop();
                 continue;
@@ -431,24 +471,24 @@ impl VirtQueue {
                 }
             };
 
-            // Fast check: I/O may have completed already.
-            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-            let used_idx = unsafe {
-                let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                core::ptr::read_volatile(used_idx_ptr)
-            };
-            if used_idx != prev_used {
-                return used_idx;
+            // Fast check: our own request may have completed already.
+            // SAFETY: resp_done reads the caller-owned response byte.
+            if unsafe { resp_done(resp_status) } {
+                // SAFETY: used_ring offset 2 is the idx field.
+                return unsafe {
+                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                    core::ptr::read_volatile(used_idx_ptr)
+                };
             }
 
             // Add to wait queue, then spin-wait briefly before sleeping.
             // This closes the lost-wakeup race window without changing
             // task state or disabling interrupts:
             //
-            //   race: add → [interrupt fires, used_idx updated, wake returns
+            //   race: add → [interrupt fires, our resp written, wake returns
             //          false because task is RUNNING] → schedule → sleep forever
             //
-            //   fix: add → spin-wait catches the updated used_idx → return
+            //   fix: add → spin-wait catches the completed response → return
             //
             // The spin-wait is short (256 iterations ≈ few µs) so it
             // only activates when the race actually occurs; the normal
@@ -459,13 +499,14 @@ impl VirtQueue {
 
             for _ in 0..256 {
                 core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-                let used_idx = unsafe {
-                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                    core::ptr::read_volatile(used_idx_ptr)
-                };
-                if used_idx != prev_used {
+                // SAFETY: resp_done reads the caller-owned response byte.
+                if unsafe { resp_done(resp_status) } {
                     wait_queue.remove(current);
-                    return used_idx;
+                    // SAFETY: used_ring offset 2 is the idx field.
+                    return unsafe {
+                        let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                        core::ptr::read_volatile(used_idx_ptr)
+                    };
                 }
                 core::hint::spin_loop();
             }
@@ -479,12 +520,14 @@ impl VirtQueue {
             wait_queue.remove(current);
         }
 
-        // Timeout: return current used_idx (caller treats as error)
-        // SAFETY: used_ring is still valid; offset 2 is the idx field within the ring.
-        unsafe {
-            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-            core::ptr::read_volatile(used_idx_ptr)
-        }
+        // Timeout without seeing OUR response: return the caller's prev_used
+        // sentinel. Callers treat `new_used == prev_expected` as "request
+        // possibly still in flight" and run their bounded late-drain before
+        // erroring (R21-N2: never free a buffer the device may still DMA
+        // into — a true timeout leaks the 64B block instead). Returning the
+        // current used-ring index here would let concurrent completions of
+        // OTHER requests mask our timeout and skip that protection.
+        prev_used
     }
 
     /// Wait for a specific descriptor to appear in the used ring.
@@ -515,7 +558,12 @@ impl VirtQueue {
             _ => true,
         };
 
-        let max_iterations = if is_early_boot { 1_000_000 } else { 5000 };
+        // Preempt-disabled callers must not sleep (same wedge discipline as
+        // wait_for_used_interruptible): poll the used ring instead.
+        let poll_only =
+            is_early_boot || crate::interrupt::preempt::preempt_count() != 0;
+
+        let max_iterations = if poll_only { 1_000_000 } else { 5000 };
 
         for _iteration in 0..max_iterations {
             // Read the current used ring index
@@ -541,8 +589,8 @@ impl VirtQueue {
                 scan_idx = scan_idx.wrapping_add(1);
             }
 
-            // Early boot: pure spin-poll
-            if is_early_boot {
+            // Early boot / lock holder: pure spin-poll
+            if poll_only {
                 core::hint::spin_loop();
                 continue;
             }
@@ -652,29 +700,35 @@ impl VirtQueue {
     /// buffers (2*3+3 > 8) even though the queue holds 8. Passing the real
     /// chain length restores the full ring for 1-desc (RX) and 2-desc
     /// (net TX) users; blk keeps the 3-desc accounting via alloc_desc().
-    pub fn alloc_desc_chain(&mut self, chain_len: u16) -> Option<u16> {
+    pub fn alloc_desc_chain(&mut self, _chain_len: u16) -> Option<u16> {
         let used_idx = self.get_used();
         let avail_idx = self.get_avail();
 
-        // Reclaim descriptors that the device has finished with.
-        // The device has consumed up to used_idx; we can safely reuse those.
-        if self.next_desc.load(Ordering::Acquire) < used_idx {
-            self.next_desc.store(used_idx, Ordering::Release);
-        }
-
+        // Descriptor allocation is a free-running counter taken modulo
+        // queue_size. Do NOT clamp it against the used-ring index: next_desc
+        // counts DESCRIPTORS (2-3 per request) while used_idx counts
+        // COMPLETED CHAINS — different domains. After next_desc's first
+        // u16 wrap (~21k requests) the old clamp
+        // `if next_desc < used_idx { next_desc = used_idx }` started to
+        // fire and re-based the allocator on the completion watermark,
+        // handing out the slots of still-in-flight chains; the overwritten
+        // chain head then produced a header-less descriptor chain that the
+        // device silently drops — used.idx stalls forever and every later
+        // waiter starves (the journal-churn VFS wedge family).
+        //
+        // Slot safety comes from the in-flight guard below plus the fact
+        // that live chains always occupy CONSECUTIVE descriptor ranges: at
+        // most two chains may be in flight, so their ranges are adjacent
+        // and disjoint (queue_size 8, chains of 2-3 descriptors).
+        //
         // Check if all descriptors are in flight (avail - used >= queue_size)
         // Note: indices wrap at u16::MAX, not queue_size.
         let in_flight = avail_idx.wrapping_sub(used_idx);
-        // R9-5: bound by DESCRIPTORS, not chains — each request consumes 3
-        // (header/data/resp); with queue_size 8, three concurrent chains
-        // handed out 9 indices over 8 slots and request C overwrote
-        // request A's still-submitted header descriptor (wrong chain
-        // completed; both waiters matched the same used entry).
-        if in_flight.saturating_mul(chain_len).saturating_add(chain_len) > self.queue_size {
-            // R10-3: account for the chain being BUILT — the round-9 guard
-            // only blocked the FOURTH concurrent chain; the third still
-            // wrapped next_desc onto slot 0 and overwrote chain #1's
-            // submitted header descriptor.
+        // Bound by the WORST-CASE chain length (3: blk header/data/resp),
+        // not the caller's: a 2-descriptor flush admitted under the old
+        // per-caller guard could become the 4th concurrent chain and wrap
+        // onto the oldest live chain's slots (R9-5/R10-3 family).
+        if in_flight.saturating_mul(3).saturating_add(3) > self.queue_size {
             return None;
         }
 
@@ -684,12 +738,11 @@ impl VirtQueue {
 
     /// Reclaim descriptors that the device has finished processing.
     ///
-    /// Called after I/O completion to make descriptors available for reuse.
+    /// Called after I/O completion. Descriptor slots are recycled purely by
+    /// the allocator's modulo cycle under the in-flight guard (see
+    /// alloc_desc_chain for why next_desc must never be re-based on the
+    /// used-ring index).
     pub fn reclaim_descs(&mut self) {
-        let used_idx = self.get_used();
-        if self.next_desc.load(Ordering::Acquire) < used_idx {
-            self.next_desc.store(used_idx, Ordering::Release);
-        }
     }
 
     /// Reset descriptor allocator
