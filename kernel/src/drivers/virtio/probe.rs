@@ -8,6 +8,8 @@
 
 use crate::println;
 use crate::config::ENABLE_VIRTIO_NET_PROBE;
+use crate::sync::spinlock::Spinlock;
+use alloc::vec::Vec;
 
 /// VirtIO device IDs
 ///
@@ -112,6 +114,9 @@ fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
     crate::drivers::net::virtio_net::init(base_addr)?;
     // Enable device interrupt
     crate::drivers::net::virtio_net::enable_device_interrupt(base_addr);
+    // U3: registration-time uevent — notify udev/mdev the netdev exists.
+    // virtio_net::init names the device "eth0" (fixed, single-function).
+    crate::fs::sysfs::netdev_uevent("eth0", "add");
     Ok(())
 }
 
@@ -126,6 +131,12 @@ fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
     crate::drivers::virtio::init(base_addr)?;
     // Enable device interrupt
     crate::drivers::virtio::enable_device_interrupt(base_addr);
+    // U3: registration-time uevent for the (first) virtio-blk disk. The
+    // MMIO GenDisk is "virtblk" (minor 0) and surfaces as /dev/vda.
+    let capacity = crate::drivers::virtio::get_device()
+        .map(|d| d.disk.get_capacity())
+        .unwrap_or(0);
+    crate::fs::sysfs::register_block_disk("vda", crate::fs::devfs::VIRTIO_BLK_MAJOR, 0, capacity);
     Ok(())
 }
 
@@ -137,7 +148,13 @@ fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
 /// # Notes
 /// Loopback device is always available as a fallback network device
 fn init_loopback_device() -> bool {
-    crate::drivers::net::loopback::loopback_init().is_some()
+    if crate::drivers::net::loopback::loopback_init().is_some() {
+        // U3: registration-time uevent for "lo".
+        crate::fs::sysfs::netdev_uevent("lo", "add");
+        true
+    } else {
+        false
+    }
 }
 
 /// Initialize all network devices
@@ -178,6 +195,16 @@ pub fn init_block_devices() -> usize {
     0
 }
 
+/// ECAM addresses of virtio-blk functions already claimed by the boot
+/// probe or a hotplug rescan (U4). Rescans only consider new functions.
+static CLAIMED_BLK_ECAM: Spinlock<Vec<u64>> = Spinlock::new(Vec::new());
+
+/// Next minor for a hotplug virtio-blk disk. vda (the boot disk, if any)
+/// holds minor 0; hotplug disks take 16, 32, ... matching the legacy
+/// per-disk minor stride of the 254 major.
+static HOTPLUG_BLK_MINOR: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(16);
+
 /// Initialize PCI block devices
 ///
 /// # Notes
@@ -201,6 +228,19 @@ pub fn init_pci_block_devices() -> usize {
     );
 
     for ecam_addr in ecam_addresses {
+        // The virtio-blk layer owns ONE vring/GenDisk pair (single global
+        // queue + single GenDisk registry slot). A second full init would
+        // clobber those singletons and silently reroute the ROOT DISK's
+        // I/O to the new device — claim only the first function at boot;
+        // additional functions stay for the runtime rescan path
+        // (pci_rescan_block_hotplug: metadata bring-up + sysfs + uevent).
+        if device_count > 0 {
+            crate::pr_info!(
+                "virtio-blk: extra function at {:#x} deferred to PCI rescan",
+                ecam_addr
+            );
+            break;
+        }
         {
             match crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
                 Ok(mut virtio_dev) => {
@@ -304,6 +344,21 @@ pub fn init_pci_block_devices() -> usize {
                                     // Register GenDisk wrapper (so ext4 driver can access)
                                     crate::drivers::virtio::register_pci_gen_disk();
 
+                                    // U3: registration-time sysfs entry + "add"
+                                    // uevent (the boot disk is /dev/vda).
+                                    let capacity = crate::drivers::virtio::get_pci_gen_disk()
+                                        .map(|d| d.get_capacity())
+                                        .unwrap_or(0);
+                                    crate::fs::sysfs::register_block_disk(
+                                        "vda",
+                                        crate::fs::devfs::VIRTIO_BLK_MAJOR,
+                                        0,
+                                        capacity,
+                                    );
+
+                                    // U4: remember the function for rescan diffing.
+                                    CLAIMED_BLK_ECAM.lock().push(ecam_addr);
+
                                     device_count += 1;
                                 }
                                 Err(_) => {}
@@ -317,4 +372,116 @@ pub fn init_pci_block_devices() -> usize {
     }
 
     device_count
+}
+
+/// Hotplug PCI rescan (U4): `echo 1 > /sys/bus/pci/rescan`.
+///
+/// Re-enumerates the ECAM space for virtio-blk functions not yet claimed
+/// (attached after boot, or deferred by the boot probe — see
+/// init_pci_block_devices). The riscv/virt platform has no ACPI/PCIe
+/// hotplug interrupt AND QEMU's gpex host does not decode ECAM cycles for
+/// secondary buses behind pcie-root-ports (verified on QEMU 8.2.2 and
+/// 10.2.2: full guest-side bridge programming — bus numbers, memory
+/// window, command, slot power — still leaves bus-1 config reads at
+/// 0xFFFFFFFF while QEMU's own info pci sees the device), so userland
+/// drives the rescan and only root-bus functions are discoverable.
+///
+/// Each NEW function gets a minimal virtio bring-up (reset → ACK|DRIVER →
+/// FEATURES_OK → DRIVER_OK) and a config-space capacity read; the disk is
+/// then registered in sysfs (/sys/class/block/vdX) and an "add" uevent
+/// with MAJOR/MINOR/DEVNAME is broadcast for udev/mdev to create the
+/// /dev/vdX node.
+///
+/// NOTE (scope): the hotplug disk is metadata-complete (sysfs + uevent +
+/// node), not I/O-wired — the virtio-blk layer has a single global
+/// vring/GenDisk pair owned by the boot disk; hot disks do not steal it.
+pub fn pci_rescan_block_hotplug() -> usize {
+    use crate::drivers::virtio::offset::status;
+
+    let ecam_addresses = crate::drivers::pci::find_ecam_devices(
+        crate::drivers::pci::vendor::RED_HAT,
+        &[
+            crate::drivers::pci::virtio_device::VIRTIO_BLK,
+            crate::drivers::pci::virtio_device::VIRTIO_BLK_MODERN,
+        ],
+    );
+
+    let mut found = 0usize;
+    for ecam_addr in ecam_addresses {
+        // Skip functions the boot probe already claimed.
+        if CLAIMED_BLK_ECAM.lock().contains(&ecam_addr) {
+            continue;
+        }
+
+        let dev = match crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // Minimal bring-up: reset, ACK|DRIVER, no feature the driver must
+        // then honor, FEATURES_OK, DRIVER_OK. No queue setup — config
+        // space (capacity) is readable once DRIVER_OK is set.
+        dev.reset_device();
+        let mut reset_timeout = crate::config::VIRTIO_RESET_TIMEOUT_TICKS;
+        while dev.get_status() != 0 && reset_timeout > 0 {
+            core::hint::spin_loop();
+            reset_timeout -= 1;
+        }
+        if dev.get_status() != 0 {
+            continue;
+        }
+        dev.set_status(status::ACKNOWLEDGE | status::DRIVER);
+        dev.write_driver_features(0); // word 0 none; word 1 VIRTIO_F_VERSION_1
+        dev.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
+        if dev.get_status() & status::FEATURES_OK == 0 {
+            continue;
+        }
+        dev.set_status(
+            status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK,
+        );
+
+        // Capacity: virtio-blk device config is a u64 sector count at
+        // offset 0 of the device cfg region. register_pci_gen_disk reads
+        // it at common_cfg + 0x2000 (same BAR, capability layout); use
+        // the parsed device_cfg BAR when present, else the known quirk.
+        let cfg_base = if dev.device_cfg_bar != 0 {
+            dev.device_cfg_bar
+        } else {
+            dev.common_cfg_bar + 0x2000
+        };
+        // SAFETY: cfg_base is a valid MMIO-mapped virtio-blk device
+        // config region (parsed from the device's PCI capabilities).
+        let capacity = unsafe { core::ptr::read_volatile(cfg_base as *const u64) };
+
+        // Assign identity: vdX with minor stride 16 (vda holds minor 0).
+        let minor = HOTPLUG_BLK_MINOR.fetch_add(16, core::sync::atomic::Ordering::SeqCst);
+        if minor > 16 * 25 {
+            break; // cap at vdz
+        }
+        let letter = b'a' + (minor / 16) as u8;
+        let name = alloc::format!("vd{}", letter as char);
+
+        let seq = crate::fs::sysfs::register_block_disk(
+            &name,
+            crate::fs::devfs::VIRTIO_BLK_MAJOR,
+            minor,
+            capacity,
+        );
+        CLAIMED_BLK_ECAM.lock().push(ecam_addr);
+        found += 1;
+        crate::pr_info!(
+            "virtio-blk hotplug: {} ({}:{}) {} sectors, uevent seq {}",
+            name,
+            crate::fs::devfs::VIRTIO_BLK_MAJOR,
+            minor,
+            capacity,
+            seq
+        );
+    }
+
+    if found == 0 {
+        crate::pr_info!("pci rescan: no new virtio-blk functions");
+    }
+
+    found
 }

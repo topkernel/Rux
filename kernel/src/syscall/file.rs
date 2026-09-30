@@ -2009,7 +2009,7 @@ fn mknod_device(path: &str, ftype: u32, dev: u32, perm: u32) -> i64 {
     let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);
     let type_bits = if ftype == 0o020000 { 0o020000 } else { 0o060000 };
     let mode_bits = type_bits | (perm & 0o777);
-    match crate::fs::devfs::mknod(dev_path, crate::fs::dev_t::DevNo::new(major, minor), mode_bits) {
+    match crate::fs::devfs::mknod_user(dev_path, crate::fs::dev_t::DevNo::new(major, minor), mode_bits) {
         Ok(()) => 0,
         Err(()) => -(errno::EACCES as i64), // missing parent dir inside /dev
     }

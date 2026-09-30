@@ -100,3 +100,4 @@ kernel/verify/kani-output.txt
 /work/
 *.out
 .x11work/
+/.udev/

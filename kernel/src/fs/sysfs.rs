@@ -56,6 +56,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -89,6 +90,8 @@ pub enum KType {
     Net,
     /// block class devices
     Block,
+    /// input class devices (evdev event nodes)
+    Input,
     /// tty class devices
     Tty,
     /// /sys/devices/system/cpu
@@ -117,6 +120,7 @@ impl KType {
         match self {
             KType::Net => Some("net"),
             KType::Block => Some("block"),
+            KType::Input => Some("input"),
             KType::Tty => Some("tty"),
             KType::Cpu => Some("cpu"),
             KType::Module => Some("module"),
@@ -162,6 +166,10 @@ pub struct KObject {
     pub kind: NodeKind,
     /// device number for block/char devices (MAJOR=/MINOR= uevent vars)
     pub devno: Spinlock<Option<(u32, u32)>>,
+    /// device-node path relative to /dev (DEVNAME= uevent var); defaults
+    /// to the kobject name when a devno is present but no override was set
+    /// (input event nodes need "input/event0", not "event0").
+    pub devname: Spinlock<Option<String>>,
     /// fs-unique inode number
     pub ino: u64,
     /// child objects (BTreeMap → readdir order is deterministic)
@@ -184,6 +192,7 @@ impl KObject {
             ktype: KType::System,
             kind: NodeKind::Directory,
             devno: Spinlock::new(None),
+            devname: Spinlock::new(None),
             ino: 1,
             children: Spinlock::new(BTreeMap::new()),
             attributes: Spinlock::new(BTreeMap::new()),
@@ -198,6 +207,7 @@ impl KObject {
             ktype,
             kind,
             devno: Spinlock::new(None),
+            devname: Spinlock::new(None),
             ino: alloc_ino(),
             children: Spinlock::new(BTreeMap::new()),
             attributes: Spinlock::new(BTreeMap::new()),
@@ -206,8 +216,11 @@ impl KObject {
 
     /// Attach a child (sets its parent backlink). Replaces an existing
     /// child of the same name.
-    pub fn add_child(&self, child: Arc<KObject>) {
-        *child.parent.lock() = Some(Arc::downgrade(&child));
+    pub fn add_child(self: &Arc<Self>, child: Arc<KObject>) {
+        // The backlink must point at the PARENT (this object) — a Weak to
+        // `child` here made every kobject its own parent, corrupting
+        // KObject::path() into "/name/name/name..." (U4: DEVPATH bug).
+        *child.parent.lock() = Some(Arc::downgrade(self));
         self.children.lock().insert(child.name.clone(), child);
     }
 
@@ -352,29 +365,56 @@ where
     parent.set_attr(name, 0o644, Some(Box::new(show)), Some(Box::new(store)));
 }
 
-/// The "uevent" attribute present on every device kobject: writing
+/// The "uevent" attribute present on every device kobject. READ returns
+/// the current environment block ("MAJOR=..\nMINOR=..\nDEVNAME=..\n" —
+/// Linux kobject uevent attr parity; busybox mdev parses "\nDEVNAME="
+/// out of exactly this file when $DEVNAME is absent). WRITE of
 /// "add"/"remove"/"change" synthesizes a userspace-triggered uevent
 /// (udevadm trigger coldboot path).
 fn add_uevent_attr(dev: &Arc<KObject>) {
-    // Copy everything the closure needs — it must be 'static.
+    // Copy everything the closures need — they must be 'static.
     let devpath = dev.path();
     let subsystem = String::from(dev.ktype.subsystem().unwrap_or("kernel"));
     let devno = *dev.devno.lock();
-    attr_rw(dev, "uevent", Vec::new, move |buf| {
-        let action = match parse_uevent_action(buf) {
-            Some(a) => a,
-            None => return errno::Errno::InvalidArgument.as_neg_i32(),
-        };
-        if let Some((major, minor)) = devno {
-            let maj = format!("{}", major);
-            let min = format!("{}", minor);
-            let extra: [(&str, &str); 2] = [("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
-            uevent_send_full(&devpath, action, &subsystem, &extra);
-        } else {
-            uevent_send_full(&devpath, action, &subsystem, &[]);
-        }
-        0
-    });
+    let devname = dev.devname.lock().clone();
+    let devname_show = devname.clone();
+    attr_rw(
+        dev,
+        "uevent",
+        move || {
+            // Show side: the static env keys (newline-separated).
+            let mut out = String::new();
+            if let Some((major, minor)) = devno {
+                use core::fmt::Write as _;
+                let _ = write!(out, "MAJOR={}\nMINOR={}", major, minor);
+                if let Some(ref dn) = devname_show {
+                    let _ = write!(out, "\nDEVNAME={}", dn);
+                }
+                out.push('\n');
+            }
+            out.into_bytes()
+        },
+        move |buf| {
+            let action = match parse_uevent_action(buf) {
+                Some(a) => a,
+                None => return errno::Errno::InvalidArgument.as_neg_i32(),
+            };
+            if let Some((major, minor)) = devno {
+                let maj = format!("{}", major);
+                let min = format!("{}", minor);
+                let mut extra: Vec<(&str, &str)> =
+                    vec![("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+                if let Some(ref dn) = devname {
+                    // DEVNAME: node path relative to /dev (Linux dev_uevent).
+                    extra.push(("DEVNAME", dn.as_str()));
+                }
+                uevent_send_full(&devpath, action, &subsystem, &extra);
+            } else {
+                uevent_send_full(&devpath, action, &subsystem, &[]);
+            }
+            0
+        },
+    );
 }
 
 /// Parse a uevent action string ("add\n" → "add").
@@ -399,17 +439,6 @@ fn parse_uevent_action(buf: &[u8]) -> Option<&'static str> {
 
 /// Live netdev accessor type (both loopback and virtio-net match).
 type NetDevGetter = fn() -> Option<&'static mut crate::drivers::net::space::NetDevice>;
-
-/// Live GenDisk capacity in 512-byte sectors (0 when no disk present).
-fn disk_capacity_sectors() -> u64 {
-    if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
-        return disk.get_capacity();
-    }
-    if let Some(dev) = crate::drivers::virtio::get_device() {
-        return dev.disk.get_capacity();
-    }
-    0
-}
 
 /// "0-3"-style CPU range for /sys/devices/system/cpu/{online,present,...}.
 fn cpu_range_str(count: usize) -> String {
@@ -494,29 +523,176 @@ fn add_net_device(
     add_uevent_attr(&dev);
 }
 
-/// Build the /sys/class/block/vda device directory.
-fn add_block_device(class_block: &Arc<KObject>, name: &str, major: u32, minor: u32) {
-    let dev = mk_dir(class_block, name, KType::Block);
+// ============================================================================
+// Dynamic device registration (driver probe paths) — U3
+// ============================================================================
+
+/// Register a block disk under /sys/class/block/<name> (+ /sys/block/<name>
+/// and /sys/dev/block/<maj:min> symlinks) and broadcast the "add" uevent.
+///
+/// Called by the virtio-blk probe at device discovery: the tree entry and
+/// the uevent are created at registration time (Linux add_disk() parity).
+/// `capacity_sectors` is captured once — virtio-blk capacity is fixed
+/// after device reset. Idempotent per name: a re-registration only updates
+/// the size attribute (no second uevent, matching Linux which fires "add"
+/// once per kobject birth).
+///
+/// Returns the uevent SEQNUM, or 0 when sysfs is not up / already present.
+pub fn register_block_disk(name: &str, major: u32, minor: u32, capacity_sectors: u64) -> u64 {
+    if sysfs_root().is_none() {
+        return 0;
+    }
+
+    // /sys/class/block must exist (build_tree skeleton).
+    let class_block = match lookup_path("class/block") {
+        Some(d) => d,
+        None => return 0,
+    };
+    if class_block.find_child(name.as_bytes()).is_some() {
+        return 0; // already registered
+    }
+
+    let dev = mk_dir(&class_block, name, KType::Block);
     *dev.devno.lock() = Some((major, minor));
+    *dev.devname.lock() = Some(String::from(name));
 
     attr_ro(&dev, "size", move || {
-        format!("{}\n", disk_capacity_sectors()).into_bytes()
+        format!("{}\n", capacity_sectors).into_bytes()
     });
     attr_ro(&dev, "dev", move || format!("{}:{}\n", major, minor).into_bytes());
     attr_ro(&dev, "ro", move || b"0\n".to_vec());
+    // Removable media flag (GD_WIN: mdev/udev read it to pick node mode).
+    attr_ro(&dev, "removable", move || b"0\n".to_vec());
     // struct block_device_stats — 17 u64 fields (reads/merges/sectors/ms,
     // writes/..., in-flight, io-time, weighted, discards x4, flushes x2).
     attr_ro(&dev, "stat", move || {
         format!("{}\n", "0 ".repeat(16) + "0").into_bytes()
     });
-
     add_uevent_attr(&dev);
+
+    // /sys/block/<name> → ../../class/block/<name>
+    if let Some(sys_block) = lookup_path("block") {
+        mk_link(&sys_block, name, &format!("../../class/block/{}", name));
+    }
+    // /sys/dev/block/<maj:min> → ../../../class/block/<name>
+    if let Some(dev_block) = lookup_path("dev/block") {
+        mk_link(
+            &dev_block,
+            &format!("{}:{}", major, minor),
+            &format!("../../../class/block/{}", name),
+        );
+    }
+
+    let devpath = dev.path();
+    let maj = format!("{}", major);
+    let min = format!("{}", minor);
+    let extra: [(&str, &str); 3] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", name),
+    ];
+    uevent_send_full(&devpath, "add", "block", &extra)
+}
+
+/// Unregister a block disk: drop the tree entries and broadcast "remove".
+/// (No virtio-blk removal path exists yet — kept for device_del bring-up.)
+#[allow(dead_code)]
+pub fn unregister_block_disk(name: &str, major: u32, minor: u32) -> u64 {
+    if let Some(class_block) = lookup_path("class/block") {
+        class_block.remove_child(name);
+    }
+    if let Some(sys_block) = lookup_path("block") {
+        sys_block.remove_child(name);
+    }
+    if let Some(dev_block) = lookup_path("dev/block") {
+        dev_block.remove_child(&format!("{}:{}", major, minor));
+    }
+    let devpath = format!("/class/block/{}", name);
+    let maj = format!("{}", major);
+    let min = format!("{}", minor);
+    let extra: [(&str, &str); 3] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", name),
+    ];
+    uevent_send_full(&devpath, "remove", "block", &extra)
+}
+
+/// Register an input event node under /sys/class/input/<name> (+ the
+/// /sys/dev/char/<maj:min> mapping) and broadcast the "add" uevent.
+///
+/// DEVNAME is "input/<name>" — the node path relative to /dev — exactly
+/// what udev/mdev need to create /dev/input/event<N>.
+pub fn register_input_event(name: &str, major: u32, minor: u32) -> u64 {
+    if sysfs_root().is_none() {
+        return 0;
+    }
+    let class_input = match lookup_path("class/input") {
+        Some(d) => d,
+        None => match lookup_path("class") {
+            Some(class) => mk_dir(&class, "input", KType::Input),
+            None => return 0,
+        },
+    };
+    if class_input.find_child(name.as_bytes()).is_some() {
+        return 0; // already registered
+    }
+
+    let dev = mk_dir(&class_input, name, KType::Input);
+    *dev.devno.lock() = Some((major, minor));
+    *dev.devname.lock() = Some(format!("input/{}", name));
+
+    attr_ro(&dev, "dev", move || format!("{}:{}\n", major, minor).into_bytes());
+    add_uevent_attr(&dev);
+
+    // /sys/dev/char/<maj:min> → ../../../class/input/<name>
+    if let Some(dev_char) = lookup_path("dev/char") {
+        mk_link(
+            &dev_char,
+            &format!("{}:{}", major, minor),
+            &format!("../../../class/input/{}", name),
+        );
+    }
+
+    let devpath = dev.path();
+    let devname = format!("input/{}", name);
+    let maj = format!("{}", major);
+    let min = format!("{}", minor);
+    let extra: [(&str, &str); 3] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", devname.as_str()),
+    ];
+    uevent_send_full(&devpath, "add", "input", &extra)
+}
+
+/// Unregister an input event node (drop tree entries, broadcast "remove").
+/// (No evdev removal path exists yet — kept for device_del bring-up.)
+#[allow(dead_code)]
+pub fn unregister_input_event(name: &str, major: u32, minor: u32) -> u64 {
+    if let Some(class_input) = lookup_path("class/input") {
+        class_input.remove_child(name);
+    }
+    if let Some(dev_char) = lookup_path("dev/char") {
+        dev_char.remove_child(&format!("{}:{}", major, minor));
+    }
+    let devpath = format!("/class/input/{}", name);
+    let devname = format!("input/{}", name);
+    let maj = format!("{}", major);
+    let min = format!("{}", minor);
+    let extra: [(&str, &str); 3] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", devname.as_str()),
+    ];
+    uevent_send_full(&devpath, "remove", "input", &extra)
 }
 
 /// Build a /sys/class/tty device directory.
 fn add_tty_device(class_tty: &Arc<KObject>, name: &str, major: u32, minor: u32) {
     let dev = mk_dir(class_tty, name, KType::Tty);
     *dev.devno.lock() = Some((major, minor));
+    *dev.devname.lock() = Some(String::from(name));
     attr_ro(&dev, "dev", move || format!("{}:{}\n", major, minor).into_bytes());
     attr_ro(&dev, "active", move || Vec::new());
     add_uevent_attr(&dev);
@@ -571,9 +747,14 @@ fn build_tree() -> Arc<KObject> {
         1,                 // ARPHRD_ETHER
     );
 
-    // /sys/class/block/vda — virtio-blk conventionally lands on major 254.
-    let block = mk_dir(&class, "block", KType::Block);
-    add_block_device(&block, "vda", 254, 0);
+    // /sys/class/block — skeleton only; disks register dynamically at
+    // probe time via register_block_disk() (vda from the boot probe, vdX
+    // from PCI rescan hotplug). virtio-blk conventionally uses major 254.
+    let _block = mk_dir(&class, "block", KType::Block);
+
+    // /sys/class/input — skeleton; event0/event1 register via
+    // register_input_event() when evdev initializes.
+    let _input = mk_dir(&class, "input", KType::Input);
 
     let tty = mk_dir(&class, "tty", KType::Tty);
     add_tty_device(&tty, "console", 5, 1);
@@ -626,6 +807,8 @@ fn build_tree() -> Arc<KObject> {
     let dev_graphics = mk_dir(&devices, "graphics", KType::Generic);
     let fb0 = mk_dir(&dev_graphics, "fb0", KType::Generic);
     // FB major 29, minor 0 (matches fs::dev_t::DEV_FB0).
+    *fb0.devno.lock() = Some((29, 0));
+    *fb0.devname.lock() = Some(String::from("fb0"));
     attr_ro(&fb0, "dev", move || b"29:0\n".to_vec());
     attr_ro(&fb0, "name", move || b"virtio-gpu\n".to_vec());
     attr_ro(&fb0, "modes", move || {
@@ -696,15 +879,34 @@ fn build_tree() -> Arc<KObject> {
     );
 
     // ---------------- /sys/dev + /sys/block ----------------
+    // /sys/dev/{block,char} and /sys/block entries are created dynamically
+    // by register_block_disk()/register_input_event(); only the tty char
+    // links (static devices) are wired here.
     let dev_tree = mk_dir(&root, "dev", KType::Dev);
-    let dev_block = mk_dir(&dev_tree, "block", KType::Block);
-    mk_link(&dev_block, "254:0", "../../../class/block/vda");
+    let _dev_block = mk_dir(&dev_tree, "block", KType::Block);
     let dev_char = mk_dir(&dev_tree, "char", KType::Tty);
     mk_link(&dev_char, "5:1", "../../../class/tty/console");
     mk_link(&dev_char, "4:0", "../../../class/tty/tty0");
 
-    let sys_block = mk_dir(&root, "block", KType::Block);
-    mk_link(&sys_block, "vda", "../../class/block/vda");
+    let _sys_block = mk_dir(&root, "block", KType::Block);
+
+    // ---------------- /sys/bus/pci ----------------
+    // Hotplug entry point: `echo 1 > /sys/bus/pci/rescan` re-enumerates
+    // the PCIe ECAM space for virtio functions added after boot (QEMU
+    // monitor `device_add`). The riscv/virt platform has no ACPI/PCIe
+    // hotplug interrupt, so userland drives the rescan like it does on
+    // interrupt-less x86 hosts.
+    let bus = mk_dir(&root, "bus", KType::Generic);
+    let pci_bus = mk_dir(&bus, "pci", KType::Generic);
+    attr_rw(
+        &pci_bus,
+        "rescan",
+        || b"\n".to_vec(),
+        |_buf| {
+            crate::drivers::probe::pci_rescan_block_hotplug();
+            0
+        },
+    );
 
     root
 }
@@ -793,30 +995,33 @@ pub fn uevent_send(devpath: &str, action: &str) -> u64 {
     uevent_send_full(devpath, action, subsystem, &[])
 }
 
-/// Fire a uevent for a KObject (adds MAJOR=/MINOR= for devices).
+/// Fire a uevent for a KObject (adds MAJOR=/MINOR=/DEVNAME= for devices
+/// carrying a device number).
 pub fn kobject_uevent(kobj: &KObject, action: &str) -> u64 {
     let devpath = kobj.path();
     let subsystem = kobj.ktype.subsystem().unwrap_or("kernel");
-    if let Some((major, minor)) = *kobj.devno.lock() {
+        if let Some((major, minor)) = *kobj.devno.lock() {
         let maj = format!("{}", major);
         let min = format!("{}", minor);
-        let extra: [(&str, &str); 2] = [("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
-        uevent_send_full(&devpath, action, subsystem, &extra)
+        let mut extra: Vec<(&str, &str)> = vec![("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+        if let Some(dn) = kobj.devname.lock().clone() {
+            extra.push(("DEVNAME", dn.as_str()));
+            uevent_send_full(&devpath, action, subsystem, &extra)
+        } else {
+            uevent_send_full(&devpath, action, subsystem, &extra)
+        }
     } else {
         uevent_send_full(&devpath, action, subsystem, &[])
     }
 }
 
-/// Network device state change (up/down) — call on IFF_UP transitions.
+/// Network device state change (up/down/add/remove) — call on IFF_UP
+/// transitions and netdev registration. Carries INTERFACE=<name> like
+/// Linux's netdev_uevent().
 pub fn netdev_uevent(name: &str, action: &str) -> u64 {
     let devpath = format!("/class/net/{}", name);
-    uevent_send_full(&devpath, action, "net", &[])
-}
-
-/// Block device discovery/removal notification.
-pub fn blockdev_uevent(name: &str, action: &str) -> u64 {
-    let devpath = format!("/class/block/{}", name);
-    uevent_send_full(&devpath, action, "block", &[])
+    let extra: [(&str, &str); 1] = [("INTERFACE", name)];
+    uevent_send_full(&devpath, action, "net", &extra)
 }
 
 /// Current uevent SEQNUM (for /sys/kernel/uevent_seqnum).
@@ -896,13 +1101,6 @@ pub fn init_sysfs() -> Result<(), i32> {
         }
     }
     let root = build_tree();
-
-    // Block device discovery: emit the initial "add" uevent for vda when
-    // a GenDisk is already present (no listeners exist this early, so the
-    // broadcast is a no-op — kept for symmetry with the driver path).
-    if disk_capacity_sectors() > 0 {
-        blockdev_uevent("vda", "add");
-    }
 
     let sb = Box::new(SysfsSuperBlock {
         sb: SuperBlock::new(4096, SYSFS_MAGIC),

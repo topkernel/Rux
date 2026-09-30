@@ -708,6 +708,19 @@ pub fn init_evdev() {
         .expect("Failed to create /dev/input/event0");
     devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
         .expect("Failed to create /dev/input/event1");
+
+    // U3: registration-time sysfs entries + "add" uevents (DEVNAME is
+    // "input/event0"/"input/event1" — the /dev-relative node path).
+    crate::fs::sysfs::register_input_event(
+        "event0",
+        DEV_EVDEV_KEYBOARD.major,
+        DEV_EVDEV_KEYBOARD.minor,
+    );
+    crate::fs::sysfs::register_input_event(
+        "event1",
+        DEV_EVDEV_POINTER.major,
+        DEV_EVDEV_POINTER.minor,
+    );
 }
 
 /// Fill an evdev device's capability bitmaps from the backing virtio

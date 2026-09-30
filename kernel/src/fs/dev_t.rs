@@ -38,6 +38,17 @@ impl DevNo {
     pub const fn to_u64(&self) -> u64 {
         ((self.major as u64) << DEV_MINOR_BITS) | (self.minor as u64 & DEV_MINOR_MASK)
     }
+
+    /// Encode for USERSPACE stat st_rdev / mknod dev_t (Linux
+    /// new_encode_dev): major in bits 8-19, minor split across bits 0-7
+    /// and 20-31. glibc/busybox major()/minor()/makedev() operate on
+    /// exactly this layout — reporting the kernel-internal format broke
+    /// every userspace device-number consumer (stat, mdev, udev).
+    pub const fn to_user_dev(&self) -> u64 {
+        ((self.major as u64 & 0xfff) << 8)
+            | (self.minor as u64 & 0xff)
+            | ((self.minor as u64 & 0xfffff00) << 12)
+    }
 }
 
 impl Default for DevNo {

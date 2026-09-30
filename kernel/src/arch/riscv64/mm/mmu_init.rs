@@ -1075,8 +1075,12 @@ pub fn setup_device_mappings() {
             device_flags,
         );
 
-        // PCIe ECAM: 0x100000 bytes
-        map_kernel_region(PCIE_ECAM_BASE as u64, PCIE_ECAM_BASE as u64, 0x100000, device_flags);
+        // PCIe ECAM: buses 0-7 (8 x 1MB, function-per-4K windows). The
+        // QEMU virt machine exposes a 256MB ECAM region here; bus 0 held
+        // every boot device so 1MB used to be enough, but devices
+        // hot-added behind a pcie-root-port (U4 rescan path) sit on
+        // bus 1+.
+        map_kernel_region(PCIE_ECAM_BASE as u64, PCIE_ECAM_BASE as u64, 0x800000, device_flags);
 
         // PCI MMIO: 0x10000000 bytes
         map_kernel_region(PCI_MMIO_BASE as u64, PCI_MMIO_BASE as u64, 0x10000000, device_flags);

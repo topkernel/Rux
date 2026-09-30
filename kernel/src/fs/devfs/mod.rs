@@ -403,6 +403,15 @@ fn devtmpfs_populate() {
 // devtmpfs dynamic device node API (U2)
 // ============================================================================
 
+/// Userspace-driven mknod (sys_mknodat): create the node AND evict any
+/// stale dentry so the next lookup sees it (same discipline as
+/// devtmpfs_register_device, for the mdev path).
+pub fn mknod_user(path: &str, devno: DevNo, mode: u32) -> Result<(), ()> {
+    mknod(path, devno, mode)?;
+    evict_dev_dentry(path);
+    Ok(())
+}
+
 /// Evict a cached dentry (negative OR positive) under /dev so freshly
 /// created/removed nodes are visible — mirrors the pty layer's
 /// evict_pts_dentry discipline. Accepts a devfs-relative path ("sda" or
@@ -445,12 +454,17 @@ pub fn devtmpfs_register_device(path: &str, devno: DevNo, is_block: bool) -> Res
     evict_dev_dentry(path);
 
     // uevent: DEVPATH relative to /sys (block devices live in
-    // /sys/class/block/<name>).
+    // /sys/class/block/<name>). DEVNAME is the node path relative to /dev
+    // (Linux dev_uevent parity — udev/mdev create the node from it).
     let name = path.rsplit('/').next().unwrap_or(path);
     let subsystem = if is_block { "block" } else { "tty" };
     let maj = format!("{}", devno.major);
     let min = format!("{}", devno.minor);
-    let extra: [(&str, &str); 2] = [("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+    let extra: [(&str, &str); 3] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", path),
+    ];
     let devpath = if is_block {
         format!("/class/block/{}", name)
     } else {
@@ -470,7 +484,11 @@ pub fn devtmpfs_unregister_device(path: &str, devno: DevNo, is_block: bool) -> R
     let subsystem = if is_block { "block" } else { "tty" };
     let maj = format!("{}", devno.major);
     let min = format!("{}", devno.minor);
-    let extra: [(&str, &str); 2] = [("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
+    let extra: [(&str, &str); 3] = [
+        ("MAJOR", maj.as_str()),
+        ("MINOR", min.as_str()),
+        ("DEVNAME", path),
+    ];
     let devpath = if is_block {
         format!("/class/block/{}", name)
     } else {
@@ -934,7 +952,10 @@ unsafe fn devfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     stat.st_nlink = 1;
     stat.st_uid = 0;
     stat.st_gid = 0;
-    stat.st_rdev = entry.devno.to_u64();
+    // Userspace dev_t encoding (glibc major()/minor() decode this — see
+    // DevNo::to_user_dev; the old kernel-internal encoding made every
+    // userspace stat report major 0).
+    stat.st_rdev = entry.devno.to_user_dev();
     stat.st_size = 0;
     stat.st_blocks = 0;
     stat.st_blksize = 4096;
@@ -1060,15 +1081,152 @@ unsafe fn devfs_destroy_inode(inode: &mut Inode) {
     }
 }
 
+// ============================================================================
+// Userspace directory mutations (U5: the mdev route)
+// ============================================================================
+
+/// Root-relative path of a directory entry, found by pointer-identity DFS
+/// (devfs trees are tiny; this runs only for mkdir/unlink/rmdir).
+fn devfs_rel_path(target: &DevfsEntry) -> Option<String> {
+    fn walk(cur: &DevfsEntry, prefix: &str, target: &DevfsEntry) -> Option<String> {
+        let children = cur.children.lock_irqsave();
+        for (name, child) in children.iter() {
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                alloc::format!("{}/{}", prefix, name)
+            };
+            if core::ptr::eq(child.as_ref() as *const DevfsEntry, target as *const DevfsEntry) {
+                return Some(path);
+            }
+            if child.is_dir() {
+                if let Some(found) = walk(child, &path, target) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    let root = DEVFS_ROOT.lock_irqsave();
+    let root = root.as_ref()?;
+    walk(root, "", target)
+}
+
+/// mkdir on devfs (userspace): create a subdirectory entry. mdev's
+/// bb_make_directory() needs at least EEXIST semantics for existing
+/// directories ("/dev/input" already exists when event nodes are created).
+/// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
+unsafe fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
+    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let entry = &*(entry_ptr as *const DevfsEntry);
+    if !entry.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+    let name = core::str::from_utf8(name)
+        .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
+
+    let mut children = entry.children.lock_irqsave();
+    if children.contains_key(name) {
+        return Err(errno::Errno::FileExists.as_neg_i32());
+    }
+    let mut dir_entry = DevfsEntry::new_dir(name);
+    if mode.bits() & 0o777 != 0 {
+        dir_entry.mode = mode.bits() & 0o777;
+    }
+    let new_dir = Arc::new(dir_entry);
+    children.insert(String::from(name), new_dir.clone());
+    drop(children);
+
+    // Build the VFS inode for the new directory (devfs_iget discipline).
+    let ino = devfs_ino_hash(name);
+    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | new_dir.mode));
+    inode.fs_id = crate::fs::inode::FS_ID_DEVFS;
+    inode.ops = Some(&DEVFS_INODE_OPS);
+    inode.private_data = Some(Arc::into_raw(new_dir) as *mut u8);
+    Ok(Arc::new(inode))
+}
+
+/// unlink on devfs (userspace): remove a device node (rm /dev/vda before
+/// mdev/udev recreates it, mdev remove events, ...).
+/// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
+unsafe fn devfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
+    let entry_ptr = match dir.private_data {
+        Some(p) => p,
+        None => return errno::Errno::BadFileNumber.as_neg_i32(),
+    };
+    let entry = &*(entry_ptr as *const DevfsEntry);
+    if !entry.is_dir() {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+    let name = match core::str::from_utf8(name) {
+        Ok(n) => n,
+        Err(_) => return errno::Errno::InvalidArgument.as_neg_i32(),
+    };
+    let removed = {
+        let mut children = entry.children.lock_irqsave();
+        match children.get(name) {
+            None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+            Some(child) if child.is_dir() => {
+                return errno::Errno::IsADirectory.as_neg_i32()
+            }
+            Some(_) => children.remove(name),
+        }
+    };
+    if removed.is_some() {
+        if let Some(rel) = devfs_rel_path(entry) {
+            evict_dev_dentry(&alloc::format!("{}/{}", rel, name));
+        }
+    }
+    0
+}
+
+/// rmdir on devfs (userspace): remove an empty subdirectory.
+/// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
+unsafe fn devfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
+    let entry_ptr = match dir.private_data {
+        Some(p) => p,
+        None => return errno::Errno::BadFileNumber.as_neg_i32(),
+    };
+    let entry = &*(entry_ptr as *const DevfsEntry);
+    if !entry.is_dir() {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+    let name = match core::str::from_utf8(name) {
+        Ok(n) => n,
+        Err(_) => return errno::Errno::InvalidArgument.as_neg_i32(),
+    };
+    let removed = {
+        let mut children = entry.children.lock_irqsave();
+        match children.get(name) {
+            None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+            Some(child) if !child.is_dir() => {
+                return errno::Errno::NotADirectory.as_neg_i32()
+            }
+            Some(child) => {
+                if !child.children.lock_irqsave().is_empty() {
+                    return errno::Errno::DirectoryNotEmpty.as_neg_i32();
+                }
+                children.remove(name)
+            }
+        }
+    };
+    if removed.is_some() {
+        if let Some(rel) = devfs_rel_path(entry) {
+            evict_dev_dentry(&alloc::format!("{}/{}", rel, name));
+        }
+    }
+    0
+}
+
 /// DevFS inode operations table
 pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(devfs_lookup),
     create: None,
     link: None,
-    unlink: None,
+    unlink: Some(devfs_unlink),
     symlink: None,
-    mkdir: None,
-    rmdir: None,
+    mkdir: Some(devfs_mkdir),
+    rmdir: Some(devfs_rmdir),
     mknod: None,
     rename: None,
     readlink: None,
