@@ -40,6 +40,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::net::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
@@ -151,6 +152,14 @@ pub struct UnixSocket {
     /// SCM_CREDENTIALS. Snapshot at socket creation (like Linux
     /// sk_peer_cred semantics for the connecting side).
     pub creds: Spinlock<UnixCred>,
+    /// Identity of this socket's open file description (File.file_id),
+    /// stamped when the fd is installed. Data-arrival points use it to
+    /// call epoll_notify_file() so edge-triggered (EPOLLET) watchers see
+    /// every enqueue — a snapshot-only ET model would swallow arrivals
+    /// that land between a drain and the next epoll_wait (Xorg registers
+    /// its client sockets EPOLLET; missing the edge wedges the server).
+    /// 0 = no fd installed yet.
+    pub file_id: AtomicU64,
 }
 
 // SAFETY: all mutable state is behind Spinlocks.
@@ -173,6 +182,7 @@ impl UnixSocket {
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
             creds: Spinlock::new(current_unix_cred()),
+            file_id: AtomicU64::new(0),
         }
     }
 
@@ -816,6 +826,15 @@ pub fn unix_send(
                 });
                 drop(q);
                 target.wait_queue.wake_up_all();
+                // Readiness rose for the TARGET's file description: re-arm
+                // edge-triggered epoll watchers and wake blocked waiters.
+                // Every enqueue is a potential fresh edge (Linux re-queues
+                // the epi from the socket's data_ready callback on every
+                // arrival, not just empty→nonempty transitions).
+                let fid = target.file_id.load(Ordering::Acquire);
+                if fid != 0 {
+                    crate::syscall::misc::epoll_notify_file(fid);
+                }
                 return Ok(data.len());
             }
         }
@@ -958,6 +977,11 @@ pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
         if let Some(peer) = sock.peer_arc() {
             *peer.eof.lock() = true;
             peer.wait_queue.wake_up_all();
+            // EOF is a readability edge for the peer's watchers too.
+            let fid = peer.file_id.load(Ordering::Acquire);
+            if fid != 0 {
+                crate::syscall::misc::epoll_notify_file(fid);
+            }
         }
     }
     if how == 0 || how == 2 {
@@ -997,6 +1021,12 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     if let Some(peer) = sock.peer_arc() {
         *peer.eof.lock() = true;
         peer.wait_queue.wake_up_all();
+        // Peer close raises the peer's POLLIN|POLLHUP readiness — an edge
+        // its EPOLLET watchers must see (Xorg detects dead clients this way).
+        let fid = peer.file_id.load(Ordering::Acquire);
+        if fid != 0 {
+            crate::syscall::misc::epoll_notify_file(fid);
+        }
     }
     // Pending children of a dying listener are dropped with their Arcs;
     // their clients see EPIPE on the next send (peer upgrade fails).
@@ -1133,6 +1163,11 @@ fn unix_socket_install(
     let file = Arc::new(File::new(FileFlags::new(flags)));
     file.set_ops(&UNIX_SOCKET_OPS);
     file.set_private_data(Arc::into_raw(socket.clone()) as *mut u8);
+    // Stamp the socket with its file description's identity so data
+    // arrival can re-arm edge-triggered epoll watchers (see unix_send).
+    socket
+        .file_id
+        .store(file.file_id, Ordering::Release);
 
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(t) => t,

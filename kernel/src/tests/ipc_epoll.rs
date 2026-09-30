@@ -29,6 +29,79 @@ pub fn test_epoll() {
 
     // Test 6: Syscall numbers
     test_syscall_numbers();
+
+    // Test 7: EPOLLET edge re-arm on data arrival (Xorg client sockets)
+    test_epoll_et_rearm();
+}
+
+/// Regression (x11-render): an edge-triggered registration must see a
+/// FRESH edge when data arrives right after a drain, even though no
+/// epoll_wait observed the idle interval in between. Linux implements
+/// this by re-queueing the epi from the socket's data_ready callback on
+/// every arrival; a snapshot-only comparison ("same readiness as last
+/// report") swallows the arrival and wedges edge-triggered users (Xorg
+/// registers its client sockets EPOLLET — a swallowed edge froze the
+/// server mid-handshake and the screen never rendered).
+fn test_epoll_et_rearm() {
+    use crate::syscall::io::{sys_read, sys_write};
+
+    let (a, b) = match crate::net::unix::unix_socketpair(1 /* SOCK_STREAM */) {
+        Ok(pair) => pair,
+        Err(_) => {
+            test_skip("epoll et rearm", "socketpair unavailable");
+            return;
+        }
+    };
+    let epfd = sys_epoll_create1([0, 0, 0, 0, 0, 0]);
+    if epfd < 0 {
+        let _ = file_close(a);
+        let _ = file_close(b);
+        test_skip("epoll et rearm", "epoll_create1 failed");
+        return;
+    }
+
+    let event = EPollEvent {
+        events: epoll_events::EPOLLIN | epoll_events::EPOLLET,
+        data: 7,
+    };
+    if sys_epoll_ctl([epfd as u64, epoll_ctl_ops::EPOLL_CTL_ADD as u64, a as u64,
+                      &event as *const EPollEvent as u64, 0, 0]) != 0 {
+        let _ = file_close(a); let _ = file_close(b); let _ = file_close(epfd as usize);
+        test_skip("epoll et rearm", "EPOLL_CTL_ADD failed");
+        return;
+    }
+
+    let mut events = [EPollEvent { events: 0, data: 0 }; 4];
+    let mut wait0 = || sys_epoll_pwait([epfd as u64, events.as_mut_ptr() as u64, 4, 0, 0, 0]);
+
+    // Edge 1: write b -> a, wait must report it.
+    let byte = [0x41u8; 1];
+    let _ = sys_write([b as u64, byte.as_ptr() as u64, 1, 0, 0, 0]);
+    let n1 = wait0();
+    if n1 != 1 {
+        let _ = file_close(a); let _ = file_close(b); let _ = file_close(epfd as usize);
+        test_fail("epoll et edge1", &alloc::format!("expected 1 event, got {}", n1));
+        return;
+    }
+
+    // Drain the data (readiness drops — but NO wait observes the idle
+    // state; this is exactly the Xorg request-stream pattern).
+    let mut buf = [0u8; 8];
+    let _ = sys_read([a as u64, buf.as_mut_ptr() as u64, 8, 0, 0, 0]);
+
+    // Edge 2: another write with no intervening idle observation. The
+    // old snapshot model returned 0 here (edge swallowed) forever.
+    let _ = sys_write([b as u64, byte.as_ptr() as u64, 1, 0, 0, 0]);
+    let n2 = wait0();
+    if n2 == 1 {
+        test_pass("epoll ET edge re-armed on data arrival");
+    } else {
+        test_fail("epoll ET rearm", &alloc::format!("second edge lost ({} events)", n2));
+    }
+
+    let _ = file_close(a);
+    let _ = file_close(b);
+    let _ = file_close(epfd as usize);
 }
 
 fn test_epoll_constants() {

@@ -105,24 +105,25 @@ struct EpollFile {
 // Epoll wake registry (groundwork for fd-side callback wakeups)
 // ============================================================================
 
-/// Monitored-file identity → epoll wait queues registered for it.
+/// Monitored-file identity → epoll instances watching it.
 ///
-/// `epoll_ctl(ADD)` binds (file_id, &epoll.wait_queue); `epoll_notify_file`
-/// wakes every epoll instance watching that open file description. This is
-/// the "correct" wake path: fd-side data-arrival points (pipe write, socket
-/// receive, timerfd/eventfd/signalfd expiry) call
-/// `epoll_notify_file(file.file_id)` instead of relying on the 10ms re-check
-/// timer. The producer-side call sites live in files owned by other repair
-/// waves (pipe.rs / net/socket.rs), so until they land the registry is
-/// dormant machinery and the timer below bounds wakeup latency.
+/// `epoll_ctl(ADD)` binds (file_id, *mut EpollFile); fd-side data-arrival
+/// points (unix socket enqueue, peer EOF, ...) call
+/// `epoll_notify_file(file.file_id)` to (a) re-arm edge-triggered
+/// registrations — resetting their readiness snapshot so the next
+/// epoll_wait reports the arrival — and (b) wake any blocked waiters.
+/// This is the load-bearing wake path for edge-triggered users: Xorg's
+/// client sockets are EPOLLET, and a snapshot-only model silently swallows
+/// an arrival that lands between a drain and the next wait (the write
+/// edge happened while the entry still said "already reported").
 /// Wrapper so the raw-pointer registry is `Send` (entries are only touched
-/// under the registry lock; queue pointers are unregistered before the
-/// owning EpollFile is freed).
+/// under the registry lock; epoll pointers are unregistered in the owning
+/// EpollFile's close op before the box is freed).
 struct EpollWakeRegistry {
-    bindings: alloc::vec::Vec<(u64, *const crate::process::wait::WaitQueueHead)>,
+    bindings: alloc::vec::Vec<(u64, *mut EpollFile)>,
 }
-// SAFETY: pointers are only compared/dereferenced under the lock and are
-// removed in the owning epoll's close op before the box is freed.
+// SAFETY: pointers are only dereferenced under the lock and are removed
+// in the owning epoll's close op, which runs before the box is freed.
 unsafe impl Send for EpollWakeRegistry {}
 
 static EPOLL_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<EpollWakeRegistry> =
@@ -130,40 +131,59 @@ static EPOLL_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<EpollWakeRegistry> =
         bindings: alloc::vec::Vec::new(),
     });
 
-/// Wake every epoll instance monitoring `file_id` (fd-side arrival hook).
+/// Data arrived on (or readiness otherwise rose for) an open file
+/// description: wake every epoll instance watching it and re-arm their
+/// edge-triggered entries so the next epoll_wait reports the edge.
 ///
-/// Safe against stale pointers: entries for an epoll instance are removed
+/// Lock order: registry → per-epoll `entries`. Every other site that
+/// touches both takes them one at a time (ctl drops `entries` before
+/// calling the registry helpers), so this nesting cannot deadlock.
+///
+/// Safe against stale pointers: bindings for an epoll instance are removed
 /// in its close op, which only runs on the last Arc reference — no
-/// epoll_wait can still be blocked on the queue at that point.
+/// epoll_wait can still be blocked on the instance at that point.
 pub fn epoll_notify_file(file_id: u64) {
     let registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
-    for (id, wq) in registry.bindings.iter() {
-        if *id == file_id {
-            // SAFETY: wq points into a boxed EpollFile whose close op has
-            // not run (entries are unregistered there first).
-            unsafe { (**wq).wake_up_all(); }
+    for (id, ep) in registry.bindings.iter() {
+        if *id != file_id {
+            continue;
         }
+        // SAFETY: `ep` came from Box::into_raw in sys_epoll_create and its
+        // close op unregisters the binding before freeing, so it is alive
+        // while we hold the registry lock.
+        let epoll = unsafe { &**ep };
+        {
+            let mut entries = epoll.entries.lock();
+            for entry in entries.iter_mut() {
+                if entry.file_id == file_id && entry.events & epoll_events::EPOLLET != 0 {
+                    // New arrival = a fresh readiness edge, even if the
+                    // previous one was reported and never observed idle.
+                    entry.last_reported = 0;
+                }
+            }
+        }
+        epoll.wait_queue.wake_up_all();
     }
 }
 
-/// Bind (file_id → epoll wait queue). Idempotent per pair.
-fn epoll_wake_register(file_id: u64, wq: *const crate::process::wait::WaitQueueHead) {
+/// Bind (file_id → epoll instance). Idempotent per pair.
+fn epoll_wake_register(file_id: u64, ep: *mut EpollFile) {
     let mut registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
-    if !registry.bindings.iter().any(|(id, q)| *id == file_id && *q == wq) {
-        registry.bindings.push((file_id, wq));
+    if !registry.bindings.iter().any(|(id, e)| *id == file_id && *e == ep) {
+        registry.bindings.push((file_id, ep));
     }
 }
 
-/// Drop every binding for `wq` (epoll instance teardown).
-fn epoll_wake_unregister_all(wq: *const crate::process::wait::WaitQueueHead) {
+/// Drop every binding for `ep` (epoll instance teardown).
+fn epoll_wake_unregister_all(ep: *mut EpollFile) {
     let mut registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
-    registry.bindings.retain(|(_, q)| *q != wq);
+    registry.bindings.retain(|(_, e)| *e != ep);
 }
 
-/// Drop bindings for (file_id, wq) (epoll_ctl DEL).
-fn epoll_wake_unregister(file_id: u64, wq: *const crate::process::wait::WaitQueueHead) {
+/// Drop bindings for (file_id, ep) (epoll_ctl DEL).
+fn epoll_wake_unregister(file_id: u64, ep: *mut EpollFile) {
     let mut registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
-    registry.bindings.retain(|(id, q)| !(*id == file_id && *q == wq));
+    registry.bindings.retain(|(id, e)| !(*id == file_id && *e == ep));
 }
 
 /// Epoll file close callback
@@ -182,7 +202,7 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
         // uniquely owned by this File.
         unsafe {
             let epoll = &mut *(ptr as *mut EpollFile);
-            epoll_wake_unregister_all(&epoll.wait_queue as *const _);
+            epoll_wake_unregister_all(ptr as *mut EpollFile);
             let _ = alloc::boxed::Box::from_raw(ptr as *mut EpollFile);
         }
         unsafe { *file.private_data.get() = None; }
@@ -989,9 +1009,14 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 );
             }
             let mut entries = epoll.entries.lock();
-            match entries.iter_mut().find(|e| e.fd == fd) {
+            enum Reg {
+                Add(u64),
+                Rebind(u64, u64),
+            }
+            let reg = match entries.iter_mut().find(|e| e.fd == fd) {
                 Some(existing) => {
                     if existing.file_id == file_id {
+                        drop(entries);
                         return -(errno::EEXIST as i64);
                     }
                     // The fd number was closed and reused between the old
@@ -999,12 +1024,12 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                     // gone from this fd — rebind the entry to the new one
                     // instead of returning EEXIST for a file that is not
                     // actually registered.
-                    epoll_wake_unregister(existing.file_id, &epoll.wait_queue as *const _);
+                    let old_id = existing.file_id;
                     existing.file_id = file_id;
                     existing.events = event.events;
                     existing.data = event.data;
                     existing.last_reported = 0;
-                    epoll_wake_register(file_id, &epoll.wait_queue as *const _);
+                    Reg::Rebind(old_id, file_id)
                 }
                 None => {
                     entries.push(EpollEntry {
@@ -1014,7 +1039,17 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                         data: event.data,
                         last_reported: 0,
                     });
-                    epoll_wake_register(file_id, &epoll.wait_queue as *const _);
+                    Reg::Add(file_id)
+                }
+            };
+            // Registry helpers are called WITHOUT holding `entries` — the
+            // lock order is always registry → entries (see epoll_notify_file).
+            drop(entries);
+            match reg {
+                Reg::Add(id) => epoll_wake_register(id, epoll_ptr),
+                Reg::Rebind(old, new) => {
+                    epoll_wake_unregister(old, epoll_ptr);
+                    epoll_wake_register(new, epoll_ptr);
                 }
             }
         }
@@ -1022,7 +1057,8 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             let mut entries = epoll.entries.lock();
             if let Some(pos) = entries.iter().position(|e| e.fd == fd) {
                 let removed = entries.remove(pos);
-                epoll_wake_unregister(removed.file_id, &epoll.wait_queue as *const _);
+                drop(entries);
+                epoll_wake_unregister(removed.file_id, epoll_ptr);
             } else {
                 return -(errno::ENOENT as i64);
             }
