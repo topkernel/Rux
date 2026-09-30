@@ -468,16 +468,16 @@ pub fn dump_all_tasks(reason: &str) {
                             put_hex(a2);
                         }
                         // Futex sleeper: dump the word + waiter chain truth.
+                        // These helpers are defined under `dfx-futex-trace`
+                        // (they print through the FTX tracer) — the call
+                        // sites must carry the SAME gate or the
+                        // `dfx-taskdump-bt` feature fails to link alone.
+                        #[cfg(feature = "dfx-futex-trace")]
                         if a7 == 98 && a0 > 0x1000 && (a0 & 0x3) == 0 {
                             if t.state().is_sleeping() {
                                 crate::sync::futex::dfx_dump_futex_state(a0 as usize, t.pid());
                                 dfx_dump_user_stack(&t, usp);
                             }
-                        }
-                        // Xorg hunt: track the input_mutex word for pid 307
-                        // even before it parks (when did 0 become nonzero?).
-                        if t.pid() == 307 {
-                            dfx_track_word(&t, 0x1c81f0);
                         }
                     }
                 }
