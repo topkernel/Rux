@@ -13,6 +13,10 @@ KERNEL_BIN ?= target/riscv64gc-unknown-none-elf/debug/rux
 UBUNTU_QEMU ?= /usr/bin/qemu-system-riscv64
 # CPU count (GUI verified 23/23 on -smp 4; override with SMP=1 make ubuntu-run)
 SMP ?= 4
+# TCG threading: multi = MTTCG (2.1x faster, verified 23/23 on both QEMU
+# builds with zero regressions); THREAD=single restores the deterministic
+# single-host-thread mode for debugging/stepping.
+THREAD ?= multi
 
 # Default target: forward to build/Makefile
 all:
@@ -90,7 +94,7 @@ ubuntu-image:
 # swallow Ctrl-A as its monitor-escape key, but Ctrl-A opens About.
 ubuntu-run: build $(UBUNTU_IMG)
 	@echo "Starting Ubuntu desktop (SDL window + keyboard in window or this terminal)..."
-	$(UBUNTU_QEMU) -M virt -accel tcg,thread=single -cpu rv64 -m 2G -smp $(SMP) \
+	$(UBUNTU_QEMU) -M virt -accel tcg,thread=$(THREAD) -cpu rv64 -m 2G -smp $(SMP) \
 	  -snapshot -display sdl -serial stdio -monitor none \
 	  -device virtio-keyboard-pci -device virtio-tablet-pci \
 	  -drive file=$(UBUNTU_IMG),if=none,id=rootfs,format=raw \
