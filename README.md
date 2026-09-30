@@ -9,7 +9,7 @@
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-4%2C125%20cases-brightgreen.svg)](#-test-status)
 [![Verification](https://img.shields.io/badge/verification-4%20tools-brightgreen.svg)](#-formal-verification)
-[![Code](https://img.shields.io/badge/code-112%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-150%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
 
@@ -19,7 +19,7 @@
 
 ## 🖥️ Rux Runs Ubuntu
 
-**A complete Ubuntu 22.04 (riscv64) userland — glibc dynamic binaries, real shells, D-Bus, and a graphical desktop session — boots on the Rux kernel today.**
+**A complete Ubuntu 22.04 (riscv64) userland — glibc dynamic binaries, real shells, D-Bus, a graphical desktop session, and now Xorg rendering X client windows — boots on the Rux kernel today.**
 
 | | |
 |---|---|
@@ -45,14 +45,23 @@ What is running in these screenshots, all on the Rux kernel:
   Ubuntu/glibc binaries run without patches; the desktop's System Info
   panel surfaces the Rux identity over the same data
   (`Rux 0.1.0-rux (buildd@rux) (rustc …) #1 SMP`)
-- X11/Xorg brings-up and a full GNOME session image are in active development
-  (see the [Roadmap](docs/progress/roadmap.md))
+- **Xorg runs**: the X server completes full initialization on Rux —
+  screen, all extensions, evdev keyboard/mouse devices, InputThread, and
+  the `/tmp/.X11-unix/X0` socket (3/3 cold boots) — and the X client ↔
+  Xorg request path is fully working (`XOpenDisplay(:0)` + `XSync`
+  succeed; xterm connects and stays alive with zero server resets)
+- **X client windows render to the screen**: a self-written X client maps
+  a window and its pixels reach the display, verified by an fbmap probe
+  counting non-black framebuffer pixels (21,384, stable across 2 runs).
+  A full GNOME session is being ignited on top — gnome-session starts
+  and forks gnome-shell/gsd (see the [Roadmap](docs/progress/roadmap.md))
 
 ### Try it
 
 ```bash
 make ubuntu-image    # build the Ubuntu GUI disk image (work/ubuntu-gui.img)
-make ubuntu-run      # boot it: native SDL window + keyboard + mouse, 4 CPUs
+make ubuntu-run      # boot it: native SDL window + keyboard + mouse, 4 CPUs, MTTCG
+                     # boot-to-login ~4.5s (THREAD=single restores the deterministic mode)
                      # login: root / rux   (Ctrl-S SysInfo, Ctrl-A About, Tab focus, Ctrl-W close)
 ```
 
@@ -98,31 +107,35 @@ python3 test/ubuntu-gui/verify.py --runs 2 --smp 4
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~148,900 lines | [Code Structure](docs/architecture/structure.md) |
-| **Source Files** | 300 files (297 Rust + 3 ASM) | [Project Structure](docs/architecture/structure.md) |
+| **Lines of Code** | ~150,600 lines | [Code Structure](docs/architecture/structure.md) |
+| **Source Files** | 301 files (298 Rust + 3 ASM) | [Project Structure](docs/architecture/structure.md) |
 | **Kernel Unit Tests** | 60 files, 995 cases (last report: 901 PASS + 94 SKIP) | [Unit Test Report](docs/test/unit-test-report.md) |
 | **Formal Verification** | 4 tools, 1,116+ test functions; 157 Kani proofs | [Verification Design](docs/development/formal-verification.md) |
 | **Smoke Tests** | 15 tests (all passing) | [Testing Guide](docs/test/testing.md) |
 | **Linux LTP** | 1,838 official tests | [Testing Guide](docs/test/testing.md) |
 | **Platform Support** | RISC-V 64-bit, 4-CPU SMP | [Roadmap](docs/progress/roadmap.md) |
 | **Syscall Numbers** | 346 dispatched | [Roadmap](docs/progress/roadmap.md) |
-| **Ubuntu Userland** | Ubuntu 22.04 riscv64 boots: graphical session, bash, D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
+| **Ubuntu Userland** | Ubuntu 22.04 riscv64 boots: graphical session, Xorg + X client windows, bash, D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
+| **Boot Performance** | MTTCG default (`thread=multi`): boot-to-login ~4.5s, 2.1x faster | [Roadmap](docs/progress/roadmap.md) |
 
 **Module Distribution**:
-- Filesystem (fs/): 24,478 lines (21.9%)
-- System Calls (syscall/): 14,061 lines (12.6%)
-- Memory Management (mm/): 10,632 lines (9.5%)
-- Unit Tests (tests/): 9,610 lines (8.6%)
-- Device Drivers (drivers/): 9,504 lines (8.5%)
-- Architecture (arch/): 8,422 lines (7.5%)
-- Top-level: 8,396 lines (7.5%)
-- Network Stack (net/): 6,905 lines (6.2%)
-- Process Management (process/): 5,818 lines (5.2%)
-- Process Scheduling (sched/): 4,307 lines (3.8%)
-- IPC (ipc/): 4,055 lines (3.6%)
-- Sync Primitives (sync/): 3,053 lines (2.7%)
-- Interrupt (interrupt/): 1,762 lines (1.6%)
-- Diagnostics (dfx/): 1,044 lines (0.9%)
+- Filesystem (fs/): 35,576 lines (23.6%)
+- System Calls (syscall/): 21,077 lines (14.0%)
+- Network Stack (net/): 14,961 lines (9.9%)
+- Memory Management (mm/): 11,307 lines (7.5%)
+- Device Drivers (drivers/): 11,019 lines (7.3%)
+- Process Management (process/): 10,463 lines (6.9%)
+- Unit Tests (tests/): 9,683 lines (6.4%)
+- Architecture (arch/): 9,672 lines (6.4%)
+- Top-level: 6,990 lines (4.6%)
+- Process Scheduling (sched/): 6,298 lines (4.2%)
+- IPC (ipc/): 4,344 lines (2.9%)
+- Sync Primitives (sync/): 3,443 lines (2.3%)
+- Interrupt (interrupt/): 1,802 lines (1.2%)
+- Diagnostics (dfx/): 1,749 lines (1.2%)
+- IO_uring (io_uring/): 1,167 lines (0.8%)
+- Security (security/): 559 lines (0.4%)
+- Module Loader (module/): 476 lines (0.3%)
 
 ---
 
@@ -264,38 +277,38 @@ udesk-init: warmup st=0
 
 ```
 Rux/
-├── kernel/                 # Kernel source (~148,900 lines)
+├── kernel/                 # Kernel source (~150,600 lines)
 │   ├── src/
-│   │   ├── fs/           # Filesystem (24,478 lines)
+│   │   ├── fs/           # Filesystem (35,576 lines)
 │   │   │   ├── ext4/     # ext4 filesystem
 │   │   │   ├── jbd2/     # JBD2 journaling layer
 │   │   │   ├── devfs/    # devfs device filesystem
 │   │   │   └── procfs/   # procfs process filesystem
-│   │   ├── arch/         # RISC-V architecture (8,422 lines)
+│   │   ├── arch/         # RISC-V architecture (9,672 lines)
 │   │   │   ├── mm/       # Arch-specific MM (pt, fixmap, ASID, page fault)
 │   │   │   ├── boot.S    # MMU trampoline, VMA/LMA linking
 │   │   │   ├── trap.S    # PtRegs save/restore, ret_from_fork
 │   │   │   └── uaccess.S # User memory access assembly
-│   │   ├── drivers/      # Device drivers (9,504 lines)
+│   │   ├── drivers/      # Device drivers (11,019 lines)
 │   │   │   ├── gpu/      # GPU/framebuffer drivers
 │   │   │   ├── input/    # Input device drivers
 │   │   │   ├── virtio/   # VirtIO devices (blk/net/gpu/input)
 │   │   │   └── net/      # Network devices
-│   │   ├── mm/           # Memory management (10,632 lines)
+│   │   ├── mm/           # Memory management (11,307 lines)
 │   │   │   ├── Zone allocator (DMA/DMA32/NORMAL/MOVABLE)
 │   │   │   ├── vmemmap, buddy, slab, PCP, memblock
 │   │   │   ├── VMA, mm_struct, page fault, COW
 │   │   │   └── rmap, hugepage, meminfo
 │   │   ├── tests/        # Unit tests (60 files, 995 cases)
-│   │   ├── syscall/      # System calls (14,061 lines, 344 syscalls)
-│   │   ├── ipc/          # IPC (4,055 lines) — System V, POSIX MQ
-│   │   ├── net/          # Network stack (6,905 lines)
-│   │   ├── sched/        # Process scheduling (4,307 lines)
+│   │   ├── syscall/      # System calls (21,077 lines, 346 syscalls)
+│   │   ├── ipc/          # IPC (4,344 lines) — System V, POSIX MQ
+│   │   ├── net/          # Network stack (14,961 lines)
+│   │   ├── sched/        # Process scheduling (6,298 lines)
 │   │   │   ├── CFS, RT (FIFO/RR), Deadline (EDF+CBS), Idle
-│   │   ├── process/      # Process management (5,818 lines)
-│   │   ├── sync/         # Sync primitives (3,053 lines)
-│   │   ├── interrupt/    # Interrupt subsystem (1,762 lines)
-│   │   └── dfx/          # Diagnostics/DFX (1,044 lines)
+│   │   ├── process/      # Process management (10,463 lines)
+│   │   ├── sync/         # Sync primitives (3,443 lines)
+│   │   ├── interrupt/    # Interrupt subsystem (1,802 lines)
+│   │   └── dfx/          # Diagnostics/DFX (1,749 lines)
 │   └── build.rs          # Build script
 ├── userspace/            # Userspace programs
 │   ├── mrsh/             # mrsh (minimal POSIX shell, musl libc)
@@ -331,7 +344,7 @@ Detailed structure: [Project Structure Documentation](docs/architecture/structur
 
 ### System Calls
 
-Supports 344 Linux system calls, including:
+Supports 346 Linux system calls, including:
 - File: openat/close/read/write/readv/writev/pread64/pwrite64/lseek/fstat/getdents64/mkdirat/rmdir/unlinkat/sendfile/statfs/copy_file_range/statx
 - Process: fork/execve/wait4/exit/getpid/getppid/gettid/kill/clone/sched_yield/prctl/getrusage
 - Memory: brk (expand+shrink)/mmap/munmap (MAP_PRIVATE COW)/mprotect/mremap/madvise/msync
@@ -348,7 +361,7 @@ Supports 344 Linux system calls, including:
 ### Core Documentation
 
 - **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
-- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (Phase 52)
+- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (X11 milestone: Xorg on Rux)
 - **[Project Structure](docs/architecture/structure.md)** - Source code organization
 - **[Design Principles](docs/architecture/design.md)** - POSIX compatibility and Linux ABI alignment
 

@@ -1,38 +1,64 @@
 # Rux Development Roadmap
 
-## Current Phase (2026-09-29): Ubuntu on Rux → GNOME
+## Current Phase (2026-09-30): X11 on Rux → GNOME
 
-**Milestone reached: a complete Ubuntu 22.04 (riscv64) userland boots on Rux.**
+**Milestone reached: Xorg runs on Rux — full server initialization, and X client windows render to the screen.**
 
-- Ubuntu graphical desktop session (native framebuffer, keyboard + mouse via
-  virtio-input/evdev), pixel-verified end to end (23 checks/boot, `-smp 4`)
-- Real command execution in Ubuntu's own `/bin/dash`; interactive `bash -i`;
-  D-Bus system + session buses working end to end (dbus-send / dbus-monitor);
-  pty (ptmx/pts), System V IPC, POSIX MQ
-- 4-CPU SMP stable under stress with cross-core TLB shootdowns on COW; full
-  rt_sig* semantics (nesting, sigsuspend mask discipline, kernel-owned
-  trampoline, sp-based rt_sigreturn)
-- Major root causes fixed this phase: trap-entry routing on `sstatus.SPP`
-  (S-origin traps corrupting the live pt_regs), 128KB kernel stacks (64KB
-  overflowed in deep debug-build paths), exec/fork trap-frame ownership,
-  corrupted 8x8 font table, printk record interleaving on SMP, evdev ioctl
-  parity (EVIOCGBIT was unreachable) and virtio-tablet never probing
+- Xorg completes full initialization on 3/3 cold boots: screen and all
+  extensions, evdev keyboard/mouse devices, InputThread, and the
+  `/tmp/.X11-unix/X0` socket
+- The X client ↔ Xorg request path is fully working: `XOpenDisplay(:0)` +
+  `XSync` succeed, xterm connects and stays alive >7 guest minutes with zero
+  server resets, and a self-written X client maps a window whose pixels reach
+  the screen — verified by an fbmap probe counting non-black framebuffer
+  pixels (21,384, stable across 2 runs). Two Linux-parity root causes
+  unlocked it: `sys_poll` now masks `revents` like Linux `do_pollfd`
+  (libxcb treats any unrequested bit as a fatal error), and edge-triggered
+  epoll re-arms on every write-side arrival (Xorg's ospoll froze every
+  client mid-handshake because an ET edge was reported only when the
+  readiness snapshot changed)
+- MTTCG (`thread=multi`) is now the default for `make ubuntu-run`:
+  boot-to-login median 9.5s → 4.5s (2.1x), variance 3.3s → 0.1s, GUI gate
+  23/23 on both QEMU 8.2.2 and 10.2.2, zero regressions under real
+  parallelism — `THREAD=single` restores the deterministic debugging mode
+- Boot-time wall clock from the goldfish RTC (fw_cfg carries no RTC entry on
+  QEMU riscv/virt — proven from source and a raw probe): `date` and
+  filesystem timestamps are now correct; settimeofday /
+  clock_settime(CLOCK_REALTIME) implemented
+- Major root causes fixed this phase: fork CLONE_CHILD_SETTID wrote the
+  child's TID into the parent's address space (glibc fork points
+  child_tidptr at the parent TCB, corrupting it — Xorg deadlocked in
+  `futex_wait`), the TCP timer softirq allocated from the global heap on
+  every tick even with zero sockets (the real "heap-lock livelock":
+  order-0 allocs paying the full 14-level buddy split/merge under the
+  irqsave lock), a VFS/virtio preempt-discipline deadlock (with two
+  virtio-blk protocol bugs), wait4/waitid thread-group semantics, >4MiB
+  mappings exceeding the allocated block, the kernel-started init skipping
+  `do_execve_elf` (dynamic PID 1 crashed — PT_INTERP never mapped), inotify
+  Linux ABI alignment, and flock/fcntl parity (24/24 matrix vs Linux)
+
+**Carried in from the previous milestone (2026-09-29):** the complete
+Ubuntu 22.04 userland boots — graphical desktop session (framebuffer +
+evdev input, pixel-verified 23 checks/boot at `-smp 4`), real command
+execution in Ubuntu's own `/bin/dash`, interactive `bash -i`, D-Bus system +
+session buses end to end, pty, System V IPC, POSIX MQ, and 4-CPU SMP with
+cross-core TLB shootdowns on COW.
 
 **In flight (toward full GNOME):**
 
 | Workstream | Status |
 |---|---|
-| Xorg completion (pthread futex/robust-list exit protocol) | root-caused to thread-exit wake; fix in progress — Xorg parses config, loads fbdev/GLX, reaches extension init without panic |
-| unix-socket hardening (SCM_RIGHTS fd passing, abstract addresses, poll semantics) | in progress |
-| GLib/GTK runtime gap audit | in progress |
-| X input drivers (xf86-input-evdev + libevdev, udev-less xorg.conf) | ready in test image; awaiting Xorg completion for xev verification |
-| GNOME session image (322 packages, gnome-session 42 + openbox fallback) | ready — `gnome-session` already starts and spawns gnome-shell/gsd once the futex fix lands |
+| GNOME session ignition (322-package image, gnome-session 42 + openbox fallback) | `gnome-session` starts on the live Xorg and forks gnome-shell/gsd; stabilization and on-screen acceptance in progress |
+| xterm window visibility | xterm connects and survives >7 guest minutes with zero server resets; its window is not yet visible — narrowing with the fbmap probe |
+| netlink + DHCP (network bring-up) | starting — required for full desktop services |
+| udev / hotplug minimal path | starting — Xorg currently runs udev-less |
+| Kernel unit-test repair | in progress — restoring the suite to green |
 
 **Next milestones:**
 
-1. Xorg completes initialization → xterm window on screen (acceptance: QMP screendump non-black, keyboard via xev)
-2. GNOME session (gnome-shell on X11 + llvmpipe, openbox fallback) with working input
-3. udev/hotplug minimal path, network bring-up for full desktop services
+1. xterm window visible on the Xorg screen (acceptance: fbmap/QMP screendump non-black, keyboard via xev)
+2. GNOME session on screen (gnome-shell on X11 + llvmpipe, openbox fallback) with working input
+3. udev/hotplug minimal path and netlink/DHCP network bring-up for full desktop services
 4. Long-run stability soak (24h boot), performance pass, upstream cleanup
 
 ---
@@ -42,15 +68,16 @@
 | | |
 |---|---|
 | **Architecture** | RISC-V 64-bit (RV64GC), 4-CPU SMP |
-| **Source Files** | 300 (297 Rust + 3 Assembly) |
-| **Code Lines** | ~148,900 |
+| **Source Files** | 301 (298 Rust + 3 Assembly) |
+| **Code Lines** | ~150,600 |
 | **Syscall Numbers** | 346 dispatched |
 | **Unit Tests** | 995 cases across 60 test files |
 | **Formal Verification** | 1,088 proptest cases (98 modules), 157 Kani proofs (22 modules), 4 SPIN models (8 LTL), Miri CI |
 | **Linux LTP** | 1,838 official tests |
 | **Smoke Tests** | 15/15 passing |
 | **GUI Gate** | 23 pixel-level checks per boot (login → desktop → apps → real commands) |
-| **Current Phase** | Ubuntu userland complete; X11/GNOME bring-up |
+| **Boot Mode** | MTTCG default (`thread=multi`): boot-to-login ~4.5s median |
+| **Current Phase** | Xorg on Rux (X client windows render); GNOME bring-up |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -252,5 +279,5 @@
 
 ---
 
-**Document Version**: v29.0
-**Last Updated**: 2026-04-15
+**Document Version**: v30.0
+**Last Updated**: 2026-09-30
