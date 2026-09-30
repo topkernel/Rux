@@ -345,7 +345,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
 /// Returns 0 on success, negative error code on failure
 pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
     let clk_id = args[0] as u32;
-    let _tp_ptr = args[1] as *const TimespecForGettime;
+    let tp_ptr = args[1] as *const u8;
 
     // CAP_SYS_TIME required to set time
     if !crate::security::capable(crate::security::CAP_SYS_TIME) {
@@ -357,8 +357,34 @@ pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // TODO: actually implement clock setting via timer hardware
-    -(errno::ENOSYS as i64)
+    if tp_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(tp_ptr as usize, 16) {
+        return -(errno::EFAULT as i64);
+    }
+
+    // struct timespec (64-bit): { i64 tv_sec; i64 tv_nsec; }
+    let mut ts = [0i64; 2];
+    // SAFETY: tp_ptr validated with access_ok; copy_from_user is the
+    // exception-table copy path (SUM=0 safe) and zero-fills on fault.
+    let residual = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            ts.as_mut_ptr() as *mut u8,
+            tp_ptr,
+            16,
+        )
+    };
+    if residual != 0 {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Linux (posix_clock_settime): tv_nsec must be normalized.
+    if ts[1] < 0 || ts[1] > 999_999_999 {
+        return -(errno::EINVAL as i64);
+    }
+
+    set_realtime_from_secs_nanos(ts[0], ts[1])
 }
 
 /// sys_clock_getres - Get clock resolution
@@ -1045,16 +1071,73 @@ pub fn sys_timer_delete(args: SyscallArgs) -> i64 {
     0
 }
 
+/// Set CLOCK_REALTIME to `tv_sec` seconds + `tv_nsec` nanoseconds.
+///
+/// Both settimeofday and clock_settime(CLOCK_REALTIME) funnel here. The
+/// monotonic CLINT clock is never touched — only WALL_EPOCH_OFFSET_SECS
+/// (and the vDSO data-page snapshot via set_wall_epoch_offset_secs)
+/// moves, so CLOCK_MONOTONIC, timers and /proc/uptime are unaffected,
+/// matching Linux semantics. The wall model carries whole seconds, so
+/// the derived offset is rounded to the nearest second.
+fn set_realtime_from_secs_nanos(tv_sec: i64, tv_nsec: i64) -> i64 {
+    // Negative absolute times are not representable (unsigned offset).
+    if tv_sec < 0 || tv_nsec < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    let (mono_s, mono_ns) = monotonic_time();
+    // wall = mono + offset  ⇒  offset = wall - mono (round to nearest).
+    // Saturating: a target before boot clamps the offset to 0 (epoch),
+    // which is the closest representable time.
+    let target_ns = (tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(tv_nsec as u64);
+    let mono_total_ns = mono_s
+        .saturating_mul(1_000_000_000)
+        .saturating_add(mono_ns)
+        .saturating_add(500_000_000);
+    let offset_secs = target_ns.saturating_sub(mono_total_ns) / 1_000_000_000;
+    set_wall_epoch_offset_secs(offset_secs);
+    0
+}
+
 /// sys_settimeofday - Set wall-clock time (NR 170)
 pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
-    let _tv_ptr = args[0] as *const u8;
-    let _tz_ptr = args[1] as *const u8;
+    let tv_ptr = args[0] as *const u8;
+    let _tz_ptr = args[1] as *const u8; // timezone is deprecated and ignored
+
     // CAP_SYS_TIME required to set time
     if !crate::security::capable(crate::security::CAP_SYS_TIME) {
         return -(errno::EPERM as i64);
     }
-    // TODO: implement time setting via timer hardware
-    -(errno::ENOSYS as i64)
+    if tv_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(tv_ptr as usize, 16) {
+        return -(errno::EFAULT as i64);
+    }
+
+    // struct timeval (64-bit): { i64 tv_sec; i64 tv_usec; }
+    let mut tv = [0i64; 2];
+    // SAFETY: tv_ptr validated with access_ok; copy_from_user is the
+    // exception-table copy path (SUM=0 safe) and zero-fills on fault.
+    let residual = unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            tv.as_mut_ptr() as *mut u8,
+            tv_ptr,
+            16,
+        )
+    };
+    if residual != 0 {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Linux (do_settimeofday64): tv_usec must be normalized.
+    if tv[1] < 0 || tv[1] > 999_999 {
+        return -(errno::EINVAL as i64);
+    }
+
+    set_realtime_from_secs_nanos(tv[0], tv[1].saturating_mul(1_000))
 }
 
 /// sys_adjtimex - Adjust system clock (NR 171)
@@ -1302,9 +1385,10 @@ pub fn sys_sched_rr_get_interval_time64(args: SyscallArgs) -> i64 {
 }
 
 
-/// Wall-clock epoch offset in whole seconds (settimeofday-adjustable).
-/// REALTIME = monotonic + this offset. Zero until settimeofday is called
-/// (no RTC source on this platform).
+/// Wall-clock epoch offset in whole seconds.
+/// REALTIME = monotonic + this offset. Armed once at boot from the
+/// goldfish RTC (drivers/rtc::rtc_init_wall_clock) and re-derived by
+/// settimeofday / clock_settime(CLOCK_REALTIME).
 static WALL_EPOCH_OFFSET_SECS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Current wall-clock epoch offset (seconds).

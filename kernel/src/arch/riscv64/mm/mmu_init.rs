@@ -1066,6 +1066,15 @@ pub fn setup_device_mappings() {
         // CLINT: 0x10000 bytes
         map_kernel_region(CLINT_BASE as u64, CLINT_BASE as u64, 0x10000, device_flags);
 
+        // Goldfish RTC: 0x101000, 1 page (QEMU virt's default RTC device,
+        // read once at boot for the wall-clock epoch offset — drivers/rtc.rs)
+        map_kernel_region(
+            crate::drivers::rtc::GOLDFISH_RTC_BASE,
+            crate::drivers::rtc::GOLDFISH_RTC_BASE,
+            crate::drivers::rtc::GOLDFISH_RTC_SIZE,
+            device_flags,
+        );
+
         // PCIe ECAM: 0x100000 bytes
         map_kernel_region(PCIE_ECAM_BASE as u64, PCIE_ECAM_BASE as u64, 0x100000, device_flags);
 

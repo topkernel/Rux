@@ -163,10 +163,10 @@ fn rootfs_path_cache_flush() {
     }
 }
 
-/// Seconds on the monotonic boot clock (rootfs timestamp source; see the
-/// note in rootfs_getattr for why wall-clock is not available yet).
-fn uptime_secs() -> u64 {
-    crate::fs::procfs::get_uptime_secs()
+/// Wall-clock seconds since epoch (RTC-armed boot offset + monotonic);
+/// rootfs timestamps are Unix epoch time, as on Linux.
+fn wall_secs() -> u64 {
+    crate::drivers::rtc::wall_secs()
 }
 
 /// Count directory entries referencing `ino` (st_nlink for hard links).
@@ -261,8 +261,7 @@ pub struct RootFSNode {
     pub data: alloc::sync::Arc<Spinlock<Vec<u8>>>,
     /// Permission + file-type bits (chmod support — review 5.4: chmod no-op).
     pub mode: Spinlock<u32>,
-    /// Last modification time in seconds (monotonic boot clock — see the
-    /// timestamp note in rootfs_getattr).
+    /// Last modification time in wall-clock epoch seconds.
     pub mtime: AtomicU64,
     /// Symbolic link target (if it's a symlink)
     pub link_target: Option<Vec<u8>>,
@@ -441,7 +440,7 @@ impl RootFSNode {
             buf.resize(required_size, 0);
         }
         buf[offset..offset + data.len()].copy_from_slice(data);
-        self.mtime.store(uptime_secs(), Ordering::Release);
+        self.mtime.store(wall_secs(), Ordering::Release);
         data.len()
     }
 }
@@ -1622,7 +1621,7 @@ unsafe fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> 
             let mut buf = node.data.lock();
             buf.resize(new_size, 0);
         }
-        node.mtime.store(uptime_secs(), Ordering::Release);
+        node.mtime.store(wall_secs(), Ordering::Release);
         0
     } else if attr == setattr_attr::ATTR_MODE {
         // chmod: store the permission bits so later DAC checks and stat
@@ -1633,7 +1632,7 @@ unsafe fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> 
             RootFSType::SymbolicLink => InodeMode::S_IFLNK,
         };
         *node.mode.lock() = file_type | (value as u32 & 0o7777);
-        node.mtime.store(uptime_secs(), Ordering::Release);
+        node.mtime.store(wall_secs(), Ordering::Release);
         0
     } else if attr == setattr_attr::ATTR_UID_GID {
         // rootfs is a boot-time memory filesystem owned by root; chown is
@@ -1664,11 +1663,14 @@ unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     stat.st_rdev = 0;
     stat.st_blksize = 4096;
     stat.st_blocks = (stat.st_size as i64 + 511) / 512;
-    stat.st_atime = 0;
+    // atime/ctime mirror mtime (rootfs only tracks mtime; wall-clock
+    // epoch seconds from wall_secs()).
+    let mtime = node.mtime.load(Ordering::Relaxed) as i64;
+    stat.st_atime = mtime;
     stat.st_atime_nsec = 0;
-    stat.st_mtime = 0;
+    stat.st_mtime = mtime;
     stat.st_mtime_nsec = 0;
-    stat.st_ctime = 0;
+    stat.st_ctime = mtime;
     stat.st_ctime_nsec = 0;
 
     0

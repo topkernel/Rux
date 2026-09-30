@@ -423,6 +423,15 @@ pub extern "C" fn rust_main() -> ! {
         arch::riscv64::mm::setup_device_mappings();
         print_status("mm", "device mappings created", true);
 
+        // Arm the wall clock from the goldfish RTC (QEMU virt's default
+        // RTC @ 0x101000): one boot-time read derives the REALTIME epoch
+        // offset used by clock_gettime/gettimeofday, the vDSO fast path
+        // and filesystem timestamps. Must precede vdso_init() (which
+        // snapshots the offset) and any file creation; if the device is
+        // unreadable the offset stays 0 and the system runs on monotonic
+        // boot time (the pre-RTC behaviour).
+        drivers::rtc::rtc_init_wall_clock();
+
         // Initialize IRQ framework
         {
             interrupt::init();

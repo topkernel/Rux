@@ -57,27 +57,6 @@ pub fn generate() -> Vec<u8> {
     content.into_bytes()
 }
 
-/// Get uptime in seconds (integer, truncated)
-///
-/// Uses RISC-V timer to calculate uptime.
-/// QEMU virt machine clock frequency is 10 MHz.
-pub fn get_uptime_secs() -> u64 {
-    // QEMU virt machine clock frequency
-    const TIMER_FREQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
-
-    let cycles = read_time_cycles();
-    cycles / TIMER_FREQ
-}
-
-/// Get uptime in milliseconds
-pub fn get_uptime_ms() -> u64 {
-    const TIMER_FREQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
-    const MS_PER_SEC: u64 = 1000;
-
-    let cycles = read_time_cycles();
-    cycles * MS_PER_SEC / TIMER_FREQ
-}
-
 /// Read time cycles from RISC-V timer
 #[inline]
 fn read_time_cycles() -> u64 {

@@ -1470,8 +1470,7 @@ pub fn ext4_fallocate(
             crate::fs::page_cache::get_page_cache()
                 .invalidate_inode(fs as *const Ext4FileSystem as u64, ino as u64);
 
-            let cycles = crate::drivers::intc::clint::read_time();
-            let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+            let sec = crate::drivers::rtc::wall_secs() as u32;
             ext4_inode.mtime = sec;
             ext4_inode.ctime = sec;
             // write_inode_disk expects the on-disk layout; convert.
@@ -1486,8 +1485,7 @@ pub fn ext4_fallocate(
         let current_blocks = (file_size + block_size - 1) / block_size;
         if needed_blocks > current_blocks {
             file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks)?;
-            let cycles = crate::drivers::intc::clint::read_time();
-            let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+            let sec = crate::drivers::rtc::wall_secs() as u32;
             ext4_inode.mtime = sec;
             ext4_inode.ctime = sec;
             let on_disk = ext4_inode.to_on_disk();
@@ -1867,7 +1865,6 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
-    use crate::drivers::intc::clint::read_time;
 
     // ext4 has no internal concurrency protection on the block
     // allocator / inode writer (review 5.5 high: EXT4_BIG_LOCK 仅覆盖
@@ -2094,17 +2091,10 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
         _ => return errno::Errno::InvalidArgument.as_neg_i32(),
     }
 
-    // Update timestamps.
-    //
-    // KNOWN LIMITATION (review 5.5: 时间戳非 epoch): the kernel has no wall
-    // clock — gettimeofday() itself reports monotonic boot time and no RTC
-    // driver exists — so mtime/ctime/atime store MONOTONIC boot seconds.
-    // They advance correctly and consistently (parent directories are
-    // touched by the same clock via namei::touch_parent_dir); converting to
-    // Unix epoch requires a wall-time base (settimeofday wiring + RTC),
-    // tracked as a follow-up.
-    let cycles = read_time();
-    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+    // Update timestamps: Unix epoch seconds from the wall clock
+    // (drivers/rtc::wall_secs — goldfish RTC boot read + settimeofday
+    // adjustments); the monotonic boot clock is never stored on disk.
+    let sec = crate::drivers::rtc::wall_secs() as u32;
     ext4_inode.mtime = sec;
     ext4_inode.ctime = sec;
 

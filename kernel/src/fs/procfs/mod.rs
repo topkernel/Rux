@@ -58,9 +58,6 @@ pub mod interrupts;
 pub mod sysctl;
 pub mod net;
 
-// Re-export uptime functions for other modules
-pub use uptime::get_uptime_secs;
-pub use uptime::get_uptime_ms;
 
 /// ProcFS magic number
 const PROCFS_MAGIC: u32 = 0x9fa0;

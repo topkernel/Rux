@@ -225,9 +225,12 @@ pub fn ext4_new_inode(
     // Don't set EXT4_EXTENTS_FL by default - the caller should set it if needed
     // and properly initialize the extent tree
     inode.i_flags = 0;
-    inode.i_atime = 0; // TODO: get current time
-    inode.i_mtime = 0;
-    inode.i_ctime = 0;
+    // Fresh inodes are born "now" (wall-clock epoch seconds —
+    // drivers/rtc::wall_secs), as in Linux's ext4_new_inode.
+    let now = crate::drivers::rtc::wall_secs() as u32;
+    inode.i_atime = now;
+    inode.i_mtime = now;
+    inode.i_ctime = now;
 
     // Update group descriptor
     update_group_descriptor_inodes(fs, group, -1)?;
@@ -840,8 +843,7 @@ fn ext4_mkdir_no_journal(
     // fix, mkdir had not).
     let mut parent = super::inode::read_inode(fs, dir_ino)?;
     parent.i_links_count += 1;
-    let cycles = crate::drivers::intc::clint::read_time();
-    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+    let sec = crate::drivers::rtc::wall_secs() as u32;
     parent.i_mtime = sec;
     parent.i_ctime = sec;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
@@ -1116,8 +1118,7 @@ fn ext4_link_inner(
     target_inode.i_links_count += 1;
 
     // Update timestamp
-    let cycles = crate::drivers::intc::clint::read_time();
-    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+    let sec = crate::drivers::rtc::wall_secs() as u32;
     target_inode.i_ctime = sec;
 
     // Write updated inode back
@@ -1269,12 +1270,11 @@ fn find_dir_entry(
     Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
 }
 
-/// Update a directory's mtime/ctime (monotonic boot clock — see the
-/// ext4_setattr timestamp note; there is no wall clock yet).
+/// Update a directory's mtime/ctime (wall-clock epoch seconds — see the
+/// ext4_setattr timestamp note).
 fn touch_parent_dir(fs: &Ext4FileSystem, dir_ino: u32) {
     if let Ok(mut dir) = super::inode::read_inode(fs, dir_ino) {
-        let cycles = crate::drivers::intc::clint::read_time();
-        let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+        let sec = crate::drivers::rtc::wall_secs() as u32;
         dir.i_mtime = sec;
         dir.i_ctime = sec;
         let _ = super::inode::write_inode_disk(fs, dir_ino, &dir);
@@ -1936,8 +1936,7 @@ fn ext4_rename_inner(
     ext4_delete_entry(fs, old_dir_ino, old_name)?;
 
     // Update timestamp on renamed inode
-    let cycles = crate::drivers::intc::clint::read_time();
-    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+    let sec = crate::drivers::rtc::wall_secs() as u32;
     let mut renamed_inode = old_inode;
     renamed_inode.i_ctime = sec;
     renamed_inode.i_mtime = sec;

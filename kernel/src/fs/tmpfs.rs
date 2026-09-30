@@ -54,9 +54,10 @@ const PAGE_SIZE: usize = 4096;
 /// collide (VFS-H8 discipline — see FS_ID_ROOTFS in inode.rs).
 const FS_ID_TMPFS_BASE: u64 = 0x5450_4653_0000_0000;
 
-/// Monotonic boot-clock seconds (timestamp source, same as rootfs).
-fn uptime_secs() -> u64 {
-    crate::fs::procfs::get_uptime_secs()
+/// Wall-clock seconds since epoch (RTC-armed boot offset + monotonic);
+/// tmpfs atime/mtime are Unix epoch time, as on Linux.
+fn wall_secs() -> u64 {
+    crate::drivers::rtc::wall_secs()
 }
 
 // ============================================================================
@@ -87,7 +88,7 @@ pub struct TmpfsNode {
     size: AtomicU64,
     /// File-type + permission bits (chmod-visible).
     pub mode: Spinlock<u32>,
-    /// atime / mtime in boot-clock seconds.
+    /// atime / mtime in wall-clock (epoch) seconds.
     atime: AtomicU64,
     mtime: AtomicU64,
     /// Symlink target (None for non-symlinks).
@@ -123,8 +124,8 @@ impl TmpfsNode {
             pages: Arc::new(Spinlock::new(BTreeMap::new())),
             size: AtomicU64::new(0),
             mode: Spinlock::new(mode),
-            atime: AtomicU64::new(uptime_secs()),
-            mtime: AtomicU64::new(uptime_secs()),
+            atime: AtomicU64::new(wall_secs()),
+            mtime: AtomicU64::new(wall_secs()),
             link_target: None,
             children: Spinlock::new(Vec::new()),
             ino,
@@ -217,7 +218,7 @@ impl TmpfsNode {
         }
         drop(pages);
 
-        self.atime.store(uptime_secs(), Ordering::Release);
+        self.atime.store(wall_secs(), Ordering::Release);
         done
     }
 
@@ -258,7 +259,7 @@ impl TmpfsNode {
             }
         }
 
-        self.mtime.store(uptime_secs(), Ordering::Release);
+        self.mtime.store(wall_secs(), Ordering::Release);
         data.len()
     }
 
@@ -277,7 +278,7 @@ impl TmpfsNode {
         }
         drop(pages);
         self.size.store(new_size as u64, Ordering::Release);
-        self.mtime.store(uptime_secs(), Ordering::Release);
+        self.mtime.store(wall_secs(), Ordering::Release);
     }
 }
 
@@ -758,7 +759,7 @@ unsafe fn tmpfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i
                 *node.mode.lock() & InodeMode::S_IFMT
             };
             *node.mode.lock() = file_type | (v & 0o7777);
-            node.mtime.store(uptime_secs(), Ordering::Release);
+            node.mtime.store(wall_secs(), Ordering::Release);
             0
         }
         setattr_attr::ATTR_ATIME => {

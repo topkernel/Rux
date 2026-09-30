@@ -360,8 +360,7 @@ pub fn ext4_file_write(
     }
 
     // Update inode timestamp
-    let cycles = crate::drivers::intc::clint::read_time();
-    let sec = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+    let sec = crate::drivers::rtc::wall_secs() as u32;
     inode.mtime = sec;
     inode.ctime = sec;
 
@@ -799,12 +798,10 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
             Ok(read_bytes) => {
                 file.set_pos(offset + read_bytes as u64);
                 // atime: keep the CACHED inode in sync with the read (no
-                // disk write — see the timestamp limitation note in
-                // ext4_setattr; there is no wall clock to store yet, so
-                // this records the monotonic boot seconds like mtime/ctime).
+                // disk write — same wall-clock seconds ext4_setattr would
+                // persist for mtime/ctime).
                 if read_bytes > 0 {
-                    let cycles = crate::drivers::intc::clint::read_time();
-                    let atime = (cycles / crate::config::TIMER_CLOCK_FREQ_HZ) as u32;
+                    let atime = crate::drivers::rtc::wall_secs() as u32;
                     // SAFETY: the cached Ext4Inode in inode.sb is a Box
                     // owned by this VFS inode; the big lock above
                     // serializes writers, and readers of atime tolerate

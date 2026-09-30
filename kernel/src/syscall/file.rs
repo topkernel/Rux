@@ -1175,7 +1175,10 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
     // values/negative tv_sec are reported as EINVAL and unreadable memory
     // as EFAULT, matching Linux.
     let (atime, mtime): (Option<u64>, Option<u64>) = if times_ptr.is_null() {
-        (None, None) // NULL = UTIME_NOW for both
+        // NULL = UTIME_NOW for both (resolve here: vfs_utimensat leaves
+        // None fields untouched).
+        let now = current_time_secs();
+        (Some(now), Some(now))
     } else {
         if !crate::arch::riscv64::uaccess::access_ok(times_ptr as usize, 32) {
             return -(errno::EFAULT as i64);
@@ -1250,8 +1253,9 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    // UTIME_NOW (times==NULL or per-component) needs a "now" the vfs layer
-    // understands; vfs_utimensat treats None as UTIME_NOW.
+    // UTIME_NOW (times==NULL or per-component) was resolved to
+    // current_time_secs() above; None reaching the vfs layer means
+    // UTIME_OMIT (leave untouched).
     match crate::fs::vfs::vfs_utimensat(&full_path, atime, mtime) {
         Ok(()) => 0,
         Err(e) => -(e as i64),
@@ -1260,10 +1264,7 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
 
 /// Current wall-clock time in whole seconds (for UTIME_NOW).
 fn current_time_secs() -> u64 {
-    let cycles = crate::drivers::intc::clint::read_time();
-    let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
-    let monotonic = cycles / freq_hz;
-    monotonic + crate::syscall::time::wall_epoch_offset_secs()
+    crate::drivers::rtc::wall_secs()
 }
 
 /// Read a null-terminated path string from user space into a kernel buffer.

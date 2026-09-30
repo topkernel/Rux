@@ -6,6 +6,7 @@
 
 pub mod intc;
 pub mod timer;
+pub mod rtc;
 pub mod blkdev;
 pub mod pci;
 pub mod virtio;
