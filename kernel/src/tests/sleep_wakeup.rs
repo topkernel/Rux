@@ -11,9 +11,10 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_sleep_and_wakeup() {
     test_group_start("sleep and wakeup");
 
-    // Test 1: Verify TaskState constant values
+    // Test 1: Verify TaskState constant values (Linux task-state bit layout:
+    // ZOMBIE is EXIT_ZOMBIE = 0x20, not the old sequential 16)
     if TaskState::RUNNING == 0 && TaskState::INTERRUPTIBLE == 1
-        && TaskState::UNINTERRUPTIBLE == 2 && TaskState::ZOMBIE == 16
+        && TaskState::UNINTERRUPTIBLE == 2 && TaskState::ZOMBIE == 0x20
         && TaskState::STOPPED == 4 {
         test_pass("TaskState constants");
     } else {

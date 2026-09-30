@@ -233,12 +233,15 @@ fn test_sys_ioctl() {
     const TIOCSWINSZ: u32 = 0x5414;
     const FIONREAD: u32 = 0x541B;
 
-    // ---- Test: ioctl TIOCSWINSZ on stdin (no user pointer needed, always returns 0) ----
+    // ---- Test: ioctl TIOCSWINSZ with null arg returns -EFAULT ----
+    // (fd 0 is the console file installed by the test bootstrap, so the
+    // TTY gate passes; the implementation now validates arg like Linux.)
     let ret = sys_ioctl([0, TIOCSWINSZ as u64, 0, 0, 0, 0]);
-    if ret == 0 {
-        test_pass("sys_ioctl TIOCSWINSZ stdin returns 0");
+    const EFAULT_SW: i64 = 14;
+    if ret == -(EFAULT_SW as i64) {
+        test_pass("sys_ioctl TIOCSWINSZ null arg returns -EFAULT");
     } else {
-        test_fail("sys_ioctl TIOCSWINSZ", &alloc::format!("expected 0, got {}", ret));
+        test_fail("sys_ioctl TIOCSWINSZ", &alloc::format!("expected -14, got {}", ret));
     }
 
     // ---- Test: ioctl unrecognized TTY command on fd 0 returns 0 ----

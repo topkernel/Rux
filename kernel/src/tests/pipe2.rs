@@ -3,8 +3,18 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-use crate::fs::pipe::{Pipe, PipeBuffer, create_pipe, pipe_read, pipe_write};
-use super::{test_pass, test_fail, test_group_start};
+use crate::fs::pipe::{Pipe, PipeBuffer, create_pipe, pipe_file_read, pipe_file_write};
+use crate::fs::file::File;
+use super::test_group_start;
+
+/// Borrow the Pipe backing a pipe-end File — the same raw-pointer access the
+/// data-path callbacks in fs/pipe.rs perform (the old free-function
+/// pipe_read/pipe_write helpers were removed as dead code in review 5.2).
+fn pipe_of(file: &File) -> &Pipe {
+    let ptr = unsafe { *file.private_data.get() }
+        .expect("pipe end File must have private_data");
+    unsafe { &*(ptr as *const Pipe) }
+}
 
 pub fn test_pipe2() {
     test_group_start("pipe2");
@@ -40,44 +50,39 @@ pub fn test_pipe2() {
     test_assert_eq!(buf.available_read(), 1500, "PipeBuffer wraparound available_read");
 
     // Test 5: create_pipe returns valid pair
-    match create_pipe() {
-        (read_file, write_file) => {
-            test_assert!(true, "create_pipe returns valid pair");
-        }
-        _ => {
-            test_fail("create_pipe", "returned None");
-        }
-    }
+    let (read_file, write_file) = create_pipe();
+    test_assert!(true, "create_pipe returns valid pair");
 
-    // Test 6: pipe_write + pipe_read roundtrip on real pipe
+    // Test 6: pipe_file_write + pipe_file_read roundtrip on real pipe
     {
-        let pipe = Pipe::new();
+        let (read_file, write_file) = create_pipe();
         let data = [0x42u8; 50];
-        let written = pipe_write(&pipe, &data);
-        test_assert!(written > 0, "pipe_write succeeds on open pipe");
+        let written = pipe_file_write(&write_file, &data);
+        test_assert_eq!(written, 50, "pipe_file_write writes all 50 bytes");
 
         let mut read_buf = [0u8; 50];
-        let read = pipe_read(&pipe, &mut read_buf);
-        test_assert!(read > 0, "pipe_read succeeds after write");
+        let read = pipe_file_read(&read_file, &mut read_buf);
+        test_assert_eq!(read, 50, "pipe_file_read succeeds after write");
+        test_assert_eq!(read_buf, [0x42u8; 50], "pipe_file_read data matches written");
     }
 
-    // Test 7: pipe_read on empty + write-closed pipe returns 0 (EOF)
+    // Test 7: pipe_file_read on empty + write-closed pipe returns 0 (EOF)
     {
-        let pipe = Pipe::new();
-        pipe.close_write();
+        let (read_file, write_file) = create_pipe();
+        pipe_of(&write_file).close_write();
         let mut buf = [0u8; 10];
-        let read = pipe_read(&pipe, &mut buf);
-        test_assert_eq!(read, 0, "pipe_read on write-closed empty pipe returns 0");
+        let read = pipe_file_read(&read_file, &mut buf);
+        test_assert_eq!(read, 0, "pipe_file_read on write-closed empty pipe returns 0");
     }
 
-    // Test 8: pipe_write on read-closed pipe returns -EPIPE
+    // Test 8: pipe_file_write on read-closed pipe returns -EPIPE
     {
-        let pipe = Pipe::new();
-        pipe.close_read();
+        let (read_file, write_file) = create_pipe();
+        pipe_of(&read_file).close_read();
         let data = [0x01u8; 10];
-        let result = pipe_write(&pipe, &data);
+        let result = pipe_file_write(&write_file, &data);
         // Should return -EPIPE (32)
-        test_assert_eq!(result, -32, "pipe_write on read-closed pipe returns -EPIPE");
+        test_assert_eq!(result, -(crate::errno::constants::EPIPE as isize), "pipe_file_write on read-closed pipe returns -EPIPE");
     }
 
     // Test 9: O_CLOEXEC and O_NONBLOCK flag constants
@@ -88,9 +93,14 @@ pub fn test_pipe2() {
 
     // Test 10: Multiple small writes
     {
-        let pipe = Pipe::new();
-        let w1 = pipe_write(&pipe, &[0x01u8; 10]);
-        let w2 = pipe_write(&pipe, &[0x02u8; 10]);
-        test_assert!(w1 >= 10 && w2 >= 10, "multiple pipe_write succeed");
+        let (read_file, write_file) = create_pipe();
+        let w1 = pipe_file_write(&write_file, &[0x01u8; 10]);
+        let w2 = pipe_file_write(&write_file, &[0x02u8; 10]);
+        test_assert!(w1 >= 10 && w2 >= 10, "multiple pipe_file_write succeed");
+        let mut buf = [0u8; 20];
+        let r = pipe_file_read(&read_file, &mut buf);
+        test_assert_eq!(r, 20, "both small writes are readable (FIFO order)");
+        test_assert_eq!(buf[..10], [0x01u8; 10], "first chunk order preserved");
+        test_assert_eq!(buf[10..], [0x02u8; 10], "second chunk order preserved");
     }
 }

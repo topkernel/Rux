@@ -317,9 +317,49 @@ pub mod syscall_signal;
 #[cfg(feature = "unit-test")]
 pub mod syscall_misc;
 
+/// Install a fresh fdtable (with the UART console as fd 0) on the current
+/// boot task so fd-allocating syscall tests exercise the real fd path.
+/// See the call site in `run_all_tests` for why this is safe.
+#[cfg(feature = "unit-test")]
+fn setup_boot_task_fdtable() {
+    use alloc::sync::Arc;
+
+    let Some(task) = crate::sched::current() else {
+        return;
+    };
+    // SAFETY: we hold the sole &'static mut to the current task for the
+    // duration of the test suite (timer interrupts are disabled and the
+    // scheduler is not running); nothing else can alias it concurrently.
+    unsafe {
+        if (*task).try_fdtable().is_none() {
+            (*task).set_fdtable(Some(Arc::new(crate::fs::FdTable::new())));
+        }
+        // Console file as fd 0: TTY-class ioctls (TCGETS/TIOCGWINSZ/...)
+        // are gated on file_is_tty(), and the CONDEV_OPS backing is the
+        // same one /dev/console opens hand out.
+        let console_file = Arc::new(crate::fs::File::new(
+            crate::fs::file::FileFlags::new(crate::fs::file::FileFlags::O_RDWR),
+        ));
+        console_file.set_ops(&crate::fs::devfs::CONDEV_OPS);
+        if let Some(ft) = (*task).try_fdtable() {
+            if let Some(fd) = ft.alloc_fd() {
+                let _ = ft.install_fd(fd, console_file);
+            }
+        }
+    }
+}
+
 #[cfg(feature = "unit-test")]
 pub fn run_all_tests() {
     test_println!("test: ===== Starting Rux OS Unit Tests =====");
+
+    // The suite runs on the kernel-main boot task (pid 0) which carries no
+    // fdtable — fd-allocating syscall tests (eventfd/epoll/ioctl/pipes)
+    // would all see EBADF. Give it a throwaway table with the UART console
+    // installed as fd 0 (mirroring init's stdio): the unit-test kernel
+    // never execs init (it halts or panics when the suite finishes), so
+    // nothing else observes this state.
+    setup_boot_task_fdtable();
 
     // ===== 1. Pure logic tests =====
     test_group_start("dev_t");

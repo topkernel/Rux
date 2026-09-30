@@ -163,6 +163,17 @@ fn test_loopback() {
         return;
     }
 
+    // NEW-C6: xmit no longer delivers inline — the packet lands in the
+    // backlog and rx is only counted when the single consumer drains it
+    // (ethernet_poll → loopback_poll; here driven directly, timer IRQs
+    // are off in the test context so nothing else can race the drain).
+    let drained = loopback::loopback_poll();
+    if drained.is_none() {
+        test_fail("loopback stats", "backlog empty after send");
+        return;
+    }
+    drop(drained);
+
     // Check statistics
     let stats = device.get_stats();
     if stats.tx_packets == 1 && stats.rx_packets == 1 {

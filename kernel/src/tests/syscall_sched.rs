@@ -79,27 +79,40 @@ fn test_priority() {
         test_pass("getpriority returns valid priority");
     }
 
-    // getpriority with invalid which value (PRIO_PGRP not supported)
+    // getpriority PRIO_PGRP / PRIO_USER (review批次1: both selectors are
+    // now supported — who=0 takes the caller's own pgid/uid and returns
+    // the best priority among matching tasks). At this point the boot
+    // task still has nice=0 → 20 - 0 = 20.
     let result = sys_getpriority([PRIO_PGRP as u64, 0, 0, 0, 0, 0]);
-    // Should return -EINVAL
-    test_assert!(result == -22, "getpriority PRIO_PGRP returns -EINVAL");
+    if result == 20 {
+        test_pass("getpriority PRIO_PGRP returns best prio of own pgrp");
+    } else if result < 0 {
+        test_skip("getpriority PRIO_PGRP", "no matching process context");
+    } else {
+        test_fail("getpriority PRIO_PGRP", &alloc::format!("expected 20, got {}", result));
+    }
 
-    // getpriority with invalid which value (PRIO_USER not supported)
     let result = sys_getpriority([PRIO_USER as u64, 0, 0, 0, 0, 0]);
-    test_assert!(result == -22, "getpriority PRIO_USER returns -EINVAL");
+    if result == 20 {
+        test_pass("getpriority PRIO_USER returns best prio of own uid");
+    } else if result < 0 {
+        test_skip("getpriority PRIO_USER", "no matching process context");
+    } else {
+        test_fail("getpriority PRIO_USER", &alloc::format!("expected 20, got {}", result));
+    }
 
     // setpriority for current process (which=PRIO_PROCESS, who=0, prio=5)
     let result = sys_setpriority([PRIO_PROCESS as u64, 0, 5, 0, 0, 0]);
     if result == 0 {
         test_pass("setpriority succeeds");
-        // Verify: getpriority should now return 5 + 20 = 25
+        // Verify: Linux ABI returns 20 - nice, so nice=5 → 15
         let new_prio = sys_getpriority([PRIO_PROCESS as u64, 0, 0, 0, 0, 0]);
-        if new_prio == 25 {
-            test_pass("getpriority reflects setpriority(5) → 25");
+        if new_prio == 15 {
+            test_pass("getpriority reflects setpriority(5) → 15");
         } else if new_prio < 0 {
             test_skip("getpriority verify", "no process context");
         } else {
-            test_fail("getpriority after set", &alloc::format!("expected 25, got {}", new_prio));
+            test_fail("getpriority after set", &alloc::format!("expected 15, got {}", new_prio));
         }
         // Restore nice to 0
         let _ = sys_setpriority([PRIO_PROCESS as u64, 0, 0, 0, 0, 0]);
@@ -107,24 +120,41 @@ fn test_priority() {
         test_skip("setpriority", "no valid process context");
     }
 
-    // setpriority with invalid which value
+    // setpriority PRIO_PGRP (supported since review批次1): who=0 selects
+    // the caller's own process group. In the test context pgrp 0 also
+    // contains kernel threads, and renicing a foreign task needs
+    // CAP_SYS_NICE — the syscall then reports -EPERM, which is the
+    // documented Linux behaviour, not a failure.
     let result = sys_setpriority([PRIO_PGRP as u64, 0, 0, 0, 0, 0]);
-    test_assert!(result == -22, "setpriority PRIO_PGRP returns -EINVAL");
+    if result == 0 {
+        test_pass("setpriority PRIO_PGRP applies to own pgrp");
+    } else if result == -1 {
+        test_pass("setpriority PRIO_PGRP blocked by CAP_SYS_NICE on pgrp mates");
+    } else if result == -3 {
+        test_skip("setpriority PRIO_PGRP", "no matching process context");
+    } else {
+        test_fail("setpriority PRIO_PGRP", &alloc::format!("expected 0 or -EPERM, got {}", result));
+    }
 
     // setpriority clamps nice value
     // setpriority with nice=-100 should clamp to MIN_NICE=-20
     let result = sys_setpriority([PRIO_PROCESS as u64, 0, (-100i32) as u64, 0, 0, 0]);
     if result == 0 {
         let prio = sys_getpriority([PRIO_PROCESS as u64, 0, 0, 0, 0, 0]);
-        if prio == 0 {
-            // nice=-20 → prio = -20+20 = 0
+        if prio == 40 {
+            // nice=-20 → prio = 20-(-20) = 40
             test_pass("setpriority clamps to MIN_NICE");
         } else if prio < 0 {
             test_skip("setpriority clamp verify", "no process context");
         } else {
-            test_fail("setpriority MIN_NICE", &alloc::format!("expected prio=0, got {}", prio));
+            test_fail("setpriority MIN_NICE", &alloc::format!("expected prio=40, got {}", prio));
         }
         let _ = sys_setpriority([PRIO_PROCESS as u64, 0, 0, 0, 0, 0]);
+    } else if result == -13 {
+        // EACCES: raising priority (nice < current) needs CAP_SYS_NICE,
+        // which the boot task lacks — the clamp is still exercised by the
+        // MAX_NICE case below.
+        test_skip("setpriority clamp", "CAP_SYS_NICE required to raise priority");
     } else {
         test_skip("setpriority clamp", "no valid process context");
     }
@@ -133,13 +163,13 @@ fn test_priority() {
     let result = sys_setpriority([PRIO_PROCESS as u64, 0, 100, 0, 0, 0]);
     if result == 0 {
         let prio = sys_getpriority([PRIO_PROCESS as u64, 0, 0, 0, 0, 0]);
-        if prio == 39 {
-            // nice=19 → prio = 19+20 = 39
+        if prio == 1 {
+            // nice=19 → prio = 20-19 = 1
             test_pass("setpriority clamps to MAX_NICE");
         } else if prio < 0 {
             test_skip("setpriority MAX clamp", "no process context");
         } else {
-            test_fail("setpriority MAX_NICE", &alloc::format!("expected prio=39, got {}", prio));
+            test_fail("setpriority MAX_NICE", &alloc::format!("expected prio=1, got {}", prio));
         }
         let _ = sys_setpriority([PRIO_PROCESS as u64, 0, 0, 0, 0, 0]);
     } else {

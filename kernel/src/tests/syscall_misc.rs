@@ -74,25 +74,35 @@ fn test_sys_prlimit64() {
     const RLIM_INFINITY: u64 = 0xFFFFFFFFFFFFFFFF;
     test_assert_eq!(RLIM_INFINITY, !0u64, "sys_prlimit64 infinity value");
 
-    // Test: unsupported resource returns error (may be -EFAULT or -EINVAL depending on access_ok order)
+    // Test: query with both pointers null is a Linux-legal no-op probe —
+    // succeeds (0) against the current (boot) task for every valid
+    // resource, including ones that used to be rejected (RLIMIT_AS).
     let ret = sys_prlimit64([0, RLIMIT_CPU as u64, 0, 0, 0, 0]);
-    test_assert!(ret < 0, "sys_prlimit64 unsupported resource returns error",
+    test_assert!(ret == 0, "sys_prlimit64 null query on RLIMIT_CPU succeeds",
         &alloc::format!("got {:#x}", ret));
 
     let ret = sys_prlimit64([0, RLIMIT_AS as u64, 0, 0, 0, 0]);
-    test_assert!(ret < 0, "sys_prlimit64 RLIMIT_AS returns error",
+    test_assert!(ret == 0, "sys_prlimit64 null query on RLIMIT_AS succeeds",
         &alloc::format!("got {:#x}", ret));
 
-    // Test: null old_rlim returns -EFAULT
-    let ret = sys_prlimit64([0, RLIMIT_NOFILE as u64, 0, 0, 0, 0]);
-    let expected = -(errno::EFAULT as i64);
-    test_assert!(ret == expected, "sys_prlimit64 null old_rlim returns -EFAULT",
+    // Test: resource out of range returns -EINVAL (validated before the
+    // pointer/current-task checks)
+    let ret = sys_prlimit64([0, 16, 0, 0, 0, 0]); // RLIM_NLIMITS == 16
+    let expected = -(errno::EINVAL as i64);
+    test_assert!(ret == expected, "sys_prlimit64 resource out of range returns -EINVAL",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
-    // Test: setting a limit returns -EPERM (only querying supported)
+    // Test: kernel-space new_rlim pointer is rejected by access_ok (-EFAULT)
     let ret = sys_prlimit64([0, RLIMIT_NOFILE as u64, 1, 0, 0, 0]);
+    let expected = -(errno::EFAULT as i64);
+    test_assert!(ret == expected, "sys_prlimit64 kernel new_rlim returns -EFAULT",
+        &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
+
+    // Test: cross-process prlimit (pid != self) returns -EPERM — the
+    // kernel only permits self until ptrace support lands.
+    let ret = sys_prlimit64([4321, RLIMIT_NOFILE as u64, 0, 0, 0, 0]);
     let expected = -(errno::EPERM as i64);
-    test_assert!(ret == expected, "sys_prlimit64 set limit returns -EPERM",
+    test_assert!(ret == expected, "sys_prlimit64 other pid returns -EPERM",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
     // Test: query RLIMIT_NOFILE with valid old_rlim buffer
@@ -113,10 +123,11 @@ fn test_sys_getrandom() {
         "sys_getrandom flags");
     test_assert_eq!(GRND_INSECURE, 4, "sys_getrandom insecure flag");
 
-    // Test: null buffer returns -EINVAL
+    // Test: null buffer returns -EFAULT (Linux semantics: the buffer is
+    // copy_to_user'd, a NULL destination fails the access check)
     let ret = sys_getrandom([0, 16, 0, 0, 0, 0]);
-    let expected = -(errno::EINVAL as i64);
-    test_assert!(ret == expected, "sys_getrandom null buf returns -EINVAL",
+    let expected = -(errno::EFAULT as i64);
+    test_assert!(ret == expected, "sys_getrandom null buf returns -EFAULT",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 
     // Test: zero length returns 0
@@ -435,17 +446,21 @@ fn test_syscall_numbers() {
     // Verify syscall numbers match RISC-V ABI
     test_assert_eq!(SyscallNo::Prlimit64 as u32, 261, "SyscallNo::Prlimit64 == 261");
     test_assert_eq!(SyscallNo::Getrandom as u32, 278, "SyscallNo::Getrandom == 278");
-    test_assert_eq!(SyscallNo::Select as u32, 280, "SyscallNo::Select == 280");
-    test_assert_eq!(SyscallNo::Pselect6 as u32, 281, "SyscallNo::Pselect6 == 281");
-    test_assert_eq!(SyscallNo::Eventfd as u32, 290, "SyscallNo::Eventfd == 290");
+    // asm-generic 64-bit (RISC-V) has no legacy select/eventfd entries:
+    // callers use pselect6=72 / eventfd2=19. 280=bpf, 281=execveat,
+    // 290=pkey_free — the old Select=280/Eventfd=290 numbers were
+    // x86-isms and were never valid on this ABI.
+    test_assert_eq!(SyscallNo::Pselect6 as u32, 72, "SyscallNo::Pselect6 == 72");
+    test_assert_eq!(SyscallNo::Ppoll as u32, 73, "SyscallNo::Ppoll == 73");
     test_assert_eq!(SyscallNo::Eventfd2 as u32, 19, "SyscallNo::Eventfd2 == 19");
+    test_skip("SyscallNo::Select/Eventfd enum variants",
+        "no select(2)/eventfd(2) syscalls on riscv64 — select maps to pselect6, eventfd to eventfd2");
 
     // epoll syscall numbers (RISC-V)
     test_assert_eq!(SyscallNo::EpollCreate1 as u32, 20, "SyscallNo::EpollCreate1 == 20");
     test_assert_eq!(SyscallNo::EpollCtl as u32, 21, "SyscallNo::EpollCtl == 21");
     test_assert_eq!(SyscallNo::EpollPwait as u32, 22, "SyscallNo::EpollPwait == 22");
 
-    // poll/ppoll are not in SyscallNo enum (dispatched directly by number)
+    // poll is not in the SyscallNo enum (dispatched directly by number)
     test_skip("SyscallNo::Poll enum variant", "Poll not defined in SyscallNo enum (dispatched by raw number)");
-    test_skip("SyscallNo::Ppoll enum variant", "Ppoll not defined in SyscallNo enum (dispatched by raw number)");
 }

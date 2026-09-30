@@ -254,8 +254,12 @@ fn test_sys_client() {
                 test_fail("sys_sendto null buf", "should have failed");
             }
 
-            // Test sendto with zero length → 0
-            let result = sys_sendto([fd as u64, data.as_ptr() as u64, 0, 0, addr_ptr as u64, 16]);
+            // Test sendto with zero length → 0. Use a user-range dummy
+            // pointer: access_ok() gates the buffer before the len==0
+            // shortcut, and a kernel pointer (like data.as_ptr()) is
+            // rejected as -EFAULT regardless of the length.
+            const USER_DUMMY: u64 = 0x1000;
+            let result = sys_sendto([fd as u64, USER_DUMMY, 0, 0, addr_ptr as u64, 16]);
             if result == 0 {
                 test_pass("sys_sendto zero length returns 0");
             } else {
@@ -279,8 +283,9 @@ fn test_sys_client() {
                 test_fail("sys_recvfrom null buf", "should have failed");
             }
 
-            // Test recvfrom with zero length → 0
-            let result = sys_recvfrom([fd as u64, buf.as_mut_ptr() as u64, 0, 0, 0, 0]);
+            // Test recvfrom with zero length → 0 (user-range dummy ptr —
+            // see the sendto zero-length note about access_ok ordering)
+            let result = sys_recvfrom([fd as u64, USER_DUMMY, 0, 0, 0, 0]);
             if result == 0 {
                 test_pass("sys_recvfrom zero length returns 0");
             } else {

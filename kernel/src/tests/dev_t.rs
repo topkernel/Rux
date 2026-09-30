@@ -13,12 +13,14 @@ pub fn test_dev_t() {
     let dev = DevNo::new(1, 3);
     test_assert!(dev.major == 1 && dev.minor == 3, "DevNo::new construction");
 
-    // Test 2: DevNo to_u64
+    // Test 2: DevNo to_u64 — Linux kernel internal dev_t layout (MINORBITS=20)
     let dev = DevNo::new(0xABCD, 0x1234);
-    test_assert!(dev.to_u64() == ((0xABCDu64 << 32) | 0x1234u64), "DevNo::to_u64 encoding");
+    test_assert!(dev.to_u64() == ((0xABCDu64 << 20) | 0x1234u64), "DevNo::to_u64 encoding");
+    // oversized minors are masked to 20 bits on encode
+    test_assert!(DevNo::new(0, 0x12345678).to_u64() == 0x45678, "DevNo::to_u64 masks minor to 20 bits");
 
     // Test 3: DevNo from_u64
-    let v = ((0xABCDu64 << 32) | 0x1234u64);
+    let v = ((0xABCDu64 << 20) | 0x1234u64);
     let dev = DevNo::from_u64(v);
     test_assert!(dev.major == 0xABCD && dev.minor == 0x1234, "DevNo::from_u64 decoding");
 
@@ -27,10 +29,11 @@ pub fn test_dev_t() {
     let roundtrip = DevNo::from_u64(original.to_u64());
     test_assert!(roundtrip == original, "DevNo roundtrip consistency");
 
-    // Test 5: Roundtrip with max values
-    let max_dev = DevNo::new(0xFFFFFFFF, 0xFFFFFFFF);
+    // Test 5: Roundtrip with max encodable values (major: 12 bits used by
+    // dev_t, minor: 20 bits per MINORBITS)
+    let max_dev = DevNo::new(0xFFF, 0xFFFFF);
     let rt = DevNo::from_u64(max_dev.to_u64());
-    test_assert!(rt.major == 0xFFFFFFFF && rt.minor == 0xFFFFFFFF, "DevNo roundtrip max values");
+    test_assert!(rt.major == 0xFFF && rt.minor == 0xFFFFF, "DevNo roundtrip max values");
 
     // Test 6: DevNo from_u64(0)
     let zero = DevNo::from_u64(0);
