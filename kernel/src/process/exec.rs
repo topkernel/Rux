@@ -945,7 +945,22 @@ pub(crate) fn do_execve_elf(
     unsafe {
         // Capture the new mm's ASID before the Arc takes ownership.
         let new_asid = new_addr_space.asid();
-        // Set new address space (this will drop old Arc if no other references)
+
+        // Switch to the NEW address space BEFORE dropping the old mm.
+        // The old order (set_address_space → switch_mm) had an SMP window:
+        // set_address_space drops the old mm's last Arc → teardown frees the
+        // old root/table frames → another CPU's exec immediately recycles
+        // (and zeroes) one of them → THIS task still executes on the OLD
+        // satp for the 17 lines until switch_mm ran → kernel-text fetch
+        // fault with the kernel half gone (the pid-309/1842 warmup lockups:
+        // 10s soft-lockups, task-list damage, do_wait children-list panics).
+        // The exit path (exit_mm) already switches satp before dropping;
+        // exec must too.
+        crate::arch::riscv64::context::switch_mm(user_ppn, new_asid);
+
+        // Set new address space (this will drop old Arc if no other
+        // references — with satp already on the new root, freeing the old
+        // tree is safe for this hart).
         (*task_ptr).set_address_space(Some(alloc::sync::Arc::new(new_addr_space)));
 
         // Update exe_path
@@ -953,17 +968,6 @@ pub(crate) fn do_execve_elf(
 
         // Set user stack pointer
         (*task_ptr).set_user_sp(adjusted_stack_top);
-
-        // Switch to new address space. MUST go through switch_mm so the
-        // satp carries the new mm's ASID: the old raw `8<<60 | ppn` write
-        // used ASID 0 for EVERY freshly exec'd task, parking their TLB
-        // entries in the shared ASID-0 namespace — TLB lookup matches by
-        // ASID, so two exec'd tasks on one hart (concurrent fork+exec)
-        // aliased each other's translations (executing the parent image
-        // while task->mm pointed at the new one). switch_mm's ASID-scoped
-        // sfence also clears any stale entries from the ASID's previous
-        // owner.
-        crate::arch::riscv64::context::switch_mm(user_ppn, new_asid);
 
         // ===== Return to user mode immediately after successful execve =====
         // After execve returns, sret will jump to new program entry

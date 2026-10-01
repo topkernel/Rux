@@ -137,9 +137,59 @@ mod module;
 mod tests;
 
 // Allocation error handler for no_std
+//
+// OOM defense (GNOME-oom postmortem): when the kernel heap is exhausted the
+// panic path used to be the FIRST casualty — `panic!` formatting touches
+// subsystems that want the very heap that just failed, and the machine died
+// with an empty log. Before panicking, emit one allocation-free forensic
+// line over the raw UART (SBI putchar, no locks, no fmt buffers): the
+// failing layout size plus the return-address chain of the caller that
+// asked for the memory, for offline addr2line. The chain lives entirely in
+// live frames (this handler <- alloc::alloc::alloc <- __rust_alloc <- the
+// kernel caller), so the validated walk in memwatch::walk_fp_chain cannot
+// fault.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
+    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+
+    taskdump_raw_line(b"\nALLOCTHROW size=");
+    taskdump_dec(layout.size() as u64);
+    taskdump_raw_line(b" align=");
+    taskdump_dec(layout.align() as u64);
+    let mut frames: [u64; 6] = [0; 6];
+    let s0: u64;
+    unsafe {
+        core::arch::asm!("mv {s}, s0", s = out(reg) s0, options(nomem, nostack));
+        crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+    }
+    taskdump_raw_line(b" frames:");
+    for f in frames.iter() {
+        if *f == 0 {
+            break;
+        }
+        taskdump_raw_line(b" ");
+        taskdump_raw_line(format_hex(*f).as_bytes());
+    }
+    taskdump_raw_line(b"\n");
     panic!("Allocation error: {:?}", layout);
+}
+
+/// 16-hex-digit formatting into a fixed buffer (no allocator — usable on
+/// the exhausted-heap path above; `format!` is NOT).
+fn format_hex(v: u64) -> &'static str {
+    static mut BUF: [u8; 19] = [b'0'; 19];
+    // SAFETY: single-panicking-CPU path; the UART line below is emitted
+    // before any other CPU can reach this code (they are stopped in the
+    // panic handler shortly after).
+    unsafe {
+        BUF[0] = b'0';
+        BUF[1] = b'x';
+        for i in 0..16 {
+            let nib = (v >> ((15 - i) * 4)) & 0xF;
+            BUF[2 + i] = if nib < 10 { b'0' + nib as u8 } else { b'a' + (nib - 10) as u8 };
+        }
+        core::str::from_utf8_unchecked(&BUF)
+    }
 }
 
 // Include platform-specific assembly code

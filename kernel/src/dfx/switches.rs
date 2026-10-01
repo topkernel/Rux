@@ -36,9 +36,12 @@ pub enum DfxSwitch {
     /// Periodic task snapshots (every PERIODIC_SECS) from the timer
     /// softirq — catches silent hangs that never trip any watchdog.
     PeriodicDump,
+    /// Heap-leak hunt: size-class alloc/free counters + big-object call
+    /// site histogram, reported with the periodic dump (see memwatch.rs).
+    MemWatch,
 }
 
-const SWITCH_COUNT: usize = 3;
+const SWITCH_COUNT: usize = 4;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -48,6 +51,7 @@ impl DfxSwitch {
             DfxSwitch::WatchdogDump => 0,
             DfxSwitch::TaskDumpKey => 1,
             DfxSwitch::PeriodicDump => 2,
+            DfxSwitch::MemWatch => 3,
         }
     }
 
@@ -56,6 +60,7 @@ impl DfxSwitch {
             "watchdog" => Some(DfxSwitch::WatchdogDump),
             "taskdump" => Some(DfxSwitch::TaskDumpKey),
             "periodic" => Some(DfxSwitch::PeriodicDump),
+            "memwatch" => Some(DfxSwitch::MemWatch),
             _ => None,
         }
     }
@@ -69,6 +74,9 @@ pub fn enabled(switch: DfxSwitch) -> bool {
 /// Force a switch on/off programmatically (used by tests and the sysrq hook).
 pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
+    if let DfxSwitch::MemWatch = switch {
+        super::memwatch::ENABLED.store(on, Ordering::Relaxed);
+    }
 }
 
 /// Parse `dfx=` from the kernel command line. Unknown names are ignored

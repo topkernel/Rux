@@ -222,7 +222,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     let mut expired: alloc::vec::Vec<(u64, TimerAction)> = alloc::vec::Vec::with_capacity(EXPIRY_BUDGET);
     {
         let mut timers = TIMERS.lock_irqsave();
-        let actions = ACTIONS.lock_irqsave();
+        let mut actions = ACTIONS.lock_irqsave();
         let mut budget = EXPIRY_BUDGET;
         timers.retain(|&id, entry| {
             if entry.expires <= current {
@@ -233,22 +233,28 @@ pub fn timer_softirq_handler(_nr: usize) {
                 }
                 budget -= 1;
                 if let Some(action) = actions.get(&id) {
-                    expired.push((id, TimerAction {
-                        pid: action.pid,
-                        signo: action.signo,
-                        interval_jiffies: action.interval_jiffies,
-                        tfd_addr: action.tfd_addr,
-                        wake_pid: action.wake_pid,
-                    }));
                     if action.interval_jiffies > 0 {
                         // Periodic: re-arm IN PLACE (same id, node kept) —
                         // semantically identical to the old remove+re-insert
                         // of the same key, but without the under-lock
                         // dealloc+alloc pair. Bonus: del_timer can no longer
                         // miss the briefly-removed id (orphan-timer race).
+                        // The action stays in ACTIONS untouched.
                         entry.expires = current + action.interval_jiffies;
                         return true;
                     }
+                }
+                // One-shot: TAKE the action out (remove = dealloc only,
+                // cannot allocate — the no-alloc-under-lock discipline is
+                // preserved). The old code copied it with `actions.get`
+                // and left the entry in ACTIONS forever, so every one-shot
+                // timer (nanosleep / glib timeout / timerfd tick in GNOME)
+                // leaked one TimerAction: the ACTIONS BTreeMap grew
+                // ~4.8 nodes/s until the 128MB kernel heap died at ~65min
+                // (the GNOME-oom leak; memwatch live-site evidence:
+                // add_timer_wakeup leaf/internal nodes live=3000+, frees=4).
+                if let Some(action) = actions.remove(&id) {
+                    expired.push((id, action));
                 }
                 false // one-shot: remove (dealloc cannot fail)
             } else {

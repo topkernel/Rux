@@ -30,13 +30,38 @@ static IN_DIRECT_RECLAIM: AtomicUsize = AtomicUsize::new(0);
 
 /// Allocate 2^order contiguous physical pages
 ///
+/// DFX memwatch wrapper: captures the caller chain (frame-pointer walk,
+/// valid at -O0) and feeds the page-level site table in dfx::memwatch —
+/// net growth per call-site is the physical-page leak signature.
+pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
+    if !crate::dfx::memwatch::armed() {
+        return alloc_pages_inner(gfp_flags, order);
+    }
+    let mw_s0: u64;
+    unsafe {
+        core::arch::asm!("mv {s}, s0", s = out(reg) mw_s0, options(nomem, nostack));
+    }
+    let phys = alloc_pages_inner(gfp_flags, order);
+    if phys != 0 {
+        let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
+            [0; crate::dfx::memwatch::SITE_FRAMES];
+        unsafe {
+            crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
+        }
+        crate::dfx::memwatch::note_page_alloc(phys, order, &mw_frames);
+    }
+    phys
+}
+
+/// Allocate 2^order contiguous physical pages
+///
 /// # Arguments
 /// - `gfp_flags`: GFP flags controlling allocation behavior
 /// - `order`: Order of allocation (2^order pages)
 ///
 /// # Returns
 /// - Physical address of the first page, or 0 if allocation fails
-pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
+fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
     if order > MAX_ORDER {
         return 0;
     }
@@ -151,6 +176,26 @@ pub fn free_pages(addr: usize, order: usize) {
     if addr == 0 {
         return;
     }
+
+    // NEVER return a boot-reserved frame (kernel image, kernel heap, slab,
+    // vmemmap, dtb) to the zone allocator. The kernel heap lives in a
+    // memblock-reserved region and hosts every Task/file object; a forged
+    // or stale PTE walking through the mm-teardown path used to be able to
+    // put_page+free_pages an arbitrary physical frame — if that frame was
+    // heap memory, the next zone allocation handed kernel objects to a
+    // user mapping (observed: corrupted task children lists, do_wait
+    // panics). Refuse loudly and keep the frame leaked instead.
+    if crate::mm::memblock::memblock().is_reserved(addr) {
+        crate::pr_err!(
+            "free_pages: REFUSED boot-reserved frame {:#x} order {} — not returned to zone",
+            addr, order
+        );
+        return;
+    }
+
+    // DFX memwatch: attribute the free back to the site that stamped this
+    // block (page-level leak accounting — see dfx::memwatch).
+    crate::dfx::memwatch::note_page_free(addr, order);
 
     let pfn = phys_to_pfn(addr);
 

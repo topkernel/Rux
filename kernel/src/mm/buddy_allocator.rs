@@ -450,6 +450,17 @@ impl BuddyAllocator {
 
 unsafe impl GlobalAlloc for BuddyAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // DFX memwatch: own s0, captured unconditionally at the top of the
+        // body. s0 is callee-saved so the value stays valid for the whole
+        // body even across helper calls; the actual frame walk runs just
+        // before the note call (see below). -O0 riscv64 frames keep
+        // s0 = frame TOP: [s0-8] = own saved ra, [s0-0x10] = caller's s0,
+        // so walking from s0 yields [ra-into-__rust_alloc, callers...].
+        let mw_s0: u64;
+        unsafe {
+            core::arch::asm!("mv {s}, s0", s = out(reg) mw_s0, options(nomem, nostack));
+        }
+
         // Check magic number and initialization state
         if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
             || self.initialized.load(Ordering::Acquire) == 0
@@ -467,7 +478,66 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         if ptr.is_null() && size > 4 * 1024 * 1024 {
             crate::pr_err!("bigalloc: FAILED size={:#x}", size);
         }
+        drop(_guard);
+        if !ptr.is_null() && crate::dfx::memwatch::armed() {
+            let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
+                [0; crate::dfx::memwatch::SITE_FRAMES];
+            // f[0] = own saved ra (== the ra at entry, before any helper
+            // could clobber the register), f[1..] = the s0 chain above.
+            // s0 is callee-saved, so the walk stays valid even here, after
+            // alloc_blocks().
+            unsafe {
+                crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
+            }
+            crate::dfx::memwatch::note_alloc(
+                ptr,
+                self.heap_start.load(Ordering::Relaxed),
+                size,
+                &mw_frames,
+            );
+        }
         ptr
+    }
+
+    // DFX memwatch leak hunt: explicit realloc (instead of the default
+    // trait method) so the frame-pointer chain can be walked past the whole
+    // raw_vec/alloc growth machinery into the allocating kernel code. This
+    // is how the GNOME-oom leak was run to ground (the "129..256-byte
+    // buffer reallocated ~4.6x/s" signature was BTreeMap node growth in
+    // timer add_timer_wakeup). At -O0 the chain is: this method <-
+    // __rust_realloc <- realloc_nonnull <- grow_impl <- Allocator::grow <-
+    // finish_grow <- grow_amortized <- do_reserve <- reserve <-
+    // append_elements <- THE KERNEL CODE, so 12 frames are captured.
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // DFX memwatch leak hunt (see the method-level comment below for the
+        // chain shape). The walk is gated: disabled = zero added work on the
+        // realloc hot path; enabled = 12-frame pointer chase per realloc.
+        let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
+            [0; crate::dfx::memwatch::SITE_FRAMES];
+        if crate::dfx::memwatch::armed() {
+            let mut fp: u64;
+            core::arch::asm!("mv {f}, s0", f = out(reg) fp, options(nomem, nostack));
+            // f[0] = return address out of this method (into __rust_realloc);
+            // f[1..] ascend the caller chain through the growth machinery.
+            unsafe {
+                crate::dfx::memwatch::walk_fp_chain(fp, &mut mw_frames);
+            }
+            crate::dfx::memwatch::note_realloc(new_size, &mw_frames);
+        }
+
+        // Default GlobalAlloc::realloc behavior.
+        let new_layout = match Layout::from_size_align(new_size, layout.align()) {
+            Ok(l) => l,
+            Err(_) => return core::ptr::null_mut(),
+        };
+        let new_ptr = self.alloc(new_layout);
+        if new_ptr.is_null() {
+            return core::ptr::null_mut();
+        }
+        let copy_len = layout.size().min(new_size);
+        core::ptr::copy_nonoverlapping(ptr, new_ptr, copy_len);
+        self.dealloc(ptr, layout);
+        new_ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -512,6 +582,12 @@ unsafe impl GlobalAlloc for BuddyAllocator {
 
         let _guard = self.lock.lock_irqsave();
         self.free_blocks(ptr, order);
+        drop(_guard);
+        crate::dfx::memwatch::note_free(
+            ptr,
+            self.heap_start.load(Ordering::Relaxed),
+            size,
+        );
     }
 }
 

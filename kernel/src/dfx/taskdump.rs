@@ -516,6 +516,14 @@ pub fn dump_all_tasks(reason: &str) {
         put_dec(linked_unknown as u64);
         puts(" linked= probes skipped (GRQ lock busy)\n");
     }
+    // Heap/page snapshot on every periodic dump: the leak curve rides the
+    // same 5s cadence, and with dfx=memwatch the size-class growth table
+    // and big-object call-site histogram follow (memwatch.rs). Only from
+    // the periodic path — the watchdog variant may run while the heap lock
+    // is the wedged one, and the stats walk takes allocator locks.
+    if reason == "periodic" {
+        crate::dfx::memwatch::dump_mem();
+    }
 }
 
 fn state_name(bits: u32) -> &'static str {

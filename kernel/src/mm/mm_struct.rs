@@ -938,6 +938,7 @@ impl Drop for MmStruct {
         // The VMA tree itself is released with the struct. RSS/LRU stats
         // are already drained by that PTE walk.
         if self.space_type == PageTableType::User {
+            crate::dfx::memwatch::MM_DROPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             unsafe {
                 crate::arch::mm::free_user_page_tables(self.pgd);
             }

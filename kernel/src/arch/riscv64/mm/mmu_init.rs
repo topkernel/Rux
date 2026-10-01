@@ -203,6 +203,21 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
                 return None;
             }
 
+            // DFX memwatch: page-table frames bypass page_alloc::alloc_pages
+            // (direct zone.alloc_pages above) — feed them to the page-level
+            // site table from THIS frame so the chain names the mapping
+            // path (map_page_noflush / create_user_address_space / ...).
+            if crate::dfx::memwatch::armed() {
+                let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
+                    [0; crate::dfx::memwatch::SITE_FRAMES];
+                let mw_s0: u64;
+                unsafe {
+                    core::arch::asm!("mv {s}, s0", s = out(reg) mw_s0, options(nomem, nostack));
+                    crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
+                }
+                crate::dfx::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
+            }
+
             // FORENSIC ledger: stamp every Late-stage table allocation.
             PT_LEDGER.stamp(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid());
 
@@ -249,6 +264,7 @@ unsafe fn free_page_table_checked(phys_addr: u64, site: &str) {
                     // rather than wired into two live trees
         }
     }
+    crate::dfx::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     free_page_table(phys_addr)
 }
 
@@ -268,15 +284,21 @@ unsafe fn stamp_kernel_tree_boot() {
         return;
     }
     BOOT_TREE_STAMPED.store(true, Ordering::Release);
-    // Every frame the early boot allocator (memblock) ever handed out is
-    // boot-permanent: kernel image, early page-table blocks (e.g. the
-    // contiguous 0x8cf6x trees), fixmap, dtb. mms forked from the initial
-    // template can reference these; teardown must never free them.
-    for region in crate::mm::memblock::memblock().reserved().iter() {
-        for ppn in region.base_pfn()..region.end_pfn() {
-            PT_LEDGER.stamp_boot(ppn as u64);
-        }
-    }
+    // Boot-permanent tables are exactly the frames reachable from the
+    // kernel ROOT tree below (plus the Fixmap-stage tables stamped at
+    // their allocation, and the EARLY_PMD/PTE static arrays range-checked
+    // in free_page_table).
+    //
+    // The loop that used to be here stamped EVERY memblock-reserved frame
+    // (kernel image, 128MB kernel heap, slab region, vmemmap — tens of
+    // thousands of pages) into the ledger's 16384-slot boot mask. The mask
+    // is a direct hash (slot = ppn & 16383), so it was 100% saturated: the
+    // kernel heap alone spans every slot twice. take_returns() then
+    // returned false for EVERY Late-stage page-table frame and
+    // free_page_table_checked silently refused every table free — every
+    // user mm leaked all of its page-table pages at exit (the exec/fork
+    // baseline leak: ~100KB per exec, 2GB gone in ~21 min under load;
+    // memwatch evidence: fut_calls=618, fut_tables=0).
     let root_virt = &raw mut ROOT_PAGE_TABLE as u64;
     let root_phys = root_virt.wrapping_sub(KERNEL_MAP.va_kernel_pa_offset as u64);
     for vpn2 in 0..512usize {
@@ -310,8 +332,10 @@ unsafe fn free_page_table(phys_addr: u64) {
         return;
     }
 
-    // FORENSIC ledger: detect double-free / free-of-unallocated table frames.
-    PT_LEDGER.take(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid(), "free_page_table");
+    // NOTE: the PT_LEDGER.take() that used to live here was the SECOND
+    // take of the same frame (free_page_table_checked already took it);
+    // its guaranteed failure printed a bogus "DOUBLE-FREE ... at
+    // free_page_table" for every single legitimately-freed table.
 
     // Check if it's from early static region
     // Early tables live in BSS at KERNEL_LINK_ADDR; convert VA→PA using
@@ -342,11 +366,18 @@ pub struct PtLedger {
     // no eviction churn; a slot is reused only when the previous ppn was
     // freed (cleared) or a genuine double-alloc collides.
     slots: [core::sync::atomic::AtomicU64; 16384],
-    // Boot-permanent tables (Early static + Fixmap/memblock): referenced
-    // by every early mm — freeing them per-mm tears down shared state and
-    // feeds the frames back for reuse as live page tables (the concurrent
-    // fork/exec corruption family).
-    boot: [core::sync::atomic::AtomicBool; 16384],
+    // Boot-permanent tables (kernel root tree + Early static + Fixmap):
+    // referenced by every early mm — freeing them per-mm tears down shared
+    // state and feeds the frames back for reuse as live page tables (the
+    // concurrent fork/exec corruption family).
+    //
+    // EXACT membership (array of ppn+1, linear scan), NOT a hash: the old
+    // `ppn & 16383` bool mask collided with unrelated user tables ~0.3% of
+    // the time. A false "boot" on a USER table made fork share that
+    // subtree between parent and child (cross-process PTE aliasing) and
+    // made teardown skip its pages. The boot set is tiny (the kernel
+    // tree's own tables, ~dozens), so the scan is cheap.
+    boot: [core::sync::atomic::AtomicU64; 512],
     reported: core::sync::atomic::AtomicUsize,
     freed_by: [core::sync::atomic::AtomicU32; 16384],
 }
@@ -354,20 +385,36 @@ impl PtLedger {
     const fn new() -> Self {
         Self {
             slots: [const { core::sync::atomic::AtomicU64::new(0) }; 16384],
-            boot: [const { core::sync::atomic::AtomicBool::new(false) }; 16384],
+            boot: [const { core::sync::atomic::AtomicU64::new(0) }; 512],
             reported: core::sync::atomic::AtomicUsize::new(0),
             freed_by: [const { core::sync::atomic::AtomicU32::new(0) }; 16384],
         }
     }
     fn stamp_boot(&self, ppn: u64) {
-        self.boot[(ppn as usize) & (self.boot.len() - 1)]
-            .store(true, core::sync::atomic::Ordering::Relaxed);
+        for slot in self.boot.iter() {
+            let v = slot.load(core::sync::atomic::Ordering::Relaxed);
+            if v == ppn + 1 {
+                return; // already stamped
+            }
+            if v == 0 {
+                slot.store(ppn + 1, core::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+        // Table full (kernel tree is ~dozens of tables; 512 slots): refuse
+        // to pretend — drop the stamp and let the frame be treated as
+        // normal. Should be unreachable; loudly noted if it ever happens.
+        crate::pr_err!("PTLEDGER: boot table overflow, ppn={:#x}", ppn);
     }
     fn take_returns(&self, ppn: u64) -> bool {
-        if self.boot[(ppn as usize) & (self.boot.len() - 1)]
-            .load(core::sync::atomic::Ordering::Relaxed)
-        {
-            return false;
+        for slot in self.boot.iter() {
+            let v = slot.load(core::sync::atomic::Ordering::Relaxed);
+            if v == 0 {
+                break;
+            }
+            if v == ppn + 1 {
+                return false;
+            }
         }
         true
     }
@@ -417,6 +464,23 @@ impl PtLedger {
     }
 }
 pub static PT_LEDGER: PtLedger = PtLedger::new();
+
+impl PtLedger {
+    /// Stamp a page-table root allocated OUTSIDE alloc_page_table
+    /// (create_user_address_space draws the root from alloc_pages). Without
+    /// this stamp the teardown's ledger take() refuses the root free and the
+    /// root frame leaks with every mm.
+    pub fn stamp_root(&self, ppn: u64) {
+        self.stamp(ppn, crate::sched::get_current_pid());
+    }
+
+    /// Read-only: is this frame boot-permanent (shared kernel tree)?
+    /// Fork and teardown use this to share/skip instead of copy/free.
+    pub fn is_boot(&self, ppn: u64) -> bool {
+        !self.take_returns(ppn)
+    }
+}
+
 pub struct FutEntry {
     pub root: core::sync::atomic::AtomicU64,
     pub pid: core::sync::atomic::AtomicU64,
@@ -484,10 +548,23 @@ pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
 
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
     use crate::mm::{pfn_to_page, pfn_to_page_mut, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
-    // FORENSIC: record teardown events so a refused double-free can name
-    // the two trees involved.
+    crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // Double-teardown detector: the same root walked twice means two
+    // MmStructs ended up owning one page-table tree — the second walk
+    // chases recycled frames full of foreign data (the corruption family
+    // behind do_wait children-list panics). Ring is small; a hit here is
+    // not proof for old trees, but a fresh repeat IS.
     {
         use core::sync::atomic::Ordering::Relaxed;
+        for k in 0..FUT_RING.len() {
+            if FUT_RING[k].root.load(Relaxed) == root_ppn && root_ppn != 0 {
+                crate::pr_err!(
+                    "FUT: REPEAT teardown of root ppn={:#x} (ring[{}])",
+                    root_ppn, k
+                );
+                break;
+            }
+        }
         let idx = FUT_RING_CURSOR.fetch_add(1, Relaxed) % FUT_RING.len();
         FUT_RING[idx].root.store(root_ppn, Relaxed);
         FUT_RING[idx].pid.store(crate::sched::get_current_pid() as u64, Relaxed);
@@ -522,6 +599,9 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
             if is_framebuffer_frame(phys_addr) {
                 continue;
             }
+            if !phys_valid(phys_addr as usize) || phys_addr < 0x80000000 {
+                continue;
+            }
             let pfn = phys_to_pfn(phys_addr as usize);
             let page = pfn_to_page(pfn);
             if !page.is_null() {
@@ -530,6 +610,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 }
                 let new_ref = (*page).put_page();
                 if new_ref == 0 {
+                    crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     free_pages(phys_addr as usize, 0);
                 }
             }
@@ -544,6 +625,14 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
         }
 
         if table1_phys == root_phys {
+            continue;
+        }
+
+        // Shared kernel subtree (MMIO/ECAM tables shared into every mm by
+        // copy_kernel_mappings): nothing under it belongs to THIS mm — skip
+        // the descent entirely (also saves walking ~140 tables' worth of
+        // kernel-only entries per teardown).
+        if get_alloc_stage() == AllocStage::Late && PT_LEDGER.is_boot(ppn1) {
             continue;
         }
 
@@ -564,6 +653,9 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 if is_framebuffer_frame(phys_addr) {
                     continue;
                 }
+                if !phys_valid(phys_addr as usize) || phys_addr < 0x80000000 {
+                    continue;
+                }
                 let pfn = phys_to_pfn(phys_addr as usize);
                 let page = pfn_to_page(pfn);
                 if !page.is_null() {
@@ -572,6 +664,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     }
                     let new_ref = (*page).put_page();
                     if new_ref == 0 {
+                        crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         free_pages(phys_addr as usize, 0);
                     }
                 }
@@ -617,7 +710,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 let pfn = phys_to_pfn(phys_addr as usize);
                 let page = pfn_to_page(pfn);
 
-                if page.is_null() || phys_addr < 0x80000000 {
+                if page.is_null() || !phys_valid(phys_addr as usize) || phys_addr < 0x80000000 {
                     continue;
                 }
 
@@ -627,6 +720,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 
                 let new_ref = (*page).put_page();
                 if new_ref == 0 {
+                    crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     free_pages(phys_addr as usize, 0);
                 }
             }
@@ -663,6 +757,42 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     let vpn1 = ((virt_addr >> 21) & 0x1FF) as usize;
     let vpn0 = ((virt_addr >> 12) & 0x1FF) as usize;
 
+    // DFX memwatch: catch writes into the KERNEL root's low half. Every
+    // non-leaf entry that lands at vpn2[0..1] of the kernel root is cloned
+    // into EVERY future address space by copy_kernel_mappings (the
+    // exec-leak amplifier). One-shot caller chain, raw UART.
+    if vpn2 < 2 && root_ppn == root_page_table_ppn() && crate::dfx::memwatch::armed() {
+        static POLLUTED: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if POLLUTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
+            let mut frames: [u64; 8] = [0; 8];
+            let s0: u64;
+            unsafe {
+                core::arch::asm!("mv {s}, s0", s = out(reg) s0, options(nomem, nostack));
+                crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+            }
+            crate::dfx::taskdump::taskdump_raw_line(b"KROOT-POLLUTE va=0x");
+            let mut sh: i32 = 64;
+            while sh > 0 {
+                sh -= 4;
+                let nb = ((virt_addr >> sh) & 0xF) as u8;
+                crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+            }
+            for f in frames.iter() {
+                if *f == 0 { break; }
+                crate::dfx::taskdump::taskdump_raw_line(b" ");
+                let mut sh2: i32 = 64;
+                crate::dfx::taskdump::taskdump_raw_line(b"0x");
+                while sh2 > 0 {
+                    sh2 -= 4;
+                    let nb = ((*f >> sh2) & 0xF) as u8;
+                    crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
+                }
+            }
+            crate::dfx::taskdump::taskdump_raw_line(b"\n");
+        }
+    }
+
     // Get root page table (L2)
     let root_table_addr = root_ppn << PAGE_SHIFT;
     let root_table = get_page_table_virt(root_table_addr);
@@ -684,14 +814,18 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     let table1 = get_page_table_virt(table1_phys);
     let table1_ref = &mut *table1;
     let pte1 = table1_ref.get(vpn1);
-    // PERF/SAFETY (superpage MMIO): boot maps the PCI MMIO/ECAM windows as
-    // 2MB L1 leaves. A user mapping landing inside such a window (only
-    // possible via a fixed-address mmap over a device hole) must not
-    // follow the leaf PPN as an L0 table pointer — that would read/write
-    // device MMIO as PTEs. Replace the leaf with a fresh, empty L0 table
-    // carrying just this entry: contained to this address space, same
-    // failure mode as the pre-superpage 4KB overwrite.
-    let ppn0 = if pte1.is_valid() && !pte1.is_leaf() {
+    // A 2MB megapage leaf here cannot host a 4K mapping — treating its
+    // PPN as an L0 table pointer would corrupt whatever frame it names.
+    // No caller maps 4K inside the megapaged device windows today; refuse
+    // loudly to keep that invariant explicit.
+    if pte1.is_valid() && pte1.is_leaf() {
+        crate::pr_err!(
+            "map_page: 4K map at {:#x} collides with 2MB megapage — refused",
+            virt_addr
+        );
+        return;
+    }
+    let ppn0 = if pte1.is_valid() {
         pte1.ppn()
     } else {
         let table_phys = alloc_page_table().expect("map_page: failed to allocate L0 page table");
@@ -896,35 +1030,37 @@ pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
     asm!("sfence.vma zero, zero", options(nomem, nostack));
 }
 
-/// Install a 2MB leaf PTE at the L1 (PMD) level for the current satp.
-/// Only used by map_kernel_region for boot-time identity MMIO windows,
-/// where the L1 slot is guaranteed empty (fresh page tables).
-unsafe fn map_kernel_pmd(virt: u64, pte_bits: u64) {
-    let vpn2 = ((virt >> 30) & 0x1FF) as usize;
-    let vpn1 = ((virt >> 21) & 0x1FF) as usize;
-
-    let satp: u64;
-    asm!("csrr {}, satp", out(reg) satp);
-    let root_ppn = satp & 0xFFFFFFFFFFFFF;
-    let root = get_page_table_virt(root_ppn << PAGE_SHIFT) as *mut PageTable;
-
-    // Level 2 -> Level 1 (allocate L1 table if needed)
-    let pte2 = (*root).get(vpn2);
-    let table1_phys = if pte2.is_valid() {
-        pte2.ppn() << PAGE_SHIFT
-    } else {
-        let t = alloc_page_table().expect("map_kernel_pmd: failed to allocate L1 page table");
-        (*root).set(vpn2, PageTableEntry::new_table(t >> PAGE_SHIFT));
-        t
-    };
-    let table1 = get_page_table_virt(table1_phys) as *mut PageTable;
-    // Defensive: refuse to overwrite an existing L1 leaf or table with a
-    // different mapping (boot order guarantees this never fires today).
-    let old = (*table1).get(vpn1);
-    if old.is_valid() {
-        return;
+/// Map a kernel device region using 2MB megapage leaf entries where the
+/// range permits (interior 2MB-aligned span), falling back to 4K pages for
+/// the head/tail. Device windows mapped this way cost ONE L1 leaf entry
+/// per 2MB instead of an L0 table per 2MB — copy_kernel_mappings clones
+/// leaf entries in O(1), so every exec/fork stops allocating one L0 table
+/// per 2MB of device window (the 256MB PCI MMIO window alone was 128
+/// tables per exec).
+///
+/// Must only be used for device memory that is mapped once at boot and
+/// never re-mapped at 4K granularity later (map_page cannot descend below
+/// an L1 leaf).
+pub unsafe fn map_kernel_region_huge(virt: u64, size: u64, flags: u64) {
+    const PMD: u64 = 0x20_0000;
+    let mut v = virt;
+    let end = virt + size;
+    // Head: 4K pages up to the next 2MB boundary
+    while v < end && v % PMD != 0 {
+        map_kernel_page_noflush(v, v, flags);
+        v += PAGE_SIZE;
     }
-    (*table1).set(vpn1, PageTableEntry::from_bits(pte_bits));
+    // Interior: 2MB megapage leaf entries
+    while v + PMD <= end {
+        map_pmd_huge_page(v as usize, v as usize, flags);
+        v += PMD;
+    }
+    // Tail: 4K pages
+    while v < end {
+        map_kernel_page_noflush(v, v, flags);
+        v += PAGE_SIZE;
+    }
+    asm!("sfence.vma zero, zero", options(nomem, nostack));
 }
 
 /// Map device memory page to user space
@@ -1137,7 +1273,9 @@ pub fn setup_device_mappings() {
 
         // PLIC: priority space (0x2000) + enable/threshold/claim per hart context
         // With 4 harts: context space at 0x200000, each 0x1000, total ~0x204000
-        map_kernel_region(PLIC_BASE as u64, PLIC_BASE as u64, 0x210000, device_flags);
+        // megapage: the low-half device tables are cloned per exec by
+        // copy_kernel_mappings — L1 leaves copy in O(1), L0 tables do not.
+        map_kernel_region_huge(PLIC_BASE as u64, 0x210000, device_flags);
 
         // CLINT: 0x10000 bytes
         map_kernel_region(CLINT_BASE as u64, CLINT_BASE as u64, 0x10000, device_flags);
@@ -1155,11 +1293,15 @@ pub fn setup_device_mappings() {
         // QEMU virt machine exposes a 256MB ECAM region here; bus 0 held
         // every boot device so 1MB used to be enough, but devices
         // hot-added behind a pcie-root-port (U4 rescan path) sit on
-        // bus 1+.
-        map_kernel_region(PCIE_ECAM_BASE as u64, PCIE_ECAM_BASE as u64, 0x800000, device_flags);
+        // bus 1+. Mapped as megapages (see PLIC note).
+        map_kernel_region_huge(PCIE_ECAM_BASE as u64, 0x800000, device_flags);
 
-        // PCI MMIO: 0x10000000 bytes
-        map_kernel_region(PCI_MMIO_BASE as u64, PCI_MMIO_BASE as u64, 0x10000000, device_flags);
+        // PCI MMIO: 0x10000000 bytes. Megapage: this single window was 128
+        // L0 tables cloned into EVERY address space by
+        // copy_kernel_mappings (~560KB of table alloc+zero per exec).
+        // BARs are assigned by writing config space only — nothing maps
+        // inside this window at 4K granularity later.
+        map_kernel_region_huge(PCI_MMIO_BASE as u64, 0x10000000, device_flags);
     }
 }
 

@@ -1026,6 +1026,11 @@ pub fn create_user_address_space() -> Option<u64> {
 
     let root_page = phys_addr as u64;
 
+    // Stamp the root into the PT ledger (it comes from alloc_pages, NOT
+    // alloc_page_table, so it is otherwise unstamped and its teardown free
+    // is refused — one leaked frame per exec'd mm).
+    super::mmu_init::PT_LEDGER.stamp_root(root_page >> PAGE_SHIFT);
+
     // SAFETY: root_page is a freshly allocated physical page; get_page_table_virt returns a
     // valid kernel-virtual pointer to it. copy_kernel_mappings and copy_fixmap_to_user expect
     // a valid root PPN for a page-sized allocation that we exclusively own.

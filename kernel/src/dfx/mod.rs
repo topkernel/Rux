@@ -35,6 +35,7 @@ pub mod hung_task;
 pub mod sbi_debug;
 pub mod switches;
 pub mod taskdump;
+pub mod memwatch;
 
 /// Initialize the DFX subsystem.
 ///
