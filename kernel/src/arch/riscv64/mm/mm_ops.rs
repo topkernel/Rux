@@ -1749,10 +1749,20 @@ pub unsafe fn is_cow_page(root_ppn: u64, addr: VirtAddr) -> bool {
         return false;
     }
 
+    // Superpage leaf (PERF: boot-time MMIO windows map as 2MB L1 leaves;
+    // the framebuffer maps as a 1GB L2 leaf): a leaf is never a COW PTE
+    // (COW only exists on 4KB user leaves).
+    if pte2.is_leaf() {
+        return false;
+    }
+
     let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
     let pte1 = (*table1).get(vpn1);
 
     if !pte1.is_valid() {
+        return false;
+    }
+    if pte1.is_leaf() {
         return false;
     }
 
@@ -1781,11 +1791,33 @@ pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bo
         return None;
     }
 
+    // Superpage leaf (PERF: MMIO windows as 2MB L1 leaves, framebuffer as
+    // 1GB L2 leaf): report the LEAF's permissions — following its PPN as
+    // a table pointer would read device/framebuffer memory as PTEs.
+    if pte2.is_leaf() {
+        let bits = pte2.bits();
+        return Some((
+            (bits & PageTableEntry::R) != 0,
+            (bits & PageTableEntry::W) != 0,
+            (bits & PageTableEntry::X) != 0,
+            (bits & PageTableEntry::U) != 0,
+        ));
+    }
+
     let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
     let pte1 = (*table1).get(vpn1);
 
     if !pte1.is_valid() {
         return None;
+    }
+    if pte1.is_leaf() {
+        let bits = pte1.bits();
+        return Some((
+            (bits & PageTableEntry::R) != 0,
+            (bits & PageTableEntry::W) != 0,
+            (bits & PageTableEntry::X) != 0,
+            (bits & PageTableEntry::U) != 0,
+        ));
     }
 
     let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);

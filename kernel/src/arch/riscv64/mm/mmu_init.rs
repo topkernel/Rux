@@ -684,7 +684,14 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     let table1 = get_page_table_virt(table1_phys);
     let table1_ref = &mut *table1;
     let pte1 = table1_ref.get(vpn1);
-    let ppn0 = if pte1.is_valid() {
+    // PERF/SAFETY (superpage MMIO): boot maps the PCI MMIO/ECAM windows as
+    // 2MB L1 leaves. A user mapping landing inside such a window (only
+    // possible via a fixed-address mmap over a device hole) must not
+    // follow the leaf PPN as an L0 table pointer — that would read/write
+    // device MMIO as PTEs. Replace the leaf with a fresh, empty L0 table
+    // carrying just this entry: contained to this address space, same
+    // failure mode as the pre-superpage 4KB overwrite.
+    let ppn0 = if pte1.is_valid() && !pte1.is_leaf() {
         pte1.ppn()
     } else {
         let table_phys = alloc_page_table().expect("map_page: failed to allocate L0 page table");
@@ -853,15 +860,71 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
 /// Uses current satp's page table. Maps each 4KB page individually, then
 /// flushes the TLB ONCE for the whole region (per-page flushes in the loop
 /// cost hundreds of global sfence.vma at boot — review PERF).
+///
+/// PERF (superpage MMIO): identity windows that are 2MB-aligned and at
+/// least one PMD apart are mapped as L1 2MB leaf PTEs instead of 512
+/// individual 4KB PTEs. The QEMU virt platform's PCI MMIO hole is 256MB
+/// and ECAM 8MB: as 4KB pages that is 68K PTEs + 139 L0 tables in EVERY
+/// address space (copy_kernel_mappings duplicates them per process,
+/// copy_page_table_cow walks/copies them per fork, free_user_page_tables
+/// walks them per exit — measured ~85ms per fork+exit under TCG). With
+/// L1 leaves the same windows cost ~132 PTEs and zero L0 tables.
+/// Unaligned head/tail pages still map at 4KB granularity.
 pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
+    use crate::arch::riscv64::mm::memory_layout::PMD_SIZE;
+
     let mut v = virt;
+    let mut p = phys;
     let end = virt + size;
     while v < end {
-        let offset = v - virt;
-        map_kernel_page_noflush(v, phys + offset, flags);
-        v += PAGE_SIZE;
+        let remain = end - v;
+        if v % PMD_SIZE == 0 && p % PMD_SIZE == 0 && remain >= PMD_SIZE {
+            // 2MB superpage: install one L1 leaf PTE (identity v==p here).
+            // PPN field stays in 4KB units ((p>>12)<<10); the 2MB-aligned
+            // p makes PPN[0] zero as Sv39 requires for a PMD leaf, and the
+            // RWX bits in `flags` make the entry a leaf.
+            let pte_bits = ((p >> PAGE_SHIFT) << 10) | flags;
+            map_kernel_pmd(v, pte_bits);
+            v += PMD_SIZE;
+            p += PMD_SIZE;
+        } else {
+            map_kernel_page_noflush(v, p, flags);
+            v += PAGE_SIZE;
+            p += PAGE_SIZE;
+        }
     }
     asm!("sfence.vma zero, zero", options(nomem, nostack));
+}
+
+/// Install a 2MB leaf PTE at the L1 (PMD) level for the current satp.
+/// Only used by map_kernel_region for boot-time identity MMIO windows,
+/// where the L1 slot is guaranteed empty (fresh page tables).
+unsafe fn map_kernel_pmd(virt: u64, pte_bits: u64) {
+    let vpn2 = ((virt >> 30) & 0x1FF) as usize;
+    let vpn1 = ((virt >> 21) & 0x1FF) as usize;
+
+    let satp: u64;
+    asm!("csrr {}, satp", out(reg) satp);
+    let root_ppn = satp & 0xFFFFFFFFFFFFF;
+    let root = get_page_table_virt(root_ppn << PAGE_SHIFT) as *mut PageTable;
+
+    // Level 2 -> Level 1 (allocate L1 table if needed)
+    let pte2 = (*root).get(vpn2);
+    let table1_phys = if pte2.is_valid() {
+        pte2.ppn() << PAGE_SHIFT
+    } else {
+        let t = alloc_page_table().expect("map_kernel_pmd: failed to allocate L1 page table");
+        (*root).set(vpn2, PageTableEntry::new_table(t >> PAGE_SHIFT));
+        t
+    };
+    let table1 = get_page_table_virt(table1_phys) as *mut PageTable;
+    // Defensive: refuse to overwrite an existing L1 leaf or table with a
+    // different mapping (boot order guarantees this never fires today).
+    let old = (*table1).get(vpn1);
+    if old.is_valid() {
+        return;
+    }
+    (*table1).set(vpn1, PageTableEntry::from_bits(pte_bits));
 }
 
 /// Map device memory page to user space

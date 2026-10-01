@@ -610,10 +610,21 @@ pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
         let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
         let pte2 = (*root_table).get(vpn2 as usize);
         if !pte2.is_valid() { return None; }
+        // Superpage leaves: compute the 4KB frame inside the leaf (PERF:
+        // MMIO windows map as 2MB L1 leaves; never follow a leaf PPN as a
+        // table pointer).
+        if pte2.is_leaf() {
+            // 1GB leaf: PPN[2] (bits 53:28) is the 1GB frame number.
+            let ppn2 = (pte2.bits() >> 28) & 0x3FF_FFFF;
+            return Some((ppn2 << 30) | (vaddr & 0x3FFF_FFFF & !0xFFF));
+        }
 
         let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
         let pte1 = (*table1).get(vpn1 as usize);
         if !pte1.is_valid() { return None; }
+        if pte1.is_leaf() {
+            return Some((pte1.ppn_for_2mb_page() << 21) | (vaddr & 0x1F_FFFF & !0xFFF));
+        }
 
         let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
         let pte0 = (*table0).get(vpn0 as usize);
@@ -643,10 +654,15 @@ pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
         let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
         let pte2 = (*root_table).get(vpn2 as usize);
         if !pte2.is_valid() { return None; }
+        // Superpage leaves (PERF: 2MB MMIO L1 leaves / 1GB L2 framebuffer):
+        // return the leaf itself — never a swap/migration entry, and its
+        // PPN must not be followed as a table pointer.
+        if pte2.is_leaf() { return Some(pte2.bits()); }
 
         let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
         let pte1 = (*table1).get(vpn1 as usize);
         if !pte1.is_valid() { return None; }
+        if pte1.is_leaf() { return Some(pte1.bits()); }
 
         let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
         let pte0 = (*table0).get(vpn0 as usize);
