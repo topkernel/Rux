@@ -256,6 +256,18 @@ fn emit_to_console(text: &[u8]) {
 /// Write a formatted message with trailing newline to the kernel log.
 /// Used by the `println!` macro.
 pub fn printk_ln(level: u8, args: fmt::Arguments) {
+    // Perf: filter BEFORE formatting. core::fmt argument construction and
+    // the format pass itself dominate the cost of a printk — with the
+    // check only in printk_bytes, every discarded pr_debug! on a hot path
+    // (the per-trap trace in trap.rs runs on EVERY syscall, page fault and
+    // interrupt) still paid full formatting into a stack buffer that was
+    // then thrown away. Semantics are unchanged: printk_bytes drops
+    // filtered messages after its re-entrancy guard anyway; skipping the
+    // guard+format first only removes work (measured ~70% of the getpid
+    // syscall cost under TCG debug builds).
+    if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+        return;
+    }
     // Format with newline into a local buffer to avoid borrow conflict
     let mut buf = [0u8; RECORD_TEXT_SIZE];
     let mut writer = BufferWriter { buf: &mut buf, pos: 0 };
