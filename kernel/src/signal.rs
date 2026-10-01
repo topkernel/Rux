@@ -1586,6 +1586,11 @@ pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_
     // busy foreground task that is not blocked in read().
     crate::console::tty_isig_deliver_pending();
 
+    // Ctrl-Alt-Del path: same task-context delivery rule. The input
+    // detectors (UART RX IRQ, evdev) only latch an atomic; the SIGINT to
+    // init (or the immediate-reboot cascade) runs here.
+    crate::syscall::process::cad_deliver_pending();
+
     // SAFETY: regs is passed from trap handler; sched::current() returns the running task.
     unsafe {
         if regs.is_null() {

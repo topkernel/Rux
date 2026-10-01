@@ -720,6 +720,16 @@ pub fn do_exit(exit_code: i32) -> ! {
             wait_for_thread_group_death(current);
         }
 
+        // ===== PID 1 exit: power the machine down =====
+        // No orphan is ever reaped or respawned without init — the
+        // shutdown(8) init-signal path lands here (init kills every user
+        // process, including shutdown(8) itself, then exits). Runs the
+        // reboot(2) cascade (never returns) unless one is already in
+        // flight — that caller is waiting for exactly this exit.
+        if current_pid == 1 {
+            crate::syscall::process::init_exited_fallback_cascade();
+        }
+
         // R9-3: close the preempt window between ZOMBIE and the deferred
         // notify — a timer IRQ landing here would schedule() us out with
         // state != RUNNING, and lines below (the notify arm) would never

@@ -124,6 +124,21 @@ if [ -f "$SLIRP_TEST_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; th
     fi
 fi
 
+# Build + install the reboot(2) cascade E2E probe (static glibc — needs
+# printf for the serial markers; exercises syscall NR 142 straight down
+# to the SBI system reset).
+REBOOT_PROBE_SRC="$PROJECT_ROOT/test/reboot_probe.c"
+if [ -f "$REBOOT_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing reboot_probe to /test/reboot_probe..."
+    if riscv64-linux-gnu-gcc -static -O2 \
+         -o "$STAGING/test/reboot_probe" "$REBOOT_PROBE_SRC"; then
+        chmod +x "$STAGING/test/reboot_probe"
+    else
+        echo "Warning: reboot_probe failed to compile (skipped)"
+        rm -f "$STAGING/test/reboot_probe"
+    fi
+fi
+
 # Copy linux-ltp test suite
 LINUX_LTP_DIR="$PROJECT_ROOT/userspace/linux-ltp/output"
 if [ -d "$LINUX_LTP_DIR/testcases" ]; then

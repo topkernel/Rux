@@ -135,6 +135,17 @@ static UART_IRQ_ARMED: core::sync::atomic::AtomicBool =
 /// Rolling match position for the DFX "DUMP!" magic (RX IRQ context only).
 static mut DUMP_MAGIC_POS: usize = 0;
 
+/// Rolling match position for the serial Ctrl-Alt-Del sequence (RX IRQ
+/// context only). The xterm/modifier encoding of Ctrl+Alt+Delete is
+/// CSI 3;7~ (ESC [ 3 ; 7 ~): tilcode 3 = Delete, modifier 7 = 1 + Ctrl(4)
+/// + Alt(2) — what a real terminal emulator sends for the combo. The
+/// sequence stays in the RX ring (a raw-mode reader just sees unknown
+/// escape bytes); only the CAD latch side effect fires.
+static mut CAD_SEQ_POS: usize = 0;
+/// Ctrl-Alt-Del over the serial console: ESC [ 3 ; 7 ~ (xterm CSI-u style
+/// modifier encoding — see CAD_SEQ_POS).
+const CAD_MAGIC: &[u8; 6] = b"\x1b[3;7~";
+
 /// Wait queue for blocking reads — readers sleep here when buffer is empty.
 static UART_READ_WAITQ: crate::process::wait::WaitQueueHead =
     crate::process::wait::WaitQueueHead::new();
@@ -382,6 +393,26 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
                         DUMP_MAGIC_POS = 0;
                         crate::dfx::taskdump::dump_all_tasks("uart-magic");
                     }
+                }
+
+                // Serial Ctrl-Alt-Del: same rolling-window matcher, but
+                // always armed (C.A.D is a standard console feature, not a
+                // debug switch). Only latches an atomic — the actual
+                // signal/cascade runs in task context via
+                // cad_deliver_pending() (the ISIG rule: never walk the pid
+                // hash from the RX IRQ).
+                CAD_SEQ_POS = if CAD_SEQ_POS < CAD_MAGIC.len()
+                    && c == CAD_MAGIC[CAD_SEQ_POS]
+                {
+                    CAD_SEQ_POS + 1
+                } else if c == CAD_MAGIC[0] {
+                    1
+                } else {
+                    0
+                };
+                if CAD_SEQ_POS == CAD_MAGIC.len() {
+                    CAD_SEQ_POS = 0;
+                    crate::syscall::process::ctrl_alt_del_latch();
                 }
             }
         }

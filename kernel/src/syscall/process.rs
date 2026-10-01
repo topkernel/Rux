@@ -3640,6 +3640,8 @@ pub fn sys_reboot(args: SyscallArgs) -> i64 {
     const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
     const LINUX_REBOOT_CMD_HALT: u32 = 0xCDEF0123;
     const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
+    const LINUX_REBOOT_CMD_CAD_OFF: u32 = 0x00000000;
+    const LINUX_REBOOT_CMD_CAD_ON: u32 = 0x89ABCDEF;
 
     // CAP_SYS_BOOT required to reboot
     if !crate::security::capable(crate::security::CAP_SYS_BOOT) {
@@ -3660,12 +3662,128 @@ pub fn sys_reboot(args: SyscallArgs) -> i64 {
                 core::hint::spin_loop();
             }
         }
+        // C.A.D mode switches (util-linux `ctrlaltdel`): 0 = SIGINT to
+        // init on Ctrl-Alt-Del (Linux default), 1 = immediate reboot.
+        LINUX_REBOOT_CMD_CAD_OFF => {
+            CAD_IMMEDIATE.store(false, core::sync::atomic::Ordering::Release);
+            0
+        }
+        LINUX_REBOOT_CMD_CAD_ON => {
+            CAD_IMMEDIATE.store(true, core::sync::atomic::Ordering::Release);
+            0
+        }
         _ => -(errno::EINVAL as i64),
     }
 }
 
+// ============================================================================
+// Ctrl-Alt-Del (SA_CAD semantics)
+// ============================================================================
+
+/// reboot(2) CAD mode: false = send SIGINT to init (Linux default),
+/// true = reboot immediately (LINUX_REBOOT_CMD_CAD_ON).
+static CAD_IMMEDIATE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// CAD latched by an input detector (UART RX IRQ / evdev push) and executed
+/// in task context by `cad_deliver_pending()` — the ISIG pending pattern:
+/// the pid-hash walk inside send_signal must not run from IRQ context.
+static PENDING_CAD: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Last jiffy a CAD was executed (rate-limit: ignore repeats within the
+/// window so a held key or a retried sequence cannot re-enter).
+static LAST_CAD_JIFFY: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// CAD de-dup window in jiffies (~2s at 100Hz).
+const CAD_RATELIMIT_JIFFIES: u64 = 200;
+
+/// Latch a Ctrl-Alt-Del from an input detector. IRQ-safe: only atomic
+/// stores, no locks, no pid-hash walks.
+pub fn ctrl_alt_del_latch() {
+    crate::println!("kernel: Ctrl-Alt-Del detected");
+    PENDING_CAD.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Execute any latched Ctrl-Alt-Del. Called in TASK context from
+/// check_and_deliver_signals (every return to user space).
+pub fn cad_deliver_pending() {
+    if !PENDING_CAD.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST_CAD_JIFFY.load(core::sync::atomic::Ordering::Acquire);
+    if now.saturating_sub(last) < CAD_RATELIMIT_JIFFIES {
+        return; // duplicate within the window
+    }
+    LAST_CAD_JIFFY.store(now, core::sync::atomic::Ordering::Release);
+
+    if CAD_IMMEDIATE.load(core::sync::atomic::Ordering::Acquire) {
+        // C.A.D enabled (reboot(2) CAD_ON): Linux runs an emergency
+        // restart. Rux routes it through the full cascade so the root
+        // filesystem still gets synced before the SBI reset. Runs in the
+        // delivering task's context and never returns.
+        crate::println!("kernel: CAD immediate mode -> reboot");
+        shutdown_cascade(LINUX_REBOOT_CMD_RESTART);
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    // Linux default (C.A_D disabled): SIGINT to PID 1 — init decides what
+    // a Ctrl-Alt-Del means (systemd maps it to reboot; udesk-init calls
+    // reboot(2) itself). A tiny init that ignores SIGINT just keeps the
+    // session alive, exactly like an unhandled CAD under Linux.
+    crate::println!("kernel: CAD -> sending SIGINT to init (pid 1)");
+    let _ = crate::signal::send_signal(1, crate::signal::Signal::SIGINT as i32);
+}
+
+/// The RESTART cmd value, shared by sys_reboot and the CAD immediate path.
+const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
+
 /// P1: how long to wait for PID 1 to exit after SIGTERM (5 seconds).
 const SHUTDOWN_PID1_TIMEOUT_SECS: u64 = 5;
+
+/// PID 1 "has exited" test for the cascade wait: PID 1 is parented to the
+/// kernel, so a dead init lingers as a ZOMBIE nobody reaps — count ZOMBIE
+/// (and DEAD) as exited instead of burning the whole timeout.
+fn pid1_exited() -> bool {
+    match crate::process::find_task_by_pid(1) {
+        None => true,
+        Some(t) => t.state().is_dead(),
+    }
+}
+
+/// Set when a shutdown cascade is in flight (reboot(2) caller, the CAD
+/// immediate path, or the init-exit fallback): a second entry must not
+/// re-drive the teardown (double ext4 sync / racing SBI calls).
+static SHUTDOWN_CASCADE_ACTIVE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The POWER_OFF cmd value, shared by sys_reboot's match arms' callers
+/// and the init-exit fallback (RESTART already has a module-level const
+/// further up).
+const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
+
+/// Kernel fallback for "PID 1 exited" — the shutdown(8) init-signal path
+/// ends here: init tears down every user process (including shutdown(8)
+/// itself), exits, and the kernel completes the cascade. Without init no
+/// orphan is ever reaped or respawned, so a real OS powers off (Linux
+/// panics instead). Called from do_exit() of PID 1 before the ZOMBIE
+/// transition; never returns unless another cascade already owns the
+/// teardown (a reboot(2) caller is then waiting for exactly this exit).
+pub fn init_exited_fallback_cascade() {
+    if SHUTDOWN_CASCADE_ACTIVE.load(core::sync::atomic::Ordering::Acquire) {
+        return; // reboot(2)/CAD cascade in flight — it finishes the job
+    }
+    crate::println!("kernel: init exited — powering system down");
+    shutdown_cascade(LINUX_REBOOT_CMD_POWER_OFF);
+    // shutdown_cascade returns only on total SBI failure — park.
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 /// P1 shutdown cascade body. Performs the ordered teardown and drives the
 /// machine into the reset/shutdown SBI call; returns only if every SBI
@@ -3674,6 +3792,18 @@ fn shutdown_cascade(cmd: u32) {
     const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
     const LINUX_REBOOT_CMD_HALT: u32 = 0xCDEF0123;
     const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
+
+    // Single-driver rule: the first cascade entry claims the teardown;
+    // later entries (e.g. a reboot(2) racing the init-exit fallback)
+    // park forever instead of double-driving it.
+    if SHUTDOWN_CASCADE_ACTIVE.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        crate::println!("reboot: cascade already in progress");
+        loop {
+            // SAFETY: wfi halts the hart until an interrupt; the machine
+            // is going down on the other CPU.
+            unsafe { core::arch::asm!("wfi") };
+        }
+    }
 
     // --- 1. Tell init (PID 1) to shut down (SIGTERM, systemd sequence) ---
     let my_pid = crate::sched::get_current_pid();
@@ -3685,13 +3815,13 @@ fn shutdown_cascade(cmd: u32) {
         let deadline = crate::drivers::timer::get_jiffies()
             + crate::drivers::timer::msecs_to_jiffies(SHUTDOWN_PID1_TIMEOUT_SECS * 1000);
         while crate::drivers::timer::get_jiffies() < deadline {
-            if crate::process::find_task_by_pid(1).is_none() {
+            if pid1_exited() {
                 crate::println!("reboot: init exited");
                 break;
             }
             sleep_one_tick();
         }
-        if crate::process::find_task_by_pid(1).is_some() {
+        if !pid1_exited() {
             crate::println!("reboot: init did not exit in time, continuing");
         }
     }

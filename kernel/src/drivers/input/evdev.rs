@@ -776,6 +776,14 @@ fn fill_capabilities(
 
 /// Push event to evdev device
 pub fn push_input_event(is_pointer: bool, event: InputEvent) {
+    // Keyboard events feed the Ctrl-Alt-Del detector (SA_CAD semantics):
+    // track Ctrl/Alt state and latch on a Delete press with both held.
+    // Called from the evdev read/poll path — task context — but latching
+    // only (atomic stores) keeps it safe from any context; execution
+    // happens in cad_deliver_pending() on the next return to user.
+    if !is_pointer {
+        cad_detect(event);
+    }
     // SAFETY: EVDEV_KEYBOARD and EVDEV_POINTER are initialized by init_evdev()
     // before any events can be pushed.
     unsafe {
@@ -788,6 +796,44 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
                 dev.push_event(event);
             }
         }
+    }
+}
+
+// ============================================================================
+// Ctrl-Alt-Del detection (virtio-keyboard)
+// ============================================================================
+
+/// Modifier state for the CAD detector (bit flags, IRQ-safe atomics not
+/// needed: push_input_event callers hold no shared state and the worst
+/// race is a missed/extra detection on a simultaneous key event).
+static CAD_MOD_CTRL: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static CAD_MOD_ALT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Track Ctrl/Alt and latch a Ctrl-Alt-Del: a Delete PRESS while at least
+/// one Ctrl and one Alt are down (left or right either). Value semantics
+/// per input.h: 0 = release, 1 = press, 2 = autorepeat (repeat counts —
+/// a held Delete keeps telling the user wants out).
+fn cad_detect(event: InputEvent) {
+    if event.type_ != EV_KEY {
+        return;
+    }
+    match event.code {
+        super::event::KEY_LEFTCTRL | super::event::KEY_RIGHTCTRL => {
+            CAD_MOD_CTRL.store(event.value != 0, core::sync::atomic::Ordering::Release);
+        }
+        super::event::KEY_LEFTALT | super::event::KEY_RIGHTALT => {
+            CAD_MOD_ALT.store(event.value != 0, core::sync::atomic::Ordering::Release);
+        }
+        super::event::KEY_DELETE if event.value != 0 => {
+            if CAD_MOD_CTRL.load(core::sync::atomic::Ordering::Acquire)
+                && CAD_MOD_ALT.load(core::sync::atomic::Ordering::Acquire)
+            {
+                crate::syscall::process::ctrl_alt_del_latch();
+            }
+        }
+        _ => {}
     }
 }
 

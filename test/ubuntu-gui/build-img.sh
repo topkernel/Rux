@@ -21,6 +21,7 @@ cp -a "$SRC/." "$ROOT/"
 
 $CC -static -O2 -Wall -Wextra -o "$ROOT/usr/bin/udesk" "$WT/test/ubuntu-gui/udesk.c"
 $CC -static -O2 -Wall -Wextra -o "$ROOT/sbin/udesk-init" "$WT/test/ubuntu-gui/init.c"
+$CC -static -O2 -Wall -Wextra -o "$ROOT/sbin/shutdown" "$WT/test/ubuntu-gui/shutdown.c"
 
 # preserve any pre-existing init exactly once
 if [ ! -e "$ROOT/sbin/init.dist" ]; then

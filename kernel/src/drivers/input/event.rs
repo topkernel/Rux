@@ -152,6 +152,9 @@ pub const KEY_RIGHT: u16 = 0x6a;
 pub const KEY_RIGHTCTRL: u16 = 0x61;
 pub const KEY_RIGHTALT: u16 = 0x64;
 
+/// Delete key (the Ctrl-Alt-Del trio's terminal)
+pub const KEY_DELETE: u16 = 0x6f;
+
 // ============================================================================
 // Key values
 // ============================================================================
