@@ -9,6 +9,9 @@
 //!   /proc/sys/kernel/hostname       rw (Linux: uts; <= 64 bytes, no NUL)
 //!   /proc/sys/kernel/pid_max        rw (default 32768; clamped 2..=4194304)
 //!   /proc/sys/kernel/ostype         r  ("Linux" — compat for userland)
+//!   /proc/sys/kernel/core_pattern   rw (default "core.%p"; specifiers
+//!                                    %p/%e/%s/%u/%g/%h/%% expanded at
+//!                                    dump time, see process::coredump)
 //!   /proc/sys/vm/overcommit_memory  rw (default 0; stored, NO effect on
 //!                                    the allocator — recorded divergence)
 //!   /proc/sys/fs/file-max           rw (default 4096*16 per our MAX_FDS;
@@ -42,6 +45,45 @@ pub static OVERCOMMIT_MEMORY: AtomicU32 = AtomicU32::new(0);
 /// enforcement is per-process RLIMIT_NOFILE today (no global file table
 /// accounting); recorded divergence.
 pub static FILE_MAX: AtomicU64 = AtomicU64::new(64 * 1024);
+
+/// /proc/sys/kernel/core_pattern — Linux CORENAME_MAX_SIZE = 128.
+pub const CORENAME_MAX_SIZE: usize = 128;
+
+/// /proc/sys/kernel/core_pattern storage.
+///
+/// Default "core.%p" (Linux ships plain "core"; the pid suffix keeps
+/// concurrent crash dumps from overwriting each other — the recorded
+/// divergence is deliberate for bring-up debugging). A leading '|' (pipe
+/// to a usermode helper) is REJECTED at write time: no helper infra
+/// exists, and silently accepting it would lose every core.
+pub struct CorePattern {
+    buf: [u8; CORENAME_MAX_SIZE],
+    len: usize,
+}
+
+impl CorePattern {
+    const DEFAULT: &[u8] = b"core.%p";
+
+    /// Const initializer seeding the default pattern.
+    pub const fn new() -> Self {
+        let mut buf = [0u8; CORENAME_MAX_SIZE];
+        let mut i = 0;
+        while i < Self::DEFAULT.len() {
+            buf[i] = Self::DEFAULT[i];
+            i += 1;
+        }
+        Self { buf, len: Self::DEFAULT.len() }
+    }
+
+    /// Current pattern bytes (no NUL, no newline).
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// The live core_pattern (read by process::coredump::do_coredump).
+pub static CORE_PATTERN: crate::sync::Spinlock<CorePattern> =
+    crate::sync::Spinlock::new(CorePattern::new());
 
 // ============================================================================
 // Generators (read side)
@@ -157,4 +199,33 @@ pub fn write_file_max(input: &[u8]) -> i32 {
         }
         Err(e) => e,
     }
+}
+
+pub fn generate_core_pattern() -> Vec<u8> {
+    let mut out = CORE_PATTERN.lock().as_bytes().to_vec();
+    out.push(b'\n');
+    out
+}
+
+pub fn write_core_pattern(input: &[u8]) -> i32 {
+    // sysctl(8) appends '\n'; tolerate it.
+    let s: &[u8] = if input.last() == Some(&b'\n') {
+        &input[..input.len() - 1]
+    } else {
+        input
+    };
+    let einval = -(crate::errno::constants::EINVAL as i32);
+    if s.is_empty() || s.len() > CORENAME_MAX_SIZE {
+        return einval;
+    }
+    if s[0] == b'|' {
+        // Pipe-to-helper patterns (systemd-coredump) need a usermode
+        // helper; rejecting keeps the write loud instead of losing cores.
+        crate::pr_warn!("core_pattern: pipe handler not supported\n");
+        return einval;
+    }
+    let mut pat = CORE_PATTERN.lock();
+    pat.buf[..s.len()].copy_from_slice(s);
+    pat.len = s.len();
+    0
 }

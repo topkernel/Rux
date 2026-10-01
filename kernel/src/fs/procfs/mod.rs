@@ -546,6 +546,13 @@ impl ProcFSSuperBlock {
             sysctl::generate_cap_last_cap,
             self.alloc_ino(),
         )));
+        // Core dump file name pattern (consumed by process::coredump).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"core_pattern".to_vec(),
+            sysctl::generate_core_pattern,
+            sysctl::write_core_pattern,
+            self.alloc_ino(),
+        )));
 
         let vm = Arc::new(ProcFSNode::new_dir(b"vm".to_vec(), self.alloc_ino()));
         sys.add_child(vm.clone());

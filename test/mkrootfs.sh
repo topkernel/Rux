@@ -139,6 +139,21 @@ if [ -f "$REBOOT_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; 
     fi
 fi
 
+# Build + install the core dump E2E probe (static glibc, with -g so the
+# host-side gdb --core symbolization of the crash PC works out of the
+# box; raises RLIMIT_CORE then takes a NULL-deref SIGSEGV).
+COREDUMP_PROBE_SRC="$PROJECT_ROOT/test/coredump_probe.c"
+if [ -f "$COREDUMP_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing coredump_probe to /test/coredump_probe..."
+    if riscv64-linux-gnu-gcc -static -O2 -g \
+         -o "$STAGING/test/coredump_probe" "$COREDUMP_PROBE_SRC"; then
+        chmod +x "$STAGING/test/coredump_probe"
+    else
+        echo "Warning: coredump_probe failed to compile (skipped)"
+        rm -f "$STAGING/test/coredump_probe"
+    fi
+fi
+
 # Copy linux-ltp test suite
 LINUX_LTP_DIR="$PROJECT_ROOT/userspace/linux-ltp/output"
 if [ -d "$LINUX_LTP_DIR/testcases" ]; then

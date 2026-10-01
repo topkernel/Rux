@@ -5,13 +5,14 @@
 //! Core dump support (P1: crash diagnostics).
 //!
 //! When a fatal signal whose default action is "core dump" terminates a
-//! process, `do_coredump()` writes an ELF core file ("core" in the dying
-//! task's current working directory — /proc/sys/kernel/core_pattern is not
-//! implemented, the name is fixed) containing:
+//! process, `do_coredump()` writes an ELF core file into the dying task's
+//! current working directory (absolute patterns go to the named path)
+//! containing:
 //!
 //! - ELF64 header (ET_CORE, EM_RISC-V)
 //! - one PT_NOTE segment with NT_PRSTATUS (full GP register set + pid
-//!   lineage) and NT_PRPSINFO (comm)
+//!   lineage), NT_PRPSINFO (comm) and NT_AUXV (the exec-time auxiliary
+//!   vector saved in the mm)
 //! - one PT_LOAD segment per readable VMA, dumped through the target's
 //!   page tables (present pages carry their contents, non-present pages
 //!   are zero-filled)
@@ -20,6 +21,14 @@
 //! computed first (under the RLIMIT_CORE budget) so the program headers
 //! describe the file exactly, then the header block and the segment
 //! contents are streamed through the created file.
+//!
+//! File naming follows /proc/sys/kernel/core_pattern (default
+//! "core.%p"): %p pid, %e comm, %s signal number, %u/%g uid/gid,
+//! %h hostname, %% literal '%'. A relative name lands in the dying
+//! task's cwd; an empty cwd falls back to /core. No NT_FPREGSET is
+//! emitted — FP state is only banked into ThreadStruct at context
+//! switch, so it is stale in the trap-time exit path (recorded
+//! limitation).
 //!
 //! `signal_makes_core()` lists the core-dumping signals. On success the
 //! task is marked `core_dumped`, which wait4 encodes as WCOREDUMP (0x80)
@@ -39,6 +48,8 @@ const EM_RISCV: u16 = 243;
 const NT_PRSTATUS: u32 = 1;
 /// NT_PRPSINFO note type.
 const NT_PRPSINFO: u32 = 3;
+/// NT_AUXV note type.
+const NT_AUXV: u32 = 6;
 
 /// Core dump I/O chunk (one page).
 const CHUNK: usize = 4096;
@@ -97,22 +108,26 @@ fn push_phdr(out: &mut Vec<u8>, p: &Elf64Phdr) {
 
 /// Build the NT_PRSTATUS descriptor for the dying task.
 ///
-/// Layout (glibc elf_prstatus, 64-bit):
+/// Layout (Linux elf_prstatus, 64-bit — byte-exact so host gdb's
+/// `.reg` extraction finds the register block):
 ///   0   elf_siginfo { si_signo, si_code, si_errno }   3 × i32
 ///   12  pr_cursig (i16 + 2 pad)
-///   16  pr_pid, pr_ppid, pr_pgrp, pr_sid              4 × i32
-///   32  pr_utime, pr_stime, pr_cutime, pr_cstime      4 × timeval(16)
-///   96  pr_reg (elf_gregset_t: 32 × u64 = 256)
-///   352 pr_fpvalid (i32) + 4 pad                      -> descsz 360
+///   16  pr_sigpend, pr_sighold                       2 × u64
+///   32  pr_pid, pr_ppid, pr_pgrp, pr_sid              4 × i32
+///   48  pr_utime, pr_stime, pr_cutime, pr_cstime      4 × timeval(16)
+///   112 pr_reg (elf_gregset_t: 32 × u64 = 256)
+///   368 pr_fpvalid (i32) + 4 pad                      -> descsz 376
 ///
 /// # Safety
 /// `task` is the current, dying task; its trap frame is quiescent.
 unsafe fn build_prstatus(task: *mut Task, sig: i32) -> Vec<u8> {
-    let mut d = Vec::with_capacity(360);
+    let mut d = Vec::with_capacity(376);
     push_u32(&mut d, sig as u32); // si_signo
     push_u32(&mut d, 0); // si_code
     push_u32(&mut d, 0); // si_errno
     push_u32(&mut d, sig as u32); // pr_cursig (i16 + 2 pad)
+    push_u64(&mut d, 0); // pr_sigpend
+    push_u64(&mut d, 0); // pr_sighold
     // SAFETY: pid/ppid/pgid/sid accessors on a valid task.
     unsafe {
         push_u32(&mut d, (*task).pid());
@@ -136,7 +151,7 @@ unsafe fn build_prstatus(task: *mut Task, sig: i32) -> Vec<u8> {
         d.extend_from_slice(&[0u8; 256]);
     }
     push_u32(&mut d, 0); // pr_fpvalid (no FP note written)
-    while d.len() < 360 {
+    while d.len() < 376 {
         d.push(0);
     }
     d
@@ -144,15 +159,26 @@ unsafe fn build_prstatus(task: *mut Task, sig: i32) -> Vec<u8> {
 
 /// Build the NT_PRPSINFO descriptor (state, ids, comm).
 ///
+/// Layout (Linux elf_prpsinfo, 64-bit — pr_flag needs 4 bytes of
+/// alignment padding after the pr_state quad):
+///   0   pr_state, pr_sname, pr_zomb, pr_nice         4 × i8
+///   4   (4 pad)
+///   8   pr_flag                                        u64
+///   16  pr_uid, pr_gid                                 2 × u32
+///   24  pr_pid, pr_ppid, pr_pgrp, pr_sid               4 × i32
+///   40  pr_fname[16]
+///   56  pr_psargs[80]                                 -> descsz 136
+///
 /// # Safety
 /// `task` is the current, dying task.
 unsafe fn build_prpsinfo(task: *mut Task) -> Vec<u8> {
     let mut d = Vec::with_capacity(136);
-    // pr_state/pr_sname/pr_zomb/pr_nice.
+    // pr_state/pr_sname/pr_zomb/pr_nice + alignment pad.
     d.push(4);
     d.push(b'T');
     d.push(0);
     d.push(0);
+    push_u32(&mut d, 0); // align pr_flag to 8
     push_u64(&mut d, 0); // pr_flag
     // SAFETY: cred accessors on a valid task.
     unsafe {
@@ -164,12 +190,12 @@ unsafe fn build_prpsinfo(task: *mut Task) -> Vec<u8> {
         push_u32(&mut d, (*task).pgid());
         push_u32(&mut d, (*task).sid());
     }
-    // pr_fname[16] (offset 36).
+    // pr_fname[16] (offset 40).
     // SAFETY: comm is a NUL-terminated 16-byte field.
     let comm = unsafe { (*task).comm() };
     let name_len = comm.iter().position(|&b| b == 0).unwrap_or(16);
     d.extend_from_slice(&comm[..name_len]);
-    while d.len() < 52 {
+    while d.len() < 56 {
         d.push(0);
     }
     // pr_psargs[80]: the executable path, truncated.
@@ -177,10 +203,76 @@ unsafe fn build_prpsinfo(task: *mut Task) -> Vec<u8> {
     let exe = unsafe { (*task).get_exe_path() };
     let args_len = exe.len().min(79);
     d.extend_from_slice(&exe[..args_len]);
-    while d.len() < 132 {
+    while d.len() < 136 {
         d.push(0);
     }
     d
+}
+
+// ==================== core_pattern expansion ====================
+
+/// Expand /proc/sys/kernel/core_pattern for the dying task.
+///
+/// Supported specifiers (core(5) subset): %p pid, %e comm, %s signal
+/// number, %u uid, %g gid, %h hostname, %% literal '%'. Unknown
+/// specifiers pass through unchanged, as in Linux.
+///
+/// # Safety
+/// `task` is the current, dying task.
+unsafe fn expand_core_pattern(task: *mut Task, sig: i32) -> Vec<u8> {
+    use alloc::string::ToString;
+
+    let pattern = crate::fs::procfs::sysctl::CORE_PATTERN
+        .lock()
+        .as_bytes()
+        .to_vec();
+    // SAFETY: comm is a NUL-terminated 16-byte field of the valid task.
+    let comm: &[u8] = unsafe {
+        let c = (*task).comm();
+        let n = c.iter().position(|&b| b == 0).unwrap_or(c.len());
+        &c[..n]
+    };
+    // SAFETY: cred accessor on a valid task.
+    let (uid, gid) = unsafe {
+        let cred = (*task).cred();
+        (cred.uid, cred.gid)
+    };
+    let hostname = crate::process::ns::current_uts_ns().get_hostname();
+
+    let mut out = Vec::with_capacity(pattern.len() + 24);
+    let mut i = 0;
+    while i < pattern.len() {
+        let b = pattern[i];
+        if b != b'%' || i + 1 >= pattern.len() {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        // A trailing lone '%' is kept verbatim.
+        match pattern[i + 1] {
+            b'p' => {
+                // SAFETY: pid accessor on a valid task.
+                out.extend_from_slice(unsafe { (*task).pid().to_string() }.as_bytes())
+            }
+            b'e' => out.extend_from_slice(comm),
+            b's' => out.extend_from_slice(sig.to_string().as_bytes()),
+            b'u' => out.extend_from_slice(uid.to_string().as_bytes()),
+            b'g' => out.extend_from_slice(gid.to_string().as_bytes()),
+            b'h' => out.extend_from_slice(&hostname),
+            b'%' => out.push(b'%'),
+            other => {
+                out.push(b'%');
+                out.push(other);
+            }
+        }
+        i += 2;
+    }
+    if out.is_empty() {
+        // Defensive: write side never stores an empty pattern, but a
+        // default-named core beats a pathologically named one.
+        out.extend_from_slice(b"core");
+    }
+    out
 }
 
 // ==================== memory reader ====================
@@ -315,6 +407,17 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
         push_note(&mut notes, NT_PRSTATUS, &build_prstatus(task, sig));
         push_note(&mut notes, NT_PRPSINFO, &build_prpsinfo(task));
     }
+    // NT_AUXV: the exec-time auxiliary vector snapshotted in the mm —
+    // lets debuggers locate the interpreter/vDSO/entry without walking
+    // the dying thread's (possibly clobbered) stack.
+    let auxv_words = mm.saved_auxv();
+    if !auxv_words.is_empty() {
+        let mut auxv_desc = Vec::with_capacity(auxv_words.len() * 8);
+        for w in &auxv_words {
+            push_u64(&mut auxv_desc, *w);
+        }
+        push_note(&mut notes, NT_AUXV, &auxv_desc);
+    }
 
     // File layout: ehdr(64) + phdrs + notes, then page-aligned segments.
     // Segment sizes are capped by the remaining RLIMIT_CORE budget so the
@@ -350,15 +453,24 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
     // rewrite the header counts accordingly.
     let real_phnum = 1 + planned.len();
 
-    // ---- Open the core file (fixed name "core" in the cwd) ----
-    let cwd = unsafe { (*task).get_cwd() };
-    let cwd_str = alloc::string::String::from_utf8_lossy(&cwd).into_owned();
-    let path = if cwd_str.ends_with('/') {
-        alloc::format!("{}core", cwd_str)
-    } else if cwd_str.is_empty() {
-        alloc::string::String::from("/core")
+    // ---- Open the core file (core_pattern, default "core.%p") ----
+    // Absolute patterns name the dump directly; relative ones land in the
+    // dying task's cwd, with /core as the no-cwd fallback.
+    // SAFETY: task is current and dying.
+    let name = unsafe { expand_core_pattern(task, sig) };
+    let name_str = alloc::string::String::from_utf8_lossy(&name).into_owned();
+    let path = if name_str.starts_with('/') {
+        name_str
     } else {
-        alloc::format!("{}/core", cwd_str)
+        let cwd = unsafe { (*task).get_cwd() };
+        let cwd_str = alloc::string::String::from_utf8_lossy(&cwd).into_owned();
+        if cwd_str.is_empty() {
+            alloc::format!("/{}", name_str)
+        } else if cwd_str.ends_with('/') {
+            alloc::format!("{}{}", cwd_str, name_str)
+        } else {
+            alloc::format!("{}/{}", cwd_str, name_str)
+        }
     };
 
     let open_flags = FileFlags::O_WRONLY | FileFlags::O_CREAT | FileFlags::O_TRUNC;

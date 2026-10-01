@@ -595,6 +595,11 @@ pub(crate) fn do_execve_elf(
 
     let adjusted_stack_virt_addr = phys_to_virt(PhysAddr::new(adjusted_phys_stack_top as u64)).bits();
 
+    // Saved auxv for core dumps (NT_AUXV): the (type, value) words exactly
+    // as written to the user stack below, including the AT_NULL pair.
+    // Handed to the new mm after it is created — Linux mm->saved_auxv.
+    let mut auxv_words: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(auxv_slots + 2);
+
     // SAFETY: adjusted_stack_virt_addr points into freshly mapped and allocated user stack
     // memory. All offsets are pre-calculated to stay within the allocation bounds.
     unsafe {
@@ -746,6 +751,8 @@ pub(crate) fn do_execve_elf(
         for (typ, val) in auxv {
             core::ptr::write_volatile(stack_ptr.offset(offset), *typ);
             core::ptr::write_volatile(stack_ptr.offset(offset + 1), *val);
+            auxv_words.push(*typ);
+            auxv_words.push(*val);
             offset += 2;
         }
 
@@ -753,6 +760,8 @@ pub(crate) fn do_execve_elf(
         // AT_NULL
         core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
         core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
+        auxv_words.push(AT_NULL);
+        auxv_words.push(0);
 
         // 16 random bytes AT AT_RANDOM's address (time-seeded LCG; a real
         // entropy source is a separate work item).
@@ -820,6 +829,10 @@ pub(crate) fn do_execve_elf(
         let env_end_addr = adjusted_stack_top + (env_end_offset * 8) as u64;
         new_addr_space.setup_envp(env_start_addr as usize, env_end_addr as usize);
     }
+
+    // Save the auxv into the mm so a fatal-signal core dump can emit
+    // NT_AUXV without depending on the (clobberable) user stack.
+    new_addr_space.set_saved_auxv(&auxv_words);
 
     // Set up stack VMA with GROWSDOWN flag and stack limit.
     // stack_bottom here is the mapped bottom of the high stack (see the

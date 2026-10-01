@@ -39,6 +39,10 @@ use crate::mm::vma::{VmaManager, Vma, VmaFlags, VmaType};
 use crate::mm::page::VirtAddr;
 use crate::mm::pagemap::{MapError, Perm, PageTableType};
 
+/// Capacity of the saved auxv, in u64 words (Linux AT_VECTOR_SIZE = 22
+/// (type, value) pairs = 44 words).
+pub const AT_VECTOR_SIZE: usize = 44;
+
 /// Memory Descriptor
 ///
 /// Structure describing a process's complete address space.
@@ -111,6 +115,15 @@ pub struct MmStruct {
 
     /// Environment variables end address
     env_end: AtomicUsize,
+
+    /// Saved auxiliary vector (core dump NT_AUXV source).
+    ///
+    /// Linux keeps the exec-time auxv in mm->saved_auxv so a later core
+    /// dump can emit NT_AUXV without walking the (possibly clobbered)
+    /// user stack. AT_VECTOR_SIZE-sized word array: (type, value) pairs,
+    /// terminated by the AT_NULL pair written by copy_strings; entries
+    /// past the terminator stay zero.
+    saved_auxv: RwSpinlock<[u64; AT_VECTOR_SIZE]>,
 
     // ==================== Virtual Memory Statistics ====================
     /// Total virtual memory page count
@@ -230,6 +243,7 @@ impl MmStruct {
             arg_end: AtomicUsize::new(0),
             env_start: AtomicUsize::new(0),
             env_end: AtomicUsize::new(0),
+            saved_auxv: RwSpinlock::new([0; AT_VECTOR_SIZE]),
             // Virtual memory statistics
             total_vm: AtomicU64::new(0),
             locked_vm: AtomicU64::new(0),
@@ -873,6 +887,35 @@ impl MmStruct {
     pub fn setup_envp(&self, env_start: usize, env_end: usize) {
         self.set_env_start(env_start);
         self.set_env_end(env_end);
+    }
+
+    /// Save the exec-time auxiliary vector for a later core dump
+    /// (NT_AUXV source). `words` is (type, value) pairs ending with the
+    /// AT_NULL pair; anything past the terminator or past
+    /// AT_VECTOR_SIZE words is dropped.
+    pub fn set_saved_auxv(&self, words: &[u64]) {
+        let n = words.len().min(AT_VECTOR_SIZE);
+        let mut auxv = self.saved_auxv.write();
+        auxv[..n].copy_from_slice(&words[..n]);
+    }
+
+    /// Read back the saved auxiliary vector as (type, value) pairs up to
+    /// and including the AT_NULL terminator. Returns an empty Vec when
+    /// no auxv was ever saved.
+    pub fn saved_auxv(&self) -> alloc::vec::Vec<u64> {
+        let auxv = self.saved_auxv.read();
+        // AT_NULL == 0 terminates the pair list.
+        let mut n = 0;
+        while n + 1 < AT_VECTOR_SIZE && auxv[n] != 0 {
+            n += 2;
+        }
+        if n == 0 {
+            return alloc::vec::Vec::new();
+        }
+        // Include the AT_NULL pair itself (n points AT it), clamped to the
+        // array for a completely full vector with no terminator.
+        let end = (n + 2).min(AT_VECTOR_SIZE);
+        auxv[..end].to_vec()
     }
 }
 

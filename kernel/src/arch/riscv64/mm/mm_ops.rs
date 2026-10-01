@@ -886,6 +886,14 @@ impl MmStruct {
         new_space.set_arg_end(self.arg_end());
         new_space.set_env_start(self.env_start());
         new_space.set_env_end(self.env_end());
+        // Linux dup_mm copies mm->saved_auxv: a forked child that later
+        // crashes dumps the auxv of the exec that built its image.
+        {
+            let auxv = self.saved_auxv();
+            if !auxv.is_empty() {
+                new_space.set_saved_auxv(&auxv);
+            }
+        }
 
         // RSS (review 4.14): the child's page tables map (COW-shared) every
         // page the parent had resident — inherit the count so OOM badness
