@@ -226,6 +226,12 @@ fn try_expand_stack(
             // This page was just allocated and is not yet shared, so exclusive access is guaranteed.
             unsafe {
                 (*page).set_flag(PageFlag::Anonymous);
+                // SwapBacked + LRU_INACTIVE_ANON membership make the page
+                // visible to the reclaim engine — vmscan only swaps out
+                // pages that sit on LRU_INACTIVE_ANON with SwapBacked set.
+                // Without this, anonymous demand faults accumulate as
+                // unreclaimable memory and the system OOMs with swap idle.
+                (*page).set_flag(PageFlag::SwapBacked);
                 (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
                 (*page).inc_mapcount();
                 crate::mm::rmap::page_record_mapping(
@@ -233,6 +239,7 @@ fn try_expand_stack(
                     addr_space as *const _ as usize,
                     fault_addr.bits() as usize,
                 );
+                crate::mm::lru::page_add_anon_lru(&*page);
             }
         }
     }
@@ -537,13 +544,31 @@ file.set_pos(saved_pos);
             // The page was just allocated and mapped, so we have exclusive access.
             unsafe {
                 match vma_type {
-                    VmaType::Anonymous | VmaType::SharedMemory => {
+                    VmaType::Anonymous => {
                         (*page).set_flag(PageFlag::Anonymous);
+                        // SwapBacked + LRU membership: required for vmscan
+                        // to consider this page for swap-out (see the stack
+                        // growth path above).
+                        (*page).set_flag(PageFlag::SwapBacked);
                         (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
                         (*page).inc_mapcount();
                         // Multi-mapping bookkeeping (review 4.10): record
                         // (mm, vpn) so try_to_unmap can find re-mapped
                         // instances of this frame.
+                        crate::mm::rmap::page_record_mapping(
+                            unsafe { &*page },
+                            addr_space as *const _ as usize,
+                            fault_addr.bits() as usize,
+                        );
+                        crate::mm::lru::page_add_anon_lru(unsafe { &*page });
+                    }
+                    VmaType::SharedMemory => {
+                        (*page).set_flag(PageFlag::Anonymous);
+                        (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+                        (*page).inc_mapcount();
+                        // Shmem stays off the anon LRU: try_to_unmap only
+                        // walks VmaType::Anonymous VMAs, so marking these
+                        // SwapBacked would only add reclaim scan churn.
                         crate::mm::rmap::page_record_mapping(
                             unsafe { &*page },
                             addr_space as *const _ as usize,
@@ -605,7 +630,7 @@ pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
 /// Walks the three-level page table and returns the raw bits of the
 /// leaf PTE, even if V=0 (e.g. a swap entry).  Returns None if the
 /// page table walk cannot reach the leaf level.
-fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
+pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
     use super::PAGE_SHIFT;
 
     let vpn2 = (vaddr.bits() >> 30) & 0x1FF;

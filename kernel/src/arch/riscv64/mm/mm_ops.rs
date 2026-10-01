@@ -127,8 +127,17 @@ impl MmStruct {
             let page = pfn_to_page_mut(phys_addr / (PAGE_SIZE as usize));
             if !page.is_null() {
                 (*page).set_flag(PageFlag::Anonymous);
+                // SwapBacked + LRU membership: make the page reclaimable
+                // via swap-out (vmscan scans LRU_INACTIVE_ANON only).
+                (*page).set_flag(PageFlag::SwapBacked);
                 (*page).set_index(virt_addr.bits() as usize / (PAGE_SIZE as usize));
                 (*page).inc_mapcount();
+                crate::mm::rmap::page_record_mapping(
+                    &*page,
+                    self as *const _ as usize,
+                    virt_addr.bits() as usize,
+                );
+                crate::mm::lru::page_add_anon_lru(&*page);
             }
         }
 
@@ -216,8 +225,17 @@ impl MmStruct {
                                 // check ensures page is valid before dereference.
                                 unsafe {
                                     (*page).set_flag(PageFlag::Anonymous);
+                                    // SwapBacked + LRU membership: heap pages
+                                    // are swap-out candidates too (vmscan).
+                                    (*page).set_flag(PageFlag::SwapBacked);
                                     (*page).set_index(addr / (PAGE_SIZE as usize));
                                     (*page).inc_mapcount();
+                                    crate::mm::rmap::page_record_mapping(
+                                        &*page,
+                                        self as *const _ as usize,
+                                        addr,
+                                    );
+                                    crate::mm::lru::page_add_anon_lru(&*page);
                                 }
                             }
                         }
@@ -584,6 +602,28 @@ impl MmStruct {
             // SAFETY: self.pgd is a valid root PPN and addr is page-aligned within the range
             // being unmapped from this address space.
             let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
+
+            // Swap entry (V=0 leaf): no resident page — free the swap
+            // slot and clear the PTE. Without this, munmap of a swapped
+            // page leaks the slot for the lifetime of the swap area.
+            if ppn.is_none() {
+                if let Some(raw) = super::page_fault::read_pte_raw(
+                    self.pgd,
+                    VirtAddr::new(addr as u64),
+                ) {
+                    if crate::mm::swap::is_swap_entry(raw) {
+                        crate::mm::swap::swap_free_slot(
+                            crate::mm::swap::swap_entry_type(raw),
+                            crate::mm::swap::swap_entry_offset(raw),
+                        );
+                        // SAFETY: addr is a page-aligned user address whose
+                        // PTE we just verified above.
+                        unsafe { self.clear_pte(addr as u64); }
+                    }
+                }
+                addr += PAGE_SIZE_USIZE;
+                continue;
+            }
 
             if let Some((ppn_val, _pte_bits)) = ppn {
                 // Device frames (virtio-gpu framebuffer) are not RAM pages —
@@ -1669,6 +1709,9 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         let new_page = pfn_to_page_mut(new_ppn as usize);
         if !new_page.is_null() {
             (*new_page).set_flag(PageFlag::Anonymous);
+            // SwapBacked + LRU membership: the COW copy is an ordinary
+            // anonymous page and must stay reclaimable (vmscan).
+            (*new_page).set_flag(PageFlag::SwapBacked);
             (*new_page).set_index(virt_addr as usize / (PAGE_SIZE as usize));
             (*new_page).inc_mapcount();
         }
@@ -1682,6 +1725,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
                     mm as *const _ as usize,
                     virt_addr as usize,
                 );
+                crate::mm::lru::page_add_anon_lru(&*new_page);
             }
             mm.add_rss(1);
         }

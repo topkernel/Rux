@@ -22,6 +22,12 @@ use super::pglist::{first_online_node_mut, node_data_mut, init_node_data};
 static ZONE_ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static LEGACY_ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
+/// Direct-reclaim recursion guard (equivalent of Linux PF_MEMALLOC):
+/// set while a task is inside vmscan's reclaim loop, so allocations made
+/// BY reclaim (swap I/O paths) fail fast instead of recursing into
+/// another try_to_free_pages round.
+static IN_DIRECT_RECLAIM: AtomicUsize = AtomicUsize::new(0);
+
 /// Allocate 2^order contiguous physical pages
 ///
 /// # Arguments
@@ -52,6 +58,32 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
                 // Zone allocator failed — wake kswapd if below low watermark
                 if !zone.watermark_ok(order, WMARK_LOW) {
                     super::kswapd::wakeup_kswapd(order as i32);
+                }
+
+                // Synchronous direct reclaim (Linux __alloc_pages_slowpath):
+                // waking kswapd alone loses the race — the faulting task
+                // returns OOM before the daemon has reclaimed anything.
+                // GFP_KERNEL-style callers reclaim pages themselves (clean
+                // page cache first, then anonymous pages to swap) and retry.
+                // Skipped for GFP_ATOMIC (IRQ contexts must not block on I/O)
+                // and while already inside reclaim (PF_MEMALLOC equivalent).
+                if gfp_flags.0 & GfpFlags::GFP_ATOMIC.0 == 0
+                    && IN_DIRECT_RECLAIM
+                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    for _ in 0..8 {
+                        let freed = super::vmscan::try_to_free_pages(order as i32);
+                        if let Some(pfn) = zone.alloc_pages(order) {
+                            ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+                            IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                            return pfn_to_phys(pfn);
+                        }
+                        if freed == 0 {
+                            break; // no progress — do not spin
+                        }
+                    }
+                    IN_DIRECT_RECLAIM.store(0, Ordering::Release);
                 }
 
                 // High-order allocation failed: try compaction to reduce fragmentation

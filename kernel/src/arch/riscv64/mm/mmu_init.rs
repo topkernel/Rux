@@ -589,6 +589,19 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 
             for vpn0 in 0..512 {
                 let pte0 = (*table0).get(vpn0);
+
+                // Swap entry (V=0 leaf with the swap signature): the page
+                // lives on the swap device — free the slot. Without this,
+                // every swapped-out page of a dying task leaks its slot
+                // for the lifetime of the swap area.
+                if !pte0.is_valid() && crate::mm::swap::is_swap_entry(pte0.bits()) {
+                    crate::mm::swap::swap_free_slot(
+                        crate::mm::swap::swap_entry_type(pte0.bits()),
+                        crate::mm::swap::swap_entry_offset(pte0.bits()),
+                    );
+                    continue;
+                }
+
                 if !pte0.is_valid() || !pte0.is_leaf() {
                     continue;
                 }

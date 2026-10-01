@@ -22,6 +22,9 @@ cp -a "$SRC/." "$ROOT/"
 $CC -static -O2 -Wall -Wextra -o "$ROOT/usr/bin/udesk" "$WT/test/ubuntu-gui/udesk.c"
 $CC -static -O2 -Wall -Wextra -o "$ROOT/sbin/udesk-init" "$WT/test/ubuntu-gui/init.c"
 $CC -static -O2 -Wall -Wextra -o "$ROOT/sbin/shutdown" "$WT/test/ubuntu-gui/shutdown.c"
+# Swap gate probe: touches >2 GiB of anonymous memory and survives only
+# when the swap tail carve is active (mm/swap.rs + vmscan reclaim).
+$CC -static -O2 -Wall -Wextra -o "$ROOT/usr/bin/swap-probe" "$WT/test/ubuntu-gui/swap-probe.c"
 
 # preserve any pre-existing init exactly once
 if [ ! -e "$ROOT/sbin/init.dist" ]; then
@@ -32,6 +35,13 @@ ln -sf /sbin/udesk-init "$ROOT/sbin/init"
 rm -f "$IMG"
 truncate -s 400M "$IMG"
 mkfs.ext4 -F -b 4096 -O ^metadata_csum -d "$ROOT" -I 256 "$IMG" >/dev/null
+
+# Swap tail carve (Kernel.toml swap_size_mb=256): the ext4 filesystem is
+# sized at 400M and the raw image is then grown to 700M, leaving 300M of
+# non-fs space at the end of the disk for the kernel swap area. mm/swap.rs
+# refuses to enable swap when the tail carve would overlap the filesystem,
+# so the fs must NOT be grown to fill the image (no resize2fs here).
+truncate -s 700M "$IMG"
 
 echo "image ready: $IMG ($(du -h "$IMG" | cut -f1))"
 file "$IMG"

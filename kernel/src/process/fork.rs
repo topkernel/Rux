@@ -532,6 +532,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 let new_page = pfn_to_page_mut(new_ppn as usize);
                 if !new_page.is_null() {
                     (*new_page).set_flag(PageFlag::Anonymous);
+                    // SwapBacked + LRU membership: keep the copy reclaimable
+                    // via swap-out (vmscan scans LRU_INACTIVE_ANON only).
+                    (*new_page).set_flag(PageFlag::SwapBacked);
                     (*new_page).set_index(va as usize / (PAGE_SIZE as usize));
                     (*new_page).inc_mapcount();
                 }
@@ -543,6 +546,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                             mm as *const _ as usize,
                             va as usize,
                         );
+                        crate::mm::lru::page_add_anon_lru(&*new_page);
                     }
                     mm.add_rss(1);
                 }

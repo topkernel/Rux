@@ -46,6 +46,7 @@ use crate::errno;
 
 // Sub-modules for individual procfs entries
 pub mod meminfo;
+pub mod swaps;
 pub mod cpuinfo;
 pub mod version;
 pub mod uptime;
@@ -432,6 +433,7 @@ impl ProcFSSuperBlock {
     pub fn init_default_files(&self) {
         // System information files
         self.create_dynamic_file("meminfo", meminfo::generate);
+        self.create_dynamic_file("swaps", swaps::generate);
         self.create_dynamic_file("cpuinfo", cpuinfo::generate);
         self.create_dynamic_file("version", version::generate);
         self.create_dynamic_file("uptime", uptime::generate);

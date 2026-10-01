@@ -1091,8 +1091,19 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
             if !page.is_null() {
                 // SAFETY: freshly allocated page exclusively owned here.
                 (*page).set_flag(PageFlag::Anonymous);
+                // SwapBacked + LRU membership: keep the moved page
+                // reclaimable via swap-out (vmscan).
+                (*page).set_flag(PageFlag::SwapBacked);
                 (*page).set_index(new_virt as usize / (PAGE_SIZE as usize));
                 (*page).inc_mapcount();
+                if let Some(mm) = crate::sched::current().and_then(|t| t.address_space()) {
+                    crate::mm::rmap::page_record_mapping(
+                        &*page,
+                        mm as *const _ as usize,
+                        new_virt as usize,
+                    );
+                }
+                crate::mm::lru::page_add_anon_lru(&*page);
             }
         }
         offset += PAGE_SIZE as usize;
