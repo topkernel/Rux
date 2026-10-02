@@ -1022,8 +1022,6 @@ pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
             // PPN field stays in 4KB units ((p>>12)<<10); the 2MB-aligned
             // p makes PPN[0] zero as Sv39 requires for a PMD leaf, and the
             // RWX bits in `flags` make the entry a leaf.
-            let pte_bits = ((p >> PAGE_SHIFT) << 10) | flags;
-=======
             map_pmd_huge_page(v as usize, p as usize, flags);
             v += PMD_SIZE;
             p += PMD_SIZE;
