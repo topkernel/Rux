@@ -68,6 +68,9 @@ const FIONREAD: u32 = 0x541B;
 const TIOCGPTN: u32 = 0x8004_5430;
 /// TIOCSPTLCK — _IOW('T', 0x31, int): unlock (no-op, always unlocked)
 const TIOCSPTLCK: u32 = 0x4004_5431;
+/// TIOCGPTPEER — _IO('T', 0x41, int flags): open the SLAVE side of this
+/// master's pair; the ioctl return value IS the new slave fd.
+const TIOCGPTPEER: u32 = 0x5441;
 
 // ============================================================================
 // Master read buffer (slave output + echo, waiting for master read)
@@ -772,6 +775,15 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                     return Some(-(EFAULT as i64));
                 }
                 let pgid = pair.tty.fg_pgrp.load(Ordering::Acquire);
+                if pgid == 0 {
+                    // Linux tiocgpgrp: no foreground pgrp ever set on this
+                    // tty → ENOTTY. Returning success with pgid 0 made
+                    // dash's setjobctl loop forever ("am I in the
+                    // background?") at 100% CPU with no I/O — its
+                    // tcgetpgrp retry never saw its own pgrp. Callers use
+                    // the ENOTTY failure to fall back to no-job-control.
+                    return Some(-(crate::errno::constants::ENOTTY as i64));
+                }
                 if copy_to_user(arg as *mut u8, pgid.to_le_bytes().as_ptr(), 4) > 0 {
                     return Some(-(EFAULT as i64));
                 }
@@ -804,6 +816,91 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                     return Some(-(EFAULT as i64));
                 }
                 Some(0)
+            }
+            // TIOCGPTPEER: open the slave of this master's pair and return
+            // its fd as the ioctl result (Linux devpts pty_open_peer). This
+            // is how glibc >= 2.28's openpty() acquires the slave — it never
+            // calls open("/dev/pts/N") itself. Before this was implemented,
+            // the request fell into the console ioctl fallback, which
+            // "simplified" every unknown 'T' ioctl to success(0): openpty
+            // then believed fd 0 was the slave. fd 0 was really the console
+            // (or whatever lived there), so every shell spawned through
+            // openpty — xterm's interactive child included — wired stdio to
+            // the wrong file: bash hung silently on the console, dash spun
+            // in its tcsetpgrp retry loop, and bare `xterm` could never run
+            // a working shell.
+            TIOCGPTPEER if is_master => {
+                use crate::fs::file::{get_file_fd_install, File, FileFlags};
+
+                const O_RDWR: u32 = 0o2;
+                const O_NONBLOCK: u32 = 0o4000;
+                const O_CLOEXEC: u32 = 0o2000000;
+
+                if pair.master_closed.load(Ordering::Acquire) {
+                    return Some(-(crate::errno::Errno::IOError.as_neg_i32() as i64));
+                }
+                // An owning Arc for the File's private_data (pair_of lends
+                // a &static; the close op reconstructs the Arc from the raw
+                // pointer, so this must be a real counted reference).
+                let pair_arc = match PTY_TABLE.lock_irqsave().get(&pair.index).cloned() {
+                    Some(p) => p,
+                    None => {
+                        return Some(-(crate::errno::Errno::IOError.as_neg_i32() as i64))
+                    }
+                };
+                // Slave descriptions are O_RDWR regardless of `arg`; Linux
+                // honors only O_NONBLOCK | O_CLOEXEC from the caller.
+                let flags = O_RDWR | (arg as u32 & (O_NONBLOCK | O_CLOEXEC));
+                let file = Arc::new(File::new(FileFlags::new(flags)));
+                file.set_ops(&PTY_SLAVE_OPS);
+                // Attach the /dev/pts/N devfs inode when it can be resolved
+                // so fstat/ttyname on the peer fd report the real device
+                // identity (rdev 136:N) instead of the anonymous-file
+                // fallback. Best-effort: the pair lives in PTY_TABLE, so a
+                // lookup miss here is benign.
+                if let Ok(vp) = crate::fs::vfs::path_lookup(
+                    &format!("/dev/pts/{}", pair.index),
+                    0,
+                ) {
+                    if let Some(inode) = vp.inode {
+                        file.set_inode(inode);
+                        if let Some(d) = vp.dentry {
+                            file.set_dentry(d);
+                        }
+                    }
+                }
+                // Reopen-after-last-close discipline identical to slave_open.
+                if pair.slave_refs.fetch_add(1, Ordering::AcqRel) == 0 {
+                    pair.slave_closed.store(false, Ordering::Release);
+                }
+                file.set_private_data(Arc::into_raw(pair_arc) as *mut u8);
+
+                match get_file_fd_install(Arc::clone(&file)) {
+                    Some(fd) => {
+                        if flags & O_CLOEXEC != 0 {
+                            if let Some(fdtable) = crate::sched::get_current_fdtable() {
+                                fdtable.set_fd_cloexec(fd, true);
+                            }
+                        }
+                        Some(fd as i64)
+                    }
+                    None => {
+                        // Install failed. Reclaim the Arc ref stashed in
+                        // private_data (no fd owns the File, so its close op
+                        // would never run to consume it) and undo the
+                        // slave_refs bump with the same last-close
+                        // discipline as pty_slave_close.
+                        // SAFETY: we exclusively own `file`; private_data
+                        // holds the Arc::into_raw pointer we just installed.
+                        if let Some(ptr) = unsafe { (*file.private_data.get()).take() } {
+                            drop(unsafe { Arc::from_raw(ptr as *const PtyPair) });
+                        }
+                        if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
+                            pair.slave_closed.store(true, Ordering::Release);
+                        }
+                        Some(-(crate::errno::Errno::TooManyOpenFiles.as_neg_i32() as i64))
+                    }
+                }
             }
             FIONREAD => {
                 if arg == 0 || !access_ok(arg, 4) {
