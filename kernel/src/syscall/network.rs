@@ -2511,6 +2511,20 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // Linux ABI: on return, msg_controllen holds the number of control
+    // bytes ACTUALLY written — 0 when the message carries no cmsgs. Every
+    // success path below that does not deliver a cmsg chain must zero the
+    // field: leaving the caller's input value (the buffer capacity) in
+    // place makes the caller walk its own uninitialized buffer as a cmsg
+    // chain. On Xorg 1.21 the on-stack control buffer contained
+    // 0xffff..ffff as the "cmsg_len" of the first garbage header;
+    // CMSG_NXTHDR then computes next = cmsg + ((SIZE_MAX+7)&~7) = cmsg,
+    // the walk never advances and the dispatch thread spins forever
+    // (Xorg+0x17f8b4, 100% CPU, unbounded AppendPendingFd mallocs).
+    let zero_controllen = || unsafe {
+        let _ = crate::arch::riscv64::uaccess::put_user(msg_ptr.add(40) as *mut usize, 0);
+    };
+
     // Read iovec from msghdr
     // SAFETY: msg_ptr validated with access_ok(64); reading fields at known offsets.
     // SAFETY: msg_ptr validated with access_ok(64); get_user is the
@@ -2553,6 +2567,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     }
 
     if total_buf_len == 0 {
+        zero_controllen();
         return 0;
     }
 
@@ -2603,6 +2618,10 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 Ok(n) => cmsg_bytes = n,
                 Err(e) => return e,
             }
+        } else {
+            // No cmsgs: still a successful receive — msg_controllen must
+            // report 0 written bytes (see zero_controllen above).
+            zero_controllen();
         }
         // Source address.
         if let Some(src) = r.src {
@@ -2684,6 +2703,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 }
             }
         }
+        // Netlink receive writes no cmsgs — report 0 control bytes.
+        zero_controllen();
         return n as i64;
     }
 
@@ -2748,6 +2769,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 }
             }
         }
+        // Raw-socket receive writes no cmsgs — report 0 control bytes.
+        zero_controllen();
         return n as i64;
     }
 
@@ -2836,6 +2859,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     unsafe {
         let _ = crate::arch::riscv64::uaccess::put_user(msg_ptr.add(48) as *mut u32, out_flags);
     }
+    // Generic socket receive writes no cmsgs — report 0 control bytes.
+    zero_controllen();
 
     bytes_read as i64
 }
