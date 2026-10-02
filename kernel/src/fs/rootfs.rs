@@ -1631,7 +1631,11 @@ unsafe fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> 
             RootFSType::RegularFile => InodeMode::S_IFREG,
             RootFSType::SymbolicLink => InodeMode::S_IFLNK,
         };
-        *node.mode.lock() = file_type | (value as u32 & 0o7777);
+        let new_mode = file_type | (value as u32 & 0o7777);
+        *node.mode.lock() = new_mode;
+        // Icache coherency (same as ext4/tmpfs): keep the cached Inode.mode
+        // in sync so open()/DAC see chmod results immediately.
+        inode.update_cached_mode(InodeMode::new(new_mode));
         node.mtime.store(wall_secs(), Ordering::Release);
         0
     } else if attr == setattr_attr::ATTR_UID_GID {

@@ -558,12 +558,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
         use core::sync::atomic::Ordering::Relaxed;
         for k in 0..FUT_RING.len() {
             if FUT_RING[k].root.load(Relaxed) == root_ppn && root_ppn != 0 {
-                // Forensic ring hit: benign in the common case — the buddy
-                // recycles freed root frames, so a reused ppn legitimately
-                // reappears. Downgraded from pr_err!: the flood it produced
-                // on every fork/exec buried real diagnostics and hammered
-                // the serial console. Enable debug logs to see it again.
-                crate::pr_debug!(
+                crate::pr_err!(
                     "FUT: REPEAT teardown of root ppn={:#x} (ring[{}])",
                     root_ppn, k
                 );
@@ -1018,10 +1013,8 @@ pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
     while v < end {
         let remain = end - v;
         if v % PMD_SIZE == 0 && p % PMD_SIZE == 0 && remain >= PMD_SIZE {
-            // 2MB superpage: install one L1 leaf PTE (identity v==p here).
-            // PPN field stays in 4KB units ((p>>12)<<10); the 2MB-aligned
-            // p makes PPN[0] zero as Sv39 requires for a PMD leaf, and the
-            // RWX bits in `flags` make the entry a leaf.
+            // 2MB superpage: install one L1 leaf PTE (identity v==p here);
+            // map_pmd_huge_page derives the PTE bits from the 2MB-aligned p.
             map_pmd_huge_page(v as usize, p as usize, flags);
             v += PMD_SIZE;
             p += PMD_SIZE;

@@ -146,15 +146,10 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         }
     }
 
-    // Shortcut: /proc/[pid]/xxx paths go through procfs read file
+    // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
     // because VFS inode lookup doesn't support PID subdirectories.
-    // READ-ONLY OPENS ONLY: a mem-file snapshot is write-hostile, and the
-    // writable procfs knobs (/proc/sys sysctls, /proc/[pid]/oom_score_adj)
-    // must reach their real inodes + write handlers through the VFS path
-    // below. O_ACCMODE&3 != 0 (O_WRONLY/O_RDWR) skips the shortcut.
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::chrooted() && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0
-        && (flags & 0o3) == 0 {
+    if !crate::fs::vfs::chrooted() && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
         // ptrace_may_access gate for environ BEFORE generating content
         // (review 5.7): self or CAP_SYS_PTRACE.
         {
@@ -1044,6 +1039,35 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
+    // Linux path_mount resolves the target against the CALLER'S CWD —
+    // a relative mountpoint like LTP madvise01's "tmp_madvise" (mounted
+    // from inside the test's tmpdir) must attach at <cwd>/tmp_madvise.
+    // The old code passed the relative string straight to vfs_mount,
+    // which walks from the VFS ROOT — the mount landed on a phantom
+    // /tmp_madvise dentry and every later lookup crossed into the
+    // unmounted ext4 dir instead.
+    let target_owned = if !target.starts_with('/') {
+        match crate::sched::current() {
+            Some(t) => {
+                let cwd = unsafe { (*t).get_cwd() };
+                let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + target.len());
+                abs.extend_from_slice(&cwd);
+                if !cwd.ends_with(&[b'/']) {
+                    abs.push(b'/');
+                }
+                abs.extend_from_slice(target.as_bytes());
+                match alloc::string::String::from_utf8(abs) {
+                    Ok(s) => s,
+                    Err(_) => return -(errno::EINVAL as i64),
+                }
+            }
+            None => alloc::string::String::from(target),
+        }
+    } else {
+        alloc::string::String::from(target)
+    };
+    let target = target_owned.as_str();
+
     let mut fstype_buf = [0u8; 64];
     let fs_type_str = match read_user_str(args[2] as *const u8, &mut fstype_buf) {
         Ok(s) => s,
@@ -1077,6 +1101,30 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         Ok(s) => s,
         Err(e) => return e as i64,
     };
+
+    // Same CWD resolution as sys_mount — umount(2) takes the same kind
+    // of path and must unmount the mount the caller sees.
+    let target_owned = if !target.starts_with('/') {
+        match crate::sched::current() {
+            Some(t) => {
+                let cwd = unsafe { (*t).get_cwd() };
+                let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + target.len());
+                abs.extend_from_slice(&cwd);
+                if !cwd.ends_with(&[b'/']) {
+                    abs.push(b'/');
+                }
+                abs.extend_from_slice(target.as_bytes());
+                match alloc::string::String::from_utf8(abs) {
+                    Ok(s) => s,
+                    Err(_) => return -(errno::EINVAL as i64),
+                }
+            }
+            None => alloc::string::String::from(target),
+        }
+    } else {
+        alloc::string::String::from(target)
+    };
+    let target = target_owned.as_str();
 
     // U1c: drop the mount row from the CALLER's mount namespace (the
     // dentry-level unmount below is global — recorded divergence).

@@ -750,24 +750,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // __schedule processes it AFTER the context switch, when this
         // task is no longer running on any CPU.
         if parent_pid != 0 {
-            // Queue the full SIGCHLD siginfo FIRST (no wake — queueing
-            // cannot trigger a reap). SA_SIGINFO parents (toybox timeout,
-            // glib) decode si_code/si_status from it; plain wait4 parents
-            // never look. Mirror waitid's encoding: exit_code < 0 means
-            // killed by signal (-exit_code), CLD_DUMPED when a core was
-            // written.
-            let (code, status) = if exit_code >= 0 {
-                (CLD_EXITED, exit_code)
-            } else if (*current).core_dumped() {
-                (CLD_DUMPED, -exit_code)
-            } else {
-                (CLD_KILLED, -exit_code)
-            };
-            crate::signal::queue_sigchld_info(
-                parent_pid,
-                crate::signal::SigInfo::child(current_pid, (*current).cred().uid, status, code),
-            );
-            crate::sched::defer_exit_notify(parent_pid);
+            crate::sched::defer_exit_notify(parent_pid, current_pid);
         }
         crate::interrupt::preempt::preempt_count_sub(1);
 
@@ -899,7 +882,16 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
         // forever.
         if (*child).state() == TaskState::new(TaskState::ZOMBIE) {
             let dest_pid = (*dest).pid();
-            let _ = crate::signal::send_signal(dest_pid, crate::signal::Signal::SIGCHLD as i32);
+            // Full do_notify_parent siginfo: the new parent's SA_SIGINFO
+            // handlers decode the orphan zombie's outcome from
+            // si_code/si_status.
+            let info = crate::signal::SigInfo::child_exit(
+                (*child).pid(),
+                (*child).cred().uid,
+                (*child).exit_code(),
+                (*child).core_dumped(),
+            );
+            let _ = crate::signal::send_signal_with_info(dest_pid, info);
             // init's default SIGCHLD disposition is SIG_IGN, so the signal
             // path neither pends nor wakes anything. Wake the new parent's
             // child-exit wait queue directly (same queue the deferred

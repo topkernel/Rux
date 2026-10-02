@@ -14,6 +14,8 @@ const CLOCK_MONOTONIC: u32 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
 const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
 const CLOCK_MONOTONIC_RAW: u32 = 4;
+const CLOCK_REALTIME_COARSE: u32 = 5;
+const CLOCK_MONOTONIC_COARSE: u32 = 6;
 const CLOCK_BOOTTIME: u32 = 7;
 const CLOCK_TAI: u32 = 11;
 
@@ -60,9 +62,15 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
 
     // SAFETY: tv_ptr validated with access_ok; put_user is the
     // exception-table copy path (SUM=0 safe).
+    // SAFETY: tv_ptr validated with access_ok; put_user is the
+    // exception-table copy path. A faulting store is EFAULT (LTP
+    // gettimeofday01's bad_addr case).
     unsafe {
-        let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tv_ptr).tv_sec, sec as i64);
-        let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tv_ptr).tv_usec, usec as i64);
+        let ok1 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tv_ptr).tv_sec, sec as i64);
+        let ok2 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tv_ptr).tv_usec, usec as i64);
+        if !ok1 || !ok2 {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     0
@@ -90,7 +98,7 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
     }
 
     match clk_id {
-        CLOCK_REALTIME | CLOCK_TAI => {
+        CLOCK_REALTIME | CLOCK_TAI | CLOCK_REALTIME_COARSE => {
             // Wall clock = monotonic + epoch offset (settimeofday-adjustable;
             // zero until set — no RTC on this platform).
             // CLOCK_TAI is REALTIME + TAI-UTC offset. No clock_adjtime
@@ -102,19 +110,29 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
                 + if clk_id == CLOCK_TAI { tai_offset } else { 0 };
             // SAFETY: tp_ptr validated with access_ok; put_user is the
             // exception-table copy path (SUM=0 safe).
+            // SAFETY: tp_ptr validated with access_ok; put_user is the
+            // exception-table copy path (SUM=0 safe). A store that faults
+            // (PROT_NONE / unmapped — LTP clock_gettime02's bad_addr)
+            // must surface as EFAULT, not be swallowed into success.
             unsafe {
-                let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, mono_nsec as i64);
+                let ok1 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                let ok2 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, mono_nsec as i64);
+                if !ok1 || !ok2 {
+                    return -(errno::EFAULT as i64);
+                }
             }
             0
         }
-        CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME => {
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
             let (sec, nsec) = monotonic_time();
             // SAFETY: tp_ptr validated with access_ok; put_user is the
-            // exception-table copy path (SUM=0 safe).
+            // exception-table copy path (SUM=0 safe). EFAULT on fault.
             unsafe {
-                let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
+                let ok1 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                let ok2 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
+                if !ok1 || !ok2 {
+                    return -(errno::EFAULT as i64);
+                }
             }
             0
         }
@@ -127,11 +145,16 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
                 .unwrap_or(0);
             // SAFETY: tp_ptr validated with access_ok; put_user is the
             // exception-table copy path (SUM=0 safe).
+            // SAFETY: tp_ptr validated with access_ok; EFAULT on a
+            // faulting store (LTP clock_gettime02).
             unsafe {
-                let _ = crate::arch::riscv64::uaccess::put_user(
+                let ok1 = crate::arch::riscv64::uaccess::put_user(
                     &raw mut (*tp_ptr).tv_sec, (cputime_ns / 1_000_000_000) as i64);
-                let _ = crate::arch::riscv64::uaccess::put_user(
+                let ok2 = crate::arch::riscv64::uaccess::put_user(
                     &raw mut (*tp_ptr).tv_nsec, (cputime_ns % 1_000_000_000) as i64);
+                if !ok1 || !ok2 {
+                    return -(errno::EFAULT as i64);
+                }
             }
             0
         }
@@ -401,7 +424,8 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
 
     // Validate clock ID
     match clk_id as u32 {
-        CLOCK_REALTIME | CLOCK_TAI | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME
+        CLOCK_REALTIME | CLOCK_TAI | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW
+        | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME
         | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {}
         _ => return -(errno::EINVAL as i64),
     }
@@ -458,8 +482,26 @@ pub fn sys_getitimer(args: SyscallArgs) -> i64 {
     // struct itimerval { struct timeval it_interval, it_value }
     // struct timeval { time_t tv_sec, suseconds_t tv_usec }
     let (interval_sec, interval_usec, value_sec, value_usec) = if which == 0 {
-        // ITIMER_REAL — remaining computed from the timer wheel entry
-        itimer_real_timeval(&task)
+        // ITIMER_REAL — remaining against the monotonic mirror recorded
+        // at arm time (set_itimer_real).
+        let deadline_ns = task.itimer_real[0].load(core::sync::atomic::Ordering::Acquire);
+        if deadline_ns == 0 {
+            // Disarmed
+            (0i64, 0i64, 0i64, 0i64)
+        } else {
+            let interval_ns = task.itimer_real[1].load(core::sync::atomic::Ordering::Acquire);
+            let (mono_sec, mono_nsec) = monotonic_time();
+            let now_ns = (mono_sec as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(mono_nsec as u64);
+            let remaining_ns = deadline_ns.saturating_sub(now_ns);
+            (
+                (interval_ns / 1_000_000_000) as i64,
+                ((interval_ns % 1_000_000_000) / 1000) as i64,
+                (remaining_ns / 1_000_000_000) as i64,
+                ((remaining_ns % 1_000_000_000) / 1000) as i64,
+            )
+        }
     } else {
         // ITIMER_VIRTUAL / ITIMER_PROF — CPU-time timers tracked against
         // the sched entity's sum_exec_runtime. Remaining = deadline - now;
@@ -515,48 +557,65 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // Write old_value (remaining time of the timer being replaced, BEFORE
-    // disarming — POSIX requires the pre-call state). alarm(2) is built on
-    // this: alarm(0) returns old.it_value rounded up.
+    // Write old_value: the timer's CURRENT state (remaining + interval)
+    // BEFORE re-arming — musl's alarm() derives its return value from
+    // this, and getitimer/setitimer old-value reporting is POSIX
+    // observable (LTP alarm02: alarm(0) after alarm(N) returns ~N).
     if !old_value.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
         }
-        let task = match crate::process::current_task() {
-            Some(t) => t,
-            None => return -(errno::ESRCH as i64),
-        };
-        let (interval_sec, interval_usec, value_sec, value_usec) = if which == 0 {
-            itimer_real_timeval(&task)
-        } else {
-            // ITIMER_VIRTUAL / ITIMER_PROF — deadline/interval atomics
-            let state = if which == 1 { &task.itimer_virt } else { &task.itimer_prof };
-            let deadline_ns = state[0].load(core::sync::atomic::Ordering::Acquire);
-            if deadline_ns == 0 {
-                (0i64, 0i64, 0i64, 0i64)
-            } else {
-                let interval_ns = state[1].load(core::sync::atomic::Ordering::Acquire);
-                let now_ns = task
-                    .sched_entity()
-                    .sum_exec_runtime
-                    .load(core::sync::atomic::Ordering::Acquire);
-                let remaining_ns = deadline_ns.saturating_sub(now_ns);
-                (
-                    (interval_ns / 1_000_000_000) as i64,
-                    ((interval_ns % 1_000_000_000) / 1000) as i64,
-                    (remaining_ns / 1_000_000_000) as i64,
-                    ((remaining_ns % 1_000_000_000) / 1000) as i64,
-                )
+        let (i_sec, i_usec, v_sec, v_usec) = match crate::process::current_task() {
+            Some(t) => {
+                if which == 0 {
+                    let deadline_ns = t.itimer_real[0].load(core::sync::atomic::Ordering::Acquire);
+                    if deadline_ns == 0 {
+                        (0i64, 0i64, 0i64, 0i64)
+                    } else {
+                        let interval_ns = t.itimer_real[1].load(core::sync::atomic::Ordering::Acquire);
+                        let (mono_sec, mono_nsec) = monotonic_time();
+                        let now_ns = (mono_sec as u64)
+                            .saturating_mul(1_000_000_000)
+                            .saturating_add(mono_nsec as u64);
+                        let remaining_ns = deadline_ns.saturating_sub(now_ns);
+                        (
+                            (interval_ns / 1_000_000_000) as i64,
+                            ((interval_ns % 1_000_000_000) / 1000) as i64,
+                            (remaining_ns / 1_000_000_000) as i64,
+                            ((remaining_ns % 1_000_000_000) / 1000) as i64,
+                        )
+                    }
+                } else {
+                    let state = if which == 1 { &t.itimer_virt } else { &t.itimer_prof };
+                    let deadline_ns = state[0].load(core::sync::atomic::Ordering::Acquire);
+                    if deadline_ns == 0 {
+                        (0i64, 0i64, 0i64, 0i64)
+                    } else {
+                        let interval_ns = state[1].load(core::sync::atomic::Ordering::Acquire);
+                        let now_ns = t
+                            .sched_entity()
+                            .sum_exec_runtime
+                            .load(core::sync::atomic::Ordering::Acquire);
+                        let remaining_ns = deadline_ns.saturating_sub(now_ns);
+                        (
+                            (interval_ns / 1_000_000_000) as i64,
+                            ((interval_ns % 1_000_000_000) / 1000) as i64,
+                            (remaining_ns / 1_000_000_000) as i64,
+                            ((remaining_ns % 1_000_000_000) / 1000) as i64,
+                        )
+                    }
+                }
             }
+            None => (0i64, 0i64, 0i64, 0i64),
         };
-        // SAFETY: old_value validated with access_ok(32); put_user goes
-        // through the exception-table copy path.
+        // SAFETY: old_value validated with access_ok(32); put_user is the
+        // exception-table copy path (SUM=0 safe).
         unsafe {
             let p = old_value as *mut i64;
-            let _ = crate::arch::riscv64::uaccess::put_user(p, interval_sec);
-            let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), interval_usec);
-            let _ = crate::arch::riscv64::uaccess::put_user(p.add(2), value_sec);
-            let _ = crate::arch::riscv64::uaccess::put_user(p.add(3), value_usec);
+            let _ = crate::arch::riscv64::uaccess::put_user(p, i_sec);
+            let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), i_usec);
+            let _ = crate::arch::riscv64::uaccess::put_user(p.add(2), v_sec);
+            let _ = crate::arch::riscv64::uaccess::put_user(p.add(3), v_usec);
         }
     }
 
@@ -621,34 +680,6 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
     0
 }
 
-/// Compute the current ITIMER_REAL itimerval from the timer wheel.
-///
-/// Returns (interval_sec, interval_usec, value_sec, value_usec) where
-/// it_value is the REMAINING time (expires - now). All zeros if disarmed.
-fn itimer_real_timeval(task: &crate::process::task::Task) -> (i64, i64, i64, i64) {
-    use crate::drivers::timer as drv_timer;
-
-    let timer_id = task.itimer_ids[0].load(core::sync::atomic::Ordering::Acquire);
-    if timer_id == 0 {
-        return (0, 0, 0, 0);
-    }
-    let Some((expires_j, interval_j)) = crate::timer::get_timer_state(timer_id) else {
-        // Timer already fired and was not re-armed: report disarmed.
-        return (0, 0, 0, 0);
-    };
-    let now_j = drv_timer::get_jiffies();
-    let remaining_j = expires_j.saturating_sub(now_j);
-    let usec_per_jiffy = 1_000_000 / drv_timer::HZ;
-    let remaining_usec = remaining_j * usec_per_jiffy;
-    let interval_usec = interval_j * usec_per_jiffy;
-    (
-        (interval_usec / 1_000_000) as i64,
-        (interval_usec % 1_000_000) as i64,
-        (remaining_usec / 1_000_000) as i64,
-        (remaining_usec % 1_000_000) as i64,
-    )
-}
-
 /// Disarm ITIMER_REAL timer for the current process.
 fn disarm_itimer_real() {
     let task = match crate::process::current_task() {
@@ -660,6 +691,8 @@ fn disarm_itimer_real() {
     if old_timer_id != 0 {
         crate::timer::del_timer(old_timer_id);
     }
+    task.itimer_real[0].store(0, core::sync::atomic::Ordering::Release);
+    task.itimer_real[1].store(0, core::sync::atomic::Ordering::Release);
 }
 
 /// Set ITIMER_REAL timer for the current process.
@@ -708,6 +741,17 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
     );
 
     task.itimer_ids[0].store(new_timer_id, core::sync::atomic::Ordering::Release);
+
+    // Mirror the armed state for getitimer/setitimer-old-value (and so
+    // musl's alarm() can report the previous remaining time).
+    let (mono_sec, mono_nsec) = monotonic_time();
+    let now_ns = mono_sec.saturating_mul(1_000_000_000).saturating_add(mono_nsec as u64);
+    let deadline_ns = now_ns.saturating_add((total_usec as u64).saturating_mul(1000));
+    task.itimer_real[0].store(deadline_ns, core::sync::atomic::Ordering::Release);
+    task.itimer_real[1].store(
+        (interval_usec_total.max(0) as u64).saturating_mul(1000),
+        core::sync::atomic::Ordering::Release,
+    );
 }
 
 /// sys_clock_nanosleep - High-resolution sleep (with specified clock)

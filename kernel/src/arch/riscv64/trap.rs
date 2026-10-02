@@ -623,6 +623,16 @@ fn handle_breakpoint(regs: &mut PtRegs) {
 /// Handle page fault
 ///
 /// Delegate to mm::exception::do_page_fault for complete handling
+/// True when the CURRENT task has a user handler installed for SIGSEGV
+/// (used by the page-fault termination paths to decide between "pend the
+/// signal and let do_signal deliver it to the handler" and "kill now").
+fn sigsegv_has_handler() -> bool {
+    crate::sched::current()
+        .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(11)) })
+        .map(|a| a.is_some_and(|a| a.has_handler()))
+        .unwrap_or(false)
+}
+
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     use crate::arch::riscv64::mm::exception::{do_page_fault, MmFaultResult};
 
@@ -646,9 +656,16 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             if regs.user_mode() {
                 // Linux semantics: route user-mode faults through normal
                 // signal delivery (force_sig_fault) — an installed
-                // SIGSEGV handler (debuggers, crash catchers) must run;
-                // the direct do_exit bypassed every handler.
+                // SIGSEGV handler (debuggers, crash catchers, LTP mmap05)
+                // must run. With a handler: pend the signal and RETURN;
+                // do_signal delivers it on the way back to userspace.
+                // Without one: the default action kills here (and avoids
+                // a fault-retry loop when the disposition is SIG_IGN).
                 let pid = crate::process::current_pid();
+                if sigsegv_has_handler() {
+                    let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                    return;
+                }
                 let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }
@@ -657,6 +674,14 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
             crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
             // Terminate user process via do_exit (properly notifies parent)
             if regs.user_mode() {
+                // Same handler-first routing as Segfault: a PROT_NONE
+                // access with an installed SIGSEGV handler must run it
+                // (LTP mmap05); default disposition kills directly.
+                let pid = crate::process::current_pid();
+                if sigsegv_has_handler() {
+                    let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                    return;
+                }
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }
         }

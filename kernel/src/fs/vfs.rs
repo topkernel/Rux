@@ -1211,6 +1211,13 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
 
 /// Unlink file - unified implementation using inode_operations
 pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
+    // POSIX/Linux: an empty pathname is ENOENT (name resolution fails
+    // before anything else; resolving "" must never fall back to the
+    // current/root directory) — LTP unlink07.
+    if pathname.is_empty() {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.lock();
 
@@ -1931,6 +1938,13 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
 
         // Directory -> redirect to opendir
         if inode.mode.is_directory() {
+            // Linux: opening a directory for WRITING (O_RDWR/O_WRONLY)
+            // fails with EISDIR before anything else (LTP open08) — only
+            // O_RDONLY (optionally |O_DIRECTORY) is legal on a dir.
+            let accmode = flags & FileFlags::O_ACCMODE;
+            if accmode != FileFlags::O_RDONLY {
+                return Err(errno::Errno::IsADirectory.as_neg_i32());
+            }
             return file_opendir(filename, flags | 0o00200000);
         }
 
@@ -1961,6 +1975,23 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             }
             if mask != 0 && !inode_permission(&inode, mask) {
                 return Err(errno::Errno::PermissionDenied.as_neg_i32());
+            }
+        }
+
+        // O_NOATIME (Linux): requires the caller to OWN the file or hold
+        // CAP_FOWNER — a plain unprivileged reader of another user's file
+        // gets EPERM (LTP open02).
+        if flags & FileFlags::O_NOATIME != 0 {
+            let fsuid = crate::sched::current()
+                .map(|t| t.cred().fsuid)
+                .unwrap_or(0);
+            let owner = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+            if fsuid != owner
+                && !crate::security::capable(
+                    crate::security::capability::CAP_FOWNER,
+                )
+            {
+                return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
             }
         }
 

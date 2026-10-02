@@ -326,9 +326,40 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         }
     }
 
+    // File-backed mapping fd validation (Linux mmap semantics):
+    // - non-anonymous mapping requires an OPEN fd → EBADF for a closed
+    //   one (LTP mmap08);
+    // - the fd must be open for reading (the page cache fills private
+    //   and shared pages alike) → EACCES for an O_WRONLY fd (LTP
+    //   mmap06: every prot on a write-only fd fails);
+    // - MAP_SHARED with PROT_WRITE additionally needs write access.
+    if map_flags & map::MAP_ANONYMOUS == 0 && map_flags & map::MAP_HUGETLB == 0 {
+        if fd < 0 {
+            return mmap_error::EBADF;
+        }
+        match unsafe { crate::fs::get_file_fd(fd as usize) } {
+            None => return mmap_error::EBADF,
+            Some(file) => {
+                let accmode = file.flags().bits()
+                    & crate::fs::file::FileFlags::O_ACCMODE;
+                let readable = accmode != crate::fs::file::FileFlags::O_WRONLY;
+                let writable = accmode == crate::fs::file::FileFlags::O_RDWR
+                    || accmode == crate::fs::file::FileFlags::O_WRONLY;
+                if !readable {
+                    return mmap_error::EACCES;
+                }
+                if map_flags & map::MAP_SHARED != 0
+                    && prot_flags & prot::PROT_WRITE != 0
+                    && !writable
+                {
+                    return mmap_error::EACCES;
+                }
+            }
+        }
+    }
+
     // (review批次1) The "fd >= 1000 means framebuffer" special case is
-    // GONE: an unrelated file that happens to get a high fd number was
-    // silently mapped onto the framebuffer instead of its own contents.
+    // GONE: an unrelated file that happens to get a high fd number was    // silently mapped onto the framebuffer instead of its own contents.
     // File-backed mappings now go through the generic path; mmap on a file
     // description without mmap-capable ops (e.g. a device node with no
     // driver backing) fails with ENODEV, matching Linux.
@@ -448,8 +479,18 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // Parse VMA flags
                     let mut vma_flags = VmaFlags::new();
 
-                    // Default readable
-                    vma_flags.insert(VmaFlags::READ);
+                    // Readable only for PROT_READ (write-only stays W-only
+                    // in the VMA so /proc/self/maps shows "-w"; the Sv39
+                    // W-without-R PTE fold happens at page-fault build
+                    // time). PROT_NONE gets NO access flags — a fault
+                    // inside it must reach the exception table (EFAULT
+                    // for uaccess) or SIGSEGV (user access), not be
+                    // demand-filled (LTP write03/unlink07: the old
+                    // unconditional READ made PROT_NONE pages read as
+                    // zeros through copy_from_user).
+                    if prot_flags & prot::PROT_READ != 0 {
+                        vma_flags.insert(VmaFlags::READ);
+                    }
 
                     if map_flags & map::MAP_SHARED != 0 {
                         vma_flags.insert(VmaFlags::SHARED);
@@ -713,6 +754,41 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // Get current process
     match crate::sched::current() {
         Some(current_task) => {
+            // Linux mprotect: the ENTIRE [addr, addr+length) range must be
+            // covered by VMAs — any gap fails the whole call with ENOMEM
+            // (mprotect_fixup walks until the vma list stops covering the
+            // range). Silently skipping unmapped pages (the old behavior)
+            // returned success for a range that was never mapped (LTP
+            // mprotect01).
+            {
+                let addr_space = match current_task.address_space() {
+                    Some(a) => a,
+                    None => return -12_i64, // ENOMEM
+                };
+                let mut spans: alloc::vec::Vec<(usize, usize)> = addr_space
+                    .vma_read()
+                    .iter()
+                    .map(|v| (v.start().as_usize(), v.end().as_usize()))
+                    .collect();
+                spans.sort_unstable();
+                let mut cursor = addr;
+                for (s, e) in &spans {
+                    if *e <= cursor {
+                        continue;
+                    }
+                    if *s > cursor {
+                        break; // gap at `cursor`
+                    }
+                    cursor = *e;
+                    if cursor >= addr + length {
+                        break;
+                    }
+                }
+                if cursor < addr + length {
+                    return -12_i64; // ENOMEM: range not fully mapped
+                }
+            }
+
             // Get page table root
             let root_ppn = if let Some(addr_space) = current_task.address_space() {
                 addr_space.root_ppn()
@@ -848,16 +924,44 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                         continue; // no longer overlapping (split by a prior iteration)
                     }
 
-                    // Permissions for the covered portion.
-                    let perm_bits = (prot & 0x1 != 0) as u32      // PROT_READ
-                        | ((prot & 0x2 != 0) as u32) << 1         // PROT_WRITE
-                        | ((prot & 0x4 != 0) as u32) << 2;        // PROT_EXEC
+                    // Permissions for the covered portion. Write-only
+                    // stays W-only (display-accurate); the Sv39 PTE fold
+                    // happens at fault time.
+                    let perm_bits = (prot & 0x1 != 0) as u32             // R (PROT_READ)
+                        | ((prot & 0x2 != 0) as u32) << 1               // PROT_WRITE
+                        | ((prot & 0x4 != 0) as u32) << 2;              // PROT_EXEC
 
                     let full_flags = vma.flags();
                     let old_type = vma.vma_type();
                     let old_fd = vma.file_fd();
                     let old_fsz = vma.file_size();
                     let old_off = vma.offset();
+
+                    // Escalating a SHARED FILE mapping to writable
+                    // requires the backing file to be open for writing
+                    // (Linux mprotect_fixup → vma_wants_writectory):
+                    // mprotect(PROT_WRITE) on a read-only-fd MAP_SHARED
+                    // mapping fails with EACCES (LTP mprotect01). Private
+                    // (COW) mappings are exempt — writes stay private.
+                    // (pinned_file was fetched before this loop; taking
+                    // no further VMA locks here.)
+                    if prot & 0x2 != 0
+                        && full_flags.contains(crate::mm::vma::VmaFlags::SHARED)
+                        && old_type == crate::mm::vma::VmaType::FileBacked
+                    {
+                        let writable = pinned_file
+                            .as_ref()
+                            .map(|f| {
+                                let m = f.flags().bits()
+                                    & crate::fs::file::FileFlags::O_ACCMODE;
+                                m == crate::fs::file::FileFlags::O_RDWR
+                                    || m == crate::fs::file::FileFlags::O_WRONLY
+                            })
+                            .unwrap_or(false);
+                        if !writable {
+                            return -13_i64; // EACCES
+                        }
+                    }
 
                     // Head piece [v_start, range_start): keep original flags.
                     let head = if v_start < range_start {
@@ -1023,16 +1127,129 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
     }
 
     // 2. Perform sync operation
-    // Note: Complete implementation should:
-    // - For file mappings, write dirty pages back to file
-    // - If MS_SYNC, wait for write to complete
-    // - If MS_ASYNC, just mark as needing write
-    // - If MS_INVALIDATE, invalidate other processes' cache
     //
-    // Simplified implementation: since we currently mainly have anonymous mappings, no file mappings,
-    // so just return success
+    // MS_SYNC/MS_ASYNC: write dirty pages of SHARED FILE mappings back to
+    // the backing file. The mapping's pages are private allocations filled
+    // from the file at fault time; without this writeback a MAP_SHARED
+    // mapping's stores were lost on every msync (LTP msync01 read back the
+    // original file contents).
+    {
+        use crate::arch::riscv64::mm::{PageTableEntry, PageTable};
+        use crate::mm::vma::{VmaFlags, VmaType};
+
+        let root_ppn = address_space.root_ppn();
+        let end_addr = addr + length_aligned;
+
+        // Snapshot the overlapping shared file VMAs (start, end, offset).
+        let mut spans: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
+        {
+            let vma_mgr = address_space.vma_read();
+            for v in vma_mgr.iter() {
+                if v.end().as_usize() <= addr || v.start().as_usize() >= end_addr {
+                    continue;
+                }
+                if v.flags().contains(VmaFlags::SHARED)
+                    && v.vma_type() == VmaType::FileBacked
+                    && v.flags().is_writable()
+                {
+                    spans.push((
+                        v.start().as_usize().max(addr),
+                        v.end().as_usize().min(end_addr),
+                        v.offset(),
+                    ));
+                }
+            }
+        }
+
+        for (v_start, v_end, v_off) in spans {
+            // The pinned vm_file (Linux vm_file): demand faults keep
+            // reading it after the mapping fd is closed.
+            let file = match address_space.get_vma_file(v_start)
+                .or_else(|| vma_file_by_range(&address_space, v_start)) {
+                Some(f) => f,
+                None => continue,
+            };
+            // i_size clamp: Linux writeback never extends past EOF — bytes
+            // a MAP_SHARED mapping holds beyond the file's end are
+            // silently dropped at msync (LTP mmap01 greps for a pattern
+            // written past EOF and requires it to stay out of the file).
+            let file_size = unsafe {
+                (*file.inode.get()).as_ref().map(|i| i.get_size()).unwrap_or(0)
+            };
+            let mut cursor = v_start;
+            while cursor < v_end {
+                // SAFETY: root_ppn is a valid page-table root; the walk
+                // only reads PTEs, the write path uses the kernel's
+                // linear map of the physical page.
+                unsafe {
+                    let vpn = [
+                        (cursor >> 12) & 0x1FF,
+                        (cursor >> 21) & 0x1FF,
+                        (cursor >> 30) & 0x1FF,
+                    ];
+                    let mut pte_virt =
+                        get_page_table_virt(root_ppn << PAGE_SHIFT) as *const PageTableEntry;
+                    let mut phys: Option<u64> = None;
+                    for level in (0..3usize).rev() {
+                        let pte = &*pte_virt.add(vpn[level]);
+                        if !pte.is_valid() {
+                            break;
+                        }
+                        let is_leaf = pte.is_readable() || pte.is_writable() || pte.is_executable();
+                        if level == 0 || is_leaf {
+                            if pte.is_writable() {
+                                phys = Some(pte.ppn() << PAGE_SHIFT);
+                            }
+                            break;
+                        }
+                        pte_virt = get_page_table_virt(pte.ppn() << PAGE_SHIFT) as *const PageTableEntry;
+                    }
+                    if let Some(p) = phys {
+                        // Clamped whole-page writeback from the kernel
+                        // linear map: nothing past EOF (see i_size clamp
+                        // above), full pages otherwise.
+                        let page_phys = p;
+                        let file_off = (v_off + (cursor - v_start)) as u64;
+                        if file_off >= file_size {
+                            cursor += PAGE_SIZE as usize;
+                            continue;
+                        }
+                        let n = core::cmp::min(
+                            PAGE_SIZE as u64,
+                            file_size - file_off,
+                        ) as usize;
+                        let kva = crate::arch::riscv64::mm::phys_to_virt(
+                            crate::arch::riscv64::mm::memory_layout::PhysAddr(page_phys),
+                        );
+                        let _ = file.write_at(
+                            file_off,
+                            kva.as_usize() as *const u8,
+                            n,
+                        );
+                    }
+                }
+                cursor += PAGE_SIZE as usize;
+            }
+        }
+    }
 
     0  // Success
+}
+
+/// Fallback vm_file resolution for a SHARED file VMA whose pin was lost
+/// (should not happen — pins live for the VMA — but msync must not skip
+/// writeback silently): re-resolve through the VMA's recorded fd.
+fn vma_file_by_range(
+    address_space: &crate::mm::mm_struct::MmStruct,
+    addr: usize,
+) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+    let vma_mgr = address_space.vma_read();
+    let vma = vma_mgr.find(crate::mm::page::VirtAddr::new(addr))?;
+    let fd = vma.file_fd();
+    if fd < 0 {
+        return None;
+    }
+    unsafe { crate::fs::get_file_fd(fd as usize) }
 }
 /// Copy page contents from old virtual address range to new virtual address range.
 ///
@@ -1431,8 +1648,13 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
             }
         }
         MADV_REMOVE => {
-            // MADV_REMOVE: Completely free mapping (equivalent to munmap)
-            match address_space.munmap(VirtAddr::new(addr), length_aligned) {
+            // MADV_REMOVE: Linux punches a hole (FALLOC_FL_PUNCH_HOLE) —
+            // pages are freed and the file range becomes a hole, but the
+            // MAPPING STAYS VALID. Treating it as munmap destroyed the
+            // VMA and every later madvise on the same region failed with
+            // ENOMEM (LTP madvise01's post-REMOVE cases). Zap the pages
+            // only (same page-discard engine as DONTNEED).
+            match address_space.zap_page_range(VirtAddr::new(addr), length_aligned) {
                 Ok(()) => 0,
                 Err(_) => mmap_error::ENOMEM,
             }
@@ -1516,12 +1738,16 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
     // Calculate needed page count
     let page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
 
-
-    // Validate user pointer
-    if !crate::arch::riscv64::uaccess::access_ok(vec_ptr as usize, page_count) {
-        return mmap_error::EFAULT;
+    // Linux mincore order of checks: range validity FIRST (overflow past
+    // TASK_SIZE or a VMA gap → ENOMEM), only then the vec EFAULT — LTP
+    // mincore01 distinguishes the two errnos.
+    let range_end = match addr.checked_add(page_count * PAGE_SIZE) {
+        Some(e) => e,
+        None => return mmap_error::ENOMEM,
+    };
+    if range_end > crate::arch::riscv64::mm::user_addr::USER_END {
+        return mmap_error::ENOMEM;
     }
-
 
     // Get current process
     let current_task = match crate::sched::current() {
@@ -1538,7 +1764,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
     {
         let vma_mgr = address_space.vma_read();
         let mut check_addr = addr;
-        let end_addr = addr + page_count * PAGE_SIZE;
+        let end_addr = range_end;
 
         while check_addr < end_addr {
             match vma_mgr.find(VirtAddr::new(check_addr)) {
@@ -1553,12 +1779,21 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
         }
     }
 
+    // Validate vec pointer (only now — after the ENOMEM checks)
+    if vec_ptr.is_null() {
+        return mmap_error::EINVAL;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(vec_ptr as usize, page_count) {
+        return mmap_error::EFAULT;
+    }
+
     // 2. Get page table root
     let root_ppn = address_space.root_ppn();
 
     // 3. Check if each page is in memory
     // SAFETY: root_ppn is a valid page table root; we traverse 3-level Sv39 page tables
     // via linear mapping. vec_ptr validated with access_ok(page_count).
+    let mut vec_ok = true;
     unsafe {
         for i in 0..page_count {
             let page_addr = addr + i * PAGE_SIZE;
@@ -1599,11 +1834,19 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
             // put_user (exception-table): a raw store faults in S-mode on
             // every U page (SUM=0) and panics the kernel — glibc's malloc
             // probes with mincore, so any allocator-heavy program hit this.
-            let _ = crate::arch::riscv64::uaccess::put_user(
+            // A store that fails (vec page unmapped — LTP mincore01
+            // setup2) must surface as EFAULT, not be swallowed.
+            if !crate::arch::riscv64::uaccess::put_user(
                 vec_ptr.add(i),
                 if page_in_memory { 1u8 } else { 0u8 },
-            );
+            ) {
+                vec_ok = false;
+            }
         }
+    }
+
+    if !vec_ok {
+        return mmap_error::EFAULT;
     }
 
     0  // Success
@@ -1634,10 +1877,10 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
         return -22_i64;  // EINVAL
     }
 
-    // Address must be page aligned
-    if addr % crate::mm::page::PAGE_SIZE != 0 {
-        return -22_i64;  // EINVAL
-    }
+    // Linux rounds the range to page boundaries: addr DOWN, len UP — an
+    // unaligned addr is legal (LTP mlock01 locks one byte past a page
+    // boundary); the old alignment check rejected it with EINVAL.
+    let addr = addr & !(crate::mm::page::PAGE_SIZE - 1);
 
     // P2 mlock (fake-success cleanup): set VM_LOCKED on every VMA covering
     // [addr, addr+len). The flag marks the range non-swappable for the
@@ -1706,10 +1949,9 @@ pub fn sys_munlock(args: [u64; 6]) -> i64 {
         return -22_i64;  // EINVAL
     }
 
-    // Address must be page aligned
-    if addr % crate::mm::page::PAGE_SIZE != 0 {
-        return -22_i64;  // EINVAL
-    }
+    // Round to page boundaries like mlock (Linux mlock/munlock never
+    // require the caller to align).
+    let addr = addr & !(crate::mm::page::PAGE_SIZE - 1);
 
     // P2 mlock: clear VM_LOCKED on every VMA covering the range (same
     // whole-VMA granularity as sys_mlock).

@@ -539,10 +539,10 @@ impl FdTable {
             return Err(());
         }
         entry.fds[fd] = Some(file);
-        // CLOEXEC bit note: stale bits are cleared on CLOSE (close_fd),
-        // not here — clearing on install raced set_cloexec_fd calls made
-        // between alloc_fd and install_fd (signalfd4 et al.) and wiped
-        // legitimately-requested flags.
+        // Clear any stale CLOEXEC bit from a previous occupant of this fd
+        // number (regression round 5, MED: closed CLOEXEC fds leaked the
+        // bit to the next file that reused the number).
+        entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
         entry.count += 1;
         Ok(())
     }
@@ -585,13 +585,6 @@ impl FdTable {
             }
             let file_opt = core::mem::replace(&mut entry.fds[fd], None);
             entry.count -= 1;
-            // Clear the descriptor's CLOEXEC bit on CLOSE (not on
-            // install): install-side clearing raced callers that set the
-            // flag between alloc_fd and install_fd (signalfd4/eventfd2/
-            // timerfd_create all pre-installed it) and silently wiped it —
-            // LTP signalfd4_01 SFD_CLOEXEC. Clearing here still prevents
-            // a stale bit from leaking to the next occupant of the number.
-            entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
             // R10-2 (PIPE2 EBADF root cause): release only on the LAST
             // Arc reference — running the close op per EVENT let
             // pipe_file_close STEAL private_data from the File that fd 1
@@ -653,6 +646,29 @@ impl FdTable {
         let newfd = self.alloc_fd()?;
         self.install_fd(newfd, file).ok()?;
         Some(newfd)
+    }
+
+    /// Duplicate file descriptor keeping the errno distinction: EBADF for
+    /// an invalid `oldfd`, EMFILE when the descriptor is fine but the
+    /// table / RLIMIT_NOFILE has no free number (Linux dup semantics —
+    /// LTP dup03 requires EMFILE, not EBADF, at the limit).
+    pub fn dup_fd_strict(&self, oldfd: usize) -> Result<usize, i32> {
+        const EBADF: i32 = 9;
+        const EMFILE: i32 = 24;
+        if oldfd >= MAX_FDS {
+            return Err(-EBADF);
+        }
+        let file = match self.get_file(oldfd) {
+            Some(f) => f,
+            None => return Err(-EBADF),
+        };
+        match self.alloc_fd() {
+            Some(newfd) => match self.install_fd(newfd, file) {
+                Ok(()) => Ok(newfd),
+                Err(()) => Err(-EBADF),
+            },
+            None => Err(-EMFILE),
+        }
     }
 
     /// Duplicate file descriptor to specific number (dup2)

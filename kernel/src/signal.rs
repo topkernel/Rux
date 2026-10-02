@@ -298,26 +298,40 @@ impl SigPending {
         }
     }
 
-    /// Add signal with info (for sigqueue / kernel-generated siginfo)
+    /// Add signal with info (for sigqueue)
     pub fn add_info(&self, info: SigInfo) {
         let sig = info.si_signo;
         if sig < 1 || sig > 64 {
             return;
         }
 
-        // Set bitmap, remembering whether the bit was already pending.
+        // Set bitmap
         let mask = 1u64 << (sig - 1);
-        let prev = self.signal.fetch_or(mask, Ordering::AcqRel);
+        self.signal.fetch_or(mask, Ordering::AcqRel);
 
+        // Real-time signals need queuing
         if sig >= SIGRTMIN {
-            // Real-time signals queue every instance
             self.queue.enqueue(info);
-        } else if (prev & mask) == 0 {
-            // Standard signals do not queue duplicates: attach the siginfo
-            // of the FIRST pending instance only (Linux legacy_queue()).
-            // The delivery path (remove_one) consumes it with the bit.
-            self.queue.enqueue(info);
+        } else {
+            // Standard signals coalesce to one pending instance — keep the
+            // LATEST siginfo (e.g. SIGCHLD exit status) so an SA_SIGINFO
+            // handler sees the most recent child state. Linux mirrors this:
+            // the bitmap collapses duplicates while the queued info carries
+            // the payload the delivery frame needs.
+            let mut queue = self.queue.inner.lock();
+            queue.retain(|i| i.si_signo != sig);
+            queue.push_back(info);
         }
+    }
+
+    /// Peek at the queued siginfo for a signal WITHOUT consuming it.
+    ///
+    /// Delivery-path helper: the frame builder needs the payload (e.g.
+    /// SIGCHLD si_status/si_code) while the signal stays pending until
+    /// the disposition completes.
+    pub fn peek_info(&self, sig: i32) -> Option<SigInfo> {
+        let queue = self.queue.inner.lock();
+        queue.iter().find(|i| i.si_signo == sig).copied()
     }
 
     /// Remove signal (from bitmap and queue)
@@ -328,23 +342,13 @@ impl SigPending {
 
         let mask = 1u64 << (sig - 1);
 
-        // If real-time signal and queue not empty, remove from queue
-        if sig >= SIGRTMIN && !self.queue.is_empty() {
-            // Try to remove signal from queue head
-            while let Some(info) = self.queue.peek() {
-                if info.si_signo == sig {
-                    self.queue.dequeue();
-                } else {
-                    break;
-                }
-            }
-        }
-
-        // Standard signals: also drop the attached siginfo (if still
-        // present — the delivery path may have consumed it already).
-        if sig < SIGRTMIN {
-            let _ = self.remove_one(sig);
-            return;
+        // Drop every queued siginfo for this signal number: RT FIFO
+        // entries (old behavior popped only from the head) and the single
+        // coalesced standard-signal entry alike, so a consumed SIGCHLD
+        // never leaks its payload into a later delivery.
+        {
+            let mut queue = self.queue.inner.lock();
+            queue.retain(|i| i.si_signo != sig);
         }
 
         // Clear bitmap
@@ -598,16 +602,34 @@ impl SigInfo {
         }
     }
 
-    /// Create child process exit signal info (SIGCHLD siginfo).
-    ///
-    /// `code` is CLD_EXITED / CLD_KILLED / CLD_DUMPED; `status` is the raw
-    /// exit code or the fatal signal number, exactly what waitid's si_status
-    /// carries. SA_SIGINFO SIGCHLD handlers (toybox timeout, glib) decode
-    /// these two fields.
-    pub fn child(pid: u32, uid: u32, status: i32, code: i32) -> Self {
-        let mut info = Self::new(Signal::SIGCHLD as i32, code, pid, uid);
+    /// Create child process exit signal info
+    pub fn child(pid: u32, uid: u32, status: i32) -> Self {
+        let mut info = Self::new(Signal::SIGCHLD as i32, 1, pid, uid);
         // si_status lives at _sifields offset 8 → absolute offset 24
         // (the start of _rest; review IPC-M15: it used to land at 32).
+        info._rest[..4].copy_from_slice(&status.to_le_bytes());
+        info
+    }
+
+    /// Create the SIGCHLD siginfo a parent's SA_SIGINFO handler must see
+    /// when a child exits (Linux do_notify_parent semantics).
+    ///
+    /// - `raw_exit >= 0`: normal exit → si_code = CLD_EXITED,
+    ///   si_status = (code & 0xFF) << 8 (the waitpid WSTATUS encoding, so
+    ///   WEXITSTATUS(si_status) == code and waitid consumers work).
+    /// - `raw_exit < 0`: signal death → si_code = CLD_DUMPED when a core
+    ///   was dumped, else CLD_KILLED; si_status = the plain signal number
+    ///   (no core bit — the distinction rides on si_code; e.g. toybox
+    ///   timeout computes 128+WTERMSIG from si_status).
+    pub fn child_exit(pid: u32, uid: u32, raw_exit: i32, core_dumped: bool) -> Self {
+        let (code, status) = if raw_exit >= 0 {
+            (si_code::CLD_EXITED, ((raw_exit as u32) & 0xFF) << 8)
+        } else {
+            let sig = (-(raw_exit as i64)) as u32 & 0x7F;
+            let c = if core_dumped { si_code::CLD_DUMPED } else { si_code::CLD_KILLED };
+            (c, sig)
+        };
+        let mut info = Self::new(Signal::SIGCHLD as i32, code, pid, uid);
         info._rest[..4].copy_from_slice(&status.to_le_bytes());
         info
     }
@@ -862,12 +884,6 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
             (*current).sigmask_restore_valid = false;
         }
 
-        // Dequeue the queued siginfo (if any) NOW: it is the authoritative
-        // frame payload for SA_SIGINFO handlers (Linux dequeue_signal()).
-        // Kernel-originated signals carry CLD_*/SI_* codes here; bitmap-only
-        // signals yield None and setup_frame synthesizes an SI_KERNEL info.
-        let queued_info = (*current).pending.remove_one(sig);
-
         // If a handler is already active (sigframe armed), a recorded
         // frame whose region the current sp sits inside MIGHT be live.
         // SMP livelock fix: do NOT drop the delivery on this heuristic.
@@ -900,9 +916,9 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
                 // leaks to userspace as a bogus errno when the tracee
                 // resumes — same engine as review syscallb-H-06).
                 restart_syscall_no_handler(regs);
-                (*current).pending.remove(sig);
-                let info = queued_info
+                let info = (*current).pending.peek_info(sig)
                     .unwrap_or_else(|| SigInfo::new(sig, si_code::SI_KERNEL, (*current).pid(), 0));
+                (*current).pending.remove(sig);
                 // SAFETY: current is the running (about-to-stop) task.
                 crate::process::ptrace::ptrace_stop(current, sig, info);
                 return true;
@@ -913,6 +929,12 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
         // Get signal handling action (clone needed data)
         let action = (*current).signal.as_ref()
             .and_then(|s| s.get_action(sig));
+
+        // Snapshot the queued siginfo payload for this signal (kernel-
+        // generated signals like SIGCHLD carry si_code/si_status here).
+        // It is consumed together with the bitmap bit at the remove()
+        // below once the disposition has been taken.
+        let queued_info: Option<SigInfo> = (*current).pending.peek_info(sig);
 
         // Handle signal
         if let Some(action) = action {
@@ -926,14 +948,10 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
                     // POSIX SA_RESETHAND (System V semantics): the
                     // disposition resets to SIG_DFL once delivery has
                     // started, so a second occurrence of the signal takes
-                    // the default action unless re-armed. Linux resets
-                    // ONLY the handler (get_signal: ka->sa.sa_handler =
-                    // SIG_DFL) — flags (SA_SIGINFO et al) and sa_mask
-                    // survive the readback (LTP sigaction01).
+                    // the default action unless re-armed. Reset the stored
+                    // action (flags included — glibc readback expects it).
                     if let Some(sig_struct) = (*current).signal.as_ref() {
-                        let mut reset = action.clone();
-                        reset.sa_handler = 0; // SIG_DFL
-                        let _ = sig_struct.set_action(sig, reset);
+                        let _ = sig_struct.set_action(sig, SigAction::new());
                     }
                 }
             } else if action.action() == SigActionKind::Ignore {
@@ -1034,7 +1052,7 @@ unsafe fn setup_frame(
     sig: i32,
     action: &SigAction,
     regs: *mut crate::arch::riscv64::pt_regs::PtRegs,
-    queued: Option<SigInfo>,
+    queued_info: Option<SigInfo>,
 ) -> bool {
     let regs = &mut *regs;
 
@@ -1066,16 +1084,13 @@ unsafe fn setup_frame(
     // Ensure 16-byte alignment (RISC-V ABI requirement)
     let frame_addr = frame_addr & !0xF;
 
-    // Create signal frame. The frame's siginfo is the QUEUED info when the
-    // signal carried one (SIGCHLD exit codes, rt_sigqueueinfo payloads) —
-    // SA_SIGINFO handlers decode si_code/si_status from it (toybox timeout
-    // classifies exits via CLD_EXITED; the old unconditional SI_KERNEL
-    // marker made every child exit look signal-killed: rc 128).
+    // Create signal frame. SA_SIGINFO handlers decode the payload fields
+    // (si_code/si_status for SIGCHLD), so prefer the siginfo queued by the
+    // sender and only fall back to the generic SI_KERNEL placeholder.
     let mut frame = SignalFrame {
         reserved: [0; 4],
-        info: queued.unwrap_or_else(|| {
-            SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0)
-        }),
+        info: queued_info
+            .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0)),
         uc: UContext::new(),
         trampoline: [
             0x93, 0x08, 0x8b, 0x00,  // li a7, 139 (rt_sigreturn)
@@ -1473,8 +1488,10 @@ unsafe fn send_signal_locked(task_ptr: *mut crate::process::task::Task, _pid: u3
     send_signal_locked_info(task_ptr, sig, None)
 }
 
-/// Signal-sending core with optional siginfo (rt_sigqueueinfo family).
-/// `si_code: Option<i32>` — queued for real-time signals when present.
+/// Signal-sending core with optional siginfo (rt_sigqueueinfo family and
+/// kernel-generated signals like SIGCHLD that carry a payload).
+/// `si: Option<SigInfo>` — queued (RT: appended, standard: coalesced) so
+/// SA_SIGINFO handlers and sigtimedwait readers see the real fields.
 ///
 /// The mask check uses the TARGET TASK's per-thread sigmask (Linux
 /// wants_signal): the shared SignalStruct's mask field is not per-thread,
@@ -1484,29 +1501,7 @@ unsafe fn send_signal_locked(task_ptr: *mut crate::process::task::Task, _pid: u3
 unsafe fn send_signal_locked_info(
     task_ptr: *mut crate::process::task::Task,
     sig: i32,
-    si_code: Option<i32>,
-) -> Result<(), i32> {
-    if let Some(code) = si_code {
-        let my_pid = crate::process::current_pid();
-        let my_uid = match crate::sched::current() {
-            Some(c) => (*c).cred().uid,
-            None => 0,
-        };
-        send_signal_full_locked(task_ptr, SigInfo::new(sig, code, my_pid, my_uid))
-    } else {
-        // Legacy bitmap-only send (TTY ISIG, ptrace, deferred exit-notify
-        // plain SIGCHLD): no siginfo payload — callers that need one use
-        // send_signal_full / queue_sigchld_info.
-        send_signal_bitmap_locked(task_ptr, sig)
-    }
-}
-
-/// Bitmap-only signal-sending core (no siginfo payload).
-///
-/// SAFETY: `task_ptr` is pinned (task_refcnt held by the caller).
-unsafe fn send_signal_bitmap_locked(
-    task_ptr: *mut crate::process::task::Task,
-    sig: i32,
+    si: Option<SigInfo>,
 ) -> Result<(), i32> {
     use crate::signal::Signal;
 
@@ -1514,7 +1509,11 @@ unsafe fn send_signal_bitmap_locked(
 
     // SIGKILL and SIGSTOP cannot be ignored
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
-        task.pending.add(sig);
+        if let Some(info) = si {
+            task.pending.add_info(info);
+        } else {
+            task.pending.add(sig);
+        }
         signal_wake_up(task_ptr);
         // P1 signalfd hook: wake signalfd readers of this task.
         crate::syscall::misc::signalfd_notify_task(task_ptr);
@@ -1533,107 +1532,28 @@ unsafe fn send_signal_bitmap_locked(
         }
     };
 
-    // Linux prepare_signal()/sig_ignored(): SIG_IGN discards the signal
-    // before it pends — unless it is blocked for this thread (see
-    // send_signal_full_locked for the sigwait rationale).
-    if sig >= 1 && sig <= 64 {
-        let bit = 1u64 << (sig - 1);
-        let blocked_for_task = task.sigmask & bit != 0;
-        if !blocked_for_task {
-            if let Some(action) = signal_ref.get_action(sig) {
-                if action.action() == SigActionKind::Ignore {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    task.pending.add(sig);
-
-    // Blocked signals stay pending; wake anyway for sigwait sleepers
-    // (send_signal_full_locked documents the rationale).
-    if sig >= 1 && sig <= 64 {
-        let bit = 1u64 << (sig - 1);
-        if task.sigmask & bit != 0 {
-            crate::syscall::misc::signalfd_notify_task(task_ptr);
-            signal_wake_up(task_ptr);
+    // Linux prepare_signal(): a SIG_IGN disposition discards the signal
+    // BEFORE it is marked pending. The old add-then-remove left a
+    // transient pending bit that wait_event_interruptible polls could
+    // observe — the waiter then returned -ERESTARTSYS for a signal that
+    // vanished before delivery, leaking the raw -512 sentinel to
+    // userspace as a bogus errno.
+    if let Some(action) = signal_ref.get_action(sig) {
+        if action.action() == SigActionKind::Ignore {
             return Ok(());
         }
     }
 
-    signal_wake_up(task_ptr);
-    // P1 signalfd hook: wake signalfd readers of this task (in-mask
-    // signals are typically blocked, so they stay pending and are only
-    // observable through the fd — this wake is what unblocks read(sfd)).
-    crate::syscall::misc::signalfd_notify_task(task_ptr);
-    Ok(())
-}
-
-/// Full-siginfo signal-sending core. `info.si_signo` drives everything;
-/// the siginfo is attached to the pending bit (first instance for
-/// standard signals, every instance for real-time signals).
-///
-/// SAFETY: `task_ptr` is pinned (task_refcnt held by the caller).
-unsafe fn send_signal_full_locked(
-    task_ptr: *mut crate::process::task::Task,
-    info: SigInfo,
-) -> Result<(), i32> {
-    use crate::signal::Signal;
-
-    let sig = info.si_signo;
-    let task = &*task_ptr;
-
-    // SIGKILL and SIGSTOP cannot be ignored
-    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
+    // Add signal to pending set BEFORE checking mask.
+    // Masked signals stay pending and will be delivered when unmasked.
+    if let Some(info) = si {
         task.pending.add_info(info);
-        signal_wake_up(task_ptr);
-        // P1 signalfd hook: wake signalfd readers of this task.
-        crate::syscall::misc::signalfd_notify_task(task_ptr);
-        return Ok(());
+    } else {
+        task.pending.add(sig);
     }
-
-    // Idle task has no signal handling
-    let signal_ref: &SignalStruct = match task.signal.as_ref() {
-        Some(s) => s,
-        None => {
-            task.pending.add_info(info);
-            signal_wake_up(task_ptr);
-            // P1 signalfd hook: wake signalfd readers of this task.
-            crate::syscall::misc::signalfd_notify_task(task_ptr);
-            return Ok(());
-        }
-    };
-
-    // Linux prepare_signal()/sig_ignored(): a SIG_IGN disposition discards
-    // the signal BEFORE it is marked pending — EXCEPT when the signal is
-    // blocked for this thread: "Blocked signals are never ignored, since
-    // the signal handler may change by the time it is unblocked" (and the
-    // thread might be in sigwait/sigtimedwait for it — LTP
-    // rt_sigtimedwait01 depends on ignored-but-blocked signals being
-    // queued). The old add-then-remove left a transient pending bit that
-    // wait_event_interruptible polls could observe — the waiter then
-    // returned -ERESTARTSYS for a signal that vanished before delivery,
-    // leaking the raw -512 sentinel to userspace as a bogus errno.
-    if sig >= 1 && sig <= 64 {
-        let bit = 1u64 << (sig - 1);
-        let blocked_for_task = task.sigmask & bit != 0;
-        if !blocked_for_task {
-            if let Some(action) = signal_ref.get_action(sig) {
-                if action.action() == SigActionKind::Ignore {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    // Add signal (with its siginfo) to the pending set BEFORE checking the
-    // mask. Masked signals stay pending and are delivered when unmasked —
-    // or consumed by sigwait/sigtimedwait, which read pending regardless
-    // of the mask.
-    task.pending.add_info(info);
 
     // Check if the signal is blocked FOR THIS THREAD — still pending,
-    // just not handler-delivered now.
+    // just not delivered now.
     if sig >= 1 && sig <= 64 {
         let bit = 1u64 << (sig - 1);
         if task.sigmask & bit != 0 {
@@ -1642,15 +1562,6 @@ unsafe fn send_signal_full_locked(
             // no handler path will run, so this wake is the only thing
             // that unblocks a read(sfd) on this signal.
             crate::syscall::misc::signalfd_notify_task(task_ptr);
-            // Linux sets TIF_SIGPENDING for ANY queued signal, blocked or
-            // not: rt_sigtimedwait/sigwait sleep waiting for PENDING
-            // signals (their wait sets are normally BLOCKED) and rely on
-            // the sender's wake. Skipping it left sigwaitinfo sleepers
-            // running out their deadlines (LTP watchdog "Test killed").
-            // Handler delivery still filters on the mask, so the wake is
-            // invisible to everyone else (interruptible sleepers re-check
-            // their condition and re-sleep).
-            signal_wake_up(task_ptr);
             return Ok(());
         }
     }
@@ -1673,26 +1584,22 @@ pub fn send_signal_info(pid: u32, sig: i32, si_code: i32) -> Result<(), i32> {
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
-    // SAFETY: pinned lookup keeps the Task alive across the call.
-    unsafe {
-        let task_ptr = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
-        if task_ptr.is_null() {
-            return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32());
-        }
-        let result = send_signal_locked_info(task_ptr, sig, Some(si_code));
-        crate::process::task::Task::task_put(task_ptr);
-        result
-    }
+    let my_pid = crate::process::current_pid();
+    let my_uid = match crate::sched::current() {
+        Some(c) => (*c).cred().uid,
+        None => 0,
+    };
+    let info = SigInfo::new(sig, si_code, my_pid, my_uid);
+    send_signal_with_info(pid, info)
 }
 
-/// Send a signal carrying a FULL kernel siginfo (kill's SI_USER with the
-/// sender identity, rt_sigqueueinfo's user payload, SIGCHLD's CLD_*).
+/// Send a signal carrying a fully-formed kernel SigInfo.
 ///
-/// `info.si_signo` selects the signal; the whole struct is attached to
-/// the pending bit so sigwaitinfo/sigwait and SA_SIGINFO handlers see the
-/// real fields (LTP sigwaitinfo01/rt_sigqueueinfo01 decode si_pid,
-/// si_code and si_value from it).
-pub fn send_signal_full(pid: u32, info: SigInfo) -> Result<(), i32> {
+/// Used by kernel-originated signals whose payload matters to userspace
+/// (SIGCHLD si_code/si_status from child exit is the canonical case:
+/// SA_SIGINFO handlers — toybox timeout, glib's child reaper, systemd —
+/// decode the child's outcome from these fields).
+pub fn send_signal_with_info(pid: u32, info: SigInfo) -> Result<(), i32> {
     let sig = info.si_signo;
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
@@ -1703,50 +1610,9 @@ pub fn send_signal_full(pid: u32, info: SigInfo) -> Result<(), i32> {
         if task_ptr.is_null() {
             return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32());
         }
-        let result = send_signal_full_locked(task_ptr, info);
+        let result = send_signal_locked_info(task_ptr, sig, Some(info));
         crate::process::task::Task::task_put(task_ptr);
         result
-    }
-}
-
-/// Queue a fully-formed SIGCHLD siginfo on the parent WITHOUT waking it.
-///
-/// Called from do_exit BEFORE the final schedule(): waking the parent there
-/// lets it reap the exiting task before the context switch completes
-/// (use-after-free — see defer_exit_notify). The WAKE stays deferred to
-/// __schedule; queueing alone touches only the parent's pending set.
-/// Mirrors prepare_signal(): a SIG_IGN disposition discards the signal
-/// before it is queued.
-pub fn queue_sigchld_info(parent_pid: u32, info: SigInfo) {
-    // SAFETY: pinned lookup keeps the parent Task alive across the call.
-    unsafe {
-        let task_ptr = crate::process::pid_hash::pid_hash_lookup_pinned(parent_pid);
-        if task_ptr.is_null() {
-            return;
-        }
-        let task = &*task_ptr;
-        // sig_ignored(): blocked signals are never ignored (the waiter may
-        // be sigwaiting for SIGCHLD); unblocked SIG_IGN discards it.
-        let bit = 1u64 << (Signal::SIGCHLD as u32 - 1);
-        let blocked = task.sigmask & bit != 0;
-        if !blocked {
-            if let Some(signal_ref) = task.signal.as_ref() {
-                if let Some(action) = signal_ref.get_action(Signal::SIGCHLD as i32) {
-                    if action.action() == SigActionKind::Ignore {
-                        crate::process::task::Task::task_put(task_ptr);
-                        return;
-                    }
-                }
-            }
-        }
-        task.pending.add_info(info);
-        // A blocked SIGCHLD is a signalfd use case — wake readers, but do
-        // NOT signal_wake_up the task itself (that is the deferred part).
-        let bit = 1u64 << (Signal::SIGCHLD as u32 - 1);
-        if task.sigmask & bit != 0 {
-            crate::syscall::misc::signalfd_notify_task(task_ptr);
-        }
-        crate::process::task::Task::task_put(task_ptr);
     }
 }
 

@@ -168,7 +168,10 @@ fn try_expand_stack(
     let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
     pte_flags |= PageTableEntry::U; // User page
 
-    if vma_flags.is_readable() {
+    // Sv39 forbids W-without-R leaf PTEs: a write-only VMA (PROT_WRITE
+    // alone) folds to RW here while the VMA itself stays W-only so
+    // /proc/self/maps shows the true "-w" permissions (LTP mmap04).
+    if vma_flags.is_readable() || vma_flags.is_writable() {
         pte_flags |= PageTableEntry::R;
     }
     if vma_flags.is_writable() {
@@ -483,7 +486,10 @@ file.set_pos(saved_pos);
     let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
     pte_flags |= PageTableEntry::U; // User page
 
-    if vma_flags.is_readable() {
+    // Sv39 forbids W-without-R leaf PTEs: a write-only VMA (PROT_WRITE
+    // alone) folds to RW here while the VMA itself stays W-only so
+    // /proc/self/maps shows the true "-w" permissions (LTP mmap04).
+    if vma_flags.is_readable() || vma_flags.is_writable() {
         pte_flags |= PageTableEntry::R;
     }
     if vma_flags.is_writable() {
@@ -763,7 +769,10 @@ fn handle_swap_fault(
     let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
     pte_flags |= PageTableEntry::U;
 
-    if vma_flags.is_readable() {
+    // Sv39 forbids W-without-R leaf PTEs: a write-only VMA (PROT_WRITE
+    // alone) folds to RW here while the VMA itself stays W-only so
+    // /proc/self/maps shows the true "-w" permissions (LTP mmap04).
+    if vma_flags.is_readable() || vma_flags.is_writable() {
         pte_flags |= PageTableEntry::R;
     }
     if vma_flags.is_writable() {

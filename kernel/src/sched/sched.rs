@@ -477,19 +477,34 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
 // processes it AFTER the context switch, when the exiting task is
 // guaranteed to no longer run on any CPU.
 
-/// Per-CPU deferred exit-notification parent PID (0 = no pending notification).
-static DEFERRED_EXIT_NOTIFY_PID: [core::sync::atomic::AtomicI32; MAX_CPUS] = [
-    const { core::sync::atomic::AtomicI32::new(0) },
-    const { core::sync::atomic::AtomicI32::new(0) },
-    const { core::sync::atomic::AtomicI32::new(0) },
-    const { core::sync::atomic::AtomicI32::new(0) },
+/// Per-CPU deferred exit-notification slot. Packs (parent_pid << 32 |
+/// child_pid) into one atomic so the parent/child PAIR is never torn
+/// (0 = no pending notification).
+static DEFERRED_EXIT_NOTIFY: [core::sync::atomic::AtomicI64; MAX_CPUS] = [
+    const { core::sync::atomic::AtomicI64::new(0) },
+    const { core::sync::atomic::AtomicI64::new(0) },
+    const { core::sync::atomic::AtomicI64::new(0) },
+    const { core::sync::atomic::AtomicI64::new(0) },
 ];
+
+#[inline]
+fn pack_notify(parent_pid: u32, child_pid: u32) -> i64 {
+    ((parent_pid as i64) << 32) | (child_pid as i64 & 0xFFFF_FFFF)
+}
+
+#[inline]
+fn unpack_notify(v: i64) -> (u32, u32) {
+    (((v >> 32) as u32) & 0xFFFF_FFFF, (v & 0xFFFF_FFFF) as u32)
+}
 
 /// Defer sending SIGCHLD to `parent_pid` until after the next context switch.
 ///
 /// Called from `do_exit` *before* `schedule()`.  The notification is
 /// delivered by `__schedule` once the exiting task has been switched away.
-pub fn defer_exit_notify(parent_pid: u32) {
+/// `child_pid` rides along so the SIGCHLD siginfo can carry the child's
+/// exit status (SA_SIGINFO handlers — toybox timeout, glib, systemd —
+/// decode the outcome from si_code/si_status).
+pub fn defer_exit_notify(parent_pid: u32, child_pid: u32) {
     let cpu = arch::cpu_id() as usize;
     if cpu < MAX_CPUS {
         // R11-4: single-slot overwrite lost notifications when two tasks
@@ -498,10 +513,58 @@ pub fn defer_exit_notify(parent_pid: u32) {
         // Fire any pending predecessor INLINE (we are in syscall context,
         // post-preempt-enable; send_signal + wake are safe here) before
         // taking the slot.
-        let old = DEFERRED_EXIT_NOTIFY_PID[cpu].swap(parent_pid as i32, core::sync::atomic::Ordering::Relaxed);
-        if old > 0 && old as u32 != parent_pid {
-            process_deferred_exit_pid(old as u32);
+        let new = pack_notify(parent_pid, child_pid);
+        let old = DEFERRED_EXIT_NOTIFY[cpu].swap(new, core::sync::atomic::Ordering::Relaxed);
+        if old != 0 && old != new {
+            process_deferred_exit_pid(old);
         }
+    }
+}
+
+/// Build the Linux do_notify_parent siginfo from the (zombie) child task:
+/// si_code = CLD_EXITED/CLD_KILLED/CLD_DUMPED and si_status in waitpid
+/// WSTATUS encoding. Falls back to None when the child is already gone
+/// from the pid hash (reaped by a racing WNOHANG loop).
+fn build_sigchld_info(child_pid: u32) -> Option<crate::signal::SigInfo> {
+    let child = crate::process::pid_hash::pid_hash_lookup_pinned(child_pid);
+    if child.is_null() {
+        return None;
+    }
+    // SAFETY: child is pinned (refcount held); only read-only field access.
+    let info = unsafe {
+        crate::signal::SigInfo::child_exit(
+            (*child).pid(),
+            (*child).cred().uid,
+            (*child).exit_code(),
+            (*child).core_dumped(),
+        )
+    };
+    crate::process::task::Task::task_put(child);
+    Some(info)
+}
+
+/// Deliver one deferred exit notification: SIGCHLD with the child's exit
+/// siginfo to the parent, plus the group-wide wait_chldexit wake.
+fn process_deferred_exit_pid(packed: i64) {
+    use crate::signal::Signal;
+    let (parent_pid, child_pid) = unpack_notify(packed);
+    match build_sigchld_info(child_pid) {
+        Some(info) => {
+            let _ = crate::signal::send_signal_with_info(parent_pid, info);
+        }
+        None => {
+            // Child already reaped — the bare wake still unblocks a
+            // racing wait4 (it re-checks its children).
+            let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
+        }
+    }
+    let parent = crate::process::pid_hash::pid_hash_lookup_pinned(parent_pid);
+    if !parent.is_null() {
+        // Group-wide wake: Linux's wait_chldexit queue is shared by the
+        // whole thread group — a sibling blocked in wait4/waitid (e.g.
+        // glib's gmain worker) must also observe the child exit.
+        unsafe { crate::process::exit::wake_group_chldexit(parent) };
+        crate::process::task::Task::task_put(parent);
     }
 }
 
@@ -513,32 +576,21 @@ pub fn defer_exit_notify(parent_pid: u32) {
 /// Called with the CPU that the exiting task was running on (captured
 /// before context_switch), because cpu_id() returns the new task's
 /// CPU after the switch.
-/// R11-4: deliver a specific pending notify inline (slot chaining).
-fn process_deferred_exit_pid(parent_pid: u32) {
-    use crate::signal::Signal;
-    let _ = crate::signal::send_signal(parent_pid, Signal::SIGCHLD as i32);
-    let parent = crate::process::pid_hash::pid_hash_lookup_pinned(parent_pid);
-    if !parent.is_null() {
-        // Group-wide wake: Linux's wait_chldexit queue is shared by the
-        // whole thread group — a sibling blocked in wait4/waitid (e.g.
-        // glib's gmain worker) must also observe the child exit.
-        unsafe { crate::process::exit::wake_group_chldexit(parent) };
-        crate::process::task::Task::task_put(parent);
-    }
-}
+// (delivery helper lives above as process_deferred_exit_pid(packed))
 
 fn process_deferred_exit_notify_cpu(cpu: usize) {
     if cpu >= MAX_CPUS {
         return;
     }
-    let pid = DEFERRED_EXIT_NOTIFY_PID[cpu].load(core::sync::atomic::Ordering::Relaxed);
-    if pid <= 0 {
+    let packed = DEFERRED_EXIT_NOTIFY[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    if packed == 0 {
         return;
     }
     // Clear the slot (consume the notification).
-    DEFERRED_EXIT_NOTIFY_PID[cpu].store(0, core::sync::atomic::Ordering::Relaxed);
+    DEFERRED_EXIT_NOTIFY[cpu].store(0, core::sync::atomic::Ordering::Relaxed);
 
-    let parent = crate::process::pid_hash::pid_hash_lookup_pinned(pid as u32);
+    let (pid, _child) = unpack_notify(packed);
+    let parent = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
     if !parent.is_null() {
         // SAFETY: parent was obtained from pid_hash_lookup and is a valid Task
         // pointer (PID hash table entries are not freed until release_task).
@@ -553,7 +605,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
             // R13-1 (root cause of S-A AND S-B): is_sleeping() is TRUE
             // during the whole prepare_to_wait -> schedule() window while
             // the parent is STILL EXECUTING on another CPU. Steering its
-            // ti_cpu then poisons cpu_id() (a tp->ti_cpu FIELD read) for
+            // ti_cpu then poisons cpu_id() (a tp→ti_cpu FIELD read) for
             // the rest of its kernel path: the next __schedule resolves
             // prev from the WRONG per-CPU slot and switches context
             // against a different task — two tasks, one kernel stack;
@@ -562,7 +614,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
             // is exactly "picked, context not yet saved": true inside
             // that window (skip), false once genuinely switched out
             // (safe to steer).
-            // R49: the on_cpu gate must be evaluated ATOMICALLY with the
+            // R49: the on_cpu gate must be evaluated ATOMOMICALLY with the
             // pick path — the old unlocked check-then-write raced
             // mark_picked_on_cpu + context_switch's ti_cpu stamp (see
             // steer_task_cpu). The is_sleeping() filter stays unlocked
@@ -575,20 +627,7 @@ fn process_deferred_exit_notify_cpu(cpu: usize) {
         crate::process::task::Task::task_put(parent);
     }
 
-    use crate::signal::Signal;
-    let _ = crate::signal::send_signal(pid as u32, Signal::SIGCHLD as i32);
-
-    // R9-12: re-lookup after send_signal — the captured pointer crossed a
-    // signal-delivery call during which the (zombie) parent could have been
-    // reaped and freed on another CPU; operating on the fresh lookup (or
-    // none) closes the narrow UAF.
-    let parent_fresh = crate::process::pid_hash::pid_hash_lookup_pinned(pid as u32);
-    if !parent_fresh.is_null() {
-        unsafe {
-            let _woken = (*parent_fresh).wait_chldexit.wake_up_all();
-        }
-        crate::process::task::Task::task_put(parent_fresh);
-    }
+    process_deferred_exit_pid(packed);
 }
 
 /// Per-CPU idle task storage

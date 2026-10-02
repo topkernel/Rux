@@ -334,6 +334,26 @@ impl Drop for Inode {
 }
 
 impl Inode {
+    /// Update the CACHED mode word after a successful setattr(ATTR_MODE).
+    ///
+    /// The icache shares Inode through Arc while the VFS reads `mode`
+    /// lock-free (is_fifo/is_directory/bits). Filesystem setattr paths
+    /// persist the new mode to their backing store but historically left
+    /// this cached copy stale — stat (getattr) and open (cached field)
+    /// then DISAGREED: an mknod-retyped FIFO stayed "regular" for every
+    /// open while stat reported S_IFIFO, and chmod changes were invisible
+    /// to DAC checks. A single aligned u32 volatile store cannot tear on
+    /// this target; fences order it against the persisted store.
+    pub fn update_cached_mode(&self, mode: InodeMode) {
+        let ptr = &self.mode as *const InodeMode as *mut InodeMode;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        // SAFETY: self is a live shared Inode; the store is aligned and
+        // u32-sized (see comment) — concurrent readers observe either the
+        // old or the new full word.
+        unsafe { ptr.write_volatile(mode); }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+    }
+
     /// Create new inode
     pub fn new(ino: Ino, mode: InodeMode) -> Self {
         Self {

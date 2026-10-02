@@ -89,6 +89,13 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
     let ret = unsafe {
         match get_file_fd(fd) {
             Some(file) => {
+                // Linux: reading from an O_WRONLY-only descriptor fails with
+                // EBADF (the fd is "not open for reading") — LTP read03.
+                let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
+                    & crate::fs::file::FileFlags::O_ACCMODE;
+                if mode == crate::fs::file::FileFlags::O_WRONLY {
+                    return -errno::EBADF as i64;
+                }
                 // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
                 // a huge count can never OOM the kernel heap. A short chunk
                 // (EOF / pipe drained) ends the loop and returns what we
@@ -257,6 +264,14 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     unsafe {
         match get_file_fd(fd) {
             Some(file) => {
+                // Linux: writing to a read-only (O_RDONLY) descriptor fails
+                // with EBADF (the fd is "not open for writing") — LTP
+                // write03/write04.
+                let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
+                    & crate::fs::file::FileFlags::O_ACCMODE;
+                if mode == crate::fs::file::FileFlags::O_RDONLY {
+                    return -errno::EBADF as i64;
+                }
                 // Check if this is the original console (UART) stdout/stderr
                 // by checking if the file ops match UART_OPS
                 use crate::fs::char_dev::UART_OPS;
@@ -544,12 +559,10 @@ pub fn sys_dup(args: SyscallArgs) -> i64 {
     // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
     unsafe {
         match crate::sched::get_current_fdtable() {
-            Some(fdtable) => {
-                match fdtable.dup_fd(oldfd) {
-                    Some(newfd) => newfd as i64,
-                    None => -errno::EBADF as i64,
-                }
-            }
+            Some(fdtable) => match fdtable.dup_fd_strict(oldfd) {
+                Ok(newfd) => newfd as i64,
+                Err(e) => e as i64,
+            },
             None => -errno::EBADF as i64,
         }
     }

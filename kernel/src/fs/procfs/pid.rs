@@ -556,14 +556,18 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
             (String::new(), 0)
         };
 
+        // Linux prints maps addresses UNPADDED (%lx, no zero fill) —
+        // the zero-padded form broke scanf prefix matching in userspace
+        // parsers (LTP mmap04 builds its pattern with PRIxPTR and got 0
+        // conversions).
         if pathname.is_empty() {
             content.push_str(&format!(
-                "{:012x}-{:012x} {}{}{}{} {:08x} 00:00 {} \n",
+                "{:x}-{:x} {}{}{}{} {:08x} 00:00 {} \n",
                 start, end, r, w, x, s, offset, inode
             ));
         } else {
             content.push_str(&format!(
-                "{:012x}-{:012x} {}{}{}{} {:08x} 00:00 {} {}\n",
+                "{:x}-{:x} {}{}{}{} {:08x} 00:00 {} {}\n",
                 start, end, r, w, x, s, offset, inode, pathname
             ));
         }

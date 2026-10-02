@@ -1898,6 +1898,11 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                 ((ext4_inode.mode as u32) & 0o170000) | (v & 0o777)
             };
             ext4_inode.mode = new_mode as u16;
+            // Keep the icache copy coherent: open() and DAC checks read
+            // Inode.mode directly while stat() goes through getattr — a
+            // stale cache made retyped nodes (mkfifo/socket) and chmod
+            // results invisible to the VFS (LTP open06/read03).
+            inode.update_cached_mode(crate::fs::inode::InodeMode::new(new_mode));
         }
         setattr_attr::ATTR_UID_GID => {
             // arg1 = uid, arg2 = gid
@@ -2274,7 +2279,19 @@ unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     };
 
     match namei::ext4_link(fs, dir.ino as u32, target.ino as u32, name) {
-        Ok(()) => 0,
+        Ok(()) => {
+            // Refresh the target's CACHED Ext4Inode (VFS inode.sb): fstat
+            // and stat read links_count through it, and namei::ext4_link
+            // only updates the on-disk inode — the stale cache reported
+            // st_nlink == 1 after a successful link (LTP fstat02).
+            if let Some(ptr) = target.sb {
+                let cached = &mut *(ptr as *mut inode::Ext4Inode);
+                if let Ok(disk) = inode::read_inode(fs, target.ino as u32) {
+                    *cached = inode::Ext4Inode::from_disk(&disk, target.ino as u32);
+                }
+            }
+            0
+        }
         Err(e) => e,
     }
 }

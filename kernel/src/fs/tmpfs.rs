@@ -758,7 +758,12 @@ unsafe fn tmpfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i
             } else {
                 *node.mode.lock() & InodeMode::S_IFMT
             };
-            *node.mode.lock() = file_type | (v & 0o7777);
+            let new_mode = file_type | (v & 0o7777);
+            *node.mode.lock() = new_mode;
+            // Icache coherency: open()/DAC read the cached Inode.mode
+            // while stat() reads through getattr (node.mode) — keep both
+            // in sync or retyped FIFOs stay "regular" for open.
+            inode.update_cached_mode(InodeMode::new(new_mode));
             node.mtime.store(wall_secs(), Ordering::Release);
             0
         }
