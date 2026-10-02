@@ -880,6 +880,13 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let pgid = crate::fs::tty::console().fg_pgrp.load(Ordering::Acquire);
+            if pgid == 0 {
+                // Linux tiocgpgrp: no foreground pgrp set on the tty →
+                // ENOTTY, never a fake success with pgid 0 (dash's
+                // setjobctl retries tcgetpgrp forever otherwise — same
+                // spin the pty side had).
+                return -errno::ENOTTY as i64;
+            }
             let pgid_bytes = (pgid as u32).to_le_bytes();
             // SAFETY: arg validated with access_ok(4); copy_to_user handles user writes.
             let uncopied = unsafe {
@@ -1054,19 +1061,20 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 None => -errno::EBADF as i64,
             }
         }
-        // Other TTY commands
-        _ if (request & 0xFF00) == 0x5400 => {
-            0  // Simplified: return success
-        }
-        // Other commands
-        _ => {
-            // For stdin/stdout/stderr, return success
-            if fd >= 0 && fd <= 2 {
-                0
-            } else {
-                -errno::ENOTTY as i64
-            }
-        }
+        // Unhandled 'T' (tty) commands: ENOTTY, exactly like Linux for an
+        // ioctl the driver does not implement. The old blanket success
+        // here was load-bearing in the worst way: glibc's openpty() takes
+        // the TIOCGPTPEER result as an fd NUMBER, so "0" handed it a
+        // phantom slave at fd 0 (really the console), and every shell
+        // spawned via openpty wired stdio to the wrong file — bash hung
+        // silently, dash spun in its tcsetpgrp retry loop. Callers probe
+        // ioctls and expect ENOTTY for unsupported ones; fake success
+        // corrupts anything that interprets the return value.
+        _ if (request & 0xFF00) == 0x5400 => -errno::ENOTTY as i64,
+        // Other commands: ENOTTY for every fd — including stdio. Same
+        // reasoning: a probing caller must see "not supported", never a
+        // fabricated success for an ioctl that did nothing.
+        _ => -errno::ENOTTY as i64,
     }
 }
 
