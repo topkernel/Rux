@@ -880,13 +880,18 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let pgid = crate::fs::tty::console().fg_pgrp.load(Ordering::Acquire);
-            if pgid == 0 {
-                // Linux tiocgpgrp: no foreground pgrp set on the tty →
-                // ENOTTY, never a fake success with pgid 0 (dash's
-                // setjobctl retries tcgetpgrp forever otherwise — same
-                // spin the pty side had).
-                return -errno::ENOTTY as i64;
-            }
+            // No foreground pgrp set on the console: report the caller's
+            // own process group (Linux sets fg_pgrp when the session
+            // leader acquires the ctty on open; without a ctty model this
+            // is the same answer for the first shell). Returning a
+            // foreign/zero pgid or ENOTTY makes shell job-control loops
+            // spin — mrsh 4c81598 (init shell) burned 100% CPU forever
+            // comparing tcgetpgrp to its own pgrp.
+            let pgid = if pgid == 0 {
+                crate::process::current_pgid()
+            } else {
+                pgid
+            };
             let pgid_bytes = (pgid as u32).to_le_bytes();
             // SAFETY: arg validated with access_ok(4); copy_to_user handles user writes.
             let uncopied = unsafe {

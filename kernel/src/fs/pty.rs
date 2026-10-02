@@ -775,15 +775,21 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                     return Some(-(EFAULT as i64));
                 }
                 let pgid = pair.tty.fg_pgrp.load(Ordering::Acquire);
-                if pgid == 0 {
-                    // Linux tiocgpgrp: no foreground pgrp ever set on this
-                    // tty → ENOTTY. Returning success with pgid 0 made
-                    // dash's setjobctl loop forever ("am I in the
-                    // background?") at 100% CPU with no I/O — its
-                    // tcgetpgrp retry never saw its own pgrp. Callers use
-                    // the ENOTTY failure to fall back to no-job-control.
-                    return Some(-(crate::errno::constants::ENOTTY as i64));
-                }
+                // No foreground pgrp ever set: report the CALLER's process
+                // group as foreground. Rux has no ctty-acquisition on open
+                // (where Linux sets fg_pgrp to the acquiring session
+                // leader's pgrp), and this is the same net effect for the
+                // first shell on the tty. Both alternatives spin real
+                // shells in their "am I in the foreground?" loops, which
+                // never see their own pgrp: success-with-0 (old behavior)
+                // looped dash's setjobctl forever; ENOTTY loops mrsh
+                // (4c81598 shell/job.c checks tcgetpgrp == getpgrp() with
+                // no -1 handling, 100% CPU since boot as init).
+                let pgid = if pgid == 0 {
+                    crate::process::current_pgid()
+                } else {
+                    pgid
+                };
                 if copy_to_user(arg as *mut u8, pgid.to_le_bytes().as_ptr(), 4) > 0 {
                     return Some(-(EFAULT as i64));
                 }
