@@ -89,6 +89,104 @@ impl<'a> BlockAllocator<'a> {
         Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
     }
 
+    /// Allocate a CONTIGUOUS run of up to `want` blocks.
+    ///
+    /// Returns `Some((start_block, got))` with `got >= 1` (the first free
+    /// run found, possibly shorter than `want`). One bitmap read + one
+    /// bitmap write + one descriptor/superblock update per run — this is
+    /// what makes large fallocate(2) preallocations feasible: the old
+    /// one-block-at-a-time path cost a full bitmap read/write plus a
+    /// synchronous data-block zero per 4KB, so LTP's tst_acquire_device
+    /// (posix_fallocate of a 128MB scratch device) ground the kernel for
+    /// minutes under TCG while holding EXT4_BIG_LOCK — every LTP test
+    /// with .needs_device wedged the whole sweep.
+    pub fn alloc_block_run(&self, goal_group: u32, want: u32) -> Result<Option<(u64, u32)>, i32> {
+        let block_groups = self.fs.group_count;
+
+        if let Some(run) = self.try_alloc_run_from_group(goal_group, want)? {
+            return Ok(Some(run));
+        }
+        for dist in 1..block_groups {
+            let forward = goal_group as i32 + dist as i32;
+            let backward = goal_group as i32 - dist as i32;
+            if forward >= 0 && (forward as u32) < block_groups {
+                if let Some(run) = self.try_alloc_run_from_group(forward as u32, want)? {
+                    return Ok(Some(run));
+                }
+            }
+            if backward >= 0 && (backward as u32) < block_groups && backward != forward as i32 {
+                if let Some(run) = self.try_alloc_run_from_group(backward as u32, want)? {
+                    return Ok(Some(run));
+                }
+            }
+        }
+        Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
+    }
+
+    /// Run-allocation counterpart of try_alloc_from_group: finds the first
+    /// free bit, extends the run while bits stay free, marks them all used,
+    /// writes the bitmap back ONCE.
+    fn try_alloc_run_from_group(
+        &self,
+        group_idx: u32,
+        want: u32,
+    ) -> Result<Option<(u64, u32)>, i32> {
+        let blocks_per_group = self.fs.blocks_per_group as u64;
+        let first_data_block = self.fs.sb_info.as_ref()
+            .map(|sb| sb.s_first_data_block as u64)
+            .unwrap_or(0);
+
+        let (free_blocks, block_bitmap_block) = {
+            let group_descs = self.fs.group_descs.lock();
+            let group_desc = &group_descs[group_idx as usize];
+            (group_desc.bg_free_blocks_count_lo, group_desc.bg_block_bitmap_lo as u64)
+        };
+        if free_blocks == 0 || block_bitmap_block == 0 {
+            return Ok(None);
+        }
+
+        let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
+        let start = if group_idx == 0 {
+            core::cmp::max(first_data_block, 1)
+        } else {
+            0
+        };
+
+        let Some(first) = find_free_bit(&bitmap, start, blocks_per_group) else {
+            return Ok(None);
+        };
+        let max_run = core::cmp::min(want as u64, free_blocks as u64);
+        let mut len: u64 = 1;
+        while len < max_run {
+            let bit = first + len;
+            if bit >= blocks_per_group {
+                break;
+            }
+            if bitmap[(bit / 8) as usize] & (1 << (bit % 8)) != 0 {
+                break;
+            }
+            len += 1;
+        }
+
+        // Mark the whole run used in one pass, one writeback.
+        for bit in first..first + len {
+            bitmap[(bit / 8) as usize] |= 1 << (bit % 8);
+        }
+        self.write_block_bitmap(block_bitmap_block, &bitmap)?;
+
+        {
+            let mut group_descs = self.fs.group_descs.lock();
+            group_descs[group_idx as usize].bg_free_blocks_count_lo =
+                group_descs[group_idx as usize].bg_free_blocks_count_lo
+                    .saturating_sub(len as u16);
+        }
+        self.update_group_desc_free_blocks(group_idx as u64, free_blocks - len as u16)?;
+        self.update_superblock_free_blocks(-(len as i32))?;
+
+        let block_number = (group_idx as u64) * blocks_per_group + first;
+        Ok(Some((block_number, len as u32)))
+    }
+
     /// Try to allocate a single block from a specific group.
     ///
     /// Reads bitmap once, finds free bit, marks it used, writes back once.
@@ -150,15 +248,51 @@ impl<'a> BlockAllocator<'a> {
 
     /// Free a block
     pub fn free_block(&self, block: u64) -> Result<(), i32> {
+        self.free_block_run(block, 1)
+    }
+
+    /// Free a CONTIGUOUS run of blocks: one bitmap read, one bitmap write,
+    /// one descriptor/superblock update per GROUP-SEGMENT of the run.
+    /// Truncating/deleting a file with multi-block extents must not pay
+    /// four synchronous I/Os per 4KB block (LTP device-scratch files reach
+    /// 300MB — 76800 per-block frees wedged the whole system through the
+    /// block-I/O wait path).
+    pub fn free_block_run(&self, start: u64, len: u64) -> Result<(), i32> {
+        if len == 0 {
+            return Ok(());
+        }
+        let blocks_per_group = self.fs.blocks_per_group as u64;
+
+        // A run may cross group boundaries — free it group-segment by
+        // group-segment (each segment: one bitmap round trip).
+        let mut cursor = start;
+        let mut remain = len;
+        while remain > 0 {
+            let group_idx = cursor / blocks_per_group;
+            let offset_in_group = cursor % blocks_per_group;
+            let seg = core::cmp::min(remain, blocks_per_group - offset_in_group);
+            self.free_block_run_single_group(group_idx, offset_in_group, cursor, seg)?;
+            cursor += seg;
+            remain -= seg;
+        }
+        Ok(())
+    }
+
+    fn free_block_run_single_group(
+        &self,
+        group_idx: u64,
+        block_offset: u64,
+        start: u64,
+        len: u64,
+    ) -> Result<(), i32> {
         let blocks_per_group = self.fs.blocks_per_group as u64;
         let block_groups = self.fs.group_count as u64;
-
-        let group_idx = block / blocks_per_group;
         if group_idx >= block_groups {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
-
-        let block_offset = (block % blocks_per_group) as usize;
+        if block_offset + len > blocks_per_group {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        }
 
         let (free_blocks, block_bitmap_block) = {
             let group_descs = self.fs.group_descs.lock();
@@ -168,27 +302,26 @@ impl<'a> BlockAllocator<'a> {
 
         let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
 
-        let byte_idx = block_offset / 8;
-        let bit_idx = block_offset % 8;
-
-        if byte_idx < bitmap.len() {
-            bitmap[byte_idx] &= !(1 << bit_idx);
-
-            self.write_block_bitmap(block_bitmap_block, &bitmap)?;
-
-            {
-                let mut group_descs = self.fs.group_descs.lock();
-                group_descs[group_idx as usize].bg_free_blocks_count_lo =
-                    group_descs[group_idx as usize].bg_free_blocks_count_lo.saturating_add(1);
-            }
-
-            self.update_group_desc_free_blocks(group_idx, free_blocks + 1)?;
-            self.update_superblock_free_blocks(1)?;
-
-            Ok(())
-        } else {
-            Err(errno::Errno::InvalidArgument.as_neg_i32())
+        let end_bit = (block_offset + len) as usize;
+        if end_bit.div_ceil(8) > bitmap.len() {
+            return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
+        for bit in block_offset as usize..end_bit {
+            bitmap[bit / 8] &= !(1 << (bit % 8));
+        }
+        self.write_block_bitmap(block_bitmap_block, &bitmap)?;
+
+        {
+            let mut group_descs = self.fs.group_descs.lock();
+            group_descs[group_idx as usize].bg_free_blocks_count_lo =
+                group_descs[group_idx as usize].bg_free_blocks_count_lo
+                    .saturating_add(len as u16);
+        }
+
+        self.update_group_desc_free_blocks(group_idx, free_blocks + len as u16)?;
+        self.update_superblock_free_blocks(len as i32)?;
+
+        Ok(())
     }
 
     fn read_block_bitmap(&self, bitmap_block: u64) -> Result<Vec<u8>, i32> {

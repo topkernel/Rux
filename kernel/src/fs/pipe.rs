@@ -47,21 +47,69 @@ pub struct PipeBuffer {
 }
 
 impl PipeBuffer {
-    /// Create new pipe buffer
-    pub fn new(size: usize) -> Self {
+    /// Create new pipe buffer with USABLE capacity `capacity` bytes.
+    ///
+    /// The ring keeps one slot empty to distinguish full from empty, so it
+    /// allocates capacity+1 slots — the old code allocated exactly
+    /// `capacity` slots and thus could only ever hold capacity-1 bytes
+    /// while F_GETPIPE_SZ reported `capacity` (LTP pipe2_04: a full
+    /// 65536-byte write into a fresh pipe returned 65535).
+    pub fn new(capacity: usize) -> Self {
         // Manually allocate and initialize vector to avoid vec! macro
-        let mut data = Vec::with_capacity(size);
+        let ring_len = capacity + 1;
+        let mut data = Vec::with_capacity(ring_len);
         unsafe {
-            core::ptr::write_bytes(data.as_mut_ptr(), 0, size);
-            data.set_len(size);
+            core::ptr::write_bytes(data.as_mut_ptr(), 0, ring_len);
+            data.set_len(ring_len);
         }
 
         Self {
             data,
             read_pos: AtomicUsize::new(0),
             write_pos: AtomicUsize::new(0),
-            size,
+            size: ring_len,
         }
+    }
+
+    /// Usable capacity in bytes (ring length - 1 reserved slot).
+    pub fn capacity(&self) -> usize {
+        self.size - 1
+    }
+
+    /// Resize the ring to a new usable capacity, PRESERVING buffered data
+    /// (F_SETPIPE_SZ semantics; Linux only fails with ENOSPC-ish EBUSY
+    /// analogues we do not model — data that no longer fits is dropped).
+    pub fn resize(&mut self, new_capacity: usize) -> usize {
+        let read_pos = self.read_pos.load(Ordering::Acquire);
+        let write_pos = self.write_pos.load(Ordering::Acquire);
+        let buffered = if write_pos >= read_pos {
+            write_pos - read_pos
+        } else {
+            self.size - read_pos + write_pos
+        };
+        let keep = core::cmp::min(buffered, new_capacity);
+
+        // Copy the OLDEST `keep` bytes out in FIFO order.
+        let mut staged: Vec<u8> = Vec::with_capacity(keep);
+        for i in 0..keep {
+            staged.push(self.data[(read_pos + i) % self.size]);
+        }
+
+        let ring_len = new_capacity + 1;
+        let mut data = Vec::with_capacity(ring_len);
+        unsafe {
+            core::ptr::write_bytes(data.as_mut_ptr(), 0, ring_len);
+            data.set_len(ring_len);
+        }
+        for (i, b) in staged.iter().enumerate() {
+            data[i] = *b;
+        }
+
+        self.data = data;
+        self.size = ring_len;
+        self.read_pos.store(0, Ordering::Release);
+        self.write_pos.store(keep, Ordering::Release);
+        new_capacity
     }
 
     /// Read data from ring buffer
@@ -561,6 +609,59 @@ impl Pipe {
     pub fn available_read(&self) -> usize {
         self.buffer.lock().available_read()
     }
+
+    /// Current usable capacity in bytes (F_GETPIPE_SZ).
+    pub fn capacity(&self) -> usize {
+        self.buffer.lock().capacity()
+    }
+
+    /// Resize (F_SETPIPE_SZ): page-rounded, minimum one page. Returns the
+    /// new capacity — Linux rounds the request up to a page multiple and
+    /// treats 0 as "one page".
+    pub fn resize(&self, requested: usize) -> usize {
+        const PAGE: usize = 4096;
+        const MAX_PIPE_SIZE: usize = 1 << 20; // fs.pipe-max-size default 1MB
+        let new_cap = if requested == 0 {
+            PAGE
+        } else {
+            requested.div_ceil(PAGE) * PAGE
+        }
+        .clamp(PAGE, MAX_PIPE_SIZE);
+        self.buffer.lock().resize(new_cap)
+    }
+}
+
+/// F_GETPIPE_SZ entry for the fcntl layer: identity-checks the File
+/// against PIPE_OPS and reports the live ring capacity.
+/// Returns None when `file` is not a pipe.
+pub fn pipe_get_sz(file: &File) -> Option<usize> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity confirmed this is a pipe File; private_data was
+    // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
+    // while the File exists.
+    let ptr = unsafe { *file.private_data.get() }?;
+    let pipe = unsafe { &*(ptr as *const Pipe) };
+    Some(pipe.capacity())
+}
+
+/// F_SETPIPE_SZ entry for the fcntl layer: identity-checks the File
+/// against PIPE_OPS, then resizes the shared ring (both ends of the pipe
+/// see the change — Linux stores the size on the pipe inode).
+/// Returns None when `file` is not a pipe.
+pub fn pipe_set_sz(file: &File, size: usize) -> Option<usize> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity confirmed this is a pipe File; private_data was
+    // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
+    // while the File exists.
+    let ptr = unsafe { *file.private_data.get() }?;
+    let pipe = unsafe { &*(ptr as *const Pipe) };
+    Some(pipe.resize(size))
 }
 
 /// Synthetic st_dev for anonymous pipe file descriptions (Linux keeps

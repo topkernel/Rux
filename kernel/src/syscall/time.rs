@@ -136,6 +136,30 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             }
             0
         }
+        // Coarse clocks: same sources, jiffies-granular timestamps.
+        // LTP's tst_clocks probes them for test timing (msgrcv01/msgsnd01
+        // TBROK'd with EINVAL); callers accept coarse granularity.
+        CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
+            let j = crate::drivers::timer::get_jiffies();
+            let nsec = (j % crate::drivers::timer::HZ) * (1_000_000_000 / crate::drivers::timer::HZ);
+            if clk_id == CLOCK_REALTIME_COARSE {
+                let sec = j / crate::drivers::timer::HZ + wall_epoch_offset_secs();
+                // SAFETY: tp_ptr validated with access_ok; put_user is the
+                // exception-table copy path (SUM=0 safe).
+                unsafe {
+                    let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                    let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
+                }
+            } else {
+                let sec = j / crate::drivers::timer::HZ;
+                // SAFETY: same validation as above.
+                unsafe {
+                    let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                    let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
+                }
+            }
+            0
+        }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
             // Minimal implementation: the scheduling entity's cumulative
             // execution time (nanoseconds). PROCESS and THREAD collapse to

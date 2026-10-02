@@ -82,6 +82,271 @@ pub fn get_extent_header(i_block: &[u32; 15]) -> &Ext4ExtentHeader {
     }
 }
 
+/// Unwritten-extent flag (bit 15 of ee_len): the blocks are allocated in
+/// the bitmap but their contents have NOT been materialized — reads must
+/// be zero-filled without touching disk. fallocate(2) preallocation
+/// creates these (Linux semantics); the first write converts them.
+pub const EXT4_EXT_UNWRITTEN: u16 = 0x8000;
+
+/// Map a logical block to (physical block, unwritten flag).
+///
+/// Returns `Ok((0, false))` for a hole (nothing allocated). Unwritten
+/// blocks ARE allocated — the physical block is returned along with
+/// `unwritten == true` so callers can zero-fill instead of reading
+/// garbage from a never-materialized disk block.
+pub fn ext4_ext_get_block_ex(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    i_block: &[u32; 15],
+    logical_block: u64,
+) -> Result<(u64, bool), i32> {
+    let header = get_extent_header(i_block);
+
+    if header.eh_magic != EXT4_EXT_MAGIC {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    if header.eh_entries > header.eh_max {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Root-node leaves only (same scope limit as ext4_ext_get_block for
+    // depth > 0 trees created by foreign tools).
+    if header.eh_depth != 0 {
+        // Deep trees: report through the generic walker — it resolves the
+        // leaf; unwritten in deep trees is not distinguished (accepted
+        // approximation; our own allocator only builds root trees).
+        let b = find_block_in_extent_tree(fs, i_block, logical_block, 0)?;
+        return Ok((b, false));
+    }
+
+    let max_entries = (60 - core::mem::size_of::<Ext4ExtentHeader>())
+        / core::mem::size_of::<Ext4Extent>();
+    if header.eh_entries as usize > max_entries {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    // SAFETY: entries follow the 12-byte header inside the 60-byte i_block;
+    // eh_entries is validated against max_entries above.
+    let entries = unsafe {
+        core::slice::from_raw_parts(
+            (i_block.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
+                as *const Ext4Extent,
+            header.eh_entries as usize
+        )
+    };
+
+    for ext in entries {
+        let start = ext.ee_block as u64;
+        let end = start + ext.length() as u64;
+        if logical_block >= start && logical_block < end {
+            let offset = logical_block - start;
+            let unwritten = ext.ee_len & EXT4_EXT_UNWRITTEN != 0;
+            return Ok((ext.start_block() + offset, unwritten));
+        }
+    }
+    Ok((0, false))
+}
+
+/// Write-time conversion for unwritten extents: mark the single logical
+/// block WRITTEN, splitting its extent into up to three entries
+/// (unwritten prefix / one written block / unwritten suffix) inside the
+/// root node. Returns the physical block (which the caller must then
+/// materialize — zero it — before any read-modify-write).
+///
+/// Returns `Ok(None)` when the logical block has no extent (hole) and
+/// `Err(IOError)` for deep trees or when the split would overflow the
+/// four root inline entries.
+pub fn ext4_ext_materialize_block(
+    i_block: &mut [u32; 15],
+    logical_block: u64,
+) -> Result<Option<u64>, i32> {
+    // Copy out the scalars first — the mutable rewrite below reborrows
+    // i_block, which the live &Ext4ExtentHeader borrow would conflict with.
+    let (magic, mut n_entries, eh_max, depth): (u16, u16, u16, u16) = {
+        let header = get_extent_header(i_block);
+        (header.eh_magic, header.eh_entries, header.eh_max, header.eh_depth)
+    };
+    if magic != EXT4_EXT_MAGIC || depth != 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    let max_entries = (60 - core::mem::size_of::<Ext4ExtentHeader>())
+        / core::mem::size_of::<Ext4Extent>();
+    if n_entries as usize > max_entries {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Find the covering entry index.
+    let mut hit: Option<usize> = None;
+    {
+        // SAFETY: entries live inside the 60-byte i_block after the
+        // 12-byte header; count validated above.
+        let entries = unsafe {
+            core::slice::from_raw_parts(
+                (i_block.as_ptr() as *const u8).add(core::mem::size_of::<Ext4ExtentHeader>())
+                    as *const Ext4Extent,
+                n_entries as usize
+            )
+        };
+        for (i, ext) in entries.iter().enumerate() {
+            let start = ext.ee_block as u64;
+            let end = start + ext.length() as u64;
+            if logical_block >= start && logical_block < end {
+                if ext.ee_len & EXT4_EXT_UNWRITTEN == 0 {
+                    // Already written — nothing to convert.
+                    return Ok(Some(ext.start_block() + (logical_block - start)));
+                }
+                hit = Some(i);
+                break;
+            }
+        }
+    }
+    let Some(idx) = hit else {
+        return Ok(None); // hole
+    };
+
+    // Work on a byte view of the entry array for the split.
+    // SAFETY: i_block is 60 bytes; header 12 bytes; entry idx*12 within
+    // the remaining 48 bytes (validated via eh_entries above).
+    let (ee_block, ee_len, phys) = unsafe {
+        let e = ((i_block.as_mut_ptr() as *mut u8)
+            .add(core::mem::size_of::<Ext4ExtentHeader>() + idx * core::mem::size_of::<Ext4Extent>())
+            ) as *mut Ext4Extent;
+        ((*e).ee_block, (*e).length(), (*e).start_block())
+    };
+
+    let prefix = (logical_block - ee_block as u64) as u16; // blocks before
+    let suffix = ee_len - prefix - 1; // blocks after
+    let needed_extra = (prefix > 0) as u16 + (suffix > 0) as u16;
+    if n_entries + needed_extra > eh_max.min(max_entries as u16) {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // Rebuild the entry list with the split pieces (single memmove-sized
+    // shift; root arrays are at most 4 entries).
+    // SAFETY: building on the in-place array; total entries <= 4*12+12=60.
+    unsafe {
+        let base = (i_block.as_mut_ptr() as *mut u8)
+            .add(core::mem::size_of::<Ext4ExtentHeader>());
+        let entries = core::slice::from_raw_parts_mut(base as *mut Ext4Extent, max_entries);
+        // Shift the tail right by needed_extra slots.
+        let tail_len = n_entries as usize - idx - 1;
+        for i in (idx + 1..idx + 1 + tail_len).rev() {
+            entries[i + needed_extra as usize] = entries[i];
+        }
+        let mut slot = idx;
+        if prefix > 0 {
+            entries[slot] = Ext4Extent {
+                ee_block,
+                ee_len: prefix | EXT4_EXT_UNWRITTEN,
+                ee_start_hi: (phys >> 32) as u16,
+                ee_start_lo: phys as u32,
+            };
+            slot += 1;
+        }
+        entries[slot] = Ext4Extent {
+            ee_block: (ee_block as u64 + prefix as u64) as u32,
+            ee_len: 1, // written
+            ee_start_hi: ((phys + prefix as u64) >> 32) as u16,
+            ee_start_lo: (phys + prefix as u64) as u32,
+        };
+        slot += 1;
+        if suffix > 0 {
+            entries[slot] = Ext4Extent {
+                ee_block: (ee_block as u64 + prefix as u64 + 1) as u32,
+                ee_len: suffix | EXT4_EXT_UNWRITTEN,
+                ee_start_hi: ((phys + prefix as u64 + 1) >> 32) as u16,
+                ee_start_lo: (phys + prefix as u64 + 1) as u32,
+            };
+        }
+        // Update the entry count.
+        let hdr = (i_block.as_mut_ptr() as *mut u8) as *mut Ext4ExtentHeader;
+        (*hdr).eh_entries = n_entries + needed_extra;
+        n_entries = (*hdr).eh_entries;
+    }
+
+    Ok(Some(phys + prefix as u64))
+}
+
+/// Insert a WRITTEN extent entry covering [ee_block, ee_block+len) at
+/// physical `phys`, keeping the root array sorted by ee_block, merging
+/// with a logically+physically contiguous neighbor when possible.
+///
+/// Used by the write path when a write lands in a HOLE of an extent file
+/// (ftruncate-grow then write): a block is allocated and mapped here.
+/// Returns Err when the four root inline slots are exhausted.
+pub fn ext4_ext_insert_written(
+    i_block: &mut [u32; 15],
+    ee_block: u64,
+    phys: u64,
+    len: u16,
+) -> Result<(), i32> {
+    let (magic, mut n_entries, eh_max, depth) = {
+        let h = get_extent_header(i_block);
+        (h.eh_magic, h.eh_entries, h.eh_max, h.eh_depth)
+    };
+    if magic != EXT4_EXT_MAGIC || depth != 0 {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+    let max_entries = ((60 - core::mem::size_of::<Ext4ExtentHeader>())
+        / core::mem::size_of::<Ext4Extent>()) as u16;
+    if n_entries > eh_max.min(max_entries) {
+        return Err(errno::Errno::IOError.as_neg_i32());
+    }
+
+    // SAFETY: entry array sits after the 12-byte header in the 60-byte
+    // i_block; the count was validated above.
+    unsafe {
+        let base = (i_block.as_mut_ptr() as *mut u8)
+            .add(core::mem::size_of::<Ext4ExtentHeader>());
+        let entries = core::slice::from_raw_parts_mut(base as *mut Ext4Extent, max_entries as usize);
+
+        // Try merging with an adjacent entry first.
+        for i in 0..n_entries as usize {
+            let e = &mut entries[i];
+            let start = e.ee_block as u64;
+            let end = start + e.length() as u64;
+            let e_unwritten = e.ee_len & EXT4_EXT_UNWRITTEN != 0;
+            // Extend a preceding written extent.
+            if !e_unwritten && end == ee_block && e.start_block() + e.length() as u64 == phys {
+                e.ee_len += len;
+                return Ok(());
+            }
+            // Extend a following written extent (ours ends where it starts).
+            if !e_unwritten && start == ee_block + len as u64 && phys + len as u64 == e.start_block() {
+                e.ee_block = ee_block as u32;
+                e.ee_start_hi = (phys >> 32) as u16;
+                e.ee_start_lo = phys as u32;
+                e.ee_len += len;
+                return Ok(());
+            }
+        }
+
+        // New entry: find the insertion slot (sorted by ee_block).
+        if n_entries >= eh_max.min(max_entries) {
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+        let mut slot = n_entries as usize;
+        for i in 0..n_entries as usize {
+            if (entries[i].ee_block as u64) > ee_block {
+                slot = i;
+                break;
+            }
+        }
+        // Shift the tail right one slot.
+        for i in (slot..n_entries as usize).rev() {
+            entries[i + 1] = entries[i];
+        }
+        entries[slot] = Ext4Extent {
+            ee_block: ee_block as u32,
+            ee_len: len,
+            ee_start_hi: (phys >> 32) as u16,
+            ee_start_lo: phys as u32,
+        };
+        let hdr = (i_block.as_mut_ptr() as *mut u8) as *mut Ext4ExtentHeader;
+        n_entries += 1;
+        (*hdr).eh_entries = n_entries;
+    }
+    Ok(())
+}
+
 /// Find physical block corresponding to logical block (using extent)
 ///
 /// # Parameters

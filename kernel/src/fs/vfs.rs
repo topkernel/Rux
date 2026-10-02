@@ -1037,6 +1037,13 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.lock();
 
+    // EEXIST before any mutation (Linux do_mkdirat; LTP mkdir03) — the
+    // old path left the "already exists" decision to the filesystem's
+    // mkdir callback, which succeeded.
+    if path_lookup(pathname, LOOKUP_NOFOLLOW).is_ok() {
+        return Err(errno::Errno::FileExists.as_neg_i32());
+    }
+
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
     // Get parent inode
@@ -1086,6 +1093,12 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.lock();
+
+    // EEXIST before any mutation (Linux sys_symlinkat; LTP symlink01
+    // derivatives expect failure when the link name is taken).
+    if path_lookup(pathname, LOOKUP_NOFOLLOW).is_ok() {
+        return Err(errno::Errno::FileExists.as_neg_i32());
+    }
 
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
@@ -1681,8 +1694,20 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32) -> Result<(), i32> {
         gid
     };
 
-    // POSIX: clear setuid/setgid bits on owner change (per Linux notify_change)
-    let mode = inode.mode.bits();
+    // POSIX: clear setuid/setgid bits on owner change (per Linux notify_change).
+    // Read the CURRENT mode through the filesystem's getattr, not the cached
+    // inode mode word: filesystems whose authoritative attributes live in
+    // fs-private nodes (devfs entry, tmpfs node) update those in setattr
+    // while the cached inode keeps its instantiation-time word — chmod 600
+    // followed by chown rewrote the stale 0666 back over the entry.
+    let mode = {
+        let mut st = crate::fs::Stat::default();
+        if inode.op_getattr(&mut st) == 0 {
+            st.st_mode
+        } else {
+            inode.mode.bits()
+        }
+    };
     if uid != u32::MAX || gid != u32::MAX {
         let new_mode = mode & !(0o4000u32 | 0o2000u32); // clear S_ISUID | S_ISGID
         let _ = inode.op_setattr(setattr_attr::ATTR_MODE, new_mode as u64, 0);
@@ -1761,10 +1786,11 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     let file = unsafe { get_file_fd(fd) }
         .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
 
-    // Linux: check that fd was opened for writing (FMODE_WRITE)
+    // Linux: check that fd was opened for writing (FMODE_WRITE) —
+    // ftruncate(2) documents EBADF for a read-only fd (LTP ftruncate03).
     let file_flags = file.flags();
     if file_flags.is_readonly() {
-        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+        return Err(errno::Errno::BadFileNumber.as_neg_i32());
     }
 
     // Get inode from file
@@ -3046,16 +3072,18 @@ pub fn open_mem_file(data: alloc::vec::Vec<u8>, flags: u32) -> Result<usize, i32
     }
 }
 
-/// F_GETPIPE_SZ / F_SETPIPE_SZ (P3): report/accept the pipe capacity.
-/// The buffer is a fixed 64KB (config::PIPE_BUFFER_SIZE); accept but
-/// don't resize (Linux allows shrinking/growing within page multiples;
-/// a fixed size is a conservative simplification).
-pub fn pipe_fcntl(file: &File, cmd: usize, _arg: usize) -> Result<i64, i32> {
+/// F_GETPIPE_SZ / F_SETPIPE_SZ: report/resize the pipe capacity.
+/// The request is page-rounded (0 → one page) and clamped to the 1MB
+/// fs.pipe-max-size default; buffered data is preserved. LTP pipe2_04
+/// shrinks to page size and expects F_GETPIPE_SZ to agree.
+pub fn pipe_fcntl(file: &File, cmd: usize, arg: usize) -> Result<i64, i32> {
     const F_GETPIPE_SZ: usize = 1032;
     const F_SETPIPE_SZ: usize = 1031;
     match cmd {
-        F_GETPIPE_SZ => Ok(crate::fs::pipe::PIPE_CAPACITY as i64),
-        F_SETPIPE_SZ => Ok(crate::fs::pipe::PIPE_CAPACITY as i64), // accept, no resize
+        F_GETPIPE_SZ => Ok(crate::fs::pipe::pipe_get_sz(file)
+            .ok_or(-(crate::errno::constants::EINVAL as i32))? as i64),
+        F_SETPIPE_SZ => Ok(crate::fs::pipe::pipe_set_sz(file, arg)
+            .ok_or(-(crate::errno::constants::EINVAL as i32))? as i64),
         _ => Err(-22),
     }
 }

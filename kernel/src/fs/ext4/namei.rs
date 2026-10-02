@@ -222,9 +222,31 @@ pub fn ext4_new_inode(
     inode.i_gid = gid;
     inode.i_size = 0;
     inode.i_blocks = 0;
-    // Don't set EXT4_EXTENTS_FL by default - the caller should set it if needed
-    // and properly initialize the extent tree
+    // New regular files and directories are EXTENT-based (as in Linux
+    // ext4_new_inode): EXT4_EXTENTS_FL plus an initialized EMPTY extent
+    // header in i_block. Without the flag, fresh files took the indirect
+    // path where every bulk allocation materializes block-by-block — a
+    // 300MB fallocate (LTP tst_acquire_device's scratch device) wedged
+    // the system; extent files get the unwritten-extent fast path (see
+    // preallocate_unwritten_extents). Symlinks keep i_block for the
+    // inline fast-target — they stay indirect.
     inode.i_flags = 0;
+    if (mode & S_IFMT) == S_IFREG || (mode & S_IFMT) == S_IFDIR {
+        inode.i_flags |= 0x80000; // EXT4_EXTENTS_FL
+        use super::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
+        let hdr = Ext4ExtentHeader {
+            eh_magic: EXT4_EXT_MAGIC,
+            eh_entries: 0,
+            eh_max: 4, // (60 - 12) / 12 root inline entries
+            eh_depth: 0,
+            eh_generation: 0,
+        };
+        // SAFETY: i_block is a [u32; 15] = 60 bytes; a 12-byte header at
+        // its start is in-bounds.
+        unsafe {
+            *(inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader) = hdr;
+        }
+    }
     // Fresh inodes are born "now" (wall-clock epoch seconds —
     // drivers/rtc::wall_secs), as in Linux's ext4_new_inode.
     let now = crate::drivers::rtc::wall_secs() as u32;
@@ -823,8 +845,33 @@ fn ext4_mkdir_no_journal(
         write_block_from_vec(fs.device, block_nr, &block_data)?;
     }
 
-    // Update new inode
-    new_inode.i_block[0] = block_nr as u32;
+    // Update new inode's block mapping. New inodes are EXTENT-based (see
+    // ext4_new_inode): the first block must become a WRITTEN extent entry
+    // in i_block — the old `i_block[0] = block_nr` indirect-style store
+    // overwrote the extent HEADER with the block number, corrupting the
+    // tree before the directory was ever read.
+    if (new_inode.i_flags & 0x80000) != 0 {
+        use super::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
+        // SAFETY: i_block is 60 bytes — a 12-byte header plus one
+        // 12-byte extent entry fits with room to spare.
+        unsafe {
+            let hdr = new_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader;
+            (*hdr).eh_magic = EXT4_EXT_MAGIC;
+            (*hdr).eh_entries = 1;
+            (*hdr).eh_max = 4;
+            (*hdr).eh_depth = 0;
+            (*hdr).eh_generation = 0;
+            let e = (new_inode.i_block.as_mut_ptr() as *mut u8)
+                .add(core::mem::size_of::<Ext4ExtentHeader>())
+                as *mut Ext4Extent;
+            (*e).ee_block = 0;
+            (*e).ee_len = 1; // written
+            (*e).ee_start_hi = (block_nr >> 32) as u16;
+            (*e).ee_start_lo = block_nr as u32;
+        }
+    } else {
+        new_inode.i_block[0] = block_nr as u32;
+    }
     new_inode.i_size = block_size as u32;
     new_inode.i_blocks = (block_size / 512) as u32;
     new_inode.i_links_count = 2; // "." and parent's entry
@@ -1749,10 +1796,15 @@ fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(),
             };
             for ext in entries {
                 let start = ext.start_block();
-                for i in 0..ext.length() as u64 {
-                    revoke_freed_block(fs, start + i);
-                    allocator.free_block(start + i)?;
-                }
+                let len = ext.length() as u64;
+                // Run-free (one bitmap pass for the whole contiguous
+                // extent): a fallocate-preallocated scratch file spans
+                // 76800 blocks — per-block frees are 4 synchronous I/Os
+                // each and effectively hang unlink (LTP tst_rmdir of the
+                // device image timed out and leaked the space, driving
+                // the whole filesystem into ENOSPC).
+                revoke_freed_block(fs, start);
+                allocator.free_block_run(start, len)?;
             }
         }
         return Ok(());

@@ -183,8 +183,33 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     content.push_str(&format!("Gid:\t{}\t{}\t{}\t{}\n", cred.gid, cred.egid, cred.sgid, cred.fsgid));
     content.push_str(&format!("FDSize:\t64\n"));
     content.push_str("Groups:\t\n");
-    content.push_str("VmSize:\t0 kB\n");
-    content.push_str("VmRSS:\t0 kB\n");
+    // Real VM counters (pages → kB). VmLck sums whole VMAs carrying
+    // VM_LOCKED — our mlock pins at VMA granularity, so the locked size
+    // is the locked VMA span (LTP mmap14 mlocks a 1MB mapping and reads
+    // VmLck back). The old hardcoded zeros made every Vm* report 0 kB.
+    let (vm_size_kb, vm_rss_kb, vm_lck_kb) = {
+        let page_kb = (crate::mm::page::PAGE_SIZE / 1024) as u64;
+        let aspace = task.address_space();
+        let (total, rss) = match &aspace {
+            Some(a) => (a.total_vm(), a.rss()),
+            None => (0, 0),
+        };
+        let lck_pages: u64 = match &aspace {
+            Some(a) => a
+                .vma_read()
+                .iter()
+                .filter(|v| v.flags().contains(crate::mm::vma::VmaFlags::LOCKED))
+                .map(|v| (v.end().as_usize() - v.start().as_usize()) as u64)
+                .sum::<u64>()
+                / crate::mm::page::PAGE_SIZE as u64,
+            None => 0,
+        };
+        (total * page_kb, rss * page_kb, lck_pages * page_kb)
+    };
+    content.push_str(&format!("VmPeak:\t{} kB\n", vm_size_kb));
+    content.push_str(&format!("VmSize:\t{} kB\n", vm_size_kb));
+    content.push_str(&format!("VmLck:\t{} kB\n", vm_lck_kb));
+    content.push_str(&format!("VmRSS:\t{} kB\n", vm_rss_kb));
     content.push_str("VmData:\t0 kB\n");
     content.push_str("VmStk:\t0 kB\n");
     content.push_str("VmExe:\t0 kB\n");

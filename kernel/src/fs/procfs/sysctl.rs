@@ -46,6 +46,17 @@ pub static OVERCOMMIT_MEMORY: AtomicU32 = AtomicU32::new(0);
 /// accounting); recorded divergence.
 pub static FILE_MAX: AtomicU64 = AtomicU64::new(64 * 1024);
 
+/// /proc/sys/fs/pipe-user-pages-soft — total pages granted to pipes
+/// before unprivileged pipe allocations shrink to 1 page (Linux default
+/// 16384; read by LTP pipe15). We do not enforce the limit yet; 1024
+/// pages matches the fdtable scale (MAX_FDS = 1024 → 128 max pipes at
+/// 64KB, well under this budget) so the derived pipe count stays creatable.
+pub static PIPE_USER_PAGES_SOFT: AtomicU64 = AtomicU64::new(1024);
+/// /proc/sys/fs/pipe-user-pages-hard — hard cap variant (Linux default
+/// 1048576, i.e. 0 for "not set" on some kernels; the common default is
+/// 1048576).
+pub static PIPE_USER_PAGES_HARD: AtomicU64 = AtomicU64::new(1048576);
+
 /// /proc/sys/kernel/core_pattern — Linux CORENAME_MAX_SIZE = 128.
 pub const CORENAME_MAX_SIZE: usize = 128;
 
@@ -117,6 +128,14 @@ pub fn generate_overcommit_memory() -> Vec<u8> {
 
 pub fn generate_file_max() -> Vec<u8> {
     alloc::format!("{}\n", FILE_MAX.load(Ordering::Relaxed)).into_bytes()
+}
+
+pub fn generate_pipe_user_pages_soft() -> Vec<u8> {
+    alloc::format!("{}\n", PIPE_USER_PAGES_SOFT.load(Ordering::Relaxed)).into_bytes()
+}
+
+pub fn generate_pipe_user_pages_hard() -> Vec<u8> {
+    alloc::format!("{}\n", PIPE_USER_PAGES_HARD.load(Ordering::Relaxed)).into_bytes()
 }
 
 // ============================================================================
@@ -199,6 +218,42 @@ pub fn write_file_max(input: &[u8]) -> i32 {
         }
         Err(e) => e,
     }
+}
+
+pub fn write_pipe_user_pages_soft(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            PIPE_USER_PAGES_SOFT.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+pub fn write_pipe_user_pages_hard(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            PIPE_USER_PAGES_HARD.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/kernel/msgmni — System V message queue count limit. Matches
+/// the IPC_IDS_MAX slots the ipc table offers.
+pub fn generate_msgmni() -> Vec<u8> {
+    alloc::format!("{}\n", crate::ipc::util::IPC_IDS_MAX).into_bytes()
+}
+
+/// /proc/sys/kernel/msgmax — largest single message (bytes).
+pub fn generate_msgmax() -> Vec<u8> {
+    alloc::format!("8192\n").into_bytes()
+}
+
+/// /proc/sys/kernel/msgmnb — default max queue size in bytes.
+pub fn generate_msgmnb() -> Vec<u8> {
+    alloc::format!("16384\n").into_bytes()
 }
 
 pub fn generate_core_pattern() -> Vec<u8> {

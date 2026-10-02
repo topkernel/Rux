@@ -1384,10 +1384,11 @@ pub fn ext4_fallocate(
                         let phys = ext.start_block();
 
                         if ext_first >= punch_first && ext_last <= punch_last {
-                            // Entirely inside the punch range: free it all.
-                            for j in 0..ext_len {
-                                let _ = allocator.free_block(phys + j);
-                            }
+                            // Entirely inside the punch range: free it all
+                            // (one bitmap pass for the contiguous run —
+                            // see free_inode_blocks for why per-block
+                            // frees are untenable for big extents).
+                            let _ = allocator.free_block_run(phys, ext_len);
                             ext4_inode.blocks =
                                 ext4_inode.blocks.saturating_sub(ext_len * (block_size / 512));
                             // dropped from the kept list
@@ -1410,10 +1411,15 @@ pub fn ext4_fallocate(
                                     crate::fs::bio::brelse(bh);
                                 }
                             }
-                            kept[kept_count] = (ext.ee_block, ext.length(), phys);
+                            // Keep the RAW ee_len — an unwritten flag on a
+                            // kept preallocated range must survive (masked
+                            // lengths turn never-materialized blocks into
+                            // "written" and reads would fetch disk garbage
+                            // instead of zeros).
+                            kept[kept_count] = (ext.ee_block, ext.ee_len, phys);
                             kept_count += 1;
                         } else {
-                            kept[kept_count] = (ext.ee_block, ext.length(), phys);
+                            kept[kept_count] = (ext.ee_block, ext.ee_len, phys);
                             kept_count += 1;
                         }
                     }
@@ -1479,12 +1485,32 @@ pub fn ext4_fallocate(
             return Ok(());
         }
 
-        // KEEP_SIZE / default: preallocate blocks up to `end` without
-        // touching i_size.
+        // KEEP_SIZE / default: preallocate blocks up to `end`.
         let needed_blocks = (end + block_size - 1) / block_size;
         let current_blocks = (file_size + block_size - 1) / block_size;
         if needed_blocks > current_blocks {
-            file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks)?;
+            // Extent files: UNWRITTEN preallocation — metadata-only, no
+            // per-block zeroing (a 300MB posix_fallocate would otherwise
+            // issue 76800 buffer reads+writes and wedge the system).
+            if ext4_inode.has_extent() {
+                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                let goal_group = (ext4_inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
+                file::preallocate_unwritten_extents(
+                    fs, &mut ext4_inode, needed_blocks, current_blocks, &allocator, goal_group,
+                )?;
+            } else {
+                file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks)?;
+            }
+        }
+        // Default mode (no FALLOC_FL_KEEP_SIZE) extends the file: the range
+        // is guaranteed allocated, reads as zeros, and i_size grows to
+        // cover it (fallocate(2); POSIX posix_fallocate relies on this —
+        // LTP fallocate01/03 stat the size after allocating). KEEP_SIZE
+        // leaves i_size untouched.
+        if mode & FALLOC_FL_KEEP_SIZE == 0 && end > ext4_inode.size {
+            ext4_inode.set_size(end);
+        }
+        {
             let sec = crate::drivers::rtc::wall_secs() as u32;
             ext4_inode.mtime = sec;
             ext4_inode.ctime = sec;
@@ -1995,22 +2021,23 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 
                             if logical_start >= new_blocks {
                                 // Entirely beyond the new EOF: drop it.
-                                for j in 0..ext_len {
-                                    let _ = allocator.free_block(phys_start + j);
-                                }
+                                let _ = allocator.free_block_run(phys_start, ext_len);
                             } else if logical_start + ext_len > new_blocks {
                                 // Straddles: shrink to the new EOF, free the tail.
                                 let keep_len = new_blocks - logical_start;
-                                for j in keep_len..ext_len {
-                                    let _ = allocator.free_block(phys_start + j);
-                                }
-                                kept[kept_count] =
-                                    (ext.ee_block, keep_len as u16, phys_start);
+                                let _ = allocator.free_block_run(phys_start + keep_len, ext_len - keep_len);
+                                // Preserve the unwritten flag on the kept
+                                // head (see the punch-path note above).
+                                kept[kept_count] = (
+                                    ext.ee_block,
+                                    keep_len as u16 | (ext.ee_len & 0x8000),
+                                    phys_start,
+                                );
                                 kept_count += 1;
                             } else {
                                 // Fully below the new EOF: keep as-is.
                                 kept[kept_count] =
-                                    (ext.ee_block, ext.length(), phys_start);
+                                    (ext.ee_block, ext.ee_len, phys_start);
                                 kept_count += 1;
                             }
                         }
@@ -2090,6 +2117,35 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     }
                 }
                 ext4_inode.blocks = (new_blocks * (block_size / 512)) as u64;
+
+                // Partial last block: ZERO the tail of the kept block.
+                // POSIX truncate-extend semantics make [old, new) read as
+                // zeros — without this the stale bytes of the kept block
+                // resurface on the next extend (LTP ftruncate01 extends
+                // 256→1024 and reads back 'a's).
+                if new_size % block_size != 0 {
+                    let last_block = new_size / block_size;
+                    if let Ok(block_nr) = ext4_inode.get_data_block(fs, last_block) {
+                        if block_nr != 0 {
+                            let tail_start = (new_size % block_size) as usize;
+                            if let Some(bh) = crate::fs::bio::bread(fs.device, block_nr) {
+                                // SAFETY: bh is a one-block buffer from
+                                // bread; the tail range is in-bounds and
+                                // the buffer is released after the sync.
+                                unsafe {
+                                    let data = (*bh).b_data.as_mut_ptr();
+                                    core::ptr::write_bytes(
+                                        data.add(tail_start),
+                                        0,
+                                        (block_size as usize) - tail_start,
+                                    );
+                                }
+                                let _ = crate::fs::bio::sync_dirty_buffer(bh);
+                                crate::fs::bio::brelse(bh);
+                            }
+                        }
+                    }
+                }
             }
             ext4_inode.set_size(new_size);
         }

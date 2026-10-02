@@ -25,66 +25,76 @@ pub const ASID_FIRST: u16 = 2;
 
 // ==================== ASID Allocator ====================
 
-/// Global ASID allocator state
-static ASID_BITMAP: AtomicU64 = AtomicU64::new(0b11);  // ASID 0 and 1 reserved
-static ASID_NEXT: AtomicU16 = AtomicU16::new(ASID_FIRST);
+/// Number of 64-bit words covering MAX_ASID+1 bits (512 ASIDs -> 8 words).
+/// The old single-AtomicU64 bitmap only covered 64 ASIDs while the scan
+/// ran to MAX_ASID — with 64+ concurrent processes `1u64 << i` overflowed
+/// and PANICKED the kernel (LTP pipe13: 50 children + waiter processes).
+const ASID_WORDS: usize = (MAX_ASID as usize + 1 + 63) / 64;
+
+/// Global ASID allocator state: word 0 starts with ASID 0 and 1 reserved.
+static ASID_BITMAP: [AtomicU64; ASID_WORDS] = {
+    let mut words = [const { AtomicU64::new(0) }; ASID_WORDS];
+    words[0] = AtomicU64::new(0b11); // ASID 0 and 1 reserved
+    words
+};
 
 /// Allocate a new ASID
 ///
 /// Returns the allocated ASID, or None if no ASIDs are available.
-/// Uses an outer loop + inner scan instead of recursion to avoid
-/// stack overflow under contention.
+/// Lock-free: per-word CAS retry.
 pub fn alloc_asid() -> Option<u16> {
-    loop {
-        let bitmap = ASID_BITMAP.load(Ordering::Acquire);
-
-        for i in ASID_FIRST..=MAX_ASID {
-            let mask = 1u64 << i;
-            if bitmap & mask == 0 {
-                // Found a free ASID, try to claim it
-                if ASID_BITMAP.compare_exchange(
-                    bitmap,
-                    bitmap | mask,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ).is_ok() {
-                    return Some(i);
+    'retry: loop {
+        for w in 0..ASID_WORDS {
+            let word = ASID_BITMAP[w].load(Ordering::Acquire);
+            if word == u64::MAX {
+                continue;
+            }
+            let base = (w * 64) as u16;
+            for bit in 0..64u32 {
+                let i = base + bit as u16;
+                if i < ASID_FIRST || i > MAX_ASID {
+                    continue;
                 }
-                // CAS failed — another CPU claimed this slot.
-                // Break out of the inner loop and reload the bitmap.
-                break;
+                let mask = 1u64 << bit;
+                if word & mask == 0 {
+                    // Found a free ASID, try to claim it
+                    if ASID_BITMAP[w]
+                        .compare_exchange(word, word | mask, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        return Some(i);
+                    }
+                    // CAS failed — another CPU claimed this slot; rescan.
+                    continue 'retry;
+                }
             }
         }
-
-        // If the inner loop completed without finding any free slot,
-        // all ASIDs are allocated.
-        let current = ASID_BITMAP.load(Ordering::Acquire);
-        let all_used = (ASID_FIRST..=MAX_ASID).all(|i| current & (1u64 << i) != 0);
-        if all_used {
-            return None;
-        }
-        // Otherwise, retry with the fresh bitmap loaded at the top of the loop.
+        // Every word is full (or holds only reserved/out-of-range bits).
+        return None;
     }
 }
 
 /// Free an ASID
 ///
-/// # Safety
-/// Caller must ensure the ASID is no longer in use and TLB entries
+/// # Safety: Caller must ensure the ASID is no longer in use and TLB entries
 /// for this ASID have been flushed.
 pub fn free_asid(asid: u16) {
     if asid < ASID_FIRST || asid > MAX_ASID {
         return;
     }
 
-    let mask = 1u64 << asid;
-    ASID_BITMAP.fetch_and(!mask, Ordering::Release);
+    let w = (asid / 64) as usize;
+    let mask = 1u64 << (asid % 64);
+    ASID_BITMAP[w].fetch_and(!mask, Ordering::Release);
 }
 
 /// Get ASID usage count
 pub fn asid_usage_count() -> u32 {
-    let bitmap = ASID_BITMAP.load(Ordering::Acquire);
-    bitmap.count_ones()
+    let mut used = 0u32;
+    for w in 0..ASID_WORDS {
+        used += ASID_BITMAP[w].load(Ordering::Acquire).count_ones();
+    }
+    used
 }
 
 // ==================== TLB Flush Operations ====================
@@ -278,7 +288,6 @@ impl AsidContext {
 
 /// Print ASID allocator status
 pub fn print_asid_status() {
-    let bitmap = ASID_BITMAP.load(Ordering::Acquire);
     let used = asid_usage_count();
     let free = (MAX_ASID - ASID_FIRST + 1) as u32 - used;
 
@@ -287,5 +296,7 @@ pub fn print_asid_status() {
     crate::println!("  Reserved:      {}", ASID_FIRST);
     crate::println!("  Used:          {}", used);
     crate::println!("  Free:          {}", free);
-    crate::println!("  Bitmap:        {:#018x}", bitmap);
+    for w in 0..ASID_WORDS {
+        crate::println!("  Bitmap[{}]:     {:#018x}", w, ASID_BITMAP[w].load(Ordering::Acquire));
+    }
 }

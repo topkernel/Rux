@@ -280,48 +280,97 @@ pub fn ext4_file_write(
         // Get data block number (supports indirect blocks)
         let block_num = match inode.get_data_block(fs, block_index) {
             Ok(0) => {
-                // Extent-mapped file with a hole: allocating into
-                // inode.block[] would overwrite the extent header stored
-                // there (ftruncate-grow then write destroyed the tree —
-                // review EXT4-C4). Extent insertion is not implemented;
-                // fail honestly instead of corrupting the inode.
+                // Extent-mapped file: 0 here is either a hole or an
+                // UNWRITTEN fallocate-preallocated block. Unwritten blocks
+                // convert to written on first write (split the extent,
+                // materialize the one block — bounded by real data);
+                // genuine holes still fail honestly below (extent insertion
+                // is not implemented — review EXT4-C4).
                 if inode.has_extent() {
-                    return Err(errno::Errno::IOError.as_neg_i32());
-                }
-                // Block not allocated, need to allocate a new one for writing
-                let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
-                let goal_group = (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
-                let new_block = match allocator.alloc_block(goal_group) {
-                    Ok(b) => b,
-                    Err(e) => return Err(e),
-                };
-
-                // Zero the new block
-                // SAFETY: bio::bread returns a valid BufferHead; b_data is a
-                // block-sized writable buffer. We zero it before use.
-                unsafe {
-                    let bh = bio::bread(fs.device, new_block)
-                        .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-                    for byte in (*bh).b_data.iter_mut() {
-                        *byte = 0;
+                    match crate::fs::ext4::extent::ext4_ext_materialize_block(
+                        &mut inode.block, block_index,
+                    ) {
+                        Ok(Some(phys)) => {
+                            // Materialize the block contents now: the
+                            // read-modify-write below breads it; an
+                            // unzeroed block would splice garbage around
+                            // the written span.
+                            // SAFETY: fs.device is a valid GenDisk; phys is
+                            // a freshly allocated block whose disk contents
+                            // are irrelevant — getblk_zero creates a zeroed
+                            // dirty buffer without the disk read.
+                            unsafe {
+                                if let Some(bh) = bio::getblk_zero(fs.device, phys) {
+                                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                                    bio::brelse(bh);
+                                } else {
+                                    return Err(errno::Errno::IOError.as_neg_i32());
+                                }
+                            }
+                            phys
+                        }
+                        Ok(None) => {
+                            // Hole in an extent file (e.g. ftruncate-grow
+                            // then write): allocate one block, map it with
+                            // a written extent entry, zero it.
+                            let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                            let goal_group =
+                                (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
+                            let new_block = allocator.alloc_block(goal_group)?;
+                            crate::fs::ext4::extent::ext4_ext_insert_written(
+                                &mut inode.block, block_index, new_block, 1,
+                            )?;
+                            // SAFETY: freshly allocated block; getblk_zero
+                            // fabricates the zeroed dirty buffer without a
+                            // disk read (full-block overwrite follows).
+                            unsafe {
+                                if let Some(bh) = bio::getblk_zero(fs.device, new_block) {
+                                    bio::brelse(bh);
+                                } else {
+                                    return Err(errno::Errno::IOError.as_neg_i32());
+                                }
+                            }
+                            inode.blocks += sectors_per_block;
+                            new_block
+                        }
+                        Err(e) => return Err(e),
                     }
-                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                    let sync_res = bio::sync_dirty_buffer(bh);
-                    bio::brelse(bh);
-                    sync_res?;
-                }
-
-                // Update inode block pointer
-                if block_index < 12 {
-                    inode.block[block_index as usize] = new_block as u32;
                 } else {
-                    // Handle indirect blocks
-                    allocate_indirect_block(fs, inode, block_index, new_block, &allocator, goal_group)?;
-                }
-                inode.blocks += sectors_per_block;
+                    // Block not allocated, need to allocate a new one for writing
+                    let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
+                    let goal_group = (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
+                    let new_block = match allocator.alloc_block(goal_group) {
+                        Ok(b) => b,
+                        Err(e) => return Err(e),
+                    };
 
-                new_block
+                    // Zero the new block
+                    // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+                    // block-sized writable buffer. We zero it before use.
+                    unsafe {
+                        let bh = bio::bread(fs.device, new_block)
+                            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+
+                        for byte in (*bh).b_data.iter_mut() {
+                            *byte = 0;
+                        }
+                        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                        let sync_res = bio::sync_dirty_buffer(bh);
+                        bio::brelse(bh);
+                        sync_res?;
+                    }
+
+                    // Update inode block pointer
+                    if block_index < 12 {
+                        inode.block[block_index as usize] = new_block as u32;
+                    } else {
+                        // Handle indirect blocks
+                        allocate_indirect_block(fs, inode, block_index, new_block, &allocator, goal_group)?;
+                    }
+                    inode.blocks += sectors_per_block;
+
+                    new_block
+                }
             }
             Ok(b) => b,
             Err(e) => return Err(e),
@@ -383,45 +432,46 @@ pub fn allocate_blocks_for_file(
         return allocate_blocks_with_extents(fs, inode, needed_blocks, current_blocks, &allocator, goal_group);
     }
 
-    // Allocate new blocks (indirect block mode)
-    for i in current_blocks..needed_blocks {
-        match allocator.alloc_block(goal_group) {
-            Ok(data_block) => {
-                // Zero newly allocated data block
-                // SAFETY: bio::bread returns a valid BufferHead; b_data is a
-                // block-sized writable buffer. We zero it before use.
-                unsafe {
-                    let bh = bio::bread(fs.device, data_block)
-                        .ok_or(errno::Errno::IOError.as_neg_i32())?;
+    // Allocate new blocks (indirect block mode). Run-based like the
+    // extents path: one bitmap pass per contiguous run instead of one per
+    // block — a 300MB fallocate (LTP tst_acquire_device) is 76800 bitmap
+    // read/write/desc/superblock round trips otherwise.
+    let mut i = current_blocks;
+    while i < needed_blocks {
+        let want = core::cmp::min(needed_blocks - i, 0x7FFF) as u32;
+        let (run_start, run_len) = match allocator.alloc_block_run(goal_group, want) {
+            Ok(Some(run)) => run,
+            Ok(None) => return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32()),
+            Err(e) => return Err(e),
+        };
+        for k in 0..run_len as u64 {
+            let data_block = run_start + k;
+            // Zero newly allocated data block (deferred-dirty).
+            // SAFETY: bio::bread returns a valid BufferHead; b_data is a
+            // block-sized writable buffer. We zero it before use.
+            unsafe {
+                let bh = bio::bread(fs.device, data_block)
+                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
-                    for byte in (*bh).b_data.iter_mut() {
-                        *byte = 0;
-                    }
-
-                    (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                    let sync_res = bio::sync_dirty_buffer(bh);
-                    bio::brelse(bh);
-                    sync_res?;
+                for byte in (*bh).b_data.iter_mut() {
+                    *byte = 0;
                 }
 
-                // Decide how to store block number based on block index
-                let block_index = i;
+                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                bio::brelse(bh);
+            }
+            let block_index = i + k;
 
-                if block_index < 12 {
-                    // Direct block
-                    inode.block[block_index as usize] = data_block as u32;
-                } else {
-                    // Indirect block
-                    allocate_indirect_block(fs, inode, block_index, data_block, &allocator, goal_group)?;
-                }
-                inode.blocks += sectors_per_block;
+            if block_index < 12 {
+                // Direct block
+                inode.block[block_index as usize] = data_block as u32;
+            } else {
+                // Indirect block
+                allocate_indirect_block(fs, inode, block_index, data_block, &allocator, goal_group)?;
             }
-            Err(e) => {
-                // Allocation failed, rollback allocated blocks
-                // TODO: Implement complete rollback
-                return Err(e);
-            }
+            inode.blocks += sectors_per_block;
         }
+        i += run_len as u64;
     }
 
     Ok(())
@@ -429,6 +479,122 @@ pub fn allocate_blocks_for_file(
 
 /// Allocate blocks for extent-based files
 /// Creates a simple inline extent that maps logical blocks to physical blocks
+/// Unwritten-extent preallocation for fallocate(2) (extent files only).
+///
+/// Allocates contiguous runs and records them as UNWRITTEN extents
+/// (ee_len bit 15): the bitmap is updated (metadata-only — a handful of
+/// I/Os regardless of size) and NO data blocks are zeroed or read. Reads
+/// of unwritten blocks are zero-filled (ext4_ext_get_block_ex); the first
+/// write converts the covered block (ext4_ext_materialize_block) — the
+/// work stays proportional to the data actually written, not to the
+/// preallocated size. This is what Linux's fallocate does and what makes
+/// LTP's 300MB tst_acquire_device scratch file instant.
+pub fn preallocate_unwritten_extents(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &mut crate::fs::ext4::inode::Ext4Inode,
+    needed_blocks: u64,
+    current_blocks: u64,
+    allocator: &crate::fs::ext4::allocator::BlockAllocator,
+    goal_group: u32,
+) -> Result<(), i32> {
+    use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC, EXT4_EXT_UNWRITTEN};
+
+    let sectors_per_block = (fs.block_size / 512) as u64;
+    const MAX_EXTENT_LEN: u32 = 0x7FFF;
+
+    // Root-node only (same rule as the other extent writers).
+    {
+        // SAFETY: inode.block is 60 bytes; reading a 12-byte header at its
+        // start is in-bounds.
+        let header = unsafe { &*(inode.block.as_ptr() as *const Ext4ExtentHeader) };
+        if header.eh_magic == EXT4_EXT_MAGIC && header.eh_depth > 0 {
+            return Err(errno::Errno::IOError.as_neg_i32());
+        }
+    }
+
+    let mut logical_block = current_blocks;
+    while logical_block < needed_blocks {
+        let want = core::cmp::min((needed_blocks - logical_block) as u32, MAX_EXTENT_LEN);
+        let Some((run_start, run_len)) = allocator.alloc_block_run(goal_group, want)? else {
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        };
+
+        // SAFETY: inode.block is a [u32; 15] = 60 bytes; the header and the
+        // (at most 4) entries fit exactly.
+        let header = unsafe { &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader) };
+        if header.eh_magic != EXT4_EXT_MAGIC {
+            header.eh_magic = EXT4_EXT_MAGIC;
+            header.eh_entries = 0;
+            header.eh_max = 4;
+            header.eh_depth = 0;
+            header.eh_generation = 0;
+        }
+        // SAFETY: entries follow the 12-byte header within 60 bytes.
+        let entries = unsafe {
+            core::slice::from_raw_parts_mut(
+                (inode.block.as_mut_ptr() as *mut u8)
+                    .add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4Extent,
+                header.eh_max as usize,
+            )
+        };
+
+        // Append a new UNWRITTEN entry for the run. Extending an existing
+        // unwritten entry is only possible when physically contiguous AND
+        // both unwritten — a written extent cannot absorb unwritten blocks.
+        let mut appended = false;
+        if header.eh_entries > 0 {
+            let last = &mut entries[(header.eh_entries - 1) as usize];
+            let last_end = last.ee_block as u64 + last.length() as u64;
+            if last_end == logical_block
+                && last.ee_len & EXT4_EXT_UNWRITTEN != 0
+                && last.start_block() + last.length() as u64 == run_start
+                && last.length() < 0x7FFF
+            {
+                let room = 0x7FFFu32 - last.length() as u32;
+                let take = core::cmp::min(run_len as u32, room);
+                last.ee_len += take as u16;
+                logical_block += take as u64;
+                inode.blocks += sectors_per_block * take as u64;
+                appended = take == run_len;
+                // A partial take falls through to append the remainder.
+                if !appended {
+                    // Continue below with the leftover run.
+                    let leftover = run_len as u32 - take;
+                    let leftover_start = run_start + take as u64;
+                    let leftover_logical = logical_block;
+                    if header.eh_entries >= header.eh_max {
+                        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+                    }
+                    let new_entry = &mut entries[header.eh_entries as usize];
+                    new_entry.ee_block = leftover_logical as u32;
+                    new_entry.ee_len = leftover as u16 | EXT4_EXT_UNWRITTEN;
+                    new_entry.ee_start_hi = (leftover_start >> 32) as u16;
+                    new_entry.ee_start_lo = leftover_start as u32;
+                    header.eh_entries += 1;
+                    inode.blocks += sectors_per_block * leftover as u64;
+                    logical_block += leftover as u64;
+                    appended = true;
+                }
+            }
+        }
+        if !appended {
+            if header.eh_entries >= header.eh_max {
+                return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+            }
+            let new_entry = &mut entries[header.eh_entries as usize];
+            new_entry.ee_block = logical_block as u32;
+            new_entry.ee_len = run_len as u16 | EXT4_EXT_UNWRITTEN;
+            new_entry.ee_start_hi = (run_start >> 32) as u16;
+            new_entry.ee_start_lo = run_start as u32;
+            header.eh_entries += 1;
+            inode.blocks += sectors_per_block * run_len as u64;
+            logical_block += run_len as u64;
+        }
+    }
+
+    Ok(())
+}
+
 fn allocate_blocks_with_extents(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
@@ -454,44 +620,55 @@ fn allocate_blocks_with_extents(
         }
     }
 
-    // For simplicity, allocate blocks one by one and update/create extent
-    for logical_block in current_blocks..needed_blocks {
-        let physical_block = allocator.alloc_block(goal_group)?;
+    // Run-based allocation: contiguous blocks are claimed with one bitmap
+    // pass (alloc_block_run) and zeroed DEFERRED-dirty (no per-block
+    // sync_dirty_buffer — buffer-cache eviction and sync_all flush dirty
+    // buffers). The old one-block-per-iteration loop did a bitmap
+    // read+write, a block read and a synchronous block write PER 4KB; a
+    // single posix_fallocate of a 128MB scratch device (LTP
+    // tst_acquire_device, every .needs_device test) held EXT4_BIG_LOCK for
+    // minutes under TCG and wedged whole sweep chunks.
+    const MAX_EXTENT_LEN: u32 = 0x7FFF; // ee_len u16 with the unwritten bit reserved
+    let mut logical_block = current_blocks;
+    while logical_block < needed_blocks {
+        let want = core::cmp::min(
+            (needed_blocks - logical_block) as u32,
+            MAX_EXTENT_LEN,
+        );
+        let Some((run_start, run_len)) = allocator.alloc_block_run(goal_group, want)? else {
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        };
 
-        // Zero the new block
+        // Zero each new block in the run (deferred-dirty, no sync).
         // SAFETY: bio::bread returns a valid BufferHead; b_data is a
         // block-sized writable buffer. We zero it before use.
-        unsafe {
-            let bh = bio::bread(fs.device, physical_block)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            for byte in (*bh).b_data.iter_mut() {
-                *byte = 0;
+        for b in run_start..run_start + run_len as u64 {
+            unsafe {
+                let bh = bio::bread(fs.device, b)
+                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
+                for byte in (*bh).b_data.iter_mut() {
+                    *byte = 0;
+                }
+                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                bio::brelse(bh);
             }
-            (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            let sync_res = bio::sync_dirty_buffer(bh);
-            bio::brelse(bh);
-            sync_res?;
         }
 
-        // Update extent tree
-        // For simple case, we just create/extend an inline extent in i_block
+        // Update extent tree — extend the last extent when the run is
+        // physically contiguous with it, else append a new entry.
         // SAFETY: inode.block is a [u8; 60] array; reinterpreting its start
         // as Ext4ExtentHeader is safe because extent data is stored inline
         // in i_block for extent-based inodes.
         let header = unsafe {
             &mut *(inode.block.as_mut_ptr() as *mut Ext4ExtentHeader)
         };
-
         if header.eh_magic != EXT4_EXT_MAGIC {
-            // Initialize new extent header
             header.eh_magic = EXT4_EXT_MAGIC;
             header.eh_entries = 0;
             header.eh_max = 4; // Max inline extents
             header.eh_depth = 0;
             header.eh_generation = 0;
         }
-
-        // Get or create extent entry
         // SAFETY: The pointer is derived from inode.block (60 bytes) advanced
         // past the Ext4ExtentHeader (12 bytes), leaving room for up to
         // eh_max (4) Ext4Extent entries (each 12 bytes = 48 bytes total).
@@ -503,36 +680,42 @@ fn allocate_blocks_with_extents(
             )
         };
 
-        // Check if we can extend the last extent or need a new one
-        if header.eh_entries > 0 {
-            let last_entry = &mut entries[(header.eh_entries - 1) as usize];
-            let last_end = last_entry.ee_block as u64 + last_entry.length() as u64;
-
-            if last_end == logical_block && last_entry.length() < 0x8000 {
-                // Can extend last extent (contiguous blocks)
-                // Check if physical blocks are contiguous
-                let expected_physical = last_entry.start_block() + last_entry.length() as u64;
-                if physical_block == expected_physical {
-                    last_entry.ee_len += 1;
-                    inode.blocks += sectors_per_block;
-                    continue;
+        let mut remaining = run_len;
+        let mut phys = run_start;
+        while remaining > 0 {
+            let mut take = remaining;
+            let mut extended = false;
+            if header.eh_entries > 0 {
+                let last_entry = &mut entries[(header.eh_entries - 1) as usize];
+                let last_end = last_entry.ee_block as u64 + last_entry.length() as u64;
+                if last_end == logical_block
+                    && last_entry.start_block() + last_entry.length() as u64 == phys
+                {
+                    // Extend the last extent; cap at the u15 field limit.
+                    let room = MAX_EXTENT_LEN as u64 - last_entry.length() as u64;
+                    if room > 0 {
+                        take = core::cmp::min(take as u64, room) as u32;
+                        last_entry.ee_len += take as u16;
+                        extended = true;
+                    }
                 }
             }
+            if !extended {
+                if header.eh_entries >= header.eh_max {
+                    return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+                }
+                let new_entry = &mut entries[header.eh_entries as usize];
+                new_entry.ee_block = logical_block as u32;
+                new_entry.ee_len = take as u16;
+                new_entry.ee_start_hi = (phys >> 32) as u16;
+                new_entry.ee_start_lo = phys as u32;
+                header.eh_entries += 1;
+            }
+            inode.blocks += sectors_per_block * take as u64;
+            logical_block += take as u64;
+            phys += take as u64;
+            remaining -= take;
         }
-
-        // Need to add new extent entry
-        if header.eh_entries >= header.eh_max {
-            // No space for new extent - should not happen for small files
-            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
-        }
-
-        let new_entry = &mut entries[header.eh_entries as usize];
-        new_entry.ee_block = logical_block as u32;
-        new_entry.ee_len = 1;
-        new_entry.ee_start_hi = (physical_block >> 32) as u16;
-        new_entry.ee_start_lo = physical_block as u32;
-        header.eh_entries += 1;
-        inode.blocks += sectors_per_block;
     }
 
     Ok(())

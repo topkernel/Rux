@@ -246,7 +246,7 @@ fn fifo_file_close(file: &File) -> i32 {
 }
 
 /// FIFO file operations: pipe data path + FIFO-aware close.
-static FIFO_OPS: FileOps = FileOps {
+pub static FIFO_OPS: FileOps = FileOps {
     read: Some(fifo_file_read),
     write: Some(fifo_file_write),
     lseek: None, // unseekable (ESPIPE via the default in File::lseek)

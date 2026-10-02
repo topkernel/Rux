@@ -256,6 +256,10 @@ pub mod mmap_error {
     pub const ENODEV: i64 = -19;
     /// Bad file descriptor
     pub const EBADF: i64 = -9;
+    /// Operation not supported (MAP_SHARED_VALIDATE with an unknown flag)
+    pub const EOPNOTSUPP: i64 = -95;
+    /// File exists (MAP_FIXED_NOREPLACE over an existing mapping)
+    pub const EEXIST: i64 = -17;
 }
 
 /// User space address range (Sv39 compatible)

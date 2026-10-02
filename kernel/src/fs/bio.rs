@@ -657,6 +657,86 @@ impl BlockCache {
         }
     }
 
+    /// getblk-style fetch for FULL-BLOCK overwrites: cache hit returns the
+    /// buffer; a miss creates it ZEROED, marked Uptodate+Dirty, WITHOUT the
+    /// disk read a bread() would do. Only for blocks whose existing disk
+    /// contents are irrelevant (freshly allocated blocks being zeroed) —
+    /// reading through this API would fabricate zeros for real data.
+    fn get_zero(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+        // SAFETY: same entry-lifetime guarantees as get(); the BufferHead is
+        // either found in the cache (pinned via get()) or freshly created and
+        // inserted below, never freed while the caller holds a reference.
+        unsafe {
+            let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+            let index = self.hash_index(device_major, device_minor, blocknr);
+
+            // Phase 1: lookup under bucket lock (hit path identical to get)
+            {
+                let mut bucket = self.buckets[index].lock();
+                let mut current = bucket.head;
+                while let Some(entry_ptr) = current {
+                    let entry = &*entry_ptr;
+                    current = entry.hash_next;
+                    if entry.evicting {
+                        continue;
+                    }
+                    if entry.key == (device_major, device_minor, blocknr) {
+                        if entry.bh.is_null()
+                            || (*entry.bh).b_data.len() != self.block_size as usize
+                        {
+                            continue; // dead entry — treat as miss
+                        }
+                        (*entry.bh).get();
+                        return Some(entry.bh);
+                    }
+                }
+            }
+
+            // Phase 1.5: evict if full (dirty victims are synced by evict_one)
+            while self.count.load(Ordering::Acquire) as usize >= self.max_entries {
+                if !self.evict_one() {
+                    return None; // all buffers in use
+                }
+            }
+
+            // Phase 2: create the buffer zeroed — NO disk read.
+            let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
+            bh.set_device(device);
+            bh.set_state_bit(BufferState::BH_Uptodate);
+            bh.set_state_bit(BufferState::BH_Dirty);
+
+            let entry = Box::new(CacheEntry::new(bh, device_major, device_minor, blocknr));
+            let entry_ptr = Box::into_raw(entry);
+
+            // Phase 3: insert (same duplicate double-check as get)
+            {
+                let mut bucket = self.buckets[index].lock();
+                let mut current = bucket.head;
+                while let Some(cp) = current {
+                    if (*cp).key == (device_major, device_minor, blocknr) {
+                        if (*cp).bh.is_null()
+                            || (*(*cp).bh).b_data.len() != self.block_size as usize
+                        {
+                            current = (*cp).hash_next;
+                            continue;
+                        }
+                        (*(*cp).bh).get();
+                        let _ = Box::from_raw(entry_ptr);
+                        return Some((*cp).bh);
+                    }
+                    current = (*cp).hash_next;
+                }
+                (*entry_ptr).hash_next = bucket.head;
+                bucket.head = Some(entry_ptr);
+                let mut lru = self.lru_lock_under_bucket();
+                Self::move_to_lru_head(&mut lru, entry_ptr);
+            }
+
+            self.count.fetch_add(1, Ordering::Release);
+            Some((*entry_ptr).bh)
+        }
+    }
+
     /// Release buffer (decrement refcount)
     fn put(&self, bh: *const BufferHead) {
         // SAFETY: bh is a raw pointer returned by get()/bread(); it points to a
@@ -782,6 +862,13 @@ fn get_block_cache() -> &'static BlockCache {
 /// Read a block from cache (or disk if not cached)
 pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get(device, blocknr)
+}
+
+/// Fetch a block for a full-block overwrite: no disk read on a miss — the
+/// buffer is created zeroed and dirty (see BlockCache::get_zero). Callers
+/// must overwrite the whole block (or rely on the zeros).
+pub fn getblk_zero(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+    get_block_cache().get_zero(device, blocknr)
 }
 
 /// Async block read: submit I/O without blocking, return buffer head immediately.

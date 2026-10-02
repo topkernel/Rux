@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use alloc::format;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU32, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::fs::file::FileOps;
 use super::dev_t::DevNo;
@@ -48,8 +49,15 @@ pub struct DevfsEntry {
     pub children: Spinlock<BTreeMap<String, Arc<DevfsEntry>>>,
     /// Device number (valid only for device types)
     pub devno: DevNo,
-    /// Permissions (default 0666)
-    pub mode: u32,
+    /// Permission bits (default 0666). Atomic: chmod (devfs_setattr) writes
+    /// this from a shared &Inode while concurrent lookups build fresh inodes
+    /// from the same entry. The entry is the authoritative store — the entry
+    /// outlives any cached inode, so a chmod survives dentry/icache eviction.
+    pub mode: AtomicU32,
+    /// Owner uid/gid (grantpt's chmod/chown on /dev/pts/N — see
+    /// devfs_setattr). Atomic for the same reason as `mode`.
+    pub uid: AtomicU32,
+    pub gid: AtomicU32,
 }
 
 impl DevfsEntry {
@@ -60,7 +68,9 @@ impl DevfsEntry {
             entry_type: DevEntryType::Directory,
             children: Spinlock::new(BTreeMap::new()),
             devno: DevNo::default(),
-            mode: 0o755,
+            mode: AtomicU32::new(0o755),
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
         }
     }
 
@@ -71,7 +81,9 @@ impl DevfsEntry {
             entry_type: DevEntryType::CharDevice,
             children: Spinlock::new(BTreeMap::new()),
             devno,
-            mode: 0o666,
+            mode: AtomicU32::new(0o666),
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
         }
     }
 
@@ -82,7 +94,9 @@ impl DevfsEntry {
             entry_type: DevEntryType::CharDevice,
             children: Spinlock::new(BTreeMap::new()),
             devno,
-            mode: mode & 0o777,
+            mode: AtomicU32::new(mode & 0o777),
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
         }
     }
 
@@ -95,7 +109,9 @@ impl DevfsEntry {
             entry_type: DevEntryType::BlockDevice,
             children: Spinlock::new(BTreeMap::new()),
             devno,
-            mode: mode & 0o777,
+            mode: AtomicU32::new(mode & 0o777),
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
         }
     }
 
@@ -917,17 +933,19 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
     drop(children);
 
     let mode = if child.is_dir() {
-        InodeMode::new(InodeMode::S_IFDIR | child.mode)
+        InodeMode::new(InodeMode::S_IFDIR | child.mode.load(Ordering::Acquire))
     } else if child.is_char_device() {
-        InodeMode::new(InodeMode::S_IFCHR | child.mode)
+        InodeMode::new(InodeMode::S_IFCHR | child.mode.load(Ordering::Acquire))
     } else if child.is_block_device() {
-        InodeMode::new(InodeMode::S_IFBLK | child.mode)
+        InodeMode::new(InodeMode::S_IFBLK | child.mode.load(Ordering::Acquire))
     } else {
-        InodeMode::new(InodeMode::S_IFBLK | child.mode)
+        InodeMode::new(InodeMode::S_IFBLK | child.mode.load(Ordering::Acquire))
     };
 
     let ino = devfs_ino_hash(name_str);
     let mut inode = Inode::new(ino, mode);
+    inode.uid.store(child.uid.load(Ordering::Acquire), Ordering::Relaxed);
+    inode.gid.store(child.gid.load(Ordering::Acquire), Ordering::Relaxed);
     inode.fs_id = crate::fs::inode::FS_ID_DEVFS;  // icache isolation (VFS-H8)
     inode.ops = Some(&DEVFS_INODE_OPS);
     // Clone the Arc and convert to raw pointer to keep the DevfsEntry alive
@@ -950,8 +968,8 @@ unsafe fn devfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     stat.st_dev = 0;
     stat.st_ino = inode.ino;
     stat.st_nlink = 1;
-    stat.st_uid = 0;
-    stat.st_gid = 0;
+    stat.st_uid = entry.uid.load(Ordering::Acquire);
+    stat.st_gid = entry.gid.load(Ordering::Acquire);
     // Userspace dev_t encoding (glibc major()/minor() decode this — see
     // DevNo::to_user_dev; the old kernel-internal encoding made every
     // userspace stat report major 0).
@@ -959,7 +977,10 @@ unsafe fn devfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     stat.st_size = 0;
     stat.st_blocks = 0;
     stat.st_blksize = 4096;
-    stat.st_mode = inode.mode.bits();
+    // File type from the (immutable) entry kind, permission bits from the
+    // entry — the authoritative store, so a chmod is visible in stat even
+    // while a stale cached inode still carries the old mode word.
+    stat.st_mode = (inode.mode.bits() & InodeMode::S_IFMT) | entry.mode.load(Ordering::Acquire);
     stat.st_atime = 0;
     stat.st_atime_nsec = 0;
     stat.st_mtime = 0;
@@ -1131,7 +1152,7 @@ unsafe fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<I
     }
     let mut dir_entry = DevfsEntry::new_dir(name);
     if mode.bits() & 0o777 != 0 {
-        dir_entry.mode = mode.bits() & 0o777;
+        dir_entry.mode = AtomicU32::new(mode.bits() & 0o777);
     }
     let new_dir = Arc::new(dir_entry);
     children.insert(String::from(name), new_dir.clone());
@@ -1139,7 +1160,10 @@ unsafe fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<I
 
     // Build the VFS inode for the new directory (devfs_iget discipline).
     let ino = devfs_ino_hash(name);
-    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | new_dir.mode));
+    let mut inode = Inode::new(
+        ino,
+        InodeMode::new(InodeMode::S_IFDIR | new_dir.mode.load(Ordering::Acquire)),
+    );
     inode.fs_id = crate::fs::inode::FS_ID_DEVFS;
     inode.ops = Some(&DEVFS_INODE_OPS);
     inode.private_data = Some(Arc::into_raw(new_dir) as *mut u8);
@@ -1218,6 +1242,63 @@ unsafe fn devfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
     0
 }
 
+/// DevFS setattr: chmod/chown on /dev nodes.
+///
+/// Before this hook existed, DEVFS_INODE_OPS.setattr was None and every
+/// chmod/chown on ANY /dev node failed with EROFS via op_setattr's fallback
+/// — fatal to glibc's grantpt(): after posix_openpt, grantpt chmods the
+/// slave node /dev/pts/N (mode 0o620 computed from the master's stat; the
+/// chown is skipped for a root owner). The chmod hit EROFS, grantpt has no
+/// pt_chown helper on Ubuntu, openpty() failed, and xterm's interactive
+/// dash child died within seconds — bare `xterm` (no -e) could never keep
+/// a shell alive. Linux devtmpfs nodes are chmod/chown-able; so are these.
+///
+/// The DevfsEntry is the authoritative store (it outlives cached inodes);
+/// the live inode's uid/gid are mirrored too so permission checks see the
+/// new owner without a dentry re-lookup.
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
+unsafe fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
+    use crate::fs::inode::setattr_attr;
+
+    let entry_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::InvalidArgument.as_neg_i32(),
+    };
+    let entry = &*(entry_ptr as *const DevfsEntry);
+
+    match attr {
+        setattr_attr::ATTR_MODE => {
+            // Permission bits only: devfs node types are fixed at creation
+            // (the entry kind), so unlike tmpfs there is no retype path and
+            // type bits in `arg1` (vfs_chown's setuid-clearing mode word
+            // carries them) are masked off.
+            entry.mode.store((arg1 as u32) & 0o7777, Ordering::Release);
+            0
+        }
+        setattr_attr::ATTR_UID => {
+            entry.uid.store(arg1 as u32, Ordering::Release);
+            inode.uid.store(arg1 as u32, Ordering::Release);
+            0
+        }
+        setattr_attr::ATTR_GID => {
+            entry.gid.store(arg1 as u32, Ordering::Release);
+            inode.gid.store(arg1 as u32, Ordering::Release);
+            0
+        }
+        setattr_attr::ATTR_UID_GID => {
+            entry.uid.store(arg1 as u32, Ordering::Release);
+            entry.gid.store(arg2 as u32, Ordering::Release);
+            inode.uid.store(arg1 as u32, Ordering::Release);
+            inode.gid.store(arg2 as u32, Ordering::Release);
+            0
+        }
+        // Device nodes have no size; timestamp updates are accepted no-ops
+        // (Linux devtmpfs honors utimensat on device nodes the same way).
+        setattr_attr::ATTR_SIZE | setattr_attr::ATTR_ATIME | setattr_attr::ATTR_MTIME => 0,
+        _ => -95, // EOPNOTSUPP (same fallback as tmpfs_setattr)
+    }
+}
+
 /// DevFS inode operations table
 pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(devfs_lookup),
@@ -1235,7 +1316,7 @@ pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     open: Some(devfs_open),
     permission: None,
     getattr: Some(devfs_getattr),
-    setattr: None,
+    setattr: Some(devfs_setattr),
     iget: Some(devfs_iget),
     destroy_inode: Some(devfs_destroy_inode),
 };

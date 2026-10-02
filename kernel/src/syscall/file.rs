@@ -981,6 +981,13 @@ pub fn sys_getcwd(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // A zero-length buffer can never hold the cwd (+ NUL): ERANGE before
+    // any range validation (Linux getcwd; LTP getcwd01 — the old order
+    // ran access_ok first and returned EFAULT for size 0).
+    if size == 0 {
+        return -(errno::ERANGE as i64);
+    }
+
     // Check if buf is in valid user space
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, size) {
         return -(errno::EFAULT as i64);
@@ -2161,9 +2168,25 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
     // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
+            // Linux: fsync on pipes, sockets, and FIFOs is EINVAL (no
+            // fsync method), regardless of the file having an inode
+            // (LTP fsync03). Recognize them by their file-ops identity
+            // FIRST — a pipe File carries no inode at all.
+            {
+                let ops = file.get_ops();
+                let is_pseudo = ops.is_some_and(|o| {
+                    core::ptr::eq(o as *const _, &crate::fs::pipe::PIPE_OPS as *const _)
+                        || core::ptr::eq(o as *const _, &crate::fs::fifo::FIFO_OPS as *const _)
+                });
+                if is_pseudo {
+                    return -(errno::EINVAL as i64);
+                }
+            }
             // SAFETY: inode is an UnsafeCell written at open time; read-only here.
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
+                // No inode at all (anonymous pipe/socket file): EINVAL.
+                None => -(errno::EINVAL as i64),
                 Some(inode) => {
                     // Linux do_fsync → vfs_fsync: only file types with an
                     // fsync method (regular files) can be synced. FIFOs,

@@ -503,6 +503,11 @@ impl FdTable {
     /// Honors RLIMIT_NOFILE: returns None for the first free fd at or
     /// above the soft limit, so callers translate it to EMFILE exactly
     /// like a full table (Linux alloc_fd).
+    ///
+    /// POSIX dup/open return the LOWEST unused fd. close_fd pulls next_fd
+    /// back down when a slot below it is freed (put_unused_fd discipline),
+    /// so every fd < next_fd is busy and starting the scan there is both
+    /// correct and O(free run).
     pub fn alloc_fd_from(&self, min_fd: usize) -> Option<usize> {
         let ceiling = Self::nofile_ceiling();
         let mut entry = self.entry.lock_irqsave();
@@ -515,7 +520,10 @@ impl FdTable {
                 return Some(fd);
             }
         }
-        // Wrap around: search from min_fd to start (if start > min_fd due to next_fd)
+        // Wrap around: search from min_fd to start (if start > min_fd due
+        // to next_fd). Belt-and-braces: with the close_fd pullback the
+        // invariant makes this dead code, but it keeps alloc correct even
+        // if a future path frees a slot without adjusting next_fd.
         if start > min_fd {
             for fd in min_fd..start.min(ceiling) {
                 if entry.fds[fd].is_none() {
@@ -585,6 +593,18 @@ impl FdTable {
             }
             let file_opt = core::mem::replace(&mut entry.fds[fd], None);
             entry.count -= 1;
+            // Linux put_unused_fd semantics: freeing a slot BELOW next_fd
+            // pulls the search hint back down, preserving the invariant
+            // "every fd < next_fd is busy". Without this, alloc_fd_from
+            // (which starts at next_fd) handed out high numbers while low
+            // slots sat free — `close(0); dup(m)` returned some fd > 0
+            // instead of 0 (POSIX: dup returns the LOWEST unused fd).
+            // xterm's child does exactly close(0..2)+dup(slave) to wire its
+            // stdio to the pty; the dups landed on 12/13/14, dash started
+            // with closed stdin (EBADF) and exited instantly.
+            if fd < entry.next_fd {
+                entry.next_fd = fd;
+            }
             // R10-2 (PIPE2 EBADF root cause): release only on the LAST
             // Arc reference — running the close op per EVENT let
             // pipe_file_close STEAL private_data from the File that fd 1

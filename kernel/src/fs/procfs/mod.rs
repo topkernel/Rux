@@ -553,6 +553,24 @@ impl ProcFSSuperBlock {
             sysctl::write_core_pattern,
             self.alloc_ino(),
         )));
+        // SysV IPC message-queue limits (read by LTP msgstress01 and
+        // ipcs(1); msgmni = queue-count limit, msgmax = largest message,
+        // msgmnb = default queue bytes).
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"msgmni".to_vec(),
+            sysctl::generate_msgmni,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"msgmax".to_vec(),
+            sysctl::generate_msgmax,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"msgmnb".to_vec(),
+            sysctl::generate_msgmnb,
+            self.alloc_ino(),
+        )));
 
         let vm = Arc::new(ProcFSNode::new_dir(b"vm".to_vec(), self.alloc_ino()));
         sys.add_child(vm.clone());
@@ -569,6 +587,18 @@ impl ProcFSSuperBlock {
             b"file-max".to_vec(),
             sysctl::generate_file_max,
             sysctl::write_file_max,
+            self.alloc_ino(),
+        )));
+        fsdir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"pipe-user-pages-soft".to_vec(),
+            sysctl::generate_pipe_user_pages_soft,
+            sysctl::write_pipe_user_pages_soft,
+            self.alloc_ino(),
+        )));
+        fsdir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"pipe-user-pages-hard".to_vec(),
+            sysctl::generate_pipe_user_pages_hard,
+            sysctl::write_pipe_user_pages_hard,
             self.alloc_ino(),
         )));
     }

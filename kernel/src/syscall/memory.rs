@@ -281,9 +281,12 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
-    // Check mapping type (must specify MAP_SHARED or MAP_PRIVATE)
+    // Check mapping type (must specify MAP_SHARED, MAP_PRIVATE, or
+    // MAP_SHARED_VALIDATE). MAP_SHARED_VALIDATE (0x03) behaves like
+    // SHARED but turns unknown-flag EINVAL into EOPNOTSUPP (Linux
+    // map_mmap_flags — LTP mmap20).
     let map_type = map_flags & map::MAP_TYPE_MASK;
-    if map_type != map::MAP_SHARED && map_type != map::MAP_PRIVATE {
+    if map_type != map::MAP_SHARED && map_type != map::MAP_PRIVATE && map_type != 0x03 {
         return mmap_error::EINVAL;
     }
 
@@ -305,7 +308,44 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         | 0x10000  // MAP_NONBLOCK
         | 0x80000; // MAP_SYNC
     if map_flags & !known_map_flags != 0 {
+        // With MAP_SHARED_VALIDATE an unknown flag is EOPNOTSUPP; plain
+        // SHARED/PRIVATE reject it with EINVAL (LTP mmap20 passes a
+        // bogus 1<<10 bit and expects EOPNOTSUPP).
+        if map_type == 0x03 {
+            return mmap_error::EOPNOTSUPP;
+        }
         return mmap_error::EINVAL;
+    }
+
+    // MAP_FIXED_NOREPLACE: exact placement like MAP_FIXED, but any overlap
+    // with an EXISTING mapping fails EEXIST instead of replacing it
+    // (Linux do_mmap — LTP mmap17 maps the same address twice).
+    if map_flags & map::MAP_FIXED_NOREPLACE != 0 {
+        if addr % crate::mm::page::PAGE_SIZE != 0 || addr == 0 {
+            return mmap_error::EINVAL;
+        }
+        // Page-rounded, overflow-safe end (Vma::new asserts alignment).
+        let sum = match addr.checked_add(actual_length) {
+            Some(s) => s,
+            None => return mmap_error::EINVAL,
+        };
+        let end = sum.div_ceil(crate::mm::page::PAGE_SIZE) * crate::mm::page::PAGE_SIZE;
+        if end <= addr {
+            return mmap_error::EINVAL;
+        }
+        if let Some(task) = crate::sched::current() {
+            if let Some(aspace) = task.address_space() {
+                let test = crate::mm::vma::Vma::new(
+                    VirtAddr::new(addr),
+                    VirtAddr::new(end),
+                    VmaFlags::new(),
+                );
+                let mgr = aspace.vma_read();
+                if mgr.iter().any(|v| v.overlaps(&test)) {
+                    return mmap_error::EEXIST;
+                }
+            }
+        }
     }
 
     // User-address-space limit. The user root page table shares the kernel
@@ -506,6 +546,12 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     }
                     if map_flags & map::MAP_STACK != 0 {
                         vma_flags.insert(VmaFlags::GROWSDOWN);
+                    }
+                    // MAP_LOCKED: the VMA is born locked (Linux VM_LOCKED on
+                    // mmap — VmLck in /proc/self/status reports it; LTP
+                    // mmap14 diffs VmLck across a MAP_LOCKED mmap).
+                    if map_flags & map::MAP_LOCKED != 0 {
+                        vma_flags.insert(VmaFlags::LOCKED);
                     }
 
                     // Set VMA type
@@ -1066,10 +1112,13 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
     let length = args[1] as usize;
     let flags = args[2] as u32;
 
-    // msync flags
+    // msync flags (asm-generic ABI: MS_ASYNC=1, MS_INVALIDATE=2, MS_SYNC=4
+    // — the old table had SYNC/INVALIDATE SWAPPED, so msync(MS_INVALIDATE)
+    // silently became a plain sync and succeeded where Linux returns EBUSY
+    // on locked ranges; LTP msync03).
     const MS_ASYNC: u32 = 0x1;      // Async write
-    const MS_SYNC: u32 = 0x2;       // Sync write
-    const MS_INVALIDATE: u32 = 0x4; // Invalidate cache
+    const MS_INVALIDATE: u32 = 0x2; // Invalidate cache
+    const MS_SYNC: u32 = 0x4;       // Sync write
 
     // Validate flags
     if flags & !(MS_ASYNC | MS_SYNC | MS_INVALIDATE) != 0 {
@@ -1088,6 +1137,13 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
 
     // Address must be page aligned
     if addr % PAGE_SIZE != 0 {
+        return mmap_error::EINVAL;
+    }
+
+    // Above the user address space: EINVAL, not ENOMEM (Linux msync
+    // bounds-checks against TASK_SIZE first — LTP msync03 case 3 passes
+    // RLIMIT_DATA's max, which lies far above user space).
+    if addr >= crate::arch::riscv64::mm::user_addr::USER_END {
         return mmap_error::EINVAL;
     }
 
@@ -1114,8 +1170,14 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
         while check_addr < end_addr {
             match vma_mgr.find(VirtAddr::new(check_addr)) {
                 Some(vma) => {
-                    // Check if it is a shared mapping (only shared mappings can be msynced)
-                    // Simplified: we allow all mappings to msync
+                    // MS_INVALIDATE over a LOCKED (mlock/MAP_LOCKED) range
+                    // is EBUSY — the pages cannot be dropped (Linux
+                    // SYSCALL msync → EBUSY; LTP msync03 case 1).
+                    if flags & MS_INVALIDATE != 0
+                        && vma.flags().contains(crate::mm::vma::VmaFlags::LOCKED)
+                    {
+                        return -16_i64; // EBUSY
+                    }
                     check_addr = vma.end().as_usize();
                 }
                 None => {
@@ -1361,6 +1423,23 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
     const MREMAP_MAYMOVE: u32 = 0x1;  // Can move to new address
     const MREMAP_FIXED: u32 = 0x2;    // Must map to specified address
 
+    // Flag sanity (Linux mremap_to): MREMAP_FIXED requires MREMAP_MAYMOVE,
+    // and the new placement must not overlap the old mapping. Unknown
+    // bits are EINVAL (LTP mremap05).
+    if (flags & MREMAP_FIXED) != 0 && (flags & MREMAP_MAYMOVE) == 0 {
+        return mmap_error::EINVAL;
+    }
+    if flags & !(MREMAP_MAYMOVE | MREMAP_FIXED) != 0 {
+        return mmap_error::EINVAL;
+    }
+    if (flags & MREMAP_FIXED) != 0 {
+        let old_end = old_addr.saturating_add(old_size);
+        let new_end = new_addr_arg.saturating_add(new_size);
+        if new_addr_arg < old_end && old_addr < new_end {
+            return mmap_error::EINVAL;
+        }
+    }
+
     // Validate old_addr page alignment
     if old_addr % PAGE_SIZE != 0 {
         return mmap_error::EINVAL;
@@ -1578,6 +1657,13 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
+    // Above the user address space: EINVAL, not ENOMEM (Linux msync
+    // bounds-checks against TASK_SIZE first — LTP msync03 case 3 passes
+    // RLIMIT_DATA's max, which lies far above user space).
+    if addr >= crate::arch::riscv64::mm::user_addr::USER_END {
+        return mmap_error::EINVAL;
+    }
+
     // Validate advice type
     match advice {
         MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED |
@@ -1730,6 +1816,13 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
+    // Above the user address space: EINVAL, not ENOMEM (Linux msync
+    // bounds-checks against TASK_SIZE first — LTP msync03 case 3 passes
+    // RLIMIT_DATA's max, which lies far above user space).
+    if addr >= crate::arch::riscv64::mm::user_addr::USER_END {
+        return mmap_error::EINVAL;
+    }
+
     // Validate vec pointer
     if vec_ptr.is_null() {
         return mmap_error::EINVAL;
@@ -1760,7 +1853,11 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
         None => return mmap_error::ENOMEM,
     };
 
-    // 1. Validate that address range is covered by VMA
+    // 1. Validate that address range is covered by VMA — BEFORE the vec
+    // pointer check: Linux do_mincore walks the VMAs first (ENOMEM for an
+    // unmapped range), and only the vec WRITE can EFAULT (mincore01 case
+    // 4: huge len past RLIMIT_AS is ENOMEM even though the vec pointer
+    // arithmetic then looks out-of-range).
     {
         let vma_mgr = address_space.vma_read();
         let mut check_addr = addr;
@@ -1914,9 +2011,70 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
             None => return -12_i64, // ENOMEM: unmapped hole in the range
         };
         let vma_end = vma.end().as_usize();
+        let vma_type = vma.vma_type();
+        let vma_writable = vma.flags().is_writable();
         let mut flags = vma.flags();
         flags.insert(VmaFlags::LOCKED);
         vma.set_flags(flags);
+        drop(mgr);
+
+        // Linux mlock PREFAULTS the whole range (populate_vma_page_range):
+        // locked pages are resident — mincore02 asserts every locked page
+        // shows present. Anonymous/SharedMemory VMAs get zero pages mapped
+        // here (file-backed pages stay demand-read; mincore02 uses anon).
+        if vma_type == crate::mm::vma::VmaType::Anonymous
+            || vma_type == crate::mm::vma::VmaType::SharedMemory
+        {
+            let seg_start = cursor.max(addr);
+            let seg_end = vma_end.min(end);
+            let root_ppn = address_space.root_ppn();
+            let mut p = seg_start & !(crate::mm::page::PAGE_SIZE - 1);
+            while p < seg_end {
+                // SAFETY: PageTableWalker::walk is a read-only inspection
+                // of the task's own page tables.
+                let present = unsafe {
+                    crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                        root_ppn,
+                        p as u64,
+                    )
+                }
+                .is_some();
+                if !present {
+                    // SAFETY: alloc + map under the PTE lock, same as the
+                    // sysv shm attach path; p is page-aligned user memory.
+                    unsafe {
+                        let _pte_guard =
+                            crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                        if let Some(phys) =
+                            crate::arch::riscv64::mm::mm_ops::alloc_user_phys_page()
+                        {
+                            let page_ptr = crate::arch::riscv64::mm::phys_to_virt(
+                                crate::arch::riscv64::mm::PhysAddr::new(phys),
+                            )
+                            .0 as *mut u8;
+                            core::ptr::write_bytes(page_ptr, 0, crate::mm::page::PAGE_SIZE);
+                            let mut pte_flags =
+                                crate::arch::riscv64::mm::PageTableEntry::V
+                                    | crate::arch::riscv64::mm::PageTableEntry::A
+                                    | crate::arch::riscv64::mm::PageTableEntry::D
+                                    | crate::arch::riscv64::mm::PageTableEntry::U
+                                    | crate::arch::riscv64::mm::PageTableEntry::R;
+                            if vma_writable {
+                                pte_flags |= crate::arch::riscv64::mm::PageTableEntry::W;
+                            }
+                            crate::arch::riscv64::mm::mm_ops::map_user_page(
+                                root_ppn,
+                                crate::arch::riscv64::mm::VirtAddr::new(p as u64),
+                                crate::arch::riscv64::mm::PhysAddr::new(phys),
+                                pte_flags,
+                            );
+                        }
+                    }
+                }
+                p += crate::mm::page::PAGE_SIZE;
+            }
+        }
+
         if vma_end >= end {
             return 0;
         }

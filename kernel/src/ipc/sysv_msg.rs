@@ -599,7 +599,14 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
     if msgp.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !access_ok(msgp as usize, msgsz + 8) {
+    // Negative (sign-extended, e.g. -1 → SIZE_MAX) or otherwise absurd
+    // sizes are EINVAL (Linux do_msgrcv bounds msgsz; LTP msgrcv02 feeds
+    // -1). The old `msgsz + 8` access check PANICKED on overflow in debug
+    // builds and took the whole kernel down mid-sweep.
+    if (msgsz as isize) < 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if !access_ok(msgp as usize, msgsz.saturating_add(8)) {
         return -(errno::EFAULT as i64);
     }
 

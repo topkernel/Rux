@@ -51,6 +51,8 @@ pub enum MmFaultResult {
     PermissionDenied,
     /// Out of memory
     OutOfMemory,
+    /// Bus error — file-backed fault past EOF (SIGBUS to the task)
+    BusError,
     /// Already mapped (no handling needed)
     AlreadyMapped,
     /// COW pending (handled by handle_cow_fault)
@@ -408,6 +410,32 @@ pub fn handle_mm_fault(
 
     // Release read lock
     drop(vma_mgr);
+
+    // File-backed fault BEYOND the file's end is SIGBUS, not a zero page
+    // (Linux filemap_fault: no page at/after EOF can be served for a
+    // mapping — LTP mmap13 truncates a mapped file and expects the next
+    // touch of the cut page to raise SIGBUS). The effective size is the
+    // CURRENT inode size (a truncate after mmap shrinks it), falling
+    // back to the snapshot taken at mmap time.
+    if vma_type == VmaType::FileBacked && vma_file_fd >= 0 {
+        if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
+            if let Some(found_vma) = aspace.vma_read().find(page_virt_addr) {
+                let vma_start = found_vma.start().as_usize();
+                let file_offset = vma_offset + (page_virt_addr.as_usize() - vma_start);
+                let effective_size = addr_space
+                    .get_vma_file(vma_start)
+                    .and_then(|f| {
+                        // SAFETY: inode cell written at open time; read-only.
+                        let inode_opt = unsafe { &*f.inode.get() };
+                        inode_opt.as_ref().map(|i| i.get_size())
+                    })
+                    .unwrap_or(vma_file_size) as usize;
+                if file_offset >= effective_size {
+                    return MmFaultResult::BusError;
+                }
+            }
+        }
+    }
 
     // Allocate new page
     let phys_addr = match alloc_user_phys_page() {

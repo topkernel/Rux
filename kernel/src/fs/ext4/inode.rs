@@ -222,12 +222,14 @@ impl Ext4Inode {
         if self.has_extent() {
             // Search using extent tree
             for i in 0..remaining_blocks {
-                match super::extent::ext4_ext_get_block(fs, &self.block, i) {
-                    Ok(block_num) => {
-                        if block_num != 0 {
+                match super::extent::ext4_ext_get_block_ex(fs, &self.block, i) {
+                    Ok((block_num, unwritten)) => {
+                        // Unwritten (fallocate-preallocated) blocks read as
+                        // zeros — the disk contents were never materialized.
+                        if block_num != 0 && !unwritten {
                             blocks.push(block_num);
                         } else {
-                            // Sparse file, block not allocated
+                            // Sparse file or unwritten: not read from disk
                             blocks.push(0);
                         }
                     }
@@ -256,10 +258,16 @@ impl Ext4Inode {
 
     /// Get data block number at specified block index
     ///
-    /// Supports both extent and indirect block modes
+    /// Supports both extent and indirect block modes. For extent files an
+    /// UNWRITTEN (fallocate-preallocated, never-materialized) block maps
+    /// to 0: every read path must zero-fill it instead of touching disk.
+    /// Writers use ext4_ext_materialize_block for the real mapping.
     pub fn get_data_block(&self, fs: &super::super::ext4::Ext4FileSystem, block_index: u64) -> Result<u64, i32> {
         if self.has_extent() {
-            super::extent::ext4_ext_get_block(fs, &self.block, block_index)
+            match super::extent::ext4_ext_get_block_ex(fs, &self.block, block_index)? {
+                (b, false) => Ok(b),
+                (.., true) => Ok(0),
+            }
         } else {
             super::indirect::ext4_get_block(fs, &self.block, block_index)
         }

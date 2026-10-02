@@ -579,6 +579,11 @@ crate::pr_err!(
             send_signal(9, 0, fault_addr.bits(), regs.epc, access_type, regs);  // SIGKILL
             return MmFaultResult::OutOfMemory;
         }
+        crate::arch::riscv64::mm::MmFaultResult::BusError => {
+            // File-backed fault past EOF: SIGBUS with si_code BUS_ADRERR (2)
+            send_signal(7, 2, fault_addr.bits(), regs.epc, access_type, regs);
+            return MmFaultResult::BusError;
+        }
         // Fixed and KernelPanic are handled by bad_area/no_context, not by handle_mm_fault
         crate::arch::riscv64::mm::MmFaultResult::Fixed
         | crate::arch::riscv64::mm::MmFaultResult::KernelPanic => {

@@ -54,7 +54,7 @@ pub const O_NONBLOCK_MQ: i32 = 0o400;
 pub const O_CLOEXEC_MQ: i32 = 0o2000000;
 
 // Maximum number of IPC objects per type
-const IPC_IDS_MAX: usize = 256;
+pub const IPC_IDS_MAX: usize = 256;
 
 // ============================================================================
 // UAPI Structures (ABI-compatible, #[repr(C)])
@@ -238,6 +238,15 @@ impl<T> IpcIds<T> {
                     }
                 }
             }
+        }
+
+        // Creating a NEW object requires IPC_CREAT (Linux ipcget): a bare
+        // get on a nonexistent key is ENOENT — the old code created it
+        // unconditionally (LTP msgget02: msgget(random_key, 0) must fail,
+        // and the leaked queue then made the follow-up IPC_EXCL probe
+        // return EEXIST instead of ENOENT).
+        if key != 0 && flags & IPC_CREAT == 0 {
+            return Err(-2); // ENOENT
         }
 
         // Allocate a new slot
@@ -427,8 +436,14 @@ pub fn ipc_check_permissions(perm: &KernIpcPerm, desired_mode: u16) -> bool {
 /// Helper to get current jiffies-based time for IPC timestamps.
 /// Returns time in seconds since boot.
 pub fn ipc_current_time() -> i64 {
-    let jiffies = crate::drivers::timer::get_jiffies();
-    (jiffies / crate::drivers::timer::HZ as u64) as i64
+    // IPC timestamps are CLOCK_REALTIME seconds — the SAME source
+    // sys_clock_gettime reports. The old jiffies/HZ variant returned
+    // seconds-since-boot (epoch-mismatched vs userspace clock_gettime,
+    // LTP msgctl01) and the jiffies+epoch hybrid still drifted seconds
+    // against the CLINT-based wall clock within one test (msgctl01 ctime
+    // 4s stale, msgrcv01 rtime 3s stale) — use wall_secs() so both
+    // clocks tick from the same counter.
+    crate::drivers::rtc::wall_secs() as i64
 }
 
 /// Per-process semaphore undo entry.

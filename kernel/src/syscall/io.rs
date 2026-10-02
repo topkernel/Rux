@@ -377,6 +377,18 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
 /// IOV_MAX — Linux's limit on the number of iovec entries per call.
 const IOV_MAX: usize = 1024;
 
+/// Per-entry iovec sanity shared by the vector syscalls: a length whose
+/// signed view is negative is EINVAL (Linux rw_verify_area/import_iovec)
+/// — checking access_ok on it first misclassified the case as EFAULT
+/// (LTP readv02/writev01 feed iov_len = -1 and expect EINVAL).
+#[inline]
+fn iov_len_sanity(len: usize) -> Result<(), i64> {
+    if (len as isize) < 0 {
+        return Err(-(errno::EINVAL as i64));
+    }
+    Ok(())
+}
+
 /// Validate an iovec array header shared by readv/writev/preadv/pwritev:
 /// IOV_MAX bound, overflow-safe size computation, and user-range check.
 /// Returns Ok(size) of the array or the (negative errno) error.
@@ -437,6 +449,10 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
 
             let base = iov.iov_base as usize;
             let len = iov.iov_len;
+
+            if let Err(e) = iov_len_sanity(len) {
+                return e;
+            }
 
             // Skip iov with NULL base
             if base == 0 {
@@ -510,6 +526,10 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
 
             let base = iov.iov_base as usize;
             let len = iov.iov_len;
+
+            if let Err(e) = iov_len_sanity(len) {
+                return e;
+            }
 
             // Skip iov with NULL base
             if base == 0 {
@@ -1215,6 +1235,7 @@ pub fn sys_preadv(args: SyscallArgs) -> i64 {
 
             let base = iov.iov_base as usize;
             let len = iov.iov_len;
+            if let Err(e) = iov_len_sanity(len) { return e; }
             if base == 0 { continue; }
             if len > 0 && crate::arch::riscv64::uaccess::access_ok(base, len) {
                 has_valid_iov = true;
@@ -1285,6 +1306,7 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
 
             let base = iov.iov_base as usize;
             let len = iov.iov_len;
+            if let Err(e) = iov_len_sanity(len) { return e; }
             if base == 0 { continue; }
             if len > 0 && crate::arch::riscv64::uaccess::access_ok(base, len) {
                 has_valid_iov = true;
@@ -1327,9 +1349,12 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
         return -errno::EFAULT as i64;
     }
 
-    // Only O_CLOEXEC and O_NONBLOCK are valid for pipe2
+    // O_CLOEXEC, O_NONBLOCK and O_DIRECT are valid for pipe2. O_DIRECT
+    // (kernel 3.4+) applies to the WRITE end only — it marks packets for
+    // future buffer-flag use; Linux rejects anything else with EINVAL.
     const VALID_FLAGS: u32 = crate::fs::file::FileFlags::O_CLOEXEC
-        | crate::fs::file::FileFlags::O_NONBLOCK;
+        | crate::fs::file::FileFlags::O_NONBLOCK
+        | crate::fs::file::FileFlags::O_DIRECT;
     if flags & !VALID_FLAGS != 0 {
         return -errno::EINVAL as i64;
     }
@@ -1343,6 +1368,11 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
         use core::sync::atomic::Ordering;
         read_file.flags.fetch_or(crate::fs::file::FileFlags::O_NONBLOCK, Ordering::Release);
         write_file.flags.fetch_or(crate::fs::file::FileFlags::O_NONBLOCK, Ordering::Release);
+    }
+    // O_DIRECT on the write end (LTP pipe2_01 checks F_GETFL shows it).
+    if (flags & crate::fs::file::FileFlags::O_DIRECT) != 0 {
+        use core::sync::atomic::Ordering;
+        write_file.flags.fetch_or(crate::fs::file::FileFlags::O_DIRECT, Ordering::Release);
     }
 
     // Get current process fdtable

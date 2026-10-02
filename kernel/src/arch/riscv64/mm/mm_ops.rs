@@ -278,7 +278,11 @@ impl MmStruct {
             return Err(MapError::Invalid);
         }
 
-        let is_fixed = map_flags & map::MAP_FIXED != 0;
+        // MAP_FIXED_NOREPLACE implies exact placement like MAP_FIXED (the
+        // EEXIST overlap check happens in sys_mmap before we get here).
+        let is_fixed = map_flags
+            & (map::MAP_FIXED | map::MAP_FIXED_NOREPLACE)
+            != 0;
 
         use user_addr::BRK_DEFAULT;
         use user_addr::MMAP_START;

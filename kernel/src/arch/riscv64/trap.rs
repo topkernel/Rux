@@ -633,6 +633,13 @@ fn sigsegv_has_handler() -> bool {
         .unwrap_or(false)
 }
 
+fn sigbus_has_handler() -> bool {
+    crate::sched::current()
+        .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(7)) })
+        .map(|a| a.is_some_and(|a| a.has_handler()))
+        .unwrap_or(false)
+}
+
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     use crate::arch::riscv64::mm::exception::{do_page_fault, MmFaultResult};
 
@@ -683,6 +690,19 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     return;
                 }
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+            }
+        }
+        MmFaultResult::BusError => {
+            crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
+            if regs.user_mode() {
+                // Handler-first routing like Segfault: LTP mmap13 installs
+                // a SIGBUS handler and must catch it; the default action
+                // kills with SIGBUS.
+                let pid = crate::process::current_pid();
+                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGBUS as i32);
+                if !sigbus_has_handler() {
+                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
+                }
             }
         }
         MmFaultResult::OutOfMemory => {
