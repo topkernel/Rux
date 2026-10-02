@@ -458,21 +458,8 @@ pub fn sys_getitimer(args: SyscallArgs) -> i64 {
     // struct itimerval { struct timeval it_interval, it_value }
     // struct timeval { time_t tv_sec, suseconds_t tv_usec }
     let (interval_sec, interval_usec, value_sec, value_usec) = if which == 0 {
-        // ITIMER_REAL — compute remaining time from kernel timer
-        let timer_id = task.itimer_ids[0].load(core::sync::atomic::Ordering::Acquire);
-        if timer_id == 0 {
-            // Disarmed
-            (0i64, 0i64, 0i64, 0i64)
-        } else {
-            // Get the interval from the timer action (if periodic)
-            // For simplicity, compute remaining from jiffies
-            let current_jiffies = crate::drivers::timer::get_jiffies();
-            // We need the original expires and interval — stored in timer action
-            // Since we can't easily read the action from here, return interval as 0
-            // and compute remaining from jiffies delta
-            // TODO: store interval per-process
-            (0i64, 0i64, 0i64, 0i64)
-        }
+        // ITIMER_REAL — remaining computed from the timer wheel entry
+        itimer_real_timeval(&task)
     } else {
         // ITIMER_VIRTUAL / ITIMER_PROF — CPU-time timers tracked against
         // the sched entity's sum_exec_runtime. Remaining = deadline - now;
@@ -528,15 +515,49 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // Write old_value (disarm current timer first)
+    // Write old_value (remaining time of the timer being replaced, BEFORE
+    // disarming — POSIX requires the pre-call state). alarm(2) is built on
+    // this: alarm(0) returns old.it_value rounded up.
     if !old_value.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
         }
-        // Get old timer state and write it as zeros (disarmed)
-        // SAFETY: old_value validated with access_ok(32); clear_user is the
-        // exception-table zeroing path.
-        unsafe { crate::arch::riscv64::uaccess::clear_user(old_value as *mut u8, 32); }
+        let task = match crate::process::current_task() {
+            Some(t) => t,
+            None => return -(errno::ESRCH as i64),
+        };
+        let (interval_sec, interval_usec, value_sec, value_usec) = if which == 0 {
+            itimer_real_timeval(&task)
+        } else {
+            // ITIMER_VIRTUAL / ITIMER_PROF — deadline/interval atomics
+            let state = if which == 1 { &task.itimer_virt } else { &task.itimer_prof };
+            let deadline_ns = state[0].load(core::sync::atomic::Ordering::Acquire);
+            if deadline_ns == 0 {
+                (0i64, 0i64, 0i64, 0i64)
+            } else {
+                let interval_ns = state[1].load(core::sync::atomic::Ordering::Acquire);
+                let now_ns = task
+                    .sched_entity()
+                    .sum_exec_runtime
+                    .load(core::sync::atomic::Ordering::Acquire);
+                let remaining_ns = deadline_ns.saturating_sub(now_ns);
+                (
+                    (interval_ns / 1_000_000_000) as i64,
+                    ((interval_ns % 1_000_000_000) / 1000) as i64,
+                    (remaining_ns / 1_000_000_000) as i64,
+                    ((remaining_ns % 1_000_000_000) / 1000) as i64,
+                )
+            }
+        };
+        // SAFETY: old_value validated with access_ok(32); put_user goes
+        // through the exception-table copy path.
+        unsafe {
+            let p = old_value as *mut i64;
+            let _ = crate::arch::riscv64::uaccess::put_user(p, interval_sec);
+            let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), interval_usec);
+            let _ = crate::arch::riscv64::uaccess::put_user(p.add(2), value_sec);
+            let _ = crate::arch::riscv64::uaccess::put_user(p.add(3), value_usec);
+        }
     }
 
     if new_value.is_null() {
@@ -598,6 +619,34 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
     }
 
     0
+}
+
+/// Compute the current ITIMER_REAL itimerval from the timer wheel.
+///
+/// Returns (interval_sec, interval_usec, value_sec, value_usec) where
+/// it_value is the REMAINING time (expires - now). All zeros if disarmed.
+fn itimer_real_timeval(task: &crate::process::task::Task) -> (i64, i64, i64, i64) {
+    use crate::drivers::timer as drv_timer;
+
+    let timer_id = task.itimer_ids[0].load(core::sync::atomic::Ordering::Acquire);
+    if timer_id == 0 {
+        return (0, 0, 0, 0);
+    }
+    let Some((expires_j, interval_j)) = crate::timer::get_timer_state(timer_id) else {
+        // Timer already fired and was not re-armed: report disarmed.
+        return (0, 0, 0, 0);
+    };
+    let now_j = drv_timer::get_jiffies();
+    let remaining_j = expires_j.saturating_sub(now_j);
+    let usec_per_jiffy = 1_000_000 / drv_timer::HZ;
+    let remaining_usec = remaining_j * usec_per_jiffy;
+    let interval_usec = interval_j * usec_per_jiffy;
+    (
+        (interval_usec / 1_000_000) as i64,
+        (interval_usec % 1_000_000) as i64,
+        (remaining_usec / 1_000_000) as i64,
+        (remaining_usec % 1_000_000) as i64,
+    )
 }
 
 /// Disarm ITIMER_REAL timer for the current process.

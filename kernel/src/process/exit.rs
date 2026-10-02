@@ -750,6 +750,23 @@ pub fn do_exit(exit_code: i32) -> ! {
         // __schedule processes it AFTER the context switch, when this
         // task is no longer running on any CPU.
         if parent_pid != 0 {
+            // Queue the full SIGCHLD siginfo FIRST (no wake — queueing
+            // cannot trigger a reap). SA_SIGINFO parents (toybox timeout,
+            // glib) decode si_code/si_status from it; plain wait4 parents
+            // never look. Mirror waitid's encoding: exit_code < 0 means
+            // killed by signal (-exit_code), CLD_DUMPED when a core was
+            // written.
+            let (code, status) = if exit_code >= 0 {
+                (CLD_EXITED, exit_code)
+            } else if (*current).core_dumped() {
+                (CLD_DUMPED, -exit_code)
+            } else {
+                (CLD_KILLED, -exit_code)
+            };
+            crate::signal::queue_sigchld_info(
+                parent_pid,
+                crate::signal::SigInfo::child(current_pid, (*current).cred().uid, status, code),
+            );
             crate::sched::defer_exit_notify(parent_pid);
         }
         crate::interrupt::preempt::preempt_count_sub(1);

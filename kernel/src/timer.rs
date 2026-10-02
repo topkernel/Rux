@@ -185,6 +185,20 @@ pub fn timer_pending(id: u64) -> bool {
     timers.contains_key(&id)
 }
 
+/// Query a pending timer's absolute state.
+///
+/// Returns `Some((expires_jiffies, interval_jiffies))` while the timer is
+/// pending; `interval_jiffies` is 0 for one-shot timers. Used by
+/// getitimer/setitimer to report the remaining ITIMER_REAL time.
+pub fn get_timer_state(id: u64) -> Option<(u64, u64)> {
+    // Lock order: TIMERS then ACTIONS — matches add/del paths.
+    let timers = TIMERS.lock_irqsave();
+    let expires = timers.get(&id)?.expires;
+    let actions = ACTIONS.lock_irqsave();
+    let interval_jiffies = actions.get(&id).map(|a| a.interval_jiffies).unwrap_or(0);
+    Some((expires, interval_jiffies))
+}
+
 // ==================== Softirq Handler ====================
 
 /// Timer softirq handler.

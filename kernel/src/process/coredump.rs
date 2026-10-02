@@ -54,17 +54,23 @@ const NT_AUXV: u32 = 6;
 /// Core dump I/O chunk (one page).
 const CHUNK: usize = 4096;
 
-/// Signals whose default action produces a core dump (signal(7) subset —
-/// the hardware-fault and abort family).
+/// Signals whose default action produces a core dump (Linux SIGCORE mask
+/// from include/uapi/asm-generic/signal-defs.h — LTP kill11 checks
+/// WCOREDUMP for the whole set; SIGTRAP/SIGXCPU/SIGXFSZ/SIGSYS were
+/// missing).
 pub fn signal_makes_core(sig: i32) -> bool {
     matches!(
         sig,
         3 |  // SIGQUIT
         4 |  // SIGILL
+        5 |  // SIGTRAP
         6 |  // SIGABRT
         7 |  // SIGBUS
         8 |  // SIGFPE
-        11   // SIGSEGV
+        11 | // SIGSEGV
+        24 | // SIGXCPU
+        25 | // SIGXFSZ
+        31   // SIGSYS
     )
 }
 

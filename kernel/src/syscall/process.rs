@@ -778,11 +778,22 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         } else if pid == -1 {
             None
         } else {
-            Some((-pid) as u32)
+            // wrapping_neg: pid == i32::MIN must reach here as a
+            // (nonexistent) process group and yield ESRCH — plain `-pid`
+            // overflowed and PANICKED the kernel (LTP kill03).
+            Some(pid.wrapping_neg() as u32)
         };
 
         let found = core::cell::Cell::new(false);
         let denied = core::cell::Cell::new(false);
+        // Every kill() carries an SI_USER siginfo with the sender's
+        // identity (Linux copy_siginfo): sigwaitinfo consumers and
+        // SA_SIGINFO handlers decode si_pid/si_uid from it.
+        let my_pid = crate::process::current_pid();
+        let my_uid = match crate::sched::current() {
+            Some(c) => unsafe { (*c).cred().uid },
+            None => 0,
+        };
         // pid_hash_for_each_task covers sleeping tasks too (unlike the
         // per-CPU for_each_task which only sees running/idle tasks) — and
         // every THREAD is its own hash entry, so each live member of a
@@ -792,9 +803,14 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
             if tp == 1 {
                 return; // kill(-1) skips init
             }
-            // Skip the caller's own thread GROUP (all its threads), not
-            // just the calling thread.
-            if (*task).tgid() == my_tgid {
+            // kill(-1) skips the caller's own thread GROUP (Linux
+            // kill_all_something_info: `p->pid > 1 && p != current`).
+            // But kill(0)/kill(-pgid) deliver to EVERY member of the
+            // group INCLUDING the caller (LTP kill06/kill08: a process
+            // killing its own pgrp with SIGKILL dies from its own
+            // signal — the old blanket self-group skip left it alive
+            // and the parent saw termsig 0).
+            if pid == -1 && (*task).tgid() == my_tgid {
                 return;
             }
             if let Some(g) = group_filter {
@@ -804,8 +820,20 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
             }
             found.set(true);
             if sig > 0 {
-                if crate::security::can_send_signal((*task).cred()) {
-                    let _ = crate::signal::send_signal(tp, sig);
+                // Self-send is always permitted (check_kill_permission);
+                // pending delivery happens on the way back to userspace.
+                if (*task).tgid() == my_tgid
+                    || crate::security::can_send_signal((*task).cred())
+                {
+                    let _ = crate::signal::send_signal_full(
+                        tp,
+                        crate::signal::SigInfo::new(
+                            sig,
+                            crate::signal::si_code::SI_USER,
+                            my_pid,
+                            my_uid,
+                        ),
+                    );
                 } else {
                     denied.set(true);
                 }
@@ -840,6 +868,18 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
             if !crate::security::can_send_signal(target_task.cred()) {
                 return -(errno::EPERM as i64);
             }
+            // SI_USER siginfo with the sender identity (see broadcast path).
+            let my_pid = crate::process::current_pid();
+            let my_uid = match crate::sched::current() {
+                Some(c) => (*c).cred().uid,
+                None => 0,
+            };
+            let info = crate::signal::SigInfo::new(
+                sig,
+                crate::signal::si_code::SI_USER,
+                my_pid,
+                my_uid,
+            );
             // Collect the group's member pids (leader's ring), then send
             // outside the ring lock. Skips dead members; zombies ignore.
             let leader = (*target).group_leader_ptr();
@@ -850,7 +890,7 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
                 }
             });
             for m in members {
-                let _ = crate::signal::send_signal(m, sig);
+                let _ = crate::signal::send_signal_full(m, info);
             }
         }
     }
@@ -2030,27 +2070,47 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // Read si_code (offset 8) — user-sent siginfo must carry a NEGATIVE
-    // si_code (Linux: si_code >= 0 is reserved for the kernel → EPERM).
-    let mut code_buf = [0u8; 4];
-    if unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
-            code_buf.as_mut_ptr(),
-            uinfo.add(8),
-            4,
-        )
-    } != 0
-    {
-        return -(errno::EFAULT as i64);
-    }
-    let si_code = i32::from_le_bytes(code_buf);
-    if si_code >= 0 {
+    // Read the user's siginfo (128 bytes), validate si_code, force the
+    // sender identity (Linux copy_siginfo: si_pid/si_uid are always the
+    // SENDER's) and pass the full struct through so si_value survives
+    // (LTP rt_sigqueueinfo01 checks it via sigwaitinfo).
+    // SAFETY: uinfo validated access_ok(128); exception-table copy.
+    let mut info = match unsafe { read_user_siginfo(uinfo, sig) } {
+        Some(i) => i,
+        None => return -(errno::EFAULT as i64),
+    };
+    if info.si_code >= 0 {
+        // si_code >= 0 is reserved for kernel-originated siginfo
         return -(errno::EPERM as i64);
     }
+    info.si_pid = crate::process::current_pid() as i32;
+    info.si_uid = match crate::sched::current() {
+        Some(c) => unsafe { (*c).cred().uid },
+        None => 0,
+    };
 
-    crate::signal::send_signal_info(tgid, sig, si_code)
+    crate::signal::send_signal_full(tgid, info)
         .map(|_| 0)
         .unwrap_or(-(errno::EINVAL as i64))
+}
+
+/// Copy a 128-byte user siginfo_t, forcing si_signo to `sig`.
+///
+/// SAFETY: `uinfo` must be validated access_ok(128) by the caller.
+unsafe fn read_user_siginfo(uinfo: *const u8, sig: i32) -> Option<crate::signal::SigInfo> {
+    const _: () = assert!(
+        core::mem::size_of::<crate::signal::SigInfo>() == 128,
+        "SigInfo must match the 128-byte user siginfo_t ABI"
+    );
+    let mut buf = [0u8; 128];
+    if crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), uinfo, 128) != 0 {
+        return None;
+    }
+    // SAFETY: SigInfo is repr(C), 128 bytes, no padding-invariants beyond
+    // the raw bytes (all fields are plain integers).
+    let mut info: crate::signal::SigInfo = core::mem::transmute(buf);
+    info.si_signo = sig;
+    Some(info)
 }
 
 /// sys_rt_tgsigqueueinfo - send signal with data to a precise THREAD
@@ -2082,27 +2142,29 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Read si_signo (offset 0) and si_code (offset 8).
-    let mut hdr = [0u8; 12];
-    if unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(hdr.as_mut_ptr(), uinfo, 12)
-    } != 0
-    {
-        return -(errno::EFAULT as i64);
-    }
-    let sig = i32::from_le_bytes(hdr[0..4].try_into().unwrap());
-    if sig < 0 || sig > 64 {
+    // Read the full user siginfo; si_signo from the buffer must match the
+    // tid target rules and si_code must be user-range (negative).
+    // SAFETY: uinfo validated access_ok(128); exception-table copy.
+    let mut info = match unsafe { read_user_siginfo(uinfo, 0) } {
+        Some(i) => i,
+        None => return -(errno::EFAULT as i64),
+    };
+    if info.si_signo < 0 || info.si_signo > 64 {
         return -(errno::EINVAL as i64);
     }
-    if sig == 0 {
+    if info.si_signo == 0 {
         return 0;
     }
-    let si_code = i32::from_le_bytes(hdr[8..12].try_into().unwrap());
-    if si_code >= 0 {
+    if info.si_code >= 0 {
         return -(errno::EPERM as i64);
     }
+    info.si_pid = crate::process::current_pid() as i32;
+    info.si_uid = match crate::sched::current() {
+        Some(c) => (*c).cred().uid,
+        None => 0,
+    };
 
-    crate::signal::send_signal_info(tid, sig, si_code)
+    crate::signal::send_signal_full(tid, info)
         .map(|_| 0)
         .unwrap_or(-(errno::EINVAL as i64))
 }
@@ -2148,9 +2210,10 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
     };
-    if sigset == 0 {
-        return -(errno::EINVAL as i64);
-    }
+    // NOTE: an EMPTY set is legal (POSIX/Linux): rt_sigtimedwait then
+    // blocks until any unblocked signal arrives (→ EINTR via the
+    // out-of-set check below) or the deadline passes (→ EAGAIN). LTP
+    // test_empty_set depends on it.
 
     // Optional timeout (timespec {tv_sec, tv_nsec}).
     let deadline = if !uts.is_null() {

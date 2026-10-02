@@ -403,150 +403,171 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
     let key = FutexKey::new(uaddr, mm, flags);
     let bucket_idx = futex_hash(&key);
 
-    // Lock the hash bucket.  All subsequent operations (value check,
-    // waiter insertion, state change) happen under this lock.
-    let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
+    // Linux futex_wait semantics: success (0) is returned ONLY when
+    // FUTEX_WAKE (or a requeue) explicitly woke us. A spurious wakeup
+    // (blocked-signal wake, timer noise) must RE-CHECK the value and go
+    // back to sleep — returning 0 here let LTP's checkpoint handshake
+    // (sighold02: child holds all signals, parent kills 60 of them, then
+    // FUTEX_WAKEs) complete the wait early: the parent's wake found no
+    // waiter and TBROK'd with ETIMEDOUT.
+    loop {
+        // Lock the hash bucket.  All subsequent operations (value check,
+        // waiter insertion, state change) happen under this lock.
+        let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
 
-    // Re-check value under lock (prevents lost wakeup).
-    // SAFETY: get_user goes through the exception-table copy path; an
-    // unmapped user address yields EFAULT instead of a kernel page fault.
-    let uval = match unsafe {
-        crate::arch::riscv64::uaccess::get_user(uaddr_ptr as *const u32)
-    } {
-        Some(v) => v,
-        None => return -EFAULT as i64,
-    };
-    #[cfg(feature = "dfx-futex-trace")]
-    ftx_trace(b"WAIT-VAL", uaddr, uval as u64, val as u64);
-    if uval != val {
-        return -EAGAIN as i64;
-    }
-
-    // Allocate waiter slot.
-    let waiter_idx = match alloc_waiter() {
-        Some(idx) => idx,
-        None => return -ENOMEM as i64,
-    };
-
-    // Initialize and insert waiter into hash chain (fill the placeholder
-    // reserved by alloc_waiter in place).
-    {
-        let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
-        if let Some(ref mut w) = *slot {
-            w.key = key;
-            w.task = current;
-            w.bitset = bitset;
-            w.woken = false;
-            w.bucket = bucket_idx;
-            w.next = *head;
+        // Re-check value under lock (prevents lost wakeup).
+        // SAFETY: get_user goes through the exception-table copy path; an
+        // unmapped user address yields EFAULT instead of a kernel page fault.
+        let uval = match unsafe {
+            crate::arch::riscv64::uaccess::get_user(uaddr_ptr as *const u32)
+        } {
+            Some(v) => v,
+            None => return -EFAULT as i64,
+        };
+        #[cfg(feature = "dfx-futex-trace")]
+        ftx_trace(b"WAIT-VAL", uaddr, uval as u64, val as u64);
+        if uval != val {
+            return -EAGAIN as i64;
         }
-    }
 
-    // Update chain head.
-    *head = Some(waiter_idx);
+        // Deadline already passed while we were re-checking?
+        if let Some(dl) = deadline {
+            if crate::drivers::timer::get_jiffies() >= dl {
+                return -ETIMEDOUT as i64;
+            }
+        }
 
-    // Set task state to INTERRUPTIBLE while still holding the hash lock.
-    // This guarantees that any futex_wake that sees the waiter in the chain
-    // will also see the task in INTERRUPTIBLE state, preventing the
-    // lost-wakeup race.
-    // SAFETY: current is the current task, valid for the duration of this
-    // function.  We hold the hash bucket lock so futex_wake will see the
-    // state transition before checking is_sleeping().
-    unsafe {
-        (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-    }
+        // Allocate waiter slot.
+        let waiter_idx = match alloc_waiter() {
+            Some(idx) => idx,
+            None => return -ENOMEM as i64,
+        };
 
-    // Release the hash bucket lock.  The Release semantics ensure that
-    // the waiter entry (chain + INTERRUPTIBLE state) is visible to other
-    // CPUs before they can observe the lock is free.
-    drop(head);
+        // Initialize and insert waiter into hash chain (fill the placeholder
+        // reserved by alloc_waiter in place).
+        {
+            let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
+            if let Some(ref mut w) = *slot {
+                w.key = key;
+                w.task = current;
+                w.bitset = bitset;
+                w.woken = false;
+                w.bucket = bucket_idx;
+                w.next = *head;
+            }
+        }
 
-    // Schedule — yields the CPU.  The task will be re-enqueued by
-    // Task::wake_up() when futex_wake (or a signal) wakes it.  Arm a
-    // wakeup timer when a deadline is set: nothing else would wake a
-    // futex that is never signaled (pthread_cond_timedwait would hang).
-    crate::arch::riscv64::cpu::restore_irq(true);
-    let timer_id = deadline
-        .map(|dl| crate::timer::add_timer_wakeup(
-            dl, crate::sched::get_current_pid(),
-        ))
-        .unwrap_or(0);
-    // R32 (NEW-3): if a deadline was requested but the timer pool is
-    // exhausted (add_timer_wakeup → 0), schedule() below would sleep
-    // FOREVER — nothing else wakes an un-signaled futex, so the timed
-    // wait degenerated into an untimed hang. Unlink and fail instead.
-    if deadline.is_some() && timer_id == 0 {
-        remove_waiter(bucket_idx, waiter_idx);
-        return -ENOMEM as i64;
-    }
-    crate::sched::schedule();
-    if timer_id != 0 {
-        crate::timer::del_timer(timer_id);
-    }
-    #[cfg(feature = "dfx-futex-trace")]
-    ftx_trace(b"WAIT-RET", uaddr, val as u64, 0);
+        // Update chain head.
+        *head = Some(waiter_idx);
 
-    // The waiter's bucket may have changed while we slept (FUTEX_REQUEUE
-    // moved us to uaddr2's bucket). Re-read it from the slot so the
-    // removal below hits the right chain.
-    let live_bucket = {
-        let slot = WAITER_POOL[waiter_idx].lock_irqsave();
-        slot.as_ref().map(|w| w.bucket).unwrap_or(bucket_idx)
-    };
+        // Set task state to INTERRUPTIBLE while still holding the hash lock.
+        // This guarantees that any futex_wake that sees the waiter in the chain
+        // will also see the task in INTERRUPTIBLE state, preventing the
+        // lost-wakeup race.
+        // SAFETY: current is the current task, valid for the duration of this
+        // function.  We hold the hash bucket lock so futex_wake will see the
+        // state transition before checking is_sleeping().
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
 
-    // Check for signal interruption (EINTR). Ownership guard: only act on
-    // the slot if it still belongs to us (task pointer matches).
-    {
-        let slot = WAITER_POOL[waiter_idx].lock_irqsave();
-        let mine = slot.as_ref().map(|w| w.task == current).unwrap_or(false);
-        drop(slot);
-        if !mine {
-            // Slot was recycled underneath us (should not happen now that
-            // the waker never frees slots, but stay defensive).
+        // Release the hash bucket lock.  The Release semantics ensure that the
+        // waiter entry (chain + INTERRUPTIBLE state) is visible to other
+        // CPUs before they can observe the lock is free.
+        drop(head);
+
+        // Schedule — yields the CPU.  The task will be re-enqueued by
+        // Task::wake_up() when futex_wake (or a signal) wakes it.  Arm a
+        // wakeup timer when a deadline is set: nothing else would wake a
+        // futex that is never signaled (pthread_cond_timedwait would hang).
+        crate::arch::riscv64::cpu::restore_irq(true);
+        let timer_id = deadline
+            .map(|dl| crate::timer::add_timer_wakeup(
+                dl, crate::sched::get_current_pid(),
+            ))
+            .unwrap_or(0);
+        // R32 (NEW-3): if a deadline was requested but the timer pool is
+        // exhausted (add_timer_wakeup → 0), schedule() below would sleep
+        // FOREVER — nothing else wakes an un-signaled futex, so the timed
+        // wait degenerated into an untimed hang. Unlink and fail instead.
+        if deadline.is_some() && timer_id == 0 {
+            remove_waiter(bucket_idx, waiter_idx);
+            return -ENOMEM as i64;
+        }
+        crate::sched::schedule();
+        if timer_id != 0 {
+            crate::timer::del_timer(timer_id);
+        }
+        #[cfg(feature = "dfx-futex-trace")]
+        ftx_trace(b"WAIT-RET", uaddr, val as u64, 0);
+
+        // The waiter's bucket may have changed while we slept (FUTEX_REQUEUE
+        // moved us to uaddr2's bucket). Re-read it from the slot so the
+        // removal below hits the right chain.
+        let live_bucket = {
+            let slot = WAITER_POOL[waiter_idx].lock_irqsave();
+            slot.as_ref().map(|w| w.bucket).unwrap_or(bucket_idx)
+        };
+
+        // Check for signal interruption (EINTR). Ownership guard: only act on
+        // the slot if it still belongs to us (task pointer matches).
+        {
+            let slot = WAITER_POOL[waiter_idx].lock_irqsave();
+            let mine = slot.as_ref().map(|w| w.task == current).unwrap_or(false);
+            drop(slot);
+            if !mine {
+                // Slot was recycled underneath us (should not happen now that
+                // the waker never frees slots, but stay defensive).
+                return 0;
+            }
+            if crate::signal::signal_pending() {
+                let woken = {
+                    let slot = WAITER_POOL[waiter_idx].lock_irqsave();
+                    slot.as_ref().map(|w| w.woken).unwrap_or(false)
+                };
+                if !woken {
+                    remove_waiter(live_bucket, waiter_idx);
+                    return -crate::syscall::errno::EINTR as i64;
+                }
+            }
+        }
+
+        // After waking up, check if we were explicitly woken. The waiter owns
+        // its slot: unlink paths that did not wake us leave it in the chain
+        // (remove), the waker unlinked it already (just free the slot).
+        let mut was_spurious = false;
+        {
+            let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
+            let mine = slot.as_ref().map(|w| w.task == current).unwrap_or(false);
+            if mine {
+                let was_woken = slot.as_ref().map(|w| w.woken).unwrap_or(false);
+                if !was_woken {
+                    // Not explicitly woken (spurious wakeup or the timeout
+                    // timer): still in the chain.
+                    drop(slot);
+                    remove_waiter(live_bucket, waiter_idx);
+                    // Timeout semantics (review 2R.9): if we were not woken and
+                    // the deadline has passed, this is a genuine ETIMEDOUT —
+                    // returning success here broke every timed waiter.
+                    if let Some(dl) = deadline {
+                        if crate::drivers::timer::get_jiffies() >= dl {
+                            return -ETIMEDOUT as i64;
+                        }
+                    }
+                    // Spurious: loop — re-check the value and sleep again.
+                    was_spurious = true;
+                } else {
+                    // Woken: the waker unlinked us from the chain and left the
+                    // slot for us to free.
+                    *slot = None;
+                }
+            }
+        }
+        if !was_spurious {
             return 0;
         }
-        if crate::signal::signal_pending() {
-            let woken = {
-                let slot = WAITER_POOL[waiter_idx].lock_irqsave();
-                slot.as_ref().map(|w| w.woken).unwrap_or(false)
-            };
-            if !woken {
-                remove_waiter(live_bucket, waiter_idx);
-                return -crate::syscall::errno::EINTR as i64;
-            }
-        }
+        // else: continue the loop (Linux futex_wait re-sleeps).
     }
-
-    // After waking up, check if we were explicitly woken. The waiter owns
-    // its slot: unlink paths that did not wake us leave it in the chain
-    // (remove), the waker unlinked it already (just free the slot).
-    {
-        let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
-        let mine = slot.as_ref().map(|w| w.task == current).unwrap_or(false);
-        if mine {
-            let was_woken = slot.as_ref().map(|w| w.woken).unwrap_or(false);
-            if !was_woken {
-                // Not explicitly woken (spurious wakeup or the timeout
-                // timer): still in the chain.
-                drop(slot);
-                remove_waiter(live_bucket, waiter_idx);
-                // Timeout semantics (review 2R.9): if we were not woken and
-                // the deadline has passed, this is a genuine ETIMEDOUT —
-                // returning success here broke every timed waiter.
-                if let Some(dl) = deadline {
-                    if crate::drivers::timer::get_jiffies() >= dl {
-                        return -ETIMEDOUT as i64;
-                    }
-                }
-            } else {
-                // Woken: the waker unlinked us from the chain and left the
-                // slot for us to free.
-                *slot = None;
-            }
-        }
-    }
-
-    0
 }
 
 /// Remove waiter from hash chain.
