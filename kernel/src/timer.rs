@@ -302,8 +302,10 @@ pub fn timer_softirq_handler(_nr: usize) {
                         // timer_settime hangs). Queue a COPY of the action
                         // for the outside-locks delivery pass below; the
                         // map keeps its own entry for the next expiry.
-                        if *len_ptr < EXPIRY_BUDGET {
-                            unsafe { (*buf_ptr)[*len_ptr] = (id, *action); *len_ptr += 1; }
+                        unsafe {
+                            if *len_ptr < EXPIRY_BUDGET {
+                                (*buf_ptr)[*len_ptr] = (id, *action); *len_ptr += 1;
+                            }
                         }
                         return true;
                     }
