@@ -247,6 +247,46 @@ impl<T> Spinlock<T> {
         SpinlockGuard { lock: self }
     }
 
+    /// Bounded-spin + yield acquire for COARSE, long-held global locks
+    /// (VFS_MUTATION_LOCK, EXT4_BIG_LOCK — held across synchronous block
+    /// I/O, i.e. for milliseconds at a time).
+    ///
+    /// Wedge background (LTP r2 WEDGE family: inode02, ftest02/04/06,
+    /// creat09, sendmsg02): when enough tasks contend a plain lock(),
+    /// every CPU ends up spinning preempt-disabled; the lock holder —
+    /// which may be BLOCKED in virtio I/O or simply not resident on any
+    /// CPU — can then never be rescheduled (wake IPIs cannot preempt a
+    /// preempt-disabled spinner), and the machine freezes with all CPUs
+    /// pinned. This acquire spins a bounded budget like lock(); if the
+    /// lock still isn't free it re-enables preemption and yields the CPU
+    /// (schedule()) so the holder can run HERE, then retries. Waiters
+    /// therefore never starve the system of a schedulable CPU.
+    ///
+    /// NOT for IRQ context or short critical sections — schedule() from
+    /// interrupt context is illegal; use plain lock()/lock_irq() there.
+    pub fn lock_fair(&self) -> SpinlockGuard<'_, T> {
+        const FAIR_SPIN_BUDGET: u32 = 1_000_000;
+        loop {
+            preempt_disable();
+            let mut spins: u32 = 0;
+            loop {
+                if self.raw.try_lock() {
+                    return SpinlockGuard { lock: self };
+                }
+                spins += 1;
+                if spins >= FAIR_SPIN_BUDGET {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            // Budget exhausted: hand the CPU to the holder instead of
+            // pinning it. The schedule() picks another task (likely the
+            // holder); we come back and retry afterwards.
+            preempt_enable();
+            crate::sched::schedule();
+        }
+    }
+
     /// Disable interrupts + preempt disable + lock.
     /// Guard drop: unlock + preempt enable + restore interrupts.
     #[inline]

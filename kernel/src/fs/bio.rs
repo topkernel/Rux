@@ -594,11 +594,21 @@ impl BlockCache {
                 }
             }
 
-            // Phase 1.5: Evict if cache is full
+            // Phase 1.5: Evict if cache is full (soft limit — wedge fix).
+            // evict_one() SYNCS dirty victims: one synchronous block write
+            // per eviction. Under a dirty-metadata storm (LTP inode02/
+            // ftest* filling the disk) the old hard loop spent minutes
+            // inside a single bread, all in kernel context — the test
+            // runner's SIGKILL could never be delivered (the r2 WEDGE
+            // family). Bound the reclaim work; a cache still full of
+            // pinned/dirty entries admits the new buffer anyway (reads
+            // must not fail on cache pressure — Linux grows its caches).
+            let mut evict_tries = 0u32;
             while self.count.load(Ordering::Acquire) as usize >= self.max_entries {
-                if !self.evict_one() {
-                    return None; // all buffers in use
+                if !self.evict_one() || evict_tries >= 32 {
+                    break;
                 }
+                evict_tries += 1;
             }
 
             // Phase 2: Read from disk (no locks held)
@@ -692,11 +702,14 @@ impl BlockCache {
                 }
             }
 
-            // Phase 1.5: evict if full (dirty victims are synced by evict_one)
+            // Phase 1.5: evict if full (soft limit — see the read-path
+            // Phase 1.5 comment; bounded reclaim, then admit).
+            let mut evict_tries = 0u32;
             while self.count.load(Ordering::Acquire) as usize >= self.max_entries {
-                if !self.evict_one() {
-                    return None; // all buffers in use
+                if !self.evict_one() || evict_tries >= 32 {
+                    break;
                 }
+                evict_tries += 1;
             }
 
             // Phase 2: create the buffer zeroed — NO disk read.
@@ -883,14 +896,33 @@ pub fn getblk_zero(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut 
 /// owner's reference, so `bh` stays valid. In IRQ/early context (no
 /// current task) spin instead of sleeping. Returns 0 when the buffer is
 /// uptodate, -EIO otherwise (review 2R.11).
+///
+/// WEDGE fix (LTP inode02/ftest02/04/06, sendmsg02): this wait had NO
+/// timeout. When a buffer's completion was lost (or its owner errored out
+/// before its bread_wait), the calling task looped here forever — always
+/// in kernel context, so the test runner's SIGKILL could never be
+/// delivered, and each iteration churned an add_timer/del_timer heap
+/// allocation pair (the observed buddy-allocator livelock; the same
+/// churn starved the timer softirq into ALLOCTHROW panics on other
+/// CPUs). Bound the wait: after WAIT_DEADLINE_JIFFIES, give up and
+/// report -EIO so the syscall unwinds and the task stays killable.
 unsafe fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
+    const WAIT_DEADLINE_JIFFIES: u64 = crate::drivers::timer::msecs_to_jiffies(10_000);
     let mut slept = 0u32;
+    let deadline = crate::drivers::timer::get_jiffies().saturating_add(WAIT_DEADLINE_JIFFIES);
     loop {
         let state = (*bh).get_state();
         if !state.test(BufferState::BH_Req) {
             return if state.test(BufferState::BH_Uptodate) { 0 } else { -5 };
         }
-        if crate::sched::current().is_some() && slept < 10_000 {
+        if crate::sched::current().is_some() {
+            if crate::drivers::timer::get_jiffies() >= deadline {
+                crate::pr_err!(
+                    "bio: buffer io wait timeout block={} — reporting EIO (wedge fix)",
+                    (*bh).b_blocknr
+                );
+                return -5;
+            }
             let pid = crate::sched::get_current_pid();
             let dl = crate::drivers::timer::get_jiffies().saturating_add(1);
             let id = crate::timer::add_timer_wakeup(dl, pid);
@@ -902,6 +934,8 @@ unsafe fn wait_buffer_io_done(bh: *mut BufferHead) -> i32 {
             }
             slept += 1;
         } else {
+            // Early boot / IRQ context: no task to sleep, no timer budget —
+            // spin as before (bounded by the caller's poll budget).
             core::hint::spin_loop();
         }
     }
@@ -977,11 +1011,14 @@ pub fn bread_async(
             }
         }
 
-        // Phase 1.5: Evict if cache is full
+        // Phase 1.5: Evict if cache is full (soft limit — see the
+        // read-path Phase 1.5 comment; bounded reclaim, then admit).
+        let mut evict_tries = 0u32;
         while cache.count.load(Ordering::Acquire) as usize >= cache.max_entries {
-            if !cache.evict_one() {
-                return None;
+            if !cache.evict_one() || evict_tries >= 32 {
+                break;
             }
+            evict_tries += 1;
         }
 
         // Phase 2: Cache miss — submit async I/O (no lock held)

@@ -1030,7 +1030,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group
         // descriptor updates and the inode rewrite all happen under the
         // ext4 big lock, same as namei.
-        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
+        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
 
         // Start a journal transaction for data=ordered semantics:
         // data blocks are synced during write, then the inode metadata is

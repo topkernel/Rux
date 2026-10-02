@@ -1035,7 +1035,7 @@ fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
 /// 2. Calling the parent's inode_operations->mkdir
 pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
     // EEXIST before any mutation (Linux do_mkdirat; LTP mkdir03) — the
     // old path left the "already exists" decision to the filesystem's
@@ -1092,7 +1092,7 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 /// Create symbolic link - unified implementation using inode_operations
 pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
     // EEXIST before any mutation (Linux sys_symlinkat; LTP symlink01
     // derivatives expect failure when the link name is taken).
@@ -1144,7 +1144,7 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
 /// Remove directory - unified implementation using inode_operations
 pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
     // Look up the target inode to get its ino for cache invalidation
     // (and its owner for the sticky-bit check).
@@ -1232,7 +1232,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
     }
 
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
     // Look up the target inode to get its ino for cache invalidation
     // (and its owner for the sticky-bit check).
@@ -1333,7 +1333,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
 /// Create hard link - unified implementation using inode_operations
 pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
     // Lookup the source file
     let src_vpath = path_lookup(oldpath, 0)?;
@@ -1398,7 +1398,7 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note):
     // both the source and destination sequences must be atomic against a
     // concurrent creator/unlinker.
-    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
     vfs_rename_locked(oldpath, newpath)
 }
 
@@ -1576,7 +1576,7 @@ pub fn vfs_rename_exchange(oldpath: &str, newpath: &str) -> Result<(), i32> {
         return stat_file_by_path(oldpath, &mut st);
     }
 
-    let _mutation_guard = VFS_MUTATION_LOCK.lock();
+    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
     // Both endpoints must exist.
     let old_vpath = path_lookup(oldpath, 0)
@@ -1887,7 +1887,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // entry. Bracket the whole sequence with the coarse VFS mutation
         // lock (see VFS_MUTATION_LOCK note for the design choice).
         let _mutation_guard = if o_creat {
-            Some(VFS_MUTATION_LOCK.lock())
+            Some(VFS_MUTATION_LOCK.lock_fair())
         } else {
             None
         };

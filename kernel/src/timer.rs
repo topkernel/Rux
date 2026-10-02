@@ -32,6 +32,7 @@ struct TimerEntry {
 }
 
 /// A timer action: what to do when a timer expires.
+#[derive(Clone, Copy)]
 struct TimerAction {
     /// Target PID (0 = no signal delivery).
     pid: u32,
@@ -45,6 +46,18 @@ struct TimerAction {
     tfd_addr: u64,
     /// PID to wake up on expiry (non-zero = wake this process).
     wake_pid: u32,
+}
+
+impl TimerAction {
+    /// All-zero instance for array initialization (a zeroed TimerAction
+    /// delivers nothing: pid/signo/wake_pid/tfd_addr are all 0).
+    const EMPTY: TimerAction = TimerAction {
+        pid: 0,
+        signo: 0,
+        interval_jiffies: 0,
+        tfd_addr: 0,
+        wake_pid: 0,
+    };
 }
 
 /// Active timers: timer_id → TimerEntry.
@@ -233,7 +246,33 @@ pub fn timer_softirq_handler(_nr: usize) {
     // observed "holder never returns" signature. Leftover expired entries
     // (budget exhausted) stay in the map and drain on the next jiffy
     // (LAST_TICK dedupe only skips the SAME jiffy).
-    let mut expired: alloc::vec::Vec<(u64, TimerAction)> = alloc::vec::Vec::with_capacity(EXPIRY_BUDGET);
+    // WEDGE/perf fix: the expired list used to be a heap
+    // `Vec::with_capacity(EXPIRY_BUDGET)` allocated on EVERY tick — a
+    // 2560-byte alloc/dealloc pair per jiffy in IRQ/softirq context.
+    // Under the LTP fs-storm wedges this churn dominated the buddy
+    // allocator (photographed by gdb at exactly this line) and was the
+    // sendmsg02 ALLOCTHROW (alloc-failure panic) site. Use per-CPU
+    // static backing storage instead: the SOFTIRQ_IN_PROGRESS guard
+    // makes handler re-entry on the same CPU impossible, so a per-CPU
+    // buffer needs no lock. (TimerAction is Copy — moved out of the map
+    // below.)
+    /// Per-CPU expired-timer scratch (EXPIRY_BUDGET entries).
+    static mut EXPIRED_BUF: [[(u64, TimerAction); EXPIRY_BUDGET];
+        crate::config::MAX_CPUS] =
+        [[(0, TimerAction::EMPTY); EXPIRY_BUDGET]; crate::config::MAX_CPUS];
+    /// Per-CPU fill level of EXPIRED_BUF.
+    static mut EXPIRED_LEN: [usize; crate::config::MAX_CPUS] = [0; crate::config::MAX_CPUS];
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return; // unreachable on this platform; keep the handler total
+    }
+    // SAFETY: per-CPU rows indexed by this CPU's id; the SOFTIRQ_IN_PROGRESS
+    // guard prevents re-entry, so this CPU's row is exclusively ours.
+    let buf_ptr: *mut [(u64, TimerAction); EXPIRY_BUDGET] =
+        unsafe { (core::ptr::addr_of_mut!(EXPIRED_BUF) as *mut [(u64, TimerAction); EXPIRY_BUDGET]).add(cpu) };
+    let len_ptr: *mut usize =
+        unsafe { (core::ptr::addr_of_mut!(EXPIRED_LEN) as *mut usize).add(cpu) };
+    unsafe { *len_ptr = 0 };
     {
         let mut timers = TIMERS.lock_irqsave();
         let mut actions = ACTIONS.lock_irqsave();
@@ -268,7 +307,13 @@ pub fn timer_softirq_handler(_nr: usize) {
                 // (the GNOME-oom leak; memwatch live-site evidence:
                 // add_timer_wakeup leaf/internal nodes live=3000+, frees=4).
                 if let Some(action) = actions.remove(&id) {
-                    expired.push((id, action));
+                    unsafe {
+                        // SAFETY: budget > 0 guarantees *len < EXPIRY_BUDGET;
+                        // per-CPU buffer, non-reentrant via SOFTIRQ guard.
+                        let n = *len_ptr;
+                        (*buf_ptr)[n] = (id, action);
+                        *len_ptr = n + 1;
+                    }
                 }
                 false // one-shot: remove (dealloc cannot fail)
             } else {
@@ -293,7 +338,10 @@ pub fn timer_softirq_handler(_nr: usize) {
     // CPUs on the TIMERS lock whenever the GRQ side stalled (observed
     // after pipelines). `expired` is a detached snapshot; the ids were
     // removed from the maps under the locks above.
-    for (id, action) in &expired {
+    // SAFETY: slice of this CPU's row, filled under the locks above.
+    let expired_len = unsafe { *len_ptr };
+    let expired: &[(u64, TimerAction)] = &unsafe { &*buf_ptr }[..expired_len];
+    for (id, action) in expired {
         if action.wake_pid != 0 {
             // R13-3: pinned (softirq wake racing a concurrent reap) — the
             // last unpinned cross-CPU wake path.

@@ -10,6 +10,7 @@
 //! an async I/O function, then calls `wait()` later (or never, if polling).
 
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use crate::drivers::timer::msecs_to_jiffies;
 use crate::process::wait::WaitQueueHead;
 
 /// I/O completion signal.
@@ -57,6 +58,8 @@ impl IoCompletion {
     /// Follows the standard BKL discipline: release BKL, schedule,
     /// re-acquire BKL.
     pub fn wait(&self) -> i32 {
+        let mut deadline_set = false;
+        let mut deadline = 0u64;
         loop {
             if self.done.load(Ordering::Acquire) {
                 return self.status.load(Ordering::Acquire);
@@ -69,6 +72,20 @@ impl IoCompletion {
                     continue;
                 }
             };
+
+            // WEDGE fix (LTP inode02/ftest family): an unbounded
+            // kernel-side wait is unkillable — signals are delivered only
+            // on the return to userspace, so a lost completion wedged the
+            // whole sweep. Bound the wait (10s of jiffies); a lost
+            // completion then reports -EIO and the syscall unwinds.
+            if !deadline_set {
+                deadline = crate::drivers::timer::get_jiffies()
+                    .saturating_add(msecs_to_jiffies(10_000));
+                deadline_set = true;
+            } else if crate::drivers::timer::get_jiffies() >= deadline {
+                crate::pr_err!("io_completion: lost completion — reporting EIO (wedge fix)");
+                return -5;
+            }
 
             // Use prepare_to_wait to atomically set INTERRUPTIBLE and
             // add to queue, preventing lost-wakeup race.

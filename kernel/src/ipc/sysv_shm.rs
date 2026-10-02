@@ -164,6 +164,24 @@ fn get_current_pid() -> u32 {
 // ============================================================================
 
 /// Find a free virtual address range in the current process's address space.
+///
+/// Wedge fix (LTP shmt03/shmt08): two bugs livelocked this loop — one CPU
+/// spinning in shmat forever (unkillable by the test runner: whole-chunk
+/// WEDGE, photographed by the QEMU monitor at exactly this function):
+///
+/// 1. The conflict handler set `addr = vma.end()` — an address HIGHER
+///    than the candidate — so the next `addr -= size` reproduced the same
+///    candidate against the same VMA. Continue the DOWNWARD search:
+///    place the next candidate at the blocking VMA's start.
+/// 2. The conflict test used `vma.start() <= addr + size`, counting a
+///    candidate that ends EXACTLY at a VMA's start as a conflict. When
+///    `vma.start() - size` is page-aligned, the loop re-derived the same
+///    adjacent candidate forever. Back-to-back mappings are legal: use
+///    STRICT overlap (`vma.start() < addr + size`).
+///
+/// Termination: each conflict now yields candidate
+/// align_down(vma.start() - size) whose end is <= vma.start() — either
+/// conflict-free (return) or strictly lower than the previous candidate.
 fn find_free_shm_addr(size: usize) -> Option<VirtAddr> {
     let current = crate::sched::current()?;
     let addr_space = current.address_space()?;
@@ -179,11 +197,12 @@ fn find_free_shm_addr(size: usize) -> Option<VirtAddr> {
         addr -= size;
         addr &= !PAGE_MASK;
 
-        // Check for conflicts
+        // Check for conflicts (strict overlap — see comment above)
         let mut conflict = false;
         for vma in vma_mgr.iter() {
-            if vma.start().as_usize() <= addr + size && vma.end().as_usize() > addr {
-                addr = vma.end().as_usize();
+            if vma.start().as_usize() < addr + size && vma.end().as_usize() > addr {
+                // Restart the search just below this VMA.
+                addr = vma.start().as_usize();
                 conflict = true;
                 break;
             }
