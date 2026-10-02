@@ -146,10 +146,15 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         }
     }
 
-    // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
+    // Shortcut: /proc/[pid]/xxx paths go through procfs read file
     // because VFS inode lookup doesn't support PID subdirectories.
+    // READ-ONLY OPENS ONLY: a mem-file snapshot is write-hostile, and the
+    // writable procfs knobs (/proc/sys sysctls, /proc/[pid]/oom_score_adj)
+    // must reach their real inodes + write handlers through the VFS path
+    // below. O_ACCMODE&3 != 0 (O_WRONLY/O_RDWR) skips the shortcut.
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::chrooted() && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
+    if !crate::fs::vfs::chrooted() && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0
+        && (flags & 0o3) == 0 {
         // ptrace_may_access gate for environ BEFORE generating content
         // (review 5.7): self or CAP_SYS_PTRACE.
         {

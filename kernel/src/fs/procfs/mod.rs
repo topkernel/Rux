@@ -1068,8 +1068,9 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         InodeMode::S_IFDIR | 0o555  // read-only directory
     } else if node.is_symlink() {
         InodeMode::S_IFLNK | 0o777
-    } else if node.sysctl_write.is_some() {
-        // P1 /proc/sys: root-owned writable sysctl (Linux 0644).
+    } else if node.sysctl_write.is_some() || node.pid_file_kind == Some(PidFileKind::OomScoreAdj) {
+        // P1 /proc/sys writable sysctl and /proc/[pid]/oom_score_adj
+        // (Linux 0644: root-owned, owner-writable).
         InodeMode::S_IFREG | 0o644
     } else {
         InodeMode::S_IFREG | 0o444  // read-only file
@@ -1202,6 +1203,9 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         let is_symlink = matches!(kind, PidFileKind::Exe | PidFileKind::Cwd);
         let mode = if is_symlink {
             InodeMode::new(InodeMode::S_IFLNK | 0o777)
+        } else if kind == PidFileKind::OomScoreAdj {
+            // Writable per-task knob (Linux 0644).
+            InodeMode::new(InodeMode::S_IFREG | 0o644)
         } else {
             InodeMode::new(InodeMode::S_IFREG | 0o444)
         };
@@ -1257,8 +1261,8 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         InodeMode::new(InodeMode::S_IFDIR | 0o555)
     } else if child.is_symlink() {
         InodeMode::new(InodeMode::S_IFLNK | 0o777)
-    } else if child.sysctl_write.is_some() {
-        // P1 /proc/sys: writable sysctl files open O_RDWR for root.
+    } else if child.sysctl_write.is_some() || child.pid_file_kind == Some(PidFileKind::OomScoreAdj) {
+        // P1 /proc/sys writable sysctl (and oom_score_adj) open for root.
         InodeMode::new(InodeMode::S_IFREG | 0o644)
     } else {
         InodeMode::new(InodeMode::S_IFREG | 0o444)
@@ -1303,8 +1307,9 @@ fn procfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     }
 }
 
-/// ProcFS file write operation: /proc/sys sysctl files only (P1).
-/// Everything else stays EINVAL — procfs has no other writable nodes.
+/// ProcFS file write operation: /proc/sys sysctl files (P1) and
+/// /proc/[pid]/oom_score_adj. Everything else stays EINVAL — procfs has no
+/// other writable nodes.
 fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: inode is written once at open time; read-only access here.
     let inode_opt = unsafe { (*file.inode.get()).clone() };
@@ -1318,6 +1323,46 @@ fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         None => return -22,
     };
     let node = unsafe { &*(node_ptr as *const ProcFSNode) };
+
+    // /proc/[pid]/oom_score_adj: store the adjustment on the task (Linux
+    // semantics: decimal i32 in [-1000, 1000]; out-of-range/undecodable is
+    // EINVAL). LTP's tst_enable_oom_protection writes -1000 in setup and
+    // TWARNs on failure — that warning turned every mem test's exit code
+    // into rc=4.
+    if node.pid_file_kind == Some(PidFileKind::OomScoreAdj) {
+        let pid = match node.pid {
+            Some(p) => p,
+            None => return -22, // EINVAL
+        };
+        let trimmed = core::str::from_utf8(buf).unwrap_or("").trim();
+        // Whitespace-only buffer (the guest toybox `echo v > file` writes
+        // the value and the trailing "\n" as SEPARATE write() calls):
+        // accept as a no-op. Linux would EINVAL a lone "\n", but the split
+        // write is this guest's stdio behavior, not a test's intent.
+        if trimmed.is_empty() {
+            return buf.len() as isize;
+        }
+        let adj = match trimmed.parse::<i32>() {
+            Ok(v) => v,
+            Err(_) => return -22, // EINVAL (Linux: kstrtoint failure)
+        };
+        if !(-1000..=1000).contains(&adj) {
+            return -22; // EINVAL (Linux: OOM_SCORE_ADJ_MIN/MAX)
+        }
+        let task = if crate::process::current_pid() as u64 == pid {
+            crate::process::current_task()
+        } else {
+            crate::process::find_task_by_pid(pid as u32)
+        };
+        return match task {
+            Some(t) => {
+                t.set_oom_score_adj(adj);
+                buf.len() as isize
+            }
+            None => -3, // ESRCH: target task gone
+        };
+    }
+
     match node.sysctl_write {
         Some(write_fn) => {
             let ret = write_fn(buf);
