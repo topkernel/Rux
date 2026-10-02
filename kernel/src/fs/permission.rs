@@ -26,11 +26,16 @@ pub fn generic_permission(
     mask: u32,
     cred: &crate::process::task::Cred,
 ) -> bool {
-    // CAP_DAC_OVERRIDE: root bypasses DAC (except execute on file without any x bit)
+    // CAP_DAC_OVERRIDE: root bypasses DAC. Linux grants read/write/search
+    // on DIRECTORIES unconditionally; on files, execute still needs at
+    // least one x bit (LTP access01 creates files inside 0222 dirs as
+    // root — search must be overridden).
     if crate::security::has_capability(cred, crate::security::CAP_DAC_OVERRIDE) {
-        if mask & MAY_EXEC != 0 {
+        let mode = inode_mode as u32;
+        let is_dir = mode & 0o170000 == 0o040000; // S_IFMT == S_IFDIR
+        if mask & MAY_EXEC != 0 && !is_dir {
             // DAC_OVERRIDE: can exec only if at least one x bit is set
-            if (inode_mode as u32 & 0o111) == 0 {
+            if (mode & 0o111) == 0 {
                 return false;
             }
         }

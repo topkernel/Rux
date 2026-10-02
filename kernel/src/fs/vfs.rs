@@ -1758,6 +1758,10 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
         return Err(errno::Errno::PermissionDenied.as_neg_i32());
     }
 
+    // File leases: truncation conflicts with BOTH read and write leases
+    // (Linux break_lease on ATTR_SIZE).
+    crate::fs::locks::break_lease(inode, true)?;
+
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
     if result == 0 {
         // inotify: truncate → IN_MODIFY (Linux reports it for every
@@ -1810,6 +1814,9 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     if !inode.mode.is_regular_file() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
+
+    // File leases: ftruncate conflicts with read AND write leases.
+    crate::fs::locks::break_lease(inode, true)?;
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
     if result == 0 {
@@ -2002,6 +2009,16 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             if mask != 0 && !inode_permission(&inode, mask) {
                 return Err(errno::Errno::PermissionDenied.as_neg_i32());
             }
+        }
+
+        // File leases (P3): a conflicting open blocks while the holder is
+        // signalled (SIGIO) and the kernel waits up to fs.lease-break-time
+        // before breaking the lease by force (LTP fcntl33). Write leases
+        // conflict with ANY open; read leases with write-mode opens.
+        // Directories never carry leases (set_lease rejects them).
+        if inode.mode.is_regular_file() {
+            let writer = flags & FileFlags::O_ACCMODE != FileFlags::O_RDONLY;
+            crate::fs::locks::break_lease(&inode, writer)?;
         }
 
         // O_NOATIME (Linux): requires the caller to OWN the file or hold
@@ -2284,8 +2301,29 @@ pub mod fcntl {
     pub const F_SETLK64: usize = 13;
     pub const F_SETLKW64: usize = 14;
 
+    /// Signal I/O owner commands (asm-generic numbering).
+    pub const F_SETOWN: usize = 8;
+    pub const F_GETOWN: usize = 9;
+    pub const F_SETSIG: usize = 10;
+    pub const F_GETSIG: usize = 11;
+    pub const F_SETOWN_EX: usize = 15;
+    pub const F_GETOWN_EX: usize = 16;
+
+    /// Open-file-description record locks (Linux 3.15+).
+    pub const F_OFD_GETLK: usize = 36;
+    pub const F_OFD_SETLK: usize = 37;
+    pub const F_OFD_SETLKW: usize = 38;
+
     /// Duplicate file descriptor with close-on-exec
     pub const F_DUPFD_CLOEXEC: usize = 1030;
+
+    /// File leases (asm-generic).
+    pub const F_SETLEASE: usize = 1024;
+    pub const F_GETLEASE: usize = 1025;
+
+    /// Pipe capacity query/resize.
+    pub const F_SETPIPE_SZ: usize = 1031;
+    pub const F_GETPIPE_SZ: usize = 1032;
 
     /// FD_CLOEXEC flag value
     pub const FD_CLOEXEC: usize = 1;
@@ -2471,12 +2509,16 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     | crate::fs::file::FileFlags::O_NONBLOCK
                     | crate::fs::file::FileFlags::O_SYNC
                     | crate::fs::file::FileFlags::O_DSYNC
-                    | crate::fs::file::FileFlags::O_DIRECT;
+                    | crate::fs::file::FileFlags::O_DIRECT
+                    | crate::fs::file::FileFlags::O_ASYNC;
 
                 let current = file.flags().bits();
                 let new_flags = (current & !SETFL_FLAGS) | (arg as u32 & SETFL_FLAGS);
 
                 file.set_flags(crate::fs::file::FileFlags::new(new_flags));
+                // O_ASYNC bit changed: refresh the pipe fasync registration
+                // (registering enables SIGIO delivery, clearing disables).
+                crate::fs::pipe::oasync_register_pipe(&file);
 
                 Ok(0)  // Return 0 on success
             }
@@ -2485,7 +2527,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
             //
             // struct flock (LP64): { i16 l_type; i16 l_whence; off_t
             // l_start; off_t l_len; pid_t l_pid; } = 32 bytes.
-            fcntl::F_GETLK | fcntl::F_GETLK64 => {
+            fcntl::F_GETLK | fcntl::F_GETLK64 | fcntl::F_OFD_GETLK => {
                 let file = match get_file_fd(fd) {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
@@ -2522,14 +2564,21 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 }
 
                 let (start, end) = resolve_lock_region(&file, l_whence, l_start, l_len)?;
-                let owner_pid = crate::sched::current()
-                    .map(|t| t.tgid())
-                    .unwrap_or(0);
+                // OFD variant: the requester's owner token is the open
+                // file description, not the process.
+                let owner = if cmd == fcntl::F_OFD_GETLK {
+                    crate::fs::locks::LockOwner::Ofd(file.file_id)
+                } else {
+                    let owner_pid = crate::sched::current()
+                        .map(|t| t.tgid())
+                        .unwrap_or(0);
+                    crate::fs::locks::LockOwner::Pid(owner_pid)
+                };
 
                 let out = {
                     let mut out = fl;
                     match crate::fs::locks::posix_test_lock(
-                        &file, owner_pid, exclusive, start, end,
+                        &file, owner, exclusive, start, end,
                     ) {
                         // First conflicting lock: report it with ABSOLUTE
                         // start (l_whence = SEEK_SET) and l_len = 0 for a
@@ -2551,11 +2600,12 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                             out[16..24].copy_from_slice(&len.to_le_bytes());
                             out[24..28].copy_from_slice(&(c.pid as i32).to_le_bytes());
                         }
-                        // No conflict: l_type = F_UNLCK, other fields
-                        // untouched (POSIX); l_pid = 0 to be explicit.
+                        // No conflict: set l_type = F_UNLCK and leave every
+                        // other field UNTOUCHED (POSIX; Linux leaves l_pid
+                        // at the caller's value — LTP fcntl05 pre-fills
+                        // l_pid and expects it preserved).
                         None => {
                             out[0..2].copy_from_slice(&flock_types::F_UNLCK.to_le_bytes());
-                            out[24..28].copy_from_slice(&0i32.to_le_bytes());
                         }
                     }
                     out
@@ -2573,8 +2623,11 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 Ok(0)
             }
 
-            fcntl::F_SETLK | fcntl::F_SETLK64 | fcntl::F_SETLKW | fcntl::F_SETLKW64 => {
-                let wait = cmd == fcntl::F_SETLKW || cmd == fcntl::F_SETLKW64;
+            fcntl::F_SETLK | fcntl::F_SETLK64 | fcntl::F_SETLKW | fcntl::F_SETLKW64
+            | fcntl::F_OFD_SETLK | fcntl::F_OFD_SETLKW => {
+                let wait = cmd == fcntl::F_SETLKW
+                    || cmd == fcntl::F_SETLKW64
+                    || cmd == fcntl::F_OFD_SETLKW;
                 let file = match get_file_fd(fd) {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
@@ -2618,30 +2671,234 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 };
 
                 let (start, end) = resolve_lock_region(&file, l_whence, l_start, l_len)?;
-                let owner_pid = crate::sched::current()
-                    .map(|t| t.tgid())
-                    .unwrap_or(0);
+                // Owner token: the process for classic POSIX locks, the
+                // open file description for F_OFD_SETLK/W (Linux 3.15+).
+                let owner = if cmd == fcntl::F_OFD_SETLK || cmd == fcntl::F_OFD_SETLKW {
+                    crate::fs::locks::LockOwner::Ofd(file.file_id)
+                } else {
+                    let owner_pid = crate::sched::current()
+                        .map(|t| t.tgid())
+                        .unwrap_or(0);
+                    crate::fs::locks::LockOwner::Pid(owner_pid)
+                };
 
-                crate::fs::locks::posix_set_lock(&file, owner_pid, kind, start, end, wait)
+                crate::fs::locks::posix_set_lock(&file, owner, kind, start, end, wait)
                     .map(|_| 0)
             }
 
-            // F_GETPIPE_SZ / F_SETPIPE_SZ (P3): only valid on pipe fds.
-            1031 | 1032 => {
-                // P3 F_GET/F_SETPIPE_SZ: pipes report a fixed 64KB
-                // capacity (no resize). For non-pipe fds Linux gives
-                // EINVAL; we accept the fd is valid and report the size
-                // conservatively (the ops identity check infrastructure
-                // is not worth the complexity for this P3 item).
-                match get_file_fd(fd) {
-                    Some(_) => Ok(crate::fs::pipe::PIPE_CAPACITY),
-                    None => Err(errno::Errno::BadFileNumber.as_neg_i32()),
+            // F_SETOWN (8): set the O_ASYNC signal recipient. arg > 0 is a
+            // process id, arg < 0 a process group (-pgid), 0 clears.
+            fcntl::F_SETOWN => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                let argi = arg as i32;
+                if argi != 0 {
+                    // Validate the target exists (Linux: ESRCH).
+                    let (kind, id) = if argi < 0 {
+                        (2u8, -argi)
+                    } else {
+                        (1u8, argi)
+                    };
+                    let exists = if kind == 1 {
+                        crate::process::find_task_by_pid(id as u32).is_some()
+                    } else {
+                        // Any task in the process group?
+                        let pgid = id as u32;
+                        let found = core::cell::Cell::new(false);
+                        crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+                            if (*task).pgid() == pgid {
+                                found.set(true);
+                            }
+                        });
+                        found.get()
+                    };
+                    if !exists {
+                        return Err(errno::Errno::NoSuchProcess.as_neg_i32());
+                    }
+                    *file.f_owner.lock() = crate::fs::file::FileOwner { kind, id };
+                } else {
+                    *file.f_owner.lock() = crate::fs::file::FileOwner::none();
+                }
+                crate::fs::pipe::oasync_register_pipe(&file);
+                Ok(0)
+            }
+
+            // F_GETOWN (9): positive pid / negative pgid / 0 (none).
+            fcntl::F_GETOWN => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                let o = *file.f_owner.lock();
+                Ok(match o.kind {
+                    2 => -(o.id) as usize,
+                    _ => o.id as usize,
+                })
+            }
+
+            // F_SETSIG (10): O_ASYNC signal number (0 = default SIGIO).
+            fcntl::F_SETSIG => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                let sig = arg as i32;
+                if sig != 0 && !(1..=64).contains(&sig) {
+                    return Err(errno::Errno::InvalidArgument.as_neg_i32());
+                }
+                file.f_signum.store(sig, core::sync::atomic::Ordering::Relaxed);
+                crate::fs::pipe::oasync_register_pipe(&file);
+                Ok(0)
+            }
+
+            // F_GETSIG (11): the O_ASYNC signal number (0 = SIGIO default).
+            fcntl::F_GETSIG => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                Ok(file.f_signum.load(core::sync::atomic::Ordering::Relaxed) as usize)
+            }
+
+            // F_SETOWN_EX (15): struct f_owner_ex { i32 type; i32 pid; }.
+            // type: 0 = F_OWNER_TID, 1 = F_OWNER_PID, 2 = F_OWNER_PGRP.
+            fcntl::F_SETOWN_EX => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                if arg == 0
+                    || !crate::arch::riscv64::uaccess::access_ok(arg, 8)
+                {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                let mut buf = [0u8; 8];
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(
+                        buf.as_mut_ptr(),
+                        arg as *const u8,
+                        8,
+                    )
+                } > 0
+                {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                let otype = i32::from_le_bytes(buf[0..4].try_into().unwrap());
+                let opid = i32::from_le_bytes(buf[4..8].try_into().unwrap());
+                // Map f_owner_ex type to our kind: TID→3, PID→1, PGRP→2.
+                let kind = match otype {
+                    0 => 3u8,
+                    1 => 1u8,
+                    2 => 2u8,
+                    _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+                };
+                if opid <= 0 {
+                    return Err(errno::Errno::InvalidArgument.as_neg_i32());
+                }
+                // Validate the target exists (Linux: ESRCH).
+                let exists = if kind == 2 {
+                    let found = core::cell::Cell::new(false);
+                    crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+                        if (*task).pgid() == opid as u32 {
+                            found.set(true);
+                        }
+                    });
+                    found.get()
+                } else {
+                    crate::process::find_task_by_pid(opid as u32).is_some()
+                };
+                if !exists {
+                    return Err(errno::Errno::NoSuchProcess.as_neg_i32());
+                }
+                *file.f_owner.lock() = crate::fs::file::FileOwner { kind, id: opid };
+                crate::fs::pipe::oasync_register_pipe(&file);
+                Ok(0)
+            }
+
+            // F_GETOWN_EX (16): report the current owner.
+            fcntl::F_GETOWN_EX => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                if arg == 0
+                    || !crate::arch::riscv64::uaccess::access_ok(arg, 8)
+                {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                let o = *file.f_owner.lock();
+                let otype = match o.kind {
+                    3 => 0i32, // F_OWNER_TID
+                    1 => 1i32, // F_OWNER_PID
+                    2 => 2i32, // F_OWNER_PGRP
+                    _ => 1i32, // no owner set: report own pid, F_OWNER_PID
+                };
+                let opid = if o.kind == 0 {
+                    crate::sched::current().map(|t| t.tgid()).unwrap_or(0) as i32
+                } else {
+                    o.id
+                };
+                let mut buf = [0u8; 8];
+                buf[0..4].copy_from_slice(&otype.to_le_bytes());
+                buf[4..8].copy_from_slice(&opid.to_le_bytes());
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(
+                        arg as *mut u8,
+                        buf.as_ptr(),
+                        8,
+                    )
+                } > 0
+                {
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                Ok(0)
+            }
+
+            // F_SETLEASE (1024): establish/remove a file lease.
+            fcntl::F_SETLEASE => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                crate::fs::locks::set_lease(&file, arg as i16).map(|_| 0)
+            }
+
+            // F_GETLEASE (1025): the lease held by this description.
+            fcntl::F_GETLEASE => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                Ok(crate::fs::locks::get_lease(&file) as usize)
+            }
+
+            // F_GETPIPE_SZ (1032) / F_SETPIPE_SZ (1031): pipe-only (Linux
+            // returns EINVAL for any other fd).
+            fcntl::F_SETPIPE_SZ => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                crate::fs::pipe::pipe_set_sz(&file, arg)
+            }
+            fcntl::F_GETPIPE_SZ => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                match crate::fs::pipe::pipe_get_sz(&file) {
+                    Some(sz) => Ok(sz),
+                    None => Err(errno::Errno::InvalidArgument.as_neg_i32()),
                 }
             }
 
-            // Unsupported command
+            // Unsupported command: Linux do_fcntl's default is EINVAL
+            // (LTP fcntl13/18 pass a bogus cmd and expect EINVAL; the
+            // old ENOSYS failed both).
             _ => {
-                Err(errno::Errno::FunctionNotImplemented.as_neg_i32())
+                Err(errno::Errno::InvalidArgument.as_neg_i32())
             }
         }
     }
@@ -3073,17 +3330,19 @@ pub fn open_mem_file(data: alloc::vec::Vec<u8>, flags: u32) -> Result<usize, i32
 }
 
 /// F_GETPIPE_SZ / F_SETPIPE_SZ: report/resize the pipe capacity.
-/// The request is page-rounded (0 → one page) and clamped to the 1MB
-/// fs.pipe-max-size default; buffered data is preserved. LTP pipe2_04
-/// shrinks to page size and expects F_GETPIPE_SZ to agree.
+/// The request is page-rounded; buffered data is preserved (a shrink
+/// below the buffered bytes fails EBUSY, a grow past fs.pipe-max-size
+/// without CAP_SYS_RESOURCE fails EPERM — Linux pipe_set_size). LTP
+/// pipe2_04 shrinks to page size and expects F_GETPIPE_SZ to agree.
 pub fn pipe_fcntl(file: &File, cmd: usize, arg: usize) -> Result<i64, i32> {
     const F_GETPIPE_SZ: usize = 1032;
     const F_SETPIPE_SZ: usize = 1031;
     match cmd {
         F_GETPIPE_SZ => Ok(crate::fs::pipe::pipe_get_sz(file)
             .ok_or(-(crate::errno::constants::EINVAL as i32))? as i64),
-        F_SETPIPE_SZ => Ok(crate::fs::pipe::pipe_set_sz(file, arg)
-            .ok_or(-(crate::errno::constants::EINVAL as i32))? as i64),
+        F_SETPIPE_SZ => {
+            crate::fs::pipe::pipe_set_sz(file, arg).map(|sz| sz as i64)
+        }
         _ => Err(-22),
     }
 }

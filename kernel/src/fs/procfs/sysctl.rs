@@ -138,6 +138,53 @@ pub fn generate_pipe_user_pages_hard() -> Vec<u8> {
     alloc::format!("{}\n", PIPE_USER_PAGES_HARD.load(Ordering::Relaxed)).into_bytes()
 }
 
+/// /proc/sys/fs/pipe-max-size — largest pipe capacity an unprivileged
+/// F_SETPIPE_SZ may request (Linux default 1MB). Read by LTP fcntl30;
+/// consulted by Pipe::resize as the ceiling.
+pub static PIPE_MAX_SIZE: AtomicU64 = AtomicU64::new(1 << 20);
+
+pub fn generate_pipe_max_size() -> Vec<u8> {
+    alloc::format!("{}\n", PIPE_MAX_SIZE.load(Ordering::Relaxed)).into_bytes()
+}
+
+pub fn write_pipe_max_size(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            // Linux clamps to [page, UINT_MAX]; below one page is EINVAL.
+            if v < 4096 {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            PIPE_MAX_SIZE.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/fs/lease-break-time — seconds to wait after signalling a
+/// lease holder before breaking the lease by force (Linux default 45;
+/// read+written by LTP fcntl33).
+pub fn generate_lease_break_time() -> Vec<u8> {
+    alloc::format!(
+        "{}\n",
+        crate::fs::locks::LEASE_BREAK_TIME.load(Ordering::Relaxed)
+    )
+    .into_bytes()
+}
+
+pub fn write_lease_break_time(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            if v > i32::MAX as u64 {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            crate::fs::locks::LEASE_BREAK_TIME.store(v as u32, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
 // ============================================================================
 // Writers (write side) — return 0 on success, negative errno on failure
 // ============================================================================

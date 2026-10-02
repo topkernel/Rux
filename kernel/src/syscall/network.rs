@@ -695,7 +695,29 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
 
     let (socket, file_nonblock) = match socket_file_of(fd) {
         Some(s) => s,
-        None => return -(errno::ENOTSOCK as i64),
+        None => {
+            // Distinguish EBADF (fd not open at all — Linux sockfd_lookup)
+            // from ENOTSOCK (fd open but not a socket). LTP accept01 case 1
+            // passes a never-opened fd and expects EBADF.
+            match crate::sched::get_current_fdtable() {
+                Some(ft) => match ft.get_file(fd) {
+                    None => return -(errno::EBADF as i64),
+                    // O_PATH descriptors reject every operation that
+                    // actually uses the file (Linux f_op check) — accept
+                    // included — with EBADF (LTP accept03 case 2).
+                    Some(f) => {
+                        if f.flags().bits()
+                            & crate::fs::file::FileFlags::O_PATH
+                            != 0
+                        {
+                            return -(errno::EBADF as i64);
+                        }
+                        return -(errno::ENOTSOCK as i64);
+                    }
+                },
+                _ => return -(errno::ENOTSOCK as i64),
+            }
+        }
     };
     if socket.sock_type != crate::net::socket::SocketType::Tcp {
         return -(errno::EOPNOTSUPP as i64);

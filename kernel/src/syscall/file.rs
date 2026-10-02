@@ -1161,6 +1161,13 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[1] as *const u8;
     let mode = args[2] as i32;
 
+    // Linux validates the mode word before touching the path: anything
+    // outside F_OK|R_OK|W_OK|X_OK is EINVAL (LTP access04 case 1 passes
+    // -1 and expects EINVAL, not a permission answer).
+    if mode & !0o7 != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,

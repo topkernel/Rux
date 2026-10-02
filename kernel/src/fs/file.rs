@@ -44,6 +44,9 @@ impl FileFlags {
     pub const O_CLOEXEC: u32 = 0o02000000;
     pub const O_SYNC: u32 = 0o04000000;
     pub const O_PATH: u32 = 0o10000000;
+    /// O_ASYNC / FASYNC (asm-generic 020000): signal the f_owner on I/O
+    /// readiness (F_SETFL settable; drives pipe SIGIO, fcntl31).
+    pub const O_ASYNC: u32 = 0o20000;
 
     pub fn new(flags: u32) -> Self {
         Self(flags)
@@ -128,6 +131,25 @@ pub struct File {
     /// update) so concurrent writers on SMP cannot interleave. Added for
     /// review 5.2 (O_APPEND 写与 pos 更新无锁).
     pub write_lock: Spinlock<()>,
+    /// O_ASYNC signal destination (F_SETOWN / F_SETOWN_EX). kind 0 none,
+    /// 1 process, 2 process group, 3 thread (F_OWNER_TID).
+    pub f_owner: Spinlock<FileOwner>,
+    /// O_ASYNC signal number (F_SETSIG); 0 = default SIGIO.
+    pub f_signum: core::sync::atomic::AtomicI32,
+}
+
+/// fasync owner set via F_SETOWN/F_SETOWN_EX (kept on the open file
+/// description, like Linux's f_owner).
+#[derive(Clone, Copy)]
+pub struct FileOwner {
+    pub kind: u8,
+    pub id: i32,
+}
+
+impl FileOwner {
+    pub const fn none() -> Self {
+        Self { kind: 0, id: 0 }
+    }
 }
 
 // SAFETY: File is only shared across threads when referenced through Arc,
@@ -158,6 +180,8 @@ impl File {
             cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
             file_id: FILE_ID_GENERATION.fetch_add(1, Ordering::Relaxed),
             write_lock: Spinlock::new(()),
+            f_owner: Spinlock::new(FileOwner::none()),
+            f_signum: core::sync::atomic::AtomicI32::new(0),
         }
     }
 
@@ -178,6 +202,12 @@ impl File {
 
     /// Set inode
     pub fn set_inode(&self, inode: Arc<Inode>) {
+        // Lease/open bookkeeping: every File that gains an inode is an
+        // open file description on that inode (the F_SETLEASE grant
+        // checks and lease-break blocking consult these counts).
+        // File::drop unregisters. O_ACCMODE=3: O_WRONLY(1)/O_RDWR(2)
+        // carry write access.
+        crate::fs::locks::inode_open_register(&inode, self.flags_bits() & 0o3 != 0);
         unsafe { *self.inode.get() = Some(inode); }
     }
 
@@ -419,6 +449,13 @@ impl Drop for File {
         // deferred close_pending path alike, across fork's shared
         // descriptions.
         crate::fs::locks::flock_release_file(self.file_id);
+        // F_OFD_SETLK record locks likewise die with the description.
+        crate::fs::locks::ofd_release_file(self.file_id);
+        // Lease bookkeeping: drop the inode open count and release any
+        // lease this description holds (wakes blocked lease breakers).
+        crate::fs::locks::inode_open_unregister(self);
+        // O_ASYNC registry entry (pipes), if any.
+        crate::fs::pipe::oasync_unregister_file(self.file_id);
         // P0-4 inotify: IN_CLOSE_WRITE / IN_CLOSE_NOWRITE fires when the
         // last reference to the description goes away (Linux fires it
         // from fput, i.e. dup'd fds defer it — same discipline).

@@ -58,6 +58,7 @@ pub mod pid;
 pub mod interrupts;
 pub mod sysctl;
 pub mod net;
+pub mod configgz;
 
 
 /// ProcFS magic number
@@ -438,6 +439,8 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("version", version::generate);
         self.create_dynamic_file("uptime", uptime::generate);
         self.create_dynamic_file("cmdline", cmdline::generate);
+        // IKCONFIG-style embedded config (LTP tst_kconfig reads this).
+        self.create_dynamic_file("config.gz", configgz::generate);
         self.create_dynamic_file("loadavg", loadavg::generate);
         self.create_dynamic_file("mounts", mounts::generate);
         self.create_dynamic_file("filesystems", mounts::generate_filesystems);
@@ -599,6 +602,20 @@ impl ProcFSSuperBlock {
             b"pipe-user-pages-hard".to_vec(),
             sysctl::generate_pipe_user_pages_hard,
             sysctl::write_pipe_user_pages_hard,
+            self.alloc_ino(),
+        )));
+        // F_SETPIPE_SZ ceiling (read by LTP fcntl30).
+        fsdir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"pipe-max-size".to_vec(),
+            sysctl::generate_pipe_max_size,
+            sysctl::write_pipe_max_size,
+            self.alloc_ino(),
+        )));
+        // Lease break timeout (read+written by LTP fcntl33).
+        fsdir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"lease-break-time".to_vec(),
+            sysctl::generate_lease_break_time,
+            sysctl::write_lease_break_time,
             self.alloc_ino(),
         )));
     }

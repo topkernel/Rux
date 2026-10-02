@@ -205,8 +205,26 @@ pub struct Pipe {
 impl Pipe {
     /// Create new pipe
     pub fn new() -> Self {
+        // Default capacity: the 64KB ring, clamped down to
+        // /proc/sys/fs/pipe-max-size for UNPRIVILEGED users (Linux
+        // alloc_pipe_info; LTP fcntl35 sets pipe-max-size=4096 and
+        // expects nobody's fresh pipe to report 4096 while root keeps
+        // 64KB).
+        let cap = {
+            let max = crate::fs::procfs::sysctl::PIPE_MAX_SIZE
+                .load(core::sync::atomic::Ordering::Relaxed) as usize;
+            if PIPE_CAPACITY > max
+                && !crate::security::capable(
+                    crate::security::capability::CAP_SYS_RESOURCE,
+                )
+            {
+                max.max(4096)
+            } else {
+                PIPE_CAPACITY
+            }
+        };
         Self {
-            buffer: Spinlock::new(PipeBuffer::new(PIPE_BUF_SIZE)),
+            buffer: Spinlock::new(PipeBuffer::new(cap)),
             read_closed: AtomicUsize::new(0),
             write_closed: AtomicUsize::new(0),
             read_queue: WaitQueueHead::new(),
@@ -297,6 +315,8 @@ pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 // Read successful, wake up write waiters (space available)
                 drop(guard); // Release lock before waking waiters
                 pipe.write_queue().wake_up_all();
+                // O_ASYNC: space freed — signal write-end owners (fcntl31).
+                oasync_notify(pipe as *const _ as usize, false);
                 return count as isize;
             }
 
@@ -418,6 +438,8 @@ pub fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 drop(guard);
                 // Wake up read waiters (data available)
                 pipe.read_queue().wake_up_all();
+                // O_ASYNC: data arrived — signal read-end owners (fcntl31).
+                oasync_notify(pipe as *const _ as usize, true);
                 continue;
             }
 
@@ -518,6 +540,107 @@ pub fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
     }
 }
 
+// ============================================================================
+// O_ASYNC (FASYNC) SIGIO delivery for pipes — LTP fcntl31
+// ============================================================================
+//
+// Linux keeps the fasync owner on the open file description and delivers
+// the configured signal (F_SETSIG, default SIGIO) when the description
+// becomes readable (read end) or writable (write end). The owner is
+// stored on File.f_owner/f_signum by the fcntl layer; this registry maps
+// pipe identity → registered descriptions so the data path can find the
+// owners to signal without a back-pointer from Pipe to its end Files.
+
+struct OAsyncEntry {
+    file_id: u64,
+    pipe_addr: usize,
+    /// true: read end (signal when data arrives); false: write end
+    /// (signal when space frees up).
+    read_end: bool,
+    owner_kind: u8,
+    owner_id: i32,
+    signum: i32,
+}
+
+static PIPE_OASYNC: crate::sync::spinlock::Spinlock<alloc::vec::Vec<OAsyncEntry>> =
+    crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new());
+
+/// Refresh (or remove) this description's O_ASYNC registration after an
+/// fcntl touched f_owner/f_signum/O_ASYNC. No-op for non-pipe files.
+pub fn oasync_register_pipe(file: &File) {
+    let ops = match file.get_ops() {
+        Some(o) => o,
+        None => return,
+    };
+    if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
+        return;
+    }
+    // SAFETY: ops identity confirmed a pipe File; private_data holds the
+    // shared Arc<Pipe> raw pointer installed by create_pipe.
+    let pipe_addr = match unsafe { *file.private_data.get() } {
+        Some(p) => p as usize,
+        None => return,
+    };
+    let owner = *file.f_owner.lock();
+    let signum = file.f_signum.load(core::sync::atomic::Ordering::Relaxed);
+    let has_async = file.flags().bits() & FileFlags::O_ASYNC != 0;
+    let mut reg = PIPE_OASYNC.lock();
+    reg.retain(|e| e.file_id != file.file_id);
+    if owner.kind != 0 && has_async {
+        reg.push(OAsyncEntry {
+            file_id: file.file_id,
+            pipe_addr,
+            read_end: file.flags().is_readonly(),
+            owner_kind: owner.kind,
+            owner_id: owner.id,
+            signum: if signum == 0 {
+                crate::signal::Signal::SIGIO as i32
+            } else {
+                signum
+            },
+        });
+    }
+}
+
+/// Drop a dying description's registration (File::drop).
+pub fn oasync_unregister_file(file_id: u64) {
+    let mut reg = PIPE_OASYNC.lock();
+    reg.retain(|e| e.file_id != file_id);
+}
+
+/// Send the configured signal to an owner: process (1), process group
+/// (2, id negative in F_SETOWN terms — stored positive here) or thread
+/// (3). Best-effort, like Linux's kill_fasync.
+fn oasync_signal_owner(kind: u8, id: i32, sig: i32) {
+    match kind {
+        1 | 3 => {
+            if id > 0 {
+                let _ = crate::signal::send_signal(id as u32, sig);
+            }
+        }
+        2 => {
+            let pgid = id.unsigned_abs();
+            crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+                if (*task).pgid() == pgid {
+                    let _ = crate::signal::send_signal((*task).pid(), sig);
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Notify O_ASYNC owners on `pipe_addr`: readable events signal read-end
+/// owners, writable events signal write-end owners.
+fn oasync_notify(pipe_addr: usize, readable: bool) {
+    let reg = PIPE_OASYNC.lock();
+    for e in reg.iter() {
+        if e.pipe_addr == pipe_addr && e.read_end == readable {
+            oasync_signal_owner(e.owner_kind, e.owner_id, e.signum);
+        }
+    }
+}
+
 pub fn pipe_file_poll(file: &File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     let mut ready = 0u16;
@@ -615,19 +738,42 @@ impl Pipe {
         self.buffer.lock().capacity()
     }
 
-    /// Resize (F_SETPIPE_SZ): page-rounded, minimum one page. Returns the
-    /// new capacity — Linux rounds the request up to a page multiple and
-    /// treats 0 as "one page".
-    pub fn resize(&self, requested: usize) -> usize {
+    /// Current capacity and buffered bytes (for F_SETPIPE_SZ checks).
+    fn cap_and_buffered(&self) -> (usize, usize) {
+        let b = self.buffer.lock();
+        (b.capacity(), b.available_read())
+    }
+
+    /// Resize (F_SETPIPE_SZ) with Linux's error contract
+    /// (fs/pipe.c pipe_set_size):
+    ///   - arg > 1<<31  → EINVAL
+    ///   - arg == 0     → EINVAL (round_pipe_size(0) == 0 → no slots)
+    ///   - growing past /proc/sys/fs/pipe-max-size without
+    ///     CAP_SYS_RESOURCE → EPERM
+    ///   - shrinking below the bytes already buffered → EBUSY
+    /// Returns the granted capacity (page-rounded).
+    pub fn resize_checked(&self, requested: usize) -> Result<usize, i32> {
         const PAGE: usize = 4096;
-        const MAX_PIPE_SIZE: usize = 1 << 20; // fs.pipe-max-size default 1MB
-        let new_cap = if requested == 0 {
-            PAGE
-        } else {
-            requested.div_ceil(PAGE) * PAGE
+        const MAX_SIZE: usize = 1 << 31;
+        if requested == 0 || requested > MAX_SIZE {
+            return Err(-(crate::errno::constants::EINVAL as i32));
         }
-        .clamp(PAGE, MAX_PIPE_SIZE);
-        self.buffer.lock().resize(new_cap)
+        let new_cap = requested.div_ceil(PAGE) * PAGE;
+        let max_pipe_size =
+            crate::fs::procfs::sysctl::PIPE_MAX_SIZE.load(core::sync::atomic::Ordering::Relaxed)
+                as usize;
+        let (cur_cap, buffered) = self.cap_and_buffered();
+        if new_cap > cur_cap
+            && new_cap > max_pipe_size
+            && !crate::security::capable(crate::security::capability::CAP_SYS_RESOURCE)
+        {
+            return Err(-(crate::errno::constants::EPERM as i32));
+        }
+        if buffered > new_cap {
+            return Err(-(crate::errno::constants::EBUSY as i32));
+        }
+        self.buffer.lock().resize(new_cap);
+        Ok(new_cap)
     }
 }
 
@@ -650,18 +796,24 @@ pub fn pipe_get_sz(file: &File) -> Option<usize> {
 /// F_SETPIPE_SZ entry for the fcntl layer: identity-checks the File
 /// against PIPE_OPS, then resizes the shared ring (both ends of the pipe
 /// see the change — Linux stores the size on the pipe inode).
-/// Returns None when `file` is not a pipe.
-pub fn pipe_set_sz(file: &File, size: usize) -> Option<usize> {
-    let ops = file.get_ops()?;
+/// Returns Err(EINVAL) when `file` is not a pipe.
+pub fn pipe_set_sz(file: &File, size: usize) -> Result<usize, i32> {
+    let ops = match file.get_ops() {
+        Some(o) => o,
+        None => return Err(-(crate::errno::constants::EINVAL as i32)),
+    };
     if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
-        return None;
+        return Err(-(crate::errno::constants::EINVAL as i32));
     }
     // SAFETY: ops identity confirmed this is a pipe File; private_data was
     // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
     // while the File exists.
-    let ptr = unsafe { *file.private_data.get() }?;
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return Err(-(crate::errno::constants::EINVAL as i32)),
+    };
     let pipe = unsafe { &*(ptr as *const Pipe) };
-    Some(pipe.resize(size))
+    pipe.resize_checked(size)
 }
 
 /// Synthetic st_dev for anonymous pipe file descriptions (Linux keeps
