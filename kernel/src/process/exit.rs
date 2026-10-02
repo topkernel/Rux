@@ -541,6 +541,29 @@ pub fn do_exit(exit_code: i32) -> ! {
         // Set exit code
         (*current).set_exit_code(exit_code);
 
+        // ===== CPU-time accounting fold =====
+        // Linux semantics: a dying thread's user/system ticks fold into the
+        // thread-group leader (so /proc/[pid]/stat, times() and
+        // getrusage(RUSAGE_SELF) report group totals), and the leader's
+        // accumulated totals fold into the PARENT's cutime/cstime (what
+        // times()/getrusage(RUSAGE_CHILDREN) report after wait()). Lost
+        // silently when the parent already exited (orphan), matching the
+        // fact that nobody can wait for them anymore.
+        {
+            use core::sync::atomic::Ordering::Relaxed;
+            let u = (*current).utime_ticks.load(Relaxed);
+            let s = (*current).stime_ticks.load(Relaxed);
+            if is_leader {
+                if let Some(parent) = crate::process::find_task_by_pid(parent_pid) {
+                    (*parent).cutime_ticks.fetch_add(u, Relaxed);
+                    (*parent).cstime_ticks.fetch_add(s, Relaxed);
+                }
+            } else {
+                (*leader).utime_ticks.fetch_add(u, Relaxed);
+                (*leader).stime_ticks.fetch_add(s, Relaxed);
+            }
+        }
+
         // Drop any in-progress signal frame: a handler that longjmp'd out
         // left sigframe set, which blocks all further delivery including
         // SIGKILL (review H15) — clear it so the dying task stays killable.

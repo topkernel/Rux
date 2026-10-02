@@ -801,6 +801,16 @@ pub struct Task {
     /// scheduler_tick (IRQ context).
     cpu_time_last_sigxcpu: AtomicU64,
 
+    /// CPU-time accounting (kernel ticks, HZ per second). utime/stime are
+    /// this task's own user/system time, sampled in the timer IRQ from the
+    /// interrupted privilege mode (Linux account_process_tick style);
+    /// cutime/cstime accumulate the same counters of reaped children at
+    /// their exit. Read by /proc/[pid]/stat, times(2) and getrusage(2).
+    pub utime_ticks: AtomicU64,
+    pub stime_ticks: AtomicU64,
+    pub cutime_ticks: AtomicU64,
+    pub cstime_ticks: AtomicU64,
+
     // ==================== ptrace state (P1) ====================
 
     /// PID of the tracing process (0 = not traced). Deliberately a pid,
@@ -1046,6 +1056,10 @@ impl Task {
             posix_timers: Spinlock::new(alloc::vec::Vec::new()),
             rlimits: Spinlock::new(default_rlimits()),
             cpu_time_last_sigxcpu: AtomicU64::new(0),
+            utime_ticks: AtomicU64::new(0),
+            stime_ticks: AtomicU64::new(0),
+            cutime_ticks: AtomicU64::new(0),
+            cstime_ticks: AtomicU64::new(0),
             tracer_pid: AtomicU32::new(0),
             ptrace_options: AtomicU64::new(0),
             ptrace_sigdeliver: AtomicU32::new(0),
@@ -1406,6 +1420,24 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cpu_time_last_sigxcpu)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // CPU-time accounting (utime/stime/cutime/cstime ticks): the buddy
+        // allocator does not zero Task pages — explicit init required.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, utime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cutime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
             AtomicU64::new(0),
         );
         // Ptrace + coredump state (P1 wave 3): same R9-1 discipline — the
@@ -1837,6 +1869,24 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cpu_time_last_sigxcpu)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // CPU-time accounting: non-zeroing buddy allocator — must be
+        // explicitly initialized (utime/stime/cutime/cstime ticks).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, utime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, stime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cutime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
             AtomicU64::new(0),
         );
         // Ptrace + coredump state (P1 wave 3): see new_idle_at — non-zeroing

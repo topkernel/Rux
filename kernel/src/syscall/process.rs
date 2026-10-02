@@ -228,9 +228,27 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         }
     };
 
-    // Read file from file system
-    let program_data = match read_exec_file(full_path.as_ref()) {
-        Some(data) => data,
+    // Read file from file system. The read can fail TRANSIENTLY under
+    // concurrent block I/O (same family as the PT_INTERP read below —
+    // buffer-cache pressure right after a killed task's teardown), which
+    // surfaced in the LTP sweep as spurious execve ENOENT of binaries
+    // that plainly exist (creat08, asapi_02, pipeio, fs_fill, ...).
+    // Retry a bounded number of times before reporting ENOENT, like the
+    // interpreter path does.
+    let mut program_data = read_exec_file(full_path.as_ref());
+    let mut main_attempt = 1;
+    while program_data.is_none() && main_attempt < 3 {
+        crate::pr_err!(
+            "exec: transient read of {} failed (pid {}, attempt {}), retrying",
+            full_path.as_ref(),
+            crate::process::current_pid(),
+            main_attempt
+        );
+        program_data = read_exec_file(full_path.as_ref());
+        main_attempt += 1;
+    }
+    let program_data = match program_data {
+        Some(d) => d,
         None => return -errno::ENOENT as u64,
     };
 
@@ -817,7 +835,7 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
             found.set(true);
             if sig > 0 {
                 if crate::security::can_send_signal((*task).cred()) {
-                    let _ = crate::signal::send_signal(tp, sig);
+                    let _ = crate::signal::send_signal_from_user(tp, sig);
                 } else {
                     denied.set(true);
                 }
@@ -862,7 +880,7 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
                 }
             });
             for m in members {
-                let _ = crate::signal::send_signal(m, sig);
+                let _ = crate::signal::send_signal_from_user(m, sig);
             }
         }
     }
@@ -2175,9 +2193,11 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
     };
-    if sigset == 0 {
-        return -(errno::EINVAL as i64);
-    }
+    // An EMPTY wait set is legal (Linux do_sigtimedwait): the call then
+    // blocks until any signal OUTSIDE the set (i.e. any deliverable
+    // signal) arrives and returns EINTR, or until the timeout (EAGAIN).
+    // Returning EINVAL here broke the LTP sigwait family's test_empty_set
+    // and left its killer child's signal unreported.
 
     // Optional timeout (timespec {tv_sec, tv_nsec}).
     let deadline = if !uts.is_null() {
@@ -2441,19 +2461,32 @@ pub fn sys_times(args: SyscallArgs) -> i64 {
         if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 32) {
             return -(errno::EFAULT as i64);
         }
-        // struct tms: tms_utime, tms_stime, tms_cutime, tms_cstime (all clock_t = i64)
-        // Zeroed buffer written via the exception-table copy path so an
-        // unmapped user page yields EFAULT instead of a kernel page fault.
-        let zeros = [0u8; 32];
-        let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_to_user(
-                buf_ptr as *mut u8,
-                zeros.as_ptr(),
-                32,
-            )
+        // struct tms: tms_utime, tms_stime, tms_cutime, tms_cstime (clock_t = i64)
+        // Self ticks from the timer-IRQ CPU accounting; child ticks are
+        // folded into this task at each child's exit (see do_exit).
+        let (utime, stime, cutime, cstime) = match crate::sched::current() {
+            Some(t) => unsafe {
+                use core::sync::atomic::Ordering::Relaxed;
+                (
+                    (*t).utime_ticks.load(Relaxed) as i64,
+                    (*t).stime_ticks.load(Relaxed) as i64,
+                    (*t).cutime_ticks.load(Relaxed) as i64,
+                    (*t).cstime_ticks.load(Relaxed) as i64,
+                )
+            },
+            None => (0, 0, 0, 0),
         };
-        if uncopied > 0 {
-            return -(errno::EFAULT as i64);
+        // SAFETY: buf_ptr validated with access_ok above; each field write
+        // goes through put_user (exception-table path, SUM=0 safe).
+        unsafe {
+            let put = crate::arch::riscv64::uaccess::put_user::<u64>;
+            if !put(buf_ptr as *mut u64, utime as u64)
+                || !put(buf_ptr.add(1) as *mut u64, stime as u64)
+                || !put(buf_ptr.add(2) as *mut u64, cutime as u64)
+                || !put(buf_ptr.add(3) as *mut u64, cstime as u64)
+            {
+                return -(errno::EFAULT as i64);
+            }
         }
     }
     // Return clock ticks since boot (simplified: use jiffies)
@@ -3549,7 +3582,7 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
 /// struct rusage is 144 bytes on riscv64 (the old 136-byte write left the
 /// last fields — ru_maxrss etc. — as garbage for `time`/`make` parsers).
 pub fn sys_getrusage(args: SyscallArgs) -> i64 {
-    let _who = args[0] as i32;
+    let who = args[0] as i32;
     let rusage_ptr = args[1] as *mut u8;
 
     if rusage_ptr.is_null() {
@@ -3559,19 +3592,67 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Fill rusage with zeros (no resource tracking yet) — via the
-    // exception-table copy so a bad pointer is EFAULT, not a kernel fault.
-    // SAFETY: rusage_ptr validated with access_ok; exception-table copy.
-    let zeros = [0u8; 144];
-    if unsafe {
-        crate::arch::riscv64::uaccess::copy_to_user(
-            rusage_ptr,
-            &zeros as *const u8,
-            144,
-        )
-    } != 0
-    {
-        return -(errno::EFAULT as i64);
+    const RUSAGE_SELF: i32 = 0;
+    const RUSAGE_CHILDREN: i32 = -1;
+    const RUSAGE_THREAD: i32 = 1;
+
+    // struct rusage layout (bytes):
+    //   0  ru_utime.tv_sec     8  ru_utime.tv_usec
+    //   16 ru_stime.tv_sec     24 ru_stime.tv_usec
+    //   32 ru_maxrss .. 40 ru_minflt 48 ru_majflt 56 ru_inblock 64 ru_oublock
+    //   72 ru_nvcsw 80 ru_nivcsw (padded to 96) — struct is 96 bytes on musl;
+    //   the old code zeroed 144 (glibc layout), keep zeroing the whole 144.
+    let (utime_ticks, stime_ticks) = match crate::sched::current() {
+        Some(t) => unsafe {
+            use core::sync::atomic::Ordering::Relaxed;
+            if who == RUSAGE_CHILDREN {
+                (
+                    (*t).cutime_ticks.load(Relaxed),
+                    (*t).cstime_ticks.load(Relaxed),
+                )
+            } else {
+                // SELF and THREAD both report the calling task's own time
+                // (threads are Tasks here; thread-group totals live on the
+                // leader after the folding in do_exit).
+                (
+                    (*t).utime_ticks.load(Relaxed),
+                    (*t).stime_ticks.load(Relaxed),
+                )
+            }
+        },
+        None => (0, 0),
+    };
+
+    // Ticks (HZ=100) -> timeval: tv_sec = ticks/HZ, tv_usec = (ticks%HZ)*1e4.
+    const HZ: u64 = crate::drivers::timer::HZ;
+    let utv = (utime_ticks / HZ, (utime_ticks % HZ) * 10_000);
+    let stv = (stime_ticks / HZ, (stime_ticks % HZ) * 10_000);
+
+    // ru_maxrss (KB): SELF/THREAD — resident pages of the current mm;
+    // CHILDREN — approximated by the same value (children RSS hiwater is
+    // not tracked yet).
+    let maxrss_kb: u64 = if who == RUSAGE_CHILDREN {
+        0
+    } else {
+        crate::sched::current()
+            .and_then(|t| unsafe { (*t).address_space() })
+            .map(|mm| mm.rss() * 4)
+            .unwrap_or(0)
+    };
+
+    // SAFETY: rusage_ptr validated with access_ok; zero fill via the
+    // exception-table copy, then per-field put_user updates.
+    unsafe {
+        let zeros = [0u8; 144];
+        if crate::arch::riscv64::uaccess::copy_to_user(rusage_ptr, zeros.as_ptr(), 144) != 0 {
+            return -(errno::EFAULT as i64);
+        }
+        let put = crate::arch::riscv64::uaccess::put_user::<u64>;
+        let _ = put(rusage_ptr as *mut u64, utv.0);
+        let _ = put(rusage_ptr.add(8) as *mut u64, utv.1);
+        let _ = put(rusage_ptr.add(16) as *mut u64, stv.0);
+        let _ = put(rusage_ptr.add(24) as *mut u64, stv.1);
+        let _ = put(rusage_ptr.add(32) as *mut u64, maxrss_kb);
     }
     0
 }

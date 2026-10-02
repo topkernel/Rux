@@ -294,6 +294,15 @@ pub fn timer_softirq_handler(_nr: usize) {
                         // miss the briefly-removed id (orphan-timer race).
                         // The action stays in ACTIONS untouched.
                         entry.expires = current + action.interval_jiffies;
+                        // R37: a PERIODIC timer must also DELIVER on every
+                        // expiry — the old path only re-armed, so repeating
+                        // ITIMER_REAL (setitimer with it_interval != 0) and
+                        // periodic posix timers armed through the wheel
+                        // never sent a single signal (LTP setitimer01/
+                        // timer_settime hangs). Queue a COPY of the action
+                        // for the outside-locks delivery pass below; the
+                        // map keeps its own entry for the next expiry.
+                        expired.push((id, *action));
                         return true;
                     }
                 }
@@ -378,8 +387,7 @@ pub fn timer_softirq_handler(_nr: usize) {
         && current.saturating_sub(LAST_PERIODIC_DUMP.load(Ordering::Relaxed)) >= 500
     {
         LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
-        crate::dfx::taskdump::dump_all_tasks("periodic");
-    }
+        crate::dfx::taskdump::dump_all_tasks("periodic");    }
 }
 
 /// Jiffies of the last periodic DFX snapshot (dfx=periodic).

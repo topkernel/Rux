@@ -1451,8 +1451,24 @@ fn handle_default_signal(sig: i32) {
 ///
 /// * `true` - Signal sent successfully
 /// * `false` - Signal send failed
-pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {
-    // Check if signal number is valid
+/// User-originated signal (kill/tgkill/tkill): identical to send_signal
+/// but the queued siginfo carries the SENDER's pid/uid (SI_USER), so
+/// sigwaitinfo/sigtimedwait readers and SA_SIGINFO handlers see si_pid.
+/// Kernel-internal senders (timers, OOM, tty) keep using send_signal —
+/// their siginfo is SI_KERNEL with no sender.
+pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
+    if sig < 1 || sig > 64 {
+        return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    let (sender_pid, sender_uid) = match crate::sched::current() {
+        // SAFETY: the current task pointer is valid for the call duration.
+        Some(t) => unsafe { ((*t).pid(), (*t).cred().uid) },
+        None => (0, 0),
+    };
+    send_signal_with_info(pid, SigInfo::new(sig, si_code::SI_USER, sender_pid, sender_uid))
+}
+
+pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {    // Check if signal number is valid
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -1557,6 +1573,16 @@ unsafe fn send_signal_locked_info(
     if sig >= 1 && sig <= 64 {
         let bit = 1u64 << (sig - 1);
         if task.sigmask & bit != 0 {
+            // A blocked signal that just became pending must still WAKE
+            // interruptible sleepers (Linux wakes sigtimedwait/sigwait
+            // pollers; si block state only delays handler delivery).
+            // Without this, a task that entered rt_sigtimedwait and THEN
+            // received the (blocked) signal it waits for slept forever —
+            // the LTP sigwait family hang (sigtimedwait01/sigwait01/
+            // sigwaitinfo01/rt_sigtimedwait01). Waking is always safe:
+            // every sleeper re-checks its own condition and re-sleeps if
+            // unmet.
+            signal_wake_up(task_ptr);
             // P1 signalfd hook: a BLOCKED signal is exactly the signalfd
             // use case (the app blocks the mask and reads via the fd) —
             // no handler path will run, so this wake is the only thing

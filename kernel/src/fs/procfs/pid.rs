@@ -392,31 +392,45 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
         find_task_by_pid(pid as u32)
     };
 
-    let (name_str, ppid, state_ch, vsize_pages, sig_mask, exit_code) = match task {
+    let (name_str, ppid, state_ch, vsize_pages, sig_mask, exit_code, utime, stime, cutime, cstime) = match task {
         Some(t) => {
             let ch = task_state_char(&t) as char;
             let vsize = t.address_space().map(|mm| mm.total_vm()).unwrap_or(0);
             let sigmask = t.sigmask;
             let ec = t.exit_code();
+            use core::sync::atomic::Ordering::Relaxed;
+            let ticks = (
+                t.utime_ticks.load(Relaxed),
+                t.stime_ticks.load(Relaxed),
+                t.cutime_ticks.load(Relaxed),
+                t.cstime_ticks.load(Relaxed),
+            );
             // comm (basename, like Linux), not the full exe path. Owned:
             // the Cow would borrow from the match-local binding.
-            (task_comm(&t).into_owned(), t.ppid(), ch, vsize, sigmask, ec)
+            (task_comm(&t).into_owned(), t.ppid(), ch, vsize, sigmask, ec,
+             ticks.0, ticks.1, ticks.2, ticks.3)
         }
-        None => (alloc::string::String::from("unknown"), 0, 'X', 0, 0, 0),
+        None => (alloc::string::String::from("unknown"), 0, 'X', 0, 0, 0, 0, 0, 0, 0),
     };
 
     // Key fields filled: pid(1), comm(2), state(3), ppid(4), pgrp(5), session(6),
-    // vsize(23) in bytes, signal block mask(30), exit_code(52).
-    // Fields 7-22 and 24-29,31-51 remain 0 — filled as accounting infrastructure grows.
+    // utime(14)/stime(15) — own user/system CPU in ticks (timer-IRQ sampled);
+    // cutime(16)/cstime(17) — reaped-children CPU folded in at their exit;
+    // vsize(23) in bytes, signal block mask(31), exit_code(54).
+    // Fields 7-13,18-22 and 24-30,32-53 remain 0 — filled as accounting grows.
     let vsize_bytes = vsize_pages * 4096;
     let content = format!(
-        "{} ({}) {} {} {} {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
+        "{} ({}) {} {} {} {} 0 0 0 0 0 0 0 {} {} {} {} 0 0 0 0 0 {} 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         pid,
         name_str,
         state_ch,
         ppid,
         pid,  // pgrp = pid
         pid,  // session = pid
+        utime,
+        stime,
+        cutime,
+        cstime,
         vsize_bytes,
         sig_mask,
         exit_code,

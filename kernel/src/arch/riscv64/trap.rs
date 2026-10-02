@@ -307,7 +307,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
 }
 
 /// Handle timer interrupt
-fn handle_timer_interrupt(_regs: &mut PtRegs, cpu: usize) {
+fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     // Increment interrupt counter for /proc/interrupts
     interrupts::timer_inc(cpu);
 
@@ -320,6 +320,25 @@ fn handle_timer_interrupt(_regs: &mut PtRegs, cpu: usize) {
     // early but the intermediate state can be inconsistent.
     if crate::sched::current().is_none() {
         return;
+    }
+
+    // 0. CPU-time accounting (Linux account_process_tick): charge this
+    // tick to the interrupted task as user or system time depending on
+    // the privilege mode the timer hit. Only user tasks are charged
+    // (kthreads are born without an address space).
+    if let Some(task) = crate::sched::current() {
+        // SAFETY: current() returned a live task pointer; we only touch
+        // per-task atomic counters, no teardown race on these fields.
+        unsafe {
+            if (*task).address_space().is_some() {
+                use core::sync::atomic::Ordering::Relaxed;
+                if regs.user_mode() {
+                    (*task).utime_ticks.fetch_add(1, Relaxed);
+                } else {
+                    (*task).stime_ticks.fetch_add(1, Relaxed);
+                }
+            }
+        }
     }
 
     // 1. Update jiffies

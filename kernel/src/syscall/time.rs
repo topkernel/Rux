@@ -280,7 +280,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     let my_pid = unsafe { (*current).pid() };
 
     // Register a one-shot timer to wake us up at the target time.
-    // Without this, the sleep below would have no mechanism to wake us
+    // Without this, the sleep below would have no mechanism to wake us up
     // — timer softirq would fire but nobody would call wake_up_process.
     let timer_id = crate::timer::add_timer_wakeup(target_jiffies, my_pid);
 
