@@ -96,7 +96,9 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         17 => file::sys_getcwd(args),
         18 => time::sys_lookup_dcookie(args),  // lookup_dcookie
         19 => misc::sys_eventfd2(args),        // eventfd2
-        20 => misc::sys_epoll_create(args),    // epoll_create1
+        20 => misc::sys_epoll_create1(args),   // epoll_create1 (flags!
+        // LTP round 3: NR 20 used to land on sys_epoll_create, silently
+        // dropping EPOLL_CLOEXEC — epoll_create1_01's F_GETFD check failed)
         21 => misc::sys_epoll_ctl(args),       // epoll_ctl
         22 => misc::sys_epoll_pwait(args),     // epoll_pwait
         26 => misc::sys_inotify_init1(args),   // inotify_init1

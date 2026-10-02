@@ -3126,19 +3126,56 @@ pub fn sys_epoll_pwait2(args: SyscallArgs) -> i64 {
         if uncopied > 0 {
             return -(errno::EFAULT as i64);
         }
-        let sec = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-        let nsec = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        let sec = i64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let nsec = i64::from_le_bytes(buf[8..16].try_into().unwrap());
+        // Linux timespec validation: negative tv_sec/tv_nsec or
+        // tv_nsec >= 1s is EINVAL, not an infinite wait (LTP
+        // epoll_pwait05 — the old u64 read turned "-1" into ~584 years).
+        if sec < 0 || nsec < 0 || nsec > 999_999_999 {
+            return -(errno::EINVAL as i64);
+        }
         if sec == 0 && nsec == 0 {
             0 // zero timeout = poll once and return
         } else {
             // Convert to milliseconds, cap at i32 max (very long = infinite
             // for our purposes — same policy as sys_ppoll).
-            let total_ms = sec.saturating_mul(1000).saturating_add(nsec / 1_000_000);
+            let total_ms = (sec as u64).saturating_mul(1000).saturating_add(nsec as u64 / 1_000_000);
             if total_ms > i32::MAX as u64 { -1 } else { total_ms as i32 }
         }
     };
-    // sigmask (args[4]) intentionally ignored, matching sys_epoll_pwait.
-    crate::syscall::misc::sys_epoll_wait([args[0], args[1], args[2], timeout_ms as u64, 0, 0])
+    // P3 LTP round 3: validate (and apply) the sigmask like epoll_pwait.
+    let sigmask_ptr = args[4] as *const u64;
+    let sigsetsize = args[5] as usize;
+    let saved_mask_cell = core::cell::Cell::new(0u64);
+    let mask_applied = !sigmask_ptr.is_null();
+    if mask_applied {
+        if sigsetsize != 8 {
+            return -(errno::EINVAL as i64);
+        }
+        if !crate::arch::riscv64::uaccess::access_ok(sigmask_ptr as usize, 8) {
+            return -(errno::EFAULT as i64);
+        }
+        let new_mask = match unsafe { crate::arch::riscv64::uaccess::get_user(sigmask_ptr) } {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        };
+        let new_mask = new_mask & !((1u64 << 8) | (1u64 << 18));
+        if let Some(c) = crate::sched::current() {
+            let current = c as *const _ as *mut crate::process::task::Task;
+            // SAFETY: current is the running task; sigmask is a plain u64.
+            saved_mask_cell.set(unsafe { (*current).sigmask });
+            unsafe { (*current).sigmask = new_mask; }
+        }
+    }
+    let ret = crate::syscall::misc::sys_epoll_wait([args[0], args[1], args[2], timeout_ms as u64, 0, 0]);
+    if mask_applied {
+        if let Some(c) = crate::sched::current() {
+            let current = c as *const _ as *mut crate::process::task::Task;
+            // SAFETY: same running task as above.
+            unsafe { (*current).sigmask = saved_mask_cell.get(); }
+        }
+    }
+    ret
 }
 
 /// sys_mount_setattr - Change mount attributes (NR 442)

@@ -259,6 +259,64 @@ pub const F_WRLCK_KIND: u8 = 2;
 static RECORD_LOCK_TABLE: Spinlock<Vec<RecordLock>> = Spinlock::new(Vec::new());
 /// All blocked F_SETLKW waiters (wake-all-and-recheck on every change).
 static RECORD_LOCK_WAIT: WaitQueueHead = WaitQueueHead::new();
+/// Pending blocking requests: (owner, key, start, end). Written before a
+/// blocking F_SETLKW sleeps and removed on grant/abort — the wait-for
+/// graph for POSIX deadlock detection (EDEADLK, LTP fcntl17).
+static RECORD_WAIT_FOR: Spinlock<Vec<(LockOwner, (u64, u64), u64, u64)>> =
+    Spinlock::new(Vec::new());
+
+/// Would a request by `owner` for `[start,end)` on `key` deadlock?
+/// Classic cycle walk: find who currently HOLDS a conflicting lock; if
+/// that owner is itself WAITING for a region that conflicts with a lock
+/// held by the requester (transitively), the wait would never satisfy —
+/// Linux posix_deadlock_check returns EDEADLK instead of sleeping.
+fn deadlock_check(
+    table: &Vec<RecordLock>,
+    wait_for: &Vec<(LockOwner, (u64, u64), u64, u64)>,
+    owner: LockOwner,
+    key: (u64, u64),
+    start: u64,
+    end: u64,
+) -> bool {
+    // DFS frontier: owners whose held locks we are (transitively) waiting
+    // for. Start with the direct holders of a conflicting lock.
+    let mut frontier: Vec<LockOwner> = table
+        .iter()
+        .filter(|l| {
+            l.key == key
+                && l.owner != owner
+                && ranges_overlap(l.start, l.end, start, end)
+        })
+        .map(|l| l.owner)
+        .collect();
+    let mut visited: Vec<LockOwner> = Vec::new();
+    while let Some(h) = frontier.pop() {
+        if h == owner {
+            return true; // the cycle closed on the requester
+        }
+        if visited.contains(&h) {
+            continue;
+        }
+        visited.push(h);
+        // h is waiting for some region; every owner h waits ON that
+        // conflicts with a lock HELD by h... no — h waits on a region; the
+        // owners of locks conflicting with h's REQUEST advance the walk.
+        for (w_owner, w_key, w_start, w_end) in wait_for.iter() {
+            if *w_owner != h {
+                continue;
+            }
+            for l in table.iter() {
+                if l.key == *w_key
+                    && l.owner != h
+                    && ranges_overlap(l.start, l.end, *w_start, *w_end)
+                {
+                    frontier.push(l.owner);
+                }
+            }
+        }
+    }
+    false
+}
 
 /// Ranges [s1,e1) and [s2,e2) overlap. A "to EOF" end of u64::MAX works
 /// out naturally. Zero-length requests overlap nothing (POSIX).
@@ -434,6 +492,20 @@ pub fn posix_set_lock(
         let outcome = {
             let mut table = RECORD_LOCK_TABLE.lock();
             if exclusive || kind == F_RDLCK_KIND {
+                // POSIX deadlock detection (EDEADLK): before blocking,
+                // would this request close a wait-for cycle? Only for
+                // blocking requests (a non-blocking request returns
+                // EAGAIN regardless). Checked under the table lock with
+                // the wait-for graph — the graph itself is registered
+                // below once we commit to waiting.
+                if wait {
+                    let wf = RECORD_WAIT_FOR.lock();
+                    if deadlock_check(&table, &wf, owner, key, start, end) {
+                        drop(wf);
+                        drop(table);
+                        return Err(-crate::errno::constants::EDEADLK);
+                    }
+                }
                 if let Some(conflict) = table.iter().find(|l| {
                     l.key == key
                         && l.owner != owner
@@ -478,10 +550,16 @@ pub fn posix_set_lock(
                     // Linux returns EAGAIN (== EACCES on some systems).
                     return Err(-crate::errno::constants::EAGAIN);
                 }
+                // Publish the pending request for other waiters' deadlock
+                // checks, then sleep until the conflict clears.
+                RECORD_WAIT_FOR.lock().push((owner, key, start, end));
                 let ret = crate::wait_event_interruptible!(
                     &RECORD_LOCK_WAIT,
                     find_conflict(key, owner, start, end, exclusive).is_none()
                 );
+                RECORD_WAIT_FOR.lock().retain(|(o, k, s0, e0)| {
+                    !(*o == owner && *k == key && *s0 == start && *e0 == end)
+                });
                 if ret != 0 {
                     return Err(-crate::errno::constants::EINTR);
                 }

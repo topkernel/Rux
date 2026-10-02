@@ -922,6 +922,84 @@ pub fn sys_epoll_create1(args: SyscallArgs) -> i64 {
     ret
 }
 
+
+/// Does the epoll at `root` (transitively) watch the epoll at `needle`?
+/// Members are resolved through the caller's fdtable (fd + file_id + ops
+/// identity), so closed members simply drop out of the walk. `depth`
+/// bounds the recursion (mirrors Linux's EP_MAX_NESTS walk bound).
+fn epoll_watches_epoll(
+    root: *mut EpollFile,
+    needle: *mut EpollFile,
+    fdtable: &crate::fs::file::FdTable,
+    depth: u32,
+) -> bool {
+    if depth >= 6 {
+        return false;
+    }
+    // SAFETY: caller verified root/needle via ops identity (Box::into_raw
+    // EpollFile pointers, alive while their Files exist — the fdtable Arc
+    // pins every member we resolve below for the duration of the walk).
+    let root_ref = unsafe { &*root };
+    let members: alloc::vec::Vec<(i32, u64)> = root_ref
+        .entries
+        .lock()
+        .iter()
+        .map(|e| (e.fd, e.file_id))
+        .collect();
+    for (fd, file_id) in members {
+        if let Some(f) = fdtable.get_file(fd as usize) {
+            if f.file_id == file_id
+                && f.get_ops()
+                    .is_some_and(|o| core::ptr::eq(o, &EPOLL_OPS as *const _))
+            {
+                // SAFETY: ops identity confirmed an epoll File.
+                if let Some(p) = unsafe { *f.private_data.get() } {
+                    let ptr = p as *mut EpollFile;
+                    if ptr == needle || epoll_watches_epoll(ptr, needle, fdtable, depth + 1) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Longest chain of nested epoll instances starting at `root` (root = 1).
+fn epoll_chain_depth(
+    root: *mut EpollFile,
+    fdtable: &crate::fs::file::FdTable,
+    depth: u32,
+) -> u32 {
+    if depth >= 6 {
+        return 1;
+    }
+    // SAFETY: same ops-identity discipline as epoll_watches_epoll.
+    let root_ref = unsafe { &*root };
+    let members: alloc::vec::Vec<(i32, u64)> = root_ref
+        .entries
+        .lock()
+        .iter()
+        .map(|e| (e.fd, e.file_id))
+        .collect();
+    let mut best = 1;
+    for (fd, file_id) in members {
+        if let Some(f) = fdtable.get_file(fd as usize) {
+            if f.file_id == file_id
+                && f.get_ops()
+                    .is_some_and(|o| core::ptr::eq(o, &EPOLL_OPS as *const _))
+            {
+                // SAFETY: ops identity confirmed an epoll File.
+                if let Some(p) = unsafe { *f.private_data.get() } {
+                    let d = 1 + epoll_chain_depth(p as *mut EpollFile, fdtable, depth + 1);
+                    best = best.max(d);
+                }
+            }
+        }
+    }
+    best
+}
+
 /// sys_epoll_ctl - Control epoll instance
 ///
 /// # Arguments
@@ -980,6 +1058,11 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
 
     match op {
         EPOLL_CTL_ADD => {
+            // Linux: adding an epoll instance to itself is EINVAL
+            // (LTP epoll_ctl02 case 5).
+            if fd == epfd {
+                return -(errno::EINVAL as i64);
+            }
             // R32-B9: Linux requires the target fd to be OPEN at ADD time
             // (EBADF otherwise), and the registration binds to that open
             // file description. Record the description's identity so that a
@@ -997,6 +1080,47 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 Some(f) => f,
                 None => return -(errno::EBADF as i64),
             };
+            // Linux only accepts targets with a poll implementation —
+            // directories (and other non-pollable files) get EPERM
+            // (LTP epoll_ctl02 case 2 passes an open(".",
+            // O_RDONLY|O_DIRECTORY) fd).
+            let is_epoll = file
+                .get_ops()
+                .is_some_and(|o| core::ptr::eq(o, &EPOLL_OPS as *const _));
+            if !is_epoll {
+                // SAFETY: inode written once at open; read-only access.
+                let is_dir = unsafe { &*file.inode.get() }
+                    .as_ref()
+                    .is_some_and(|i| i.mode.is_directory());
+                let has_poll = file.get_ops().is_some_and(|o| o.poll.is_some());
+                if is_dir || !has_poll {
+                    return -(errno::EPERM as i64);
+                }
+            }
+            // Nested-epoll limits (Linux EP_MAX_NESTS / ep_loop_check):
+            // an epoll chain of depth 5 cannot be added anywhere (EINVAL —
+            // LTP epoll_ctl04) and an ADD that would create a cycle of
+            // epoll instances fails with ELOOP (LTP epoll_ctl05).
+            if is_epoll {
+                // SAFETY: ops identity confirmed an epoll File;
+                // private_data holds the Box::into_raw EpollFile.
+                let target_ptr = match unsafe { *file.private_data.get() } {
+                    Some(p) => p as *mut EpollFile,
+                    None => return -(errno::EBADF as i64),
+                };
+                if target_ptr == epoll_ptr {
+                    return -(errno::EINVAL as i64);
+                }
+                // Cycle FIRST (a cyclic chain is also deep — Linux checks
+                // ep_loop_check before the nesting limit, LTP epoll_ctl05).
+                if epoll_watches_epoll(target_ptr, epoll_ptr, &fdtable, 0) {
+                    return -(errno::ELOOP as i64);
+                }
+                // Nesting: chain depth of the target (itself counted as 1).
+                if epoll_chain_depth(target_ptr, &fdtable, 0) >= 5 {
+                    return -(errno::EINVAL as i64);
+                }
+            }
             let file_id = file.file_id;
             // SAFETY: event_ptr validated with access_ok above; copy_from_user
             // is the exception-table copy path (SUM=0 safe).
@@ -1110,7 +1234,12 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
     let maxevents = args[2] as i32;
     let timeout_ms = args[3] as i32;
 
-    if epfd < 0 || events_ptr.is_null() || maxevents <= 0 || maxevents > 1024 {
+    // Linux ordering: a negative/closed epfd is EBADF even when the
+    // other arguments are also bad (LTP epoll_wait03 case 1 passes -1).
+    if epfd < 0 {
+        return -(errno::EBADF as i64);
+    }
+    if events_ptr.is_null() || maxevents <= 0 || maxevents > 1024 {
         return -(errno::EINVAL as i64);
     }
 
@@ -1231,13 +1360,18 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         if !ready_events.is_empty() {
             let count = ready_events.len().min(maxevents as usize);
             // SAFETY: events_ptr validated with access_ok; copy_to_user is
-            // the exception-table copy path (SUM=0 safe).
-            unsafe {
+            // the exception-table copy path (SUM=0 safe). A fault (e.g. a
+            // read-only page) must fail with EFAULT, not silently succeed
+            // (LTP epoll_wait03 case 2).
+            let uncopied = unsafe {
                 crate::arch::riscv64::uaccess::copy_to_user(
                     events_ptr as *mut u8,
                     ready_events.as_ptr() as *const u8,
                     count * core::mem::size_of::<EPollEvent>(),
-                );
+                )
+            };
+            if uncopied > 0 {
+                return -(errno::EFAULT as i64);
             }
             return count as i64;
         }
@@ -1329,8 +1463,39 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns number of ready events on success, 0 on timeout, negative error code on failure
 pub fn sys_epoll_pwait(args: SyscallArgs) -> i64 {
-    // Simplified implementation: ignore signal mask
-    sys_epoll_wait([args[0], args[1], args[2], args[3], 0, 0])
+    // P3 LTP round 3: epoll_pwait's sigmask argument REPLACES the blocked
+    // mask for the duration of the wait (Linux semantics). Validate the
+    // pointer (EFAULT) and size (EINVAL), apply, wait, restore. Without
+    // the temporary mask a signal that the caller asked to block
+    // interrupted the wait (LTP epoll_pwait01) and a bad pointer went
+    // unnoticed (epoll_pwait04).
+    let sigmask_ptr = args[4] as *const u64;
+    let sigsetsize = args[5] as usize;
+    if sigmask_ptr.is_null() {
+        return sys_epoll_wait([args[0], args[1], args[2], args[3], 0, 0]);
+    }
+    if sigsetsize != 8 {
+        return -(errno::EINVAL as i64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(sigmask_ptr as usize, 8) {
+        return -(errno::EFAULT as i64);
+    }
+    let new_mask = match unsafe { crate::arch::riscv64::uaccess::get_user(sigmask_ptr) } {
+        Some(v) => v,
+        None => return -(errno::EFAULT as i64),
+    };
+    // SIGKILL/SIGSTOP are unblockable (same rule as rt_sigprocmask).
+    let new_mask = new_mask & !((1u64 << 8) | (1u64 << 18));
+    let current = match crate::sched::current() {
+        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        None => return -(errno::EPERM as i64),
+    };
+    // SAFETY: current is the running task; sigmask is a plain u64 field.
+    let saved_mask = unsafe { (*current).sigmask };
+    unsafe { (*current).sigmask = new_mask; }
+    let ret = sys_epoll_wait([args[0], args[1], args[2], args[3], 0, 0]);
+    unsafe { (*current).sigmask = saved_mask; }
+    ret
 }
 
 // ============================================================================
