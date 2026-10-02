@@ -65,7 +65,7 @@ const TIOCGWINSZ: u32 = 0x5413;
 const TIOCSWINSZ: u32 = 0x5414;
 const FIONREAD: u32 = 0x541B;
 /// TIOCGPTN — _IOR('T', 0x30, unsigned int): pty index (ptsname_r)
-const TIOCGPTN: u32 = 0x8004_5440;
+const TIOCGPTN: u32 = 0x8004_5430;
 /// TIOCSPTLCK — _IOW('T', 0x31, int): unlock (no-op, always unlocked)
 const TIOCSPTLCK: u32 = 0x4004_5431;
 
