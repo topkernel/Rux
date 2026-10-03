@@ -2215,17 +2215,11 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
             return -(errno::EMFILE as i64);
         }
     };
-    // SFD_CLOEXEC must be applied AFTER install_fd: install_fd clears any
-    // pre-set cloexec bit for the fd number (stale-bit hygiene), so setting
-    // it first silently lost the flag — fcntl(F_GETFD) showed no FD_CLOEXEC
-    // for a signalfd4(SFD_CLOEXEC) descriptor (LTP signalfd4_01).
+    if flags & SFD_CLOEXEC != 0 {
+        crate::fs::set_cloexec_fd(new_fd, true);
+    }
     match fdtable.install_fd(new_fd, file) {
-        Ok(()) => {
-            if flags & SFD_CLOEXEC != 0 {
-                crate::fs::set_cloexec_fd(new_fd, true);
-            }
-            new_fd as i64
-        }
+        Ok(()) => new_fd as i64,
         Err(_) => {
             // SAFETY: sfd_ptr was created via Box::into_raw above; reclaim.
             unsafe {

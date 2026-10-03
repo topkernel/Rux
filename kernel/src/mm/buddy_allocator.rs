@@ -108,66 +108,6 @@ impl MetaArray {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FB clash tripwire (fb0-corruption hunt).
-//
-// The scanout framebuffer is an alloc_zeroed block of THIS heap. When its
-// content is zeroed mid-run the question is whether the buddy handed its
-// pages out again (alloc) or absorbed them into a neighbor merge (free).
-// register_fb_guard() names the fb range; every alloc/free touching it (or
-// any order>=8 block) is recorded in a static ring that kfbflush prints
-// when the fb canary trips. Recording is lock-free atomics only — the
-// callsites run under the buddy spinlock with IRQs off.
-// ---------------------------------------------------------------------------
-pub static FB_GUARD_LO: AtomicUsize = AtomicUsize::new(0);
-pub static FB_GUARD_HI: AtomicUsize = AtomicUsize::new(0);
-
-pub const BB_RING: usize = 256;
-pub static BB_EV_PTR: [AtomicUsize; BB_RING] = [const { AtomicUsize::new(0) }; BB_RING];
-/// bits: 63 = op (1 alloc / 0 free), 56..62 = order, 0..48 = jiffies
-pub static BB_EV_OP: [AtomicUsize; BB_RING] = [const { AtomicUsize::new(0) }; BB_RING];
-static BB_EV_CUR: AtomicUsize = AtomicUsize::new(0);
-
-pub fn register_fb_guard(lo: usize, hi: usize) {
-    FB_GUARD_LO.store(lo, Ordering::Release);
-    FB_GUARD_HI.store(hi, Ordering::Release);
-}
-
-fn bb_note(ptr: usize, order: usize, is_alloc: bool) {
-    let lo = FB_GUARD_LO.load(Ordering::Relaxed);
-    let hi = FB_GUARD_HI.load(Ordering::Relaxed);
-    let in_fb = lo != 0 && ptr >= lo && ptr < hi;
-    if order < 8 && !in_fb {
-        return;
-    }
-    let i = BB_EV_CUR.fetch_add(1, Ordering::Relaxed) % BB_RING;
-    BB_EV_PTR[i].store(ptr, Ordering::Relaxed);
-    let j = crate::drivers::timer::get_jiffies() as usize & 0xFFFF_FFFF_FFFF;
-    BB_EV_OP[i].store(
-        ((is_alloc as usize) << 63) | (order.min(63) << 56) | j,
-        Ordering::Relaxed,
-    );
-}
-
-/// Current ring cursor (for the kfbflush canary dump).
-pub fn bb_ev_cur_load() -> usize {
-    BB_EV_CUR.load(Ordering::Relaxed)
-}
-
-/// Leader-page metadata probe for the canary dump (takes the buddy lock).
-pub fn block_meta_at(ptr: usize) -> (u8, u8) {
-    if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
-        return (0, 0);
-    }
-    match HEAP_ALLOCATOR.addr_to_page_idx_checked(ptr) {
-        Some(idx) => {
-            let m = HEAP_ALLOCATOR.meta.get(idx);
-            (m.free, m.order)
-        }
-        None => (0xFF, 0xFF),
-    }
-}
-
 pub struct BuddyAllocator {
     /// Magic number (for corruption detection)
     magic: AtomicUsize,
@@ -416,7 +356,6 @@ impl BuddyAllocator {
                 self.init_block(page_idx, order, false);
 
                 let addr = self.page_idx_to_addr(page_idx);
-                bb_note(addr, order, true);
                 // R18-1 (alloc-side handoff probe): if this page is already
                 // marked as a LIVE Task page and this allocation is NOT the
                 // Task allocator itself, the page just received its SECOND
@@ -451,7 +390,6 @@ impl BuddyAllocator {
     /// Free memory
     unsafe fn free_blocks(&self, ptr: *mut u8, order: usize) {
         let addr = ptr as usize;
-        bb_note(addr, order, false);
         let mut page_idx = match self.addr_to_page_idx_checked(addr) {
             Some(idx) => idx,
             None => return,

@@ -513,24 +513,11 @@ pub fn wait_vpid(global_pid: u32) -> u32 {
 // fork / unshare / setns
 // ============================================================================
 
-/// Capability gate for namespace creation (Linux copy_namespaces in
-/// kernel/fork.c): only the act of CREATING a namespace is gated. A request
-/// without any CLONE_NEW* bit (a plain fork/clone that shares the parent's
-/// namespaces) passes unconditionally. CLONE_NEWUSER is exempt: an
-/// unprivileged user may create a user namespace (the new userns then owns
-/// the process, where it holds all capabilities).
-///
-/// The old condition inverted this: it demanded CAP_SYS_ADMIN whenever
-/// CLONE_NEWUSER was ABSENT — i.e. for every plain fork — so any process
-/// that had dropped privileges (setuid04 after setuid(nobody)) got EPERM
-/// from fork().
+/// Capability gate for namespace creation (Linux check_clonewhitelist/
+/// create_new_namespaces): CAP_SYS_ADMIN unless CLONE_NEWUSER is present
+/// (an unprivileged user may create a user ns first).
 fn check_ns_capability(flags: u64) -> Result<(), i32> {
-    // Bits (other than CLONE_NEWUSER) that would create a new namespace.
-    let gated = flags & !CLONE_NEWUSER;
-    if gated == 0 {
-        return Ok(());
-    }
-    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+    if flags & CLONE_NEWUSER == 0 && !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
         return Err(-1); // EPERM
     }
     Ok(())

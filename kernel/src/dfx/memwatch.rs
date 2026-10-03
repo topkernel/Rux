@@ -164,7 +164,6 @@ pub fn note_alloc(ptr: *mut u8, heap_start: usize, size: usize, frames: &[u64; S
     }
     let b = bucket(size);
     ALLOC_BINS[b].fetch_add(1, Ordering::Relaxed);
-    smalllog_alloc(ptr as usize, size, frames);
 
     if b >= 7 {
         let key = chain_key(b, frames);
@@ -189,13 +188,9 @@ pub fn note_alloc(ptr: *mut u8, heap_start: usize, size: usize, frames: &[u64; S
     }
 
     // Live accounting: mark every heap page of this block with the site id
-    // so the later free() of the block decrements the RIGHT site. Classes
-    // 2..=6 (2..63 bytes): the heap-leak hunt found the growing classes at
-    // 2..7 bytes (b2/b3 net +4/exec) — the >=64B classes intern hundreds of
-    // distinct kernel call chains and saturate the table, starving the
-    // small leak classes of slots, so they are skipped in LIVE (the exact
-    // ALLOC/FREE bins still cover them).
-    if b >= 2 && b <= 6 {
+    // so the later free() of the block decrements the RIGHT site. Only
+    // classes >= 128B — see LIVE_SLOTS comment.
+    if b >= 7 {
         let sid = live_intern(b, size, frames);
         if sid != 0 {
             LIVE_SITES[sid - 1].allocs.fetch_add(1, Ordering::Relaxed);
@@ -255,17 +250,12 @@ pub static LIVE_SITES: [LiveSite; LIVE_SLOTS] = [const {
 /// Map a chain to a stable live-site id (1..=LIVE_SLOTS), or 0 if the
 /// table is full / disabled. Same relaxed-races-are-fine discipline as
 /// the histogram tables above.
-///
-/// Heap-leak hunt: full-table linear probe. The old two-slot probe lost
-/// every chain whose home+neighbor slots were taken by foreign keys —
-/// with the small classes (2..63B) interned, hundreds of distinct chains
-/// exist and the leak site's live count was undercounted 10x.
 fn live_intern(bucket: usize, size: usize, frames: &[u64; SITE_FRAMES]) -> usize {
     let key = chain_key(bucket, frames);
     let h = key % LIVE_SLOTS;
-    // Probe the whole table: first pass from the home slot wraps around;
-    // stop at an empty slot (claim it) or the matching key.
-    for off in 0..LIVE_SLOTS {
+    // Check the home slot and one neighbor: linear probing keeps distinct
+    // chains distinct without a full scan.
+    for off in 0..2 {
         let s = &LIVE_SITES[(h + off) % LIVE_SLOTS];
         let k = s.key.load(Ordering::Relaxed);
         if k == key {
@@ -318,214 +308,12 @@ fn mark_pages(ptr: usize, heap_start: usize, size: usize, sid: usize, set: bool)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Small-allocation ledger (heap-leak hunt): exact per-event log of tiny
-// allocations (1..=128 bytes, classes b1..b8 — the classes whose ALLOC/FREE
-// net grows monotonically under the mixed soak load). The live-site table
-// is hash-based and undercounts by design under churn; this ledger is
-// exact. Each alloc records {ptr, size, first 3 caller frames}; each free
-// clears by ptr. The dump prints survivors with the first 8 BYTES of the
-// block — the leaked payload names the leaked object.
-// ---------------------------------------------------------------------------
-
-pub const SMALLLOG_SLOTS: usize = 2048;
-
-pub struct SmallEntry {
-    pub ptr: AtomicUsize,
-    pub size: AtomicUsize,
-    /// allocation sequence number (monotonic) — lets the dump show the
-    /// MOST RECENT survivors, not the boot-time ones.
-    pub seq: AtomicUsize,
-    /// frames[5..11] of the allocator chain — past the raw_vec/alloc
-    /// machinery, into the kernel callers.
-    pub frames: [AtomicUsize; 6],
-}
-
-pub static SMALLLOG: [SmallEntry; SMALLLOG_SLOTS] = [const {
-    SmallEntry {
-        ptr: AtomicUsize::new(0),
-        size: AtomicUsize::new(0),
-        seq: AtomicUsize::new(0),
-        frames: [const { AtomicUsize::new(0) }; 6],
-    }
-}; SMALLLOG_SLOTS];
-
-static SMALLLOG_SEQ: AtomicUsize = AtomicUsize::new(0);
-
-fn smalllog_alloc(ptr: usize, size: usize, frames: &[u64; SITE_FRAMES]) {
-    if size == 0 || size > 128 {
-        return;
-    }
-    let mut slot = usize::MAX;
-    for i in 0..SMALLLOG_SLOTS {
-        let p = SMALLLOG[i].ptr.load(Ordering::Relaxed);
-        if p == ptr && ptr != 0 {
-            // ptr reused after a free we missed (slot already cleared
-            // handles this) — refresh in place
-            SMALLLOG[i].size.store(size, Ordering::Relaxed);
-            SMALLLOG[i].seq.store(SMALLLOG_SEQ.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
-            for k in 0..6 {
-                SMALLLOG[i].frames[k].store(frames.get(k + 5).copied().unwrap_or(0) as usize, Ordering::Relaxed);
-            }
-            return;
-        }
-        if p == 0 && slot == usize::MAX {
-            slot = i;
-        }
-    }
-    if slot == usize::MAX {
-        return; // ledger full — diagnostic only
-    }
-    let s = &SMALLLOG[slot];
-    if s.ptr
-        .compare_exchange(0, ptr, Ordering::Relaxed, Ordering::Relaxed)
-        .is_ok()
-    {
-        s.size.store(size, Ordering::Relaxed);
-        s.seq.store(SMALLLOG_SEQ.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
-        for k in 0..6 {
-            s.frames[k].store(frames.get(k + 5).copied().unwrap_or(0) as usize, Ordering::Relaxed);
-        }
-    }
-}
-
-fn smalllog_free(ptr: usize, size: usize) {
-    if size == 0 || size > 128 {
-        return;
-    }
-    for i in 0..SMALLLOG_SLOTS {
-        if SMALLLOG[i].ptr.load(Ordering::Relaxed) == ptr {
-            SMALLLOG[i].ptr.store(0, Ordering::Relaxed);
-            return;
-        }
-    }
-}
-
-/// Dump survivors of the small-allocation ledger: total + payload
-/// histogram + the 16 MOST RECENT survivors (by seq) with caller frames
-/// (raw UART, allocation-free).
-pub fn dump_smalllog() {
-    // histogram: [data u64] -> count, top 16 by count
-    const HIST: usize = 16;
-    let mut hkey = [0u64; HIST];
-    let mut hcnt = [0u64; HIST];
-    let mut total = 0u64;
-    // recent-16 by seq
-    let mut rseq = [0u64; 16];
-    let mut ridx = [0usize; 16];
-    for i in 0..SMALLLOG_SLOTS {
-        let p = SMALLLOG[i].ptr.load(Ordering::Relaxed);
-        if p == 0 {
-            continue;
-        }
-        total += 1;
-        let bytes = unsafe { core::ptr::read_volatile(p as *const u64) };
-        let mut found = false;
-        for h in 0..HIST {
-            if hcnt[h] != 0 && hkey[h] == bytes {
-                hcnt[h] += 1;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            for h in 0..HIST {
-                if hcnt[h] == 0 {
-                    hkey[h] = bytes;
-                    hcnt[h] = 1;
-                    break;
-                }
-            }
-        }
-        let seq = SMALLLOG[i].seq.load(Ordering::Relaxed) as u64;
-        let mut pos = 16usize;
-        let mut min = u64::MAX;
-        for r in 0..16 {
-            if rseq[r] < min {
-                min = rseq[r];
-                pos = r;
-            }
-        }
-        if seq > min {
-            rseq[pos] = seq;
-            ridx[pos] = i;
-        }
-    }
-    // sort histogram entries by count desc (insertion sort, 16 elems)
-    for a in 1..HIST {
-        let mut b = a;
-        while b > 0 && hcnt[b - 1] < hcnt[b] {
-            hcnt.swap(b - 1, b);
-            hkey.swap(b - 1, b);
-            b -= 1;
-        }
-    }
-    taskdump_raw_line(b"SMALLLOG total_live=");
-    put_dec(total);
-    taskdump_raw_line(b" (1..128B allocs) histogram by payload:\n");
-    for h in 0..HIST {
-        if hcnt[h] == 0 {
-            break;
-        }
-        taskdump_raw_line(b" x");
-        put_dec(hcnt[h]);
-        taskdump_raw_line(b" data=");
-        let mut sh: i32 = 64;
-        while sh > 0 {
-            sh -= 8;
-            let by = ((hkey[h] >> sh) & 0xFF) as u8;
-            let c = if by >= 0x20 && by < 0x7F { by } else { b'.' };
-            taskdump_raw_line(&[c]);
-        }
-        taskdump_raw_line(b"\n");
-    }
-    taskdump_raw_line(b"SMALLLOG recent survivors:\n");
-    // sort recent by seq ascending (simple insertion sort, 16 elems)
-    for a in 1..16usize {
-        let mut b = a;
-        while b > 0 && rseq[b - 1] > rseq[b] {
-            rseq.swap(b - 1, b);
-            ridx.swap(b - 1, b);
-            b -= 1;
-        }
-    }
-    for r in 0..16 {
-        if rseq[r] == 0 {
-            break;
-        }
-        let i = ridx[r];
-        let p = SMALLLOG[i].ptr.load(Ordering::Relaxed);
-        taskdump_raw_line(b" seq=");
-        put_dec(rseq[r]);
-        taskdump_raw_line(b" p=");
-        put_hex(p as u64);
-        taskdump_raw_line(b" sz=");
-        put_dec(SMALLLOG[i].size.load(Ordering::Relaxed) as u64);
-        let bytes = unsafe { core::ptr::read_volatile(p as *const u64) };
-        taskdump_raw_line(b" data=");
-        let mut sh: i32 = 64;
-        while sh > 0 {
-            sh -= 8;
-            let by = ((bytes >> sh) & 0xFF) as u8;
-            let c = if by >= 0x20 && by < 0x7F { by } else { b'.' };
-            taskdump_raw_line(&[c]);
-        }
-        taskdump_raw_line(b" f=");
-        for k in 0..6 {
-            put_hex(SMALLLOG[i].frames[k].load(Ordering::Relaxed) as u64);
-            taskdump_raw_line(b" ");
-        }
-        taskdump_raw_line(b"\n");
-    }
-}
-
 /// Attribute one free to the site that allocated the block.
 pub fn note_free(ptr: *mut u8, heap_start: usize, size: usize) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
     FREE_BINS[bucket(size)].fetch_add(1, Ordering::Relaxed);
-    smalllog_free(ptr as usize, size);
     if heap_start == 0 || (ptr as usize) < heap_start {
         return;
     }
@@ -855,8 +643,6 @@ pub fn dump_mem() {
         return;
     }
 
-    dump_smalllog();
-
     // net growth per size class since boot (allocs - frees)
     taskdump_raw_line(b"MEMBINS class:net\n");
     for i in 0..NUM_BINS {
@@ -927,7 +713,7 @@ pub fn dump_mem() {
     // churn-heavy sites show live ~0 despite huge alloc counts.
     taskdump_raw_line(b"MEMLIVE live allocs frees bucket sz f1..f12\n");
     taskdump_raw_line(b" livebins");
-    for i in 2..NUM_BINS {
+    for i in 7..NUM_BINS {
         taskdump_raw_line(b" b");
         put_dec(i as u64);
         taskdump_raw_line(b"=");

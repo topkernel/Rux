@@ -1918,14 +1918,10 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             // the existing file type, exactly like Linux chmod.
             let v = arg1 as u32;
             let vtype = v & 0o170000;
-            // Keep the full S_IALLUGO (0o7777: setuid/setgid/sticky included).
-            // Masking to 0o777 silently dropped S_ISUID/S_ISGID/S_ISVTX, so
-            // chmod(2) modes like 01777/04755/02777 never stuck on ext4
-            // (LTP chmod01/chmod07, mkdir02 S_ISGID inheritance).
             let new_mode = if vtype != 0 {
-                vtype | (v & 0o7777)
+                vtype | (v & 0o777)
             } else {
-                ((ext4_inode.mode as u32) & 0o170000) | (v & 0o7777)
+                ((ext4_inode.mode as u32) & 0o170000) | (v & 0o777)
             };
             ext4_inode.mode = new_mode as u16;
             // Keep the icache copy coherent: open() and DAC checks read
@@ -2289,21 +2285,10 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
         Err(e) => return e,
     };
 
-    let result = match namei::ext4_rmdir(fs, dir.ino as u32, name) {
+    match namei::ext4_rmdir(fs, dir.ino as u32, name) {
         Ok(()) => 0,
         Err(e) => e,
-    };
-
-    // Refresh the parent's cached Ext4Inode: namei::ext4_rmdir decrements
-    // the parent's on-disk links_count, but the VFS-cached copy stayed
-    // stale, so stat kept reporting inflated st_nlink for directories
-    // whose subdirs were removed (LTP tst_tmpdir rmobj saw nlink>=3 on an
-    // EMPTY dir, took the "linked directory" unlink() path and got EISDIR).
-    if result == 0 {
-        refresh_parent_dir_cache(dir, fs);
     }
-
-    result
 }
 
 /// Wrapper for ext4_create to match VFS signature

@@ -351,13 +351,6 @@ impl VirtioGpuDevice {
 
         self.fb_ptr = fb_ptr;
         self.fb_layout = Some(layout);
-        // FB clash tripwire: the scanout buffer is heap memory; the buddy
-        // records every order>=8 (and fb-range) alloc/free so kfbflush can
-        // name the clobberer if the display dies (see buddy_allocator.rs).
-        crate::mm::buddy_allocator::register_fb_guard(
-            fb_ptr as usize,
-            fb_ptr as usize + fb_size,
-        );
 
         // Step 3: Create 2D resource
         self.create_resource_2d(width, height)?;

@@ -544,16 +544,6 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             return Err(-(errno::constants::ENAMETOOLONG));
         }
 
-        // ENOTDIR (Linux link_path_walk): `current` must be a directory to
-        // walk INTO the next component — a regular file / FIFO / device in
-        // the middle of a path fails with ENOTDIR, not ENOENT (LTP
-        // chmod06 "t_file/tfile_3" expects ENOTDIR).
-        if let Some(ref cur_inode) = current.get_inode() {
-            if !cur_inode.mode.is_directory() {
-                return Err(errno::Errno::NotADirectory.as_neg_i32());
-            }
-        }
-
         // DAC: search (x) permission is required on every directory we
         // traverse through (Linux checks MAY_EXEC per component).
         if let Some(ref dir_inode) = current.get_inode() {
@@ -722,13 +712,8 @@ fn follow_symlink(
         return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32());
     }
 
-    // Read symlink target. Heap-allocate the buffer: follow_symlink is
-    // recursive (one frame per nested symlink hop, up to MAX_SYMLINKS=40),
-    // and the old [0u8; 4096] stack array burned ~4KB of the 128KB kernel
-    // stack per level — a symlink loop like LTP's test_eloop overflowed it
-    // before the depth counter could return ELOOP (chmod06 STACK-OVERFLOW
-    // → KERNPANIC).
-    let mut target_buf = alloc::vec![0u8; 4096];
+    // Read symlink target
+    let mut target_buf = [0u8; 4096];
     let target_len = inode.op_readlink(&mut target_buf);
     if target_len <= 0 {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -775,15 +760,6 @@ fn follow_symlink(
 
     let mut current = base;
     for component in target_components.iter() {
-        // ENOTDIR: same rule as the path_lookup main loop — every
-        // component source during symlink-body resolution must be a
-        // directory.
-        if let Some(ref cur_inode) = current.get_inode() {
-            if !cur_inode.mode.is_directory() {
-                return Err(errno::Errno::NotADirectory.as_neg_i32());
-            }
-        }
-
         // DAC (B4): resolving a symlink body walks directories the caller
         // never named.  Linux checks search (MAY_EXEC) permission on every
         // directory traversed during symlink expansion, exactly like the
@@ -1085,50 +1061,8 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     // SAFETY: ops.mkdir is a VFS callback; parent_inode Arc is valid in scope
     unsafe {
         if let Some(mkdir_fn) = ops.mkdir {
-            let inode_mode = InodeMode::new(InodeMode::S_IFDIR | (mode & 0o7777));
+            let inode_mode = InodeMode::new(InodeMode::S_IFDIR | mode);
             let new_inode = mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode)?;
-
-            // inode_init_owner (Linux): a new entry gets the caller's fsuid,
-            // and when the PARENT directory has S_ISGID set the child
-            // inherits the parent's GID — plus the S_ISGID bit itself for
-            // directories. LTP mkdir02 depends on both. Mode AND gid come
-            // from the filesystem's getattr: a prior chown of the parent
-            // updates the on-disk/fs-private inode while the cached VFS
-            // inode keeps its instantiation-time gid, so
-            // parent_inode.gid.load() returned a STALE gid and the child
-            // inherited the wrong group.
-            let (parent_mode_bits, parent_gid) = {
-                let mut st = crate::fs::Stat::default();
-                if parent_inode.op_getattr(&mut st) == 0 {
-                    (st.st_mode, st.st_gid as u32)
-                } else {
-                    (
-                        parent_inode.mode.bits(),
-                        parent_inode.gid.load(Ordering::Relaxed),
-                    )
-                }
-            };
-            if parent_mode_bits & 0o2000 != 0 {
-                let mut st = crate::fs::Stat::default();
-                if new_inode.op_getattr(&mut st) == 0 {
-                    let keep_uid = st.st_uid as u64;
-                    let _ = new_inode.op_setattr(
-                        setattr_attr::ATTR_UID_GID,
-                        keep_uid,
-                        parent_gid as u64,
-                    );
-                    // Re-read the (possibly updated) mode and set S_ISGID on
-                    // the new directory, preserving its type bits.
-                    let mut st2 = crate::fs::Stat::default();
-                    if new_inode.op_getattr(&mut st2) == 0 {
-                        let _ = new_inode.op_setattr(
-                            setattr_attr::ATTR_MODE,
-                            (st2.st_mode | 0o2000) as u64,
-                            0,
-                        );
-                    }
-                }
-            }
 
             // Invalidate negative dentry and cache the new one
             if let Some(ref parent_dentry) = parent_vpath.dentry {
@@ -1405,13 +1339,6 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     let src_vpath = path_lookup(oldpath, 0)?;
     let src_inode = src_vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
-
-    // Linux may_linkat: hard-linking a DIRECTORY is EPERM (directory link
-    // counts are maintained by mkdir/rmdir only). LTP link08/linkat01
-    // expect EPERM, previously the filesystem callback surfaced EISDIR.
-    if src_inode.mode.is_directory() {
-        return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
-    }
 
     // Lookup parent directory of new path
     let (parent_vpath, name) = lookup_parent_dir(newpath)?;
@@ -1720,24 +1647,6 @@ pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
         return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
     }
 
-    // Linux chmod_common/notify_change: only the permission + special bits
-    // (S_IALLUGO = 0o7777) are honored — type bits in the request are
-    // ignored, not rejected (LTP chmod05 passes S_IFDIR|mode).
-    let mode = mode & 0o7777;
-    // notify_change: an unprivileged caller that is not in the file's group
-    // loses S_ISGID on chmod (setgid dirs/ executables must not survive a
-    // downgrade by a non-owner). Root (CAP_FSETID) keeps it.
-    let inode_gid = inode.gid.load(Ordering::Relaxed);
-    let mode = if mode & 0o2000 != 0
-        && cred.euid != 0
-        && cred.egid != inode_gid
-        && !cred.groups.contains(&inode_gid)
-    {
-        mode & !0o2000
-    } else {
-        mode
-    };
-
     let result = inode.op_setattr(setattr_attr::ATTR_MODE, mode as u64, 0);
     if result == 0 {
         // inotify: mode change → IN_ATTRIB.
@@ -1755,11 +1664,8 @@ pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
 /// - `pathname`: file path
 /// - `uid`: new owner uid (u32::MAX = no change)
 /// - `gid`: new owner gid (u32::MAX = no change)
-/// - `follow`: follow a final symlink (chown) or act on the link itself
-///   (lchown / fchownat AT_SYMLINK_NOFOLLOW)
-pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(), i32> {
-    let lookup_flags = if follow { 0 } else { LOOKUP_NOFOLLOW };
-    let vpath = path_lookup(pathname, lookup_flags)?;
+pub fn vfs_chown(pathname: &str, uid: u32, gid: u32) -> Result<(), i32> {
+    let vpath = path_lookup(pathname, 0)?;
     let inode = vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
@@ -1802,16 +1708,7 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(),
             inode.mode.bits()
         }
     };
-    // Linux chown_common + notify_change: ATTR_KILL_SUID/SGID/PRIV are only
-    // requested for NON-directories, and the capability hook
-    // (cap_inode_need_killpriv) STRIPS the kill flags when the caller holds
-    // CAP_FSETID. So root chown keeps setuid/setgid (LTP chown02 expects
-    // mode 0102700 to survive chown(0,0)); an unprivileged chown of a
-    // regular file drops both bits.
-    if (uid != u32::MAX || gid != u32::MAX)
-        && !inode.mode.is_directory()
-        && !crate::security::has_capability(&cred, crate::security::CAP_FSETID)
-    {
+    if uid != u32::MAX || gid != u32::MAX {
         let new_mode = mode & !(0o4000u32 | 0o2000u32); // clear S_ISUID | S_ISGID
         let _ = inode.op_setattr(setattr_attr::ATTR_MODE, new_mode as u64, 0);
     }

@@ -228,36 +228,6 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         }
     };
 
-    // Pre-flight VFS validation (Linux do_open_execat runs through the
-    // normal path walk before reading a byte): a >NAME_MAX component is
-    // ENAMETOOLONG, walking through a non-directory is ENOTDIR, and the
-    // target must carry at least one execute bit for the caller (EACCES —
-    // even root needs one x bit). Reading the file raw from ext4 skipped
-    // all of this and reported ENOENT/ENOEXEC instead (LTP execve03).
-    match crate::fs::vfs::path_lookup(full_path.as_ref(), 0) {
-        Ok(vp) => {
-            let inode = vp
-                .inode
-                .clone()
-                .or_else(|| vp.dentry.as_ref().and_then(|d| d.get_inode()));
-            let inode_ok = inode
-                .as_ref()
-                .map(|inode| {
-                    // MAY_EXEC honors the caller's cred: owner/group/other
-                    // bits, CAP_DAC_OVERRIDE still needs one x bit.
-                    crate::fs::permission::inode_permission(
-                        inode,
-                        crate::fs::permission::MAY_EXEC,
-                    )
-                })
-                .unwrap_or(false);
-            if !inode_ok {
-                return -errno::EACCES as u64;
-            }
-        }
-        Err(e) => return (e as i64) as u64,
-    }
-
     // Read file from file system. The read can fail TRANSIENTLY under
     // concurrent block I/O (same family as the PT_INTERP read below —
     // buffer-cache pressure right after a killed task's teardown), which
@@ -607,13 +577,6 @@ const WUNTRACED_OPT: i32 = 0x00000002;
 const WCONTINUED_OPT: i32 = 0x00000008;
 const WEXITED_OPT: i32 = 0x00000004;
 const WNOWAIT_OPT: i32 = 0x01000000;
-/// __WNOTHREAD/__WCLONE/__WALL — Linux private wait bits, accepted (and
-/// ignored: every child is waited the same way here). LTP clone301 passes
-/// __WALL to waitpid for a clone(SIGCHLD) child; rejecting it made the
-/// wait fail with EINVAL.
-const WNOTHREAD_OPT: i32 = 0x20000000;
-const WCLONE_OPT: i32 = -0x80000000; // __WCLONE bit pattern as i32
-const WALL_OPT: i32 = 0x40000000;
 
 /// sys_wait4 - Wait for child process
 ///
@@ -638,19 +601,8 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Unknown option bits → EINVAL (Linux). The __W* private bits
-    // (__WCLONE/__WALL/__WNOTHREAD) are accepted like Linux's WNOWAIT.
-    if options
-        & !(WNOHANG_OPT
-            | WUNTRACED_OPT
-            | WCONTINUED_OPT
-            | WNOWAIT_OPT
-            | WEXITED_OPT
-            | WNOTHREAD_OPT
-            | WCLONE_OPT
-            | WALL_OPT)
-        != 0
-    {
+    // Unknown option bits → EINVAL (Linux)
+    if options & !(WNOHANG_OPT | WUNTRACED_OPT | WCONTINUED_OPT | WNOWAIT_OPT | WEXITED_OPT) != 0 {
         return -(errno::EINVAL as i64);
     }
 
@@ -861,13 +813,6 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
 
         let found = core::cell::Cell::new(false);
         let denied = core::cell::Cell::new(false);
-        // kill(-1) excludes the caller's own thread group (Linux
-        // group_send_sig_info over every process but self). But kill(0)
-        // and kill(-pgid) DO target the caller's own group — the caller
-        // is a member of its process group like any other (LTP kill06:
-        // kill(-getpgrp(), SIGKILL) must SIGKILL the caller itself so
-        // the parent observes WIFSIGNALED/WTERMSIG==SIGKILL).
-        let skip_self_group = pid == -1;
         // pid_hash_for_each_task covers sleeping tasks too (unlike the
         // per-CPU for_each_task which only sees running/idle tasks) — and
         // every THREAD is its own hash entry, so each live member of a
@@ -877,8 +822,9 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
             if tp == 1 {
                 return; // kill(-1) skips init
             }
-            // Only kill(-1) excludes the caller's own thread group.
-            if skip_self_group && (*task).tgid() == my_tgid {
+            // Skip the caller's own thread GROUP (all its threads), not
+            // just the calling thread.
+            if (*task).tgid() == my_tgid {
                 return;
             }
             if let Some(g) = group_filter {
@@ -4352,88 +4298,35 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     if uargs.is_null() {
         return -(errno::EFAULT as i64);
     }
-    // Linux copy_struct_from_user semantics (kernel/fork.c
-    // copy_clone_args_from_user): size below the 64-byte v1 struct is
-    // EINVAL; a larger size must still be READ from user space (EFAULT
-    // when the extra bytes are unmapped — LTP clone302 "extra size"
-    // places the struct at the end of a mapping) and the extra bytes
-    // must be zero (E2BIG otherwise).
+    // Linux requires size >= sizeof(struct clone_args) of the version it
+    // knows (88 as of 5.10; the first 64 bytes cover v1). Reject both
+    // too-small and absurdly-large with the ABI errors.
     if size < 64 {
         return -(errno::EINVAL as i64);
     }
-    if size > 4096 {
+    if size > 128 {
         return -(errno::E2BIG as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(uargs as usize, size) {
+    if !crate::arch::riscv64::uaccess::access_ok(uargs as usize, 64) {
         return -(errno::EFAULT as i64);
     }
 
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 64];
     // SAFETY: access_ok-validated pointer; exception-table copy.
     if unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), uargs, size)
+        crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), uargs, 64)
     } != 0
     {
         return -(errno::EFAULT as i64);
     }
-    if size > 64 && buf[64..size].iter().any(|&b| b != 0) {
-        return -(errno::E2BIG as i64);
-    }
 
     let rd64 = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
     let flags = rd64(0);
-    let pidfd_ptr = rd64(8) as *mut u32;
     let child_tid = rd64(16) as *mut i32;
     let parent_tid = rd64(24) as *mut i32;
-    let exit_signal = rd64(32) as u64;
     let stack = rd64(40);
     let stack_size = rd64(48);
     let tls = rd64(56);
-
-    // clone3 keeps the exit signal in its own field; legacy CSIGNAL bits
-    // in flags are rejected (kernel/fork.c clone3: "make the CSIGNAL bits
-    // unusable"), as is an out-of-range exit_signal (LTP clone302
-    // "invalid signal": CSIGNAL+1).
-    const CSIGNAL_MASK: u64 = 0xff;
-    if flags & CSIGNAL_MASK != 0 {
-        return -(errno::EINVAL as i64);
-    }
-    if exit_signal & !CSIGNAL_MASK != 0 || exit_signal > 64 {
-        return -(errno::EINVAL as i64);
-    }
-
-    // stack/stack_size must come as a pair (LTP clone302 "zero-stack-size"
-    // passes stack != 0 with size 0; "invalid-stack" passes stack 0 with
-    // size 4 — both EINVAL).
-    if (stack == 0) != (stack_size == 0) {
-        return -(errno::EINVAL as i64);
-    }
-
-    // CLONE_PIDFD: the pidfd field points at the user word that receives
-    // the new pidfd. Probe it for writability now (before the child is
-    // created): an unmapped/word address fails EFAULT (LTP clone302
-    // "invalid pidfd"). Writing the actual fd stays future work — only
-    // the fault probe is observable by current callers.
-    if flags & 0x00001000 != 0 && !pidfd_ptr.is_null() {
-        let root = crate::sched::current()
-            .and_then(|t| t.address_space())
-            .map(|a| a.root_ppn());
-        let ok = match root {
-            Some(root_ppn) => unsafe {
-                crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
-                    root_ppn,
-                    pidfd_ptr as usize as u64 & !0xfff,
-                )
-                .map(|(_, pte)| pte & crate::arch::riscv64::mm::PageTableEntry::W != 0
-                    && pte & crate::arch::riscv64::mm::PageTableEntry::U != 0)
-                .unwrap_or(false)
-            },
-            None => false,
-        };
-        if !ok {
-            return -(errno::EFAULT as i64);
-        }
-    }
 
     // The ABI expects `stack` to be the stack TOP (sp), matching plain
     // clone's a1 semantics when stack_size is present; if a caller passes
