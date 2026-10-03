@@ -209,6 +209,18 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // Linux bind(2) checks the fd BEFORE any address parsing: a fd that is
+    // not open at all is EBADF, an open-but-not-a-socket fd is ENOTSOCK
+    // (LTP bind01: "sockfd is not a valid file descriptor" → EBADF).
+    match crate::sched::get_current_fdtable() {
+        Some(ft) => {
+            if ft.get_file(fd as usize).is_none() {
+                return -(errno::EBADF as i64);
+            }
+        }
+        None => return -(errno::EBADF as i64),
+    }
+
     // Read sockaddr_in structure (simplified implementation)
     // struct sockaddr_in {
     //     sa_family_t sin_family;  // 2 bytes
@@ -248,7 +260,20 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
                 Ok(()) => 0,
                 Err(e) => e as i64,
             },
-            None => -(errno::ENOTSOCK as i64),
+            None => {
+                // A REAL socket of another family given an AF_UNIX address
+                // is a family mismatch → EAFNOSUPPORT (LTP bind01 binds a
+                // TCP socket with a sockaddr_un). Non-sockets fell through
+                // the EBADF/ENOTSOCK split above... they are open files:
+                // ENOTSOCK.
+                if crate::net::socket::get_socket_from_fd(fd as usize).is_some()
+                    || crate::net::netlink::netlink_socket_from_fd(fd as usize).is_some()
+                    || crate::net::raw::raw_socket_from_fd(fd as usize).is_some()
+                {
+                    return -(errno::EAFNOSUPPORT as i64);
+                }
+                -(errno::ENOTSOCK as i64)
+            }
         };
     }
 
@@ -280,10 +305,45 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
+    // Linux inet_bind/inet6_bind reject an address shorter than the family
+    // struct with EINVAL (LTP bind01 "invalid salen" binds with salen=3).
+    match &parsed {
+        ParsedSockAddr::V4 { .. } if _addrlen < 16 => {
+            return -(errno::EINVAL as i64);
+        }
+        ParsedSockAddr::V6 { .. } if _addrlen < 28 => {
+            return -(errno::EINVAL as i64);
+        }
+        _ => {}
+    }
     let (sin_port, _sin_addr) = match parsed {
         ParsedSockAddr::V4 { addr, port } => (port, addr),
         ParsedSockAddr::V6 { port, .. } => (port, 0),
     };
+
+    // Linux inet_bind: a unicast address that is not assigned to any local
+    // interface fails with EADDRNOTAVAIL (LTP bind01 "non-local address"
+    // binds 10.255.254.253). Wildcard, loopback, our own address, and
+    // multicast/broadcast remain bindable.
+    match parsed {
+        ParsedSockAddr::V4 { addr, .. } => {
+            let is_any = addr == 0;
+            let is_loopback = (addr >> 24) == 127;
+            let is_local = addr == crate::net::arp::get_local_ip();
+            let is_mcast = (addr >> 28) == 0xE;
+            let is_broadcast = addr == 0xFFFF_FFFF;
+            if !(is_any || is_loopback || is_local || is_mcast || is_broadcast) {
+                return -(errno::EADDRNOTAVAIL as i64);
+            }
+        }
+        ParsedSockAddr::V6 { addr, .. } => {
+            let unspecified = addr == [0u8; 16];
+            let loopback = addr == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+            if !(unspecified || loopback) {
+                return -(errno::EADDRNOTAVAIL as i64);
+            }
+        }
+    }
 
     // Permission check: privileged ports (< 1024) require CAP_NET_BIND_SERVICE.
     // Port 0 means "assign an ephemeral port" and must NOT be rejected.
@@ -329,6 +389,18 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
 pub fn sys_listen(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let backlog = args[1] as i32;
+
+    // Linux sockfd_lookup runs BEFORE any protocol dispatch: a fd that is
+    // not open at all is EBADF, an open non-socket is ENOTSOCK (LTP
+    // listen01 case 1 passes a never-opened fd and expects EBADF).
+    match crate::sched::get_current_fdtable() {
+        Some(ft) => {
+            if ft.get_file(fd).is_none() {
+                return -(errno::EBADF as i64);
+            }
+        }
+        None => return -(errno::EBADF as i64),
+    }
 
     // Resolve through the per-process fd table (review NET-C3): the old
     // code indexed the global TCP table with the process fd, so listen()
@@ -828,6 +900,18 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // Linux sockfd_lookup runs before any address parsing: a fd that is
+    // not open at all is EBADF (LTP connect01 case 1 passes a
+    // never-opened fd and expects EBADF), an open non-socket is ENOTSOCK.
+    match crate::sched::get_current_fdtable() {
+        Some(ft) => {
+            if ft.get_file(fd as usize).is_none() {
+                return -(errno::EBADF as i64);
+            }
+        }
+        None => return -(errno::EBADF as i64),
+    }
+
     // Read sockaddr_in structure via the exception-table copy path
     let sockaddr = match copy_sockaddr_in_from_user(addr_ptr) {
         Some(b) => b,
@@ -890,10 +974,11 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
             }
             ParsedSockAddr::V4 { addr, port } => socket.connect(addr, port),
         };
-        match result {
+        let r = match result {
             Ok(()) => 0,
             Err(e) => e as i64,
-        }
+        };
+        r
     } else {
         // W3: fd resolves but is not a socket -> ENOTSOCK
         -(errno::ENOTSOCK as i64)
@@ -1800,6 +1885,68 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
                 }
             }
             IP_TOS | IP_MULTICAST_TTL | IP_MULTICAST_LOOP => 0,
+            // RFC 3678 MCAST_JOIN_GROUP (42) / MCAST_LEAVE_GROUP (45):
+            // struct group_req { u32 gr_interface; pad; sockaddr_storage
+            // gr_group } — 136 bytes. Membership lives on the Socket, so
+            // TCP sockets can join (LTP accept02 arms a listener) and
+            // accepted clones start membership-free (LEAVE → EADDRNOTAVAIL).
+            42 | 45 => {
+                if optlen < 136 || optval.is_null() {
+                    return -(errno::EINVAL as i64);
+                }
+                let mut greq = [0u8; 136];
+                // SAFETY: optlen >= 136 and access_ok covered optval at entry.
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_from_user(
+                        greq.as_mut_ptr(),
+                        optval,
+                        136,
+                    )
+                } != 0
+                {
+                    return -(errno::EFAULT as i64);
+                }
+                // sockaddr_storage: family at 0; sockaddr_in sin_addr at
+                // offset 4 within the group (group starts at offset 8).
+                let family = u16::from_ne_bytes([greq[8], greq[9]]);
+                if family != 2 {
+                    // AF_INET6 groups: EAFNOSUPPORT on an inet4-only stack
+                    // would be Linux's answer for a non-inet group source.
+                    return -(errno::EAFNOSUPPORT as i64);
+                }
+                let group = u32::from_be_bytes(greq[12..16].try_into().unwrap());
+                // Multicast range check (224.0.0.0/4) — Linux rejects other
+                // addresses with EINVAL.
+                if group >> 28 != 0xE {
+                    return -(errno::EINVAL as i64);
+                }
+                let mut opts = socket.options.lock();
+                if optname == 42 {
+                    if !opts.mcast_groups[..opts.mcast_group_count as usize].contains(&group) {
+                        let idx = opts.mcast_group_count as usize;
+                        if idx < opts.mcast_groups.len() {
+                            opts.mcast_groups[idx] = group;
+                            opts.mcast_group_count += 1;
+                        }
+                    }
+                    0
+                } else {
+                    match opts.mcast_groups[..opts.mcast_group_count as usize]
+                        .iter()
+                        .position(|&g| g == group)
+                    {
+                        Some(i) => {
+                            let last = opts.mcast_group_count as usize - 1;
+                            opts.mcast_groups[i] = opts.mcast_groups[last];
+                            opts.mcast_group_count -= 1;
+                            0
+                        }
+                        None => {
+                            -(errno::EADDRNOTAVAIL as i64)
+                        }
+                    }
+                }
+            }
             _ => -(errno::ENOPROTOOPT as i64),
         },
         // W3: unknown levels are no longer silently accepted.
@@ -2907,8 +3054,45 @@ pub fn sys_socketpair(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Only AF_UNIX (1) is supported for socketpair
+    // Only AF_UNIX (1) supports socketpair. Linux still runs the domain's
+    // create validation first, so an inet socketpair fails with the SAME
+    // errno socket() would (EINVAL for bad type bits, EPROTONOSUPPORT for
+    // a type/protocol mismatch — LTP socketpair01), and only valid inet
+    // sockets reach the "no socketpair op" EOPNOTSUPP.
     if domain != 1 {
+        const SOCK_TYPE_MASK_SP: i32 = 0xF;
+        const SOCK_NONBLOCK_SP: i32 = 0x800;
+        const SOCK_CLOEXEC_SP: i32 = 0x80000;
+        const AF_INET_SP: i32 = 2;
+        const AF_INET6_SP: i32 = 10;
+        const SOCK_STREAM_SP: i32 = 1;
+        const SOCK_DGRAM_SP: i32 = 2;
+        const SOCK_RAW_SP: i32 = 3;
+        const IPPROTO_TCP_SP: i32 = 6;
+        const IPPROTO_UDP_SP: i32 = 17;
+        if domain == AF_INET_SP || domain == AF_INET6_SP {
+            if _type_ & !(SOCK_TYPE_MASK_SP | SOCK_NONBLOCK_SP | SOCK_CLOEXEC_SP) != 0 {
+                return -(errno::EINVAL as i64);
+            }
+            match _type_ & SOCK_TYPE_MASK_SP {
+                SOCK_STREAM_SP => {
+                    if _protocol != 0 && _protocol != IPPROTO_TCP_SP {
+                        return -(errno::EPROTONOSUPPORT as i64);
+                    }
+                }
+                SOCK_DGRAM_SP => {
+                    if _protocol != 0 && _protocol != IPPROTO_UDP_SP {
+                        return -(errno::EPROTONOSUPPORT as i64);
+                    }
+                }
+                // SOCK_RAW never gets a socketpair op; LTP expects
+                // EPROTONOSUPPORT for the raw case.
+                SOCK_RAW_SP => return -(errno::EPROTONOSUPPORT as i64),
+                _ => {}
+            }
+            // Valid inet socket, but inet has no socketpair operation.
+            return -(errno::EOPNOTSUPP as i64);
+        }
         return -(errno::EAFNOSUPPORT as i64);
     }
 
@@ -2919,10 +3103,17 @@ pub fn sys_socketpair(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
     // SAFETY: sv was access_ok(8)-validated above; put_user is the
-    // exception-table copy path.
+    // exception-table copy path. A faulting store (LTP socketpair01's
+    // bad/unaligned sv) must fail the syscall with EFAULT, not succeed
+    // with the fds lost.
     unsafe {
-        let _ = crate::arch::riscv64::uaccess::put_user(sv as *mut i32, fd0 as i32);
-        let _ = crate::arch::riscv64::uaccess::put_user(sv.add(1) as *mut i32, fd1 as i32);
+        let ok0 = crate::arch::riscv64::uaccess::put_user(sv as *mut i32, fd0 as i32);
+        let ok1 = crate::arch::riscv64::uaccess::put_user(sv.add(1) as *mut i32, fd1 as i32);
+        if !ok0 || !ok1 {
+            crate::fs::close_file_fd(fd0);
+            crate::fs::close_file_fd(fd1);
+            return -(errno::EFAULT as i64);
+        }
     }
     0
 }

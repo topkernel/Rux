@@ -299,6 +299,16 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
     let policy = args[1] as i32;
     let param_ptr = args[2] as *const SchedParam;
 
+    // Negative pids are EINVAL before any lookup (Linux). The policy may
+    // carry SCHED_RESET_ON_FORK (0x40000000): accepted, stored, and cleared
+    // in forked children (LTP sched_setscheduler04).
+    const SCHED_RESET_ON_FORK_FLAG: i32 = 0x4000_0000;
+    let reset_on_fork = policy & SCHED_RESET_ON_FORK_FLAG != 0;
+    let policy = policy & !SCHED_RESET_ON_FORK_FLAG;
+    if (args[0] as i64) < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     // Validate policy
     if !matches!(policy, SCHED_NORMAL | SCHED_FIFO | SCHED_RR | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE) {
         return -(errno::EINVAL as i64);
@@ -361,6 +371,10 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // Store the RESET_ON_FORK request where fork() can see it.
+    unsafe {
+        (*task).set_sched_reset_on_fork(reset_on_fork);
+    }
     // Convert and apply with run-queue migration under the GRQ lock
     // (review PROC-P07).
     let new_policy = match policy {
@@ -390,6 +404,11 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
 /// Policy number on success, negative error code on failure
 pub fn sys_sched_getscheduler(args: SyscallArgs) -> i64 {
     let pid = args[0] as u32;
+
+    // Negative pids are EINVAL before any lookup.
+    if (args[0] as i64) < 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     let target_pid = if pid == 0 {
         match crate::sched::current() {
@@ -431,6 +450,11 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
     let pid = args[0] as u32;
     let param_ptr = args[1] as *const SchedParam;
 
+    // Negative pids are EINVAL before any lookup (LTP sched_setparam04
+    // passes -1; sched_setparam05 passes a reaped/unused pid → ESRCH).
+    if (args[0] as i64) < 0 {
+        return -(errno::EINVAL as i64);
+    }
     if param_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
@@ -511,6 +535,11 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> i64 {
     let pid = args[0] as u32;
     let param_ptr = args[1] as *mut SchedParam;
 
+    // Negative pids are EINVAL before any lookup (LTP sched_getparam03
+    // passes -1 and expects EINVAL, not ESRCH).
+    if (args[0] as i64) < 0 {
+        return -(errno::EINVAL as i64);
+    }
     if param_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
@@ -566,8 +595,17 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
     let pid = args[0] as u32;
     let attr_ptr = args[1] as *mut SchedAttr;
     let size = args[2] as u32;
-    let _flags = args[3] as u32;
+    let flags = args[3] as u32;
 
+    // Linux sched_getattr rejects ANY nonzero flags with EINVAL (LTP
+    // sched_getattr02 case 4 passes flags=1000).
+    if flags != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // Negative pids are EINVAL before any lookup (Linux find_task_by_pid).
+    if (args[0] as i64) < 0 {
+        return -(errno::EINVAL as i64);
+    }
     if attr_ptr.is_null() || size == 0 {
         return -(errno::EINVAL as i64);
     }
@@ -617,7 +655,13 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
             sched_nice: task_ref.nice(),
             sched_priority: task_ref.rt_priority(),
             sched_runtime: task_ref.dl_entity().dl_runtime.load(core::sync::atomic::Ordering::Acquire),
-            sched_deadline: task_ref.dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire),
+            sched_deadline: {
+                // Report the user-programmed relative deadline, not the
+                // scheduler's internal absolute one (LTP sched_getattr01).
+                let dl = task_ref.dl_entity();
+                let user_dl = dl.attr_deadline.load(core::sync::atomic::Ordering::Acquire);
+                if user_dl != 0 { user_dl } else { dl.dl_period.load(core::sync::atomic::Ordering::Acquire) }
+            },
             sched_period: task_ref.dl_entity().dl_period.load(core::sync::atomic::Ordering::Acquire),
             sched_util_min: 0,
             sched_util_max: core::u32::MAX,
@@ -647,8 +691,19 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
 pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     let pid = args[0] as u32;
     let attr_ptr = args[1] as *const SchedAttr;
-    let _flags = args[2] as u32;
+    let flags = args[2] as u32;
 
+    // Linux sched_setattr accepts only the known SCHED_FLAG_* bits (mask
+    // 0x7f); anything else is EINVAL (LTP sched_setattr01 case 4 passes
+    // flags=1000).
+    const SCHED_FLAG_KNOWN: u32 = 0x7f;
+    if flags & !SCHED_FLAG_KNOWN != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // Negative pids are EINVAL before any lookup.
+    if (args[0] as i64) < 0 {
+        return -(errno::EINVAL as i64);
+    }
     if attr_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
@@ -780,6 +835,10 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
         let dl = unsafe { (*task).dl_entity_mut() };
         dl.dl_runtime.store(attr.sched_runtime, core::sync::atomic::Ordering::Release);
         dl.dl_period.store(dl_period, core::sync::atomic::Ordering::Release);
+        // Keep the user's relative deadline for sched_getattr readback —
+        // the scheduler's absolute `deadline` is internal state (LTP
+        // sched_getattr01 compares all three values).
+        dl.attr_deadline.store(attr.sched_deadline, core::sync::atomic::Ordering::Release);
     }
 
     // Apply the policy switch with run-queue migration under the GRQ lock
@@ -817,6 +876,11 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> i64 {
     let pid = args[0] as u32;
     let ts_ptr = args[1] as *mut TimeSpec;
 
+    // Negative pids are EINVAL before any lookup (LTP
+    // sched_rr_get_interval03 passes -1).
+    if (args[0] as i64) < 0 {
+        return -(errno::EINVAL as i64);
+    }
     if ts_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
@@ -824,7 +888,7 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    let _target_pid = if pid == 0 {
+    let target_pid = if pid == 0 {
         match crate::sched::current() {
             // SAFETY: sched::current() returns a valid Task pointer when Some.
             Some(t) => unsafe { (*t).pid() },
@@ -834,8 +898,22 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> i64 {
         pid
     };
 
-    // Return default RR timeslice (100ms)
-    let ts = TimeSpec { tv_sec: 0, tv_nsec: 100_000_000 };
+    // SAFETY: find_task_by_pid returns a valid pointer when non-null.
+    let task = unsafe { crate::sched::find_task_by_pid(target_pid) };
+    if task.is_null() {
+        return -(errno::ESRCH as i64);
+    }
+
+    // Linux reports the real RR timeslice only for SCHED_RR tasks; every
+    // other policy gets {0, 0} (LTP sched_rr_get_interval02 runs with
+    // SCHED_FIFO and requires an all-zero timespec).
+    // SAFETY: task validated non-null; policy() reads the task's field.
+    let policy = unsafe { (*task).policy() };
+    let ts = if policy == crate::process::task::SchedPolicy::Rr {
+        TimeSpec { tv_sec: 0, tv_nsec: 100_000_000 }
+    } else {
+        TimeSpec { tv_sec: 0, tv_nsec: 0 }
+    };
     // SAFETY: ts_ptr is access_ok-validated above.
     let uncopied = unsafe {
         crate::arch::riscv64::uaccess::copy_to_user(
@@ -872,49 +950,42 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Only self (pid=0) or current process
-    if pid != 0 && pid as u32 != crate::process::current_pid() {
-        return -(errno::ESRCH as i64);
-    }
-
-    // Validate that at least one CPU in the mask is online
-    let ncpus = crate::config::MAX_CPUS;
-    let mask_words = core::cmp::min(size / core::mem::size_of::<usize>(), 8);
-    let mut has_online = false;
-    for i in 0..mask_words {
-        // SAFETY: mask_ptr is access_ok-validated for size bytes; get_user
-        // is the exception-table copy path (SUM=0 safe). Unreadable word = 0.
-        let word = unsafe {
-            crate::arch::riscv64::uaccess::get_user(mask_ptr.add(i)).unwrap_or(0)
-        };
-        // Check bits up to ncpus
-        let bits_to_check = core::cmp::min(core::mem::size_of::<usize>() * 8, ncpus);
-        for bit in 0..bits_to_check {
-            let cpu = i * core::mem::size_of::<usize>() * 8 + bit;
-            if cpu < ncpus && (word & (1 << bit)) != 0 {
-                has_online = true;
-                break;
-            }
-        }
-        if has_online { break; }
-    }
-    if !has_online {
-        return -(errno::EINVAL as i64);
-    }
-
-    // Accept the affinity mask and STORE it per-task (review批次1: the old
-    // code validated and threw the mask away, so getaffinity always lied).
+    // Resolve the target: self (pid 0 / own pid) or any existing task.
+    // A missing pid is ESRCH (LTP setaffinity01 case 3); changing ANOTHER
+    // task's affinity without CAP_SYS_NICE is EPERM (case 4, run as an
+    // unprivileged user against a root child).
     // SAFETY: sched::current() returns the running task's pointer.
     let current = match crate::sched::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
+    let task = if pid == 0 || pid as u32 == crate::process::current_pid() {
+        current
+    } else {
+        // SAFETY: find_task_by_pid returns a valid task pointer or null.
+        let target = unsafe { crate::sched::find_task_by_pid(pid) };
+        if target.is_null() {
+            return -(errno::ESRCH as i64);
+        }
+        if target != current && !crate::security::capable(crate::security::CAP_SYS_NICE) {
+            return -(errno::EPERM as i64);
+        }
+        target
+    };
+
+    // Read the mask word by word; an UNREADABLE word is EFAULT, not a
+    // silent zero (LTP setaffinity01 case 1 passes a bad address).
+    let ncpus = crate::config::MAX_CPUS;
+    let mask_words = core::cmp::min(size / core::mem::size_of::<usize>(), 8);
     let mut stored_mask: u32 = 0;
     for i in 0..mask_words {
         // SAFETY: mask_ptr is access_ok-validated for size bytes; get_user
-        // is the exception-table copy path (SUM=0 safe). Unreadable word = 0.
-        let word = unsafe {
-            crate::arch::riscv64::uaccess::get_user(mask_ptr.add(i)).unwrap_or(0)
+        // is the exception-table copy path (SUM=0 safe).
+        let word = match unsafe {
+            crate::arch::riscv64::uaccess::get_user(mask_ptr.add(i))
+        } {
+            Some(w) => w,
+            None => return -(errno::EFAULT as i64),
         };
         let bits_to_check = core::cmp::min(core::mem::size_of::<usize>() * 8, ncpus);
         for bit in 0..bits_to_check {
@@ -924,12 +995,13 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
             }
         }
     }
+    // An empty mask (no online CPU set) is EINVAL (LTP case 2).
     if stored_mask == 0 {
         return -(errno::EINVAL as i64);
     }
-    // SAFETY: current is the running task; set_cpus_allowed is a locked store.
+    // SAFETY: task validated non-null; set_cpus_allowed is a locked store.
     unsafe {
-        (*current).set_cpus_allowed(stored_mask);
+        (*task).set_cpus_allowed(stored_mask);
     }
     0
 }
@@ -1013,6 +1085,9 @@ pub fn sys_sched_get_priority_max(args: SyscallArgs) -> i64 {
     let policy = args[0] as i32;
     match policy {
         SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE => 0,
+        // SCHED_DEADLINE has a single (0) static priority (LTP
+        // sched_get_priority_max01 covers it).
+        SCHED_DEADLINE => 0,
         SCHED_FIFO | SCHED_RR => 99,
         _ => -(errno::EINVAL as i64),
     }
@@ -1026,6 +1101,7 @@ pub fn sys_sched_get_priority_min(args: SyscallArgs) -> i64 {
     let policy = args[0] as i32;
     match policy {
         SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE => 0,
+        SCHED_DEADLINE => 0,
         SCHED_FIFO | SCHED_RR => 1,
         _ => -(errno::EINVAL as i64),
     }

@@ -577,6 +577,7 @@ pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
 
 /// Filesystem paths are registry keys without the leading NUL marker that
 /// abstract addresses carry.
+#[allow(dead_code)]
 fn is_fs_path(key: &str) -> bool {
     !key.starts_with('\0')
 }
@@ -1009,12 +1010,13 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
             .unwrap_or(false)
         {
             table.remove(&name);
-            // Unlink the filesystem node we created at bind() (Linux
-            // removes the socket path when the last fd closes). Best
-            // effort: a vanished node is fine.
-            if is_fs_path(&name) {
-                let _ = crate::fs::vfs::file_unlink(&name);
-            }
+            // NOTE: the filesystem node created at bind() is deliberately
+            // NOT unlinked here — Linux keeps the socket file after the
+            // last fd closes (the classic stale-socket-file behavior; a
+            // re-bind over it gets EADDRINUSE until it is unlinked).
+            // Auto-removing it broke LTP bind04/bind05, whose cleanup
+            // unlink(2)s the path AFTER closing the sockets and expects
+            // it to still exist.
         }
     }
     // Peer gets drain-then-EOF semantics.

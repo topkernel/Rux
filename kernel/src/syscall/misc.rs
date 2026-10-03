@@ -1855,35 +1855,44 @@ fn timerfd_poll(file: &crate::fs::File, events: u16) -> u16 {
     ready
 }
 
-/// Write old timer settings (for timerfd_gettime / timerfd_settime old_value)
-fn timerfd_write_olds(tfd: &TimerFd, old_value: *mut u64) {
+/// Write old timer settings (for timerfd_gettime / timerfd_settime old_value).
+/// Returns false when a user store faulted (callers must surface EFAULT —
+/// LTP timerfd_settime01 case 2 passes a bad old_value pointer).
+fn timerfd_write_olds(tfd: &TimerFd, old_value: *mut u64) -> bool {
     // SAFETY: old_value validated with access_ok(32 bytes) by callers;
     // put_user is the exception-table copy path (SUM=0 safe).
     unsafe {
         let p = old_value as *mut i64;
         let put = crate::arch::riscv64::uaccess::put_user;
-        // it_interval
-        if tfd.interval_jiffies > 0 {
-            let int_msecs = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
-            let _ = put(p, (int_msecs / 1000) as i64);
-            let _ = put(p.add(1), 0i64);
-        } else {
-            let _ = put(p, 0i64);
-            let _ = put(p.add(1), 0i64);
-        }
-        // it_value
-        if tfd.kernel_timer_id != 0 && crate::timer::timer_pending(tfd.kernel_timer_id) {
-            if tfd.interval_jiffies > 0 {
-                let val_msecs = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
-                let _ = put(p.add(2), (val_msecs / 1000) as i64);
-            } else {
-                let _ = put(p.add(2), 1i64);
+        let mut ok = true;
+        // it_interval (ns-precise from the stored interval)
+        let interval_ms = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
+        let interval_ns = (interval_ms as u64).saturating_mul(1_000_000);
+        ok &= put(p, (interval_ns / 1_000_000_000) as i64);
+        ok &= put(p.add(1), (interval_ns % 1_000_000_000) as i64);
+        // it_value: real remaining time from the wheel
+        let (val_sec, val_nsec) = tfd_remaining(tfd);
+        ok &= put(p.add(2), val_sec);
+        ok &= put(p.add(3), val_nsec);
+        ok
+    }
+}
+
+/// Current (it_value) of a timerfd as (sec, nsec): 0/0 when disarmed.
+fn tfd_remaining(tfd: &TimerFd) -> (i64, i64) {
+    if tfd.kernel_timer_id == 0 {
+        return (0, 0);
+    }
+    match crate::timer::get_timer_state(tfd.kernel_timer_id) {
+        Some((expires, _interval)) => {
+            let now = crate::drivers::timer::get_jiffies();
+            if expires <= now {
+                return (0, 0);
             }
-            let _ = put(p.add(3), 0i64);
-        } else {
-            let _ = put(p.add(2), 0i64);
-            let _ = put(p.add(3), 0i64);
+            let ms = crate::drivers::timer::jiffies_to_msecs(expires - now);
+            ((ms / 1000) as i64, ((ms % 1000) * 1_000_000) as i64)
         }
+        None => (0, 0),
     }
 }
 
@@ -2446,12 +2455,16 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
         }
     };
 
-    if flags & TFD_CLOEXEC != 0 {
-        crate::fs::set_cloexec_fd(fd, true);
-    }
-
     match fdtable.install_fd(fd, file) {
-        Ok(()) => fd as i64,
+        Ok(()) => {
+            // TFD_CLOEXEC must be set AFTER install_fd — install CLEARS the
+            // per-descriptor cloexec bit (LTP timerfd02: the flag set
+            // before the install was wiped and F_GETFD read 0).
+            if flags & TFD_CLOEXEC != 0 {
+                crate::fs::set_cloexec_fd(fd, true);
+            }
+            fd as i64
+        }
         Err(_) => {
             // SAFETY: tfd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(tfd_ptr as *mut TimerFd); }
@@ -2508,12 +2521,16 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and unique.
     let tfd = unsafe { &mut *(ptr as *mut TimerFd) };
 
-    // Write old_value (current settings)
+    // Write old_value (current settings) — a faulting store is EFAULT
+    // (LTP timerfd_settime01 case 2 passes a bad old_value pointer and
+    // the old code silently swallowed the failure).
     if !old_value.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
         }
-        timerfd_write_olds(tfd, old_value);
+        if !timerfd_write_olds(tfd, old_value) {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     // Read struct itimerspec { struct timespec it_interval, struct timespec it_value }
@@ -2536,6 +2553,15 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
         tfd.kernel_timer_id = 0;
     }
 
+    // Linux (timerfd_rearm path): tv_nsec of BOTH members must be a
+    // normalized [0, 1e9) value and tv_sec non-negative — anything else is
+    // EINVAL before any timer state changes (LTP timerfd_settime02).
+    if int_sec < 0 || int_nsec < 0 || int_nsec > 999_999_999
+        || val_sec < 0 || val_nsec < 0 || val_nsec > 999_999_999
+    {
+        return -(errno::EINVAL as i64);
+    }
+
     // If value is zero, timer is disarmed
     let total_nsec = val_sec.saturating_mul(1_000_000_000).saturating_add(val_nsec); // M-19
     if total_nsec <= 0 {
@@ -2554,20 +2580,37 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
         0
     };
 
-    // R32-B10: for TFD_TIMER_ABSTIME, it_value is an ABSOLUTE time on the
-    // timer's clock, not a delay. Both CLOCK_REALTIME and CLOCK_MONOTONIC
-    // read from mtime (time since boot — sys_clock_gettime), and jiffies
-    // also count from boot, so the absolute timespec converts directly
-    // into an absolute jiffies value. The old code added `now` in BOTH
-    // branches, treating every absolute deadline as a relative delay (a
-    // timer armed for an absolute point T fired ~T-after-arm instead).
-    // A deadline already in the past (absolute jiffies <= now) satisfies
-    // the wheel's `expires <= current` test and fires on the next softirq
-    // scan — matching Linux's immediate expiry for past ABSTIME values.
+    // R32-B10 fix: for TFD_TIMER_ABSTIME, it_value is an ABSOLUTE time on
+    // the timer's clock. It CANNOT be interpreted as an absolute jiffies
+    // count — jiffies are based at the FIRST timer tick (seconds after
+    // mtime-reset), so `msecs_to_jiffies(abs_ms)` lands far in the past or
+    // future depending on boot timing (LTP timerfd01: an absolute now+50ms
+    // timer read back as multiple seconds remaining and delivered one
+    // tick). Convert to a RELATIVE deadline first (REALTIME values shift
+    // back by the wall epoch), then add to the current jiffies. A deadline
+    // already in the past yields expires == now and fires on the next
+    // softirq scan — matching Linux's immediate expiry.
     let now = crate::drivers::timer::get_jiffies();
     let expires = if flags & 1 != 0 {
-        // TFD_TIMER_ABSTIME: value_jiffies is already the absolute jiffies.
-        value_jiffies
+        let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
+        let now_ns = (crate::drivers::timer::read_time() as u64)
+            .saturating_mul(1_000_000_000 / freq_hz);
+        let abs_ns = (val_sec.max(0) as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(val_nsec.max(0) as u64);
+        let abs_mono_ns = if tfd.clockid == 0 {
+            // CLOCK_REALTIME: shift into the monotonic domain.
+            abs_ns.saturating_sub(crate::syscall::time::wall_epoch_offset_ns())
+        } else {
+            abs_ns
+        };
+        let rel_ns = abs_mono_ns.saturating_sub(now_ns);
+        if rel_ns == 0 {
+            now
+        } else {
+            let rel_ms = rel_ns / 1_000_000;
+            now.saturating_add(crate::drivers::timer::msecs_to_jiffies(rel_ms).max(1))
+        }
     } else {
         now + value_jiffies
     };
@@ -2621,13 +2664,9 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let curr_value = args[1] as *mut u64;
 
-    if curr_value.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-    if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
-        return -(errno::EFAULT as i64);
-    }
-
+    // Linux checks the fd FIRST (LTP timerfd_gettime01 case 1 passes
+    // fd=-1 with a NULL buffer and expects EBADF, not EFAULT), then the
+    // not-a-timerfd EINVAL, and only then touches the user buffer.
     // SAFETY: fd is a valid timerfd file descriptor from timerfd_create.
     let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(f) => f,
@@ -2640,6 +2679,13 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    if curr_value.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
+        return -(errno::EFAULT as i64);
+    }
+
     // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
@@ -2648,7 +2694,9 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
     // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and properly aligned.
     let tfd = unsafe { &*(ptr as *const TimerFd) };
 
-    timerfd_write_olds(tfd, curr_value);
+    if !timerfd_write_olds(tfd, curr_value) {
+        return -(errno::EFAULT as i64);
+    }
     0
 }
 

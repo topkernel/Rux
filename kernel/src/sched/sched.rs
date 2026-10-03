@@ -2419,6 +2419,31 @@ pub fn scheduler_tick() {
                 crate::signal::Signal::SIGPROF as i32,
             );
         }
+
+        // POSIX timers on the CPU-time clocks (CLOCK_PROCESS/THREAD_
+        // CPUTIME_ID, LTP timer_settime01/timer_delete01): same accounting
+        // counter, per-timer deadlines in posix_timers; SIGEV_SIGNAL
+        // delivery only (SIGEV_NONE just counts the expiry).
+        // — if the interrupted task holds the lock (mid timer_settime),
+        // spinning for it would self-deadlock the CPU. A skipped check
+        // simply re-runs on the next tick.
+        if let Some(posix_timers) = (*current).posix_timers.try_lock() {
+            for pt in posix_timers.iter() {
+                let deadline = pt.cputime_deadline_ns.load(core::sync::atomic::Ordering::Acquire);
+                if deadline != 0 && now >= deadline {
+                    let interval =
+                        pt.cputime_interval_ns.load(core::sync::atomic::Ordering::Acquire);
+                    let next = if interval != 0 { now + interval } else { 0 };
+                    pt.cputime_deadline_ns.store(next, core::sync::atomic::Ordering::Release);
+                    if pt.sigev_notify != 1 && pt.sigev_signo > 0 {
+                        let _ = crate::signal::send_signal(
+                            (*current).pid() as u32,
+                            pt.sigev_signo,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // RT bandwidth accounting / throttle (batch 8) — runs every tick on

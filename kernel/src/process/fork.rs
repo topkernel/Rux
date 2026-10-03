@@ -752,11 +752,23 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             let parent = &*current_ptr;
             let child = &mut *task_ptr;
             child.set_comm(parent.comm());
-            child.set_policy(parent.policy());
-            // set_nice derives static_prio/normal_prio/prio AND updates the
-            // CFS entity weight — must go through it, not raw field writes.
-            child.set_nice(parent.nice());
-            child.set_rt_priority(parent.rt_priority());
+            // SCHED_RESET_ON_FORK (Linux __sched_fork): a child of a task
+            // that requested reset-on-fork does NOT inherit the privileged
+            // policy/priority — it lands on SCHED_OTHER with nice 0, and
+            // the reset request itself is cleared (LTP sched_setscheduler04).
+            if parent.sched_reset_on_fork() {
+                child.set_policy(crate::process::task::SchedPolicy::Normal);
+                child.set_nice(0);
+                child.set_rt_priority(0);
+                child.set_sched_reset_on_fork(false);
+            } else {
+                child.set_policy(parent.policy());
+                // set_nice derives static_prio/normal_prio/prio AND updates the
+                // CFS entity weight — must go through it, not raw field writes.
+                child.set_nice(parent.nice());
+                child.set_rt_priority(parent.rt_priority());
+                child.set_sched_reset_on_fork(false);
+            }
             child.set_cpus_allowed(parent.cpus_allowed());
             child.set_oom_score_adj(parent.oom_score_adj());
             child.sigstack = parent.sigstack;

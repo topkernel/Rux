@@ -29,6 +29,36 @@ static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
 struct TimerEntry {
     /// Jiffies when this timer fires.
     expires: u64,
+    /// Optional HIGH-RESOLUTION absolute expiry (time CSR ticks, 100ns
+    /// each; 0 = jiffies-only timer). When set, the timer also fires as
+    /// soon as read_time() reaches it — nanosleep-class callers must never
+    /// be woken early, and jiffy rounding alone wakes up to one tick
+    /// (10ms) short (LTP clock_nanosleep02).
+    expires_time: u64,
+}
+
+/// Earliest outstanding high-resolution deadline (time CSR ticks);
+/// u64::MAX when none. Drives timer re-arming: the per-hart timer is
+/// programmed to min(next grid tick, this value).
+static HRES_NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Read the earliest outstanding high-resolution deadline (u64::MAX = none).
+pub fn hres_next_deadline() -> u64 {
+    HRES_NEXT.load(Ordering::Acquire)
+}
+
+/// Recompute HRES_NEXT from the active timer set (min expires_time > 0).
+/// Caller holds no locks requirement — takes TIMERS internally.
+fn recompute_hres_next() {
+    let timers = TIMERS.lock_irqsave();
+    let mut next = u64::MAX;
+    for entry in timers.values() {
+        if entry.expires_time != 0 && entry.expires_time < next {
+            next = entry.expires_time;
+        }
+    }
+    drop(timers);
+    HRES_NEXT.store(next, Ordering::Release);
 }
 
 /// A timer action: what to do when a timer expires.
@@ -101,7 +131,7 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
         return 0;
     }
 
-    let entry = TimerEntry { expires };
+    let entry = TimerEntry { expires, expires_time: 0 };
     let action = TimerAction {
         pid: 0,
         signo: 0,
@@ -115,6 +145,43 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
         return 0;
     }
     timers.insert(id, entry);
+
+    let mut actions = ACTIONS.lock_irqsave();
+    actions.insert(id, action);
+
+    id
+}
+
+/// Add a one-shot HIGH-RESOLUTION wake timer: fires when the time CSR
+/// reaches `expires_time` (absolute ticks), with `expires` as the jiffy
+/// fallback (must be >= the jiffy covering expires_time so the timer
+/// never lingers). Used by nanosleep/clock_nanosleep.
+pub fn add_timer_wakeup_hres(expires: u64, expires_time: u64, wake_pid: u32) -> u64 {
+    let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        return 0;
+    }
+
+    let entry = TimerEntry { expires, expires_time };
+    let action = TimerAction {
+        pid: 0,
+        signo: 0,
+        interval_jiffies: 0,
+        tfd_addr: 0,
+        wake_pid,
+    };
+
+    let mut timers = TIMERS.lock_irqsave();
+    if timers.len() >= MAX_TIMERS {
+        return 0;
+    }
+    timers.insert(id, entry);
+    // Keep the global earliest-hres view current so the caller (on its own
+    // hart, before sleeping) can re-arm the hart timer to the earlier
+    // deadline.
+    if expires_time != 0 && expires_time < HRES_NEXT.load(Ordering::Acquire) {
+        HRES_NEXT.store(expires_time, Ordering::Release);
+    }
 
     let mut actions = ACTIONS.lock_irqsave();
     actions.insert(id, action);
@@ -145,7 +212,7 @@ pub fn add_timer_with_action(
         return 0;
     }
 
-    let entry = TimerEntry { expires };
+    let entry = TimerEntry { expires, expires_time: 0 };
     let action = TimerAction {
         pid,
         signo,
@@ -166,6 +233,46 @@ pub fn add_timer_with_action(
     id
 }
 
+/// add_timer_with_action with a HIGH-RESOLUTION absolute deadline (POSIX
+/// timers armed by timer_settime — signal delivery at a precise time CSR
+/// tick, jiffy `expires` as the collection fallback).
+pub fn add_timer_with_action_hres(
+    expires: u64,
+    expires_time: u64,
+    pid: u32,
+    signo: i32,
+    interval_jiffies: u64,
+    tfd_addr: u64,
+) -> u64 {
+    let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        return 0;
+    }
+
+    let entry = TimerEntry { expires, expires_time };
+    let action = TimerAction {
+        pid,
+        signo,
+        interval_jiffies,
+        tfd_addr,
+        wake_pid: 0,
+    };
+
+    let mut timers = TIMERS.lock_irqsave();
+    if timers.len() >= MAX_TIMERS {
+        return 0;
+    }
+    timers.insert(id, entry);
+    if expires_time != 0 && expires_time < HRES_NEXT.load(Ordering::Acquire) {
+        HRES_NEXT.store(expires_time, Ordering::Release);
+    }
+
+    let mut actions = ACTIONS.lock_irqsave();
+    actions.insert(id, action);
+
+    id
+}
+
 /// Delete a timer and its associated action.
 ///
 /// # Returns
@@ -173,7 +280,20 @@ pub fn add_timer_with_action(
 pub fn del_timer(id: u64) -> bool {
     // Lock order: TIMERS then ACTIONS — matches add_timer / softirq handler
     let mut timers = TIMERS.lock_irqsave();
+    let removed_hres = timers.get(&id).map(|e| e.expires_time != 0).unwrap_or(false);
     let removed = timers.remove(&id).is_some();
+    if removed_hres {
+        // The deleted timer may have been the global hres minimum; the
+        // cheap next recompute in the softirq will fix the value, but do it
+        // now so hart re-arms stop over-firing sooner.
+        let mut next = u64::MAX;
+        for entry in timers.values() {
+            if entry.expires_time != 0 && entry.expires_time < next {
+                next = entry.expires_time;
+            }
+        }
+        HRES_NEXT.store(next, Ordering::Release);
+    }
     let mut actions = ACTIONS.lock_irqsave();
     actions.remove(&id);
     removed
@@ -186,6 +306,7 @@ pub fn mod_timer(id: u64, new_expires: u64) -> bool {
     let mut timers = TIMERS.lock_irqsave();
     if let Some(entry) = timers.get_mut(&id) {
         entry.expires = new_expires;
+        entry.expires_time = 0;
         true
     } else {
         false
@@ -223,7 +344,12 @@ pub fn timer_softirq_handler(_nr: usize) {
     let current = timer::get_jiffies();
     let last = LAST_TICK.load(Ordering::Relaxed);
 
-    if current == last {
+    // High-resolution timers are NOT jiffy-deduped: an extra hart IRQ fired
+    // at a sub-jiffy deadline re-runs this scan even in the same jiffy.
+    let now_time = timer::read_time();
+    let hres_due = HRES_NEXT.load(Ordering::Acquire) <= now_time;
+
+    if current == last && !hres_due {
         return;
     }
     // R20-7: record the processed jiffy so a second softirq within the same
@@ -278,7 +404,11 @@ pub fn timer_softirq_handler(_nr: usize) {
         let mut actions = ACTIONS.lock_irqsave();
         let mut budget = EXPIRY_BUDGET;
         timers.retain(|&id, entry| {
-            if entry.expires <= current {
+            // Expiry: the jiffy deadline, OR (for high-resolution entries)
+            // the precise time-CSR deadline has been reached.
+            if entry.expires <= current
+                || (entry.expires_time != 0 && entry.expires_time <= now_time)
+            {
                 if budget == 0 {
                     // Budget exhausted: keep the entry — it is re-scanned on
                     // the next jiffy. Never let the critical section allocate.
@@ -307,6 +437,10 @@ pub fn timer_softirq_handler(_nr: usize) {
                                 (*buf_ptr)[*len_ptr] = (id, *action); *len_ptr += 1;
                             }
                         }
+                        // Periodic re-arm is jiffy-based — drop any stale
+                        // high-resolution deadline so it cannot re-fire the
+                        // very next scan.
+                        entry.expires_time = 0;
                         return true;
                     }
                 }
@@ -345,6 +479,12 @@ pub fn timer_softirq_handler(_nr: usize) {
         // freeing, which does not happen in this loop).
         // (Delivery happens after the locks drop — see the moved block.)
     } // TIMERS + ACTIONS released here
+
+    // Refresh the earliest-hres view: fired/removed timers may have been
+    // the minimum. Cheap scan under TIMERS only.
+    if hres_due {
+        recompute_hres_next();
+    }
 
     // R12-3: delivery OUTSIDE the timer locks. The old in-lock
     // wake_up_process created a TIMERS -> GRQ nesting that wedged all

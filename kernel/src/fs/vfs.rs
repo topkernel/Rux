@@ -2026,6 +2026,13 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 let parent_vpath = path_lookup(&parent_path, 0)?;
                 let parent_inode = parent_vpath.inode
                     .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+                // A non-directory in the middle of the create path is
+                // ENOTDIR, not a permission error (LTP bind01: unix bind
+                // under a regular file must fail ENOTDIR; the ops.create
+                // lookup below would otherwise surface EPERM/EACCES).
+                if !parent_inode.mode.is_directory() {
+                    return Err(errno::Errno::NotADirectory.as_neg_i32());
+                }
                 // DAC: creating an entry requires write+search on the parent
                 if !crate::fs::permission::inode_permission(
                     &parent_inode,

@@ -134,7 +134,10 @@ pub fn set_timer(deadline: u64) {
     set_timer_sbi(deadline);
 }
 
-/// Set next timer interrupt, aligned to the NOMINAL tick grid.
+/// Set next timer interrupt, aligned to the NOMINAL tick grid — but never
+/// later than the earliest outstanding HIGH-RESOLUTION deadline (precise
+/// sleeps; LTP clock_nanosleep02 forbids early wakeups, so the hart timer
+/// must be able to fire BETWEEN grid ticks).
 ///
 /// Review批次8: arming at `now + period` accumulates every handler's
 /// latency into the period (permanent drift — sleeps lengthen under
@@ -142,8 +145,19 @@ pub fn set_timer(deadline: u64) {
 /// cadence glued to nominal 1/HZ boundaries.
 pub fn set_next_trigger() {
     let current = read_time();
-    let deadline = (current / TIME_SLICE_TICKS + 1) * TIME_SLICE_TICKS;
+    let mut deadline = (current / TIME_SLICE_TICKS + 1) * TIME_SLICE_TICKS;
+    let hres = crate::timer::hres_next_deadline();
+    if hres < deadline {
+        deadline = hres.max(current + 1);
+    }
     set_timer(deadline);
+}
+
+/// Re-arm THIS hart's timer to min(next grid tick, earliest hres deadline).
+/// Called by a task that just registered a high-resolution sleep so the
+/// already-armed (later) grid tick does not delay its precise wake.
+pub fn rearm_for_hres() {
+    set_next_trigger();
 }
 
 /// Clock interrupt handler

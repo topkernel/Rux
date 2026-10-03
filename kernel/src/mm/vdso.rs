@@ -25,7 +25,7 @@
 //!   0   u32  seq            (odd = write in progress)
 //!   8   u64  base_cycles    time CSR at the last refresh
 //!   16  u64  base_mono_ns   monotonic ns at the last refresh
-//!   24  u64  wall_epoch_s   REALTIME = monotonic + this
+//!   24  u64  wall_epoch_ns  REALTIME = monotonic + this (ns)
 //!   32  u32  tz_minuteswest (always 0: no timezone model)
 //!   36  u32  tz_dsttime
 //!
@@ -72,14 +72,14 @@ pub fn vdso_data_tick() {
     let cycles = crate::drivers::timer::read_time();
     // 10 MHz source: 100 ns per cycle, exact.
     let mono_ns = cycles.saturating_mul(100);
-    let epoch = crate::syscall::time::wall_epoch_offset_secs();
+    let epoch_ns = crate::syscall::time::wall_epoch_offset_ns();
     // SAFETY: the page is only written here under the seqlock; user
     // readers validate via the seq word before trusting the fields.
     unsafe {
         let base = VDSO_DATA_PAGE.0.as_mut_ptr();
         core::ptr::write_volatile(base.add(8) as *mut u64, cycles);
         core::ptr::write_volatile(base.add(16) as *mut u64, mono_ns);
-        core::ptr::write_volatile(base.add(24) as *mut u64, epoch);
+        core::ptr::write_volatile(base.add(24) as *mut u64, epoch_ns);
         // tz fields (32/36) stay zero.
     }
     VDSO_SEQ.fetch_add(1, Ordering::Release);
@@ -286,8 +286,12 @@ fn emit_clock_gettime(off: u32) -> alloc::vec::Vec<u32> {
     a.label(L_CGI_WALL);
     emit_seqlock_read(&mut a, L_CGI_RETRY_W);
     emit_interpolate(&mut a);
-    a.emit(i_type(24, T2, 3, A6, 0x03)); // ld a6, 24(t2) epoch secs
-    a.emit(r_type(0, S2, A6, 0, A6, 0x33)); // add a6, a6, s2
+    // Wall clock: add the ns-precise epoch offset to the interpolated
+    // monotonic ns BEFORE the sec/nsec split (a seconds-only epoch lost
+    // sub-second clock_settime deltas — LTP clock_settime01).
+    a.emit(i_type(24, T2, 3, A6, 0x03)); // ld a6, 24(t2) epoch ns
+    a.emit(r_type(0, A6, T5, 0, T5, 0x33)); // add t5, t5, a6
+    a.emit(r_type(0, S2, ZERO, 0, A6, 0x33)); // add a6, s2, 0 (TAI secs)
     a.jal_rel(L_CGI_SPLIT);
     a.label(L_CGI_MONO);
     emit_seqlock_read(&mut a, L_CGI_RETRY_M);
@@ -316,9 +320,14 @@ fn emit_gettimeofday(off: u32) -> alloc::vec::Vec<u32> {
     a.label(L_GV_TV);
     emit_seqlock_read(&mut a, L_GV_RETRY);
     emit_interpolate(&mut a);
-    a.emit(i_type(24, T2, 3, A6, 0x03)); // ld a6, 24(t2) epoch secs
+    // Wall clock with ns-precise epoch: total ns → (sec, usec).
+    a.emit(i_type(24, T2, 3, A6, 0x03)); // ld a6, 24(t2) epoch ns
+    a.emit(r_type(0, A6, T5, 0, T5, 0x33)); // add t5, t5, a6
+    emit_li(&mut a, T1, 1_000_000_000);
+    a.emit(r_type(1, T1, T5, 5, T4, 0x33)); // divu t4, t5, t1 → sec
+    a.emit(r_type(1, T1, T5, 7, A6, 0x33)); // remu a6, t5, t1 → rem ns
     a.emit(i_type(1000, ZERO, 0, T1, 0x13)); // li t1, 1000
-    a.emit(r_type(1, T1, T5, 5, T4, 0x33)); // divu t4, t5, t1 → usec
+    a.emit(r_type(1, T1, A6, 5, A6, 0x33)); // divu a6, a6, t1 → usec
     a.label(L_GV_STORE);
     a.emit(s_type(0, A6, A0, 3, 0x23)); // sd a6, 0(a0) tv_sec
     a.emit(s_type(8, T4, A0, 3, 0x23)); // sd t4, 8(a0) tv_usec

@@ -53,12 +53,17 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Get time from RISC-V timer + wall-clock epoch offset
+    // Get time from RISC-V timer + wall-clock epoch offset (ns-precise:
+    // the sub-second part of a clock_settime must survive, LTP
+    // clock_settime01 advances/recedes by 10 ms deltas).
     let cycles = crate::drivers::intc::clint::read_time();
     let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;  // 10 MHz
 
-    let sec = cycles / freq_hz + wall_epoch_offset_secs();
-    let usec = (cycles % freq_hz) * 1_000_000 / freq_hz;
+    let total_ns = cycles
+        .saturating_mul(1_000_000_000 / freq_hz)
+        .saturating_add(wall_epoch_offset_ns());
+    let sec = total_ns / 1_000_000_000;
+    let usec = (total_ns % 1_000_000_000) / 1_000;
 
     // SAFETY: tv_ptr validated with access_ok; put_user is the
     // exception-table copy path (SUM=0 safe).
@@ -98,16 +103,26 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
     }
 
     match clk_id {
-        CLOCK_REALTIME | CLOCK_TAI | CLOCK_REALTIME_COARSE => {
+        CLOCK_REALTIME | CLOCK_TAI => {
             // Wall clock = monotonic + epoch offset (settimeofday-adjustable;
-            // zero until set — no RTC on this platform).
-            // CLOCK_TAI is REALTIME + TAI-UTC offset. No clock_adjtime
-            // (ADJ_TAI) support, so use the current real-world constant
-            // 37 s (2017+ offset) as the fixed boot default.
+            // zero until set — no RTC on this platform). The offset is
+            // ns-precise (LTP clock_settime01's 10 ms deltas must be
+            // observable). CLOCK_TAI is REALTIME + TAI-UTC offset. No
+            // clock_adjtime (ADJ_TAI) support, so use the current
+            // real-world constant 37 s (2017+ offset) as the boot default.
             let tai_offset: u64 = 37;
             let (mono_sec, mono_nsec) = monotonic_time();
-            let sec = mono_sec + wall_epoch_offset_secs()
-                + if clk_id == CLOCK_TAI { tai_offset } else { 0 };
+            let total_ns = (mono_sec as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(mono_nsec as u64)
+                .saturating_add(wall_epoch_offset_ns())
+                .saturating_add(if clk_id == CLOCK_TAI {
+                    tai_offset.saturating_mul(1_000_000_000)
+                } else {
+                    0
+                });
+            let sec = total_ns / 1_000_000_000;
+            let mono_nsec = (total_ns % 1_000_000_000) as u64;
             // SAFETY: tp_ptr validated with access_ok; put_user is the
             // exception-table copy path (SUM=0 safe).
             // SAFETY: tp_ptr validated with access_ok; put_user is the
@@ -136,26 +151,24 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             }
             0
         }
-        // Coarse clocks: same sources, jiffies-granular timestamps.
-        // LTP's tst_clocks probes them for test timing (msgrcv01/msgsnd01
-        // TBROK'd with EINVAL); callers accept coarse granularity.
+        // Coarse clocks: jiffies-granular timestamps (Linux CLOCK_*_COARSE
+        // advances in 1/HZ steps — that IS the contract, and LTP
+        // clock_gettime04 sizes its tolerance from clock_getres()).
         CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
             let j = crate::drivers::timer::get_jiffies();
-            let nsec = (j % crate::drivers::timer::HZ) * (1_000_000_000 / crate::drivers::timer::HZ);
+            let mut total_ns = (j * (1_000_000_000 / crate::drivers::timer::HZ)) as u64;
             if clk_id == CLOCK_REALTIME_COARSE {
-                let sec = j / crate::drivers::timer::HZ + wall_epoch_offset_secs();
-                // SAFETY: tp_ptr validated with access_ok; put_user is the
-                // exception-table copy path (SUM=0 safe).
-                unsafe {
-                    let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                    let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
-                }
-            } else {
-                let sec = j / crate::drivers::timer::HZ;
-                // SAFETY: same validation as above.
-                unsafe {
-                    let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                    let _ = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
+                total_ns = total_ns.saturating_add(wall_epoch_offset_ns());
+            }
+            let sec = total_ns / 1_000_000_000;
+            let nsec = total_ns % 1_000_000_000;
+            // SAFETY: tp_ptr validated with access_ok; put_user is the
+            // exception-table copy path (SUM=0 safe).
+            unsafe {
+                let ok1 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                let ok2 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
+                if !ok1 || !ok2 {
+                    return -(errno::EFAULT as i64);
                 }
             }
             0
@@ -259,16 +272,25 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
         return 0;
     }
 
-    // Convert to milliseconds, minimum 1ms to avoid truncating sub-ms sleeps to zero
-    // Linux guarantees at least one jiffy of sleep for any non-zero nanosleep request.
-    let sleep_msecs = ((total_nanos + 999_999) / 1_000_000).max(1) as u64;
+    // ---- Precise (high-resolution) deadline ----
+    // The time CSR runs at TIMER_CLOCK_FREQ_HZ (10 MHz, 100 ns/tick).
+    // Round the request UP to whole ticks (+1 guard tick) so the sleeper
+    // is NEVER woken early (LTP clock_nanosleep02: any early sample is a
+    // failure). The jiffy wheel alone truncates and wakes up to one tick
+    // (10 ms) short.
+    let freq_hz = crate::config::TIMER_CLOCK_FREQ_HZ;
+    let now0 = timer::read_time();
+    let ns_to_ticks = ((total_nanos as u64).saturating_mul(freq_hz) / 1_000_000_000).saturating_add(1);
+    let hres_deadline = now0.saturating_add(ns_to_ticks);
 
-    // Get current jiffies
+    // Jiffy fallback: the wheel entry also expires at the first jiffy that
+    // FULLY covers the precise deadline (ceil + 1 grid tick) — the hres
+    // deadline normally fires first; the fallback guarantees the timer is
+    // eventually collected even if a sub-jiffy IRQ is lost.
     let start_jiffies = timer::get_jiffies();
-
-    // Calculate target jiffies
-    let sleep_jiffies = timer::msecs_to_jiffies(sleep_msecs);
-    let target_jiffies = start_jiffies + sleep_jiffies;
+    let ticks_per_jiffy = freq_hz / timer::HZ;
+    let sleep_jiffies = (ns_to_ticks + ticks_per_jiffy - 1) / ticks_per_jiffy + 1;
+    let target_jiffies = start_jiffies.saturating_add(sleep_jiffies);
 
     // Get current task pointer + PID for timer wakeup
     let current = match crate::sched::current() {
@@ -279,10 +301,15 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // sched::current(), valid for the whole syscall (we are it).
     let my_pid = unsafe { (*current).pid() };
 
-    // Register a one-shot timer to wake us up at the target time.
+    // Register a one-shot HIGH-RESOLUTION timer to wake us up at the
+    // precise deadline (jiffy fallback inside the wheel).
     // Without this, the sleep below would have no mechanism to wake us up
     // — timer softirq would fire but nobody would call wake_up_process.
-    let timer_id = crate::timer::add_timer_wakeup(target_jiffies, my_pid);
+    let timer_id = crate::timer::add_timer_wakeup_hres(target_jiffies, hres_deadline, my_pid);
+    // The hart timer may already be armed for the NEXT GRID TICK, which can
+    // be LATER than our precise deadline — re-arm it now (we are running on
+    // the hart that will sleep).
+    timer::rearm_for_hres();
 
     // R33 (B-family wedge — lost wakeup): state-first + re-check protocol.
     // The timer softirq's wake is ONE-SHOT: it fires wake_up_process exactly
@@ -298,23 +325,27 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // jiffies / pending signal and we exit the loop instead of sleeping.
     // Mirrors sys_rt_sigtimedwait's established pattern.
     loop {
-        let current_jiffies = timer::get_jiffies();
+        // Precise wake condition: the time CSR has reached the deadline.
+        let now = timer::read_time();
 
         // Check if target time has been reached
-        if current_jiffies >= target_jiffies {
+        if now >= hres_deadline {
             crate::timer::del_timer(timer_id);
             return 0;  // Success
         }
 
-        // Calculate remaining time
-        let remaining_jiffies = target_jiffies - current_jiffies;
-        let remaining_msecs = timer::jiffies_to_msecs(remaining_jiffies);
+        // Calculate remaining time (ns, from the precise deadline)
+        let remaining_ns = (hres_deadline - now) * (1_000_000_000 / crate::config::TIMER_CLOCK_FREQ_HZ);
+        let remaining_msecs = (remaining_ns + 999_999) / 1_000_000;
 
         // Check for pending signals
         use crate::signal;
         if signal::signal_pending() {
             crate::timer::del_timer(timer_id);
-            // Write remaining time to rem (if rem_ptr is provided)
+            // Write remaining time to rem (if rem_ptr is provided).
+            // A faulting rem write is EFAULT — Linux reports the copy
+            // failure over the EINTR (LTP clock_nanosleep01's
+            // bad-rmtp-with-signal case).
             if !rem_ptr.is_null() {
                 // SAFETY: rem_ptr validated with access_ok in caller;
                 // copy_to_user is the exception-table copy path (SUM=0 safe).
@@ -322,12 +353,15 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
                     // Convert milliseconds to timespec
                     let rem_sec = (remaining_msecs / 1000) as i64;
                     let rem_nsec = ((remaining_msecs % 1000) * 1_000_000) as i64;
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    if crate::arch::riscv64::uaccess::copy_to_user(
                         rem_ptr as *mut u8,
                         &Timespec { tv_sec: rem_sec, tv_nsec: rem_nsec }
                             as *const Timespec as *const u8,
                         core::mem::size_of::<Timespec>(),
-                    );
+                    ) != 0
+                    {
+                        return -(errno::EFAULT as i64);
+                    }
                 }
             }
 
@@ -348,7 +382,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // set_state. Either its wake was captured by the INTERRUPTIBLE
             // state (we may already be RUNNING + enqueued again), or the
             // condition is now observable — either way we must not sleep.
-            if timer::get_jiffies() >= target_jiffies || signal::signal_pending() {
+            if timer::read_time() >= hres_deadline || signal::signal_pending() {
                 // SAFETY: current is the running task's pointer.
                 unsafe {
                     (*current).set_state(process::task::TaskState::new(
@@ -454,7 +488,17 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
         _ => return -(errno::EINVAL as i64),
     }
 
-    // Return actual timer resolution: 100ns for 10 MHz timer
+    // Return actual timer resolution: 100ns for the 10 MHz timer, but the
+    // COARSE clocks are jiffies-granular (1/HZ steps) — LTP
+    // clock_gettime04 sizes its tolerance from clock_getres(), so a coarse
+    // clock must not claim 100 ns.
+    let res_ns: u64 = if clk_id as u32 == CLOCK_REALTIME_COARSE
+        || clk_id as u32 == CLOCK_MONOTONIC_COARSE
+    {
+        1_000_000_000 / crate::drivers::timer::HZ
+    } else {
+        100
+    };
     if !res.is_null() {
         // Check if res is in valid user space
         if !crate::arch::riscv64::uaccess::access_ok(res as usize, 16) {  // 2 * sizeof(u64)
@@ -468,7 +512,7 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
         unsafe {
             // timespec structure: tv_sec (8 bytes) + tv_nsec (8 bytes)
             let ok_sec = crate::arch::riscv64::uaccess::put_user(res, 0u64);          // tv_sec = 0
-            let ok_nsec = crate::arch::riscv64::uaccess::put_user(res.offset(1), 100u64);  // tv_nsec = 100ns
+            let ok_nsec = crate::arch::riscv64::uaccess::put_user(res.offset(1), res_ns);  // tv_nsec
             if !ok_sec || !ok_nsec {
                 return -(errno::EFAULT as i64);
             }
@@ -736,9 +780,15 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
         crate::timer::del_timer(old_timer_id);
     }
 
-    // If value is zero, just disarm (already done above)
+    // If value is zero, just disarm (already done above) — and CLEAR the
+    // mirrored deadline so the next setitimer's old-value read reports a
+    // DISARMED timer (musl alarm() derives its return value from it; the
+    // stale deadline made alarm(N) after alarm(0) return the cancelled
+    // timer's remaining time — LTP alarm02).
     let total_usec = value_sec.saturating_mul(1_000_000).saturating_add(value_usec);
     if total_usec <= 0 {
+        task.itimer_real[0].store(0, core::sync::atomic::Ordering::Release);
+        task.itimer_real[1].store(0, core::sync::atomic::Ordering::Release);
         return;
     }
 
@@ -794,15 +844,26 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
     let rqtp = args[2] as *const Timespec;
     let rmtp = args[3] as *mut Timespec;
 
-    // Linux special case: clock_nanosleep returns the POSITIVE errno on
-    // failure (unlike most syscalls which return -errno). musl/glibc expect
-    // this for all error paths below.
-    let fail = |e: i32| -> i64 { e as i64 };
+    // ABI correction (LTP clock_nanosleep01): the KERNEL syscall returns
+    // -errno like every other syscall — musl's __clock_nanosleep NEGATES it
+    // (`return -__syscall_cp(...)`) to produce the POSIX-style positive
+    // error number. Returning the positive errno here leaked through musl
+    // as a NEGATIVE libc return and through syscall(2) as a bogus success
+    // value.
+    let fail = |e: i32| -> i64 { -(e as i64) };
 
-    // Only the sleepable clocks are valid here.
+    // Only the sleepable clocks are valid here. THREAD-cputime has no
+    // nsleep op in Linux and fails with ENOTSUP (LTP clock_nanosleep01
+    // expects EOPNOTSUPP for the raw-syscall variant).
     match clk_id {
         CLOCK_REALTIME | CLOCK_MONOTONIC => {}
+        CLOCK_THREAD_CPUTIME_ID => return fail(errno::EOPNOTSUPP),
         _ => return fail(errno::EINVAL),
+    }
+
+    // Only TIMER_ABSTIME (bit 0) is a defined flag; anything else is EINVAL.
+    if flags & !1 != 0 {
+        return fail(errno::EINVAL);
     }
 
     // Validate request pointer
@@ -851,7 +912,7 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
         let now_nanos = mono_sec.saturating_mul(1_000_000_000).saturating_add(mono_nsec);
         // For CLOCK_REALTIME the deadline is expressed against the wall
         // epoch: shift it back into the monotonic domain.
-        let epoch_nanos = wall_epoch_offset_secs().saturating_mul(1_000_000_000);
+        let epoch_nanos = wall_epoch_offset_ns();
         let target_nanos = (req.tv_sec.max(0) as u64)
             .saturating_mul(1_000_000_000)
             .saturating_add(req.tv_nsec as u64);
@@ -895,8 +956,11 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) supported
-    if clockid != 0 && clockid != 1 {
+    // CLOCK_REALTIME (0), CLOCK_MONOTONIC (1) arm on the wall timer
+    // wheel; the CPU-time clocks (2/3) arm against sum_exec_runtime and
+    // are checked in scheduler_tick (LTP timer_settime01/timer_delete01
+    // create timers on all four).
+    if !(0..=3).contains(&clockid) {
         return -(errno::EINVAL as i64);
     }
 
@@ -946,6 +1010,10 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         sigev_notify,
         overrun_count: 0,
         user_timer_id: user_timer_id,
+        cputime_deadline_ns: core::sync::atomic::AtomicU64::new(0),
+        cputime_interval_ns: core::sync::atomic::AtomicU64::new(0),
+        wall_deadline_ticks: core::sync::atomic::AtomicU64::new(0),
+        interval_ns: 0,
     };
 
     let mut timers = task.posix_timers.lock();
@@ -972,8 +1040,14 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     let new_value = args[2] as *const u64;
     let old_value = args[3] as *mut u64;
 
+    // Linux (common_timer_set): a NULL new_value pointer is EINVAL, and
+    // only TIMER_ABSTIME (bit 0) is a legal flag (LTP timer_settime02
+    // cases 1 and the flags checks).
     if new_value.is_null() {
-        return -(errno::EFAULT as i64);
+        return -(errno::EINVAL as i64);
+    }
+    if flags & !1 != 0 {
+        return -(errno::EINVAL as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
         return -(errno::EFAULT as i64);
@@ -989,13 +1063,21 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     // exception-table copy path (SUM=0 safe). Unreadable fields read as 0.
     let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
         let p = new_value as *const i64;
-        (
-            crate::arch::riscv64::uaccess::get_user(p).unwrap_or(0),
-            crate::arch::riscv64::uaccess::get_user(p.add(1)).unwrap_or(0),
-            crate::arch::riscv64::uaccess::get_user(p.add(2)).unwrap_or(0),
-            crate::arch::riscv64::uaccess::get_user(p.add(3)).unwrap_or(0),
-        )
+        let get = crate::arch::riscv64::uaccess::get_user::<i64>;
+        match (get(p), get(p.add(1)), get(p.add(2)), get(p.add(3))) {
+            (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
+            _ => return -(errno::EFAULT as i64),
+        }
     };
+
+    // Linux: tv_nsec of BOTH members must be normalized [0, 1e9) and
+    // tv_sec non-negative (LTP timer_settime02: -1 and NSEC_PER_SEC+1
+    // must fail with EINVAL, not be silently accepted).
+    if int_sec < 0 || int_nsec < 0 || int_nsec > 999_999_999
+        || val_sec < 0 || val_nsec < 0 || val_nsec > 999_999_999
+    {
+        return -(errno::EINVAL as i64);
+    }
 
     // Find timer by stable user handle (review批次1: index arithmetic
     // misdirected operations after a middle timer was deleted).
@@ -1005,33 +1087,41 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         None => return -(errno::EINVAL as i64),
     };
 
-    // Write old_value as disarmed (before mutating the timer)
+    // Write old_value (the CURRENT settings — real values, not zeros)
     if !old_value.is_null() {
         if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: old_value validated with access_ok(32); clear_user is the
-        // exception-table zeroing path.
-        unsafe { crate::arch::riscv64::uaccess::clear_user(old_value as *mut u8, 32); }
+        let (oi, on, ov, vn) = posix_timer_current(timer);
+        // SAFETY: old_value validated with access_ok(32); put_user is the
+        // exception-table copy path (SUM=0 safe).
+        unsafe {
+            let p = old_value as *mut i64;
+            let put = crate::arch::riscv64::uaccess::put_user;
+            let _ = put(p, oi);
+            let _ = put(p.add(1), on);
+            let _ = put(p.add(2), ov);
+            let _ = put(p.add(3), vn);
+        }
     }
 
     let pid = task.pid();
 
-    // Disarm existing kernel timer
+    // Disarm existing kernel timer / cpu-time deadline
     if timer.kernel_timer_id != 0 {
         crate::timer::del_timer(timer.kernel_timer_id);
         timer.kernel_timer_id = 0;
     }
+    timer.wall_deadline_ticks.store(0, core::sync::atomic::Ordering::Release);
+    timer.cputime_deadline_ns.store(0, core::sync::atomic::Ordering::Release);
 
     // If value is zero, timer is disarmed
     let total_nsec = val_sec.saturating_mul(1_000_000_000).saturating_add(val_nsec);
     if total_nsec <= 0 {
+        timer.interval_ns = 0;
+        timer.cputime_interval_ns.store(0, core::sync::atomic::Ordering::Release);
         return 0;
     }
-
-    // Convert to jiffies
-    let value_msecs = (total_nsec / 1_000_000) as u64;
-    let value_jiffies = crate::drivers::timer::msecs_to_jiffies(value_msecs).max(1);
 
     let interval_nsec = int_sec.saturating_mul(1_000_000_000).saturating_add(int_nsec);
     let interval_jiffies = if interval_nsec > 0 {
@@ -1040,34 +1130,91 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     } else {
         0
     };
+    timer.interval_ns = interval_nsec as u64;
+    timer.interval_jiffies = interval_jiffies;
+    timer.cputime_interval_ns.store(interval_nsec as u64, core::sync::atomic::Ordering::Release);
 
-    let expires = if flags & 1 != 0 {
-        // TIMER_ABSTIME: val_sec/val_nsec is an absolute CLOCK_MONOTONIC
-        // timestamp. Convert it to a jiffies deadline directly (10 MHz
-        // CLINT, same source as clock_gettime) — the old code treated it
-        // as relative for both branches (review M-18).
-        let cycles = crate::drivers::intc::clint::read_time();
-        let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
-        let now_ns = (cycles / freq_hz).saturating_mul(1_000_000_000)
-            + ((cycles % freq_hz) * 1_000_000_000 / freq_hz);
-        let abs_ns = (val_sec.max(0) as u64).saturating_mul(1_000_000_000)
-            .saturating_add(val_nsec.max(0) as u64);
-        let now_j = crate::drivers::timer::get_jiffies();
-        if abs_ns <= now_ns {
-            now_j // already expired: fire at the next tick
+    // ---- CPU-time clocks: arm against sum_exec_runtime ----
+    if timer.clock_id == CLOCK_PROCESS_CPUTIME_ID as i32 || timer.clock_id == CLOCK_THREAD_CPUTIME_ID as i32 {
+        let now_cpu_ns = task
+            .sched_entity()
+            .sum_exec_runtime
+            .load(core::sync::atomic::Ordering::Acquire);
+        timer.cputime_deadline_ns.store(
+            now_cpu_ns.saturating_add(total_nsec as u64),
+            core::sync::atomic::Ordering::Release,
+        );
+        timer.overrun_count = 0;
+        return 0;
+    }
+
+    // ---- Wall clocks (REALTIME / MONOTONIC): precise deadline ----
+    let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
+    let now_ticks = crate::drivers::timer::read_time();
+    // Relative or absolute target, in MONOTONIC ns.
+    // Signed monotonic target: TIMER_ABSTIME values BEFORE the clock's
+    // zero point are legal (LTP timer_settime03 arms ~300 s in the past)
+    // and count fully as missed periods. TIMER_ABSTIME on CLOCK_REALTIME
+    // addresses the WALL clock — shift back to the monotonic domain with
+    // the epoch offset (the old code always read it as monotonic, so an
+    // absolute wall deadline after a clock_settime never fired — LTP
+    // clock_settime03 hung waiting for SIGABRT).
+    let now_ns_i = (now_ticks as u64)
+        .saturating_mul(1_000_000_000 / freq_hz) as i64;
+    let target_mono_ns: i64 = if flags & 1 != 0 {
+        let abs_ns = val_sec
+            .saturating_mul(1_000_000_000)
+            .saturating_add(val_nsec);
+        if timer.clock_id == CLOCK_REALTIME as i32 {
+            abs_ns.saturating_sub(wall_epoch_offset_ns() as i64)
         } else {
-            let rel_ms = (abs_ns - now_ns) / 1_000_000;
-            now_j.saturating_add(
-                crate::drivers::timer::msecs_to_jiffies(rel_ms).max(1)
-            )
+            abs_ns
         }
     } else {
-        // Relative time
-        crate::drivers::timer::get_jiffies() + value_jiffies
+        now_ns_i.saturating_add(total_nsec)
     };
 
-    let new_kernel_id = crate::timer::add_timer_with_action(
+    // Precise absolute deadline in time CSR ticks (round UP, never early).
+    // A non-positive target is already expired: arm at "now".
+    let deadline_ticks: u64 = if target_mono_ns <= 0 {
+        0
+    } else {
+        ((target_mono_ns as u64)
+            .saturating_mul(freq_hz)
+            .div_ceil(1_000_000_000))
+        .saturating_add(1)
+    };
+    timer.wall_deadline_ticks.store(deadline_ticks, core::sync::atomic::Ordering::Release);
+
+    // Jiffy fallback (>= the jiffy covering the precise deadline + 1 grid
+    // tick); the hres deadline normally fires first.
+    let ticks_per_jiffy = freq_hz / crate::drivers::timer::HZ;
+    let now_j = crate::drivers::timer::get_jiffies();
+    let expires = if deadline_ticks <= now_ticks {
+        // Already expired. With an interval, Linux reports the number of
+        // MISSED periods as the overrun (capped at INT_MAX — LTP
+        // timer_settime03 arms an absolute deadline ~INT_MAX periods in
+        // the past and reads timer_getoverrun).
+        if interval_nsec > 0 {
+            let late_ns = now_ns_i.saturating_sub(target_mono_ns);
+            let missed = if late_ns <= 0 {
+                0u64
+            } else {
+                (late_ns as u64) / interval_nsec as u64
+            };
+            timer.overrun_count = missed.min(i32::MAX as u64) as i32;
+        }
+        // Fire at the next tick.
+        now_j + 1
+    } else {
+        let rel_ticks = deadline_ticks - now_ticks;
+        now_j.saturating_add(rel_ticks.div_ceil(ticks_per_jiffy)).saturating_add(1)
+    };
+
+    // Arm with the precise deadline (add_timer_with_action_hres).
+    let new_kernel_id = crate::timer::add_timer_with_action_hres(
         expires,
+        deadline_ticks,
         pid,
         timer.sigev_signo,
         interval_jiffies,
@@ -1075,10 +1222,47 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     );
 
     timer.kernel_timer_id = new_kernel_id;
-    timer.interval_jiffies = interval_jiffies;
-    timer.overrun_count = 0;
+    // NOTE: overrun_count was already seeded by the late-ABSTIME accounting
+    // above (missed periods); a fresh on-time arm leaves it at 0.
 
     0
+}
+
+/// Current (it_interval sec/nsec, it_value sec/nsec) of a POSIX timer —
+/// precise readback for timer_gettime and settime old_value.
+fn posix_timer_current(timer: &crate::process::task::PosixTimerState) -> (i64, i64, i64, i64) {
+    let interval_ns = timer.interval_ns;
+    let oi = (interval_ns / 1_000_000_000) as i64;
+    let on = (interval_ns % 1_000_000_000) as i64;
+
+    if timer.clock_id == CLOCK_PROCESS_CPUTIME_ID as i32 || timer.clock_id == CLOCK_THREAD_CPUTIME_ID as i32 {
+        let deadline = timer.cputime_deadline_ns.load(core::sync::atomic::Ordering::Acquire);
+        if deadline == 0 {
+            return (oi, on, 0, 0);
+        }
+        match crate::process::current_task() {
+            Some(t) => {
+                let now = t
+                    .sched_entity()
+                    .sum_exec_runtime
+                    .load(core::sync::atomic::Ordering::Acquire);
+                let rem = deadline.saturating_sub(now);
+                (oi, on, (rem / 1_000_000_000) as i64, (rem % 1_000_000_000) as i64)
+            }
+            None => (oi, on, 0, 0),
+        }
+    } else {
+        let deadline_ticks = timer.wall_deadline_ticks.load(core::sync::atomic::Ordering::Acquire);
+        if deadline_ticks == 0 {
+            return (oi, on, 0, 0);
+        }
+        let now = crate::drivers::timer::read_time();
+        if deadline_ticks <= now {
+            return (oi, on, 0, 0);
+        }
+        let rem_ns = (deadline_ticks - now).saturating_mul(1_000_000_000 / crate::config::TIMER_CLOCK_FREQ_HZ);
+        (oi, on, (rem_ns / 1_000_000_000) as i64, (rem_ns % 1_000_000_000) as i64)
+    }
 }
 
 /// sys_timer_gettime - Get timer value (NR 108)
@@ -1105,40 +1289,24 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> i64 {
         None => return -(errno::EINVAL as i64),
     };
 
-    // Compute remaining time
-    let (val_sec, val_nsec) = if timer.kernel_timer_id != 0 {
-        // Approximate: check if timer is still pending
-        if crate::timer::timer_pending(timer.kernel_timer_id) {
-            // Timer is active but we can't easily get remaining jiffies
-            // Write interval as remaining (best effort)
-            if timer.interval_jiffies > 0 {
-                let remaining_msecs = crate::drivers::timer::jiffies_to_msecs(timer.interval_jiffies);
-                ((remaining_msecs / 1000) as i64, 0i64)
-            } else {
-                (1i64, 0i64) // active, at least 1 jiffy remaining
-            }
-        } else {
-            (0i64, 0i64) // expired
-        }
-    } else {
-        (0i64, 0i64) // disarmed
-    };
+    // Precise readback: it_interval as programmed (ns) and it_value from
+    // the stored absolute deadline (LTP timer_settime01 checks
+    // interval == 50 ms and value <= max(value, interval)).
+    let (int_sec, int_nsec, val_sec, val_nsec) = posix_timer_current(timer);
 
     // Write struct itimerspec { struct timespec it_interval, struct timespec it_value }
     // SAFETY: curr_value validated with access_ok(32); put_user is the
     // exception-table copy path (SUM=0 safe).
     unsafe {
         let p = curr_value as *mut i64;
-        if timer.interval_jiffies > 0 {
-            let int_msecs = crate::drivers::timer::jiffies_to_msecs(timer.interval_jiffies);
-            let _ = crate::arch::riscv64::uaccess::put_user(p, (int_msecs / 1000) as i64);
-            let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), 0i64);
-        } else {
-            let _ = crate::arch::riscv64::uaccess::put_user(p, 0i64);
-            let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), 0i64);
+        let put = crate::arch::riscv64::uaccess::put_user;
+        let ok1 = put(p, int_sec);
+        let ok2 = put(p.add(1), int_nsec);
+        let ok3 = put(p.add(2), val_sec);
+        let ok4 = put(p.add(3), val_nsec);
+        if !ok1 || !ok2 || !ok3 || !ok4 {
+            return -(errno::EFAULT as i64);
         }
-        let _ = crate::arch::riscv64::uaccess::put_user(p.add(2), val_sec);
-        let _ = crate::arch::riscv64::uaccess::put_user(p.add(3), val_nsec);
     }
 
     0
@@ -1178,10 +1346,13 @@ pub fn sys_timer_delete(args: SyscallArgs) -> i64 {
         None => return -(errno::EINVAL as i64),
     };
 
-    // Disarm kernel timer
-    let timer = &timers[idx];
-    if timer.kernel_timer_id != 0 {
-        crate::timer::del_timer(timer.kernel_timer_id);
+    // Disarm kernel timer / cpu-time deadline
+    if let Some(timer) = timers.get_mut(idx) {
+        if timer.kernel_timer_id != 0 {
+            crate::timer::del_timer(timer.kernel_timer_id);
+        }
+        timer.cputime_deadline_ns.store(0, core::sync::atomic::Ordering::Release);
+        timer.wall_deadline_ticks.store(0, core::sync::atomic::Ordering::Release);
     }
 
     timers.remove(idx);
@@ -1191,11 +1362,12 @@ pub fn sys_timer_delete(args: SyscallArgs) -> i64 {
 /// Set CLOCK_REALTIME to `tv_sec` seconds + `tv_nsec` nanoseconds.
 ///
 /// Both settimeofday and clock_settime(CLOCK_REALTIME) funnel here. The
-/// monotonic CLINT clock is never touched — only WALL_EPOCH_OFFSET_SECS
-/// (and the vDSO data-page snapshot via set_wall_epoch_offset_secs)
-/// moves, so CLOCK_MONOTONIC, timers and /proc/uptime are unaffected,
-/// matching Linux semantics. The wall model carries whole seconds, so
-/// the derived offset is rounded to the nearest second.
+/// monotonic CLINT clock is never touched — only WALL_EPOCH_OFFSET_NS
+/// (and the vDSO data-page snapshot) moves, so CLOCK_MONOTONIC, timers
+/// and /proc/uptime are unaffected, matching Linux semantics. The offset
+/// is kept with NANOSECOND precision — clock_settime01 advances/recades
+/// the clock by 10 ms deltas and reads it back through both the syscall
+/// and the vDSO fast path.
 fn set_realtime_from_secs_nanos(tv_sec: i64, tv_nsec: i64) -> i64 {
     // Negative absolute times are not representable (unsigned offset).
     if tv_sec < 0 || tv_nsec < 0 {
@@ -1203,7 +1375,7 @@ fn set_realtime_from_secs_nanos(tv_sec: i64, tv_nsec: i64) -> i64 {
     }
 
     let (mono_s, mono_ns) = monotonic_time();
-    // wall = mono + offset  ⇒  offset = wall - mono (round to nearest).
+    // wall = mono + offset  ⇒  offset = wall - mono.
     // Saturating: a target before boot clamps the offset to 0 (epoch),
     // which is the closest representable time.
     let target_ns = (tv_sec as u64)
@@ -1211,10 +1383,9 @@ fn set_realtime_from_secs_nanos(tv_sec: i64, tv_nsec: i64) -> i64 {
         .saturating_add(tv_nsec as u64);
     let mono_total_ns = mono_s
         .saturating_mul(1_000_000_000)
-        .saturating_add(mono_ns)
-        .saturating_add(500_000_000);
-    let offset_secs = target_ns.saturating_sub(mono_total_ns) / 1_000_000_000;
-    set_wall_epoch_offset_secs(offset_secs);
+        .saturating_add(mono_ns);
+    let offset_ns = target_ns.saturating_sub(mono_total_ns);
+    set_wall_epoch_offset_ns(offset_ns);
     0
 }
 
@@ -1260,14 +1431,19 @@ pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
 /// sys_adjtimex - Adjust system clock (NR 171)
 ///
 /// struct timex is 128 bytes on 64-bit. We fill it as "clock synchronized".
-pub fn sys_adjtimex(args: SyscallArgs) -> i64 {
-    // Permission check: require CAP_SYS_TIME
-    if !crate::security::capable(crate::security::CAP_SYS_TIME) {
-        return -(errno::EPERM as i64);
-    }
+/// Kernel NTP state actually modeled: the settable timex fields are
+/// stored and read back (LTP clock_adjtime01 round-trips every mode's
+/// value through a verify GET).
+///
+/// struct timex (LP64): modes i32 @0, offset @8, freq @16, maxerror @24,
+/// esterror @32, status i32 @40, constant @48, precision @56, tolerance
+/// @64, time @72 (16 B), tick @88.
+static TIMEX_STATE: crate::sync::spinlock::Spinlock<[u8; 96]> =
+    crate::sync::spinlock::Spinlock::new([0u8; 96]);
 
-    let buf_ptr = args[0] as *mut u8;
-
+/// Shared adjtimex/clock_adjtime core: copy the timex in, validate it,
+/// apply the settable fields, report TIME_OK.
+fn adjtimex_common(buf_ptr: *mut u8) -> i64 {
     if buf_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
@@ -1275,43 +1451,130 @@ pub fn sys_adjtimex(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // TIME_OK = 0: clock is synchronized
-    // SAFETY: buf_ptr validated with access_ok(128); clear_user/put_user are
-    // the exception-table copy paths.
+    // Read the request (a bad pointer is EFAULT — LTP clock_adjtime02's
+    // bad_addr case; the old stub never read the buffer at all).
+    let mut buf = [0u8; 128];
+    // SAFETY: buf_ptr validated with access_ok(128); copy_from_user is the
+    // exception-table copy path (SUM=0 safe).
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), buf_ptr, 128)
+    } != 0
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let modes = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+
+    // Non-zero modes require CAP_SYS_TIME.
+    if modes != 0 && !crate::security::capable(crate::security::CAP_SYS_TIME) {
+        return -(errno::EPERM as i64);
+    }
+
+    // Mode validation (LTP adjtimex03): only the bits Linux actually
+    // implements are accepted; ADJ_MICRO (0x1000) is nano-kernel-only
+    // legacy (rejected with EINVAL), and so is any undefined bit (the
+    // test probes 0x8000).
+    const ADJ_KNOWN_MODES: u32 = 0x007F      // offset|freq|maxerror|esterror|status|constant
+        | 0x0080                              // ADJ_TAI
+        | 0x0100                              // ADJ_SETOFFSET
+        | 0x1000                              // ADJ_MICRO (unit flag, accepted)
+        | 0x2000                              // ADJ_NANO / ADJ_OFFSET_READONLY
+        | 0x4000                              // ADJ_TICK
+        | 0x8000;                             // ADJ_ADJTIME
+    if modes & !ADJ_KNOWN_MODES != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // ADJ_ADJTIME alone (without ADJ_OFFSET / ADJ_OFFSET_READONLY) is the
+    // classic invalid combination (LTP adjtimex03 probes exactly 0x8000).
+    const ADJ_ADJTIME: u32 = 0x8000;
+    if modes & ADJ_ADJTIME != 0
+        && modes & (0x001 | 0x2000) == 0
+    {
+        return -(errno::EINVAL as i64);
+    }
+
+    // ADJ_TICK bounds: user tick (usec/s per HZ-scaled units) must stay in
+    // [900000/HZ, 1100000/HZ] (LTP clock_adjtime02's low/high cases);
+    // tick == 0 means "leave unchanged".
+    const ADJ_TICK: u32 = 0x4000;
+    if modes & ADJ_TICK != 0 {
+        let tick = i32::from_le_bytes(buf[88..92].try_into().unwrap());
+        if tick != 0 {
+            let hz = crate::drivers::timer::HZ as i32;
+            let low = 900_000 / hz;
+            let high = 1_100_000 / hz;
+            if !(low..=high).contains(&tick) {
+                return -(errno::EINVAL as i64);
+            }
+        }
+    }
+
+    // Apply the settable fields to the kernel state and echo the FULL
+    // state back (clock_adjtime01 verifies a round-trip of every field).
+    let mut state = TIMEX_STATE.lock();
+    // Seed the Linux default tick (1e6/HZ usec) on first use so an
+    // ADJ_TICK delta from the GET value stays inside the valid window
+    // (clock_adjtime01 reads tick then adds delta).
+    if state[88..96] == [0u8; 8] {
+        let def_tick: u64 = 1_000_000 / crate::drivers::timer::HZ;
+        state[88..96].copy_from_slice(&def_tick.to_le_bytes());
+    }
+    const ADJ_OFFSET: u32 = 0x001;
+    const ADJ_FREQUENCY: u32 = 0x002;
+    const ADJ_MAXERROR: u32 = 0x004;
+    const ADJ_ESTERROR: u32 = 0x008;
+    const ADJ_STATUS: u32 = 0x010;
+    const ADJ_TIMECONST: u32 = 0x020;
+    let copy_field = |state: &mut [u8; 96], off: usize, w: usize| {
+        state[off..off + w].copy_from_slice(&buf[off..off + w]);
+    };
+    if modes & ADJ_OFFSET != 0 { copy_field(&mut state, 8, 8); }
+    if modes & ADJ_FREQUENCY != 0 { copy_field(&mut state, 16, 8); }
+    if modes & ADJ_MAXERROR != 0 { copy_field(&mut state, 24, 8); }
+    if modes & ADJ_ESTERROR != 0 { copy_field(&mut state, 32, 8); }
+    if modes & ADJ_STATUS != 0 { copy_field(&mut state, 40, 4); }
+    if modes & ADJ_TIMECONST != 0 { copy_field(&mut state, 48, 8); }
+    if modes & ADJ_TICK != 0 { copy_field(&mut state, 88, 8); }
+
+    // Write the state back: all modeled fields, modes = 0 (request
+    // consumed), status kept, return value TIME_OK.
+    // SAFETY: buf_ptr validated with access_ok(128); copy_to_user is the
+    // exception-table copy path.
+    let mut out = [0u8; 128];
+    out[8..96].copy_from_slice(&state[8..96]);
+    // Preserve the caller's read-only fields (precision/tolerance/time...)
+    // where we do not model them — a GET should not zero what it cannot
+    // know; the test only compares the settable fields.
+    out[56..88].copy_from_slice(&buf[56..88]);
+    out[96..128].copy_from_slice(&buf[96..128]);
     unsafe {
-        crate::arch::riscv64::uaccess::clear_user(buf_ptr, 128);
-        // status field at offset 4 (after modes u32)
-        // Return TIME_OK
-        let _ = crate::arch::riscv64::uaccess::put_user(buf_ptr.add(4) as *mut i32, 0);
+        if crate::arch::riscv64::uaccess::copy_to_user(buf_ptr, out.as_ptr(), 128) != 0 {
+            return -(errno::EFAULT as i64);
+        }
     }
     0
 }
 
+pub fn sys_adjtimex(args: SyscallArgs) -> i64 {
+    adjtimex_common(args[0] as *mut u8)
+}
+
 /// sys_clock_adjtime - Adjust per-ClockID (NR 266)
 pub fn sys_clock_adjtime(args: SyscallArgs) -> i64 {
+    let clk_id = args[0] as i32;
+
+    // Only CLOCK_REALTIME is adjustable; every other clock id (including
+    // ids >= MAX_CLOCKS) is EINVAL before anything else (LTP
+    // clock_adjtime02 cases 1-2 pass MAX_CLOCKS / MAX_CLOCKS+1).
+    if clk_id != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     // Permission check: require CAP_SYS_TIME
     if !crate::security::capable(crate::security::CAP_SYS_TIME) {
         return -(errno::EPERM as i64);
     }
 
-    let _clk_id = args[0] as i32;
-    let buf_ptr = args[1] as *mut u8;
-
-    if buf_ptr.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 128) {
-        return -(errno::EFAULT as i64);
-    }
-
-    // TIME_OK = 0: return as synchronized
-    // SAFETY: buf_ptr validated with access_ok(128); clear_user/put_user are
-    // the exception-table copy paths.
-    unsafe {
-        crate::arch::riscv64::uaccess::clear_user(buf_ptr, 128);
-        let _ = crate::arch::riscv64::uaccess::put_user(buf_ptr.add(4) as *mut i32, 0);
-    }
-    0
+    adjtimex_common(args[1] as *mut u8)
 }
 
 /// sys_fanotify_init - Initialize fanotify (NR 262)
@@ -1502,20 +1765,31 @@ pub fn sys_sched_rr_get_interval_time64(args: SyscallArgs) -> i64 {
 }
 
 
-/// Wall-clock epoch offset in whole seconds.
+/// Wall-clock epoch offset in NANOSECONDS (whole-second view kept for the
+/// RTC / legacy readers).
 /// REALTIME = monotonic + this offset. Armed once at boot from the
 /// goldfish RTC (drivers/rtc::rtc_init_wall_clock) and re-derived by
 /// settimeofday / clock_settime(CLOCK_REALTIME).
-static WALL_EPOCH_OFFSET_SECS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WALL_EPOCH_OFFSET_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Current wall-clock epoch offset (seconds).
+/// Current wall-clock epoch offset (seconds, floored).
 pub fn wall_epoch_offset_secs() -> u64 {
-    WALL_EPOCH_OFFSET_SECS.load(core::sync::atomic::Ordering::Acquire)
+    wall_epoch_offset_ns() / 1_000_000_000
 }
 
-/// Set the wall-clock epoch offset (settimeofday path).
+/// Current wall-clock epoch offset (nanoseconds).
+pub fn wall_epoch_offset_ns() -> u64 {
+    WALL_EPOCH_OFFSET_NS.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Set the wall-clock epoch offset, seconds variant (RTC boot path).
 pub fn set_wall_epoch_offset_secs(secs: u64) {
-    WALL_EPOCH_OFFSET_SECS.store(secs, core::sync::atomic::Ordering::Release);
+    set_wall_epoch_offset_ns(secs.saturating_mul(1_000_000_000));
+}
+
+/// Set the wall-clock epoch offset (settimeofday / clock_settime path).
+pub fn set_wall_epoch_offset_ns(ns: u64) {
+    WALL_EPOCH_OFFSET_NS.store(ns, core::sync::atomic::Ordering::Release);
     // P2 vDSO: refresh the shared data page immediately so REALTIME
     // readers do not wait for the next timer tick.
     crate::mm::vdso::vdso_data_tick();

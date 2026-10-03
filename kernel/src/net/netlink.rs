@@ -1202,7 +1202,9 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
     use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
 
     if arg == 0 {
-        return -(constants::EINVAL as i64);
+        // Linux dev_ioctl: a NULL user buffer for an interface request is
+        // EFAULT, not EINVAL (LTP sockioctl01 "invalid option buffer").
+        return -(constants::EFAULT as i64);
     }
 
     // ---- rtentry-based route ioctls (busybox/net-tools `route`) ----

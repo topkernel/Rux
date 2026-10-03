@@ -340,6 +340,12 @@ pub struct SchedDlEntity {
     /// Timestamp (ns) when this entity last started executing.
     /// Used by update_curr() to calculate actual runtime consumed.
     pub exec_start: AtomicU64,
+
+    /// The RELATIVE deadline value from the user's sched_attr
+    /// (sched_setattr), kept verbatim for sched_getattr readback. The
+    /// scheduler's own absolute `deadline` above is internal state that
+    /// moves with every replenishment and must not leak to user space.
+    pub attr_deadline: AtomicU64,
 }
 
 impl SchedDlEntity {
@@ -355,6 +361,7 @@ impl SchedDlEntity {
             on_rq: AtomicBool::new(false),
             dl_boosted: AtomicBool::new(false),
             exec_start: AtomicU64::new(0),
+            attr_deadline: AtomicU64::new(0),
         }
     }
 

@@ -614,6 +614,11 @@ pub struct Task {
     /// Contains deadline, runtime, period and other DL-specific info
     dl_entity: crate::sched::deadline::SchedDlEntity,
 
+    /// SCHED_RESET_ON_FORK request (set via sched_setscheduler/setattr):
+    /// forked children are reset to SCHED_OTHER/nice 0 and the request is
+    /// cleared in the child (Linux sched_reset_on_fork).
+    sched_reset_on_fork: core::sync::atomic::AtomicBool,
+
     /// Kernel stack
     /// TODO: Implement kernel stack allocation
     kernel_stack: Option<*mut u8>,
@@ -936,11 +941,11 @@ pub fn default_rlimits() -> [(u64, u64); RLIM_NLIMITS] {
 }
 
 /// Per-process POSIX timer state.
-#[derive(Clone)]
 pub struct PosixTimerState {
     /// Kernel timer ID (0 = disarmed).
     pub kernel_timer_id: u64,
-    /// Clock ID (CLOCK_REALTIME=0, CLOCK_MONOTONIC=1).
+    /// Clock ID (CLOCK_REALTIME=0, CLOCK_MONOTONIC=1, and the CPU-time
+    /// clocks 2/3 whose expiry is checked in scheduler_tick).
     pub clock_id: i32,
     /// Interval in jiffies (0 = one-shot).
     pub interval_jiffies: u64,
@@ -952,6 +957,42 @@ pub struct PosixTimerState {
     pub overrun_count: i32,
     /// User-visible timer ID.
     pub user_timer_id: i32,
+    /// CPU-time deadline (ns on sum_exec_runtime; 0 = none armed) for
+    /// CLOCK_PROCESS/THREAD_CPUTIME_ID timers. Atomics: scheduler_tick
+    /// reads/re-arms them from timer-IRQ context where taking the
+    /// posix_timers spinlock could deadlock against a syscall holder.
+    pub cputime_deadline_ns: core::sync::atomic::AtomicU64,
+    /// CPU-time re-arm interval (ns; 0 = one-shot).
+    pub cputime_interval_ns: core::sync::atomic::AtomicU64,
+    /// Wall-clock absolute expiry (time CSR ticks; 0 = none) — precise
+    /// it_value readback for wheel-armed timers.
+    pub wall_deadline_ticks: core::sync::atomic::AtomicU64,
+    /// Programmed interval in ns (precise it_interval readback).
+    pub interval_ns: u64,
+}
+
+impl Clone for PosixTimerState {
+    fn clone(&self) -> Self {
+        Self {
+            kernel_timer_id: self.kernel_timer_id,
+            clock_id: self.clock_id,
+            interval_jiffies: self.interval_jiffies,
+            sigev_signo: self.sigev_signo,
+            sigev_notify: self.sigev_notify,
+            overrun_count: self.overrun_count,
+            user_timer_id: self.user_timer_id,
+            cputime_deadline_ns: core::sync::atomic::AtomicU64::new(
+                self.cputime_deadline_ns.load(core::sync::atomic::Ordering::Relaxed),
+            ),
+            cputime_interval_ns: core::sync::atomic::AtomicU64::new(
+                self.cputime_interval_ns.load(core::sync::atomic::Ordering::Relaxed),
+            ),
+            wall_deadline_ticks: core::sync::atomic::AtomicU64::new(
+                self.wall_deadline_ticks.load(core::sync::atomic::Ordering::Relaxed),
+            ),
+            interval_ns: self.interval_ns,
+        }
+    }
 }
 
 impl Task {
@@ -1009,6 +1050,7 @@ impl Task {
             rt_run_list: ListHead::new(),
             rt_entity: crate::sched::rt::SchedRtEntity::new(),
             dl_entity: crate::sched::deadline::SchedDlEntity::new(),
+            sched_reset_on_fork: core::sync::atomic::AtomicBool::new(false),
             kernel_stack: None,
             kernel_stack_bottom: 0,
             is_fork_child: core::sync::atomic::AtomicBool::new(false),
@@ -2362,6 +2404,19 @@ impl Task {
     #[inline]
     pub fn dl_entity_mut(&mut self) -> &mut crate::sched::deadline::SchedDlEntity {
         &mut self.dl_entity
+    }
+
+    /// SCHED_RESET_ON_FORK request state.
+    #[inline]
+    pub fn sched_reset_on_fork(&self) -> bool {
+        self.sched_reset_on_fork.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Set/clear the SCHED_RESET_ON_FORK request (atomic — called from
+    /// sched_setscheduler/sched_setattr without exclusive task access).
+    #[inline]
+    pub fn set_sched_reset_on_fork(&self, on: bool) {
+        self.sched_reset_on_fork.store(on, core::sync::atomic::Ordering::Release);
     }
 
     /// Get nice value

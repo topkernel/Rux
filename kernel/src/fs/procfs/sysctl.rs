@@ -116,6 +116,14 @@ pub fn generate_ostype() -> Vec<u8> {
     Vec::from(&b"Linux\n"[..])
 }
 
+/// /proc/sys/kernel/tainted — taint-flag bitmap. The kernel sets no taint
+/// bits today; LTP's tst_taint reads it before/after each test to detect
+/// kernel bugs (timerfd_settime02 aborts TBROK when the file is missing).
+pub fn generate_tainted() -> Vec<u8> {
+    b"0\n".to_vec()
+}
+
+
 /// /proc/sys/kernel/cap_last_cap — highest supported capability number
 /// (read by libcap-ng init() to size the capability bounding set).
 pub fn generate_cap_last_cap() -> Vec<u8> {

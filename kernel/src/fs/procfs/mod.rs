@@ -543,6 +543,13 @@ impl ProcFSSuperBlock {
             sysctl::generate_ostype,
             self.alloc_ino(),
         )));
+        // Kernel taint flags — always 0 here; read by LTP's per-test
+        // taint check (tst_taint, timerfd_settime02 and friends).
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"tainted".to_vec(),
+            sysctl::generate_tainted,
+            self.alloc_ino(),
+        )));
         // Highest supported capability number (read by libcap-ng init()).
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"cap_last_cap".to_vec(),

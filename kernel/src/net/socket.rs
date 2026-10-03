@@ -75,6 +75,15 @@ pub struct SocketOptions {
     pub linger_on: bool,
     /// SO_LINGER: l_linger seconds.
     pub linger_secs: u32,
+    /// MCAST_JOIN_GROUP / MCAST_LEAVE_GROUP (SOL_IP, RFC 3678 group_req):
+    /// joined multicast group addresses in NETWORK byte order. Kept on the
+    /// Socket (not the UDP slot) so a TCP socket can hold memberships too,
+    /// and accepted children start empty (LTP accept02: the clone of a
+    /// listener must NOT inherit memberships — MCAST_LEAVE_GROUP fails
+    /// EADDRNOTAVAIL on it). Fixed-size storage keeps SocketOptions Copy.
+    pub mcast_groups: [u32; 4],
+    /// Number of valid entries in mcast_groups.
+    pub mcast_group_count: u8,
 }
 
 impl SocketOptions {
@@ -95,6 +104,8 @@ impl SocketOptions {
             ttl: 0,
             linger_on: false,
             linger_secs: 0,
+            mcast_groups: [0u32; 4],
+            mcast_group_count: 0,
         }
     }
 }
@@ -424,6 +435,38 @@ impl Socket {
                 *self.state.lock() = SocketState::Connecting;
                 let ret = crate::net::tcp::tcp_connect(tcp_fd, addr, port);
                 if ret == 0 {
+                    // Loopback handshake driver (LTP accept02 hang): the SYN
+                    // sits in the loopback backlog until SOMEBODY drains it.
+                    // The listener's accept() polls before waiting, but when
+                    // the SYN lands after that poll nothing else does — the
+                    // client returned from connect(), everyone else blocked,
+                    // and the accept slept forever. Drain from HERE (syscall
+                    // context, same discipline as the accept-side poll) until
+                    // the protocol slot is ESTABLISHED. Harmless for real
+                    // virtio-net peers (poll is a no-op without queued RX).
+                    let mut established = false;
+                    for _ in 0..8 {
+                        let done = crate::net::tcp::tcp_socket_get(tcp_fd)
+                            .map(|ts| {
+                                ts.state == crate::net::tcp::TcpState::TCP_ESTABLISHED
+                                    || ts.state == crate::net::tcp::TcpState::TCP_CLOSE
+                            })
+                            .unwrap_or(true);
+                        if done {
+                            established = true;
+                            break;
+                        }
+                        crate::net::ethernet::ethernet_poll();
+                    }
+                    // The client flips ESTABLISHED when it EMITS the final
+                    // ACK — the peer still has to receive it. Two extra
+                    // drains flush that residual so an immediately
+                    // following accept()/write() on the peer side does not
+                    // see a half-open child (LTP bind04 write EIO).
+                    if established {
+                        crate::net::ethernet::ethernet_poll();
+                        crate::net::ethernet::ethernet_poll();
+                    }
                     *self.state.lock() = SocketState::Connected;
                     Ok(())
                 } else {
@@ -1372,16 +1415,23 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
     let nonblock = (type_ & SOCK_NONBLOCK_FLAG) != 0;
     let cloexec = (type_ & SOCK_CLOEXEC_FLAG) != 0;
 
+    // Linux inet_create: protocol outside [0, IPPROTO_MAX) is EINVAL; a
+    // valid number that does not match the socket TYPE is EPROTONOSUPPORT
+    // (LTP socket01: SOCK_STREAM+IPPROTO_UDP, SOCK_DGRAM+IPPROTO_TCP,
+    // SOCK_STREAM+IPPROTO_ICMP all expect EPROTONOSUPPORT, not EINVAL).
+    if protocol < 0 || protocol >= 256 {
+        return Err(-22); // EINVAL — protocol number out of range
+    }
     let sock_type = match type_ & SOCK_TYPE_MASK {
         SOCK_STREAM => {
             if protocol != 0 && protocol != IPPROTO_TCP {
-                return Err(-22); // EINVAL
+                return Err(-93); // EPROTONOSUPPORT
             }
             SocketType::Tcp
         }
         SOCK_DGRAM => {
             if protocol != 0 && protocol != IPPROTO_UDP {
-                return Err(-22); // EINVAL
+                return Err(-93); // EPROTONOSUPPORT
             }
             SocketType::Udp
         }
