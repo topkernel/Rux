@@ -159,32 +159,28 @@ impl Dentry {
             }
             let parent = d.parent.lock().clone();
             if parent.is_none() {
-                // Reached root — only push name if it's non-empty (e.g. "/")
-                let root_name = d.get_name();
-                if !root_name.is_empty() {
-                    components.push(root_name);
-                }
+                // Reached the root dentry. Its name is "/" — pushing it as
+                // a COMPONENT made the join below emit "//tmp/..." (a
+                // leading double slash) for every absolute path. Callers
+                // that string-compare results (LTP getcwd01, symlink01
+                // chdir01 vs getcwd) need the canonical single-slash form,
+                // so the root contributes the leading '/', not a component.
                 break;
             }
             components.push(d.get_name());
             current = parent;
         }
         components.reverse();
-        // Build path
-        let mut path = if components.is_empty() {
-            alloc::string::String::from("/")
-        } else {
-            let mut s = alloc::string::String::new();
-            for comp in &components {
-                if !s.is_empty() {
-                    s.push('/');
-                }
-                s.push_str(comp);
+        // Build path — absolute: "/" + root-to-leaf components.
+        let mut path = alloc::string::String::from("/");
+        for comp in &components {
+            if path != "/" {
+                path.push('/');
             }
-            s
-        };
-        if !name.is_empty() {
-            if !path.is_empty() && path != "/" {
+            path.push_str(comp);
+        }
+        if !name.is_empty() && name != "/" {
+            if path != "/" {
                 path.push('/');
             }
             path.push_str(&name);

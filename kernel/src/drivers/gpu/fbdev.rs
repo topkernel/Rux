@@ -74,10 +74,79 @@ extern "C" fn kfbflush_fn(_arg: *mut core::ffi::c_void) -> i32 {
         }
 
         if FB_USER_MAPPED.load(Ordering::Acquire) {
+            fb_canary();
             super::flush_framebuffer();
         }
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// FB canary (fb0-corruption hunt): sample the first words of each 2MB half
+// of the scanout buffer every flush tick. Once a half HAS held content, it
+// must never read back all-zero — the fb is not anonymous memory, nothing
+// legitimately clears it. On a nonzero->zero transition dump the buddy
+// state of the fb block plus the recent big-block alloc/free ring.
+// ---------------------------------------------------------------------------
+static CANARY_LO_NZ: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static CANARY_HI_NZ: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static CANARY_FIRED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn fb_canary() {
+    use crate::mm::buddy_allocator as buddy;
+    let lo = buddy::FB_GUARD_LO.load(Ordering::Relaxed);
+    let hi = buddy::FB_GUARD_HI.load(Ordering::Relaxed);
+    if lo == 0 || hi <= lo {
+        return;
+    }
+    let half = (hi - lo) / 2;
+    // 256 samples per half, spread over the first 1MB of each half.
+    let nz = |base: usize| -> usize {
+        let mut n = 0;
+        for k in 0..256 {
+            let p = (base + k * 4096) as *const u64;
+            let v = unsafe { core::ptr::read_volatile(p) };
+            if v != 0 {
+                n += 1;
+            }
+        }
+        n
+    };
+    let lo_nz = nz(lo);
+    let hi_nz = nz(lo + half);
+    let prev_lo = CANARY_LO_NZ.load(Ordering::Relaxed);
+    let prev_hi = CANARY_HI_NZ.load(Ordering::Relaxed);
+    CANARY_LO_NZ.store(lo_nz, Ordering::Relaxed);
+    CANARY_HI_NZ.store(hi_nz, Ordering::Relaxed);
+    let trip = (prev_lo != 0 && lo_nz == 0) || (prev_hi != 0 && hi_nz == 0);
+    if !trip || CANARY_FIRED.swap(1, Ordering::Relaxed) != 0 {
+        return;
+    }
+    let (m_lead_free, m_lead_order) = buddy::block_meta_at(lo);
+    let (m_mid_free, m_mid_order) = buddy::block_meta_at(lo + half);
+    crate::pr_err!(
+        "FBCANARY: fb content vanished! lo_nz {}->{} hi_nz {}->{} meta(lead free={} order={} mid free={} order={})",
+        prev_lo, lo_nz, prev_hi, hi_nz,
+        m_lead_free, m_lead_order, m_mid_free, m_mid_order
+    );
+    // Dump the recent big-block ring (last events first seen is fine).
+    let cur = buddy::bb_ev_cur_load();
+    crate::pr_err!("FBCANARY: last {} big-block events (cur={}):", buddy::BB_RING, cur);
+    for k in (0..buddy::BB_RING).rev() {
+        let i = (cur + buddy::BB_RING - 1 - k) % buddy::BB_RING;
+        let ptr = buddy::BB_EV_PTR[i].load(Ordering::Relaxed);
+        let op = buddy::BB_EV_OP[i].load(Ordering::Relaxed);
+        if ptr == 0 {
+            continue;
+        }
+        let is_alloc = op >> 63;
+        let order = (op >> 56) & 0x7F;
+        let jiffies = op & 0xFFFF_FFFF_FFFF;
+        crate::pr_err!(
+            "FBBIG[{}] {} ptr={:#x} order={} jiffies={}",
+            i, if is_alloc == 1 { "ALLOC" } else { "FREE " }, ptr, order, jiffies
+        );
+    }
 }
 
 /// ioctl command codes

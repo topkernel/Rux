@@ -948,10 +948,16 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
                     // POSIX SA_RESETHAND (System V semantics): the
                     // disposition resets to SIG_DFL once delivery has
                     // started, so a second occurrence of the signal takes
-                    // the default action unless re-armed. Reset the stored
-                    // action (flags included — glibc readback expects it).
+                    // the default action unless re-armed. Linux
+                    // (kernel/signal.c get_signal) resets ONLY the
+                    // sa_handler field — sa_flags/sa_mask survive, so a
+                    // subsequent sigaction(NULL, &oact) query still
+                    // reports e.g. SA_SIGINFO (LTP sigaction01 case 1:
+                    // SA_RESETHAND must not clear SA_SIGINFO).
                     if let Some(sig_struct) = (*current).signal.as_ref() {
-                        let _ = sig_struct.set_action(sig, SigAction::new());
+                        let mut reset = action;
+                        reset.sa_handler = SigAction::default_handler();
+                        let _ = sig_struct.set_action(sig, reset);
                     }
                 }
             } else if action.action() == SigActionKind::Ignore {

@@ -897,8 +897,23 @@ pub fn sys_chdir(args: SyscallArgs) -> i64 {
             } else {
                 return -(errno::ENOENT as i64);
             }
+            // Linux getcwd(2) returns the PHYSICAL path: the kernel keeps
+            // the cwd as a (vfsmount, dentry) pair, so a chdir through a
+            // symlink reports the RESOLVED location, never the symlink
+            // name (LTP symlink01 chdir01 compares getcwd against the
+            // object directory). Storing the literal argument string made
+            // getcwd echo the unresolved symlink path.
+            let physical = vpath
+                .dentry
+                .as_ref()
+                .map(|d| d.build_path())
+                .unwrap_or_else(|| {
+                    core::str::from_utf8(&abs_path)
+                        .map(|s| alloc::string::String::from(s))
+                        .unwrap_or_else(|_| alloc::string::String::from("/"))
+                });
             if let Some(current) = crate::sched::current() {
-                unsafe { (*current).set_cwd(&abs_path); }
+                unsafe { (*current).set_cwd(physical.as_bytes()); }
             }
             0
         }
@@ -1379,6 +1394,13 @@ pub fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::s
     let mut buf = [0u8; PATH_MAX];
     let pathname_str = read_user_path(pathname_ptr, &mut buf)?;
 
+    // Linux getname(): an EMPTY pathname is ENOENT, never the cwd. The old
+    // code joined "" onto the cwd ("/tmp/LTP_xxx/") so chmod("") silently
+    // chmod'ed the test's own temp directory (LTP chmod06 case 6).
+    if pathname_str.is_empty() {
+        return Err((-errno::ENOENT as i64) as u64);
+    }
+
     let full_path: alloc::string::String = if pathname_str.starts_with('/') {
         alloc::string::String::from(pathname_str)
     } else if dirfd == AT_FDCWD {
@@ -1474,7 +1496,13 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::vfs_chown(full_path.as_ref(), uid, gid) {
+    // AT_SYMLINK_NOFOLLOW: lchown(2) semantics — the ownership change
+    // applies to the SYMBOLIC LINK itself, never the target. musl maps
+    // lchown() to fchownat(..., AT_SYMLINK_NOFOLLOW), so ignoring the flag
+    // made lchown chown the target instead (LTP chown05 saw the link keep
+    // root:root where it expected the nobody ownership it had set).
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    match crate::fs::vfs::vfs_chown(full_path.as_ref(), uid, gid, follow) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }
