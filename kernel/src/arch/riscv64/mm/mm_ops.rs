@@ -1417,6 +1417,22 @@ pub unsafe fn copy_page_table_cow(
     // still a TODO for SMP scalability.
     use crate::mm::page_desc::pfn_to_page_mut;
 
+    // Framebuffer frames (virtio-gpu scanout backing store) are
+    // device-shared memory and must NEVER be COW-marked. The VMA-range
+    // exemption (cow_exempt) keys off the mapping's VMA flags/type, which
+    // is a derived, fragile identity: any fork whose VMA state has lost
+    // SHARED/Device downgrades the mapping's PTEs to RO+COW, and the very
+    // next store from the fb owner (Xorg's fbdev driver) COW-faults into
+    // a PRIVATE copy — from then on every pixel lands off-screen while
+    // /dev/fb0 readers (fbmap-style mmap probes) see only the stale
+    // pre-fork image, usually zeros (the fb0 read-regression family).
+    // The PHYSICAL frame range is invariant, so key the exemption on it
+    // as well. This mirrors Linux fbdev, which maps the scanout with
+    // VM_IO|VM_SHARED semantics regardless of MAP_PRIVATE — writes from
+    // any mapper always reach the device memory.
+    let fb_frame_range: Option<(u64, u64)> = crate::drivers::gpu::get_framebuffer_info()
+        .map(|i| (i.addr >> 12, (i.addr + i.size as u64 + 0xFFF) >> 12));
+
     if parent_root_ppn == 0 {
         return None;
     }
@@ -1518,13 +1534,20 @@ pub unsafe fn copy_page_table_cow(
                 // COW exemption (see MmStruct::fork): MAP_SHARED and
                 // device VMA pages are inherited as-is — write-protecting
                 // them in the PARENT would COW-divert every later store
-                // (the fbterm framebuffer-freeze root cause).
+                // (the fbterm framebuffer-freeze root cause). Framebuffer
+                // frames are additionally exempted by PHYSICAL range (see
+                // fb_frame_range above): the scanout is device-shared
+                // memory, so no fork may ever COW it away.
                 let leaf_va = ((vpn2 as u64) << 30)
                     | ((vpn1 as u64) << 21)
                     | ((vpn0 as u64) << 12);
+                let leaf_ppn = pte0.ppn();
                 let cow_exempt_leaf = cow_exempt
                     .iter()
-                    .any(|(s, e)| leaf_va >= *s && leaf_va < *e);
+                    .any(|(s, e)| leaf_va >= *s && leaf_va < *e)
+                    || fb_frame_range.map_or(false, |(lo, hi)| {
+                        leaf_ppn >= lo && leaf_ppn < hi
+                    });
 
                 let new_pte = if is_user {
                     let phys_ppn = pte0.ppn() as usize;
