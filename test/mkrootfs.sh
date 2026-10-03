@@ -154,6 +154,22 @@ if [ -f "$COREDUMP_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null
     fi
 fi
 
+# Build + install the heap-leak regression probe (static glibc; drives
+# fork/pipes/close-on-exec/execve churn — the workload that exposed the
+# exe_path Task-field leak; heap flatness is checked via /proc/meminfo
+# HeapUsed by test/exec-heap-check.sh).
+CLOEXEC_PROBE_SRC="$PROJECT_ROOT/test/cloexec_probe.c"
+if [ -f "$CLOEXEC_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing cloexec_probe to /test/cloexec_probe..."
+    if riscv64-linux-gnu-gcc -static -O2 \
+         -o "$STAGING/test/cloexec_probe" "$CLOEXEC_PROBE_SRC"; then
+        chmod +x "$STAGING/test/cloexec_probe"
+    else
+        echo "Warning: cloexec_probe failed to compile (skipped)"
+        rm -f "$STAGING/test/cloexec_probe"
+    fi
+fi
+
 # Copy linux-ltp test suite
 LINUX_LTP_DIR="$PROJECT_ROOT/userspace/linux-ltp/output"
 if [ -d "$LINUX_LTP_DIR/testcases" ]; then

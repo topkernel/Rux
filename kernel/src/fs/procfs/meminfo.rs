@@ -51,6 +51,16 @@ pub fn generate() -> Vec<u8> {
     content.push_str(&format!("Cached:                {} kB\n", cached_kb));
     content.push_str("SwapCached:            0 kB\n");
 
+    // Kernel heap watermark (Rux extension, the soak observability hook):
+    // HeapUsed is the buddy heap in use — under steady-state load (exec
+    // loops, IPC churn, GUI sessions) it must oscillate, not climb; a
+    // monotonic climb is a kernel-side leak (see the cloexec Vec leak this
+    // line was added to guard). HeapTotal is the fixed heap window.
+    let heap = crate::mm::buddy_allocator::buddy_stats();
+    content.push_str(&format!("HeapTotal:      {} kB\n", heap.heap_size / 1024));
+    content.push_str(&format!("HeapUsed:       {} kB\n", heap.used_bytes / 1024));
+    content.push_str(&format!("HeapFree:       {} kB\n", heap.free_bytes / 1024));
+
     // Active/Inactive memory
     let active_kb = active_file_kb + active_anon_kb;
     let inactive_kb = inactive_file_kb + inactive_anon_kb;

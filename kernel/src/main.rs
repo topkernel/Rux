@@ -148,6 +148,19 @@ mod tests;
 // live frames (this handler <- alloc::alloc::alloc <- __rust_alloc <- the
 // kernel caller), so the validated walk in memwatch::walk_fp_chain cannot
 // fault.
+//
+// ENOMEM defense (heap-v2): the handler used to end in an unconditional
+// `panic!`, which stops every CPU — one process's OOM killed the whole
+// machine. Linux answers a GFP_KERNEL allocation failure with SIGKILL/OOM
+// for the offending task, not a kernel halt. `#[alloc_error_handler]` has
+// signature `fn(Layout) -> !`, so "return null to the caller" is not
+// literally possible here (fallible callers already see null from
+// GlobalAlloc::alloc); what we CAN do is scope the damage: when the failure
+// arrives on the retryable path — task (process) context, IRQs enabled (no
+// lock_irqsave held), scheduler up — kill the CURRENT task with SIGKILL and
+// let its teardown (which frees memory) run. Only IRQ/atomic-context
+// failures, early-boot failures, or a second failure during the teardown
+// itself still fall through to panic.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
@@ -171,6 +184,33 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
         taskdump_raw_line(format_hex(*f).as_bytes());
     }
     taskdump_raw_line(b"\n");
+
+    // Scope the blast radius: process-context failures kill the offending
+    // TASK (the kernel survives), everything else panics as before. The
+    // TIF_MEMDIE latch is per-task (the same primitive mm/oom_kill.rs uses)
+    // and prevents recursion: do_exit's own teardown (fd closes, mm drop,
+    // printk) can allocate again and must land in panic, not back here.
+    // SIGKILL (9) never triggers the coredump path inside do_exit, and the
+    // flag dies with the task, so later failures on other tasks keep the
+    // task-kill defense.
+    let kill_self = crate::interrupt::preempt::in_task()
+        && crate::arch::riscv64::cpu::get_interrupts_state()
+        && match crate::sched::current() {
+            Some(task) => {
+                use crate::process::task::TIF_MEMDIE;
+                if task.test_ti_flag(TIF_MEMDIE) {
+                    false
+                } else {
+                    task.set_ti_flag(TIF_MEMDIE);
+                    true
+                }
+            }
+            None => false,
+        };
+    if kill_self {
+        taskdump_raw_line(b"ALLOCTHROW -> SIGKILL current task (task-context ENOMEM)\n");
+        crate::process::exit::do_exit(-9);
+    }
     panic!("Allocation error: {:?}", layout);
 }
 

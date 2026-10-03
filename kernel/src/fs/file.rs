@@ -811,15 +811,27 @@ impl FdTable {
 
     /// Close all file descriptors with close-on-exec flag set
     pub fn close_cloexec_fds(&self) {
-        // Collect cloexec fds under lock, then close outside lock
-        let cloexec_fds: alloc::vec::Vec<usize> = {
+        // Heap-leak fix (soak: pure-exec loop, double-reproduced OOM): the
+        // previous implementation collected the cloexec fds into a heap
+        // Vec<usize> on EVERY execve. The collect's growth chain (1, 2, ...
+        // 8 KiB worth of allocs and reallocs, ~16 KiB total for a large
+        // table) was never fully returned to the allocator, so each exec
+        // bled ~16 KiB of heap and a 128 MiB heap died in ~64 minutes of
+        // exec load. cloexec_bits is a fixed [u64; MAX_FDS/64] — 128 bytes
+        // for MAX_FDS=1024 — so snapshot it on the STACK under the lock,
+        // then close outside the lock with zero heap traffic.
+        let mut snapshot: [u64; MAX_FDS / 64] = [0; MAX_FDS / 64];
+        {
             let entry = self.entry.lock_irqsave();
-            (0..MAX_FDS).filter(|&fd| {
-                entry.cloexec_bits[fd / 64] & (1u64 << (fd % 64)) != 0
-            }).collect()
-        };
-        for fd in cloexec_fds {
-            let _ = self.close_fd(fd);
+            snapshot.copy_from_slice(&entry.cloexec_bits);
+        }
+        for (word_idx, &word) in snapshot.iter().enumerate() {
+            let mut word = word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= !(1u64 << bit);
+                let _ = self.close_fd(word_idx * 64 + bit);
+            }
         }
     }
 }
