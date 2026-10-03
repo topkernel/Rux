@@ -210,11 +210,18 @@ pub fn ext4_new_inode(
     let mut inode = Ext4InodeOnDisk::default();
     inode.i_mode = mode;
     inode.i_links_count = 1;
-    // Inherit uid/gid from current process credentials
+    // Inherit uid/gid from current process credentials.
+    // Linux inode_init_owner() assigns current_fsuid()/current_fsgid() —
+    // the EFFECTIVE filesystem ids, not the real ones. seteuid(nobody)
+    // changes fsuid only; using the real uid made every file created by a
+    // seteuid'd LTP test root-owned, so the creator then failed its own
+    // open(O_CREAT|O_RDWR) with EACCES against the other-permission bits
+    // (chmod03/utimes01 TBROK, and root-owned stale files that broke
+    // tst_rmdir cleanup for later tests).
     let (uid, gid) = if let Some(task) = crate::sched::current() {
         // SAFETY: task is a valid reference from sched::current(); cred() is a simple field accessor.
         let cred = unsafe { (*task).cred() };
-        (cred.uid as u16, cred.gid as u16)
+        (cred.fsuid as u16, cred.fsgid as u16)
     } else {
         (0u16, 0u16)
     };
