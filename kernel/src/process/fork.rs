@@ -252,6 +252,13 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         crate::pr_warn!("clone: CLONE_SIGHAND requires CLONE_VM");
         return Err(einval());
     }
+    // CLONE_FS|CLONE_NEWNS is mutually exclusive (kernel/fork.c copy_fs):
+    // the child cannot both SHARE the parent's fs info and get a private
+    // copy of its mount namespace (LTP clone302 "fs-newns").
+    if args.flags & CLONE_NEWNS != 0 && args.flags & CLONE_FS != 0 {
+        crate::pr_warn!("clone: CLONE_NEWNS is incompatible with CLONE_FS");
+        return Err(einval());
+    }
     // Unknown flag bits (excluding the low CSIGNAL byte) → EINVAL.
     if args.flags & !CLONE_KNOWN_FLAGS & !0xff != 0 {
         crate::pr_warn!("clone: unknown flags {:#x}", args.flags);
@@ -371,7 +378,17 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // parent's children list — wait4 only ever reaps process products.
         let is_thread = args.flags & CLONE_THREAD != 0;
         if !is_thread {
-            (*current_ptr).add_child(task_ptr);
+            if args.flags & CLONE_PARENT != 0 {
+                // CLONE_PARENT: the child's parent is the CALLER'S parent
+                // (Linux: real_parent of the caller). The child's getppid()
+                // equals the caller's getppid(), and the CALLER cannot
+                // wait for it — the grandparent reaps it (LTP clone08's
+                // CLONE_PARENT case).
+                let grandparent = (*current_ptr).parent_ptr().unwrap_or(current_ptr);
+                (*grandparent).add_child(task_ptr);
+            } else {
+                (*current_ptr).add_child(task_ptr);
+            }
         }
 
         // === copy_thread: Set up child's context ===

@@ -657,6 +657,114 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 }
                             }
 
+                            // MAP_SHARED|MAP_ANONYMOUS: the mapping must be
+                            // genuinely shared across fork (Linux shmem
+                            // object semantics). A demand-filled anonymous
+                            // VMA faults a PRIVATE zero page per process —
+                            // the parent never sees the child's stores
+                            // (LTP getpid02/clone03: the child writes
+                            // getpid() into a MAP_SHARED|MAP_ANONYMOUS
+                            // page and the parent re-reads 0). Eagerly
+                            // allocate zeroed pages and map them NOW: the
+                            // VMA carries VmaFlags::SHARED, so fork's
+                            // copy_page_table_cow inherits these frames
+                            // as-is (COW-exempt, refcount bumped) and both
+                            // processes alias the same physical pages.
+                            // Same eager model shmat() uses for SysV shm.
+                            if map_flags & map::MAP_ANONYMOUS != 0
+                                && vma_flags.contains(VmaFlags::SHARED)
+                            {
+                                let root_ppn = address_space.root_ppn();
+                                let mut pte_flags = PageTableEntry::V
+                                    | PageTableEntry::A
+                                    | PageTableEntry::D
+                                    | PageTableEntry::U;
+                                // Same W^X folds as the demand-fault path.
+                                if vma_flags.is_readable() || vma_flags.is_writable() {
+                                    pte_flags |= PageTableEntry::R;
+                                }
+                                if vma_flags.is_writable() {
+                                    pte_flags |= PageTableEntry::W;
+                                }
+                                if vma_flags.is_executable() {
+                                    pte_flags |= PageTableEntry::X;
+                                }
+                                let npages = actual_length / crate::mm::page::PAGE_SIZE;
+                                let mut failed = false;
+                                for i in 0..npages {
+                                    let phys = crate::mm::page_alloc::get_zeroed_page(
+                                        crate::mm::zone::GfpFlags::GFP_USER,
+                                    );
+                                    if phys == 0 {
+                                        failed = true;
+                                        break;
+                                    }
+                                    // SAFETY: mapped_addr + i*PAGE_SIZE is
+                                    // page-aligned inside the VMA just added;
+                                    // phys is a fresh zeroed page; root_ppn is
+                                    // the caller's page-table root. Map+book-
+                                    // keeping under the PTE lock, matching the
+                                    // demand-fault discipline.
+                                    unsafe {
+                                        let _pte_guard =
+                                            crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK
+                                                .lock_irqsave();
+                                        crate::arch::riscv64::mm::map_user_page(
+                                            root_ppn,
+                                            crate::arch::riscv64::mm::memory_layout::VirtAddr::new(
+                                                (mapped_addr.as_usize()
+                                                    + i * crate::mm::page::PAGE_SIZE)
+                                                    as u64,
+                                            ),
+                                            crate::arch::riscv64::mm::memory_layout::PhysAddr::new(
+                                                phys as u64,
+                                            ),
+                                            pte_flags,
+                                        );
+                                        // Mirror the SharedMemory fault-path
+                                        // page bookkeeping (Anonymous flag,
+                                        // index, mapcount, rmap) so vmscan/
+                                        // unmap see a normal shared anon
+                                        // page. No anon-LRU: like SysV shm
+                                        // pages, these have no private rmap
+                                        // walk to reverse.
+                                        let page = crate::mm::page_desc::pfn_to_page_mut(
+                                            crate::mm::phys_to_pfn(phys),
+                                        );
+                                        if !page.is_null() {
+                                            (*page).set_flag(
+                                                crate::mm::page_desc::PageFlag::Anonymous,
+                                            );
+                                            (*page).set_index(
+                                                (mapped_addr.as_usize()
+                                                    + i * crate::mm::page::PAGE_SIZE)
+                                                    / crate::mm::page::PAGE_SIZE,
+                                            );
+                                            (*page).inc_mapcount();
+                                            crate::mm::rmap::page_record_mapping(
+                                                &*page,
+                                                (&address_space) as *const _ as usize,
+                                                mapped_addr.as_usize()
+                                                    + i * crate::mm::page::PAGE_SIZE,
+                                            );
+                                        }
+                                    }
+                                }
+                                if failed {
+                                    // Unwind the partial mapping and the VMA;
+                                    // munmap frees the eagerly mapped frames.
+                                    let _ = address_space.munmap(
+                                        VirtAddr::new(mapped_addr.as_usize()),
+                                        actual_length,
+                                    );
+                                    return mmap_error::ENOMEM;
+                                }
+                                address_space.add_rss(npages as u64);
+                                // SAFETY: sfence.vma is valid in S-mode; the
+                                // new PTEs need a flush before first use.
+                                unsafe { core::arch::asm!("sfence.vma"); }
+                            }
+
                             mapped_addr.as_usize() as i64
                         },
                         Err(e) => {
@@ -1702,6 +1810,50 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
             return mmap_error::ENOMEM;
         }
 
+        // Advice/VMA compatibility checks (Linux mm/madvise.c):
+        // - MADV_REMOVE / MADV_DONTNEED / MADV_FREE over a VM_LOCKED
+        //   range fail with EINVAL (LTP madvise02 mlocks its file mapping
+        //   in tcases_filter, then expects EINVAL for each).
+        // - MADV_MERGEABLE / MADV_UNMERGEABLE need KSM, which this kernel
+        //   does not provide → EINVAL.
+        // - MADV_FREE only applies to private anonymous memory → EINVAL
+        //   on file-backed ranges.
+        {
+            let mut check = addr;
+            let mut rejected = false;
+            while check < addr + length_aligned {
+                match vma_mgr.find(VirtAddr::new(check)) {
+                    Some(vma) => {
+                        let locked = vma
+                            .flags()
+                            .contains(crate::mm::vma::VmaFlags::LOCKED);
+                        let anon = vma.vma_type() == crate::mm::vma::VmaType::Anonymous
+                            || vma.vma_type() == crate::mm::vma::VmaType::SharedMemory;
+                        match advice {
+                            MADV_REMOVE | MADV_DONTNEED | MADV_FREE if locked => {
+                                rejected = true;
+                            }
+                            MADV_MERGEABLE | MADV_UNMERGEABLE => {
+                                rejected = true; // no KSM in this kernel
+                            }
+                            MADV_FREE if !anon => {
+                                rejected = true;
+                            }
+                            _ => {}
+                        }
+                        if rejected {
+                            break;
+                        }
+                        check = vma.end().as_usize();
+                    }
+                    None => break,
+                }
+            }
+            if rejected {
+                return mmap_error::EINVAL;
+            }
+        }
+
         // For MADV_DONTNEED and MADV_REMOVE, need entire range to be in VMA
         if advice == MADV_DONTNEED || advice == MADV_REMOVE {
             // Find VMA covering entire range
@@ -1984,9 +2136,14 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
     // reclaim/swap paths (like Linux's vm_flags bit). Granularity is the
     // WHOLE VMA, not a split range — a partial mlock of a large mapping
     // pins more than requested (documented approximation; VMA splitting is
-    // future work). RLIMIT_MEMLOCK is NOT enforced yet (rlimits are
-    // stored-but-inactive; see gap analysis). Pages are not prefaulted —
-    // with swap still unwired, nothing can evict them anyway.
+    // future work). RLIMIT_MEMLOCK is enforced the Linux way
+    // (mm/mlock.c): a caller without CAP_IPC_LOCK and a zero
+    // RLIMIT_MEMLOCK gets EPERM (can_do_mlock); exceeding the soft limit
+    // gets ENOMEM. The locked-bytes projection counts LOCKED VMA bytes
+    // OUTSIDE the range being locked now (they keep their charge) plus
+    // the FULL size of every VMA the range touches (our granularity) —
+    // re-locking an already-locked range is therefore idempotent (LTP
+    // mlock203's VmLck-stable expectation).
     let length_aligned = (length + crate::mm::page::PAGE_SIZE - 1)
         & !(crate::mm::page::PAGE_SIZE - 1);
     let end = match addr.checked_add(length_aligned) {
@@ -1998,10 +2155,46 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
         Some(t) => t,
         None => return -12_i64,
     };
+
+    // RLIMIT_MEMLOCK gate (Linux can_do_mlock): EPERM when the caller
+    // holds no CAP_IPC_LOCK and the soft limit is 0.
+    let has_ipc_lock = crate::security::capable(crate::security::CAP_IPC_LOCK);
+    let (memlock_cur, _) = current_task
+        .rlimit(crate::process::task::rlimit_res::MEMLOCK);
+    if !has_ipc_lock && memlock_cur == 0 {
+        return -1_i64; // EPERM
+    }
+
     let address_space = match current_task.address_space_mut() {
         Some(a) => a,
         None => return -12_i64,
     };
+
+    // RLIMIT_MEMLOCK accounting: ENOMEM when the post-lock locked bytes
+    // would exceed the soft limit (CAP_IPC_LOCK holders bypass).
+    if !has_ipc_lock && memlock_cur != u64::MAX {
+        let (mut locked_others, mut locked_target) = (0u64, 0u64);
+        {
+            let mgr = address_space.vma_read();
+            for v in mgr.iter() {
+                let (s, e2) = (v.start().as_usize(), v.end().as_usize());
+                let bytes = (e2 - s) as u64;
+                if v.flags().contains(VmaFlags::LOCKED) {
+                    if e2 <= addr || s >= end {
+                        locked_others += bytes; // stays locked, outside range
+                    }
+                    // Overlapping the range: it will be re-charged in
+                    // locked_target below; don't double count.
+                }
+                if e2 > addr && s < end {
+                    locked_target += bytes; // our whole-VMA granularity
+                }
+            }
+        }
+        if locked_others + locked_target > memlock_cur {
+            return -12_i64; // ENOMEM
+        }
+    }
 
     let mut cursor = addr;
     loop {
@@ -2168,6 +2361,36 @@ pub fn sys_mlockall(args: [u64; 6]) -> i64 {
         Some(t) => t,
         None => return -12_i64,
     };
+
+    // RLIMIT_MEMLOCK gate (Linux can_do_mlock / mlockall): EPERM for a
+    // caller without CAP_IPC_LOCK and a zero soft limit (LTP mlockall03
+    // case 2: seteuid(nobody) + rlimit 0); ENOMEM when locking EVERYTHING
+    // would exceed a nonzero soft limit (LTP mlockall03 case 1: rlimit 7
+    // bytes vs the whole address space). CAP_IPC_LOCK bypasses the size
+    // check.
+    let has_ipc_lock = crate::security::capable(crate::security::CAP_IPC_LOCK);
+    let (memlock_cur, _) = current_task
+        .rlimit(crate::process::task::rlimit_res::MEMLOCK);
+    if !has_ipc_lock && memlock_cur == 0 {
+        return -1_i64; // EPERM
+    }
+    if !has_ipc_lock && memlock_cur != u64::MAX && flags & MCL_CURRENT != 0 {
+        // Whole-address-space lock: the charge is the total VMA span.
+        let as_ref = match current_task.address_space() {
+            Some(a) => a,
+            None => return -12_i64,
+        };
+        let total: u64 = {
+            let mgr = as_ref.vma_read();
+            mgr.iter()
+                .map(|v| (v.end().as_usize() - v.start().as_usize()) as u64)
+                .sum()
+        };
+        if total > memlock_cur {
+            return -12_i64; // ENOMEM
+        }
+    }
+
     let address_space = match current_task.address_space_mut() {
         Some(a) => a,
         None => return -12_i64,
