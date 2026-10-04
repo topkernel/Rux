@@ -170,6 +170,22 @@ if [ -f "$CLOEXEC_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null;
     fi
 fi
 
+# Build + install the pure-exec leak probe (static glibc; fork+execve+wait
+# churn of a real dynamic binary, printing /proc/meminfo HeapUsed every
+# 100 rounds — the workload that exposed the free_task_slot exe_path
+# Box<[u8]> leak: one whole buddy page per 9-byte object, +4kB/exec).
+EXECLOOP_SRC="$PROJECT_ROOT/test/execloop.c"
+if [ -f "$EXECLOOP_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing execloop to /test/execloop..."
+    if riscv64-linux-gnu-gcc -static -O2 \
+         -o "$STAGING/test/execloop" "$EXECLOOP_SRC"; then
+        chmod +x "$STAGING/test/execloop"
+    else
+        echo "Warning: execloop failed to compile (skipped)"
+        rm -f "$STAGING/test/execloop"
+    fi
+fi
+
 # Copy linux-ltp test suite
 LINUX_LTP_DIR="$PROJECT_ROOT/userspace/linux-ltp/output"
 if [ -d "$LINUX_LTP_DIR/testcases" ]; then

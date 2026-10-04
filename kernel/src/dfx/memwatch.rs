@@ -188,9 +188,14 @@ pub fn note_alloc(ptr: *mut u8, heap_start: usize, size: usize, frames: &[u64; S
     }
 
     // Live accounting: mark every heap page of this block with the site id
-    // so the later free() of the block decrements the RIGHT site. Only
-    // classes >= 128B — see LIVE_SLOTS comment.
-    if b >= 7 {
+    // so the later free() of the block decrements the RIGHT site. Hunt-v3:
+    // threshold lowered from b>=7 to b>=3. The buddy heap is PAGE-granular
+    // (a 9-byte Box<[u8]> pins a whole 4096B block), so SMALL-object leaks
+    // dominate real heap growth — the per-exec exe_path leak was a b3
+    // (8..15-byte) site invisible under the old >=128B tracking. b0..b2
+    // (1..4-byte) churn stays excluded to keep the 250-slot table from
+    // saturating at boot (see LIVE_SLOTS comment).
+    if b >= 3 {
         let sid = live_intern(b, size, frames);
         if sid != 0 {
             LIVE_SITES[sid - 1].allocs.fetch_add(1, Ordering::Relaxed);
@@ -713,7 +718,10 @@ pub fn dump_mem() {
     // churn-heavy sites show live ~0 despite huge alloc counts.
     taskdump_raw_line(b"MEMLIVE live allocs frees bucket sz f1..f12\n");
     taskdump_raw_line(b" livebins");
-    for i in 7..NUM_BINS {
+    for i in 0..NUM_BINS {
+        if LIVE_BINS[i].load(Ordering::Relaxed) == 0 {
+            continue;
+        }
         taskdump_raw_line(b" b");
         put_dec(i as u64);
         taskdump_raw_line(b"=");

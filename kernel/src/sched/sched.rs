@@ -987,6 +987,29 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+        // Heap-v3 leak fix: run the Task field destructors BEFORE returning
+        // the page. The Task owns heap memory in plain (non-Arc) fields —
+        // exe_path: Box<[u8]> (re-set on every execve by set_exe_path),
+        // sem_undo / dead_threads / wait_chldexit Vecs, queued siginfo,
+        // seccomp_filter — and dealloc() below releases only the Task's
+        // own bytes, so every one of those allocations used to leak.
+        // Observed signature (dfx=memwatch): MEMLIVE site
+        // Task::set_exe_path b=3 sz=9 live=603 a=603 f=0 under a pure
+        // exec loop — one 9-byte Box per exec pinning a whole 4kB buddy
+        // page (+4kB/exec, +1.2MB/min steady-state HeapUsed growth).
+        //
+        // drop_in_place is safe at every call site: new_task_at's ONLY
+        // failure return sits AFTER all fields are initialized (the
+        // kernel-stack alloc is its last step), and the fork/kthread
+        // unwind paths plus release_task/free_dead_member all operate on
+        // fully initialized tasks. The Arc fields (address_space,
+        // fdtable, signal, fs) are already explicitly released to None on
+        // the exit paths, so their drops here are no-ops there; on the
+        // fork unwind paths dropping the cloned Arcs is exactly the
+        // correct refcount decrement.
+        unsafe {
+            core::ptr::drop_in_place(task_ptr);
+        }
         // R12-4: poison + record before the free — the next "zeroed/garbage
         // linked child" or wild-pointer wake then shows this exact marker
         // instead of anonymous zeros, proving (or ruling out) the
