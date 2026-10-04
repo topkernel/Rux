@@ -286,6 +286,18 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                 let pollfd = &mut pollfds[i];
                 pollfd.revents = 0;
 
+                // POSIX poll(2): "If the value of fd is negative, the
+                // events field is ignored and the revents field is set
+                // to 0." GLib pads its poll arrays with fd=-1 slots for
+                // sources removed between iterations and RELIES on this:
+                // reporting POLLNVAL for them made every glib main-loop
+                // iteration return "1 fd ready" and spin forever at 100%
+                // CPU (gnome-session-binary wedged in ppoll — the gsd
+                // component discovery regression).
+                if pollfd.fd < 0 {
+                    continue;
+                }
+
                 let file = match fdtable.get_file(pollfd.fd as usize) {
                     Some(f) => f,
                     None => {
