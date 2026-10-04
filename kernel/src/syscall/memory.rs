@@ -268,6 +268,11 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     let map_flags = args[3] as u32;
     let mut fd = args[4] as i32;
     let offset = args[5] as u64;
+    // MAP_SHARED /dev/zero mapping: the ORIGINAL open file description is
+    // captured here (the fd is masked out of the generic attach below) and
+    // pinned onto the resulting VMA so mprotect() can enforce the
+    // read-only-open EACCES rule (LTP mprotect01 case 3).
+    let mut zero_dev_shared_file: Option<alloc::sync::Arc<crate::fs::file::File>> = None;
 
     // length of 0 is invalid per POSIX
     if length == 0 {
@@ -585,6 +590,18 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // The generic file attach below must not pin
                             // the device "file" either — use the anonymous
                             // path by masking the fd out of that branch.
+                            // EXCEPTION (Linux vm_file semantics): a
+                            // MAP_SHARED /dev/zero mapping still remembers
+                            // the open file's access mode — mprotect()
+                            // upgrading it to PROT_WRITE fails EACCES when
+                            // /dev/zero was opened O_RDONLY (LTP mprotect01
+                            // case 3). Capture the file here; it is pinned
+                            // onto the VMA after the mapping succeeds.
+                            zero_dev_shared_file = if map_flags & map::MAP_SHARED != 0 {
+                                unsafe { crate::fs::file::get_file_fd(fd as usize) }
+                            } else {
+                                None
+                            };
                             fd = -1;
                         }
                     }
@@ -683,6 +700,16 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 if let Some(file) = unsafe { crate::fs::get_file_fd(fd as usize) } {
                                     address_space.pin_vma_file(mapped_addr.as_usize(), file);
                                 }
+                            }
+
+                            // MAP_SHARED /dev/zero: pin the ORIGINAL device
+                            // file description (captured before fd was
+                            // masked out). mprotect's shared-file PROT_WRITE
+                            // EACCES check reads it; nothing else consumes a
+                            // pinned file on an Anonymous VMA (faults and
+                            // msync writeback are FileBacked-only).
+                            if let Some(file) = zero_dev_shared_file.take() {
+                                address_space.pin_vma_file(mapped_addr.as_usize(), file);
                             }
 
                             // MAP_SHARED|MAP_ANONYMOUS: the mapping must be
@@ -968,6 +995,29 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                 }
                 if cursor < addr + length {
                     return -12_i64; // ENOMEM: range not fully mapped
+                }
+
+                // Linux mprotect: requesting PROT_WRITE on a MAP_SHARED
+                // file mapping whose backing file was NOT opened for
+                // writing fails with EACCES before any PTE is touched
+                // (LTP mprotect01 case 3: mmap /dev/zero O_RDONLY
+                // PROT_READ MAP_SHARED, then mprotect PROT_WRITE).
+                if prot & 0x2 != 0 {
+                    for vma in addr_space.vma_read().iter() {
+                        let vs = vma.start().as_usize();
+                        let ve = vma.end().as_usize();
+                        if vs >= addr + length || ve <= addr {
+                            continue; // no overlap with the target range
+                        }
+                        if !vma.flags().is_shared() {
+                            continue; // MAP_PRIVATE upgrades are legal
+                        }
+                        if let Some(file) = addr_space.get_vma_file(vs) {
+                            if file.flags().is_readonly() {
+                                return -13_i64; // EACCES
+                            }
+                        }
+                    }
                 }
             }
 
