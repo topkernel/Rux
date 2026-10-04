@@ -29,6 +29,22 @@ pub use crate::arch::riscv64::uaccess::MAX_RW_COUNT;
 /// on `read(fd, buf, 0x4000_0000)` (review SYSA-C1 fix in Wave 2R).
 pub const RW_CHUNK: usize = 64 * 1024;
 
+/// Allocate an UNINITIALIZED staging buffer for read/write chunking.
+///
+/// The buffer is always fully overwritten before it is read (file layers
+/// fill exactly the bytes they return; copy_from_user fills before write
+/// dispatch), so the previous `vec![0u8; n]` paid a useless memset per
+/// syscall — 4KB+ of zeroing on every read(2)/write(2) hot path (file,
+/// pipe, tty) that showed up directly in throughput under TCG.
+#[inline]
+fn alloc_uninit_buf(n: usize) -> alloc::vec::Vec<u8> {
+    let mut v = alloc::vec::Vec::with_capacity(n);
+    // SAFETY: capacity is exactly n, so set_len is in bounds. The buffer is
+    // filled by the caller before any read of its contents (see doc).
+    unsafe { v.set_len(n); }
+    v
+}
+
 /// Clamp a user-supplied transfer length to MAX_RW_COUNT.
 #[inline]
 pub fn clamp_rw_count(count: usize) -> usize {
@@ -96,12 +112,31 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                 if mode == crate::fs::file::FileFlags::O_WRONLY {
                     return -errno::EBADF as i64;
                 }
+                // Pipe fast path: transfer directly user↔ring. The generic
+                // staging below costs an alloc + 2 copies per op; on pipes
+                // that was ~half the per-syscall time under TCG.
+                if crate::fs::pipe::is_pipe_file(&file) {
+                    return crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
+                }
+                // ext4 fast path: page cache → user memory without the
+                // staging buffer (O_DIRECT keeps the generic staged path —
+                // it serves straight from the block layer).
+                if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT == 0
+                    && crate::fs::ext4::file::is_ext4_file(&file)
+                {
+                    return crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
+                }
                 // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
                 // a huge count can never OOM the kernel heap. A short chunk
                 // (EOF / pipe drained) ends the loop and returns what we
                 // have — pipe reads still return as soon as data exists
                 // (pipe capacity 16KB < RW_CHUNK).
-                let mut kernel_buf = alloc::vec![0u8; count.min(RW_CHUNK)];
+                //
+                // UNINIT staging: the file layer fills exactly the `n`
+                // bytes it returns before copy_to_user reads them, so
+                // zero-filling the buffer was a 4KB memset per read(2) —
+                // measurable on every hot path (file, pipe, tty).
+                let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
                 let mut total: usize = 0;
                 let mut user_ptr = buf;
                 let mut remaining = count;
@@ -184,7 +219,7 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                 // position-invariant read_at() instead.
                 // Chunked (SYSA-C1): bounded staging buffer, sequential
                 // offset advance; short read ends the loop.
-                let mut kernel_buf = alloc::vec![0u8; count.min(RW_CHUNK)];
+                let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
                 let mut total: usize = 0;
                 let mut err: i32 = 0;
                 let mut user_ptr = buf;
@@ -323,11 +358,16 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 }
 
                 // Regular file or redirected output
+                // Pipe fast path: transfer directly user↔ring (see the
+                // matching branch in sys_read).
+                if crate::fs::pipe::is_pipe_file(&file) {
+                    return crate::fs::pipe::pipe_write_user(&file, buf, count) as i64;
+                }
                 // Chunked write (SYSA-C1): bounded staging buffer so a huge
                 // count cannot OOM the kernel heap; a partial chunk write
                 // ends the loop and returns what was accepted (POSIX
                 // partial-write semantics).
-                let mut kernel_buf = alloc::vec![0u8; count.min(RW_CHUNK)];
+                let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
                 let mut total: usize = 0;
                 let mut user_ptr = buf;
                 let mut remaining = count;
@@ -1249,7 +1289,7 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
                 // shared fd position under concurrent I/O.
                 // Chunked (SYSA-C1): bounded staging, sequential offset
                 // advance; partial chunk write ends the loop.
-                let mut kernel_buf = alloc::vec![0u8; count.min(RW_CHUNK)];
+                let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
                 let mut total: usize = 0;
                 let mut err: i32 = 0;
                 let mut user_ptr = buf;

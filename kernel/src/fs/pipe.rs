@@ -17,6 +17,7 @@
 //!   never interleave (review 5.2: PIPE_BUF atomicity was broken).
 //! - Pipe capacity is 64 KiB (Linux default, review 5.2: was 16 KiB).
 
+use alloc::vec;
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -89,10 +90,13 @@ impl PipeBuffer {
         };
         let keep = core::cmp::min(buffered, new_capacity);
 
-        // Copy the OLDEST `keep` bytes out in FIFO order.
-        let mut staged: Vec<u8> = Vec::with_capacity(keep);
-        for i in 0..keep {
-            staged.push(self.data[(read_pos + i) % self.size]);
+        // Copy the OLDEST `keep` bytes out in FIFO order (split-segment
+        // bulk copy — see read()/write() for why per-byte modulo is slow).
+        let mut staged: Vec<u8> = vec![0u8; keep];
+        let first = core::cmp::min(keep, self.size - read_pos);
+        staged[..first].copy_from_slice(&self.data[read_pos..read_pos + first]);
+        if keep > first {
+            staged[first..keep].copy_from_slice(&self.data[0..keep - first]);
         }
 
         let ring_len = new_capacity + 1;
@@ -112,9 +116,8 @@ impl PipeBuffer {
         new_capacity
     }
 
-    /// Read data from ring buffer
-    ///
-    /// Handles wrap-around: data may span [read_pos..size) and [0..write_pos).
+    /// Read data from ring buffer into KERNEL memory (see read_xfer for the
+    /// split-segment bulk-copy rationale and the generic version).
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
@@ -130,18 +133,67 @@ impl PipeBuffer {
         };
 
         let to_read = core::cmp::min(total_available, buf.len());
+        if to_read == 0 {
+            return 0;
+        }
 
-        for i in 0..to_read {
-            buf[i] = self.data[(read_pos + i) % self.size];
+        // First segment: read_pos .. (wrap or end of copy)
+        let first_len = core::cmp::min(to_read, self.size - read_pos);
+        // SAFETY-free slice copy; both sides are in-bounds by construction.
+        buf[..first_len].copy_from_slice(&self.data[read_pos..read_pos + first_len]);
+
+        // Second segment: wrapped tail at the ring start
+        if to_read > first_len {
+            buf[first_len..to_read].copy_from_slice(&self.data[0..to_read - first_len]);
         }
 
         self.read_pos.store((read_pos + to_read) % self.size, Ordering::Release);
         to_read
     }
 
-    /// Write data to ring buffer
+    /// Read from the ring into USER memory (exception-table copies).
     ///
-    /// Handles wrap-around: write may span [write_pos..size) and [0..gap).
+    /// Returns bytes copied; a faulting second segment returns the first
+    /// segment's bytes (short read, POSIX-compatible).
+    ///
+    /// # Safety
+    /// `dst` must be a user pointer validated for `max` bytes (access_ok).
+    pub unsafe fn read_user(&mut self, dst: *mut u8, max: usize) -> usize {
+        use crate::arch::riscv64::uaccess::copy_to_user;
+        let read_pos = self.read_pos.load(Ordering::Acquire);
+        let write_pos = self.write_pos.load(Ordering::Acquire);
+
+        if read_pos == write_pos || max == 0 {
+            return 0;
+        }
+        let total_available = if write_pos > read_pos {
+            write_pos - read_pos
+        } else {
+            self.size - read_pos + write_pos
+        };
+        let to_read = core::cmp::min(total_available, max);
+        let first_len = core::cmp::min(to_read, self.size - read_pos);
+
+        // SAFETY: dst is access_ok-validated for max bytes; exception-table
+        // copy returns the uncopied count on fault.
+        let mut done = 0usize;
+        if unsafe { copy_to_user(dst, self.data[read_pos..read_pos + first_len].as_ptr(), first_len) } == 0 {
+            done = first_len;
+            let second = to_read - first_len;
+            if second > 0 {
+                if unsafe { copy_to_user(dst.add(first_len), self.data[0..second].as_ptr(), second) } == 0 {
+                    done = to_read;
+                }
+            }
+        }
+        if done > 0 {
+            self.read_pos.store((read_pos + done) % self.size, Ordering::Release);
+        }
+        done
+    }
+
+    /// Write data to ring buffer from KERNEL memory (see write_xfer for the
+    /// generic version).
     pub fn write(&mut self, buf: &[u8]) -> usize {
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
@@ -154,13 +206,60 @@ impl PipeBuffer {
         };
 
         let to_write = core::cmp::min(available, buf.len());
+        if to_write == 0 {
+            return 0;
+        }
 
-        for i in 0..to_write {
-            self.data[(write_pos + i) % self.size] = buf[i];
+        // First segment: write_pos .. (wrap or end of copy)
+        let first_len = core::cmp::min(to_write, self.size - write_pos);
+        self.data[write_pos..write_pos + first_len].copy_from_slice(&buf[..first_len]);
+
+        // Second segment: wrapped tail at the ring start
+        if to_write > first_len {
+            self.data[0..to_write - first_len].copy_from_slice(&buf[first_len..to_write]);
         }
 
         self.write_pos.store((write_pos + to_write) % self.size, Ordering::Release);
         to_write
+    }
+
+    /// Write into the ring from USER memory (exception-table copies).
+    /// Returns bytes copied; a fault mid-copy yields a short write.
+    ///
+    /// # Safety
+    /// `src` must be a user pointer validated for `max` bytes (access_ok).
+    pub unsafe fn write_user(&mut self, src: *const u8, max: usize) -> usize {
+        use crate::arch::riscv64::uaccess::copy_from_user;
+        let read_pos = self.read_pos.load(Ordering::Acquire);
+        let write_pos = self.write_pos.load(Ordering::Acquire);
+
+        let available = if write_pos >= read_pos {
+            self.size - (write_pos - read_pos) - 1
+        } else {
+            read_pos - write_pos - 1
+        };
+        let to_write = core::cmp::min(available, max);
+        if to_write == 0 {
+            return 0;
+        }
+        let first_len = core::cmp::min(to_write, self.size - write_pos);
+
+        // SAFETY: src is access_ok-validated for max bytes; exception-table
+        // copy returns the uncopied count on fault.
+        let mut done = 0usize;
+        if unsafe { copy_from_user(self.data[write_pos..write_pos + first_len].as_mut_ptr(), src, first_len) } == 0 {
+            done = first_len;
+            let second = to_write - first_len;
+            if second > 0 {
+                if unsafe { copy_from_user(self.data[0..second].as_mut_ptr(), src.add(first_len), second) } == 0 {
+                    done = to_write;
+                }
+            }
+        }
+        if done > 0 {
+            self.write_pos.store((write_pos + done) % self.size, Ordering::Release);
+        }
+        done
     }
 
     /// Get available read bytes
@@ -305,6 +404,13 @@ pub fn pipe_of_file(file: &File) -> Option<&'static Pipe> {
     // while the File exists.
     let ptr = unsafe { *file.private_data.get() }?;
     Some(unsafe { &*(ptr as *const Pipe) })
+}
+
+/// True when `file` is a pipe/fifo description (PIPE_OPS) — used by the
+/// read/write syscall layer to take the direct user-transfer fast path.
+pub fn is_pipe_file(file: &File) -> bool {
+    file.get_ops()
+        .is_some_and(|ops| core::ptr::eq(ops as *const _, &PIPE_OPS as *const _))
 }
 
 /// vmsplice(2) write direction: move user bytes into the pipe. Linux
@@ -499,6 +605,25 @@ pub fn pipe_vmsplice_from(file: &File, iovs: &[(usize, usize)], nonblock: bool) 
 }
 
 pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
+    pipe_read_common(file, buf.as_mut_ptr(), buf.len(), false)
+}
+
+/// read(2) fast path for pipes: transfer directly user↔ring.
+///
+/// The generic sys_read stages through a kernel buffer (alloc + 2 copies);
+/// for pipes that was ~half the per-op cost under TCG. Same semantics as
+/// pipe_file_read — the caller must have access_ok-validated `dst`.
+pub fn pipe_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
+    pipe_read_common(file, dst, count, true)
+}
+
+/// Shared pipe read core: `user` selects exception-table user copies
+/// (direct transfer) vs kernel-slice copies (FileOps path).
+///
+/// # Safety
+/// When `user` is true, `dst` must be a validated user pointer with `count`
+/// writable bytes.
+fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
@@ -515,7 +640,21 @@ pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
             }
 
             // Try to read data
-            let count = guard.read(buf);
+            // SAFETY: user=true only from pipe_read_user with an
+            // access_ok-validated pointer; user=false passes a kernel slice
+            // pointer of `count` bytes.
+            let avail = guard.available_read();
+            let count = if avail > 0 {
+                if user {
+                    unsafe { guard.read_user(dst, count) }
+                } else {
+                    // SAFETY: dst is a kernel pointer to count writable bytes
+                    // (the FileOps slice).
+                    unsafe { guard.read(core::slice::from_raw_parts_mut(dst, count)) }
+                }
+            } else {
+                0
+            };
             if count > 0 {
                 // Read successful, wake up write waiters (space available)
                 drop(guard); // Release lock before waking waiters
@@ -523,6 +662,12 @@ pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
                 // O_ASYNC: space freed — signal write-end owners (fcntl31).
                 oasync_notify(pipe as *const _ as usize, false);
                 return count as isize;
+            }
+            // avail > 0 but 0 bytes copied: a USER fault on the destination
+            // (kernel copies cannot fault). Never sleep-retry a faulting
+            // buffer — that would livelock until the writer closes.
+            if avail > 0 && user {
+                return -14; // EFAULT
             }
 
             // Buffer empty — release lock before blocking
@@ -597,6 +742,21 @@ pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 pub fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
+    pipe_write_common(file, buf.as_ptr(), buf.len(), false)
+}
+
+/// write(2) fast path for pipes: transfer directly user↔ring (see
+/// pipe_read_user). The caller must have access_ok-validated `src`.
+pub fn pipe_write_user(file: &File, src: *const u8, count: usize) -> isize {
+    pipe_write_common(file, src, count, true)
+}
+
+/// Shared pipe write core (kernel slice vs direct user transfer).
+///
+/// # Safety
+/// When `user` is true, `src` must be a validated user pointer with
+/// `count` readable bytes.
+fn pipe_write_common(file: &File, src: *const u8, count: usize, user: bool) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
@@ -615,29 +775,51 @@ pub fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
         let mut total_written = 0;
 
         // Loop write until all data written or error encountered
-        while total_written < buf.len() {
-            let remaining = &buf[total_written..];
+        while total_written < count {
+            let remaining = count - total_written;
 
             // POSIX PIPE_BUF atomicity: a write of <= PIPE_BUF bytes must be
             // atomic — never split across other writers. In blocking mode we
             // wait until the ENTIRE remaining chunk fits before copying any
             // of it (review 5.2: the old code partial-wrote whenever there
             // was any space, interleaving chunks from concurrent writers).
-            let atomic = remaining.len() <= PIPE_BUF;
+            let atomic = remaining <= PIPE_BUF;
 
             // Acquire lock once for check + IO
             let mut guard = pipe.buffer.lock();
 
             let space = guard.available_write();
             let can_write = if atomic {
-                space >= remaining.len()
+                space >= remaining
             } else {
                 space > 0
             };
 
             if can_write {
                 // Write successful
-                let count = guard.write(remaining);
+                // SAFETY: user=true only from pipe_write_user with an
+                // access_ok-validated pointer; user=false passes a kernel
+                // slice pointer of `count` bytes.
+                let count = if user {
+                    unsafe { guard.write_user(src.add(total_written), remaining) }
+                } else {
+                    // SAFETY: src is a kernel pointer to count readable bytes
+                    // (the FileOps slice).
+                    unsafe {
+                        guard.write(core::slice::from_raw_parts(src.add(total_written), remaining))
+                    }
+                };
+                // can_write held but 0 bytes copied: a USER fault on the
+                // source. Retrying would livelock (space never drains) —
+                // return a short write or EFAULT.
+                if count == 0 && user {
+                    drop(guard);
+                    return if total_written > 0 {
+                        total_written as isize
+                    } else {
+                        -14 // EFAULT
+                    };
+                }
                 total_written += count;
                 // Release lock before waking waiters
                 drop(guard);
@@ -681,8 +863,8 @@ pub fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
                 let recheck_ok = {
                     let guard = pipe.buffer.lock();
                     let space = guard.available_write();
-                    if remaining.len() <= PIPE_BUF {
-                        space >= remaining.len()
+                    if remaining <= PIPE_BUF {
+                        space >= remaining
                     } else {
                         space > 0
                     }
