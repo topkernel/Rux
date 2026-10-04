@@ -112,11 +112,13 @@ pub const fn is_linear_mapping(virt: usize) -> bool {
 /// Kernel entry point (after OpenSBI)
 pub const KERNEL_ENTRY: u64 = 0x80200000;
 
-/// Default kernel size estimate (8MB)
-pub const KERNEL_SIZE: u64 = 0x800000;
+/// Kernel image mapping budget (entry 0x80200000 + 10MB). The debug image
+/// (text+rodata+bss+boot stack) outgrew 8MB; the heap now starts at
+/// 0x80C00000, one PMD past this budget (see boot.S PMD[4]).
+pub const KERNEL_SIZE: u64 = 0xA00000;
 
 /// Heap start address (after kernel)
-pub const HEAP_START: u64 = 0x80A00000;
+pub const HEAP_START: u64 = 0x80C00000;
 
 /// Slab start address (after heap)
 /// Note: Actual address depends on KERNEL_HEAP_SIZE config

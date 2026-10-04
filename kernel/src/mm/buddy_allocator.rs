@@ -37,7 +37,7 @@ const MIN_ORDER: usize = 0;
 // Hardcoded heap start address for early boot.
 // Uses phys_to_virt() to get the virtual address in the linear mapping region.
 // VA_PA_OFFSET = PAGE_OFFSET - PHYS_MEMORY_BASE = 0xffffffd600000000 - 0x80000000
-const KERNEL_HEAP_PHYS: usize = 0x80A0_0000;
+const KERNEL_HEAP_PHYS: usize = 0x80C0_0000;
 const VA_PA_OFFSET: usize = 0xffffffd600000000 - 0x80000000;
 const HEAP_START: usize = KERNEL_HEAP_PHYS + VA_PA_OFFSET;
 

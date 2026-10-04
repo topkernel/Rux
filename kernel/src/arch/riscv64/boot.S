@@ -190,6 +190,19 @@ _start:
     or t4, t4, t5
     sd t4, 24(t3)
 
+    // PMD[4]: VA 0xFFFFFFFF80800000 -> PA 0x80A00000 (fifth 2MB)
+    // The debug kernel image (text+rodata+bss+boot stack) outgrew the old
+    // 8MB budget — the boot stack's top page sat on the first UNMAPPED page
+    // and the very first trap on it page-faulted (pfault at
+    // 0xffffffff80800000). Budget is now 10MB; the kernel heap moved from
+    // 0x80A00000 to 0x80C00000 accordingly (see memory_layout.rs/main.rs).
+    li t4, KERNEL_PHYS
+    li t6, 0x800000              // 8MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 32(t3)
+
     // --- MMIO identity mapping (UART at 0x10000000) ---
     // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)
     // VPN2 for 0x10000000 = (0x10000000 >> 30) & 0x1FF = 0
@@ -366,7 +379,7 @@ secondary_start:
     csrw satp, t0
 
 .Lsecondary_mmu_on:
-    // Now running at virtual address with early_pg_dir (maps 8MB kernel)
+    // Now running at virtual address with early_pg_dir (maps 10MB kernel)
 
     // Fix up stack pointer: was physical, convert to virtual
     li t0, KERNEL_VIRT
@@ -382,7 +395,7 @@ secondary_start:
     .option pop
 
     // Switch to the permanent page table saved by the boot hart.
-    // early_pg_dir only maps 8MB; the permanent table has linear mapping,
+    // early_pg_dir only maps 10MB; the permanent table has linear mapping,
     // vmemmap, device mappings, etc.
     // Fence to ensure we see the boot hart's store to BOOT_HART_SATP
     fence

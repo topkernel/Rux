@@ -337,8 +337,8 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // Reserve memory regions (kernel, heap, slab)
-        const KERNEL_RESERVE_SIZE: usize = 0xA00000; // 10MB kernel reservation
-        const KERNEL_HEAP_PHYS: usize = 0x80A00000; // Physical address after kernel reservation
+        const KERNEL_RESERVE_SIZE: usize = 0xC00000; // 12MB kernel reservation
+        const KERNEL_HEAP_PHYS: usize = 0x80C00000; // Physical address after kernel reservation
         let heap_start = KERNEL_HEAP_PHYS;
         let heap_size = crate::config::KERNEL_HEAP_SIZE;
         let slab_start = heap_start + heap_size;
@@ -367,7 +367,7 @@ pub extern "C" fn rust_main() -> ! {
     mm::init_heap();
 
     // Initialize Slab allocator (use virtual address in linear mapping region)
-    let slab_phys = 0x80A00000usize + crate::config::KERNEL_HEAP_SIZE;
+    let slab_phys = 0x80C00000usize + crate::config::KERNEL_HEAP_SIZE;
     let slab_start = slab_phys + arch::riscv64::mm::VA_PA_OFFSET;
     mm::init_slab(slab_start, 4 * 1024 * 1024);  // 4MB for slab
 
@@ -416,7 +416,7 @@ pub extern "C" fn rust_main() -> ! {
 
     // Display heap size using config value
     let heap_mb = crate::config::KERNEL_HEAP_SIZE / (1024 * 1024);
-    let heap_info = format!("heap region {}MB @ {:#x}", heap_mb, 0x80A00000usize);
+    let heap_info = format!("heap region {}MB @ {:#x}", heap_mb, 0x80C00000usize);
     print_status("mm", &heap_info, true);
     print_status("mm", "slab allocator 4MB", true);
 
@@ -471,8 +471,8 @@ pub extern "C" fn rust_main() -> ! {
             }
 
             // Initialize kernel memory layout
-            const KERNEL_RESERVE_SIZE: usize = 0xA00000; // 10MB kernel reservation
-            const KERNEL_HEAP_PHYS: usize = 0x80A00000; // Physical address after kernel reservation
+            const KERNEL_RESERVE_SIZE: usize = 0xC00000; // 12MB kernel reservation
+            const KERNEL_HEAP_PHYS: usize = 0x80C00000; // Physical address after kernel reservation
             let heap_size = crate::config::KERNEL_HEAP_SIZE;
             let slab_start = KERNEL_HEAP_PHYS + heap_size;
             let slab_size = 4 * 1024 * 1024;
