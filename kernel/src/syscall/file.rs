@@ -552,35 +552,9 @@ pub fn sys_linkat(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let old_full = if flags & AT_EMPTY_PATH != 0 {
-        // Linux: with AT_EMPTY_PATH and an empty oldpath, the link source
-        // is the file referenced by olddirfd itself (linkat(fd, "", ...)).
-        // Reading the first byte through the exception-table copy.
-        let mut probe = [0u8; 1];
-        let is_empty = unsafe {
-            crate::arch::riscv64::uaccess::copy_from_user(
-                probe.as_mut_ptr(),
-                oldpath_ptr,
-                1,
-            )
-        } == 0
-            && probe[0] == 0;
-        if is_empty {
-            match unsafe { crate::fs::file::get_file_fd(olddirfd as usize) } {
-                Some(f) => f.path(),
-                None => return -(errno::EBADF as i64),
-            }
-        } else {
-            match resolve_user_path(olddirfd, oldpath_ptr) {
-                Ok(p) => p,
-                Err(e) => return e as i64,
-            }
-        }
-    } else {
-        match resolve_user_path(olddirfd, oldpath_ptr) {
-            Ok(p) => p,
-            Err(e) => return e as i64,
-        }
+    let old_full = match resolve_user_path(olddirfd, oldpath_ptr) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
     };
     let new_full = match resolve_user_path(newdirfd, newpath_ptr) {
         Ok(p) => p,
@@ -664,63 +638,11 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     let buf = args[2] as *mut u8;
     let bufsize = args[3] as usize;
 
-    // Linux do_readlinkat: buflen <= 0 is EINVAL BEFORE any buffer pointer
-    // is touched — readlink(link, NULL, 0) is EINVAL, not EFAULT (LTP
-    // readlinkat02 case 1).
-    if bufsize == 0 {
-        return -(errno::EINVAL as i64);
-    }
     if buf.is_null() {
         return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, bufsize) {
         return -(errno::EFAULT as i64);
-    }
-
-    // Linux do_readlinkat: an EMPTY pathname with a valid dirfd reads the
-    // link target of the FILE REFERRED TO BY THE FD (user_path_at_empty
-    // semantics — no AT_EMPTY_PATH flag needed). LTP readlinkat01 opens
-    // its test symlink O_PATH|O_NOFOLLOW and readlinkat(fd, "", ...).
-    {
-        // Peek at the user path: only the empty case is handled here.
-        let mut pbuf = [0u8; PATH_MAX];
-        let is_empty = match unsafe {
-            crate::arch::riscv64::uaccess::strncpy_from_user(
-                pathname_ptr, PATH_MAX, &mut pbuf)
-        } {
-            Ok(s) => s.is_empty(),
-            Err(_) => return -(errno::EFAULT as i64),
-        };
-    if is_empty && dirfd >= 0 {
-        // SAFETY: get_file_fd returns an Arc<File> or None.
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(dirfd as usize) } {
-            // SAFETY: inode cell written once at open; read-only here.
-            let target = unsafe {
-                (*file.inode.get()).as_ref().and_then(|inode| {
-                    if !inode.mode.is_symlink() {
-                        return None;
-                    }
-                    let mut tbuf = [0u8; PATH_MAX];
-                    let n = inode.op_readlink(&mut tbuf);
-                    if n < 0 { return None; }
-                    Some((n as usize, tbuf))
-                })
-            };
-            if let Some((n, tbuf)) = target {
-                let copy_len = n.min(bufsize);
-                // SAFETY: buf validated with access_ok(bufsize) above.
-                if unsafe {
-                    crate::arch::riscv64::uaccess::copy_to_user(buf, tbuf.as_ptr(), copy_len)
-                } != 0
-                {
-                    return -(errno::EFAULT as i64);
-                }
-                return copy_len as i64;
-            }
-            return -(errno::EINVAL as i64);
-        }
-        return -(errno::EBADF as i64);
-    }
     }
 
     // Resolve dirfd-relative paths like every other *at() syscall — the
@@ -838,26 +760,19 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
         return path;
     }
 
-    // The readlinkat entry path already went through resolve_user_path(),
-    // which yields an ABSOLUTE path for every dirfd. Concatenating the cwd
-    // again ("/tmp" + "/tmp/link") broke every readlink of an absolute
-    // non-/proc path while cwd != "/" (LTP readlink01/03 ran in /tmp and
-    // saw ENOENT for existing symlinks). Only a relative path (direct
-    // callers passing raw user input) takes the join.
-    if !pathname.starts_with('/') {
-        if dirfd == AT_FDCWD {
-            if let Some(current) = crate::sched::current() {
-                // SAFETY: current is the running task's Task pointer from sched::current().
-                let cwd = unsafe { (*current).get_cwd() };
-                let cwd_str = core::str::from_utf8(&cwd).unwrap_or("/");
-                let mut full = alloc::format!("{}{}", cwd_str, pathname);
-                if full.contains("/self/") {
-                    // SAFETY: current_pid() reads the current task's pid from scheduler.
-                    let pid = unsafe { crate::process::current_pid() };
-                    full = full.replace("/self/", &alloc::format!("/{}/", pid));
-                }
-                return full;
+    // Relative path - try to resolve using dirfd
+    if dirfd == AT_FDCWD {
+        if let Some(current) = crate::sched::current() {
+            // SAFETY: current is the running task's Task pointer from sched::current().
+            let cwd = unsafe { (*current).get_cwd() };
+            let cwd_str = core::str::from_utf8(&cwd).unwrap_or("?");
+            let mut full = alloc::format!("{}{}", cwd_str, pathname);
+            if full.contains("/self/") {
+                // SAFETY: current_pid() reads the current task's pid from scheduler.
+                let pid = unsafe { crate::process::current_pid() };
+                full = full.replace("/self/", &alloc::format!("/{}/", pid));
             }
+            return full;
         }
     }
 
@@ -1002,7 +917,7 @@ pub fn sys_chdir(args: SyscallArgs) -> i64 {
             }
             0
         }
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -1200,7 +1115,7 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
 
     match crate::fs::mount::do_mount(source, target, fs_type_str, args[3]) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -1294,7 +1209,7 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
 
     match crate::fs::vfs::vfs_umount(target) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -1401,7 +1316,7 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
             }
             0
         }
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -1523,7 +1438,7 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
     // UTIME_OMIT (leave untouched).
     match crate::fs::vfs::vfs_utimensat(&full_path, atime, mtime) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -1770,20 +1685,72 @@ fn fill_rootfs_statfs(buf: &mut Statfs) {
     }
 }
 
-/// Fill a Statfs for ext4
-fn fill_ext4_statfs(buf: &mut Statfs) {
-    buf.f_type = 0xEF53;  // EXT4_SUPER_MAGIC
-    buf.f_bsize = 4096;
-    buf.f_blocks = 0;
-    buf.f_bfree = 0;
-    buf.f_bavail = 0;
-    buf.f_files = 0;
-    buf.f_ffree = 0;
+/// Fill a Statfs for ext4 from a LIVE filesystem instance.
+///
+/// The old filler hardcoded zeroes for every counter, which made guest
+/// `df`/statfs(2) useless and hid exactly the "/tmp is filling up" state
+/// behind the LTP r4/r5 exhaustion regression. Free counts come from the
+/// in-memory group descriptors — the allocators keep them exact on every
+/// alloc/free (bitmap, descriptor and superblock round trips are
+/// synchronous under EXT4_BIG_LOCK).
+fn fill_ext4_statfs_live(fs: &crate::fs::ext4::Ext4FileSystem, buf: &mut Statfs) {
+    buf.f_type = 0xEF53; // EXT4_SUPER_MAGIC
+    buf.f_bsize = fs.block_size as u64;
+    buf.f_frsize = fs.block_size as u64;
+    buf.f_blocks = fs.sb_info.as_ref().map(|sb| sb.s_blocks_count).unwrap_or(0);
+    let mut free_blocks: u64 = 0;
+    let mut free_inodes: u64 = 0;
+    {
+        let descs = fs.group_descs.lock();
+        for d in descs.iter() {
+            free_blocks += d.bg_free_blocks_count_lo as u64;
+            free_inodes += d.bg_free_inodes_count_lo as u64;
+        }
+    }
+    buf.f_bfree = free_blocks;
+    // Reserved blocks are not enforced by this ext4; report them available
+    // (matching what an unprivileged allocation can actually get).
+    buf.f_bavail = free_blocks;
+    buf.f_files = fs.sb_info.as_ref().map(|sb| sb.s_inodes_count as u64).unwrap_or(0);
+    buf.f_ffree = free_inodes;
     buf.f_fsid = [0xEF53, 0];
     buf.f_namelen = 255;
-    buf.f_frsize = 4096;
     buf.f_flags = 0;
     buf.f_spare = [0; 4];
+}
+
+/// Fill a Statfs according to which filesystem actually backs `inode`.
+///
+/// Dispatch by inode-ops identity (the mount layout decides, not a
+/// hardcoded "/mnt|/disk" prefix): an ext4 root covers `/`, `/tmp`, `/home`,
+/// ... and must report ITS live numbers, while tmpfs mounts (/dev/shm,
+/// /run) and the boot ramfs report their own.
+fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _))
+    {
+        if let Some(p) = inode.private_data {
+            // SAFETY: ext4 inodes carry their filesystem instance in
+            // private_data (installed at iget; valid for the inode's life).
+            let fs = unsafe { &*(p as *const crate::fs::ext4::Ext4FileSystem) };
+            fill_ext4_statfs_live(fs, buf);
+            return;
+        }
+    }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::tmpfs::TMPFS_INODE_OPS as *const _))
+    {
+        // tmpfs: pages are kernel-heap allocations with no fixed quota;
+        // report the static instance identity (as before) — size signals
+        // come from meminfo, not statfs.
+        fill_rootfs_statfs(buf);
+        buf.f_type = crate::fs::tmpfs::TMPFS_MAGIC as u32 as u64;
+        buf.f_fsid = [crate::fs::tmpfs::TMPFS_MAGIC, 0];
+        return;
+    }
+    fill_rootfs_statfs(buf);
 }
 
 /// sys_statfs - Get filesystem statistics by path
@@ -1800,32 +1767,26 @@ pub fn sys_statfs(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Determine filesystem type from path
-    // Simplified: use rootfs statfs for all paths
     let mut statfs_buf = Statfs {
         f_type: 0, f_bsize: 0, f_blocks: 0, f_bfree: 0, f_bavail: 0,
         f_files: 0, f_ffree: 0, f_fsid: [0; 2], f_namelen: 0,
         f_frsize: 0, f_flags: 0, f_spare: [0; 4],
     };
 
-    // Check if the path is on ext4 (under /mnt or similar)
+    // Linux statfs fails with ENOENT for paths that do not exist — the old
+    // code fabricated rootfs numbers for ANY path (review批次1: statfs 不查
+    // 路径存在性).
     let full_path = match resolve_user_path(-100, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-
-    // Linux statfs fails with ENOENT for paths that do not exist — the old
-    // code fabricated rootfs numbers for ANY path (review批次1: statfs 不查
-    // 路径存在性).
-    if let Err(e) = crate::fs::vfs::path_lookup(&full_path, 0) {
-        return e as i64;
-    }
-
-    let path_str = full_path.as_str();
-    if path_str.starts_with("/mnt") || path_str.starts_with("/disk") {
-        fill_ext4_statfs(&mut statfs_buf);
-    } else {
-        fill_rootfs_statfs(&mut statfs_buf);
+    let vpath = match crate::fs::vfs::path_lookup(&full_path, 0) {
+        Ok(v) => v,
+        Err(e) => return e as i64,
+    };
+    match vpath.inode.as_ref() {
+        Some(inode) => fill_statfs_for_inode(inode, &mut statfs_buf),
+        None => fill_rootfs_statfs(&mut statfs_buf),
     }
 
     // Copy to user space
@@ -1858,8 +1819,6 @@ pub fn sys_fstatfs(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Get file and check if it has an inode with superblock info
-    use crate::fs::get_file_fd;
     let mut statfs_buf = Statfs {
         f_type: 0, f_bsize: 0, f_blocks: 0, f_bfree: 0, f_bavail: 0,
         f_files: 0, f_ffree: 0, f_fsid: [0; 2], f_namelen: 0,
@@ -1868,10 +1827,14 @@ pub fn sys_fstatfs(args: SyscallArgs) -> i64 {
 
     // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     unsafe {
-        match get_file_fd(fd) {
-            Some(_file) => {
-                // Use rootfs statfs as default for all fds
-                fill_rootfs_statfs(&mut statfs_buf);
+        match crate::fs::get_file_fd(fd) {
+            Some(file) => {
+                // SAFETY: inode is written once at open time; read-only here.
+                let inode_opt = &*file.inode.get();
+                match inode_opt.as_ref() {
+                    Some(inode) => fill_statfs_for_inode(inode, &mut statfs_buf),
+                    None => fill_rootfs_statfs(&mut statfs_buf),
+                }
             }
             None => return -(errno::EBADF as i64),
         }
@@ -2193,7 +2156,7 @@ pub fn sys_mknodat(args: SyscallArgs) -> i64 {
             if ftype == 0o040000 {
                 match crate::fs::vfs::vfs_mkdir(&path, mode & 0o7777) {
                     Ok(_) => 0,
-                    Err(e) => -(e as i64),
+                    Err(e) => e as i64,
                 }
             } else {
                 // Regular file - create with O_CREAT|O_EXCL (fail with
@@ -2376,7 +2339,7 @@ pub fn sys_fallocate(args: SyscallArgs) -> i64 {
     // coreutils/dd error paths that rely on fallocate failing honestly).
     match crate::fs::vfs::vfs_fallocate(fd as usize, mode, offset as u64, length as u64) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2411,17 +2374,6 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                     // sockets, and device nodes report EINVAL instead of
                     // flushing an unrelated global cache and claiming
                     // success.
-                    // Block devices (loop devices above all — LTP
-                    // tst_device/mkfs) DO have an fsync method in Linux:
-                    // flush the buffer cache and succeed instead of the
-                    // EINVAL that killed mke2fs ("fsync: Invalid argument").
-                    if inode.mode.is_block_device() {
-                        let _ = crate::fs::bio::sync_buffers();
-                        if crate::drivers::virtio::flush_pci_blk().is_err() {
-                            return -(errno::EIO as i64);
-                        }
-                        return 0;
-                    }
                     if !inode.mode.is_regular_file() {
                         return -(errno::EINVAL as i64);
                     }
@@ -2445,7 +2397,7 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                         // time and live as long as the inode (Arc).
                         match unsafe { crate::fs::ext4::file::ext4_sync_file(&*fs_ptr, ext4_inode) } {
                             Ok(()) => 0,
-                            Err(e) => -(e as i64),
+                            Err(e) => e as i64,
                         }
                     } else {
                         let _ = crate::fs::bio::sync_buffers();
@@ -2563,7 +2515,7 @@ fn do_setxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     };
     match crate::fs::xattr::set(inode, &name, &value, args[4] as i32) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2578,7 +2530,7 @@ fn do_getxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     if size == 0 {
         return match crate::fs::xattr::get(inode, &name, None) {
             Ok(n) => n as i64,
-            Err(e) => -(e as i64),
+            Err(e) => e as i64,
         };
     }
     if value_ptr == 0 || !crate::arch::riscv64::uaccess::access_ok(value_ptr, size) {
@@ -2600,7 +2552,7 @@ fn do_getxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
             }
             n as i64
         }
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2611,7 +2563,7 @@ fn do_listxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     if size == 0 {
         return match crate::fs::xattr::list(inode, None) {
             Ok(n) => n as i64,
-            Err(e) => -(e as i64),
+            Err(e) => e as i64,
         };
     }
     if list_ptr == 0 || !crate::arch::riscv64::uaccess::access_ok(list_ptr, size) {
@@ -2633,7 +2585,7 @@ fn do_listxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
             }
             n as i64
         }
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2645,7 +2597,7 @@ fn do_removexattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     };
     match crate::fs::xattr::remove(inode, &name) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2656,7 +2608,7 @@ pub fn sys_setxattr(args: SyscallArgs) -> i64 {
     };
     match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_setxattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2667,14 +2619,14 @@ pub fn sys_lsetxattr(args: SyscallArgs) -> i64 {
     };
     match xattr_inode_by_path(&path, false) {
         Ok(inode) => do_setxattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
 pub fn sys_fsetxattr(args: SyscallArgs) -> i64 {
     match xattr_inode_by_fd(args[0]) {
         Ok(inode) => do_setxattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2685,7 +2637,7 @@ pub fn sys_getxattr(args: SyscallArgs) -> i64 {
     };
     match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_getxattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2696,14 +2648,14 @@ pub fn sys_lgetxattr(args: SyscallArgs) -> i64 {
     };
     match xattr_inode_by_path(&path, false) {
         Ok(inode) => do_getxattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
 pub fn sys_fgetxattr(args: SyscallArgs) -> i64 {
     match xattr_inode_by_fd(args[0]) {
         Ok(inode) => do_getxattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2714,7 +2666,7 @@ pub fn sys_listxattr(args: SyscallArgs) -> i64 {
     };
     match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_listxattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2725,14 +2677,14 @@ pub fn sys_llistxattr(args: SyscallArgs) -> i64 {
     };
     match xattr_inode_by_path(&path, false) {
         Ok(inode) => do_listxattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
 pub fn sys_flistxattr(args: SyscallArgs) -> i64 {
     match xattr_inode_by_fd(args[0]) {
         Ok(inode) => do_listxattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2743,7 +2695,7 @@ pub fn sys_removexattr(args: SyscallArgs) -> i64 {
     };
     match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_removexattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2754,14 +2706,14 @@ pub fn sys_lremovexattr(args: SyscallArgs) -> i64 {
     };
     match xattr_inode_by_path(&path, false) {
         Ok(inode) => do_removexattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
 pub fn sys_fremovexattr(args: SyscallArgs) -> i64 {
     match xattr_inode_by_fd(args[0]) {
         Ok(inode) => do_removexattr(&inode, args),
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2836,7 +2788,7 @@ pub fn sys_setxattrat(args: SyscallArgs) -> i64 {
     };
     match crate::fs::xattr::set(&inode, &name, &value, flags) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2856,7 +2808,7 @@ pub fn sys_getxattrat(args: SyscallArgs) -> i64 {
     if size == 0 {
         return match crate::fs::xattr::get(&inode, &name, None) {
             Ok(n) => n as i64,
-            Err(e) => -(e as i64),
+            Err(e) => e as i64,
         };
     }
     if value_ptr == 0
@@ -2880,7 +2832,7 @@ pub fn sys_getxattrat(args: SyscallArgs) -> i64 {
             }
             n as i64
         }
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2896,7 +2848,7 @@ pub fn sys_listxattrat(args: SyscallArgs) -> i64 {
     if size == 0 {
         return match crate::fs::xattr::list(&inode, None) {
             Ok(n) => n as i64,
-            Err(e) => -(e as i64),
+            Err(e) => e as i64,
         };
     }
     if list_ptr == 0 || !crate::arch::riscv64::uaccess::access_ok(list_ptr as usize, size as usize)
@@ -2919,7 +2871,7 @@ pub fn sys_listxattrat(args: SyscallArgs) -> i64 {
             }
             n as i64
         }
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -2934,7 +2886,7 @@ pub fn sys_removexattrat(args: SyscallArgs) -> i64 {
     };
     match crate::fs::xattr::remove(&inode, &name) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -3635,13 +3587,6 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
     if flags & RENAME_WHITEOUT != 0 {
-        return -(errno::EINVAL as i64);
-    }
-    // Flag validation runs BEFORE any path lookup (Linux do_renameat2:
-    // NOREPLACE and EXCHANGE are mutually exclusive, and a missing source
-    // with a bogus flag combination must still report EINVAL — LTP
-    // renameat201 cases 5/6).
-    if flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0 {
         return -(errno::EINVAL as i64);
     }
 

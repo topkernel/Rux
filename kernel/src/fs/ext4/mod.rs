@@ -1342,6 +1342,21 @@ pub fn ext4_fallocate_on(
     // (private_data) or the boot GLOBAL — both valid for the mount.
     unsafe {
         let fs = &*fs_ptr;
+
+        // EFBIG before touching the allocator (Linux ext4_fallocate checks
+        // s_maxbytes first). The extent tree encodes logical blocks in a
+        // u32 ee_block, so the largest representable file is 2^32 blocks;
+        // a request past that used to fall into the block allocator and
+        // drain the whole filesystem run by run before failing ENOSPC —
+        // and because a failed preallocation did not persist the inode,
+        // every drained block leaked permanently (the LTP r4/r5 "/tmp
+        // fills and never recovers" regression: fallocate02's EFBIG
+        // subtests alone consumed ~500MB this way).
+        let max_file_size = (1u64 << 32) * fs.block_size as u64;
+        if offset >= max_file_size || end > max_file_size {
+            return Err(errno::Errno::FileTooLarge.as_neg_i32());
+        }
+
         let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
 
         let mut ext4_inode = fs.read_inode(ino)?;
@@ -1465,14 +1480,31 @@ pub fn ext4_fallocate_on(
             // Extent files: UNWRITTEN preallocation — metadata-only, no
             // per-block zeroing (a 300MB posix_fallocate would otherwise
             // issue 76800 buffer reads+writes and wedge the system).
-            if ext4_inode.has_extent() {
+            let alloc_res = if ext4_inode.has_extent() {
                 let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
                 let goal_group = (ext4_inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
                 file::preallocate_unwritten_extents(
                     fs, &mut ext4_inode, needed_blocks, current_blocks, &allocator, goal_group,
-                )?;
+                )
             } else {
-                file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks)?;
+                file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks)
+            };
+            if let Err(e) = alloc_res {
+                // The allocators mark blocks used in the on-disk bitmap as
+                // they go, but only the in-memory `ext4_inode` carries the
+                // extents claiming them. Persist the partial state BEFORE
+                // propagating the error — otherwise every block allocated
+                // before the failure (ENOSPC mid-run, bitmap I/O error, ...)
+                // is owned by nobody and leaks permanently once the caller
+                // deletes the file (the r4/r5 /tmp-exhaustion leak).
+                // Linux keeps partial fallocate allocations too; the file
+                // stays deletable and truncatable, reclaiming its blocks.
+                let sec = crate::drivers::rtc::wall_secs() as u32;
+                ext4_inode.mtime = sec;
+                ext4_inode.ctime = sec;
+                let on_disk = ext4_inode.to_on_disk();
+                let _ = inode::write_inode_disk(fs, ino, &on_disk);
+                return Err(e);
             }
         }
         // Default mode (no FALLOC_FL_KEEP_SIZE) extends the file: the range
@@ -2069,13 +2101,6 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                 }
             }
             ext4_inode.set_size(new_size);
-            // Keep the GENERIC VFS Inode.size coherent too: the icache
-            // object outlives this fd, and consumers that read
-            // inode.size directly (loop LOOP_SET_FD backing size, mmap
-            // length checks) saw 0 for a freshly ftruncate-extended
-            // sparse file while stat() — which goes through getattr —
-            // reported the new size (mkfs/tst_device on loop devices).
-            inode.size.store(new_size, core::sync::atomic::Ordering::Release);
         }
         _ => return errno::Errno::InvalidArgument.as_neg_i32(),
     }
