@@ -2034,6 +2034,13 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
                             core::mem::size_of::<i64>(),
                         );
                     }
+                    // Linux do_sendfile: an error on the FIRST write attempt
+                    // surfaces as the sendfile errno — a full nonblocking
+                    // out_fd must report EAGAIN, not a silent 0-byte
+                    // "success" (LTP sendfile07).
+                    if n_write < 0 && total_transferred + written == 0 {
+                        return n_write as i64;
+                    }
                     return total_transferred as i64;
                 }
                 written += n_write as usize;

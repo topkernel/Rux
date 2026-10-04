@@ -852,9 +852,18 @@ fn append_node(
         // Leaf full: new rightmost sibling leaf holding just `e`.
         let blk = alloc_meta_block(fs, e.phys, meta_sectors)?;
         let mut nd = alloc::vec![0u8; fs.block_size as usize];
-        init_node_header(&mut nd, 0, cap as u16);
-        // SAFETY: fresh block-size buffer with cap entries fitting.
-        unsafe { node_extents_mut(&mut nd, cap)[0] = e.to_disk() };
+        // The sibling is a FULL-SIZE external node: its eh_max must be the
+        // external capacity, NOT this node's `cap`. When the split fired
+        // on the inline root (cap=4), the sibling went to disk with
+        // eh_max=4; later appends descend with external_node_cap and grew
+        // the entry count past the stored max (entries=5 > max=4), and
+        // every subsequent read of the node failed validation with EIO —
+        // writes into fallocate-preallocated files past the first tree
+        // promotion died (LTP mkfs-on-loop, the access04/acct01 chain).
+        let ext_cap = external_node_cap(fs);
+        init_node_header(&mut nd, 0, ext_cap as u16);
+        // SAFETY: fresh block-size buffer with ext_cap entries fitting.
+        unsafe { node_extents_mut(&mut nd, ext_cap)[0] = e.to_disk() };
         node_header_mut(&mut nd).eh_entries = 1;
         // SAFETY: blk was just allocated (valid fs block).
         unsafe { write_node(fs, blk, &nd)? };
@@ -891,13 +900,16 @@ fn append_node(
                     Ok(None)
                 } else {
                     // Index full: new rightmost sibling index node with
-                    // just the split child.
+                    // just the split child. Same eh_max discipline as the
+                    // leaf split above: the sibling is a full-size external
+                    // node even when THIS node is the 4-slot inline root.
                     let blk = alloc_meta_block(fs, split.child, meta_sectors)?;
                     let mut nd = alloc::vec![0u8; fs.block_size as usize];
-                    init_node_header(&mut nd, depth, cap as u16);
-                    // SAFETY: fresh block-size buffer, cap entries fit.
+                    let ext_cap = external_node_cap(fs);
+                    init_node_header(&mut nd, depth, ext_cap as u16);
+                    // SAFETY: fresh block-size buffer, ext_cap entries fit.
                     unsafe {
-                        let slot = &mut node_indices_mut(&mut nd, cap)[0];
+                        let slot = &mut node_indices_mut(&mut nd, ext_cap)[0];
                         slot.ei_block = split.ei_block;
                         slot.ei_leaf_lo = split.child as u32;
                         slot.ei_leaf_hi = (split.child >> 32) as u16;

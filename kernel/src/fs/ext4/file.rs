@@ -104,46 +104,58 @@ impl ReadDst {
     }
 
     /// Copy `bytes` from a cached page into this destination at `off`.
-    /// Returns bytes actually copied (a user fault truncates the read).
+    /// Returns bytes actually copied; `Err(EFAULT)` when a USER destination
+    /// faulted before ANY byte of the request could be delivered (Linux
+    /// semantics: a fault at the first byte is EFAULT, a fault mid-copy is
+    /// a short read).
     ///
     /// # Safety
     /// `src` must hold `bytes` readable bytes; Kernel variant pointer must
     /// have `len` writable bytes, User variant must be access_ok-validated.
-    unsafe fn put(&self, off: usize, src: *const u8, bytes: usize) -> usize {
+    unsafe fn put(&self, off: usize, src: *const u8, bytes: usize) -> Result<usize, i32> {
         match self {
             ReadDst::Kernel(dst, _) => {
                 // SAFETY: caller guarantees dst+off+bytes is in bounds.
                 unsafe { core::ptr::copy_nonoverlapping(src, dst.add(off), bytes) };
-                bytes
+                Ok(bytes)
             }
             ReadDst::User(dst, _) => {
                 // SAFETY: exception-table copy; uncopied bytes truncate.
                 let uncopied = unsafe {
                     crate::arch::riscv64::uaccess::copy_to_user(dst.add(off), src, bytes)
                 };
-                bytes - uncopied
+                if uncopied >= bytes {
+                    // Nothing delivered: the page is unmapped — report the
+                    // fault instead of a silent 0-byte "EOF" (the r8
+                    // read(2) fast path turned read() on a bad buffer into
+                    // an apparent success; LTP read02/readv02 EFAULT).
+                    return Err(errno::Errno::BadAddress.as_neg_i32());
+                }
+                Ok(bytes - uncopied)
             }
         }
     }
 
-    /// Zero-fill `bytes` at `off` (sparse holes).
+    /// Zero-fill `bytes` at `off` (sparse holes). Returns bytes filled;
+    /// `Err(EFAULT)` on an immediate full user fault.
     ///
     /// # Safety
     /// Same destination validity as `put`.
-    unsafe fn put_zeroes(&self, off: usize, bytes: usize) -> usize {
+    unsafe fn put_zeroes(&self, off: usize, bytes: usize) -> Result<usize, i32> {
         // The zero page: ext4 block_size-sized static is overkill — copy in
         // 4 KiB chunks from a small const zero block.
         static ZEROS: [u8; 4096] = [0u8; 4096];
         let mut done = 0usize;
         while done < bytes {
             let n = core::cmp::min(4096, bytes - done);
-            let c = unsafe { self.put(off + done, ZEROS.as_ptr(), n) };
+            // SAFETY: same destination validity as put.
+            let c = unsafe { self.put(off + done, ZEROS.as_ptr(), n)? };
             if c < n {
                 break; // user fault: short read
             }
             done += c;
         }
-        done
+        Ok(done)
     }
 }
 
@@ -213,12 +225,20 @@ fn ext4_file_read_cached_dst(
                 unsafe {
                     let avail = block_size_usize - in_page_off;
                     let copy_len = core::cmp::min(remaining_now, avail);
-                    let copied = dst.put(buf_offset, page_data.add(in_page_off), copy_len);
+                    let copied = match dst.put(buf_offset, page_data.add(in_page_off), copy_len) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            // Immediate full user fault: EFAULT when nothing
+                            // has been delivered yet, short read otherwise.
+                            cache.put_range(fs_id, ino, &run[..run_len]);
+                            return if total_read == 0 { Err(e) } else { Ok(total_read) };
+                        }
+                    };
                     total_read += copied;
                     buf_offset += copied;
                     current_offset += copied as u64;
                     if copied < copy_len {
-                        // User fault: short read, stop.
+                        // Partial user fault: short read, stop.
                         cache.put_range(fs_id, ino, &run[..run_len]);
                         return Ok(total_read);
                     }
@@ -256,10 +276,18 @@ fn ext4_file_read_cached_dst(
                         let data = &(*bh).b_data;
                         let avail = block_size_usize - page_offset;
                         let copy_len = core::cmp::min(remaining, avail);
-                        let copied = dst.put(buf_offset, data.as_ptr().add(page_offset), copy_len);
-                        total_read += copied;
-                        buf_offset += copied;
-                        current_offset += copied as u64;
+                        match dst.put(buf_offset, data.as_ptr().add(page_offset), copy_len) {
+                            Ok(copied) => {
+                                total_read += copied;
+                                buf_offset += copied;
+                                current_offset += copied as u64;
+                            }
+                            Err(e) => {
+                                cache.insert(fs_id, ino, page_index, block_nr, data);
+                                bio::brelse(bh);
+                                return if total_read == 0 { Err(e) } else { Ok(total_read) };
+                            }
+                        }
                         cache.insert(fs_id, ino, page_index, block_nr, data);
                         bio::brelse(bh);
                         continue;
@@ -273,7 +301,10 @@ fn ext4_file_read_cached_dst(
             let avail = block_size_usize - page_offset;
             let zero_len = core::cmp::min(remaining, avail);
             // SAFETY: dst validity documented on ReadDst::put_zeroes.
-            let copied = unsafe { dst.put_zeroes(buf_offset, zero_len) };
+            let copied = match unsafe { dst.put_zeroes(buf_offset, zero_len) } {
+                Ok(c) => c,
+                Err(e) => return if total_read == 0 { Err(e) } else { Ok(total_read) },
+            };
             total_read += copied;
             buf_offset += copied;
             current_offset += copied as u64;

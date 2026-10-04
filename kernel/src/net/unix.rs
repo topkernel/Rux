@@ -234,6 +234,27 @@ impl UnixSocket {
         q.iter().map(|s| s.data.len()).sum()
     }
 
+    /// Kernel-heap cost of the receive queue (Linux `sk_wmem_alloc` /
+    /// skb-truesize semantics).
+    ///
+    /// The flow-control cap (SO_SNDBUF) must be charged what a queued
+    /// segment actually COSTS, not its payload length: the buddy heap's
+    /// minimum block is one page, so a 1-byte datagram occupies PAGE_SIZE
+    /// of kernel heap plus its VecDeque slot. Payload-only accounting let
+    /// LTP sendfile07's fill loop (1-byte writes until EAGAIN, cap
+    /// 212992) queue one page per byte — 128MB of heap before the byte
+    /// cap was reached — killing tasks with ALLOCTHROW and taking the
+    /// whole sweep chunk down (the r8 sendfile/sendmsg/sendmmsg CRASH
+    /// family). Linux charges skb->truesize for exactly this reason.
+    fn queued_truesize(&self) -> usize {
+        const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
+            + crate::arch::riscv64::mm::PAGE_SIZE as usize;
+        let q = self.recv_queue.lock();
+        q.iter()
+            .map(|s| s.data.len() + SEG_OVERHEAD)
+            .sum()
+    }
+
     /// Resolve the connected peer to a strong Arc (None = peer gone).
     fn peer_arc(&self) -> Option<Arc<UnixSocket>> {
         self.peer.lock().as_ref().and_then(|w| w.upgrade())
@@ -260,7 +281,7 @@ impl UnixSocket {
                 match self.peer_arc() {
                     Some(peer) => {
                         let cap = self.options.lock().sndbuf as usize;
-                        peer.queued_bytes() < cap
+                        peer.queued_truesize() < cap
                     }
                     // No peer link (listener/unconnected): send() would
                     // return ENOTCONN/EPIPE immediately — "ready".
@@ -923,6 +944,15 @@ pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
     sock.peer_arc().and_then(|p| p.bound_name.lock().clone())
 }
 
+/// Flow-control charge of one segment of `len` payload bytes: payload plus
+/// the per-segment heap cost (see UnixSocket::queued_truesize — the buddy
+/// heap allocates whole pages).
+fn seg_charge(len: usize) -> usize {
+    const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
+        + crate::arch::riscv64::mm::PAGE_SIZE as usize;
+    len + SEG_OVERHEAD
+}
+
 /// Can `target` accept a segment of `len` bytes (Linux unix-SO_SNDBUF
 /// semantics: at least one segment is always accepted)?
 fn target_has_room(target: &Arc<UnixSocket>, len: usize, cap: usize) -> bool {
@@ -936,8 +966,8 @@ fn target_has_room(target: &Arc<UnixSocket>, len: usize, cap: usize) -> bool {
     if *target.dead.lock() || *target.state.lock() == UnixState::Closed {
         return true;
     }
-    let queued = target.queued_bytes();
-    queued == 0 || queued + len <= cap
+    let queued = target.queued_truesize();
+    queued == 0 || queued + seg_charge(len) <= cap
 }
 
 /// Send one message (segment). `dest` overrides the connected destination
@@ -1025,8 +1055,12 @@ pub fn unix_send(
 
         {
             let mut q = target.recv_queue.lock();
-            let queued: usize = q.iter().map(|s| s.data.len()).sum();
-            if queued == 0 || queued + data.len() <= cap {
+            // Truesize discipline (see seg_charge): the enqueue gate must
+            // charge the segment's HEAP cost, or 1-byte datagram fills
+            // exhaust the buddy heap one page at a time before the byte
+            // cap is ever reached (r8 ALLOCTHROW family).
+            let queued: usize = q.iter().map(|s| seg_charge(s.data.len())).sum();
+            if queued == 0 || queued + seg_charge(data.len()) <= cap {
                 let src = sock.bound_name.lock().clone();
                 // Drain parked ancillary data onto the front of the new
                 // segment: first-touch delivery with the first bytes that

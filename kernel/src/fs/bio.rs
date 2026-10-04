@@ -601,6 +601,19 @@ impl BlockCache {
                             current = entry.hash_next;
                             continue;
                         }
+                        // Failed-async residue: a buffer whose async read
+                        // FAILED stays cached !Uptodate (bread_wait only
+                        // sets Uptodate on status 0) with new_uninit heap
+                        // garbage in b_data. Serving it as a hit handed
+                        // userspace uninitialized memory (r8 read02/
+                        // readv02/mmapstress04 mismatches — the zero-fill
+                        // of BufferHead::new used to mask this). Treat it
+                        // as a miss: Phase 2 re-reads the block from disk.
+                        if unsafe { !(*entry.bh).get_state().is_uptodate() } {
+                            prev = Some(entry_ptr);
+                            current = entry.hash_next;
+                            continue;
+                        }
                         // Found — move to hash chain head
                         if prev.is_some() {
                             let prev_entry = &mut *prev.unwrap();
@@ -669,6 +682,14 @@ impl BlockCache {
                             current = (*cp).hash_next;
                             continue;
                         }
+                        // Same failed-async rule as Phase 1: a !Uptodate
+                        // duplicate is residue, not data — skip it and
+                        // insert the fresh buffer at the chain head (the
+                        // stale entry is reclaimed by LRU eviction later).
+                        if unsafe { !(*(*cp).bh).get_state().is_uptodate() } {
+                            current = (*cp).hash_next;
+                            continue;
+                        }
                         (*(*cp).bh).get();
                         let mut lru = unsafe { self.lru_lock_under_bucket() };
                         Self::move_to_lru_head(&mut lru, cp);
@@ -721,6 +742,11 @@ impl BlockCache {
                         {
                             continue; // dead entry — treat as miss
                         }
+                        // Failed-async residue: never hand out a !Uptodate
+                        // buffer (see get() Phase 1).
+                        if !(*entry.bh).get_state().is_uptodate() {
+                            continue;
+                        }
                         (*entry.bh).get();
                         return Some(entry.bh);
                     }
@@ -755,6 +781,12 @@ impl BlockCache {
                         if (*cp).bh.is_null()
                             || (*(*cp).bh).b_data.len() != self.block_size as usize
                         {
+                            current = (*cp).hash_next;
+                            continue;
+                        }
+                        // Failed-async residue — skip, insert ours (get()
+                        // Phase 3 discipline).
+                        if !(*(*cp).bh).get_state().is_uptodate() {
                             current = (*cp).hash_next;
                             continue;
                         }
@@ -858,6 +890,66 @@ impl BlockCache {
         lru.tail = None;
         self.count.store(0, Ordering::Release);
     }
+
+    /// Invalidate every buffer of ONE device (loop-detach discipline,
+    /// Linux's invalidate_bdev on LOOP_CLR_FD).
+    ///
+    /// A loop device whose backing-file write failed leaves a BH_Dirty
+    /// buffer behind (sync failed, dirty bit stays). Once the loop is
+    /// unbound, that buffer can never be written back — but it still sits
+    /// in the shared cache, so the NEXT full-cache sync
+    /// (ext4_mkdir's bio::sync_buffers, sync(2)) or an eviction would
+    /// fail with the DEAD device's ENXIO and leak that errno into
+    /// completely unrelated syscalls (the r8 mkdtemp(/tmp/LTP_*) ENXIO
+    /// storm after every loop-format failure).
+    ///
+    /// Unpinned entries are freed WITHOUT syncing (their dirty data is
+    /// failed-write data — detach discards it, same as Linux). Pinned
+    /// entries (in-flight users) only get BH_Dirty cleared so their later
+    /// natural eviction cannot try the dead device either.
+    fn invalidate_device(&self, device_major: u32, device_minor: u32) {
+        for i in 0..self.hash_size {
+            let mut bucket = self.buckets[i].lock();
+            let mut current = bucket.head;
+            let mut prev: Option<*mut CacheEntry> = None;
+            while let Some(entry_ptr) = current {
+                // SAFETY: entry_ptr is from the hash chain (created by
+                // Box::into_raw); the bucket lock is held.
+                unsafe {
+                    let entry = &mut *entry_ptr;
+                    let next = entry.hash_next;
+                    if entry.key.0 == device_major && entry.key.1 == device_minor {
+                        if (*entry.bh).count() == 0 {
+                            // Unlink from the chain; the LRU link is
+                            // removed under the lru lock below.
+                            entry.evicting = true;
+                            match prev {
+                                Some(pp) => (*pp).hash_next = next,
+                                None => bucket.head = next,
+                            }
+                            let mut lru = self.lru.lock_irqsave();
+                            Self::remove_from_lru(&mut lru, entry_ptr);
+                            // No I/O, no sync: dirty data is discarded
+                            // (detach semantics). Presence under the
+                            // bucket lock makes the free safe (get()
+                            // skips evicting entries).
+                            let _ = Box::from_raw(entry_ptr);
+                            self.count.fetch_sub(1, Ordering::Release);
+                        } else {
+                            // Pinned: keep the buffer for its holder, but
+                            // make sure it never syncs against the dead
+                            // device after release.
+                            (*entry.bh).clear_state_bit(BufferState::BH_Dirty);
+                            prev = Some(entry_ptr);
+                        }
+                    } else {
+                        prev = Some(entry_ptr);
+                    }
+                    current = next;
+                }
+            }
+        }
+    }
 }
 
 impl Drop for BlockCache {
@@ -907,6 +999,16 @@ pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut Buffer
 /// must overwrite the whole block (or rely on the zeros).
 pub fn getblk_zero(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get_zero(device, blocknr)
+}
+
+/// Invalidate every cached buffer of `device` without writing anything
+/// back (loop detach — see BlockCache::invalidate_device).
+pub fn invalidate_device(device: *const blkdev::GenDisk) {
+    // SAFETY: device is a valid GenDisk pointer from the block layer;
+    // only its major/first_minor fields are read.
+    unsafe {
+        get_block_cache().invalidate_device((*device).major, (*device).first_minor);
+    }
 }
 
 /// Async block read: submit I/O without blocking, return buffer head immediately.
@@ -1015,6 +1117,16 @@ pub fn bread_async(
                         completion.complete(status);
                         return Some(bh);
                     }
+                    if !state.test(BufferState::BH_Uptodate) {
+                        // Failed-async residue (!Uptodate, !BH_Req): the
+                        // previous read of this block FAILED and the buffer
+                        // holds new_uninit heap garbage. Not a hit — fall
+                        // through and submit a fresh read (Phase 3 skips
+                        // this stale entry when inserting).
+                        prev = Some(entry_ptr);
+                        current = entry.hash_next;
+                        continue;
+                    }
                     // Cache hit (up to date)
                     if prev.is_some() {
                         let prev_entry = &mut *prev.unwrap();
@@ -1083,6 +1195,15 @@ pub fn bread_async(
                                 || (*(*cp).bh).b_data.len() != cache.block_size as usize
                         }
                     {
+                        current = (*cp).hash_next;
+                        continue;
+                    }
+                    // Failed-async residue: a !Uptodate, !BH_Req duplicate
+                    // holds garbage from a FAILED read — do not return it;
+                    // publish our fresh entry instead (the stale one is
+                    // skipped by lookups and reclaimed by LRU eviction).
+                    let st = unsafe { (*(*cp).bh).get_state() };
+                    if !st.test(BufferState::BH_Uptodate) && !st.test(BufferState::BH_Req) {
                         current = (*cp).hash_next;
                         continue;
                     }

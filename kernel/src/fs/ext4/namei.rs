@@ -851,8 +851,15 @@ fn ext4_mkdir_no_journal(
     parent.i_ctime = sec;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
 
-    // Sync all buffers to ensure directory is fully written
-    bio::sync_buffers()?;
+    // Best-effort full-cache flush for durability. NOT fatal to the
+    // syscall: sync_buffers drains EVERY device's dirty buffers, and a
+    // foreign device's writeback error (e.g. a loop whose backing-file
+    // write failed) must not fail this mkdir — Linux reports such errors
+    // via fsync/sync, never through the creating syscall (the r8 mkdtemp
+    // ENXIO storm: mkdir inherited a dead loop's -6 from here).
+    if let Err(e) = bio::sync_buffers() {
+        crate::pr_warn!("ext4: post-mkdir buffer sync failed (errno {})", e);
+    }
 
     Ok(new_ino)
 }

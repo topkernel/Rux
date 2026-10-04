@@ -192,6 +192,14 @@ pub fn loop_clr_fd(idx: usize) -> Result<(), i32> {
         Some(_) => {
             if let Some(disk) = dev.disk {
                 disk.capacity.store(0, Ordering::Release);
+                // Drop every cached buffer of this loop, dirty ones
+                // included (Linux invalidate_bdev on detach). A dirty
+                // buffer whose writeback failed cannot be synced against
+                // an unbound loop — leaving it in the shared cache let
+                // the NEXT full-cache sync fail with this device's ENXIO
+                // and poison unrelated syscalls (the mkdtemp ENXIO storm
+                // after a failed mkfs-on-loop).
+                crate::fs::bio::invalidate_device(disk as *const _);
             }
             Ok(())
         }
