@@ -511,6 +511,26 @@ pub fn do_exit(exit_code: i32) -> ! {
             (*leader).ppid()
         };
 
+        // ===== Journal handle unwind =====
+        // A task killed mid-syscall (SIGKILL/SIGSEGV between
+        // set_current_handle and clear_current_handle — LTP abort01 sends
+        // SIGABRT into its children) dies owning a jbd2 handle: its
+        // transaction's t_updates stays elevated forever, and EVERY later
+        // jbd2_journal_stop spins out its 1,000,000-lap "wait for other
+        // handles" loop (seconds under TCG — the capset01/03 soft-lockup
+        // family; multiplied per write it became a whole-chunk wedge).
+        // Unwind the reference now: the handle lives on this task's dying
+        // stack and can never reach ext4_journal_stop itself. The
+        // registered dirty buffers stay in the transaction for the next
+        // stopper to commit; nothing else in the handle needs release.
+        if let Some(handle_ptr) = crate::fs::ext4::namei::get_current_handle() {
+            let txn = (*handle_ptr).h_transaction.clone();
+            if let Some(txn) = txn {
+                txn.t_updates.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+            }
+            crate::fs::ext4::namei::clear_current_handle();
+        }
+
         // ===== Core dump (P1) =====
         // A negative exit code encodes death by signal; the core-dumping
         // signals get a core file written BEFORE any resource is torn
