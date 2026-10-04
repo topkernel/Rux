@@ -937,6 +937,10 @@ impl VirtIOBlkDevice {
             resp_layout,
             header_ptr,
             header_layout,
+            // Unused on the MMIO path: its queue admits ONE in-flight chain
+            // (queue_size 8 / 3 descs), so completion order is trivially
+            // submission order and the ordinal-indexed walk below is sound.
+            head_desc: 0,
         };
         let slot = prev as usize % MAX_PENDING_IO;
         VIRTIO_MMIO_PENDING.lock_irqsave()[slot] = Some(pending);
@@ -1007,6 +1011,9 @@ struct PendingIo {
     header_ptr: *mut u8,
     /// Layout of request header buffer for deallocation.
     header_layout: alloc::alloc::Layout,
+    /// Head descriptor id of this request's chain (PCI only): the key the
+    /// completion walker matches against the used ring's UsedElem.id.
+    head_desc: u32,
 }
 
 // SAFETY: PendingIo is stored in a Spinlock-protected table and only accessed
@@ -1055,10 +1062,33 @@ static VIRTIO_PCI_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync:
 const MAX_PENDING_IO_PCI: usize = 64;
 
 /// Pending async I/O requests for the PCI VirtIO block device.
-/// Indexed by (submission order % MAX_PENDING_IO_PCI); synchronous requests
-/// share the submission counter (VIRTIO_PCI_EXPECTED_USED_IDX) but occupy
-/// their slot with None — the completion walk skips them (their waiter polls
-/// its own response byte).
+///
+/// DEVICE-TRUTHED DISPATCH: entries are keyed by their chain's head
+/// descriptor id (`head_desc`) and matched against the used ring's actual
+/// `UsedElem.id`. The previous design indexed entries by submission ordinal
+/// (`ordinal % MAX_PENDING_IO_PCI`) and the walker mapped used-ring entry i
+/// to slot `i % MAX_PENDING_IO_PCI` — an identity that only holds when the
+/// device completes chains exactly in submission order. QEMU virtio-blk
+/// completes mixed-size chains OUT OF ORDER (a 4 KiB single-block read
+/// routinely overtakes an in-flight 256 KiB coalesced readahead chain), so
+/// the walker fired the WRONG pending on every reordering:
+///   - a pending whose chain was still in flight fired EARLY with a
+///     fabricated -EIO (its response byte still 0xFF); the waiter returned,
+///     the caller freed the DMA target (`bfree_multi`) and could exit while
+///     the device still wrote into it, and the late used-ring entry then
+///     fired yet another innocent pending — a cascade (the wandering heap
+///     corruption behind the r1/r3/r4 families), and
+///   - when the walker lagged >= 64 entries (Block-softirq starvation), the
+///     submit path's stale-slot takeover fired still-waiting completions
+///     with a fabricated -EIO, and any waiter that left via the 10s
+///     deadline left a pending pointing at its kernel-stack IoCompletion —
+///     the walker later fired it into the freed (recycled-to-userspace)
+///     stack page: the r2 WAKE-WILD-PTR panic.
+/// Keying by head descriptor id makes completion order irrelevant: a
+/// pending fires exactly when ITS chain's used-ring entry appears, never
+/// earlier. Synchronous request chains simply match no entry. A timing-out
+/// waiter retires its own entry via `blk_retire_pending_async` so a late
+/// completion can never touch memory its owner has stopped owning.
 static VIRTIO_PCI_PENDING: Spinlock<[Option<PendingIo>; MAX_PENDING_IO_PCI]> =
     Spinlock::new([const { None }; MAX_PENDING_IO_PCI]);
 
@@ -1086,12 +1116,12 @@ pub fn pci_blk_kick() {
 /// Abandon in-flight async I/O bound to one IoCompletion pointer.
 ///
 /// GSD fix (10s-deadline UAF): `IoCompletion::wait` bounds itself at 10s
-/// and returns -EIO to escape wedged I/O. That waiter's `IoCompletion`
-/// usually lives on its KERNEL STACK (fill_page_cache_batch), so once
-/// wait() returns, the stack frame — and the completion with it — is
-/// gone. But the pending tables kept the raw pointer, and every later
-/// completion walker (`pci_process_async_completions`, the MMIO IRQ
-/// path) plus the stale-slot branch in `pci_submit_read_async` happily
+/// and returns -ETIMEDOUT to escape wedged I/O. That waiter's
+/// `IoCompletion` usually lives on its KERNEL STACK
+/// (fill_page_cache_batch), so once wait() returns, the stack frame —
+/// and the completion with it — is gone. But the pending tables kept the
+/// raw pointer, and every later completion walker
+/// (`pci_process_async_completions`, the MMIO IRQ path) would have
 /// called `complete()` through it: a wake_up_all() over a wait queue
 /// that no longer exists, corrupting whatever now owns that stack. The
 /// resulting wild `wake_up_process` on a garbage Task pointer was the
@@ -1100,8 +1130,15 @@ pub fn pci_blk_kick() {
 /// This removes every pending-table entry referencing `comp`, so nothing
 /// dereferences the abandoning waiter's memory after it unwinds. The
 /// device may still finish the chain and DMA into the request buffer —
-/// the waiter must therefore NOT free its DMA buffers on the -EIO path
-/// (see fill_page_cache_batch / bread_wait callers).
+/// the waiter must therefore NOT free its DMA buffers on the
+/// WAIT_TIMED_OUT path (see fill_page_cache_batch / bread_wait callers).
+///
+/// The chain's header/resp io_buf is deliberately LEAKED, not freed: the
+/// device writes the response byte (inside that block) exactly when the
+/// chain completes — possibly long after this abandon — so freeing it
+/// would hand a late 1-byte DMA a freed heap block (R21-N2 discipline:
+/// integrity over a bounded leak; descriptor slots cannot be reused
+/// while the chain still counts against the in-flight guard).
 ///
 /// Returns the number of entries abandoned.
 pub fn abandon_pending_completion(
@@ -1113,29 +1150,18 @@ pub fn abandon_pending_completion(
     {
         let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
         for slot in table.iter_mut() {
-            if let Some(p) = slot.take_if(|p| p.completion == comp) {
-                // SAFETY: the combined R17-C block: header at base, resp at
-                // +48, one allocation (header_layout == resp base layout).
-                unsafe { alloc::alloc::dealloc(p.header_ptr, p.header_layout); }
+            if slot.take_if(|p| p.completion == comp).is_some() {
+                // io_buf intentionally leaked (see above).
                 abandoned += 1;
             }
         }
     }
-    // MMIO table (separate allocation for header and resp)
+    // MMIO table
     {
         let mut table = VIRTIO_MMIO_PENDING.lock_irqsave();
         for slot in table.iter_mut() {
-            if let Some(p) = slot.take_if(|p| p.completion == comp) {
-                // SAFETY: allocated by the MMIO submit path with these
-                // layouts; freed exactly once here.
-                unsafe {
-                    if !p.header_ptr.is_null() {
-                        alloc::alloc::dealloc(p.header_ptr, p.header_layout);
-                    }
-                    if !p.resp_ptr.is_null() {
-                        alloc::alloc::dealloc(p.resp_ptr, p.resp_layout);
-                    }
-                }
+            if slot.take_if(|p| p.completion == comp).is_some() {
+                // header + resp intentionally leaked (same discipline).
                 abandoned += 1;
             }
         }
@@ -1201,6 +1227,32 @@ unsafe fn pci_submit_read_async(
     const VIRTQ_DESC_F_NEXT: u16 = 1;
     const VIRTQ_DESC_F_WRITE: u16 = 2;
 
+    // Reserve a FREE pending slot BEFORE touching the device (device-truthed
+    // dispatch — see VIRTIO_PCI_PENDING): submitters are serialized by the
+    // BLK lock (the completion walker takes the same lock), so the scan
+    // cannot race another submitter or the walker. Live pendings are bounded
+    // by in-flight chains (< queue_size/3 = 41) plus completed-but-unwalked
+    // ones; if the Block softirq is starved long enough for all 64 slots to
+    // fill, fail with "queue full" — callers drain what is in flight and
+    // retry, which is exactly the backpressure needed to let the walker
+    // catch up.
+    let free_slot = {
+        let table = VIRTIO_PCI_PENDING.lock_irqsave();
+        let mut free = usize::MAX;
+        for (i, e) in table.iter().enumerate() {
+            if e.is_none() {
+                free = i;
+                break;
+            }
+        }
+        free
+    };
+    if free_slot == usize::MAX {
+        // SAFETY: io_buf was allocated with io_layout and is unreferenced.
+        unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+        return Err(-5); // pending table full — caller drains and retries
+    }
+
     #[cfg(feature = "riscv64")]
     let header_phys = crate::arch::riscv64::mm::virt_to_phys(
         crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64),
@@ -1248,9 +1300,6 @@ unsafe fn pci_submit_read_async(
         core::mem::size_of::<VirtIOBlkResp>() as u32,
         VIRTQ_DESC_F_WRITE, 0);
 
-    // Slot ordinal BEFORE submit (submission order == completion order on a
-    // single virtqueue; sync submissions take a None slot).
-    let prev = get_expected_used_idx();
     // Batch submission discipline: publish quietly and count. Every notify
     // is an MMIO trap (device emulation under TCG, ~hundreds of µs), so a
     // 128-block read-ahead window kicks once (pci_blk_kick from the waiter)
@@ -1258,6 +1307,9 @@ unsafe fn pci_submit_read_async(
     // virtqueue is nearly exhausted anyway and a lost waiter must never
     // depend on someone else's kick.
     virt_queue.submit_quiet(header_desc_idx);
+    // Keep the submission counter aligned with the used ring for the SYNC
+    // paths' `new_used == prev_expected` sentinel (read_block_once). The
+    // async pending table no longer uses it (device-truthed dispatch).
     increment_expected_used_idx();
     let unkicked = PCI_UNKICKED.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
     if unkicked >= 32 {
@@ -1265,35 +1317,18 @@ unsafe fn pci_submit_read_async(
         virt_queue.notify();
     }
 
-    let pending = PendingIo {
+    // Publish the pending entry keyed by this chain's head descriptor id.
+    // The BLK lock is still held, so the completion walker (same lock)
+    // cannot observe the used-ring advance before this entry is visible —
+    // no matter how fast the device completes.
+    VIRTIO_PCI_PENDING.lock_irqsave()[free_slot] = Some(PendingIo {
         completion: completion as *const _ as *mut _,
         resp_ptr: resp_ptr as *mut u8,
         resp_layout: io_layout,
         header_ptr: header_ptr as *mut u8,
         header_layout: io_layout,
-    };
-    let slot = prev as usize % MAX_PENDING_IO_PCI;
-    let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
-    // Stale slot (a lost completion from a previous I/O): drop it so the
-    // table cannot fill with orphans. The BufferHead stays !Uptodate and
-    // the caller's bread_wait deadline reports -EIO.
-    // SAFETY: resp/header pointers were allocated by this function for the
-    // PREVIOUS occupant and freed by exactly one of these two paths.
-    //
-    // GSD fix (10s-deadline UAF): the old completion pointer may belong to
-    // a waiter that already timed out and unwound (completions live on the
-    // waiter's kernel stack) — completing through it corrupted freed
-    // memory. Timed-out waiters now abandon their entries
-    // (abandon_pending_completion); the original waiter of a slot found
-    // stale here is still blocked in bread_wait and will reach its own
-    // deadline. Never touch the stale pointer.
-    if let Some(old) = table[slot].take() {
-        unsafe {
-            alloc::alloc::dealloc(old.header_ptr, old.header_layout);
-        }
-        crate::pr_err!("virtio: dropped stale pending I/O (lost completion)");
-    }
-    table[slot] = Some(pending);
+        head_desc: header_desc_idx as u32,
+    });
 
     Ok(())
 }
@@ -1316,7 +1351,15 @@ unsafe fn pci_async_read_fn(
 }
 
 /// Process completed PCI async reads: walk the used ring from the last
-/// processed index, complete each pending I/O found on the way.
+/// processed index and fire the pending I/O matching each entry's chain.
+///
+/// DEVICE-TRUTHED DISPATCH: each used-ring entry carries the head
+/// descriptor id of the chain the device ACTUALLY completed; the pending
+/// entry with the same `head_desc` is fired. This is order-independent —
+/// QEMU completes mixed-size chains out of order, which broke the old
+/// `used-ring index == submission ordinal` slot mapping and fired the
+/// wrong pendings (early fires with fabricated EIO; see
+/// VIRTIO_PCI_PENDING).
 ///
 /// Runs in the Block softirq (raised by the PCI IRQ handler) under the PCI
 /// BLK lock — the same context/discipline as the MMIO completion walker, so
@@ -1324,10 +1367,13 @@ unsafe fn pci_async_read_fn(
 pub fn pci_process_async_completions() {
     // Fast path: nothing pending. Read the used ring first; if the walker is
     // already caught up, skip the lock entirely.
-    let used_ring = match get_pci_device_queue() {
-        Some(q) => q.used_ring_ptr(),
+    let (used_ring, queue_sz) = match get_pci_device_queue() {
+        Some(q) => (q.used_ring_ptr(), q.queue_size),
         None => return,
     };
+    if queue_sz == 0 {
+        return;
+    }
     // SAFETY: used ring offset 2 is the idx field (u16); the queue is alive
     // (VIRTIO_PCI_READY was checked by get_pci_device_queue).
     let used_idx = unsafe {
@@ -1349,12 +1395,38 @@ pub fn pci_process_async_completions() {
     let mut budget = MAX_PENDING_IO_PCI as u16;
     while i != used_idx && budget > 0 {
         budget -= 1;
-        let slot = i as usize % MAX_PENDING_IO_PCI;
-        let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
-        // SAFETY: entries were published by pci_submit_read_async under the
-        // BLK lock; the device has completed their chains (used ring
-        // advanced past their submission index).
-        if let Some(pending) = table[slot].take() {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        // The completed chain's head descriptor id (UsedElem.id at
+        // used_ring + 4 + pos*8; the device publishes it only after the
+        // chain — including its DMA writes — is done).
+        // SAFETY: ring position `i % queue_sz` is within the used ring.
+        let ring_pos = (i as usize) % queue_sz as usize;
+        let entry_id = unsafe {
+            core::ptr::read_volatile(
+                (used_ring as usize + 4 + ring_pos * 8) as *const u32
+            )
+        };
+        // Fire the pending whose chain this entry completed (keyed lookup —
+        // order-independent). No match = a synchronous request chain (its
+        // waiter polls its own response byte) or an already-retired
+        // (timed-out) chain: nothing to do.
+        let mut fired: Option<PendingIo> = None;
+        {
+            let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
+            let mut hit = usize::MAX;
+            for (j, e) in table.iter().enumerate() {
+                if let Some(p) = e {
+                    if p.head_desc == entry_id {
+                        hit = j;
+                        break;
+                    }
+                }
+            }
+            if hit != usize::MAX {
+                fired = table[hit].take();
+            }
+        }
+        if let Some(pending) = fired {
             let status = unsafe { *(pending.resp_ptr as *mut u8) };
             let io_status = if status == 0 { 0 } else { -5i32 };
             // SAFETY: the combined R17-C block: header at base, resp at +48,
@@ -1362,11 +1434,10 @@ pub fn pci_process_async_completions() {
             unsafe {
                 alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
             }
-            // SAFETY: completion token outlives its I/O.
+            // SAFETY: the waiter keeps this completion alive until it fires
+            // (or retires it via blk_retire_pending_async before leaving).
             unsafe { (*pending.completion).complete(io_status); }
         }
-        // None = a synchronous request's slot — its waiter polls its own
-        // response byte; nothing to do.
         i = i.wrapping_add(1);
     }
     VIRTIO_PCI_PENDING_LAST.store(i, core::sync::atomic::Ordering::Release);

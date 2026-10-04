@@ -1,0 +1,10 @@
+echo REPRO-READY
+i=0
+while [ $i -lt 12 ]; do ( while :; do cat /bin/toybox > /dev/null; cat /lib/ld-musl-riscv64.so.1 > /dev/null; cat /app/desktop > /dev/null; done ) & i=$((i+1)); done
+echo LONG-READERS-UP
+j=0
+while [ $j -lt 400 ]; do ( cat /bin/toybox > /dev/null; cat /lib/ld-musl-riscv64.so.1 > /dev/null ) & j=$((j+1)); done
+echo EXIT-STORM-DONE
+k=0
+while [ $k -lt 8 ]; do ( while :; do cat /app/desktop > /dev/null; cat /bin/toybox > /dev/null; done ) & k=$((k+1)); done
+echo SECOND-WAVE-UP

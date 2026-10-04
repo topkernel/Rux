@@ -1224,10 +1224,17 @@ pub fn bread_async(
                 // one we passed to blkdev_read_async), then also wait for
                 // the existing buffer to be up to date so the caller never
                 // observes a half-filled cache hit (review 2R.11).
-                let _ = completion.wait();
-                // SAFETY: entry_ptr was created by Box::into_raw above; our
-                // I/O has finished and the entry was never published.
-                let _ = Box::from_raw(entry_ptr);
+                let wait_status = completion.wait();
+                if wait_status == crate::fs::io_completion::WAIT_TIMED_OUT {
+                    // Timed out: wait() already abandoned the pending (no
+                    // late fire into this stack completion). Our chain may
+                    // still DMA into the private bh — LEAK the entry, never
+                    // free a buffer the device may still write.
+                } else {
+                    // SAFETY: entry_ptr was created by Box::into_raw above;
+                    // our I/O has finished and the entry was never published.
+                    let _ = Box::from_raw(entry_ptr);
+                }
                 let _ = wait_buffer_io_done(existing_bh);
                 // The caller's bread_wait() sees the completion our I/O
                 // signaled; the winning buffer is settled either way.
@@ -1257,6 +1264,13 @@ pub fn bread_async(
 /// R20-FS8: returns the I/O status (0 = success, negative errno on failure)
 /// so callers can refuse to consume/cache data from a failed read. The
 /// buffer stays in the cache marked !Uptodate on error.
+///
+/// On [`crate::fs::io_completion::WAIT_TIMED_OUT`] the device may STILL be
+/// writing the request's DMA target: wait() itself has already abandoned the
+/// device-side pending entry (so its late completion can never fire into the
+/// waiter's memory after this returns — the freed-kernel-stack completion
+/// corruption family), and callers must NOT free the DMA target (multi-block
+/// buffers are leaked by drain_batch; single-block buffers keep their pin).
 pub fn bread_wait(bh: *mut BufferHead, completion: &crate::fs::io_completion::IoCompletion) -> i32 {
     // SAFETY: bh is a raw pointer returned by bread_async(); it points to a
     // valid BufferHead owned by a CacheEntry in the cache.

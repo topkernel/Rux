@@ -1,0 +1,15 @@
+tag=baseline-r6 kernel=/home/william/rux-agents/virtio-comp-baseline/target/riscv64gc-unknown-none-elf/debug/rux dur=600
+panic=None
+rounds_done=0 last=None all_done=False
+marker KERNPANIC                count=0
+marker WAKE-WILD-PTR            count=0
+marker panicked                 count=0
+marker Kernel panic             count=0
+marker soft lockup              count=0
+marker SOFT-LOCKUP              count=0
+marker ALLOCTHROW               count=0
+marker trap: stack:             count=0
+marker lost completion          count=0
+marker buffer io wait timeout   count=0
+marker dead bh in chain         count=0
+serial_bytes=6731

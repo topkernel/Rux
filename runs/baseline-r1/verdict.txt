@@ -1,0 +1,20 @@
+=== verdict for baseline-r1 ===
+pattern 'KERNPANIC': 0
+pattern 'WAKE-WILD-PTR': 0
+pattern 'panic': 0
+pattern 'soft lockup': 0
+pattern 'SOFT-LOCKUP': 0
+pattern 'ALLOCTHROW': 0
+pattern 'trap: stack:': 0
+pattern 'backtrace': 0
+pattern 'lost completion': 0
+pattern 'buffer io wait timeout': 0
+markers:
+141:[1;32mroot[0m:[1;34m/[0m# cho REPRO-READY
+146:[1;32mroot[0m:[1;34m/[0m# echo LONG-READERS-UP
+148:LONG-READERS-UP
+152:[1;32mroot[0m:[1;34m/[0m# echo EXIT-STORM-DONE
+154:EXIT-STORM-DONE
+159:[1;32mroot[0m:[1;34m/[0m# echo SECOND-WAVE-UP
+162:SECOND-WAVE-UP
+serial log lines: 164

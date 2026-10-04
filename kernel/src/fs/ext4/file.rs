@@ -542,32 +542,34 @@ fn drain_batch(
                 // Single-block requests went through bread_async: they live
                 // in the block cache, release with brelse.
                 //
-                // GSD fix (10s-deadline UAF): a -EIO here means the waiter
-                // hit the IoCompletion deadline and abandoned the I/O —
-                // the device may still DMA into b_data, so the buffer must
-                // NOT re-enter the block cache for reuse. Intentionally
-                // leaked (bounded by the rarity of 10s I/O stalls) with a
-                // diagnostic: freeing it corrupted unrelated pages.
-                if status[i] != 0 {
+                // Abandon discipline (10s-deadline): on WAIT_TIMED_OUT the
+                // device may still DMA into b_data, so the buffer must NOT
+                // re-enter the block cache for reuse — the pin is
+                // intentionally held forever (bounded by the rarity of 10s
+                // stalls; freeing it corrupted unrelated pages). A real
+                // device EIO COMPLETED its chain — brelse is safe there.
+                if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
                     crate::pr_err!(
-                        "ext4: leaked failed read-ahead bh (block {}) — device may still DMA",
+                        "ext4: leaked timed-out read-ahead bh (block {}) — device may still DMA",
                         ra_blk[i]
                     );
                 } else {
                     bio::brelse(bh_ptrs[i]);
                 }
+            } else if status[i] == crate::fs::io_completion::WAIT_TIMED_OUT {
+                // Multi-block private buffer, timed out (the waiter already
+                // abandoned the pending so no late completion fires into
+                // its stack): the device may still DMA into it.
+                // NEVER free a buffer the device may still write — leak it
+                // (R21-N2 discipline: integrity over a bounded leak).
+                crate::pr_err!(
+                    "ext4: leaked timed-out multi-block read-ahead ({} blocks from {}) — device may still DMA",
+                    ra_len[i], ra_blk[i]
+                );
             } else {
-                // Multi-block buffers are private: free directly. Same
-                // abandon discipline as above — a timed-out chain's DMA
-                // buffer is leaked, never freed.
-                if status[i] != 0 {
-                    crate::pr_err!(
-                        "ext4: leaked failed multi-block read-ahead ({} blocks from {}) — device may still DMA",
-                        ra_len[i], ra_blk[i]
-                    );
-                } else {
-                    bio::bfree_multi(bh_ptrs[i]);
-                }
+                // Multi-block buffers are private: free directly. A real
+                // device EIO completed its chain — the DMA is done.
+                bio::bfree_multi(bh_ptrs[i]);
             }
         }
     }
