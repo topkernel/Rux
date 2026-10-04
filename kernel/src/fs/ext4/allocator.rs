@@ -180,7 +180,12 @@ impl<'a> BlockAllocator<'a> {
                 group_descs[group_idx as usize].bg_free_blocks_count_lo
                     .saturating_sub(len as u16);
         }
-        self.update_group_desc_free_blocks(group_idx as u64, free_blocks - len as u16)?;
+        // Saturating: the on-disk descriptor count is known to drift from
+        // the bitmap truth (see the matching note in free_block_run; the
+        // journal checkpoint can restore a stale descriptor block over the
+        // allocator's direct write). A debug-build subtraction underflow
+        // here panicked the kernel long before the drift itself mattered.
+        self.update_group_desc_free_blocks(group_idx as u64, free_blocks.saturating_sub(len as u16))?;
         self.update_superblock_free_blocks(-(len as i32))?;
 
         let block_number = (group_idx as u64) * blocks_per_group + first;
@@ -318,7 +323,11 @@ impl<'a> BlockAllocator<'a> {
                     .saturating_add(len as u16);
         }
 
-        self.update_group_desc_free_blocks(group_idx, free_blocks + len as u16)?;
+        // Saturating: with a drifted (inflated) on-disk count, a large free
+        // run overflowed u16 here in debug builds and panicked the kernel
+        // ("attempt to add with overflow") — turning a bookkeeping anomaly
+        // into a filesystem-level DoS.
+        self.update_group_desc_free_blocks(group_idx, free_blocks.saturating_add(len as u16))?;
         self.update_superblock_free_blocks(len as i32)?;
 
         Ok(())
