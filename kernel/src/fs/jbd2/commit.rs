@@ -84,6 +84,70 @@ pub fn jbd2_journal_commit_transaction(
         return Ok(());
     }
 
+    // Fast path (write-through commit, no revoke records): every buffer
+    // registered via jbd2_journal_dirty_metadata is ALSO modified in place
+    // through its buffer-cache BufferHead (write_inode / write_block all
+    // edit the cached block before registering). Syncing the cached buffer
+    // to its FINAL on-disk location persists the update directly — the
+    // journal-area copy (descriptor + data + commit block + superblock,
+    // four synchronous I/Os) is pure overhead under this write-through
+    // design because Phase 4 below advances the log tail past the
+    // transaction immediately, so recovery never replays it anyway.
+    // One synchronous write per dirty buffer instead of four per commit
+    // takes a small ext4 write from ~60ms (five-plus waits, the LTP
+    // post-exec "hang" family: every test writing a few KB of setup data
+    // in <32B chunks blew the 30s wall clock) back to ~one wait.
+    if journal.revoke_records.lock().is_empty() {
+        let mut first_err: i32 = 0;
+        for (blocknr, ref data) in &dirty_buffers {
+            // SAFETY: bio::bread on a valid device returns a buffer head
+            // for the cached block (cache hit) or a freshly-read one
+            // (after an eviction in between — whose on-disk copy may be
+            // stale). Re-apply the registered snapshot either way, then
+            // sync: the write-through design persists the update at its
+            // FINAL location without touching the journal area.
+            match bio::bread(device, *blocknr) {
+                Some(bh) => {
+                    // SAFETY: bh is valid; b_data is block_size bytes and
+                    // data.len() <= block_size (journal block granularity).
+                    unsafe {
+                        let bh_ref = &mut *bh;
+                        let copy_len = core::cmp::min(data.len(), bh_ref.b_data.len());
+                        bh_ref.b_data[..copy_len].copy_from_slice(&data[..copy_len]);
+                        // Buffer content is the metadata update.
+                        bh_ref.set_state_bit(bio::BufferState::BH_Dirty);
+                        // Sync writes the cached content out.
+                        let sync_res = bio::sync_dirty_buffer(bh);
+                        // Release the cache reference taken by bread.
+                        bio::brelse(bh);
+                        if let Err(e) = sync_res {
+                            first_err = e;
+                            break;
+                        }
+                    }
+                }
+                None => {
+                    first_err = 5; // EIO
+                    break;
+                }
+            }
+        }
+        // Sequences advance; the log itself consumed no space (j_head,
+        // j_tail, j_free unchanged).
+        journal
+            .j_commit_sequence
+            .store(tid, core::sync::atomic::Ordering::SeqCst);
+        journal
+            .j_tail_sequence
+            .store(tid, core::sync::atomic::Ordering::SeqCst);
+        *commit_transaction.t_state.lock() = TransactionState::Finished;
+        if first_err != 0 {
+            journal.abort(first_err);
+            return Err(first_err);
+        }
+        return Ok(());
+    }
+
     // Phase 2: Write to journal
     {
         let mut state = commit_transaction.t_state.lock();

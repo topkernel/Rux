@@ -349,9 +349,11 @@ pub fn ext4_file_write(
                         Err(e) => return Err(e),
                     };
 
-                    // Zero the new block
-                    // SAFETY: bio::bread returns a valid BufferHead; b_data is a
-                    // block-sized writable buffer. We zero it before use.
+                    // Zero the new block (deferred-dirty: the write loop
+                    // below leaves the data buffer BH_Dirty; the block
+                    // cache write-back persists it — see ext4_file_write).
+                    // SAFETY: bio::bread returns a valid BufferHead;
+                    // b_data is a block-sized writable buffer.
                     unsafe {
                         let bh = bio::bread(fs.device, new_block)
                             .ok_or(errno::Errno::IOError.as_neg_i32())?;
@@ -360,9 +362,7 @@ pub fn ext4_file_write(
                             *byte = 0;
                         }
                         (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-                        let sync_res = bio::sync_dirty_buffer(bh);
                         bio::brelse(bh);
-                        sync_res?;
                     }
 
                     // Update inode block pointer
@@ -396,11 +396,16 @@ pub fn ext4_file_write(
             data[block_offset..block_offset + write_in_block]
                 .copy_from_slice(&buf[buf_offset..buf_offset + write_in_block]);
 
-            // Mark as dirty
+            // Deferred write-back: leave the buffer BH_Dirty in the block
+            // cache instead of syncing it here. A synchronous write per
+            // write(2) (~10-20ms of virtio wait under TCG) made any
+            // small-write workload — every LTP test's setup — blow the
+            // 30s wall clock. Durability now comes from fsync
+            // (ext4_sync_file syncs the file's dirty data blocks), the
+            // buffer-cache eviction path (dirty victims are synced before
+            // reuse), and sync(2).
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
-            sync_res?;
 
             total_written += write_in_block;
             buf_offset += write_in_block;
@@ -812,10 +817,23 @@ pub fn ext4_sync_file(
     // per-block sync above already wrote everything through.
     if let Some(journal) = fs.journal.clone() {
         let mut handle = super::journal::ext4_journal_start(fs, 0)?;
+        // h_sync: fsync must force the lazy-batched transaction to commit
+        // now (jbd2_journal_stop otherwise leaves it open for batching) —
+        // the commit's write-through fast path persists the registered
+        // inode-table blocks, making the fsynced state durable.
+        handle.h_sync = true;
         let res = super::journal::ext4_journal_stop(&mut handle);
         let _ = journal; // Journal Arc retained for clarity
         res?;
     }
+
+    // The lazy write-back (bio::sync_dirty_buffer defers while a journal
+    // handle is active) also leaves UNREGISTERED metadata dirty in the
+    // buffer cache — block bitmaps, group descriptors, extent-tree and
+    // directory blocks from the same update. fsync semantics require those
+    // on disk too, so flush the whole cache; the common case (nothing new
+    // dirty) scans the hash buckets only.
+    bio::sync_buffers()?;
 
     Ok(())
 }

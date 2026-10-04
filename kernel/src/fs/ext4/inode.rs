@@ -538,21 +538,33 @@ pub fn write_inode(
     data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
 
     // Mark buffer dirty and sync
-    // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies
+    // SAFETY: bh is a valid buffer head from bio::bread; set_state_bit modifies
     // the buffer state flags through an internal spinlock.
     unsafe { (*bh).set_state_bit(bio::BufferState::BH_Dirty) };
 
     // Journal the inode table block if a transaction is active
     // SAFETY: bh is a valid buffer head from bio::bread
+    let mut have_handle = false;
     unsafe {
         if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
             let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+            have_handle = true;
         }
     }
 
-    let sync_res = bio::sync_dirty_buffer(bh);
+    // With an active handle the commit persists this block (write-through
+    // fast path syncs the registered buffers); syncing here too would
+    // restore the one-synchronous-I/O-per-write(2) cost this path just
+    // lost. Without a handle (standalone inode updates outside a
+    // transaction) keep the direct sync for durability.
+    if !have_handle {
+        let sync_res = bio::sync_dirty_buffer(bh);
+        bio::brelse(bh);
+        sync_res?;
+        return Ok(());
+    }
+    // SAFETY: bh valid; release the reference taken by bread above.
     bio::brelse(bh);
-    sync_res?;
 
     Ok(())
 }

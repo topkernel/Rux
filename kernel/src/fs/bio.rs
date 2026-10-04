@@ -1128,7 +1128,28 @@ pub fn brelse(bh: *const BufferHead) {
 }
 
 /// Sync a dirty buffer to disk
+///
+/// Lazy write-back: while the current task holds an active ext4 journal
+/// handle, the sync is deferred — the buffer simply stays BH_Dirty. This
+/// covers ALL metadata writes inside a write(2)/create transaction (data
+/// blocks, inode table, bitmaps, group descriptors, extent trees,
+/// directory blocks): a synchronous virtio round trip per sync (~10-20ms
+/// under TCG) made every small-write workload — each LTP test's setup
+/// phase — blow the 30s wall-clock timeout (the r5 "post-exec hang"
+/// family). Persistence is restored at the batch points: the journal
+/// commit's write-through fast path (registered buffers), fsync/sync
+/// (ext4_sync_file flushes the file's data blocks and forces the
+/// transaction to commit; sync(2) writes the whole cache), and
+/// buffer-cache eviction (dirty victims are synced before reuse).
 pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
+    // SAFETY: get_current_handle reads the current task's handle slot and
+    // is null-safe when no task context exists (interrupt/early boot).
+    let journal_active = unsafe {
+        crate::fs::ext4::namei::get_current_handle().is_some()
+    };
+    if journal_active {
+        return Ok(());
+    }
     // SAFETY: bh is a raw pointer returned by bread(); it points to a valid
     // BufferHead owned by a CacheEntry in the cache.
     unsafe {

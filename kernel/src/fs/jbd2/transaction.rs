@@ -213,6 +213,31 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     // Decrement transaction updates
     txn.t_updates.fetch_sub(1, Ordering::SeqCst);
 
+    // Lazy commit batching (Linux kjournald behavior): the last handle on a
+    // running transaction does NOT force a synchronous commit. Consecutive
+    // write(2) calls each start/stop one handle; committing per stop cost
+    // several synchronous I/Os per syscall and turned any small-write
+    // workload (every LTP test's setup) into a 30s timeout. The
+    // transaction stays open and later handles join it; a commit is forced
+    // only when:
+    //   - the caller asked for durability (h_sync — fsync/sync paths), or
+    //   - the batch is large (>= LAZY_COMMIT_MAX_BUFFERS registered
+    //     metadata buffers), or
+    //   - revoke records are pending (the slow path must suppress them).
+    // Metadata durability between forced commits relies on the buffer
+    // cache write-back (eviction syncs dirty buffers) and sync(2).
+    const LAZY_COMMIT_MAX_BUFFERS: usize = 64;
+    if err == 0 && !handle.h_sync {
+        let dirty_len = txn.t_dirty_buffers.lock().len();
+        let revokes_pending = !journal.revoke_records.lock().is_empty();
+        if dirty_len < LAZY_COMMIT_MAX_BUFFERS && !revokes_pending {
+            // Leave j_running_transaction in place: the next
+            // start_this_handle joins this transaction.
+            handle.h_transaction = None;
+            return Ok(());
+        }
+    }
+
     // On single-core: always commit synchronously when last handle stops
     // Spin-wait for any other handles (shouldn't happen on single-core)
     let mut spin_count = 0u32;
