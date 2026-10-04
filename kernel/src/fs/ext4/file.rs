@@ -381,15 +381,44 @@ fn fill_page_cache_batch(
         }
         let nblocks = n as u32;
 
-        match bio::bread_async_multi(fs.device, block_nr, nblocks, &completions[count]) {
+        // Coherence guard (bisect: 3bf0a33 broke Xorg's xkbcomp flow):
+        // bread_async_multi DMA-reads the whole run into a private buffer
+        // WITHOUT consulting the block cache. Any member block with a live
+        // entry there — dirty ones hold data the disk does not have yet
+        // (sync_dirty_buffer defers while a journal handle is active) —
+        // would come back as stale disk bytes and poison the page cache
+        // (write-then-read-back returned garbage; Xorg read back a
+        // corrupt .xkm and died at "XKB: Failed to compile keymap").
+        // Split the run at the first block-cached block: the clean prefix
+        // still rides one multi-block request; the cached block (and
+        // everything after) is revisited by the loop and fetched with
+        // per-block bread_async, which returns the cached uptodate data.
+        let submit_blocks = if nblocks > 1 {
+            let mut k = 0u64;
+            while k < nblocks as u64 {
+                if bio::block_cached(fs.device, block_nr + k) {
+                    break;
+                }
+                k += 1;
+            }
+            if k == 0 {
+                1 // block 0 itself cached: single-block bread_async hits it
+            } else {
+                k as u32
+            }
+        } else {
+            nblocks
+        };
+
+        match bio::bread_async_multi(fs.device, block_nr, submit_blocks, &completions[count]) {
             Some(bh) => {
                 bh_ptrs[count] = bh;
                 ra_idx[count] = run_first;
                 ra_blk[count] = block_nr;
-                ra_len[count] = nblocks;
+                ra_len[count] = submit_blocks;
                 count += 1;
-                blocks_in_batch += n;
-                idx += n;
+                blocks_in_batch += submit_blocks as u64;
+                idx += submit_blocks as u64;
             }
             None => {
                 // Queue full (or async unsupported): drain what is in

@@ -1154,6 +1154,47 @@ pub fn brelse(bh: *const BufferHead) {
     get_block_cache().put(bh)
 }
 
+/// Non-blocking presence probe: does a live block-cache entry exist for
+/// (device, blocknr)? No I/O, no pinning, no LRU touch.
+///
+/// Coherence guard for `bread_async_multi`: that path DMA-reads a whole
+/// block run into a private buffer WITHOUT consulting the block cache.
+/// If any member block has a live entry here — especially a DIRTY one
+/// holding data the disk does not have yet (lazy write-back defers while
+/// a journal handle is active) — the private read would fetch stale disk
+/// bytes and poison the page cache with them. Callers must split such
+/// runs and use per-block `bread_async`, which returns the cached
+/// (uptodate, possibly dirty) contents instead.
+pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
+    // SAFETY: device is a valid GenDisk pointer from the block device layer;
+    // entry traversal mirrors bread_async Phase 1 under the bucket lock.
+    unsafe {
+        let (device_major, device_minor) = ((*device).major, (*device).first_minor);
+        let cache = get_block_cache();
+        let index = cache.hash_index(device_major, device_minor, blocknr);
+        let bucket = cache.buckets[index].lock_irqsave();
+        let mut current = bucket.head;
+        while let Some(entry_ptr) = current {
+            let entry = &*entry_ptr;
+            // Same validity guards as bread_async Phase 1: skip entries
+            // being evicted and dead (freed/reused) BufferHeads.
+            if entry.evicting {
+                current = entry.hash_next;
+                continue;
+            }
+            if entry.bh.is_null() || (*entry.bh).b_data.len() != cache.block_size as usize {
+                current = entry.hash_next;
+                continue;
+            }
+            if entry.key == (device_major, device_minor, blocknr) {
+                return true; // SpinlockGuard drops on early return
+            }
+            current = entry.hash_next;
+        }
+        false
+    }
+}
+
 /// Submit ONE async read covering `nblocks` consecutive disk blocks into a
 /// single buffer — the coalesced-readahead fast path.
 ///
