@@ -571,14 +571,14 @@ static int server_main(void)
                     stalling = 1; /* silence reads: backpressure wave */
             }
             struct pollfd pf[SRV_MAXFDS + 1];
-            int map[SRV_MAXFDS + 1];
+            int is_listener[SRV_MAXFDS + 1];
             int n = 0;
-            pf[n].fd = ls; pf[n].events = POLLIN; map[n] = -1; n++;
+            pf[n].fd = ls; pf[n].events = POLLIN; is_listener[n] = 1; n++;
             for (int i = 0; i < nconn; i++) {
                 short ev = 0;
                 if (!stalling) ev |= POLLIN;
                 if (conns[i].out_len > conns[i].out_off) ev |= POLLOUT;
-                pf[n].fd = conns[i].fd; pf[n].events = ev; map[n] = i; n++;
+                pf[n].fd = conns[i].fd; pf[n].events = ev; is_listener[n] = 0; n++;
             }
             int pr = poll(pf, n, 1000);
             if (pr < 0) {
@@ -593,11 +593,19 @@ static int server_main(void)
             for (int k = 0; k < n && pr > 0; k++) {
                 if (!pf[k].revents) continue;
                 pr--;
-                if (map[k] == -1) {
+                if (is_listener[k]) {
                     srv_accept(ls, -1);
                     continue;
                 }
-                struct conn *cn = &conns[map[k]];
+                /* Re-resolve the conn BY FD at handle time: srv_drop()
+                 * compacts conns[] mid-sweep, so an index captured while
+                 * building pf[] can point at a shifted (wrong) entry —
+                 * the originally-ready fd was then silently skipped,
+                 * which wedged its client forever (C9 at seq=1 with the
+                 * server healthy; also the phantom EBADF/EPIPES on fds
+                 * that had just been closed). */
+                struct conn *cn = srv_find(pf[k].fd);
+                if (!cn) continue;
                 int dead = 0;
                 if (pf[k].revents & POLLIN)
                     dead = srv_readable(cn) < 0;
