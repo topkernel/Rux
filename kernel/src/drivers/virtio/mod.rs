@@ -1083,6 +1083,72 @@ pub fn pci_blk_kick() {
     }
 }
 
+/// Abandon in-flight async I/O bound to one IoCompletion pointer.
+///
+/// GSD fix (10s-deadline UAF): `IoCompletion::wait` bounds itself at 10s
+/// and returns -EIO to escape wedged I/O. That waiter's `IoCompletion`
+/// usually lives on its KERNEL STACK (fill_page_cache_batch), so once
+/// wait() returns, the stack frame — and the completion with it — is
+/// gone. But the pending tables kept the raw pointer, and every later
+/// completion walker (`pci_process_async_completions`, the MMIO IRQ
+/// path) plus the stale-slot branch in `pci_submit_read_async` happily
+/// called `complete()` through it: a wake_up_all() over a wait queue
+/// that no longer exists, corrupting whatever now owns that stack. The
+/// resulting wild `wake_up_process` on a garbage Task pointer was the
+/// recurring `KERNPANIC pfault badaddr=0x5e` under gnome-session load.
+///
+/// This removes every pending-table entry referencing `comp`, so nothing
+/// dereferences the abandoning waiter's memory after it unwinds. The
+/// device may still finish the chain and DMA into the request buffer —
+/// the waiter must therefore NOT free its DMA buffers on the -EIO path
+/// (see fill_page_cache_batch / bread_wait callers).
+///
+/// Returns the number of entries abandoned.
+pub fn abandon_pending_completion(
+    comp: *mut crate::fs::io_completion::IoCompletion,
+) -> usize {
+    let mut abandoned = 0usize;
+
+    // PCI table
+    {
+        let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
+        for slot in table.iter_mut() {
+            if let Some(p) = slot.take_if(|p| p.completion == comp) {
+                // SAFETY: the combined R17-C block: header at base, resp at
+                // +48, one allocation (header_layout == resp base layout).
+                unsafe { alloc::alloc::dealloc(p.header_ptr, p.header_layout); }
+                abandoned += 1;
+            }
+        }
+    }
+    // MMIO table (separate allocation for header and resp)
+    {
+        let mut table = VIRTIO_MMIO_PENDING.lock_irqsave();
+        for slot in table.iter_mut() {
+            if let Some(p) = slot.take_if(|p| p.completion == comp) {
+                // SAFETY: allocated by the MMIO submit path with these
+                // layouts; freed exactly once here.
+                unsafe {
+                    if !p.header_ptr.is_null() {
+                        alloc::alloc::dealloc(p.header_ptr, p.header_layout);
+                    }
+                    if !p.resp_ptr.is_null() {
+                        alloc::alloc::dealloc(p.resp_ptr, p.resp_layout);
+                    }
+                }
+                abandoned += 1;
+            }
+        }
+    }
+    if abandoned > 0 {
+        crate::pr_err!(
+            "virtio: abandoned {} in-flight I/O(s) of a timed-out waiter",
+            abandoned
+        );
+    }
+    abandoned
+}
+
 /// Submit an async read on the PCI VirtIO block device (no waiting).
 ///
 /// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); `buf` must
@@ -1208,17 +1274,24 @@ unsafe fn pci_submit_read_async(
     };
     let slot = prev as usize % MAX_PENDING_IO_PCI;
     let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
-    // Stale slot (a lost completion from a previous I/O): drop it with an
-    // error so the table cannot fill with orphans. The BufferHead stays
-    // !Uptodate and the caller's bread_wait deadline reports -EIO.
+    // Stale slot (a lost completion from a previous I/O): drop it so the
+    // table cannot fill with orphans. The BufferHead stays !Uptodate and
+    // the caller's bread_wait deadline reports -EIO.
     // SAFETY: resp/header pointers were allocated by this function for the
     // PREVIOUS occupant and freed by exactly one of these two paths.
+    //
+    // GSD fix (10s-deadline UAF): the old completion pointer may belong to
+    // a waiter that already timed out and unwound (completions live on the
+    // waiter's kernel stack) — completing through it corrupted freed
+    // memory. Timed-out waiters now abandon their entries
+    // (abandon_pending_completion); the original waiter of a slot found
+    // stale here is still blocked in bread_wait and will reach its own
+    // deadline. Never touch the stale pointer.
     if let Some(old) = table[slot].take() {
         unsafe {
             alloc::alloc::dealloc(old.header_ptr, old.header_layout);
         }
-        // SAFETY: completion token outlives its I/O (bread_wait contract).
-        unsafe { (*old.completion).complete(-5); }
+        crate::pr_err!("virtio: dropped stale pending I/O (lost completion)");
     }
     table[slot] = Some(pending);
 
@@ -1248,7 +1321,7 @@ unsafe fn pci_async_read_fn(
 /// Runs in the Block softirq (raised by the PCI IRQ handler) under the PCI
 /// BLK lock — the same context/discipline as the MMIO completion walker, so
 /// IoCompletion::complete (wait-queue wakeup) never runs in hard-IRQ context.
-fn pci_process_async_completions() {
+pub fn pci_process_async_completions() {
     // Fast path: nothing pending. Read the used ring first; if the walker is
     // already caught up, skip the lock entirely.
     let used_ring = match get_pci_device_queue() {

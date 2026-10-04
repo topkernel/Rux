@@ -78,12 +78,32 @@ impl IoCompletion {
             // on the return to userspace, so a lost completion wedged the
             // whole sweep. Bound the wait (10s of jiffies); a lost
             // completion then reports -EIO and the syscall unwinds.
+            //
+            // GSD fix (10s-deadline UAF): returning with the I/O still
+            // queued left the virtio pending tables holding a raw pointer
+            // to this (usually stack-allocated) completion; later
+            // completion walkers called complete() through freed stack
+            // memory (wild wake_up_all -> KERNPANIC under gnome-session).
+            // Before unwinding: (1) kick + drain one last time — recovers
+            // lost-kick stalls; (2) abandon our pending-table entries so
+            // nothing dereferences this memory after we return. Callers
+            // must likewise NOT free the I/O's DMA buffers on -EIO.
             if !deadline_set {
                 deadline = crate::drivers::timer::get_jiffies()
                     .saturating_add(msecs_to_jiffies(10_000));
                 deadline_set = true;
             } else if crate::drivers::timer::get_jiffies() >= deadline {
+                // Final chance: kick the queue and drain completions once.
+                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_process_async_completions();
+                if self.done.load(Ordering::Acquire) {
+                    crate::pr_err!("io_completion: recovered by final kick/drain");
+                    return self.status.load(Ordering::Acquire);
+                }
                 crate::pr_err!("io_completion: lost completion — reporting EIO (wedge fix)");
+                crate::drivers::virtio::abandon_pending_completion(
+                    self as *const _ as *mut _,
+                );
                 return -5;
             }
 
