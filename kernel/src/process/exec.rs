@@ -78,6 +78,20 @@ pub(crate) fn do_execve_elf(
         fdtable.close_cloexec_fds();
     }
 
+    // Linux setup_new_exec(): comm becomes the executable's basename (max
+    // TASK_COMM_LEN-1 = 15 chars). Without this every post-exec task keeps
+    // the FORK-inherited comm — /proc/[pid]/comm, ps and the DFX task dumps
+    // showed empty names for nearly every process (only PR_SET_NAME users
+    // like glib's gdbus/InputThread threads were identifiable).
+    {
+        let base = pathname.rsplit('/').next().unwrap_or(pathname);
+        let mut name = [0u8; 16];
+        let len = core::cmp::min(base.len(), 15);
+        name[..len].copy_from_slice(&base.as_bytes()[..len]);
+        // SAFETY: task_ptr is the current task, valid throughout execve.
+        unsafe { (*task_ptr).set_comm(&name); }
+    }
+
     // POSIX exec signal cleanup:
     // 1. Reset signal handlers to SIG_DFL (preserve SIG_IGN per POSIX)
     // 2. Clear sigaltstack

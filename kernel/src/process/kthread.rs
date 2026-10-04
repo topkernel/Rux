@@ -112,6 +112,13 @@ pub fn kernel_thread(
 
     // 7. Store KthreadInfo
     {
+        // comm mirrors the kthread name (Linux kthreads carry their name in
+        // task_struct->comm) — the DFX task dumps and /proc then agree with
+        // the KTHREAD_MAP name instead of printing empty comm= lines.
+        let mut name_buf = [0u8; 16];
+        let len = core::cmp::min(_name.len(), 15);
+        name_buf[..len].copy_from_slice(&_name.as_bytes()[..len]);
+        task.set_comm(&name_buf);
         let mut map = KTHREAD_MAP.lock();
         map.insert(pid, KthreadInfo {
             should_stop: AtomicBool::new(false),

@@ -526,6 +526,37 @@ pub fn do_exit(exit_code: i32) -> ! {
             current_pid, (*current).tgid(), exit_code, parent_pid,
             if is_leader { "leader" } else { "thread" });
 
+        // DFX (dbus-death hunt): every death-by-signal gets a KERN_INFO
+        // line on the console — the default loglevel hides pr_debug, and
+        // the only external symptom of the dbus-daemon kill was
+        // ECONNREFUSED with the socket file left behind. `kill -0`-style
+        // exits (normal, code>=0) are not printed: the fork/exec storm
+        // would bury the signal deaths in noise.
+        if exit_code < 0 {
+            let comm_raw = (*current).comm();
+            let comm_len = comm_raw.iter().position(|&b| b == 0).unwrap_or(comm_raw.len());
+            // Sender forensics: SI_USER deaths (kill/tgkill) carry the
+            // sender's pid in the queued siginfo — print it so "who killed
+            // X" is answerable from the console (kernel-originated signals
+            // have no sender and print si_code instead).
+            let sender = (*current)
+                .pending
+                .peek_info(-exit_code)
+                .map(|si| (si.si_pid, si.si_code))
+                .unwrap_or((0, 0));
+            crate::pr_info!(
+                "SIGDEATH: pid={} tgid={} comm={:?} sig={} ppid={}{} si_pid={} si_code={:#x}",
+                current_pid,
+                (*current).tgid(),
+                core::str::from_utf8(&comm_raw[..comm_len]),
+                -exit_code,
+                parent_pid,
+                if is_leader { "" } else { " (thread)" },
+                sender.0,
+                sender.1,
+            );
+        }
+
         #[cfg(feature = "dfx-futex-trace")]
         {
             use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
