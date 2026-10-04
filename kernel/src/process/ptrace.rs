@@ -305,7 +305,9 @@ unsafe fn write_gregset(task: *mut Task, from: &[u8]) -> bool {
 /// signal + siginfo, wake the tracer with SIGCHLD.
 ///
 /// Called from the tracee's own context (do_signal / trap handler), so the
-/// trap frame is quiescent once the task schedules away.
+/// trap frame is quiescent once the task schedules away. The stop PARKS
+/// the task (schedule loop) until the tracer resumes it (PTRACE_CONT /
+/// DETACH) or a signal arrives — Linux ptrace_stop() discipline.
 ///
 /// # Safety
 /// `task` is the current (about to stop) task.
@@ -321,17 +323,23 @@ pub unsafe fn ptrace_stop(task: *mut Task, sig: i32, info: SigInfo) {
 
         let tracer_pid = (*task).tracer_pid();
         if tracer_pid != 0 {
-            // Tracer visibility: SIGCHLD wakes an interruptible wait4.
+            // Tracer visibility. SIGCHLD alone is NOT reliable: its default
+            // disposition is SIG_IGN (send_signal discards it for tracers
+            // without a handler), so the waitqueue wake below is the real
+            // notifier — it unblocks a tracer parked in wait4/waitid
+            // exactly like the exit path's wake_group_chldexit.
             let _ = crate::signal::send_signal(tracer_pid, Signal::SIGCHLD as i32);
-            // SIGCHLD may be blocked by the tracer — wake it regardless so
-            // its wait4 loop re-scans children.
             let tr = crate::process::pid_hash::pid_hash_lookup_pinned(tracer_pid);
             if !tr.is_null() {
+                crate::process::exit::wake_group_chldexit(tr);
                 crate::signal::signal_wake_up(tr);
                 crate::process::task::Task::task_put(tr);
             }
         }
-        crate::sched::set_need_resched();
+        // Park in the stop until resumed. The old code only set
+        // need_resched and relied on the (disabled) trap-exit preemption
+        // check, so a traced task never actually stopped.
+        crate::signal::park_stopped_task(task);
     }
 }
 
@@ -356,6 +364,12 @@ pub fn sys_ptrace(args: SyscallArgs) -> i64 {
     if request == PTRACE_TRACEME {
         if pid != 0 {
             return -EINVAL;
+        }
+        // Linux: a task that is already being traced may not TRACEME again
+        // (LTP ptrace03 "process which is already been traced" expects EPERM).
+        // SAFETY: tracer_pid is an atomic field.
+        if unsafe { (*current).tracer_pid() } != 0 {
+            return -EPERM;
         }
         // Future stops of THIS task are reported to its real parent.
         // SAFETY: parent_ptr returns the real parent or None.

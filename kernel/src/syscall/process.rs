@@ -4262,18 +4262,6 @@ pub fn sys_quotactl(args: SyscallArgs) -> i64 {
     }
 }
 
-/// sys_ptrace - Process tracing
-///
-/// # Arguments
-/// - args[0]: request - PTRACE_TRACEME, PTRACE_PEEKTEXT, etc.
-/// - args[1]: pid - tracee PID
-/// - args[2]: addr - address
-/// - args[3]: data - data
-pub fn sys_ptrace(_args: SyscallArgs) -> i64 {
-    // TODO: implement ptrace (complex - debugger support)
-    -(errno::ENOSYS as i64)
-}
-
 /// sys_riscv_hwprobe - Probe RISC-V hardware features
 ///
 /// # Arguments

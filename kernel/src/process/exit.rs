@@ -531,6 +531,29 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::fs::ext4::namei::clear_current_handle();
         }
 
+        // ===== Ptrace tracer death: auto-detach tracees =====
+        // Linux forgets the tracing relationship when the tracer exits
+        // (ptrace_exit → every tracee is detached and resumed). Without
+        // this, a tracer that dies between PTRACE_ATTACH and DETACH (the
+        // LTP runner 30s-kills a wedged test) leaves its tracee STOPPED
+        // forever — when the tracee is init (ptrace11 attaches PID 1) the
+        // whole guest wedges.
+        {
+            crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+                if (*t).tracer_pid() != current_pid || (*t).pid() == current_pid {
+                    return;
+                }
+                // SAFETY: task is alive for the duration of the hash walk
+                // (same discipline as send_signal_to_pgid's in-walk use).
+                (*t).set_tracer_pid(0);
+                (*t).set_ptrace_options(0);
+                (*t).clear_single_step();
+                if (*t).state().contains(TaskState::STOPPED) {
+                    crate::signal::signal_wake_up(t);
+                }
+            });
+        }
+
         // ===== Core dump (P1) =====
         // A negative exit code encodes death by signal; the core-dumping
         // signals get a core file written BEFORE any resource is torn
@@ -1105,10 +1128,15 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // Check if it's in Zombie state
                 if child.state() == TaskState::new(TaskState::ZOMBIE) {
                     zombie_child = Some(child_ptr);
-                } else if options & WUNTRACED != 0
-                    && child.state() == TaskState::new(TaskState::STOPPED)
+                } else if child.state() == TaskState::new(TaskState::STOPPED)
                     && !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                    && (options & WUNTRACED != 0 || child.tracer_pid() == current_pid)
                 {
+                    // Linux wait_task_stopped(): "Traditionally we see
+                    // ptrace'd stopped children regardless of options" —
+                    // WUNTRACED gates job-control stops only; a stop of a
+                    // task WE trace is always reported (LTP ptrace01/05
+                    // use plain waitpid on a TRACEME'd child).
                     stopped_child = Some(child_ptr);
                 }
             });
@@ -1174,36 +1202,112 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 return Ok(child_pid);
             }
 
+            // Linux do_wait() also walks the caller's TRACEE list
+            // (ptrace_do_wait): a task attached with PTRACE_ATTACH that is
+            // not a real child (LTP ptrace11 attaches init and
+            // waitpid(1,...)s) is still waitable for its stops. A tracee
+            // that has not stopped yet also keeps the wait blocking (it
+            // plays the role of a child for ECHILD purposes).
+            let mut found_tracee = false;
+            {
+                let mut tracee_stop: Option<*mut Task> = None;
+                crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+                    if tracee_stop.is_some() {
+                        return;
+                    }
+                    if (*t).tracer_pid() != current_pid || (*t).pid() == current_pid {
+                        return;
+                    }
+                    if !wait_pid_matches(&*t, pid, caller_pgid) {
+                        return;
+                    }
+                    found_tracee = true;
+                    if (*t).state() == TaskState::new(TaskState::STOPPED)
+                        && !(*t).stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                    {
+                        tracee_stop = Some(t);
+                    }
+                });
+                if let Some(t) = tracee_stop {
+                    let child_pid = (*t).pid();
+                    let stop_sig = (*t).stop_signal();
+                    let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
+                    if !status_ptr.is_null() {
+                        let _uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                            status_ptr as *mut u8,
+                            &status as *const i32 as *const u8,
+                            core::mem::size_of::<i32>()
+                        );
+                    }
+                    (*t).stop_reported.store(true, core::sync::atomic::Ordering::Release);
+                    return Ok(child_pid);
+                }
+            }
+
             // No zombie or stopped child found
-            if found_child {
+            if found_child || found_tracee {
                 // Atomically add to waitqueue AND set INTERRUPTIBLE.
                 // Prevents lost-wakeup race where child exits between
                 // add() and set_state(), marking the entry woken but
                 // wake_up_process skips the actual wake (task still RUNNING).
                 (*current).wait_chldexit.prepare_to_wait(current, false, true);
 
-                // Recheck for zombie after prepare_to_wait (waker may have
-                // fired between the initial scan and prepare_to_wait).  If
-                // a child is already zombie, finish_wait restores RUNNING
-                // state and we reap it immediately — no schedule() needed.
+                // Recheck after prepare_to_wait (waker may have fired
+                // between the initial scan and prepare_to_wait — a wake of
+                // a still-RUNNING waiter is refused, so the state change
+                // can only be caught here). If a child is already zombie or
+                // freshly STOPPED (ptrace stop / group stop landing in that
+                // window), finish_wait restores RUNNING state and we loop
+                // to report it — no schedule() needed. Without the stopped
+                // recheck, a stop that raced the arm was only visible via
+                // the (discarded-for-SIG_IGN-SIGCHLD) signal path and the
+                // wait slept forever (LTP ptrace05 wedge family).
                 {
-                    let mut found_zombie = false;
+                    let mut need_rescan = false;
                     (*current).for_each_group_child(|child_ptr| {
+                        if need_rescan {
+                            return;
+                        }
                         if !wait_pid_matches(&*child_ptr, pid, caller_pgid) {
                             return;
                         }
-                        if (*child_ptr).state() == TaskState::new(TaskState::ZOMBIE) {
-                            found_zombie = true;
+                        let st = (*child_ptr).state();
+                        if st == TaskState::new(TaskState::ZOMBIE) {
+                            need_rescan = true;
+                        } else if st == TaskState::new(TaskState::STOPPED)
+                            && !(*child_ptr).stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                            && (options & WUNTRACED != 0
+                                || (*child_ptr).tracer_pid() == current_pid)
+                        {
+                            need_rescan = true;
                         }
                     });
-                    if found_zombie {
+                    if !need_rescan {
+                        crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+                            if need_rescan {
+                                return;
+                            }
+                            if (*t).tracer_pid() != current_pid || (*t).pid() == current_pid {
+                                return;
+                            }
+                            if !wait_pid_matches(&*t, pid, caller_pgid) {
+                                return;
+                            }
+                            if (*t).state() == TaskState::new(TaskState::STOPPED)
+                                && !(*t).stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                            {
+                                need_rescan = true;
+                            }
+                        });
+                    }
+                    if need_rescan {
                         (*current).wait_chldexit.finish_wait(current);
-                        // The exiting child's wake_up() may have raced our
+                        // The child's wake_up() may have raced our
                         // prepare_to_wait and enqueued us; we are going to
                         // keep running on this CPU — take ourselves back
                         // off the queue (review NEW-C2).
                         crate::sched::dequeue_if_enqueued(&*current);
-                        continue; // re-enter loop to reap zombie
+                        continue; // re-enter loop to report/reap
                     }
                 }
 
@@ -1287,11 +1391,13 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
 
             if child.state() == TaskState::new(TaskState::ZOMBIE) && zombie_ptr.is_none() {
                 zombie_ptr = Some(child_ptr);
-            } else if options & WUNTRACED != 0
-                && child.state() == TaskState::new(TaskState::STOPPED)
+            } else if child.state() == TaskState::new(TaskState::STOPPED)
                 && !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                && (options & WUNTRACED != 0 || child.tracer_pid() == current_pid)
                 && stopped_ptr.is_none()
             {
+                // ptrace'd stops are reported regardless of WUNTRACED
+                // (Linux wait_task_stopped); see do_wait for the rationale.
                 stopped_ptr = Some(child_ptr);
             }
         });

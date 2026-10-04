@@ -197,7 +197,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         114 => time::sys_clock_getres(args),   // clock_getres
         115 => time::sys_clock_nanosleep(args),// clock_nanosleep
         116 => crate::printk::sys_syslog(args),  // syslog
-        117 => process::sys_ptrace(args),      // ptrace
+        117 => crate::process::ptrace::sys_ptrace(args), // ptrace
         118 => sched::sys_sched_setparam(args),// sched_setparam
         119 => sched::sys_sched_setscheduler(args), // sched_setscheduler
         120 => sched::sys_sched_getscheduler(args), // sched_getscheduler

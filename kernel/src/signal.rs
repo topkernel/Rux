@@ -860,6 +860,14 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
             None => return false,
         };
 
+        // The body is a LOOP, not a single pass: a signal whose disposition
+        // parks the task (group stop, ptrace signal-delivery-stop) resumes
+        // execution inside this loop, and the signals that arrived while it
+        // was stopped must be re-selected (Linux get_signal() discipline).
+        // delivered tracks whether ANY pass consumed a signal, so a resume
+        // that empties the queue still reports truthfully.
+        let mut delivered = false;
+        loop {
         // SMP lost-wait fix (Linux restore_saved_sigmask discipline):
         // rt_sigsuspend parks the task with a TEMPORARY mask and arms
         // sigmask_restore. The restore must happen on EVERY trip back to
@@ -883,7 +891,7 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
                     (*current).sigmask = (*current).sigmask_restore;
                     (*current).sigmask_restore_valid = false;
                 }
-                return false;
+                return delivered;
             }
         };
         if (*current).sigmask_restore_valid {
@@ -928,7 +936,10 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
                 (*current).pending.remove(sig);
                 // SAFETY: current is the running (about-to-stop) task.
                 crate::process::ptrace::ptrace_stop(current, sig, info);
-                return true;
+                // ptrace_stop parked the task; on resume re-select — the
+                // tracer may have re-injected a signal or sent SIGKILL.
+                delivered = true;
+                continue;
             }
             (*current).take_ptrace_sigdeliver();
         }
@@ -991,6 +1002,17 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
         // Remove signal from pending queue
         (*current).pending.remove(sig);
 
+        // Group stop (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU default action):
+        // handle_default_signal did the bookkeeping and marked this task
+        // STOPPED — park until continued, then re-select like Linux's
+        // get_signal() loop (signals arriving while stopped are handled
+        // after the resume).
+        if (*current).state().contains(TaskState::STOPPED) {
+            park_stopped_task(current);
+            delivered = true;
+            continue;
+        }
+
         // If process is set to ZOMBIE or STOPPED, set need_resched flag
         // The actual schedule() call happens in trap.S when returning to user mode
         let task_state = (*current).state();
@@ -999,7 +1021,8 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
             crate::sched::set_need_resched();
         }
 
-        true
+        return true;
+        }
     }
 }
 
@@ -1419,13 +1442,18 @@ fn handle_default_signal(sig: i32) {
                     (*current).set_stop_signal(sig);
                     (*current).stop_reported.store(false, core::sync::atomic::Ordering::Release);
                     (*current).set_state(TaskState::new(TaskState::STOPPED));
-                    // Notify parent
+                    // Notify parent. SIGCHLD is discarded for parents without
+                    // a handler (default disposition is SIG_IGN here), so the
+                    // waitqueue wake is what actually unblocks a wait4/WUNTRACED
+                    // sleeper — same discipline as the exit path.
                     if let Some(parent_ptr) = (*current).parent_ptr() {
                         let parent = parent_ptr as *mut crate::process::task::Task;
                         let _ = crate::signal::send_signal((*parent).pid(), Signal::SIGCHLD as i32);
+                        crate::process::exit::wake_group_chldexit(parent);
                         crate::signal::signal_wake_up(parent);
                     }
-                    // Set need_resched flag
+                    // The actual park happens in do_signal's group-stop
+                    // branch (park_stopped_task).
                     sched::set_need_resched();
                 }
             }
@@ -1587,8 +1615,15 @@ unsafe fn send_signal_locked_info(
     // observe — the waiter then returned -ERESTARTSYS for a signal that
     // vanished before delivery, leaking the raw -512 sentinel to
     // userspace as a bogus errno.
+    //
+    // sig_task_ignored() exception: a TRACED task never ignores a signal
+    // (Linux's ptrace check exempts only SIGKILL/SIGSTOP, which bypass
+    // this path anyway) — the tracer must see every delivery as a
+    // signal-delivery-stop, even one whose disposition is SIG_IGN (LTP
+    // ptrace01/ptrace05: a TRACEME'd child SIG_IGN'ing a signal, or the
+    // default-ignored SIGCHLD, still has to stop when the signal arrives).
     if let Some(action) = signal_ref.get_action(sig) {
-        if action.action() == SigActionKind::Ignore {
+        if action.action() == SigActionKind::Ignore && task.tracer_pid() == 0 {
             return Ok(());
         }
     }
@@ -1688,6 +1723,50 @@ pub fn send_signal_to_pgid(pgid: u32, sig: i32) {
             let _ = send_signal((*task).pid(), sig);
         }
     });
+}
+
+/// Park the CURRENT task while it is in group/ptrace stop.
+///
+/// The stop bookkeeping (STOPPED state, stop signal, parent/tracer
+/// SIGCHLD) is done by the callers; this drives the actual sleep: Linux's
+/// signal-stop paths call schedule() from the task's own context
+/// (do_signal_stop/ptrace_stop), but Rux previously only set STOPPED +
+/// need_resched and relied on the trap-return preemption check — which is
+/// effectively disabled (ti_preempt_count is read with a straddling `ld`
+/// that is almost always nonzero), so a "stopped" task returned to user
+/// mode and kept running. SIGSTOP/ptrace stops were completely lost.
+///
+/// Loop discipline: any wake sets the state back to RUNNING
+/// (wake_up_enqueue), which means "resumed" (SIGCONT / PTRACE_CONT /
+/// DETACH) and breaks the park. A signal that arrives while stopped also
+/// wakes the task; do_signal's re-select loop then runs its disposition
+/// (fatal signals kill the stopped task, traced tasks re-stop with the
+/// new signal — Linux signal-delivery-stop semantics).
+///
+/// # Safety
+/// `task` must be the currently running task, in task (syscall/trap)
+/// context with a valid kernel stack — schedule() switches away on it.
+pub unsafe fn park_stopped_task(task: *mut crate::process::task::Task) {
+    use crate::process::task::TaskState;
+
+    // Sleeping with SIE=0 on this hart would starve the timer; every
+    // blocking syscall re-enables IRQs before schedule() (see do_wait).
+    crate::arch::riscv64::cpu::restore_irq(true);
+    loop {
+        crate::sched::schedule();
+        if (*task).state().contains(TaskState::STOPPED) {
+            // schedule() returned without a resume (preempt refusal /
+            // next == prev fast path). Keep parking unless a deliverable
+            // signal needs a disposition decision.
+            // SAFETY: current task, plain field reads.
+            if unsafe {
+                (*task).pending.first_unmasked((*task).sigmask).is_none()
+            } {
+                continue;
+            }
+        }
+        break;
+    }
 }
 
 /// Check and process signals (called before kernel returns to user space)
