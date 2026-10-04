@@ -938,11 +938,13 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
             Some(a) => a,
             None => return -(errno::EINVAL as i64),
         };
-        return match crate::net::unix::unix_socket_from_fd(fd as usize) {
-            Some(sock) => match crate::net::unix::unix_connect(&sock, &uaddr) {
-                Ok(()) => 0,
-                Err(e) => e as i64,
-            },
+        return match crate::net::unix::unix_file_of(fd as usize) {
+            Some((sock, nonblock)) => {
+                match crate::net::unix::unix_connect(&sock, &uaddr, nonblock) {
+                    Ok(()) => 0,
+                    Err(e) => e as i64,
+                }
+            }
             None => -(errno::ENOTSOCK as i64),
         };
     }

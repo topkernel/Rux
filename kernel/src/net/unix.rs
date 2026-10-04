@@ -122,8 +122,19 @@ pub struct UnixSocket {
     pub kind: UnixKind,
     /// Socket state
     pub state: Spinlock<UnixState>,
-    /// Bound name (registry key; abstract names carry the leading NUL)
+    /// Bound name (display/reporting: the sun_path given at bind for
+    /// filesystem sockets; the registry key itself for abstract names).
     pub bound_name: Spinlock<Option<String>>,
+    /// Name-table registration key. For abstract sockets this is the
+    /// abstract name (== bound_name); for filesystem sockets it is the
+    /// socket node's inode identity "#<fs_id>:<ino>" (see fs_reg_key) —
+    /// the table key by which connects find this socket. None = unbound.
+    reg_name: Spinlock<Option<String>>,
+    /// The socket node's inode, pinned for the lifetime of the binding.
+    /// The reg key IS the inode identity, so keeping the Arc prevents
+    /// (fs_id, ino) from being recycled while this socket is bound —
+    /// the same reason Linux's unix socket holds its inode.
+    node_inode: Spinlock<Option<alloc::sync::Arc<crate::fs::inode::Inode>>>,
     /// Connected peer (STREAM, and DGRAM socketpairs). Weak both ways: no
     /// Arc cycle, and the peer's close() makes upgrade() fail — that IS
     /// the EOF/EPIPE signal.
@@ -171,6 +182,8 @@ impl UnixSocket {
             kind,
             state: Spinlock::new(UnixState::Unconnected),
             bound_name: Spinlock::new(None),
+            reg_name: Spinlock::new(None),
+            node_inode: Spinlock::new(None),
             peer: Spinlock::new(None),
             dgram_peer: Spinlock::new(None),
             accept_queue: Spinlock::new(VecDeque::new()),
@@ -344,13 +357,61 @@ fn lookup(name: &str) -> Option<Arc<UnixSocket>> {
     UNIX_TABLE.lock().get(name).cloned()
 }
 
+/// Key-resolution forensics switch (bind/connect table keys). Off in
+/// production builds; flip for alias-path debugging.
+const UNIX_KEY_DEBUG: bool = false;
+
+/// Truncate a key for a console debug line.
+fn key_shown(s: &str) -> &str {
+    &s[..s.len().min(64)]
+}
+
+/// Resolve a filesystem socket path to its name-table registration key:
+/// the socket NODE's inode identity "#<fs_id>:<ino>".
+///
+/// Linux matches filesystem unix addresses by INODE
+/// (unix_find_socket_byinode), never by the literal path bytes — every
+/// path that resolves to the same dentry names the same socket: symlink
+/// aliases (/var/run -> /run on every distro: dbus-daemon binds the
+/// config address /run/dbus/system_bus_socket while GLib's GDBus
+/// hardcodes /var/run/dbus/system_bus_socket), relative paths, ".."
+/// segments, hardlinks. The old raw-string registry made the GLib
+/// connect miss the daemon's entry — connect() returned ECONNREFUSED
+/// against a healthy listener, gnome-session aborted ("Failed to connect
+/// to system bus: Could not connect: Connection refused"), and the
+/// daemon looked "dead" from the outside while it kept serving the whole
+/// time (socket file present, no SIGDEATH, /proc/net/unix healthy).
+///
+/// Returns None when the path does not resolve (no node at that path):
+/// callers treat that as "no listener" (ECONNREFUSED) — exactly Linux,
+/// where a path with no socket node simply names no socket. Abstract
+/// names ('\0'-prefixed) never come through here.
+///
+/// Must be called OUTSIDE the UNIX_TABLE lock (the walk takes VFS locks).
+fn fs_reg_key(raw: &str) -> Option<String> {
+    const PATH_LIMIT: usize = 4096;
+    if raw.len() > PATH_LIMIT {
+        return None;
+    }
+    let vp = crate::fs::vfs::path_lookup(raw, crate::fs::vfs::LOOKUP_FOLLOW).ok()?;
+    let inode = vp.inode?;
+    Some(alloc::format!("#{}:{}", inode.fs_id, inode.ino))
+}
+
 /// /proc/net/unix snapshot: one line per named socket, Linux layout
 /// `Num RefCount Protocol Flags Type St Path` where abstract names are
 /// printed with a leading '@' in place of the NUL.
 pub fn proc_net_unix_snapshot() -> Vec<u8> {
     let mut out = String::from("Num       RefCount Protocol Flags    Type St Path\n");
     let table = UNIX_TABLE.lock();
-    for (name, sock) in table.iter() {
+    for (_reg_key, sock) in table.iter() {
+        // Display the address the socket was bound with (sun_path or
+        // @abstract); the registration key is an internal inode identity.
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| String::from("?"));
         let typ: u16 = match sock.kind {
             UnixKind::Stream => 1,
             UnixKind::Seqpacket => 5,
@@ -544,34 +605,55 @@ fn sock_recv_ready(sock: &UnixSocket) -> bool {
 
 /// bind(): register this socket under a name.
 pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
-    if sock.bound_name.lock().is_some() {
+    if sock.bound_name.lock().is_some() || sock.reg_name.lock().is_some() {
         return Err(-22); // EINVAL — already bound
     }
     // Filesystem-path bind: Linux bind(2) creates a S_IFSOCK inode at
     // sun_path (visible to stat/chmod/ls; abstract names skip this).
     // dbus-daemon chmod()s the socket path after bind — without the node
-    // the daemon fails its setup.
+    // the daemon fails its setup. The node is created through the VFS
+    // (symlinks in the walk are followed — a bind through /var/run/...
+    // lands on /run/...), and the NAME TABLE is keyed by that inode's
+    // identity (see fs_reg_key) so every alias path that resolves to the
+    // same node connects to this socket — the Linux inode-matching rule.
+    let mut key = addr.key.clone();
     if !addr.key.starts_with('\0') {
-        // Fast path: name already taken in the kernel table?
-        {
-            let table = UNIX_TABLE.lock();
-            if table.contains_key(&addr.key) {
-                return Err(-98); // EADDRINUSE
-            }
-        }
-        match create_socket_node(&addr.key) {
-            Ok(()) => {}
+        let inode = match create_socket_node(&addr.key) {
+            Ok(i) => i,
             // EEXIST on the path = EADDRINUSE (stale socket file).
             Err(-17) => return Err(-98),
             Err(e) => return Err(e),
-        }
+        };
+        key = alloc::format!("#{}:{}", inode.fs_id, inode.ino);
+        // Pin the inode: the reg key is its identity, and holding the Arc
+        // keeps (fs_id, ino) from being recycled while we are bound.
+        *sock.node_inode.lock() = Some(inode);
     }
     let mut table = UNIX_TABLE.lock();
-    if table.contains_key(&addr.key) {
-        return Err(-98); // EADDRINUSE (raced — see fast-path note above)
+    if table.contains_key(&key) {
+        drop(table);
+        // Name taken with our node freshly created (the holder's node was
+        // unlinked while it stayed bound). Undo the stray node so bind
+        // does not litter the fs.
+        if !addr.key.starts_with('\0') {
+            let _ = crate::fs::vfs::vfs_unlink(&addr.key);
+            *sock.node_inode.lock() = None;
+        }
+        return Err(-98); // EADDRINUSE
     }
+    if UNIX_KEY_DEBUG {
+        crate::pr_info!(
+            "unix: BIND raw={:?} key={:?} by pid={}",
+            key_shown(&addr.key),
+            key_shown(&key),
+            crate::process::current_pid()
+        );
+    }
+    // bound_name stays the sun_path the caller gave (display/reporting);
+    // the registration key is separate for filesystem sockets.
     *sock.bound_name.lock() = Some(addr.key.clone());
-    table.insert(addr.key.clone(), sock.clone());
+    *sock.reg_name.lock() = Some(key.clone());
+    table.insert(key, sock.clone());
     Ok(())
 }
 
@@ -585,7 +667,10 @@ fn is_fs_path(key: &str) -> bool {
 /// Create a socket node (S_IFSOCK) at `path`, the way Linux bind(2) does.
 /// Same create-and-retype pattern as FIFO mknod: create a regular file,
 /// then set its mode word to S_IFSOCK|perm via setattr.
-fn create_socket_node(path: &str) -> Result<(), i32> {
+/// Returns the retyped inode — the socket's name-table identity.
+fn create_socket_node(
+    path: &str,
+) -> Result<alloc::sync::Arc<crate::fs::inode::Inode>, i32> {
     // O_WRONLY|O_CREAT|O_EXCL — the transient fd is closed immediately.
     match crate::fs::file_open(path, 0o1 | 0o100 | 0o200 | 0o1000, 0o777) {
         Ok(fd) => {
@@ -620,7 +705,7 @@ fn create_socket_node(path: &str) -> Result<(), i32> {
             if ret != 0 {
                 return Err(ret);
             }
-            Ok(())
+            Ok(inode)
         }
         Err(e) => Err(e),
     }
@@ -644,7 +729,14 @@ pub fn unix_listen(sock: &Arc<UnixSocket>, backlog: i32) -> Result<(), i32> {
 
 /// connect(): STREAM/SEQPACKET — hook up with a listener; DGRAM — set the
 /// default destination.
-pub fn unix_connect(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
+///
+/// `nonblock` is the connecting fd's O_NONBLOCK — it governs the
+/// full-backlog behavior exactly like Linux (see below).
+pub fn unix_connect(
+    sock: &Arc<UnixSocket>,
+    addr: &UnixAddr,
+    nonblock: bool,
+) -> Result<(), i32> {
     if *sock.shut_wr.lock() {
         return Err(-32); // EPIPE
     }
@@ -653,13 +745,64 @@ pub fn unix_connect(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> 
             if *sock.state.lock() == UnixState::Connected {
                 return Err(-106); // EISCONN
             }
-            let server = lookup(&addr.key).ok_or(-111)?; // ECONNREFUSED
+            // Filesystem paths resolve to the node's inode identity, so
+            // alias paths (symlinks: /var/run vs /run) find the listener
+            // (Linux matches by inode — see fs_reg_key). An unresolvable
+            // path has no socket node: ECONNREFUSED.
+            let lookup_key = match fs_reg_key(&addr.key) {
+                Some(k) => k,
+                None => return Err(-111), // ECONNREFUSED — no node
+            };
+            let server = match lookup(&lookup_key) {
+                Some(s) => s,
+                None => {
+                    if UNIX_KEY_DEBUG {
+                        crate::pr_info!(
+                            "unix: connect REFUSED no-entry key={:?} raw={:?} by pid={}",
+                            key_shown(&lookup_key),
+                            key_shown(&addr.key),
+                            crate::process::current_pid()
+                        );
+                    }
+                    return Err(-111); // ECONNREFUSED
+                }
+            };
             if *server.state.lock() != UnixState::Listening {
                 return Err(-111); // ECONNREFUSED
             }
-            // Backlog full?
-            if server.accept_queue.lock().len() >= *server.backlog.lock() {
-                return Err(-111); // ECONNREFUSED (Linux blocks; simplified)
+            // Backlog full? Linux unix_stream_connect: a blocking
+            // connect WAITS for the listener to accept (unix_wait_for_peer)
+            // and a non-blocking one gets EAGAIN — never an instant
+            // ECONNREFUSED. Refusing outright made every client of a
+            // momentarily-stalled listener (dbus-daemon forking an
+            // activation helper under load, so its main loop pauses and
+            // the accept queue backs up) see "Connection refused" — GLib
+            // treats that as bus death and gnome-session aborts. Once the
+            // daemon drains the queue the same connect succeeds, which is
+            // why the bus "self-heals" minutes later.
+            loop {
+                let q_len = server.accept_queue.lock().len();
+                let bk = *server.backlog.lock();
+                if q_len < bk {
+                    break;
+                }
+                if *server.state.lock() != UnixState::Listening {
+                    return Err(-111); // listener died while we waited
+                }
+                if nonblock {
+                    return Err(-11); // EAGAIN
+                }
+                // Blocking: sleep on the listener's queue until an accept
+                // pops a child (room) or the listener closes.
+                let s = server.clone();
+                unix_wait_round(
+                    &s,
+                    &|| {
+                        s.accept_queue.lock().len() < *s.backlog.lock()
+                            || *s.state.lock() != UnixState::Listening
+                    },
+                    None,
+                )?;
             }
             // Linux autobind: an unbound connecting client gets a unique
             // abstract name so the server can address/report it.
@@ -688,7 +831,13 @@ pub fn unix_connect(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> 
         }
         UnixKind::Dgram => {
             // The target must exist (Linux checks this for connect()).
-            if lookup(&addr.key).is_none() {
+            // Resolved to the node's inode identity for the same
+            // alias-path reasons as STREAM.
+            let lookup_key = match fs_reg_key(&addr.key) {
+                Some(k) => k,
+                None => return Err(-111), // ECONNREFUSED — no node
+            };
+            if lookup(&lookup_key).is_none() {
                 return Err(-111); // ECONNREFUSED
             }
             // Autobind an abstract name if unbound (Linux semantics: a
@@ -696,7 +845,7 @@ pub fn unix_connect(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> 
             if sock.bound_name.lock().is_none() {
                 autobind(sock);
             }
-            *sock.dgram_peer.lock() = Some(addr.key.clone());
+            *sock.dgram_peer.lock() = Some(lookup_key);
             *sock.state.lock() = UnixState::Connected;
             Ok(())
         }
@@ -713,7 +862,9 @@ fn autobind(sock: &Arc<UnixSocket>) {
         let mut table = UNIX_TABLE.lock();
         if !table.contains_key(&key) {
             table.insert(key.clone(), sock.clone());
-            *sock.bound_name.lock() = Some(key);
+            // Abstract names ARE their own registration key.
+            *sock.bound_name.lock() = Some(key.clone());
+            *sock.reg_name.lock() = Some(key);
             return;
         }
     }
@@ -727,7 +878,11 @@ pub fn unix_accept(sock: &Arc<UnixSocket>) -> Result<Arc<UnixSocket>, i32> {
     if *sock.state.lock() != UnixState::Listening {
         return Err(-22); // EINVAL
     }
-    sock.accept_queue.lock().pop_front().ok_or(-11) // EAGAIN
+    let child = sock.accept_queue.lock().pop_front().ok_or(-11)?; // EAGAIN
+    // An accept freed backlog room — wake blocking connects that are
+    // waiting for space on this listener (they re-check and enqueue).
+    sock.wait_queue.wake_up_all();
+    Ok(child)
 }
 
 /// W3: one wait round for a blocking accept — sleeps on the listener's
@@ -792,7 +947,13 @@ pub fn unix_send(
                     autobind(sock);
                 }
                 if let Some(a) = dest {
-                    match lookup(&a.key) {
+                    // sendto resolves to the node's inode identity — a
+                    // symlink alias reaches the same DGRAM target.
+                    let key = match fs_reg_key(&a.key) {
+                        Some(k) => k,
+                        None => return Err(-111), // ECONNREFUSED — no node
+                    };
+                    match lookup(&key) {
                         Some(t) => t,
                         None => return Err(-111), // ECONNREFUSED
                     }
@@ -999,8 +1160,9 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // Peer's poll() starts reporting POLLHUP (Linux SHUTDOWN_MASK on peer
     // release) — set before the wake below so a racing poll sees it.
     *sock.dead.lock() = true;
-    // Remove our name-table entry.
-    if let Some(name) = sock.bound_name.lock().take() {
+    // Remove our name-table entry (the registration key — the inode
+    // identity for filesystem sockets, the abstract name otherwise).
+    if let Some(name) = sock.reg_name.lock().take() {
         let mut table = UNIX_TABLE.lock();
         // Only remove if the entry still points at US (a replaced entry
         // after a re-bind must survive).
@@ -1030,6 +1192,8 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
             crate::syscall::misc::epoll_notify_file(fid);
         }
     }
+    // Drop the pinned socket-node inode (its identity was our reg key).
+    *sock.node_inode.lock() = None;
     // Pending children of a dying listener are dropped with their Arcs;
     // their clients see EPIPE on the next send (peer upgrade fails).
     sock.accept_queue.lock().clear();
