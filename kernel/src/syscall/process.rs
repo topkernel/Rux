@@ -2147,7 +2147,30 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    crate::signal::send_signal_info(tgid, sig, si_code)
+    // The payload (si_value at offset 24) MUST survive to the receiver:
+    // SA_SIGINFO handlers read info->si_value (LTP rt_sigqueueinfo01 sends
+    // sival_int=777 and checks it). Linux rebuilds si_pid/si_uid from the
+    // SENDER but keeps the user's si_errno/si_value bytes.
+    let mut payload = [0u8; 8]; // sival_int/sival_ptr at siginfo offset 24
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            payload.as_mut_ptr(),
+            uinfo.add(24),
+            8,
+        )
+    } != 0
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let mut info = crate::signal::SigInfo::new(
+        sig,
+        si_code,
+        crate::process::current_pid(),
+        crate::sched::current().map(|c| unsafe { (*c).cred().uid }).unwrap_or(0),
+    );
+    info.set_value_bytes(&payload);
+
+    crate::signal::send_signal_with_info(tgid, info)
         .map(|_| 0)
         .unwrap_or(-(errno::EINVAL as i64))
 }
@@ -2201,7 +2224,28 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    crate::signal::send_signal_info(tid, sig, si_code)
+    // Preserve the user payload (si_value @24) for SA_SIGINFO receivers,
+    // mirroring rt_sigqueueinfo above.
+    let mut payload = [0u8; 8];
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(
+            payload.as_mut_ptr(),
+            uinfo.add(24),
+            8,
+        )
+    } != 0
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let mut info = crate::signal::SigInfo::new(
+        sig,
+        si_code,
+        crate::process::current_pid(),
+        crate::sched::current().map(|c| unsafe { (*c).cred().uid }).unwrap_or(0),
+    );
+    info.set_value_bytes(&payload);
+
+    crate::signal::send_signal_with_info(tid, info)
         .map(|_| 0)
         .unwrap_or(-(errno::EINVAL as i64))
 }

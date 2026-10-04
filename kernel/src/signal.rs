@@ -602,6 +602,13 @@ impl SigInfo {
         }
     }
 
+    /// Store the si_value payload (siginfo offset 24, 8 bytes — sival_int
+    /// or sival_ptr) as sent by the rt_sigqueueinfo caller. SA_SIGINFO
+    /// handlers and sigwaitinfo consumers read it verbatim.
+    pub fn set_value_bytes(&mut self, bytes: &[u8; 8]) {
+        self._rest[..8].copy_from_slice(bytes);
+    }
+
     /// Create child process exit signal info
     pub fn child(pid: u32, uid: u32, status: i32) -> Self {
         let mut info = Self::new(Signal::SIGCHLD as i32, 1, pid, uid);

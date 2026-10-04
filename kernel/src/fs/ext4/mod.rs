@@ -2069,6 +2069,13 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                 }
             }
             ext4_inode.set_size(new_size);
+            // Keep the GENERIC VFS Inode.size coherent too: the icache
+            // object outlives this fd, and consumers that read
+            // inode.size directly (loop LOOP_SET_FD backing size, mmap
+            // length checks) saw 0 for a freshly ftruncate-extended
+            // sparse file while stat() — which goes through getattr —
+            // reported the new size (mkfs/tst_device on loop devices).
+            inode.size.store(new_size, core::sync::atomic::Ordering::Release);
         }
         _ => return errno::Errno::InvalidArgument.as_neg_i32(),
     }

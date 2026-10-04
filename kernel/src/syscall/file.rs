@@ -552,9 +552,35 @@ pub fn sys_linkat(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    let old_full = match resolve_user_path(olddirfd, oldpath_ptr) {
-        Ok(p) => p,
-        Err(e) => return e as i64,
+    let old_full = if flags & AT_EMPTY_PATH != 0 {
+        // Linux: with AT_EMPTY_PATH and an empty oldpath, the link source
+        // is the file referenced by olddirfd itself (linkat(fd, "", ...)).
+        // Reading the first byte through the exception-table copy.
+        let mut probe = [0u8; 1];
+        let is_empty = unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(
+                probe.as_mut_ptr(),
+                oldpath_ptr,
+                1,
+            )
+        } == 0
+            && probe[0] == 0;
+        if is_empty {
+            match unsafe { crate::fs::file::get_file_fd(olddirfd as usize) } {
+                Some(f) => f.path(),
+                None => return -(errno::EBADF as i64),
+            }
+        } else {
+            match resolve_user_path(olddirfd, oldpath_ptr) {
+                Ok(p) => p,
+                Err(e) => return e as i64,
+            }
+        }
+    } else {
+        match resolve_user_path(olddirfd, oldpath_ptr) {
+            Ok(p) => p,
+            Err(e) => return e as i64,
+        }
     };
     let new_full = match resolve_user_path(newdirfd, newpath_ptr) {
         Ok(p) => p,
@@ -638,11 +664,63 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     let buf = args[2] as *mut u8;
     let bufsize = args[3] as usize;
 
+    // Linux do_readlinkat: buflen <= 0 is EINVAL BEFORE any buffer pointer
+    // is touched — readlink(link, NULL, 0) is EINVAL, not EFAULT (LTP
+    // readlinkat02 case 1).
+    if bufsize == 0 {
+        return -(errno::EINVAL as i64);
+    }
     if buf.is_null() {
         return -(errno::EFAULT as i64);
     }
     if !crate::arch::riscv64::uaccess::access_ok(buf as usize, bufsize) {
         return -(errno::EFAULT as i64);
+    }
+
+    // Linux do_readlinkat: an EMPTY pathname with a valid dirfd reads the
+    // link target of the FILE REFERRED TO BY THE FD (user_path_at_empty
+    // semantics — no AT_EMPTY_PATH flag needed). LTP readlinkat01 opens
+    // its test symlink O_PATH|O_NOFOLLOW and readlinkat(fd, "", ...).
+    {
+        // Peek at the user path: only the empty case is handled here.
+        let mut pbuf = [0u8; PATH_MAX];
+        let is_empty = match unsafe {
+            crate::arch::riscv64::uaccess::strncpy_from_user(
+                pathname_ptr, PATH_MAX, &mut pbuf)
+        } {
+            Ok(s) => s.is_empty(),
+            Err(_) => return -(errno::EFAULT as i64),
+        };
+    if is_empty && dirfd >= 0 {
+        // SAFETY: get_file_fd returns an Arc<File> or None.
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(dirfd as usize) } {
+            // SAFETY: inode cell written once at open; read-only here.
+            let target = unsafe {
+                (*file.inode.get()).as_ref().and_then(|inode| {
+                    if !inode.mode.is_symlink() {
+                        return None;
+                    }
+                    let mut tbuf = [0u8; PATH_MAX];
+                    let n = inode.op_readlink(&mut tbuf);
+                    if n < 0 { return None; }
+                    Some((n as usize, tbuf))
+                })
+            };
+            if let Some((n, tbuf)) = target {
+                let copy_len = n.min(bufsize);
+                // SAFETY: buf validated with access_ok(bufsize) above.
+                if unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(buf, tbuf.as_ptr(), copy_len)
+                } != 0
+                {
+                    return -(errno::EFAULT as i64);
+                }
+                return copy_len as i64;
+            }
+            return -(errno::EINVAL as i64);
+        }
+        return -(errno::EBADF as i64);
+    }
     }
 
     // Resolve dirfd-relative paths like every other *at() syscall — the
@@ -760,19 +838,26 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
         return path;
     }
 
-    // Relative path - try to resolve using dirfd
-    if dirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            // SAFETY: current is the running task's Task pointer from sched::current().
-            let cwd = unsafe { (*current).get_cwd() };
-            let cwd_str = core::str::from_utf8(&cwd).unwrap_or("?");
-            let mut full = alloc::format!("{}{}", cwd_str, pathname);
-            if full.contains("/self/") {
-                // SAFETY: current_pid() reads the current task's pid from scheduler.
-                let pid = unsafe { crate::process::current_pid() };
-                full = full.replace("/self/", &alloc::format!("/{}/", pid));
+    // The readlinkat entry path already went through resolve_user_path(),
+    // which yields an ABSOLUTE path for every dirfd. Concatenating the cwd
+    // again ("/tmp" + "/tmp/link") broke every readlink of an absolute
+    // non-/proc path while cwd != "/" (LTP readlink01/03 ran in /tmp and
+    // saw ENOENT for existing symlinks). Only a relative path (direct
+    // callers passing raw user input) takes the join.
+    if !pathname.starts_with('/') {
+        if dirfd == AT_FDCWD {
+            if let Some(current) = crate::sched::current() {
+                // SAFETY: current is the running task's Task pointer from sched::current().
+                let cwd = unsafe { (*current).get_cwd() };
+                let cwd_str = core::str::from_utf8(&cwd).unwrap_or("/");
+                let mut full = alloc::format!("{}{}", cwd_str, pathname);
+                if full.contains("/self/") {
+                    // SAFETY: current_pid() reads the current task's pid from scheduler.
+                    let pid = unsafe { crate::process::current_pid() };
+                    full = full.replace("/self/", &alloc::format!("/{}/", pid));
+                }
+                return full;
             }
-            return full;
         }
     }
 
@@ -2326,6 +2411,17 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                     // sockets, and device nodes report EINVAL instead of
                     // flushing an unrelated global cache and claiming
                     // success.
+                    // Block devices (loop devices above all — LTP
+                    // tst_device/mkfs) DO have an fsync method in Linux:
+                    // flush the buffer cache and succeed instead of the
+                    // EINVAL that killed mke2fs ("fsync: Invalid argument").
+                    if inode.mode.is_block_device() {
+                        let _ = crate::fs::bio::sync_buffers();
+                        if crate::drivers::virtio::flush_pci_blk().is_err() {
+                            return -(errno::EIO as i64);
+                        }
+                        return 0;
+                    }
                     if !inode.mode.is_regular_file() {
                         return -(errno::EINVAL as i64);
                     }
@@ -3539,6 +3635,13 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
     if flags & RENAME_WHITEOUT != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // Flag validation runs BEFORE any path lookup (Linux do_renameat2:
+    // NOREPLACE and EXCHANGE are mutually exclusive, and a missing source
+    // with a bogus flag combination must still report EINVAL — LTP
+    // renameat201 cases 5/6).
+    if flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0 {
         return -(errno::EINVAL as i64);
     }
 

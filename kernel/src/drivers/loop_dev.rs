@@ -29,6 +29,10 @@ pub const LOOP_CONTROL_MINOR: u32 = 237;
 // ---- loop ioctl numbers (linux/loop.h) ----
 pub const LOOP_SET_FD: u32 = 0x4C00;
 pub const LOOP_CLR_FD: u32 = 0x4C01;
+/// BLKGETSIZE64 (bytes) — mke2fs/tst_device size probe.
+pub const BLKGETSIZE64: u32 = 0x8008_1272;
+/// BLKSSZGET (logical sector size).
+pub const BLKSSZGET: u32 = 0x1268;
 pub const LOOP_SET_STATUS: u32 = 0x4C02;
 pub const LOOP_GET_STATUS: u32 = 0x4C03;
 pub const LOOP_SET_STATUS64: u32 = 0x4C04;
@@ -501,6 +505,30 @@ pub fn loop_file_ioctl(
                 Ok(()) => 0,
                 Err(e) => e as i64,
             }
+        }
+        BLKGETSIZE64 | BLKSSZGET => {
+            // mke2fs sizes the filesystem from BLKGETSIZE64 (and a failed
+            // probe makes it fall back to an interactive "proceed?" prompt
+            // that reads EOF from /dev/null and aborts — "mkfs.ext2 failed
+            // with exit code 1" in every LTP tst_mkfs test).
+            let idx = devno.minor as usize;
+            if devno.major != LOOP_MAJOR {
+                return Some(-25i64);
+            }
+            let val: u64 = if request == BLKSSZGET {
+                512
+            } else {
+                loop_size_bytes(idx)
+            };
+            // SAFETY: arg points to a user u64/u16; exception-table copy.
+            let len = if request == BLKSSZGET { 2 } else { 8 };
+            let bytes = val.to_le_bytes();
+            let mut out = [0u8; 8];
+            out[..len].copy_from_slice(&bytes[..len]);
+            if unsafe { copy_to_user(arg as *mut u8, out.as_ptr(), len) } != 0 {
+                return Some(-14i64); // EFAULT
+            }
+            0
         }
         LOOP_GET_STATUS64 => {
             let idx = devno.minor as usize;

@@ -2000,7 +2000,10 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // privileged callers rely on this against symlink tricks, and the
         // flag was previously accepted and silently ignored (the link was
         // followed anyway).
-        let lookup_flags = if flags & FileFlags::O_NOFOLLOW != 0 {
+        // O_PATH (Linux): never follows the final component — the fd
+        // refers to the symlink itself when one is there (LTP readlinkat01
+        // opens its test link with O_PATH|O_NOFOLLOW).
+        let lookup_flags = if flags & (FileFlags::O_NOFOLLOW | FileFlags::O_PATH) != 0 {
             LOOKUP_NOFOLLOW
         } else {
             0
@@ -2015,14 +2018,41 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     return Err(errno::Errno::FileExists.as_neg_i32());
                 }
                 let inode = vpath.inode.ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
-                if flags & FileFlags::O_NOFOLLOW != 0 && inode.mode.is_symlink() {
+                if flags & (FileFlags::O_NOFOLLOW | FileFlags::O_PATH) != 0
+                    && inode.mode.is_symlink()
+                    && flags & FileFlags::O_PATH == 0
+                {
                     return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32()); // ELOOP
+                }
+                // O_PATH on a symlink: install a descriptor-only File on
+                // the link inode (no read/write ops — matches Linux, where
+                // only fstat/fchdir-ish/readlinkat(fd,"") use it).
+                if flags & FileFlags::O_PATH != 0 && inode.mode.is_symlink() {
+                    let file = Arc::new(File::new(FileFlags::new(flags)));
+                    file.set_inode(Arc::clone(&inode));
+                    if let Some(d) = vpath.dentry.clone() {
+                        file.set_dentry(d);
+                    }
+                    match get_file_fd_install(Arc::clone(&file)) {
+                        Some(fd) => return Ok(fd),
+                        None => return Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),
+                    }
                 }
                 existed_before_trunc = true;
                 (inode, vpath.dentry)
             }
             Err(_e) if o_creat => {
                 let (parent_path, child_name) = path_parent_and_name(filename)?;
+                // O_CREAT|O_EXCL is a NOFOLLOW-style existence probe: a
+                // dangling symlink at the final component is EEXIST (the
+                // name is taken), never "follow it and create the target"
+                // (POSIX open; LTP open10/excl cases).
+                if o_excl && !child_name.is_empty() {
+                    if let Ok(vp) = path_lookup(filename, LOOKUP_NOFOLLOW) {
+                        let _ = vp;
+                        return Err(errno::Errno::FileExists.as_neg_i32());
+                    }
+                }
                 let parent_vpath = path_lookup(&parent_path, 0)?;
                 let parent_inode = parent_vpath.inode
                     .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;

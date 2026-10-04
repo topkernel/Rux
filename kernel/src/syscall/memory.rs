@@ -2737,12 +2737,46 @@ pub fn sys_pkey_free(args: [u64; 6]) -> i64 {
 }
 
 /// sys_fadvise64 - Predeclare file access pattern (NR 223)
+///
+/// Linux vfs_fadvise error contract (LTP posix_fadvise02/03/04):
+/// - EBADF when `fd` does not refer to an open file
+/// - ESPIPE when the file is a pipe or FIFO (no pos to advise on)
+/// - EINVAL when `advice` is outside POSIX_FADV_NORMAL..POSIX_FADV_DONTNEED
+/// Success is a no-op (no read-ahead engine to program yet).
 pub fn sys_fadvise64(args: [u64; 6]) -> i64 {
-    let _fd = args[0] as i32;
+    let fd = args[0] as i32;
     let _offset = args[1] as i64;
     let _len = args[2] as i64;
-    let _advice = args[3] as i32;
-    // Simplified: ignore advice, return success
+    let advice = args[3] as i32;
+
+    // POSIX_FADV_NORMAL=0 .. POSIX_FADV_DONTNEED=5 (sequential layout on
+    // every arch except 31-bit s390; RISC-V uses the generic values).
+    if !(0..=5).contains(&advice) {
+        return -errno::EINVAL as i64;
+    }
+
+    // SAFETY: get_file_fd returns a shared Arc<File> or None; only the
+    // ops identity is inspected, no mutation.
+    unsafe {
+        let file = match crate::fs::file::get_file_fd(fd as usize) {
+            Some(f) => f,
+            None => return -errno::EBADF as i64,
+        };
+        // Pipes are anonymous Files with PIPE_OPS and no inode; FIFOs are
+        // inode-backed with S_IFMT == S_IFIFO. Both are unseekable.
+        let is_pipe = file
+            .get_ops()
+            .map(|ops| core::ptr::eq(ops as *const _, &crate::fs::pipe::PIPE_OPS as *const _))
+            .unwrap_or(false);
+        if is_pipe {
+            return -errno::ESPIPE as i64;
+        }
+        if let Some(inode) = (*file.inode.get()).as_ref() {
+            if inode.mode.is_fifo() {
+                return -errno::ESPIPE as i64;
+            }
+        }
+    }
     0
 }
 

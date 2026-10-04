@@ -662,6 +662,13 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     let request = args[1] as u32;
     let arg = args[2] as usize;
 
+    // Linux fdget() gate: an ioctl on an fd that is not open fails with
+    // EBADF before the request is even looked at (LTP sockioctl01 uses
+    // fd=1025 with SIOCATMARK and expects EBADF, not ENOTTY).
+    if fd < 0 || unsafe { crate::fs::file::get_file_fd(fd as usize) }.is_none() {
+        return -errno::EBADF as i64;
+    }
+
     // Framebuffer ioctls dispatch on the FILE's ops identity (R22-2
     // spirit, minus the fd>=1000 heuristic that only worked for the
     // side-namespace fd range).
@@ -754,6 +761,70 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             return crate::net::netlink::net_if_ioctl(request, arg);
         }
         return -errno::ENOTTY as i64;
+    }
+
+    // SIOCATMARK (0x8905) — socket-only, and Linux only wires it for
+    // stream sockets: a UDP socket gets ENOTTY (LTP sockioctl01 "ATMARK on
+    // UDP"), a non-socket fd gets ENOTTY ("not a socket"), and a bad
+    // result pointer is EFAULT ("invalid option buffer" — the arg is an
+    // int* written with the at-OOB-mark flag; we never generate urgent
+    // data, so the answer is always 0).
+    if request == 0x8905 {
+        let file_opt = if fd >= 0 {
+            unsafe { crate::fs::file::get_file_fd(fd as usize) }
+        } else {
+            None
+        };
+        let is_socket = file_opt
+            .as_ref()
+            .map(|file| {
+                let ops = file.get_ops();
+                match ops {
+                    Some(ops) => {
+                        core::ptr::eq(ops as *const _, &crate::net::socket::SOCKET_OPS as *const _)
+                            || core::ptr::eq(
+                                ops as *const _,
+                                &crate::net::unix::UNIX_SOCKET_OPS as *const _,
+                            )
+                    }
+                    None => false,
+                }
+            })
+            .unwrap_or(false);
+        if !is_socket {
+            return -errno::ENOTTY as i64;
+        }
+        // TCP socket: report "not at mark". The unix-socket case falls
+        // through with 0 too (Linux treats SIOCATMARK as a generic sock
+        // op; AF_UNIX has no urgent data either).
+        if let Some(file) = file_opt.as_ref() {
+            let is_stream = file
+                .get_ops()
+                .map(|ops| {
+                    core::ptr::eq(ops as *const _, &crate::net::socket::SOCKET_OPS as *const _)
+                })
+                .and_then(|is_inet| {
+                    if !is_inet {
+                        return Some(true); // AF_UNIX: no datagram distinction
+                    }
+                    // SAFETY: private_data holds an Arc<Socket> for
+                    // SOCKET_OPS files, installed at socket creation.
+                    let ptr = unsafe { *file.private_data.get() }? as *const crate::net::socket::Socket;
+                    Some(unsafe { (*ptr).sock_type == crate::net::socket::SocketType::Tcp })
+                })
+                .unwrap_or(true);
+            if !is_stream {
+                return -errno::ENOTTY as i64;
+            }
+        }
+        if arg == 0 || !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
+            return -errno::EFAULT as i64;
+        }
+        // SAFETY: arg validated non-null with access_ok(4).
+        if !unsafe { crate::arch::riscv64::uaccess::put_user(arg as *mut i32, 0i32) } {
+            return -errno::EFAULT as i64;
+        }
+        return 0;
     }
 
     // TTY ioctl commands — but only on fds that ARE terminals.
@@ -1526,64 +1597,201 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
             None => return -errno::EBADF as i64,
         };
 
-        // Transfer data through kernel buffer
-        let mut total = 0usize;
-        let mut remaining = len;
-        while remaining > 0 {
-            let chunk = core::cmp::min(remaining, 8192);
-            let mut buf = alloc::vec![0u8; chunk];
-            let n = match in_off {
-                Some(off) => in_file.read_at(off, buf.as_mut_ptr(), chunk),
-                None => in_file.read(buf.as_mut_ptr(), chunk),
-            };
-            if n <= 0 { break; }
-            let n = n as usize;
-            let mut written = 0usize;
-            while written < n {
-                let w = match out_off {
-                    Some(off) => out_file.write_at(off + written as u64, buf.as_ptr().add(written), n - written),
-                    None => out_file.write(buf.as_ptr().add(written), n - written),
+        let ipipe = crate::fs::pipe::pipe_of_file(&in_file);
+        let opipe = crate::fs::pipe::pipe_of_file(&out_file);
+
+        // Linux do_splice(): one of the two ends must be a pipe.
+        if ipipe.is_some() && opipe.is_some() {
+            // pipe → pipe
+            if !off_in.is_null() || !off_out.is_null() {
+                return -errno::ESPIPE as i64;
+            }
+            if core::ptr::eq(ipipe.unwrap() as *const _, opipe.unwrap() as *const _) {
+                return -errno::EINVAL as i64; // splicing to self
+            }
+            let mut total = 0usize;
+            while total < len {
+                let chunk = core::cmp::min(len - total, 4096);
+                let mut buf = alloc::vec![0u8; chunk];
+                // Consume from the input pipe (File::read carries the
+                // blocking/EOF semantics of pipe_file_read).
+                let n = in_file.read(buf.as_mut_ptr(), chunk);
+                if n <= 0 {
+                    if n < 0 && total == 0 { return n as i64; }
+                    break;
+                }
+                // Publish ALL of it into the output pipe (pipe_file_write
+                // blocks until written; EPIPE propagates).
+                let mut w = 0usize;
+                while w < n as usize {
+                    let r = out_file.write(buf.as_ptr().add(w), n as usize - w);
+                    if r <= 0 {
+                        if r < 0 && total == 0 && w == 0 { return r as i64; }
+                        // Reader died mid-transfer: report what moved.
+                        return writeback_and_return(
+                            off_in, in_off, off_out, out_off, total as i64,
+                        );
+                    }
+                    w += r as usize;
+                }
+                total += n as usize;
+            }
+            return writeback_and_return(off_in, in_off, off_out, out_off, total as i64);
+        }
+
+        if let Some(_pipe) = ipipe {
+            // pipe → file (Linux ipipe branch).
+            if !off_in.is_null() {
+                return -errno::ESPIPE as i64;
+            }
+            if in_file.flags().is_writeonly() {
+                return -errno::EBADF as i64; // wrong-direction pipe end
+            }
+            if out_file.flags().is_readonly() {
+                // O_RDONLY (and O_PATH-style no-access) targets cannot take
+                // spliced output (Linux FMODE_WRITE gate → EBADF).
+                return -errno::EBADF as i64;
+            }
+            if out_file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+                return -errno::EINVAL as i64; // O_APPEND out (Linux)
+            }
+            let mut total = 0usize;
+            while total < len {
+                let chunk = core::cmp::min(len - total, 8192);
+                let mut buf = alloc::vec![0u8; chunk];
+                let n = in_file.read(buf.as_mut_ptr(), chunk);
+                if n <= 0 {
+                    if n < 0 && total == 0 { return n as i64; }
+                    break; // EOF
+                }
+                let n = n as usize;
+                let mut written = 0usize;
+                while written < n {
+                    let w = match out_off {
+                        Some(off) => out_file.write_at(off + total as u64 + written as u64,
+                                                       buf.as_ptr().add(written), n - written),
+                        None => out_file.write(buf.as_ptr().add(written), n - written),
+                    };
+                    if w <= 0 {
+                        if total + written > 0 {
+                            return writeback_and_return(
+                                off_in, in_off, off_out,
+                                out_off.map(|o| o + total as u64 + written as u64),
+                                (total + written) as i64);
+                        }
+                        return w as i64;
+                    }
+                    written += w as usize;
+                }
+                total += written;
+            }
+            return writeback_and_return(
+                off_in, in_off, off_out,
+                out_off.map(|o| o + total as u64),
+                total as i64,
+            );
+        }
+
+        if let Some(_pipe) = opipe {
+            // file → pipe (Linux opipe branch).
+            if !off_out.is_null() {
+                return -errno::ESPIPE as i64;
+            }
+            if in_file.flags().is_writeonly() {
+                return -errno::EBADF as i64; // fd_in not readable
+            }
+            if out_file.flags().is_readonly() {
+                return -errno::EBADF as i64; // writing to the read end
+            }
+            // Linux rejects splice sources that cannot feed an iter read:
+            // - O_PATH descriptors carry no read mode (EBADF)
+            // - directories (EBADF — LTP splice07/08 expect {EBADF,EINVAL})
+            // - sockets: af_unix has sock_no_splice_read (EINVAL); blocking
+            //   on an empty socket would hang the fd-matrix sweep instead
+            const O_PATH_RISCV: u32 = 0x200000;
+            if in_file.flags().bits() & O_PATH_RISCV != 0 {
+                return -errno::EBADF as i64;
+            }
+            if let Some(inode) = (*in_file.inode.get()).as_ref() {
+                if inode.mode.is_directory() {
+                    return -errno::EBADF as i64;
+                }
+            }
+            if let Some(ops) = in_file.get_ops() {
+                if core::ptr::eq(ops as *const _, &crate::net::socket::SOCKET_OPS as *const _)
+                    || core::ptr::eq(ops as *const _, &crate::net::unix::UNIX_SOCKET_OPS as *const _)
+                    || core::ptr::eq(ops as *const _, &crate::net::netlink::NETLINK_OPS as *const _)
+                    || core::ptr::eq(ops as *const _, &crate::net::raw::RAW_OPS as *const _)
+                {
+                    return -errno::EINVAL as i64; // sock_no_splice_read
+                }
+            }
+            let mut total = 0usize;
+            while total < len {
+                let chunk = core::cmp::min(len - total, 8192);
+                let mut buf = alloc::vec![0u8; chunk];
+                let n = match in_off {
+                    Some(off) => in_file.read_at(off, buf.as_mut_ptr(), chunk),
+                    None => in_file.read(buf.as_mut_ptr(), chunk),
                 };
-                if w <= 0 {
-                    // Publish the offsets consumed so far before bailing out.
-                    if total + written > 0 { break; }
-                    return total as i64;
+                if n <= 0 {
+                    if n < 0 && total == 0 { return n as i64; }
+                    break; // EOF on source
                 }
-                written += w as usize;
+                let n = n as usize;
+                let mut written = 0usize;
+                while written < n {
+                    let w = out_file.write(buf.as_ptr().add(written), n - written);
+                    if w <= 0 {
+                        if total + written > 0 {
+                            return writeback_and_return(
+                                off_in, in_off, off_out, out_off,
+                                (total + written) as i64);
+                        }
+                        return w as i64;
+                    }
+                    written += w as usize;
+                }
+                in_off = in_off.map(|o| o + n as u64);
+                total += written;
             }
-            in_off = in_off.map(|o| o + n as u64);
-            out_off = out_off.map(|o| o + written as u64);
-            total += written;
-            remaining -= written;
-            if written < n {
-                break;
-            }
+            return writeback_and_return(off_in, in_off, off_out, out_off, total as i64);
         }
 
-        // Write the updated offsets back through copy_to_user.
-        if !off_in.is_null() {
-            if let Some(off) = in_off {
-                let v = off as i64;
-                // SAFETY: off_in validated with access_ok(8) above.
-                if crate::arch::riscv64::uaccess::copy_to_user(
-                    off_in as *mut u8, &v as *const i64 as *const u8, 8) > 0 {
-                    return -errno::EFAULT as i64;
-                }
-            }
-        }
-        if !off_out.is_null() {
-            if let Some(off) = out_off {
-                let v = off as i64;
-                // SAFETY: off_out validated with access_ok(8) above.
-                if crate::arch::riscv64::uaccess::copy_to_user(
-                    off_out as *mut u8, &v as *const i64 as *const u8, 8) > 0 {
-                    return -errno::EFAULT as i64;
-                }
-            }
-        }
-
-        total as i64
+        // Neither end is a pipe.
+        -errno::EINVAL as i64
     }
+}
+
+/// Publish the consumed offsets (splice off_in/off_out contract) and return
+/// the byte count. SAFETY: both pointers were access_ok(8)-validated by the
+/// caller before any copy.
+unsafe fn writeback_and_return(
+    off_in: *mut i64,
+    in_off: Option<u64>,
+    off_out: *mut i64,
+    out_off: Option<u64>,
+    ret: i64,
+) -> i64 {
+    if !off_in.is_null() {
+        if let Some(off) = in_off {
+            let v = off as i64;
+            if crate::arch::riscv64::uaccess::copy_to_user(
+                off_in as *mut u8, &v as *const i64 as *const u8, 8) > 0 {
+                return -errno::EFAULT as i64;
+            }
+        }
+    }
+    if !off_out.is_null() {
+        if let Some(off) = out_off {
+            let v = off as i64;
+            if crate::arch::riscv64::uaccess::copy_to_user(
+                off_out as *mut u8, &v as *const i64 as *const u8, 8) > 0 {
+                return -errno::EFAULT as i64;
+            }
+        }
+    }
+    ret
 }
 
 /// sys_tee - Copy data between pipes
@@ -1600,14 +1808,92 @@ pub fn sys_tee(_args: SyscallArgs) -> i64 {
 
 /// sys_vmsplice - Map user pages into a pipe
 ///
+/// Linux semantics (LTP vmsplice01..04):
+/// - EBADF: fd not open, or does not refer to a pipe
+/// - EINVAL: unknown flags, or nr_segs > IOV_MAX (1024)
+/// - write end: fill available pipe space with user bytes, return the
+///   (possibly short) count; block while the pipe is FULL (EAGAIN with
+///   SPLICE_F_NONBLOCK)
+/// - read end: drain pipe bytes into the user iovs
+///
 /// # Arguments
 /// - args[0]: fd - pipe file descriptor
 /// - args[1]: iov - pointer to iovec array
 /// - args[2]: nr_segs - number of iovec entries
-/// - args[3]: flags - SPLICE_F_GIFT, etc.
-pub fn sys_vmsplice(_args: SyscallArgs) -> i64 {
-    // TODO: requires pipe buffer and page mapping
-    -errno::ENOSYS as i64
+/// - args[3]: flags - SPLICE_F_MOVE/NONBLOCK/MORE/GIFT
+pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
+    let fd = args[0] as i32;
+    let iov_ptr = args[1] as *const u8;
+    let nr_segs = args[2] as usize;
+    let flags = args[3] as u32;
+
+    const SPLICE_F_MOVE: u32 = 0x1;
+    const SPLICE_F_NONBLOCK: u32 = 0x2;
+    const SPLICE_F_MORE: u32 = 0x4;
+    const SPLICE_F_GIFT: u32 = 0x8;
+    if flags & !(SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT) != 0 {
+        return -errno::EINVAL as i64;
+    }
+    if nr_segs == 0 {
+        return 0;
+    }
+    const IOV_MAX: usize = 1024;
+    if nr_segs > IOV_MAX {
+        return -errno::EINVAL as i64;
+    }
+    if iov_ptr.is_null() {
+        return -errno::EFAULT as i64;
+    }
+    if !crate::arch::riscv64::uaccess::access_ok(iov_ptr as usize, nr_segs * 16) {
+        return -errno::EFAULT as i64;
+    }
+
+    // Copy the iovec array in (16 bytes per entry on LP64).
+    let mut raw = alloc::vec![0u8; nr_segs * 16];
+    // SAFETY: iov_ptr validated with access_ok above; exception-table copy.
+    if unsafe {
+        crate::arch::riscv64::uaccess::copy_from_user(raw.as_mut_ptr(), iov_ptr, nr_segs * 16)
+    } != 0
+    {
+        return -errno::EFAULT as i64;
+    }
+    let mut iovs: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::with_capacity(nr_segs);
+    for i in 0..nr_segs {
+        let base = u64::from_le_bytes(raw[i * 16..i * 16 + 8].try_into().unwrap()) as usize;
+        let len = u64::from_le_bytes(raw[i * 16 + 8..i * 16 + 16].try_into().unwrap()) as usize;
+        if len == 0 {
+            continue;
+        }
+        if !crate::arch::riscv64::uaccess::access_ok(base, len.min(4096)) {
+            return -errno::EFAULT as i64;
+        }
+        iovs.push((base, len));
+    }
+    if iovs.is_empty() {
+        return 0;
+    }
+
+    // fd must be a pipe (Linux get_pipe_info failure → EBADF).
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    let file = match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        Some(f) => f,
+        None => return -errno::EBADF as i64,
+    };
+    if crate::fs::pipe::pipe_of_file(&file).is_none() {
+        return -errno::EBADF as i64;
+    }
+
+    let nonblock = flags & SPLICE_F_NONBLOCK != 0;
+    // Direction from the fd's access mode (Linux: FMODE_WRITE → to pipe).
+    let f = file.flags();
+    let ret = if !f.is_readonly() {
+        crate::fs::pipe::pipe_vmsplice_to(&file, &iovs, nonblock)
+    } else if !f.is_writeonly() {
+        crate::fs::pipe::pipe_vmsplice_from(&file, &iovs, nonblock)
+    } else {
+        return -errno::EBADF as i64;
+    };
+    ret as i64
 }
 
 /// sys_sendfile - Transfer data between file descriptors

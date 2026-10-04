@@ -290,8 +290,213 @@ impl Pipe {
 
 use crate::fs::file::{File, FileOps, FileFlags};
 
-// The three data-path callbacks are `pub` so fs/fifo.rs (named pipes) can
-// reuse them verbatim — only the close op differs between the two.
+// ============================================================================
+// vmsplice(2) helpers — LTP vmsplice01..04
+// ============================================================================
+
+/// Extract the shared `Pipe` behind a pipe `File` (both ends), or None.
+pub fn pipe_of_file(file: &File) -> Option<&'static Pipe> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity confirms this is a pipe File; private_data was
+    // installed by create_pipe as Arc::into_raw(Pipe) and remains valid
+    // while the File exists.
+    let ptr = unsafe { *file.private_data.get() }?;
+    Some(unsafe { &*(ptr as *const Pipe) })
+}
+
+/// vmsplice(2) write direction: move user bytes into the pipe. Linux
+/// vmsplice_to_pipe fills whatever pipe space exists and returns a SHORT
+/// count (callers loop); it blocks only while the pipe is completely full
+/// (LTP vmsplice01's poll+partial-write loop depends on this, and
+/// vmsplice04's full-pipe blocking case on the wait below).
+///
+/// `iovs` are (user_base, len) pairs already validated in kernel space.
+/// Returns bytes moved, or a negative errno.
+pub fn pipe_vmsplice_to(file: &File, iovs: &[(usize, usize)], nonblock: bool) -> isize {
+    use crate::arch::riscv64::uaccess::copy_from_user;
+
+    let Some(pipe) = pipe_of_file(file) else {
+        return -9; // EBADF
+    };
+    let file_nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
+    let nonblock = nonblock || file_nonblock;
+
+    let total_len: usize = iovs.iter().map(|(_, l)| *l).sum();
+    if total_len == 0 {
+        return 0;
+    }
+
+    let mut kbuf = alloc::vec![0u8; total_len.min(PIPE_CAPACITY)];
+    loop {
+        {
+            let mut guard = pipe.buffer.lock();
+            let space = guard.available_write();
+            if space > 0 {
+                let want = total_len.min(space).min(kbuf.len());
+                let mut filled = 0usize;
+                for &(base, len) in iovs {
+                    if filled >= want {
+                        break;
+                    }
+                    let take = len.min(want - filled).min(kbuf.len() - filled);
+                    if take == 0 {
+                        continue;
+                    }
+                    // SAFETY: base is a user pointer; exception-table copy.
+                    if unsafe {
+                        copy_from_user(
+                            kbuf.as_mut_ptr().add(filled),
+                            base as *const u8,
+                            take,
+                        )
+                    } != 0
+                    {
+                        if filled > 0 {
+                            let n = guard.write(&kbuf[..filled]);
+                            drop(guard);
+                            pipe.read_queue().wake_up_all();
+                            oasync_notify(pipe as *const _ as usize, true);
+                            return n as isize;
+                        }
+                        return -14; // EFAULT
+                    }
+                    filled += take;
+                }
+                let n = guard.write(&kbuf[..filled]);
+                drop(guard);
+                pipe.read_queue().wake_up_all();
+                oasync_notify(pipe as *const _ as usize, true);
+                return n as isize;
+            }
+        }
+
+        // Pipe full.
+        if pipe.is_read_closed() {
+            if let Some(current) = crate::sched::current() {
+                let _ = crate::signal::send_signal(
+                    (*current).pid(),
+                    crate::signal::Signal::SIGPIPE as i32,
+                );
+            }
+            return -(crate::errno::constants::EPIPE) as isize;
+        }
+        if nonblock {
+            return -11; // EAGAIN
+        }
+
+        let current = match crate::sched::current() {
+            Some(t) => t,
+            None => return 0,
+        };
+        pipe.write_queue().prepare_to_wait(current, false, true);
+        let recheck_ok = pipe.buffer.lock().available_write() > 0;
+        if recheck_ok || pipe.is_read_closed() {
+            pipe.write_queue().finish_wait(current);
+            crate::sched::dequeue_task(&*current);
+            continue;
+        }
+        if crate::signal::signal_pending() {
+            pipe.write_queue().finish_wait(current);
+            crate::sched::dequeue_task(&*current);
+            return -(crate::errno::constants::EINTR) as isize;
+        }
+        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::sched::schedule();
+        pipe.write_queue().finish_wait(current);
+        if crate::signal::signal_pending() {
+            return -(crate::errno::constants::EINTR) as isize;
+        }
+    }
+}
+
+/// vmsplice(2) read direction: drain up to the iov total from the pipe
+/// into user memory (LTP vmsplice03). Returns bytes moved (0 = EOF) or a
+/// negative errno.
+pub fn pipe_vmsplice_from(file: &File, iovs: &[(usize, usize)], nonblock: bool) -> isize {
+    use crate::arch::riscv64::uaccess::copy_to_user;
+
+    let Some(pipe) = pipe_of_file(file) else {
+        return -9; // EBADF
+    };
+    let file_nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
+    let nonblock = nonblock || file_nonblock;
+
+    let total_len: usize = iovs.iter().map(|(_, l)| *l).sum();
+    if total_len == 0 {
+        return 0;
+    }
+
+    let cap = total_len.min(PIPE_CAPACITY);
+    let mut kbuf = alloc::vec![0u8; cap];
+    loop {
+        {
+            let mut guard = pipe.buffer.lock();
+            if pipe.is_write_closed() && guard.available_read() == 0 {
+                return 0; // EOF
+            }
+            let avail = guard.available_read();
+            if avail > 0 {
+                let want = total_len.min(avail).min(cap);
+                let n = guard.read(&mut kbuf[..want]);
+                drop(guard);
+                if n > 0 {
+                    pipe.write_queue().wake_up_all();
+                    oasync_notify(pipe as *const _ as usize, false);
+                    // Copy out segment by segment.
+                    let mut off = 0usize;
+                    for &(base, len) in iovs {
+                        if off >= n {
+                            break;
+                        }
+                        let take = len.min(n - off);
+                        // SAFETY: base is a user pointer; exception-table copy.
+                        if unsafe {
+                            copy_to_user(base as *mut u8, kbuf.as_ptr().add(off), take)
+                        } != 0
+                        {
+                            return if off > 0 { off as isize } else { -14 };
+                        }
+                        off += take;
+                    }
+                    return off as isize;
+                }
+                return n as isize;
+            }
+        }
+
+        if nonblock {
+            return -11; // EAGAIN
+        }
+        let current = match crate::sched::current() {
+            Some(t) => t,
+            None => return 0,
+        };
+        pipe.read_queue().prepare_to_wait(current, false, true);
+        let recheck = {
+            let guard = pipe.buffer.lock();
+            guard.available_read() > 0 || pipe.is_write_closed()
+        };
+        if recheck {
+            pipe.read_queue().finish_wait(current);
+            crate::sched::dequeue_task(&*current);
+            continue;
+        }
+        if crate::signal::signal_pending() {
+            pipe.read_queue().finish_wait(current);
+            crate::sched::dequeue_task(&*current);
+            return -(crate::errno::constants::EINTR) as isize;
+        }
+        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::sched::schedule();
+        pipe.read_queue().finish_wait(current);
+        if crate::signal::signal_pending() {
+            return -(crate::errno::constants::EINTR) as isize;
+        }
+    }
+}
 
 pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
