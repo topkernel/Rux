@@ -827,6 +827,21 @@ pub fn unix_connect(
             *sock.state.lock() = UnixState::Connected;
             server.accept_queue.lock().push_back(child);
             server.wait_queue.wake_up_all();
+            // A queued connection is an ARRIVAL on the listener — the
+            // epoll analogue of unix_send's notify on the target. Without
+            // it an EPOLLET-watched listener (Xorg registers its listener
+            // EPOLLET) only re-reports on a readiness snapshot CHANGE: a
+            // backlog that drained (accept-until-EAGAIN) and refilled
+            // between two epoll_wait calls still reads EPOLLIN ==
+            // last_reported and the edge is swallowed — late connectors
+            // sit in the accept queue forever while the server keeps
+            // serving the fds it already holds. Linux re-queues the epi
+            // from the listener's data_ready callback on EVERY connection
+            // arrival.
+            let fid = server.file_id.load(Ordering::Acquire);
+            if fid != 0 {
+                crate::syscall::misc::epoll_notify_file(fid);
+            }
             Ok(())
         }
         UnixKind::Dgram => {
