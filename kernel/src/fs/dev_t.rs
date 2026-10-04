@@ -70,6 +70,12 @@ pub const TTY_MAJOR: u32 = 4;
 /// Parallel ports
 pub const LP_MAJOR: u32 = 6;
 
+/// Loop block devices (/dev/loopN)
+pub const LOOP_MAJOR: u32 = 7;
+
+/// Misc char devices (loop-control, ...)
+pub const MISC_MAJOR: u32 = 10;
+
 /// SCSI disks
 pub const SCSI_DISK_MAJOR: u32 = 8;
 

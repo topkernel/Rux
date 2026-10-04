@@ -1529,6 +1529,26 @@ unsafe fn send_signal_locked_info(
 
     let task = &*task_ptr;
 
+    // Linux prepare_signal(): the global init process only receives
+    // signals it has explicitly installed a handler for — every other
+    // signal, INCLUDING SIGKILL/SIGSTOP, is silently discarded. Without
+    // this, a broadcast/process-group kill escaping a test (LTP kill10's
+    // signal flood between 10 forked pgrps) reaches PID 1, kills the
+    // sweep runner, and powers the whole machine off mid-chunk.
+    // Kernel-forced kills of a crashing init bypass this funnel (the trap
+    // path calls do_exit directly), so a genuinely broken init still dies.
+    if task.pid() == 1 && task.tgid() == 1 {
+        let handled = task
+            .signal
+            .as_ref()
+            .and_then(|s| s.get_action(sig))
+            .map(|a| a.action() == SigActionKind::Handler)
+            .unwrap_or(false);
+        if !handled {
+            return Ok(());
+        }
+    }
+
     // SIGKILL and SIGSTOP cannot be ignored
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
         if let Some(info) = si {

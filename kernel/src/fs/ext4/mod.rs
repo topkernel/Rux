@@ -952,7 +952,7 @@ pub fn init() {
 }
 
 /// Global ext4 filesystem instance
-static GLOBAL_EXT4_FS: core::sync::atomic::AtomicPtr<Ext4FileSystem> =
+pub static GLOBAL_EXT4_FS: core::sync::atomic::AtomicPtr<Ext4FileSystem> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// Mount ext4 filesystem
@@ -1282,7 +1282,7 @@ pub fn create_file(path: &str, mode: u32) -> Result<alloc::sync::Arc<Inode>, i32
         add_dir_entry(fs, &parent_inode, filename, new_ino, 1)?;  // 1 = regular file
 
         // Create VFS inode
-        Ok(create_vfs_inode(new_ino, &new_inode))
+        Ok(create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &new_inode))
     }
 }
 
@@ -1307,6 +1307,20 @@ pub fn ext4_fallocate(
     offset: u64,
     len: u64,
 ) -> Result<(), i32> {
+    // Instance-aware wrapper: prefer the caller-resolved filesystem (a
+    // loop-mounted ext2 must not touch the boot root's inode tables).
+    ext4_fallocate_on(ino, mode, offset, len, None)
+}
+
+/// `fs_hint`: the filesystem instance the inode lives on (None = boot
+/// root via GLOBAL_EXT4_FS).
+pub fn ext4_fallocate_on(
+    ino: u32,
+    mode: i32,
+    offset: u64,
+    len: u64,
+    fs_hint: Option<*const Ext4FileSystem>,
+) -> Result<(), i32> {
     use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
 
     if len == 0 {
@@ -1317,12 +1331,15 @@ pub fn ext4_fallocate(
         None => return Err(errno::Errno::FileTooLarge.as_neg_i32()),
     };
 
-    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+    let fs_ptr = fs_hint.unwrap_or_else(|| {
+        GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire) as *const Ext4FileSystem
+    });
     if fs_ptr.is_null() {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    // SAFETY: GLOBAL_EXT4_FS holds the mounted instance for the boot.
+    // SAFETY: the instance pointer comes from the caller's inode
+    // (private_data) or the boot GLOBAL — both valid for the mount.
     unsafe {
         let fs = &*fs_ptr;
         let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
@@ -1348,40 +1365,21 @@ pub fn ext4_fallocate(
             let punch_last = (file_end - offset).div_ceil(block_size) + punch_first; // exclusive
 
             if ext4_inode.has_extent() {
-                const ROOT_MAX_ENTRIES: usize = 4;
-                let mut iblock_bytes = [0u8; 60];
-                core::ptr::copy_nonoverlapping(
-                    ext4_inode.block.as_ptr() as *const u8,
-                    iblock_bytes.as_mut_ptr(),
-                    60,
-                );
-                let header =
-                    &*(iblock_bytes.as_ptr() as *const Ext4ExtentHeader);
-                if header.eh_magic == EXT4_EXT_MAGIC {
-                    if header.eh_depth > 0 {
-                        // Deep trees: refuse rather than corrupt (same
-                        // conservative rule as truncate).
-                        return Err(errno::Errno::IOError.as_neg_i32());
-                    }
-                    let n_entries =
-                        core::cmp::min(header.eh_entries as usize, ROOT_MAX_ENTRIES);
-                    let entries = core::slice::from_raw_parts(
-                        (iblock_bytes.as_ptr()
-                            .add(core::mem::size_of::<Ext4ExtentHeader>()))
-                            as *const Ext4Extent,
-                        n_entries,
-                    );
-
+                // Any-depth punch via gather/classify/rebuild (the old
+                // inline-root-only walker refused deep trees and could
+                // not represent more than 4 surviving fragments).
+                let hdr = &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader);
+                if hdr.eh_magic == EXT4_EXT_MAGIC {
                     let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
-                    let mut kept: [(u32, u16, u64); ROOT_MAX_ENTRIES] =
-                        [(0, 0, 0); ROOT_MAX_ENTRIES];
-                    let mut kept_count = 0usize;
-
-                    for ext in entries {
-                        let ext_first = ext.ee_block as u64;
-                        let ext_len = ext.length() as u64;
-                        let ext_last = ext_first + ext_len; // exclusive
-                        let phys = ext.start_block();
+                    let all = crate::fs::ext4::extent::ext4_ext_gather(fs, &ext4_inode.block)?;
+                    let mut kept: alloc::vec::Vec<crate::fs::ext4::extent::RawExtent> =
+                        alloc::vec::Vec::new();
+                    let mut freed_sectors: u64 = 0;
+                    for e in &all {
+                        let ext_first = e.ee_block as u64;
+                        let ext_len = e.len as u64;
+                        let ext_last = ext_first + ext_len;
+                        let phys = e.phys;
 
                         if ext_first >= punch_first && ext_last <= punch_last {
                             // Entirely inside the punch range: free it all
@@ -1389,9 +1387,7 @@ pub fn ext4_fallocate(
                             // see free_inode_blocks for why per-block
                             // frees are untenable for big extents).
                             let _ = allocator.free_block_run(phys, ext_len);
-                            ext4_inode.blocks =
-                                ext4_inode.blocks.saturating_sub(ext_len * (block_size / 512));
-                            // dropped from the kept list
+                            freed_sectors += ext_len * (block_size / 512);
                         } else if ext_first < punch_last && ext_last > punch_first {
                             // Partially covered: ZERO the overlapped blocks in
                             // place; allocation kept (documented above).
@@ -1411,46 +1407,23 @@ pub fn ext4_fallocate(
                                     crate::fs::bio::brelse(bh);
                                 }
                             }
-                            // Keep the RAW ee_len — an unwritten flag on a
+                            // Keep the RAW entry — the unwritten flag on a
                             // kept preallocated range must survive (masked
                             // lengths turn never-materialized blocks into
                             // "written" and reads would fetch disk garbage
                             // instead of zeros).
-                            kept[kept_count] = (ext.ee_block, ext.ee_len, phys);
-                            kept_count += 1;
+                            kept.push(*e);
                         } else {
-                            kept[kept_count] = (ext.ee_block, ext.ee_len, phys);
-                            kept_count += 1;
+                            kept.push(*e);
                         }
                     }
-
-                    // Rebuild the root extent array.
-                    let new_header = Ext4ExtentHeader {
-                        eh_magic: EXT4_EXT_MAGIC,
-                        eh_entries: kept_count as u16,
-                        eh_max: header.eh_max,
-                        eh_depth: 0,
-                        eh_generation: header.eh_generation,
-                    };
-                    *(iblock_bytes.as_mut_ptr() as *mut Ext4ExtentHeader) = new_header;
-                    for (i, &(blk, len2, phys)) in
-                        kept.iter().take(kept_count).enumerate()
-                    {
-                        let dst = (iblock_bytes
-                            .as_mut_ptr()
-                            .add(core::mem::size_of::<Ext4ExtentHeader>()
-                                + i * core::mem::size_of::<Ext4Extent>()))
-                            as *mut Ext4Extent;
-                        (*dst).ee_block = blk;
-                        (*dst).ee_len = len2;
-                        (*dst).ee_start_hi = (phys >> 32) as u16;
-                        (*dst).ee_start_lo = phys as u32;
-                    }
-                    core::ptr::copy_nonoverlapping(
-                        iblock_bytes.as_ptr(),
-                        ext4_inode.block.as_mut_ptr() as *mut u8,
-                        60,
-                    );
+                    let meta_delta = crate::fs::ext4::extent::ext4_ext_rebuild(
+                        fs, &mut ext4_inode.block, &kept,
+                    )?;
+                    ext4_inode.blocks = ext4_inode
+                        .blocks
+                        .saturating_sub(freed_sectors)
+                        .saturating_add_signed(meta_delta);
                 }
             } else {
                 // Indirect-block files: zero the covered direct blocks in
@@ -1964,120 +1937,64 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                 let old_blocks = (ext4_inode.get_size() + block_size - 1) / block_size;
 
                 if ext4_inode.has_extent() {
-                    use crate::fs::ext4::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
-                    // Extent trees deeper than the root node are not
-                    // handled by the shrink code below — truncating such a
-                    // file would free blocks still mapped by internal nodes
-                    // (cross-file corruption). Conservatively refuse
-                    // (review 5.5: truncate 不处理深度>0 → 拒绝).
-                    {
-                        let hdr = unsafe {
-                            &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader)
+                    use crate::fs::ext4::extent::{Ext4ExtentHeader, EXT4_EXT_MAGIC};
+                    // Any-depth shrink via gather/classify/rebuild: extents
+                    // fully beyond the new EOF are freed, a straddling one
+                    // keeps its head (unwritten flag preserved), and the
+                    // tree is rebuilt from the survivors (the old code only
+                    // handled the 4-entry inline root and refused deep
+                    // trees).
+                    let hdr = unsafe {
+                        &*(ext4_inode.block.as_ptr() as *const Ext4ExtentHeader)
+                    };
+                    if hdr.eh_magic == EXT4_EXT_MAGIC {
+                        let all = match crate::fs::ext4::extent::ext4_ext_gather(fs, &ext4_inode.block) {
+                            Ok(a) => a,
+                            Err(e) => return e,
                         };
-                        if hdr.eh_magic == EXT4_EXT_MAGIC && hdr.eh_depth > 0 {
-                            return errno::Errno::IOError.as_neg_i32();
-                        }
-                    }
-                    // Work on a byte copy of i_block so the on-disk extent
-                    // entries can be SHRUNK/removed alongside the physical
-                    // frees. The old code only freed blocks and left the
-                    // stale extents in the inode, so the next allocation
-                    // handed those blocks to another file while this inode
-                    // still mapped them — cross-file data corruption
-                    // (review EXT4-C2).
-                    const ROOT_MAX_ENTRIES: usize = 4; // (60-12)/12
-                    let mut iblock_bytes = [0u8; 60];
-                    // SAFETY: ext4_inode.block is a [u32; 15] = 60 bytes.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            ext4_inode.block.as_ptr() as *const u8,
-                            iblock_bytes.as_mut_ptr(),
-                            60,
-                        );
-                    }
-                    let header =
-                        unsafe { &*(iblock_bytes.as_ptr() as *const Ext4ExtentHeader) };
-                    if header.eh_magic == EXT4_EXT_MAGIC && header.eh_depth == 0 {
-                        // Clamp entries to what a root node can hold (the
-                        // raw on-disk value is untrusted here — review
-                        // EXT4-H11 for the other sites).
-                        let n_entries =
-                            core::cmp::min(header.eh_entries as usize, ROOT_MAX_ENTRIES);
-                        // SAFETY: entries follow the 12-byte header within
-                        // the 60-byte i_block; n_entries is clamped above.
-                        let entries = unsafe {
-                            core::slice::from_raw_parts(
-                                iblock_bytes.as_ptr()
-                                    .add(core::mem::size_of::<Ext4ExtentHeader>())
-                                    as *const Ext4Extent,
-                                n_entries,
-                            )
-                        };
-
-                        let mut kept: [(u32, u16, u64); ROOT_MAX_ENTRIES] =
-                            [(0, 0, 0); ROOT_MAX_ENTRIES]; // (ee_block, ee_len, phys)
-                        let mut kept_count = 0usize;
-
-                        for ext in entries {
-                            let logical_start = ext.ee_block as u64;
-                            let phys_start = ext.start_block();
-                            let ext_len = ext.length() as u64;
+                        let mut kept: alloc::vec::Vec<crate::fs::ext4::extent::RawExtent> =
+                            alloc::vec::Vec::new();
+                        let mut freed_sectors: u64 = 0;
+                        for e in &all {
+                            let logical_start = e.ee_block as u64;
+                            let phys_start = e.phys;
+                            let ext_len = e.len as u64;
 
                             if logical_start >= new_blocks {
                                 // Entirely beyond the new EOF: drop it.
                                 let _ = allocator.free_block_run(phys_start, ext_len);
+                                freed_sectors += ext_len * (block_size / 512);
                             } else if logical_start + ext_len > new_blocks {
                                 // Straddles: shrink to the new EOF, free the tail.
                                 let keep_len = new_blocks - logical_start;
-                                let _ = allocator.free_block_run(phys_start + keep_len, ext_len - keep_len);
+                                let _ = allocator.free_block_run(
+                                    phys_start + keep_len,
+                                    ext_len - keep_len,
+                                );
+                                freed_sectors += (ext_len - keep_len) * (block_size / 512);
                                 // Preserve the unwritten flag on the kept
                                 // head (see the punch-path note above).
-                                kept[kept_count] = (
-                                    ext.ee_block,
-                                    keep_len as u16 | (ext.ee_len & 0x8000),
-                                    phys_start,
-                                );
-                                kept_count += 1;
+                                kept.push(crate::fs::ext4::extent::RawExtent {
+                                    ee_block: e.ee_block,
+                                    phys: phys_start,
+                                    len: keep_len as u16,
+                                    unwritten: e.unwritten,
+                                });
                             } else {
                                 // Fully below the new EOF: keep as-is.
-                                kept[kept_count] =
-                                    (ext.ee_block, ext.ee_len, phys_start);
-                                kept_count += 1;
+                                kept.push(*e);
                             }
                         }
-
-                        // Rebuild the extent array: header + compacted entries.
-                        let new_header = Ext4ExtentHeader {
-                            eh_magic: EXT4_EXT_MAGIC,
-                            eh_entries: kept_count as u16,
-                            eh_max: header.eh_max,
-                            eh_depth: 0,
-                            eh_generation: header.eh_generation,
+                        let meta_delta = match crate::fs::ext4::extent::ext4_ext_rebuild(
+                            fs, &mut ext4_inode.block, &kept,
+                        ) {
+                            Ok(d) => d,
+                            Err(e) => return e,
                         };
-                        // SAFETY: writing into the 60-byte stack copy at
-                        // bounded offsets (12 + 12*kept_count <= 60).
-                        unsafe {
-                            *(iblock_bytes.as_mut_ptr() as *mut Ext4ExtentHeader) =
-                                new_header;
-                            for (i, &(blk, len, phys)) in kept.iter().take(kept_count).enumerate() {
-                                let dst = (iblock_bytes.as_mut_ptr()
-                                    .add(core::mem::size_of::<Ext4ExtentHeader>()
-                                        + i * core::mem::size_of::<Ext4Extent>()))
-                                    as *mut Ext4Extent;
-                                (*dst).ee_block = blk;
-                                (*dst).ee_len = len;
-                                (*dst).ee_start_hi = (phys >> 32) as u16;
-                                (*dst).ee_start_lo = phys as u32;
-                            }
-                        }
-                        // SAFETY: same-size copy back into the inode field.
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                iblock_bytes.as_ptr(),
-                                ext4_inode.block.as_mut_ptr() as *mut u8,
-                                60,
-                            );
-                        }
+                        ext4_inode.blocks = ext4_inode
+                            .blocks
+                            .saturating_sub(freed_sectors)
+                            .saturating_add_signed(meta_delta);
                     }
                 } else {
                     // Free indirect blocks beyond new size
@@ -2197,8 +2114,86 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 /// spinlock (namei I/O sleeps under it after its 256-iteration spin
 /// window) remains a documented quality issue, not a correctness one:
 /// mutual exclusion holds either way.
-pub static EXT4_BIG_LOCK: crate::sync::spinlock::Spinlock<()> =
-    crate::sync::spinlock::Spinlock::new(());
+pub static EXT4_BIG_LOCK: Ext4BigLock = Ext4BigLock::new();
+
+/// Task-recursive big lock.
+///
+/// A loop device backed by a file on ANOTHER ext4 instance re-enters
+/// ext4 from inside the block layer: ext4#2's create (holding the big
+/// lock) writes metadata through /dev/loopN, and the loop's request_fn
+/// calls the backing file's write op on ext4#1 — which takes the same
+/// big lock. A plain spinlock self-deadlocks there; reentrancy is keyed
+/// on the owning task (nested acquire by the SAME task is legal, the
+/// outermost guard releases).
+pub struct Ext4BigLock {
+    state: crate::sync::spinlock::Spinlock<Ext4BigState>,
+}
+
+struct Ext4BigState {
+    locked: bool,
+    owner: u32,
+    depth: u32,
+}
+
+impl Ext4BigLock {
+    const fn new() -> Self {
+        Self {
+            state: crate::sync::spinlock::Spinlock::new(Ext4BigState {
+                locked: false,
+                owner: 0,
+                depth: 0,
+            }),
+        }
+    }
+
+    /// Acquire (fair-spinning on contention, recursive per task).
+    pub fn lock_fair(&'static self) -> Ext4BigGuard {
+        let pid = crate::process::current_pid();
+        loop {
+            {
+                let mut st = self.state.lock();
+                if !st.locked {
+                    st.locked = true;
+                    st.owner = pid;
+                    st.depth = 1;
+                    return Ext4BigGuard { lock: self };
+                }
+                if st.owner == pid {
+                    st.depth += 1;
+                    return Ext4BigGuard { lock: self };
+                }
+            }
+            // Contended by another task: brief pause and retry. The
+            // holder may sleep in block I/O — do not hold up this CPU's
+            // interrupts while spinning.
+            for _ in 0..64 {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    fn release(&'static self) {
+        let mut st = self.state.lock();
+        if st.depth > 0 {
+            st.depth -= 1;
+            if st.depth == 0 {
+                st.locked = false;
+                st.owner = 0;
+            }
+        }
+    }
+}
+
+/// Guard: releases on drop (outermost only).
+pub struct Ext4BigGuard {
+    lock: &'static Ext4BigLock,
+}
+
+impl Drop for Ext4BigGuard {
+    fn drop(&mut self) {
+        self.lock.release();
+    }
+}
 
 /// Ext4 inode operations table
 /// Ext4 now supports write operations through namei module
@@ -2235,7 +2230,7 @@ unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::syn
     let ext4_inode = fs.read_inode(ino as u32)
         .map_err(|_| errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-    let vfs_inode = create_vfs_inode(ino as u32, &ext4_inode);
+    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, ino as u32, &ext4_inode);
     crate::fs::inode::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
@@ -2255,7 +2250,7 @@ unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resul
     // Read the new inode and convert to in-memory format
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
-    let vfs_inode = create_vfs_inode(new_ino, &ext4_inode);
+    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &ext4_inode);
     crate::fs::inode::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
@@ -2318,7 +2313,7 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
 
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
-    let vfs_inode = create_vfs_inode(new_ino, &ext4_inode);
+    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &ext4_inode);
     crate::fs::inode::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
@@ -2335,7 +2330,7 @@ unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Resul
 
     let disk_inode = inode::read_inode(fs, new_ino)?;
     let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
-    let vfs_inode = create_vfs_inode(new_ino, &ext4_inode);
+    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &ext4_inode);
     crate::fs::inode::icache_add(vfs_inode.clone());
     Ok(vfs_inode)
 }
@@ -2463,6 +2458,18 @@ unsafe fn ext4_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inode
 /// This helper function creates a VFS inode structure from an ext4 inode,
 /// properly setting up the inode_operations and private data.
 pub fn create_vfs_inode(ino: u32, ext4_inode: &inode::Ext4Inode) -> alloc::sync::Arc<Inode> {
+    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
+    create_vfs_inode_in(fs_ptr, ino, ext4_inode)
+}
+
+/// Instance-aware variant: wires the new inode to `fs_ptr` (the creating
+/// directory's filesystem — a loop-mounted ext2's children must point at
+/// the LOOP instance, not the boot root).
+pub fn create_vfs_inode_in(
+    fs_ptr: *mut Ext4FileSystem,
+    ino: u32,
+    ext4_inode: &inode::Ext4Inode,
+) -> alloc::sync::Arc<Inode> {
     let mode = if ext4_inode.is_dir() {
         InodeMode::new(InodeMode::S_IFDIR | (ext4_inode.mode as u32 & 0o777))
     } else if ext4_inode.is_symlink() {
@@ -2472,9 +2479,6 @@ pub fn create_vfs_inode(ino: u32, ext4_inode: &inode::Ext4Inode) -> alloc::sync:
     } else {
         InodeMode::new(ext4_inode.mode as u32)
     };
-
-    // Store ext4 filesystem pointer in private_data
-    let fs_ptr = GLOBAL_EXT4_FS.load(core::sync::atomic::Ordering::Acquire);
 
     let mut inode = Inode::new(ino as u64, mode);
     // Set fs_id to the filesystem pointer address for cache uniqueness
@@ -2491,4 +2495,41 @@ pub fn create_vfs_inode(ino: u32, ext4_inode: &inode::Ext4Inode) -> alloc::sync:
     inode.sb = Some(Box::into_raw(ext4_copy) as *mut u8);
 
     alloc::sync::Arc::new(inode)
+}
+
+/// Mount a SECOND ext4/ext2 instance (loop-backed scratch filesystem).
+///
+/// Builds an independent Ext4FileSystem on `disk` (an mkfs.ext2 image
+/// bound to /dev/loopN), reads its root inode, and returns a VFS root
+/// wired to THIS instance (private_data / fs_id / cached inode). The
+/// boot root keeps GLOBAL_EXT4_FS; all instance-specific operations
+/// resolve the filesystem from the inode (get_ext4_fs_from_inode).
+/// The instance is intentionally leaked (single mount per boot test
+/// lifecycle; umount drops the dentry tree).
+pub fn mount_loop_instance(
+    disk: *const blkdev::GenDisk,
+) -> Result<alloc::sync::Arc<Inode>, i32> {
+    if disk.is_null() {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
+    let mut fs = alloc::boxed::Box::new(Ext4FileSystem::new(disk));
+    // Superblock/group/inode-table bootstrap; a non-ext image (missing
+    // magic — e.g. unformatted loop) fails here.
+    fs.init()?;
+    // No journal on ext2 scratch images; a journaled ext4 image would be
+    // replayed by its own mkfs/umount cycle — skip replay on purpose.
+    let fs_ptr = alloc::boxed::Box::into_raw(fs) as *mut Ext4FileSystem;
+    // SAFETY: fs_ptr is a leaked, valid instance pointer.
+    let fs_ref = unsafe { &*fs_ptr };
+    match fs_ref.read_inode(2) {
+        Ok(ext4_inode) => Ok(create_vfs_inode_in(fs_ptr, 2, &ext4_inode)),
+        Err(_) => {
+            // Not a filesystem root (bad magic / inode 2): fail the mount
+            // and reclaim the instance.
+            // SAFETY: reclaiming the just-leaked box.
+            unsafe { drop(alloc::boxed::Box::from_raw(fs_ptr)) };
+            Err(errno::Errno::InvalidArgument.as_neg_i32())
+        }
+    }
 }

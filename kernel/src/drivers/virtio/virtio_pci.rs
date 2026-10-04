@@ -1163,6 +1163,12 @@ fn read_block_once(
             core::hint::spin_loop();
         }
         if !late {
+            // True timeout: the chain may still be in flight on the device.
+            // Record the leak so (a) the in-flight guard stops counting it
+            // and (b) the caller's retry cannot reuse its slots.
+            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
+                vq.note_timed_out_chain();
+            }
             return Err("VirtIO request timeout");
         }
         // completed late — fall through to status handling
@@ -1375,6 +1381,10 @@ fn write_block_once(
             core::hint::spin_loop();
         }
         if !late {
+            // True timeout — leak-note the chain (see the read path).
+            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
+                vq.note_timed_out_chain();
+            }
             return Err("VirtIO write request timeout");
         }
         // completed late — fall through to status handling
@@ -1539,6 +1549,10 @@ fn flush_block_once() -> Result<usize, &'static str> {
             core::hint::spin_loop();
         }
         if !late {
+            // True timeout — leak-note the chain (see the read path).
+            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
+                vq.note_timed_out_chain();
+            }
             return Err("VirtIO flush request timeout");
         }
     }

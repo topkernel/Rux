@@ -3321,7 +3321,43 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
     if !core::ptr::eq(inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _) {
         return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
     }
-    crate::fs::ext4::ext4_fallocate(inode.ino as u32, mode, offset, len)
+    crate::fs::ext4::ext4_fallocate_on(
+        inode.ino as u32,
+        mode,
+        offset,
+        len,
+        Some(fs_ptr as *const crate::fs::ext4::Ext4FileSystem),
+    )?;
+
+    // Cache coherence: ext4_fallocate writes the on-disk inode directly —
+    // the VFS inode's size and the cached Ext4Inode box (inode.sb) still
+    // hold the pre-allocation size, so a subsequent read(2) through ANY
+    // open fd saw EOF at the old size (reads of a fallocated file
+    // returned 0 bytes). Refresh both caches and drop stale page-cache
+    // pages for the grown range (unwritten extents must read as zeros).
+    if mode & crate::fs::ext4::FALLOC_FL_KEEP_SIZE == 0 {
+        let fs_ptr2 = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
+        // SAFETY: fs_ptr2 is the ext4 instance from inode.private_data.
+        if let Ok(fresh) = unsafe { (*fs_ptr2).read_inode(inode.ino as u32) } {
+            inode.size.store(fresh.size, core::sync::atomic::Ordering::Relaxed);
+            // SAFETY: inode.sb is the Box<Ext4Inode> cached at open.
+            if let Some(ptr) = inode.sb {
+                unsafe {
+                    let cached = &mut *(ptr as *mut crate::fs::ext4::inode::Ext4Inode);
+                    cached.block = fresh.block;
+                    cached.size = fresh.size;
+                    cached.blocks = fresh.blocks;
+                    cached.mtime = fresh.mtime;
+                    cached.ctime = fresh.ctime;
+                }
+            }
+            crate::fs::page_cache::get_page_cache().invalidate_inode(
+                fs_ptr2 as u64,
+                inode.ino as u64,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Filesystem-side utimensat: update atime/mtime of a path. `times` carries

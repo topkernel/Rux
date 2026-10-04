@@ -301,7 +301,7 @@ pub unsafe fn do_mount(
     let _ = dev_name;
     let target = dir_name.ok_or(-22_i32)?; // EINVAL
 
-    crate::fs::mount::do_mount(target, type_name, flags)
+    crate::fs::mount::do_mount("none", target, type_name, flags)
 }
 
 pub unsafe fn do_umount(target: &str, _flags: u64) -> Result<(), i32> {

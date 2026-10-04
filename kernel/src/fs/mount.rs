@@ -167,8 +167,31 @@ fn translate_mnt_flags(ms_flags: u64) -> MntFlags {
 /// the dentry tree via `vfs_mount()`.
 ///
 /// This is the single entry point for both boot-time mounts and sys_mount().
-pub fn do_mount(target: &str, fs_type: &str, flags: u64) -> Result<(), i32> {
+pub fn do_mount(source: &str, target: &str, fs_type: &str, flags: u64) -> Result<(), i32> {
     let mnt_flags = translate_mnt_flags(flags);
+
+    // ext2/ext4 from a LOOP device: a second ext4 instance on the loop's
+    // GenDisk (LTP mount/umount tests: losetup an mkfs.ext2 image, mount,
+    // verify, umount). The boot root keeps its own instance.
+    if (fs_type == "ext2" || fs_type == "ext4") && source.starts_with("/dev/loop") {
+        let minor: Option<u32> = source["/dev/loop".len()..]
+            .parse()
+            .ok();
+        if let Some(idx) = minor {
+            let disk = crate::drivers::loop_dev::loop_disk(idx as usize)
+                .ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
+            let root = crate::fs::ext4::mount_loop_instance(disk)?;
+            crate::fs::vfs::vfs_mount(target, root, mnt_flags);
+            register_mount(
+                source,
+                target,
+                fs_type,
+                if mnt_flags.is_readonly() { "ro" } else { "rw" },
+            );
+            return Ok(());
+        }
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
 
     match fs_type {
         "ext4" => {

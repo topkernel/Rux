@@ -292,7 +292,11 @@ impl Ext4Inode {
         let available = file_size - offset;
         let to_read = core::cmp::min(buf.len() as u64, available) as usize;
 
-        let blocks = self.get_data_blocks(fs)?;
+        // Per-block lazy resolution: get_data_blocks materializes the
+        // WHOLE file mapping (O(file blocks) per read() — a 300MB
+        // fallocate-preallocated file meant 76800 tree lookups PER read
+        // call, minutes under TCG). Resolve only the blocks actually
+        // touched by this read.
         let block_size = fs.block_size as usize;
 
         let mut total_read = 0;
@@ -303,14 +307,15 @@ impl Ext4Inode {
             let block_index = current_offset / block_size;
             let block_offset = current_offset % block_size;
 
-            if block_index >= blocks.len() {
+            if block_index * block_size >= file_size as usize {
                 break;
             }
 
-            // Sparse hole (block number 0 = unallocated): reads must return
-            // ZEROES, never the content of physical block 0 (superblock
-            // backup garbage) — review 5.5 (稀疏洞读盘块 0).
-            if blocks[block_index] == 0 {
+            // Sparse hole / unwritten block (block number 0): reads must
+            // return ZEROES, never the content of physical block 0
+            // (superblock backup garbage) — review 5.5 (稀疏洞读盘块 0).
+            let this_block = self.get_data_block(fs, block_index as u64)?;
+            if this_block == 0 {
                 let remaining = to_read - total_read;
                 let available_in_block = block_size - block_offset;
                 let zero_len = core::cmp::min(remaining, available_in_block);
@@ -324,9 +329,9 @@ impl Ext4Inode {
             }
 
             // SAFETY: fs.device is a valid GenDisk pointer for the mounted filesystem;
-            // blocks[block_index] is bounds-checked above; bio::bread returns a valid BufferHead.
+            // this_block is a resolved data block; bio::bread returns a valid BufferHead.
             unsafe {
-                let bh = bio::bread(fs.device, blocks[block_index])
+                let bh = bio::bread(fs.device, this_block)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
                 // SAFETY: bh is a valid buffer head from bio::bread; b_data is block_size bytes

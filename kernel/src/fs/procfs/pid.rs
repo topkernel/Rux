@@ -520,6 +520,106 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
     read_target_user_mm(&addr_space, env_start, env_len)
 }
 
+/// Generate /proc/[pid]/smaps content
+///
+/// Per-VMA block: the maps-style header line followed by the size
+/// counters. LTP mlock05 locates its mapping by the header's starting
+/// address and reads the Rss/Locked fields — Rss counts RESIDENT pages
+/// (PTE walk), Locked reports the VM_LOCKED span of the VMA (mlock now
+/// splits VMAs range-precisely, so this equals the locked bytes).
+pub fn generate_smaps(pid: u64) -> Vec<u8> {
+    let maps = generate_maps(pid);
+    let task = if crate::process::current_pid() as u64 == pid {
+        crate::process::current_task()
+    } else {
+        crate::process::find_task_by_pid(pid as u32)
+    };
+    let task = match task {
+        Some(t) => t,
+        None => return maps,
+    };
+    let addr_space = match task.address_space() {
+        Some(a) => a,
+        None => return maps,
+    };
+    let page_kb = (crate::mm::page::PAGE_SIZE / 1024) as u64;
+
+    // maps lines are VMA-ordered; append the counter block after each.
+    let mut out = String::new();
+    let header_re = re_header();
+    for line in maps.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        let line_str = String::from_utf8_lossy(line);
+        out.push_str(&line_str);
+        out.push('\n');
+        if let Some((start, end)) = header_re(&line_str) {
+            let size_kb = ((end - start) / 1024) as u64;
+            // Resident pages: walk the PTEs of the VMA span.
+            let mut rss_pages: u64 = 0;
+            let root = addr_space.root_ppn();
+            let mut p = start & !(crate::mm::page::PAGE_SIZE - 1);
+            while p < end {
+                // SAFETY: read-only walk of this task's own page tables.
+                if unsafe {
+                    crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root, p as u64)
+                }
+                .is_some()
+                {
+                    rss_pages += 1;
+                }
+                p += crate::mm::page::PAGE_SIZE;
+            }
+            let locked_kb = {
+                let mgr = addr_space.vma_read();
+                let mut lck = 0u64;
+                for v in mgr.iter() {
+                    if v.start().as_usize() == start
+                        && v.flags().contains(crate::mm::vma::VmaFlags::LOCKED)
+                    {
+                        lck = ((v.end().as_usize() - v.start().as_usize()) / 1024) as u64;
+                        break;
+                    }
+                }
+                lck
+            };
+            out.push_str(&format!("Size:       {} kB\n", size_kb));
+            out.push_str(&format!("Rss:        {} kB\n", rss_pages * page_kb));
+            out.push_str(&format!("Pss:        {} kB\n", rss_pages * page_kb));
+            out.push_str("Shared_Clean:       0 kB\n");
+            out.push_str("Shared_Dirty:       0 kB\n");
+            out.push_str("Private_Clean:      0 kB\n");
+            out.push_str("Private_Dirty:      0 kB\n");
+            out.push_str("Referenced:         0 kB\n");
+            out.push_str("Anonymous:          0 kB\n");
+            out.push_str("LazyFree:           0 kB\n");
+            out.push_str(&format!("AnonHugePages:      0 kB\n"));
+            out.push_str("ShmemPmdMapped:     0 kB\n");
+            out.push_str("FilePmdMapped:      0 kB\n");
+            out.push_str("Shared_Hugetlb:     0 kB\n");
+            out.push_str("Private_Hugetlb:    0 kB\n");
+            out.push_str("Swap:               0 kB\n");
+            out.push_str("SwapPss:            0 kB\n");
+            out.push_str("KernelPageSize:     4 kB\n");
+            out.push_str("MMUPageSize:        4 kB\n");
+            out.push_str(&format!("Locked:             {} kB\n", locked_kb));
+            out.push_str("THPeligible:        0\n");
+            out.push_str("ProtectionKey:      0\n");
+            out.push_str("VmFlags: rd ex mr mw me sd\n");
+        }
+    }
+    out.into_bytes()
+}
+
+/// Parse "START-END ..." from a maps header line (hex, unpadded).
+fn re_header() -> fn(&str) -> Option<(usize, usize)> {
+    |line: &str| -> Option<(usize, usize)> {
+        let dash = line.find('-')?;
+        let sp = line[dash..].find(' ')? + dash;
+        let start = usize::from_str_radix(&line[..dash], 16).ok()?;
+        let end = usize::from_str_radix(&line[dash + 1..sp], 16).ok()?;
+        Some((start, end))
+    }
+}
+
 /// Generate /proc/[pid]/maps content
 ///
 /// Format: start-end perms offset dev inode pathname

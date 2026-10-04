@@ -687,7 +687,13 @@ fn add_block_to_inode(
     Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32())
 }
 
-/// Add block to an extent-based inode by extending the inline extent tree.
+/// Add block to an extent-based inode by extending the extent tree.
+///
+/// Appends through the multi-level tree engine (ext4_ext_append): merge
+/// with the last extent when physically contiguous, else a new entry —
+/// in the inline root while it fits, in external nodes beyond. The old
+/// implementation was capped at the 4 inline entries and returned a
+/// bogus ENOSPC for the 5th fragment.
 fn add_block_to_inode_extent(
     fs: &Ext4FileSystem,
     ino: u32,
@@ -695,78 +701,21 @@ fn add_block_to_inode_extent(
     block_nr: u64,
     block_size: u32,
 ) -> Result<(), i32> {
-    use super::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
-
     // Calculate which logical block this new block will be
     let current_blocks = inode.i_size / block_size;
     let logical_block = current_blocks;
 
-    // SAFETY: i_block array is 60 bytes, large enough for Ext4ExtentHeader (12 bytes)
-    // plus up to 4 Ext4Extent entries; pointer is within the local Ext4InodeOnDisk.
-    let header = unsafe {
-        &mut *(inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader)
+    let ext = crate::fs::ext4::extent::RawExtent {
+        ee_block: logical_block as u32,
+        phys: block_nr,
+        len: 1,
+        unwritten: false,
     };
-
-    // Depth>0 trees have internal (index) nodes in the root slot — treating
-    // the root as a leaf and appending corrupts the tree. Refuse
-    // (review 5.5: extent 深度>0 无条件当叶追加).
-    if header.eh_magic == EXT4_EXT_MAGIC && header.eh_depth > 0 {
-        return Err(errno::Errno::IOError.as_neg_i32());
-    }
-
-    if header.eh_magic != EXT4_EXT_MAGIC {
-        // Initialize extent header (shouldn't happen for properly created extent inodes)
-        header.eh_magic = EXT4_EXT_MAGIC;
-        header.eh_entries = 0;
-        header.eh_max = 4;
-        header.eh_depth = 0;
-        header.eh_generation = 0;
-    }
-
-    // Get mutable extent entries (max 4 inline)
-    // SAFETY: entries start at offset sizeof(Ext4ExtentHeader) within i_block;
-    // eh_max limits how many entries we access.
-    let entries = unsafe {
-        core::slice::from_raw_parts_mut(
-            (inode.i_block.as_mut_ptr() as *mut u8)
-                .add(core::mem::size_of::<Ext4ExtentHeader>()) as *mut Ext4Extent,
-            header.eh_max as usize,
-        )
-    };
-
-    // Try to extend last extent if blocks are physically contiguous
-    if header.eh_entries > 0 {
-        let last = &mut entries[(header.eh_entries - 1) as usize];
-        let last_end = last.ee_block as u64 + last.length() as u64;
-
-        if last_end == logical_block as u64 && last.length() < 0x8000 {
-            let expected_physical = last.start_block() + last.length() as u64;
-            if block_nr == expected_physical {
-                // Contiguous — just extend length
-                last.ee_len += 1;
-                inode.i_size += block_size;
-                inode.i_blocks += (block_size / 512) as u32;
-                super::inode::write_inode_disk(fs, ino, inode)?;
-                return Ok(());
-            }
-        }
-    }
-
-    // Need a new extent entry
-    if header.eh_entries >= header.eh_max {
-        // No inline space — would need an external extent node (not implemented)
-        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
-    }
-
-    let new_entry = &mut entries[header.eh_entries as usize];
-    new_entry.ee_block = logical_block as u32;
-    new_entry.ee_len = 1;
-    new_entry.ee_start_hi = (block_nr >> 32) as u16;
-    new_entry.ee_start_lo = block_nr as u32;
-    header.eh_entries += 1;
+    let mut meta_sectors: u64 = 0;
+    crate::fs::ext4::extent::ext4_ext_append(fs, &mut inode.i_block, &ext, &mut meta_sectors)?;
 
     inode.i_size += block_size;
-    inode.i_blocks += (block_size / 512) as u32;
+    inode.i_blocks += (block_size / 512) as u32 + meta_sectors as u32;
 
     super::inode::write_inode_disk(fs, ino, inode)?;
     Ok(())
@@ -1785,34 +1734,28 @@ fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(),
 
     // Check if using extents
     if (inode.i_flags & 0x80000) != 0 {
-        // Free blocks referenced by extent entries
-        // SAFETY: i_block array is 60 bytes; Ext4ExtentHeader is 12 bytes and fits within.
+        // Free blocks referenced by extent entries — ANY tree depth: the
+        // tree engine gathers every leaf extent (external nodes included;
+        // the old walker only handled the 4-entry inline root and silently
+        // LEAKED every deep-tree file) and the index/leaf metadata blocks
+        // are freed afterwards.
         let header = unsafe {
             &*(inode.i_block.as_ptr() as *const super::extent::Ext4ExtentHeader)
         };
-        if header.eh_magic == super::extent::EXT4_EXT_MAGIC && header.eh_depth == 0 {
-            // SAFETY: eh_entries bounds the slice length; data starts after the header
-            // within i_block (60 bytes total, header is 12, each extent is 12).
-            let entries = unsafe {
-                core::slice::from_raw_parts(
-                    (inode.i_block.as_ptr() as *const u8)
-                        .add(core::mem::size_of::<super::extent::Ext4ExtentHeader>())
-                        as *const super::extent::Ext4Extent,
-                    header.eh_entries as usize,
-                )
-            };
-            for ext in entries {
-                let start = ext.start_block();
-                let len = ext.length() as u64;
+        if header.eh_magic == super::extent::EXT4_EXT_MAGIC {
+            let exts = super::extent::ext4_ext_gather(fs, &inode.i_block)?;
+            for e in &exts {
                 // Run-free (one bitmap pass for the whole contiguous
                 // extent): a fallocate-preallocated scratch file spans
                 // 76800 blocks — per-block frees are 4 synchronous I/Os
                 // each and effectively hang unlink (LTP tst_rmdir of the
                 // device image timed out and leaked the space, driving
                 // the whole filesystem into ENOSPC).
-                revoke_freed_block(fs, start);
-                allocator.free_block_run(start, len)?;
+                revoke_freed_block(fs, e.phys);
+                allocator.free_block_run(e.phys, e.len as u64)?;
             }
+            let mut freed_meta: u64 = 0;
+            super::extent::ext4_ext_free_index_blocks(fs, &inode.i_block, &mut freed_meta)?;
         }
         return Ok(());
     }

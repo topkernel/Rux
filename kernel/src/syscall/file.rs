@@ -1050,6 +1050,16 @@ pub fn sys_umask(args: SyscallArgs) -> i64 {
 ///
 /// mount(source, target, filesystemtype, mountflags, data)
 pub fn sys_mount(args: SyscallArgs) -> i64 {
+    // Linux order: copy source (EFAULT on a bad pointer — LTP mount03
+    // "EFAULT for filesystemtype/source" cases) BEFORE capability checks
+    // on the strings; CAP_SYS_ADMIN gates the actual mount.
+    let mut source_buf = [0u8; PATH_MAX];
+    let source = match read_user_path(args[0] as *const u8, &mut source_buf) {
+        Ok(s) => s,
+        Err(e) => return e as i64,
+    };
+    let source = if source.is_empty() { "none" } else { source };
+
     // CAP_SYS_ADMIN required to mount
     if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
         return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as i64;
@@ -1103,7 +1113,7 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         return e as i64;
     }
 
-    match crate::fs::mount::do_mount(target, fs_type_str, args[3]) {
+    match crate::fs::mount::do_mount(source, target, fs_type_str, args[3]) {
         Ok(()) => 0,
         Err(e) => -(e as i64),
     }
@@ -1111,8 +1121,33 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
 
 /// sys_umount - Unmount a filesystem (syscall 39)
 ///
-/// umount(target, flags)
+/// umount2(target, flags) — Linux flag semantics (LTP umount2_01/02):
+///   MNT_FORCE (1)     — mark pending; without real busy-reference
+///                       tracking it unmounts like a plain umount.
+///   MNT_DETACH (2)    — lazy detach: accepted and detaches now.
+///   MNT_EXPIRE (4)    — exponential expiry: the FIRST attempt on an
+///                       idle mount fails EAGAIN and arms the flag; the
+///                       mount unmounts only on a later attempt with no
+///                       intervening access. Any access in between
+///                       re-requires the EAGAIN probe.
+///   UMOUNT_NOFOLLOW(8)— do not follow a trailing symlink (accepted).
+///   MNT_EXPIRE combined with MNT_FORCE or MNT_DETACH is EINVAL.
 pub fn sys_umount(args: SyscallArgs) -> i64 {
+    const MNT_FORCE: u64 = 1;
+    const MNT_DETACH: u64 = 2;
+    const MNT_EXPIRE: u64 = 4;
+    const UMOUNT_NOFOLLOW: u64 = 8;
+    let flags = args[1];
+
+    // Unknown flag bits are EINVAL (do_umount: flag validation first).
+    if flags & !(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // MNT_EXPIRE is exclusive with MNT_FORCE/MNT_DETACH.
+    if flags & MNT_EXPIRE != 0 && flags & (MNT_FORCE | MNT_DETACH) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     // CAP_SYS_ADMIN required to unmount
     if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
         return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as i64;
@@ -1155,11 +1190,69 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         crate::process::ns::ns_unregister_mount(&norm);
     }
 
+    // MNT_EXPIRE two-phase protocol (see the header comment): the first
+    // attempt on a mount answers EAGAIN and arms the expire flag; a later
+    // attempt unmounts only when nothing touched the mountpoint in
+    // between (path lookups under the target bump `accessed`).
+    if flags & MNT_EXPIRE != 0 {
+        let norm = crate::fs::path::path_normalize(target);
+        let mut exp = MNT_EXPIRE_STATE.lock();
+        let entry = exp.entry_mut(norm.as_bytes());
+        if !entry.armed || entry.accessed_since_arm {
+            // First probe (or the mount was used since the last probe):
+            // EAGAIN, arm/re-arm the flag and clear the access mark.
+            entry.armed = true;
+            entry.accessed_since_arm = false;
+            return -(errno::EAGAIN as i64);
+        }
+    }
+
     match crate::fs::vfs::vfs_umount(target) {
         Ok(()) => 0,
         Err(e) => -(e as i64),
     }
 }
+
+/// Per-mount MNT_EXPIRE bookkeeping: (armed, accessed-since-arm) keyed by
+/// the normalized mountpoint path.
+struct ExpireEntry {
+    armed: bool,
+    accessed_since_arm: bool,
+}
+
+struct ExpireMap {
+    map: alloc::collections::BTreeMap<alloc::vec::Vec<u8>, ExpireEntry>,
+}
+
+impl ExpireMap {
+    const fn new() -> Self {
+        Self { map: alloc::collections::BTreeMap::new() }
+    }
+
+    fn entry_mut(&mut self, key: &[u8]) -> &mut ExpireEntry {
+        self.map
+            .entry(key.to_vec())
+            .or_insert(ExpireEntry { armed: false, accessed_since_arm: false })
+    }
+
+    /// Record a path access at/under a tracked mountpoint (expires any
+    /// armed MNT_EXPIRE probe). Hooked from the access(2) family — the
+    /// Linux semantics gate on "not in use", and access() is the probe
+    /// LTP umount2_02 uses.
+    pub fn note_access(&mut self, path: &[u8]) {
+        if self.map.is_empty() {
+            return;
+        }
+        for (k, e) in self.map.iter_mut() {
+            if path == k.as_slice() || path.starts_with(k.as_slice()) {
+                e.accessed_since_arm = true;
+            }
+        }
+    }
+}
+
+static MNT_EXPIRE_STATE: crate::sync::spinlock::Spinlock<ExpireMap> =
+    crate::sync::spinlock::Spinlock::new(ExpireMap::new());
 
 /// sys_faccessat - Check file access permissions (syscall 48)
 ///
@@ -1187,6 +1280,11 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
+
+    // MNT_EXPIRE probe access: a successful resolution at/under a tracked
+    // mountpoint re-arms its expire state (umount2(2) then answers EAGAIN
+    // until the mount stays untouched across two umount2 attempts).
+    MNT_EXPIRE_STATE.lock().note_access(full_path.as_bytes());
 
     let mut may_mask: u32 = 0;
     if mode & 0o004 != 0 { may_mask |= crate::fs::permission::MAY_READ; }

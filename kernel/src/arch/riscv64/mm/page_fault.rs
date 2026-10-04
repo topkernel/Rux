@@ -459,6 +459,12 @@ pub fn handle_mm_fault(
                 core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
 
                 // Read file data if we have a valid fd
+                // (bounds use the CURRENT inode size when the pinned
+                // vm_file is available — a file grown by write(2) after
+                // the mmap must serve its new pages; the mmap-time
+                // snapshot stays only as a fallback: LTP mmapstress04
+                // mapped a 1-page file, grew it to 384 pages, and read
+                // stale zeros through the snapshot.)
                 if vma_file_fd >= 0 {
                     if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
                         if let Some(found_vma) = aspace.vma_read().find(page_virt_addr) {
@@ -466,8 +472,20 @@ pub fn handle_mm_fault(
                             let page_offset_in_mapping = page_virt_addr.as_usize() - vma_start;
                             let file_offset = vma_offset + page_offset_in_mapping;
 
+                            // Effective size: CURRENT inode size (grown or
+                            // truncated since mmap), mmap snapshot as
+                            // fallback.
+                            let effective_size = aspace
+                                .get_vma_file(vma_start)
+                                .and_then(|f| {
+                                    // SAFETY: inode cell written at open time; read-only.
+                                    let inode_opt = unsafe { &*f.inode.get() };
+                                    inode_opt.as_ref().map(|i| i.get_size())
+                                })
+                                .unwrap_or(vma_file_size) as usize;
+
                             // Read from file if within file bounds
-                            if file_offset < vma_file_size as usize {
+                            if file_offset < effective_size {
                                 // Prefer the VMA's pinned file (Linux vm_file):
                                 // the mapping fd may already be closed —
                                 // resolving by fd number failed silently and
@@ -481,7 +499,7 @@ pub fn handle_mm_fault(
 
                                     let bytes_to_read = core::cmp::min(
                                         PAGE_SIZE_USIZE,
-                                        (vma_file_size as usize).saturating_sub(file_offset),
+                                        effective_size.saturating_sub(file_offset),
                                     );
                                     let bytes_read = file.read(page_ptr, bytes_to_read);
 

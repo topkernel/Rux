@@ -97,6 +97,17 @@ pub struct VirtQueue {
     vring_layout: alloc::alloc::Layout,
     /// Next descriptor index to allocate
     next_desc: AtomicU16,
+    /// Chains whose wait timed out and whose descriptors are LEAKED (the
+    /// request may still be in flight on the device). Leaked chains must
+    /// not count against the in-flight guard forever, and their slots must
+    /// never be handed out again — see note_timed_out_chain().
+    leaked_chains: AtomicU16,
+    /// Kernel-side ordinal of the next avail-ring submission. submit()
+    /// derives the ring slot and the published avail.idx from this shadow
+    /// instead of reading the shared ring back — a corrupted avail.idx
+    /// (stray kernel write into the heap-backed vring) previously made the
+    /// device walk garbage heads and wedge permanently.
+    avail_shadow: AtomicU16,
 }
 
 unsafe impl Send for VirtQueue {}
@@ -179,6 +190,8 @@ impl VirtQueue {
             vring_addr: mem_ptr as u64,
             vring_layout: layout,
             next_desc: AtomicU16::new(0),
+            leaked_chains: AtomicU16::new(0),
+            avail_shadow: AtomicU16::new(0),
         })
     }
 
@@ -481,34 +494,37 @@ impl VirtQueue {
                 };
             }
 
-            // Add to wait queue, then spin-wait briefly before sleeping.
-            // This closes the lost-wakeup race window without changing
-            // task state or disabling interrupts:
+            // Register on the wait queue with the task state set to
+            // INTERRUPTIBLE under the queue lock (prepare_to_wait), then
+            // re-check the response and truly sleep in schedule().
             //
-            //   race: add → [interrupt fires, our resp written, wake returns
-            //          false because task is RUNNING] → schedule → sleep forever
+            // The old code only ran wait_queue.add() — the task state was
+            // never set to INTERRUPTIBLE, so schedule() found it still
+            // RUNNING and returned IMMEDIATELY: the "wait" was a 5000-lap
+            // spin that could expire before a TCG completion (10-20ms)
+            // landed. The caller then treated its still-healthy request as
+            // timed out, leaked the 64B block, and the retry's fresh
+            // descriptor chain overwrote the still-in-flight one — the
+            // device silently dropped the corrupted chain and every later
+            // waiter on those slots starved (observed: execve of a
+            // buffer-cold binary, e.g. toybox cp, hanging forever in this
+            // loop with 55s+ of CPU burned).
             //
-            //   fix: add → spin-wait catches the completed response → return
-            //
-            // The spin-wait is short (256 iterations ≈ few µs) so it
-            // only activates when the race actually occurs; the normal
-            // path (interrupt hasn't fired yet) quickly falls through
-            // to schedule().
-            let entry = crate::process::wait::WaitQueueEntry::new(current, false);
-            wait_queue.add(entry);
+            // prepare_to_wait closes the lost-wakeup race the old 256-lap
+            // spin patched over: the state change and queue insertion are
+            // atomic w.r.t. the IRQ handler's wake_up_all().
+            wait_queue.prepare_to_wait(current, false, true);
 
-            for _ in 0..256 {
-                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-                // SAFETY: resp_done reads the caller-owned response byte.
-                if unsafe { resp_done(resp_status) } {
-                    wait_queue.remove(current);
-                    // SAFETY: used_ring offset 2 is the idx field.
-                    return unsafe {
-                        let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                        core::ptr::read_volatile(used_idx_ptr)
-                    };
-                }
-                core::hint::spin_loop();
+            // Re-check AFTER registering: a completion whose interrupt
+            // fired between the fast check above and prepare_to_wait is
+            // caught here instead of sleeping on a queue nobody will wake.
+            if unsafe { resp_done(resp_status) } {
+                wait_queue.finish_wait(current);
+                // SAFETY: used_ring offset 2 is the idx field.
+                return unsafe {
+                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                    core::ptr::read_volatile(used_idx_ptr)
+                };
             }
 
             // Sleep until woken by interrupt
@@ -516,8 +532,9 @@ impl VirtQueue {
             crate::arch::riscv64::cpu::restore_irq(true);
             crate::sched::schedule();
 
-            // Remove from wait queue and loop back to re-check condition
-            wait_queue.remove(current);
+            // Remove from wait queue and restore RUNNING state, then loop
+            // back to re-check the response.
+            wait_queue.finish_wait(current);
         }
 
         // Timeout without seeing OUR response: return the caller's prev_used
@@ -604,39 +621,38 @@ impl VirtQueue {
                 }
             };
 
-            // Fast re-check after adding to wait queue (same lost-wakeup
-            // protection pattern as wait_for_used_interruptible)
-            let entry = crate::process::wait::WaitQueueEntry::new(current, false);
-            wait_queue.add(entry);
+            // Register with the task state set to INTERRUPTIBLE under the
+            // queue lock — same discipline as wait_for_used_interruptible
+            // (a bare add() never slept: schedule() saw a RUNNING task and
+            // returned immediately, turning the wait into a timed spin).
+            wait_queue.prepare_to_wait(current, false, true);
 
-            for _ in 0..256 {
-                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-                let used_idx2 = unsafe {
-                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                    core::ptr::read_volatile(used_idx_ptr)
+            // Fast re-check after registering (lost-wakeup protection):
+            // a completion that landed between the scan above and the
+            // prepare_to_wait is caught here without sleeping.
+            let used_idx2 = unsafe {
+                let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                core::ptr::read_volatile(used_idx_ptr)
+            };
+            let mut si = start_idx;
+            while si != used_idx2 {
+                let ring_slot = si as usize % queue_size as usize;
+                let eid = unsafe {
+                    let elem_ptr = (used_ring as usize + 4 + ring_slot * 8) as *const u32;
+                    core::ptr::read_volatile(elem_ptr)
                 };
-                // Re-scan for our descriptor
-                let mut si = start_idx;
-                while si != used_idx2 {
-                    let ring_slot = si as usize % queue_size as usize;
-                    let eid = unsafe {
-                        let elem_ptr = (used_ring as usize + 4 + ring_slot * 8) as *const u32;
-                        core::ptr::read_volatile(elem_ptr)
-                    };
-                    if eid == expected_desc_id {
-                        wait_queue.remove(current);
-                        return true;
-                    }
-                    si = si.wrapping_add(1);
+                if eid == expected_desc_id {
+                    wait_queue.finish_wait(current);
+                    return true;
                 }
-                core::hint::spin_loop();
+                si = si.wrapping_add(1);
             }
 
             // Sleep until woken by interrupt
             // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
             crate::arch::riscv64::cpu::restore_irq(true);
             crate::sched::schedule();
-            wait_queue.remove(current);
+            wait_queue.finish_wait(current);
         }
 
         false  // Timeout
@@ -644,13 +660,19 @@ impl VirtQueue {
 
     /// Add descriptor chain to queue and notify device
     pub fn submit(&mut self, head_idx: u16) {
+        // The slot ordinal comes from the kernel-side shadow, never from a
+        // read-back of the shared ring: the vring lives in heap memory, and
+        // a stray kernel write that smashed avail.idx made every later
+        // submit publish a bogus index — the device then walked garbage
+        /// ring slots, read a header-less chain, and stopped completing
+        /// anything (permanent I/O wedge).
+        let idx = self.avail_shadow.fetch_add(1, Ordering::AcqRel) as usize;
+        let ring_idx = idx % self.queue_size as usize;
         // SAFETY: avail points to the available ring in our allocation; the ring
         // pointer at offset 4 is within the allocated region; all volatile
-        // reads/writes target fields of the VirtIO vring we own.
+        // writes target fields of the VirtIO vring we own.
         unsafe {
             let avail = &mut *self.avail;
-            let idx = core::ptr::read_volatile(core::ptr::addr_of!(avail.idx)) as usize;
-            let ring_idx = idx % self.queue_size as usize;
 
             // Memory barrier before writing to available ring
             core::sync::atomic::fence(Ordering::Release);
@@ -662,7 +684,9 @@ impl VirtQueue {
             // Memory barrier to ensure ring write completes before index update
             core::sync::atomic::fence(Ordering::Release);
 
-            // Update available index (this signals to device that new request is ready)
+            // Update available index (this signals to device that new
+            // request is ready). Derived from the shadow — this also
+            // REPAIRS a corrupted ring index on every submit.
             let new_idx = (idx as u16).wrapping_add(1);
             core::ptr::write_volatile(&mut (*avail).idx as *mut u16, new_idx);
 
@@ -723,7 +747,12 @@ impl VirtQueue {
         //
         // Check if all descriptors are in flight (avail - used >= queue_size)
         // Note: indices wrap at u16::MAX, not queue_size.
-        let in_flight = avail_idx.wrapping_sub(used_idx);
+        // Discount chains that timed out and leaked: they will never
+        // advance the used ring (or may do so arbitrarily late), but
+        // counting them here forever would starve allocation after two
+        // timeouts — the permanent-I/O-wedge cascade.
+        let leaked = self.leaked_chains.load(Ordering::Acquire);
+        let in_flight = avail_idx.wrapping_sub(used_idx).wrapping_sub(leaked);
         // Bound by the WORST-CASE chain length (3: blk header/data/resp),
         // not the caller's: a 2-descriptor flush admitted under the old
         // per-caller guard could become the 4th concurrent chain and wrap
@@ -743,6 +772,27 @@ impl VirtQueue {
     /// alloc_desc_chain for why next_desc must never be re-based on the
     /// used-ring index).
     pub fn reclaim_descs(&mut self) {
+    }
+
+    /// Record that a chain's wait TIMED OUT and its slots are leaked.
+    ///
+    /// The caller's retry then allocates a FRESH chain; without skipping a
+    /// window here, the retry's slots (next_desc keeps cycling mod
+    /// queue_size) could land on the still-in-flight leaked chain and
+    /// overwrite its descriptors — the device then reads a header-less
+    /// chain and silently drops it, wedging every later waiter on those
+    /// slots (observed: execve of a buffer-cold binary spinning forever in
+    /// wait_for_used_interruptible). Skipping one full window guarantees
+    /// the retry cannot collide with the leaked chain.
+    pub fn note_timed_out_chain(&self) {
+        self.leaked_chains.fetch_add(1, Ordering::AcqRel);
+        // Advance to the start of the NEXT descriptor window so the very
+        // next allocation cannot reuse any slot of the leaked chain.
+        let q = self.queue_size as u16;
+        let cur = self.next_desc.load(Ordering::Acquire);
+        let into_window = cur % q;
+        let skip = (q - into_window) % q;
+        self.next_desc.fetch_add(if skip == 0 { q } else { skip }, Ordering::AcqRel);
     }
 
     /// Reset descriptor allocator

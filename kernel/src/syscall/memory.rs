@@ -266,7 +266,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     let length = args[1] as usize;
     let prot_flags = args[2] as u32;
     let map_flags = args[3] as u32;
-    let fd = args[4] as i32;
+    let mut fd = args[4] as i32;
     let offset = args[5] as u64;
 
     // length of 0 is invalid per POSIX
@@ -555,11 +555,39 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     }
 
                     // Set VMA type
-                    let vma_type = if map_flags & map::MAP_ANONYMOUS != 0 {
+                    let mut vma_type = if map_flags & map::MAP_ANONYMOUS != 0 {
                         VmaType::Anonymous
                     } else {
                         VmaType::FileBacked
                     };
+
+                    // /dev/zero mmap = anonymous zero-filled mapping
+                    // (Linux map_zero): a char device has no on-disk
+                    // extent to fault from — treating it as file-backed
+                    // made the first touch SIGBUS "past EOF" (device
+                    // size 0). LTP mmap10 mmaps /dev/zero and forks
+                    // writers into it.
+                    if vma_type == VmaType::FileBacked && fd >= 0 {
+                        let is_zero_dev = unsafe {
+                            crate::fs::file::get_file_fd(fd as usize)
+                                .and_then(|f| {
+                                    let inode_opt = &*f.inode.get();
+                                    inode_opt.as_ref().map(|i| {
+                                        i.mode.is_char_device()
+                                            && i.rdev
+                                                == crate::fs::dev_t::DEV_ZERO.to_user_dev()
+                                    })
+                                })
+                                .unwrap_or(false)
+                        };
+                        if is_zero_dev {
+                            vma_type = VmaType::Anonymous;
+                            // The generic file attach below must not pin
+                            // the device "file" either — use the anonymous
+                            // path by masking the fd out of that branch.
+                            fd = -1;
+                        }
+                    }
 
                     // Framebuffer mmap: /dev/fb0 maps the GPU framebuffer's
                     // own physical pages into the caller (no anonymous
@@ -2100,50 +2128,50 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
 
     0  // Success
 }
+/// Derive a sub-VMA of `v` covering [s, e) — same attributes, file
+/// offset advanced by the sub-range start.
+fn sub_vma(v: &crate::mm::vma::Vma, s: usize, e: usize) -> crate::mm::vma::Vma {
+    let page_delta = (s - v.start().as_usize()) / crate::mm::page::PAGE_SIZE;
+    let mut nv = crate::mm::vma::Vma::new(
+        crate::mm::page::VirtAddr::new(s),
+        crate::mm::page::VirtAddr::new(e),
+        v.flags(),
+    );
+    nv.set_offset(v.offset() + page_delta * crate::mm::page::PAGE_SIZE);
+    nv.set_type(v.vma_type());
+    nv.set_file_fd(v.file_fd());
+    nv.set_file_size(v.file_size());
+    nv
+}
+
 /// sys_mlock - Lock memory
 ///
-///
-/// # Arguments
-/// - args[0] (addr): starting address
-/// - args[1] (length): length
-///
-/// # Returns
-/// Returns 0 on success, negative error code on failure
-///
-/// - RISC-V: 228
-///
-/// # Description
-/// mlock locks memory, preventing it from being swapped out
+/// Range-precise VM_LOCKED: the covering VMAs are SPLIT at the (rounded)
+/// range boundaries and only the covered sub-VMAs carry the lock — VmLck
+/// in /proc/self/status and "Locked:" in /proc/self/smaps report exactly
+/// the locked bytes (LTP mlock201 VmLck deltas, mlock05 per-VMA Locked).
+/// Linux prefaults the whole range (populate_vma_page_range) unless the
+/// caller passed MLOCK_ONFAULT (mlock2). RLIMIT_MEMLOCK is enforced the
+/// Linux way (can_do_mlock): no CAP_IPC_LOCK + zero limit -> EPERM;
+/// exceeding a nonzero soft limit -> ENOMEM. Any unmapped hole in the
+/// range fails the whole call with ENOMEM (LTP mlock01).
 pub fn sys_mlock(args: [u64; 6]) -> i64 {
+    mlock_impl(args[0] as usize, args[1] as usize, false)
+}
+
+/// Shared implementation for mlock(2) and mlock2(2) (`onfault` skips the
+/// prefault pass — Linux VM_LOCKONFAULT: pages lock as they fault in).
+fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
     use crate::mm::page::VirtAddr;
     use crate::mm::vma::VmaFlags;
 
-    let addr = args[0] as usize;
-    let length = args[1] as usize;
-
-    // Validate arguments
     if length == 0 {
-        return -22_i64;  // EINVAL
+        return -22_i64; // EINVAL
     }
-
     // Linux rounds the range to page boundaries: addr DOWN, len UP — an
     // unaligned addr is legal (LTP mlock01 locks one byte past a page
-    // boundary); the old alignment check rejected it with EINVAL.
-    let addr = addr & !(crate::mm::page::PAGE_SIZE - 1);
-
-    // P2 mlock (fake-success cleanup): set VM_LOCKED on every VMA covering
-    // [addr, addr+len). The flag marks the range non-swappable for the
-    // reclaim/swap paths (like Linux's vm_flags bit). Granularity is the
-    // WHOLE VMA, not a split range — a partial mlock of a large mapping
-    // pins more than requested (documented approximation; VMA splitting is
-    // future work). RLIMIT_MEMLOCK is enforced the Linux way
-    // (mm/mlock.c): a caller without CAP_IPC_LOCK and a zero
-    // RLIMIT_MEMLOCK gets EPERM (can_do_mlock); exceeding the soft limit
-    // gets ENOMEM. The locked-bytes projection counts LOCKED VMA bytes
-    // OUTSIDE the range being locked now (they keep their charge) plus
-    // the FULL size of every VMA the range touches (our granularity) —
-    // re-locking an already-locked range is therefore idempotent (LTP
-    // mlock203's VmLck-stable expectation).
+    // boundary).
+    let addr = raw_addr & !(crate::mm::page::PAGE_SIZE - 1);
     let length_aligned = (length + crate::mm::page::PAGE_SIZE - 1)
         & !(crate::mm::page::PAGE_SIZE - 1);
     let end = match addr.checked_add(length_aligned) {
@@ -2170,57 +2198,109 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
         None => return -12_i64,
     };
 
-    // RLIMIT_MEMLOCK accounting: ENOMEM when the post-lock locked bytes
-    // would exceed the soft limit (CAP_IPC_LOCK holders bypass).
-    if !has_ipc_lock && memlock_cur != u64::MAX {
-        let (mut locked_others, mut locked_target) = (0u64, 0u64);
-        {
-            let mgr = address_space.vma_read();
-            for v in mgr.iter() {
-                let (s, e2) = (v.start().as_usize(), v.end().as_usize());
-                let bytes = (e2 - s) as u64;
-                if v.flags().contains(VmaFlags::LOCKED) {
-                    if e2 <= addr || s >= end {
-                        locked_others += bytes; // stays locked, outside range
-                    }
-                    // Overlapping the range: it will be re-charged in
-                    // locked_target below; don't double count.
-                }
-                if e2 > addr && s < end {
-                    locked_target += bytes; // our whole-VMA granularity
-                }
+    // Range fully mapped? Any hole -> ENOMEM before any mutation (Linux
+    // mlock/vma walk semantics — the whole call fails, nothing locked).
+    {
+        let mgr = address_space.vma_read();
+        let mut cursor = addr;
+        for v in mgr.iter() {
+            let (s, e2) = (v.start().as_usize(), v.end().as_usize());
+            if e2 <= cursor {
+                continue;
+            }
+            if s > cursor {
+                return -12_i64; // hole
+            }
+            cursor = e2;
+            if cursor >= end {
+                break;
             }
         }
-        if locked_others + locked_target > memlock_cur {
+        if cursor < end {
+            return -12_i64; // ENOMEM: trailing hole
+        }
+    }
+
+    // RLIMIT_MEMLOCK accounting: locked bytes after the call = already
+    // locked VMAs OUTSIDE the range + the rounded range (our post-split
+    // granularity is exact).
+    if !has_ipc_lock && memlock_cur != u64::MAX {
+        let locked_after: u64 = {
+            let mgr = address_space.vma_read();
+            let mut total = 0u64;
+            for v in mgr.iter() {
+                let (s, e2) = (v.start().as_usize(), v.end().as_usize());
+                if v.flags().contains(VmaFlags::LOCKED) && (e2 <= addr || s >= end) {
+                    total += (e2 - s) as u64;
+                }
+            }
+            total + length_aligned as u64
+        };
+        if locked_after > memlock_cur {
             return -12_i64; // ENOMEM
         }
     }
 
-    let mut cursor = addr;
-    loop {
+    // Flag the range in one manager pass: every VMA overlapping
+    // [addr, end) is rebuilt as up to three pieces (below/inside/above
+    // the range) with VM_LOCKED set only on the covered piece. The
+    // pieces carry DIFFERENT flags, so the manager's insert-merge cannot
+    // glue them back (a split-then-flag sequence was merged back to one
+    // whole-VMA lock — mlock201's VmLck deltas read the full mapping).
+    let mut prefault_spans: alloc::vec::Vec<(usize, usize, bool)> = alloc::vec::Vec::new();
+    {
         let mut mgr = address_space.vma_write();
-        let vma = match mgr.find_mut(VirtAddr::new(cursor)) {
-            Some(v) => v,
-            None => return -12_i64, // ENOMEM: unmapped hole in the range
-        };
-        let vma_end = vma.end().as_usize();
-        let vma_type = vma.vma_type();
-        let vma_writable = vma.flags().is_writable();
-        let mut flags = vma.flags();
-        flags.insert(VmaFlags::LOCKED);
-        vma.set_flags(flags);
-        drop(mgr);
+        let mut cursor = addr;
+        while cursor < end {
+            let vma = match mgr.find(VirtAddr::new(cursor)) {
+                Some(v) => v.clone(),
+                None => return -12_i64, // raced hole (should not happen)
+            };
+            let (vs, ve) = (vma.start().as_usize(), vma.end().as_usize());
+            let vma_type = vma.vma_type();
+            let seg_start = cursor.max(addr).max(vs);
+            let seg_end = ve.min(end);
 
-        // Linux mlock PREFAULTS the whole range (populate_vma_page_range):
-        // locked pages are resident — mincore02 asserts every locked page
-        // shows present. Anonymous/SharedMemory VMAs get zero pages mapped
-        // here (file-backed pages stay demand-read; mincore02 uses anon).
-        if vma_type == crate::mm::vma::VmaType::Anonymous
-            || vma_type == crate::mm::vma::VmaType::SharedMemory
-        {
-            let seg_start = cursor.max(addr);
-            let seg_end = vma_end.min(end);
-            let root_ppn = address_space.root_ppn();
+            let mut mid = sub_vma(&vma, seg_start, seg_end);
+            let mut flags = mid.flags();
+            flags.insert(VmaFlags::LOCKED);
+            mid.set_flags(flags);
+
+            // Remove the original and re-add the (up to three) pieces.
+            let _ = mgr.remove(VirtAddr::new(vs));
+            if vs < seg_start {
+                let _ = mgr.add(sub_vma(&vma, vs, seg_start));
+            }
+            let _ = mgr.add(mid);
+            if seg_end < ve {
+                let _ = mgr.add(sub_vma(&vma, seg_end, ve));
+            }
+
+            prefault_spans.push((
+                seg_start,
+                seg_end,
+                vma_type == crate::mm::vma::VmaType::Anonymous
+                    || vma_type == crate::mm::vma::VmaType::SharedMemory,
+            ));
+            if ve >= end {
+                break;
+            }
+            cursor = ve;
+        }
+    }
+
+    // Linux mlock PREFAULTS the whole range (populate_vma_page_range):
+    // locked pages are resident — mincore02 asserts every locked page
+    // shows present. MLOCK_ONFAULT (mlock2) skips this: pages lock as
+    // they fault in (LTP mlock201 ONFAULT cases expect locked-but-not-
+    // present pages). Anonymous/SharedMemory VMAs get zero pages mapped
+    // here (file-backed pages stay demand-read; mincore02 uses anon).
+    if !onfault {
+        let root_ppn = address_space.root_ppn();
+        for (seg_start, seg_end, zero_fill) in prefault_spans {
+            if !zero_fill {
+                continue;
+            }
             let mut p = seg_start & !(crate::mm::page::PAGE_SIZE - 1);
             while p < seg_end {
                 // SAFETY: PageTableWalker::walk is a read-only inspection
@@ -2246,15 +2326,13 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
                             )
                             .0 as *mut u8;
                             core::ptr::write_bytes(page_ptr, 0, crate::mm::page::PAGE_SIZE);
-                            let mut pte_flags =
+                            let pte_flags =
                                 crate::arch::riscv64::mm::PageTableEntry::V
                                     | crate::arch::riscv64::mm::PageTableEntry::A
                                     | crate::arch::riscv64::mm::PageTableEntry::D
                                     | crate::arch::riscv64::mm::PageTableEntry::U
-                                    | crate::arch::riscv64::mm::PageTableEntry::R;
-                            if vma_writable {
-                                pte_flags |= crate::arch::riscv64::mm::PageTableEntry::W;
-                            }
+                                    | crate::arch::riscv64::mm::PageTableEntry::R
+                                    | crate::arch::riscv64::mm::PageTableEntry::W;
                             crate::arch::riscv64::mm::mm_ops::map_user_page(
                                 root_ppn,
                                 crate::arch::riscv64::mm::VirtAddr::new(p as u64),
@@ -2267,27 +2345,19 @@ pub fn sys_mlock(args: [u64; 6]) -> i64 {
                 p += crate::mm::page::PAGE_SIZE;
             }
         }
-
-        if vma_end >= end {
-            return 0;
-        }
-        cursor = vma_end;
     }
+
+    0
 }
+
+
 /// sys_munlock - Unlock memory
 ///
-///
-/// # Arguments
-/// - args[0] (addr): starting address
-/// - args[1] (length): length
-///
-/// # Returns
-/// Returns 0 on success, negative error code on failure
-///
-/// - RISC-V: 229
-///
-/// # Description
-/// munlock unlocks previously locked memory
+/// Range-precise unlock: split at the boundaries, clear VM_LOCKED on the
+/// covered sub-VMAs only. Linux munlock(2) fails with ENOMEM when the
+/// range contains unmapped pages (same rule as mlock) — LTP munlock02
+/// munmaps the middle of a locked area and expects munlock(ENOENT hole)
+/// to return ENOMEM.
 pub fn sys_munlock(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
     use crate::mm::vma::VmaFlags;
@@ -2295,17 +2365,12 @@ pub fn sys_munlock(args: [u64; 6]) -> i64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
 
-    // Validate arguments
     if length == 0 {
-        return -22_i64;  // EINVAL
+        return -22_i64; // EINVAL
     }
-
     // Round to page boundaries like mlock (Linux mlock/munlock never
     // require the caller to align).
     let addr = addr & !(crate::mm::page::PAGE_SIZE - 1);
-
-    // P2 mlock: clear VM_LOCKED on every VMA covering the range (same
-    // whole-VMA granularity as sys_mlock).
     let length_aligned = (length + crate::mm::page::PAGE_SIZE - 1)
         & !(crate::mm::page::PAGE_SIZE - 1);
     let end = match addr.checked_add(length_aligned) {
@@ -2322,22 +2387,62 @@ pub fn sys_munlock(args: [u64; 6]) -> i64 {
         None => return -12_i64,
     };
 
-    let mut cursor = addr;
-    loop {
-        let mut mgr = address_space.vma_write();
-        let vma = match mgr.find_mut(VirtAddr::new(cursor)) {
-            Some(v) => v,
-            None => return 0, // hole: nothing to unlock there (POSIX munlock is advisory)
-        };
-        let vma_end = vma.end().as_usize();
-        let mut flags = vma.flags();
-        flags.remove(VmaFlags::LOCKED);
-        vma.set_flags(flags);
-        if vma_end >= end {
-            return 0;
+    // Whole range must be mapped — ENOMEM on any hole (LTP munlock02).
+    {
+        let mgr = address_space.vma_read();
+        let mut cursor = addr;
+        for v in mgr.iter() {
+            let (s, e2) = (v.start().as_usize(), v.end().as_usize());
+            if e2 <= cursor {
+                continue;
+            }
+            if s > cursor {
+                return -12_i64; // hole
+            }
+            cursor = e2;
+            if cursor >= end {
+                break;
+            }
         }
-        cursor = vma_end;
+        if cursor < end {
+            return -12_i64; // ENOMEM: trailing hole
+        }
     }
+
+    // Clear the flag with the same one-pass piece rebuild (a full clear
+    // of a LOCKED VMA cannot split, but a partial unlock must).
+    {
+        let mut mgr = address_space.vma_write();
+        let mut cursor = addr;
+        while cursor < end {
+            let vma = match mgr.find(VirtAddr::new(cursor)) {
+                Some(v) => v.clone(),
+                None => return -12_i64,
+            };
+            let (vs, ve) = (vma.start().as_usize(), vma.end().as_usize());
+            let seg_start = cursor.max(addr).max(vs);
+            let seg_end = ve.min(end);
+
+            let mut mid = sub_vma(&vma, seg_start, seg_end);
+            let mut flags = mid.flags();
+            flags.remove(VmaFlags::LOCKED);
+            mid.set_flags(flags);
+
+            let _ = mgr.remove(VirtAddr::new(vs));
+            if vs < seg_start {
+                let _ = mgr.add(sub_vma(&vma, vs, seg_start));
+            }
+            let _ = mgr.add(mid);
+            if seg_end < ve {
+                let _ = mgr.add(sub_vma(&vma, seg_end, ve));
+            }
+            if ve >= end {
+                break;
+            }
+            cursor = ve;
+        }
+    }
+    0
 }
 
 /// sys_mlockall - Lock all process memory (NR 230)
@@ -2490,7 +2595,7 @@ pub fn sys_mlock2(args: [u64; 6]) -> i64 {
     if addr % crate::mm::page::PAGE_SIZE != 0 {
         return -22_i64;
     }
-    sys_mlock([addr as u64, length as u64, 0, 0, 0, 0])
+    mlock_impl(addr, length, flags & MLOCK_ONFAULT != 0)
 }
 
 /// sys_mbind - Set memory policy for a range (NR 235)

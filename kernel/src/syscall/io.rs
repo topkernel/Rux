@@ -701,11 +701,33 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
     }
 
+    // Loop-family ioctls (LOOP_SET_FD/LOOP_CLR_FD/LOOP_GET_STATUS64/
+    // LOOP_CTL_GET_FREE on /dev/loopN and /dev/loop-control): dispatch on
+    // the File's ops identity (losetup / LTP tst_acquire_device).
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) = crate::drivers::loop_dev::loop_file_ioctl(&file, request, arg) {
+                return ret;
+            }
+        }
+    }
+
     // P0-2: interface-management ioctls (SIOCGIFCONF / SIOCGIFADDR /
     // SIOCSIFADDR / SIOCGIFFLAGS / SIOCSIFFLAGS / SIOCGIFHWADDR / ...) —
     // forwarded to the network layer when the fd is a socket (any family).
     if crate::net::netlink::is_if_ioctl(request) {
-        let is_socket = unsafe { crate::fs::file::get_file_fd(fd as usize) }
+        // Linux checks the fd BEFORE the request: an ioctl on a nonexistent
+        // fd is EBADF, not ENOTTY (LTP sockioctl01 "bad file descriptor").
+        let file_opt = if fd >= 0 {
+            unsafe { crate::fs::file::get_file_fd(fd as usize) }
+        } else {
+            None
+        };
+        if file_opt.is_none() {
+            return -errno::EBADF as i64;
+        }
+        let is_socket = file_opt
             .map(|file| {
                 let ops = file.get_ops();
                 match ops {

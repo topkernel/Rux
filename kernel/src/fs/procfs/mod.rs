@@ -84,6 +84,7 @@ pub enum PidFileKind {
     Exe,
     Cwd,
     Maps,
+    Smaps,
     Environ,
     OomScore,
     OomScoreAdj,
@@ -289,6 +290,7 @@ impl ProcFSNode {
                 PidFileKind::Stat => pid::generate_stat(pid),
                 PidFileKind::Cmdline => pid::generate_cmdline(pid),
                 PidFileKind::Maps => pid::generate_maps(pid),
+                PidFileKind::Smaps => pid::generate_smaps(pid),
                 PidFileKind::Environ => pid::generate_environ(pid),
                 PidFileKind::OomScore => pid::generate_oom_score(pid),
                 PidFileKind::OomScoreAdj => pid::generate_oom_score_adj(pid),
@@ -446,6 +448,7 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("filesystems", mounts::generate_filesystems);
         self.create_dynamic_file("mountinfo", mounts::generate_mountinfo);
         self.create_dynamic_file("interrupts", interrupts::generate);
+        self.create_dynamic_file("partitions", partitions_generate);
 
         // U2 kmod: registered loadable modules (kernel/src/module).
         self.create_dynamic_file("modules", crate::module::generate_proc_modules);
@@ -806,6 +809,7 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "cmdline" => Some(pid::generate_cmdline(pid)),
                 "stat" => Some(pid::generate_stat(pid)),
                 "maps" => Some(pid::generate_maps(pid)),
+                "smaps" => Some(pid::generate_smaps(pid)),
                 "exe" => Some(pid::generate_exe_link(pid)),
                 "cwd" => Some(pid::generate_cwd_link(pid)),
                 "environ" => Some(pid::generate_environ(pid)),
@@ -850,6 +854,7 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "cmdline" => Some(pid::generate_cmdline(pid)),
                 "stat" => Some(pid::generate_stat(pid)),
                 "maps" => Some(pid::generate_maps(pid)),
+                "smaps" => Some(pid::generate_smaps(pid)),
                 "exe" => Some(pid::generate_exe_link(pid)),
                 "cwd" => Some(pid::generate_cwd_link(pid)),
                 "environ" => Some(pid::generate_environ(pid)),
@@ -980,6 +985,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
             b"exe" => PidFileKind::Exe,
             b"cwd" => PidFileKind::Cwd,
             b"maps" => PidFileKind::Maps,
+            b"smaps" => PidFileKind::Smaps,
             b"environ" => PidFileKind::Environ,
             b"oom_score" => PidFileKind::OomScore,
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
@@ -1211,6 +1217,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             b"exe" => PidFileKind::Exe,
             b"cwd" => PidFileKind::Cwd,
             b"maps" => PidFileKind::Maps,
+            b"smaps" => PidFileKind::Smaps,
             b"environ" => PidFileKind::Environ,
             b"oom_score" => PidFileKind::OomScore,
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
@@ -1750,3 +1757,25 @@ static PROCFS_NS_DIR_OPS: INodeOps = INodeOps {
     iget: Some(procfs_ns_dir_iget),
     destroy_inode: None,
 };
+
+
+
+
+/// /proc/partitions — major minor #blocks name rows. Lists the root disk
+/// plus any bound loop devices (LTP tst_acquire_device's fallback probe
+/// and its "No free devices found" report read this).
+fn partitions_generate() -> alloc::vec::Vec<u8> {
+    let mut out = alloc::string::String::from("major minor  #blocks  name\n\n");
+    if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
+        // SAFETY: get_pci_gen_disk returns a valid GenDisk pointer.
+        let cap = unsafe { (*disk).capacity.load(core::sync::atomic::Ordering::Acquire) };
+        out.push_str(&alloc::format!(
+            " 254     0 {:>10} vda\n",
+            cap / 2 // sectors -> KiB blocks
+        ));
+    }
+    out.push_str(&alloc::string::String::from_utf8_lossy(
+        &crate::drivers::loop_dev::partitions_lines(),
+    ));
+    out.into_bytes()
+}

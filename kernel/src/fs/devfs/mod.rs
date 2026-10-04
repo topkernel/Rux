@@ -390,6 +390,29 @@ fn devtmpfs_populate() {
         ("random", crate::fs::dev_t::DEV_RANDOM, 0o666),
         ("urandom", crate::fs::dev_t::DEV_URANDOM, 0o666),
     ];
+    // Loop family: /dev/loop-control (misc) + /dev/loop0..7 (BLOCK
+    // majors) — LTP tst_acquire_device and losetup need both (the loop
+    // driver's ioctls are dispatched on the devfs entry identity).
+    children.insert(
+        String::from("loop-control"),
+        Arc::new(DevfsEntry::new_char_device_with_mode(
+            "loop-control",
+            crate::fs::dev_t::DevNo::new(crate::fs::dev_t::MISC_MAJOR, crate::drivers::loop_dev::LOOP_CONTROL_MINOR),
+            0o666,
+        )),
+    );
+    for i in 0..crate::drivers::loop_dev::N_LOOPS {
+        let name = alloc::format!("loop{}", i);
+        children.insert(
+            name.clone(),
+            Arc::new(DevfsEntry::new_block_device(
+                &name,
+                crate::fs::dev_t::DevNo::new(crate::fs::dev_t::LOOP_MAJOR, i as u32),
+                0o660,
+            )),
+        );
+    }
+    crate::drivers::loop_dev::init_loops();
     for (name, devno, mode) in char_nodes.iter() {
         children.insert(
             String::from(*name),
@@ -946,6 +969,10 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
     let mut inode = Inode::new(ino, mode);
     inode.uid.store(child.uid.load(Ordering::Acquire), Ordering::Relaxed);
     inode.gid.store(child.gid.load(Ordering::Acquire), Ordering::Relaxed);
+    // Record the device number (userspace dev_t encoding, same as
+    // getattr's st_rdev): mmap(2) identifies /dev/zero through it to
+    // apply the anonymous map_zero semantics.
+    inode.rdev = child.devno.to_user_dev();
     inode.fs_id = crate::fs::inode::FS_ID_DEVFS;  // icache isolation (VFS-H8)
     inode.ops = Some(&DEVFS_INODE_OPS);
     // Clone the Arc and convert to raw pointer to keep the DevfsEntry alive
@@ -1008,6 +1035,17 @@ fn devfs_ino_hash(name: &str) -> u64 {
 /// - /dev/pts/N → attach to the live pair N
 /// - everything else → no-op (0)
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
+/// Loop-family file ops: everything routes through the devno stashed on
+/// the open file (open) and the loop ioctl dispatcher (sys_ioctl).
+pub static LOOP_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+    read: Some(crate::drivers::loop_dev::loop_file_read),
+    write: Some(crate::drivers::loop_dev::loop_file_write),
+    lseek: Some(crate::drivers::loop_dev::loop_file_lseek),
+    close: None,
+    poll: None,
+};
+
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     let entry_ptr = match inode.private_data {
         Some(ptr) => ptr,
@@ -1015,6 +1053,12 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     };
     let entry = &*(entry_ptr as *const DevfsEntry);
 
+    if crate::drivers::loop_dev::is_loop_devno(entry.devno) {
+        // Stash the loop devno for the ioctl dispatcher (evdev pattern).
+        let b = alloc::boxed::Box::new(entry.devno);
+        file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
+        return 0;
+    }
     if entry.devno == crate::fs::pty::DEV_PTMX {
         return crate::fs::pty::ptmx_open(file);
     }
@@ -1036,9 +1080,18 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
 /// DevFS get_file_ops: return device-specific ops for char devices, DIR_FILE_OPS for directories
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn devfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
-    if inode.mode.is_char_device() {
+    if inode.mode.is_char_device() || inode.mode.is_block_device() {
         let entry_ptr = inode.private_data?;
         let entry = &*(entry_ptr as *const DevfsEntry);
+        if crate::drivers::loop_dev::is_loop_devno(entry.devno) {
+            // Loop family (loop-control + /dev/loopN): the loop driver
+            // owns them — open stashes the devno on the file, sys_ioctl
+            // routes the LOOP_* ioctls.
+            return Some(&crate::fs::devfs::LOOP_FILE_OPS);
+        }
+        if inode.mode.is_block_device() {
+            return None;
+        }
         let ops = registry::get_char_device_ops(entry.devno);
         if ops.is_none() {
             crate::pr_err!(

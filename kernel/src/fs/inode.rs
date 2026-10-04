@@ -270,6 +270,9 @@ pub struct Inode {
     pub size: AtomicU64,
     /// Device number (for device inodes)
     pub rdev: u64,
+    /// Device number (atomic mirror — settable through an Arc<Inode> for
+    /// retyped device nodes created by mknod on non-devfs filesystems)
+    pub rdev_atomic: AtomicU64,
     /// Owner user ID
     pub uid: AtomicU32,
     /// Owner group ID
@@ -362,6 +365,7 @@ impl Inode {
             mode,
             size: AtomicU64::new(0),
             rdev: 0,
+            rdev_atomic: AtomicU64::new(0),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             state: Spinlock::new(InodeState::INew),
@@ -383,6 +387,7 @@ impl Inode {
             mode,
             size: AtomicU64::new(0),
             rdev: 0,
+            rdev_atomic: AtomicU64::new(0),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             state: Spinlock::new(InodeState::INew),
@@ -446,6 +451,17 @@ impl Inode {
     /// Set file size
     pub fn set_size(&self, size: u64) {
         self.size.store(size, Ordering::Release);
+    }
+
+    /// Set the device number through a shared inode (mknod retype path).
+    pub fn set_rdev(&self, rdev: u64) {
+        self.rdev_atomic.store(rdev, Ordering::Release);
+    }
+
+    /// Current device number (atomic mirror wins once set).
+    pub fn get_rdev(&self) -> u64 {
+        let a = self.rdev_atomic.load(Ordering::Acquire);
+        if a != 0 { a } else { self.rdev }
     }
 
     /// Increment reference count

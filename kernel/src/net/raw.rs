@@ -601,7 +601,12 @@ pub fn raw_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
     if type_ & SOCK_TYPE_MASK != SOCK_RAW {
         return Err(-94);
     }
-    if protocol != IPPROTO_ICMP && protocol != IPPROTO_RAW && protocol != 0 {
+    // Linux inet_create's protocol lookup never binds protocol 0
+    // (IPPROTO_IP) to the SOCK_RAW protosw: the wild-case falls through
+    // the list and returns EPROTONOSUPPORT even for CAP_NET_RAW holders
+    // (LTP socket01 "raw open as non-root" runs as root and still expects
+    // EPROTONOSUPPORT for socket(PF_INET, SOCK_RAW, 0)).
+    if protocol != IPPROTO_ICMP && protocol != IPPROTO_RAW {
         return Err(-93); // EPROTONOSUPPORT
     }
     let nonblock = (type_ & SOCK_NONBLOCK_FLAG) != 0;
