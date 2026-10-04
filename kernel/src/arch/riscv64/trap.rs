@@ -758,6 +758,26 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                 }
                 put(b'\n');
+                // WP1: kernel-stack backtrace. The one-line epc/ra print
+                // cannot name the CALLER of the faulting function (ra is
+                // inside it); the saved-ra chain up the stack can. Dump 24
+                // words above sp — enough frames for wake-path panics
+                // (observed: epc=Task::pid ra=Task::wake_up with a wild
+                // 0xFFFFFFFF task pointer whose origin lived two frames up).
+                // The kernel stack is always mapped; words that happen to
+                // be data are simply ignored during symbolization.
+                for &b in b"trap: stack:" { put(b); }
+                for i in 0..24usize {
+                    let addr = regs.sp as usize + i * 8;
+                    let v = unsafe { core::ptr::read_volatile(addr as *const usize) };
+                    put(b' ');
+                    for sh in (0..64).step_by(4).rev() {
+                        let n = ((v >> sh) & 0xF) as u8;
+                        put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    }
+                    if i % 4 == 3 { put(b'\n'); }
+                }
+                if 24 % 4 != 0 { put(b'\n'); }
                 // R9: dump the faulting task's children list raw — the
                 // recurring NULL-walk corruption must be photographed at
                 // the instant it faults (other CPUs sanitize the list if

@@ -2138,6 +2138,29 @@ impl Task {
             return false;
         }
 
+        // WP2 (wild-pointer guard): a wake entered here with task ==
+        // 0x00000000FFFFFFFF (u32::MAX zero-extended — GNOME panic at
+        // guest+452s, epc=Task::pid offset 92, ra=Task::wake_up). Every
+        // legitimate Task lives in the kernel linear map or the kernel
+        // image (>= 0xFFFFFFC000000000); anything lower is user range or
+        // an integer sentinel misread as a pointer. Dropping the wake
+        // loses one wakeup at worst; dereferencing panicked the kernel.
+        if (task as usize) < 0xFFFF_FFC0_0000_0000 {
+            use crate::console::putchar;
+            const MSG: &[u8] = b"WAKE-WILD-PTR dropped ptr=0x";
+            for &b in MSG { unsafe { putchar(b); } }
+            let mut v = task as usize;
+            for _ in 0..16 {
+                let n = (v >> 60) as u8;
+                unsafe {
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+                v <<= 4;
+            }
+            unsafe { putchar(b'\n'); }
+            return false;
+        }
+
         // R15-6 (S-R resurrection guard): refuse to touch a FREED Task.
         // free_task_slot poisons pid with 0xDEADBEEF; without this check a
         // stale wake (unreliable RCU grace period) would first WRITE
