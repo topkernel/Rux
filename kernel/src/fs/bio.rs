@@ -1154,6 +1154,70 @@ pub fn brelse(bh: *const BufferHead) {
     get_block_cache().put(bh)
 }
 
+/// Submit ONE async read covering `nblocks` consecutive disk blocks into a
+/// single buffer — the coalesced-readahead fast path.
+///
+/// Every request costs a virtqueue chain (3 descriptors, a header/resp
+/// allocation, and one device kick amortized over the batch); under TCG the
+/// per-request fixed cost dwarfs the per-byte DMA cost, so a 32-block
+/// (128 KiB) request is dramatically cheaper than 32 single-block ones.
+///
+/// The returned BufferHead is PRIVATE: it is never inserted into the block
+/// cache (its odd size would be invisible to `block_size`-guarded lookups
+/// anyway). Consume it with `bread_wait`, copy the data out (page-cache
+/// inserts), then release it with `bfree_multi` — never `brelse`.
+/// A return of None means submission failed (no async support / queue
+/// full); the caller falls back to per-block reads.
+pub fn bread_async_multi(
+    device: *const blkdev::GenDisk,
+    start_blocknr: u64,
+    nblocks: u32,
+    completion: &crate::fs::io_completion::IoCompletion,
+) -> Option<*mut BufferHead> {
+    if nblocks == 0 {
+        return None;
+    }
+    if nblocks == 1 {
+        return bread_async(device, start_blocknr, completion);
+    }
+    let cache = get_block_cache();
+    let block_size = cache.block_size as usize;
+    let total = nblocks as usize * block_size;
+    let mut bh = Box::new(BufferHead::new_uninit(start_blocknr, total as u32));
+    bh.set_device(device);
+    bh.set_state_bit(BufferState::BH_Req);
+    let sectors_per_block = cache.block_size as u64 / 512;
+    // SAFETY-free: device/buffer validity mirrors bread_async Phase 2; the
+    // caller keeps the BufferHead (and its Vec) alive until bread_wait.
+    if blkdev::blkdev_read_async(
+        device,
+        start_blocknr * sectors_per_block,
+        &mut bh.b_data,
+        completion,
+    )
+    .is_err()
+    {
+        return None;
+    }
+    Some(Box::into_raw(bh))
+}
+
+/// Free a private multi-block BufferHead from `bread_async_multi`.
+///
+/// The caller must have waited for its I/O (bread_wait) first — the DMA
+/// target must not be freed while the device still writes to it.
+///
+/// # Safety
+/// `bh` must come from `bread_async_multi`, exactly once, and its I/O must
+/// have completed.
+pub unsafe fn bfree_multi(bh: *mut BufferHead) {
+    if bh.is_null() {
+        return;
+    }
+    // SAFETY: caller contract above; Box::into_raw in bread_async_multi.
+    unsafe { drop(Box::from_raw(bh)) };
+}
+
 /// Sync a dirty buffer to disk
 ///
 /// Lazy write-back: while the current task holds an active ext4 journal

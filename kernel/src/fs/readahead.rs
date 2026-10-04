@@ -16,7 +16,7 @@
 /// range and this window together through the async block layer; the
 /// virtqueue in-flight limit (queue_size/3 chains) naturally pipelines
 /// larger windows in sub-batches.
-pub const MAX_READAHEAD_BLOCKS: u32 = 128;
+pub const MAX_READAHEAD_BLOCKS: u32 = 512;
 
 /// Number of consecutive sequential reads before activating read-ahead.
 const ACTIVATION_THRESHOLD: u32 = 2;

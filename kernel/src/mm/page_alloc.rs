@@ -149,6 +149,38 @@ pub fn alloc_page(gfp_flags: GfpFlags) -> usize {
     alloc_pages(gfp_flags, 0)
 }
 
+/// Allocate up to `n` single (order-0) pages under ONE zone lock.
+///
+/// Batched companion to `alloc_page` for the page-cache bulk-insert path:
+/// one lock acquisition for n pages instead of n. PHYSICAL addresses are
+/// written to `out`; the return value is how many were actually allocated
+/// (callers fall back to `alloc_pages` — with its reclaim slowpath — for
+/// any remainder).
+pub fn alloc_page_batch(gfp_flags: GfpFlags, n: usize, out: &mut [usize]) -> usize {
+    if n == 0 || out.is_empty() {
+        return 0;
+    }
+    // SAFETY: exclusive node access — same discipline as alloc_pages_inner.
+    if let Some(node) = unsafe { first_online_node_mut() } {
+        let zone_type = gfp_flags.zone_type();
+        if let Some(zone) = node.zone_mut(zone_type) {
+            if zone.is_initialized() {
+                let want = core::cmp::min(n, out.len());
+                let got = zone.alloc_pages_order0_batch(want, out);
+                if got > 0 {
+                    ZONE_ALLOCS.fetch_add(got, Ordering::Relaxed);
+                }
+                // pfn -> phys for API symmetry with alloc_page.
+                for p in out.iter_mut().take(want) {
+                    *p = pfn_to_phys(*p);
+                }
+                return got;
+            }
+        }
+    }
+    0
+}
+
 /// Allocate a page and zero it
 pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
     let addr = alloc_page(gfp_flags);

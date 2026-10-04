@@ -268,6 +268,33 @@ pub fn page_add_file_lru(page: &Page) {
     lru_add_page(page, super::pglist::LRU_INACTIVE_FILE);
 }
 
+/// Link a batch of pages to LRU_INACTIVE_FILE under ONE lru_lock
+/// (bulk companion of `page_add_file_lru` for page-cache batch inserts,
+/// where per-page lock/unlock dominated the insert cost under TCG).
+pub fn page_add_file_lru_batch(pages: &[*mut Page]) {
+    // SAFETY: same node-access discipline as lru_add_page.
+    let node = match unsafe { first_online_node_mut() } {
+        Some(n) => n,
+        None => return,
+    };
+    let _guard = node.lru_lock.lock();
+    for page_ptr in pages {
+        if page_ptr.is_null() {
+            continue;
+        }
+        // SAFETY: caller owns these frames (fresh allocations); the lock is
+        // held for the whole batch, and the Lru-flag check keeps double
+        // links impossible — same contract as lru_add_page.
+        unsafe {
+            let page = &**page_ptr;
+            if !page.test_flag(PageFlag::Lru) {
+                link_tail_locked(node, page, super::pglist::LRU_INACTIVE_FILE);
+                page.set_flag(PageFlag::Lru);
+            }
+        }
+    }
+}
+
 /// Remove a page from its LRU list when the last mapping is removed.
 pub fn page_remove_lru(page: &Page) {
     lru_del_page(page);

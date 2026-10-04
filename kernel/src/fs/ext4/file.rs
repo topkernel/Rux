@@ -242,9 +242,34 @@ fn ext4_file_read_cached_dst(
         let fill_upto = core::cmp::min(page_index + window, file_pages);
         fill_page_cache_batch(fs, inode, cache, fs_id, ino, page_index, fill_upto);
 
-        // Hole (sparse/unwritten): the fill skips unallocated pages, so a
-        // still-missing page here is a hole — zero-fill it in place.
+        // The fill skips unallocated pages (holes) but may also have bailed
+        // early (I/O or metadata error, OOM). Verify against the block map:
+        // an ALLOCATED-but-uncached page gets a synchronous single-block
+        // read here; only true holes (block 0) zero-fill.
         if cache.get(fs_id, ino, page_index).is_none() {
+            let block_nr = inode.get_data_block(fs, page_index).unwrap_or(0);
+            if block_nr != 0 {
+                // SAFETY: bio::bread returns a valid pinned BufferHead on
+                // success; b_data points to a block-sized buffer.
+                unsafe {
+                    if let Some(bh) = bio::bread(fs.device, block_nr) {
+                        let data = &(*bh).b_data;
+                        let avail = block_size_usize - page_offset;
+                        let copy_len = core::cmp::min(remaining, avail);
+                        let copied = dst.put(buf_offset, data.as_ptr().add(page_offset), copy_len);
+                        total_read += copied;
+                        buf_offset += copied;
+                        current_offset += copied as u64;
+                        cache.insert(fs_id, ino, page_index, block_nr, data);
+                        bio::brelse(bh);
+                        continue;
+                    }
+                }
+                // Synchronous read failed: report I/O error rather than
+                // silently returning zeros for real data.
+                return Err(errno::Errno::IOError.as_neg_i32());
+            }
+            // True hole: zero-fill in place.
             let avail = block_size_usize - page_offset;
             let zero_len = core::cmp::min(remaining, avail);
             // SAFETY: dst validity documented on ReadDst::put_zeroes.
@@ -275,17 +300,27 @@ fn ext4_file_read_cached(
     ext4_file_read_cached_dst(fs, inode, offset, ReadDst::Kernel(buf.as_mut_ptr(), buf.len()), ra_state)
 }
 
-/// Batch size bound shared by fill_page_cache_batch/drain_batch.
+/// Batch size bounds shared by fill_page_cache_batch/drain_batch.
+/// MAX_BATCH_DRAIN bounds REQUESTS per sleep/wake cycle; MAX_BLOCKS_PER_BATCH
+/// bounds the heap bytes alive per cycle (128 blocks x 4 KiB = 512 KiB).
 const MAX_BATCH_DRAIN: usize = 128;
+const MAX_BLOCKS_PER_BATCH: u64 = 512;
+
+/// Max blocks coalesced into ONE device request (128 KiB). Under TCG the
+/// per-request fixed cost (chain setup, header/resp alloc, device kick
+/// amortization, IRQ) dwarfs the per-byte DMA cost.
+const MAX_MERGE_BLOCKS: u64 = 64;
 
 /// Batch-fill the page cache with pages [start, end) of a file.
 ///
-/// Submits all uncached, allocated pages via `bio::bread_async`, then waits
-/// once for the whole batch and inserts the completed pages. Pages that
-/// cannot be submitted asynchronously (device without async support, or the
-/// virtqueue is momentarily full) fall back to a synchronous `bio::bread`
-/// AFTER draining what is already in flight — forward progress is always
-/// guaranteed.
+/// Resolves each uncached page's physical block; runs of physically
+/// consecutive blocks are COALESCED into single multi-block requests
+/// (`bio::bread_async_multi`). The whole batch is submitted back-to-back,
+/// the device is kicked ONCE, and a single sleep/wake cycle drains it.
+/// Requests that cannot be submitted asynchronously (device without async
+/// support, or the virtqueue is momentarily full) fall back to a synchronous
+/// `bio::bread` AFTER draining what is already in flight — forward progress
+/// is always guaranteed.
 #[allow(clippy::too_many_arguments)]
 fn fill_page_cache_batch(
     fs: &crate::fs::ext4::Ext4FileSystem,
@@ -296,18 +331,22 @@ fn fill_page_cache_batch(
     start: u64,
     end: u64,
 ) {
-    const MAX_BATCH: usize = MAX_BATCH_DRAIN; // blocks per sleep/wake cycle (128 KiB)
+    const MAX_BATCH: usize = MAX_BATCH_DRAIN; // requests per sleep/wake cycle
 
     let mut completions: [IoCompletion; MAX_BATCH] = core::array::from_fn(|_| IoCompletion::new());
     let mut bh_ptrs = [core::ptr::null_mut::<bio::BufferHead>(); MAX_BATCH];
-    // File page index of each submitted I/O (skipped/sparse pages must not
-    // shift insert indices — review EXT4-H6 discipline).
+    // Per submitted request: first file page index, first physical block,
+    // and block count (skipped/sparse pages must not shift insert indices —
+    // review EXT4-H6 discipline).
     let mut ra_idx: [u64; MAX_BATCH] = [0; MAX_BATCH];
+    let mut ra_blk: [u64; MAX_BATCH] = [0; MAX_BATCH];
+    let mut ra_len: [u32; MAX_BATCH] = [0; MAX_BATCH];
     let mut count = 0usize;
+    let mut blocks_in_batch: u64 = 0;
 
     let mut idx = start;
     while idx < end {
-        if count >= MAX_BATCH {
+        if count >= MAX_BATCH || blocks_in_batch >= MAX_BLOCKS_PER_BATCH {
             break;
         }
         // Already cached: nothing to do.
@@ -327,20 +366,38 @@ fn fill_page_cache_batch(
             continue;
         }
 
-        match bio::bread_async(fs.device, block_nr, &completions[count]) {
+        // Coalesce the following pages while their physical blocks stay
+        // consecutive (holes and fragmentation break the run naturally).
+        let run_first = idx;
+        let mut n: u64 = 1;
+        while n < MAX_MERGE_BLOCKS
+            && idx + n < end
+            && blocks_in_batch + n < MAX_BLOCKS_PER_BATCH
+        {
+            match inode.get_data_block(fs, idx + n) {
+                Ok(b) if b == block_nr + n => n += 1,
+                _ => break,
+            }
+        }
+        let nblocks = n as u32;
+
+        match bio::bread_async_multi(fs.device, block_nr, nblocks, &completions[count]) {
             Some(bh) => {
                 bh_ptrs[count] = bh;
-                ra_idx[count] = idx;
+                ra_idx[count] = run_first;
+                ra_blk[count] = block_nr;
+                ra_len[count] = nblocks;
                 count += 1;
-                idx += 1;
+                blocks_in_batch += n;
+                idx += n;
             }
             None => {
                 // Queue full (or async unsupported): drain what is in
                 // flight, then continue — the next iteration retries this
-                // page (async if a slot freed up, sync as last resort via
+                // run (async if a slot freed up, sync as last resort via
                 // the count==0 branch below).
                 if count > 0 {
-                    drain_batch(cache, fs_id, ino, &bh_ptrs, &ra_idx, &completions, count);
+                    drain_batch(cache, fs_id, ino, &bh_ptrs, &ra_idx, &ra_blk, &ra_len, &completions, count);
                     // The IoCompletions are single-shot: reset before the
                     // array is reused for the next sub-batch, or bread_wait
                     // would return the PREVIOUS batch's status immediately.
@@ -348,28 +405,36 @@ fn fill_page_cache_batch(
                         c.reset();
                     }
                     count = 0;
+                    blocks_in_batch = 0;
                 } else {
-                    // No async path at all: synchronous single-block read
+                    // No async path at all: synchronous per-block reads
                     // (correctness fallback, e.g. loop devices).
-                    // SAFETY: bio::bread returns a valid pinned BufferHead on
-                    // success; b_data points to a block-sized buffer.
-                    unsafe {
-                        if let Some(bh) = bio::bread(fs.device, block_nr) {
-                            let data = &(*bh).b_data;
-                            cache.insert(fs_id, ino, idx, block_nr, &data);
-                            bio::brelse(bh);
-                        } else {
-                            break; // I/O error: stop filling
+                    // SAFETY: bio::bread returns a valid pinned BufferHead
+                    // on success; b_data points to a block-sized buffer.
+                    let mut ok = true;
+                    for k in 0..n {
+                        unsafe {
+                            if let Some(bh) = bio::bread(fs.device, block_nr + k) {
+                                let data = &(*bh).b_data;
+                                cache.insert(fs_id, ino, run_first + k, block_nr + k, &data);
+                                bio::brelse(bh);
+                            } else {
+                                ok = false; // I/O error: stop filling
+                                break;
+                            }
                         }
                     }
-                    idx += 1;
+                    if !ok {
+                        break;
+                    }
+                    idx += n;
                 }
             }
         }
     }
 
     if count > 0 {
-        drain_batch(cache, fs_id, ino, &bh_ptrs, &ra_idx, &completions, count);
+        drain_batch(cache, fs_id, ino, &bh_ptrs, &ra_idx, &ra_blk, &ra_len, &completions, count);
     }
 }
 
@@ -377,12 +442,15 @@ fn fill_page_cache_batch(
 ///
 /// R20-FS8 discipline: a failed read's (garbage) buffer must never be cached
 /// as a valid page.
+#[allow(clippy::too_many_arguments)]
 fn drain_batch(
     cache: &page_cache::PageCache,
     fs_id: u64,
     ino: u64,
     bh_ptrs: &[*mut bio::BufferHead],
     ra_idx: &[u64],
+    ra_blk: &[u64],
+    ra_len: &[u32],
     completions: &[IoCompletion],
     count: usize,
 ) {
@@ -400,9 +468,24 @@ fn drain_batch(
         unsafe {
             if status[i] == 0 {
                 let data = &(*bh_ptrs[i]).b_data;
-                cache.insert(fs_id, ino, ra_idx[i], (*bh_ptrs[i]).b_blocknr, data);
+                let blocks = ra_len[i] as usize;
+                if blocks <= 1 {
+                    cache.insert(fs_id, ino, ra_idx[i], ra_blk[i], data);
+                } else {
+                    // Multi-block request: one bulk insert for the whole
+                    // contiguous buffer (one lock, buddy-alloc chunks, one
+                    // BTreeMap append — see insert_batch).
+                    cache.insert_batch(fs_id, ino, ra_idx[i], data.len() / blocks, data);
+                }
             }
-            bio::brelse(bh_ptrs[i]);
+            if ra_len[i] <= 1 {
+                // Single-block requests went through bread_async: they live
+                // in the block cache, release with brelse.
+                bio::brelse(bh_ptrs[i]);
+            } else {
+                // Multi-block buffers are private: free directly.
+                bio::bfree_multi(bh_ptrs[i]);
+            }
         }
     }
 }

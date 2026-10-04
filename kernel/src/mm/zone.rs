@@ -337,6 +337,37 @@ impl Zone {
         }
 
         let _guard = self.lock.lock();
+        self.alloc_pages_locked(order)
+    }
+
+    /// Pop up to `n` ORDER-0 pages under ONE lock acquisition.
+    ///
+    /// Page-cache batch inserts used to pay one zone lock round trip (plus
+    /// descriptor init) per 4 KiB page — the dominant cold-read cost once
+    /// the block layer was batched. Order-0 only: eviction frees these
+    /// pages individually, so no compound/allocation-group semantics are
+    /// involved. Returns the number of pages popped; their PFNs are
+    /// written to `out`.
+    pub fn alloc_pages_order0_batch(&self, n: usize, out: &mut [usize]) -> usize {
+        let _guard = self.lock.lock();
+        let mut got = 0usize;
+        while got < n && got < out.len() {
+            match self.alloc_pages_locked(0) {
+                Some(pfn) => {
+                    out[got] = pfn;
+                    got += 1;
+                }
+                None => break,
+            }
+        }
+        got
+    }
+
+    /// alloc_pages body WITHOUT taking the lock — caller holds self.lock.
+    fn alloc_pages_locked(&self, order: usize) -> Option<usize> {
+        if order > MAX_ORDER {
+            return None;
+        }
 
         // Find a free block at this order or higher
         for current_order in order..=MAX_ORDER {
