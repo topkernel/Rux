@@ -454,7 +454,12 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
             bytes_read as i64
         }
         Err(errno) => {
-            -(errno as i64)
+            // file_getdents64 returns ALREADY-NEGATIVE errnos
+            // (as_neg_i32, like file_stat). Negating again turned -EINVAL
+            // into a fake successful +22 return: a getdents64 buffer too
+            // small for even one entry then reported "22 bytes read"
+            // forever and telldir-style loops spun eternally.
+            errno as i64
         }
     }
 }
