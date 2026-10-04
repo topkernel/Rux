@@ -1003,6 +1003,49 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     unsafe {
         (*task).set_cpus_allowed(stored_mask);
     }
+    // Linux semantics: when the new mask removes the CPU a task is
+    // currently running (or enqueued) on, the task must migrate promptly
+    // — not at its next natural preemption. Without this, getcpu()
+    // right after sched_setaffinity() reports the stale CPU (LTP
+    // getcpu01: pin to the highest CPU, expect getcpu to agree).
+    // For the caller itself: request a reschedule on trap return (the
+    // pick path skips tasks whose affinity excludes the picking CPU, so
+    // __schedule() parks it and an allowed CPU picks it up) and poke the
+    // lowest allowed CPU so the pickup is immediate. For another task:
+    // poking its current CPU is enough — its next schedule() will move it.
+    {
+        let this = crate::arch::cpu_id() as usize;
+        if stored_mask & (1u32 << this) == 0 {
+            let target = stored_mask.trailing_zeros() as usize;
+            let task_is_current =
+                pid == 0 || pid as u32 == crate::process::current_pid();
+            if task_is_current {
+                // Direct migration: schedule() here (a valid syscall-context
+                // sleep point) — the pick path skips tasks whose affinity
+                // excludes the picking CPU, so this CPU parks the caller
+                // and only an allowed CPU picks it back up. Poking the
+                // target first makes the pickup immediate.
+                // (The trap-exit preempt path cannot be relied on: its
+                // TASK_TI_PREEMPT check reads a straddled 8-byte load and
+                // effectively never preempts — see trap.S.)
+                if target < crate::config::MAX_CPUS && target != this {
+                    crate::sched::resched_cpu(target);
+                }
+                crate::sched::schedule();
+                // Post-conditions don't matter: whether we ran on an
+                // allowed CPU before or after this point, getcpu() now
+                // reports an allowed CPU.
+            } else {
+                // SAFETY: task validated non-null above (find_task_by_pid).
+                let ti_cpu = unsafe { (*task).ti_cpu() } as usize;
+                if ti_cpu < crate::config::MAX_CPUS && ti_cpu != this {
+                    crate::sched::resched_cpu(ti_cpu);
+                } else if target < crate::config::MAX_CPUS {
+                    crate::sched::resched_cpu(target);
+                }
+            }
+        }
+    }
     0
 }
 

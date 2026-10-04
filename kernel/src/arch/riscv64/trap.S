@@ -606,6 +606,14 @@ trap_exit:
     // need_resched - call schedule()
 
     // Check preempt_count — only preempt if preemptible (preempt_count == 0)
+    // NOTE: deliberately still `ld` (8 bytes): ti_preempt_count is an i32
+    // at offset 4, so this straddles into ti_kernel_sp's low half and is
+    // almost always nonzero — syscall-exit preemption is effectively
+    // disabled here. Switching to `lw` enables it and crashes boot
+    // (pid 1 SIGSEGV at a kernel epc in user mode) — the exit-path
+    // schedule() support is not sound yet. Migration-style preemption
+    // is done explicitly at the syscall sites instead (see
+    // sys_sched_setaffinity).
     ld t0, TASK_TI_PREEMPT(tp)
     bnez t0, .Lrestore_and_exit
 
@@ -751,6 +759,8 @@ trap_exit:
     beqz a0, .Lrestore_kernel_csrs
 
     // Check preempt_count — only preempt if not in IRQ/softirq context
+    // NOTE: still `ld` (straddles ti_kernel_sp — see the user-path note
+    // above); enabling real preemption here is not sound yet.
     ld t0, TASK_TI_PREEMPT(tp)
     bnez t0, .Lrestore_kernel_csrs
 
