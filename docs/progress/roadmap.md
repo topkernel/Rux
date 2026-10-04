@@ -1,65 +1,147 @@
 # Rux Development Roadmap
 
-## Current Phase (2026-09-30): X11 on Rux → GNOME
+## Current Phase (2026-10-04): X11 on Rux → GNOME
 
-**Milestone reached: Xorg runs on Rux — full server initialization, and X client windows render to the screen.**
+**Milestone reached: Xorg runs on Rux — full server initialization, X client
+windows render to the screen, and xterm works as an interactive terminal
+with a live shell (bash and dash).**
+
+### X11 / desktop bring-up
 
 - Xorg completes full initialization on 3/3 cold boots: screen and all
   extensions, evdev keyboard/mouse devices, InputThread, and the
-  `/tmp/.X11-unix/X0` socket
-- The X client ↔ Xorg request path is fully working: `XOpenDisplay(:0)` +
-  `XSync` succeed, xterm connects and stays alive >7 guest minutes with zero
-  server resets, and a self-written X client maps a window whose pixels reach
-  the screen — verified by an fbmap probe counting non-black framebuffer
-  pixels (21,384, stable across 2 runs). Two Linux-parity root causes
-  unlocked it: `sys_poll` now masks `revents` like Linux `do_pollfd`
-  (libxcb treats any unrequested bit as a fatal error), and edge-triggered
-  epoll re-arms on every write-side arrival (Xorg's ospoll froze every
-  client mid-handshake because an ET edge was reported only when the
-  readiness snapshot changed)
-- MTTCG (`thread=multi`) is now the default for `make ubuntu-run`:
-  boot-to-login median 9.5s → 4.5s (2.1x), variance 3.3s → 0.1s, GUI gate
-  23/23 on both QEMU 8.2.2 and 10.2.2, zero regressions under real
-  parallelism — `THREAD=single` restores the deterministic debugging mode
-- Boot-time wall clock from the goldfish RTC (fw_cfg carries no RTC entry on
-  QEMU riscv/virt — proven from source and a raw probe): `date` and
-  filesystem timestamps are now correct; settimeofday /
-  clock_settime(CLOCK_REALTIME) implemented
-- Major root causes fixed this phase: fork CLONE_CHILD_SETTID wrote the
-  child's TID into the parent's address space (glibc fork points
-  child_tidptr at the parent TCB, corrupting it — Xorg deadlocked in
-  `futex_wait`), the TCP timer softirq allocated from the global heap on
-  every tick even with zero sockets (the real "heap-lock livelock":
-  order-0 allocs paying the full 14-level buddy split/merge under the
-  irqsave lock), a VFS/virtio preempt-discipline deadlock (with two
-  virtio-blk protocol bugs), wait4/waitid thread-group semantics, >4MiB
-  mappings exceeding the allocated block, the kernel-started init skipping
-  `do_execve_elf` (dynamic PID 1 crashed — PT_INTERP never mapped), inotify
-  Linux ABI alignment, and flock/fcntl parity (24/24 matrix vs Linux)
+  `/tmp/.X11-unix/X0` socket. The X client ↔ Xorg request path is fully
+  working (`XOpenDisplay(:0)` + `XSync` succeed), and a self-written X
+  client's mapped window reaches the display (fbmap probe: 21,384
+  non-black pixels, stable across 2 runs)
+- The dispatch-path root cause is fixed: `recvmsg` left the caller's
+  buffer *capacity* in `msg_controllen` on every success path that
+  delivers no cmsgs; Xorg then walked garbage control data whose first
+  `cmsg_len` was SIZE_MAX — `CMSG_NXTHDR` never advanced and the dispatch
+  thread spun at 100% CPU. `msg_controllen` is now zeroed exactly as
+  Linux does
+- Input reaches X clients end to end (`test/xinput_probe.c`, raw X11
+  protocol, no libX11): QMP-injected KEY_A/KEY_B, absolute pointer moves
+  and clicks are delivered as the exact KeyPress/KeyRelease (keycode+8),
+  MotionNotify (scaled from the 0..32767 tablet range) and
+  ButtonPress/ButtonRelease sequence
+- xterm runs as an interactive terminal: it opens its pty through
+  `/dev/ptmx` and the shell inside — bash and dash — stays alive. The
+  enabling fixes are Linux-exact pty semantics: TIOCGPTPEER (openpty's
+  slave acquisition returned a phantom fd 0), the corrected TIOCGPTN
+  ioctl number (0x80045430, Linux uapi), TIOCGPGRP with no foreground
+  pgrp answering the caller's own pgrp, and ENOTTY for unknown ioctls
+- The D-Bus system-bus GNOME blocker is fixed. Filesystem AF_UNIX
+  sockets are now keyed by the bound node's inode identity
+  (`#<fs_id>:<ino>`), so `/run` and its `/var/run` symlink alias name
+  the same listener (GLib hardcoded the alias path and previously got
+  ECONNREFUSED against a healthy bus), and a full listen backlog now
+  blocks or returns EAGAIN like `unix_wait_for_peer` instead of an
+  instant refusal. Verified end to end: gnome-session, gnome-shell,
+  gsd-* settings daemons, gnome-keyring-d and dconf-service all stay
+  alive through the full session; a 40-minute dbus storm soak
+  (3 spawners × 6000 fork/exec) shows zero daemon deaths
 
-**Carried in from the previous milestone (2026-09-29):** the complete
+### OS completeness
+
+- **Swap is active**: anonymous pages are SwapBacked LRU_INACTIVE_ANON
+  members at every mapping site, alloc_pages runs bounded synchronous
+  direct reclaim, and `/proc/swaps` reports the 256 MB tail carve. The
+  swap-probe gate touches 2,064 MiB (>2 GiB) of anonymous memory and
+  verifies 66,048 sampled pages across the swap-out/swap-in cycle;
+  teardown frees swap slots back to zero
+- **Shutdown cascade end to end**: reboot(2) (incl. CAD_ON/CAD_OFF),
+  shutdown(8) (sysvinit sequence), Ctrl-Alt-Del (virtio-keyboard
+  modifier tracking + serial CSI encoding), and the PID-1 exit fallback
+  all power the machine down through SBI — four scenarios verified with
+  clean QEMU exits
+- **Network bring-up (P0-2) complete**: AF_PACKET/SOCK_DGRAM cooked
+  sockets, AF_INET SOCK_RAW, the full if-ioctls set (netmask, brdaddr,
+  dstaddr, metric, txqlen, map, SIOCADDRT/SIOCDELRT), broadcast-MAC
+  fast path for 255.255.255.255 and gateway-MAC resolution for off-link
+  destinations. busybox `ip`/`ifconfig`/`route` configure the stack,
+  `ping` runs 3/3 with 0% loss, and `udhcpc` completes the full
+  discover/offer/request/ack cycle with the lease script applied
+- **udev/hotplug minimal path**: registration-time `add` uevents over
+  NETLINK_KOBJECT_UEVENT with DEVNAME/INTERFACE parity, an
+  mdev-compatible `/sys` (block and input class trees, `/sys/dev`
+  links), and a PCI ECAM rescan trigger — verified end to end: netlink
+  probe → busybox mdev → `/dev/vdb` node created
+
+### Memory leaks closed (root causes, not symptoms)
+
+- **exec/fork page-table leak**: the PT ledger's boot mask stamped every
+  memblock-reserved frame, so `free_page_table_checked` silently refused
+  every table free — ~100 KB leaked per exec, 2 GB exhausted in ~21 min.
+  The boot set is now exact (array, not hash); measured ~0.03 KB/exec
+  over 3,500 execs with MemFree flat
+- **Task field leak**: `free_task_slot` raw-deallocated the Task page
+  without running destructors, leaking `exe_path`, `sem_undo`,
+  `dead_threads` and more on every exit — a fork+exec loop grew HeapUsed
+  +1,219 kB/min; `drop_in_place` before dealloc makes the watermark
+  constant
+- Supporting fixes: one-shot timers drop their action entries on expiry,
+  `close_cloexec` no longer leaks fds, and the virtio-gpu framebuffer is
+  never COW-marked on fork
+
+### Performance and debuggability
+
+- Identity MMIO windows (PCI MMIO 256 MB, ECAM, PLIC) map with 2MB
+  superpages: fork+exit −90%, exec −60%, unix ping-pong −43%; TLB
+  pressure from kernel-MMIO entries drops from ~68K PTEs to ~132
+- printk filters the log level *before* formatting: getpid −81%,
+  malloc −63%
+- MTTCG (`thread=multi`) remains the default for `make ubuntu-run`:
+  boot-to-login median 9.5s → 4.5s (2.1x), variance 3.3s → 0.1s, GUI
+  gate 23/23 (`THREAD=single` restores deterministic debugging)
+- Core dumps are host-debuggable: `/proc/sys/kernel/core_pattern` with
+  specifier expansion, NT_AUXV, byte-exact Linux NT_PRSTATUS/NT_PRPSINFO
+  layouts — `gdb --core` reads registers, symbolizes the crash PC and
+  walks auxv
+- `dfx=memwatch` grew heap + physical-page call-site accounting — the
+  instrumentation that grounded every leak hunt above
+
+### LTP
+
+- Six fix rounds so far (~90 files, ~4,000 lines): syscall semantics
+  (fadvise, vmsplice, splice, readlink, ioctl EBADF/ENOTTY ordering),
+  pty/tty, OFD record locks and file leases, epoll validation, periodic
+  timers and sigtimedwait wake, ext4 namei/dentry cache, fallocate,
+  mmap/msync/mremap, IPC, network/timer/scheduler batches
+- Full-sweep PASS trend across the 1,869-test list: 35 → 524 → 659 →
+  677 → 602 (r1–r5). The r5 decline is diagnosed — tmpfs `/tmp`
+  exhaustion (93 TBROKs) plus early-exec hangs — and the round-6 batch
+  (tmpfs/ext4 space accounting, loop devices, mke2fs-through-loop) is
+  landed; the round-6 rescan is running
+- The in-kernel unit-test suite was repaired to current semantics:
+  985/985 green
+
+**Carried in from the previous milestones (2026-09-29/30):** the complete
 Ubuntu 22.04 userland boots — graphical desktop session (framebuffer +
 evdev input, pixel-verified 23 checks/boot at `-smp 4`), real command
 execution in Ubuntu's own `/bin/dash`, interactive `bash -i`, D-Bus system +
-session buses end to end, pty, System V IPC, POSIX MQ, and 4-CPU SMP with
-cross-core TLB shootdowns on COW.
+session buses end to end, pty, System V IPC, POSIX MQ, 4-CPU SMP with
+cross-core TLB shootdowns on COW, and the boot-time wall clock from the
+goldfish RTC. Earlier root causes of the same phase: the TCP timer softirq
+allocated from the global heap on every tick even with zero sockets (the
+idle livelock), fork CLONE_CHILD_SETTID corrupting the parent TCB (Xorg's
+`futex_wait` deadlock), `sys_poll` revents masking and edge-triggered
+epoll re-arm semantics (the X client handshake unlocks), and flock/fcntl
+parity (24/24 matrix vs Linux).
 
 **In flight (toward full GNOME):**
 
 | Workstream | Status |
 |---|---|
-| GNOME session ignition (322-package image, gnome-session 42 + openbox fallback) | `gnome-session` starts on the live Xorg and forks gnome-shell/gsd; stabilization and on-screen acceptance in progress |
-| xterm window visibility | xterm connects and survives >7 guest minutes with zero server resets; its window is not yet visible — narrowing with the fbmap probe |
-| netlink + DHCP (network bring-up) | starting — required for full desktop services |
-| udev / hotplug minimal path | starting — Xorg currently runs udev-less |
-| Kernel unit-test repair | in progress — restoring the suite to green |
+| GNOME on screen (gnome-shell on X11 + llvmpipe, openbox fallback) | session survives end to end after the D-Bus fix; on-screen rendering and input acceptance next |
+| LTP round-6 rescan | fix batch landed (space accounting, vmsplice/splice/fadvise, loop devices); full sweep running |
+| r5 regression families | tmpfs exhaustion fixed; early-exec hang cluster under investigation |
 
 **Next milestones:**
 
-1. xterm window visible on the Xorg screen (acceptance: fbmap/QMP screendump non-black, keyboard via xev)
-2. GNOME session on screen (gnome-shell on X11 + llvmpipe, openbox fallback) with working input
-3. udev/hotplug minimal path and netlink/DHCP network bring-up for full desktop services
-4. Long-run stability soak (24h boot), performance pass, upstream cleanup
+1. GNOME session visible and operable on screen (gnome-shell on X11 + llvmpipe, openbox fallback) with working input
+2. LTP round-6 rescan green — recover the 677 PASS baseline and push past it
+3. Long-run stability soak (24h boot), performance pass, upstream cleanup
 
 ---
 
@@ -68,16 +150,16 @@ cross-core TLB shootdowns on COW.
 | | |
 |---|---|
 | **Architecture** | RISC-V 64-bit (RV64GC), 4-CPU SMP |
-| **Source Files** | 301 (298 Rust + 3 Assembly) |
-| **Code Lines** | ~150,600 |
-| **Syscall Numbers** | 346 dispatched |
-| **Unit Tests** | 995 cases across 60 test files |
+| **Source Files** | 306 (303 Rust + 3 Assembly) |
+| **Code Lines** | ~164,900 |
+| **Syscall Numbers** | 345 dispatched |
+| **Unit Tests** | 985 cases across 60 test files (985/985 green) |
 | **Formal Verification** | 1,088 proptest cases (98 modules), 157 Kani proofs (22 modules), 4 SPIN models (8 LTL), Miri CI |
-| **Linux LTP** | 1,838 official tests |
+| **Linux LTP** | 1,838 official tests; full-sweep PASS 35 → 524 → 659 → 677 → 602 (r1–r5), round-6 rescan in progress |
 | **Smoke Tests** | 15/15 passing |
 | **GUI Gate** | 23 pixel-level checks per boot (login → desktop → apps → real commands) |
 | **Boot Mode** | MTTCG default (`thread=multi`): boot-to-login ~4.5s median |
-| **Current Phase** | Xorg on Rux (X client windows render); GNOME bring-up |
+| **Current Phase** | X11 milestone: Xorg, X client windows, interactive xterm; GNOME bring-up |
 
 **Design Philosophy**: External interfaces 100% Linux ABI compatible. Internal implementation free to innovate.
 
@@ -255,6 +337,8 @@ cross-core TLB shootdowns on COW.
 | Sync | 50 | SeqLock | Sequence lock for read-mostly data (RawSeqLock + SeqLock<T: Copy> + SeqLockWriteGuard), lock-free readers with retry-on-write, writer serialization via odd/even sequence counter, loopback/hugepage stats converted from Spinlock |
 | Memory | 51 | Memory Compaction | Two-pointer scan compaction (migrate UP + free DOWN), page migration (unmap + copy + remap), compaction fallback in alloc_pages for high-order allocations, free block consolidation via buddy merge |
 | Hardening | 52 | Process Exit Race & Defensive Checks | Deferred exit notification (do_exit stores parent PID in per-CPU slot, __schedule processes it after context switch to prevent use-after-free), defensive ti_cpu bounds checks in trap.S and cpu_id() (clamp -1/invalid to CPU 0), bio lock ordering fix, rootfs hard link Arc<Vec> COW fix, TCP reliability (SYN-ACK retransmit, FIN drain, seq wrap), CFS Vec len vs capacity |
+| Desktop | 53–54 | Ubuntu Userland & X11 | Ubuntu 22.04 desktop (framebuffer + evdev, GUI gate 23/23), D-Bus, MTTCG default (2.1x boot), goldfish RTC wall clock, Xorg full init + X client window rendering, interactive xterm (pty semantics), GNOME session survives (unix-socket inode keys + backlog semantics) |
+| Completeness | 55 | Lifecycle, Swap, Network Bring-up | reboot(2)/shutdown(8)/Ctrl-Alt-Del cascade, swap activation (>2 GiB verified), AF_PACKET/raw sockets + udhcpc end to end, udev/hotplug (uevent + mdev /sys), host-debuggable core dumps, page-table and Task-field leak root causes, MMIO superpages + printk fast filter, LTP r1–r5 sweeps (PASS 35 → 602, six fix rounds) |
 
 ---
 
@@ -279,5 +363,5 @@ cross-core TLB shootdowns on COW.
 
 ---
 
-**Document Version**: v30.0
-**Last Updated**: 2026-09-30
+**Document Version**: v31.0
+**Last Updated**: 2026-10-04

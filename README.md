@@ -7,9 +7,9 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
-[![Tests](https://img.shields.io/badge/tests-4%2C125%20cases-brightgreen.svg)](#-test-status)
+[![Tests](https://img.shields.io/badge/tests-4%2C115%20cases-brightgreen.svg)](#-test-status)
 [![Verification](https://img.shields.io/badge/verification-4%20tools-brightgreen.svg)](#-formal-verification)
-[![Code](https://img.shields.io/badge/code-150%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-165%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Default Platform: RISC-V 64-bit (RV64GC)**
 
@@ -19,7 +19,7 @@
 
 ## 🖥️ Rux Runs Ubuntu
 
-**A complete Ubuntu 22.04 (riscv64) userland — glibc dynamic binaries, real shells, D-Bus, a graphical desktop session, and now Xorg rendering X client windows — boots on the Rux kernel today.**
+**A complete Ubuntu 22.04 (riscv64) userland — glibc dynamic binaries, real shells, D-Bus, a graphical desktop session, Xorg rendering X client windows, and an interactive xterm — boots on the Rux kernel today.**
 
 | | |
 |---|---|
@@ -49,12 +49,31 @@ What is running in these screenshots, all on the Rux kernel:
   screen, all extensions, evdev keyboard/mouse devices, InputThread, and
   the `/tmp/.X11-unix/X0` socket (3/3 cold boots) — and the X client ↔
   Xorg request path is fully working (`XOpenDisplay(:0)` + `XSync`
-  succeed; xterm connects and stays alive with zero server resets)
+  succeed). One `recvmsg` ABI fix unlocked the dispatch path: the kernel
+  now zeroes `msg_controllen` when a message carries no control data —
+  previously the caller's buffer capacity was left in the msghdr, and
+  Xorg walked garbage cmsgs in a non-advancing, 100%-CPU loop
+- **Input reaches X clients end to end**: keyboard, pointer and button
+  events injected through QEMU reach a raw X11 protocol client as the
+  exact KeyPress/KeyRelease, MotionNotify and ButtonPress sequence
+  (verified by `test/xinput_probe.c` against Xorg 1.21 with
+  xf86-input-evdev)
+- **xterm is a working interactive terminal**: it opens its pty through
+  `/dev/ptmx` and the shell inside — bash and dash — stays alive
+  (unlocked by Linux-exact pty semantics: TIOCGPTPEER, the
+  corrected TIOCGPTN ioctl number, TIOCGPGRP foreground-pgrp rules,
+  ENOTTY for unknown ioctls)
 - **X client windows render to the screen**: a self-written X client maps
   a window and its pixels reach the display, verified by an fbmap probe
-  counting non-black framebuffer pixels (21,384, stable across 2 runs).
-  A full GNOME session is being ignited on top — gnome-session starts
-  and forks gnome-shell/gsd (see the [Roadmap](docs/progress/roadmap.md))
+  counting non-black framebuffer pixels (21,384, stable across 2 runs)
+- **A full GNOME session survives**: gnome-session, gnome-shell, the
+  gsd settings daemons, gnome-keyring-d and dconf-service all stay
+  alive through the session — after the D-Bus system-bus blocker was
+  fixed (filesystem AF_UNIX sockets are now keyed by inode identity,
+  so `/run` / `/var/run` aliases name the same socket, and a full
+  listen backlog blocks like Linux instead of returning ECONNREFUSED).
+  On-screen GNOME bring-up continues (see the
+  [Roadmap](docs/progress/roadmap.md))
 
 ### Try it
 
@@ -107,34 +126,36 @@ python3 test/ubuntu-gui/verify.py --runs 2 --smp 4
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~150,600 lines | [Code Structure](docs/architecture/structure.md) |
-| **Source Files** | 301 files (298 Rust + 3 ASM) | [Project Structure](docs/architecture/structure.md) |
-| **Kernel Unit Tests** | 60 files, 995 cases (last report: 901 PASS + 94 SKIP) | [Unit Test Report](docs/test/unit-test-report.md) |
+| **Lines of Code** | ~164,900 lines | [Code Structure](docs/architecture/structure.md) |
+| **Source Files** | 306 files (303 Rust + 3 ASM) | [Project Structure](docs/architecture/structure.md) |
+| **Kernel Unit Tests** | 60 files, 985 cases (985/985 green after suite repair) | [Unit Test Report](docs/test/unit-test-report.md) |
 | **Formal Verification** | 4 tools, 1,116+ test functions; 157 Kani proofs | [Verification Design](docs/development/formal-verification.md) |
 | **Smoke Tests** | 15 tests (all passing) | [Testing Guide](docs/test/testing.md) |
-| **Linux LTP** | 1,838 official tests | [Testing Guide](docs/test/testing.md) |
+| **Linux LTP** | 1,838 official tests; 6 fix rounds (~90 files, ~4,000 lines) | [Testing Guide](docs/test/testing.md) |
+| **LTP Full Sweeps** | PASS 35 → 524 → 659 → 677 → 602 (r1–r5, 1,869 tests each); round-6 rescan in progress | [Roadmap](docs/progress/roadmap.md) |
 | **Platform Support** | RISC-V 64-bit, 4-CPU SMP | [Roadmap](docs/progress/roadmap.md) |
-| **Syscall Numbers** | 346 dispatched | [Roadmap](docs/progress/roadmap.md) |
-| **Ubuntu Userland** | Ubuntu 22.04 riscv64 boots: graphical session, Xorg + X client windows, bash, D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
+| **Syscall Numbers** | 345 dispatched | [Roadmap](docs/progress/roadmap.md) |
+| **Ubuntu Userland** | Ubuntu 22.04 riscv64 boots: graphical session, Xorg + X client windows, interactive xterm, bash, D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
+| **Memory** | Swap active: 2,064 MiB anonymous working set paged through 256 MB swap, verified | [Roadmap](docs/progress/roadmap.md) |
 | **Boot Performance** | MTTCG default (`thread=multi`): boot-to-login ~4.5s, 2.1x faster | [Roadmap](docs/progress/roadmap.md) |
 
 **Module Distribution**:
-- Filesystem (fs/): 35,576 lines (23.6%)
-- System Calls (syscall/): 21,077 lines (14.0%)
-- Network Stack (net/): 14,961 lines (9.9%)
-- Memory Management (mm/): 11,307 lines (7.5%)
-- Device Drivers (drivers/): 11,019 lines (7.3%)
-- Process Management (process/): 10,463 lines (6.9%)
-- Unit Tests (tests/): 9,683 lines (6.4%)
-- Architecture (arch/): 9,672 lines (6.4%)
-- Top-level: 6,990 lines (4.6%)
-- Process Scheduling (sched/): 6,298 lines (4.2%)
-- IPC (ipc/): 4,344 lines (2.9%)
-- Sync Primitives (sync/): 3,443 lines (2.3%)
-- Interrupt (interrupt/): 1,802 lines (1.2%)
-- Diagnostics (dfx/): 1,749 lines (1.2%)
-- IO_uring (io_uring/): 1,167 lines (0.8%)
-- Security (security/): 559 lines (0.4%)
+- Filesystem (fs/): 39,951 lines (24.2%)
+- System Calls (syscall/): 24,204 lines (14.7%)
+- Network Stack (net/): 16,214 lines (9.8%)
+- Architecture (arch/): 11,999 lines (7.3%)
+- Device Drivers (drivers/): 11,981 lines (7.3%)
+- Memory Management (mm/): 11,513 lines (7.0%)
+- Process Management (process/): 10,857 lines (6.6%)
+- Unit Tests (tests/): 9,814 lines (6.0%)
+- Top-level: 7,468 lines (4.5%)
+- Process Scheduling (sched/): 6,392 lines (3.9%)
+- IPC (ipc/): 4,385 lines (2.7%)
+- Sync Primitives (sync/): 3,504 lines (2.1%)
+- Diagnostics (dfx/): 2,595 lines (1.6%)
+- Interrupt (interrupt/): 1,802 lines (1.1%)
+- IO_uring (io_uring/): 1,167 lines (0.7%)
+- Security (security/): 559 lines (0.3%)
 - Module Loader (module/): 476 lines (0.3%)
 
 ---
@@ -277,38 +298,38 @@ udesk-init: warmup st=0
 
 ```
 Rux/
-├── kernel/                 # Kernel source (~150,600 lines)
+├── kernel/                 # Kernel source (~164,900 lines)
 │   ├── src/
-│   │   ├── fs/           # Filesystem (35,576 lines)
+│   │   ├── fs/           # Filesystem (39,951 lines)
 │   │   │   ├── ext4/     # ext4 filesystem
 │   │   │   ├── jbd2/     # JBD2 journaling layer
 │   │   │   ├── devfs/    # devfs device filesystem
 │   │   │   └── procfs/   # procfs process filesystem
-│   │   ├── arch/         # RISC-V architecture (9,672 lines)
+│   │   ├── arch/         # RISC-V architecture (11,999 lines)
 │   │   │   ├── mm/       # Arch-specific MM (pt, fixmap, ASID, page fault)
 │   │   │   ├── boot.S    # MMU trampoline, VMA/LMA linking
 │   │   │   ├── trap.S    # PtRegs save/restore, ret_from_fork
 │   │   │   └── uaccess.S # User memory access assembly
-│   │   ├── drivers/      # Device drivers (11,019 lines)
+│   │   ├── drivers/      # Device drivers (11,981 lines)
 │   │   │   ├── gpu/      # GPU/framebuffer drivers
 │   │   │   ├── input/    # Input device drivers
 │   │   │   ├── virtio/   # VirtIO devices (blk/net/gpu/input)
 │   │   │   └── net/      # Network devices
-│   │   ├── mm/           # Memory management (11,307 lines)
+│   │   ├── mm/           # Memory management (11,513 lines)
 │   │   │   ├── Zone allocator (DMA/DMA32/NORMAL/MOVABLE)
 │   │   │   ├── vmemmap, buddy, slab, PCP, memblock
 │   │   │   ├── VMA, mm_struct, page fault, COW
 │   │   │   └── rmap, hugepage, meminfo
-│   │   ├── tests/        # Unit tests (60 files, 995 cases)
-│   │   ├── syscall/      # System calls (21,077 lines, 346 syscalls)
-│   │   ├── ipc/          # IPC (4,344 lines) — System V, POSIX MQ
-│   │   ├── net/          # Network stack (14,961 lines)
-│   │   ├── sched/        # Process scheduling (6,298 lines)
+│   │   ├── tests/        # Unit tests (60 files, 985 cases)
+│   │   ├── syscall/      # System calls (24,204 lines, 345 syscalls)
+│   │   ├── ipc/          # IPC (4,385 lines) — System V, POSIX MQ
+│   │   ├── net/          # Network stack (16,214 lines)
+│   │   ├── sched/        # Process scheduling (6,392 lines)
 │   │   │   ├── CFS, RT (FIFO/RR), Deadline (EDF+CBS), Idle
-│   │   ├── process/      # Process management (10,463 lines)
-│   │   ├── sync/         # Sync primitives (3,443 lines)
+│   │   ├── process/      # Process management (10,857 lines)
+│   │   ├── sync/         # Sync primitives (3,504 lines)
 │   │   ├── interrupt/    # Interrupt subsystem (1,802 lines)
-│   │   └── dfx/          # Diagnostics/DFX (1,749 lines)
+│   │   └── dfx/          # Diagnostics/DFX (2,595 lines)
 │   └── build.rs          # Build script
 ├── userspace/            # Userspace programs
 │   ├── mrsh/             # mrsh (minimal POSIX shell, musl libc)
@@ -332,19 +353,21 @@ Detailed structure: [Project Structure Documentation](docs/architecture/structur
 ### Implemented Features
 
 - **Process Management**: fork/execve/wait4/signal handling/CFS scheduler/clone flags/gettid
-- **Memory Management**: Sv39 page table/Zone allocator/vmemmap/PCP/COW/Demand paging/ASID/MAP_PRIVATE COW/Swap/LRU page cache/OOM killer
-- **Filesystem**: ext4/procfs/devfs/ramfs/JBD2 journaling/crash recovery
+- **Memory Management**: Sv39 page table/Zone allocator/vmemmap/PCP/COW/Demand paging/ASID/MAP_PRIVATE COW/Swap (active, >2 GiB verified)/LRU page cache/OOM killer
+- **Filesystem**: ext4/procfs/devfs/ramfs/sysfs (mdev-compatible)/JBD2 journaling/crash recovery
 - **IPC**: System V semaphores/message queues/shared memory, POSIX message queues
-- **Device Drivers**: VirtIO-blk/net/gpu/input, framebuffer, evdev
-- **Network Stack**: TCP/UDP/IPv4/ARP/Socket API/IO_uring
+- **Device Drivers**: VirtIO-blk/net/gpu/input, framebuffer, evdev, goldfish RTC, PCI ECAM rescan/hotplug
+- **Network Stack**: TCP/UDP/IPv4/ARP/Socket API/AF_PACKET + raw sockets/netlink/udhcpc bring-up/IO_uring
 - **SMP Multi-core**: 4-core support/load balancing/IPI/per-CPU idle tasks
 - **Linux-Style Boot**: MMU trampoline/VMA-LMA linking/PtRegs at stack top
+- **System Lifecycle**: reboot(2) with CAD semantics, shutdown(8) cascade, Ctrl-Alt-Del, SBI poweroff
+- **Diagnostics**: core dumps readable by host gdb, dfx memwatch heap/page call-site accounting
 - **Security**: Capabilities/LSM framework/signal/file/IPC permission checks
 - **POSIX Timers**: timer_create/settime/gettime/delete, setitimer/getitimer, timerfd
 
 ### System Calls
 
-Supports 346 Linux system calls, including:
+Supports 345 Linux system calls, including:
 - File: openat/close/read/write/readv/writev/pread64/pwrite64/lseek/fstat/getdents64/mkdirat/rmdir/unlinkat/sendfile/statfs/copy_file_range/statx
 - Process: fork/execve/wait4/exit/getpid/getppid/gettid/kill/clone/sched_yield/prctl/getrusage
 - Memory: brk (expand+shrink)/mmap/munmap (MAP_PRIVATE COW)/mprotect/mremap/madvise/msync
@@ -361,7 +384,7 @@ Supports 346 Linux system calls, including:
 ### Core Documentation
 
 - **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
-- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (X11 milestone: Xorg on Rux)
+- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (X11 milestone: Xorg, X client windows, interactive xterm)
 - **[Project Structure](docs/architecture/structure.md)** - Source code organization
 - **[Design Principles](docs/architecture/design.md)** - POSIX compatibility and Linux ABI alignment
 
@@ -382,18 +405,18 @@ Supports 346 Linux system calls, including:
 
 ### Test Reports
 
-- **[Unit Test Report](docs/test/unit-test-report.md)** - Kernel unit test cases (60 files, 901 PASS + 94 SKIP at last report)
+- **[Unit Test Report](docs/test/unit-test-report.md)** - Kernel unit test cases (60 files, 985/985 green after the suite repair)
 - **[Formal Verification Report](docs/test/formal-verification-report.md)** - proptest-based invariant tests
 
 ---
 
 ## 🧪 Test Status
 
-**Total: 4,125 test cases + 161 formal verification proofs**
+**Total: 4,115 test cases + 161 formal verification proofs**
 
 | Test Suite | Cases | Run Command | Environment |
 |------------|-------|-------------|-------------|
-| **Kernel Unit Tests** | 995 | `make test` | QEMU (no_std, custom harness) |
+| **Kernel Unit Tests** | 985 | `make test` | QEMU (no_std, custom harness) |
 | **Formal Verification** | 1,116 | `make verify` | Host (std, proptest) |
 | **Linux LTP** | 1,838 | `make run` → `/test/linux-ltp/run_ltp.sh` | QEMU |
 | **Smoke Tests** | 15 | `make run` → `/test/smoke_test` | QEMU |
@@ -401,7 +424,7 @@ Supports 346 Linux system calls, including:
 | **SPIN Models** | 4 | `make spin` | Host (SPIN/Promela, concurrency) |
 | **Miri UB Detection** | - | `make miri` | Host (Miri, undefined behavior) |
 
-### Kernel Unit Tests (995 cases at last report, 60 files)
+### Kernel Unit Tests (985 cases, 60 files — 985/985 green after the suite repair)
 - **Framework**: Custom `no_std` harness (`test_pass`, `test_fail`, `test_assert!`)
 - **Coverage**: Memory management, process management, filesystem, network, drivers, syscalls, IPC, scheduler, synchronization
 - **Report**: [Unit Test Report](docs/test/unit-test-report.md)
@@ -457,6 +480,7 @@ Verifies lock ordering and concurrency safety:
 - **LTP Version**: 20240524
 - **Compile Rate**: 101% (musl libc cross-compilation)
 - **Coverage**: Syscalls (1,378), memory (108), containers (46), filesystem (29), security (24), scheduler (23), IO (19)
+- **Full sweeps**: 1,869-test guest-side runner, five scans so far — PASS 35 → 524 → 659 → 677 → 602 (r1–r5); the r5 dip (+72 TIMEOUTs, tmpfs `/tmp` exhaustion) drove the round-6 fix batch (~90 files, ~4,000 lines total across rounds), rescan in progress
 
 ---
 
