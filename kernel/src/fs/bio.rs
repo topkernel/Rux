@@ -106,6 +106,31 @@ impl BufferHead {
         }
     }
 
+    /// Create a buffer head with an UNINITIALIZED data buffer.
+    ///
+    /// Only for buffers whose every byte is about to be overwritten by the
+    /// device (async read DMA target): skips the 4 KiB zero-fill of `new`,
+    /// which was pure waste on the read-ahead path (one memset per block
+    /// under TCG). Readers must observe BH_Uptodate (bread_wait status 0)
+    /// before touching b_data — the same discipline the in-flight BH_Req
+    /// state already requires.
+    pub fn new_uninit(blocknr: u64, size: u32) -> Self {
+        let mut b_data = Vec::with_capacity(size as usize);
+        // SAFETY: the allocation holds `size` initialized bytes for the Vec's
+        // purposes; no read of b_data happens before the DMA completes and
+        // BH_Uptodate is set (documented contract above). The capacity is
+        // exactly `size`, so set_len stays in bounds.
+        unsafe { b_data.set_len(size as usize); }
+        Self {
+            b_device: None,
+            b_blocknr: blocknr,
+            b_size: size,
+            b_state: Spinlock::new(BufferState::new()),
+            b_data,
+            b_count: AtomicU32::new(1),
+        }
+    }
+
     /// Set block device
     pub fn set_device(&mut self, device: *const blkdev::GenDisk) {
         if device.is_null() {
@@ -1021,9 +1046,11 @@ pub fn bread_async(
             evict_tries += 1;
         }
 
-        // Phase 2: Cache miss — submit async I/O (no lock held)
+        // Phase 2: Cache miss — submit async I/O (no lock held).
+        // Uninit buffer: the device DMA fills every byte; zero-filling 4 KiB
+        // per block was measurable waste on the batch read-ahead path.
         let block_size = cache.block_size;
-        let mut bh = Box::new(BufferHead::new(blocknr, block_size));
+        let mut bh = Box::new(BufferHead::new_uninit(blocknr, block_size));
         bh.set_device(device);
         bh.set_state_bit(BufferState::BH_Req);
 

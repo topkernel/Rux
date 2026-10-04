@@ -29,8 +29,13 @@ use crate::mm::pglist::{first_online_node_mut, LRU_INACTIVE_FILE, LRU_ACTIVE_FIL
 use crate::mm::{pfn_to_phys, PAGE_SIZE};
 use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
 
-/// Maximum cached pages across all inodes (512 x 4KB = 2MB)
-const MAX_CACHED_PAGES: usize = 512;
+/// Maximum cached pages across all inodes (8192 x 4KB = 32MB).
+///
+/// Was 512 pages (2MB): smaller than one Ubuntu binary's text+data working
+/// set, so every exec/read cycle re-fetched from disk and a 10MB sequential
+/// read thrashed the LRU 5x over. 32MB still leaves the 2GB guest plenty of
+/// user memory and eviction/reclaim paths unchanged.
+const MAX_CACHED_PAGES: usize = 8192;
 
 /// A cached page of file data, backed by a zone-allocated physical page frame.
 struct CachedPage {
@@ -193,6 +198,86 @@ impl PageCache {
             released: core::sync::atomic::AtomicBool::new(false),
         });
         self.total_pages.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Pin up to `out.len()` consecutive cached pages starting at
+    /// `page_index`, filling `out` with (index, pointer) pairs.
+    ///
+    /// Stops at the first missing/invalidated page — the caller re-fills and
+    /// retries. One lock acquisition + one BTreeMap range walk replaces a
+    /// get()/put() pair PER PAGE: for a 1 MiB sequential read that is 2 map
+    /// round trips instead of 512 (the dominant warm-read cost under TCG).
+    /// The out-array API avoids a heap allocation per call (a Vec here
+    /// measurably regressed the 4 KiB-read hot path). Returns the run
+    /// length; 0 when `page_index` itself is not cached.
+    pub fn get_range_into(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        page_index: u64,
+        out: &mut [(u64, *const u8)],
+    ) -> usize {
+        let key = cache_key(fs_id, ino);
+        if out.is_empty() {
+            return 0;
+        }
+        let count = out.len();
+        let mut n = 0usize;
+        let cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get(&key) else {
+            return 0;
+        };
+        for (&idx, page) in inode_cache.pages.range(page_index..page_index + count as u64) {
+            if page.invalidated {
+                break;
+            }
+            page.ref_count.fetch_add(1, Ordering::AcqRel);
+            let page_desc = pfn_to_page_mut(page.pfn);
+            if !page_desc.is_null() {
+                unsafe {
+                    (*page_desc).set_flag(PageFlag::Referenced);
+                }
+            }
+            let phys = pfn_to_phys(page.pfn);
+            out[n] = (idx, phys_to_virt_ptr(phys) as *const u8);
+            n += 1;
+        }
+        n
+    }
+
+    /// Release a run of pages pinned by `get_range` (one lock for all).
+    pub fn put_range(&self, fs_id: u64, ino: u64, pages: &[(u64, *const u8)]) {
+        let key = cache_key(fs_id, ino);
+        let mut cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get_mut(&key) else {
+            return;
+        };
+        for &(page_index, _) in pages {
+            if let Some(page) = inode_cache.pages.get_mut(&page_index) {
+                // Same release discipline as put(): only a put that actually
+                // decremented may release an invalidated page's frame.
+                let decremented = page
+                    .ref_count
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                        v.checked_sub(1)
+                    })
+                    .is_ok();
+                if decremented
+                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.invalidated
+                    && !page.released.swap(true, Ordering::AcqRel)
+                {
+                    let pfn = page.pfn;
+                    inode_cache.pages.remove(&page_index);
+                    let page_desc = pfn_to_page_mut(pfn);
+                    if !page_desc.is_null() {
+                        unsafe { lru::page_remove_lru(&*page_desc); }
+                    }
+                    release_page_frame(pfn);
+                    self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
     }
 
     /// Release a page reference (decrement ref_count).

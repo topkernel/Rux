@@ -658,8 +658,14 @@ impl VirtQueue {
         false  // Timeout
     }
 
-    /// Add descriptor chain to queue and notify device
-    pub fn submit(&mut self, head_idx: u16) {
+    /// Add descriptor chain to queue WITHOUT notifying the device.
+    ///
+    /// For batch submission: publish N chains quietly, then `notify()` once —
+    /// every notify is an MMIO trap (device emulation under TCG), so a
+    /// 128-block read-ahead window pays one kick instead of 128. Callers MUST
+    /// notify before waiting for completions (or rely on the safety kick in
+    /// the submit path when too many chains go unked).
+    pub fn submit_quiet(&mut self, head_idx: u16) {
         // The slot ordinal comes from the kernel-side shadow, never from a
         // read-back of the shared ring: the vring lives in heap memory, and
         // a stray kernel write that smashed avail.idx made every later
@@ -689,13 +695,18 @@ impl VirtQueue {
             // REPAIRS a corrupted ring index on every submit.
             let new_idx = (idx as u16).wrapping_add(1);
             core::ptr::write_volatile(&mut (*avail).idx as *mut u16, new_idx);
-
-            // Full memory barrier before notify
-            core::sync::atomic::fence(Ordering::SeqCst);
-
-            // Notify device
-            Self::notify(self);
         }
+    }
+
+    /// Add descriptor chain to queue and notify device
+    pub fn submit(&mut self, head_idx: u16) {
+        self.submit_quiet(head_idx);
+
+        // Full memory barrier before notify
+        core::sync::atomic::fence(Ordering::SeqCst);
+
+        // Notify device
+        Self::notify(self);
     }
 
     /// Get descriptor

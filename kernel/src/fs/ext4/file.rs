@@ -85,15 +85,86 @@ pub fn ext4_file_read(
     Ok(total_read)
 }
 
-/// Read file data with page cache and read-ahead.
+/// Destination of a file read: kernel slice (FileOps path) or user memory
+/// (read(2) fast path — skips the syscall layer's staging buffer and its
+/// extra 4 KiB alloc+copy per call).
+pub enum ReadDst {
+    /// Kernel buffer pointer + length.
+    Kernel(*mut u8, usize),
+    /// access_ok-validated user pointer + length.
+    User(*mut u8, usize),
+}
+
+impl ReadDst {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            ReadDst::Kernel(_, n) | ReadDst::User(_, n) => *n,
+        }
+    }
+
+    /// Copy `bytes` from a cached page into this destination at `off`.
+    /// Returns bytes actually copied (a user fault truncates the read).
+    ///
+    /// # Safety
+    /// `src` must hold `bytes` readable bytes; Kernel variant pointer must
+    /// have `len` writable bytes, User variant must be access_ok-validated.
+    unsafe fn put(&self, off: usize, src: *const u8, bytes: usize) -> usize {
+        match self {
+            ReadDst::Kernel(dst, _) => {
+                // SAFETY: caller guarantees dst+off+bytes is in bounds.
+                unsafe { core::ptr::copy_nonoverlapping(src, dst.add(off), bytes) };
+                bytes
+            }
+            ReadDst::User(dst, _) => {
+                // SAFETY: exception-table copy; uncopied bytes truncate.
+                let uncopied = unsafe {
+                    crate::arch::riscv64::uaccess::copy_to_user(dst.add(off), src, bytes)
+                };
+                bytes - uncopied
+            }
+        }
+    }
+
+    /// Zero-fill `bytes` at `off` (sparse holes).
+    ///
+    /// # Safety
+    /// Same destination validity as `put`.
+    unsafe fn put_zeroes(&self, off: usize, bytes: usize) -> usize {
+        // The zero page: ext4 block_size-sized static is overkill — copy in
+        // 4 KiB chunks from a small const zero block.
+        static ZEROS: [u8; 4096] = [0u8; 4096];
+        let mut done = 0usize;
+        while done < bytes {
+            let n = core::cmp::min(4096, bytes - done);
+            let c = unsafe { self.put(off + done, ZEROS.as_ptr(), n) };
+            if c < n {
+                break; // user fault: short read
+            }
+            done += c;
+        }
+        done
+    }
+}
+
+/// Read file data with page cache and batched async I/O.
 ///
 /// Uses `get_data_block(index)` for single-block resolution (instead of
 /// resolving the entire block map) and caches pages in the global page cache.
-fn ext4_file_read_cached(
+///
+/// Performance design: a cache miss no longer pays one synchronous virtio
+/// round trip per 4 KiB page. The miss triggers a BATCH fill — all missing
+/// pages of the current request plus a read-ahead window (when the access
+/// looks sequential) are submitted back-to-back with `bio::bread_async` and
+/// completed with ONE sleep/wake cycle, then served from the page cache.
+/// Before this, every page miss was a synchronous submit/sleep/wake
+/// (~1.8 ms under TCG) and the old read-ahead never fired at all on the PCI
+/// root disk (no async_read_fn registered — fixed in the virtio driver).
+fn ext4_file_read_cached_dst(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
     offset: u64,
-    buf: &mut [u8],
+    dst: ReadDst,
     ra_state: &mut ReadAheadState,
 ) -> Result<usize, i32> {
     let file_size = inode.get_size();
@@ -102,7 +173,7 @@ fn ext4_file_read_cached(
     }
 
     let available = file_size - offset;
-    let to_read = core::cmp::min(buf.len() as u64, available) as usize;
+    let to_read = core::cmp::min(dst.len() as u64, available) as usize;
     let block_size = fs.block_size as u64;
     let block_size_usize = fs.block_size as usize;
     let cache = page_cache::get_page_cache();
@@ -110,6 +181,9 @@ fn ext4_file_read_cached(
     // Filesystem identity for the page-cache key (review 5.3: cross-FS key
     // collisions on small inode numbers).
     let fs_id = fs as *const crate::fs::ext4::Ext4FileSystem as u64;
+    let file_pages = (file_size + block_size - 1) / block_size;
+    // Pages the request itself touches.
+    let demand_pages = ((to_read as u64 + block_size - 1) / block_size) as u64;
 
     let mut total_read = 0;
     let mut current_offset = offset;
@@ -118,134 +192,219 @@ fn ext4_file_read_cached(
     while total_read < to_read {
         let page_index = current_offset / block_size;
         let page_offset = (current_offset % block_size) as usize;
+        let remaining = to_read - total_read;
+        // Consecutive pages this request still needs from this page on.
+        let pages_wanted = remaining.div_ceil(block_size_usize);
 
-        // Check page cache
-        if let Some(page_data) = cache.get(fs_id, ino, page_index) {
-            // Cache hit: copy from cached page
-            // SAFETY: page_data is a valid page-aligned pointer of block_size
-            // bytes returned by the page cache; page_offset + copy_len is
-            // bounded by block_size_usize, so the copy is in-bounds.
-            unsafe {
-                let remaining = to_read - total_read;
-                let available_in_page = block_size_usize - page_offset;
-                let copy_len = core::cmp::min(remaining, available_in_page);
-                core::ptr::copy_nonoverlapping(
-                    page_data.add(page_offset),
-                    buf.as_mut_ptr().add(buf_offset),
-                    copy_len,
-                );
-                total_read += copy_len;
-                buf_offset += copy_len;
-                current_offset += copy_len as u64;
-            }
-            cache.put(fs_id, ino, page_index);
-        } else {
-            // Cache miss: resolve single block and read from disk
-            let block_nr = inode.get_data_block(fs, page_index)?;
-            if block_nr == 0 {
-                // Sparse file: zero-fill
-                let remaining = to_read - total_read;
-                let available_in_page = block_size_usize - page_offset;
-                let zero_len = core::cmp::min(remaining, available_in_page);
-                for i in 0..zero_len {
-                    buf[buf_offset + i] = 0;
-                }
-                total_read += zero_len;
-                buf_offset += zero_len;
-                current_offset += zero_len as u64;
-                continue;
-            }
-
-            // SAFETY: bio::bread returns a valid pinned BufferHead on success;
-            // b_data points to a block-sized buffer aligned to block_size.
-            unsafe {
-                let bh = bio::bread(fs.device, block_nr)
-                    .ok_or(errno::Errno::IOError.as_neg_i32())?;
-
-                let data = &(*bh).b_data;
-                let remaining = to_read - total_read;
-                let available_in_page = block_size_usize - page_offset;
-                let copy_len = core::cmp::min(remaining, available_in_page);
-
-                buf[buf_offset..buf_offset + copy_len]
-                    .copy_from_slice(&data[page_offset..page_offset + copy_len]);
-
-                // Insert full page into page cache
-                cache.insert(fs_id, ino, page_index, block_nr, &data);
-
-                total_read += copy_len;
-                buf_offset += copy_len;
-                current_offset += copy_len as u64;
-
-                bio::brelse(bh);
-            }
-        }
-    }
-
-    // Update read-ahead state and issue prefetch if needed
-    let (should_ra, ra_start, ra_count) = ra_state.on_read(offset, total_read as u64);
-    if should_ra {
-        let file_pages = (file_size + block_size - 1) / block_size;
-
-        // Async batch submit: submit all read-ahead I/Os, then wait once.
-        let mut completions: [IoCompletion; 4] = core::array::from_fn(|_| IoCompletion::new());
-        let mut bh_ptrs = [core::ptr::null_mut::<bio::BufferHead>(); 4];
-        let mut count = 0usize;
-
-        // Record the ACTUAL page index of every submitted I/O: skipped
-        // (already-cached) and sparse pages must not shift the insert
-        // indices. The old code inserted page ra_start+i, so with any skip
-        // in the middle every later page was cached under the WRONG index —
-        // reads then served one file's page as another's (review EXT4-H6).
-        let mut ra_idx: [u64; 4] = [0; 4];
-        for i in 0..ra_count {
-            if count >= 4 { break; }
-            let idx = ra_start + i as u64;
-            if idx >= file_pages { break; }
-
-            // Skip if already cached
-            if cache.get(fs_id, ino, idx).is_some() {
-                cache.put(fs_id, ino, idx);
-                continue;
-            }
-
-            // Resolve block number
-            if let Ok(block_nr) = inode.get_data_block(fs, idx) {
-                if block_nr != 0 {
-                    if let Some(bh) = bio::bread_async(fs.device, block_nr, &completions[count]) {
-                        bh_ptrs[count] = bh;
-                        ra_idx[count] = idx;
-                        count += 1;
-                    }
-                }
-            }
-        }
-
-        // Wait for all async I/Os to complete
-        if count > 0 {
-            // R20-FS8: capture each I/O's status — a failed read must not have
-            // its (garbage) buffer cached as a valid page.
-            let mut status = [0i32; 4];
-            for i in 0..count {
-                status[i] = bio::bread_wait(bh_ptrs[i], &completions[i]);
-            }
-            // Insert completed pages into page cache under their own indices
-            for i in 0..count {
-                // SAFETY: bread_wait has completed, so bh_ptrs[i] points to a
-                // valid BufferHead with fully populated b_data.
+        // Serve a run of cached pages with ONE pin round trip. Fixed-size
+        // stack array: a heap-allocated run here measurably regressed the
+        // 4 KiB-read hot path under TCG.
+        let mut run: [(u64, *const u8); 16] = [(0, core::ptr::null()); 16];
+        let want = core::cmp::min(pages_wanted, run.len());
+        let run_len = cache.get_range_into(fs_id, ino, page_index, &mut run[..want]);
+        if run_len > 0 {
+            // Copy each pinned page's contribution.
+            for (i, (_idx, page_data)) in run[..run_len].iter().enumerate() {
+                let in_page_off = if i == 0 { page_offset } else { 0 };
+                let remaining_now = to_read - total_read;
+                // SAFETY: page_data is a valid page-aligned pointer of
+                // block_size bytes pinned by get_range_into; the copy length
+                // is bounded by the page size and the remaining request bytes.
                 unsafe {
-                    if status[i] == 0 {
-                        let data = &(*bh_ptrs[i]).b_data;
-                        cache.insert(fs_id, ino, ra_idx[i],
-                            (*bh_ptrs[i]).b_blocknr, data);
+                    let avail = block_size_usize - in_page_off;
+                    let copy_len = core::cmp::min(remaining_now, avail);
+                    let copied = dst.put(buf_offset, page_data.add(in_page_off), copy_len);
+                    total_read += copied;
+                    buf_offset += copied;
+                    current_offset += copied as u64;
+                    if copied < copy_len {
+                        // User fault: short read, stop.
+                        cache.put_range(fs_id, ino, &run[..run_len]);
+                        return Ok(total_read);
                     }
-                    bio::brelse(bh_ptrs[i]);
                 }
             }
+            cache.put_range(fs_id, ino, &run[..run_len]);
+            continue;
+        }
+
+        // Cache miss on the first page: batch-fill from here. The window
+        // covers the demand range plus (on sequential access) the read-ahead
+        // window ahead of it; pages land in the cache and the loop serves
+        // them through the fast path above.
+        let seq_contd = offset == ra_state.last_read_end || ra_state.active;
+        let window = if seq_contd || offset == 0 {
+            core::cmp::max(demand_pages, crate::fs::readahead::MAX_READAHEAD_BLOCKS as u64)
+        } else {
+            // Random seek: read only what the request needs.
+            demand_pages
+        };
+        let fill_upto = core::cmp::min(page_index + window, file_pages);
+        fill_page_cache_batch(fs, inode, cache, fs_id, ino, page_index, fill_upto);
+
+        // Hole (sparse/unwritten): the fill skips unallocated pages, so a
+        // still-missing page here is a hole — zero-fill it in place.
+        if cache.get(fs_id, ino, page_index).is_none() {
+            let avail = block_size_usize - page_offset;
+            let zero_len = core::cmp::min(remaining, avail);
+            // SAFETY: dst validity documented on ReadDst::put_zeroes.
+            let copied = unsafe { dst.put_zeroes(buf_offset, zero_len) };
+            total_read += copied;
+            buf_offset += copied;
+            current_offset += copied as u64;
+        } else {
+            cache.put(fs_id, ino, page_index);
         }
     }
+
+    // Update read-ahead bookkeeping (sequential detection state only — the
+    // actual prefetch is the batch fill above).
+    let _ = ra_state.on_read(offset, total_read as u64);
 
     Ok(total_read)
+}
+
+/// Kernel-slice wrapper (FileOps path).
+fn ext4_file_read_cached(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &crate::fs::ext4::inode::Ext4Inode,
+    offset: u64,
+    buf: &mut [u8],
+    ra_state: &mut ReadAheadState,
+) -> Result<usize, i32> {
+    ext4_file_read_cached_dst(fs, inode, offset, ReadDst::Kernel(buf.as_mut_ptr(), buf.len()), ra_state)
+}
+
+/// Batch size bound shared by fill_page_cache_batch/drain_batch.
+const MAX_BATCH_DRAIN: usize = 128;
+
+/// Batch-fill the page cache with pages [start, end) of a file.
+///
+/// Submits all uncached, allocated pages via `bio::bread_async`, then waits
+/// once for the whole batch and inserts the completed pages. Pages that
+/// cannot be submitted asynchronously (device without async support, or the
+/// virtqueue is momentarily full) fall back to a synchronous `bio::bread`
+/// AFTER draining what is already in flight — forward progress is always
+/// guaranteed.
+#[allow(clippy::too_many_arguments)]
+fn fill_page_cache_batch(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &crate::fs::ext4::inode::Ext4Inode,
+    cache: &page_cache::PageCache,
+    fs_id: u64,
+    ino: u64,
+    start: u64,
+    end: u64,
+) {
+    const MAX_BATCH: usize = MAX_BATCH_DRAIN; // blocks per sleep/wake cycle (128 KiB)
+
+    let mut completions: [IoCompletion; MAX_BATCH] = core::array::from_fn(|_| IoCompletion::new());
+    let mut bh_ptrs = [core::ptr::null_mut::<bio::BufferHead>(); MAX_BATCH];
+    // File page index of each submitted I/O (skipped/sparse pages must not
+    // shift insert indices — review EXT4-H6 discipline).
+    let mut ra_idx: [u64; MAX_BATCH] = [0; MAX_BATCH];
+    let mut count = 0usize;
+
+    let mut idx = start;
+    while idx < end {
+        if count >= MAX_BATCH {
+            break;
+        }
+        // Already cached: nothing to do.
+        if cache.get(fs_id, ino, idx).is_some() {
+            cache.put(fs_id, ino, idx);
+            idx += 1;
+            continue;
+        }
+
+        // Resolve this page's physical block (0 = hole/unwritten).
+        let block_nr = match inode.get_data_block(fs, idx) {
+            Ok(b) => b,
+            Err(_) => break, // metadata failure: stop extending the batch
+        };
+        if block_nr == 0 {
+            idx += 1;
+            continue;
+        }
+
+        match bio::bread_async(fs.device, block_nr, &completions[count]) {
+            Some(bh) => {
+                bh_ptrs[count] = bh;
+                ra_idx[count] = idx;
+                count += 1;
+                idx += 1;
+            }
+            None => {
+                // Queue full (or async unsupported): drain what is in
+                // flight, then continue — the next iteration retries this
+                // page (async if a slot freed up, sync as last resort via
+                // the count==0 branch below).
+                if count > 0 {
+                    drain_batch(cache, fs_id, ino, &bh_ptrs, &ra_idx, &completions, count);
+                    // The IoCompletions are single-shot: reset before the
+                    // array is reused for the next sub-batch, or bread_wait
+                    // would return the PREVIOUS batch's status immediately.
+                    for c in completions.iter().take(count) {
+                        c.reset();
+                    }
+                    count = 0;
+                } else {
+                    // No async path at all: synchronous single-block read
+                    // (correctness fallback, e.g. loop devices).
+                    // SAFETY: bio::bread returns a valid pinned BufferHead on
+                    // success; b_data points to a block-sized buffer.
+                    unsafe {
+                        if let Some(bh) = bio::bread(fs.device, block_nr) {
+                            let data = &(*bh).b_data;
+                            cache.insert(fs_id, ino, idx, block_nr, &data);
+                            bio::brelse(bh);
+                        } else {
+                            break; // I/O error: stop filling
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    if count > 0 {
+        drain_batch(cache, fs_id, ino, &bh_ptrs, &ra_idx, &completions, count);
+    }
+}
+
+/// Wait for a submitted batch and insert the completed pages into the cache.
+///
+/// R20-FS8 discipline: a failed read's (garbage) buffer must never be cached
+/// as a valid page.
+fn drain_batch(
+    cache: &page_cache::PageCache,
+    fs_id: u64,
+    ino: u64,
+    bh_ptrs: &[*mut bio::BufferHead],
+    ra_idx: &[u64],
+    completions: &[IoCompletion],
+    count: usize,
+) {
+    let mut status = [0i32; MAX_BATCH_DRAIN];
+    // One device kick for the whole quietly-submitted batch (see
+    // pci_submit_read_async): publish N chains, notify once, then wait.
+    crate::drivers::virtio::pci_blk_kick();
+    for i in 0..count {
+        status[i] = bio::bread_wait(bh_ptrs[i], &completions[i]);
+    }
+    // Insert completed pages into the page cache under their own indices.
+    for i in 0..count {
+        // SAFETY: bread_wait has completed, so bh_ptrs[i] points to a valid
+        // BufferHead with fully populated b_data (status 0 only).
+        unsafe {
+            if status[i] == 0 {
+                let data = &(*bh_ptrs[i]).b_data;
+                cache.insert(fs_id, ino, ra_idx[i], (*bh_ptrs[i]).b_blocknr, data);
+            }
+            bio::brelse(bh_ptrs[i]);
+        }
+    }
 }
 
 pub fn ext4_file_write(
@@ -843,8 +1002,7 @@ pub fn ext4_sync_file(
 // ============================================================================
 
 /// VFS read wrapper - calls ext4_file_read_cached with page cache and read-ahead
-pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
-    // SAFETY: file.inode.get() returns a valid pointer to Option<Arc<Inode>>;
+pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: file.inode.get() returns a valid pointer to Option<Arc<Inode>>;
     // when Some, the Arc and its contents (private_data, sb) are valid for the
     // lifetime of the file. The ext4 filesystem pointer in private_data and the
     // cached Ext4Inode in inode.sb are set during file open and remain valid.
@@ -921,6 +1079,62 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {
             }
         }
     }
+}
+
+/// read(2) fast path for ext4 regular files: copy straight from the page
+/// cache into user memory (no syscall-layer staging buffer).
+///
+/// `dst` must be access_ok-validated for `count` bytes. O_DIRECT falls back
+/// to the caller's staged path (rare, unaligned semantics kept simple).
+pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize {
+    // SAFETY: same inode/fs lifetime guarantees as ext4_file_read_vfs.
+    unsafe {
+        let inode_opt = &*file.inode.get();
+        let inode = match inode_opt {
+            Some(i) => i,
+            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+        };
+        let fs_ptr = match inode.private_data {
+            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
+        };
+        let fs = &*fs_ptr;
+        let ext4_inode = match inode.sb {
+            Some(ptr) => &*(ptr as *const super::inode::Ext4Inode),
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
+        };
+        let offset = file.get_pos() as u64;
+
+        let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
+        match ext4_file_read_cached_dst(
+            fs, ext4_inode, offset,
+            ReadDst::User(dst, count), ra_state,
+        ) {
+            Ok(read_bytes) => {
+                file.set_pos(offset + read_bytes as u64);
+                if read_bytes > 0 {
+                    let atime = crate::drivers::rtc::wall_secs() as u32;
+                    // SAFETY: same as ext4_file_read_vfs (advisory field,
+                    // big lock serializes writers).
+                    unsafe {
+                        core::ptr::write_volatile(
+                            &mut (*(inode.sb.unwrap() as *mut super::inode::Ext4Inode)).atime,
+                            atime,
+                        );
+                    }
+                }
+                read_bytes as isize
+            }
+            Err(e) => e as isize,
+        }
+    }
+}
+
+/// True when `file` uses the ext4 regular-file ops (fast-path dispatch for
+/// the read(2) syscall layer).
+pub fn is_ext4_file(file: &File) -> bool {
+    file.get_ops()
+        .is_some_and(|ops| core::ptr::eq(ops as *const _, &EXT4_FILE_OPS as *const _))
 }
 
 /// VFS write wrapper - calls ext4_file_write

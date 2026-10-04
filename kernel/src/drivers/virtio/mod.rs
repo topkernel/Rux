@@ -1037,6 +1037,268 @@ fn increment_mmio_expected_used_idx() {
 /// Incremented each time request is submitted, used to detect if device completed request
 static VIRTIO_PCI_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
+// ============================================================================
+// PCI VirtIO-Blk async read support
+//
+// The PCI device is the boot/root disk on QEMU virt (-device virtio-blk-pci),
+// but only the MMIO device ever registered an `async_read_fn`. bio::bread_async
+// therefore returned ENXIO on the root disk and the ext4 read-ahead path was
+// silently dead there: every page-cache miss paid a fully synchronous
+// submit/sleep/wake virtio round trip (~1.8 ms under TCG), capping sequential
+// file reads at ~2 MB/s. This table + submit function give the PCI disk the
+// same fire-and-forget read path the MMIO device already had.
+// ============================================================================
+
+/// Pending async I/O slots for the PCI VirtIO block device.
+/// Must exceed the maximum in-flight chains (queue_size / 3 descriptors);
+/// QEMU's virtio-blk-pci default queue size is 128 → 41 chains max.
+const MAX_PENDING_IO_PCI: usize = 64;
+
+/// Pending async I/O requests for the PCI VirtIO block device.
+/// Indexed by (submission order % MAX_PENDING_IO_PCI); synchronous requests
+/// share the submission counter (VIRTIO_PCI_EXPECTED_USED_IDX) but occupy
+/// their slot with None — the completion walk skips them (their waiter polls
+/// its own response byte).
+static VIRTIO_PCI_PENDING: Spinlock<[Option<PendingIo>; MAX_PENDING_IO_PCI]> =
+    Spinlock::new([const { None }; MAX_PENDING_IO_PCI]);
+
+/// Last used-ring index processed by the async completion walker (PCI).
+static VIRTIO_PCI_PENDING_LAST: core::sync::atomic::AtomicU16 =
+    core::sync::atomic::AtomicU16::new(0);
+
+/// Chains published to the PCI avail ring since the last device kick.
+/// Batch submitters publish quietly and the waiter kicks once — see
+/// pci_submit_read_async.
+static PCI_UNKICKED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Kick the PCI virtio-blk device if any quietly-submitted chains are
+/// pending. Callers must invoke this BEFORE sleeping on an async completion
+/// (drain paths); it is idempotent and cheap when nothing is unked.
+pub fn pci_blk_kick() {
+    if PCI_UNKICKED.swap(0, core::sync::atomic::Ordering::AcqRel) > 0 {
+        if let Some(q) = get_pci_device_queue() {
+            q.notify();
+        }
+    }
+}
+
+/// Submit an async read on the PCI VirtIO block device (no waiting).
+///
+/// SAFETY: `disk` must be the PCI virtio-blk GenDisk (major 8); `buf` must
+/// remain valid and unmodified until the completion fires; `completion` must
+/// outlive the I/O. Mirrors `VirtIOBlkDevice::submit_read_async`.
+unsafe fn pci_submit_read_async(
+    _disk: *const crate::drivers::blkdev::GenDisk,
+    sector: u64,
+    buf: &mut [u8],
+    completion: &crate::fs::io_completion::IoCompletion,
+) -> Result<(), i32> {
+    use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
+
+    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return Err(-5); // EIO
+    }
+
+    // The BLK lock is held across submit + pending-store so the completion
+    // walker (Block softirq, same lock) can never observe the used-ring
+    // advance before the pending entry is published — the lost-completion
+    // race documented on the MMIO path.
+    let _guard = VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+
+    let virt_queue = match get_pci_device_queue_mut() {
+        Some(q) => q,
+        None => return Err(-5),
+    };
+
+    // One 64-byte block carries header (offset 0) + response (offset 48) —
+    // the same R17-C combined allocation the sync path uses.
+    let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
+    // SAFETY: Layout is non-zero-sized; null check follows immediately.
+    let io_buf = unsafe { alloc::alloc::alloc(io_layout) };
+    if io_buf.is_null() {
+        return Err(-12); // ENOMEM
+    }
+    let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
+    // SAFETY: io_buf is non-null, 64 bytes, 16-byte aligned; +48 is in bounds.
+    let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
+    // SAFETY: pointers derived above are valid and aligned.
+    unsafe {
+        *header_ptr = VirtIOBlkReqHeader {
+            type_: queue::req_type::VIRTIO_BLK_T_IN,
+            reserved: 0,
+            sector,
+        };
+        (*resp_ptr).status = 0xFF;
+    }
+
+    const VIRTQ_DESC_F_NEXT: u16 = 1;
+    const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+    #[cfg(feature = "riscv64")]
+    let header_phys = crate::arch::riscv64::mm::virt_to_phys(
+        crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64),
+    ).0;
+    #[cfg(feature = "riscv64")]
+    let data_phys = crate::arch::riscv64::mm::virt_to_phys(
+        crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64),
+    ).0;
+    #[cfg(feature = "riscv64")]
+    let resp_phys = crate::arch::riscv64::mm::virt_to_phys(
+        crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64),
+    ).0;
+
+    let header_desc_idx = match virt_queue.alloc_desc() {
+        Some(idx) => idx,
+        None => {
+            // SAFETY: io_buf was allocated with io_layout and is unreferenced.
+            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+            return Err(-5); // queue full — caller falls back to sync read
+        }
+    };
+    let data_desc_idx = match virt_queue.alloc_desc() {
+        Some(idx) => idx,
+        None => {
+            // SAFETY: see above.
+            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+            return Err(-5);
+        }
+    };
+    let resp_desc_idx = match virt_queue.alloc_desc() {
+        Some(idx) => idx,
+        None => {
+            // SAFETY: see above.
+            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+            return Err(-5);
+        }
+    };
+
+    virt_queue.set_desc(header_desc_idx, header_phys,
+        core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
+        VIRTQ_DESC_F_NEXT, data_desc_idx);
+    virt_queue.set_desc(data_desc_idx, data_phys, buf.len() as u32,
+        VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT, resp_desc_idx);
+    virt_queue.set_desc(resp_desc_idx, resp_phys,
+        core::mem::size_of::<VirtIOBlkResp>() as u32,
+        VIRTQ_DESC_F_WRITE, 0);
+
+    // Slot ordinal BEFORE submit (submission order == completion order on a
+    // single virtqueue; sync submissions take a None slot).
+    let prev = get_expected_used_idx();
+    // Batch submission discipline: publish quietly and count. Every notify
+    // is an MMIO trap (device emulation under TCG, ~hundreds of µs), so a
+    // 128-block read-ahead window kicks once (pci_blk_kick from the waiter)
+    // instead of 128 times. The bound below is a safety kick: past it the
+    // virtqueue is nearly exhausted anyway and a lost waiter must never
+    // depend on someone else's kick.
+    virt_queue.submit_quiet(header_desc_idx);
+    increment_expected_used_idx();
+    let unkicked = PCI_UNKICKED.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
+    if unkicked >= 32 {
+        PCI_UNKICKED.store(0, core::sync::atomic::Ordering::Release);
+        virt_queue.notify();
+    }
+
+    let pending = PendingIo {
+        completion: completion as *const _ as *mut _,
+        resp_ptr: resp_ptr as *mut u8,
+        resp_layout: io_layout,
+        header_ptr: header_ptr as *mut u8,
+        header_layout: io_layout,
+    };
+    let slot = prev as usize % MAX_PENDING_IO_PCI;
+    let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
+    // Stale slot (a lost completion from a previous I/O): drop it with an
+    // error so the table cannot fill with orphans. The BufferHead stays
+    // !Uptodate and the caller's bread_wait deadline reports -EIO.
+    // SAFETY: resp/header pointers were allocated by this function for the
+    // PREVIOUS occupant and freed by exactly one of these two paths.
+    if let Some(old) = table[slot].take() {
+        unsafe {
+            alloc::alloc::dealloc(old.header_ptr, old.header_layout);
+        }
+        // SAFETY: completion token outlives its I/O (bread_wait contract).
+        unsafe { (*old.completion).complete(-5); }
+    }
+    table[slot] = Some(pending);
+
+    Ok(())
+}
+
+/// Static wrapper matching GenDisk's `async_read_fn` signature for the PCI disk.
+///
+/// SAFETY: `disk` is the registered PCI virtio-blk GenDisk; `completion` is a
+/// valid IoCompletion pointer that outlives the I/O.
+unsafe fn pci_async_read_fn(
+    disk: *const crate::drivers::blkdev::GenDisk,
+    sector: u64,
+    buf: &mut [u8],
+    completion: *mut core::ffi::c_void,
+) -> i32 {
+    let comp = &*(completion as *const crate::fs::io_completion::IoCompletion);
+    match pci_submit_read_async(disk, sector, buf, comp) {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Process completed PCI async reads: walk the used ring from the last
+/// processed index, complete each pending I/O found on the way.
+///
+/// Runs in the Block softirq (raised by the PCI IRQ handler) under the PCI
+/// BLK lock — the same context/discipline as the MMIO completion walker, so
+/// IoCompletion::complete (wait-queue wakeup) never runs in hard-IRQ context.
+fn pci_process_async_completions() {
+    // Fast path: nothing pending. Read the used ring first; if the walker is
+    // already caught up, skip the lock entirely.
+    let used_ring = match get_pci_device_queue() {
+        Some(q) => q.used_ring_ptr(),
+        None => return,
+    };
+    // SAFETY: used ring offset 2 is the idx field (u16); the queue is alive
+    // (VIRTIO_PCI_READY was checked by get_pci_device_queue).
+    let used_idx = unsafe {
+        core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+    };
+    let last = VIRTIO_PCI_PENDING_LAST.load(core::sync::atomic::Ordering::Acquire);
+    if used_idx == last {
+        return;
+    }
+
+    let _guard = VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+    // Re-read under the lock (a submission may have landed since).
+    // SAFETY: same field, queue alive.
+    let used_idx = unsafe {
+        core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+    };
+    let mut i = VIRTIO_PCI_PENDING_LAST.load(core::sync::atomic::Ordering::Acquire);
+    // Bounded by one queue window per pass; u16 wrap-safe subtraction.
+    let mut budget = MAX_PENDING_IO_PCI as u16;
+    while i != used_idx && budget > 0 {
+        budget -= 1;
+        let slot = i as usize % MAX_PENDING_IO_PCI;
+        let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
+        // SAFETY: entries were published by pci_submit_read_async under the
+        // BLK lock; the device has completed their chains (used ring
+        // advanced past their submission index).
+        if let Some(pending) = table[slot].take() {
+            let status = unsafe { *(pending.resp_ptr as *mut u8) };
+            let io_status = if status == 0 { 0 } else { -5i32 };
+            // SAFETY: the combined R17-C block: header at base, resp at +48,
+            // both inside the single 64-byte allocation (resp_layout == base).
+            unsafe {
+                alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
+            }
+            // SAFETY: completion token outlives its I/O.
+            unsafe { (*pending.completion).complete(io_status); }
+        }
+        // None = a synchronous request's slot — its waiter polls its own
+        // response byte; nothing to do.
+        i = i.wrapping_add(1);
+    }
+    VIRTIO_PCI_PENDING_LAST.store(i, core::sync::atomic::Ordering::Release);
+}
+
 /// PCI device ready flag (using atomic type to ensure multi-core visibility)
 static VIRTIO_PCI_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -1199,6 +1461,10 @@ pub fn register_pci_gen_disk() {
 
         // Set request handler function
         disk.set_request_fn(pci_virtio_handle_request);
+        // Async read path: without this, bio::bread_async failed with ENXIO
+        // on the root disk and ext4 read-ahead was silently disabled there
+        // (every page miss = one synchronous virtio round trip).
+        disk.set_async_read_fn(pci_async_read_fn);
 
         // Register to block device manager
         let _ = crate::drivers::blkdev::register_disk(disk);
@@ -1349,6 +1615,12 @@ pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::Irq
                     return crate::interrupt::IrqReturn::None;
                 }
             }
+            // Async read completions are processed in the Block softirq (same
+            // discipline as the MMIO device): completing an IoCompletion
+            // wakes a wait queue, which must not run in hard-IRQ context.
+            crate::interrupt::softirq::raise_softirq_irqoff(
+                crate::interrupt::softirq::SoftirqIndex::Block as usize,
+            );
             VIRTIO_PCI_BLK_WAIT_QUEUE.wake_up_all();
         }
     }
@@ -1439,6 +1711,10 @@ pub fn block_bh_handler(_vec: usize) {
             // Also wake synchronous waiters (backward compat)
             VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
         }
+        // PCI async reads complete here too (raised by
+        // interrupt_handler_pci); independent of the MMIO device so a
+        // PCI-only boot still drains its pending table.
+        pci_process_async_completions();
     }
 }
 

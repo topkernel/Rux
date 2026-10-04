@@ -9,7 +9,14 @@
 //! into the page cache to reduce VirtIO round-trips.
 
 /// Maximum number of blocks to read ahead per trigger.
-pub const MAX_READAHEAD_BLOCKS: u32 = 4;
+///
+/// 128 blocks = 512 KiB per batch: one sleep/wake cycle under TCG covers a
+/// whole window, so sequential read throughput is (window / cycle-latency)
+/// instead of (4 KiB / cycle-latency). The ext4 read path batches the demand
+/// range and this window together through the async block layer; the
+/// virtqueue in-flight limit (queue_size/3 chains) naturally pipelines
+/// larger windows in sub-batches.
+pub const MAX_READAHEAD_BLOCKS: u32 = 128;
 
 /// Number of consecutive sequential reads before activating read-ahead.
 const ACTIVATION_THRESHOLD: u32 = 2;
