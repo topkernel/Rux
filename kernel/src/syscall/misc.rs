@@ -1284,22 +1284,6 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         let mut ready_events: alloc::vec::Vec<EPollEvent> = alloc::vec::Vec::new();
 
         for entry in entries.iter_mut() {
-            // Linux epoll_wait never consumes readiness it does not deliver:
-            // events beyond `maxevents` stay on the ready list and are
-            // re-reported by the next wait. Our snapshot-scan model must
-            // match that — STOP the scan at maxevents so undelivered entries
-            // keep their edge-trigger snapshot (`last_reported`) untouched.
-            // Marking-and-dropping them silently consumed their edges: under
-            // a ready burst (more sockets readable at once than maxevents)
-            // the truncated EPOLLET fds never reported again — readiness
-            // never went idle (the data stayed unread), so no new edge could
-            // fire, and the watcher stopped reading those fds forever
-            // (Xorg registers its client sockets EPOLLET: a burst of client
-            // messages wedged every client past maxevents while the server
-            // kept spinning on the fds it still saw).
-            if ready_events.len() >= maxevents as usize {
-                break;
-            }
             // R32-B9: the registration binds to the open file description
             // recorded at ADD time (entry.file_id). The fd NUMBER alone is
             // not enough: after close(fd) and reuse of the number by an

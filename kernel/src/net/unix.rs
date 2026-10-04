@@ -147,16 +147,6 @@ pub struct UnixSocket {
     backlog: Spinlock<usize>,
     /// Receive queue (segments)
     recv_queue: Spinlock<VecDeque<UnixSeg>>,
-    /// STREAM-only parking for ancillary data (SCM_RIGHTS/SCM_CREDENTIALS)
-    /// sent with a ZERO-length payload. A byte stream has no record
-    /// boundaries, so Linux associates ancillary data with the first byte
-    /// of subsequently queued data — it must NOT materialize a 0-length
-    /// "message": an empty segment sitting alone in recv_queue made recv()
-    /// return Ok(len=0), which stream readers (GDBus, libdbus, Xlib) take
-    /// as peer EOF — a healthy connection then tears itself down (the
-    /// "Broken pipe on a live bus" shape). The next non-empty enqueue
-    /// drains this onto the front of the new segment (first-touch delivery).
-    pending_anc: Spinlock<Vec<(Vec<Arc<File>>, Option<UnixCred>)>>,
     /// Peer performed close()/shutdown — drain then EOF
     eof: Spinlock<bool>,
     /// This socket's close() ran (poll: peer sees POLLHUP — the Linux
@@ -199,7 +189,6 @@ impl UnixSocket {
             accept_queue: Spinlock::new(VecDeque::new()),
             backlog: Spinlock::new(16),
             recv_queue: Spinlock::new(VecDeque::new()),
-            pending_anc: Spinlock::new(Vec::new()),
             eof: Spinlock::new(false),
             dead: Spinlock::new(false),
             shut_wr: Spinlock::new(false),
@@ -838,21 +827,6 @@ pub fn unix_connect(
             *sock.state.lock() = UnixState::Connected;
             server.accept_queue.lock().push_back(child);
             server.wait_queue.wake_up_all();
-            // A queued connection is an ARRIVAL on the listener — the
-            // epoll analogue of unix_send's notify on the target. Without
-            // it an EPOLLET-watched listener (Xorg registers its listener
-            // EPOLLET) only re-reports on a readiness snapshot CHANGE: a
-            // backlog that drained (accept-until-EAGAIN) and refilled
-            // between two epoll_wait calls still reads EPOLLIN ==
-            // last_reported and the edge is swallowed — late connectors
-            // sit in the accept queue forever while the server keeps
-            // serving the fds it already holds (the 11-of-16-clients
-            // wedge). Linux re-queues the epi from the listener's
-            // data_ready callback on EVERY connection arrival.
-            let fid = server.file_id.load(Ordering::Acquire);
-            if fid != 0 {
-                crate::syscall::misc::epoll_notify_file(fid);
-            }
             Ok(())
         }
         UnixKind::Dgram => {
@@ -1001,37 +975,11 @@ pub fn unix_send(
             return Err(-32); // EPIPE
         }
 
-        // STREAM + zero-length payload: never enqueue an empty segment.
-        // A byte stream has no record boundaries — ancillary data rides the
-        // first subsequently queued bytes (Linux association semantics); a
-        // materialized 0-length segment made recv() return Ok(0), which
-        // stream readers take as peer EOF (see pending_anc on UnixSocket).
-        if data.is_empty() && matches!(sock.kind, UnixKind::Stream) {
-            if !files.is_empty() || cred.is_some() {
-                target.pending_anc.lock().push((files, cred));
-            }
-            return Ok(0);
-        }
-
         {
             let mut q = target.recv_queue.lock();
             let queued: usize = q.iter().map(|s| s.data.len()).sum();
             if queued == 0 || queued + data.len() <= cap {
                 let src = sock.bound_name.lock().clone();
-                // Drain parked ancillary data onto the front of the new
-                // segment: first-touch delivery with the first bytes that
-                // were queued AFTER the (files, cred) arrived.
-                let mut files = files;
-                let mut cred = cred;
-                {
-                    let mut anc = target.pending_anc.lock();
-                    for (pf, pc) in anc.drain(..) {
-                        files.extend(pf);
-                        if cred.is_none() {
-                            cred = pc;
-                        }
-                    }
-                }
                 q.push_back(UnixSeg {
                     data: data.to_vec(),
                     files,
@@ -1129,19 +1077,6 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                 drop(q);
                 // Room may have freed for senders blocked on our queue.
                 sock.wait_queue.wake_up_all();
-                // Draining also raises the PEER's writability (its send
-                // queue just got room) — an EPOLLET edge on the peer's
-                // fd. Without this notify, a peer whose EPOLLOUT edge was
-                // reported and then swallowed by a fill/drain cycle between
-                // two epoll_wait calls (snapshot still says EPOLLOUT ==
-                // last_reported) never learns it can write again — Linux
-                // fires the sender's write_space callback here.
-                if let Some(peer) = sock.peer_arc() {
-                    let fid = peer.file_id.load(Ordering::Acquire);
-                    if fid != 0 {
-                        crate::syscall::misc::epoll_notify_file(fid);
-                    }
-                }
                 return Ok(UnixRecvResult {
                     len: copied,
                     orig_len: orig_total,
@@ -1164,13 +1099,6 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                 let src = seg.src;
                 drop(q);
                 sock.wait_queue.wake_up_all();
-                // Peer writability rose (see the STREAM branch above).
-                if let Some(peer) = sock.peer_arc() {
-                    let fid = peer.file_id.load(Ordering::Acquire);
-                    if fid != 0 {
-                        crate::syscall::misc::epoll_notify_file(fid);
-                    }
-                }
                 return Ok(UnixRecvResult {
                     len: take,
                     orig_len,
