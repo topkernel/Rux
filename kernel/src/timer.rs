@@ -27,13 +27,16 @@ static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A timer entry in the active set.
 struct TimerEntry {
-    /// Jiffies when this timer fires.
+    /// Jiffies when this timer fires (jiffy-only timers; bookkeeping for
+    /// high-resolution entries — see `expires_time`).
     expires: u64,
     /// Optional HIGH-RESOLUTION absolute expiry (time CSR ticks, 100ns
-    /// each; 0 = jiffies-only timer). When set, the timer also fires as
-    /// soon as read_time() reaches it — nanosleep-class callers must never
-    /// be woken early, and jiffy rounding alone wakes up to one tick
-    /// (10ms) short (LTP clock_nanosleep02).
+    /// each; 0 = jiffies-only timer). When set, the timer fires EXACTLY
+    /// when read_time() reaches it and never otherwise — nanosleep-class
+    /// callers must never be woken early, and the jiffies counter can lag
+    /// the time grid under load, so a jiffy fallback for these entries
+    /// fired early and consumed the one-shot wake (lost-wakeup root
+    /// cause; LTP clock_nanosleep02 also forbids early wakes).
     expires_time: u64,
 }
 
@@ -153,9 +156,11 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
 }
 
 /// Add a one-shot HIGH-RESOLUTION wake timer: fires when the time CSR
-/// reaches `expires_time` (absolute ticks), with `expires` as the jiffy
-/// fallback (must be >= the jiffy covering expires_time so the timer
-/// never lingers). Used by nanosleep/clock_nanosleep.
+/// reaches `expires_time` (absolute ticks). `expires` is bookkeeping only
+/// for hres entries — the softirq expiry decision uses `expires_time`
+/// exclusively (see timer_softirq_handler: a jiffy fallback firing an
+/// hres entry EARLY consumed the one-shot wake and hung sleepers, the
+/// lost-timer-wakeup root cause). Used by nanosleep/clock_nanosleep.
 pub fn add_timer_wakeup_hres(expires: u64, expires_time: u64, wake_pid: u32) -> u64 {
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
     if id == 0 {
@@ -404,11 +409,44 @@ pub fn timer_softirq_handler(_nr: usize) {
         let mut actions = ACTIONS.lock_irqsave();
         let mut budget = EXPIRY_BUDGET;
         timers.retain(|&id, entry| {
-            // Expiry: the jiffy deadline, OR (for high-resolution entries)
-            // the precise time-CSR deadline has been reached.
-            if entry.expires <= current
-                || (entry.expires_time != 0 && entry.expires_time <= now_time)
-            {
+            // Expiry. High-resolution entries (expires_time != 0) fire ONLY
+            // on the precise time-CSR compare — the old `||
+            // entry.expires <= current` jiffy fallback ALSO fired them, and
+            // that is the lost-timer-wakeup root cause (timer-fix hunt,
+            // unix_wedge TIMER-STALL / GNOME final blocker):
+            //
+            //   `expires` is computed as get_jiffies() + ceil(...) + 1 at
+            //   ARM time, but jiffies advance only inside
+            //   increment_jiffies() on some hart's timer IRQ — under load
+            //   (long SIE=0 windows) the counter LAGS the time grid by more
+            //   than the +1 grid-tick margin, so `expires` lands BEFORE the
+            //   real time that hres_deadline represents. When ticks resume,
+            //   jiffies jump forward (max-with-nominal) and the scan fires
+            //   the entry EARLY — observed 100us..2.4ms before
+            //   expires_time (TIMER-EARLY-FIRE ... via=2 tripwire), always
+            //   immediately followed by a permanently sleeping task.
+            //
+            // Why that is fatal: the one-shot wake is the ONLY waker for
+            // nanosleep-class sleepers. An early fire consumes the token;
+            // the sleeper's re-check still sees time < hres_deadline, so it
+            // goes back to INTERRUPTIBLE sleep — with no timer left. The
+            // task hangs in state=S forever (timer_probe reproduces at
+            // ~60%/60s; unix_wedge PROC-STALL epw/srv state=S).
+            //
+            // The jiffy fallback is also redundant for hres entries:
+            // collection is guaranteed by ANY later scan, because
+            // `expires_time <= now_time` eventually holds on the jiffy
+            // grid alone (now_time only grows). Jiffy-only entries
+            // (expires_time == 0: poll_sleep_slice, unix_wait_round,
+            // itimers ...) keep firing on `expires <= current` — their
+            // callers re-check against the same jiffies clock, so an
+            // early-by-grid-jump fire is unobservable to them.
+            let due = if entry.expires_time != 0 {
+                entry.expires_time <= now_time
+            } else {
+                entry.expires <= current
+            };
+            if due {
                 if budget == 0 {
                     // Budget exhausted: keep the entry — it is re-scanned on
                     // the next jiffy. Never let the critical section allocate.
