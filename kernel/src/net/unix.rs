@@ -1092,6 +1092,19 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                 drop(q);
                 // Room may have freed for senders blocked on our queue.
                 sock.wait_queue.wake_up_all();
+                // Draining also raises the PEER's writability (its send
+                // queue just got room) — an EPOLLET edge on the peer's
+                // fd. Without this notify, a peer whose EPOLLOUT edge was
+                // reported and then swallowed by a fill/drain cycle between
+                // two epoll_wait calls (snapshot still says EPOLLOUT ==
+                // last_reported) never learns it can write again — Linux
+                // fires the sender's write_space callback here.
+                if let Some(peer) = sock.peer_arc() {
+                    let fid = peer.file_id.load(Ordering::Acquire);
+                    if fid != 0 {
+                        crate::syscall::misc::epoll_notify_file(fid);
+                    }
+                }
                 return Ok(UnixRecvResult {
                     len: copied,
                     orig_len: orig_total,
@@ -1114,6 +1127,13 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                 let src = seg.src;
                 drop(q);
                 sock.wait_queue.wake_up_all();
+                // Peer writability rose (see the STREAM branch above).
+                if let Some(peer) = sock.peer_arc() {
+                    let fid = peer.file_id.load(Ordering::Acquire);
+                    if fid != 0 {
+                        crate::syscall::misc::epoll_notify_file(fid);
+                    }
+                }
                 return Ok(UnixRecvResult {
                     len: take,
                     orig_len,
