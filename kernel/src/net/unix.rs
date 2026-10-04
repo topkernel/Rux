@@ -926,6 +926,16 @@ pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
 /// Can `target` accept a segment of `len` bytes (Linux unix-SO_SNDBUF
 /// semantics: at least one segment is always accepted)?
 fn target_has_room(target: &Arc<UnixSocket>, len: usize, cap: usize) -> bool {
+    // A target that closed (or is tearing down) will NEVER drain its
+    // queue: report room so a sender blocked on a full receive queue
+    // wakes up and takes the EPIPE path in the send loop. Linux wakes
+    // blocked writers when the peer's socket is released; without this
+    // the single wake from unix_close() re-checked a still-full queue
+    // and the sender went back to sleep forever — a wedged client whose
+    // server had exited without draining (unixstress chaos child hang).
+    if *target.dead.lock() || *target.state.lock() == UnixState::Closed {
+        return true;
+    }
     let queued = target.queued_bytes();
     queued == 0 || queued + len <= cap
 }
