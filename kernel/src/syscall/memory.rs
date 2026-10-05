@@ -744,7 +744,17 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 if vma_flags.is_executable() {
                                     pte_flags |= PageTableEntry::X;
                                 }
-                                let npages = actual_length / crate::mm::page::PAGE_SIZE;
+                                // Round UP: LTP getpid02/clone03 mmap
+                                // sizeof(pid_t) == 4 bytes — the old
+                                // length/PAGE_SIZE truncation computed
+                                // npages == 0, mapped NOTHING eagerly, and
+                                // the post-fork demand faults then produced
+                                // PRIVATE zero pages per process (parent
+                                // read 0 where the child wrote its pid).
+                                let npages = (actual_length
+                                    + crate::mm::page::PAGE_SIZE
+                                        - 1)
+                                    / crate::mm::page::PAGE_SIZE;
                                 let mut failed = false;
                                 for i in 0..npages {
                                     let phys = crate::mm::page_alloc::get_zeroed_page(
