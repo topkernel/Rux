@@ -60,7 +60,16 @@ impl IoCompletion {
     ///
     /// Wakes all waiters. Safe to call from interrupt context
     /// (no allocation, no BKL).
+    ///
+    /// VIRTIO-WQ-1 (virtio-blk ABBA fix): callers must NOT hold a virtio
+    /// driver lock — wake_up_all takes the wait-queue lock across
+    /// wake_up_process for every waiter, and nesting that inside
+    /// VIRTIO_PCI_BLK_LOCK (or the MMIO virtqueue lock) is the final6
+    /// GNOME deadlock family. Debug builds panic at the violation point
+    /// instead of wedging the machine.
     pub fn complete(&self, status: i32) {
+        #[cfg(debug_assertions)]
+        crate::drivers::virtio::assert_no_virtio_lock("IoCompletion::complete");
         self.status.store(status, Ordering::Release);
         self.done.store(true, Ordering::Release);
         self.wait_queue.wake_up_all();

@@ -1137,11 +1137,18 @@ pub fn bread_async(
                     let mut lru = unsafe { cache.lru_lock_under_bucket() };
                     BlockCache::move_to_lru_head(&mut lru, entry_ptr);
                     (*entry.bh).get();
-                    // The caller will bread_wait() on its completion; no I/O
-                    // is in flight for a cache hit, so signal it now —
-                    // otherwise the caller sleeps forever (review VFS-H7).
+                    let hit_bh = entry.bh;
+                    // Bucket/LRU locks drop HERE. The caller will bread_wait()
+                    // on its completion; no I/O is in flight for a cache hit,
+                    // so signal it right after releasing the locks — the
+                    // in-flight branch above already drops the bucket lock
+                    // before completing, and complete() takes the waiter's
+                    // wait-queue lock (wake-under-bucket-lock was the last
+                    // wake-nested-in-a-driver-lock site; INV-LOCK-6).
+                    drop(lru);
+                    drop(bucket);
                     completion.complete(0);
-                    return Some(entry.bh);
+                    return Some(hit_bh);
                 }
                 prev = Some(entry_ptr);
                 current = entry.hash_next;

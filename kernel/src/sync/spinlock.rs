@@ -45,6 +45,18 @@
 //!
 //! - **INV-LOCK-5**: GRQ lock and futex hash bucket lock nesting direction is
 //!   consistent: GRQ may nest inside futex bucket, but never the reverse.
+//!
+//! - **INV-LOCK-6** (virtio-blk ABBA fix): a wait-queue lock
+//!   (`WaitQueueHead`'s internal `Spinlock<Vec<WaitQueueEntry>>`) must NEVER
+//!   be acquired while holding a virtio driver lock (`VIRTIO_PCI_BLK_LOCK`,
+//!   the MMIO device's `virtqueue` lock, `VIRTIO_*_PENDING`). Wait-queue
+//!   wakeups run `sched::wake_up_process` (GRQ lock) per waiter while
+//!   holding the wait-queue lock, so nesting it under a virtio lock builds
+//!   the BLK→waitqueue convoy that froze GNOME final6 (deadlock watchdog:
+//!   one CPU stuck on the virtio BSS lock, another on a heap wait-queue
+//!   lock, timer IRQs stopped). Drivers must COLLECT completed work under
+//!   their locks and deliver wakes OUTSIDE them (timer.rs R12-3 pattern);
+//!   see drivers/virtio/mod.rs and `assert_no_virtio_lock`.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};

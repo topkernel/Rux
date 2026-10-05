@@ -402,6 +402,7 @@ impl VirtIOBlkDevice {
         let (used_ring_ptr, prev_used, submitted_desc_id, queue_sz, header_ptr, header_layout, resp_ptr, resp_layout) = {
             // Get VirtQueue (irqsafe: IRQ handler also takes this lock)
             let mut queue_guard = self.virtqueue.lock_irqsave();
+            let _nest = VirtioLockNest::new();
             let queue = match queue_guard.as_mut() {
                 Some(q) => q,
                 None => return Err(-5),
@@ -618,6 +619,7 @@ impl VirtIOBlkDevice {
         let (used_ring_ptr, prev_used, submitted_desc_id, queue_sz, header_ptr, header_layout, resp_ptr, resp_layout) = {
             // Get VirtQueue (irqsafe: IRQ handler also takes this lock)
             let mut queue_guard = self.virtqueue.lock_irqsave();
+            let _nest = VirtioLockNest::new();
             let queue = queue_guard.as_mut().ok_or(-5)?;
 
             use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
@@ -828,6 +830,7 @@ impl VirtIOBlkDevice {
         use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
 
         let mut queue_guard = self.virtqueue.lock_irqsave();
+        let _nest = VirtioLockNest::new();
         let queue = match queue_guard.as_mut() {
             Some(q) => q,
             None => return Err(-5),
@@ -1075,6 +1078,101 @@ fn increment_mmio_expected_used_idx() {
 /// Global VirtIO PCI block device expected used.idx (for tracking I/O completion status)
 /// Incremented each time request is submitted, used to detect if device completed request
 static VIRTIO_PCI_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+
+// ============================================================================
+// LOCK ORDER (virtio-blk ABBA fix — the GNOME final6 deadlock family)
+//
+// INVARIANT VIRTIO-WQ-1: a wait-queue lock (WaitQueueHead's internal
+// Spinlock<Vec<WaitQueueEntry>>, taken by wake_up_all / prepare_to_wait /
+// finish_wait / add / remove) must NEVER be acquired while holding a virtio
+// driver lock (VIRTIO_PCI_BLK_LOCK, the MMIO device's `virtqueue` lock, or a
+// VIRTIO_*_PENDING table lock).
+//
+// Why: WaitQueueHead::wake_up() holds the wait-queue lock across
+// sched::wake_up_process() (→ GRQ lock, per-waiter, slow under TCG), and
+// IoCompletion::wait() waiters run prepare_to_wait() on their OWN stack
+// completion (fill_page_cache_batch keeps [IoCompletion; 128] there) while
+// other CPUs submit block I/O. The old completion walker ran
+// `(*pending.completion).complete()` (→ wake_up_all → wait-queue lock) while
+// STILL HOLDING VIRTIO_PCI_BLK_LOCK with IRQs off; every submitter then piled
+// onto VIRTIO_PCI_BLK_LOCK (deadlock watchdog: cpu1/cpu3 stuck on
+// VIRTIO_PCI_BLK_LOCK @BSS, cpu0 stuck on a heap wait-queue lock inside
+// `Spinlock<Vec<WaitQueueEntry>>` lock_irqsave — fire-gnome-final6
+// attempt2/k7542fc3 serial logs) and timer IRQs stopped system-wide.
+//
+// The fix is the timer.rs R12-3 pattern: completion DELIVERY (dealloc +
+// IoCompletion::complete + wake_up_all) happens strictly OUTSIDE the virtio
+// locks. The walkers collect finished PendingIo entries under the locks, drop
+// the locks, then deliver. `VirtioLockNest` below arms a per-CPU counter so
+// debug builds assert the invariant at every wake entry point
+// (IoCompletion::complete and the two sync-queue wake_up_all sites).
+// ============================================================================
+
+/// Per-CPU depth of held virtio driver locks (debug nesting guard for
+/// INVARIANT VIRTIO-WQ-1). 0 on release builds.
+#[cfg(debug_assertions)]
+static VIRTIO_LOCK_DEPTH: [core::sync::atomic::AtomicUsize; crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::config::MAX_CPUS];
+
+/// True while the current CPU holds any virtio driver lock (debug only).
+#[cfg(debug_assertions)]
+pub fn virtio_lock_held() -> bool {
+    let cpu = crate::arch::riscv64::smp::cpu_id();
+    VIRTIO_LOCK_DEPTH[cpu.min(crate::config::MAX_CPUS - 1)]
+        .load(core::sync::atomic::Ordering::Acquire)
+        > 0
+}
+
+/// RAII marker armed around every virtio driver-lock critical section
+/// (debug builds only). IoCompletion::complete() and the wait-queue wake
+/// sites assert !virtio_lock_held() so any reintroduced nesting panics at
+/// the violation point instead of deadlocking the machine.
+#[cfg(debug_assertions)]
+pub(crate) struct VirtioLockNest;
+
+#[cfg(debug_assertions)]
+impl VirtioLockNest {
+    #[inline]
+    pub(crate) fn new() -> Self {
+        let cpu = crate::arch::riscv64::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
+        VIRTIO_LOCK_DEPTH[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        Self
+    }
+}
+
+#[cfg(debug_assertions)]
+impl core::ops::Drop for VirtioLockNest {
+    #[inline]
+    fn drop(&mut self) {
+        let cpu = crate::arch::riscv64::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
+        VIRTIO_LOCK_DEPTH[cpu].fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Compile-time no-op stand-in for release builds.
+#[cfg(not(debug_assertions))]
+pub(crate) struct VirtioLockNest;
+
+#[cfg(not(debug_assertions))]
+impl VirtioLockNest {
+    #[inline]
+    pub(crate) fn new() -> Self { Self }
+}
+
+/// Panic-at-the-violation-point check for INVARIANT VIRTIO-WQ-1 (debug
+/// builds only): callers must not be inside a virtio driver-lock critical
+/// section when they reach a wait-queue wake.
+#[cfg(debug_assertions)]
+pub fn assert_no_virtio_lock(what: &str) {
+    if virtio_lock_held() {
+        panic!(
+            "virtio: {} called with a virtio driver lock held — \
+             VIRTIO-WQ-1 lock-order violation (wait-queue wake inside the \
+             virtio lock; see drivers/virtio/mod.rs)",
+            what
+        );
+    }
+}
 
 // ============================================================================
 // PCI VirtIO-Blk async read support
@@ -1358,6 +1456,7 @@ unsafe fn pci_submit_read_async(
     // advance before the pending entry is published — the lost-completion
     // race documented on the MMIO path.
     let _guard = VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+    let _nest = VirtioLockNest::new();
 
     let virt_queue = match get_pci_device_queue_mut() {
         Some(q) => q,
@@ -1510,10 +1609,23 @@ unsafe fn pci_async_read_fn(
 /// wrong pendings (early fires with fabricated EIO; see
 /// VIRTIO_PCI_PENDING).
 ///
-/// Runs in the Block softirq (raised by the PCI IRQ handler) under the PCI
-/// BLK lock — the same context/discipline as the MMIO completion walker, so
-/// IoCompletion::complete (wait-queue wakeup) never runs in hard-IRQ context.
+/// Runs in the Block softirq (raised by the PCI IRQ handler) — never in
+/// hard-IRQ context. VIRTIO-WQ-1 discipline (the virtio-blk ABBA fix): the
+/// walk COLLECTS finished PendingIo entries under the BLK lock, then drops
+/// every lock before delivering (dealloc + IoCompletion::complete, which
+/// takes a wait-queue lock and calls wake_up_process per waiter). The old
+/// code completed in-lock: a BLK holder blocked on a wait-queue lock while
+/// waiters and submitters piled onto the BLK lock with IRQs off — the
+/// final6 GNOME deadlock (timer IRQ stop, all-vruntime freeze).
+///
+/// Collection is chunked (16 entries per lock pass) so each irqsave section
+/// stays short even when a large batch lands at once.
 pub fn pci_process_async_completions() {
+    /// Collected-per-lock-pass bound. 16 × sizeof(PendingIo) ≈ 1.3 KiB of
+    /// stack per pass; the outer loop repeats until caught up or the total
+    /// budget (one queue window) is spent.
+    const CHUNK: usize = 16;
+
     // Fast path: nothing pending. Read the used ring first; if the walker is
     // already caught up, skip the lock entirely.
     let (used_ring, queue_sz) = match get_pci_device_queue() {
@@ -1533,72 +1645,97 @@ pub fn pci_process_async_completions() {
         return;
     }
 
-    let _guard = VIRTIO_PCI_BLK_LOCK.lock_irqsave();
-    // Re-read under the lock (a submission may have landed since).
-    // SAFETY: same field, queue alive.
-    let used_idx = unsafe {
-        core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
-    };
-    let mut i = VIRTIO_PCI_PENDING_LAST.load(core::sync::atomic::Ordering::Acquire);
-    // Bounded by one queue window per pass; u16 wrap-safe subtraction.
+    // Bounded by one queue window per call; u16 wrap-safe walk.
     let mut budget = MAX_PENDING_IO_PCI as u16;
-    while i != used_idx && budget > 0 {
-        budget -= 1;
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        // The completed chain's head descriptor id (UsedElem.id at
-        // used_ring + 4 + pos*8; the device publishes it only after the
-        // chain — including its DMA writes — is done).
-        // SAFETY: ring position `i % queue_sz` is within the used ring.
-        let ring_pos = (i as usize) % queue_sz as usize;
-        let entry_id = unsafe {
-            core::ptr::read_volatile(
-                (used_ring as usize + 4 + ring_pos * 8) as *const u32
-            )
-        };
-        // Fire the pending whose chain this entry completed (keyed lookup —
-        // order-independent; window reservation makes head_desc unique
-        // among live entries, so the match is unambiguous). No match at
-        // all = an entry retired by a path that no longer tracks it.
-        let mut fired: Option<PendingIo> = None;
+    loop {
+        // ---- Phase 1: collect under the BLK lock (short irqsave section) --
+        let mut done: [Option<PendingIo>; CHUNK] = [const { None }; CHUNK];
+        let mut collected = 0usize;
         {
-            let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
-            let mut hit = usize::MAX;
-            for (j, e) in table.iter().enumerate() {
-                if let Some(p) = e {
-                    if p.head_desc == entry_id {
-                        hit = j;
-                        break;
+            let _guard = VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+            let _nest = VirtioLockNest::new();
+            // Re-read under the lock (a submission may have landed since).
+            // SAFETY: same field, queue alive.
+            let used_idx = unsafe {
+                core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+            };
+            let mut i = VIRTIO_PCI_PENDING_LAST.load(core::sync::atomic::Ordering::Acquire);
+            while i != used_idx && budget > 0 && collected < CHUNK {
+                budget -= 1;
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                // The completed chain's head descriptor id (UsedElem.id at
+                // used_ring + 4 + pos*8; the device publishes it only after
+                // the chain — including its DMA writes — is done).
+                // SAFETY: ring position `i % queue_sz` is within the used ring.
+                let ring_pos = (i as usize) % queue_sz as usize;
+                let entry_id = unsafe {
+                    core::ptr::read_volatile(
+                        (used_ring as usize + 4 + ring_pos * 8) as *const u32
+                    )
+                };
+                // Keyed lookup — order-independent; window reservation makes
+                // head_desc unique among live entries, so the match is
+                // unambiguous. Tombstones match too (their used-ring entry
+                // releases the descriptor window). No match at all = an
+                // entry retired by a path that no longer tracks it.
+                let mut fired: Option<PendingIo> = None;
+                {
+                    let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
+                    for e in table.iter_mut() {
+                        if let Some(p) = e {
+                            if p.head_desc == entry_id {
+                                fired = e.take();
+                                break;
+                            }
+                        }
                     }
                 }
-            }
-            if hit != usize::MAX {
-                fired = table[hit].take();
-            }
-        }
-        if let Some(pending) = fired {
-            if !pending.completion.is_null() {
-                let status = unsafe { *(pending.resp_ptr as *mut u8) };
-                let io_status = if status == 0 { 0 } else { -5i32 };
-                // SAFETY: the combined R17-C block: header at base, resp at
-                // +48, both inside the single 64-byte allocation
-                // (resp_layout == base).
-                unsafe {
-                    alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
+                if let Some(p) = fired {
+                    done[collected] = Some(p);
+                    collected += 1;
                 }
-                // SAFETY: the waiter keeps this completion alive until it
-                // fires (or converts its entry into a tombstone via
-                // abandon_pending_completion before leaving).
-                unsafe { (*pending.completion).complete(io_status); }
+                i = i.wrapping_add(1);
             }
+            VIRTIO_PCI_PENDING_LAST.store(i, core::sync::atomic::Ordering::Release);
+            // _nest, table guards and the BLK lock all drop HERE.
+        }
+
+        if collected == 0 {
+            break; // caught up (or nothing matched)
+        }
+
+        // ---- Phase 2: deliver OUTSIDE every virtio lock (R12-3) -----------
+        // Each complete() takes the waiter's wait-queue lock and runs
+        // wake_up_process per waiter; doing that under the BLK lock is the
+        // ABBA this walker must never reintroduce.
+        for k in 0..collected {
+            let pending = done[k].take().unwrap();
             // NULL completion = TOMBSTONE (synchronous chain or timed-out
             // abandon): its used-ring entry just released the descriptor
             // window — nothing to read, free, or fire. Sync chains' io_buf
             // is owned and freed by their own waiter; abandoned io_bufs
             // were deliberately leaked at abandon time.
+            if pending.completion.is_null() {
+                continue;
+            }
+            let status = unsafe { *(pending.resp_ptr as *mut u8) };
+            let io_status = if status == 0 { 0 } else { -5i32 };
+            // SAFETY: the combined R17-C block: header at base, resp at
+            // +48, both inside the single 64-byte allocation
+            // (resp_layout == base).
+            unsafe {
+                alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
+            }
+            // SAFETY: the waiter keeps this completion alive until it
+            // fires (or converts its entry into a tombstone via
+            // abandon_pending_completion before leaving).
+            unsafe { (*pending.completion).complete(io_status); }
         }
-        i = i.wrapping_add(1);
+
+        if budget == 0 {
+            break;
+        }
     }
-    VIRTIO_PCI_PENDING_LAST.store(i, core::sync::atomic::Ordering::Release);
 }
 
 /// PCI device ready flag (using atomic type to ensure multi-core visibility)
@@ -1900,9 +2037,17 @@ pub fn get_pci_gen_disk() -> Option<&'static GenDisk> {
 /// PCI VirtIO-Blk interrupt handler (Modern VirtIO 1.0+)
 ///
 /// Registered via request_irq. EOI (PLIC complete) is done by the IRQ framework.
+///
+/// Top half ONLY (the MMIO ISR discipline, now applied to PCI too): the ISR
+/// acknowledges the device and raises the Block softirq. Every wait-queue
+/// wakeup — async IoCompletion delivery AND the sync queues — happens in
+/// `block_bh_handler` (softirq context, no virtio lock held). The old ISR
+/// called wake_up_all() on both sync queues directly in hard-IRQ context:
+/// each wake holds the wait-queue lock across wake_up_process (→ GRQ) for
+/// EVERY waiter, a long IRQ-off window that fed the BLK↔waitqueue lock
+/// convoy (VIRTIO-WQ-1) and stopped timer IRQs system-wide.
 pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
-    // SAFETY: VIRTIO_PCI_BLK is initialized before IRQ registration;
-    // waking wait queue is safe from IRQ context.
+    // SAFETY: VIRTIO_PCI_BLK is initialized before IRQ registration.
     unsafe {
         if let Some(pci_device) = VIRTIO_PCI_BLK.as_ref() {
             // Read ISR status FIRST: per the virtio 1.1 spec the read drops
@@ -1917,24 +2062,13 @@ pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::Irq
                     return crate::interrupt::IrqReturn::None;
                 }
             }
-            // Async read completions are processed in the Block softirq (same
-            // discipline as the MMIO device): completing an IoCompletion
-            // wakes a wait queue, which must not run in hard-IRQ context.
+            // Deferred-wake discipline (R12-3): collect in the top half,
+            // deliver in the bottom half. The Block softirq runs at
+            // irq_exit() time, so wakeup latency stays bounded while the
+            // hard-IRQ section stays minimal.
             crate::interrupt::softirq::raise_softirq_irqoff(
                 crate::interrupt::softirq::SoftirqIndex::Block as usize,
             );
-            VIRTIO_PCI_BLK_WAIT_QUEUE.wake_up_all();
-            // FIX8 (lost-wakeup wedge): the synchronous read_block/write_block
-            // request path waits on VIRTIO_BLK_WAIT_QUEUE (the MMIO-era sync
-            // queue) even for the PCI device, but nothing on the PCI
-            // interrupt path ever woke that queue — block_bh_handler only
-            // reaches its wake under `VIRTIO_BLK.as_ref()` (MMIO present).
-            // A completion landing between a waiter's used-ring re-check and
-            // its schedule() then slept forever: the intermittent silent
-            // wedge after ~2MB of writes (buffer-cache eviction begins
-            // syncing dirty victims through this path). Wake the sync queue
-            // here too — wake_up_all on an empty queue is a no-op.
-            VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
         }
     }
     crate::interrupt::IrqReturn::Handled
@@ -1975,67 +2109,111 @@ pub fn interrupt_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqRetu
 ///
 /// Processes completed VirtIO Block I/O descriptors deferred from
 /// the interrupt handler. Runs in softirq context.
+///
+/// VIRTIO-WQ-1 discipline (virtio-blk ABBA fix): completed pendings are
+/// COLLECTED under the MMIO virtqueue lock, the lock is dropped, and only
+/// then are the IoCompletions delivered (complete() takes wait-queue locks
+/// and wakes tasks). The final sync-queue wake_up_all()s also run here,
+/// OUTSIDE every virtio lock — they moved out of the PCI hard-ISR top half
+/// (see interrupt_handler_pci) and out from under the virtqueue guard.
 pub fn block_bh_handler(_vec: usize) {
     // SAFETY: Runs in softirq context; VIRTIO_BLK is initialized. The irqsave
     // lock on virtqueue ensures mutual exclusion with hardirq handlers.
     unsafe {
         if let Some(device) = VIRTIO_BLK.as_ref() {
-            // Read current used ring index (irqsafe: runs in softirq, can be
-            // preempted by hard IRQ that also takes this lock)
-            let queue_guard = device.virtqueue.lock_irqsave();
-            if let Some(ref queue) = *queue_guard {
-                let used_ring = queue.used_ring_ptr();
-                let used_idx = core::ptr::read_volatile(
-                    (used_ring as usize + 2) as *const u16
-                );
-                let last_processed = VIRTIO_MMIO_LAST_PROCESSED
-                    .load(core::sync::atomic::Ordering::Acquire);
+            // MMIO pending table holds at most MAX_PENDING_IO live entries,
+            // so one collection array covers a full catch-up pass.
+            let mut done: [Option<PendingIo>; MAX_PENDING_IO] =
+                [const { None }; MAX_PENDING_IO];
+            let mut collected = 0usize;
+            {
+                // Read current used ring index (irqsafe: runs in softirq, can
+                // be preempted by hard IRQ that also takes this lock)
+                let queue_guard = device.virtqueue.lock_irqsave();
+                let _nest = VirtioLockNest::new();
+                if let Some(ref queue) = *queue_guard {
+                    let used_ring = queue.used_ring_ptr();
+                    let used_idx = core::ptr::read_volatile(
+                        (used_ring as usize + 2) as *const u16
+                    );
+                    let last_processed = VIRTIO_MMIO_LAST_PROCESSED
+                        .load(core::sync::atomic::Ordering::Acquire);
 
-                // Process each newly completed descriptor
-                let mut i = last_processed;
-                while i != used_idx {
-                    let slot = i as usize % MAX_PENDING_IO;
-                    let mut pending = VIRTIO_MMIO_PENDING.lock_irqsave();
-                    if let Some(pending) = pending[slot].take() {
-                        if pending.completion.is_null() {
-                            // TOMBSTONE (timed-out waiter): its used-ring
-                            // entry just released the slot — nothing to
-                            // read, free (the io_buf was deliberately
-                            // leaked), or fire into unwound memory.
-                            i = i.wrapping_add(1);
-                            continue;
+                    // Collect each newly completed descriptor's pending I/O.
+                    // TOMBSTONEs (timed-out waiter / sync chain) are taken
+                    // too — their used-ring entry releases the slot — but
+                    // are skipped at delivery time below.
+                    let mut i = last_processed;
+                    while i != used_idx {
+                        let slot = i as usize % MAX_PENDING_IO;
+                        let mut pending = VIRTIO_MMIO_PENDING.lock_irqsave();
+                        if let Some(pending) = pending[slot].take() {
+                            if collected < MAX_PENDING_IO {
+                                done[collected] = Some(pending);
+                                collected += 1;
+                            }
+                            // Overflow cannot happen (table holds at most
+                            // MAX_PENDING_IO Somes); keep the walker moving.
                         }
-                        // Read response status
-                        let status = if !pending.resp_ptr.is_null() {
-                            *(pending.resp_ptr as *mut u8)
-                        } else {
-                            0
-                        };
-                        let io_status = if status == 0 { 0 } else { -5i32 };
-
-                        // Free allocated buffers
-                        alloc::alloc::dealloc(
-                            pending.header_ptr, pending.header_layout,
-                        );
-                        alloc::alloc::dealloc(
-                            pending.resp_ptr, pending.resp_layout,
-                        );
-
-                        // Signal completion
-                        (*pending.completion).complete(io_status);
+                        i = i.wrapping_add(1);
                     }
-                    i = i.wrapping_add(1);
+                    VIRTIO_MMIO_LAST_PROCESSED.store(used_idx,
+                        core::sync::atomic::Ordering::Release);
                 }
-                VIRTIO_MMIO_LAST_PROCESSED.store(used_idx,
-                    core::sync::atomic::Ordering::Release);
+                // queue_guard drops HERE — no virtio lock is held below.
             }
-            // Also wake synchronous waiters (backward compat)
-            VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
+
+            // Deliver outside the virtqueue lock (R12-3): free buffers and
+            // complete, waking waiters without holding any virtio lock.
+            for k in 0..collected {
+                if let Some(pending) = done[k].take() {
+                    // TOMBSTONE (timed-out waiter / sync chain): nothing to
+                    // read, free (the io_buf was deliberately leaked), or
+                    // fire into unwound memory.
+                    if pending.completion.is_null() {
+                        continue;
+                    }
+                    // Read response status
+                    let status = if !pending.resp_ptr.is_null() {
+                        *(pending.resp_ptr as *mut u8)
+                    } else {
+                        0
+                    };
+                    let io_status = if status == 0 { 0 } else { -5i32 };
+
+                    // Free allocated buffers
+                    alloc::alloc::dealloc(
+                        pending.header_ptr, pending.header_layout,
+                    );
+                    alloc::alloc::dealloc(
+                        pending.resp_ptr, pending.resp_layout,
+                    );
+
+                    // Signal completion
+                    (*pending.completion).complete(io_status);
+                }
+            }
         }
         // PCI async reads complete here too (raised by
         // interrupt_handler_pci); independent of the MMIO device so a
         // PCI-only boot still drains its pending table.
         pci_process_async_completions();
+
+        // FIX8 (lost-wakeup wedge), relocated from the PCI hard-ISR top
+        // half: the synchronous read_block/write_block request path waits on
+        // VIRTIO_BLK_WAIT_QUEUE (the MMIO-era sync queue) even for the PCI
+        // device, and the PCI sync paths wait on
+        // VIRTIO_PCI_BLK_WAIT_QUEUE. Both must be woken from the completion
+        // path — a completion landing between a waiter's used-ring re-check
+        // and its schedule() would otherwise sleep forever (the intermittent
+        // silent wedge after ~2MB of writes). Doing it here (softirq, no
+        // virtio lock held, IRQs enabled) keeps the hard-IRQ section minimal
+        // and cannot nest the wait-queue lock inside a virtio lock.
+        // wake_up_all on an empty queue is a no-op.
+        #[cfg(debug_assertions)]
+        crate::drivers::virtio::assert_no_virtio_lock("VIRTIO_PCI_BLK_WAIT_QUEUE wake (BH)");
+        VIRTIO_PCI_BLK_WAIT_QUEUE.wake_up_all();
+        VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
     }
 }
 

@@ -127,6 +127,15 @@ impl WaitQueueHead {
     ///
     /// # Returns
     /// Actual number of processes woken
+    ///
+    /// LOCK ORDER (INV-LOCK-6, virtio-blk ABBA fix): this function takes the
+    /// wait-queue lock and holds it across sched::wake_up_process for every
+    /// woken waiter. Callers must therefore NOT hold any virtio driver lock
+    /// (VIRTIO_PCI_BLK_LOCK, MMIO virtqueue lock, VIRTIO_*_PENDING) when
+    /// calling wake_up/wake_up_all/add/prepare_to_wait/finish_wait: nesting
+    /// a wait-queue lock inside a virtio lock is the BLK↔waitqueue ABBA that
+    /// froze GNOME final6 with timer IRQs stopped. Drivers collect completed
+    /// work under their locks and wake OUTSIDE them (timer.rs R12-3 pattern).
     pub fn wake_up(&self, _mode: WakeUpHint, nr: usize) -> usize {
         // Use lock_irqsave: this is called from interrupt handlers.
         let list = self.list.lock_irqsave();
