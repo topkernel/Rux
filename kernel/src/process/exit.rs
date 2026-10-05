@@ -982,13 +982,20 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
             // Full do_notify_parent siginfo: the new parent's SA_SIGINFO
             // handlers decode the orphan zombie's outcome from
             // si_code/si_status.
-            let info = crate::signal::SigInfo::child_exit(
+            let mut info = crate::signal::SigInfo::child_exit(
                 (*child).pid(),
                 (*child).cred().uid,
                 (*child).exit_code(),
                 (*child).core_dumped(),
             );
-            let _ = crate::signal::send_signal_with_info(dest_pid, info);
+            // do_notify_parent delivers the child's clone exit_signal.
+            let orphan_sig = (*child).get_exit_signal();
+            if orphan_sig != 0 {
+                if orphan_sig != crate::signal::Signal::SIGCHLD as u8 {
+                    info.si_signo = orphan_sig as i32;
+                }
+                let _ = crate::signal::send_signal_with_info(dest_pid, info);
+            }
             // init's default SIGCHLD disposition is SIG_IGN, so the signal
             // path neither pends nor wakes anything. Wake the new parent's
             // child-exit wait queue directly (same queue the deferred

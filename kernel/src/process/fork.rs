@@ -55,6 +55,9 @@ pub struct CloneArgs {
     pub child_tid: *mut i32,
     /// TLS pointer (CLONE_SETTLS)
     pub tls: u64,
+    /// Signal the parent gets at child exit (low CSIGNAL byte of the
+    /// legacy clone flags, or clone3's own field). 0 = none.
+    pub exit_signal: u8,
 }
 
 /// Create child process
@@ -69,6 +72,7 @@ pub fn do_fork() -> Option<Pid> {
         parent_tid: core::ptr::null_mut(),
         child_tid: core::ptr::null_mut(),
         tls: 0,
+        exit_signal: 17, // SIGCHLD
     })
     .ok()
 }
@@ -399,6 +403,12 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // Copy signal mask
         (*task_ptr).sigmask = (*current_ptr).sigmask;
+
+        // Exit signal for the parent (clone CSIGNAL byte / clone3 field).
+        // Threads never notify a parent this way, but record it anyway —
+        // the notify path reads the field uniformly (LTP clone301:
+        // clone3 exit_signal=SIGUSR2 must SIGUSR2 the parent, not SIGCHLD).
+        (*task_ptr).set_exit_signal(args.exit_signal);
 
         // Inherit the executable path: a fork WITHOUT exec (daemon style)
         // keeps reporting the parent's program in /proc/[pid]/comm,

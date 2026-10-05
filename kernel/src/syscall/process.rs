@@ -41,12 +41,17 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     let tls = args[3];
     let child_tid = args[4] as *mut i32;
 
+    // Legacy clone: the low byte of `flags` is the exit signal (Linux
+    // copy_process: p->exit_signal = args->exit_signal == CSIGNAL mask).
+    let exit_signal = (flags & 0xff) as u8;
+
     let clone_args = CloneArgs {
         flags,
         stack,
         parent_tid,
         child_tid,
         tls,
+        exit_signal,
     };
 
     match do_clone(clone_args) {
@@ -4493,6 +4498,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         parent_tid,
         child_tid,
         tls,
+        exit_signal: exit_signal as u8,
     };
 
     match do_clone(clone_args) {

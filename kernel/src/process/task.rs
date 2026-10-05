@@ -682,6 +682,13 @@ pub struct Task {
     /// Exit code (valid in Zombie state)
     exit_code: i32,
 
+    /// Signal delivered to the parent at this task's exit (clone/
+    /// clone3 `exit_signal`; Linux stores it on the task and uses it
+    /// in do_notify_parent — SIGCHLD unless the clone asked otherwise,
+    /// LTP clone301 expects a clone3(SIGUSR2) child to SIGUSR2 its
+    /// parent). 0 = no signal.
+    exit_signal: u8,
+
     /// Signal that stopped the process (valid in Stopped state)
     stop_signal: i32,
 
@@ -1067,6 +1074,7 @@ impl Task {
             sigframe: None,
             parent: None,
             exit_code: 0,
+            exit_signal: 17, // SIGCHLD default (clone exit_signal)
             stop_signal: 0,
             stop_reported: core::sync::atomic::AtomicBool::new(false),
             comm: [0u8; 16],
@@ -3172,6 +3180,17 @@ impl Task {
 
     /// Get exit code
     #[inline]
+    /// Signal the parent receives at this task's exit (clone exit_signal).
+    pub fn get_exit_signal(&self) -> u8 {
+        self.exit_signal
+    }
+
+    /// Set the exit signal (clone/clone3; only meaningful before the
+    /// task first runs).
+    pub fn set_exit_signal(&mut self, sig: u8) {
+        self.exit_signal = sig;
+    }
+
     pub fn exit_code(&self) -> i32 {
         self.exit_code
     }

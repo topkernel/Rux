@@ -524,33 +524,44 @@ pub fn defer_exit_notify(parent_pid: u32, child_pid: u32) {
 /// Build the Linux do_notify_parent siginfo from the (zombie) child task:
 /// si_code = CLD_EXITED/CLD_KILLED/CLD_DUMPED and si_status in waitpid
 /// WSTATUS encoding. Falls back to None when the child is already gone
-/// from the pid hash (reaped by a racing WNOHANG loop).
-fn build_sigchld_info(child_pid: u32) -> Option<crate::signal::SigInfo> {
+/// from the pid hash (reaped by a racing WNOHANG loop). Returns the
+/// siginfo AND the child's clone exit_signal (do_notify_parent sends
+/// THAT signal, not always SIGCHLD — LTP clone301 exit_signal=SIGUSR2).
+fn build_sigchld_info(child_pid: u32) -> Option<(crate::signal::SigInfo, u8)> {
     let child = crate::process::pid_hash::pid_hash_lookup_pinned(child_pid);
     if child.is_null() {
         return None;
     }
     // SAFETY: child is pinned (refcount held); only read-only field access.
-    let info = unsafe {
-        crate::signal::SigInfo::child_exit(
+    let (info, exit_sig) = unsafe {
+        let i = crate::signal::SigInfo::child_exit(
             (*child).pid(),
             (*child).cred().uid,
             (*child).exit_code(),
             (*child).core_dumped(),
-        )
+        );
+        (i, (*child).get_exit_signal())
     };
     crate::process::task::Task::task_put(child);
-    Some(info)
+    Some((info, exit_sig))
 }
 
-/// Deliver one deferred exit notification: SIGCHLD with the child's exit
-/// siginfo to the parent, plus the group-wide wait_chldexit wake.
+/// Deliver one deferred exit notification: the child's clone exit_signal
+/// (SIGCHLD unless the clone asked otherwise) with the exit siginfo to the
+/// parent, plus the group-wide wait_chldexit wake.
 fn process_deferred_exit_pid(packed: i64) {
     use crate::signal::Signal;
     let (parent_pid, child_pid) = unpack_notify(packed);
     match build_sigchld_info(child_pid) {
-        Some(info) => {
-            let _ = crate::signal::send_signal_with_info(parent_pid, info);
+        Some((mut info, exit_sig)) => {
+            // Rewrite si_signo: the siginfo builder hardcodes SIGCHLD,
+            // do_notify_parent delivers p->exit_signal (0 = no signal).
+            if exit_sig != 0 && exit_sig != Signal::SIGCHLD as u8 {
+                info.si_signo = exit_sig as i32;
+            }
+            if exit_sig != 0 {
+                let _ = crate::signal::send_signal_with_info(parent_pid, info);
+            }
         }
         None => {
             // Child already reaped — the bare wake still unblocks a
