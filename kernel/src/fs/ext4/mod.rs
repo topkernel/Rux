@@ -1940,9 +1940,16 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             inode.update_cached_mode(crate::fs::inode::InodeMode::new(new_mode));
         }
         setattr_attr::ATTR_UID_GID => {
-            // arg1 = uid, arg2 = gid
+            // arg1 = uid, arg2 = gid. Keep the VFS-cached owner in sync —
+            // open()/chmod/chown DAC and owner checks read Inode.uid/gid
+            // directly while stat() goes through getattr; a stale cached
+            // owner made a post-chown chmod by the NEW owner fail EPERM
+            // (LTP chmod05: setup chowns testdir to nobody, drops to
+            // nobody, then chmods its own directory).
             ext4_inode.uid = arg1 as u16;
             ext4_inode.gid = arg2 as u16;
+            inode.uid.store(arg1 as u32, core::sync::atomic::Ordering::Relaxed);
+            inode.gid.store(arg2 as u32, core::sync::atomic::Ordering::Relaxed);
         }
         setattr_attr::ATTR_ATIME => {
             ext4_inode.atime = arg1 as u32;
@@ -2108,9 +2115,15 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     // Update timestamps: Unix epoch seconds from the wall clock
     // (drivers/rtc::wall_secs — goldfish RTC boot read + settimeofday
     // adjustments); the monotonic boot clock is never stored on disk.
+    // ctime changes on every metadata write. mtime is auto-stamped ONLY for
+    // size changes — a second setattr call in a utimensat pair (ATIME after
+    // MTIME) used to stomp the just-stored explicit mtime back to "now"
+    // (LTP utime01/utime02/utime04).
     let sec = crate::drivers::rtc::wall_secs() as u32;
-    ext4_inode.mtime = sec;
     ext4_inode.ctime = sec;
+    if attr == setattr_attr::ATTR_SIZE {
+        ext4_inode.mtime = sec;
+    }
 
     // Write back
     match inode::write_inode(fs, ext4_ino, &ext4_inode) {
