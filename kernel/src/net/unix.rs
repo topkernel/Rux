@@ -780,10 +780,18 @@ pub fn unix_connect(
             // Filesystem paths resolve to the node's inode identity, so
             // alias paths (symlinks: /var/run vs /run) find the listener
             // (Linux matches by inode — see fs_reg_key). An unresolvable
-            // path has no socket node: ECONNREFUSED.
-            let lookup_key = match fs_reg_key(&addr.key) {
-                Some(k) => k,
-                None => return Err(-111), // ECONNREFUSED — no node
+            // path has no socket node: ECONNREFUSED. ABSTRACT names
+            // (leading NUL) are already registry keys — never run them
+            // through the filesystem resolver (path_lookup of a "\0..."
+            // string always fails, so abstract connects were refused —
+            // LTP bind04 AF_UNIX abstract stream/seqpacket).
+            let lookup_key = if addr.key.starts_with('\0') {
+                addr.key.clone()
+            } else {
+                match fs_reg_key(&addr.key) {
+                    Some(k) => k,
+                    None => return Err(-111), // ECONNREFUSED — no node
+                }
             };
             let server = match lookup(&lookup_key) {
                 Some(s) => s,
@@ -879,10 +887,16 @@ pub fn unix_connect(
         UnixKind::Dgram => {
             // The target must exist (Linux checks this for connect()).
             // Resolved to the node's inode identity for the same
-            // alias-path reasons as STREAM.
-            let lookup_key = match fs_reg_key(&addr.key) {
-                Some(k) => k,
-                None => return Err(-111), // ECONNREFUSED — no node
+            // alias-path reasons as STREAM. Abstract names are their own
+            // registry keys (never through the filesystem resolver — see
+            // the Stream branch; LTP bind05 abstract datagram).
+            let lookup_key = if addr.key.starts_with('\0') {
+                addr.key.clone()
+            } else {
+                match fs_reg_key(&addr.key) {
+                    Some(k) => k,
+                    None => return Err(-111), // ECONNREFUSED — no node
+                }
             };
             if lookup(&lookup_key).is_none() {
                 return Err(-111); // ECONNREFUSED
