@@ -468,22 +468,6 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
         .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
 
-    // TEMP-DIAG: trace syscalls of processes named "cp"/"toybox" (debug harness)
-    if syscall_no != 222 {
-        let comm_is_cp = crate::sched::current().map(|t| {
-            let c = unsafe { (*t).comm() };
-            (c[0] == b'c' && c[1] == b'p' && c[2] == 0)
-                || (c[0] == b't' && c[1] == b'o' && c[2] == b'y')
-        }).unwrap_or(false);
-        if comm_is_cp {
-            crate::pr_err!("cp-trace nr={} a0={:#x} a1={:#x} a2={:#x} ret={:#x}",
-                syscall_no, args[0], args[1], args[2], result as u64);
-        }
-    }
-    if syscall_no == 221 {
-        crate::pr_err!("cp-trace EXECVE by pid={} a0={:#x}", crate::process::current_pid(), args[0]);
-    }
-
     crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
         crate::process::current_pid(), syscall_no, result,
         if result < 0 { "error" } else { "ok" });

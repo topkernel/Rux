@@ -496,6 +496,15 @@ impl FutEntry {
 const FUT_NEW: FutEntry = FutEntry::new();
 pub static FUT_RING: [FutEntry; 32] = [FUT_NEW; 32];
 pub static FUT_RING_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// Global cap on "REPEAT teardown" forensic reports. With only a 32-entry
+/// ring, high fork-churn tests (epoll-ltp: 13824 fork/exit protected
+/// regions) recycle root ppns within the ring window constantly — every
+/// benign teardown matched a stale entry and printed, flooding the serial
+/// console (10k+ lines per test) and drowning every other diagnostic.
+/// The first handful of reports carry the forensic value; the rest are
+/// duplicates.
+pub static FUT_REPEAT_REPORTS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 /// Free all page tables and user data pages used by a user address space
 ///
@@ -558,10 +567,16 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
         use core::sync::atomic::Ordering::Relaxed;
         for k in 0..FUT_RING.len() {
             if FUT_RING[k].root.load(Relaxed) == root_ppn && root_ppn != 0 {
-                crate::pr_err!(
-                    "FUT: REPEAT teardown of root ppn={:#x} (ring[{}])",
-                    root_ppn, k
-                );
+                if FUT_REPEAT_REPORTS.fetch_add(1, Relaxed) < 8 {
+                    crate::pr_err!(
+                        "FUT: REPEAT teardown of root ppn={:#x} (ring[{}])",
+                        root_ppn, k
+                    );
+                }
+                // Consume the matched entry even past the report cap —
+                // leaving it makes every later teardown of a recycled
+                // root ppn re-match the same stale slot.
+                FUT_RING[k].root.store(0, Relaxed);
                 break;
             }
         }
