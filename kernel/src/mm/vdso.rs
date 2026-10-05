@@ -252,9 +252,17 @@ fn emit_seqlock_read(a: &mut Asm, retry: usize) {
     a.br(bne_skel(T3, A6), retry); // bne t3, a6, retry
 }
 
-/// t5 += (rdcycle - t4) * 100 (ns interpolation at 10 MHz).
+/// t5 += (rdtime - t4) * 100 (ns interpolation at 10 MHz).
+///
+/// IMPORTANT: read the SAME counter the kernel snapshots into the data
+/// page (CLINT `time`, CSR 0xC01 — see vdso_data_tick). The old code used
+/// `rdcycle` (0xC00), a different counter whose rate only approximately
+/// matches the CLINT under QEMU TCG; the two drifted by seconds under
+/// host load and vdso time() ran away from kernel wall_secs() (mtime
+/// source) — LTP utime01/02/03 before/after windows failed. U-mode
+/// access is enabled by scounteren.TM set in arch init.
 fn emit_interpolate(a: &mut Asm) {
-    a.emit(i_type(0xC00, ZERO, 2, A7, 0x73)); // rdcycle a7
+    a.emit(i_type(0xC01, ZERO, 2, A7, 0x73)); // rdtime a7
     a.emit(r_type(0x20, T4, A7, 0, A7, 0x33)); // sub a7, a7, t4
     a.emit(i_type(100, ZERO, 0, T1, 0x13)); // li t1, 100
     a.emit(r_type(1, T1, A7, 0, A7, 0x33)); // mul a7, a7, t1

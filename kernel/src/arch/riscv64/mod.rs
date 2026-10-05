@@ -48,6 +48,21 @@ pub fn init() {
         println!("arch: Interrupts disabled in supervisor mode");
     }
 
+    // Expose the counter CSRs to user mode (scounteren: CY/TM/IR/... all
+    // bits set — the same policy Linux uses on riscv). The vDSO data-page
+    // snapshot stores the CLINT `time` counter and the vDSO code
+    // interpolates with `rdtime`; without scounteren.TM a U-mode rdtime
+    // would raise an illegal instruction. (It previously interpolated with
+    // `rdcycle`, a DIFFERENT counter that drifts against the CLINT under
+    // TCG load — kernel mtime ran seconds away from vdso time(), breaking
+    // LTP utime01/02/03 before/after windows.)
+    // SAFETY: scounteren is an S-mode read/write CSR; setting all bits
+    // only permits U-mode reads of the counters.
+    unsafe {
+        let all: u64 = 0xffff;
+        asm!("csrw scounteren, {}", in(reg) all, options(nomem, nostack));
+    }
+
     // Print CPU info
     print_cpu_info();
 
