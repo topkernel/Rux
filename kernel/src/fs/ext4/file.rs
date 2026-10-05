@@ -1375,6 +1375,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
 
         // Call internal write function
         let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
+            Err(e) => e as isize,
             Ok(written_bytes) => {
                 // Update cached copy in inode.sb
                 if let Some(ptr) = inode.sb {
@@ -1399,7 +1400,6 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
                     Err(e) => e as isize,
                 }
             }
-            Err(e) => e as isize,
         };
 
         // Stop journal transaction

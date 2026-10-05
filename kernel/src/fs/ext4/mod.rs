@@ -2117,6 +2117,19 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
         Ok(()) => {
             // Refresh cached Ext4Inode so subsequent reads see the new state
             refresh_inode_cache(inode, fs);
+            // FIX8 (stale VFS inode.size): ftruncate (ATTR_SIZE) updated the
+            // on-disk inode and the sb-cached copy but never the VFS
+            // Inode.size — stat() reads the sb copy and looked right, while
+            // consumers of inode.size (loop_dev LOOP_SET_FD sizing, lseek
+            // SEEK_END, mmap sizing) still saw the OLD size. A tmpfs-style
+            // truncate-then-bind (LTP tst_acquire_device via ftruncate,
+            // losetup) failed LOOP_SET_FD with EINVAL on a 0 size.
+            if attr == setattr_attr::ATTR_SIZE {
+                inode.size.store(
+                    ext4_inode.get_size(),
+                    core::sync::atomic::Ordering::Release,
+                );
+            }
             // Invalidate page cache after size change (truncate/extend)
             crate::fs::page_cache::get_page_cache().invalidate_inode(fs as *const Ext4FileSystem as u64, inode.ino);
             0

@@ -95,6 +95,11 @@ pub enum PidFileKind {
     /// /proc/[pid]/cgroup — cgroups v2 membership ("0::/"). systemd's
     /// boot probe parses this to place itself in the unified hierarchy.
     Cgroup,
+    /// /proc/[pid]/mounts — per-process mount list (same view as
+    /// /proc/mounts for the single mount namespace). LTP tst_cgroup
+    /// (cgroup_core01..03, clone303, madvise06, memcg_*) opens
+    /// /proc/self/mounts to find the cgroup2 mount point.
+    Mounts,
 }
 
 /// ProcFS node type
@@ -296,6 +301,7 @@ impl ProcFSNode {
                 PidFileKind::OomScoreAdj => pid::generate_oom_score_adj(pid),
                 PidFileKind::Comm => pid::generate_comm(pid),
                 PidFileKind::Cgroup => pid::generate_cgroup(pid),
+                PidFileKind::Mounts => mounts::generate(),
                 // Symlinks handled by get_link_target()
                 PidFileKind::Exe | PidFileKind::Cwd => Vec::new(),
             };
@@ -817,6 +823,7 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "oom_score_adj" => Some(pid::generate_oom_score_adj(pid)),
                 "comm" => Some(pid::generate_comm(pid)),
                 "cgroup" => Some(pid::generate_cgroup(pid)),
+                "mounts" => Some(mounts::generate()),
                 _ => None,
             };
         }
@@ -862,6 +869,7 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "oom_score_adj" => Some(pid::generate_oom_score_adj(pid)),
                 "comm" => Some(pid::generate_comm(pid)),
                 "cgroup" => Some(pid::generate_cgroup(pid)),
+                "mounts" => Some(mounts::generate()),
                 _ => None,
             };
         }
@@ -991,6 +999,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
             b"oom_score_adj" => PidFileKind::OomScoreAdj,
             b"comm" => PidFileKind::Comm,
             b"cgroup" => PidFileKind::Cgroup,
+            b"mounts" => PidFileKind::Mounts,
             _ => {
                 // /proc/[pid]/fd — the fd subdirectory (review 5.7: used to
                 // exist only behind a syscall-layer string special case, so
@@ -1562,6 +1571,7 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
     let files: &[(&[u8], u8)] = &[
         (b"status", file_type::DT_REG),
         (b"cmdline", file_type::DT_REG),
+    (b"mounts", file_type::DT_REG),
         (b"stat", file_type::DT_REG),
         (b"maps", file_type::DT_REG),
         (b"environ", file_type::DT_REG),

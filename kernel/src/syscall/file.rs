@@ -1059,9 +1059,20 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     // "EFAULT for filesystemtype/source" cases) BEFORE capability checks
     // on the strings; CAP_SYS_ADMIN gates the actual mount.
     let mut source_buf = [0u8; PATH_MAX];
-    let source = match read_user_path(args[0] as *const u8, &mut source_buf) {
-        Ok(s) => s,
-        Err(e) => return e as i64,
+    // FIX8: a NULL source is legal for anonymous filesystems (tmpfs,
+    // proc, ...). Linux path_mount passes the NULL dev_name through and
+    // only filesystems with FS_REQUIRES_DEV reject it later — LTP's
+    // tst_test tmpfs mntpoint setup calls mount(NULL, mntpoint, "tmpfs",
+    // 0, NULL) and used to fall into the block-device+mkfs fallback
+    // ("Can't mount (null) at mntpoint (tmpfs): EFAULT"). Only a
+    // NON-NULL bad pointer is EFAULT.
+    let source = if args[0] == 0 {
+        "none"
+    } else {
+        match read_user_path(args[0] as *const u8, &mut source_buf) {
+            Ok(s) => s,
+            Err(e) => return e as i64,
+        }
     };
     let source = if source.is_empty() { "none" } else { source };
 
@@ -2991,18 +3002,63 @@ pub fn sys_sync_file_range(args: SyscallArgs) -> i64 {
 pub fn sys_acct(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[0] as *const u8;
 
-    if pathname_ptr.is_null() {
-        // NULL means disable accounting — succeed
-        return 0;
-    }
-
-    // Only root can enable accounting
+    // CAP_SYS_PACCT-equivalent gate FIRST — even acct(NULL) from an
+    // unprivileged caller is EPERM (LTP acct01 runs the NULL/tmpfile
+    // cases as nobody).
     if let Some(task) = crate::sched::current() {
         if task.cred().euid != 0 {
             return -(errno::EPERM as i64);
         }
     } else {
         return -(errno::EPERM as i64);
+    }
+
+    if pathname_ptr.is_null() {
+        // NULL means disable accounting — succeed
+        return 0;
+    }
+
+    // FIX8 (LTP acct01): validate the filename like Linux sys_acct —
+    // resolution errors (ENOENT / ENOTDIR / ELOOP / ENAMETOOLONG) pass
+    // through, a directory is EISDIR, a non-regular file is EACCES, and a
+    // file on a read-only mount is EROFS. Accounting itself stays a
+    // no-op, but only after the path is proven eligible.
+    let full_path = match resolve_user_path(-100, pathname_ptr) {
+        Ok(p) => p,
+        Err(e) => return e as i64,
+    };
+    match crate::fs::vfs::path_lookup(&full_path, 0) {
+        Ok(vpath) => {
+            if let Some(inode) = vpath.inode.as_ref() {
+                if inode.mode.is_directory() {
+                    return -(errno::EISDIR as i64);
+                }
+                if !inode.mode.is_regular_file() {
+                    return -(errno::EACCES as i64);
+                }
+            }
+        }
+        Err(e) => return e as i64,
+    }
+    // Read-only mount: the longest matching mount-table prefix decides.
+    {
+        let mounts = crate::fs::mount::get_mounts();
+        let mut best_len = 0usize;
+        let mut ro = false;
+        for (_d, mp, _f, fl) in mounts.iter() {
+            if (full_path == *mp || full_path.starts_with(mp.as_str()))
+                && mp.len() >= best_len
+                && mp != "/"
+            {
+                if mp.len() > best_len || best_len == 0 {
+                    best_len = mp.len();
+                    ro = fl.contains("ro");
+                }
+            }
+        }
+        if ro {
+            return -(errno::EROFS as i64);
+        }
     }
 
     // Process accounting not implemented — succeed silently

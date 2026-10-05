@@ -26,6 +26,15 @@ fn monotonic_time() -> (u64, u64) {
     (cycles / freq_hz, (cycles % freq_hz) * 1_000_000_000 / freq_hz)
 }
 
+/// Current CLOCK_REALTIME (monotonic + wall epoch offset) as (secs, nanos).
+/// FIX8: shared by the adjtimex GET path (tx.time) and ADJ_SETOFFSET.
+fn realtime_secs_nanos() -> (i64, u64) {
+    let (s, ns) = monotonic_time();
+    let total_ns = (s as u128 * 1_000_000_000u128 + ns as u128)
+        + wall_epoch_offset_ns() as u128;
+    ((total_ns / 1_000_000_000u128) as i64, (total_ns % 1_000_000_000u128) as u64)
+}
+
 #[repr(C)]
 struct TimespecForGettime {
     tv_sec: i64,
@@ -1458,9 +1467,11 @@ pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
 /// stored and read back (LTP clock_adjtime01 round-trips every mode's
 /// value through a verify GET).
 ///
-/// struct timex (LP64): modes i32 @0, offset @8, freq @16, maxerror @24,
-/// esterror @32, status i32 @40, constant @48, precision @56, tolerance
-/// @64, time @72 (16 B), tick @88.
+/// struct timex (LP64 — offsets verified against glibc sys/timex.h):
+/// modes i32 @0; offset @8, freq @16, maxerror @24, esterror @32 (i64);
+/// status i32 @40; constant @48, precision @56, tolerance @64 (i64);
+/// time.tv_sec @72, time.tv_usec @80 (i64); tick @88; ppsfreq @96;
+/// jitter @104; shift i32 @112.
 static TIMEX_STATE: crate::sync::spinlock::Spinlock<[u8; 96]> =
     crate::sync::spinlock::Spinlock::new([0u8; 96]);
 
@@ -1558,17 +1569,67 @@ fn adjtimex_common(buf_ptr: *mut u8) -> i64 {
     if modes & ADJ_TIMECONST != 0 { copy_field(&mut state, 48, 8); }
     if modes & ADJ_TICK != 0 { copy_field(&mut state, 88, 8); }
 
+    // FIX8 (leapsec01): ADJ_SETOFFSET — step the realtime clock by the
+    // caller's tv (Linux do_adjtimex: a positive/negative offset is added
+    // to CLOCK_REALTIME immediately). tv must be normalized; the nanosecond
+    // flavour (ADJ_NANO) reads tv_usec as tv_nsec. A zero step is a no-op.
+    const ADJ_SETOFFSET: u32 = 0x0100;
+    const ADJ_NANO: u32 = 0x2000;
+    if modes & ADJ_SETOFFSET != 0 {
+        let mut sec = i64::from_le_bytes(buf[72..80].try_into().unwrap());
+        let mut usec = i64::from_le_bytes(buf[80..88].try_into().unwrap());
+        if modes & ADJ_NANO != 0 {
+            if usec < 0 || usec > 999_999_999 {
+                return -(errno::EINVAL as i64);
+            }
+        } else if usec < 0 || usec > 999_999 {
+            return -(errno::EINVAL as i64);
+        }
+        // Normalize (tv_sec negative + positive frac is legal for setoffset).
+        if sec < 0 && usec > 0 {
+            sec += 1;
+            if modes & ADJ_NANO != 0 {
+                usec -= 1_000_000_000;
+            } else {
+                usec -= 1_000_000;
+            }
+        }
+        let step_ns = sec
+            .saturating_mul(1_000_000_000)
+            .saturating_add(usec.saturating_mul(if modes & ADJ_NANO != 0 { 1 } else { 1_000 }));
+        if step_ns != 0 {
+            let (cur_s, cur_ns) = realtime_secs_nanos();
+            let _ = set_realtime_from_secs_nanos(
+                cur_s.saturating_add(step_ns / 1_000_000_000),
+                (cur_ns as i64 + step_ns % 1_000_000_000).clamp(0, 999_999_999),
+            );
+        }
+    }
+
     // Write the state back: all modeled fields, modes = 0 (request
     // consumed), status kept, return value TIME_OK.
     // SAFETY: buf_ptr validated with access_ok(128); copy_to_user is the
     // exception-table copy path.
     let mut out = [0u8; 128];
-    out[8..96].copy_from_slice(&state[8..96]);
-    // Preserve the caller's read-only fields (precision/tolerance/time...)
-    // where we do not model them — a GET should not zero what it cannot
-    // know; the test only compares the settable fields.
-    out[56..88].copy_from_slice(&buf[56..88]);
-    out[96..128].copy_from_slice(&buf[96..128]);
+    // Preserve the caller's read-only fields (precision/tolerance/ppsfreq/
+    // jitter/shift) where we do not model them — a GET should not zero
+    // what it cannot know; the tests compare the settable fields.
+    out[8..128].copy_from_slice(&buf[8..128]);
+    // Overlay the modeled state (settable fields + seeded tick).
+    out[8..48].copy_from_slice(&state[8..48]);
+    out[40..44].copy_from_slice(&state[40..44]); // status
+    out[48..56].copy_from_slice(&state[48..56]); // constant
+    out[88..96].copy_from_slice(&state[88..96]); // tick
+    // FIX8 (leapsec01): tx.time is the kernel's CURRENT CLOCK_REALTIME —
+    // the NTP readers (and LTP leapsec01's wait loop, whose exit condition
+    // is tx.time.tv_sec) poll it on every adjtimex GET. Echoing the
+    // caller's zeros back made the loop spin forever (TIMEOUT family).
+    {
+        let (s, ns) = realtime_secs_nanos();
+        out[72..80].copy_from_slice(&s.to_le_bytes());
+        let usec = (ns / 1_000) as u64;
+        out[80..88].copy_from_slice(&usec.to_le_bytes());
+    }
     unsafe {
         if crate::arch::riscv64::uaccess::copy_to_user(buf_ptr, out.as_ptr(), 128) != 0 {
             return -(errno::EFAULT as i64);

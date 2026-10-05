@@ -1695,6 +1695,17 @@ pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::Irq
                 crate::interrupt::softirq::SoftirqIndex::Block as usize,
             );
             VIRTIO_PCI_BLK_WAIT_QUEUE.wake_up_all();
+            // FIX8 (lost-wakeup wedge): the synchronous read_block/write_block
+            // request path waits on VIRTIO_BLK_WAIT_QUEUE (the MMIO-era sync
+            // queue) even for the PCI device, but nothing on the PCI
+            // interrupt path ever woke that queue — block_bh_handler only
+            // reaches its wake under `VIRTIO_BLK.as_ref()` (MMIO present).
+            // A completion landing between a waiter's used-ring re-check and
+            // its schedule() then slept forever: the intermittent silent
+            // wedge after ~2MB of writes (buffer-cache eviction begins
+            // syncing dirty victims through this path). Wake the sync queue
+            // here too — wake_up_all on an empty queue is a no-op.
+            VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
         }
     }
     crate::interrupt::IrqReturn::Handled
