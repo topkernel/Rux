@@ -163,6 +163,12 @@ fn translate_mnt_flags(ms_flags: u64) -> MntFlags {
     MntFlags::new(bits)
 }
 
+/// Public wrapper for sys_mount's MS_REMOUNT path (flags translation without
+/// re-running the filesystem mount callback).
+pub fn translate_mnt_flags_public(ms_flags: u64) -> MntFlags {
+    translate_mnt_flags(ms_flags)
+}
+
 /// Perform a real mount: call the filesystem's mount callback, then build
 /// the dentry tree via `vfs_mount()`.
 ///

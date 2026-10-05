@@ -899,6 +899,17 @@ pub fn sys_chdir(args: SyscallArgs) -> i64 {
                 if !inode.mode.is_directory() {
                     return -(errno::ENOTDIR as i64);
                 }
+                // Linux path_step/chdir checks search (MAY_EXEC) permission
+                // on the TARGET directory too, not just the components
+                // traversed — path_lookup only DAC-checks intermediate dirs.
+                // Without this, an unprivileged chdir() into a no-x
+                // directory (mode 0644) succeeded (LTP chdir01 "keep_out").
+                if !crate::fs::permission::inode_permission(
+                    inode,
+                    crate::fs::permission::MAY_EXEC,
+                ) {
+                    return -(errno::EACCES as i64);
+                }
             } else {
                 return -(errno::ENOENT as i64);
             }
@@ -950,7 +961,14 @@ pub fn sys_fchdir(args: SyscallArgs) -> i64 {
         return -(errno::ENOTDIR as i64);
     }
 
-    // Reconstruct absolute path from dentry chain
+    // Same target MAY_EXEC requirement as chdir(2) — fchdir to a directory
+    // the caller cannot search is EACCES (Linux ksys_fchdir permission hook).
+    if !crate::fs::permission::inode_permission(
+        inode,
+        crate::fs::permission::MAY_EXEC,
+    ) {
+        return -(errno::EACCES as i64);
+    }
     // SAFETY: dentry is an UnsafeCell; we hold &File so no concurrent mutation.
     let dentry_opt = unsafe { &*file.dentry.get() };
     let dentry = match dentry_opt.as_ref() {
@@ -1127,6 +1145,35 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     // any path string).
     if let Err(e) = crate::fs::vfs::path_lookup(target, 0) {
         return e as i64;
+    }
+
+    // MS_REMOUNT: update the flags of the mount already attached at `target`
+    // instead of mounting a fresh instance. LTP's needs_rofs setup does
+    // mount(NULL, mntpoint, "tmpfs", 0), creates files, then
+    // mount(dev, mntpoint, fs, MS_REMOUNT|MS_RDONLY) — routing that through
+    // do_mount replaced the tmpfs (the files vanished, ENOENT where EROFS
+    // was expected) and never produced a read-only view.
+    const MS_REMOUNT: u64 = 32;
+    if args[3] & MS_REMOUNT != 0 {
+        let new_flags = crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
+        match crate::fs::vfs::vfs_remount(target, new_flags) {
+            Ok(()) => {
+                // Keep the /proc/mounts row in sync (ro/rw string).
+                let existing = crate::fs::mount::get_mounts()
+                    .into_iter()
+                    .find(|(_, mp, _, _)| mp == target);
+                if let Some((device, _, fs_type, _)) = existing {
+                    crate::fs::mount::register_mount(
+                        &device,
+                        target,
+                        &fs_type,
+                        if new_flags.is_readonly() { "ro" } else { "rw" },
+                    );
+                }
+                return 0;
+            }
+            Err(e) => return e as i64,
+        }
     }
 
     match crate::fs::mount::do_mount(source, target, fs_type_str, args[3]) {
@@ -1307,6 +1354,12 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
     if mode & 0o002 != 0 { may_mask |= crate::fs::permission::MAY_WRITE; }
     if mode & 0o001 != 0 { may_mask |= crate::fs::permission::MAY_EXEC; }
 
+    // access(2) EROFS: write permission requested on a read-only filesystem
+    // (LTP access04 probes W_OK on an MS_RDONLY tmpfs mountpoint).
+    if mode & 0o002 != 0 && crate::fs::vfs::path_on_readonly_mount(&full_path) {
+        return -(errno::EROFS as i64);
+    }
+
     // faccessat uses the REAL uid/gid for the permission decision (Linux:
     // the euid is only used when AT_EACCESS is passed — and faccessat on
     // riscv64 has no flags argument, so the real id is always correct
@@ -1370,11 +1423,11 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
     // Parse the user timespec pair first (before any path work) so bad
     // values/negative tv_sec are reported as EINVAL and unreadable memory
     // as EFAULT, matching Linux.
-    let (atime, mtime): (Option<u64>, Option<u64>) = if times_ptr.is_null() {
+    let (atime, mtime, explicit_times): (Option<u64>, Option<u64>, bool) = if times_ptr.is_null() {
         // NULL = UTIME_NOW for both (resolve here: vfs_utimensat leaves
         // None fields untouched).
         let now = current_time_secs();
-        (Some(now), Some(now))
+        (Some(now), Some(now), false)
     } else {
         if !crate::arch::riscv64::uaccess::access_ok(times_ptr as usize, 32) {
             return -(errno::EFAULT as i64);
@@ -1406,11 +1459,17 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
                 parsed[i] = Some(sec as u64);
             }
         }
-        (parsed[0], parsed[1])
+        (parsed[0], parsed[1], true)
     };
 
-    // futimens(fd): pathname NULL, dirfd is the fd.
+    // futimens(fd): pathname NULL, dirfd is the fd. utimensat(AT_FDCWD,
+    // NULL, ...) — a userspace utimensat(-100, NULL, ...) is EFAULT (no
+    // path, no fd: LTP utimes01 "NULL pathname" case; conflating it with
+    // futimens returned EBADF).
     if pathname_ptr.is_null() {
+        if dirfd == -100 {
+            return -(errno::EFAULT as i64);
+        }
         // SAFETY: dirfd is a caller-supplied fd; get_file_fd returns None for
         // invalid fds.
         let file = match unsafe { crate::fs::get_file_fd(dirfd as usize) } {
@@ -1452,7 +1511,7 @@ pub fn sys_futimesat(args: SyscallArgs) -> i64 {
     // UTIME_NOW (times==NULL or per-component) was resolved to
     // current_time_secs() above; None reaching the vfs layer means
     // UTIME_OMIT (leave untouched).
-    match crate::fs::vfs::vfs_utimensat(&full_path, atime, mtime) {
+    match crate::fs::vfs::vfs_utimensat_ex(&full_path, atime, mtime, explicit_times) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }
@@ -2154,6 +2213,12 @@ pub fn sys_mknodat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
+    // EROFS: mknod/mkfifo on a read-only mount (Linux may_create +
+    // mnt_want_write; LTP mknod0* ro cases).
+    if crate::fs::vfs::path_on_readonly_mount(&path) {
+        return -(errno::EROFS as i64);
+    }
+
     let ftype = mode & 0o170000;
     match ftype {
         0o010000 => {
@@ -2281,15 +2346,19 @@ pub fn sys_fchmod(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let mode = args[1] as u32;
 
-    // Only the permission + setuid/setgid/sticky bits are meaningful for
-    // chmod; unknown bits are EINVAL (review SYSA-M19).
-    if mode & !0o7777 != 0 {
-        return -(errno::EINVAL as i64);
-    }
+    // Linux chmod_common: only the permission + special bits (S_IALLUGO =
+    // 0o7777) are taken from the request; file-type bits in the argument
+    // are silently DISCARDED, not rejected (LTP fchown03 setup passes
+    // 0106770 to fchmod and expects success).
+    let mode = mode & 0o7777;
 
     // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
+            // EROFS: fd-based chmod on a read-only mount (LTP fchmod06).
+            if crate::fs::vfs::file_on_readonly_mount(&file) {
+                return -(errno::EROFS as i64);
+            }
             // SAFETY: inode is an UnsafeCell; we hold &File so no concurrent mutation.
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
@@ -2955,19 +3024,68 @@ pub fn sys_fchown(args: SyscallArgs) -> i64 {
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
                 Some(inode) => {
-                    // Permission check: require CAP_CHOWN
+                    // EROFS: fd-based chown on a read-only mount (LTP fchown04).
+                    if crate::fs::vfs::file_on_readonly_mount(&file) {
+                        return -(errno::EROFS as i64);
+                    }
+                    // Linux chown_ok/chgrp_ok (fs/attr.c): CAP_CHOWN holders
+                    // may set anything; an unprivileged OWNER may re-set its
+                    // own uid and any gid it belongs to; anything else EPERMs
+                    // (LTP fchown03: nobody chgrps its own file to its own
+                    // group and expects success).
                     let cred = match crate::sched::current() {
                         Some(t) => t.cred().clone(),
                         None => return -(errno::EPERM as i64),
                     };
-                    if !crate::security::has_capability(&cred, crate::security::CAP_CHOWN) {
-                        return -(errno::EPERM as i64);
+                    let inode_uid = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+                    let inode_gid = inode.gid.load(core::sync::atomic::Ordering::Relaxed);
+                    let is_priv = crate::security::has_capability(&cred, crate::security::CAP_CHOWN);
+                    let owner = cred.euid == inode_uid;
+                    if !is_priv {
+                        if uid != u32::MAX && !(owner && uid == inode_uid) {
+                            return -(errno::EPERM as i64);
+                        }
+                        if gid != u32::MAX && !(owner && cred.in_group(gid)) {
+                            return -(errno::EPERM as i64);
+                        }
                     }
-                    if uid != u32::MAX {
-                        inode.uid.store(uid, core::sync::atomic::Ordering::Relaxed);
+                    let actual_uid = if uid == u32::MAX { inode_uid } else { uid };
+                    let actual_gid = if gid == u32::MAX { inode_gid } else { gid };
+                    // Persist through the filesystem's setattr (not just the
+                    // cached inode word — ext4 stat() reads the disk inode).
+                    let result = inode.op_setattr(
+                        crate::fs::inode::setattr_attr::ATTR_UID_GID,
+                        actual_uid as u64,
+                        actual_gid as u64,
+                    );
+                    if result != 0 {
+                        return -(result as i64);
                     }
-                    if gid != u32::MAX {
-                        inode.gid.store(gid, core::sync::atomic::Ordering::Relaxed);
+                    // Same SUID/SGID kill as chown(2) (Linux chown_common runs
+                    // for fchown too): SUID always dies on a regular file,
+                    // SGID when group-executable or the caller is outside the
+                    // file's group without CAP_FSETID (LTP chown02/fchown02).
+                    if !inode.mode.is_directory() {
+                        let mode = {
+                            let mut st = crate::fs::Stat::default();
+                            if inode.op_getattr(&mut st) == 0 { st.st_mode } else { inode.mode.bits() }
+                        };
+                        let mut new_mode = mode;
+                        if new_mode & 0o4000 != 0 {
+                            new_mode &= !0o4000;
+                        }
+                        let in_group_or_capable = cred.in_group(inode_gid)
+                            || crate::security::has_capability(&cred, crate::security::CAP_FSETID);
+                        if new_mode & 0o2000 != 0 && ((new_mode & 0o010) != 0 || !in_group_or_capable) {
+                            new_mode &= !0o2000;
+                        }
+                        if new_mode != mode {
+                            let _ = inode.op_setattr(
+                                crate::fs::inode::setattr_attr::ATTR_MODE,
+                                new_mode as u64,
+                                0,
+                            );
+                        }
                     }
                     0
                 }

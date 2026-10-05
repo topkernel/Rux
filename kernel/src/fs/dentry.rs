@@ -73,8 +73,9 @@ pub enum DentryState {
 pub struct VfsMountInternal {
     /// Root dentry of the mounted filesystem
     pub root: Arc<Dentry>,
-    /// Mount flags
-    pub flags: MntFlags,
+    /// Mount flags (interior-mutable: mount(2) with MS_REMOUNT updates them
+    /// in place while concurrent lookups read them on other CPUs)
+    pub flags: Spinlock<MntFlags>,
 }
 
 unsafe impl Send for VfsMountInternal {}

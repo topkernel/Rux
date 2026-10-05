@@ -125,11 +125,17 @@ struct VfsState {
     /// Global VFS root dentry — the top of the dentry tree
     root_dentry: Option<Arc<Dentry>>,
     initialized: bool,
+    /// Every live mount descriptor (dentry-tree mounts, not the string
+    /// registry) — lets fd/dentry-based code find the mount governing a
+    /// dentry WITHOUT reconstructing a path string (build_path() cannot
+    /// cross mount boundaries: a mounted fs's root has no parent pointer).
+    mounts: Vec<Arc<VfsMountInternal>>,
 }
 
 static VFS_STATE: Spinlock<VfsState> = Spinlock::new(VfsState {
     root_dentry: None,
     initialized: false,
+    mounts: Vec::new(),
 });
 
 /// Get the global VFS root dentry.
@@ -144,6 +150,121 @@ pub fn follow_mount(dentry: Arc<Dentry>) -> Arc<Dentry> {
     match mount {
         Some(mnt) => mnt.root.clone(),
         None => dentry,
+    }
+}
+
+/// Mount flags governing an ABSOLUTE dentry-tree path: walk the components
+/// crossing mount points (exactly like lookups do) and remember the flags of
+/// the LAST mount crossed. None = never left the root filesystem.
+///
+/// This is the EROFS enforcement hook: after `mount(2)` with
+/// MS_REMOUNT|MS_RDONLY every modifying operation inside that subtree must
+/// fail EROFS (LTP access04/creat06/unlink09/... needs_rofs family).
+pub fn mount_flags_for_path(abs_path: &str) -> Option<crate::fs::mount::MntFlags> {
+    let vfs_root = VFS_STATE.lock().root_dentry.clone()?;
+    let mut current = vfs_root;
+    let mut flags: Option<crate::fs::mount::MntFlags> = None;
+    for component in abs_path.split('/').filter(|s| !s.is_empty()) {
+        if let Some(mnt) = current.get_mount() {
+            flags = Some(*mnt.flags.lock());
+            current = mnt.root.clone();
+        }
+        // A component may not exist yet (creat/mkdir paths) or may not be in
+        // the dentry cache — the governing mount is the last one crossed.
+        match current.lookup_child(component) {
+            Some(c) => current = c,
+            None => return flags,
+        }
+    }
+    // A trailing mountpoint (e.g. the mntpoint directory itself) also
+    // crosses into the mounted fs.
+    if let Some(mnt) = current.get_mount() {
+        flags = Some(*mnt.flags.lock());
+    }
+    flags
+}
+
+/// True when the absolute path lives on a mount currently flagged read-only.
+pub fn path_on_readonly_mount(abs_path: &str) -> bool {
+    mount_flags_for_path(abs_path)
+        .map(|f| f.is_readonly())
+        .unwrap_or(false)
+}
+
+/// True when the FILE's filesystem is currently flagged read-only. Resolves
+/// the mount by the fd's dentry (climb to the fs root, match against the
+/// mount registry) — `build_path()` cannot be used: a mounted fs's root
+/// dentry has no parent, so paths of files inside a mount come out as
+/// "/file" (LTP fchmod06/fchown04 saw EPERM instead of EROFS).
+pub fn file_on_readonly_mount(file: &crate::fs::File) -> bool {
+    // SAFETY: dentry is written once at open time and never mutated.
+    let dentry_opt = unsafe { (*file.dentry.get()).clone() };
+    dentry_opt
+        .map(|d| dentry_on_readonly_mount(&d))
+        .unwrap_or(false)
+}
+
+/// Mount-readonly check for a dentry: climb to the top of its filesystem
+/// (parent chain) and match that root dentry against the mount registry.
+pub fn dentry_on_readonly_mount(dentry: &Arc<Dentry>) -> bool {
+    let mut cur = dentry.clone();
+    loop {
+        let parent = cur.parent.lock().clone();
+        match parent {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    // cur is a filesystem root; is it the root of a registered mount?
+    let state = VFS_STATE.lock();
+    for mnt in state.mounts.iter() {
+        if Arc::ptr_eq(&mnt.root, &cur) {
+            return mnt.flags.lock().is_readonly();
+        }
+    }
+    false
+}
+
+/// EROFS guard shared by the mutating vfs_* entry points (Linux mnt_want_write):
+/// every create/delete/rename/attr-change inside a MS_RDONLY mount fails
+/// before touching the filesystem (LTP needs_rofs family: unlink09, rmdir02,
+/// mkdir03, link08, chmod06, chown04, utimes01, ...).
+fn check_not_readonly(pathname: &str) -> Result<(), i32> {
+    if path_on_readonly_mount(pathname) {
+        return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
+    }
+    Ok(())
+}
+
+/// Update the flags of the mount attached at `mountpoint` (mount(2) with
+/// MS_REMOUNT). Returns Ok(()) when a mount was found and updated,
+/// Err(EINVAL) when the path is not a mount point.
+pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> Result<(), i32> {
+    let vfs_root = VFS_STATE.lock().root_dentry.clone()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    let mut current = vfs_root;
+    let mut found: Option<alloc::sync::Arc<VfsMountInternal>> = None;
+    for component in mountpoint.split('/').filter(|s| !s.is_empty()) {
+        if let Some(mnt) = current.get_mount() {
+            found = Some(mnt.clone());
+            current = mnt.root.clone();
+        }
+        current = match current.lookup_child(component) {
+            Some(c) => c,
+            None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        };
+    }
+    if found.is_none() {
+        if let Some(mnt) = current.get_mount() {
+            found = Some(mnt);
+        }
+    }
+    match found {
+        Some(mnt) => {
+            *mnt.flags.lock() = new_flags;
+            Ok(())
+        }
+        None => Err(errno::Errno::InvalidArgument.as_neg_i32()),
     }
 }
 
@@ -235,9 +356,10 @@ pub fn vfs_mount(
             // Create mount descriptor
             let mnt_desc = Arc::new(VfsMountInternal {
                 root: mounted_root.clone(),
-                flags: mnt_flags,
+                flags: Spinlock::new(mnt_flags),
             });
-            child.set_mount(mnt_desc);
+            child.set_mount(mnt_desc.clone());
+            state.mounts.push(mnt_desc);
         } else {
             // Intermediate component — create if not exists
             let child = match current.lookup_child(&name) {
@@ -272,8 +394,22 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     let parent_dentry = parent_vpath.dentry
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-    // Remove the mount point dentry (drops VfsMountInternal)
-    parent_dentry.remove_child(&name);
+    // Detach the mount but KEEP the mountpoint dentry: Linux umount leaves
+    // the covered directory in place (the underlying dir "re-appears").
+    // Removing the dentry made the mountpoint itself vanish — a later mount
+    // at the same target failed ENOENT (LTP chdir01's per-filesystem
+    // iteration 2: "Cannot resolve the absolute path of mntpoint").
+    let child = parent_dentry
+        .lookup_child(&name)
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+    let mnt = child
+        .get_mount()
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
+    {
+        let mut state = VFS_STATE.lock();
+        state.mounts.retain(|m| !Arc::ptr_eq(m, &mnt));
+    }
+    *child.vfsmount.lock() = None;
     Ok(())
 }
 
@@ -689,6 +825,16 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     let inode = dentry.get_inode()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
+    // POSIX/Linux path resolution: a TRAILING SLASH demands a directory —
+    // "file/" on a regular file is ENOTDIR, never a silent success (Linux
+    // link_path_walk; LTP acct01 "./tmpfile/" case).
+    if pathname.ends_with('/')
+        && pathname.len() > 1
+        && !inode.mode.is_directory()
+    {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+
     Ok(VfsPath {
         dentry: Some(dentry),
         mnt: None,
@@ -1058,6 +1204,8 @@ fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
 /// 1. Resolving the parent directory path
 /// 2. Calling the parent's inode_operations->mkdir
 pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
+    check_not_readonly(pathname)?;
+
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
@@ -1157,6 +1305,8 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 
 /// Create symbolic link - unified implementation using inode_operations
 pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
+    check_not_readonly(pathname)?;
+
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
@@ -1209,6 +1359,8 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
 
 /// Remove directory - unified implementation using inode_operations
 pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
+    check_not_readonly(pathname)?;
+
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
@@ -1290,6 +1442,8 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
 
 /// Unlink file - unified implementation using inode_operations
 pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
+    check_not_readonly(pathname)?;
+
     // POSIX/Linux: an empty pathname is ENOENT (name resolution fails
     // before anything else; resolving "" must never fall back to the
     // current/root directory) — LTP unlink07.
@@ -1401,6 +1555,9 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
 
+    // EROFS when the DESTINATION would be created on a read-only mount.
+    check_not_readonly(newpath)?;
+
     // Lookup the source file
     let src_vpath = path_lookup(oldpath, 0)?;
     let src_inode = src_vpath.inode.as_ref()
@@ -1472,6 +1629,10 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // both the source and destination sequences must be atomic against a
     // concurrent creator/unlinker.
     let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
+    // EROFS when either end lives on a read-only mount (Linux mnt_want_write
+    // on both the source and destination parents).
+    check_not_readonly(oldpath)?;
+    check_not_readonly(newpath)?;
     vfs_rename_locked(oldpath, newpath)
 }
 
@@ -1705,6 +1866,8 @@ pub fn vfs_rename_exchange(oldpath: &str, newpath: &str) -> Result<(), i32> {
 /// - `pathname`: file path
 /// - `mode`: new permission bits (e.g., 0o644)
 pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
+    check_not_readonly(pathname)?;
+
     let vpath = path_lookup(pathname, 0)?;
     let inode = vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
@@ -1758,6 +1921,8 @@ pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
 /// - `follow`: follow a final symlink (chown) or act on the link itself
 ///   (lchown / fchownat AT_SYMLINK_NOFOLLOW)
 pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(), i32> {
+    check_not_readonly(pathname)?;
+
     let lookup_flags = if follow { 0 } else { LOOKUP_NOFOLLOW };
     let vpath = path_lookup(pathname, lookup_flags)?;
     let inode = vpath.inode.as_ref()
@@ -1769,11 +1934,22 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(),
         crate::process::task::Cred::new_init()
     };
     let inode_uid = inode.uid.load(Ordering::Relaxed);
+    let inode_gid = inode.gid.load(Ordering::Relaxed);
 
-    // Permission check
-    if cred.euid != 0 {
-        // Non-root: can only change group to a group they belong to
-        return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+    // Linux chown_ok/chgrp_ok (fs/attr.c): CAP_CHOWN holders may set
+    // anything; an unprivileged OWNER may re-set its own uid and any gid it
+    // belongs to (LTP chown03: nobody chgrps its own file to its own
+    // group); everything else is EPERM. The old blanket euid!=0 → EPERM
+    // rejected the legal owner case.
+    let is_priv = crate::security::has_capability(&cred, crate::security::CAP_CHOWN);
+    let owner = cred.euid == inode_uid;
+    if !is_priv {
+        if uid != u32::MAX && !(owner && uid == inode_uid) {
+            return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+        }
+        if gid != u32::MAX && !(owner && cred.in_group(gid)) {
+            return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+        }
     }
 
     // Resolve actual uid/gid (u32::MAX means no change)
@@ -1802,18 +1978,29 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(),
             inode.mode.bits()
         }
     };
-    // Linux chown_common + notify_change: ATTR_KILL_SUID/SGID/PRIV are only
-    // requested for NON-directories, and the capability hook
-    // (cap_inode_need_killpriv) STRIPS the kill flags when the caller holds
-    // CAP_FSETID. So root chown keeps setuid/setgid (LTP chown02 expects
-    // mode 0102700 to survive chown(0,0)); an unprivileged chown of a
-    // regular file drops both bits.
-    if (uid != u32::MAX || gid != u32::MAX)
-        && !inode.mode.is_directory()
-        && !crate::security::has_capability(&cred, crate::security::CAP_FSETID)
-    {
-        let new_mode = mode & !(0o4000u32 | 0o2000u32); // clear S_ISUID | S_ISGID
-        let _ = inode.op_setattr(setattr_attr::ATTR_MODE, new_mode as u64, 0);
+    // Linux chown_common (fs/open.c) + notify_change: for NON-directories it
+    // requests ATTR_KILL_SUID | ATTR_KILL_PRIV UNCONDITIONALLY (even a
+    // privileged caller, even when uid/gid are unchanged), plus
+    // setattr_should_drop_sgid: S_ISGID is killed when the file is
+    // group-executable (mode & S_IXGRP) or the caller is neither in the
+    // file's group nor CAP_FSETID-capable. The old code skipped the kill for
+    // CAP_FSETID holders and required an id to change — current LTP chown02
+    // chowns a 06770 root file to (0,0) and expects 0770, while a 0670 file
+    // (no group-execute) keeps its setgid.
+    if !inode.mode.is_directory() {
+        let mut new_mode = mode;
+        if new_mode & 0o4000 != 0 {
+            new_mode &= !0o4000; // S_ISUID: always killed on chown
+        }
+        let in_group_or_capable =
+            cred.in_group(inode.gid.load(Ordering::Relaxed))
+                || crate::security::has_capability(&cred, crate::security::CAP_FSETID);
+        if new_mode & 0o2000 != 0 && ((new_mode & 0o010) != 0 || !in_group_or_capable) {
+            new_mode &= !0o2000; // S_ISGID
+        }
+        if new_mode != mode {
+            let _ = inode.op_setattr(setattr_attr::ATTR_MODE, new_mode as u64, 0);
+        }
     }
 
     let result = inode.op_setattr(setattr_attr::ATTR_UID_GID, actual_uid as u64, actual_gid as u64);
@@ -1833,6 +2020,8 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(),
 /// - `pathname`: file path
 /// - `new_size`: new file size
 pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
+    check_not_readonly(pathname)?;
+
     if new_size < 0 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -1892,6 +2081,11 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     // SAFETY: get_file_fd returns a valid Arc<File> for the given fd
     let file = unsafe { get_file_fd(fd) }
         .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+
+    // EROFS: fd-based truncate on a read-only mount (Linux mnt_want_write).
+    if file_on_readonly_mount(&file) {
+        return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
+    }
 
     // Linux: check that fd was opened for writing (FMODE_WRITE) —
     // ftruncate(2) documents EBADF for a read-only fd (LTP ftruncate03).
@@ -1984,6 +2178,16 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         let o_excl = (flags & FileFlags::O_EXCL) != 0;
         let o_trunc = (flags & FileFlags::O_TRUNC) != 0;
 
+        // EROFS before any lookup/write attempt: a write-intent open
+        // (O_WRONLY / O_RDWR / O_TRUNC) on a MS_RDONLY mount fails, as does
+        // O_CREAT on one (Linux may_open + mnt_want_write; LTP creat06 and
+        // the needs_rofs family).
+        let write_intent =
+            flags & (FileFlags::O_WRONLY | FileFlags::O_RDWR | FileFlags::O_TRUNC) != 0;
+        if (write_intent || o_creat) && path_on_readonly_mount(filename) {
+            return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
+        }
+
         // O_CREAT atomicity (review 5.1 high): the existence check and the
         // create below must be one atomic step on SMP, or two CPUs racing on
         // the same non-existent name both allocate an inode / directory
@@ -2042,6 +2246,14 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 (inode, vpath.dentry)
             }
             Err(_e) if o_creat => {
+                // Only a genuinely ABSENT name may be created (Linux
+                // path_openat: O_CREAT proceeds only on ENOENT). Other
+                // lookup failures — ELOOP on a self-referential symlink
+                // (LTP creat06/open01 ELOOP cases), ENOTDIR, EACCES —
+                // propagate to the caller instead of creating through them.
+                if _e != -(errno::constants::ENOENT) {
+                    return Err(_e);
+                }
                 let (parent_path, child_name) = path_parent_and_name(filename)?;
                 // O_CREAT|O_EXCL is a NOFOLLOW-style existence probe: a
                 // dangling symlink at the final component is EEXIST (the
@@ -3182,8 +3394,21 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
             return Err(errno::Errno::NotADirectory.as_neg_i32());
         }
 
+        // A directory whose dentry went negative (rmdir'd while an fd to it
+        // was already open) reports ENOENT, not its (stale) entry list —
+        // Linux ext4_rmdir empties the directory block, so readdir returns
+        // ENOENT (LTP getdents02 "directory was unlinked" case).
+        // SAFETY: dentry is written once at open time and never mutated.
+        let dentry_negative = {
+            let dentry_opt = unsafe { (*file.dentry.get()).clone() };
+            dentry_opt.map(|d| d.is_negative()).unwrap_or(false)
+        };
+        if dentry_negative {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+
         // Call readdir through inode.ops
-        let entries = if let Some(ops) = inode.ops {
+        let mut entries = if let Some(ops) = inode.ops {
             if let Some(readdir_fn) = ops.readdir {
                 readdir_fn(&*inode)
                     .ok_or(errno::Errno::IOError.as_neg_i32())?
@@ -3193,6 +3418,39 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
         } else {
             return Err(errno::Errno::BadFileNumber.as_neg_i32());
         };
+
+        // POSIX/Linux: every directory's readdir stream starts with "." and
+        // ".." (d_ino "." = the directory itself, ".." = its parent). The
+        // per-filesystem readdir callbacks list only real children, so the
+        // two dot entries are synthesized here, once, for all filesystems.
+        // Tests and userland (find, tar, rsync) rely on their presence.
+        {
+            let has_dot = entries.iter().any(|e| e.name == b".");
+            if !has_dot {
+                let mut with_dots = alloc::vec::Vec::with_capacity(entries.len() + 2);
+                let parent_ino = {
+                    // SAFETY: dentry is written once at open time and never mutated
+                    let dentry_opt = unsafe { (*file.dentry.get()).clone() };
+                    dentry_opt
+                        .and_then(|d| d.parent.lock().clone())
+                        .and_then(|p| p.inode.lock().clone())
+                        .map(|pi| pi.ino)
+                        .unwrap_or(inode.ino)
+                };
+                with_dots.push(crate::fs::inode::VfsDirEntry {
+                    ino: inode.ino,
+                    name: alloc::vec![b'.'],
+                    file_type: crate::fs::inode::file_type::DT_DIR,
+                });
+                with_dots.push(crate::fs::inode::VfsDirEntry {
+                    ino: parent_ino,
+                    name: alloc::vec![b'.', b'.'],
+                    file_type: crate::fs::inode::file_type::DT_DIR,
+                });
+                with_dots.extend(entries);
+                entries = with_dots;
+            }
+        }
 
         let start_pos = file.get_pos() as usize;
         let mut bytes_written = 0usize;
@@ -3398,21 +3656,51 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
 /// timestamps — wiring is owned by the syscall-layer agent.
 #[allow(dead_code)]
 pub fn vfs_utimensat(pathname: &str, atime: Option<u64>, mtime: Option<u64>) -> Result<(), i32> {
+    vfs_utimensat_ex(pathname, atime, mtime, true)
+}
+
+/// utimensat with the permission rule made explicit. Linux do_utimes:
+/// - caller supplies BOTH timestamps (explicit times): owner or CAP_FOWNER,
+///   otherwise EPERM (LTP utime06 "not file owner" / utimes01 case 6);
+/// - times NULL or partially NOW/OMIT (the "fuzz" forms): owner, or the
+///   inode must grant WRITE access — EACCES otherwise.
+pub fn vfs_utimensat_ex(
+    pathname: &str,
+    atime: Option<u64>,
+    mtime: Option<u64>,
+    explicit_times: bool,
+) -> Result<(), i32> {
+    check_not_readonly(pathname)?;
+
     let vpath = path_lookup(pathname, 0)?;
     let inode = vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
-    // Permission: owner or CAP_FOWNER (Linux do_utimes).
     let cred = if let Some(task) = crate::sched::current() {
         task.cred().clone()
     } else {
         crate::process::task::Cred::new_init()
     };
     let inode_uid = inode.uid.load(Ordering::Relaxed);
-    if cred.euid != 0 && cred.euid != inode_uid
-        && !crate::security::has_capability(&cred, crate::security::CAP_FOWNER)
-    {
-        return Err(errno::Errno::PermissionDenied.as_neg_i32());
+    let owner_or_cap = cred.euid == inode_uid
+        || cred.euid == 0
+        || crate::security::has_capability(&cred, crate::security::CAP_FOWNER);
+    if !owner_or_cap {
+        if explicit_times {
+            return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+        }
+        // Fuzz forms need write permission (inode_permission MAY_WRITE).
+        let inode_mode = inode.mode.bits() as u16;
+        let inode_gid = inode.gid.load(Ordering::Relaxed);
+        if !crate::fs::permission::generic_permission(
+            inode_mode,
+            inode_uid,
+            inode_gid,
+            crate::fs::permission::MAY_WRITE,
+            &cred,
+        ) {
+            return Err(errno::Errno::PermissionDenied.as_neg_i32());
+        }
     }
 
     if let Some(m) = mtime {
