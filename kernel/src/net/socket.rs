@@ -423,6 +423,17 @@ impl Socket {
 
     /// Connect to remote address
     pub fn connect(&self, addr: u32, port: u16) -> Result<(), i32> {
+        // Linux tcp_v4_connect: connecting an already-connected (or
+        // mid-connect) stream socket fails before anything is sent —
+        // EISCONN when established, EALREADY while the first connect is
+        // still in flight (LTP connect01 "already connected").
+        if self.sock_type == SocketType::Tcp {
+            match *self.state.lock() {
+                SocketState::Connected => return Err(-106), // EISCONN
+                SocketState::Connecting => return Err(-114), // EALREADY
+                _ => {}
+            }
+        }
         *self.remote_addr.lock() = addr;
         *self.remote_port.lock() = port;
 
@@ -445,9 +456,18 @@ impl Socket {
                     // the protocol slot is ESTABLISHED. Harmless for real
                     // virtio-net peers (poll is a no-op without queued RX).
                     let mut established = false;
+                    let mut refused = 0u32;
                     for _ in 0..8 {
                         let done = crate::net::tcp::tcp_socket_get(tcp_fd)
                             .map(|ts| {
+                                if ts.state == crate::net::tcp::TcpState::TCP_CLOSE {
+                                    // RST in SYN_SENT (no listener on the
+                                    // loopback target) records ECONNREFUSED —
+                                    // surface it, connect() must not report
+                                    // success for a refused connection (LTP
+                                    // connect01 "connection refused").
+                                    refused = ts.pending_error as u32;
+                                }
                                 ts.state == crate::net::tcp::TcpState::TCP_ESTABLISHED
                                     || ts.state == crate::net::tcp::TcpState::TCP_CLOSE
                             })
@@ -457,6 +477,14 @@ impl Socket {
                             break;
                         }
                         crate::net::ethernet::ethernet_poll();
+                    }
+                    if refused != 0 {
+                        // The peer refused (RST in SYN_SENT): the connect
+                        // failed — report the errno (LTP connect01 case 6)
+                        // and mirror it into SO_ERROR.
+                        *self.state.lock() = SocketState::Unconnected;
+                        self.options.lock().error = refused as i32;
+                        return Err(-(refused as i32));
                     }
                     // The client flips ESTABLISHED when it EMITS the final
                     // ACK — the peer still has to receive it. Two extra
@@ -493,6 +521,14 @@ impl Socket {
 
     /// P1 IPv6: connect to a pure v6 remote (same semantics as connect()).
     pub fn connect6(&self, addr: crate::net::ipv6::Ipv6Addr, port: u16) -> Result<(), i32> {
+        // Same stream-socket guards as connect() (EISCONN / EALREADY).
+        if self.sock_type == SocketType::Tcp {
+            match *self.state.lock() {
+                SocketState::Connected => return Err(-106), // EISCONN
+                SocketState::Connecting => return Err(-114), // EALREADY
+                _ => {}
+            }
+        }
         *self.remote_addr6.lock() = addr;
         *self.remote_port.lock() = port;
 
@@ -715,10 +751,32 @@ impl Socket {
                                         };
                                         Some(Ok((len, Some((src, socket.remote_port)))))
                                     }
-                                    // R22-4: zero-length read on a half/RST-closed
-                                    // connection is EOF — returning EAGAIN here made
-                                    // read() loops spin forever.
-                                    Ok(0) => Some(Ok((0, None))),
+                                    // R22-4: zero-length read on a
+                                    // closed/half-closed connection is EOF.
+                                    // But an ESTABLISHED (or handshake/
+                                    // half-close) socket with an empty
+                                    // buffer is "no data yet": reporting
+                                    // EOF made blocking readers return 0
+                                    // spuriously whenever the peer's data
+                                    // had not landed yet (LTP bind04 TCP
+                                    // variants, tight fork loops 12/12).
+                                    // Fall through to EAGAIN so the
+                                    // blocking engine waits; only these
+                                    // states are true read-half EOF:
+                                    // CLOSE_WAIT (peer FIN), LAST_ACK,
+                                    // TIME_WAIT, CLOSING, CLOSE.
+                                    Ok(0) => {
+                                        match socket.state {
+                                            crate::net::tcp::TcpState::TCP_CLOSE_WAIT
+                                            | crate::net::tcp::TcpState::TCP_LAST_ACK
+                                            | crate::net::tcp::TcpState::TCP_TIME_WAIT
+                                            | crate::net::tcp::TcpState::TCP_CLOSING
+                                            | crate::net::tcp::TcpState::TCP_CLOSE => {
+                                                Some(Ok((0, None)))
+                                            }
+                                            _ => None, // would-block → EAGAIN
+                                        }
+                                    }
                                     _ => None,
                                 }
                             }
