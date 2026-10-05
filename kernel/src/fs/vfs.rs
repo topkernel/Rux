@@ -1212,8 +1212,16 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     // EEXIST before any mutation (Linux do_mkdirat; LTP mkdir03) — the
     // old path left the "already exists" decision to the filesystem's
     // mkdir callback, which succeeded.
-    if path_lookup(pathname, LOOKUP_NOFOLLOW).is_ok() {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+    match path_lookup(pathname, LOOKUP_NOFOLLOW) {
+        Ok(_) => return Err(errno::Errno::FileExists.as_neg_i32()),
+        // Only a genuinely ABSENT name may be created. Other lookup
+        // failures — ELOOP on a symlink ring (LTP mkdir03/rmdir02/
+        // mkdirat02 43-hop rings), ENOTDIR, EACCES — propagate to the
+        // caller; recomputing the parent below replaced ELOOP with the
+        // parent walk's ENOTDIR (observed: 43 hops → ENOTDIR, 44+ →
+        // ELOOP). Same rule sys_open already follows.
+        Err(e) if e == -(errno::constants::ENOENT) => {}
+        Err(e) => return Err(e),
     }
 
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
