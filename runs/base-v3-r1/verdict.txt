@@ -1,0 +1,22 @@
+tag=base-v3-r1 kernel=/home/william/rux-agents/virtio-comp-baseline/target/riscv64gc-unknown-none-elf/debug/rux dur=900
+panic=None
+rounds_done=1473 last=ROUND-0-END all_done=False
+marker KERNPANIC                count=0
+marker WAKE-WILD-PTR            count=0
+marker panicked                 count=0
+marker Kernel panic             count=0
+marker soft lockup              count=0
+marker SOFT-LOCKUP              count=0
+marker ALLOCTHROW               count=0
+marker trap: stack:             count=0
+marker lost completion          count=0
+marker buffer io wait timeout   count=0
+marker dead bh in chain         count=0
+marker CKSUM-MISMATCH           count=1
+info   recovered by final kick  count=0
+info   abandoned                count=0
+info   leaked timed-out         count=0
+info   leaked failed            count=263
+info   Failed to reserve descriptor window count=0
+info   VirtIO request timeout   count=0
+serial_bytes=97284
