@@ -3239,6 +3239,11 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
             None => return -(errno::ESRCH as i64),
         }
     } else {
+        // Linux capget: a negative pid is EINVAL, not ESRCH (LTP capget02
+        // "bad pid" passes -1 and expects EINVAL).
+        if pid < 0 {
+            return -(errno::EINVAL as i64);
+        }
         // SAFETY: find_task_by_pid returns valid pointer when non-null.
         let ptr = unsafe { crate::sched::find_task_by_pid(pid as u32) };
         if ptr.is_null() {
@@ -3298,7 +3303,7 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
 /// - args[0]: hdr_ptr - pointer to __user_cap_header_struct { version: u32, pid: i32 }
 /// - args[1]: data_ptr - pointer to __user_cap_data_struct array(s)
 pub fn sys_capset(args: SyscallArgs) -> i64 {
-    use crate::arch::riscv64::uaccess::copy_from_user;
+    use crate::arch::riscv64::uaccess::{copy_from_user, copy_to_user};
     use crate::security::capability::Cap;
 
     const _LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;
@@ -3332,7 +3337,17 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
         _LINUX_CAPABILITY_VERSION_1 => data_count = 1,
         _LINUX_CAPABILITY_VERSION_2 => data_count = 2,
         _LINUX_CAPABILITY_VERSION_3 => data_count = 2,
-        _ => return -(errno::EINVAL as i64),
+        _ => {
+            // Linux: an unsupported version fails EINVAL but the kernel's
+            // preferred version is written back into the header first
+            // (libcap and LTP capset02 probe this way).
+            let supported = _LINUX_CAPABILITY_VERSION_3;
+            // SAFETY: hdr_ptr validated with access_ok above.
+            unsafe {
+                copy_to_user(hdr_ptr as *mut u8, &supported as *const u32 as *const u8, 4);
+            }
+            return -(errno::EINVAL as i64);
+        }
     }
     let data_size = data_count * 3 * 4;
     if !crate::arch::riscv64::uaccess::access_ok(data_ptr, data_size) {
