@@ -926,6 +926,26 @@ impl VirtIOBlkDevice {
             VIRTQ_DESC_F_WRITE, 0); // Device writes the status byte (DRIV-H4)
 
         let prev = get_mmio_expected_used_idx();
+        let slot = prev as usize % MAX_PENDING_IO;
+        // Occupancy check BEFORE submit: an entry still sitting at this
+        // ordinal is a TOMBSTONE (timed-out chain whose used-ring entry the
+        // walker has not consumed — the MMIO queue is single-in-flight, so
+        // ordinals and completion order coincide). Overwriting it would
+        // silently drop the tombstone's reservation and let the walker fire
+        // this new pending with the OLD chain's used-ring entry. Refuse
+        // instead; the caller falls back and the tombstone retires shortly.
+        {
+            let table = VIRTIO_MMIO_PENDING.lock_irqsave();
+            if table[slot].is_some() {
+                // SAFETY: both buffers were allocated above and are still
+                // owned by this frame; no chain was submitted for them.
+                unsafe {
+                    alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+                    alloc::alloc::dealloc(resp_ptr as *mut u8, resp_layout);
+                }
+                return Err(-5);
+            }
+        }
         queue.submit(header_desc_idx);
         queue.notify();
         increment_mmio_expected_used_idx();
@@ -942,7 +962,6 @@ impl VirtIOBlkDevice {
             // submission order and the ordinal-indexed walk below is sound.
             head_desc: 0,
         };
-        let slot = prev as usize % MAX_PENDING_IO;
         VIRTIO_MMIO_PENDING.lock_irqsave()[slot] = Some(pending);
 
         Ok(())
@@ -1001,18 +1020,31 @@ const MAX_PENDING_IO: usize = 16;
 
 /// Pending async I/O request for MMIO VirtIO.
 struct PendingIo {
-    /// Completion token to signal when done.
+    /// Completion token to signal when done. NULL = TOMBSTONE: the entry
+    /// exists only to keep the chain's descriptor window reserved until
+    /// the completion walker consumes the chain's used-ring entry. Used
+    /// for (a) synchronous chains (their waiter polls its own response
+    /// byte and owns the io_buf) and (b) timed-out async chains whose
+    /// waiter has unwound (the io_buf is deliberately leaked — the device
+    /// may still DMA its status byte — and the completion must never be
+    /// fired into memory its owner stopped owning).
     completion: *mut crate::fs::io_completion::IoCompletion,
-    /// Pointer to response buffer (allocated during submit, freed on completion).
+    /// Pointer to response buffer (allocated during submit, freed on
+    /// completion). NULL in tombstones (nothing to free or read).
     resp_ptr: *mut u8,
     /// Layout of response buffer for deallocation.
     resp_layout: alloc::alloc::Layout,
-    /// Pointer to request header buffer (freed on completion).
+    /// Pointer to request header buffer (freed on completion). NULL in
+    /// tombstones.
     header_ptr: *mut u8,
     /// Layout of request header buffer for deallocation.
     header_layout: alloc::alloc::Layout,
     /// Head descriptor id of this request's chain (PCI only): the key the
     /// completion walker matches against the used ring's UsedElem.id.
+    /// A virtio-blk chain occupies the three consecutive descriptors
+    /// [head_desc, head_desc+2]; window-reservation (see
+    /// pci_alloc_chain_window) guarantees this id is UNIQUE among live
+    /// table entries, so a used-ring entry can never be misattributed.
     head_desc: u32,
 }
 
@@ -1086,8 +1118,16 @@ const MAX_PENDING_IO_PCI: usize = 64;
 ///     stack page: the r2 WAKE-WILD-PTR panic.
 /// Keying by head descriptor id makes completion order irrelevant: a
 /// pending fires exactly when ITS chain's used-ring entry appears, never
-/// earlier. Synchronous request chains simply match no entry. A timing-out
-/// waiter retires its own entry via `blk_retire_pending_async` so a late
+/// earlier. UNIQUENESS is enforced by pci_alloc_chain_window's window
+/// reservation: the free-running descriptor allocator would otherwise
+/// recycle a head id every queue_size descriptors (~43 chains on a
+/// 128-desc queue) while its previous chain was still in flight — two
+/// live pendings sharing head_desc let a used-ring entry fire the wrong
+/// one (premature -EIO, io_buf freed under the device). Synchronous
+/// chains publish NULL-completion reservations ("tombstones") so their
+/// windows are equally protected and their used-ring entries cannot be
+/// misattributed to a later async pending. A timing-out waiter converts
+/// its entry into a tombstone via abandon_pending_completion so a late
 /// completion can never touch memory its owner has stopped owning.
 static VIRTIO_PCI_PENDING: Spinlock<[Option<PendingIo>; MAX_PENDING_IO_PCI]> =
     Spinlock::new([const { None }; MAX_PENDING_IO_PCI]);
@@ -1113,6 +1153,102 @@ pub fn pci_blk_kick() {
     }
 }
 
+/// True if the 3-descriptor windows of two chains (heads `a` and `b` on a
+/// queue of `q` descriptors) share any descriptor. Chains always occupy
+/// [head, head+1, head+2] consecutively (header/data/resp).
+fn chain_windows_overlap(a: u32, b: u32, q: u32) -> bool {
+    if q == 0 {
+        return false;
+    }
+    let d = (a as i64 - b as i64).rem_euclid(q as i64);
+    d < 3 || (q as i64 - d) < 3
+}
+
+/// Allocate the three descriptors of a virtio-blk chain such that the
+/// chain's window [head, head+2] does NOT overlap any live pending-table
+/// entry's window (async pendings, synchronous-chain reservations, and
+/// timeout tombstones alike).
+///
+/// WHY: the descriptor allocator is a free-running counter modulo
+/// queue_size (see alloc_desc_chain) — it recycles descriptor ids without
+/// consulting the used ring, so a head id recurs every queue_size
+/// descriptors (~43 chains on QEMU's default 128-desc queue). With two
+/// live table entries sharing head_desc, a used-ring entry (which carries
+/// only the head id) is ambiguous and the walker's first-match could fire
+/// the WRONG pending: a premature -EIO whose io_buf and DMA target are
+/// then freed while the chain is still at the device — the wandering heap
+/// corruption family. Reserving windows makes head_desc UNIQUE among live
+/// entries, which is the invariant device-truthed dispatch rests on. It
+/// also prevents one submit from overwriting another chain's descriptors
+/// before the device has even popped them from the avail ring.
+///
+/// Colliding windows are simply BURNED (the free-running allocator skips
+/// ahead); bounded by the window count. Caller must hold the PCI BLK lock.
+pub fn pci_alloc_chain_window(
+    virt_queue: &mut queue::VirtQueue,
+) -> Result<(u16, u16, u16), i32> {
+    let q = virt_queue.queue_size as u32;
+    // Enough attempts to cycle past every (q/3) window plus slack.
+    let attempts = (q / 3) + 2;
+    for _ in 0..attempts {
+        let head = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err(-5), // in-flight guard exhausted
+        };
+        let data = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err(-5),
+        };
+        let resp = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err(-5),
+        };
+        let busy = {
+            let table = VIRTIO_PCI_PENDING.lock_irqsave();
+            table.iter().any(|e| match e {
+                Some(p) => chain_windows_overlap(p.head_desc, head as u32, q),
+                None => false,
+            })
+        };
+        if !busy {
+            return Ok((head, data, resp));
+        }
+        // Window still owned by an unconsumed chain: burn it and retry.
+    }
+    // Every window is still reserved (device wedge / mass timeouts).
+    Err(-5)
+}
+
+/// Publish a NULL-completion reservation ("tombstone") for a synchronous
+/// PCI chain (read_block_once / write_block_once). Keeps the chain's
+/// descriptor window reserved until the completion walker consumes its
+/// used-ring entry, and ensures the chain's eventual used-ring entry is
+/// matched (and discarded) instead of being misattributed to a later
+/// async pending that recycled the head descriptor id.
+///
+/// Caller must hold the PCI BLK lock and have already submitted the chain.
+/// A free slot always exists: live entries each hold a distinct 3-desc
+/// window (<= queue_size/3 = 42) while the table has 64 slots.
+pub fn pci_publish_sync_chain(head_desc: u16) {
+    let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
+    for slot in table.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(PendingIo {
+                completion: core::ptr::null_mut(),
+                resp_ptr: core::ptr::null_mut(),
+                resp_layout: alloc::alloc::Layout::from_size_align(1, 1).unwrap(),
+                header_ptr: core::ptr::null_mut(),
+                header_layout: alloc::alloc::Layout::from_size_align(1, 1).unwrap(),
+                head_desc: head_desc as u32,
+            });
+            return;
+        }
+    }
+    // Unreachable in practice (see slot-count argument above); if it ever
+    // fires, the window check in pci_alloc_chain_window already refused
+    // submissions long before the table could fill — defensive no-op.
+}
+
 /// Abandon in-flight async I/O bound to one IoCompletion pointer.
 ///
 /// GSD fix (10s-deadline UAF): `IoCompletion::wait` bounds itself at 10s
@@ -1127,18 +1263,23 @@ pub fn pci_blk_kick() {
 /// resulting wild `wake_up_process` on a garbage Task pointer was the
 /// recurring `KERNPANIC pfault badaddr=0x5e` under gnome-session load.
 ///
-/// This removes every pending-table entry referencing `comp`, so nothing
-/// dereferences the abandoning waiter's memory after it unwinds. The
-/// device may still finish the chain and DMA into the request buffer —
-/// the waiter must therefore NOT free its DMA buffers on the
-/// WAIT_TIMED_OUT path (see fill_page_cache_batch / bread_wait callers).
+/// Matching entries are converted into TOMBSTONES (null completion, null
+/// io_buf pointers, head_desc kept) instead of being removed: nothing
+/// dereferences the abandoning waiter's memory after it unwinds, but the
+/// chain's descriptor window stays reserved until the walker consumes
+/// its used-ring entry — otherwise the free-running allocator could hand
+/// the head id to a NEW chain, and the abandoned chain's late used-ring
+/// entry would fire that new pending prematurely. The device may still
+/// finish the abandoned chain and DMA into the request buffer — the
+/// waiter must therefore NOT free its DMA buffers on the WAIT_TIMED_OUT
+/// path (see fill_page_cache_batch / bread_wait callers).
 ///
 /// The chain's header/resp io_buf is deliberately LEAKED, not freed: the
 /// device writes the response byte (inside that block) exactly when the
 /// chain completes — possibly long after this abandon — so freeing it
 /// would hand a late 1-byte DMA a freed heap block (R21-N2 discipline:
-/// integrity over a bounded leak; descriptor slots cannot be reused
-/// while the chain still counts against the in-flight guard).
+/// integrity over a bounded leak; the window reservation additionally
+/// guarantees no descriptor of the chain is reused before that moment).
 ///
 /// Returns the number of entries abandoned.
 pub fn abandon_pending_completion(
@@ -1146,23 +1287,43 @@ pub fn abandon_pending_completion(
 ) -> usize {
     let mut abandoned = 0usize;
 
-    // PCI table
+    // PCI table: tombstone (window stays reserved; nothing left to fire).
     {
         let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
         for slot in table.iter_mut() {
-            if slot.take_if(|p| p.completion == comp).is_some() {
-                // io_buf intentionally leaked (see above).
-                abandoned += 1;
+            if let Some(p) = slot {
+                if p.completion == comp && !p.completion.is_null() {
+                    *slot = Some(PendingIo {
+                        completion: core::ptr::null_mut(),
+                        resp_ptr: core::ptr::null_mut(),
+                        resp_layout: p.resp_layout,
+                        header_ptr: core::ptr::null_mut(),
+                        header_layout: p.header_layout,
+                        head_desc: p.head_desc,
+                    });
+                    // io_buf intentionally leaked (see above).
+                    abandoned += 1;
+                }
             }
         }
     }
-    // MMIO table
+    // MMIO table: same tombstone discipline (ordinal-indexed table).
     {
         let mut table = VIRTIO_MMIO_PENDING.lock_irqsave();
         for slot in table.iter_mut() {
-            if slot.take_if(|p| p.completion == comp).is_some() {
-                // header + resp intentionally leaked (same discipline).
-                abandoned += 1;
+            if let Some(p) = slot {
+                if p.completion == comp && !p.completion.is_null() {
+                    *slot = Some(PendingIo {
+                        completion: core::ptr::null_mut(),
+                        resp_ptr: core::ptr::null_mut(),
+                        resp_layout: p.resp_layout,
+                        header_ptr: core::ptr::null_mut(),
+                        header_layout: p.header_layout,
+                        head_desc: p.head_desc,
+                    });
+                    // header + resp intentionally leaked (same discipline).
+                    abandoned += 1;
+                }
             }
         }
     }
@@ -1227,15 +1388,16 @@ unsafe fn pci_submit_read_async(
     const VIRTQ_DESC_F_NEXT: u16 = 1;
     const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-    // Reserve a FREE pending slot BEFORE touching the device (device-truthed
-    // dispatch — see VIRTIO_PCI_PENDING): submitters are serialized by the
-    // BLK lock (the completion walker takes the same lock), so the scan
-    // cannot race another submitter or the walker. Live pendings are bounded
-    // by in-flight chains (< queue_size/3 = 41) plus completed-but-unwalked
-    // ones; if the Block softirq is starved long enough for all 64 slots to
-    // fill, fail with "queue full" — callers drain what is in flight and
-    // retry, which is exactly the backpressure needed to let the walker
-    // catch up.
+    // Reserve a window-non-overlapping descriptor triple BEFORE touching
+    // the device (device-truthed dispatch — see VIRTIO_PCI_PENDING and
+    // pci_alloc_chain_window): submitters are serialized by the BLK lock
+    // (the completion walker takes the same lock), so the reservation
+    // cannot race another submitter or the walker. Live pendings are
+    // bounded by in-flight chains (< queue_size/3 = 41) plus
+    // completed-but-unwalked ones; if the Block softirq is starved long
+    // enough for every window to stay reserved, fail with "queue full" —
+    // callers drain what is in flight and retry, which is exactly the
+    // backpressure needed to let the walker catch up.
     let free_slot = {
         let table = VIRTIO_PCI_PENDING.lock_irqsave();
         let mut free = usize::MAX;
@@ -1266,30 +1428,17 @@ unsafe fn pci_submit_read_async(
         crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64),
     ).0;
 
-    let header_desc_idx = match virt_queue.alloc_desc() {
-        Some(idx) => idx,
-        None => {
-            // SAFETY: io_buf was allocated with io_layout and is unreferenced.
-            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
-            return Err(-5); // queue full — caller falls back to sync read
-        }
-    };
-    let data_desc_idx = match virt_queue.alloc_desc() {
-        Some(idx) => idx,
-        None => {
-            // SAFETY: see above.
-            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
-            return Err(-5);
-        }
-    };
-    let resp_desc_idx = match virt_queue.alloc_desc() {
-        Some(idx) => idx,
-        None => {
-            // SAFETY: see above.
-            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
-            return Err(-5);
-        }
-    };
+    let (header_desc_idx, data_desc_idx, resp_desc_idx) =
+        match pci_alloc_chain_window(virt_queue) {
+            Ok(triple) => triple,
+            Err(_) => {
+                // SAFETY: io_buf was allocated with io_layout and is
+                // unreferenced (the failed reservation burned descriptors
+                // only — no chain was built from them).
+                unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+                return Err(-5); // queue full — caller falls back to sync read
+            }
+        };
 
     virt_queue.set_desc(header_desc_idx, header_phys,
         core::mem::size_of::<VirtIOBlkReqHeader>() as u32,
@@ -1407,9 +1556,9 @@ pub fn pci_process_async_completions() {
             )
         };
         // Fire the pending whose chain this entry completed (keyed lookup —
-        // order-independent). No match = a synchronous request chain (its
-        // waiter polls its own response byte) or an already-retired
-        // (timed-out) chain: nothing to do.
+        // order-independent; window reservation makes head_desc unique
+        // among live entries, so the match is unambiguous). No match at
+        // all = an entry retired by a path that no longer tracks it.
         let mut fired: Option<PendingIo> = None;
         {
             let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
@@ -1427,16 +1576,25 @@ pub fn pci_process_async_completions() {
             }
         }
         if let Some(pending) = fired {
-            let status = unsafe { *(pending.resp_ptr as *mut u8) };
-            let io_status = if status == 0 { 0 } else { -5i32 };
-            // SAFETY: the combined R17-C block: header at base, resp at +48,
-            // both inside the single 64-byte allocation (resp_layout == base).
-            unsafe {
-                alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
+            if !pending.completion.is_null() {
+                let status = unsafe { *(pending.resp_ptr as *mut u8) };
+                let io_status = if status == 0 { 0 } else { -5i32 };
+                // SAFETY: the combined R17-C block: header at base, resp at
+                // +48, both inside the single 64-byte allocation
+                // (resp_layout == base).
+                unsafe {
+                    alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
+                }
+                // SAFETY: the waiter keeps this completion alive until it
+                // fires (or converts its entry into a tombstone via
+                // abandon_pending_completion before leaving).
+                unsafe { (*pending.completion).complete(io_status); }
             }
-            // SAFETY: the waiter keeps this completion alive until it fires
-            // (or retires it via blk_retire_pending_async before leaving).
-            unsafe { (*pending.completion).complete(io_status); }
+            // NULL completion = TOMBSTONE (synchronous chain or timed-out
+            // abandon): its used-ring entry just released the descriptor
+            // window — nothing to read, free, or fire. Sync chains' io_buf
+            // is owned and freed by their own waiter; abandoned io_bufs
+            // were deliberately leaked at abandon time.
         }
         i = i.wrapping_add(1);
     }
@@ -1839,6 +1997,14 @@ pub fn block_bh_handler(_vec: usize) {
                     let slot = i as usize % MAX_PENDING_IO;
                     let mut pending = VIRTIO_MMIO_PENDING.lock_irqsave();
                     if let Some(pending) = pending[slot].take() {
+                        if pending.completion.is_null() {
+                            // TOMBSTONE (timed-out waiter): its used-ring
+                            // entry just released the slot — nothing to
+                            // read, free (the io_buf was deliberately
+                            // leaked), or fire into unwound memory.
+                            i = i.wrapping_add(1);
+                            continue;
+                        }
                         // Read response status
                         let status = if !pending.resp_ptr.is_null() {
                             *(pending.resp_ptr as *mut u8)

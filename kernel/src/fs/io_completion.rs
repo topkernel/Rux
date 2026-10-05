@@ -18,11 +18,12 @@ use crate::process::wait::WaitQueueHead;
 ///
 /// Distinct from -EIO: a real device error means the chain COMPLETED (its
 /// DMA writes are done); a timeout means the chain may STILL be in flight
-/// on the device. Callers must therefore (a) retire the device-side pending
-/// entry so its late completion cannot fire into memory they are about to
-/// stop owning (bio::bread_wait does this via
-/// virtio::blk_retire_pending_async), and (b) never free the request's DMA
-/// target buffer — leak it instead.
+/// on the device. Callers must therefore (a) rely on wait() itself having
+/// retired the device-side pending entry (it calls
+/// virtio::abandon_pending_completion, converting the entry into a
+/// tombstone) so its late completion cannot fire into memory they are
+/// about to stop owning, and (b) never free the request's DMA target
+/// buffer — leak it instead.
 pub const WAIT_TIMED_OUT: i32 = -110; // -ETIMEDOUT
 
 /// I/O completion signal.
@@ -183,20 +184,32 @@ impl IoCompletion {
                 let pid = crate::sched::get_current_pid();
                 let dl = crate::drivers::timer::get_jiffies().saturating_add(1);
                 let id = crate::timer::add_timer_wakeup(dl, pid);
-                // R54: schedule() now restores the caller's SIE state;
-                // wait-path callers re-arm explicitly (semaphore.rs
-                // discipline) so ticks/IPIs reach this CPU across the wait
-                // loop.
-                crate::arch::riscv64::cpu::restore_irq(true);
-                crate::sched::schedule();
                 if id != 0 {
+                    // R54: schedule() now restores the caller's SIE state;
+                    // wait-path callers re-arm explicitly (semaphore.rs
+                    // discipline) so ticks/IPIs reach this CPU across the
+                    // wait loop.
+                    crate::arch::riscv64::cpu::restore_irq(true);
+                    crate::sched::schedule();
                     crate::timer::del_timer(id);
+                } else {
+                    // Timer table STILL exhausted: never schedule() without
+                    // a wake source — that is exactly the silent forever-
+                    // sleep the deadline timer exists to prevent. Spin one
+                    // bounded interval with interrupts enabled (so the
+                    // completion walker can run) and re-check.
+                    self.wait_queue.finish_wait(current);
+                    crate::arch::riscv64::cpu::restore_irq(true);
+                    for _ in 0..100_000 {
+                        core::hint::spin_loop();
+                    }
+                    continue;
                 }
             } else {
                 // R54: schedule() now restores the caller's SIE state;
                 // wait-path callers re-arm explicitly (semaphore.rs
-                // discipline) so ticks/IPIs reach this CPU across the wait
-                // loop.
+                // discipline) so ticks/IPIs reach this CPU across the
+                // wait loop.
                 crate::arch::riscv64::cpu::restore_irq(true);
                 crate::sched::schedule();
             }

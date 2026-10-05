@@ -1024,19 +1024,16 @@ fn read_block_once(
         // Reclaim descriptors that the device has finished with
         virt_queue.reclaim_descs();
 
-        // Allocate three descriptors
-        let header_desc_idx = match virt_queue.alloc_desc() {
-            Some(idx) => idx,
-            None => return Err("Failed to alloc header descriptor"),
-        };
-        let data_desc_idx = match virt_queue.alloc_desc() {
-            Some(idx) => idx,
-            None => return Err("Failed to alloc data descriptor"),
-        };
-        let resp_desc_idx = match virt_queue.alloc_desc() {
-            Some(idx) => idx,
-            None => return Err("Failed to alloc response descriptor"),
-        };
+        // Window-reserved descriptor triple: the chain's descriptors must
+        // not overlap any live pending/tombstone window, or the device
+        // could execute a mixed chain and this chain's used-ring entry
+        // could be misattributed to another pending (device-truthed
+        // dispatch invariant — see pci_alloc_chain_window).
+        let (header_desc_idx, data_desc_idx, resp_desc_idx) =
+            match crate::drivers::virtio::pci_alloc_chain_window(virt_queue) {
+                Ok(triple) => triple,
+                Err(_) => return Err("Failed to reserve descriptor window"),
+            };
 
         // Construct VirtIO block request header
         let req_header = VirtIOBlkReqHeader {
@@ -1126,6 +1123,16 @@ fn read_block_once(
 
         // Increment expected used.idx (track our expected completion count)
         crate::drivers::virtio::increment_expected_used_idx();
+
+        // Publish a NULL-completion reservation ("tombstone") for this
+        // synchronous chain: keeps its descriptor window reserved until
+        // the completion walker consumes its used-ring entry, so (a) no
+        // async submit can recycle these descriptors while the chain is
+        // still at the device and (b) this chain's used-ring entry can
+        // never be misattributed to a later async pending that recycled
+        // the head descriptor id. Still under the BLK lock here — the
+        // walker cannot observe the used-ring advance first.
+        crate::drivers::virtio::pci_publish_sync_chain(header_desc_idx);
 
         // Snapshot used ring pointer for interrupt-driven wait
         let used_ptr = virt_queue.used_ring_ptr();
@@ -1242,19 +1249,13 @@ fn write_block_once(
         // Reclaim descriptors that the device has finished with
         virt_queue.reclaim_descs();
 
-        // Allocate three descriptors
-        let header_desc_idx = match virt_queue.alloc_desc() {
-            Some(idx) => idx,
-            None => return Err("Failed to alloc header descriptor"),
-        };
-        let data_desc_idx = match virt_queue.alloc_desc() {
-            Some(idx) => idx,
-            None => return Err("Failed to alloc data descriptor"),
-        };
-        let resp_desc_idx = match virt_queue.alloc_desc() {
-            Some(idx) => idx,
-            None => return Err("Failed to alloc response descriptor"),
-        };
+        // Window-reserved descriptor triple (see pci_alloc_chain_window;
+        // same invariant as the read path).
+        let (header_desc_idx, data_desc_idx, resp_desc_idx) =
+            match crate::drivers::virtio::pci_alloc_chain_window(virt_queue) {
+                Ok(triple) => triple,
+                Err(_) => return Err("Failed to reserve descriptor window"),
+            };
 
         // Construct VirtIO block request header (WRITE type)
         let req_header = VirtIOBlkReqHeader {
@@ -1344,6 +1345,16 @@ fn write_block_once(
 
         // Increment expected used.idx (track our expected completion count)
         crate::drivers::virtio::increment_expected_used_idx();
+
+        // Publish a NULL-completion reservation ("tombstone") for this
+        // synchronous chain: keeps its descriptor window reserved until
+        // the completion walker consumes its used-ring entry, so (a) no
+        // async submit can recycle these descriptors while the chain is
+        // still at the device and (b) this chain's used-ring entry can
+        // never be misattributed to a later async pending that recycled
+        // the head descriptor id. Still under the BLK lock here — the
+        // walker cannot observe the used-ring advance first.
+        crate::drivers::virtio::pci_publish_sync_chain(header_desc_idx);
 
         // Snapshot used ring pointer for interrupt-driven wait
         let used_ptr = virt_queue.used_ring_ptr();
