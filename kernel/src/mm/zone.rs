@@ -430,6 +430,31 @@ impl Zone {
             return None;
         }
 
+        // FORENSIC seed detector (fake-OOM family): a block popped from a
+        // free list must be refcount==0 AND carry OnFreelist. A live
+        // refcount here means a live frame was wired into the buddy (it is
+        // about to be handed out a second time); a clear OnFreelist means
+        // the head is not actually linked (counter/list desync). Either is
+        // a primary corruption event — print the first few.
+        {
+            let page = pfn_to_page(head);
+            if !page.is_null() {
+                // SAFETY: read-only descriptor access under the zone lock.
+                let (rc, linked) = unsafe {
+                    ((*page).refcount(), (*page).test_flag(PageFlag::OnFreelist))
+                };
+                if rc != 0 || !linked {
+                    if SEED_ALARMS.fetch_add(1, Ordering::Relaxed) < 8 {
+                        crate::pr_err!(
+                            "SEED-ALLOC-BAD-POP pfn={} from order={} (want {}): refcount={} on_freelist={} zone_free_cnt={}",
+                            head, current_order, target_order, rc, linked,
+                            self.free_pages.load(Ordering::Relaxed)
+                        );
+                    }
+                }
+            }
+        }
+
         // Remove from free list
         self.remove_from_free_list(head, current_order);
 
@@ -484,6 +509,38 @@ impl Zone {
             return;
         }
 
+        // FORENSIC (fake-OOM family) RAW-FREE WATCHPOINT: a frame carrying a
+        // LIVE page-table ledger stamp is about to be freed through the RAW
+        // path (not free_page_table_checked). That stamps-out a live table
+        // tree — the seed of the stale-tree/cascade corruption. The stamp
+        // stays live, so the alloc side can also catch the frame being
+        // handed out again ("DOUBLE-ALLOC still live"). Print with a
+        // frame-pointer chain to name the offender.
+        if crate::arch::riscv64::mm::mmu_init::alloc_stage_is_late()
+            && crate::arch::riscv64::mm::mmu_init::PtLedger::is_live_table(pfn as u64)
+        {
+            static RAWFREE_REPORTS: AtomicUsize = AtomicUsize::new(0);
+            if RAWFREE_REPORTS.fetch_add(1, Ordering::Relaxed) < 6 {
+                crate::pr_err!(
+                    "RAW-FREE-OF-LIVE-TABLE pfn={:#x} order={} by pid={} — stack:",
+                    pfn, order,
+                    crate::process::current_pid()
+                );
+                let mut frames: [u64; 10] = [0; 10];
+                let s0: u64;
+                unsafe {
+                    core::arch::asm!("mv {}, s0", out(reg) s0, options(nomem, nostack));
+                    crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+                }
+                for f in frames.iter() {
+                    if *f == 0 {
+                        break;
+                    }
+                    crate::pr_err!("  RAW-FREE frame {:#x}", f);
+                }
+            }
+        }
+
         let _guard = self.lock.lock();
 
         // R21-2: reset the descriptor — every raw-free caller's comments
@@ -517,6 +574,7 @@ impl Zone {
                         // console path (same discipline as the heap
                         // buddy's R43 tripwires).
                         crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                        DOUBLE_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
                         return;
                     }
                 }
@@ -732,6 +790,45 @@ impl Zone {
         !self.free_area[order].is_empty()
     }
 
+    /// FORENSIC (fake-OOM family): compare each order's DECLARED free-block
+    /// count with the length actually reachable by walking the `next_free`
+    /// chain. A declared count above the walked length means the chain is
+    /// broken (a linked page's `next_free` no longer points into the list —
+    /// every page after the break is unreachable to the allocator while the
+    /// counters still claim it). Walk is bounded and cycle-guarded; it runs
+    /// WITHOUT the zone lock (diagnostic path only).
+    ///
+    /// Returns (declared_blocks, walked_blocks, head_pfn) per order.
+    pub fn forensic_free_report(&self) -> [(usize, usize, usize); MAX_ORDER + 1] {
+        let mut out = [(0usize, 0usize, 0usize); MAX_ORDER + 1];
+        for order in 0..=MAX_ORDER {
+            let declared = self.free_area[order].nr_free();
+            let mut cur = self.free_area[order].free_list.load(Ordering::Acquire);
+            let head = cur;
+            let mut walked = 0usize;
+            let mut guard = 0usize;
+            while cur != FREE_LIST_NULL {
+                walked += 1;
+                guard += 1;
+                if guard > 4_000_000 {
+                    break; // runaway/cyclic chain
+                }
+                let page = pfn_to_page(cur);
+                if page.is_null() {
+                    break;
+                }
+                // SAFETY: read-only descriptor access on the diagnostic path.
+                let next = unsafe { (*page).next_free() };
+                if next == cur {
+                    break; // self-loop
+                }
+                cur = next;
+            }
+            out[order] = (declared, walked, if head == FREE_LIST_NULL { 0 } else { head });
+        }
+        out
+    }
+
     /// Get zone statistics
     pub fn stats(&self) -> ZoneStats {
         ZoneStats {
@@ -942,4 +1039,10 @@ pub static ZALLOC_CUR: core::sync::atomic::AtomicUsize = core::sync::atomic::Ato
 pub static ZTRACE_FREE: [core::sync::atomic::AtomicU64; 4096] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 4096];
 pub static ZFREE_CUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+// FORENSIC (fake-OOM family): rate-limit counters for the seed detectors —
+// SEED-ALLOC-BAD-POP (allocating a block that was live or unlinked) and the
+// OnFreelist double-free tripwire in free_pages().
+pub static SEED_ALARMS: AtomicUsize = AtomicUsize::new(0);
+pub static DOUBLE_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 

@@ -133,6 +133,14 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     }
                 }
 
+                // FORENSIC (fake-OOM family): the allocator is about to fail
+                // this allocation while the zone may still CLAIM free pages.
+                // Dump the state once so the serial log shows whether the
+                // free lists are genuinely empty or just unreachable.
+                if order == 0 && zone.nr_free() > 0 {
+                    oom_forensic_dump("alloc_pages(order=0) failed with free_cnt>0");
+                }
+
                 return 0;
             }
         }
@@ -147,6 +155,149 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
 /// Allocate a single page
 pub fn alloc_page(gfp_flags: GfpFlags) -> usize {
     alloc_pages(gfp_flags, 0)
+}
+
+/// FORENSIC (fake-OOM family): one-shot allocator-state dump, printed when
+/// the page allocator fails a demand-fault allocation (the kernel then kills
+/// the faulting task with SIGKILL — "pagefault: Out of memory").
+///
+/// Distinguishes the failure classes that are indistinguishable from the
+/// OOM message alone:
+///  - genuine exhaustion: free counters AND walkable lists both ~0
+///  - broken free lists: counters claim free pages, chain walk finds none
+///    (a linked page's next_free was clobbered — everything past the break
+///    is unreachable while still refcount==0)
+///  - orphaned frames: descriptors say refcount==0 but the page is not on
+///    any free list (freed through a path that never linked it, or unlinked
+///    without relinking)
+///  - inverse corruption: page is ON a free list but carries refcount>0
+///    (a live frame wired into the buddy — will be handed out twice)
+///
+/// Rate-limited to the first 4 calls per boot (alloc failure storms would
+/// otherwise flood the UART).
+pub fn oom_forensic_dump(site: &str) {
+    static DUMPS: AtomicUsize = AtomicUsize::new(0);
+    if DUMPS.fetch_add(1, Ordering::Relaxed) >= 4 {
+        return;
+    }
+
+    crate::println!("==== OOM-FORENSIC #{} @ {} ====", DUMPS.load(Ordering::Relaxed), site);
+    crate::println!("OOM-FORENSIC: in_direct_reclaim={}", IN_DIRECT_RECLAIM.load(Ordering::Relaxed));
+
+    // Zone state: counters vs walkable chains
+    // SAFETY: diagnostic read-only node access.
+    if let Some(node) = unsafe { first_online_node_mut() } {
+        for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma, ZoneType::ZoneMovable] {
+            if let Some(zone) = node.zone(zt) {
+                if !zone.is_initialized() {
+                    continue;
+                }
+                let report = zone.forensic_free_report();
+                crate::println!(
+                    "OOM-FORENSIC: zone {} free_cnt={} managed={} wmark min/low/high={}/{}/{}",
+                    zone.zone_type().name(),
+                    zone.nr_free(),
+                    zone.managed_pages(),
+                    zone.watermark(super::zone::WMARK_MIN),
+                    zone.watermark(super::zone::WMARK_LOW),
+                    zone.watermark(super::zone::WMARK_HIGH),
+                );
+                let mut walk_total = 0usize;
+                for order in 0..=MAX_ORDER {
+                    let (declared, walked, head) = report[order];
+                    walk_total += walked << order;
+                    if declared != 0 || walked != 0 {
+                        crate::println!(
+                            "OOM-FORENSIC:   order {:>2}: declared={} walked={} head_pfn={}",
+                            order, declared, walked, head
+                        );
+                    }
+                }
+                crate::println!(
+                    "OOM-FORENSIC:   walkable pages total={} vs free_cnt={}{}",
+                    walk_total,
+                    zone.nr_free(),
+                    if walk_total == zone.nr_free() { "" } else { "  <== MISMATCH" }
+                );
+            }
+        }
+        // LRU sizes
+        let mut l0 = 0usize;
+        for lru_i in 0..super::pglist::NR_LRU_LISTS {
+            let sz = node.lru_sizes[lru_i].load(Ordering::Relaxed);
+            if sz > 0 {
+                crate::println!("OOM-FORENSIC: lru[{}] size={}", lru_i, sz);
+            }
+            l0 += sz;
+        }
+        if l0 == 0 {
+            crate::println!("OOM-FORENSIC: all LRU lists empty");
+        }
+    }
+
+    // Page-descriptor census
+    let st = super::page_desc::page_desc_stats();
+    crate::println!(
+        "OOM-FORENSIC: desc used={} free={} reserved={} anon={} mapped={}",
+        st.used_pages, st.free_pages, st.reserved_pages, st.anonymous_pages, st.mapped_pages
+    );
+
+    // Swap
+    crate::println!(
+        "OOM-FORENSIC: swap active={}",
+        super::swap::nr_active_swap()
+    );
+
+    // Seed-detector counters (see zone.rs)
+    crate::println!(
+        "OOM-FORENSIC: seed_alarms={} double_free_tripwires={}",
+        super::zone::SEED_ALARMS.load(Ordering::Relaxed),
+        super::zone::DOUBLE_FREE_COUNT.load(Ordering::Relaxed)
+    );
+
+    // Orphan / inverse-corruption scan over the whole mem_map (bounded by
+    // the descriptors vmemmap actually mapped — see page_desc_stats for the
+    // MAX_PAGES-vs-RAM clamp rationale; ~0.5M iterations, acceptable on the
+    // diagnostic path).
+    {
+        use super::page_desc::{pfn_to_page, PageFlag, MIN_PFN, MAX_PAGES};
+        let nr_descs =
+            MAX_PAGES.min(super::vmemmap::vmemmap_stats().nr_pages);
+        let mut orphan = 0usize;
+        let mut inverse = 0usize;
+        let mut orphan_first: [usize; 8] = [0; 8];
+        let mut inverse_first: [usize; 8] = [0; 8];
+        for i in 0..nr_descs {
+            let page = pfn_to_page(MIN_PFN + i);
+            if page.is_null() {
+                continue;
+            }
+            // SAFETY: read-only descriptor access on the diagnostic path.
+            let (rc, linked, reserved) = unsafe {
+                ((*page).refcount(), (*page).test_flag(PageFlag::OnFreelist), (*page).is_reserved())
+            };
+            if rc == 0 && !linked && !reserved {
+                orphan += 1;
+                if orphan <= 8 {
+                    orphan_first[orphan - 1] = MIN_PFN + i;
+                }
+            } else if rc > 0 && linked {
+                inverse += 1;
+                if inverse <= 8 {
+                    inverse_first[inverse - 1] = MIN_PFN + i;
+                }
+            }
+        }
+        crate::println!(
+            "OOM-FORENSIC: orphan(unlinked,ref0)={} first={:?}",
+            orphan, orphan_first
+        );
+        crate::println!(
+            "OOM-FORENSIC: inverse(linked,ref>0)={} first={:?}",
+            inverse, inverse_first
+        );
+    }
+    crate::println!("==== OOM-FORENSIC end ====");
 }
 
 /// Allocate up to `n` single (order-0) pages under ONE zone lock.

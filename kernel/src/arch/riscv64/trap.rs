@@ -726,6 +726,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
         }
         MmFaultResult::OutOfMemory => {
             crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
+            // FORENSIC (fake-OOM family): allocator state at the kill moment.
+            crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
             // Terminate user process via do_exit (properly notifies parent)
             if regs.user_mode() {
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
