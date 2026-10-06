@@ -987,6 +987,12 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
     // Resolve through the per-process fd table — never index the global
     // protocol tables with a process fd (review NET-C3).
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
+        // O_NONBLOCK differentiates EINPROGRESS from a blocking wait for
+        // an in-flight handshake (same file-flags source as recv/send).
+        let nonblock = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(fd as usize))
+            .map(|f| (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0)
+            .unwrap_or(false);
         let result = match parsed {
             ParsedSockAddr::V6 { addr, port } => {
                 if !socket.is_ipv6() {
@@ -994,7 +1000,7 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
                 }
                 socket.connect6(addr, port)
             }
-            ParsedSockAddr::V4 { addr, port } => socket.connect(addr, port),
+            ParsedSockAddr::V4 { addr, port } => socket.connect(addr, port, nonblock),
         };
         let r = match result {
             Ok(()) => 0,
