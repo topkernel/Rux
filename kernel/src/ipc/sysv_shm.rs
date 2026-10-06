@@ -155,6 +155,23 @@ impl ShmSegment {
 
 static SHM_IDS: IpcIds<ShmSegment> = IpcIds::new();
 
+/// Whether a shm id has been removed (IPC_RMID'd) or no longer exists.
+///
+/// Used by the remap_file_pages() emulation: Linux's post-4.0 emulation
+/// (mm/mmap.c) tears the mapping down and re-establishes it with
+/// do_mmap(); when the segment was IPC_RMID'd in the window, the last
+/// attachment reference dies with the unmap and the remap fails — which
+/// is exactly what LTP shmctl05's race loop expects (`EIDRM`/`EINVAL`).
+pub fn shm_id_removed(shmid: i32) -> bool {
+    match SHM_IDS.find(shmid) {
+        None => true,
+        Some(idx) => {
+            let slots = SHM_IDS.slots.lock();
+            slots[idx].as_ref().map(|e| e.deleted).unwrap_or(true)
+        }
+    }
+}
+
 fn get_current_pid() -> u32 {
     crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0)
 }

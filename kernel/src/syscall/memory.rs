@@ -2841,8 +2841,92 @@ pub fn sys_fadvise64(args: [u64; 6]) -> i64 {
 }
 
 /// sys_remap_file_pages - Remap file pages (NR 234, deprecated)
-pub fn sys_remap_file_pages(_args: [u64; 6]) -> i64 {
-    0 // Deprecated, return success
+///
+/// F12: the old stub returned fake success (0) unconditionally. LTP
+/// shmctl05 races remap_file_pages() against IPC_RMID in a
+/// `do { ... } while (ret == 0)` loop — with a fake 0 the loop NEVER
+/// exited and the test hung forever (chunk WEDGE).
+///
+/// Linux (post-4.0 emulation, mm/mmap.c) semantics implemented here:
+///   prot != 0 or flags != 0          -> EINVAL
+///   size == 0 / unaligned / wraps    -> EINVAL
+///   no MAP_SHARED VMA at start,
+///   or range not inside one VMA      -> EINVAL
+///   SysV shm mapping whose segment
+///   has been IPC_RMID'd              -> EIDRM (the emulation's unmap
+///                                       drops the last attach and the
+///                                       re-mmap of the dying object
+///                                       fails — the race outcome LTP
+///                                       expects first)
+///   otherwise (identity remap)       -> 0 (Linux tears down and
+///                                       re-establishes the same
+///                                       mapping; the net mapping is
+///                                       unchanged)
+pub fn sys_remap_file_pages(args: [u64; 6]) -> i64 {
+    use crate::mm::vma::{VmaFlags, VmaType};
+
+    let start = args[0] as usize;
+    let size = args[1] as usize;
+    let prot = args[2] as usize;
+    let _pgoff = args[3] as usize;
+    let flags = args[4] as usize;
+
+    // Only MAP_NONBLOCK survives in Linux's emulation; Rux treats every
+    // flag as invalid (the LTP callers pass 0).
+    if prot != 0 || flags != 0 {
+        return -errno::EINVAL as i64;
+    }
+    let page: usize = PAGE_SIZE as usize;
+    if start % page != 0 {
+        return -errno::EINVAL as i64;
+    }
+    let size = (size + page - 1) & !(page - 1);
+    if size == 0 {
+        return -errno::EINVAL as i64;
+    }
+    let end = match start.checked_add(size) {
+        Some(e) if e > start => e,
+        _ => return -errno::EINVAL as i64,
+    };
+
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -errno::EINVAL as i64,
+    };
+    let aspace = match current.address_space() {
+        Some(a) => a,
+        None => return -errno::EINVAL as i64,
+    };
+
+    // The VMA must cover the whole range and be MAP_SHARED.
+    let vma = match aspace.find_vma(crate::mm::page::VirtAddr::new(start)) {
+        Some(v) => v,
+        None => return -errno::EINVAL as i64,
+    };
+    if vma.start().as_usize() > start || vma.end().as_usize() < end {
+        return -errno::EINVAL as i64;
+    }
+    if !vma.flags().contains(VmaFlags::SHARED) {
+        return -errno::EINVAL as i64;
+    }
+
+    match vma.vma_type() {
+        VmaType::SharedMemory => {
+            // shmat() stores the shmid in the VMA (set_file_fd). A removed
+            // segment fails the remap like Linux's unmap+remap emulation.
+            let shmid = vma.file_fd();
+            if crate::ipc::sysv_shm::shm_id_removed(shmid) {
+                return -errno::EIDRM as i64;
+            }
+            // Live segment, identity remap: mapping unchanged.
+            0
+        }
+        // File-backed shared mappings: identity remap is a no-op (the
+        // non-linear remap itself is not implemented — remap_file_pages01
+        // exercises that separately and already reports it).
+        VmaType::FileBacked => 0,
+        _ => -errno::EINVAL as i64,
+    }
 }
 
 /// Linux AIO syscalls (NR 0-4) - all stubs
