@@ -26,6 +26,10 @@ all:
 build:
 	@$(MAKE) -C build build
 
+# Build x86_64 kernel (QEMU q35)
+build-x86:
+	@$(MAKE) -C build build-x86
+
 # Clean
 clean:
 	@$(MAKE) -C build clean

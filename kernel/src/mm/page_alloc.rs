@@ -340,8 +340,8 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
         // phys_to_virt converts it to the corresponding virtual address in the
         // kernel linear mapping region, which is safe to write to.
         // Writing PAGE_SIZE bytes is within the allocated page.
-        let virt = crate::arch::riscv64::mm::phys_to_virt(
-            crate::arch::riscv64::mm::PhysAddr::new(addr as u64),
+        let virt = crate::arch::mm::phys_to_virt(
+            crate::arch::mm::PhysAddr::new(addr as u64),
         );
         unsafe {
             core::ptr::write_bytes(virt.0 as *mut u8, 0, PAGE_SIZE);
@@ -434,8 +434,8 @@ pub fn virt_to_page(addr: usize) -> *mut Page {
 
 /// Get page frame number from a kernel virtual address.
 pub fn virt_to_pfn(addr: usize) -> usize {
-    let phys = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(addr as u64),
+    let phys = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(addr as u64),
     );
     (phys.bits() as usize) / PAGE_SIZE
 }
@@ -448,8 +448,8 @@ pub fn page_to_phys(page: &Page) -> usize {
 /// Get the kernel-linear virtual address of a page described by `page`.
 pub fn page_to_virt(page: &Page) -> usize {
     let phys = page_to_phys(page);
-    crate::arch::riscv64::mm::phys_to_virt(
-        crate::arch::riscv64::mm::PhysAddr::new(phys as u64),
+    crate::arch::mm::phys_to_virt(
+        crate::arch::mm::PhysAddr::new(phys as u64),
     )
     .bits() as usize
 }

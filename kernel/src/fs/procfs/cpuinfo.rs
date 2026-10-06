@@ -10,7 +10,7 @@ use alloc::format;
 
 /// Generate /proc/cpuinfo content
 pub fn generate() -> Vec<u8> {
-    use crate::arch::riscv64::smp::num_started_cpus;
+    use crate::arch::smp::num_started_cpus;
 
     let mut content = String::new();
     let num_cpus = num_started_cpus();

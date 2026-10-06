@@ -17,8 +17,8 @@ use core::ptr;
 
 use super::PAGE_SIZE;
 use super::page_desc::Page;
-use crate::arch::riscv64::mm::{VMEMMAP_START, VMEMMAP_END};
-use crate::arch::riscv64::mm::{PageTableEntry, map_kernel_page, phys_to_virt, PhysAddr};
+use crate::arch::mm::{VMEMMAP_START, VMEMMAP_END};
+use crate::arch::mm::{PageTableEntry, map_kernel_page, phys_to_virt, PhysAddr};
 
 /// Page descriptor size (64 bytes for struct Page)
 pub const STRUCT_PAGE_SIZE: usize = core::mem::size_of::<Page>();

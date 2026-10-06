@@ -282,17 +282,17 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
 
             // Instruction page fault
             Cause::InstructionPageFault => {
-                handle_page_fault(regs_ref, crate::arch::riscv64::mm::FaultFlags::EXEC);
+                handle_page_fault(regs_ref, crate::arch::mm::FaultFlags::EXEC);
             }
 
             // Load page fault
             Cause::LoadPageFault => {
-                handle_page_fault(regs_ref, crate::arch::riscv64::mm::FaultFlags::READ);
+                handle_page_fault(regs_ref, crate::arch::mm::FaultFlags::READ);
             }
 
             // Store page fault
             Cause::StoreAmoPageFault => {
-                handle_page_fault(regs_ref, crate::arch::riscv64::mm::FaultFlags::WRITE);
+                handle_page_fault(regs_ref, crate::arch::mm::FaultFlags::WRITE);
             }
 
             // Other exceptions
@@ -417,7 +417,7 @@ fn handle_syscall(regs: &mut PtRegs) {
     // Linux does the same via syscall_enter_from_user_mode() → local_irq_enable().
     // The saved sstatus in pt_regs (SIE=0) is restored unmodified by the
     // trap-return path, so user-mode return semantics are preserved.
-    crate::arch::riscv64::cpu::enable_irq();
+    crate::arch::cpu::enable_irq();
 
     let orig_epc = regs.epc;
     let syscall_num = regs.a7;  // syscall number is in a7, not orig_a0!
@@ -660,7 +660,7 @@ fn sigbus_has_handler() -> bool {
 }
 
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
-    use crate::arch::riscv64::mm::exception::{do_page_fault, MmFaultResult};
+    use crate::arch::mm::exception::{do_page_fault, MmFaultResult};
 
     let fault_addr = regs.badaddr;
 

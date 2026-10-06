@@ -248,7 +248,7 @@ impl UnixSocket {
     /// family). Linux charges skb->truesize for exactly this reason.
     fn queued_truesize(&self) -> usize {
         const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-            + crate::arch::riscv64::mm::PAGE_SIZE as usize;
+            + crate::arch::mm::PAGE_SIZE as usize;
         let q = self.recv_queue.lock();
         q.iter()
             .map(|s| s.data.len() + SEG_OVERHEAD)
@@ -508,7 +508,7 @@ pub unsafe fn put_sockaddr_un(
     addrlen_ptr: *mut u32,
     name: Option<&str>,
 ) -> bool {
-    use crate::arch::riscv64::uaccess::{copy_to_user, put_user};
+    use crate::arch::uaccess::{copy_to_user, put_user};
     let mut buf = [0u8; SOCKADDR_UN_LEN];
     buf[0] = AF_UNIX as u8;
     buf[1] = 0;
@@ -583,7 +583,7 @@ fn unix_wait_round(
 
     // R54: schedule() restores the caller's SIE state; re-arm IRQs so
     // ticks/IPIs reach this CPU across the wait.
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     crate::sched::schedule();
 
     if timer_id != 0 {
@@ -963,7 +963,7 @@ pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
 /// heap allocates whole pages).
 fn seg_charge(len: usize) -> usize {
     const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-        + crate::arch::riscv64::mm::PAGE_SIZE as usize;
+        + crate::arch::mm::PAGE_SIZE as usize;
     len + SEG_OVERHEAD
 }
 

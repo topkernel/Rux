@@ -58,7 +58,7 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
     }
 
     // Check if tv_ptr is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(tv_ptr as usize, core::mem::size_of::<TimeVal>()) {
+    if !crate::arch::uaccess::access_ok(tv_ptr as usize, core::mem::size_of::<TimeVal>()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -80,8 +80,8 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
     // exception-table copy path. A faulting store is EFAULT (LTP
     // gettimeofday01's bad_addr case).
     unsafe {
-        let ok1 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tv_ptr).tv_sec, sec as i64);
-        let ok2 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tv_ptr).tv_usec, usec as i64);
+        let ok1 = crate::arch::uaccess::put_user(&raw mut (*tv_ptr).tv_sec, sec as i64);
+        let ok2 = crate::arch::uaccess::put_user(&raw mut (*tv_ptr).tv_usec, usec as i64);
         if !ok1 || !ok2 {
             return -(errno::EFAULT as i64);
         }
@@ -107,7 +107,7 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
     }
 
     // Check if tp_ptr is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(tp_ptr as usize, core::mem::size_of::<TimespecForGettime>()) {
+    if !crate::arch::uaccess::access_ok(tp_ptr as usize, core::mem::size_of::<TimespecForGettime>()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -139,8 +139,8 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             // (PROT_NONE / unmapped — LTP clock_gettime02's bad_addr)
             // must surface as EFAULT, not be swallowed into success.
             unsafe {
-                let ok1 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                let ok2 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, mono_nsec as i64);
+                let ok1 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                let ok2 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, mono_nsec as i64);
                 if !ok1 || !ok2 {
                     return -(errno::EFAULT as i64);
                 }
@@ -152,8 +152,8 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             // SAFETY: tp_ptr validated with access_ok; put_user is the
             // exception-table copy path (SUM=0 safe). EFAULT on fault.
             unsafe {
-                let ok1 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                let ok2 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
+                let ok1 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                let ok2 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
                 if !ok1 || !ok2 {
                     return -(errno::EFAULT as i64);
                 }
@@ -178,8 +178,8 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             // SAFETY: tp_ptr validated with access_ok; put_user is the
             // exception-table copy path (SUM=0 safe).
             unsafe {
-                let ok1 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
-                let ok2 = crate::arch::riscv64::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
+                let ok1 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_sec, sec as i64);
+                let ok2 = crate::arch::uaccess::put_user(&raw mut (*tp_ptr).tv_nsec, nsec as i64);
                 if !ok1 || !ok2 {
                     return -(errno::EFAULT as i64);
                 }
@@ -198,9 +198,9 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             // SAFETY: tp_ptr validated with access_ok; EFAULT on a
             // faulting store (LTP clock_gettime02).
             unsafe {
-                let ok1 = crate::arch::riscv64::uaccess::put_user(
+                let ok1 = crate::arch::uaccess::put_user(
                     &raw mut (*tp_ptr).tv_sec, (cputime_ns / 1_000_000_000) as i64);
-                let ok2 = crate::arch::riscv64::uaccess::put_user(
+                let ok2 = crate::arch::uaccess::put_user(
                     &raw mut (*tp_ptr).tv_nsec, (cputime_ns % 1_000_000_000) as i64);
                 if !ok1 || !ok2 {
                     return -(errno::EFAULT as i64);
@@ -244,12 +244,12 @@ pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
     }
 
     // Check if req_ptr is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(req_ptr as usize, core::mem::size_of::<Timespec>()) {
+    if !crate::arch::uaccess::access_ok(req_ptr as usize, core::mem::size_of::<Timespec>()) {
         return -(errno::EFAULT as i64);
     }
 
     // Check rem_ptr if provided
-    if !rem_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(rem_ptr as usize, core::mem::size_of::<Timespec>()) {
+    if !rem_ptr.is_null() && !crate::arch::uaccess::access_ok(rem_ptr as usize, core::mem::size_of::<Timespec>()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -257,7 +257,7 @@ pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
     // exception-table copy path (SUM=0 safe) and zero-fills on fault.
     let mut req = Timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             &mut req as *mut Timespec as *mut u8,
             req_ptr as *const u8,
             core::mem::size_of::<Timespec>(),
@@ -369,7 +369,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
                     // Convert milliseconds to timespec
                     let rem_sec = (remaining_msecs / 1000) as i64;
                     let rem_nsec = ((remaining_msecs % 1000) * 1_000_000) as i64;
-                    if crate::arch::riscv64::uaccess::copy_to_user(
+                    if crate::arch::uaccess::copy_to_user(
                         rem_ptr as *mut u8,
                         &Timespec { tv_sec: rem_sec, tv_nsec: rem_nsec }
                             as *const Timespec as *const u8,
@@ -440,7 +440,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // with SIE=0; without this the local timer tick cannot fire and
             // lock_irqsave in __schedule would save SIE=0 for our wake path
             // (same discipline as do_wait / wait_event).
-            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
         } else {
             // Timer registration failed (timer table full): an
@@ -477,7 +477,7 @@ pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
     if tp_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(tp_ptr as usize, 16) {
+    if !crate::arch::uaccess::access_ok(tp_ptr as usize, 16) {
         return -(errno::EFAULT as i64);
     }
 
@@ -486,7 +486,7 @@ pub fn sys_clock_settime(args: SyscallArgs) -> i64 {
     // SAFETY: tp_ptr validated with access_ok; copy_from_user is the
     // exception-table copy path (SUM=0 safe) and zero-fills on fault.
     let residual = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             ts.as_mut_ptr() as *mut u8,
             tp_ptr,
             16,
@@ -537,7 +537,7 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
     };
     if !res.is_null() {
         // Check if res is in valid user space
-        if !crate::arch::riscv64::uaccess::access_ok(res as usize, 16) {  // 2 * sizeof(u64)
+        if !crate::arch::uaccess::access_ok(res as usize, 16) {  // 2 * sizeof(u64)
             return -(errno::EFAULT as i64);
         }
         // SAFETY: res validated with access_ok; put_user is the
@@ -547,8 +547,8 @@ pub fn sys_clock_getres(args: SyscallArgs) -> i64 {
         // clock_getres on its main stack, badaddr=0x3fffffe5a8).
         unsafe {
             // timespec structure: tv_sec (8 bytes) + tv_nsec (8 bytes)
-            let ok_sec = crate::arch::riscv64::uaccess::put_user(res, 0u64);          // tv_sec = 0
-            let ok_nsec = crate::arch::riscv64::uaccess::put_user(res.offset(1), res_ns);  // tv_nsec
+            let ok_sec = crate::arch::uaccess::put_user(res, 0u64);          // tv_sec = 0
+            let ok_nsec = crate::arch::uaccess::put_user(res.offset(1), res_ns);  // tv_nsec
             if !ok_sec || !ok_nsec {
                 return -(errno::EFAULT as i64);
             }
@@ -570,7 +570,7 @@ pub fn sys_getitimer(args: SyscallArgs) -> i64 {
     if curr_value.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
+    if !crate::arch::uaccess::access_ok(curr_value as usize, 32) {
         return -(errno::EFAULT as i64);
     }
 
@@ -636,11 +636,11 @@ pub fn sys_getitimer(args: SyscallArgs) -> i64 {
     unsafe {
         // it_interval (offset 0)
         let p = curr_value as *mut i64;
-        let _ = crate::arch::riscv64::uaccess::put_user(p, interval_sec);
-        let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), interval_usec);
+        let _ = crate::arch::uaccess::put_user(p, interval_sec);
+        let _ = crate::arch::uaccess::put_user(p.add(1), interval_usec);
         // it_value (offset 16)
-        let _ = crate::arch::riscv64::uaccess::put_user(p.add(2), value_sec);
-        let _ = crate::arch::riscv64::uaccess::put_user(p.add(3), value_usec);
+        let _ = crate::arch::uaccess::put_user(p.add(2), value_sec);
+        let _ = crate::arch::uaccess::put_user(p.add(3), value_usec);
     }
 
     0
@@ -666,7 +666,7 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
     // this, and getitimer/setitimer old-value reporting is POSIX
     // observable (LTP alarm02: alarm(0) after alarm(N) returns ~N).
     if !old_value.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
+        if !crate::arch::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
         }
         let (i_sec, i_usec, v_sec, v_usec) = match crate::process::current_task() {
@@ -716,10 +716,10 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
         // exception-table copy path (SUM=0 safe).
         unsafe {
             let p = old_value as *mut i64;
-            let _ = crate::arch::riscv64::uaccess::put_user(p, i_sec);
-            let _ = crate::arch::riscv64::uaccess::put_user(p.add(1), i_usec);
-            let _ = crate::arch::riscv64::uaccess::put_user(p.add(2), v_sec);
-            let _ = crate::arch::riscv64::uaccess::put_user(p.add(3), v_usec);
+            let _ = crate::arch::uaccess::put_user(p, i_sec);
+            let _ = crate::arch::uaccess::put_user(p.add(1), i_usec);
+            let _ = crate::arch::uaccess::put_user(p.add(2), v_sec);
+            let _ = crate::arch::uaccess::put_user(p.add(3), v_usec);
         }
     }
 
@@ -731,7 +731,7 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
+    if !crate::arch::uaccess::access_ok(new_value as usize, 32) {
         return -(errno::EFAULT as i64);
     }
 
@@ -739,7 +739,7 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
     // unmapped user page yields EFAULT instead of a kernel page fault.
     let mut itimer_bits = [0u8; 32];
     let uncopied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             itimer_bits.as_mut_ptr(),
             new_value as *const u8,
             32,
@@ -908,13 +908,13 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
     }
 
     // Check if rqtp is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(rqtp as usize, core::mem::size_of::<Timespec>()) {
+    if !crate::arch::uaccess::access_ok(rqtp as usize, core::mem::size_of::<Timespec>()) {
         return fail(errno::EFAULT);
     }
 
     // Check rmtp if provided (only meaningful without TIMER_ABSTIME, but
     // validate whatever the caller passed)
-    if !rmtp.is_null() && !crate::arch::riscv64::uaccess::access_ok(rmtp as usize, core::mem::size_of::<Timespec>()) {
+    if !rmtp.is_null() && !crate::arch::uaccess::access_ok(rmtp as usize, core::mem::size_of::<Timespec>()) {
         return fail(errno::EFAULT);
     }
 
@@ -924,7 +924,7 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
     let mut req = Timespec { tv_sec: 0, tv_nsec: 0 };
     {
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_from_user(
+            crate::arch::uaccess::copy_from_user(
                 &mut req as *mut Timespec as *mut u8,
                 rqtp as *const u8,
                 core::mem::size_of::<Timespec>(),
@@ -988,7 +988,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
     if timerid_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(timerid_ptr as usize, 4) {
+    if !crate::arch::uaccess::access_ok(timerid_ptr as usize, 4) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1005,7 +1005,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
     let mut sigev_notify = 0; // SIGEV_SIGNAL
 
     if !sigevent_ptr.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(sigevent_ptr as usize, 64) {
+        if !crate::arch::uaccess::access_ok(sigevent_ptr as usize, 64) {
             return -(errno::EFAULT as i64);
         }
         // struct sigevent { sigval sigev_value, int sigev_signo, int sigev_notify, ... }
@@ -1014,8 +1014,8 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         unsafe {
             let p = sigevent_ptr as *const i32;
             // sigev_value is 8 bytes (union), then sigev_signo at offset 8
-            let signo = crate::arch::riscv64::uaccess::get_user(p.add(2)).unwrap_or(0);
-            let notify = crate::arch::riscv64::uaccess::get_user(p.add(3)).unwrap_or(0);
+            let signo = crate::arch::uaccess::get_user(p.add(2)).unwrap_or(0);
+            let notify = crate::arch::uaccess::get_user(p.add(3)).unwrap_or(0);
             if signo > 0 && signo <= 64 {
                 sigev_signo = signo;
             }
@@ -1057,7 +1057,7 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
     // SAFETY: timerid_ptr validated with access_ok(4); put_user is the
     // exception-table copy path.
     unsafe {
-        let _ = crate::arch::riscv64::uaccess::put_user(timerid_ptr, user_timer_id);
+        let _ = crate::arch::uaccess::put_user(timerid_ptr, user_timer_id);
     }
 
     0
@@ -1085,7 +1085,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     if flags & !1 != 0 {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
+    if !crate::arch::uaccess::access_ok(new_value as usize, 32) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1099,7 +1099,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
     // exception-table copy path (SUM=0 safe). Unreadable fields read as 0.
     let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
         let p = new_value as *const i64;
-        let get = crate::arch::riscv64::uaccess::get_user::<i64>;
+        let get = crate::arch::uaccess::get_user::<i64>;
         match (get(p), get(p.add(1)), get(p.add(2)), get(p.add(3))) {
             (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
             _ => return -(errno::EFAULT as i64),
@@ -1125,7 +1125,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
 
     // Write old_value (the CURRENT settings — real values, not zeros)
     if !old_value.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
+        if !crate::arch::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
         }
         let (oi, on, ov, vn) = posix_timer_current(timer);
@@ -1133,7 +1133,7 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         // exception-table copy path (SUM=0 safe).
         unsafe {
             let p = old_value as *mut i64;
-            let put = crate::arch::riscv64::uaccess::put_user;
+            let put = crate::arch::uaccess::put_user;
             let _ = put(p, oi);
             let _ = put(p.add(1), on);
             let _ = put(p.add(2), ov);
@@ -1309,7 +1309,7 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> i64 {
     if curr_value.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
+    if !crate::arch::uaccess::access_ok(curr_value as usize, 32) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1335,7 +1335,7 @@ pub fn sys_timer_gettime(args: SyscallArgs) -> i64 {
     // exception-table copy path (SUM=0 safe).
     unsafe {
         let p = curr_value as *mut i64;
-        let put = crate::arch::riscv64::uaccess::put_user;
+        let put = crate::arch::uaccess::put_user;
         let ok1 = put(p, int_sec);
         let ok2 = put(p.add(1), int_nsec);
         let ok3 = put(p.add(2), val_sec);
@@ -1437,7 +1437,7 @@ pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
     if tv_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(tv_ptr as usize, 16) {
+    if !crate::arch::uaccess::access_ok(tv_ptr as usize, 16) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1446,7 +1446,7 @@ pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
     // SAFETY: tv_ptr validated with access_ok; copy_from_user is the
     // exception-table copy path (SUM=0 safe) and zero-fills on fault.
     let residual = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             tv.as_mut_ptr() as *mut u8,
             tv_ptr,
             16,
@@ -1485,7 +1485,7 @@ fn adjtimex_common(buf_ptr: *mut u8) -> i64 {
     if buf_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 128) {
+    if !crate::arch::uaccess::access_ok(buf_ptr as usize, 128) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1495,7 +1495,7 @@ fn adjtimex_common(buf_ptr: *mut u8) -> i64 {
     // SAFETY: buf_ptr validated with access_ok(128); copy_from_user is the
     // exception-table copy path (SUM=0 safe).
     if unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), buf_ptr, 128)
+        crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), buf_ptr, 128)
     } != 0
     {
         return -(errno::EFAULT as i64);
@@ -1635,7 +1635,7 @@ fn adjtimex_common(buf_ptr: *mut u8) -> i64 {
         out[80..88].copy_from_slice(&usec.to_le_bytes());
     }
     unsafe {
-        if crate::arch::riscv64::uaccess::copy_to_user(buf_ptr, out.as_ptr(), 128) != 0 {
+        if crate::arch::uaccess::copy_to_user(buf_ptr, out.as_ptr(), 128) != 0 {
             return -(errno::EFAULT as i64);
         }
     }
@@ -1698,19 +1698,19 @@ pub fn sys_get_robust_list(args: SyscallArgs) -> i64 {
     }
 
     if !head_ptr.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(head_ptr as usize, 8) {
+        if !crate::arch::uaccess::access_ok(head_ptr as usize, 8) {
             return -(errno::EFAULT as i64);
         }
         // SAFETY: head_ptr validated with access_ok(8); put_user is the
         // exception-table copy path.
-        unsafe { let _ = crate::arch::riscv64::uaccess::put_user(head_ptr, 0u64); }
+        unsafe { let _ = crate::arch::uaccess::put_user(head_ptr, 0u64); }
     }
     if !len_ptr.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(len_ptr as usize, 4) {
+        if !crate::arch::uaccess::access_ok(len_ptr as usize, 4) {
             return -(errno::EFAULT as i64);
         }
         // SAFETY: len_ptr validated with access_ok(4); writes sizeof(struct robust_list_head).
-        unsafe { let _ = crate::arch::riscv64::uaccess::put_user(len_ptr, 24u32); } // sizeof(struct robust_list_head) on 64-bit
+        unsafe { let _ = crate::arch::uaccess::put_user(len_ptr, 24u32); } // sizeof(struct robust_list_head) on 64-bit
     }
     0
 }
@@ -1734,7 +1734,7 @@ pub fn sys_rseq(args: SyscallArgs) -> i64 {
         if rseq_ptr.align_offset(32) != 0 {
             return -(errno::EINVAL as i64);
         }
-        if !crate::arch::riscv64::uaccess::access_ok(rseq_ptr as usize, rseq_len as usize) {
+        if !crate::arch::uaccess::access_ok(rseq_ptr as usize, rseq_len as usize) {
             return -(errno::EFAULT as i64);
         }
     }

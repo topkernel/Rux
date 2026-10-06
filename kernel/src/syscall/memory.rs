@@ -8,7 +8,7 @@
 
 use super::*;
 use super::SyscallArgs;
-use crate::arch::riscv64::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageTableEntry, VirtAddr};
+use crate::arch::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageTableEntry, VirtAddr};
 
 /// sys_brk - Change data segment size
 ///
@@ -29,7 +29,7 @@ use crate::arch::riscv64::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageT
 pub fn sys_brk(args: [u64; 6]) -> i64 {
     use crate::sched;
     use crate::mm::page::PAGE_SIZE;
-    use crate::arch::riscv64::mm::{alloc_and_map_user_memory, PageTableEntry};
+    use crate::arch::mm::{alloc_and_map_user_memory, PageTableEntry};
 
     let new_brk = args[0] as u64;
 
@@ -46,7 +46,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     addr_space.brk().as_usize() as u64
                 } else {
                     // Use BRK_DEFAULT from mm module
-                    crate::arch::riscv64::mm::user_addr::BRK_DEFAULT as u64
+                    crate::arch::mm::user_addr::BRK_DEFAULT as u64
                 };
                 current_task.set_brk(default_brk);
 
@@ -68,7 +68,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
             // brk(small) would munmap the ELF segments and corrupt rmap.
             let brk_floor = current_task.address_space()
                 .map(|a| a.start_brk() as u64)
-                .unwrap_or(crate::arch::riscv64::mm::user_addr::BRK_DEFAULT as u64);
+                .unwrap_or(crate::arch::mm::user_addr::BRK_DEFAULT as u64);
             if new_brk < current_brk && new_brk >= brk_floor {
                 // Calculate page range to unmap
                 let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
@@ -93,7 +93,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 // Upper bound: the brk must stay inside the user address
                 // space. Without this check a brk above USER_END would map
                 // user-accessible pages into the kernel range (review批次4).
-                let user_end = crate::arch::riscv64::mm::user_addr::USER_END as u64;
+                let user_end = crate::arch::mm::user_addr::USER_END as u64;
                 if new_brk > user_end {
                     return current_brk as i64; // Linux: keep old brk on failure
                 }
@@ -139,7 +139,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     // SAFETY: root_ppn is the current task's page-table
                     // root; walk is a read-only page-table inspection.
                     let partial_mapped = unsafe {
-                        crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                        crate::arch::mm::mm_ops::PageTableWalker::walk(
                             root_ppn,
                             brk_page_floor as u64,
                         )
@@ -260,7 +260,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
-    use crate::arch::riscv64::mm::{prot, map, mmap_error};
+    use crate::arch::mm::{prot, map, mmap_error};
 
     let mut addr = args[0] as usize;
     let length = args[1] as usize;
@@ -357,7 +357,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // PGD entries (copy_kernel_mappings), so a fixed mapping at or above
     // USER_END would walk into the shared kernel L1/L0 tables and replace
     // kernel PTEs with user-accessible ones — a direct privilege hole.
-    let user_end = crate::arch::riscv64::mm::user_addr::USER_END;
+    let user_end = crate::arch::mm::user_addr::USER_END;
     let out_of_user_range = addr
         .checked_add(actual_length)
         .map_or(true, |end| end > user_end);
@@ -635,17 +635,17 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // SAFETY: root is the task's page-table root;
                             // info.addr..+len is the linear-mapped framebuffer.
                             unsafe {
-                                crate::arch::riscv64::mm::mm_ops::map_user_region(
+                                crate::arch::mm::mm_ops::map_user_region(
                                     root,
                                     placement as u64,
                                     info.addr,
                                     actual_length as u64,
-                                    crate::arch::riscv64::mm::PageTableEntry::V
-                                        | crate::arch::riscv64::mm::PageTableEntry::R
-                                        | crate::arch::riscv64::mm::PageTableEntry::W
-                                        | crate::arch::riscv64::mm::PageTableEntry::U
-                                        | crate::arch::riscv64::mm::PageTableEntry::A
-                                        | crate::arch::riscv64::mm::PageTableEntry::D,
+                                    crate::arch::mm::PageTableEntry::V
+                                        | crate::arch::mm::PageTableEntry::R
+                                        | crate::arch::mm::PageTableEntry::W
+                                        | crate::arch::mm::PageTableEntry::U
+                                        | crate::arch::mm::PageTableEntry::A
+                                        | crate::arch::mm::PageTableEntry::D,
                                 );
                             }
                             // Device VMA: faults never touch it (pages are
@@ -772,16 +772,16 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     // demand-fault discipline.
                                     unsafe {
                                         let _pte_guard =
-                                            crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK
+                                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK
                                                 .lock_irqsave();
-                                        crate::arch::riscv64::mm::map_user_page(
+                                        crate::arch::mm::map_user_page(
                                             root_ppn,
-                                            crate::arch::riscv64::mm::memory_layout::VirtAddr::new(
+                                            crate::arch::mm::memory_layout::VirtAddr::new(
                                                 (mapped_addr.as_usize()
                                                     + i * crate::mm::page::PAGE_SIZE)
                                                     as u64,
                                             ),
-                                            crate::arch::riscv64::mm::memory_layout::PhysAddr::new(
+                                            crate::arch::mm::memory_layout::PhysAddr::new(
                                                 phys as u64,
                                             ),
                                             pte_flags,
@@ -872,7 +872,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
 /// - RISC-V: 215
 pub fn sys_munmap(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
-    use crate::arch::riscv64::mm::mmap_error;
+    use crate::arch::mm::mmap_error;
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
@@ -933,7 +933,7 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 /// # Description
 /// mprotect is used to change protection attributes of existing memory mapping
 pub fn sys_mprotect(args: [u64; 6]) -> i64 {
-    use crate::arch::riscv64::mm::{PageTableEntry, PAGE_SIZE, PAGE_SHIFT, PageTable, VirtAddr};
+    use crate::arch::mm::{PageTableEntry, PAGE_SIZE, PAGE_SHIFT, PageTable, VirtAddr};
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
@@ -947,7 +947,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // Unknown protection bits are EINVAL. PROT_GROWSDOWN/GROWSUP are
     // mprotect *flags* living in the high bits — accepted (and ignored,
     // since we operate on the exact range passed).
-    if prot & !(crate::arch::riscv64::mm::prot::PROT_MASK | 0x0100_0000 | 0x0200_0000) != 0 {
+    if prot & !(crate::arch::mm::prot::PROT_MASK | 0x0100_0000 | 0x0200_0000) != 0 {
         return -22_i64;  // EINVAL
     }
 
@@ -960,7 +960,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // the SHARED kernel page tables with flags that always include V|U
     // (userspace gains U|R|W on kernel memory = full compromise), or strips
     // permissions off kernel text (kernel-mode fault → panic).
-    use crate::arch::riscv64::mm::user_addr;
+    use crate::arch::mm::user_addr;
     if addr < user_addr::USER_START
         || match addr.checked_add(length) {
             Some(e) => e > user_addr::USER_END,
@@ -1065,7 +1065,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // rewrite (stale PPN could resurrect a freed page) — regression
             // round 6 HIGH. The loop never sleeps, so one irqsave section
             // for the whole range is safe (fork holds it likewise).
-            let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+            let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
             for i in 0..num_pages {
                 let virt = ((start_page + i) * PAGE_SIZE as usize) as u64;
                 // SAFETY: root_ppn is a valid page table root; we traverse 3-level Sv39 page
@@ -1302,7 +1302,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
 /// msync writes changes from file mapping back to disk
 pub fn sys_msync(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
-    use crate::arch::riscv64::mm::mmap_error;
+    use crate::arch::mm::mmap_error;
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
@@ -1339,7 +1339,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
     // Above the user address space: EINVAL, not ENOMEM (Linux msync
     // bounds-checks against TASK_SIZE first — LTP msync03 case 3 passes
     // RLIMIT_DATA's max, which lies far above user space).
-    if addr >= crate::arch::riscv64::mm::user_addr::USER_END {
+    if addr >= crate::arch::mm::user_addr::USER_END {
         return mmap_error::EINVAL;
     }
 
@@ -1392,7 +1392,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
     // mapping's stores were lost on every msync (LTP msync01 read back the
     // original file contents).
     {
-        use crate::arch::riscv64::mm::{PageTableEntry, PageTable};
+        use crate::arch::mm::{PageTableEntry, PageTable};
         use crate::mm::vma::{VmaFlags, VmaType};
 
         let root_ppn = address_space.root_ppn();
@@ -1476,8 +1476,8 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                             PAGE_SIZE as u64,
                             file_size - file_off,
                         ) as usize;
-                        let kva = crate::arch::riscv64::mm::phys_to_virt(
-                            crate::arch::riscv64::mm::memory_layout::PhysAddr(page_phys),
+                        let kva = crate::arch::mm::phys_to_virt(
+                            crate::arch::mm::memory_layout::PhysAddr(page_phys),
                         );
                         let _ = file.write_at(
                             file_off,
@@ -1524,7 +1524,7 @@ fn vma_file_by_range(
 /// Caller must ensure both old and new ranges are valid, page-aligned, and
 /// the old range is mapped.
 unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize, size: usize) {
-    use crate::arch::riscv64::mm::{
+    use crate::arch::mm::{
         PAGE_SIZE, PAGE_SHIFT, PhysAddr, VirtAddr, map_page, phys_to_virt, PageTableEntry,
     };
     use crate::mm::page_alloc::alloc_page;
@@ -1533,14 +1533,14 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
 
     // R7-A5: serialize leaf-PTE mutations against fork's table walk and COW
     // faults — the same discipline as the demand-fault paths.
-    let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
     let mut offset = 0usize;
     while offset < size {
         let old_virt = (old_addr + offset) as u64;
         let new_virt = (new_addr + offset) as u64;
 
         // Walk old page table to get the source physical page
-        if let Some((old_ppn, old_bits)) = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root_ppn, old_virt) {
+        if let Some((old_ppn, old_bits)) = crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, old_virt) {
             let old_phys = old_ppn << PAGE_SHIFT;
             let old_kvaddr = phys_to_virt(PhysAddr::new(old_phys)).bits() as *const u8;
 
@@ -1607,7 +1607,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
-    use crate::arch::riscv64::mm::{map, mmap_error};
+    use crate::arch::mm::{map, mmap_error};
 
     let old_addr = args[0] as usize;
     let old_size = args[1] as usize;
@@ -1819,7 +1819,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
 /// madvise allows application to give advice to kernel about how to use memory
 pub fn sys_madvise(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
-    use crate::arch::riscv64::mm::mmap_error;
+    use crate::arch::mm::mmap_error;
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
@@ -1856,7 +1856,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
     // Above the user address space: EINVAL, not ENOMEM (Linux msync
     // bounds-checks against TASK_SIZE first — LTP msync03 case 3 passes
     // RLIMIT_DATA's max, which lies far above user space).
-    if addr >= crate::arch::riscv64::mm::user_addr::USER_END {
+    if addr >= crate::arch::mm::user_addr::USER_END {
         return mmap_error::EINVAL;
     }
 
@@ -2040,7 +2040,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
 /// Lowest bit of each byte in vec indicates if corresponding page is in memory
 pub fn sys_mincore(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
-    use crate::arch::riscv64::mm::{PageTableEntry, PageTable, mmap_error};
+    use crate::arch::mm::{PageTableEntry, PageTable, mmap_error};
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
@@ -2059,7 +2059,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
     // Above the user address space: EINVAL, not ENOMEM (Linux msync
     // bounds-checks against TASK_SIZE first — LTP msync03 case 3 passes
     // RLIMIT_DATA's max, which lies far above user space).
-    if addr >= crate::arch::riscv64::mm::user_addr::USER_END {
+    if addr >= crate::arch::mm::user_addr::USER_END {
         return mmap_error::EINVAL;
     }
 
@@ -2078,7 +2078,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
         Some(e) => e,
         None => return mmap_error::ENOMEM,
     };
-    if range_end > crate::arch::riscv64::mm::user_addr::USER_END {
+    if range_end > crate::arch::mm::user_addr::USER_END {
         return mmap_error::ENOMEM;
     }
 
@@ -2120,7 +2120,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
     if vec_ptr.is_null() {
         return mmap_error::EINVAL;
     }
-    if !crate::arch::riscv64::uaccess::access_ok(vec_ptr as usize, page_count) {
+    if !crate::arch::uaccess::access_ok(vec_ptr as usize, page_count) {
         return mmap_error::EFAULT;
     }
 
@@ -2173,7 +2173,7 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
             // probes with mincore, so any allocator-heavy program hit this.
             // A store that fails (vec page unmapped — LTP mincore01
             // setup2) must surface as EFAULT, not be swallowed.
-            if !crate::arch::riscv64::uaccess::put_user(
+            if !crate::arch::uaccess::put_user(
                 vec_ptr.add(i),
                 if page_in_memory { 1u8 } else { 0u8 },
             ) {
@@ -2366,7 +2366,7 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
                 // SAFETY: PageTableWalker::walk is a read-only inspection
                 // of the task's own page tables.
                 let present = unsafe {
-                    crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                    crate::arch::mm::mm_ops::PageTableWalker::walk(
                         root_ppn,
                         p as u64,
                     )
@@ -2377,26 +2377,26 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
                     // sysv shm attach path; p is page-aligned user memory.
                     unsafe {
                         let _pte_guard =
-                            crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
                         if let Some(phys) =
-                            crate::arch::riscv64::mm::mm_ops::alloc_user_phys_page()
+                            crate::arch::mm::mm_ops::alloc_user_phys_page()
                         {
-                            let page_ptr = crate::arch::riscv64::mm::phys_to_virt(
-                                crate::arch::riscv64::mm::PhysAddr::new(phys),
+                            let page_ptr = crate::arch::mm::phys_to_virt(
+                                crate::arch::mm::PhysAddr::new(phys),
                             )
                             .0 as *mut u8;
                             core::ptr::write_bytes(page_ptr, 0, crate::mm::page::PAGE_SIZE);
                             let pte_flags =
-                                crate::arch::riscv64::mm::PageTableEntry::V
-                                    | crate::arch::riscv64::mm::PageTableEntry::A
-                                    | crate::arch::riscv64::mm::PageTableEntry::D
-                                    | crate::arch::riscv64::mm::PageTableEntry::U
-                                    | crate::arch::riscv64::mm::PageTableEntry::R
-                                    | crate::arch::riscv64::mm::PageTableEntry::W;
-                            crate::arch::riscv64::mm::mm_ops::map_user_page(
+                                crate::arch::mm::PageTableEntry::V
+                                    | crate::arch::mm::PageTableEntry::A
+                                    | crate::arch::mm::PageTableEntry::D
+                                    | crate::arch::mm::PageTableEntry::U
+                                    | crate::arch::mm::PageTableEntry::R
+                                    | crate::arch::mm::PageTableEntry::W;
+                            crate::arch::mm::mm_ops::map_user_page(
                                 root_ppn,
-                                crate::arch::riscv64::mm::VirtAddr::new(p as u64),
-                                crate::arch::riscv64::mm::PhysAddr::new(phys),
+                                crate::arch::mm::VirtAddr::new(p as u64),
+                                crate::arch::mm::PhysAddr::new(phys),
                                 pte_flags,
                             );
                         }
@@ -2561,8 +2561,8 @@ pub fn sys_mlockall(args: [u64; 6]) -> i64 {
         None => return -12_i64,
     };
 
-    let user_start = crate::arch::riscv64::mm::user_addr::USER_START;
-    let user_end = crate::arch::riscv64::mm::user_addr::USER_END;
+    let user_start = crate::arch::mm::user_addr::USER_START;
+    let user_end = crate::arch::mm::user_addr::USER_END;
     let mut cursor = user_start;
     loop {
         let mut mgr = address_space.vma_write();
@@ -2607,8 +2607,8 @@ pub fn sys_munlockall(_args: [u64; 6]) -> i64 {
         None => return -12_i64,
     };
 
-    let user_start = crate::arch::riscv64::mm::user_addr::USER_START;
-    let user_end = crate::arch::riscv64::mm::user_addr::USER_END;
+    let user_start = crate::arch::mm::user_addr::USER_START;
+    let user_end = crate::arch::mm::user_addr::USER_END;
     let mut cursor = user_start;
     loop {
         let mut mgr = address_space.vma_write();
@@ -2672,7 +2672,7 @@ pub fn sys_mbind(args: [u64; 6]) -> i64 {
 
     // Validate nodemask pointer if provided
     if !_nodemask_ptr.is_null() && _maxnode > 0 {
-        if !crate::arch::riscv64::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
+        if !crate::arch::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
             return -errno::EFAULT as i64;
         }
     }
@@ -2694,7 +2694,7 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> i64 {
     if mode_ptr.is_null() {
         return -errno::EFAULT as i64;
     }
-    if !crate::arch::riscv64::uaccess::access_ok(mode_ptr as usize, 4) {
+    if !crate::arch::uaccess::access_ok(mode_ptr as usize, 4) {
         return -errno::EFAULT as i64;
     }
 
@@ -2702,19 +2702,19 @@ pub fn sys_get_mempolicy(args: [u64; 6]) -> i64 {
     // exception-table copy path.
     unsafe {
         // MPOL_DEFAULT = 0
-        let _ = crate::arch::riscv64::uaccess::put_user(mode_ptr, 0i32);
+        let _ = crate::arch::uaccess::put_user(mode_ptr, 0i32);
     }
 
     // Fill nodemask with all nodes
     if !nodemask_ptr.is_null() && maxnode > 0 {
-        if !crate::arch::riscv64::uaccess::access_ok(nodemask_ptr as usize, (maxnode + 7) / 8) {
+        if !crate::arch::uaccess::access_ok(nodemask_ptr as usize, (maxnode + 7) / 8) {
             return -errno::EFAULT as i64;
         }
         let nwords = (maxnode + core::mem::size_of::<usize>() * 8 - 1) / (core::mem::size_of::<usize>() * 8);
         // SAFETY: nodemask_ptr validated with access_ok; nwords bounded by maxnode.
         unsafe {
             for i in 0..nwords {
-                let _ = crate::arch::riscv64::uaccess::put_user(nodemask_ptr.add(i), usize::MAX);
+                let _ = crate::arch::uaccess::put_user(nodemask_ptr.add(i), usize::MAX);
             }
         }
     }
@@ -2729,7 +2729,7 @@ pub fn sys_set_mempolicy(args: [u64; 6]) -> i64 {
     let _maxnode = args[2] as usize;
 
     if !_nodemask_ptr.is_null() && _maxnode > 0 {
-        if !crate::arch::riscv64::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
+        if !crate::arch::uaccess::access_ok(_nodemask_ptr as usize, (_maxnode + 7) / 8) {
             return -errno::EFAULT as i64;
         }
     }
@@ -2763,7 +2763,7 @@ pub fn sys_move_pages(args: [u64; 6]) -> i64 {
     // Single-node system: all pages already on node 0
     // Fill status array with -ENOENT (page not present) if provided
     if !_status_ptr.is_null() && _count > 0 {
-        if !crate::arch::riscv64::uaccess::access_ok(_status_ptr as usize, _count * 4) {
+        if !crate::arch::uaccess::access_ok(_status_ptr as usize, _count * 4) {
             return -errno::EFAULT as i64;
         }
     }

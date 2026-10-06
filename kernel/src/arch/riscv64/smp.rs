@@ -245,8 +245,8 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     // Following the Linux model, tp was set to the idle task pointer by
     // boot.S before entering this function.  This means current() is valid
     // and the trap handler can safely access the task_struct.
-    crate::arch::riscv64::trap::init();
-    crate::arch::riscv64::trap::enable_timer_interrupt();
+    crate::arch::trap::init();
+    crate::arch::trap::enable_timer_interrupt();
 
     // Per-hart counter access for U mode (see arch::init on the BSP —
     // scounteren must be programmed on every hart for the vDSO's
@@ -260,14 +260,14 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     // Wait for boot CPU to finish ALL single-CPU initialization.
     // WFI yields the CPU in QEMU tcg single-threaded mode.
     while !is_boot_complete() {
-        unsafe { crate::arch::riscv64::cpu::wfi(); }
+        unsafe { crate::arch::cpu::wfi(); }
     }
 
     // Boot CPU has finished init — safe to call kmalloc now.
     crate::sched::init_secondary(hart_id);
 
     // Enable external interrupts (sie.SEIE) for this hart
-    crate::arch::riscv64::trap::enable_external_interrupt();
+    crate::arch::trap::enable_external_interrupt();
 
 
     // Enter scheduler idle loop (timer interrupts enabled inside the loop)

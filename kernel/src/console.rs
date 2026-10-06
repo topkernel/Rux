@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
 #[cfg(feature = "riscv64")]
-use crate::arch::riscv64::mm::fixmap::uart_virt_addr;
+use crate::arch::mm::fixmap::uart_virt_addr;
 
 // ============================================================================
 // UART 16550A Register Offsets

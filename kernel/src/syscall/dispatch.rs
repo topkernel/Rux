@@ -6,7 +6,7 @@
 //!
 //! This module handles system call dispatch and common processing
 
-use crate::arch::riscv64::pt_regs::PtRegs;
+use crate::arch::pt_regs::PtRegs;
 use super::*;
 
 /// System call argument array type

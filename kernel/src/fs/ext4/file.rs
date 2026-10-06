@@ -122,7 +122,7 @@ impl ReadDst {
             ReadDst::User(dst, _) => {
                 // SAFETY: exception-table copy; uncopied bytes truncate.
                 let uncopied = unsafe {
-                    crate::arch::riscv64::uaccess::copy_to_user(dst.add(off), src, bytes)
+                    crate::arch::uaccess::copy_to_user(dst.add(off), src, bytes)
                 };
                 if uncopied >= bytes {
                     // Nothing delivered: the page is unmapped — report the

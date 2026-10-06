@@ -253,7 +253,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     // space; capture the kernel root so boot continues on the kernel page
     // table afterwards, exactly as before this call existed.
     // SAFETY: reads the boot-time root PPN, no invariants to uphold.
-    let kernel_root_ppn = unsafe { crate::arch::riscv64::mm::mmu_init::root_page_table_ppn() };
+    let kernel_root_ppn = unsafe { crate::arch::mm::mmu_init::root_page_table_ppn() };
 
     // SAFETY: task_ptr points to the freshly built PID 1 task (static
     // INIT_TASK_STORAGE); do_execve_elf only needs it to carry a valid
@@ -285,7 +285,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     // SAFETY: kernel_root_ppn is the boot page-table root; switch_mm only
     // writes satp and issues an ASID-scoped sfence.
     unsafe {
-        crate::arch::riscv64::context::switch_mm(kernel_root_ppn, 0);
+        crate::arch::context::switch_mm(kernel_root_ppn, 0);
     }
 
     // First entry into user mode happens through ret_from_exception with

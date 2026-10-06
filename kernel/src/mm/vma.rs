@@ -834,36 +834,36 @@ impl AddressSpaceLayout for RiscVAddressSpaceLayout {
     /// User space start address (0, but null page protected)
     #[inline]
     fn user_start() -> usize {
-        crate::arch::riscv64::mm::user_addr::USER_START
+        crate::arch::mm::user_addr::USER_START
     }
 
     /// User space end address = TASK_SIZE = 256GB for Sv39
     #[inline]
     fn user_end() -> usize {
-        crate::arch::riscv64::mm::user_addr::TASK_SIZE
+        crate::arch::mm::user_addr::TASK_SIZE
     }
 
     /// Default stack size (8MB)
     #[inline]
     fn default_stack_size() -> usize {
-        crate::arch::riscv64::mm::user_addr::STACK_MAX_SIZE
+        crate::arch::mm::user_addr::STACK_MAX_SIZE
     }
 
     /// Default stack top (TASK_SIZE, stack grows down)
     #[inline]
     fn default_stack_top() -> usize {
-        crate::arch::riscv64::mm::user_addr::STACK_TOP
+        crate::arch::mm::user_addr::STACK_TOP
     }
 
     /// Heap start address (brk default)
     #[inline]
     fn heap_start() -> usize {
-        crate::arch::riscv64::mm::user_addr::BRK_DEFAULT
+        crate::arch::mm::user_addr::BRK_DEFAULT
     }
 
     /// Heap end address (maximum brk can grow to)
     #[inline]
     fn heap_end() -> usize {
-        crate::arch::riscv64::mm::user_addr::BRK_MAX
+        crate::arch::mm::user_addr::BRK_MAX
     }
 }

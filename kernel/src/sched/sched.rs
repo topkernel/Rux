@@ -85,7 +85,7 @@ impl GlobalRunQueue {
     /// Lock the global RQ (disable interrupts + preempt + lock).
     #[inline]
     pub fn lock_irqsave(&self) -> GrqGuard<'_> {
-        let flags = crate::arch::riscv64::cpu::save_and_disable_irq();
+        let flags = crate::arch::cpu::save_and_disable_irq();
         crate::interrupt::preempt::preempt_count_add(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
@@ -111,7 +111,7 @@ impl GlobalRunQueue {
     /// per-class queue trees.
     #[inline]
     pub fn try_lock_irqsave(&self) -> Option<GrqGuard<'_>> {
-        let flags = crate::arch::riscv64::cpu::save_and_disable_irq();
+        let flags = crate::arch::cpu::save_and_disable_irq();
         crate::interrupt::preempt::preempt_count_add(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
@@ -125,7 +125,7 @@ impl GlobalRunQueue {
             crate::interrupt::preempt::preempt_count_sub(
                 crate::interrupt::preempt::PREEMPT_OFFSET,
             );
-            crate::arch::riscv64::cpu::restore_irq(flags);
+            crate::arch::cpu::restore_irq(flags);
             None
         }
     }
@@ -350,7 +350,7 @@ impl Drop for GrqGuard<'_> {
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
-        crate::arch::riscv64::cpu::restore_irq(self.flags);
+        crate::arch::cpu::restore_irq(self.flags);
     }
 }
 
@@ -880,7 +880,7 @@ static TASK_PAGE_OWNED: [core::sync::atomic::AtomicU64; TASK_PAGE_WORDS] =
 fn task_page_index(ptr: *const u8) -> Option<usize> {
     const RAM_BASE: usize = 0x8000_0000;
     let p = ptr as usize;
-    let page_offset = crate::arch::riscv64::mm::memory_layout::PAGE_OFFSET;
+    let page_offset = crate::arch::mm::memory_layout::PAGE_OFFSET;
     if p >= page_offset {
         // Linear map: virt = PAGE_OFFSET + (phys - RAM_BASE)
         let off = p - page_offset;
@@ -1247,7 +1247,7 @@ unsafe fn __schedule() {
     let flags = grq_guard.unlock_irqretain();
 
     if next == prev {
-        crate::arch::riscv64::cpu::restore_irq(flags);
+        crate::arch::cpu::restore_irq(flags);
         return;
     }
 
@@ -1286,7 +1286,7 @@ unsafe fn __schedule() {
     // and wait-path callers (wait_event/nanosleep/futex...) re-enable
     // explicitly before their own schedule() — their flags are 1.
     // The idle loop re-arms before each iteration (sched.rs idle).
-    crate::arch::riscv64::cpu::restore_irq(flags);
+    crate::arch::cpu::restore_irq(flags);
 }
 
 /// Pick the next task to run on this CPU.
@@ -2349,8 +2349,8 @@ pub fn scheduler_tick() {
                     const M5: &[u8] = b" epc=0x";
                     for &b in M5 { putchar(b); }
                     {
-                        use crate::arch::riscv64::trap::current_pt_regs;
-                        use crate::arch::riscv64::pt_regs::PtRegs;
+                        use crate::arch::trap::current_pt_regs;
+                        use crate::arch::pt_regs::PtRegs;
                         let pr = current_pt_regs() as *const PtRegs;
                         if !pr.is_null() {
                             let e = unsafe { (*pr).epc };
@@ -2708,7 +2708,7 @@ where
 }
 
 pub fn current() -> Option<&'static mut Task> {
-    let tp = crate::arch::riscv64::cpu::get_thread_id() as *mut Task;
+    let tp = crate::arch::cpu::get_thread_id() as *mut Task;
     if tp.is_null() || (tp as usize) < 0x80000000 {
         None
     } else {
@@ -2719,7 +2719,7 @@ pub fn current() -> Option<&'static mut Task> {
 }
 
 pub fn get_current_pid() -> u32 {
-    let tp = crate::arch::riscv64::cpu::get_thread_id() as *const Task;
+    let tp = crate::arch::cpu::get_thread_id() as *const Task;
     if tp.is_null() || (tp as usize) < 0x80000000 {
         0
     } else {
@@ -2729,7 +2729,7 @@ pub fn get_current_pid() -> u32 {
 }
 
 pub fn get_current_ppid() -> u32 {
-    let tp = crate::arch::riscv64::cpu::get_thread_id() as *const Task;
+    let tp = crate::arch::cpu::get_thread_id() as *const Task;
     if tp.is_null() || (tp as usize) < 0x80000000 {
         0
     } else {
@@ -2810,8 +2810,8 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
-    if !crate::arch::riscv64::smp::is_boot_hart() {
-        crate::arch::riscv64::trap::enable_timer_interrupt();
+    if !crate::arch::smp::is_boot_hart() {
+        crate::arch::trap::enable_timer_interrupt();
     }
 
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
@@ -2834,7 +2834,7 @@ pub fn cpu_idle_loop() -> ! {
         // interrupts would fire and the system would be stuck.
         // This matches the reference implementation where the idle loop's
         // cpuidle enables IRQs before entering the idle state.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
 
         // 1. Try to pick a task from the global RQ
         // SAFETY: called from idle task context; schedule() handles its own locking.
@@ -2875,11 +2875,11 @@ pub fn cpu_idle_loop() -> ! {
             // IRQs must be enabled (SIE=1) so timer ticks and wake-ups arrive.
             // Charge the WFI residency to the per-CPU idle accounting that
             // feeds /proc/uptime's second column (P2: real idle stats).
-            let idle_t0 = crate::arch::riscv64::cpu::read_time();
-            unsafe { crate::arch::riscv64::cpu::wfi(); }
+            let idle_t0 = crate::arch::cpu::read_time();
+            unsafe { crate::arch::cpu::wfi(); }
             crate::fs::procfs::uptime::account_idle_cycles(
                 cpu_id,
-                crate::arch::riscv64::cpu::read_time().wrapping_sub(idle_t0),
+                crate::arch::cpu::read_time().wrapping_sub(idle_t0),
             );
 
             grq().clear_idle(cpu_id);

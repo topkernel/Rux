@@ -107,7 +107,7 @@ fn wait_event_open(peer: &FifoPeer, pred: impl Fn() -> bool) -> Result<(), i32> 
             return Err(errno::Errno::InterruptedSystemCall.as_neg_i32());
         }
         // R54: re-arm IRQs across the schedule so timers/IPIs reach this CPU.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
         peer.open_queue.finish_wait(current);
         if crate::signal::signal_pending() {

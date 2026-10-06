@@ -10,8 +10,8 @@
 //! - `copy_thread`: Copy thread state with fork
 //! - `flush_thread`: Clean up thread state
 
-use crate::arch::riscv64::pt_regs::{PtRegs, SR_PIE, SR_FS_INITIAL, SR_FS as SR_FS_MASK};
-use crate::arch::riscv64::mm::VirtAddr;
+use crate::arch::pt_regs::{PtRegs, SR_PIE, SR_FS_INITIAL, SR_FS as SR_FS_MASK};
+use crate::arch::mm::VirtAddr;
 use crate::process::task::Task;
 use core::arch::asm;
 
@@ -179,7 +179,7 @@ pub fn flush_thread() {
             // Clear FPU state
             thread.fpu.fill(0);
             thread.fcsr = 0;
-            thread.fs = crate::arch::riscv64::pt_regs::SR_FS_OFF as u32;
+            thread.fs = crate::arch::pt_regs::SR_FS_OFF as u32;
 
             // Clear vector state (TODO: implement when V extension is supported)
             thread.vstate_valid = false;
@@ -204,7 +204,7 @@ pub fn flush_thread() {
 /// Returns register state saved at trap entry for current process
 #[inline]
 pub fn current_pt_regs() -> *const PtRegs {
-    crate::arch::riscv64::trap::current_pt_regs()
+    crate::arch::trap::current_pt_regs()
 }
 
 /// Get task's PtRegs

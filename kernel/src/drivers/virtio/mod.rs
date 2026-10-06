@@ -275,14 +275,14 @@ impl VirtIOBlkDevice {
             const QUEUE_READY_OFFSET: u64 = 0x44;
 
             // Convert virtual addresses to physical addresses
-            let desc_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(desc_addr)
+            let desc_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(desc_addr)
             ).0;
-            let avail_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(avail_addr)
+            let avail_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(avail_addr)
             ).0;
-            let used_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(used_addr)
+            let used_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(used_addr)
             ).0;
 
             // Write descriptor table address (low 32 bits)
@@ -456,14 +456,14 @@ impl VirtIOBlkDevice {
             const VIRTQ_DESC_F_WRITE: u16 = 2;
 
             // Convert virtual addresses to physical addresses (VirtIO devices need physical addresses for DMA)
-            let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+            let header_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(header_ptr as u64)
             ).0;
-            let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+            let data_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
             ).0;
-            let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+            let resp_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(resp_ptr as u64)
             ).0;
 
             // Allocate three descriptors — R22-6: dealloc header/resp on
@@ -670,14 +670,14 @@ impl VirtIOBlkDevice {
             const VIRTQ_DESC_F_WRITE: u16 = 2;
 
             // Convert virtual addresses to physical addresses (VirtIO devices need physical addresses for DMA)
-            let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+            let header_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(header_ptr as u64)
             ).0;
-            let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+            let data_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
             ).0;
-            let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+            let resp_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(resp_ptr as u64)
             ).0;
 
             // Allocate three descriptors
@@ -875,14 +875,14 @@ impl VirtIOBlkDevice {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        let header_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64),
+        let header_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(header_ptr as u64),
         ).0;
-        let data_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64),
+        let data_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64),
         ).0;
-        let resp_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64),
+        let resp_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64),
         ).0;
 
         let header_desc_idx = match queue.alloc_desc() {
@@ -1132,7 +1132,7 @@ static VIRTIO_LOCK_DEPTH: [core::sync::atomic::AtomicUsize; crate::config::MAX_C
 /// True while the current CPU holds any virtio driver lock (debug only).
 #[cfg(debug_assertions)]
 pub fn virtio_lock_held() -> bool {
-    let cpu = crate::arch::riscv64::smp::cpu_id();
+    let cpu = crate::arch::smp::cpu_id();
     VIRTIO_LOCK_DEPTH[cpu.min(crate::config::MAX_CPUS - 1)]
         .load(core::sync::atomic::Ordering::Acquire)
         > 0
@@ -1149,7 +1149,7 @@ pub(crate) struct VirtioLockNest;
 impl VirtioLockNest {
     #[inline]
     pub(crate) fn new() -> Self {
-        let cpu = crate::arch::riscv64::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
+        let cpu = crate::arch::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
         VIRTIO_LOCK_DEPTH[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         Self
     }
@@ -1159,7 +1159,7 @@ impl VirtioLockNest {
 impl core::ops::Drop for VirtioLockNest {
     #[inline]
     fn drop(&mut self) {
-        let cpu = crate::arch::riscv64::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
+        let cpu = crate::arch::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
         VIRTIO_LOCK_DEPTH[cpu].fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
     }
 }
@@ -1543,16 +1543,16 @@ unsafe fn pci_submit_read_async(
     const VIRTQ_DESC_F_WRITE: u16 = 2;
 
     #[cfg(feature = "riscv64")]
-    let header_phys = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64),
+    let header_phys = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(header_ptr as u64),
     ).0;
     #[cfg(feature = "riscv64")]
-    let data_phys = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64),
+    let data_phys = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64),
     ).0;
     #[cfg(feature = "riscv64")]
-    let resp_phys = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64),
+    let resp_phys = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(resp_ptr as u64),
     ).0;
     #[cfg(not(feature = "riscv64"))]
     let header_phys = header_ptr as u64;

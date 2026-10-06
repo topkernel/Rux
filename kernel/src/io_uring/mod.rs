@@ -285,8 +285,8 @@ fn alloc_ring_region(size: usize) -> Option<RingRegion> {
     }
 
     let kvirt = unsafe {
-        crate::arch::riscv64::mm::phys_to_virt(
-            crate::arch::riscv64::mm::PhysAddr::new(phys as u64),
+        crate::arch::mm::phys_to_virt(
+            crate::arch::mm::PhysAddr::new(phys as u64),
         ).bits() as *mut u8
     };
 
@@ -500,7 +500,7 @@ pub static IO_URING_OPS: FileOps = FileOps {
 pub fn io_uring_mmap_handler(
     file: &File, addr: usize, length: usize, offset: u64, prot: u32,
 ) -> Result<usize, i32> {
-    use crate::arch::riscv64::mm::{PageTableEntry, VirtAddr, PhysAddr, map_page};
+    use crate::arch::mm::{PageTableEntry, VirtAddr, PhysAddr, map_page};
     use crate::mm::vma::{Vma, VmaFlags};
     use crate::mm::page::VirtAddr as PageVirtAddr;
 
@@ -550,7 +550,7 @@ pub fn io_uring_mmap_handler(
     // so this would overwrite kernel PTEs with user-writable ones
     // (review NEW-C1 — full privilege escalation).
     {
-        let user_end = crate::arch::riscv64::mm::user_addr::USER_END;
+        let user_end = crate::arch::mm::user_addr::USER_END;
         let end = vaddr.checked_add(region.size).ok_or(-22)?;
         if end > user_end {
             return Err(-22);
@@ -678,7 +678,7 @@ fn io_uring_dispatch_op(sqe: &IoUringSqe) -> i32 {
 
 /// IORING_OP_READ: read from fd into user buffer.
 fn io_uring_op_read(sqe: &IoUringSqe) -> i32 {
-    use crate::arch::riscv64::uaccess::access_ok;
+    use crate::arch::uaccess::access_ok;
 
     let fd = sqe.fd as usize;
     let buf = sqe.addr as usize;
@@ -738,7 +738,7 @@ fn do_read(file: &Arc<File>, buf: usize, len: usize) -> i32 {
             return if total > 0 { total as i32 } else { n as i32 };
         }
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_to_user(
+            crate::arch::uaccess::copy_to_user(
                 (buf + total) as *mut u8,
                 kbuf.as_ptr(),
                 n as usize,
@@ -763,7 +763,7 @@ fn do_read(file: &Arc<File>, buf: usize, len: usize) -> i32 {
 
 /// IORING_OP_WRITE: write from user buffer to fd.
 fn io_uring_op_write(sqe: &IoUringSqe) -> i32 {
-    use crate::arch::riscv64::uaccess::access_ok;
+    use crate::arch::uaccess::access_ok;
 
     let fd = sqe.fd as usize;
     let buf = sqe.addr as usize;
@@ -815,7 +815,7 @@ fn do_write(file: &Arc<File>, buf: usize, len: usize) -> i32 {
     while total < len {
         let chunk = core::cmp::min(len - total, kbuf.len());
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_from_user(
+            crate::arch::uaccess::copy_from_user(
                 kbuf.as_mut_ptr(),
                 (buf + total) as *const u8,
                 chunk,
@@ -968,7 +968,7 @@ fn wait_for_cqes(ring: &IoUring, min_complete: u32) -> i32 {
 
 /// sys_io_uring_setup — create a new io_uring instance (NR 425).
 pub fn sys_io_uring_setup(args: [u64; 6]) -> u64 {
-    use crate::arch::riscv64::uaccess::{access_ok, get_user, put_user};
+    use crate::arch::uaccess::{access_ok, get_user, put_user};
 
     let entries = args[0] as u32;
     let params_ptr = args[1] as *mut IoUringParams;

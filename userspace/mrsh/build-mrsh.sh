@@ -72,7 +72,7 @@ cd "$EDITLINE_BUILD"
     --disable-termcap \
     --enable-static \
     --disable-shared \
-    CFLAGS="-static -nostdinc -fno-stack-protector -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include" \
+    CFLAGS="-static -march=rv64gc_zicsr -nostdinc -fno-stack-protector -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include" \
     LDFLAGS="-static -nostdlib ${MUSL_DIR}/lib/crt1.o ${MUSL_DIR}/lib/crti.o -L${MUSL_DIR}/lib -lc -lgcc ${MUSL_DIR}/lib/crtn.o"
 
 # Patch config.h: force HAVE_TCGETATTR since musl has tcgetattr() but
@@ -123,7 +123,7 @@ cd "$MRSH_DIR"
 # Set cross-compile environment variables - using musl libc
 # Note: -fno-stack-protector is needed because musl doesn't provide __stack_chk_guard
 export CC=riscv64-linux-gnu-gcc
-export CFLAGS="-static -nostdinc -fno-stack-protector -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include -DHAVE_EDITLINE -I${SCRIPT_DIR}/include -I${EDITLINE_INSTALL}/include"
+export CFLAGS="-static -march=rv64gc_zicsr -nostdinc -fno-stack-protector -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include -DHAVE_EDITLINE -I${SCRIPT_DIR}/include -I${EDITLINE_INSTALL}/include"
 export PKG_CONFIG=""
 
 echo ""

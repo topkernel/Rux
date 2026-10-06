@@ -273,16 +273,16 @@ impl VirtioGpuDevice {
 
         // Convert virtual addresses to physical addresses
         #[cfg(feature = "riscv64")]
-        let desc_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.desc as u64 })
+        let desc_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(unsafe { queue.desc as u64 })
         ).0;
         #[cfg(feature = "riscv64")]
-        let avail_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.avail as u64 })
+        let avail_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(unsafe { queue.avail as u64 })
         ).0;
         #[cfg(feature = "riscv64")]
-        let used_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.used as u64 })
+        let used_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(unsafe { queue.used as u64 })
         ).0;
 
         #[cfg(not(feature = "riscv64"))]
@@ -357,8 +357,8 @@ impl VirtioGpuDevice {
 
         // Step 4: Attach backing storage (use physical address)
         #[cfg(feature = "riscv64")]
-        let fb_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(fb_ptr as u64)
+        let fb_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(fb_ptr as u64)
         ).0;
         #[cfg(not(feature = "riscv64"))]
         let fb_phys = fb_ptr as u64;
@@ -627,12 +627,12 @@ impl VirtioGpuDevice {
 
         // Convert virtual addresses to physical addresses
         #[cfg(feature = "riscv64")]
-        let cmd_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(cmd as *const CMD as u64)
+        let cmd_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(cmd as *const CMD as u64)
         ).0;
         #[cfg(feature = "riscv64")]
-        let resp_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(resp as *mut RESP as u64)
+        let resp_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(resp as *mut RESP as u64)
         ).0;
 
         #[cfg(not(feature = "riscv64"))]

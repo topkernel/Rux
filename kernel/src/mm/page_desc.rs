@@ -684,7 +684,7 @@ impl Page {
 /// - The source page must contain valid data
 /// - The caller must ensure no concurrent writes to either page
 pub unsafe fn copy_page_contents(src_pfn: usize, dst_pfn: usize) {
-    use crate::arch::riscv64::mm::memory_layout::{phys_to_virt, PhysAddr};
+    use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
     // pfn_to_phys yields a physical address; it must go through the linear
     // mapping (phys_to_virt) before dereference — the raw PA has no mapping
     // once the MMU is on.
@@ -803,7 +803,7 @@ pub fn init_mem_map(start_pfn: PhysFrameNr, nr_pages: usize) {
 
 /// vmemmap base address for page descriptors
 /// This is defined in arch/riscv64/mm/base.rs
-pub const VMEMMAP_START: usize = crate::arch::riscv64::mm::VMEMMAP_START;
+pub const VMEMMAP_START: usize = crate::arch::mm::VMEMMAP_START;
 
 /// PFN (Page Frame Number) to Page pointer
 ///

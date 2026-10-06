@@ -290,7 +290,7 @@ macro_rules! wait_event {
             // (SIE=0). This ensures lock_irqsave in __schedule saves SIE=1,
             // so when the task is later switched back in, restore_irq restores
             // SIE=1 (via __schedule's unconditional restore_irq(true)).
-            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
 
             // After wakeup, state is RUNNING (set by enqueue_task_locked)
@@ -353,7 +353,7 @@ macro_rules! wait_event_interruptible {
             // (SIE=0). This ensures lock_irqsave in __schedule saves SIE=1,
             // so when the task is later switched back in, restore_irq restores
             // SIE=1 (via __schedule's unconditional restore_irq(true)).
-            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
 
             // After wakeup, state is RUNNING (set by enqueue_task_locked).

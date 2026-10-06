@@ -128,10 +128,15 @@ fn main() {
         }
     }
 
-    // Get target platform
-    let platform = config.get("platform")
-        .and_then(|p| p["default_platform"].as_str())
-        .unwrap_or("riscv64");
+    // Get target platform: the active cargo feature wins over Kernel.toml
+    // (x86_64 builds pass --no-default-features --features x86_64)
+    let platform = if env::var_os("CARGO_FEATURE_X86_64").is_some() {
+        "x86_64"
+    } else {
+        config.get("platform")
+            .and_then(|p| p["default_platform"].as_str())
+            .unwrap_or("riscv64")
+    };
 
     println!("cargo:rustc-env=RUX_TARGET_PLATFORM={}", platform);
 
@@ -671,11 +676,43 @@ pub const PRINTK_RING_BUFFER_SIZE: usize = {};
 /// proper placement in the linker script (Linux-style VMA/LMA boot).
 fn compile_boot_asm() {
     let target = env::var("TARGET").unwrap_or_default();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    if target.contains("x86_64") {
+        // x86_64 boot stub: 32-bit multiboot entry assembled with the host
+        // assembler (`as --32`; the file switches to .code64 itself).
+        let boot_asm = PathBuf::from(&manifest_dir).join("src/arch/x86_64/boot.S");
+        if !boot_asm.exists() {
+            return;
+        }
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let boot_obj = out_dir.join("boot_x86.o");
+        if boot_obj.exists() {
+            let asm_time = fs::metadata(&boot_asm).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let obj_time = fs::metadata(&boot_obj).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if asm_time <= obj_time {
+                println!("cargo:rustc-link-arg={}", boot_obj.display());
+                return;
+            }
+        }
+        let status = std::process::Command::new("as")
+            .arg("--32")
+            .arg("-o").arg(&boot_obj)
+            .arg(&boot_asm)
+            .status()
+            .expect("failed to run assembler for x86 boot.S");
+        assert!(status.success(), "failed to assemble x86 boot.S");
+        println!("cargo:rustc-link-arg={}", boot_obj.display());
+        println!("cargo:rerun-if-changed={}", boot_asm.display());
+        return;
+    }
+
     if !target.contains("riscv64") {
         return;
     }
 
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let boot_asm = PathBuf::from(&manifest_dir)
         .join("src/arch/riscv64/boot.S");
 

@@ -63,7 +63,7 @@ extern "C" fn kfbflush_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 }
                 crate::timer::del_timer(timer_id);
             } else {
-                crate::arch::riscv64::cpu::restore_irq(true);
+                crate::arch::cpu::restore_irq(true);
                 crate::sched::schedule();
                 if crate::timer::timer_pending(timer_id) {
                     crate::timer::del_timer(timer_id);
@@ -377,12 +377,12 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
     match cmd {
         FBIOGET_FSCREENINFO => {
             let fix = create_fix_screeninfo(&info);
-            if !crate::arch::riscv64::uaccess::access_ok(arg, core::mem::size_of::<FbFixScreeninfo>()) {
+            if !crate::arch::uaccess::access_ok(arg, core::mem::size_of::<FbFixScreeninfo>()) {
                 return -14; // EFAULT
             }
             // SAFETY: access_ok validated the user pointer; fix is a properly initialized value.
             unsafe {
-                let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                let uncopied = crate::arch::uaccess::copy_to_user(
                     arg as *mut u8,
                     &fix as *const FbFixScreeninfo as *const u8,
                     core::mem::size_of::<FbFixScreeninfo>(),
@@ -393,12 +393,12 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
         }
         FBIOGET_VSCREENINFO => {
             let var = create_var_screeninfo(&info);
-            if !crate::arch::riscv64::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
+            if !crate::arch::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
                 return -14; // EFAULT
             }
             // SAFETY: access_ok validated the user pointer; var is a properly initialized value.
             unsafe {
-                let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                let uncopied = crate::arch::uaccess::copy_to_user(
                     arg as *mut u8,
                     &var as *const FbVarScreeninfo as *const u8,
                     core::mem::size_of::<FbVarScreeninfo>(),
@@ -416,13 +416,13 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             // reprogrammed (QEMU virtio-gpu fixed mode): accept the
             // current geometry/format verbatim (echo the request back),
             // reject anything that would change it.
-            if !crate::arch::riscv64::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
+            if !crate::arch::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
                 return -14; // EFAULT
             }
             let mut req = FbVarScreeninfo::default();
             // SAFETY: access_ok validated the user pointer; req is a local.
             unsafe {
-                let uncopied = crate::arch::riscv64::uaccess::copy_from_user(
+                let uncopied = crate::arch::uaccess::copy_from_user(
                     &mut req as *mut FbVarScreeninfo as *mut u8,
                     arg as *const u8,
                     core::mem::size_of::<FbVarScreeninfo>(),
@@ -447,7 +447,7 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             // Echo the accepted request back verbatim.
             // SAFETY: access_ok validated the user pointer.
             unsafe {
-                let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                let uncopied = crate::arch::uaccess::copy_to_user(
                     arg as *mut u8,
                     &req as *const FbVarScreeninfo as *const u8,
                     core::mem::size_of::<FbVarScreeninfo>(),
@@ -461,7 +461,7 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             // report the only pannable offset (0,0). Xorg's
             // fbdevHWAdjustFrame only warns on failure, but echoing back
             // keeps the log clean.
-            if !crate::arch::riscv64::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
+            if !crate::arch::uaccess::access_ok(arg, core::mem::size_of::<FbVarScreeninfo>()) {
                 return -14; // EFAULT
             }
             let mut var = create_var_screeninfo(&info);
@@ -469,7 +469,7 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             var.yoffset = 0;
             // SAFETY: access_ok validated the user pointer.
             unsafe {
-                let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                let uncopied = crate::arch::uaccess::copy_to_user(
                     arg as *mut u8,
                     &var as *const FbVarScreeninfo as *const u8,
                     core::mem::size_of::<FbVarScreeninfo>(),
@@ -498,7 +498,7 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             // fb_cmap is {start, len, red*, green*, blue*, transp*} = 4+4+6*8
             // bytes with pointer-ABI padding — only the header is validated;
             // the palette itself is dropped (see the const's doc comment).
-            if !crate::arch::riscv64::uaccess::access_ok(arg, 48) {
+            if !crate::arch::uaccess::access_ok(arg, 48) {
                 return -14; // EFAULT
             }
             0

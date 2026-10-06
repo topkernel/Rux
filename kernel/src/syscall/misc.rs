@@ -248,7 +248,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
             return -(errno::EINVAL as i64);
         }
     } else {
-        if !crate::arch::riscv64::uaccess::access_ok(fds_ptr as usize, fds_size) {
+        if !crate::arch::uaccess::access_ok(fds_ptr as usize, fds_size) {
             return -(errno::EFAULT as i64);
         }
     }
@@ -276,7 +276,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         // SAFETY: fds_ptr validated with access_ok; nfds bounded to 1024.
         unsafe {
             let mut pollfds = alloc::vec![PollFd { fd: -1, events: 0, revents: 0 }; nfds];
-            crate::arch::riscv64::uaccess::copy_from_user(
+            crate::arch::uaccess::copy_from_user(
                 pollfds.as_mut_ptr() as *mut u8,
                 fds_ptr as *const u8,
                 fds_size,
@@ -356,7 +356,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
             }
 
             // SAFETY: fds_ptr validated with access_ok(fds_size) above.
-            crate::arch::riscv64::uaccess::copy_to_user(
+            crate::arch::uaccess::copy_to_user(
                 fds_ptr as *mut u8,
                 pollfds.as_ptr() as *const u8,
                 fds_size,
@@ -451,7 +451,7 @@ fn poll_sleep_slice(deadline_jiffies: Option<u64>) {
         // Enable interrupts so the tick can reach us, then sleep. Syscall
         // context runs with SIE=0; __schedule must see SIE=1 (same
         // contract as wait_event! / sys_epoll_wait).
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
         // Spurious wake before expiry: drop the timer so it cannot enqueue
         // us again while running.
@@ -478,7 +478,7 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
     // A NULL timeout means "wait forever" (legal); a non-NULL but invalid
     // pointer must fail with EFAULT instead of silently waiting forever.
     if !timeout_ptr.is_null()
-        && !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16)
+        && !crate::arch::uaccess::access_ok(timeout_ptr as usize, 16)
     {
         return -(errno::EFAULT as i64);
     }
@@ -490,8 +490,8 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
         // SAFETY: timeout_ptr validated with access_ok; get_user is the
         // exception-table copy path (SUM=0 safe).
         unsafe {
-            let tv_sec = crate::arch::riscv64::uaccess::get_user(timeout_ptr).unwrap_or(0);
-            let tv_nsec = crate::arch::riscv64::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
+            let tv_sec = crate::arch::uaccess::get_user(timeout_ptr).unwrap_or(0);
+            let tv_nsec = crate::arch::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
             if tv_nsec >= 1_000_000_000 {
                 // Invalid timespec: match Linux poll_select_set_timeout().
                 return -(errno::EINVAL as i64);
@@ -534,7 +534,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
     // timeval inflated every wait 1000x (tv_nsec read as tv_usec).
     let timeout_ptr = args[4] as *const i64; // { tv_sec, tv_nsec }
     if !timeout_ptr.is_null()
-        && !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16)
+        && !crate::arch::uaccess::access_ok(timeout_ptr as usize, 16)
     {
         return -(errno::EFAULT as i64);
     }
@@ -544,8 +544,8 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
         // SAFETY: timeout_ptr validated with access_ok; get_user is the
         // exception-table copy path (SUM=0 safe).
         unsafe {
-            let tv_sec = crate::arch::riscv64::uaccess::get_user(timeout_ptr).unwrap_or(0);
-            let tv_nsec = crate::arch::riscv64::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
+            let tv_sec = crate::arch::uaccess::get_user(timeout_ptr).unwrap_or(0);
+            let tv_nsec = crate::arch::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
             if tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1_000_000_000 {
                 return -(errno::EINVAL as i64);
             }
@@ -567,7 +567,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
 pub fn sys_select(args: SyscallArgs) -> i64 {
     let timeout_ptr = args[4] as *const TimeVal;
     if !timeout_ptr.is_null()
-        && !crate::arch::riscv64::uaccess::access_ok(
+        && !crate::arch::uaccess::access_ok(
             timeout_ptr as usize,
             core::mem::size_of::<TimeVal>(),
         )
@@ -615,13 +615,13 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
 
     // Check pointer validity
     let fdset_size = core::mem::size_of::<FdSet>();
-    if !readfds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(readfds_ptr as usize, fdset_size) {
+    if !readfds_ptr.is_null() && !crate::arch::uaccess::access_ok(readfds_ptr as usize, fdset_size) {
         return -(errno::EFAULT as i64);
     }
-    if !writefds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(writefds_ptr as usize, fdset_size) {
+    if !writefds_ptr.is_null() && !crate::arch::uaccess::access_ok(writefds_ptr as usize, fdset_size) {
         return -(errno::EFAULT as i64);
     }
-    if !exceptfds_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(exceptfds_ptr as usize, fdset_size) {
+    if !exceptfds_ptr.is_null() && !crate::arch::uaccess::access_ok(exceptfds_ptr as usize, fdset_size) {
         return -(errno::EFAULT as i64);
     }
 
@@ -635,7 +635,7 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
     let original_readfds = unsafe {
         if readfds_ptr.is_null() { FdSet::new() } else {
             let mut v = FdSet::new();
-            crate::arch::riscv64::uaccess::copy_from_user(
+            crate::arch::uaccess::copy_from_user(
                 &mut v as *mut FdSet as *mut u8,
                 readfds_ptr as *const u8,
                 fdset_size,
@@ -647,7 +647,7 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
     let original_writefds = unsafe {
         if writefds_ptr.is_null() { FdSet::new() } else {
             let mut v = FdSet::new();
-            crate::arch::riscv64::uaccess::copy_from_user(
+            crate::arch::uaccess::copy_from_user(
                 &mut v as *mut FdSet as *mut u8,
                 writefds_ptr as *const u8,
                 fdset_size,
@@ -659,7 +659,7 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
     let original_exceptfds = unsafe {
         if exceptfds_ptr.is_null() { FdSet::new() } else {
             let mut v = FdSet::new();
-            crate::arch::riscv64::uaccess::copy_from_user(
+            crate::arch::uaccess::copy_from_user(
                 &mut v as *mut FdSet as *mut u8,
                 exceptfds_ptr as *const u8,
                 fdset_size,
@@ -759,21 +759,21 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
             // copy_to_user is the exception-table copy path.
             unsafe {
                 if !readfds_ptr.is_null() {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         readfds_ptr as *mut u8,
                         &result_readfds as *const FdSet as *const u8,
                         fdset_size,
                     );
                 }
                 if !writefds_ptr.is_null() {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         writefds_ptr as *mut u8,
                         &result_writefds as *const FdSet as *const u8,
                         fdset_size,
                     );
                 }
                 if !exceptfds_ptr.is_null() {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         exceptfds_ptr as *mut u8,
                         &result_exceptfds as *const FdSet as *const u8,
                         fdset_size,
@@ -789,21 +789,21 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
             // copy_to_user is the exception-table copy path.
             unsafe {
                 if !readfds_ptr.is_null() {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         readfds_ptr as *mut u8,
                         &result_readfds as *const FdSet as *const u8,
                         fdset_size,
                     );
                 }
                 if !writefds_ptr.is_null() {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         writefds_ptr as *mut u8,
                         &result_writefds as *const FdSet as *const u8,
                         fdset_size,
                     );
                 }
                 if !exceptfds_ptr.is_null() {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         exceptfds_ptr as *mut u8,
                         &result_exceptfds as *const FdSet as *const u8,
                         fdset_size,
@@ -820,21 +820,21 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
                 // copy_to_user is the exception-table copy path.
                 unsafe {
                     if !readfds_ptr.is_null() {
-                        crate::arch::riscv64::uaccess::copy_to_user(
+                        crate::arch::uaccess::copy_to_user(
                             readfds_ptr as *mut u8,
                             &result_readfds as *const FdSet as *const u8,
                             fdset_size,
                         );
                     }
                     if !writefds_ptr.is_null() {
-                        crate::arch::riscv64::uaccess::copy_to_user(
+                        crate::arch::uaccess::copy_to_user(
                             writefds_ptr as *mut u8,
                             &result_writefds as *const FdSet as *const u8,
                             fdset_size,
                         );
                     }
                     if !exceptfds_ptr.is_null() {
-                        crate::arch::riscv64::uaccess::copy_to_user(
+                        crate::arch::uaccess::copy_to_user(
                             exceptfds_ptr as *mut u8,
                             &result_exceptfds as *const FdSet as *const u8,
                             fdset_size,
@@ -1039,7 +1039,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) && event_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !event_ptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(event_ptr as usize, core::mem::size_of::<EPollEvent>()) {
+    if !event_ptr.is_null() && !crate::arch::uaccess::access_ok(event_ptr as usize, core::mem::size_of::<EPollEvent>()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1138,7 +1138,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             // is the exception-table copy path (SUM=0 safe).
             let mut event = EPollEvent { events: 0, data: 0 };
             unsafe {
-                crate::arch::riscv64::uaccess::copy_from_user(
+                crate::arch::uaccess::copy_from_user(
                     &mut event as *mut EPollEvent as *mut u8,
                     event_ptr as *const u8,
                     core::mem::size_of::<EPollEvent>(),
@@ -1204,7 +1204,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
             // is the exception-table copy path (SUM=0 safe).
             let mut event = EPollEvent { events: 0, data: 0 };
             unsafe {
-                crate::arch::riscv64::uaccess::copy_from_user(
+                crate::arch::uaccess::copy_from_user(
                     &mut event as *mut EPollEvent as *mut u8,
                     event_ptr as *const u8,
                     core::mem::size_of::<EPollEvent>(),
@@ -1256,7 +1256,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
     }
 
     let events_size = core::mem::size_of::<EPollEvent>() * (maxevents as usize);
-    if !crate::arch::riscv64::uaccess::access_ok(events_ptr as usize, events_size) {
+    if !crate::arch::uaccess::access_ok(events_ptr as usize, events_size) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1392,7 +1392,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             // read-only page) must fail with EFAULT, not silently succeed
             // (LTP epoll_wait03 case 2).
             let uncopied = unsafe {
-                crate::arch::riscv64::uaccess::copy_to_user(
+                crate::arch::uaccess::copy_to_user(
                     events_ptr as *mut u8,
                     ready_events.as_ptr() as *const u8,
                     count * core::mem::size_of::<EPollEvent>(),
@@ -1470,7 +1470,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         // Enable interrupts before schedule(): syscall context runs with
         // SIE=0; __schedule must save SIE=1 so the switched-back task has
         // interrupts enabled (same contract as wait_event!).
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
         epoll.wait_queue.finish_wait(current);
         // Spurious/early wake (signal before expiry): drop the timer so it
@@ -1505,10 +1505,10 @@ pub fn sys_epoll_pwait(args: SyscallArgs) -> i64 {
     if sigsetsize != 8 {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(sigmask_ptr as usize, 8) {
+    if !crate::arch::uaccess::access_ok(sigmask_ptr as usize, 8) {
         return -(errno::EFAULT as i64);
     }
-    let new_mask = match unsafe { crate::arch::riscv64::uaccess::get_user(sigmask_ptr) } {
+    let new_mask = match unsafe { crate::arch::uaccess::get_user(sigmask_ptr) } {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
     };
@@ -1577,7 +1577,7 @@ impl EventFd {
                 unsafe { crate::sched::dequeue_task(&*current); }
                 return Err(errno::EINTR);
             }
-            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
             self.wait_queue.finish_wait(current);
             if crate::signal::signal_pending() {
@@ -1807,7 +1807,7 @@ fn timerfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
                 unsafe { crate::sched::dequeue_task(&*current); }
                 return -(errno::EINTR) as isize;
             }
-            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
             tfd.wait_queue.finish_wait(current);
             if crate::signal::signal_pending() {
@@ -1891,7 +1891,7 @@ fn timerfd_write_olds(tfd: &TimerFd, old_value: *mut u64) -> bool {
     // put_user is the exception-table copy path (SUM=0 safe).
     unsafe {
         let p = old_value as *mut i64;
-        let put = crate::arch::riscv64::uaccess::put_user;
+        let put = crate::arch::uaccess::put_user;
         let mut ok = true;
         // it_interval (ns-precise from the stored interval)
         let interval_ms = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
@@ -2082,7 +2082,7 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             unsafe { crate::sched::dequeue_task(&*current); }
             return -(errno::EINTR) as isize;
         }
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
         sfd.wait_queue.finish_wait(current);
         if crate::signal::signal_pending() {
@@ -2167,12 +2167,12 @@ pub fn sys_signalfd4_impl(args: SyscallArgs) -> i64 {
     if mask_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, 8) {
+    if !crate::arch::uaccess::access_ok(mask_ptr as usize, 8) {
         return -(errno::EFAULT as i64);
     }
     // SAFETY: mask_ptr validated with access_ok; get_user is the
     // exception-table copy path (SUM=0 safe).
-    let mut mask = match unsafe { crate::arch::riscv64::uaccess::get_user(mask_ptr) } {
+    let mut mask = match unsafe { crate::arch::uaccess::get_user(mask_ptr) } {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
     };
@@ -2400,7 +2400,7 @@ pub fn sys_inotify_rm_watch(args: SyscallArgs) -> i64 {
 /// NUL-terminated user-path reader for inotify_add_watch. Returns the
 /// (absolute) path or the negative errno as i64.
 fn read_inotify_path(ptr: *const u8, buf: &mut [u8; 4096]) -> Result<alloc::string::String, i64> {
-    use crate::arch::riscv64::uaccess::{access_ok, strncpy_from_user};
+    use crate::arch::uaccess::{access_ok, strncpy_from_user};
 
     if ptr.is_null() {
         return Err(-(errno::EFAULT as i64));
@@ -2517,7 +2517,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     if new_value.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(new_value as usize, 32) {
+    if !crate::arch::uaccess::access_ok(new_value as usize, 32) {
         return -(errno::EFAULT as i64);
     }
 
@@ -2553,7 +2553,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     // (LTP timerfd_settime01 case 2 passes a bad old_value pointer and
     // the old code silently swallowed the failure).
     if !old_value.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(old_value as usize, 32) {
+        if !crate::arch::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
         }
         if !timerfd_write_olds(tfd, old_value) {
@@ -2566,7 +2566,7 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     // exception-table copy path (SUM=0 safe). Unreadable fields read as 0.
     let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
         let p = new_value as *const i64;
-        let get = crate::arch::riscv64::uaccess::get_user::<i64>;
+        let get = crate::arch::uaccess::get_user::<i64>;
         (
             get(p).unwrap_or(0),
             get(p.add(1)).unwrap_or(0),
@@ -2710,7 +2710,7 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
     if curr_value.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(curr_value as usize, 32) {
+    if !crate::arch::uaccess::access_ok(curr_value as usize, 32) {
         return -(errno::EFAULT as i64);
     }
 
@@ -2751,7 +2751,7 @@ pub fn sys_getrandom(args: SyscallArgs) -> i64 {
     }
 
     // Validate user space pointer
-    if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, buflen) {
+    if !crate::arch::uaccess::access_ok(buf_ptr as usize, buflen) {
         return -(errno::EFAULT as i64);
     }
 
@@ -2769,7 +2769,7 @@ pub fn sys_getrandom(args: SyscallArgs) -> i64 {
         // SAFETY: buf_ptr validated with access_ok(buflen); copy_to_user
         // is exception-table fault-safe and returns uncopied count.
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_to_user(
+            crate::arch::uaccess::copy_to_user(
                 buf_ptr.add(filled),
                 block.as_ptr().add(used),
                 chunk,

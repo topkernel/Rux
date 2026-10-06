@@ -198,7 +198,7 @@ impl IoCompletion {
                     // wait-path callers re-arm explicitly (semaphore.rs
                     // discipline) so ticks/IPIs reach this CPU across the
                     // wait loop.
-                    crate::arch::riscv64::cpu::restore_irq(true);
+                    crate::arch::cpu::restore_irq(true);
                     crate::sched::schedule();
                     crate::timer::del_timer(id);
                 } else {
@@ -208,7 +208,7 @@ impl IoCompletion {
                     // bounded interval with interrupts enabled (so the
                     // completion walker can run) and re-check.
                     self.wait_queue.finish_wait(current);
-                    crate::arch::riscv64::cpu::restore_irq(true);
+                    crate::arch::cpu::restore_irq(true);
                     for _ in 0..100_000 {
                         core::hint::spin_loop();
                     }
@@ -219,7 +219,7 @@ impl IoCompletion {
                 // wait-path callers re-arm explicitly (semaphore.rs
                 // discipline) so ticks/IPIs reach this CPU across the
                 // wait loop.
-                crate::arch::riscv64::cpu::restore_irq(true);
+                crate::arch::cpu::restore_irq(true);
                 crate::sched::schedule();
             }
 

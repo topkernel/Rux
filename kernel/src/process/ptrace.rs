@@ -104,7 +104,7 @@ fn ptrace_may_access(target_cred: &crate::process::task::Cred) -> bool {
 /// # Safety
 /// `root_ppn` must be a valid page-table root PPN.
 unsafe fn translate(root_ppn: u64, va: u64) -> Option<(u64, u64)> {
-    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
+    use crate::arch::mm::{phys_to_virt, PhysAddr};
 
     let a2 = (root_ppn << 12) + ((va >> 30) & 0x1FF) * 8;
     // SAFETY: a2 addresses a valid PTE in the target's level-2 table.
@@ -151,7 +151,7 @@ unsafe fn translate(root_ppn: u64, va: u64) -> Option<(u64, u64)> {
 /// first (this is what makes PEEKTEXT work on demand-paged, not-yet-loaded
 /// text). Returns None when the address is unmapped/unreadable.
 pub fn read_target_word(task: *mut Task, addr: u64) -> Option<u64> {
-    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
+    use crate::arch::mm::{phys_to_virt, PhysAddr};
 
     // Word must not straddle a page boundary (simplification: callers peek
     // aligned instruction/data words).
@@ -168,14 +168,14 @@ pub fn read_target_word(task: *mut Task, addr: u64) -> Option<u64> {
         if translate(root_ppn, page_fault_addr).is_none() {
             // Fault the page in through the target's mm (file-backed VMAs
             // are filled from their pinned File, anonymous ones zeroed).
-            let r = crate::arch::riscv64::mm::handle_mm_fault(
+            let r = crate::arch::mm::handle_mm_fault(
                 &mm,
-                crate::arch::riscv64::mm::VirtAddr::new(page_fault_addr),
-                crate::arch::riscv64::mm::FaultFlags::READ,
+                crate::arch::mm::VirtAddr::new(page_fault_addr),
+                crate::arch::mm::FaultFlags::READ,
             );
             if !matches!(
                 r,
-                crate::arch::riscv64::mm::MmFaultResult::Handled
+                crate::arch::mm::MmFaultResult::Handled
             ) {
                 return None;
             }
@@ -202,7 +202,7 @@ pub fn read_target_word(task: *mut Task, addr: u64) -> Option<u64> {
 /// plant breakpoints in R+X text). Flushes the D-cache-coherent TLB/I-cache
 /// afterwards so the tracee sees the new bytes.
 pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
-    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
+    use crate::arch::mm::{phys_to_virt, PhysAddr};
 
     if addr & 0o7 != 0 {
         return false;
@@ -218,12 +218,12 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
         let root_ppn = mm.root_ppn();
 
         if translate(root_ppn, page_fault_addr).is_none() {
-            let r = crate::arch::riscv64::mm::handle_mm_fault(
+            let r = crate::arch::mm::handle_mm_fault(
                 &mm,
-                crate::arch::riscv64::mm::VirtAddr::new(page_fault_addr),
-                crate::arch::riscv64::mm::FaultFlags::READ,
+                crate::arch::mm::VirtAddr::new(page_fault_addr),
+                crate::arch::mm::FaultFlags::READ,
             );
-            if !matches!(r, crate::arch::riscv64::mm::MmFaultResult::Handled) {
+            if !matches!(r, crate::arch::mm::MmFaultResult::Handled) {
                 return false;
             }
         }
@@ -402,7 +402,7 @@ fn dispatch_request(
     addr: u64,
     data: u64,
 ) -> i64 {
-    use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
+    use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
 
     // SAFETY: target is pinned for the whole call.
     let is_stopped = unsafe { (*target).state().contains(crate::process::task::TaskState::STOPPED) };

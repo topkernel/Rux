@@ -598,7 +598,7 @@ pub fn loop_file_ioctl(
     request: u32,
     arg: usize,
 ) -> Option<i64> {
-    use crate::arch::riscv64::uaccess::{copy_from_user, copy_to_user};
+    use crate::arch::uaccess::{copy_from_user, copy_to_user};
 
     if !core::ptr::eq(
         file.get_ops()? as *const _,

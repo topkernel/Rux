@@ -1181,7 +1181,7 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
 
     // R54: schedule() restores the caller's SIE state; re-arm IRQs so
     // ticks/IPIs reach this CPU across the wait.
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     crate::sched::schedule();
 
     if timer_id != 0 {
@@ -1886,7 +1886,7 @@ fn linger_drain_wait(tcp_fd: i32, secs: u32) {
             return;
         }
         // R54: re-arm IRQs so the timer tick reaches this CPU.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
     }
 }

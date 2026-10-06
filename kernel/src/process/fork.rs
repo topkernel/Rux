@@ -12,7 +12,7 @@
 
 use crate::process::task::{Task, TaskState, Pid};
 use crate::fs::FdTable;
-use crate::arch::riscv64::pt_regs::PtRegs;
+use crate::arch::pt_regs::PtRegs;
 
 // ============================================================================
 // Clone flags
@@ -133,7 +133,7 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
                 };
                 let ct = task.thread_mut();
                 ct.fpu.copy_from_slice(&pfpu);
-                ct.fs = super::super::arch::riscv64::pt_regs::SR_FS_CLEAN as u32;
+                ct.fs = super::super::arch::pt_regs::SR_FS_CLEAN as u32;
             }
         }
 
@@ -243,7 +243,7 @@ fn efault() -> i32 { crate::errno::Errno::BadAddress.as_neg_i32() }
 ///   EAGAIN when the PID space is exhausted, ENOMEM for allocation
 ///   failures, EFAULT when a CLONE_*SETTID pointer is unwritable.
 pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
-    use crate::arch::riscv64::trap::current_pt_regs;
+    use crate::arch::trap::current_pt_regs;
 
     // Validate clone flag constraints (matches Linux kernel checks):
     // CLONE_THREAD requires CLONE_SIGHAND (kernel/fork.c clone3_args_check)
@@ -446,7 +446,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // permanent futex_wait(2) wedge).
         if args.flags & CLONE_PARENT_SETTID != 0 && !args.parent_tid.is_null() {
             let tid_val = pid as i32;
-            if crate::arch::riscv64::uaccess::copy_to_user(
+            if crate::arch::uaccess::copy_to_user(
                 args.parent_tid as *mut u8,
                 &tid_val as *const i32 as *const u8,
                 core::mem::size_of::<i32>(),
@@ -460,7 +460,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             if args.flags & CLONE_VM != 0 {
                 // Shared address space: the child's memory IS this memory.
                 let tid_val = pid as i32;
-                if crate::arch::riscv64::uaccess::copy_to_user(
+                if crate::arch::uaccess::copy_to_user(
                     args.child_tid as *mut u8,
                     &tid_val as *const i32 as *const u8,
                     core::mem::size_of::<i32>(),
@@ -492,10 +492,10 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             tid: i32,
             child_task: *mut Task,
         ) -> bool {
-            use crate::arch::riscv64::mm::memory_layout::{phys_to_virt, PhysAddr, PAGE_SIZE};
-            use crate::arch::riscv64::mm::mmu_init::get_page_table_virt;
-            use crate::arch::riscv64::mm::pagetable::PageTableEntry;
-            use crate::arch::riscv64::mm::cow_flags;
+            use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr, PAGE_SIZE};
+            use crate::arch::mm::mmu_init::get_page_table_virt;
+            use crate::arch::mm::pagetable::PageTableEntry;
+            use crate::arch::mm::cow_flags;
             use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
 
             let va = child_tid as u64;
@@ -527,7 +527,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             {
                 let old_ppn = pte0.ppn();
                 let old_page = pfn_to_page_mut(old_ppn as usize);
-                let new_phys = match crate::arch::riscv64::mm::mm_ops::alloc_user_phys_page() {
+                let new_phys = match crate::arch::mm::mm_ops::alloc_user_phys_page() {
                     Some(p) => p,
                     None => return false,
                 };
@@ -645,8 +645,8 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                             let p_root = parent_as.root_ppn();
                             let c_root = child_arc.root_ppn();                            for va in [0x1c8000u64, 0x1c9000, 0x100000] {
                                 unsafe {
-                                    let p = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(p_root, va);
-                                    let c = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(c_root, va);
+                                    let p = crate::arch::mm::mm_ops::PageTableWalker::walk(p_root, va);
+                                    let c = crate::arch::mm::mm_ops::PageTableWalker::walk(c_root, va);
                                     taskdump_raw_line(b"FTX-COWCHK parent=");
                                     taskdump_dec((*current_ptr).pid() as u64);
                                     taskdump_raw_line(b" child=");
@@ -690,7 +690,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                             // any free of this root from a context that is
                             // NOT the owner while the owner is still alive —
                             // the early-teardown seed.
-                            crate::arch::riscv64::mm::mmu_init::register_fork_root(
+                            crate::arch::mm::mmu_init::register_fork_root(
                                 c_root as u64,
                                 pid as u32,
                             );

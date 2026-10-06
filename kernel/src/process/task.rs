@@ -649,7 +649,7 @@ pub struct Task {
     /// Architecture-specific thread state
     ///
     /// Stores FPU state, TLS pointer, etc.
-    pub thread: crate::arch::riscv64::thread::ThreadStruct,
+    pub thread: crate::arch::thread::ThreadStruct,
 
     /// File descriptor table (files_struct)
     /// Use Arc for CLONE_FILES sharing between threads
@@ -1072,7 +1072,7 @@ impl Task {
             fork_pt_regs: core::sync::atomic::AtomicU64::new(0),
             address_space: None,
             active_mm: None,
-            thread: crate::arch::riscv64::thread::ThreadStruct::new(),
+            thread: crate::arch::thread::ThreadStruct::new(),
             fdtable,
             signal,
             pending,
@@ -1312,9 +1312,9 @@ impl Task {
         // because WFI in QEMU TCG can starve the IO thread when stdin
         // is a blocking pipe, preventing timer interrupt delivery.
         ptr::write(
-            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::riscv64::thread::ThreadStruct,
+            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
             {
-                let mut thread = crate::arch::riscv64::thread::ThreadStruct::new();
+                let mut thread = crate::arch::thread::ThreadStruct::new();
                 thread.ra = crate::sched::cpu_idle_loop as u64;  // Return address = idle loop
                 thread.sp = 0;  // Will be set when kernel stack is allocated
                 thread
@@ -1790,8 +1790,8 @@ impl Task {
             None,
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::riscv64::thread::ThreadStruct,
-            crate::arch::riscv64::thread::ThreadStruct::new(),
+            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
+            crate::arch::thread::ThreadStruct::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<alloc::sync::Arc<FdTable>>,
@@ -2127,7 +2127,7 @@ impl Task {
 
         // Trigger scheduling, select other process to run
         // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
     }
 
@@ -2179,7 +2179,7 @@ impl Task {
         // unit test — sits above it), and every pointer that DOES pass
         // is inside mapped memory, so the poison reads below cannot
         // fault. 64GiB linear span: generous against RAM growth.
-        const MAP_BASE: usize = crate::arch::riscv64::mm::memory_layout::PAGE_OFFSET;
+        const MAP_BASE: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
         const MAP_SPAN: usize = 0x10_0000_0000; // 64 GiB
         let a = task as usize;
         if task.is_null()
@@ -2568,15 +2568,15 @@ impl Task {
 
     /// Set as fork child process
     #[inline]
-    pub fn set_fork_child(&self, pt_regs_ptr: *const crate::arch::riscv64::pt_regs::PtRegs) {
+    pub fn set_fork_child(&self, pt_regs_ptr: *const crate::arch::pt_regs::PtRegs) {
         self.is_fork_child.store(true, core::sync::atomic::Ordering::Relaxed);
         self.fork_pt_regs.store(pt_regs_ptr as u64, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get fork child's PtRegs pointer
     #[inline]
-    pub fn fork_pt_regs(&self) -> *const crate::arch::riscv64::pt_regs::PtRegs {
-        self.fork_pt_regs.load(core::sync::atomic::Ordering::Relaxed) as *const crate::arch::riscv64::pt_regs::PtRegs
+    pub fn fork_pt_regs(&self) -> *const crate::arch::pt_regs::PtRegs {
+        self.fork_pt_regs.load(core::sync::atomic::Ordering::Relaxed) as *const crate::arch::pt_regs::PtRegs
     }
 
     /// Clear fork child flag (called after child is first scheduled).
@@ -2820,12 +2820,12 @@ pub unsafe fn vfork_wake_parent(task: *mut Task) {
 
 impl Task {
     /// Get architecture-specific thread state
-    pub fn thread(&self) -> &crate::arch::riscv64::thread::ThreadStruct {
+    pub fn thread(&self) -> &crate::arch::thread::ThreadStruct {
         &self.thread
     }
 
     /// Get mutable reference to architecture-specific thread state
-    pub fn thread_mut(&mut self) -> &mut crate::arch::riscv64::thread::ThreadStruct {
+    pub fn thread_mut(&mut self) -> &mut crate::arch::thread::ThreadStruct {
         &mut self.thread
     }
 
@@ -3154,10 +3154,10 @@ impl Task {
     /// # Returns
     /// Pointer to pt_regs structure at top of kernel stack, or null if no stack
     #[inline]
-    pub fn pt_regs(&self) -> *mut super::super::arch::riscv64::pt_regs::PtRegs {
+    pub fn pt_regs(&self) -> *mut super::super::arch::pt_regs::PtRegs {
         if let Some(stack_top) = self.kernel_stack {
-            let pt_regs_addr = stack_top as usize - core::mem::size_of::<super::super::arch::riscv64::pt_regs::PtRegs>();
-            pt_regs_addr as *mut super::super::arch::riscv64::pt_regs::PtRegs
+            let pt_regs_addr = stack_top as usize - core::mem::size_of::<super::super::arch::pt_regs::PtRegs>();
+            pt_regs_addr as *mut super::super::arch::pt_regs::PtRegs
         } else {
             core::ptr::null_mut()
         }

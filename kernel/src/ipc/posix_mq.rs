@@ -3,7 +3,7 @@
 //! Implements mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify, mq_getsetattr
 //! following the Linux kernel design. POSIX MQs are file descriptor-based.
 
-use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user, put_user};
+use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, put_user};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;

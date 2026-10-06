@@ -27,7 +27,7 @@ use crate::mm::page_desc::{PageFlag, PageType, pfn_to_page_mut, Page};
 use crate::mm::lru;
 use crate::mm::pglist::{first_online_node_mut, LRU_INACTIVE_FILE, LRU_ACTIVE_FILE};
 use crate::mm::{pfn_to_phys, PAGE_SIZE};
-use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
+use crate::arch::mm::{phys_to_virt, PhysAddr};
 
 /// Maximum cached pages across all inodes (8192 x 4KB = 32MB).
 ///

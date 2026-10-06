@@ -194,7 +194,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     // flag dies with the task, so later failures on other tasks keep the
     // task-kill defense.
     let kill_self = crate::interrupt::preempt::in_task()
-        && crate::arch::riscv64::cpu::get_interrupts_state()
+        && crate::arch::cpu::get_interrupts_state()
         && match crate::sched::current() {
             Some(task) => {
                 use crate::process::task::TIF_MEMDIE;
@@ -311,8 +311,8 @@ pub extern "C" fn rust_main() -> ! {
     // This must be done before any code that uses phys_to_virt() or
     // accesses physical memory via linear mapping
     unsafe {
-        arch::riscv64::mm::memory_layout::KERNEL_MAP.va_pa_offset =
-            arch::riscv64::mm::VA_PA_OFFSET;
+        arch::mm::memory_layout::KERNEL_MAP.va_pa_offset =
+            arch::mm::VA_PA_OFFSET;
     }
 
     // ===== Setup linear mapping BEFORE heap (heap needs phys_to_virt) =====
@@ -326,7 +326,7 @@ pub extern "C" fn rust_main() -> ! {
 
         // Parse memory regions from device tree
         // DTB is already mapped by boot.S early page table at its physical address
-        let dtb_phys = arch::riscv64::boot::get_dtb_pointer();
+        let dtb_phys = arch::boot::get_dtb_pointer();
         // DTB is identity-mapped in early_pg_dir, use physical address directly
         // for early parsing (linear mapping not yet available)
         let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
@@ -353,10 +353,10 @@ pub extern "C" fn rust_main() -> ! {
         // doesn't exist in the permanent page table
 
         // Setup linear mapping (PAGE_OFFSET region)
-        arch::riscv64::mm::setup_linear_mapping(&memory_regions);
+        arch::mm::setup_linear_mapping(&memory_regions);
 
         // Now switch to fixmap stage (linear mapping is available)
-        arch::riscv64::mm::pt_ops_set_fixmap();
+        arch::mm::pt_ops_set_fixmap();
 
         // Calculate total physical memory for later use
         let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
@@ -368,7 +368,7 @@ pub extern "C" fn rust_main() -> ! {
 
     // Initialize Slab allocator (use virtual address in linear mapping region)
     let slab_phys = 0x80C00000usize + crate::config::KERNEL_HEAP_SIZE;
-    let slab_start = slab_phys + arch::riscv64::mm::VA_PA_OFFSET;
+    let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
     mm::init_slab(slab_start, 4 * 1024 * 1024);  // 4MB for slab
 
     // ========== Heap initialized, format! can be used below ==========
@@ -422,7 +422,7 @@ pub extern "C" fn rust_main() -> ! {
 
     // Initialize command line argument parsing (needs to be after heap initialization)
     {
-        let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
+        let dtb_ptr = arch::boot::get_dtb_pointer();
         cmdline::init(dtb_ptr);
         print_status("boot", "FDT/DTB parsed", true);
         if let Some(cmdline) = cmdline::get_cmdline() {
@@ -448,9 +448,9 @@ pub extern "C" fn rust_main() -> ! {
         // and setup_linear_mapping were already done above (before heap init).
         {
             // Re-parse memory regions (now with linear mapping available)
-            let dtb_phys = arch::riscv64::boot::get_dtb_pointer();
-            let dtb_virt = arch::riscv64::mm::phys_to_virt(
-                arch::riscv64::mm::PhysAddr::new(dtb_phys)
+            let dtb_phys = arch::boot::get_dtb_pointer();
+            let dtb_virt = arch::mm::phys_to_virt(
+                arch::mm::PhysAddr::new(dtb_phys)
             ).bits();
             let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_virt) };
 
@@ -501,7 +501,7 @@ pub extern "C" fn rust_main() -> ! {
             print_status("mm", "zone allocator initialized", true);
 
             // Switch to late stage (use buddy allocator for page tables)
-            arch::riscv64::mm::pt_ops_set_late();
+            arch::mm::pt_ops_set_late();
 
             // Print memblock summary
             let total_mb = mm::memblock_total_memory() / (1024 * 1024);
@@ -510,7 +510,7 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // Setup device mappings (PLIC, VirtIO, CLINT, etc.)
-        arch::riscv64::mm::setup_device_mappings();
+        arch::mm::setup_device_mappings();
         print_status("mm", "device mappings created", true);
 
         // Arm the wall clock from the goldfish RTC (QEMU virt's default

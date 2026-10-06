@@ -2305,7 +2305,7 @@ impl Ext4BigLock {
             // Sleep until release() wakes us (UNINTERRUPTIBLE: ext4 ops
             // are not signal-interruptible and the guard must be carried
             // back out of the critical section).
-            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
             self.wait.finish_wait(cur);
             // Woken: loop and retry the acquire (another task may have

@@ -493,16 +493,16 @@ impl VirtIOPCI {
 
         // Convert to physical addresses
         #[cfg(feature = "riscv64")]
-        let desc_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(desc_addr)
+        let desc_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(desc_addr)
         ).0;
         #[cfg(feature = "riscv64")]
-        let avail_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(avail_addr)
+        let avail_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(avail_addr)
         ).0;
         #[cfg(feature = "riscv64")]
-        let used_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(used_addr)
+        let used_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(used_addr)
         ).0;
 
         #[cfg(not(feature = "riscv64"))]
@@ -641,7 +641,7 @@ impl VirtIOPCI {
     /// Returns bytes read on success, error code on failure
     pub fn read_block(&self, sector: u64, buf: &mut [u8]) -> Result<usize, &'static str> {
         use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type};
-        use crate::arch::riscv64::mm::VirtAddr;
+        use crate::arch::mm::VirtAddr;
 
         // Allocate three descriptors
         let virt_queue_opt: Option<queue::VirtQueue> = queue::VirtQueue::new(8u16,
@@ -714,11 +714,11 @@ impl VirtIOPCI {
 
         // Convert virtual addresses to physical addresses
         #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(header_ptr as u64)
         ).0;
         #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(resp_ptr as u64)
         ).0;
 
@@ -734,7 +734,7 @@ impl VirtIOPCI {
         // Set data buffer descriptor (device writes)
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
         #[cfg(feature = "riscv64")]
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let data_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(buf.as_ptr() as u64)
         ).0;
         #[cfg(not(feature = "riscv64"))]
@@ -806,7 +806,7 @@ impl VirtIOPCI {
     /// Returns bytes written on success, error on failure
     pub fn write_block(&self, sector: u64, buf: &[u8]) -> Result<usize, &'static str> {
         use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type};
-        use crate::arch::riscv64::mm::VirtAddr;
+        use crate::arch::mm::VirtAddr;
 
         let virt_queue_opt: Option<queue::VirtQueue> = queue::VirtQueue::new(8u16,
             0,
@@ -891,11 +891,11 @@ impl VirtIOPCI {
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(header_ptr as u64)
         ).0;
         #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(resp_ptr as u64)
         ).0;
 
@@ -910,7 +910,7 @@ impl VirtIOPCI {
 
         // Data: device reads from host (no F_WRITE, opposite of read)
         #[cfg(feature = "riscv64")]
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let data_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(buf.as_ptr() as u64)
         ).0;
         #[cfg(not(feature = "riscv64"))]
@@ -1088,18 +1088,18 @@ fn read_block_once(
 
         // Convert virtual addresses to physical addresses
         #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(header_ptr as u64)
         ).0;
         #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64)
         ).0;
 
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
         #[cfg(feature = "riscv64")]
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+        let data_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
         ).0;
         #[cfg(not(feature = "riscv64"))]
         let data_phys_addr = buf.as_ptr() as u64;
@@ -1350,18 +1350,18 @@ fn write_block_once(
 
         // Convert virtual addresses to physical addresses
         #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(header_ptr as u64)
         ).0;
         #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64)
         ).0;
 
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
         #[cfg(feature = "riscv64")]
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+        let data_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
         ).0;
         #[cfg(not(feature = "riscv64"))]
         let data_phys_addr = buf.as_ptr() as u64;
@@ -1528,7 +1528,7 @@ pub fn flush_block_using_configured_queue(
 /// Single flush attempt using the pre-configured VirtQueue.
 fn flush_block_once() -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
-    use crate::arch::riscv64::mm::VirtAddr;
+    use crate::arch::mm::VirtAddr;
 
     let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
         let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
@@ -1578,13 +1578,13 @@ fn flush_block_once() -> Result<usize, &'static str> {
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(header_ptr as u64)
         ).0;
         #[cfg(not(feature = "riscv64"))]
         let header_phys_addr = header_ptr as u64;
         #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(resp_ptr as u64)
         ).0;
         #[cfg(not(feature = "riscv64"))]

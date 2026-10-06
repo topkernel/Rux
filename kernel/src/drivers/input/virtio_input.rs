@@ -208,8 +208,8 @@ impl VirtioInputDevice {
         self.event_buffer_layout = Some(buffer_layout);
 
         // Get physical address
-        self.event_buffer_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(event_buffer as u64)
+        self.event_buffer_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(event_buffer as u64)
         ).0;
 
         // Create VirtQueue. The notify address comes from the spec formula
@@ -227,14 +227,14 @@ impl VirtioInputDevice {
         )?;
 
         // Get queue physical addresses
-        let desc_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.desc as u64 })
+        let desc_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(unsafe { queue.desc as u64 })
         ).0;
-        let avail_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.avail as u64 })
+        let avail_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(unsafe { queue.avail as u64 })
         ).0;
-        let used_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(unsafe { queue.used as u64 })
+        let used_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(unsafe { queue.used as u64 })
         ).0;
 
         // Set queue addresses

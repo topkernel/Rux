@@ -41,6 +41,11 @@ build-release:
 	@echo "Building Rux kernel (Release)..."
 	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --release
 
+# x86_64 build (QEMU q35, multiboot1)
+build-x86:
+	@echo "Building Rux kernel (x86_64)..."
+	@cd $(PROJECT_ROOT) && cargo build --target x86_64-unknown-none --no-default-features --features x86_64
+
 # Quick build (compile only, no output)
 build-quiet:
 	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --quiet

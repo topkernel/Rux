@@ -289,7 +289,7 @@ unsafe fn expand_core_pattern(task: *mut Task, sig: i32) -> Vec<u8> {
 /// # Safety
 /// `root_ppn` is a valid page-table root PPN of the dumped mm.
 unsafe fn dump_read(root_ppn: u64, va: u64, out: &mut [u8]) {
-    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
+    use crate::arch::mm::{phys_to_virt, PhysAddr};
 
     for b in out.iter_mut() {
         *b = 0;

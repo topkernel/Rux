@@ -137,7 +137,7 @@ impl<T: Copy> SeqLock<T> {
         crate::interrupt::preempt::preempt_count_add(
             crate::interrupt::preempt::SOFTIRQ_OFFSET,
         );
-        let irq_state = crate::arch::riscv64::cpu::save_and_disable_irq();
+        let irq_state = crate::arch::cpu::save_and_disable_irq();
         self.raw.write_lock();
         SeqLockWriteGuard { lock: self, irq_state }
     }
@@ -147,7 +147,7 @@ impl<T: Copy> SeqLock<T> {
     pub fn try_write(&self) -> Option<SeqLockWriteGuard<'_, T>> {
         preempt_disable();
         if self.raw.try_write_lock() {
-            Some(SeqLockWriteGuard { lock: self, irq_state: crate::arch::riscv64::cpu::save_and_disable_irq() })
+            Some(SeqLockWriteGuard { lock: self, irq_state: crate::arch::cpu::save_and_disable_irq() })
         } else {
             preempt_enable();
             None
@@ -238,7 +238,7 @@ impl<T: Copy> Drop for SeqLockWriteGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.raw.write_unlock();
         // R21-N5: undo the irqsave with the exact saved state.
-        crate::arch::riscv64::cpu::restore_irq(self.irq_state);
+        crate::arch::cpu::restore_irq(self.irq_state);
         crate::interrupt::preempt::preempt_count_sub(
             crate::interrupt::preempt::SOFTIRQ_OFFSET,
         );

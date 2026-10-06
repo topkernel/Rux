@@ -187,7 +187,7 @@ fn try_expand_stack(
     // setup: a concurrent fork's copy_page_table_cow walk landing between
     // the map and the rmap/refcount update takes a reference the rmap
     // never sees (round 6 MED — demand-fault PTE lock).
-    let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
     // R7-C3: re-check under the lock. The already_mapped walk at entry was
     // lock-free; two threads sharing this mm (CLONE_VM) can both see "not
     // mapped", both allocate+zero (+read for file VMAs), and the second
@@ -298,7 +298,7 @@ fn try_expand_stack(
 #[inline]
 fn pte_counts_as_mapped(bits: u64, va: u64) -> bool {
     !(bits & PageTableEntry::U == 0
-        && crate::arch::riscv64::mm::mmu_init::kernel_device_window_pte(va).is_some())
+        && crate::arch::mm::mmu_init::kernel_device_window_pte(va).is_some())
 }
 
 pub fn handle_mm_fault(
@@ -582,7 +582,7 @@ file.set_pos(saved_pos);
     // setup: a concurrent fork's copy_page_table_cow walk landing between
     // the map and the rmap/refcount update takes a reference the rmap
     // never sees (round 6 MED — demand-fault PTE lock).
-    let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
     // R7-C3: re-check under the lock. The already_mapped walk at entry was
     // lock-free; two threads sharing this mm (CLONE_VM) can both see "not
     // mapped", both allocate+zero (+read for file VMAs), and the second
@@ -870,7 +870,7 @@ fn handle_swap_fault(
     // and pte_flags are built from valid VMA permissions. The page is exclusively owned.
     // Swap-in map under the PTE-modify lock (round 6 MED). The swap read
     // finished above, so no I/O happens inside the irqsave section.
-    let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
     // R7-C3: re-check under the lock (same double-fault race as the demand
     // paths). The swap-in page is exclusively owned, so freeing on loss is
     // safe; the swap slot is freed by the winner.

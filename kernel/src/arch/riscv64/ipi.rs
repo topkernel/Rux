@@ -121,7 +121,7 @@ pub fn send_reschedule_ipi(target_cpu: usize) {
 /// remote harts flush asynchronously).
 pub fn flush_tlb_others() {
     let me = crate::arch::cpu_id() as usize;
-    let online = crate::arch::riscv64::smp::num_started_cpus().max(1);
+    let online = crate::arch::smp::num_started_cpus().max(1);
     for cpu in 0..core::cmp::min(online, MAX_CPUS) {
         if cpu != me {
             send_ipi_type(cpu, IpiType::TlbFlush);

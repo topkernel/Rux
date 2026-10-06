@@ -595,7 +595,7 @@ impl VirtQueue {
                         // wait-path callers re-arm explicitly (semaphore.rs
                         // discipline) so ticks/IPIs reach this CPU across the
                         // wait loop.
-                        crate::arch::riscv64::cpu::restore_irq(true);
+                        crate::arch::cpu::restore_irq(true);
                         crate::sched::schedule();
                         crate::timer::del_timer(id);
                     } else {
@@ -604,7 +604,7 @@ impl VirtQueue {
                         // enabled (the completion walker can still run) and
                         // re-check.
                         wait_queue.finish_wait(current);
-                        crate::arch::riscv64::cpu::restore_irq(true);
+                        crate::arch::cpu::restore_irq(true);
                         for _ in 0..100_000 {
                             core::hint::spin_loop();
                         }
@@ -613,7 +613,7 @@ impl VirtQueue {
                 } else {
                     // Sleep until woken by interrupt
                     // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-                    crate::arch::riscv64::cpu::restore_irq(true);
+                    crate::arch::cpu::restore_irq(true);
                     crate::sched::schedule();
                 }
 
@@ -746,7 +746,7 @@ impl VirtQueue {
 
             // Sleep until woken by interrupt
             // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
             wait_queue.finish_wait(current);
         }

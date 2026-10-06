@@ -416,7 +416,7 @@ fn ptmx_read(file: &File, buf: &mut [u8]) -> isize {
         }
 
         // R54: re-arm interrupts so ticks/IPIs reach this CPU.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
 
         pair.master_waitq.finish_wait(current);
@@ -592,7 +592,7 @@ fn pty_slave_write(file: &File, buf: &[u8]) -> isize {
         }
 
         // R54: re-arm interrupts so ticks/IPIs reach this CPU.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
 
         pair.master_space_waitq.finish_wait(current);
@@ -671,7 +671,7 @@ pub static PTY_SLAVE_OPS: FileOps = FileOps {
 /// (or is a pty-specific stub); returns None when the file is not a pty or
 /// the request must fall through to the generic handler (FIONBIO, ...).
 pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
-    use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user};
+    use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user};
     use crate::errno::constants::EFAULT;
 
     let ops = file.get_ops()?;

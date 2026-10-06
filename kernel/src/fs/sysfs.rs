@@ -913,7 +913,7 @@ fn build_tree() -> Arc<KObject> {
 
 /// Live started-CPU count.
 fn started_cpus() -> usize {
-    crate::arch::riscv64::smp::num_started_cpus()
+    crate::arch::smp::num_started_cpus()
 }
 
 /// Last value written to /sys/power/state.

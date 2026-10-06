@@ -333,7 +333,7 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                 // vma_mgr still held — protects page table walk below
 
                 let root_ppn = mm.pgd();
-                let walk_result = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                let walk_result = crate::arch::mm::mm_ops::PageTableWalker::walk(
                     root_ppn, target_vaddr as u64,
                 );
 
@@ -343,26 +343,26 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                         let vpn1 = ((target_vaddr >> 21) & 0x1FF) as usize;
                         let vpn0 = ((target_vaddr >> 12) & 0x1FF) as usize;
 
-                        let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                            root_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
+                        let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                            root_ppn << crate::arch::mm::PAGE_SHIFT,
                         );
                         let pte2 = (*root_table).get(vpn2);
                         if !pte2.is_valid() { continue; }
 
-                        let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                            pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                        let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                            pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
                         );
                         let pte1 = (*table1).get(vpn1);
                         if !pte1.is_valid() { continue; }
 
-                        let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                            pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
+                        let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
+                            pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
                         );
 
                         // R22-3 (§17.4 close): leaf-PTE mutation under the
                         // PTE lock like every other writer (fork-COW/munmap/
                         // mprotect/fault-map) — was racing them.
-                        let _pte_g = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                        let _pte_g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
 
                         // Re-validate the leaf under the lock (R7-C3 pattern):
                         // the walk above ran OUTSIDE it, and a concurrent leaf
@@ -382,7 +382,7 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                         // migration marker during compaction)
                         (*table0).set(
                             vpn0,
-                            crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(swap_entry),
+                            crate::arch::mm::pagetable::PageTableEntry::from_bits(swap_entry),
                         );
 
                         drop(_pte_g);

@@ -113,7 +113,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 crate::timer::del_timer(timer_id);
             } else {
                 // Enable interrupts so the tick can reach us, then sleep.
-                crate::arch::riscv64::cpu::restore_irq(true);
+                crate::arch::cpu::restore_irq(true);
                 crate::sched::schedule();
                 // Spurious wake before the deadline: drop the timer and
                 // loop (re-armed next iteration).

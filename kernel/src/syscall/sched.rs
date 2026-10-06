@@ -318,13 +318,13 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
     if param_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
+    if !crate::arch::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
         return -(errno::EFAULT as i64);
     }
     let mut param = core::mem::MaybeUninit::<SchedParam>::uninit();
     // SAFETY: param_ptr is access_ok-validated; SchedParam is repr(C) plain data.
     let uncopied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             param.as_mut_ptr() as *mut u8,
             param_ptr as *const u8,
             core::mem::size_of::<SchedParam>(),
@@ -458,13 +458,13 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
     if param_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
+    if !crate::arch::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
         return -(errno::EFAULT as i64);
     }
     let mut param = core::mem::MaybeUninit::<SchedParam>::uninit();
     // SAFETY: param_ptr is access_ok-validated; SchedParam is repr(C) plain data.
     let uncopied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             param.as_mut_ptr() as *mut u8,
             param_ptr as *const u8,
             core::mem::size_of::<SchedParam>(),
@@ -543,7 +543,7 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> i64 {
     if param_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
+    if !crate::arch::uaccess::access_ok(param_ptr as usize, core::mem::size_of::<SchedParam>()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -568,7 +568,7 @@ pub fn sys_sched_getparam(args: SyscallArgs) -> i64 {
         let task_ref = &*task;
         let priority = task_ref.rt_priority() as i32;
         let out = SchedParam { sched_priority: priority };
-        let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+        let uncopied = crate::arch::uaccess::copy_to_user(
             param_ptr as *mut u8,
             &out as *const SchedParam as *const u8,
             core::mem::size_of::<SchedParam>(),
@@ -616,7 +616,7 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
 
     // Only copy min(user_size, struct_size) bytes, matching Linux ABI.
     let copy_len = core::cmp::min(size as usize, core::mem::size_of::<SchedAttr>());
-    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, copy_len) {
+    if !crate::arch::uaccess::access_ok(attr_ptr as usize, copy_len) {
         return -(errno::EFAULT as i64);
     }
 
@@ -666,7 +666,7 @@ pub fn sys_sched_getattr(args: SyscallArgs) -> i64 {
             sched_util_min: 0,
             sched_util_max: core::u32::MAX,
         };
-        let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+        let uncopied = crate::arch::uaccess::copy_to_user(
             attr_ptr as *mut u8,
             &attr as *const SchedAttr as *const u8,
             copy_len,
@@ -710,12 +710,12 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     // Read the user-declared size first (review批次1: setattr 不按 size 截读).
     // Linux copies only attr->size bytes: an older/smaller user struct must
     // not be over-read (the rest of the kernel copy stays zero).
-    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, 8) {
+    if !crate::arch::uaccess::access_ok(attr_ptr as usize, 8) {
         return -(errno::EFAULT as i64);
     }
     let mut size_word = [0u8; 4];
     // SAFETY: attr_ptr validated with access_ok(8) above (covers these 4).
-    if unsafe { crate::arch::riscv64::uaccess::copy_from_user(
+    if unsafe { crate::arch::uaccess::copy_from_user(
         size_word.as_mut_ptr(), attr_ptr as *const u8, 4) } != 0 {
         return -(errno::EFAULT as i64);
     }
@@ -727,14 +727,14 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
     if user_size > core::mem::size_of::<SchedAttr>() {
         return -(errno::E2BIG as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(attr_ptr as usize, user_size) {
+    if !crate::arch::uaccess::access_ok(attr_ptr as usize, user_size) {
         return -(errno::EFAULT as i64);
     }
     let mut attr_storage = [0u8; core::mem::size_of::<SchedAttr>()];
     // SAFETY: attr_ptr is access_ok-validated for user_size; copying into a
     // zeroed stack buffer leaves any fields beyond user_size as zero.
     let uncopied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             attr_storage.as_mut_ptr(),
             attr_ptr as *const u8,
             user_size,
@@ -884,7 +884,7 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> i64 {
     if ts_ptr.is_null() {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(ts_ptr as usize, core::mem::size_of::<TimeSpec>()) {
+    if !crate::arch::uaccess::access_ok(ts_ptr as usize, core::mem::size_of::<TimeSpec>()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -916,7 +916,7 @@ pub fn sys_sched_rr_get_interval(args: SyscallArgs) -> i64 {
     };
     // SAFETY: ts_ptr is access_ok-validated above.
     let uncopied = unsafe {
-        crate::arch::riscv64::uaccess::copy_to_user(
+        crate::arch::uaccess::copy_to_user(
             ts_ptr as *mut u8,
             &ts as *const TimeSpec as *const u8,
             core::mem::size_of::<TimeSpec>(),
@@ -946,7 +946,7 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     if mask_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, size) {
+    if !crate::arch::uaccess::access_ok(mask_ptr as usize, size) {
         return -(errno::EFAULT as i64);
     }
 
@@ -982,7 +982,7 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
         // SAFETY: mask_ptr is access_ok-validated for size bytes; get_user
         // is the exception-table copy path (SUM=0 safe).
         let word = match unsafe {
-            crate::arch::riscv64::uaccess::get_user(mask_ptr.add(i))
+            crate::arch::uaccess::get_user(mask_ptr.add(i))
         } {
             Some(w) => w,
             None => return -(errno::EFAULT as i64),
@@ -1075,7 +1075,7 @@ pub fn sys_sched_getaffinity(args: SyscallArgs) -> i64 {
         * core::mem::size_of::<usize>();
     let ret_len = core::cmp::min(bytes_needed, size);
 
-    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, ret_len) {
+    if !crate::arch::uaccess::access_ok(mask_ptr as usize, ret_len) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1107,7 +1107,7 @@ pub fn sys_sched_getaffinity(args: SyscallArgs) -> i64 {
     }
 
     unsafe {
-        let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+        let uncopied = crate::arch::uaccess::copy_to_user(
             mask_ptr,
             kernel_mask.as_ptr(),
             ret_len,

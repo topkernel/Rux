@@ -336,7 +336,7 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
         // NO lock at all.
         if let Some(_mm_arc) = task.address_space_arc() {
         let mm = _mm_arc.as_ref();
-            if let Some((_ppn, bits)) = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+            if let Some((_ppn, bits)) = crate::arch::mm::mm_ops::PageTableWalker::walk(
                 mm.pgd(), old_vaddr as u64,
             ) {
                 saved_flags_cell.set(bits & 0x3FF);
@@ -467,7 +467,7 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         let vpn1 = ((old_vaddr >> 21) & 0x1FF) as usize;
         let vpn0 = ((old_vaddr >> 12) & 0x1FF) as usize;
 
-        let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+        let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
             root_ppn << super::hugepage::PAGE_SHIFT,
         );
         let pte2 = (*root_table).get(vpn2);
@@ -475,7 +475,7 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
             return;
         }
 
-        let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+        let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
             pte2.ppn() << super::hugepage::PAGE_SHIFT,
         );
         let pte1 = (*table1).get(vpn1);
@@ -483,16 +483,16 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
             return;
         }
 
-        let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+        let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
             pte1.ppn() << super::hugepage::PAGE_SHIFT,
         );
 
         // Rebuild the leaf PTE under the PTE lock (R22-3 — §17.4 close).
-        let _pte_g = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+        let _pte_g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
         let new_pte_bits = (new_ppn << 10) | (saved_flags & 0x3FF) | 0x1 /* V */;
         (*table0).set(
             vpn0,
-            crate::arch::riscv64::mm::pagetable::PageTableEntry::from_bits(new_pte_bits),
+            crate::arch::mm::pagetable::PageTableEntry::from_bits(new_pte_bits),
         );
 
         // Flush TLB for this address

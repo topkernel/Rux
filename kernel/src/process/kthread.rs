@@ -76,7 +76,7 @@ pub fn kernel_thread(
     unsafe {
         core::ptr::write_bytes(
             pt_regs_ptr, 0u8,
-            core::mem::size_of::<crate::arch::riscv64::pt_regs::PtRegs>(),
+            core::mem::size_of::<crate::arch::pt_regs::PtRegs>(),
         );
     }
 
@@ -85,7 +85,7 @@ pub fn kernel_thread(
     // SAFETY: pt_regs_ptr was just zeroed above and points to valid memory
     // on the kernel stack; SR_SPP is a constant with only the SPP bit set.
     unsafe {
-        (*pt_regs_ptr).status = crate::arch::riscv64::pt_regs::SR_SPP;
+        (*pt_regs_ptr).status = crate::arch::pt_regs::SR_SPP;
     }
 
     // 5. Set up thread context for ret_from_fork_kernel_asm

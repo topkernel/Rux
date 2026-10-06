@@ -95,7 +95,7 @@ pub fn plic_count(irq: usize, cpu: usize) -> u64 {
 pub fn generate() -> Vec<u8> {
     let mut output = String::new();
 
-    let num_cpus = crate::arch::riscv64::smp::num_started_cpus().min(MAX_CPUS);
+    let num_cpus = crate::arch::smp::num_started_cpus().min(MAX_CPUS);
 
     // Header: CPU0 CPU1 CPU2 CPU3 ...
     output.push_str("           ");

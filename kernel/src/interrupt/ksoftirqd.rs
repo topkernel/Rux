@@ -151,7 +151,7 @@ pub fn wakeup_ksoftirqd() {
 ///     (sbi send_ipi error=-3 spam).
 pub fn init() {
     for cpu in 0..MAX_CPUS {
-        if !crate::arch::riscv64::smp::cpu_started(cpu) {
+        if !crate::arch::smp::cpu_started(cpu) {
             continue;
         }
         let name = match cpu {

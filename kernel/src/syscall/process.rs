@@ -7,8 +7,8 @@
 //! Includes: clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address, uname, etc.
 
 use super::*;
-use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
-use crate::arch::riscv64::uaccess::strncpy_from_user;
+use crate::arch::mm::{phys_to_virt, PhysAddr};
+use crate::arch::uaccess::strncpy_from_user;
 use crate::process::exec::do_execve_elf;
 
 /// sys_clone - Create child process/thread
@@ -167,7 +167,7 @@ fn copy_argv_from_user(argv_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
             return Err(-(errno::E2BIG as i64));
         }
         // Read one pointer from the user argv array via get_user (handles SUM + exception table).
-        let arg_ptr = match unsafe { crate::arch::riscv64::uaccess::get_user(argv_ptr.add(i)) } {
+        let arg_ptr = match unsafe { crate::arch::uaccess::get_user(argv_ptr.add(i)) } {
             Some(p) => p,
             None => break, // fault or end of array
         };
@@ -175,7 +175,7 @@ fn copy_argv_from_user(argv_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
             break;
         }
         // Read the null-terminated string via strncpy_from_user (byte-by-byte get_user).
-        match crate::arch::riscv64::uaccess::strncpy_from_user(arg_ptr, MAX_ARG_STRLEN, &mut buf) {
+        match crate::arch::uaccess::strncpy_from_user(arg_ptr, MAX_ARG_STRLEN, &mut buf) {
             Ok(slice) => {
                 total = total.saturating_add(slice.len());
                 if total > MAX_ARG_TOTAL {
@@ -206,14 +206,14 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
             return Err(-(errno::E2BIG as i64));
         }
         // Read one pointer from the user envp array via get_user (handles SUM + exception table).
-        let env_str_ptr = match unsafe { crate::arch::riscv64::uaccess::get_user(envp_ptr.add(i)) } {
+        let env_str_ptr = match unsafe { crate::arch::uaccess::get_user(envp_ptr.add(i)) } {
             Some(p) => p,
             None => break,
         };
         if env_str_ptr.is_null() {
             break;
         }
-        match crate::arch::riscv64::uaccess::strncpy_from_user(env_str_ptr, MAX_ARG_STRLEN, &mut buf) {
+        match crate::arch::uaccess::strncpy_from_user(env_str_ptr, MAX_ARG_STRLEN, &mut buf) {
             Ok(slice) => {
                 total = total.saturating_add(slice.len());
                 if total > MAX_ARG_TOTAL {
@@ -663,7 +663,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
     let rusage = args[3] as *mut u8;
 
     // Validate wstatus pointer
-    if !wstatus.is_null() && !crate::arch::riscv64::uaccess::access_ok(wstatus as usize, 4) {
+    if !wstatus.is_null() && !crate::arch::uaccess::access_ok(wstatus as usize, 4) {
         return -(errno::EFAULT as i64);
     }
 
@@ -688,11 +688,11 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
     // like `time`/`make` read the full struct).
     let fill_rusage = || {
         if !rusage.is_null() {
-            if crate::arch::riscv64::uaccess::access_ok(rusage as usize, 144) {
+            if crate::arch::uaccess::access_ok(rusage as usize, 144) {
                 let zeros = [0u8; 144];
                 // SAFETY: access_ok-validated pointer; exception-table copy.
                 unsafe {
-                    let _ = crate::arch::riscv64::uaccess::copy_to_user(
+                    let _ = crate::arch::uaccess::copy_to_user(
                         rusage, &zeros as *const u8, 144,
                     );
                 }
@@ -775,7 +775,7 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
     if infop.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(infop as usize, 128) {
+    if !crate::arch::uaccess::access_ok(infop as usize, 128) {
         return -(errno::EFAULT as i64);
     }
 
@@ -976,7 +976,7 @@ pub fn sys_set_tid_address(args: SyscallArgs) -> i64 {
     let tidptr = args[0] as *mut i32;
 
     // Validate tidptr pointer
-    if !tidptr.is_null() && !crate::arch::riscv64::uaccess::access_ok(tidptr as usize, 4) {
+    if !tidptr.is_null() && !crate::arch::uaccess::access_ok(tidptr as usize, 4) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1008,7 +1008,7 @@ pub fn sys_set_robust_list(args: SyscallArgs) -> i64 {
     if len != 24 {
         return -(errno::EINVAL as i64);
     }
-    if !head.is_null() && !crate::arch::riscv64::uaccess::access_ok(head as usize, 24) {
+    if !head.is_null() && !crate::arch::uaccess::access_ok(head as usize, 24) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1040,7 +1040,7 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
     }
 
     // Validate user pointer
-    if !crate::arch::riscv64::uaccess::access_ok(buf as usize, core::mem::size_of::<Utsname>()) {
+    if !crate::arch::uaccess::access_ok(buf as usize, core::mem::size_of::<Utsname>()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1097,7 +1097,7 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
 
     // SAFETY: buf validated with access_ok above; copy_to_user handles SUM bit.
     unsafe {
-        let remaining = crate::arch::riscv64::uaccess::copy_to_user(
+        let remaining = crate::arch::uaccess::copy_to_user(
             buf as *mut u8,
             &uname as *const Utsname as *const u8,
             core::mem::size_of::<Utsname>(),
@@ -1420,22 +1420,22 @@ pub fn sys_getresuid(args: SyscallArgs) -> i64 {
         // SAFETY: task is valid; user pointers are validated with access_ok before each write.
         unsafe {
             if !ruid_ptr.is_null() {
-                if !crate::arch::riscv64::uaccess::access_ok(ruid_ptr as usize, 4) {
+                if !crate::arch::uaccess::access_ok(ruid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::riscv64::uaccess::put_user(ruid_ptr, cred.uid);
+                let _ = crate::arch::uaccess::put_user(ruid_ptr, cred.uid);
             }
             if !euid_ptr.is_null() {
-                if !crate::arch::riscv64::uaccess::access_ok(euid_ptr as usize, 4) {
+                if !crate::arch::uaccess::access_ok(euid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::riscv64::uaccess::put_user(euid_ptr, cred.euid);
+                let _ = crate::arch::uaccess::put_user(euid_ptr, cred.euid);
             }
             if !suid_ptr.is_null() {
-                if !crate::arch::riscv64::uaccess::access_ok(suid_ptr as usize, 4) {
+                if !crate::arch::uaccess::access_ok(suid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::riscv64::uaccess::put_user(suid_ptr, cred.suid);
+                let _ = crate::arch::uaccess::put_user(suid_ptr, cred.suid);
             }
         }
         0
@@ -1527,22 +1527,22 @@ pub fn sys_getresgid(args: SyscallArgs) -> i64 {
         // SAFETY: task is valid; user pointers validated with access_ok before each write.
         unsafe {
             if !rgid_ptr.is_null() {
-                if !crate::arch::riscv64::uaccess::access_ok(rgid_ptr as usize, 4) {
+                if !crate::arch::uaccess::access_ok(rgid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::riscv64::uaccess::put_user(rgid_ptr, cred.gid);
+                let _ = crate::arch::uaccess::put_user(rgid_ptr, cred.gid);
             }
             if !egid_ptr.is_null() {
-                if !crate::arch::riscv64::uaccess::access_ok(egid_ptr as usize, 4) {
+                if !crate::arch::uaccess::access_ok(egid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::riscv64::uaccess::put_user(egid_ptr, cred.egid);
+                let _ = crate::arch::uaccess::put_user(egid_ptr, cred.egid);
             }
             if !sgid_ptr.is_null() {
-                if !crate::arch::riscv64::uaccess::access_ok(sgid_ptr as usize, 4) {
+                if !crate::arch::uaccess::access_ok(sgid_ptr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
-                let _ = crate::arch::riscv64::uaccess::put_user(sgid_ptr, cred.sgid);
+                let _ = crate::arch::uaccess::put_user(sgid_ptr, cred.sgid);
             }
         }
         0
@@ -1585,7 +1585,7 @@ pub fn sys_getgroups(args: SyscallArgs) -> i64 {
         let groups = &task.cred().groups;
         let bytes = ngroups * core::mem::size_of::<u32>();
         unsafe {
-            crate::arch::riscv64::uaccess::copy_to_user(
+            crate::arch::uaccess::copy_to_user(
                 list_ptr as *mut u8,
                 groups.as_ptr() as *const u8,
                 bytes,
@@ -1625,7 +1625,7 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
     }
 
     // Validate user pointer
-    if !crate::arch::riscv64::uaccess::access_ok(list_ptr as usize, (size as usize) * 4) {
+    if !crate::arch::uaccess::access_ok(list_ptr as usize, (size as usize) * 4) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1635,7 +1635,7 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
     let mut groups = alloc::vec::Vec::new();
     groups.resize(size as usize, 0u32);
     unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             groups.as_mut_ptr() as *mut u8,
             list_ptr as *const u8,
             size as usize * 4,
@@ -1816,10 +1816,10 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
     let resource = resource as usize;
 
     // Validate pointers
-    if !new_rlim.is_null() && !crate::arch::riscv64::uaccess::access_ok(new_rlim as usize, 16) {
+    if !new_rlim.is_null() && !crate::arch::uaccess::access_ok(new_rlim as usize, 16) {
         return -(errno::EFAULT as i64);
     }
-    if !old_rlim.is_null() && !crate::arch::riscv64::uaccess::access_ok(old_rlim as usize, 16) {
+    if !old_rlim.is_null() && !crate::arch::uaccess::access_ok(old_rlim as usize, 16) {
         return -(errno::EFAULT as i64);
     }
 
@@ -1843,7 +1843,7 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
         // SAFETY: new_rlim validated with access_ok(16); reads two u64s.
         let new_vals = unsafe {
             let mut buf = [0u64; 2];
-            if crate::arch::riscv64::uaccess::copy_from_user(
+            if crate::arch::uaccess::copy_from_user(
                 buf.as_mut_ptr() as *mut u8,
                 new_rlim,
                 core::mem::size_of::<[u64; 2]>(),
@@ -1881,7 +1881,7 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
         let rlimit: [u64; 2] = [old_vals[resource].0, old_vals[resource].1];
         // SAFETY: old_rlim validated non-null and access_ok above.
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_to_user(
+            crate::arch::uaccess::copy_to_user(
                 old_rlim,
                 rlimit.as_ptr() as *const u8,
                 core::mem::size_of::<[u64; 2]>(),
@@ -1898,7 +1898,7 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
 /// Reprogram the address space's stack growth bound from an
 /// RLIMIT_STACK soft limit (used by setrlimit/prlimit64 and exec).
 fn sync_stack_limit(task: &crate::process::task::Task, rlim_cur: u64) {
-    use crate::arch::riscv64::mm::user_addr::STACK_MAX_SIZE;
+    use crate::arch::mm::user_addr::STACK_MAX_SIZE;
 
     if let Some(aspace) = task.address_space() {
         let stack_top = aspace.start_stack();
@@ -1914,7 +1914,7 @@ fn sync_stack_limit(task: &crate::process::task::Task, rlim_cur: u64) {
 ///
 /// Arguments: (option, arg2, arg3, arg4, arg5)
 pub fn sys_prctl(args: SyscallArgs) -> i64 {
-    use crate::arch::riscv64::uaccess::{copy_to_user, strncpy_from_user};
+    use crate::arch::uaccess::{copy_to_user, strncpy_from_user};
 
     let option = args[0] as i32;
     let arg2 = args[1];
@@ -1944,13 +1944,13 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             if ptr.is_null() {
                 return -(errno::EFAULT as i64);
             }
-            if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 4) {
+            if !crate::arch::uaccess::access_ok(ptr as usize, 4) {
                 return -(errno::EFAULT as i64);
             }
             // SAFETY: ptr validated with access_ok; put_user is the
             // exception-table copy path.
             unsafe {
-                let _ = crate::arch::riscv64::uaccess::put_user(ptr, (*current).pdeath_signal);
+                let _ = crate::arch::uaccess::put_user(ptr, (*current).pdeath_signal);
             }
             0
         }
@@ -1989,7 +1989,7 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             if ptr.is_null() {
                 return -(errno::EFAULT as i64);
             }
-            if !crate::arch::riscv64::uaccess::access_ok(ptr as usize, 16) {
+            if !crate::arch::uaccess::access_ok(ptr as usize, 16) {
                 return -(errno::EFAULT as i64);
             }
             // SAFETY: ptr validated with access_ok; current is valid; comm() returns a
@@ -2136,7 +2136,7 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
     if uinfo.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128) {
+    if !crate::arch::uaccess::access_ok(uinfo as usize, 128) {
         return -(errno::EFAULT as i64);
     }
 
@@ -2162,7 +2162,7 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
     // si_code (Linux: si_code >= 0 is reserved for the kernel → EPERM).
     let mut code_buf = [0u8; 4];
     if unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             code_buf.as_mut_ptr(),
             uinfo.add(8),
             4,
@@ -2182,7 +2182,7 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
     // SENDER but keeps the user's si_errno/si_value bytes.
     let mut payload = [0u8; 8]; // sival_int/sival_ptr at siginfo offset 24
     if unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             payload.as_mut_ptr(),
             uinfo.add(24),
             8,
@@ -2229,14 +2229,14 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
     if uinfo.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128) {
+    if !crate::arch::uaccess::access_ok(uinfo as usize, 128) {
         return -(errno::EFAULT as i64);
     }
 
     // Read si_signo (offset 0) and si_code (offset 8).
     let mut hdr = [0u8; 12];
     if unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(hdr.as_mut_ptr(), uinfo, 12)
+        crate::arch::uaccess::copy_from_user(hdr.as_mut_ptr(), uinfo, 12)
     } != 0
     {
         return -(errno::EFAULT as i64);
@@ -2257,7 +2257,7 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
     // mirroring rt_sigqueueinfo above.
     let mut payload = [0u8; 8];
     if unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             payload.as_mut_ptr(),
             uinfo.add(24),
             8,
@@ -2300,22 +2300,22 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
     if sigsetsize < 8 {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(uthese as usize, 8) {
+    if !crate::arch::uaccess::access_ok(uthese as usize, 8) {
         return -(errno::EFAULT as i64);
     }
     if !uinfo.is_null()
-        && !crate::arch::riscv64::uaccess::access_ok(uinfo as usize, 128)
+        && !crate::arch::uaccess::access_ok(uinfo as usize, 128)
     {
         return -(errno::EFAULT as i64);
     }
-    if !uts.is_null() && !crate::arch::riscv64::uaccess::access_ok(uts as usize, 16) {
+    if !uts.is_null() && !crate::arch::uaccess::access_ok(uts as usize, 16) {
         return -(errno::EFAULT as i64);
     }
 
     // Signal set to wait for (exception-table copy).
     // SAFETY: uthere validated non-null + access_ok above.
     let sigset = match unsafe {
-        crate::arch::riscv64::uaccess::get_user(uthese)
+        crate::arch::uaccess::get_user(uthese)
     } {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
@@ -2331,7 +2331,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
         let mut ts = [0u8; 16];
         // SAFETY: uts validated with access_ok above.
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_from_user(
+            crate::arch::uaccess::copy_from_user(
                 ts.as_mut_ptr(), uts as *const u8, 16,
             )
         };
@@ -2370,7 +2370,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
                 let src = &info as *const SigInfo as *const u8;
                 // SAFETY: uinfo validated access_ok(128); exception-table copy.
                 let uncopied = unsafe {
-                    crate::arch::riscv64::uaccess::copy_to_user(uinfo, src, 128)
+                    crate::arch::uaccess::copy_to_user(uinfo, src, 128)
                 };
                 if uncopied > 0 {
                     return -(errno::EFAULT as i64);
@@ -2410,7 +2410,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
         }
         // Arm the deadline wakeup BEFORE sleeping: nothing else would wake
         // a task that only has a timeout pending (same pattern as futex).
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         let timer_id = deadline
             .map(|dl| crate::timer::add_timer_wakeup(
                 dl, crate::sched::get_current_pid(),
@@ -2445,7 +2445,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
 /// - args[1]: node_ptr - NUMA node pointer
 /// - args[2]: cache_ptr - cache ID pointer
 pub fn sys_getcpu(args: SyscallArgs) -> i64 {
-    use crate::arch::riscv64::smp::cpu_id;
+    use crate::arch::smp::cpu_id;
 
     let cpuset_ptr = args[0] as *mut u32;
     let node_ptr = args[1] as *mut u32;
@@ -2455,13 +2455,13 @@ pub fn sys_getcpu(args: SyscallArgs) -> i64 {
     // wrote 16 bytes through each, overflowing user buffers by 12
     // (review syscallb-H-03); writes go through the exception-table copy.
     if !cpuset_ptr.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(cpuset_ptr as usize, 4) {
+        if !crate::arch::uaccess::access_ok(cpuset_ptr as usize, 4) {
             return -(errno::EFAULT as i64);
         }
         let cpu = cpu_id() as u32;
         // SAFETY: 4-byte validated pointer, exception-table path.
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_to_user(
+            crate::arch::uaccess::copy_to_user(
                 cpuset_ptr as *mut u8,
                 &cpu as *const u32 as *const u8,
                 4,
@@ -2472,13 +2472,13 @@ pub fn sys_getcpu(args: SyscallArgs) -> i64 {
         }
     }
     if !node_ptr.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(node_ptr as usize, 4) {
+        if !crate::arch::uaccess::access_ok(node_ptr as usize, 4) {
             return -(errno::EFAULT as i64);
         }
         let node = 0u32;
         // SAFETY: 4-byte validated pointer, exception-table path.
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_to_user(
+            crate::arch::uaccess::copy_to_user(
                 node_ptr as *mut u8,
                 &node as *const u32 as *const u8,
                 4,
@@ -2585,7 +2585,7 @@ pub fn sys_setfsgid(args: SyscallArgs) -> i64 {
 pub fn sys_times(args: SyscallArgs) -> i64 {
     let buf_ptr = args[0] as *mut u64;
     if !buf_ptr.is_null() {
-        if !crate::arch::riscv64::uaccess::access_ok(buf_ptr as usize, 32) {
+        if !crate::arch::uaccess::access_ok(buf_ptr as usize, 32) {
             return -(errno::EFAULT as i64);
         }
         // struct tms: tms_utime, tms_stime, tms_cutime, tms_cstime (clock_t = i64)
@@ -2606,7 +2606,7 @@ pub fn sys_times(args: SyscallArgs) -> i64 {
         // SAFETY: buf_ptr validated with access_ok above; each field write
         // goes through put_user (exception-table path, SUM=0 safe).
         unsafe {
-            let put = crate::arch::riscv64::uaccess::put_user::<u64>;
+            let put = crate::arch::uaccess::put_user::<u64>;
             if !put(buf_ptr as *mut u64, utime as u64)
                 || !put(buf_ptr.add(1) as *mut u64, stime as u64)
                 || !put(buf_ptr.add(2) as *mut u64, cutime as u64)
@@ -2629,14 +2629,14 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
     if info_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(info_ptr as usize, 112) {
+    if !crate::arch::uaccess::access_ok(info_ptr as usize, 112) {
         return -(errno::EFAULT as i64);
     }
     // struct sysinfo: 112 bytes, fill with available info
     // SAFETY: info_ptr validated with access_ok above; every field write goes
     // through put_user (exception-table copy path, SUM=0 safe).
     unsafe {
-        let put_u64 = crate::arch::riscv64::uaccess::put_user::<u64>;
+        let put_u64 = crate::arch::uaccess::put_user::<u64>;
         // uptime (seconds) - from jiffies
         let uptime = crate::drivers::timer::get_jiffies() as u64 / crate::drivers::timer::HZ as u64;
         let _ = put_u64(info_ptr as *mut u64, uptime);
@@ -2659,12 +2659,12 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
         static PROC_COUNT: AtomicU16 = AtomicU16::new(0);
         PROC_COUNT.store(0, Ordering::Relaxed);
         crate::sched::for_each_task(|_| { PROC_COUNT.fetch_add(1, Ordering::Relaxed); });
-        let _ = crate::arch::riscv64::uaccess::put_user::<u16>(
+        let _ = crate::arch::uaccess::put_user::<u16>(
             info_ptr.add(80) as *mut u16, PROC_COUNT.load(Ordering::Relaxed));
         // totalhigh, freehigh, mem_unit
         let _ = put_u64(info_ptr.add(88) as *mut u64, 0);
         let _ = put_u64(info_ptr.add(96) as *mut u64, 0);
-        let _ = crate::arch::riscv64::uaccess::put_user::<u32>(
+        let _ = crate::arch::uaccess::put_user::<u32>(
             info_ptr.add(104) as *mut u32, 1); // mem_unit = 1 (bytes)
     }
     0
@@ -2702,11 +2702,11 @@ pub fn sys_membarrier(args: SyscallArgs) -> i64 {
                 // read/write fence orders this CPU's memory operations.
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             }
-            let online = crate::arch::riscv64::smp::num_started_cpus().max(1);
+            let online = crate::arch::smp::num_started_cpus().max(1);
             let me = crate::arch::cpu_id() as usize;
             for cpu in 0..online.min(crate::config::MAX_CPUS) {
                 if cpu != me {
-                    crate::arch::riscv64::ipi::smp_call_function(cpu, remote_fence, core::ptr::null_mut());
+                    crate::arch::ipi::smp_call_function(cpu, remote_fence, core::ptr::null_mut());
                 }
             }
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -2867,7 +2867,7 @@ struct SockFprogUser {
 ///   args (struct sock_fprog) and switch to FILTER mode.
 /// - SECCOMP_GET_ACTION_AVAIL(2) / GET_NOTIF_SIZES(3): accepted minimal.
 pub fn sys_seccomp(args: SyscallArgs) -> i64 {
-    use crate::arch::riscv64::uaccess::copy_from_user;
+    use crate::arch::uaccess::copy_from_user;
 
     let operation = args[0] as u32;
     let flags = args[1] as u32;
@@ -2972,7 +2972,7 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
             // SAFETY: validated non-null; exception-table zero-write.
             unsafe {
                 let zeros = [0u8; 6];
-                if crate::arch::riscv64::uaccess::copy_to_user(uargs as *mut u8, zeros.as_ptr(), 6) != 0 {
+                if crate::arch::uaccess::copy_to_user(uargs as *mut u8, zeros.as_ptr(), 6) != 0 {
                     return -(errno::EFAULT as i64);
                 }
             }
@@ -3066,7 +3066,7 @@ const STRICT_ALLOWED: [u64; 5] = [
 /// seccomp gate result: None = allow, Some(rv) = block with syscall return
 /// value rv. Kill actions queue SIGKILL on the current task (terminated on
 /// return to user) and report -ENOSYS — the dying task never observes it.
-pub fn seccomp_syscall_gate(nr: u64, regs: &crate::arch::riscv64::pt_regs::PtRegs) -> Option<i64> {
+pub fn seccomp_syscall_gate(nr: u64, regs: &crate::arch::pt_regs::PtRegs) -> Option<i64> {
     let task = crate::sched::current()?;
     match task.seccomp_mode() {
         SECCOMP_MODE_STRICT => {
@@ -3116,7 +3116,7 @@ pub fn seccomp_syscall_gate(nr: u64, regs: &crate::arch::riscv64::pt_regs::PtReg
 fn seccomp_run(
     prog: &[crate::process::task::SockFilter],
     nr: u64,
-    regs: &crate::arch::riscv64::pt_regs::PtRegs,
+    regs: &crate::arch::pt_regs::PtRegs,
 ) -> u32 {
     let mut a: u32 = 0;
     let mut pc: usize = 0;
@@ -3216,7 +3216,7 @@ pub fn sys_bpf(_args: SyscallArgs) -> i64 {
 /// - args[0]: hdr_ptr - pointer to __user_cap_header_struct { version: u32, pid: i32 }
 /// - args[1]: data_ptr - pointer to __user_cap_data_struct array(s)
 pub fn sys_capget(args: SyscallArgs) -> i64 {
-    use crate::arch::riscv64::uaccess::{copy_from_user, copy_to_user};
+    use crate::arch::uaccess::{copy_from_user, copy_to_user};
 
     const _LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;
     const _LINUX_CAPABILITY_VERSION_2: u32 = 0x2007_1026;
@@ -3226,7 +3226,7 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
     let data_ptr = args[1] as usize;
 
     // Header is 8 bytes: version (u32) + pid (i32)
-    if !crate::arch::riscv64::uaccess::access_ok(hdr_ptr, 8) {
+    if !crate::arch::uaccess::access_ok(hdr_ptr, 8) {
         return -(errno::EFAULT as i64);
     }
 
@@ -3302,7 +3302,7 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
     }
 
     let data_size = data_count * 3 * 4; // each entry is 3 u32s
-    if !crate::arch::riscv64::uaccess::access_ok(data_ptr, data_size) {
+    if !crate::arch::uaccess::access_ok(data_ptr, data_size) {
         return -(errno::EFAULT as i64);
     }
 
@@ -3332,7 +3332,7 @@ pub fn sys_capget(args: SyscallArgs) -> i64 {
 /// - args[0]: hdr_ptr - pointer to __user_cap_header_struct { version: u32, pid: i32 }
 /// - args[1]: data_ptr - pointer to __user_cap_data_struct array(s)
 pub fn sys_capset(args: SyscallArgs) -> i64 {
-    use crate::arch::riscv64::uaccess::{copy_from_user, copy_to_user};
+    use crate::arch::uaccess::{copy_from_user, copy_to_user};
     use crate::security::capability::Cap;
 
     const _LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;
@@ -3345,7 +3345,7 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
     if hdr_ptr == 0 || data_ptr == 0 {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(hdr_ptr, 8) {
+    if !crate::arch::uaccess::access_ok(hdr_ptr, 8) {
         return -(errno::EFAULT as i64);
     }
 
@@ -3379,7 +3379,7 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
         }
     }
     let data_size = data_count * 3 * 4;
-    if !crate::arch::riscv64::uaccess::access_ok(data_ptr, data_size) {
+    if !crate::arch::uaccess::access_ok(data_ptr, data_size) {
         return -(errno::EFAULT as i64);
     }
 
@@ -3464,7 +3464,7 @@ pub fn sys_personality(args: SyscallArgs) -> i64 {
 /// to the new root, and (d) resets the cwd to the new root when it now
 /// lies outside the jail.
 pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
-    use crate::arch::riscv64::uaccess::strncpy_from_user;
+    use crate::arch::uaccess::strncpy_from_user;
 
     // CAP_SYS_ADMIN required (Linux).
     if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
@@ -3641,7 +3641,7 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
     if rlim_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(rlim_ptr as usize, 16) {
+    if !crate::arch::uaccess::access_ok(rlim_ptr as usize, 16) {
         return -(errno::EFAULT as i64);
     }
 
@@ -3653,8 +3653,8 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
     // SAFETY: rlim_ptr validated with access_ok above; put_user is the
     // exception-table copy path.
     unsafe {
-        let _ = crate::arch::riscv64::uaccess::put_user(rlim_ptr, cur);
-        let _ = crate::arch::riscv64::uaccess::put_user(rlim_ptr.add(1), max);
+        let _ = crate::arch::uaccess::put_user(rlim_ptr, cur);
+        let _ = crate::arch::uaccess::put_user(rlim_ptr.add(1), max);
     }
     0
 }
@@ -3680,14 +3680,14 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
     if rlim_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(rlim_ptr as usize, 16) {
+    if !crate::arch::uaccess::access_ok(rlim_ptr as usize, 16) {
         return -(errno::EFAULT as i64);
     }
 
     // SAFETY: rlim_ptr validated with access_ok; get_user is the
     // exception-table copy path (SUM=0 safe).
-    let rlim_cur = unsafe { crate::arch::riscv64::uaccess::get_user(rlim_ptr).unwrap_or(0) };
-    let rlim_max = unsafe { crate::arch::riscv64::uaccess::get_user(rlim_ptr.add(1)).unwrap_or(0) };
+    let rlim_cur = unsafe { crate::arch::uaccess::get_user(rlim_ptr).unwrap_or(0) };
+    let rlim_max = unsafe { crate::arch::uaccess::get_user(rlim_ptr.add(1)).unwrap_or(0) };
 
     if rlim_cur > rlim_max {
         return -(errno::EINVAL as i64);
@@ -3730,7 +3730,7 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     if rusage_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(rusage_ptr as usize, 144) {
+    if !crate::arch::uaccess::access_ok(rusage_ptr as usize, 144) {
         return -(errno::EFAULT as i64);
     }
 
@@ -3792,10 +3792,10 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     // exception-table copy, then per-field put_user updates.
     unsafe {
         let zeros = [0u8; 144];
-        if crate::arch::riscv64::uaccess::copy_to_user(rusage_ptr, zeros.as_ptr(), 144) != 0 {
+        if crate::arch::uaccess::copy_to_user(rusage_ptr, zeros.as_ptr(), 144) != 0 {
             return -(errno::EFAULT as i64);
         }
-        let put = crate::arch::riscv64::uaccess::put_user::<u64>;
+        let put = crate::arch::uaccess::put_user::<u64>;
         let _ = put(rusage_ptr as *mut u64, utv.0);
         let _ = put(rusage_ptr.add(8) as *mut u64, utv.1);
         let _ = put(rusage_ptr.add(16) as *mut u64, stv.0);
@@ -3822,14 +3822,14 @@ pub fn sys_sethostname(args: SyscallArgs) -> i64 {
     if name_ptr.is_null() || len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(name_ptr as usize, len) {
+    if !crate::arch::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);
     }
 
     let mut buf = [0u8; 64];
     // SAFETY: name_ptr validated with access_ok(len); exception-table copy.
     unsafe {
-        if crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), name_ptr, len) != 0 {
+        if crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), name_ptr, len) != 0 {
             return -(errno::EFAULT as i64);
         }
     }
@@ -3855,14 +3855,14 @@ pub fn sys_setdomainname(args: SyscallArgs) -> i64 {
     if name_ptr.is_null() || len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(name_ptr as usize, len) {
+    if !crate::arch::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);
     }
 
     let mut buf = [0u8; 64];
     // SAFETY: name_ptr validated with access_ok(len); exception-table copy.
     unsafe {
-        if crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), name_ptr, len) != 0 {
+        if crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), name_ptr, len) != 0 {
             return -(errno::EFAULT as i64);
         }
     }
@@ -4153,7 +4153,7 @@ fn sleep_one_tick() {
         (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
     }
     // R54: re-arm IRQs so the timer tick reaches this CPU.
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     crate::sched::schedule();
     if timer_id != 0 {
         crate::timer::del_timer(timer_id);
@@ -4287,24 +4287,24 @@ pub fn sys_quotactl(args: SyscallArgs) -> i64 {
         0x800 => {
             // Return -ENOTSUP to indicate no quota format
             if !addr.is_null() {
-                if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 4) {
+                if !crate::arch::uaccess::access_ok(addr as usize, 4) {
                     return -(errno::EFAULT as i64);
                 }
                 // SAFETY: addr validated with access_ok; put_user is the
                 // exception-table copy path.
-                unsafe { let _ = crate::arch::riscv64::uaccess::put_user(addr as *mut i32, -1); }
+                unsafe { let _ = crate::arch::uaccess::put_user(addr as *mut i32, -1); }
             }
             0
         }
         // Q_GETINFO: return struct if_dqinfo (16 bytes)
         0x8000 => {
             if !addr.is_null() {
-                if !crate::arch::riscv64::uaccess::access_ok(addr as usize, 16) {
+                if !crate::arch::uaccess::access_ok(addr as usize, 16) {
                     return -(errno::EFAULT as i64);
                 }
                 // SAFETY: addr validated with access_ok; clear_user is the
                 // exception-table zeroing path.
-                unsafe { crate::arch::riscv64::uaccess::clear_user(addr, 16); }
+                unsafe { crate::arch::uaccess::clear_user(addr, 16); }
             }
             0
         }
@@ -4328,7 +4328,7 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
     if pairs_ptr.is_null() || count == 0 {
         return 0;
     }
-    if !crate::arch::riscv64::uaccess::access_ok(pairs_ptr as usize, count.saturating_mul(16)) {
+    if !crate::arch::uaccess::access_ok(pairs_ptr as usize, count.saturating_mul(16)) {
         return -(errno::EFAULT as i64);
     }
 
@@ -4342,7 +4342,7 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
     // exception-table copy paths (SUM=0 safe).
     unsafe {
         for i in 0..count {
-            let key = crate::arch::riscv64::uaccess::get_user(pairs_ptr.add(i * 2)).unwrap_or(u64::MAX);
+            let key = crate::arch::uaccess::get_user(pairs_ptr.add(i * 2)).unwrap_or(u64::MAX);
             let value = match key {
                 // mvendorid/marchid/mimpid are M-mode CSRs and trap in S-mode;
                 // report 0 ("not implemented") like an SBI-less platform would.
@@ -4352,7 +4352,7 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
                 KEY_MMU => 1, // sv39
                 _ => u64::MAX,
             };
-            let _ = crate::arch::riscv64::uaccess::put_user(pairs_ptr.add(i * 2 + 1), value);
+            let _ = crate::arch::uaccess::put_user(pairs_ptr.add(i * 2 + 1), value);
         }
     }
 
@@ -4446,14 +4446,14 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     if size > 4096 {
         return -(errno::E2BIG as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(uargs as usize, size) {
+    if !crate::arch::uaccess::access_ok(uargs as usize, size) {
         return -(errno::EFAULT as i64);
     }
 
     let mut buf = [0u8; 4096];
     // SAFETY: access_ok-validated pointer; exception-table copy.
     if unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(buf.as_mut_ptr(), uargs, size)
+        crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), uargs, size)
     } != 0
     {
         return -(errno::EFAULT as i64);
@@ -4502,12 +4502,12 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
             .map(|a| a.root_ppn());
         let ok = match root {
             Some(root_ppn) => unsafe {
-                crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(
+                crate::arch::mm::mm_ops::PageTableWalker::walk(
                     root_ppn,
                     pidfd_ptr as usize as u64 & !0xfff,
                 )
-                .map(|(_, pte)| pte & crate::arch::riscv64::mm::PageTableEntry::W != 0
-                    && pte & crate::arch::riscv64::mm::PageTableEntry::U != 0)
+                .map(|(_, pte)| pte & crate::arch::mm::PageTableEntry::W != 0
+                    && pte & crate::arch::mm::PageTableEntry::U != 0)
                 .unwrap_or(false)
             },
             None => false,

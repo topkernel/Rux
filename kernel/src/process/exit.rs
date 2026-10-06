@@ -43,7 +43,7 @@ const ROBUST_LIST_HEAD_SIZE: usize = 24;
 /// skips broken entries too); the head itself must be the registered
 /// 24-byte layout.
 unsafe fn exit_robust_list(task: *mut Task) {
-    use crate::arch::riscv64::uaccess::get_user;
+    use crate::arch::uaccess::get_user;
 
     let head = (*task).robust_list_head() as usize;
     if head == 0 || (*task).robust_list_len() != ROBUST_LIST_HEAD_SIZE {
@@ -70,7 +70,7 @@ unsafe fn exit_robust_list(task: *mut Task) {
     // Process one entry: mark OWNER_DIED if we still own it, wake waiters.
     // SAFETY: all user accesses go through the exception-table helpers.
     unsafe fn handle_robust_entry(entry: usize, futex_offset: i64, tid: u32, mm_id: usize) {
-        use crate::arch::riscv64::uaccess::{get_user, put_user};
+        use crate::arch::uaccess::{get_user, put_user};
         let uaddr = (entry as i64).wrapping_add(futex_offset) as u64;
         if uaddr & 0x3 != 0 {
             return; // misaligned futex word — skip
@@ -95,7 +95,7 @@ unsafe fn exit_robust_list(task: *mut Task) {
     // the chain ends when next == head (circular) or is unreadable.
     // SAFETY: bounded walk, exception-table user reads.
     unsafe fn walk_robust_chain(start: usize, head: usize, futex_offset: i64, tid: u32, mm_id: usize) {
-        use crate::arch::riscv64::uaccess::get_user;
+        use crate::arch::uaccess::get_user;
         let mut entry = start;
         let mut count = 0u32;
         while entry != 0 && entry != head && count < ROBUST_LIST_LIMIT {
@@ -149,7 +149,7 @@ unsafe fn exit_clear_child_tid(task: *mut Task) {
 
     // Write 0 to the tid pointer in user memory.
     let zero: i32 = 0;
-    crate::arch::riscv64::uaccess::copy_to_user(
+    crate::arch::uaccess::copy_to_user(
         tid_ptr as *mut u8,
         &zero as *const i32 as *const u8,
         core::mem::size_of::<i32>(),
@@ -206,7 +206,7 @@ pub fn kill_other_threads(current: *mut Task) {
 /// (same trade-off as Linux's exit_group on D-state threads is NOT
 /// taken there — documented as a known risk).
 pub fn wait_for_thread_group_death(current: *mut Task) {
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     // SAFETY: current stays valid (it is the running task).
     while unsafe { (*current).nr_threads() } > 1 {
         crate::sched::schedule();
@@ -242,7 +242,7 @@ unsafe fn free_dead_member(member: *mut Task) {
     // The member's final context switch-out may still be in flight —
     // on_cpu is cleared exactly when __switch_to has saved its context
     // (see release_task R9 for the full rationale).
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     // DFX (4-thread hang hunt): report a stuck wait loudly instead of
     // spinning silently — a member whose on_cpu never clears wedges every
     // later exiter (and their CPUs) here.
@@ -278,7 +278,7 @@ unsafe fn free_dead_member(member: *mut Task) {
     if !pt_regs_ptr.is_null() {
         use alloc::alloc::{dealloc, Layout};
         let layout = Layout::from_size_align(
-            core::mem::size_of::<crate::arch::riscv64::pt_regs::PtRegs>(), 16
+            core::mem::size_of::<crate::arch::pt_regs::PtRegs>(), 16
         ).unwrap();
         dealloc(pt_regs_ptr as *mut u8, layout);
     }
@@ -412,7 +412,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
         }
         drop(guard);
         // Yield so the stragglers can progress (IRQs are on throughout).
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         core::hint::spin_loop();
     }
 
@@ -447,7 +447,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // R9-16 (actually landed, round 10): spin with interrupts enabled —
     // this CPU must keep reporting RCU quiescent states and taking ticks
     // while waiting (the round-9 commit claimed this but never landed).
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     while (*task).on_cpu() {
         core::hint::spin_loop();
     }
@@ -462,7 +462,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     if !pt_regs_ptr.is_null() {
         use alloc::alloc::{dealloc, Layout};
         let layout = Layout::from_size_align(
-            core::mem::size_of::<crate::arch::riscv64::pt_regs::PtRegs>(), 16
+            core::mem::size_of::<crate::arch::pt_regs::PtRegs>(), 16
         ).unwrap();
         dealloc(pt_regs_ptr as *mut u8, layout);
     }
@@ -700,7 +700,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     }
                 }
             }
-            let kernel_ppn = crate::arch::riscv64::mm::mmu_init::root_page_table_ppn();
+            let kernel_ppn = crate::arch::mm::mmu_init::root_page_table_ppn();
             let satp: u64;
             // SAFETY: plain CSR read of the current satp.
             unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp) };
@@ -1264,7 +1264,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
                 // Write exit status safely using copy_to_user
                 if !status_ptr.is_null() {
-                    let _uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                    let _uncopied = crate::arch::uaccess::copy_to_user(
                         status_ptr as *mut u8,
                         &status as *const i32 as *const u8,
                         core::mem::size_of::<i32>()
@@ -1289,7 +1289,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
                 // Write status safely using copy_to_user
                 if !status_ptr.is_null() {
-                    let _uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                    let _uncopied = crate::arch::uaccess::copy_to_user(
                         status_ptr as *mut u8,
                         &status as *const i32 as *const u8,
                         core::mem::size_of::<i32>()
@@ -1334,7 +1334,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                     let stop_sig = (*t).stop_signal();
                     let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
                     if !status_ptr.is_null() {
-                        let _uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+                        let _uncopied = crate::arch::uaccess::copy_to_user(
                             status_ptr as *mut u8,
                             &status as *const i32 as *const u8,
                             core::mem::size_of::<i32>()
@@ -1426,7 +1426,7 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 // Enable interrupts before schedule(). We're in syscall context
                 // (SIE=0). Without this, timer IRQ can't fire and the task
                 // can never be rescheduled.
-                crate::arch::riscv64::cpu::restore_irq(true);
+                crate::arch::cpu::restore_irq(true);
 
                 // Schedule other processes
                 crate::sched::schedule();
@@ -1519,7 +1519,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
             };
 
             if !status_ptr.is_null() {
-                if crate::arch::riscv64::uaccess::copy_to_user(
+                if crate::arch::uaccess::copy_to_user(
                     status_ptr as *mut u8,
                     &status as *const i32 as *const u8,
                     core::mem::size_of::<i32>(),
@@ -1538,7 +1538,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
             let stop_sig = child.stop_signal();
             let status: i32 = (((stop_sig as u32) << 8) | 0x7F) as i32;
             if !status_ptr.is_null() {
-                if crate::arch::riscv64::uaccess::copy_to_user(
+                if crate::arch::uaccess::copy_to_user(
                     status_ptr as *mut u8,
                     &status as *const i32 as *const u8,
                     core::mem::size_of::<i32>(),
@@ -1592,7 +1592,7 @@ unsafe fn write_siginfo(
     si_uid: u32,
     si_status: i32,
 ) {
-    use crate::arch::riscv64::uaccess::copy_to_user;
+    use crate::arch::uaccess::copy_to_user;
     let base = infop;
 
     let signo = 17i32; // SIGCHLD
@@ -1789,7 +1789,7 @@ pub fn do_waitid(
                 // Enable interrupts before schedule() — we're in syscall
                 // context (SIE=0). Without this, timer IRQ can't fire and
                 // the task can never be rescheduled.
-                crate::arch::riscv64::cpu::restore_irq(true);
+                crate::arch::cpu::restore_irq(true);
 
                 crate::sched::schedule();
 

@@ -481,7 +481,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // SAFETY: get_user goes through the exception-table copy path; an
         // unmapped user address yields EFAULT instead of a kernel page fault.
         let uval = match unsafe {
-            crate::arch::riscv64::uaccess::get_user(uaddr_ptr as *const u32)
+            crate::arch::uaccess::get_user(uaddr_ptr as *const u32)
         } {
             Some(v) => v,
             None => return -EFAULT as i64,
@@ -560,7 +560,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // Task::wake_up() when futex_wake (or a signal) wakes it.  Arm a
         // wakeup timer when a deadline is set: nothing else would wake a
         // futex that is never signaled (pthread_cond_timedwait would hang).
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         let timer_id = deadline
             .map(|dl| crate::timer::add_timer_wakeup(
                 dl, crate::sched::get_current_pid(),
@@ -772,13 +772,13 @@ pub fn futex_parse_timeout(timeout_ptr: u64, absolute: bool) -> Result<Option<u6
     if timeout_ptr == 0 {
         return Ok(None);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(timeout_ptr as usize, 16) {
+    if !crate::arch::uaccess::access_ok(timeout_ptr as usize, 16) {
         return Err(EFAULT);
     }
     let mut buf = [0u8; 16];
     // SAFETY: access_ok-validated user pointer; exception-table copy.
     let uncopied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             buf.as_mut_ptr(), timeout_ptr as *const u8, 16,
         )
     };
@@ -846,7 +846,7 @@ pub fn futex_requeue(
         // SAFETY: exception-table protected read; unmapped address → EFAULT.
         let uaddr_ptr = uaddr as *const u32;
         let uval = match unsafe {
-            crate::arch::riscv64::uaccess::get_user(uaddr_ptr)
+            crate::arch::uaccess::get_user(uaddr_ptr)
         } {
             Some(v) => v,
             None => return -EFAULT as i64,
@@ -1083,7 +1083,7 @@ pub fn futex_wake_op(
         let _head2 = HASH_HEADS[bucket2].lock_irqsave();
         // SAFETY: exception-table protected access; EFAULT on bad pointer.
         let old = match unsafe {
-            crate::arch::riscv64::uaccess::get_user(uaddr2 as *const u32)
+            crate::arch::uaccess::get_user(uaddr2 as *const u32)
         } {
             Some(v) => v,
             None => return -EFAULT as i64,
@@ -1107,7 +1107,7 @@ pub fn futex_wake_op(
             _ => return -EINVAL as i64,
         };
         if unsafe {
-            !crate::arch::riscv64::uaccess::put_user(uaddr2 as *mut u32, new)
+            !crate::arch::uaccess::put_user(uaddr2 as *mut u32, new)
         } {
             return -EFAULT as i64;
         }
@@ -1134,7 +1134,7 @@ pub fn dfx_dump_futex_state(uaddr: usize, parked_pid: u32) {
     // The user word and its neighbours (16 words starting uaddr-16).
     for i in 0..4 {
         let a = uaddr + 16 * i;
-        match unsafe { crate::arch::riscv64::uaccess::get_user(a as *const u32) } {
+        match unsafe { crate::arch::uaccess::get_user(a as *const u32) } {
             Some(v) => {
                 taskdump_raw_line(b" +");
                 taskdump_dec(i as u64 * 4);
@@ -1258,7 +1258,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             }
             // uaddr2 must be a readable user word (get_futex_key faults).
             if unsafe {
-                crate::arch::riscv64::uaccess::get_user(uaddr2 as *const u32).is_none()
+                crate::arch::uaccess::get_user(uaddr2 as *const u32).is_none()
             } {
                 return -EFAULT as i64;
             }

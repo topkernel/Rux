@@ -3050,12 +3050,12 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                if arg == 0 || !crate::arch::riscv64::uaccess::access_ok(arg, 32) {
+                if arg == 0 || !crate::arch::uaccess::access_ok(arg, 32) {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
                 let mut fl = [0u8; 32];
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_from_user(
+                    crate::arch::uaccess::copy_from_user(
                         fl.as_mut_ptr(),
                         arg as *const u8,
                         32,
@@ -3129,7 +3129,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     out
                 };
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         arg as *mut u8,
                         out.as_ptr(),
                         32,
@@ -3150,12 +3150,12 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                if arg == 0 || !crate::arch::riscv64::uaccess::access_ok(arg, 32) {
+                if arg == 0 || !crate::arch::uaccess::access_ok(arg, 32) {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
                 let mut fl = [0u8; 32];
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_from_user(
+                    crate::arch::uaccess::copy_from_user(
                         fl.as_mut_ptr(),
                         arg as *const u8,
                         32,
@@ -3288,13 +3288,13 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
                 if arg == 0
-                    || !crate::arch::riscv64::uaccess::access_ok(arg, 8)
+                    || !crate::arch::uaccess::access_ok(arg, 8)
                 {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
                 let mut buf = [0u8; 8];
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_from_user(
+                    crate::arch::uaccess::copy_from_user(
                         buf.as_mut_ptr(),
                         arg as *const u8,
                         8,
@@ -3342,7 +3342,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
                 if arg == 0
-                    || !crate::arch::riscv64::uaccess::access_ok(arg, 8)
+                    || !crate::arch::uaccess::access_ok(arg, 8)
                 {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
@@ -3362,7 +3362,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 buf[0..4].copy_from_slice(&otype.to_le_bytes());
                 buf[4..8].copy_from_slice(&opid.to_le_bytes());
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         arg as *mut u8,
                         buf.as_ptr(),
                         8,

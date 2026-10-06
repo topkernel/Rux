@@ -248,14 +248,14 @@ impl VirtIONetDevice {
             // Register the VirtQueue's OWN rings with the device (modern
             // virtio-mmio split-address layout). R32 fixed the addresses;
             // R34 fixed the register offsets they are written through.
-            let rx_desc_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(rx_queue.get_desc_addr())
+            let rx_desc_phys = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(rx_queue.get_desc_addr())
             ).0;
-            let rx_avail_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(rx_queue.get_avail_addr())
+            let rx_avail_phys = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(rx_queue.get_avail_addr())
             ).0;
-            let rx_used_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(rx_queue.get_used_addr())
+            let rx_used_phys = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(rx_queue.get_used_addr())
             ).0;
 
             // Set queue count
@@ -293,14 +293,14 @@ impl VirtIONetDevice {
                 None => return Err("Failed to create TX VirtQueue"),
             };
 
-            let tx_desc_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_desc_addr())
+            let tx_desc_phys = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(tx_queue.get_desc_addr())
             ).0;
-            let tx_avail_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_avail_addr())
+            let tx_avail_phys = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(tx_queue.get_avail_addr())
             ).0;
-            let tx_used_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(tx_queue.get_used_addr())
+            let tx_used_phys = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(tx_queue.get_used_addr())
             ).0;
 
             // Set queue count
@@ -414,8 +414,8 @@ impl VirtIONetDevice {
         };
 
         // Set packet header descriptor (use physical address for DMA)
-        let hdr_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(hdr_ptr as u64)
+        let hdr_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(hdr_ptr as u64)
         ).0;
         queue.set_desc(
             header_desc_idx,
@@ -426,8 +426,8 @@ impl VirtIONetDevice {
         );
 
         // Set data descriptor (use physical address for DMA)
-        let data_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(skb.data as u64)
+        let data_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(skb.data as u64)
         ).0;
         queue.set_desc(
             data_desc_idx,
@@ -565,8 +565,8 @@ impl VirtIONetDevice {
         // mapping. The old code used desc.addr directly as a kernel pointer
         // AND dealloc'd it — a physical address dereference that only
         // "worked" while nothing arrived (the RX rings were never armed).
-        let buf_virt = crate::arch::riscv64::mm::phys_to_virt(
-            crate::arch::riscv64::mm::PhysAddr::new(desc.addr)
+        let buf_virt = crate::arch::mm::phys_to_virt(
+            crate::arch::mm::PhysAddr::new(desc.addr)
         ).bits();
 
         // VirtIO-Net packet structure:
@@ -698,8 +698,8 @@ impl VirtIONetDevice {
             // Set descriptor — DMA needs physical address
             // SAFETY: buf_ptr is a valid kernel virtual address from alloc; virt_to_phys
             // converts to the corresponding physical address for DMA.
-            let buf_phys = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(buf_ptr as u64)
+            let buf_phys = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(buf_ptr as u64)
             ).0 as u64;
             // VIRTQ_DESC_F_WRITE = 2 means device can write
             queue.set_desc(desc_idx, buf_phys, buf_size as u32, 2, 0);

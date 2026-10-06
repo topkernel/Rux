@@ -62,7 +62,7 @@ cd "$TOYBOX_DIR"
 # Set cross-compile environment variables - using musl libc
 # Include musl headers and system linux/asm headers
 export CC=riscv64-linux-gnu-gcc
-export CFLAGS="-static -nostdinc -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include"
+export CFLAGS="-static -march=rv64gc_zicsr -nostdinc -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include"
 export LDFLAGS="-static -nostdlib -L${MUSL_DIR}/lib ${MUSL_DIR}/lib/crt1.o ${MUSL_DIR}/lib/crti.o -lgcc ${MUSL_DIR}/lib/crtn.o -lc -lgcc"
 
 echo ""

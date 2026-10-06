@@ -108,7 +108,7 @@ impl ConditionVariable {
         mutex.unlock();
 
         // 3. Yield CPU — task removed from runqueue by __schedule()
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
 
         // 4. After wakeup, finish_wait restores RUNNING and removes entry.
@@ -149,7 +149,7 @@ impl ConditionVariable {
         mutex.unlock();
 
         // 3. Yield CPU — task removed from runqueue by __schedule()
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
 
         // 4. After wakeup, finish_wait restores RUNNING and removes entry.

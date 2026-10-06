@@ -848,7 +848,7 @@ pub mod consts {
 ///
 /// * `true` - If there are pending signals
 /// * `false` - If no pending signals
-pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
+pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
     use crate::sched;
     use crate::process::task::TaskState;
 
@@ -1039,8 +1039,8 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
 ///
 /// # Safety
 /// `regs` is the current task's live PtRegs (from the trap path).
-unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) {
-    use crate::arch::riscv64::pt_regs::Cause;
+unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
+    use crate::arch::pt_regs::Cause;
     const ERESTARTSYS: i64 = -512;
     const ERESTARTNOHAND: i64 = -514;
     let regs = &mut *regs;
@@ -1087,7 +1087,7 @@ unsafe fn setup_frame(
     task: *mut crate::process::task::Task,
     sig: i32,
     action: &SigAction,
-    regs: *mut crate::arch::riscv64::pt_regs::PtRegs,
+    regs: *mut crate::arch::pt_regs::PtRegs,
     queued_info: Option<SigInfo>,
 ) -> bool {
     let regs = &mut *regs;
@@ -1233,7 +1233,7 @@ unsafe fn setup_frame(
 
     // Copy signal frame to user stack so the handler can access siginfo/ucontext
     let frame_size = core::mem::size_of::<SignalFrame>();
-    let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+    let uncopied = crate::arch::uaccess::copy_to_user(
         frame_addr as *mut u8,
         &frame as *const SignalFrame as *const u8,
         frame_size,
@@ -1294,7 +1294,7 @@ unsafe fn setup_frame(
 pub unsafe fn restore_sigcontext(
     task: *mut crate::process::task::Task,
     frame_addr: u64,
-    regs: *mut crate::arch::riscv64::pt_regs::PtRegs,
+    regs: *mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
     // Validate signal frame address
     if frame_addr == 0 {
@@ -1308,7 +1308,7 @@ pub unsafe fn restore_sigcontext(
     // backup only when the user copy is unreadable.
     let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
     let copied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             &mut user_frame as *mut SignalFrame as *mut u8,
             frame_addr as *const u8,
             core::mem::size_of::<SignalFrame>(),
@@ -1751,7 +1751,7 @@ pub unsafe fn park_stopped_task(task: *mut crate::process::task::Task) {
 
     // Sleeping with SIE=0 on this hart would starve the timer; every
     // blocking syscall re-enables IRQs before schedule() (see do_wait).
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     loop {
         crate::sched::schedule();
         if (*task).state().contains(TaskState::STOPPED) {
@@ -1776,7 +1776,7 @@ pub unsafe fn park_stopped_task(task: *mut crate::process::task::Task) {
 /// * `regs` - PtRegs pointer, passed from trap.S
 ///
 #[no_mangle]
-pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) {
+pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
     use crate::sched;
 
     // ^C interrupt path (review批次8): deliver any ISIG character the UART

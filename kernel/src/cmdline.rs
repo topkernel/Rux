@@ -391,8 +391,8 @@ pub fn init(dtb_ptr: u64) {
     };
 
     // Convert physical address to kernel virtual address using linear mapping
-    let dtb_virt = crate::arch::riscv64::mm::phys_to_virt(
-        crate::arch::riscv64::mm::PhysAddr::new(dtb_phys)
+    let dtb_virt = crate::arch::mm::phys_to_virt(
+        crate::arch::mm::PhysAddr::new(dtb_phys)
     ).bits();
 
     let cmdline: &'static str = unsafe {

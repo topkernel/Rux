@@ -433,8 +433,8 @@ pub fn swap_read_page(swap_type: u32, offset: u64, phys_addr: usize) -> Result<(
     let sector = get_swap_sector(swap_type, offset);
     // Convert physical address to virtual address before dereferencing.
     // After MMU init, physical addresses are not directly accessible.
-    let virt_addr = crate::arch::riscv64::mm::memory_layout::phys_to_virt(
-        crate::arch::riscv64::mm::memory_layout::PhysAddr(phys_addr as u64)
+    let virt_addr = crate::arch::mm::memory_layout::phys_to_virt(
+        crate::arch::mm::memory_layout::PhysAddr(phys_addr as u64)
     ).0 as usize;
     // SAFETY: virt_addr is a valid, page-aligned virtual address mapped from
     // the buddy allocator's physical page; PAGE_SIZE is the exact allocation size.
@@ -459,8 +459,8 @@ pub fn swap_write_page(swap_type: u32, offset: u64, phys_addr: usize) -> Result<
 
     let sector = get_swap_sector(swap_type, offset);
     // Convert physical address to virtual address before dereferencing.
-    let virt_addr = crate::arch::riscv64::mm::memory_layout::phys_to_virt(
-        crate::arch::riscv64::mm::memory_layout::PhysAddr(phys_addr as u64)
+    let virt_addr = crate::arch::mm::memory_layout::phys_to_virt(
+        crate::arch::mm::memory_layout::PhysAddr(phys_addr as u64)
     ).0 as usize;
     // SAFETY: virt_addr is a valid virtual address mapped from the physical page;
     // the page is exclusively owned (refcount == 1) during swap-out.

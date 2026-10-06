@@ -188,7 +188,7 @@ fn raw_wait_round(sock: &Arc<RawSocket>, deadline: Option<u64>) -> Result<(), i3
         return Err(-12); // ENOMEM
     }
 
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     crate::sched::schedule();
 
     if timer_id != 0 {
@@ -653,7 +653,7 @@ pub unsafe fn put_sockaddr_raw(
     addr_ptr: *mut u8,
     addrlen_ptr: *mut u32,
 ) {
-    use crate::arch::riscv64::uaccess::{copy_to_user, put_user};
+    use crate::arch::uaccess::{copy_to_user, put_user};
     match sock.kind {
         RawKind::Packet => {
             let proto = sock.protocol.load(core::sync::atomic::Ordering::Relaxed);
@@ -684,13 +684,13 @@ pub unsafe fn copy_src_to_user(
     user_namelen: u32,
     addrlen_ptr: *mut u32,
 ) {
-    use crate::arch::riscv64::uaccess::copy_to_user;
+    use crate::arch::uaccess::copy_to_user;
     let (addr, len) = src;
     let copy = (len as usize).min(user_namelen as usize);
     if copy > 0 {
         let _ = copy_to_user(addr_ptr, addr.as_ptr(), copy);
     }
     if !addrlen_ptr.is_null() {
-        let _ = crate::arch::riscv64::uaccess::put_user(addrlen_ptr, len as u32);
+        let _ = crate::arch::uaccess::put_user(addrlen_ptr, len as u32);
     }
 }

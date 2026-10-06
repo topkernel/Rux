@@ -90,7 +90,7 @@ impl RawSpinlock {
     #[inline]
     #[cfg(feature = "dfx-lock-owner")]
     fn record_owner(&self) {
-        self.owner.store(crate::arch::riscv64::smp::cpu_id() + 1, Ordering::Relaxed);
+        self.owner.store(crate::arch::smp::cpu_id() + 1, Ordering::Relaxed);
     }
 
     /// Clear the holder (dfx-lock-owner feature only).
@@ -136,7 +136,7 @@ impl RawSpinlock {
     /// Print deadlock warning via SBI (works even with interrupts disabled).
     fn deadlock_warn(lock_addr: *const Self, caller_ra: usize) {
         // Use SBI putchar directly — printk might need locks we're spinning on
-        let cpu = crate::arch::riscv64::smp::cpu_id();
+        let cpu = crate::arch::smp::cpu_id();
         let msg = b"DEADLOCK: spinlock stuck cpu=";
         for &b in msg {
             unsafe { crate::console::putchar_no_lock(b); }
@@ -528,12 +528,12 @@ fn preempt_enable() {
 
 #[inline]
 fn irq_save() -> bool {
-    crate::arch::riscv64::cpu::save_and_disable_irq()
+    crate::arch::cpu::save_and_disable_irq()
 }
 
 #[inline]
 fn irq_restore(flags: bool) {
-    crate::arch::riscv64::cpu::restore_irq(flags);
+    crate::arch::cpu::restore_irq(flags);
 }
 
 #[inline]
