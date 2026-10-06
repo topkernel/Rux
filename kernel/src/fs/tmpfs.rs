@@ -40,7 +40,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::sync::spinlock::Spinlock;
 
 /// Linux TMPFS_MAGIC.
@@ -102,6 +102,12 @@ pub struct TmpfsNode {
     pub fs_id: u64,
     /// Owning superblock (leaked at mount; valid for the kernel's lifetime).
     sb: *const TmpfsSuperBlock,
+    /// Owner uid/gid, chown-visible. Initialized from the creating task's
+    /// fsuid/fsgid (Linux inode_init_owner()); updated by chown/setattr
+    /// (LTP creat09 tmpfs round: chown(dir, uid, gid) then stat must
+    /// report the new gid).
+    uid: AtomicU32,
+    gid: AtomicU32,
 }
 
 // SAFETY: mutable fields (pages/size/mode/children/atime/mtime) are protected
@@ -118,6 +124,16 @@ impl TmpfsNode {
             TmpfsType::RegularFile => InodeMode::S_IFREG | 0o666,
             TmpfsType::SymbolicLink => InodeMode::S_IFLNK | 0o777,
         };
+        // Linux inode_init_owner(): creator's EFFECTIVE filesystem ids, not
+        // the real ones (same rule as ext4_new_inode).
+        let (uid, gid) = match crate::sched::current() {
+            Some(task) => {
+                // SAFETY: sched::current() yields a valid task reference.
+                let cred = unsafe { (*task).cred() };
+                (cred.fsuid, cred.fsgid)
+            }
+            None => (0, 0),
+        };
         Self {
             name: UnsafeCell::new(name),
             node_type,
@@ -131,6 +147,8 @@ impl TmpfsNode {
             ino,
             fs_id,
             sb,
+            uid: AtomicU32::new(uid),
+            gid: AtomicU32::new(gid),
         }
     }
 
@@ -386,6 +404,8 @@ fn tmpfs_make_inode(node: &Arc<TmpfsNode>) -> Arc<Inode> {
     let mut inode = Inode::new(node.ino, InodeMode::new(*node.mode.lock()));
     inode.fs_id = node.fs_id;
     inode.size.store(node.file_size(), Ordering::Release);
+    inode.uid.store(node.uid.load(Ordering::Relaxed), Ordering::Relaxed);
+    inode.gid.store(node.gid.load(Ordering::Relaxed), Ordering::Relaxed);
     inode.private_data = Some(Arc::into_raw(Arc::clone(node)) as *mut u8);
     inode.ops = Some(&TMPFS_INODE_OPS);
     Arc::new(inode)
@@ -720,8 +740,8 @@ unsafe fn tmpfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         // SAFETY: sb is a leaked mount-lifetime superblock.
         unsafe { tmpfs_count_links(&(*sb).root_node, node.ino) }
     };
-    stat.st_uid = 0;
-    stat.st_gid = 0;
+    stat.st_uid = node.uid.load(Ordering::Relaxed) as u32;
+    stat.st_gid = node.gid.load(Ordering::Relaxed) as u32;
     stat.st_rdev = 0;
     stat.st_blksize = PAGE_SIZE as i64;
     stat.st_blocks = (node.page_count() * (PAGE_SIZE as u64 / 512)) as i64;
@@ -735,15 +755,15 @@ unsafe fn tmpfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i32 {
+unsafe fn tmpfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     let node = match node_of(inode) {
         Ok(n) => n,
         Err(e) => return e,
     };
     match attr {
         setattr_attr::ATTR_SIZE => {
-            node.truncate(value as usize);
-            inode.size.store(value, Ordering::Release);
+            node.truncate(arg1 as usize);
+            inode.size.store(arg1, Ordering::Release);
             0
         }
         setattr_attr::ATTR_MODE => {
@@ -751,7 +771,7 @@ unsafe fn tmpfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i
             // create their special nodes by create-regular-then-retype
             // (the mknod pattern). A perm-only word (chmod) preserves the
             // current file type from the stored mode word, like Linux.
-            let v = value as u32;
+            let v = arg1 as u32;
             let vtype = v & InodeMode::S_IFMT;
             let file_type = if vtype != 0 {
                 vtype
@@ -768,16 +788,36 @@ unsafe fn tmpfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> i
             0
         }
         setattr_attr::ATTR_ATIME => {
-            node.atime.store(value, Ordering::Release);
+            node.atime.store(arg1, Ordering::Release);
             0
         }
         setattr_attr::ATTR_MTIME => {
-            node.mtime.store(value, Ordering::Release);
+            node.mtime.store(arg1, Ordering::Release);
             0
         }
         setattr_attr::ATTR_UID_GID => {
-            // tmpfs objects are root-owned in this wave; chown accepted,
-            // stored nowhere (same policy as rootfs).
+            // arg1 = uid, arg2 = gid (same encoding as ext4_setattr; the
+            // chown syscall and the VFS setgid-directory gid inheritance
+            // both use it). u32::MAX means "leave unchanged" (chown(2)
+            // with -1). Keep the VFS-cached owner in sync — DAC and owner
+            // checks read Inode.uid/gid while stat() goes through getattr.
+            let old_uid = node.uid.load(Ordering::Relaxed);
+            let old_gid = node.gid.load(Ordering::Relaxed);
+            let new_uid = if arg1 == u32::MAX as u64 {
+                old_uid
+            } else {
+                arg1 as u32
+            };
+            let new_gid = if arg2 == u32::MAX as u64 {
+                old_gid
+            } else {
+                arg2 as u32
+            };
+            node.uid.store(new_uid, Ordering::Relaxed);
+            node.gid.store(new_gid, Ordering::Relaxed);
+            inode.uid.store(new_uid, Ordering::Relaxed);
+            inode.gid.store(new_gid, Ordering::Relaxed);
+            node.mtime.store(wall_secs(), Ordering::Release);
             0
         }
         _ => -95, // EOPNOTSUPP (matches rootfs_setattr's fallback)

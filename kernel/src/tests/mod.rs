@@ -297,6 +297,10 @@ pub mod framebuffer;
 #[cfg(feature = "unit-test")]
 pub mod boundary;
 
+// ===== VFS create-mode rules (creat09 / CVE-2018-13405) =====
+#[cfg(feature = "unit-test")]
+pub mod sgid_mode;
+
 // ===== System call interface =====
 #[cfg(feature = "unit-test")]
 pub mod syscall_file;
@@ -546,6 +550,10 @@ pub fn run_all_tests() {
 
     test_group_start("syscall_misc");
     syscall_misc::test_syscall_misc();
+
+    // ===== VFS create-mode rules (creat09) =====
+    test_group_start("sgid_mode");
+    sgid_mode::test_sgid_mode();
 
     // ===== 13. Boundary (destructive, MUST be last) =====
     test_group_start("boundary");

@@ -2178,6 +2178,103 @@ pub fn vfs_stat(pathname: &str, stat: &mut Stat) -> Result<(), i32> {
     Ok(())
 }
 
+// ==================== inode creation ownership helpers ====================
+// Linux counterparts: mode_strip_sgid() + inode_init_owner() in fs/inode.c,
+// vfs_prepare_mode() in fs/namei.c (commit 1639a49ccdce, "fs: move S_ISGID
+// stripping into the vfs_*() helpers") and the CVE-2018-13405 fix
+// 0fa3ecd87848 ("Fix up non-directory creation in SGID Directories").
+// LTP creat09 checks all three rules below.
+
+const S_ISGID_BIT: u32 = 0o2000;
+const S_IXGRP_BIT: u32 = 0o010;
+
+/// Linux in_group_or_capable(idmap, dir, dir->i_gid): true when the caller
+/// may keep S_ISGID on a file it creates in a setgid directory — its fsgid
+/// (or a supplementary group) matches the directory's gid, or it holds
+/// CAP_FSETID.
+fn in_group_or_capable_dir(dir_gid: u32) -> bool {
+    match crate::sched::current() {
+        Some(task) => {
+            // SAFETY: sched::current() yields a valid task reference.
+            let cred = unsafe { (*task).cred() };
+            if cred.fsgid == dir_gid || cred.in_group(dir_gid) {
+                return true;
+            }
+            crate::security::has_capability(cred, crate::security::CAP_FSETID)
+        }
+        None => false,
+    }
+}
+
+/// Linux mode_strip_sgid() (fs/inode.c): a NEW non-directory keeps S_ISGID
+/// only when the requested mode has S_ISGID|S_IXGRP, the parent directory
+/// is itself setgid, and the caller is in the parent's group or privileged
+/// (CAP_FSETID). Otherwise the S_ISGID bit is stripped before the mode
+/// reaches the filesystem — creating a setgid file one does not belong to
+/// would be a privilege escalation (CVE-2018-13405; LTP creat09).
+pub fn mode_strip_sgid(dir_mode_bits: u32, dir_gid: u32, mode: u32) -> u32 {
+    if mode & (S_ISGID_BIT | S_IXGRP_BIT) != (S_ISGID_BIT | S_IXGRP_BIT) {
+        return mode;
+    }
+    // Directories never come through here (vfs_mkdir has its own S_ISGID
+    // propagation); the parent must carry S_ISGID for the strip rule.
+    if dir_mode_bits & S_ISGID_BIT == 0 {
+        return mode;
+    }
+    if in_group_or_capable_dir(dir_gid) {
+        return mode;
+    }
+    mode & !S_ISGID_BIT
+}
+
+/// Linux vfs_prepare_mode() (fs/namei.c) for non-directory creation:
+/// S_ISGID strip FIRST, then umask. The umask must not mask away S_IXGRP
+/// before the strip decision, or the mandatory-lock-style setgid file
+/// (mode 02777 & ~010) would survive against the caller's interest
+/// (LTP creat09's umask(S_IXGRP) round).
+fn prepare_create_mode(dir_mode_bits: u32, dir_gid: u32, mode: u32) -> u32 {
+    let stripped = mode_strip_sgid(dir_mode_bits, dir_gid, mode & 0o7777);
+    let umask = match crate::sched::current() {
+        Some(task) => {
+            // SAFETY: sched::current() yields a valid task reference.
+            unsafe { (*task).get_umask() }
+        }
+        None => 0o022,
+    };
+    stripped & !umask
+}
+
+/// Linux inode_init_owner() (fs/inode.c) gid rule for a fresh inode: when
+/// the parent directory carries S_ISGID, the new entry inherits the
+/// directory's gid (directories additionally inherit the S_ISGID bit —
+/// handled by vfs_mkdir; non-directories get it STRIPPED by
+/// mode_strip_sgid above). Applied post-create through setattr because
+/// the per-filesystem create callbacks initialize gid from the caller's
+/// fsgid. Mode and gid come from the parent's getattr (a chown'd cached
+/// VFS inode keeps its instantiation-time gid — see the vfs_mkdir note).
+fn inherit_setgid_dir_gid(parent_inode: &Arc<Inode>, new_inode: &Arc<Inode>) {
+    let (parent_mode_bits, parent_gid) = {
+        let mut st = crate::fs::Stat::default();
+        if parent_inode.op_getattr(&mut st) == 0 {
+            (st.st_mode, st.st_gid as u32)
+        } else {
+            (
+                parent_inode.mode.bits(),
+                parent_inode.gid.load(core::sync::atomic::Ordering::Relaxed),
+            )
+        }
+    };
+    if parent_mode_bits & S_ISGID_BIT == 0 {
+        return;
+    }
+    let keep_uid = new_inode.uid.load(core::sync::atomic::Ordering::Relaxed) as u64;
+    let _ = new_inode.op_setattr(
+        crate::fs::inode::setattr_attr::ATTR_UID_GID,
+        keep_uid,
+        parent_gid as u64,
+    );
+}
+
 ///
 ///
 /// # Arguments
@@ -2309,14 +2406,29 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 let new_inode = {
                     let create_fn = ops.create
                         .ok_or(errno::Errno::PermissionDenied.as_neg_i32())?;
-                    // Apply umask to mode (POSIX requirement)
-                    let effective_mode = if let Some(task) = crate::sched::current() {
-                        unsafe { (*task).get_umask() }
-                    } else {
-                        0o022
+                    // Linux vfs_prepare_mode() (S_ISGID strip then umask) —
+                    // the parent's live mode/gid decide both the strip and
+                    // the gid inheritance below (cached fields can lag a
+                    // chmod/chown of the parent; see the vfs_mkdir note).
+                    let (parent_mode_bits, parent_gid) = {
+                        let mut st = crate::fs::Stat::default();
+                        if parent_inode.op_getattr(&mut st) == 0 {
+                            (st.st_mode, st.st_gid as u32)
+                        } else {
+                            (
+                                parent_inode.mode.bits(),
+                                parent_inode.gid.load(core::sync::atomic::Ordering::Relaxed),
+                            )
+                        }
                     };
-                    let filtered_mode = mode & !effective_mode;
-                    create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(filtered_mode))?
+                    let filtered_mode =
+                        prepare_create_mode(parent_mode_bits, parent_gid, mode);
+                    let new_inode = create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(filtered_mode))?;
+                    // Linux inode_init_owner(): a setgid parent hands its
+                    // gid to everything created inside it (LTP creat09,
+                    // CVE-2018-13405 family).
+                    inherit_setgid_dir_gid(&parent_inode, &new_inode);
+                    new_inode
                 };
                 // Cache new dentry (replace stale/negative dentry)
                 let mut new_d = None;
