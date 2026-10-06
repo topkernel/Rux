@@ -949,6 +949,15 @@ pub fn page_desc_stats() -> PageDescStats {
     };
 
     let base_pfn = MIN_PFN;
+    // Clamp to the descriptors actually mapped by init_vmemmap: MAX_PAGES
+    // is the compile-time PHYS_MEMORY_SIZE (2 GiB) while the machine may
+    // boot with less RAM — descriptors past the mapped range are unmapped
+    // vmemmap, and dereferencing them panics the periodic DFX dump
+    // (observed: KERNPANIC in page_desc_stats 8s into a -m 1G boot with
+    // dfx=periodic,taskdump). The vmemmap-mapped count is the direct
+    // dereference-safety bound; F12's phys_memory_size estimate is kept
+    // for total_pages above.
+    let live_pages = live_pages.min(crate::mm::vmemmap::vmemmap_stats().nr_pages);
     for i in 0..live_pages {
         let page = pfn_to_page(base_pfn + i);
         if page.is_null() {
