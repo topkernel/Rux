@@ -265,7 +265,7 @@ const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
 #[cfg(feature = "riscv64")]
 const KERNEL_HEAP_PHYS: usize = 0x80C0_0000;
 #[cfg(feature = "x86_64")]
-const KERNEL_HEAP_PHYS: usize = 0x0200_0000;
+const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 
 /// Physical base of RAM and the kernel's physical load address, per arch.
 #[cfg(feature = "riscv64")]
@@ -278,16 +278,31 @@ const MEMORY_PHYS_BASE: usize = 0x0000_0000;
 const KERNEL_PHYS_LOAD_ADDR: usize = 0x0020_0000; // multiboot1 LMA
 
 /// Usable memory regions from the multiboot/e820 map (x86_64).
+///
+/// Allocation-free: this runs BEFORE the heap exists (setup_linear_mapping
+/// needs the regions first). Fill a static BSS array instead of collecting
+/// into a Vec.
 #[cfg(feature = "x86_64")]
-fn x86_boot_memory_regions() -> alloc::vec::Vec<cmdline::MemoryRegion> {
-    arch::boot::boot_memory_regions()
-        .iter()
-        .filter(|r| r.usable)
-        .map(|r| cmdline::MemoryRegion {
-            base: r.start as usize,
-            size: (r.end - r.start) as usize,
-        })
-        .collect()
+fn x86_boot_memory_regions() -> &'static [cmdline::MemoryRegion] {
+    static mut REGIONS: [cmdline::MemoryRegion; 64] =
+        [cmdline::MemoryRegion { base: 0, size: 0 }; 64];
+    let mut n = 0usize;
+    for r in arch::boot::boot_memory_regions() {
+        if !r.usable || n >= 64 {
+            continue;
+        }
+        // SAFETY: single-threaded early boot; the array is written once
+        // before any reference to it escapes.
+        unsafe {
+            REGIONS[n] = cmdline::MemoryRegion {
+                base: r.start as usize,
+                size: (r.end - r.start) as usize,
+            };
+        }
+        n += 1;
+    }
+    // SAFETY: the first n entries were just initialized.
+    unsafe { &REGIONS[..n] }
 }
 
 // Kernel main function
@@ -387,7 +402,7 @@ pub extern "C" fn rust_main() -> ! {
         let memory_regions = x86_boot_memory_regions();
 
         // Add memory regions to memblock
-        for region in &memory_regions {
+        for region in memory_regions.iter() {
             mm::memblock_add(region.base, region.size).ok();
         }
 

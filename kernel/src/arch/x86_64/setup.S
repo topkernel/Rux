@@ -54,6 +54,33 @@ setup_entry16:
 	mov	%ax, %ss
 	mov	$0x4000, %sp
 
+	/* ---- BIOS int 15h AX=E820 memory map (real mode only) ----
+	 * Entries (20B: addr u64, size u64, type u32) land at setup+0x660,
+	 * count (u16) at setup+0x658. Cap 32 entries. DS/ES = setup seg. */
+	sti
+	cld
+	xor	%ebx, %ebx		# continuation id
+	mov	$0x660, %di
+	mov	$0, %bp		# entry count
+e820_loop:
+	mov	$0xe820, %eax
+	mov	$0x534d4150, %edx	# 'SMAP'
+	mov	$20, %ecx
+	int	$0x15
+	jc	e820_done
+	cmp	$0x534d4150, %eax
+	jne	e820_done
+	inc	%bp
+	add	$20, %di
+	test	%ebx, %ebx
+	jz	e820_done
+	cmp	$32, %bp
+	jb	e820_loop
+e820_done:
+	mov	%bp, %es:0x658		# store count
+	cli
+	cld
+
 	/* A20 via port 0x92 (QEMU has it on already) */
 	inb	$0x92, %al
 	orb	$0x02, %al

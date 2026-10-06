@@ -428,8 +428,11 @@ pub const PCIE_ECAM_SIZE: u64 = 0x1000;
 /// pcie-root-port (U4 rescan) land on bus 1+. Absent functions read
 /// vendor 0xFFFF and are skipped.
 pub fn find_ecam_devices(vendor: u16, device_ids: &[u16]) -> alloc::vec::Vec<u64> {
-    #[cfg(feature = "riscv64")]
     {
+        // Arch ECAM base (riscv64 virt: 0x30000000; x86_64 q35 MMCONFIG:
+        // 0xb0000000). Both map config space at VA == ECAM phys base, so the
+        // walker is identical after the constant swap.
+        const ECAM_BASE: u64 = crate::arch::mm::memory_layout::PCIE_ECAM_BASE;
         const MAX_BUSES: u64 = 8;
         const MAX_SLOTS: u64 = 32;
         const FUNCTIONS_PER_SLOT: u64 = 8;
@@ -438,7 +441,7 @@ pub fn find_ecam_devices(vendor: u16, device_ids: &[u16]) -> alloc::vec::Vec<u64
         for bus in 0..MAX_BUSES {
             for slot in 0..MAX_SLOTS {
                 for func in 0..FUNCTIONS_PER_SLOT {
-                    let ecam_addr = RISCV_PCIE_ECAM_BASE
+                    let ecam_addr = ECAM_BASE
                         + (bus << 20)
                         + (slot * 0x8000)
                         + (func * PCIE_ECAM_SIZE);
@@ -456,12 +459,6 @@ pub fn find_ecam_devices(vendor: u16, device_ids: &[u16]) -> alloc::vec::Vec<u64
             }
         }
         found
-    }
-
-    #[cfg(not(feature = "riscv64"))]
-    {
-        let _ = (vendor, device_ids);
-        alloc::vec::Vec::new()
     }
 }
 

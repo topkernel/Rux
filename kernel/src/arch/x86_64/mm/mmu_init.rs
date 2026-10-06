@@ -1511,6 +1511,9 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
 pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
     const WINDOWS: &[(u64, u64)] = &[
         (PCIE_ECAM_BASE, PCIE_ECAM_SIZE),  // q35 MMCONFIG, 256MB
+        (0xc000_0000, 0x4000_0000),           // q35 32-bit PCI MMIO hole,
+                                             // 0xc0000000..4GB (firmware
+                                             // BARs incl. 0xfe000000 zone)
         (IOAPIC_BASE, 0x1000),
         (LAPIC_BASE, 0x1000),
     ];
@@ -1542,7 +1545,12 @@ pub fn setup_device_mappings() {
         // q35 MMCONFIG ECAM window: 256MB, 2MB-aligned — megapages.
         map_kernel_region_huge(PCIE_ECAM_BASE, PCIE_ECAM_SIZE, device_flags);
 
-        // IOAPIC + LAPIC: single 4K pages each.
+        // 32-bit PCI MMIO hole 0xc0000000..4GB: the firmware assigns virtio
+        // BARs here (observed at 0xfe000000). One full PD of 2MB leaves.
+        map_kernel_region_huge(0xc000_0000, 0x4000_0000, device_flags);
+
+        // IOAPIC + LAPIC: single 4K pages each (already covered by the hole
+        // megapages above; re-mapping the 4K pages keeps their exactness).
         map_kernel_region(IOAPIC_BASE, IOAPIC_BASE, 0x1000, device_flags);
         map_kernel_region(LAPIC_BASE, LAPIC_BASE, 0x1000, device_flags);
     }

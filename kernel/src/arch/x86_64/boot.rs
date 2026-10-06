@@ -99,7 +99,53 @@ pub fn early_boot_init() {
     unsafe {
         BOOT_MAGIC = get_boot_magic();
 
-        // ---- Memory map (mmap format: flags bit 6) ----
+        // ---- bzImage (Linux protocol): QEMU's linuxboot ROM has already
+        // patched the boot_params zero page at 0x10000 (where our setup
+        // sectors were loaded): e820_entries @ +0x1E8, e820_map @ +0x2D0
+        // (20-byte entries: addr u64, size u64, type u32; type 1 = usable),
+        // cmd_line_ptr @ +0x228. Multiboot handoff (EAX=0x2BADB002) is the
+        // other supported path. ----
+        if get_boot_magic() != 0x2BADB002 {
+            // bzImage path: the 16-bit trampoline ran BIOS int 15h E820 and
+            // stored the map at setup+0x660 with count (u16) at setup+0x658
+            // (setup is loaded at linear 0x10000).
+            let count = core::ptr::read_volatile(0x10658usize as *const u16) as usize;
+            let mut idx = 0usize;
+            for i in 0..count.min(32) {
+                // BIOS entries are 20 bytes, packed (repr(C) with u64 would
+                // stride 24 — read fields manually at 20-byte stride).
+                let base = 0x10660usize + i * 20;
+                let addr = core::ptr::read_volatile(base as *const u64);
+                let size = core::ptr::read_volatile((base + 8) as *const u64);
+                let mtype = core::ptr::read_volatile((base + 16) as *const u32);
+                BOOT_MMAP[idx] = BootMemoryRegion {
+                    start: addr,
+                    end: addr + size,
+                    usable: mtype == 1,
+                };
+                idx += 1;
+            }
+            BOOT_MMAP_COUNT = idx;
+
+            // command line from boot_params.cmd_line_ptr (setup header at
+            // 0x10000; QEMU/rom honor our cmd_line_ptr = 0x20000)
+            let cl = u64::from(core::ptr::read_volatile(0x10228usize as *const u32)) as usize;
+            if cl != 0 {
+                let src = cl as *const u8;
+                let mut i = 0usize;
+                while i < CMDLINE_MAX - 1 {
+                    let b = core::ptr::read_volatile(src.add(i));
+                    if b == 0 {
+                        break;
+                    }
+                    BOOT_CMDLINE[i] = b;
+                    i += 1;
+                }
+            }
+            return;
+        }
+
+        // ---- Multiboot path (mmap format: flags bit 6) ----
         if mbi.flags & (1 << 6) != 0 && mbi.mmap_addr != 0 && mbi.mmap_length != 0 {
             let mut off = 0u32;
             let mut idx = 0usize;

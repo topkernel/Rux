@@ -28,14 +28,14 @@ def main():
     subprocess.run([os.environ.get("OBJCOPY", "objcopy"), "-O", "binary",
                     "--only-section=.setup", out + ".setup.o", out + ".setup.bin"], check=True)
     setup = bytearray(open(out + ".setup.bin", "rb").read())
-    assert len(setup) <= 2048, "setup trampoline too big"
+    assert len(setup) <= 4096, "setup trampoline too big"
     os.unlink(out + ".setup.o"); os.unlink(out + ".setup.bin")
-    setup.extend(b"\x00" * (2048 - len(setup)))
+    setup.extend(b"\x00" * (4096 - len(setup)))
     def put(off, data):
         setup[off:off+len(data)] = data
     # syssize = kernel size in 16-byte paragraphs
     put(0x1f4, struct.pack("<I", (len(kernel) + 15) // 16))
-    put(0x1f1, bytes([3]))                             # setup_sects = 3 (4 sectors)
+    put(0x1f1, bytes([7]))                             # setup_sects = 7 (8 sectors, e820 area)
 
     with open(out, "wb") as f:
         f.write(setup)

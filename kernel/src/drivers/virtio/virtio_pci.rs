@@ -6,7 +6,7 @@
 //!
 //! Implements VirtIO device PCI transport (Modern VirtIO 1.0+)
 
-use crate::drivers::pci::{PCIConfig, vendor, virtio_device, BARType};
+use crate::drivers::pci::{PCIConfig, vendor, virtio_device, BARType, PCIBAR};
 use crate::drivers::virtio::queue;
 use crate::drivers::virtio::offset;
 use alloc::collections::btree_map::BTreeMap;
@@ -286,7 +286,15 @@ impl VirtIOPCI {
         // ========== PCI BAR address assignment ==========
         // VirtIO PCI devices require kernel to assign BAR addresses
         // Use fixed MMIO region: 0x40000000 - 0x50000000 (256MB)
+        #[cfg(feature = "riscv64")]
         const PCI_MMIO_BASE: u64 = 0x40000000;
+        // x86_64/q35: the BIOS has already enumerated PCI and assigned BARs
+        // inside the 32-bit MMIO hole; re-assigning them at a fixed window
+        // would fight the firmware (and the old window overlaps the kernel
+        // heap at phys 0x40000000). Keep the firmware values: BAR_ASSIGN_BASE
+        // is only used for size probing fallback.
+        #[cfg(feature = "x86_64")]
+        const PCI_MMIO_BASE: u64 = 0xfd000000;
 
         // Use global static variable to track MMIO offset, avoiding address conflicts between devices
         use core::sync::atomic::{AtomicU64, Ordering};
@@ -308,7 +316,7 @@ impl VirtIOPCI {
         }
 
         // Store assigned BAR info
-        let mut assigned_bars = alloc::collections::btree_map::BTreeMap::new();
+        let mut assigned_bars: alloc::collections::btree_map::BTreeMap<u8, PCIBAR> = alloc::collections::btree_map::BTreeMap::new();
 
         // Assign address for each BAR
         for &bar_idx in &bars_to_assign {
@@ -322,9 +330,18 @@ impl VirtIOPCI {
                 mmio_offset
             };
 
+            #[cfg(feature = "riscv64")]
             let bar_addr = PCI_MMIO_BASE + aligned_addr;
 
+            // x86_64: use the firmware-assigned address verbatim.
+            #[cfg(feature = "x86_64")]
+            let bar_addr = {
+                let _ = (mmio_offset, aligned_addr); // silence unused on x86
+                pci_config.read_bar(bar_idx).base_addr
+            };
+
             // Write BAR address and store returned PCIBAR object
+            #[cfg(feature = "riscv64")]
             match pci_config.assign_bar(bar_idx, bar_addr) {
                 Ok(bar_obj) => {
                     mmio_offset = aligned_addr + bar_size;
@@ -334,6 +351,17 @@ impl VirtIOPCI {
                     crate::println!("virtio-pci: ERROR - Failed to assign BAR{}: {}", bar_idx, e);
                     return Err("Failed to assign PCI BAR");
                 }
+            }
+
+            // x86_64: the firmware BAR is already programmed; keep it.
+            #[cfg(feature = "x86_64")]
+            {
+                let bar_obj = pci_config.read_bar(bar_idx);
+                if bar_obj.base_addr == 0 {
+                    crate::println!("virtio-pci: BAR{} unassigned by firmware", bar_idx);
+                    return Err("Firmware left PCI BAR unassigned");
+                }
+                assigned_bars.insert(bar_idx, bar_obj);
             }
         }
 

@@ -17,10 +17,19 @@ if [ "$MODE" = "debug" ]; then
     echo "QEMU stopped at entry; attach with: gdb ${KERNEL} -ex 'target remote :1234'"
 fi
 
+# Rootfs disk (optional): set ROOTFS=path/to/rootfs.img
+DRIVE=()
+if [ -n "$ROOTFS" ] && [ -f "$ROOTFS" ]; then
+    DRIVE=(-drive "file=$ROOTFS,if=none,id=rootfs,format=raw,file.locking=off"
+           -device virtio-blk-pci,disable-legacy=on,drive=rootfs)
+fi
+
 exec qemu-system-x86_64 \
     -M q35 -m 2G -smp 1 \
     -accel tcg,thread=single \
     -cpu max \
+    -nic none \
     -nographic -serial mon:stdio \
     $EXTRA \
+    "${DRIVE[@]}" \
     -kernel "$KERNEL"
