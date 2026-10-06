@@ -1159,17 +1159,57 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     let table1_phys = ppn1 << PAGE_SHIFT;
     let table1 = get_page_table_virt(table1_phys);
     let table1_ref = &mut *table1;
-    let pte1 = table1_ref.get(vpn1);
-    // A 2MB megapage leaf here cannot host a 4K mapping — treating its
-    // PPN as an L0 table pointer would corrupt whatever frame it names.
-    // No caller maps 4K inside the megapaged device windows today; refuse
-    // loudly to keep that invariant explicit.
+    let mut pte1 = table1_ref.get(vpn1);
+    // E8-MM: a 2MB megapage leaf cannot host a 4K entry as-is — its PPN
+    // names a frame, not a table. The old behavior REFUSED the map
+    // silently, which was correct for the kernel root's own device
+    // windows but fatal for user address spaces: every user root CLONES
+    // the low-half device megapages (PLIC at 0x0c000000, PCI MMIO —
+    // copy_kernel_mappings), so a user fixed-address mmap landing on one
+    // of those windows was dropped page by page with no error and no
+    // mapping (gnome-shell's gjs/mozjs heap cage at 0x0c000000: 64
+    // consecutive refusals, then the first cage access SIGSEGV'd at
+    // 0x0c01f0f8 — sig=11 SIGDEATH at guest+998s). Linux semantics for a
+    // mapping over an existing translation: the new mapping REPLACES
+    // it. Demote the leaf — install an L0 table whose 512 entries
+    // reproduce the megapage's translation verbatim (same phys base,
+    // same flag bits incl. U=0) — then the caller's 4K map overwrites
+    // exactly its own slot below. Per-address-space by construction:
+    // user VPN2[0..1] L1 tables are private clones, so the kernel root
+    // and every other process keep their megapage; a future
+    // copy_kernel_mappings re-clone copies the demoted table's kernel
+    // (U=0) leaf entries only, skipping any user pages mapped here.
     if pte1.is_valid() && pte1.is_leaf() {
-        crate::pr_err!(
-            "map_page: 4K map at {:#x} collides with 2MB megapage — refused",
-            virt_addr
-        );
-        return;
+        if let Some(l0_phys) = alloc_page_table() {
+            let l0 = get_page_table_virt(l0_phys);
+            // 4K-granule PPN of the 2MB-aligned base: ppn_for_2mb_page
+            // returns the 2MB-granule number (base >> 21 — the unit test
+            // caught the first version using it as 4K-granule: every
+            // demoted entry mapped phys 0x60000+ instead of 0x0c000000+).
+            // PPN[0] of the leaf is reserved/WI for megapages.
+            let base_ppn = pte1.ppn_for_2mb_page() << 9;
+            // Flag bits are positionally identical at L0 (V/R/W/X/U/G/
+            // A/D + RSW [9:8]); preserve SVPBMT/PBMT bits [63:62] too,
+            // and drop the leaf's PPN field entirely.
+            let flag_bits = (pte1.bits() & 0x3FF) | (pte1.bits() & 0xC000_0000_0000_0000);
+            for k in 0..512u64 {
+                (*l0).set(k as usize, PageTableEntry::from_bits(((base_ppn + k) << 10) | flag_bits));
+            }
+            // Single-word swap: a concurrent walker sees either the leaf
+            // or a fully populated table — both translate all 512 pages
+            // identically. The caller's page is overwritten afterwards;
+            // the trailing sfence.vma (map_page / region batch) publishes
+            // both writes before the first access.
+            let l0_ppn = l0_phys >> PAGE_SHIFT;
+            table1_ref.set(vpn1, PageTableEntry::new_table(l0_ppn));
+            pte1 = table1_ref.get(vpn1);
+        } else {
+            crate::pr_err!(
+                "map_page: L0 table alloc failed demoting megapage at {:#x}",
+                virt_addr
+            );
+            return;
+        }
     }
     let ppn0 = if pte1.is_valid() {
         pte1.ppn()
@@ -1593,6 +1633,44 @@ pub fn init() {
         let addr_space = MmStruct::new_kernel(root_ppn);
         addr_space.enable();
     }
+}
+
+/// E8-MM: the low-half (identity, va == phys) device windows the kernel
+/// maps into EVERY address space (see setup_device_mappings and
+/// copy_kernel_mappings — the kernel may access any of them from a trap
+/// while a USER satp is active, e.g. the PLIC claim read in IRQ entry).
+///
+/// `clear_pte` consults this so that unmapping a user page that was
+/// mapped OVER one of these windows (possible since map_page started
+/// demoting megapages for user fixed-address mmaps — Linux MAP_FIXED
+/// replace semantics) RESTORES the device translation instead of
+/// punching an unmapped hole the kernel would page-fault into on this
+/// mm's satp (claim at 0x0c201004: fault in S-mode = KERNPANIC).
+///
+/// Returns the raw PTE bits of the device translation for a page inside
+/// a window (identity phys, V|R|W|A|D — the same flags
+/// setup_device_mappings installs), or None for ordinary user VAs.
+pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
+    const WINDOWS: &[(u64, u64)] = &[
+        (CLINT_BASE, 0x1_0000),                                // CLINT
+        (PLIC_BASE, 0x21_0000),                                // PLIC prio/pending/enable/contexts
+        (VIRTIO_MMIO_BASE & !0xFFF, 0x9_000),                  // UART + virtio-mmio slots
+        (crate::drivers::rtc::GOLDFISH_RTC_BASE, crate::drivers::rtc::GOLDFISH_RTC_SIZE),
+        (PCIE_ECAM_BASE, 0x800_000),                           // PCIe ECAM buses 0-7
+        (PCI_MMIO_BASE, 0x1000_0000),                          // PCI MMIO BAR window
+    ];
+    let page = va & !0xFFF;
+    for &(base, size) in WINDOWS {
+        if page >= base && page + 0x1000 <= base + size {
+            let device_flags = PageTableEntry::V
+                | PageTableEntry::R
+                | PageTableEntry::W
+                | PageTableEntry::A
+                | PageTableEntry::D;
+            return Some(((page >> PAGE_SHIFT) << 10) | device_flags);
+        }
+    }
+    None
 }
 
 /// Setup device mappings (called after fixmap stage is ready)

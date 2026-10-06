@@ -164,6 +164,21 @@ if [ -f "$ORPHAN_STORM_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; 
 fi
 
 
+# Build + install the E8 megapage-demotion E2E probe (static glibc;
+# fixed-address 4K mmap over the cloned PLIC 2MB megapage — the
+# gnome-shell gjs heap-cage SIGSEGV repro: touch, munmap, re-map).
+MEGAPAGE_MMAP_SRC="$PROJECT_ROOT/test/megapage_mmap.c"
+if [ -f "$MEGAPAGE_MMAP_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing megapage_mmap to /test/megapage_mmap..."
+    if riscv64-linux-gnu-gcc -static -O2 \
+         -o "$STAGING/test/megapage_mmap" "$MEGAPAGE_MMAP_SRC"; then
+        chmod +x "$STAGING/test/megapage_mmap"
+    else
+        echo "Warning: megapage_mmap failed to compile (skipped)"
+        rm -f "$STAGING/test/megapage_mmap"
+    fi
+fi
+
 # Build + install the core dump E2E probe (static glibc, with -g so the
 # host-side gdb --core symbolization of the crash PC works out of the
 # box; raises RLIMIT_CORE then takes a NULL-deref SIGSEGV).

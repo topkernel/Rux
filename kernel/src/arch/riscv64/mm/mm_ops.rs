@@ -629,7 +629,20 @@ impl MmStruct {
                 continue;
             }
 
-            if let Some((ppn_val, _pte_bits)) = ppn {
+            if let Some((ppn_val, pte_bits)) = ppn {
+                // E8-MM: a valid leaf WITHOUT the U bit is a KERNEL
+                // translation the user VA range overlaps (device windows
+                // cloned into every root, or one RESTORED by clear_pte
+                // after the user mapping over it was unmapped). It is not
+                // this mm's page: no rmap entry, no refcount, no PTE to
+                // clear — freeing or punching it corrupts kernel MMIO
+                // access (also closes the pre-existing hole where
+                // munmap over an untouched cloned MMIO page zeroed the
+                // kernel's PTE).
+                if pte_bits & PageTableEntry::U == 0 {
+                    addr += PAGE_SIZE_USIZE;
+                    continue;
+                }
                 // Device frames (virtio-gpu framebuffer) are not RAM pages —
                 // never put_page/free them (accounting corruption otherwise).
                 {
@@ -711,13 +724,27 @@ impl MmStruct {
 
         let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
         let pte1 = (*table1).get(vpn1);
-        if !pte1.is_valid() {
+        // A still-megapaged L1 leaf means no user page was ever mapped at
+        // this VA (user maps over a megapage demote it first) — nothing to
+        // clear, and treating the leaf's frame as an L0 table would write
+        // into MMIO memory.
+        if !pte1.is_valid() || pte1.is_leaf() {
             return;
         }
 
         let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
 
-        (*table0).set(vpn0, PageTableEntry::from_bits(0));
+        // E8-MM: if this VA sits inside a kernel low-half device window
+        // (PLIC/ECAM/PCI-MMIO/UART/...), the PTE being cleared may cover
+        // a device page the user mapped over (megapage demotion made that
+        // possible — Linux MAP_FIXED replace semantics). RESTORE the
+        // device translation instead of writing 0: the kernel accesses
+        // these registers from traps on the CURRENT satp (PLIC claim in
+        // IRQ entry), and a hole here is an S-mode page fault —
+        // KERNPANIC. Ordinary user VAs (the None case) clear to 0 as
+        // before.
+        let new_bits = super::mmu_init::kernel_device_window_pte(virt).unwrap_or(0);
+        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
     }
 
     /// Rewrite the leaf-PTE permission flags for [start, start+size) in the

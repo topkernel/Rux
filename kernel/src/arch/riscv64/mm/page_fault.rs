@@ -193,7 +193,15 @@ fn try_expand_stack(
     // mapped", both allocate+zero (+read for file VMAs), and the second
     // map_page would orphan the first page (refcount 1, mapcount 0,
     // unreclaimable) and silently discard stores landed in it.
-    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }.is_some() {
+    // E8-MM: same device-window-hole rule as the entry walk (see
+    // pte_counts_as_mapped) — a restored kernel PTE must not be mistaken
+    // for the winner's mapping here, or this path "Handles" forever
+    // against it while the user instruction keeps refaulting.
+    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+        .map_or(false, |(_ppn, bits)| {
+            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+        })
+    {
         drop(_pte_guard);
         // Lost the race: free our exclusively-owned fresh page and let the
         // caller retry — the next entry sees the mapping present.
@@ -274,6 +282,25 @@ fn try_expand_stack(
 /// 3. If COW page, return CowPending
 /// 4. If unmapped, allocate new page (zero anonymous pages)
 /// 5. Update page table, set correct permission bits
+/// E8-MM: does a leaf PTE (raw bits) at `va` count as "mapped" for a
+/// fault on this address space? A valid KERNEL (U=0) PTE inside a
+/// low-half device window is the RESTORE fill clear_pte leaves behind
+/// after a user mapping over the window was unmapped (megapage
+/// demotion made those mmaps possible — MAP_FIXED replace semantics).
+/// A user fault there is a demand fault on the user mapping, not a
+/// protection violation: treat the device PTE as a hole and let the
+/// VMA layer decide (a stray access with no covering VMA still
+/// SIGSEGVs, just via the correct path). Caught by megapage_mmap's
+/// re-map step: the old code returned Permission denied at 0x0c008007
+/// (sig=11), and without this same rule in the R7-C3 re-check the
+/// demand path spun forever "Handling" refaults against the restored
+/// kernel PTE.
+#[inline]
+fn pte_counts_as_mapped(bits: u64, va: u64) -> bool {
+    !(bits & PageTableEntry::U == 0
+        && crate::arch::riscv64::mm::mmu_init::kernel_device_window_pte(va).is_some())
+}
+
 pub fn handle_mm_fault(
     addr_space: &AddressSpace,
     fault_addr: VirtAddr,
@@ -289,7 +316,9 @@ pub fn handle_mm_fault(
     // SAFETY: root_ppn is the address space's valid root page table PPN.
     // PageTableWalker::walk only reads page table entries.
     let already_mapped = unsafe {
-        PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).is_some()
+        PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).map_or(false, |(_ppn, bits)| {
+            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+        })
     };
 
     // If not mapped, check for a swap entry in the PTE (V=0 but non-zero bits)
@@ -559,7 +588,15 @@ file.set_pos(saved_pos);
     // mapped", both allocate+zero (+read for file VMAs), and the second
     // map_page would orphan the first page (refcount 1, mapcount 0,
     // unreclaimable) and silently discard stores landed in it.
-    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }.is_some() {
+    // E8-MM: same device-window-hole rule as the entry walk (see
+    // pte_counts_as_mapped) — a restored kernel PTE must not be mistaken
+    // for the winner's mapping here, or this path "Handles" forever
+    // against it while the user instruction keeps refaulting.
+    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+        .map_or(false, |(_ppn, bits)| {
+            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+        })
+    {
         drop(_pte_guard);
         // Lost the race: free our exclusively-owned fresh page and let the
         // caller retry — the next entry sees the mapping present.
@@ -837,7 +874,13 @@ fn handle_swap_fault(
     // R7-C3: re-check under the lock (same double-fault race as the demand
     // paths). The swap-in page is exclusively owned, so freeing on loss is
     // safe; the swap slot is freed by the winner.
-    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }.is_some() {
+    // E8-MM: device-window-hole rule applies here too (see
+    // pte_counts_as_mapped).
+    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
+        .map_or(false, |(_ppn, bits)| {
+            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+        })
+    {
         drop(_pte_guard);
         crate::mm::page_alloc::free_page(phys_addr as usize);
         // R8-4: Handled — see the demand-fault sites (no SIGSEGV for the
