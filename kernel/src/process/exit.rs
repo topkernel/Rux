@@ -627,10 +627,22 @@ pub fn do_exit(exit_code: i32) -> ! {
             use core::sync::atomic::Ordering::Relaxed;
             let u = (*current).utime_ticks.load(Relaxed);
             let s = (*current).stime_ticks.load(Relaxed);
+            // ru_maxrss propagation (Linux signal->cmaxrss): the child's
+            // resident set at exit (captured below while the mm is still
+            // alive) folds into the parent's RUSAGE_CHILDREN hiwater.
+            let rss_kb = {
+                let mm_rss = (*current)
+                    .address_space()
+                    .map(|mm| mm.rss())
+                    .unwrap_or(0);
+                mm_rss * (crate::mm::page::PAGE_SIZE / 1024) as u64
+            };
+            (*current).exit_maxrss_kb.store(rss_kb, Relaxed);
             if is_leader {
                 if let Some(parent) = crate::process::find_task_by_pid(parent_pid) {
                     (*parent).cutime_ticks.fetch_add(u, Relaxed);
                     (*parent).cstime_ticks.fetch_add(s, Relaxed);
+                    let _ = (*parent).cmaxrss_kb.fetch_max(rss_kb, Relaxed);
                 }
             } else {
                 (*leader).utime_ticks.fetch_add(u, Relaxed);

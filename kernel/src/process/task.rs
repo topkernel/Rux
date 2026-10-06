@@ -822,6 +822,14 @@ pub struct Task {
     pub stime_ticks: AtomicU64,
     pub cutime_ticks: AtomicU64,
     pub cstime_ticks: AtomicU64,
+    /// RUSAGE_CHILDREN ru_maxrss (KB): max of reaped children's resident
+    /// set at exit (Linux signal->cmaxrss). LTP getrusage03 requires the
+    /// propagation (initial.children ~= 100MB after a 100MB consumer
+    /// grandchild is reaped).
+    pub cmaxrss_kb: AtomicU64,
+    /// Resident set (KB) captured at THIS task's exit, before its mm is
+    /// dropped — the value the parent folds into cmaxrss_kb.
+    pub exit_maxrss_kb: AtomicU64,
 
     // ==================== ptrace state (P1) ====================
 
@@ -1110,6 +1118,8 @@ impl Task {
             stime_ticks: AtomicU64::new(0),
             cutime_ticks: AtomicU64::new(0),
             cstime_ticks: AtomicU64::new(0),
+            cmaxrss_kb: AtomicU64::new(0),
+            exit_maxrss_kb: AtomicU64::new(0),
             tracer_pid: AtomicU32::new(0),
             ptrace_options: AtomicU64::new(0),
             ptrace_sigdeliver: AtomicU32::new(0),

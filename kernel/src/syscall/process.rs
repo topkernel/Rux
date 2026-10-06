@@ -3747,10 +3747,16 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     let stv = (stime_ticks / HZ, (stime_ticks % HZ) * 10_000);
 
     // ru_maxrss (KB): SELF/THREAD — resident pages of the current mm;
-    // CHILDREN — approximated by the same value (children RSS hiwater is
-    // not tracked yet).
+    // CHILDREN — max reaped-child resident set at exit (cmaxrss_kb,
+    // folded in do_exit; LTP getrusage03's inherit_fork2/grandchild
+    // assertions read it).
     let maxrss_kb: u64 = if who == RUSAGE_CHILDREN {
-        0
+        crate::sched::current()
+            .map(|t| unsafe {
+                (*t).cmaxrss_kb
+                    .load(core::sync::atomic::Ordering::Relaxed)
+            })
+            .unwrap_or(0)
     } else {
         crate::sched::current()
             .and_then(|t| unsafe { (*t).address_space() })
