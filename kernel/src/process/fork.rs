@@ -113,10 +113,11 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         let regs = &mut *child_regs;
 
         // ===== Clear callee-saved registers =====
-        // CRITICAL: Clear callee-saved registers (s0-s11) for child task
+        // CRITICAL: Clear kernel-side callee-saved registers for the child
+        // (its user-side values live in the copied pt_regs)
         {
             let thread = task.thread_mut();
-            thread.s.fill(0);
+            crate::process::thread_clear_callee_saved(thread);
         }
 
         // ===== Inherit the parent's floating-point state (POSIX) =====
@@ -126,14 +127,22 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         if let Some(parent_task) = crate::sched::current() {
             // SAFETY: parent_task is the currently running task.
             unsafe {
-                (*parent_task).thread_mut().save_fpu();
-                let (pfpu, _) = {
-                    let pt = (*parent_task).thread();
-                    (pt.fpu, pt.fs)
-                };
-                let ct = task.thread_mut();
-                ct.fpu.copy_from_slice(&pfpu);
-                ct.fs = super::super::arch::pt_regs::SR_FS_CLEAN as u32;
+                #[cfg(feature = "riscv64")]
+                {
+                    (*parent_task).thread_mut().save_fpu();
+                    let pfpu = (*parent_task).thread().fpu;
+                    let ct = task.thread_mut();
+                    ct.fpu.copy_from_slice(&pfpu);
+                    ct.mark_fpu_clean();
+                }
+                #[cfg(feature = "x86_64")]
+                {
+                    (*parent_task).thread_mut().fpu_save_for_switch();
+                    let pfpu = (*parent_task).thread().fpu;
+                    let ct = task.thread_mut();
+                    ct.fpu.bytes.copy_from_slice(&pfpu.bytes);
+                    ct.mark_fpu_clean();
+                }
             }
         }
 
@@ -147,22 +156,27 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         // DO NOT clear pt_regs.s0-s11 - child should inherit parent's values!
 
         // Child process return value is 0
-        regs.a0 = 0;
-        regs.orig_a0 = 0;
+        regs.set_return_value(0);
+        #[cfg(feature = "riscv64")]
+        {
+            regs.orig_a0 = 0;
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            regs.orig_rax = 0;
+        }
 
-        // Clear SPP bit to ensure child returns to user mode
-        // SPP = bit 8 in sstatus
-        const SR_SPP: u64 = 1 << 8;
-        regs.status &= !SR_SPP;
+        // Mark the frame user-mode so the child returns to user mode
+        regs.mark_user_frame();
 
         // Use new stack if specified (CLONE_VM | CLONE_SETTLS uses this)
         if args.stack != 0 {
-            regs.sp = args.stack;
+            regs.set_user_stack_pointer(args.stack);
         }
 
         // Set TLS if requested
         if args.flags & CLONE_SETTLS != 0 {
-            regs.tp = args.tls;
+            crate::process::set_user_tls(task, args.tls);
         }
 
         // Set up thread struct for context switch
@@ -171,8 +185,8 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         }
 
         let thread = task.thread_mut();
-        thread.ra = ret_from_fork as u64;  // Return address = ret_from_fork
-        thread.sp = child_regs as u64;     // Stack pointer = pt_regs address
+        // First switch-in "returns" into ret_from_fork on the pt_regs stack
+        crate::process::thread_set_entry(thread, ret_from_fork as u64, child_regs as u64);
 
         // Callee-saved registers (s0-s11) are cleared to 0 above.
         // This is correct because:

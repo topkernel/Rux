@@ -124,9 +124,10 @@ pub(crate) fn do_execve_elf(
     secure_exec: bool,
 ) -> Result<(), i32> {
     use crate::arch::mm::{
-        alloc_and_map_to_user_table, create_user_address_space,
+        create_user_address_space,
         PAGE_SIZE, PageTableEntry, phys_to_virt, PhysAddr,
     };
+    use crate::mm::alloc_and_map_user_table as alloc_and_map_to_user_table;
 
     // Capture the trap frame ONCE, before any blocking I/O below — but
     // derive it from THE TASK, never from the per-CPU current_pt_regs()
@@ -322,6 +323,8 @@ pub(crate) fn do_execve_elf(
     // without sa_restorer and returns through this fixed page (the Linux
     // kernel uses the vDSO __vdso_rt_sigreturn stub for the same purpose;
     // Rux's vDSO is disabled). Contents: li a7,139 (rt_sigreturn); ecall.
+    // x86_64 needs no trampoline page: glibc always passes SA_RESTORER.
+    #[cfg(feature = "riscv64")]
     {
         // SAFETY: user_ppn is a fresh user page-table root; RX U flags are
         // valid PTE bits. The returned frame is freshly allocated and
@@ -452,6 +455,9 @@ pub(crate) fn do_execve_elf(
     // virt_to_phys warnings on every exec while AT_SYSINFO_EHDR stays
     // commented out — skipped until the vDSO pages come from linear-mapped
     // memory.
+    // (riscv64-only: the block encodes the riscv map_user_region ABI;
+    // x86_64 has no vDSO mapping — AT_SYSINFO_EHDR stays absent.)
+    #[cfg(feature = "riscv64")]
     #[allow(unused_variables)]
     if false {
     // P2 vDSO: map the shared time-data page (RW) and the vDSO ELF page
@@ -1032,7 +1038,9 @@ pub(crate) fn do_execve_elf(
         // 10s soft-lockups, task-list damage, do_wait children-list panics).
         // The exit path (exit_mm) already switches satp before dropping;
         // exec must too.
-        crate::arch::context::switch_mm(user_ppn, new_asid);
+        // SAFETY: user_ppn is the new image's page-table root with the
+        // kernel half mapped (create_user_address_space links it).
+        unsafe { crate::mm::switch_address_space(user_ppn, new_asid) };
 
         // Set new address space (this will drop old Arc if no other
         // references — with satp already on the new root, freeing the old
@@ -1081,29 +1089,44 @@ pub(crate) fn do_execve_elf(
         // SAFETY: current_regs was obtained from current_pt_regs() and checked for null above.
         // We are modifying the trap frame to set up the new program's entry point and stack.
         unsafe {
-            (*current_regs).epc = actual_entry;         // Entry point (interpreter or program)
-            (*current_regs).sp = adjusted_stack_top;   // New user stack
-            (*current_regs).status = SR_SPIE;          // Clear SPP, set SPIE
-            (*current_regs).tp = 0;                   // Clear TLS pointer - musl libc will reinitialize
-            (*current_regs).a0 = argc;                 // argc for C runtime
+            // Entry-frame setup per arch. Both follow the ELF_PLAT_INIT
+            // discipline: a fresh image must not inherit the old image's
+            // register state — the old frame carried the CALLER's ra, gp,
+            // and temporaries; startup code that consumes an unsaved slot
+            // (rtld_fini in a5 to __libc_start_main, lazy prologues,
+            // assertion backtraces) jumps through them — observed as fetch
+            // faults at parent-image addresses right after a successful
+            // exec. Zero everything except the ABI-defined inputs.
+            #[cfg(feature = "riscv64")]
+            {
+                (*current_regs).epc = actual_entry;         // Entry point (interpreter or program)
+                (*current_regs).sp = adjusted_stack_top;   // New user stack
+                (*current_regs).status = SR_SPIE;          // Clear SPP, set SPIE
+                (*current_regs).tp = 0;                   // Clear TLS pointer - musl libc will reinitialize
+                (*current_regs).a0 = argc;                 // argc for C runtime
 
-            // ELF_PLAT_INIT discipline: a fresh image must not inherit the
-            // old image's register state. The old frame carried the CALLER's
-            // ra (e.g. 0x10706), gp, and temporaries; startup code that
-            // consumes an unsaved slot (rtld_fini passed in a5 to
-            // __libc_start_main, lazy prologues, assertion backtraces)
-            // jumps through them — observed as fetch faults at parent-image
-            // addresses right after a successful exec. Zero everything
-            // except the ABI-defined inputs: epc, sp, tp=0, a0=argc.
-            let r = &mut *current_regs;
-            r.ra = 0;
-            r.gp = 0;
-            r.t0 = 0; r.t1 = 0; r.t2 = 0; r.t3 = 0; r.t4 = 0; r.t5 = 0; r.t6 = 0;
-            r.s0 = 0; r.s1 = 0;
-            r.s2 = 0; r.s3 = 0; r.s4 = 0; r.s5 = 0;
-            r.s6 = 0; r.s7 = 0; r.s8 = 0; r.s9 = 0; r.s10 = 0; r.s11 = 0;
-            r.a1 = 0; r.a2 = 0; r.a3 = 0; r.a4 = 0;
-            r.a5 = 0; r.a6 = 0; r.a7 = 0;
+                let r = &mut *current_regs;
+                r.ra = 0;
+                r.gp = 0;
+                r.t0 = 0; r.t1 = 0; r.t2 = 0; r.t3 = 0; r.t4 = 0; r.t5 = 0; r.t6 = 0;
+                r.s0 = 0; r.s1 = 0;
+                r.s2 = 0; r.s3 = 0; r.s4 = 0; r.s5 = 0;
+                r.s6 = 0; r.s7 = 0; r.s8 = 0; r.s9 = 0; r.s10 = 0; r.s11 = 0;
+                r.a1 = 0; r.a2 = 0; r.a3 = 0; r.a4 = 0;
+                r.a5 = 0; r.a6 = 0; r.a7 = 0;
+            }
+            #[cfg(feature = "x86_64")]
+            {
+                let r = &mut *current_regs;
+                // Fresh zeroed frame: entry, user stack, user segments,
+                // rflags.IF, and argc in the System V first-argument slot.
+                *r = crate::arch::pt_regs::PtRegs::new();
+                r.rip = actual_entry;
+                r.rsp = adjusted_stack_top;
+                r.mark_user_frame();
+                r.rflags = 1 << 9; // IF
+                r.rdi = argc;
+            }
 
             {
             use crate::arch::mm::mm_ops::PageTableWalker;

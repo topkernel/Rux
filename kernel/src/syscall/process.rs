@@ -1081,7 +1081,10 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
         },
         machine: {
             let mut a = [0u8; 65];
+            #[cfg(feature = "riscv64")]
             let s = b"riscv64\0";
+            #[cfg(feature = "x86_64")]
+            let s = b"x86_64\0";
             a[..s.len()].copy_from_slice(s);
             a
         },
@@ -2697,16 +2700,26 @@ pub fn sys_membarrier(args: SyscallArgs) -> i64 {
             // Remote fence on every other started CPU, then fence locally.
             // smp_call_function spins for completion, so the caller returns
             // only after all peers have fenced.
+            #[cfg(feature = "riscv64")]
             fn remote_fence(_arg: *mut core::ffi::c_void) {
                 // SAFETY: fence.i not needed (no SYNC_CORE flag); the
                 // read/write fence orders this CPU's memory operations.
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            }
+            #[cfg(feature = "x86_64")]
+            fn remote_fence() {
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             }
             let online = crate::arch::smp::num_started_cpus().max(1);
             let me = crate::arch::cpu_id() as usize;
             for cpu in 0..online.min(crate::config::MAX_CPUS) {
                 if cpu != me {
+                    // riscv64 takes (target, fn(*mut c_void), arg); the
+                    // x86_64 interface takes a plain Fn() closure.
+                    #[cfg(feature = "riscv64")]
                     crate::arch::ipi::smp_call_function(cpu, remote_fence, core::ptr::null_mut());
+                    #[cfg(feature = "x86_64")]
+                    crate::arch::ipi::smp_call_function(remote_fence);
                 }
             }
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -2823,8 +2836,12 @@ const SECCOMP_RET_TRACE: u32 = 0x7ff0_0000;
 const SECCOMP_RET_LOG: u32 = 0x7ffc_0000;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 
-/// AUDIT_ARCH_RISCV64: __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE | EM_RISCV(243).
+/// AUDIT_ARCH: __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE | EM_<arch>.
+/// riscv64: EM_RISCV(243); x86_64: EM_X86_64(62).
+#[cfg(feature = "riscv64")]
 const AUDIT_ARCH_RISCV64: u32 = 0x8000_0000 | 0x4000_0000 | 243;
+#[cfg(feature = "x86_64")]
+const AUDIT_ARCH_RISCV64: u32 = 0x8000_0000 | 0x4000_0000 | 62;
 
 /// Classic-BPF instruction classes/ops (uapi/linux/filter.h subset).
 const BPF_LD: u16 = 0x00;
@@ -3125,11 +3142,10 @@ fn seccomp_run(
     let mut data = [0u32; 16];
     data[0] = nr as u32;
     data[1] = AUDIT_ARCH_RISCV64;
-    data[2] = regs.epc as u32;
-    data[3] = (regs.epc >> 32) as u32;
-    let arg_words = [
-        regs.orig_a0, regs.a1, regs.a2, regs.a3, regs.a4, regs.a5,
-    ];
+    let ip = regs.instruction_pointer();
+    data[2] = ip as u32;
+    data[3] = (ip >> 32) as u32;
+    let arg_words = regs.syscall_args();
     for (i, w) in arg_words.iter().enumerate() {
         data[4 + i * 2] = *w as u32;
         data[5 + i * 2] = (*w >> 32) as u32;
@@ -4057,7 +4073,7 @@ fn shutdown_cascade(cmd: u32) {
         loop {
             // SAFETY: wfi halts the hart until an interrupt; the machine
             // is going down on the other CPU.
-            unsafe { core::arch::asm!("wfi") };
+            crate::arch::cpu::wfi();
         }
     }
 
@@ -4092,29 +4108,49 @@ fn shutdown_cascade(cmd: u32) {
     match cmd {
         LINUX_REBOOT_CMD_RESTART => {
             crate::println!("reboot: Restarting system");
-            // SBI SRST warm reset (QEMU supports it); fall back to the
-            // legacy shutdown ecall when the SBI lacks SRST.
-            if !crate::sbi::sbi_system_reset(
-                crate::sbi::srst_type::WARM_REBOOT,
-                crate::sbi::srst_reason::NONE,
-            ) {
-                sbi_legacy_shutdown();
+            #[cfg(feature = "riscv64")]
+            {
+                // SBI SRST warm reset (QEMU supports it); fall back to the
+                // legacy shutdown ecall when the SBI lacks SRST.
+                if !crate::sbi::sbi_system_reset(
+                    crate::sbi::srst_type::WARM_REBOOT,
+                    crate::sbi::srst_reason::NONE,
+                ) {
+                    sbi_legacy_shutdown();
+                }
+            }
+            #[cfg(feature = "x86_64")]
+            {
+                // No 8259/ACPI reset yet — park with interrupts waiting.
+                machine_park();
             }
         }
         _ => {
-            // HALT / POWER_OFF: the legacy SBI shutdown ecall powers the
-            // machine down under QEMU.
+            // HALT / POWER_OFF
             if cmd == LINUX_REBOOT_CMD_HALT {
                 crate::println!("reboot: System halted");
             } else {
                 crate::println!("reboot: Power down");
             }
+            #[cfg(feature = "riscv64")]
             sbi_legacy_shutdown();
+            #[cfg(feature = "x86_64")]
+            machine_park();
         }
     }
 }
 
+/// Park the CPU with interrupts waiting (x86_64 stand-in for the SBI
+/// shutdown path until an ACPI/8259 reset driver lands).
+#[cfg(feature = "x86_64")]
+fn machine_park() -> ! {
+    loop {
+        crate::arch::cpu::wfi();
+    }
+}
+
 /// SBI legacy shutdown ecall (FID 0x8) — the pre-0.3 power-off path.
+#[cfg(feature = "riscv64")]
 fn sbi_legacy_shutdown() {
     // SAFETY: privileged SBI ecall; reached only after the CAP_SYS_BOOT
     // gate in sys_reboot.
@@ -4130,7 +4166,7 @@ fn sbi_legacy_shutdown() {
     // Some SBI implementations return instead of halting — park.
     loop {
         // SAFETY: wfi halts the hart until an interrupt.
-        unsafe { core::arch::asm!("wfi") };
+        crate::arch::cpu::wfi();
     }
 }
 

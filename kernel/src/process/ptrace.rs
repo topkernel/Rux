@@ -498,7 +498,7 @@ fn dispatch_request(
                     if regs.is_null() {
                         return -EIO;
                     }
-                    let epc = (*regs).epc;
+                    let epc = (*regs).instruction_pointer();
                     match read_target_word(target, epc) {
                         Some(word) => {
                             (*target).arm_single_step(epc, word);

@@ -23,7 +23,7 @@ pub const PIT_INPUT_FREQ: u64 = 1_193_182;
 
 /// Nominal clock domain of `read_time()` — matches
 /// `crate::config::TIMER_CLOCK_FREQ_HZ` so generic cycle arithmetic
-//! keeps its units.
+/// keeps its units.
 pub const CLOCK_FREQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;
 
 /// System clock frequency (HZ) — ticks per second

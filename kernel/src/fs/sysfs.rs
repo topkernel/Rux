@@ -812,11 +812,18 @@ fn build_tree() -> Arc<KObject> {
     attr_ro(&fb0, "dev", move || b"29:0\n".to_vec());
     attr_ro(&fb0, "name", move || b"virtio-gpu\n".to_vec());
     attr_ro(&fb0, "modes", move || {
-        match crate::drivers::gpu::get_framebuffer_info() {
-            Some(info) => {
-                format!("U:{}x{}p-0\n", info.width, info.height).into_bytes()
+        #[cfg(feature = "riscv64")]
+        {
+            match crate::drivers::gpu::get_framebuffer_info() {
+                Some(info) => {
+                    format!("U:{}x{}p-0\n", info.width, info.height).into_bytes()
+                }
+                None => Vec::new(),
             }
-            None => Vec::new(),
+        }
+        #[cfg(not(feature = "riscv64"))]
+        {
+            Vec::new()
         }
     });
     mk_link(&graphics, "fb0", "../../devices/graphics/fb0");

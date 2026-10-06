@@ -2356,7 +2356,7 @@ pub fn scheduler_tick() {
                         use crate::arch::pt_regs::PtRegs;
                         let pr = current_pt_regs() as *const PtRegs;
                         if !pr.is_null() {
-                            let e = unsafe { (*pr).epc };
+                            let e = unsafe { (*pr).instruction_pointer() };
                             let mut sh = 64;
                             while sh > 0 { sh -= 4; let nb = ((e >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
                         }

@@ -183,8 +183,13 @@ impl VirtIOPCI {
         // True PCI slot number: ECAM addr bit 15..19. Dividing by the ECAM
         // function size (0x1000) inflated the slot 8x and fed a wrong IRQ
         // swizzle (review DRIV NEW-1).
+        #[cfg(feature = "riscv64")]
         let pci_slot =
             (((pci_base - crate::drivers::pci::RISCV_PCIE_ECAM_BASE) >> 15) & 0x1F) as u8;
+        // x86_64: no ECAM slot derivation until the PCI host bridge driver
+        // lands; the IRQ path is unreachable with an empty probe set.
+        #[cfg(feature = "x86_64")]
+        let pci_slot = 0u8;
 
         // Verify vendor ID and device ID
         let vendor_id = pci_config.vendor_id();
@@ -492,25 +497,15 @@ impl VirtIOPCI {
         let used_addr = virt_queue.get_used_addr();
 
         // Convert to physical addresses
-        #[cfg(feature = "riscv64")]
         let desc_phys = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(desc_addr)
         ).0;
-        #[cfg(feature = "riscv64")]
         let avail_phys = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(avail_addr)
         ).0;
-        #[cfg(feature = "riscv64")]
         let used_phys = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(used_addr)
         ).0;
-
-        #[cfg(not(feature = "riscv64"))]
-        let desc_phys = desc_addr;
-        #[cfg(not(feature = "riscv64"))]
-        let avail_phys = avail_addr;
-        #[cfg(not(feature = "riscv64"))]
-        let used_phys = used_addr;
 
         // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
         // writing descriptor table physical address split into two 32-bit writes per spec.
@@ -713,11 +708,9 @@ impl VirtIOPCI {
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // Convert virtual addresses to physical addresses
-        #[cfg(feature = "riscv64")]
         let header_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
         let resp_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(resp_ptr as u64)
         ).0;
@@ -733,12 +726,9 @@ impl VirtIOPCI {
 
         // Set data buffer descriptor (device writes)
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
-        #[cfg(feature = "riscv64")]
         let data_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(buf.as_ptr() as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let data_phys_addr = buf.as_ptr() as u64;
 
         virt_queue.set_desc(
             data_desc_idx,
@@ -890,11 +880,9 @@ impl VirtIOPCI {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        #[cfg(feature = "riscv64")]
         let header_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
         let resp_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(resp_ptr as u64)
         ).0;
@@ -909,12 +897,9 @@ impl VirtIOPCI {
         );
 
         // Data: device reads from host (no F_WRITE, opposite of read)
-        #[cfg(feature = "riscv64")]
         let data_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(buf.as_ptr() as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let data_phys_addr = buf.as_ptr() as u64;
 
         virt_queue.set_desc(
             data_desc_idx,
@@ -1087,22 +1072,17 @@ fn read_block_once(
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // Convert virtual addresses to physical addresses
-        #[cfg(feature = "riscv64")]
         let header_phys_addr = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
         let resp_phys_addr = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(resp_ptr as u64)
         ).0;
 
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
-        #[cfg(feature = "riscv64")]
         let data_phys_addr = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let data_phys_addr = buf.as_ptr() as u64;
 
         // Set request header descriptor
         virt_queue.set_desc(
@@ -1349,22 +1329,17 @@ fn write_block_once(
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // Convert virtual addresses to physical addresses
-        #[cfg(feature = "riscv64")]
         let header_phys_addr = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
         let resp_phys_addr = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(resp_ptr as u64)
         ).0;
 
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
-        #[cfg(feature = "riscv64")]
         let data_phys_addr = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let data_phys_addr = buf.as_ptr() as u64;
 
         // Set request header descriptor (device reads this)
         virt_queue.set_desc(
@@ -1577,18 +1552,12 @@ fn flush_block_once() -> Result<usize, &'static str> {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        #[cfg(feature = "riscv64")]
         let header_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let header_phys_addr = header_ptr as u64;
-        #[cfg(feature = "riscv64")]
         let resp_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(resp_ptr as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let resp_phys_addr = resp_ptr as u64;
 
         virt_queue.set_desc(
             header_desc_idx,

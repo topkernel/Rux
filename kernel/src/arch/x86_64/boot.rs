@@ -173,7 +173,7 @@ __x86_64_start:
      *   - long mode + higher-half mapping active
      *   - rsp on the low boot stack (still identity-mapped)
      *   - selectors already loaded (0x08/0x10) */
-    xorq %rbp, %rbp
+    xor rbp, rbp
     /* Keep the low boot stack for now; mm::init switches to the real
      * boot task stack when the scheduler comes up. */
     call {early_boot_init}

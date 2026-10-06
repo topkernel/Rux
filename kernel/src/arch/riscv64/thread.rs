@@ -314,6 +314,13 @@ impl ThreadStruct {
     pub fn set_tp(&mut self, tp: u64) {
         self.tp_value = tp;
     }
+
+    /// Mark the saved FPU image as a clean, valid state (fork/exec
+    /// parity with the x86_64 backend).
+    #[inline]
+    pub fn mark_fpu_clean(&mut self) {
+        self.fs = SR_FS_CLEAN as u32;
+    }
 }
 
 impl Default for ThreadStruct {

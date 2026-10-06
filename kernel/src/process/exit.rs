@@ -16,7 +16,6 @@
 
 use crate::errno;
 use crate::process::task::{Pid, Task, TaskState};
-use core::arch::asm;
 
 // ============================================================================
 // Robust list / clear_child_tid exit processing (must run while the mm lives)
@@ -499,7 +498,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         None => {
             loop {
                 // SAFETY: `wfi` is a plain hint instruction with no side effects.
-                unsafe { asm!("wfi", options(nomem, nostack)); }
+                crate::arch::cpu::wfi();
             }
         }
     };
@@ -701,22 +700,13 @@ pub fn do_exit(exit_code: i32) -> ! {
                 }
             }
             let kernel_ppn = crate::arch::mm::mmu_init::root_page_table_ppn();
-            let satp: u64;
-            // SAFETY: plain CSR read of the current satp.
-            unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp) };
-            let current_ppn = satp & 0xF_FFFF_FFFF_FFFF;
+            let current_ppn = crate::arch::mm::read_satp() as u64 & 0xF_FFFF_FFFF_FFFF;
             if current_ppn != kernel_ppn {
-                let new_satp = (8u64 << 60) | kernel_ppn;
                 // SAFETY: switching to the kernel root page table; the
                 // kernel linear mapping is present in every address space's
                 // kernel portion and in ROOT_PAGE_TABLE itself.
                 unsafe {
-                    core::arch::asm!(
-                        "csrw satp, {0}",
-                        "sfence.vma zero, zero",
-                        in(reg) new_satp,
-                        options(nostack),
-                    );
+                    crate::mm::switch_address_space(kernel_ppn, 0);
                 }
             }
         }
@@ -822,7 +812,7 @@ pub fn do_exit(exit_code: i32) -> ! {
 
             loop {
                 // SAFETY: `wfi` is a plain hint instruction with no side effects.
-                asm!("wfi", options(nomem, nostack));
+                crate::arch::cpu::wfi();
             }
         }
 
@@ -874,7 +864,7 @@ pub fn do_exit(exit_code: i32) -> ! {
 
         loop {
             // SAFETY: `wfi` is a plain hint instruction with no side effects.
-            asm!("wfi", options(nomem, nostack));
+            crate::arch::cpu::wfi();
         }
     }
 }

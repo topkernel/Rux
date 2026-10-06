@@ -408,6 +408,28 @@ pub fn init(dtb_ptr: u64) {
         }
     };
 
+    install(cmdline);
+}
+
+/// Initialize from a bootloader-provided command line (x86_64 multiboot
+/// path — no device tree). `cmdline` may be empty, in which case the
+/// default command line applies.
+#[cfg(feature = "x86_64")]
+pub fn init_from(cmdline: &str) {
+    let cmdline: &'static str = if cmdline.is_empty() {
+        DEFAULT_CMDLINE
+    } else {
+        // Leak a heap copy so the global has 'static lifetime.
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            alloc::string::String::from(cmdline),
+        ))
+    };
+    install(cmdline);
+}
+
+/// Publish the active command line and apply early printk loglevel
+/// parameters (`quiet`, `loglevel=`).
+fn install(cmdline: &'static str) {
     // Store command line arguments (use atomic operations to ensure multi-core visibility)
     let len = cmdline.len();
     let ptr = cmdline.as_ptr() as *mut u8;
