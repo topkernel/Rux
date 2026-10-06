@@ -168,7 +168,17 @@ impl InotifyInstance {
             };
             let effective = raw_mask
                 & (watch_mask | IN_ISDIR | IN_IGNORED | IN_Q_OVERFLOW | IN_UNMOUNT);
-            if effective == 0 {
+            // Linux never queues an event whose only surviving bit is the
+            // IN_ISDIR modifier: fsnotify drops the event once the watch
+            // mask intersection removes every real event bit. Queueing the
+            // bare modifier made every readdir()/open() of a watched
+            // directory deliver an IN_ISDIR-only record to watchers whose
+            // mask excludes access/open (dbus-daemon's service-dir
+            // monitors, GLib GFileMonitor, Xorg's config watches). Those
+            // watchers then saw a permanently readable inotify fd, spun
+            // their main loops (epoll_pwait hammering) at 100% CPU, and
+            // starved the whole desktop.
+            if effective == 0 || effective == IN_ISDIR {
                 return;
             }
             if inner.queue.len() >= MAX_QUEUED_EVENTS {
