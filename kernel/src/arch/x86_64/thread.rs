@@ -74,21 +74,72 @@ impl ThreadStruct {
         }
     }
 
-    /// Save FPU state before a context switch (fxsave).
+    /// Save FPU state before a context switch (fxsave64 into thread).
+    ///
+    /// Unconditional: x86_64 does no lazy-FPU tracking (no CR0.TS games),
+    /// so every switch-out just snapshots the live state.
     ///
     /// # Safety
-    /// Must run in the task's own context on the local CPU.
+    /// Must run in the task's own context on the local CPU, with the FPU
+    /// enabled (CR4.OSFXSR set by `fpu_init`).
     pub unsafe fn fpu_save_for_switch(&mut self) {
-        // X86-TODO(agent x86-trap): fxsave64 [self.fpu]
+        // SAFETY: fxsave64 writes 512 bytes at the given address; the
+        // FxsaveArea field is 16-byte aligned (repr(align(16)) and the
+        // struct layout keeps the field 16-aligned when the Task itself
+        // is 16-aligned, which the allocator honors).
+        unsafe {
+            core::arch::asm!(
+                "fxsave64 [{ptr}]",
+                ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
+                options(nostack, preserves_flags),
+            );
+        }
         self.fpu_valid = true;
     }
 
-    /// Restore FPU state after a switch-in (fxrstor).
+    /// Restore FPU state after a switch-in (fxrstor64).
+    ///
+    /// A task with no saved image (never ran FP since fork/exec) gets a
+    /// deterministic zeroed FPU instead of the previous task's registers —
+    /// cross-task numeric pollution plus information leakage otherwise
+    /// (review ARCH-H1 parity with the riscv64 twin).
     ///
     /// # Safety
     /// Must run in the task's own context on the local CPU.
     pub unsafe fn restore_fpu(&mut self) {
-        // X86-TODO(agent x86-trap): fxrstor64 [self.fpu] if fpu_valid
+        // SAFETY: fxrstor64 reads the 512-byte image written by
+        // fpu_save_for_switch (or zeroed by mark_fpu_clean); fninit +
+        // pxor give the ABI initial state when no image exists.
+        unsafe {
+            if self.fpu_valid {
+                core::arch::asm!(
+                    "fxrstor64 [{ptr}]",
+                    ptr = in(reg) self.fpu.bytes.as_ptr(),
+                    options(nostack, preserves_flags),
+                );
+            } else {
+                core::arch::asm!(
+                    "fninit",
+                    "pxor %xmm0, %xmm0",
+                    "pxor %xmm1, %xmm1",
+                    "pxor %xmm2, %xmm2",
+                    "pxor %xmm3, %xmm3",
+                    "pxor %xmm4, %xmm4",
+                    "pxor %xmm5, %xmm5",
+                    "pxor %xmm6, %xmm6",
+                    "pxor %xmm7, %xmm7",
+                    "pxor %xmm8, %xmm8",
+                    "pxor %xmm9, %xmm9",
+                    "pxor %xmm10, %xmm10",
+                    "pxor %xmm11, %xmm11",
+                    "pxor %xmm12, %xmm12",
+                    "pxor %xmm13, %xmm13",
+                    "pxor %xmm14, %xmm14",
+                    "pxor %xmm15, %xmm15",
+                    options(nostack),
+                );
+            }
+        }
     }
 
     /// Mark the FPU area as a valid zeroed image (fork/exec parity with
@@ -115,10 +166,28 @@ impl Default for ThreadStruct {
     }
 }
 
-/// Enable FPU at boot: CR4.OSFXSR + OSXMMEEXCPT, EM/MP cleared in CR0.
+/// Enable FPU at boot: CR4.OSFXSR + OSXMMEEXCPT set, CR0.EM cleared and
+/// CR0.MP set (the classic DOS-era emulation bits), then a clean x87
+/// initial state.  CR4.OSXSAVE stays clear on purpose (see the module
+/// comment): glibc's ifunc selection then stays on SSE code paths.
 ///
 /// # Safety
 /// Must be called once per CPU before any FP instruction.
 pub unsafe fn fpu_init() {
-    // X86-TODO(agent x86-trap)
+    // SAFETY: RMW of CR4/CR0 feature bits — no memory effects; fxsave
+    // area untouched.  fninit establishes the x87 initial state.
+    unsafe {
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+        cr4 |= (1 << 9) | (1 << 10); // OSFXSR | OSXMMEEXCPT
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+
+        let mut cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
+        cr0 &= !(1 << 2); // clear EM (no emulation)
+        cr0 |= 1 << 1; // set MP (monitor coprocessor)
+        core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
+
+        core::arch::asm!("fninit", options(nostack, preserves_flags));
+    }
 }

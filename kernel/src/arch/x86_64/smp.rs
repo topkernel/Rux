@@ -60,6 +60,11 @@ pub fn num_started_cpus() -> usize {
     PER_CPU.iter().filter(|c| c.started.load(Ordering::Acquire) == 1).count()
 }
 
+/// Interface parity with the riscv64 twin (main.rs boot sequence calls
+/// it): single-CPU bring-up has nothing to signal — the boot CPU IS the
+/// whole system until SIPI lands.
+pub fn signal_boot_complete() {}
+
 pub fn cpu_started(cpu: usize) -> bool {
     PER_CPU[cpu].started.load(Ordering::Acquire) == 1
 }

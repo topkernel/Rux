@@ -5,8 +5,6 @@
 //! x86_64 IPIs. Single-CPU bring-up: shootdowns are local-only; SMP
 //! (LAPIC IPI) lands with the SIPI phase.
 
-use super::mm::asid;
-
 /// Initialize IPI support
 pub fn init() {}
 
