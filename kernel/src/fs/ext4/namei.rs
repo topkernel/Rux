@@ -502,10 +502,12 @@ pub fn ext4_add_entry(
             let mut new_block = block_data.clone();
             add_entry_to_block(&mut new_block, offset, name, new_ino, file_type, block_size);
 
-            // Write block back
-            // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
+            // Write block back — ORDERED: everything this entry publishes
+            // (the new inode's table block, bitmaps, data blocks) is
+            // persisted BEFORE the entry block itself.
+            // SAFETY: same contract as write_block_from_vec.
             unsafe {
-                write_block_from_vec(fs.device, block_nr, &new_block)?;
+                write_entry_block_ordered(fs, block_nr, &new_block)?;
             }
 
             return Ok(());
@@ -522,10 +524,11 @@ pub fn ext4_add_entry(
     let mut new_block = alloc::vec![0u8; block_size];
     create_initial_entry(&mut new_block, name, new_ino, file_type, block_size);
 
-    // Write new block
-    // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
+    // Write new block — ORDERED (see the in-place path above): the freshly
+    // allocated block's bitmap bit persists before the entry that names it.
+    // SAFETY: same contract as write_block_from_vec.
     unsafe {
-        write_block_from_vec(fs.device, new_block_nr, &new_block)?;
+        write_entry_block_ordered(fs, new_block_nr, &new_block)?;
     }
 
     // Update directory inode to reference new block
@@ -624,6 +627,132 @@ fn add_entry_to_block(
 
     // Write name
     block_data[new_offset + 8..new_offset + 8 + name.len()].copy_from_slice(name);
+}
+
+/// Crash-safe ordering barrier for directory-entry writes.
+///
+/// ROOT CAUSE CONTEXT (the "ghost empty file" after non-clean shutdown):
+/// while a journal handle is active, bio::sync_dirty_buffer defers EVERY
+/// write into the buffer cache (it returns Ok leaving the buffer dirty).
+/// The op-level durability points then drain those buffers in an order
+/// unrelated to the operation's logic: bio::sync_buffers (end of mkdir)
+/// walks the hash buckets; cache eviction and the commit fast path have
+/// their own orders. A crash mid-drain could therefore persist a parent
+/// directory's entry block — the block that PUBLISHES a freshly created
+/// inode — before that inode's table block, its bitmaps, or the new
+/// directory's data block. After the reboot the path still resolves (the
+/// entry survived) but to the inode slot's STALE contents — the mode and
+/// size of whatever occupied it before — turning `mkdir /x` into an empty
+/// 0644 regular file and losing x's subtree. The journal cannot repair
+/// it: commits without revoke records take the write-through fast path
+/// and write nothing to the journal area, so recovery has no records to
+/// replay over the torn state.
+///
+/// This barrier establishes a crash-safe order around every entry write
+/// that publishes an inode (mkdir / create / symlink / link / rename):
+///   1. flush the running jbd2 transaction's registered buffers in
+///      REGISTRATION order — which is the logical modification order of
+///      the operation (bitmaps first, then the initialized inode, its
+///      data blocks, ...); re-registration keeps first position, so the
+///      order is stable,
+///   2. flush every other dirty buffer of this filesystem device except
+///      the entry block itself (the allocator's deliberately
+///      un-journaled writes: block/inode bitmaps, group descriptors,
+///      superblock counters),
+///   3. the caller then writes the entry block and syncs it DIRECTLY —
+///      last.
+/// A crash at any point leaves either "no entry" (the operation never
+/// happened; an orphan inode/block at worst) or "entry + fully
+/// initialized inode" — never an entry over a stale inode slot.
+///
+/// `skip` is the entry block about to be written (None flushes everything,
+/// used on the DELETE side: an entry removal must be durable before the
+/// inode/bitmap frees that follow it, or a crash leaves a stale entry
+/// naming a freed — and reallocatable — inode).
+///
+/// No-op without an active handle: nothing was deferred then (every
+/// metadata write synced itself in logical order already).
+fn ext4_entry_barrier(fs: &Ext4FileSystem, skip: Option<u64>) {
+    // SAFETY: get_current_handle reads this task's handle slot; null when
+    // no journaled ext4 operation is in progress on this task.
+    let handle_ptr = match unsafe { get_current_handle() } {
+        Some(p) => p,
+        None => return, // no deferral in effect — ordering already safe
+    };
+    // SAFETY: the handle lives on this task's stack for the duration of
+    // the enclosing ext4_* operation (set/clear_current_handle bracket it);
+    // we only read h_transaction and the buffer list.
+    unsafe {
+        let handle = &*handle_ptr;
+        if let Some(txn) = handle.h_transaction.clone() {
+            // Snapshot block numbers under the lock (short critical
+            // section — the synchronous I/O happens outside it).
+            let blocks: alloc::vec::Vec<u64> = {
+                let bufs = txn.t_dirty_buffers.lock();
+                bufs.iter().map(|(nr, _)| *nr).collect()
+            };
+            for nr in blocks {
+                if Some(nr) == skip {
+                    continue;
+                }
+                if let Some(bh) = bio::bread(fs.device, nr) {
+                    // Direct sync: bio::sync_dirty_buffer would defer again
+                    // under this very handle.
+                    // SAFETY: bh is a valid BufferHead from bread.
+                    if let Err(e) = (*bh).sync() {
+                        crate::pr_warn!(
+                            "ext4: entry barrier sync blk {} failed (errno {})",
+                            nr,
+                            e
+                        );
+                    }
+                    bio::brelse(bh);
+                }
+            }
+        }
+    }
+    // Everything else dirty on this device — the allocator's un-journaled
+    // metadata — still excluding the entry block.
+    if let Err(e) = bio::sync_device_buffers_excluding(fs.device, skip) {
+        crate::pr_warn!("ext4: entry barrier device flush failed (errno {})", e);
+    }
+}
+
+/// Write a directory-entry block with crash-safe ordering: run the
+/// publication barrier first, write the block, then persist the block
+/// itself LAST (write_block_from_vec's internal sync is deferred under an
+/// active journal handle, so sync directly here).
+///
+/// SAFETY: same contract as write_block_from_vec (valid device, blocknr).
+unsafe fn write_entry_block_ordered(
+    fs: &Ext4FileSystem,
+    blocknr: u64,
+    data: &[u8],
+) -> Result<(), i32> {
+    ext4_entry_barrier(fs, Some(blocknr));
+    // SAFETY: fs.device is a valid GenDisk pointer; write_block_from_vec
+    // handles the buffer lifecycle.
+    unsafe { write_block_from_vec(fs.device, blocknr, data)? };
+
+    // Persist the publishing entry now — directly, bypassing the deferral.
+    // SAFETY: get_current_handle is task-local and null-safe; bread returns
+    // a valid BufferHead whose cache content is exactly what we just wrote.
+    if unsafe { get_current_handle() }.is_some() {
+        if let Some(bh) = bio::bread(fs.device, blocknr) {
+            // SAFETY: bh is valid; sync() writes the cached content out.
+            unsafe {
+                if let Err(e) = (*bh).sync() {
+                    crate::pr_warn!(
+                        "ext4: entry block sync blk {} failed (errno {})",
+                        blocknr,
+                        e
+                    );
+                }
+            }
+            bio::brelse(bh);
+        }
+    }
+    Ok(())
 }
 
 /// Create initial entry in empty block
@@ -1431,6 +1560,14 @@ fn ext4_unlink_inner(
     // Delete directory entry
     let entry_ino = ext4_delete_entry(fs, dir_ino, name)?;
 
+    // CRASH-SAFETY (delete side): make the entry REMOVAL durable BEFORE
+    // any of the frees below (dead inode, data blocks, inode bitmap) can
+    // persist — under the active handle all of them are deferred, and the
+    // later unordered drains could otherwise land the bitmap free first,
+    // leaving a stale entry naming an inode the allocator can hand out
+    // again (the cross-link twin of the create-side ghost).
+    ext4_entry_barrier(fs, None);
+
     // Read the unlinked inode
     let mut inode = super::inode::read_inode(fs, entry_ino)?;
 
@@ -1524,6 +1661,10 @@ fn ext4_rmdir_inner(
 
     // Delete directory entry from parent
     ext4_delete_entry(fs, dir_ino, name)?;
+
+    // CRASH-SAFETY (delete side): the entry removal must be durable BEFORE
+    // the inode/bitmap/block frees below persist (see ext4_unlink_inner).
+    ext4_entry_barrier(fs, None);
 
     // Update parent link count
     let mut parent = parent_inode;
@@ -1893,6 +2034,13 @@ fn ext4_rename_inner(
 
         // Delete existing target entry
         ext4_delete_entry(fs, new_dir_ino, new_name)?;
+
+        // CRASH-SAFETY (delete side, rename-replace): the target entry's
+        // removal must be durable BEFORE the inode/bitmap/block frees below
+        // persist — same rationale as ext4_unlink_inner (a stale entry
+        // naming a freed, reallocatable inode is the create-side ghost's
+        // twin).
+        ext4_entry_barrier(fs, None);
 
         // Clean up the replaced inode
         let mut target_mut = target_inode;

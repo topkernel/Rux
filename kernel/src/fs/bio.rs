@@ -883,6 +883,62 @@ impl BlockCache {
         }
     }
 
+    /// Sync all dirty buffers of ONE device, optionally skipping a single
+    /// block, in hash order.
+    ///
+    /// Used by the ext4 directory-entry publication barrier: the skipped
+    /// block is the entry block being published, which must reach the disk
+    /// strictly AFTER every block it names (new inode table block, bitmaps,
+    /// data blocks) — the caller persists it itself, last. Order among the
+    /// flushed blocks does not matter for that invariant; only their
+    /// "all-before-the-entry" grouping does.
+    ///
+    /// Same locking discipline as sync_all (collect under per-bucket locks
+    /// with a refcount bump, sync without any lock held).
+    fn sync_all_excluding(
+        &self,
+        device: *const blkdev::GenDisk,
+        skip: Option<u64>,
+    ) -> Result<(), i32> {
+        let mut dirty_list: Vec<*mut BufferHead> = Vec::new();
+        for i in 0..self.hash_size {
+            let bucket = self.buckets[i].lock();
+            let mut current = bucket.head;
+            while let Some(entry_ptr) = current {
+                // SAFETY: entry_ptr is from the hash chain (Box::into_raw);
+                // bucket lock is held so the entry cannot be freed
+                // concurrently.
+                unsafe {
+                    let entry = &*entry_ptr;
+                    let bh = &*entry.bh;
+                    if bh.is_dirty() && bh.b_device == Some(device) && Some(bh.b_blocknr) != skip {
+                        bh.get();
+                        dirty_list.push(entry.bh);
+                    }
+                    current = entry.hash_next;
+                }
+            }
+        }
+        let mut first_error: i32 = 0;
+        for bh in &dirty_list {
+            // SAFETY: bh pointers were collected under bucket locks above and
+            // had their refcount incremented; they remain valid BufferHeads.
+            unsafe {
+                if let Err(e) = (**bh).sync() {
+                    if first_error == 0 {
+                        first_error = e;
+                    }
+                }
+            }
+            self.put(*bh);
+        }
+        if first_error != 0 {
+            Err(first_error)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Invalidate all buffers (for device removal, etc.)
     fn invalidate(&self) {
         for i in 0..self.hash_size {
@@ -1451,6 +1507,19 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
 /// Sync all dirty buffers
 pub fn sync_buffers() -> Result<(), i32> {
     get_block_cache().sync_all()
+}
+
+/// Sync all dirty buffers of ONE device, optionally skipping one block.
+///
+/// Unlike sync_dirty_buffer this flushes regardless of any active ext4
+/// journal handle: it is the escape hatch the entry-publication barrier
+/// uses to order metadata that the handle-deferred path would otherwise
+/// write back in arbitrary (hash-bucket) order.
+pub fn sync_device_buffers_excluding(
+    device: *const crate::drivers::blkdev::GenDisk,
+    skip: Option<u64>,
+) -> Result<(), i32> {
+    get_block_cache().sync_all_excluding(device, skip)
 }
 
 /// Initialize block cache (lazy init on first use)
