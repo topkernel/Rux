@@ -4,18 +4,102 @@
 //!
 //! x86_64 user-memory access.
 //!
-//! Phase 1 (this file): direct-access copies — the kernel's higher-half
-//! mappings coexist with user space and SMAP/SMEP are not enabled, so a
-//! plain Rust loop reaches user memory. Bounds are checked with
-//! `access_ok` first. An unmapped/unfaultable user page still takes a
-//! kernel #PF: X86-TODO(agent x86-trap) replaces the copy cores with
-//! exception-table-bracketed asm (`__ex_table` windows) so faults land
-//! in `exception::fixup_exception` and return short counts / None,
-//! exactly like the riscv64 twin.
+//! Copy cores are `rep movsb`/`rep stosb` loops bracketed with
+//! `__ex_table` entries: the kernel's higher-half mappings coexist with
+//! user space and SMAP/SMEP are not enabled, so plain string ops reach
+//! user memory, and a #PF on an unmapped/unfaultable user page lands in
+//! the fixup (see arch/x86_64/mm/exception.rs `fixup_exception`) instead
+//! of the KernelPanic path — the copy then returns a short count, exactly
+//! like the riscv64 twin's SUM-bracketed copies.
+//!
+//! Restartability is the load-bearing property: the architecture
+//! guarantees that an exception in the middle of a REP string leaves
+//! RCX = remaining iterations and RSI/RDI past the completed ones, so
+//! the fixup only has to move RCX into the return register.
+//!
+//! `get_user`/`put_user` (scalar accesses) remain direct loads/stores:
+//! they are access_ok-gated single-word touches whose fault window is
+//! one instruction; converting them is a later micro-hardening step.
 
 use super::mm::memory_layout::user_addr::USER_END;
 
 pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
+
+// asm copy cores (AT&T syntax — global_asm defaults to Intel on x86).
+core::arch::global_asm!(
+    r#"
+.section .text.uaccess
+.align 8
+
+/* __x64_copy_to_user: rdi = user dst, rsi = kernel src, rdx = n.
+ * Returns rax = bytes NOT copied. */
+.global __x64_copy_to_user
+.hidden __x64_copy_to_user
+__x64_copy_to_user:
+    movq %rdx, %rcx
+    testq %rcx, %rcx
+    jz 2f
+    cld
+1:  rep movsb
+    .pushsection __ex_table, "a"
+    .balign 8
+    .quad 1b
+    .quad 3f
+    .popsection
+2:  movq %rcx, %rax          /* rcx == 0 on completion */
+    ret
+3:  movq %rcx, %rax          /* fault mid-copy: rcx = remaining */
+    ret
+
+/* __x64_copy_from_user: rdi = kernel dst, rsi = user src, rdx = n.
+ * Returns rax = bytes NOT copied. */
+.global __x64_copy_from_user
+.hidden __x64_copy_from_user
+__x64_copy_from_user:
+    movq %rdx, %rcx
+    testq %rcx, %rcx
+    jz 2f
+    cld
+1:  rep movsb
+    .pushsection __ex_table, "a"
+    .balign 8
+    .quad 1b
+    .quad 3f
+    .popsection
+2:  movq %rcx, %rax
+    ret
+3:  movq %rcx, %rax
+    ret
+
+/* __x64_clear_user: rdi = user dst, rsi = n.
+ * Returns rax = bytes NOT cleared. */
+.global __x64_clear_user
+.hidden __x64_clear_user
+__x64_clear_user:
+    movq %rsi, %rcx
+    testq %rcx, %rcx
+    jz 2f
+    xorl %eax, %eax
+    cld
+1:  rep stosb
+    .pushsection __ex_table, "a"
+    .balign 8
+    .quad 1b
+    .quad 3f
+    .popsection
+2:  xorl %eax, %eax
+    ret
+3:  movq %rcx, %rax
+    ret
+"#,
+    options(att_syntax)
+);
+
+extern "C" {
+    fn __x64_copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize;
+    fn __x64_copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize;
+    fn __x64_clear_user(to: *mut u8, n: usize) -> usize;
+}
 
 /// Is the [addr, addr+size) window inside user VA space?
 pub fn access_ok(addr: usize, size: usize) -> bool {
@@ -30,11 +114,9 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if !access_ok(to as usize, n) {
         return n;
     }
-    // SAFETY: caller guarantees `from`; `to` was just bounds-checked.
-    unsafe {
-        core::ptr::copy_nonoverlapping(from, to, n);
-    }
-    0
+    // SAFETY: exception-table copy — a fault on `to` jumps to the fixup
+    // and returns the remaining count instead of faulting the kernel.
+    unsafe { __x64_copy_to_user(to, from, n) }
 }
 
 /// Copy user → kernel. Returns the number of bytes NOT copied.
@@ -45,26 +127,20 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if !access_ok(from as usize, n) {
         return n;
     }
-    // SAFETY: caller guarantees `to`; `from` was just bounds-checked.
-    unsafe {
-        core::ptr::copy_nonoverlapping(from, to, n);
-    }
-    0
+    // SAFETY: exception-table copy (see copy_to_user).
+    unsafe { __x64_copy_from_user(to, from, n) }
 }
 
 /// Zero user memory. Returns the number of bytes NOT cleared.
 ///
 /// # Safety
-/// `to` is validated by access_ok only in this phase.
+/// `to` is validated by access_ok; a fault lands in the exception table.
 pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
     if !access_ok(to as usize, n) {
         return n;
     }
-    // SAFETY: bounds-checked above.
-    unsafe {
-        core::ptr::write_bytes(to, 0, n);
-    }
-    0
+    // SAFETY: exception-table clear (see copy_to_user).
+    unsafe { __x64_clear_user(to, n) }
 }
 
 /// Read one value from user memory.
