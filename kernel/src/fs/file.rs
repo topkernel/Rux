@@ -520,6 +520,28 @@ impl FdTable {
         Self { entry: crate::sync::spinlock::Spinlock::new(entry) }
     }
 
+    /// Fork-time deep copy of a parent table: every installed descriptor
+    /// (Arc clone) and its FD_CLOEXEC bit, taken in ONE entry-lock pass.
+    /// The old loop called get_file() + get_fd_cloexec() + install_fd()
+    /// per slot — three lock round-trips over all MAX_FDS slots, ~10ms
+    /// per fork under TCG (measured: FORKPROF fd-copy ~100K CLINT cycles),
+    /// which is a third of every fork-heavy workload's budget.
+    pub fn fork_from(parent: &FdTable) -> Self {
+        let mut child_entry = Box::new(FdTableEntry {
+            fds: [const { None }; MAX_FDS],
+            cloexec_bits: [0; MAX_FDS / 64],
+            next_fd: 0,
+            count: 0,
+        });
+        let g = parent.entry.lock_irqsave();
+        child_entry.fds = g.fds.clone();
+        child_entry.cloexec_bits = g.cloexec_bits;
+        child_entry.count = g.count;
+        child_entry.next_fd = g.next_fd;
+        drop(g);
+        Self { entry: crate::sync::spinlock::Spinlock::new(child_entry) }
+    }
+
     /// RLIMIT_NOFILE ceiling for the calling task: the table size, or the
     /// task's soft limit when lower (RLIM_INFINITY = u64::MAX is masked by
     /// the min). Tasks without a Task context (early boot) are unlimited.
