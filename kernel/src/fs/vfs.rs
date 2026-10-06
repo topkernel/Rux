@@ -33,6 +33,7 @@ use alloc::format;
 use alloc::sync::Arc;
 use core::sync::atomic::Ordering;
 use crate::sync::spinlock::Spinlock;
+use crate::sync::Mutex;
 
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
@@ -86,7 +87,20 @@ pub const NAME_MAX: usize = 255;
 /// operation, a single lock is the only scheme that cannot be defeated by a
 /// rename of an ancestor between hash and use. ext4 additionally takes
 /// EXT4_BIG_LOCK inside its ops, so mutual exclusion composes.
-pub static VFS_MUTATION_LOCK: Spinlock<()> = Spinlock::new(());
+///
+/// This MUST be a sleeping lock (semaphore Mutex), not a Spinlock: the
+/// critical section spans the ext4_*_wrapper callbacks, and those take
+/// EXT4_BIG_LOCK whose lock_fair() sleeps under contention. With a
+/// Spinlock guard pinning preempt_count != 0 across that window, the
+/// sleeper's schedule() is refused by __schedule's preempt discipline and
+/// lock_fair degenerates into a hot retry loop whose dequeue_if_enqueued
+/// hammers the GRQ lock hard enough to starve the other CPU's timer tick
+/// (which needs GRQ with IRQs disabled) — the sendmsg02 early-exec
+/// machine-wide stall-quiet wedge (2/2 on main c517099, gdb frozen-state:
+/// pid sendmsg02 preempt=0x2 inside lock_fair's retry, CPU1 spinning on GRQ
+/// in scheduler_tick). All users are syscall-context directory mutators, so
+/// sleeping is legal everywhere this lock is taken.
+pub static VFS_MUTATION_LOCK: Mutex = Mutex::new();
 
 
 impl VfsPath {
@@ -1207,7 +1221,7 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     check_not_readonly(pathname)?;
 
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
+    let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // EEXIST before any mutation (Linux do_mkdirat; LTP mkdir03) — the
     // old path left the "already exists" decision to the filesystem's
@@ -1316,7 +1330,7 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
     check_not_readonly(pathname)?;
 
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
+    let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // EEXIST before any mutation (Linux sys_symlinkat; LTP symlink01
     // derivatives expect failure when the link name is taken).
@@ -1370,7 +1384,7 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
     check_not_readonly(pathname)?;
 
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
+    let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // Look up the target inode to get its ino for cache invalidation
     // (and its owner for the sticky-bit check).
@@ -1460,7 +1474,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
     }
 
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
+    let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // Look up the target inode to get its ino for cache invalidation
     // (and its owner for the sticky-bit check).
@@ -1561,7 +1575,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
 /// Create hard link - unified implementation using inode_operations
 pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
-    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
+    let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // EROFS when the DESTINATION would be created on a read-only mount.
     check_not_readonly(newpath)?;
@@ -1636,7 +1650,7 @@ pub fn vfs_rename(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note):
     // both the source and destination sequences must be atomic against a
     // concurrent creator/unlinker.
-    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
+    let _mutation_guard = VFS_MUTATION_LOCK.guard();
     // EROFS when either end lives on a read-only mount (Linux mnt_want_write
     // on both the source and destination parents).
     check_not_readonly(oldpath)?;
@@ -1818,7 +1832,7 @@ pub fn vfs_rename_exchange(oldpath: &str, newpath: &str) -> Result<(), i32> {
         return stat_file_by_path(oldpath, &mut st);
     }
 
-    let _mutation_guard = VFS_MUTATION_LOCK.lock_fair();
+    let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // Both endpoints must exist.
     let old_vpath = path_lookup(oldpath, 0)
@@ -2202,7 +2216,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // entry. Bracket the whole sequence with the coarse VFS mutation
         // lock (see VFS_MUTATION_LOCK note for the design choice).
         let _mutation_guard = if o_creat {
-            Some(VFS_MUTATION_LOCK.lock_fair())
+            Some(VFS_MUTATION_LOCK.guard())
         } else {
             None
         };

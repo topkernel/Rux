@@ -2255,10 +2255,20 @@ impl Ext4BigLock {
         }
 
         // Contended for real. If we have no task context (early boot /
-        // IRQ) we cannot sleep — degrade to the old pure spin.
+        // IRQ) we cannot sleep — degrade to the old pure spin. A task that
+        // holds a spinlock (preempt_count != 0) cannot sleep EITHER:
+        // __schedule's preempt discipline refuses to switch it out, so the
+        // wait-then-schedule loop below degenerates into a hot retry loop
+        // whose dequeue_if_enqueued hammers the GRQ lock and starves the
+        // other CPUs' timer ticks (the sendmsg02 stall-quiet wedge — see
+        // VFS_MUTATION_LOCK's note). Spin instead: interrupts stay enabled,
+        // the scheduler is never touched, and whichever CPU runs the holder
+        // can still take its ticks and release us.
+        let can_sleep = crate::sched::current().is_some()
+            && crate::interrupt::preempt::preempt_count() == 0;
         let cur = match crate::sched::current() {
-            Some(t) => t,
-            None => {
+            Some(t) if can_sleep => t,
+            _ => {
                 loop {
                     if let Some(g) = self.try_acquire_or_recurse(pid) {
                         return g;
