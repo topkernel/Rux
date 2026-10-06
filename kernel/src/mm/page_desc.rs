@@ -930,13 +930,26 @@ pub struct PageDescStats {
 
 /// Get page descriptor statistics
 pub fn page_desc_stats() -> PageDescStats {
+    // F12: iterate only the pages the RUNNING machine actually has.
+    // MAX_PAGES is the compile-time 2 GB worst case; on a 1 GB QEMU the
+    // vmemmap pages past the real RAM are unmapped, and the dfx periodic
+    // dump walked straight into them (KERNPANIC pfault from
+    // Page::refcount — the diagnostic killed the box it was diagnosing).
+    let live_pages = {
+        let size = crate::mm::layout::phys_memory_size();
+        if size == 0 || size > PHYS_MEMORY_SIZE {
+            MAX_PAGES
+        } else {
+            size / PAGE_SIZE
+        }
+    };
     let mut stats = PageDescStats {
-        total_pages: MAX_PAGES,
+        total_pages: live_pages,
         ..Default::default()
     };
 
     let base_pfn = MIN_PFN;
-    for i in 0..MAX_PAGES {
+    for i in 0..live_pages {
         let page = pfn_to_page(base_pfn + i);
         if page.is_null() {
             continue;
