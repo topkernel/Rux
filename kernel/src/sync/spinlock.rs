@@ -10,9 +10,9 @@
 //!   lock_irqsave()  — save interrupt state + disable + preempt disable + lock
 //!   lock_bh()       — disable bottom-half (softirq) + lock
 //!
-//! Backend: TAS (test-and-set) via compare_exchange.
+//! Backend: TTAS (test-and-test-and-set) via compare_exchange.
 //! Ticket lock causes interactive-input deadlock on QEMU
-//! (likely QEMU's amoadd.w emulation bug), so TAS is used for now.
+//! (likely QEMU's amoadd.w emulation bug), so TTAS is used for now.
 //!
 //! # Safety Invariants — Lock Ordering & Deadlock Prevention
 //!
@@ -64,7 +64,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(feature = "dfx-lock-owner")]
 use core::sync::atomic::AtomicUsize;
 
-// ==================== RawSpinlock (TAS) ====================
+// ==================== RawSpinlock (TTAS) ====================
 
 pub struct RawSpinlock {
     locked: AtomicU32,
@@ -111,7 +111,7 @@ impl RawSpinlock {
     /// Spinlock deadlock threshold (iterations before warning).
     /// On SMP with QEMU emulation, brief contention is normal — PLIC IRQ
     /// claim/release, GRQ lock, etc. can take 10-100ms of spin time.
-    /// 100M iterations ≈ 100-500ms depending on CAS latency.
+    /// 100M iterations ≈ 100-500ms depending on load/CAS latency.
     const DEADLOCK_WARN_ITERS: u32 = 100_000_000;
 
     #[inline(never)]
@@ -120,13 +120,26 @@ impl RawSpinlock {
         let caller_ra: usize;
         unsafe { core::arch::asm!("mv {}, ra", out(reg) caller_ra, lateout("x1") _, options(nomem, nostack)); }
         let mut spins: u32 = 0;
-        while self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_err() {
-            spins = spins.wrapping_add(1);
-            if spins == Self::DEADLOCK_WARN_ITERS {
-                Self::deadlock_warn(self as *const Self, caller_ra);
-                spins = 0; // continue spinning (might resolve)
+        // TTAS (test-and-test-and-set, C7): one CAS to acquire; while
+        // contended, spin on a plain Relaxed load until the word reads
+        // free, then retry the CAS. Relaxed is sufficient for the spin
+        // load: it only decides WHEN to retry — the acquiring CAS pairs
+        // with the holder's Release store in unlock() and provides all
+        // necessary synchronization. The old tight CAS loop kept issuing
+        // an atomic RMW on every iteration, hammering the cacheline (and
+        // the QEMU TCG atomic slow path) for the whole hold duration.
+        loop {
+            if self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
+                break;
             }
-            core::hint::spin_loop();
+            while self.locked.load(Ordering::Relaxed) != 0 {
+                spins = spins.wrapping_add(1);
+                if spins == Self::DEADLOCK_WARN_ITERS {
+                    Self::deadlock_warn(self as *const Self, caller_ra);
+                    spins = 0; // continue spinning (might resolve)
+                }
+                core::hint::spin_loop();
+            }
         }
         // Diagnostics: record the holder AFTER the acquire (a spinner's
         // watchdog may read a stale 0 in the tiny window — acceptable).
