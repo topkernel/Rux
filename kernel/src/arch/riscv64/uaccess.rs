@@ -174,13 +174,19 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
             }
             // Valid but read-only: COW? (COW software bit 8)
             if bits & (1 << 8) != 0 {
-                if crate::arch::riscv64::mm::mm_ops::handle_cow_fault(
+                match crate::arch::riscv64::mm::mm_ops::handle_cow_fault(
                     root_ppn,
                     ArchVirtAddr::new(page as u64),
-                )
-                .is_some()
-                {
-                    resolved_any = true;
+                ) {
+                    // Retry = a sibling thread resolved the COW (or the
+                    // mapping changed) between our check and the locked
+                    // re-walk — the following write either succeeds or
+                    // faults again into the right path. Count as progress.
+                    crate::arch::riscv64::mm::CowFaultResult::Resolved
+                    | crate::arch::riscv64::mm::CowFaultResult::Retry => {
+                        resolved_any = true;
+                    }
+                    crate::arch::riscv64::mm::CowFaultResult::OutOfMemory => {}
                 }
             }
             // Non-COW read-only is a genuine protection fault — give up.
@@ -198,13 +204,15 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
         ) {
             crate::arch::riscv64::mm::page_fault::MmFaultResult::CowPending => {
                 // handle_cow_fault resolves it
-                if crate::arch::riscv64::mm::mm_ops::handle_cow_fault(
+                match crate::arch::riscv64::mm::mm_ops::handle_cow_fault(
                     root_ppn,
                     ArchVirtAddr::new(page as u64),
-                )
-                .is_some()
-                {
-                    resolved_any = true;
+                ) {
+                    crate::arch::riscv64::mm::CowFaultResult::Resolved
+                    | crate::arch::riscv64::mm::CowFaultResult::Retry => {
+                        resolved_any = true;
+                    }
+                    crate::arch::riscv64::mm::CowFaultResult::OutOfMemory => {}
                 }
             }
             crate::arch::riscv64::mm::page_fault::MmFaultResult::Handled

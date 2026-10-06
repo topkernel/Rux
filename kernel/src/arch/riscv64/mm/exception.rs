@@ -303,11 +303,22 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         crate::arch::riscv64::mm::MmFaultResult::CowPending => {
             // COW page, try copy-on-write
             match unsafe { handle_cow_fault(addr_space.root_ppn(), fault_addr) } {
-                Some(()) => {
+                crate::arch::riscv64::mm::CowFaultResult::Resolved => {
                     return MmFaultResult::Handled;
                 }
-                None => {
-                    // COW failed, possibly out of memory
+                crate::arch::riscv64::mm::CowFaultResult::Retry => {
+                    // The PTE changed between handle_mm_fault's lock-free
+                    // is_cow_page() check and the locked re-walk — a
+                    // sibling thread sharing this mm broke the COW first
+                    // (fake-OOM layer 2: the old None→OutOfMemory mapping
+                    // here SIGKILLed the race loser with the allocator
+                    // nearly full). Re-execute the instruction; if the
+                    // store still faults, the next entry sees the new PTE
+                    // state and takes the proper path.
+                    return MmFaultResult::Handled;
+                }
+                crate::arch::riscv64::mm::CowFaultResult::OutOfMemory => {
+                    // Allocating the private copy genuinely failed
                     return MmFaultResult::OutOfMemory;
                 }
             }

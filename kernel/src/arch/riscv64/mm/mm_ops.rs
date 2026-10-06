@@ -1604,8 +1604,41 @@ pub unsafe fn copy_page_table_cow(
     Some(child_root_ppn)
 }
 
+/// Outcome of a COW fault resolution attempt.
+///
+/// `handle_cow_fault` used to return `Option<()>`, collapsing two very
+/// different situations into `None`:
+///
+///  - the re-walk under `PTE_MODIFY_LOCK` no longer sees a COW PTE — a
+///    sibling thread sharing the mm (CLONE_VM) broke the COW between
+///    `handle_mm_fault`'s LOCK-FREE `is_cow_page()` check and the locked
+///    re-walk, or the mapping was concurrently unmapped/replaced;
+///  - allocating the private copy genuinely failed.
+///
+/// `do_page_fault` mapped every `None` to `OutOfMemory`, so the race loser
+/// was SIGKILLed by a fabricated OOM while the allocator sat nearly full
+/// (the "fake OOM layer 2" family: GNOME gsettings/gmain/dconf-worker
+/// deaths, OOM-FORENSIC dumps with ~450k free pages, zero corruption
+/// counters). The tri-state result keeps the two cases apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CowFaultResult {
+    /// COW resolved: PTE is writable again (exclusive fast path, or a
+    /// private copy was installed and mapped).
+    Resolved,
+    /// The PTE changed under us between the lock-free COW check and the
+    /// locked re-walk. Not an error: re-execute the faulting instruction.
+    /// If the mapping is now writable the store simply succeeds; if it was
+    /// unmapped or swapped the NEXT fault takes the proper path
+    /// (Segfault / swap-in). This mirrors Linux's do_wp_page() re-check
+    /// under the PTL, which returns VM_FAULT_RETRY/0 — never a kill —
+    /// when the pte changed.
+    Retry,
+    /// Allocating the private copy failed — a genuine out-of-memory.
+    OutOfMemory,
+}
+
 /// Handle copy-on-write page fault
-pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()> {
+pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultResult {
     let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
     use crate::mm::page_desc::pfn_to_page_mut;
 
@@ -1619,7 +1652,9 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
     let pte2 = (*root_table).get(vpn2);
     if !pte2.is_valid() {
-        return None;
+        // Walk failure at re-check time: the upper levels were restructured
+        // (teardown/fork) after handle_mm_fault's lock-free COW check.
+        return CowFaultResult::Retry;
     }
 
     let ppn1 = pte2.ppn();
@@ -1627,7 +1662,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
     let pte1 = (*table1).get(vpn1);
     if !pte1.is_valid() {
-        return None;
+        return CowFaultResult::Retry;
     }
 
     let ppn0 = pte1.ppn();
@@ -1636,12 +1671,16 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
 
     let old_pte = (*table0).get(vpn0);
     if !old_pte.is_valid() {
-        return None;
+        return CowFaultResult::Retry;
     }
 
     let old_bits = old_pte.bits();
     if old_bits & cow_flags::COW == 0 {
-        return None;
+        // COW bit gone at re-check time: a sibling thread sharing this mm
+        // broke the COW first (or the page was mprotected/remapped). The
+        // winner's PTE (possibly a fresh private copy, RW) is already
+        // installed for the whole mm — re-execute the store, do NOT kill.
+        return CowFaultResult::Retry;
     }
 
     let old_ppn = old_pte.ppn();
@@ -1688,7 +1727,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
             options(nostack)
         );
 
-        return Some(());
+        return CowFaultResult::Resolved;
     }
 
     // NOTE: put_page() on the old page is deferred until AFTER the copy and
@@ -1701,7 +1740,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
     let new_phys = match alloc_user_phys_page() {
         Some(p) => p,
         None => {
-            return None;
+            return CowFaultResult::OutOfMemory;
         }
     };
     let new_ppn = new_phys >> PAGE_SHIFT;
@@ -1771,7 +1810,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> Option<()
         }
     }
 
-    Some(())
+    CowFaultResult::Resolved
 }
 
 /// Check if page is a COW page
