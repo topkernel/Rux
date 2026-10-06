@@ -69,3 +69,20 @@ Format:
   bitmanip, no context-switch impact (V stays forbidden: kernel saves no vector state).
 - Status: MITIGATED (CPU model); toolchain hygiene item OPEN (audit every build script
   for the pin; add a post-build scan rejecting zext.b/rev8/andn/etc).
+
+## BUG-S005  Repeated core-dumping children corrupt the parent shell (SIGILL after ~2 aborting children)
+- Class: CORRUPTION → INIT-DEATH
+- Signature: children die correctly (sig=6 SIGABRT, core dumped); after the 2nd-3rd
+  such child, the PARENT sh (even PID 1) dies with sig=4 SIGILL
+- Repro (2-3 min, riscv64, -cpu rv64,zbb=true,zba=true,zbs=true, smp1 or smp2):
+  `i=0; while [ $i -lt 8 ]; do /test/linux-ltp/testcases/bin/abort01 >/dev/null 2>&1; echo "iter $i rc=$?"; i=$((i+1)); done`
+  → iter0/iter1 ok, iter2 kills the shell
+- First seen: LTP r2 baseline runner death (run_ltp.sh stops after first test)
+- Frequency: deterministic (3 iterations)
+- Logs: /tmp/repro4.log
+- Status: OPEN
+- Notes: abort01 = LTP abort() test with "dumped core" TPASS — suspicion on
+  process/coredump.rs (core writer touching wrong pages / fd) or the SIGCHLD+
+  wait return path scribbling parent user memory under repeated core dumps.
+  This is THE LTP-runner blocker; every core-dumping test kills the runner.
+  abs01 loops (no core dump) are clean at 5+ iterations.
