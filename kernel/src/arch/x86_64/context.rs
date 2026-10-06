@@ -41,6 +41,18 @@ extern "C" {
     fn __switch_to(prev: *mut Task, next: *mut Task);
 }
 
+/// Switch the address-space root (interface parity with the riscv64
+/// twin's switch_mm; called from exec/exit paths outside context_switch).
+///
+/// # Safety
+/// `next_ppn` must be a live page-table root PPN.  `asid` is ignored —
+/// PCID is disabled at bring-up (see mm/asid.rs) and the CR3 reload
+/// flushes non-global translations by itself.
+pub unsafe fn switch_mm(next_ppn: u64, _asid: u16) {
+    // SAFETY: caller guarantees a valid PML4 physical address.
+    unsafe { write_cr3(super::mm::asid::build_satp(0, next_ppn)) };
+}
+
 // ============================================================================
 // __switch_to
 // ============================================================================

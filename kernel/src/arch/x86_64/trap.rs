@@ -1047,6 +1047,14 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 }
                 let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+            } else {
+                // The riscv64 mm layer returns KernelPanic for kernel
+                // faults; until the x86 twin grows that, do NOT silently
+                // iretq back into the faulting rip (infinite fault loop).
+                panic!(
+                    "pagefault: Segfault in kernel mode at {:#x}, rip={:#x}",
+                    fault_addr, regs.rip
+                );
             }
         }
         MmFaultResult::PermissionDenied => {
@@ -1059,6 +1067,11 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     return;
                 }
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+            } else {
+                panic!(
+                    "pagefault: PermissionDenied in kernel mode at {:#x}, rip={:#x}",
+                    fault_addr, regs.rip
+                );
             }
         }
         MmFaultResult::BusError => {
@@ -1069,6 +1082,11 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 if !sigbus_has_handler() {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
                 }
+            } else {
+                panic!(
+                    "pagefault: BusError in kernel mode at {:#x}, rip={:#x}",
+                    fault_addr, regs.rip
+                );
             }
         }
         MmFaultResult::OutOfMemory => {
@@ -1076,6 +1094,11 @@ fn handle_page_fault(regs: &mut PtRegs) {
             crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
             if regs.user_mode() {
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+            } else {
+                panic!(
+                    "pagefault: OOM in kernel mode at {:#x}, rip={:#x}",
+                    fault_addr, regs.rip
+                );
             }
         }
         MmFaultResult::KernelPanic => {
