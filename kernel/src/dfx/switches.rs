@@ -45,9 +45,19 @@ pub enum DfxSwitch {
     /// (LTP fork_procs lost seconds per 1000 forks to them); enable only
     /// while hunting the fake-OOM / stale-tree families.
     MmForensics,
+    /// Input-event payload trace: every event pushed into the evdev queues
+    /// prints a one-line record (device, type, code, value) plus the push
+    /// count. Used to hunt phantom input streams; printing happens on the
+    /// event path so it is OFF in production boots.
+    InputTrace,
+    /// epoll delivery trace: every (rate-limited) epoll_wait return prints
+    /// pid/comm plus each ready fd's number, event bits and FileOps table
+    // pointer (symbolizable against the kernel ELF) — hunts permanently
+    /// ready fds that spin epoll_pwait/ppoll callers.
+    EpollTrace,
 }
 
-const SWITCH_COUNT: usize = 5;
+const SWITCH_COUNT: usize = 7;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -59,6 +69,8 @@ impl DfxSwitch {
             DfxSwitch::PeriodicDump => 2,
             DfxSwitch::MemWatch => 3,
             DfxSwitch::MmForensics => 4,
+            DfxSwitch::InputTrace => 5,
+            DfxSwitch::EpollTrace => 6,
         }
     }
 
@@ -69,6 +81,8 @@ impl DfxSwitch {
             "periodic" => Some(DfxSwitch::PeriodicDump),
             "memwatch" => Some(DfxSwitch::MemWatch),
             "mmforensics" => Some(DfxSwitch::MmForensics),
+            "inputtrace" => Some(DfxSwitch::InputTrace),
+            "epolltrace" => Some(DfxSwitch::EpollTrace),
             _ => None,
         }
     }

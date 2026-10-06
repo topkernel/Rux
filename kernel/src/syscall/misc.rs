@@ -1291,9 +1291,13 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         0
     };
 
-    loop {
+        loop {
         let mut entries = epoll.entries.lock();
         let mut ready_events: alloc::vec::Vec<EPollEvent> = alloc::vec::Vec::new();
+        // dfx=epolltrace: identity of each ready fd (fd, file ops table) so
+        // the trace line can be symbolized against the kernel ELF.
+        let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> =
+            alloc::vec::Vec::new();
 
         for entry in entries.iter_mut() {
             // Linux epoll_wait never consumes readiness it does not deliver:
@@ -1327,6 +1331,11 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                 Some(f) if f.file_id == entry.file_id => f,
                 _ => {
                     // fd was closed (or its number reused), report error
+                    if crate::dfx::switches::enabled(
+                        crate::dfx::switches::DfxSwitch::EpollTrace,
+                    ) {
+                        trace_fds.push((entry.fd, EPOLLERR | EPOLLHUP, core::ptr::null()));
+                    }
                     ready_events.push(EPollEvent {
                         events: EPOLLERR | EPOLLHUP,
                         data: entry.data,
@@ -1373,6 +1382,15 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                 // registration did not subscribe to them — they are not
                 // maskable. Only the I/O readiness bits honor entry.events.
                 let report_mask = entry.events | EPOLLERR | EPOLLHUP;
+                if crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::EpollTrace,
+                ) {
+                    trace_fds.push((
+                        entry.fd,
+                        ep_events & report_mask,
+                        file.get_ops().map_or(core::ptr::null(), |o| o as *const _ as *const ()),
+                    ));
+                }
                 ready_events.push(EPollEvent {
                     events: ep_events & report_mask,
                     data: entry.data,
@@ -1386,6 +1404,37 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         drop(entries);
 
         if !ready_events.is_empty() {
+            // dfx=epolltrace: who got woken by which fd. Rate-limited to the
+            // first 400 deliveries plus every 2000th after, so a spinning
+            // waiter does not flood the serial console.
+            if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::EpollTrace,
+            ) {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static N: AtomicU64 = AtomicU64::new(0);
+                let n = N.fetch_add(1, Ordering::Relaxed);
+                if n < 400 || n % 2000 == 0 {
+                    if let Some(cur) = crate::sched::current() {
+                        // SAFETY: read-only comm/pid access on the current task.
+                        let (pid, comm) =
+                            unsafe { ((*cur).pid(), (*cur).comm()) };
+                        let comm_str = core::str::from_utf8(comm)
+                            .unwrap_or("?\u{0}")
+                            .trim_end_matches('\u{0}');
+                        let mut line: alloc::string::String =
+                            alloc::format!("EPTRC[{}] pid={} {} n={}", n, pid, comm_str, ready_events.len());
+                        for (fd, ev, ops) in trace_fds.iter().take(8) {
+                            line.push_str(&alloc::format!(
+                                " fd={} ev={:#x} ops={:#x}",
+                                fd,
+                                ev,
+                                *ops as usize
+                            ));
+                        }
+                        crate::pr_info!("{}", line);
+                    }
+                }
+            }
             let count = ready_events.len().min(maxevents as usize);
             // SAFETY: events_ptr validated with access_ok; copy_to_user is
             // the exception-table copy path (SUM=0 safe). A fault (e.g. a

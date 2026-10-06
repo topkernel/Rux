@@ -776,6 +776,22 @@ fn fill_capabilities(
 
 /// Push event to evdev device
 pub fn push_input_event(is_pointer: bool, event: InputEvent) {
+    // dfx=inputtrace: payload trace to hunt phantom event streams. Prints
+    // every event with a monotonically increasing ordinal so serial-log
+    // frequency analysis works; gated by a runtime switch (default OFF).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+        use core::sync::atomic::AtomicU64;
+        static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = TRACE_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::pr_info!(
+            "INPTRC[{}] dev={} type={:#04x} code={:#04x} value={}",
+            seq,
+            if is_pointer { "ptr" } else { "kbd" },
+            event.type_,
+            event.code,
+            event.value
+        );
+    }
     // Keyboard events feed the Ctrl-Alt-Del detector (SA_CAD semantics):
     // track Ctrl/Alt state and latch on a Delete press with both held.
     // Called from the evdev read/poll path — task context — but latching
