@@ -24,17 +24,21 @@ pub fn test_pipe2() {
     test_assert!(!pipe.is_read_closed() && !pipe.is_write_closed(), "Pipe::new valid state");
 
     // Test 2: PipeBuffer initial state
-    // Note: PipeBuffer uses circular buffer, available_write() returns size - 1
+    // Note: PipeBuffer is a ring that keeps one slot empty to distinguish
+    // full from empty. Since 22ff21a ("LTP round 3") PipeBuffer::new(N)
+    // allocates N+1 slots so the pipe can hold the FULL N bytes (F_GETPIPE_SZ
+    // reported N but a full N-byte write used to return N-1 — LTP pipe2_04).
+    // available_write() on a fresh buffer is therefore N, not N-1.
     let mut buf = PipeBuffer::new(4096);
     test_assert_eq!(buf.available_read(), 0, "PipeBuffer initial available_read == 0");
-    test_assert_eq!(buf.available_write(), 4095, "PipeBuffer initial available_write == size-1");
+    test_assert_eq!(buf.available_write(), 4096, "PipeBuffer initial available_write == capacity");
 
     // Test 3: PipeBuffer write and read roundtrip
     let data = [0xDEu8; 100];
     let written = buf.write(&data);
     test_assert_eq!(written, 100, "PipeBuffer write 100 bytes");
     test_assert_eq!(buf.available_read(), 100, "PipeBuffer available_read after write");
-    test_assert_eq!(buf.available_write(), 3995, "PipeBuffer available_write after write (size-1-read)");
+    test_assert_eq!(buf.available_write(), 3996, "PipeBuffer available_write after write (capacity-read)");
 
     let mut read_buf = [0u8; 100];
     let read = buf.read(&mut read_buf);

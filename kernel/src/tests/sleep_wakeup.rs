@@ -60,6 +60,20 @@ pub fn test_sleep_and_wakeup() {
         test_fail("wake_up running task", "should return false");
     }
 
+    // Task::wake_up (the first call above) ENQUEUES the task into the live
+    // scheduler run queue. This Task lives on the boot stack — once this
+    // function returns the frame is reused by later tests and the timeline
+    // would hold a dangling pointer. The next pick walk (e.g. the
+    // sys_sched_yield test 40 groups later) then read garbage through the
+    // stale pointer: the cgroup-chain check in the fair pick path loaded
+    // cpu_throttled from address 0xffffffff000000cc and KERNPANIC'd
+    // (pfault, then all CPUs DEADLOCK-detected on the GRQ lock the
+    // panicking CPU still held). The suite only stayed green while the
+    // reused stack bytes happened to keep the entry skippable — any test
+    // layout change flipped it back on. Remove the task from the run
+    // queue before the frame goes away.
+    crate::sched::dequeue_if_enqueued(&task);
+
     // Test 4: Verify sleep function exists
     test_pass("sleep function available");
 

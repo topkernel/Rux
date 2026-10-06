@@ -35,24 +35,27 @@ fn test_basic_link() {
             let newpath = "/test_link_hardlink.txt";
             match file_link(oldpath, newpath) {
                 Ok(()) => {
-                    // Verify both paths point to same file
-                    let sb = unsafe { crate::fs::rootfs::get_rootfs() };
-                    if !sb.is_null() {
-                        let old_node = unsafe { (*sb).lookup(oldpath) };
-                        let new_node = unsafe { (*sb).lookup(newpath) };
-
-                        match (old_node, new_node) {
-                            (Some(o), Some(n)) => {
-                                // Check if inode numbers are the same
-                                if o.ino == n.ino {
-                                    test_pass("link same inode");
-                                } else {
-                                    test_fail("link", "different inodes");
-                                }
+                    // Verify both paths point to same file. NOTE: do NOT
+                    // verify through rootfs::get_rootfs().lookup() — that
+                    // walks the RAM-rootfs node tree, which ext4 (auto-
+                    // mounted over "/") shadows for every VFS syscall;
+                    // files created via file_open/file_link live on the
+                    // ext4 side and the RAM lookup can never see them
+                    // (that mismatch is what made this test fail on every
+                    // run). stat_file_by_path resolves through the same
+                    // VFS path the link went through.
+                    use crate::fs::stat_file_by_path;
+                    let (mut st_old, mut st_new) = (crate::fs::Stat::default(), crate::fs::Stat::default());
+                    match (stat_file_by_path(oldpath, &mut st_old), stat_file_by_path(newpath, &mut st_new)) {
+                        (Ok(()), Ok(())) => {
+                            if st_old.st_ino == st_new.st_ino {
+                                test_pass("link same inode");
+                            } else {
+                                test_fail("link", "different inodes");
                             }
-                            _ => {
-                                test_fail("link", "path not found");
-                            }
+                        }
+                        _ => {
+                            test_fail("link", "path not found");
                         }
                     }
                 }
@@ -92,17 +95,16 @@ fn test_link_persistence() {
         // Delete original filename
         match file_unlink(oldpath) {
             Ok(()) => {
-                // Verify links still exist
-                let sb = unsafe { crate::fs::rootfs::get_rootfs() };
-                if !sb.is_null() {
-                    let link1 = unsafe { (*sb).lookup(linkpath1) };
-                    let link2 = unsafe { (*sb).lookup(linkpath2) };
-
-                    if link1.is_some() && link2.is_some() {
-                        test_pass("link persistence after unlink");
-                    } else {
-                        test_fail("link persistence", "links disappeared");
-                    }
+                // Verify links still exist — through the VFS (stat), not
+                // the shadowed RAM-rootfs tree (see test_basic_link).
+                use crate::fs::stat_file_by_path;
+                let (mut st1, mut st2) = (crate::fs::Stat::default(), crate::fs::Stat::default());
+                if stat_file_by_path(linkpath1, &mut st1).is_ok()
+                    && stat_file_by_path(linkpath2, &mut st2).is_ok()
+                {
+                    test_pass("link persistence after unlink");
+                } else {
+                    test_fail("link persistence", "links disappeared");
                 }
             }
             Err(e) => {
@@ -158,6 +160,16 @@ fn test_link_errors() {
     let dirname = "/test_link_dir";
     let linkname = "/test_link_dir_link";
 
+    // Pre-clean a leftover from an earlier run on the persistent ext4
+    // image (idempotent setup, see test_mkdir). Both forms are removed:
+    // a stale entry of EITHER type breaks the assertion below — a
+    // leftover DIRECTORY makes mkdir fail EEXIST (fine, link still
+    // EPERMs) but a leftover REGULAR FILE makes file_mkdir fail EEXIST
+    // AND makes the link succeed, failing the test.
+    let _ = file_unlink(dirname);
+    let _ = file_rmdir(dirname);
+    let _ = file_unlink(linkname);
+    let _ = file_rmdir(linkname);
     let _ = file_mkdir(dirname, 0o755);
 
     match file_link(dirname, linkname) {

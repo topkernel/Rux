@@ -28,6 +28,11 @@ pub fn test_mkdir_unlink() {
 fn test_mkdir() {
     // Create single level directory
     let dirname1 = "/test_mkdir_single";
+    // The ext4 rootfs persists across `make test` runs — remove a
+    // leftover from an earlier run so the create below starts clean
+    // (file_mkdir on the stale entry answered EEXIST and failed this
+    // test on every second boot of the same image).
+    let _ = file_rmdir(dirname1);
     match file_mkdir(dirname1, 0o755) {
         Ok(()) => {
             // Verify directory exists
@@ -114,6 +119,10 @@ fn test_rmdir() {
 
     // Create non-empty directory and try to remove (should fail)
     let parent_dir = "/test_rmdir_parent";
+    // Pre-clean a leftover from an earlier run of this suite on the same
+    // persistent ext4 image (idempotent setup, see test_mkdir).
+    let _ = file_unlink("/test_rmdir_parent/file.txt");
+    let _ = file_rmdir(parent_dir);
     let _ = file_mkdir(parent_dir, 0o755);
     let child_file = "/test_rmdir_parent/file.txt";
 

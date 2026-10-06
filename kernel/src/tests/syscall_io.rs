@@ -244,22 +244,29 @@ fn test_sys_ioctl() {
         test_fail("sys_ioctl TIOCSWINSZ", &alloc::format!("expected -14, got {}", ret));
     }
 
-    // ---- Test: ioctl unrecognized TTY command on fd 0 returns 0 ----
-    // Use a TTY-range command that is not explicitly handled
+    // ---- Test: ioctl unrecognized TTY command on fd 0 returns -ENOTTY ----
+    // Use a TTY-range command that is not explicitly handled. Since
+    // d63cfa2 ("unknown ioctls return ENOTTY") an unhandled 'T' command
+    // fails with ENOTTY exactly like Linux, instead of faking success.
     let ret = sys_ioctl([0, 0x5420, 0, 0, 0, 0]);
-    if ret == 0 {
-        test_pass("sys_ioctl unrecognized TTY cmd fd=0 returns 0");
+    const ENOTTY_T: i64 = 25;
+    if ret == -(ENOTTY_T as i64) {
+        test_pass("sys_ioctl unrecognized TTY cmd fd=0 returns -ENOTTY");
     } else {
-        test_fail("sys_ioctl unrecognized TTY cmd", &alloc::format!("expected 0, got {}", ret));
+        test_fail("sys_ioctl unrecognized TTY cmd", &alloc::format!("expected -25, got {}", ret));
     }
 
-    // ---- Test: ioctl unrecognized command on fd > 2 returns -ENOTTY ----
-    const ENOTTY: i64 = 25;
+    // ---- Test: ioctl on a closed fd returns -EBADF ----
+    // fd 10 is not open in the boot-task fdtable. The EBADF gate now sits
+    // ahead of the ENOTTY decision (LTP sockioctl01: a bad fd answers
+    // EBADF, not ENOTTY); the old -ENOTTY expectation asserted the
+    // pre-d63cfa2 behaviour.
+    const EBADF: i64 = 9;
     let ret = sys_ioctl([10, 0x1234, 0, 0, 0, 0]);
-    if ret == -(ENOTTY as i64) {
-        test_pass("sys_ioctl unrecognized cmd fd>2 returns -ENOTTY");
+    if ret == -(EBADF as i64) {
+        test_pass("sys_ioctl on closed fd returns -EBADF");
     } else {
-        test_fail("sys_ioctl ENOTTY", &alloc::format!("expected -25, got {}", ret));
+        test_fail("sys_ioctl closed fd", &alloc::format!("expected -9, got {}", ret));
     }
 
     // ---- Test: ioctl TIOCGWINSZ with null arg returns -EFAULT ----

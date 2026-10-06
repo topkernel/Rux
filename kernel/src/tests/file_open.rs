@@ -73,6 +73,22 @@ pub fn test_file_open() {
         // Create /test_existing.txt
         let _ = sb.create_file("/test_existing.txt", b"Hello, Rux!\n".to_vec());
     }
+    // The RAM rootfs superblock above is SHADOWED: ext4 is auto-mounted
+    // over "/" during boot, so vfs::file_open resolves into the ext4
+    // dentry tree while sb.create_file only touched the underlying RAM
+    // rootfs node tree — a file created that way is invisible to
+    // file_open (this mismatch is why "open existing file" used to fail
+    // on every run). Create the file through the same VFS path that the
+    // open test below uses.
+    {
+        match vfs::file_open("/test_existing.txt", FileFlags::O_CREAT | FileFlags::O_WRONLY | FileFlags::O_TRUNC, 0o644) {
+            Ok(fd) => { unsafe { let _ = close_file_fd(fd); } }
+            Err(_) => {
+                test_skip("open existing file", "cannot create /test_existing.txt");
+                return;
+            }
+        }
+    }
 
     // Test 1: Open existing file (should succeed)
     match vfs::file_open("/test_existing.txt", FileFlags::O_RDONLY, 0) {
@@ -117,10 +133,16 @@ pub fn test_file_open() {
     }
 
     // Test 5: O_EXCL - exclusive create new file (should succeed)
+    // Pre-clean: nothing removes /test_excl_file after this test, and the
+    // ext4 rootfs persists across `make test` runs — a leftover made the
+    // O_CREAT|O_EXCL below fail with EEXIST on every second boot of the
+    // same image.
+    let _ = crate::fs::file_unlink("/test_excl_file");
     match vfs::file_open("/test_excl_file", FileFlags::O_CREAT | FileFlags::O_EXCL | FileFlags::O_WRONLY, 0) {
         Ok(fd) => {
             test_pass("O_EXCL new file");
             unsafe { let _ = close_file_fd(fd); }
+            let _ = crate::fs::file_unlink("/test_excl_file");
         }
         Err(_) => {
             test_fail("O_EXCL new file", "create failed");
