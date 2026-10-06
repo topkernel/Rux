@@ -412,12 +412,24 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         }
     }
 
-    // R12-2: wake WHILE STILL HOLDING the bucket lock — same reasoning as
-    // WaitQueueHead::wake_up (R12-1): the waiter is still linked here, so
-    // it cannot have passed its unlink-under-this-lock and exited. Bucket
-    // -> GRQ order is safe (no GRQ-held path takes a futex bucket). The
-    // old drop-then-wake window was the deferred-wake UAF.
-    let woken_n = wake_list.len();
+        // R12-2: wake WHILE STILL HOLDING the bucket lock — same reasoning as
+        // WaitQueueHead::wake_up (R12-1): the waiter is still linked here, so
+        // it cannot have passed its unlink-under-this-lock and exited. Bucket
+        // -> GRQ order is safe (no GRQ-held path takes a futex bucket). The
+        // old drop-then-wake window was the deferred-wake UAF.
+        //
+        // C8 wake-ordering invariant (waker side): for every waiter above,
+        // (1) the task pointer was extracted from its entry under the slot
+        // lock, (2) the `woken` flag was set to true (the slot spinlock's
+        // Release store publishes it), and only then (3) Task::wake_up is
+        // invoked — in that order. Reordering loses wakeups: the moment
+        // wake_up runs, the sleeper is schedulable; a woken sleeper that
+        // polls `woken` BEFORE the flag store returns from schedule(),
+        // reads false, classifies the wake as spurious, re-checks *uaddr
+        // and goes back to sleep — the later `woken = true` is a plain
+        // store that schedules no one, and with no second FUTEX_WAKE the
+        // waiter sleeps forever despite having been woken once.
+        let woken_n = wake_list.len();
     for task in wake_list {
         if !task.is_null() {
             Task::wake_up(task);
@@ -540,6 +552,21 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // Update chain head.
         *head = Some(waiter_idx);
 
+        // C8 wake-ordering invariant (sleeper side): in order — (1) our
+        // waiter entry (task pointer, the flag the waker polls) is linked
+        // into the bucket chain, (2) the task state is stored as
+        // INTERRUPTIBLE with Release, both strictly BEFORE (3) the bucket
+        // lock is dropped and schedule() runs. The waker (futex_wake /
+        // futex_requeue) takes the same lock, so it can never observe the
+        // entry without also observing the sleeping state — Task::wake_up
+        // drops every wake of a non-sleeping task. Reordering loses
+        // wakeups: linked-but-RUNNING lets the waker consume the wake
+        // (entry marked woken, task never enqueued), and our later state
+        // store + schedule() then sleep forever; symmetrically, the
+        // post-schedule `woken` poll below must come AFTER the waker's
+        // flag store, which the waker guarantees by setting `woken`
+        // before it invokes Task::wake_up (see futex_wake_in_mm).
+        //
         // Set task state to INTERRUPTIBLE while still holding the hash lock.
         // This guarantees that any futex_wake that sees the waiter in the chain
         // will also see the task in INTERRUPTIBLE state, preventing the
@@ -742,6 +769,10 @@ pub fn futex_cleanup(task: *mut Task) {
     }
 
     // Wake the task so it can continue the exit path — done outside all bucket locks.
+    // C8: no `woken` flag is needed here (unlike futex_wake) because the
+    // target never re-sleeps: do_exit calls this after the task's last
+    // schedule(), so there is no sleeper-side poll that a reordered wake
+    // could strand.
     Task::wake_up(task);
 }
 
@@ -1035,6 +1066,19 @@ pub fn futex_requeue(
     // locks in the collecting pass; unlike futex_wake we are already past
     // those critical sections, so the PID revalidation stays as defense
     // in depth against the cross-CPU reap window.
+    //
+    // C8 wake-ordering invariant (waker side): every woken waiter had its
+    // `woken` flag set to true under the bucket lock during the pass
+    // above, strictly before these Task::wake_up calls — flag first, wake
+    // second. This is what makes waking outside the bucket lock safe for
+    // any wake source: a sleeper roused by a SIGNAL rather than by us
+    // re-acquires the slot lock, reads woken == true (our store already
+    // happened), and takes the success path instead of EINTR; a sleeper
+    // that has not run yet is woken by the calls below. Reordered
+    // (wake first, flag later) the signal-roused sleeper would read
+    // woken == false, exit with EINTR, and the later store would wake no
+    // one — the waiter's FUTEX_WAIT returns the wrong result or the
+    // requeued-to futex never completes.
     for task in wake_list {
         if !task.is_null() {
             let pid = unsafe { (*task).pid() };
@@ -1113,6 +1157,10 @@ pub fn futex_wake_op(
         }
     }
 
+    // The user-word RMW above happens under uaddr2's bucket lock so a
+    // concurrent futex_wait on uaddr2 cannot miss it; the actual wakes go
+    // through futex_wake, which carries the C8 waker-side invariant
+    // (extract task → set `woken` → Task::wake_up).
     let mut woken = futex_wake(uaddr, flags, nr_wake, FUTEX_BITSET_MATCH_ANY);
     if cmp_holds && nr_wake2 > 0 {
         let woken2 = futex_wake(uaddr2, flags, nr_wake2, FUTEX_BITSET_MATCH_ANY);
