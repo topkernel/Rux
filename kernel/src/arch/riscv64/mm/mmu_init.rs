@@ -17,6 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use super::memory_layout::*;
 use super::pagetable::*;
 use crate::mm::{MmStruct, alloc_pages, free_pages, GfpFlags};
+use crate::mm::page_desc::MAX_PAGES;
 use crate::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
 
 // ==================== Assembly Page Tables (defined in boot.S) ====================
@@ -107,6 +108,12 @@ static ALLOC_STAGE: AtomicU8 = AtomicU8::new(AllocStage::Early as u8);
 /// Get current allocation stage
 pub fn get_alloc_stage() -> AllocStage {
     AllocStage::from_u8(ALLOC_STAGE.load(Ordering::Acquire))
+}
+
+/// FORENSIC: true once the buddy allocator is the table-frame source —
+/// cheap check for the raw-free watchpoint in Zone::free_pages.
+pub fn alloc_stage_is_late() -> bool {
+    matches!(get_alloc_stage(), AllocStage::Late)
 }
 
 /// Transition to fixmap stage (MMU enabled, can use memblock)
@@ -356,16 +363,26 @@ unsafe fn free_page_table(phys_addr: u64) {
     crate::mm::page_alloc::free_pages(phys_addr as usize, 0);
 }
 
-// FORENSIC (temporary): page-table frame ledger — every Late-stage
-// alloc_page_table stamps the PPN; free_page_table clears it. A stamp on
-// an already-stamped PPN = double allocation; clearing an unstamped or
-// already-cleared PPN = double free / foreign free. Both are silent
-// address-space corruptors under concurrent fork/exec.
+// FORENSIC: page-table frame ledger — every Late-stage alloc_page_table
+// stamps the PPN; free_page_table clears it. A stamp on an already-stamped
+// PPN = double allocation; clearing an unstamped or already-cleared PPN =
+// double free / foreign free. Both are silent address-space corruptors
+// under concurrent fork/exec.
 pub struct PtLedger {
-    // Direct-hash: slot = ppn & MASK, value = ppn+1 (0 = empty). O(1),
-    // no eviction churn; a slot is reused only when the previous ppn was
-    // freed (cleared) or a genuine double-alloc collides.
-    slots: [core::sync::atomic::AtomicU64; 16384],
+    // EXACT membership: one bit per PFN of the managed physical range
+    // (PHYS_MEMORY_BASE..+PHYS_MEMORY_SIZE — MAX_PAGES bits, 64 KiB at
+    // 2 GiB). Set by stamp(), cleared by take(). Zero collisions by
+    // construction.
+    //
+    // The old 16384-slot direct hash (slot = ppn & 16383) saturated once
+    // live table frames reached a few thousand (the ppn span maps onto
+    // only span/16384 distinct slot groups — 32 at 2 GiB): unrelated
+    // tables constantly overwrote each other's stamps, and take() then
+    // REFUSED perfectly legitimate frees — every refusal permanently
+    // leaked one 4 KiB table frame, and the serial filled with false
+    // "PTLEDGER: DOUBLE-FREE REFUSED" / "FUT-STALE-TREE" reports (the
+    // fake-OOM investigation's first dead end). A bitmap cannot collide.
+    live: [core::sync::atomic::AtomicU64; MAX_PAGES / 64],
     // Boot-permanent tables (kernel root tree + Early static + Fixmap):
     // referenced by every early mm — freeing them per-mm tears down shared
     // state and feeds the frames back for reuse as live page tables (the
@@ -379,15 +396,51 @@ pub struct PtLedger {
     // tree's own tables, ~dozens), so the scan is cheap.
     boot: [core::sync::atomic::AtomicU64; 512],
     reported: core::sync::atomic::AtomicUsize,
-    freed_by: [core::sync::atomic::AtomicU32; 16384],
 }
 impl PtLedger {
     const fn new() -> Self {
         Self {
-            slots: [const { core::sync::atomic::AtomicU64::new(0) }; 16384],
+            live: [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PAGES / 64],
             boot: [const { core::sync::atomic::AtomicU64::new(0) }; 512],
             reported: core::sync::atomic::AtomicUsize::new(0),
-            freed_by: [const { core::sync::atomic::AtomicU32::new(0) }; 16384],
+        }
+    }
+    /// Bit index for an absolute PPN; None when outside the managed range.
+    #[inline]
+    fn bit_index(ppn: u64) -> Option<usize> {
+        let base = crate::mm::page_desc::MIN_PFN as u64;
+        let i = ppn.checked_sub(base)? as usize;
+        if i < MAX_PAGES {
+            Some(i)
+        } else {
+            None
+        }
+    }
+    #[inline]
+    fn live_bit(&self, ppn: u64) -> bool {
+        match Self::bit_index(ppn) {
+            Some(i) => {
+                let word = &self.live[i / 64];
+                word.load(Ordering::Relaxed) & (1u64 << (i % 64)) != 0
+            }
+            None => false,
+        }
+    }
+    #[inline]
+    fn set_live_bit(&self, ppn: u64, value: bool) -> bool {
+        // Returns the PREVIOUS bit (false for out-of-range PFNs — they are
+        // never tracked, so a take() on one is refused as before).
+        match Self::bit_index(ppn) {
+            Some(i) => {
+                let word = &self.live[i / 64];
+                let mask = 1u64 << (i % 64);
+                if value {
+                    word.fetch_or(mask, Ordering::Relaxed) & mask != 0
+                } else {
+                    word.fetch_and(!mask, Ordering::Relaxed) & mask != 0
+                }
+            }
+            None => false,
         }
     }
     fn stamp_boot(&self, ppn: u64) {
@@ -420,15 +473,20 @@ impl PtLedger {
     }
     fn stamp(&self, ppn: u64, pid: u32) {
         use core::sync::atomic::Ordering::Relaxed;
-        let slot = &self.slots[(ppn as usize) & (self.slots.len() - 1)];
-        let v = slot.load(Relaxed);
-        if v != 0 && v - 1 == ppn {
+        if self.set_live_bit(ppn, true) {
             crate::pr_err!(
                 "PTLEDGER: DOUBLE-ALLOC ppn={:#x} by pid={} (still live)",
                 ppn, pid
             );
         }
-        slot.store(ppn + 1, Relaxed);
+        // FORENSIC (fake-OOM family): alloc-side ring — pairs with
+        // PT_FREE_RING to replay a frame's full table-incarnation history.
+        {
+            let idx = PT_STAMP_CURSOR.fetch_add(1, Relaxed) % PT_FREE_RING.len();
+            PT_STAMP_RING[idx].ppn.store(ppn, Relaxed);
+            PT_STAMP_RING[idx].pid.store(pid, Relaxed);
+            PT_STAMP_RING[idx].site.store(b'S' as u64, Relaxed);
+        }
     }
     /// Returns true if the frame had a live stamp (a legitimate first
     /// free) and was cleared; false for double/foreign frees — the caller
@@ -437,21 +495,72 @@ impl PtLedger {
     /// two live page-table trees (the shared-pgd corruption family).
     fn take(&self, ppn: u64, pid: u32, site: &str) -> bool {
         use core::sync::atomic::Ordering::Relaxed;
-        let i = (ppn as usize) & (self.slots.len() - 1);
-        let slot = &self.slots[i];
-        let v = slot.load(Relaxed);
-        if v != 0 && v - 1 == ppn {
-            slot.store(0, Relaxed);
-            self.freed_by[i].store(pid, Relaxed);
+        if self.set_live_bit(ppn, false) {
+            // FORENSIC (fake-OOM family): ring of successful table frees —
+            // at a stale-tree event this names who freed each frame and from
+            // which teardown site ('r'=root, '0'=l0, '1'=l1).
+            {
+                let idx = PT_FREE_CURSOR.fetch_add(1, Relaxed) % PT_FREE_RING.len();
+                PT_FREE_RING[idx].ppn.store(ppn, Relaxed);
+                PT_FREE_RING[idx].pid.store(pid, Relaxed);
+                PT_FREE_RING[idx].site.store(site.as_bytes()[0] as u64, Relaxed);
+            }
+            // EARLY-TEARDOWN WITNESS: a registered fork-mm root is being
+            // freed. If the freeing context is NOT the registered owner and
+            // the owner task is still alive, another mm shared this root (or
+            // the tree was torn down out from under its live owner).
+            if site == "root" {
+                for k in 0..FORK_ROOTS.len() {
+                    let r = FORK_ROOTS[k].root.load(Relaxed);
+                    if r == ppn && r != 0 {
+                        let owner = FORK_ROOTS[k].owner.load(Relaxed);
+                        if owner != pid && task_pid_alive(owner) {
+                            static EARLY_REPORTS: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if EARLY_REPORTS.fetch_add(1, Relaxed) < 8 {
+                                crate::pr_err!(
+                                    "EARLY-ROOT-FREE root={:#x} owner pid={} ALIVE, freed in pid={} context",
+                                    ppn, owner, pid
+                                );
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
             return true;
         }
         if self.reported.fetch_add(1, Relaxed) < 8 {
             crate::pr_err!(
-                "PTLEDGER: DOUBLE-FREE ppn={:#x} at {} by pid={} REFUSED (prev-free pid={})",
-                ppn, site, pid, self.freed_by[i].load(Relaxed)
+                "PTLEDGER: DOUBLE-FREE ppn={:#x} at {} by pid={} REFUSED (prev-free pid={}, boot={})",
+                ppn, site, pid, pt_free_ring_prev_free_pid(ppn), self.is_boot(ppn)
             );
+            // FORENSIC (fake-OOM family): the frame's live descriptor state
+            // distinguishes "freed earlier, still on freelist" (OnFreelist,
+            // refcount 0) from "reallocated as live data page" (refcount>0,
+            // Anonymous/Lru) — both prove this tree references a frame it no
+            // longer owns.
+            {
+                let page = crate::mm::page_desc::pfn_to_page(ppn as usize);
+                if !page.is_null() {
+                    // SAFETY: read-only descriptor access on the diagnostic path.
+                    let (rc, linked, lru, anon) = unsafe {
+                        use crate::mm::page_desc::PageFlag;
+                        (
+                            (*page).refcount(),
+                            (*page).test_flag(PageFlag::OnFreelist),
+                            (*page).test_flag(PageFlag::Lru),
+                            (*page).test_flag(PageFlag::Anonymous),
+                        )
+                    };
+                    crate::pr_err!(
+                        "  PTLEDGER: frame state refcount={} on_freelist={} lru={} anon={}",
+                        rc, linked, lru, anon
+                    );
+                }
+            }
             let cur = FUT_RING_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
-            for k in 0..FUT_RING.len() {
+            for k in 0..32 {
                 let idx = (cur + FUT_RING.len() - 1 - k) % FUT_RING.len();
                 let r = FUT_RING[idx].root.load(core::sync::atomic::Ordering::Relaxed);
                 let p = FUT_RING[idx].pid.load(core::sync::atomic::Ordering::Relaxed);
@@ -464,6 +573,72 @@ impl PtLedger {
     }
 }
 pub static PT_LEDGER: PtLedger = PtLedger::new();
+
+// FORENSIC (fake-OOM family): ring of successful page-table frees, recorded
+// by PtLedger::take() — replayed when the stale-tree census fires.
+pub struct PtFreeEntry {
+    pub ppn: core::sync::atomic::AtomicU64,
+    pub pid: core::sync::atomic::AtomicU32,
+    pub site: core::sync::atomic::AtomicU64,
+}
+impl PtFreeEntry {
+    const fn new() -> Self {
+        Self {
+            ppn: core::sync::atomic::AtomicU64::new(0),
+            pid: core::sync::atomic::AtomicU32::new(0),
+            site: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+const PT_FREE_NEW: PtFreeEntry = PtFreeEntry::new();
+pub static PT_FREE_RING: [PtFreeEntry; 4096] = [PT_FREE_NEW; 4096];
+pub static PT_FREE_CURSOR: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+pub static PT_STAMP_RING: [PtFreeEntry; 4096] = [PT_FREE_NEW; 4096];
+pub static PT_STAMP_CURSOR: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+// FORENSIC (fake-OOM family): fork-mm registry — every AddressSpace::fork
+// records its fresh root. When a registered root's ledger stamp is taken,
+// the taker is compared against the registered owner: a free by any other
+// context while the owner task is still alive is the EARLY-TEARDOWN
+// witness (the seed of the stale-tree corruption family).
+pub struct ForkRootReg {
+    pub root: core::sync::atomic::AtomicU64,
+    pub owner: core::sync::atomic::AtomicU32,
+}
+impl ForkRootReg {
+    const fn new() -> Self {
+        Self {
+            root: core::sync::atomic::AtomicU64::new(0),
+            owner: core::sync::atomic::AtomicU32::new(0),
+        }
+    }
+}
+const FORK_ROOT_NEW: ForkRootReg = ForkRootReg::new();
+pub static FORK_ROOTS: [ForkRootReg; 256] = [FORK_ROOT_NEW; 256];
+pub static FORK_ROOT_CURSOR: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+pub fn register_fork_root(root_ppn: u64, owner_pid: u32) {
+    let idx = FORK_ROOT_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        % FORK_ROOTS.len();
+    FORK_ROOTS[idx].root.store(root_ppn, core::sync::atomic::Ordering::Relaxed);
+    FORK_ROOTS[idx].owner.store(owner_pid, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn task_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let alive = core::sync::atomic::AtomicBool::new(false);
+    crate::sched::for_each_task(|t| unsafe {
+        if (*t).pid() as u32 == pid {
+            alive.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    alive.load(core::sync::atomic::Ordering::Relaxed)
+}
 
 impl PtLedger {
     /// Stamp a page-table root allocated OUTSIDE alloc_page_table
@@ -479,6 +654,42 @@ impl PtLedger {
     pub fn is_boot(&self, ppn: u64) -> bool {
         !self.take_returns(ppn)
     }
+
+    /// FORENSIC (fake-OOM family): live-stamp probe for the stale-tree
+    /// census. Returns 1 when the frame carries a live table stamp, 0 when
+    /// not (exact bitmap — no hash-collision ambiguity).
+    pub fn peek(&self, ppn: u64) -> u64 {
+        self.live_bit(ppn) as u64
+    }
+
+    /// FORENSIC: pid that last successfully freed this ppn's stamp
+    /// (most recent PT_FREE_RING entry naming the ppn; 0 = unknown).
+    pub fn freed_by_peek(&self, ppn: u64) -> u32 {
+        pt_free_ring_prev_free_pid(ppn)
+    }
+
+    /// FORENSIC (fake-OOM family): does this frame carry a LIVE table stamp?
+    /// Used by the raw-free watchpoint in Zone::free_pages — a raw
+    /// (non-page-table-path) free of a live-stamped frame is the seed event
+    /// that turns a live page-table tree stale.
+    pub fn is_live_table(ppn: u64) -> bool {
+        PT_LEDGER.live_bit(ppn)
+    }
+}
+
+/// FORENSIC: newest PT_FREE_RING entry naming `ppn` — the pid context of its
+/// most recent legitimate free (0 when the frame never freed within the
+/// ring window). Backwards scan from the cursor; the freshest match wins.
+fn pt_free_ring_prev_free_pid(ppn: u64) -> u32 {
+    use core::sync::atomic::Ordering::Relaxed;
+    let cur = PT_FREE_CURSOR.load(Relaxed);
+    for k in 0..PT_FREE_RING.len() {
+        let idx = (cur + PT_FREE_RING.len() - 1 - k) % PT_FREE_RING.len();
+        if PT_FREE_RING[idx].ppn.load(Relaxed) == ppn {
+            return PT_FREE_RING[idx].pid.load(Relaxed) as u32;
+        }
+    }
+    0
 }
 
 pub struct FutEntry {
@@ -494,15 +705,15 @@ impl FutEntry {
     }
 }
 const FUT_NEW: FutEntry = FutEntry::new();
-pub static FUT_RING: [FutEntry; 32] = [FUT_NEW; 32];
+pub static FUT_RING: [FutEntry; 1024] = [FUT_NEW; 1024];
 pub static FUT_RING_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-/// Global cap on "REPEAT teardown" forensic reports. With only a 32-entry
-/// ring, high fork-churn tests (epoll-ltp: 13824 fork/exit protected
-/// regions) recycle root ppns within the ring window constantly — every
-/// benign teardown matched a stale entry and printed, flooding the serial
-/// console (10k+ lines per test) and drowning every other diagnostic.
-/// The first handful of reports carry the forensic value; the rest are
-/// duplicates.
+/// Global cap on "REPEAT teardown" forensic reports. Even with a
+/// 1024-entry ring, high fork-churn tests (epoll-ltp: 13824 fork/exit
+/// protected regions) recycle root ppns within the ring window
+/// constantly — every benign teardown can match a stale entry and print,
+/// flooding the serial console (10k+ lines per test) and drowning every
+/// other diagnostic. The first handful of reports carry the forensic
+/// value; the rest are duplicates.
 pub static FUT_REPEAT_REPORTS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
@@ -569,8 +780,10 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
             if FUT_RING[k].root.load(Relaxed) == root_ppn && root_ppn != 0 {
                 if FUT_REPEAT_REPORTS.fetch_add(1, Relaxed) < 8 {
                     crate::pr_err!(
-                        "FUT: REPEAT teardown of root ppn={:#x} (ring[{}])",
-                        root_ppn, k
+                        "FUT: REPEAT teardown of root ppn={:#x} (ring[{}], prev pid={}, now pid={})",
+                        root_ppn, k,
+                        FUT_RING[k].pid.load(Relaxed),
+                        crate::sched::get_current_pid()
                     );
                 }
                 // Consume the matched entry even past the report cap —
@@ -584,6 +797,14 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
         FUT_RING[idx].root.store(root_ppn, Relaxed);
         FUT_RING[idx].pid.store(crate::sched::get_current_pid() as u64, Relaxed);
     }
+    // FORENSIC (fake-OOM family): stale-tree census. Every intermediate
+    // table frame this walk reaches must carry a LIVE ledger stamp (its
+    // allocation incarnation). A missing stamp means the frame was freed
+    // earlier and this tree has been pointing at recycled memory — the
+    // walk is about to put_page/free whatever now lives there. Collected
+    // here (with vpn indices), printed once per offending teardown.
+    let mut stale_tables: [(u8, usize, usize, u64); 16] = [(0, 0, 0, 0); 16];
+    let mut stale_count = 0usize;
     // Serialize against concurrent fork copies / COW faults on ANY mm: the
     // pages freed here can be immediately reallocated as page tables or
     // COW copies by another CPU (PTE_MODIFY_LOCK, NEW2 class).
@@ -739,9 +960,109 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     free_pages(phys_addr as usize, 0);
                 }
             }
+            // FORENSIC: census the L0 table before freeing it.
+            if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn0) {
+                let live = PT_LEDGER.peek(ppn0) != 0;
+                if !live {
+                    if stale_count < stale_tables.len() {
+                        stale_tables[stale_count] = (0, vpn2, vpn1, ppn0);
+                    }
+                    stale_count += 1;
+                }
+            }
             free_page_table_checked(table0_phys, "l0");
         }
+        // FORENSIC: census the L1 table before freeing it.
+        if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn1) {
+            let live = PT_LEDGER.peek(ppn1) != 0;
+            if !live {
+                if stale_count < stale_tables.len() {
+                    stale_tables[stale_count] = (1, vpn2, 0xFFFF, ppn1);
+                }
+                stale_count += 1;
+            }
+        }
         free_page_table_checked(table1_phys, "l1");
+    }
+
+    if stale_count > 0 {
+        static STALE_REPORTS: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if STALE_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
+            crate::pr_err!(
+                "FUT-STALE-TREE: root ppn={:#x} pid={} walks {} foreign/unstamped table frames:",
+                root_ppn, crate::sched::get_current_pid(), stale_count
+            );
+            for i in 0..stale_count.min(stale_tables.len()) {
+                let (lvl, v2, v1, ppn) = stale_tables[i];
+                crate::pr_err!(
+                    "  FUT-STALE: lvl={} vpn2={} vpn1={} ppn={:#x}",
+                    lvl, v2, v1, ppn
+                );
+            }
+            // Root-slot forensics: who freed THIS root's ledger stamp last?
+            crate::pr_err!(
+                "  FUT-STALE: root slot peek={:#x} last-freed-by pid={}",
+                PT_LEDGER.peek(root_ppn),
+                PT_LEDGER.freed_by_peek(root_ppn)
+            );
+            // Replay of the stamp/free rings: search them for the FIRST few
+            // stale ppns (+ the root) and print every recorded incarnation.
+            use core::sync::atomic::Ordering::Relaxed;
+            let mut probes = [0u64; 4];
+            let mut nprobes = 0usize;
+            for i in 0..stale_count.min(stale_tables.len()) {
+                if nprobes == probes.len() { break; }
+                probes[nprobes] = stale_tables[i].3;
+                nprobes += 1;
+            }
+            let scur = PT_STAMP_CURSOR.load(Relaxed);
+            for k in 0..PT_STAMP_RING.len() {
+                let idx = (scur + PT_STAMP_RING.len() - 1 - k) % PT_STAMP_RING.len();
+                let ppn = PT_STAMP_RING[idx].ppn.load(Relaxed);
+                if ppn == 0 {
+                    continue;
+                }
+                if probes.iter().any(|&p| p == ppn) || ppn == root_ppn {
+                    crate::pr_err!(
+                        "  PT-HIST stamp[{}]: ppn={:#x} by pid={} (age {})",
+                        idx, ppn, PT_STAMP_RING[idx].pid.load(Relaxed), k
+                    );
+                }
+            }
+            let fcur = PT_FREE_CURSOR.load(Relaxed);
+            for k in 0..PT_FREE_RING.len() {
+                let idx = (fcur + PT_FREE_RING.len() - 1 - k) % PT_FREE_RING.len();
+                let ppn = PT_FREE_RING[idx].ppn.load(Relaxed);
+                if ppn == 0 {
+                    continue;
+                }
+                if probes.iter().any(|&p| p == ppn) || ppn == root_ppn {
+                    crate::pr_err!(
+                        "  PT-HIST free[{}]: ppn={:#x} by pid={} site={} (age {})",
+                        idx, ppn,
+                        PT_FREE_RING[idx].pid.load(Relaxed),
+                        PT_FREE_RING[idx].site.load(Relaxed) as u8 as char,
+                        k
+                    );
+                }
+            }
+            // Recent teardown history — with a 1024-entry ring this reaches
+            // back past a full repro round; entries naming THIS root are the
+            // early teardown(s).
+            let cur = FUT_RING_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+            for k in 0..FUT_RING.len() {
+                let idx = (cur + FUT_RING.len() - 1 - k) % FUT_RING.len();
+                let r = FUT_RING[idx].root.load(core::sync::atomic::Ordering::Relaxed);
+                let p = FUT_RING[idx].pid.load(core::sync::atomic::Ordering::Relaxed);
+                if r == root_ppn {
+                    crate::pr_err!(
+                        "  FUT-HIST: root={:#x} torn down in pid={} context (age {})",
+                        r, p, k
+                    );
+                }
+            }
+        }
     }
 
     // Free root table (L2)

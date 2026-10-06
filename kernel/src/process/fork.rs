@@ -684,6 +684,16 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                         {
                             let child_arc = alloc::sync::Arc::new(child_as);
                             let c_root = child_arc.root_ppn();
+                            // FORENSIC (fake-OOM family): record the fresh
+                            // fork root against its OWNING child pid. The
+                            // teardown witness in PtLedger::take then flags
+                            // any free of this root from a context that is
+                            // NOT the owner while the owner is still alive —
+                            // the early-teardown seed.
+                            crate::arch::riscv64::mm::mmu_init::register_fork_root(
+                                c_root as u64,
+                                pid as u32,
+                            );
                             (*task_ptr).set_address_space(Some(child_arc));
                             if child_settid_pending
                                 && !unsafe { write_child_settid(c_root, args.child_tid, pid as i32, task_ptr) }
