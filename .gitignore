@@ -101,3 +101,4 @@ kernel/verify/kani-output.txt
 *.out
 .x11work/
 /.udev/
+.ltp/
