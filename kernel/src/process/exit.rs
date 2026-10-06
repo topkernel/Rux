@@ -424,9 +424,15 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     crate::sync::rcu::synchronize_rcu();
 
     // Detach from parent's children list (must happen before freeing task memory)
+    // E8-REPAR: screen the parent pointer first — do_wait claimed the
+    // child under the tree lock (parent forced None), so a Some here is
+    // either the normal pre-claim path or a stale pointer planted by
+    // older corruption; never dereference an implausible one.
     let parent_ptr = (*task).parent_ptr();
     if let Some(parent) = parent_ptr {
-        (*parent).remove_child(task);
+        if Task::is_plausible_task_ptr(parent) {
+            (*parent).remove_child(task);
+        }
     }
 
     // R9 (NEW2 engine #2): do_exit sets ZOMBIE BEFORE its final schedule(),
@@ -915,6 +921,12 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
     // subreaper over init (prctl stores the flag on the shared
     // SignalStruct). Bounded walk to stay safe against parent loops.
     let mut dest = init;
+    // E8-REPAR: a non-init dest (group member or subreaper ancestor) can
+    // die and be freed between its selection here and the moves below —
+    // pin it (task_refcnt) so its Task outlives every add_child; the
+    // final8 kernel panic walked a parent pointer that had been written
+    // into exactly such a freed dest.
+    let mut dest_pin: *mut Task = core::ptr::null_mut();
     // A dying THREAD's children go to a surviving member of its own
     // thread group first (Linux find_new_reaper): the group's remaining
     // threads keep group-wide wait visibility, so wait4/waitid callers
@@ -933,7 +945,15 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
             // therefore valid memory.
             let st = (*member).state();
             if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
+                // Pin INSIDE the lock hold: the member cannot leave the
+                // ring (thread_group_leave takes this lock) and a pinned
+                // member cannot be freed after leaving, so this fetch_add
+                // can never land in freed memory.
+                (*member)
+                    .task_refcnt
+                    .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
                 dest = member;
+                dest_pin = member;
                 break;
             }
             member = (*member).next_thread_ptr();
@@ -941,10 +961,37 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
         }
     }
     if dest as *const Task == init as *const Task {
-        let mut p = (*dying).parent_ptr();
+        // E8-REPAR: a non-leader thread's `parent` field is an UNLINKED
+        // snapshot copied from the leader at thread_group_join time — the
+        // leader gets reparented later, the copy does not, so it can name
+        // an ancestor that was reaped and freed long ago. Walk from the
+        // LEADER's parent field instead (the maintained one; a zombie
+        // leader's memory stays until reaped, and a leader cannot be
+        // released while any member — us — is still alive).
+        let leader = (*dying).group_leader_ptr();
+        let chain_root = if leader.is_null()
+            || leader as *const Task == dying as *const Task
+        {
+            dying
+        } else {
+            leader as *mut Task
+        };
+        let mut p = (*chain_root).parent_ptr();
         let mut hops = 0;
+        // The whole walk under the tree lock: every release_task of a
+        // chain member has to pass remove_child under this lock first,
+        // so no hop can be freed mid-walk.
+        let _lock = crate::process::task::PROCESS_TREE_LOCK.lock();
         while let Some(pp) = p {
             let pp = pp as *mut Task;
+            // E8-REPAR: validate EVERY hop before dereferencing it
+            // (kernel-range + TASK_POISON, the wake_up guard family).
+            // The final8 panic died on `(*pp).signal` of a freed
+            // ancestor at exit.rs:954; a stale hop now bails to init
+            // instead of faulting.
+            if !Task::is_plausible_task_ptr(pp) {
+                break;
+            }
             if pp == dying as *const Task as *mut Task || pp == init || hops > 64 {
                 break;
             }
@@ -955,6 +1002,12 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
                 .unwrap_or(false);
             if is_reaper {
                 dest = pp;
+                // Pin the subreaper dest under the same lock hold (same
+                // argument as the member pin above).
+                (*pp)
+                    .task_refcnt
+                    .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                dest_pin = pp;
                 break;
             }
             p = (*pp).parent_ptr();
@@ -962,17 +1015,35 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
         }
     }
     if dest as *const Task == dying as *const Task {
+        // dest == dying happens only when dying IS init (the member walk
+        // skips dying; the subreaper walk breaks on it) — release the pin
+        // before bailing.
+        if !dest_pin.is_null() {
+            Task::task_put(dest_pin);
+        }
         return; // dying IS init / the only candidate — nothing to do
     }
 
-    // Collect children first: add_child mutates the list we walk, and we
-    // must not hold the tree lock while sending signals.
+    // Collect children PINNED (same lock hold as the list walk): a
+    // sibling thread of dying's group may be in wait4 reaping these very
+    // children (for_each_group_child scans every member's list); without
+    // the pin, release_task could free a collected child before the move
+    // loop links it — writing through freed sibling pointers and
+    // planting freed nodes into dest's children list.
     let mut moved: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
-    (*dying).for_each_child(|child| {
-        moved.push(child as *mut Task);
-    });
+    (*dying).collect_children_pinned(&mut moved);
 
     for child in moved {
+        // E8-REPAR: atomic validate+unlink+relink. move_child skips a
+        // child that a concurrent reaper already unlinked (claimed or
+        // released) — after a false return the child may be freed memory
+        // we must not touch beyond our own task_put.
+        let ok = (*dying).move_child(child, dest);
+        if !ok {
+            Task::task_put(child);
+            continue;
+        }
+
         // PR_SET_PDEATHSIG: the old parent just died — deliver the signal
         // the child asked for (Linux: it fires on reparenting, before the
         // child could observe the orphaning).
@@ -981,11 +1052,6 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
             let _ = crate::signal::send_signal((*child).pid(), pdeath as i32);
         }
 
-        // Unlink from the dying parent's list, then re-link under the new
-        // parent. SAFETY: child is linked in dying's children list (from
-        // the walk); dest is a valid Task.
-        (*dying).remove_child(child);
-        (*dest).add_child(child);
         // If the orphan is already a zombie, the new parent must be
         // notified so it reaps it — otherwise it would sit unreapable
         // forever.
@@ -1018,12 +1084,16 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
             let dest_pinned = crate::process::pid_hash::pid_hash_lookup_pinned(dest_pid);
             if !dest_pinned.is_null() {
                 // SAFETY: dest_pinned is pinned (refcount held).
-                unsafe {
-                    wake_group_chldexit(dest_pinned);
-                }
+                wake_group_chldexit(dest_pinned);
                 crate::process::task::Task::task_put(dest_pinned);
             }
         }
+        // Drop the collector's pin now that the move completed.
+        Task::task_put(child);
+    }
+    // Drop the dest pin (init was never pinned — it outlives shutdown).
+    if !dest_pin.is_null() {
+        Task::task_put(dest_pin);
     }
 }
 
@@ -1146,7 +1216,19 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
                 // Check if it's in Zombie state
                 if child.state() == TaskState::new(TaskState::ZOMBIE) {
-                    zombie_child = Some(child_ptr);
+                    // E8-REPAR: CLAIM the zombie here, inside the same
+                    // tree-lock critical section that selected it
+                    // (unlink + parent=None). Two group members woken by
+                    // the same SIGCHLD (glib reaper thread + main) could
+                    // both select this zombie and double-release_task it
+                    // — the second release would lock/unlink/free through
+                    // the already-freed Task. Losers simply fail the
+                    // claim and re-scan. Claim only the first winner:
+                    // every claimed zombie must be reaped by this call or
+                    // it becomes unreapable (no list links it anymore).
+                    if zombie_child.is_none() && Task::claim_child_locked(child_ptr) {
+                        zombie_child = Some(child_ptr);
+                    }
                 } else if child.state() == TaskState::new(TaskState::STOPPED)
                     && !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
                     && (options & WUNTRACED != 0 || child.tracer_pid() == current_pid)

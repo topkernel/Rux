@@ -210,6 +210,7 @@ pub mod mount_flags;
 pub mod scheduler;
 #[cfg(feature = "unit-test")]
 pub mod process_tree;
+pub mod reparent_safety;
 #[cfg(feature = "unit-test")]
 pub mod fork;
 #[cfg(feature = "unit-test")]
@@ -417,6 +418,9 @@ pub fn run_all_tests() {
 
     test_group_start("process_tree");
     process_tree::test_process_tree();
+
+    test_group_start("reparent_safety");
+    reparent_safety::test_reparent_safety();
 
     test_group_start("fork");
     fork::test_fork();

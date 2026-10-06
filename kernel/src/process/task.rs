@@ -2150,6 +2150,57 @@ impl Task {
     ///     sched::wake_up_process(child);
     /// }
     /// ```
+    /// E8-REPAR: plausibility screen for a raw Task* harvested from a
+    /// parent chain or children list (GNOME final8 KERNPANIC at
+    /// guest+3286s: reparent_children_to_init's subreaper walk
+    /// dereferenced `(*pp).signal` on a freed ancestor and faulted at
+    /// 0xb5d66 — epc=atomic_load<u8> exit.rs:954). Two screens, in the
+    /// spirit of the WP2/R15-6 guards in wake_up but tightened to the
+    /// kernel linear map: (1) address window — every Task is
+    /// heap-allocated inside [PAGE_OFFSET, PAGE_OFFSET+RAM), so integer
+    /// sentinels are rejected on both sides AND anything that passes is
+    /// mapped memory; (2) the TASK_POISON canary free_task_slot writes
+    /// at the compile-time state/pid offsets (catches
+    /// freed-not-yet-reused pages). A page freed AND recycled into
+    /// non-Task data can still pass — the durable fix is that nothing
+    /// writes a stale pointer into a parent field anymore (pinning +
+    /// atomic move in reparent_children_to_init); this screen degrades
+    /// any residual into a bail-to-init instead of a panic.
+    pub fn is_plausible_task_ptr(task: *const Task) -> bool {
+        // WINDOW = kernel linear map ∪ the boot init task's static
+        // storage. Every Task is heap-allocated inside [PAGE_OFFSET,
+        // PAGE_OFFSET+RAM) except init's MaybeUninit<Task> in .bss
+        // (init.rs — its exact address is exported, so no generous
+        // image-window guess that could admit unmapped holes).
+        // Restricting to these means integer sentinels are rejected on
+        // BOTH sides (u32::MAX zero-extended sits below the linear map;
+        // 0xFFFFFFFFFFFFFFFF — which passes wake_up's looser low bound
+        // and wraps the poison probe into badaddr=0x57, caught by the
+        // unit test — sits above it), and every pointer that DOES pass
+        // is inside mapped memory, so the poison reads below cannot
+        // fault. 64GiB linear span: generous against RAM growth.
+        const MAP_BASE: usize = crate::arch::riscv64::mm::memory_layout::PAGE_OFFSET;
+        const MAP_SPAN: usize = 0x10_0000_0000; // 64 GiB
+        let a = task as usize;
+        if task.is_null()
+            || ((a < MAP_BASE || a >= MAP_BASE + MAP_SPAN)
+                && a != crate::init::init_task_storage_addr())
+        {
+            return false;
+        }
+        let slot = task as *const u8;
+        // SAFETY: reads at compile-time Task offsets; the range screen
+        // above already proved the address is inside the kernel linear
+        // map, so the loads cannot take a user-range page fault.
+        let state = unsafe {
+            core::ptr::read_volatile(slot.add(task_offsets::TASK_STATE) as *const u32)
+        };
+        let pid = unsafe {
+            core::ptr::read_volatile(slot.add(task_offsets::TASK_PID) as *const u32)
+        };
+        state != crate::sched::sched::TASK_POISON && pid != crate::sched::sched::TASK_POISON
+    }
+
     #[inline(never)]
     pub fn wake_up(task: *mut Task) -> bool {
         if task.is_null() {
@@ -2492,7 +2543,17 @@ impl Task {
     pub fn ppid(&self) -> Pid {
         match self.parent {
             Some(parent_ptr) => {
-                // SAFETY: parent_ptr was set by add_child() and remains valid while child is alive.
+                // E8-REPAR: a thread's parent field is an unlinked
+                // snapshot (thread_group_join copies leader.parent) that
+                // can name a reaped-and-freed ancestor; a non-leader
+                // caller should use the leader's ppid, and everyone else
+                // gets 0 rather than a dereference of freed memory.
+                if !Self::is_plausible_task_ptr(parent_ptr) {
+                    return 0;
+                }
+                // SAFETY: parent_ptr passed the plausibility screen; for
+                // leaders it was set by add_child() and remains valid
+                // while the child is alive.
                 unsafe { (*parent_ptr).pid }
             }
             None => 0, // No parent process, return 0
@@ -3506,6 +3567,112 @@ impl Task {
 
         // Clear parent children list head pointer
         (*child).parent_children_head = ptr::null_mut();
+    }
+
+    /// E8-REPAR: collect `self`'s children into `out`, PINNING each one
+    /// (task_refcnt) inside the same PROCESS_TREE_LOCK critical section
+    /// that walks the list.
+    ///
+    /// The reparent path used for_each_child, which returns bare
+    /// pointers the instant the tree lock drops — while the reaper of
+    /// those children (a sibling thread of the dying task's group, in
+    /// its own wait4 via for_each_group_child) could concurrently
+    /// release_task() them: unlink, free_pid, task_put, page back to
+    /// the heap. The reparent loop then wrote through the freed node's
+    /// sibling pointers (ListHead::del's `(*next).prev = prev` —
+    /// arbitrary kernel-memory writes) and linked the freed node into
+    /// the new parent's children list, leaving every later walk reading
+    /// garbage task pointers. A pin taken under the same lock hold makes
+    /// the free impossible until the mover task_put()s: release_task's
+    /// final task_put finds refcnt > 1 and defers free_task_slot.
+    ///
+    /// # Safety
+    /// `self` is a valid task; callers must Task::task_put every
+    /// returned pointer exactly once.
+    pub unsafe fn collect_children_pinned(&self, out: &mut alloc::vec::Vec<*mut Task>) {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let head = &self.children as *const _ as *mut ListHead;
+        ListHead::for_each(head, |node| {
+            let task_ptr = (node as usize - offset_of!(Task, sibling)) as *mut Task;
+            (*task_ptr)
+                .task_refcnt
+                .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            out.push(task_ptr);
+        });
+    }
+
+    /// E8-REPAR: atomically move `child` from `self`'s children list to
+    /// `dest`'s — validate + unlink + relink in ONE PROCESS_TREE_LOCK
+    /// critical section.
+    ///
+    /// The old reparent code ran remove_child() and add_child() as two
+    /// separately-locked sections with signal sends in between: a
+    /// concurrent reaper unlinking the child in the gap left the second
+    /// half writing into freed memory, and a `dest` chosen earlier (a
+    /// surviving thread-group member) could itself complete do_exit and
+    /// be swept before add_child — planting a permanently dangling
+    /// parent pointer into the moved child (the exact ancestor the
+    /// final8 subreaper walk panicked on). Validation (child still ours:
+    /// parent AND parent_children_head) makes the vanishing-child case a
+    /// clean "skip"; callers must pin `dest` for the duration.
+    ///
+    /// Returns true when the move happened; false means the child was
+    /// concurrently unlinked (reaped / already moved) — do not touch it
+    /// further beyond the caller's own task_put.
+    ///
+    /// # Safety
+    /// `self`, `child` and `dest` are valid Task pointers; `child` is
+    /// pinned by the caller; `dest` is pinned by the caller.
+    pub unsafe fn move_child(&self, child: *mut Task, dest: *mut Task) -> bool {
+        let _lock = PROCESS_TREE_LOCK.lock();
+        let still_ours = (*child).parent == Some(self as *const Task)
+            && (*child).parent_children_head == &self.children as *const _ as *mut ListHead;
+        if !still_ours {
+            return false;
+        }
+        // Unlink — the same mutations remove_child performs.
+        (*child).sibling.del();
+        (*child).sibling.init();
+        // Relink — the same mutations add_child performs.
+        (*child).parent = Some(dest as *const Task);
+        (*child).parent_children_head = &(*dest).children as *const _ as *mut ListHead;
+        (*child)
+            .sibling
+            .add_tail(&(*dest).children as *const _ as *mut ListHead);
+        true
+    }
+
+    /// E8-REPAR: claim a zombie child for reaping — unlink it from
+    /// whichever parent's children list it is on right now.
+    ///
+    /// do_wait() selected the zombie under the tree lock but released it
+    /// before calling release_task(); two group members woken by the
+    /// same SIGCHLD (glib reaper + main thread) could BOTH select the
+    /// same zombie and double-release it: the second release_task()
+    /// then locks/unlinks/frees through the already-freed Task. Claiming
+    /// (unlink + parent=None) inside the selection critical section
+    /// makes the second scanner simply not find the child anymore; the
+    /// first reap proceeds (release_task skips its own unlink when
+    /// parent is already None).
+    ///
+    /// Returns true when this caller won the claim.
+    ///
+    /// # Safety
+    /// CALLER MUST HOLD PROCESS_TREE_LOCK (invoked from inside
+    /// for_each_group_child's critical section); `child` is a valid,
+    /// pinned-or-otherwise-still-linked Task.
+    pub unsafe fn claim_child_locked(child: *mut Task) -> bool {
+        if (*child).parent.is_none() {
+            return false; // already claimed / never linked
+        }
+        // Unlink from the CURRENT list — the child's own sibling pointers
+        // are the ground truth for which list the node is on, so del()
+        // heals the owner's list without naming it.
+        (*child).sibling.del();
+        (*child).sibling.init();
+        (*child).parent = None;
+        (*child).parent_children_head = ptr::null_mut();
+        true
     }
 
     /// Iterate over all children

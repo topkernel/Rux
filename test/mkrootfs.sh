@@ -139,6 +139,31 @@ if [ -f "$REBOOT_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; 
     fi
 fi
 
+# Build + install the E8 reparent-safety storm (static glibc + pthreads;
+# orphan-zombie chains, thread-group sibling reapers and deep top-first
+# chain teardown — the workload family behind the GNOME final8
+# reparent-walk KERNPANIC).
+ORPHAN_STORM_SRC="$PROJECT_ROOT/test/orphan_storm.c"
+if [ -f "$ORPHAN_STORM_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing orphan_storm to /test/orphan_storm..."
+    if riscv64-linux-gnu-gcc -static -O2 \
+         -o "$STAGING/test/orphan_storm" "$ORPHAN_STORM_SRC" -pthread; then
+        chmod +x "$STAGING/test/orphan_storm"
+        # Threadless variant: same orphan-zombie cascade without the
+        # pthread churn (whose stall is pre-existing on faedf87 and
+        # reproduces identically without the E8 fixes — this build is
+        # the regression fence for the reparent-safety work).
+        if riscv64-linux-gnu-gcc -static -O2 -DNO_THREADS \
+             -o "$STAGING/test/orphan_storm_nt" "$ORPHAN_STORM_SRC"; then
+            chmod +x "$STAGING/test/orphan_storm_nt"
+        fi
+    else
+        echo "Warning: orphan_storm failed to compile (skipped)"
+        rm -f "$STAGING/test/orphan_storm"
+    fi
+fi
+
+
 # Build + install the core dump E2E probe (static glibc, with -g so the
 # host-side gdb --core symbolization of the crash PC works out of the
 # box; raises RLIMIT_CORE then takes a NULL-deref SIGSEGV).

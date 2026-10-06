@@ -25,6 +25,17 @@ use alloc::sync::Arc;
 // Use MaybeUninit to avoid auto-initialization issues
 static mut INIT_TASK_STORAGE: core::mem::MaybeUninit<Task> = core::mem::MaybeUninit::uninit();
 
+/// E8-REPAR: address of the boot init task's static storage — the ONE
+/// Task that lives outside the kernel linear map (Task::is_plausible_
+/// task_ptr accepts exactly this address in addition to the linear-map
+/// window, so the pointer screen needs no unmapped image-range holes).
+#[inline]
+pub fn init_task_storage_addr() -> usize {
+    // SAFETY: only the address of the static is read; the storage may be
+    // uninitialized at call time.
+    unsafe { core::ptr::addr_of!(INIT_TASK_STORAGE) as usize }
+}
+
 /// Initialize init process (PID 1)
 ///
 ///
