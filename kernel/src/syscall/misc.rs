@@ -2879,7 +2879,7 @@ impl ChaCha20Crng {
     /// CLINT timebase, jiffies, a monotonically increasing boot counter,
     /// and the address of a stack local (ASLR/scheduler placement).
     fn new() -> Self {
-        let clint = crate::drivers::intc::clint::read_time();
+        let clint = crate::arch::cpu::read_time();
         let jiffies = crate::drivers::timer::get_jiffies() as u64;
         static BOOT_NONCE: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
@@ -2909,7 +2909,7 @@ impl ChaCha20Crng {
     /// exhausted, with a nonce drawn from fresh CLINT entropy.
     fn next_bytes(&mut self) -> ([u8; 64], usize) {
         if self.pos >= 64 {
-            let entropy = crate::drivers::intc::clint::read_time();
+            let entropy = crate::arch::cpu::read_time();
             self.block = Self::block(&self.key, self.counter, Self::mix64(entropy));
             self.counter = self.counter.wrapping_add(1);
             self.pos = 0;

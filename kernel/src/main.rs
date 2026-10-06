@@ -107,6 +107,7 @@ pub fn print_status_ex(module: &str, desc: &str, success: Option<bool>) {
     }
 }
 
+#[cfg(feature = "riscv64")]
 mod sbi;
 mod mm;
 mod console;
@@ -170,10 +171,10 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     taskdump_raw_line(b" align=");
     taskdump_dec(layout.align() as u64);
     let mut frames: [u64; 6] = [0; 6];
-    let s0: u64;
+    // SAFETY: reads the frame-pointer chain of the current stack.
     unsafe {
-        core::arch::asm!("mv {s}, s0", s = out(reg) s0, options(nomem, nostack));
-        crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+        let fp = crate::dfx::backtrace::current_frame_pointer();
+        crate::dfx::memwatch::walk_fp_chain(fp, &mut frames);
     }
     taskdump_raw_line(b" frames:");
     for f in frames.iter() {
@@ -926,7 +927,7 @@ pub extern "C" fn rust_main() -> ! {
                 // All tests passed, normal exit
                 println!("\nAll tests passed! Halting...");
                 loop {
-                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+                    crate::arch::cpu::wfi();
                 }
             }
         }
@@ -1020,6 +1021,6 @@ fn panic(info: &PanicInfo) -> ! {
 
     // Halt
     loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        crate::arch::cpu::wfi();
     }
 }

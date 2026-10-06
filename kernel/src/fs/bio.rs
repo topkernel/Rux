@@ -594,7 +594,7 @@ impl BlockCache {
                                 let mut n = 0;
                                 if v == 0 { digs[0] = b'0'; n = 1; }
                                 while v > 0 { digs[n] = b'0' + (v % 10) as u8; n += 1; v /= 10; }
-                                while n > 0 { n -= 1; sbi_rt::legacy::console_putchar(digs[n] as usize); }
+                                while n > 0 { n -= 1; crate::console::putchar_no_lock(digs[n]); }
                                 crate::console::putchar_no_lock(b'\n');
                             }
                             prev = Some(entry_ptr);

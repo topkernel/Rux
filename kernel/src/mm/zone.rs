@@ -527,9 +527,9 @@ impl Zone {
                     crate::process::current_pid()
                 );
                 let mut frames: [u64; 10] = [0; 10];
-                let s0: u64;
+                // SAFETY: reads the frame-pointer chain of the current stack.
                 unsafe {
-                    core::arch::asm!("mv {}, s0", out(reg) s0, options(nomem, nostack));
+                    let s0 = crate::dfx::backtrace::current_frame_pointer();
                     crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
                 }
                 for f in frames.iter() {

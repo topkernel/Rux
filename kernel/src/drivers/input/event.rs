@@ -195,7 +195,7 @@ impl InputEvent {
     /// TIMER_CLOCK_FREQ_HZ; convert to the struct timeval
     /// (seconds + microseconds) the uapi expects.
     pub fn new(type_: u16, code: u16, value: i32) -> Self {
-        let cycles = crate::drivers::intc::clint::read_time();
+        let cycles = crate::arch::cpu::read_time();
         let freq = crate::config::TIMER_CLOCK_FREQ_HZ;
         let tv_sec = cycles / freq;
         let tv_usec = (cycles % freq) * 1_000_000 / freq;

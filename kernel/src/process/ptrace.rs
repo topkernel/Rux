@@ -244,18 +244,34 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
             );
         }
         // Coherent ordering: make the store visible before any fetch on
-        // any hart. sfence.vma covers the store buffer; fence.i the I-side
-        // for text writes (POKETEXT breakpoints).
-        unsafe {
-            core::arch::asm!(
-                "fence rw, rw",
-                "sfence.vma {0}, zero",
-                "fence.i",
-                in(reg) addr,
-                options(nostack, preserves_flags)
-            );
-        }
+        // any hart (text writes — POKETEXT breakpoints).
+        flush_icache_range(addr);
         true
+    }
+}
+
+/// Make a text write coherent before subsequent execution (breakpoints).
+///
+/// riscv64: full store fence + per-address TLB invalidation + fence.i.
+/// x86_64: self-modifying code is cache-coherent; a serializing fence for
+/// compiler ordering is sufficient.
+#[inline]
+fn flush_icache_range(_addr: u64) {
+    #[cfg(feature = "riscv64")]
+    // SAFETY: fence/sfence.vma/fence.i are the standard text-write
+    // coherence sequence; no memory operands beyond the address register.
+    unsafe {
+        core::arch::asm!(
+            "fence rw, rw",
+            "sfence.vma {0}, zero",
+            "fence.i",
+            in(reg) _addr,
+            options(nostack, preserves_flags)
+        );
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
 

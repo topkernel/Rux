@@ -590,7 +590,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             );
             // The child has never run, so no TLB can hold a stale entry;
             // fence for ordering only.
-            core::arch::asm!("fence rw, rw");
+            crate::arch::cpu::dsb();
             true
         }
 

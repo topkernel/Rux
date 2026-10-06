@@ -56,6 +56,20 @@ pub use layout::{
 
 pub const PAGE_SIZE: usize = 4096;
 
+/// Invalidate one user page mapping in the local TLB (no cross-CPU
+/// shootdown — callers issue that separately via arch::ipi when needed).
+///
+/// Bridges the per-arch `flush_tlb_page` signatures: riscv64 takes
+/// `(vaddr, asid)` (asid 0 = all address spaces), x86_64 takes the
+/// address alone (PCID-less invlpg).
+#[inline]
+pub fn flush_tlb_page_local(addr: u64) {
+    #[cfg(feature = "riscv64")]
+    crate::arch::mm::flush_tlb_page(addr as usize, 0);
+    #[cfg(feature = "x86_64")]
+    crate::arch::mm::flush_tlb_page(addr);
+}
+
 // Use physical memory size from config (Kernel.toml: memory.physical_memory)
 // This allows runtime configuration instead of hardcoding
 pub const PHYS_MEMORY_SIZE: usize = crate::config::PHYS_MEMORY_SIZE;

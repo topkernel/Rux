@@ -175,11 +175,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     }
 
     // Final TLB flush after all mappings - MUST flush before accessing!
-    // SAFETY: sfence.vma is a valid RISC-V instruction; must be issued after
-    // new page table entries are written.
-    unsafe {
-        core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
-    }
+    crate::arch::mm::flush_tlb_all();
 
     // Store statistics
     // SAFETY: VMEMMAP_INIT guard ensures single initialization; no concurrent

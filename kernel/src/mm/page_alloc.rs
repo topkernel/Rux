@@ -37,10 +37,7 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
     if !crate::dfx::memwatch::armed() {
         return alloc_pages_inner(gfp_flags, order);
     }
-    let mw_s0: u64;
-    unsafe {
-        core::arch::asm!("mv {s}, s0", s = out(reg) mw_s0, options(nomem, nostack));
-    }
+    let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
     let phys = alloc_pages_inner(gfp_flags, order);
     if phys != 0 {
         let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =

@@ -10,7 +10,7 @@
 use crate::syscall::SyscallNo;
 use crate::syscall::time::{sys_clock_gettime, sys_clock_getres, sys_nanosleep, sys_gettimeofday};
 use crate::syscall::memory::{sys_mmap, sys_munmap};
-use crate::drivers::intc::clint::read_time;
+use crate::arch::cpu::read_time;
 use super::{test_pass, test_fail, test_skip, test_group_start};
 
 pub fn test_syscall_time() {

@@ -456,10 +456,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // before the note call (see below). -O0 riscv64 frames keep
         // s0 = frame TOP: [s0-8] = own saved ra, [s0-0x10] = caller's s0,
         // so walking from s0 yields [ra-into-__rust_alloc, callers...].
-        let mw_s0: u64;
-        unsafe {
-            core::arch::asm!("mv {s}, s0", s = out(reg) mw_s0, options(nomem, nostack));
-        }
+        let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
 
         // Check magic number and initialization state
         if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
@@ -515,8 +512,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
             [0; crate::dfx::memwatch::SITE_FRAMES];
         if crate::dfx::memwatch::armed() {
-            let mut fp: u64;
-            core::arch::asm!("mv {f}, s0", f = out(reg) fp, options(nomem, nostack));
+            let mut fp: u64 = crate::dfx::backtrace::current_frame_pointer();
             // f[0] = return address out of this method (into __rust_realloc);
             // f[1..] ascend the caller chain through the growth machinery.
             unsafe {

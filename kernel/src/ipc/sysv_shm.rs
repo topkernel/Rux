@@ -802,10 +802,8 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     // Update segment metadata (nattch was already incremented atomically
     // with the mapping above)
 
-    // Flush TLB
-    // SAFETY: sfence.vma is a RISC-V privileged instruction valid in S-mode;
-    // required after modifying page table entries for the mapping to take effect.
-    unsafe { core::arch::asm!("sfence.vma"); }
+    // Flush TLB after modifying page table entries for the mapping.
+    crate::arch::mm::flush_tlb_all();
 
     attach_addr as i64
 }
@@ -883,10 +881,8 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
         SHM_IDS.free_slot(shm_id);
     }
 
-    // Flush TLB
-    // SAFETY: sfence.vma is a RISC-V privileged instruction valid in S-mode;
-    // required after unmapping page table entries to flush stale TLB entries.
-    unsafe { core::arch::asm!("sfence.vma"); }
+    // Flush TLB after unmapping page table entries.
+    crate::arch::mm::flush_tlb_all();
 
     0
 }

@@ -841,7 +841,7 @@ pub(crate) fn do_execve_elf(
 
         // 16 random bytes AT AT_RANDOM's address (time-seeded LCG; a real
         // entropy source is a separate work item).
-        let seed = crate::drivers::intc::clint::read_time();
+        let seed = crate::arch::cpu::read_time();
         let mut state = seed;
         state = state.wrapping_mul(1103515245).wrapping_add(12345);
         let rand0 = state;

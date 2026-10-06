@@ -92,7 +92,7 @@ pub fn rtc_init_wall_clock() {
 
     // Monotonic clock in ns at (almost) the same instant: 10 MHz CLINT
     // `time` CSR = 100 ns per cycle exactly.
-    let mono_ns = crate::drivers::intc::clint::read_time().saturating_mul(100);
+    let mono_ns = crate::arch::cpu::read_time().saturating_mul(100);
 
     // wall = mono + offset  ⇒  offset = rtc - mono (round to nearest).
     let offset_secs = rtc_ns.saturating_sub(mono_ns).saturating_add(500_000_000) / 1_000_000_000;
