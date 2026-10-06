@@ -888,7 +888,7 @@ pub fn sys_accept(args: SyscallArgs) -> i64 {
 pub fn sys_connect(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
     let addr_ptr = args[1] as *const u8;
-    let _addrlen = args[2] as u32;
+    let addrlen = args[2] as u32;
 
     // Check address pointer validity
     if addr_ptr.is_null() {
@@ -898,6 +898,12 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
     // Validate user pointer
     if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, 16) {
         return -(errno::EFAULT as i64);
+    }
+
+    // move_addr_to_kernel (Linux): no sockaddr can be larger than
+    // sockaddr_storage — reject oversized lengths before dispatch.
+    if addrlen > 128 {
+        return -(errno::EINVAL as i64);
     }
 
     // Linux sockfd_lookup runs before any address parsing: a fd that is
@@ -922,7 +928,7 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
     // P0-1: AF_UNIX connect — resolve the name in the unix table.
     if sin_family == crate::net::unix::AF_UNIX as u16 {
         const SOCKADDR_UN_LEN: usize = crate::net::unix::SOCKADDR_UN_LEN;
-        let want = ((_addrlen as usize).min(SOCKADDR_UN_LEN)).max(2);
+        let want = ((addrlen as usize).min(SOCKADDR_UN_LEN)).max(2);
         if !crate::arch::riscv64::uaccess::access_ok(addr_ptr as usize, want) {
             return -(errno::EFAULT as i64);
         }
@@ -959,6 +965,20 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
     }
 
     // P1 IPv6: parse AF_INET or AF_INET6 (v4-mapped normalizes to v4).
+    // Length validation first, exactly like the Linux protocol connect
+    // paths (tcp_v4_connect / tcp_v6_connect check addr_len before the
+    // family matches): an inet connect needs at least sockaddr_in (16)
+    // / sockaddr_in6 (24) bytes — a shorter length is EINVAL even when
+    // the family field parses (LTP connect01 "invalid salen": len=3).
+    if sin_family == crate::net::socket::AF_INET as u16 {
+        if (addrlen as usize) < 16 {
+            return -(errno::EINVAL as i64);
+        }
+    } else if sin_family == crate::net::socket::AF_INET6 as u16 {
+        if (addrlen as usize) < 24 {
+            return -(errno::EINVAL as i64);
+        }
+    }
     let parsed = match parse_sockaddr_inet(addr_ptr) {
         Ok(p) => p,
         Err(e) => return e,
@@ -967,6 +987,12 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
     // Resolve through the per-process fd table — never index the global
     // protocol tables with a process fd (review NET-C3).
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd as usize) {
+        // O_NONBLOCK differentiates EINPROGRESS from a blocking wait for
+        // an in-flight handshake (same file-flags source as recv/send).
+        let nonblock = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(fd as usize))
+            .map(|f| (f.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0)
+            .unwrap_or(false);
         let result = match parsed {
             ParsedSockAddr::V6 { addr, port } => {
                 if !socket.is_ipv6() {
@@ -974,7 +1000,7 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
                 }
                 socket.connect6(addr, port)
             }
-            ParsedSockAddr::V4 { addr, port } => socket.connect(addr, port),
+            ParsedSockAddr::V4 { addr, port } => socket.connect(addr, port, nonblock),
         };
         let r = match result {
             Ok(()) => 0,

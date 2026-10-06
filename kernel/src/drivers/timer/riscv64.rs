@@ -51,6 +51,23 @@ pub fn get_jiffies() -> u64 {
     JIFFIES.load(Ordering::Acquire)
 }
 
+/// Coarse time in nanoseconds since boot, snapped to the NOMINAL tick
+/// grid and computed from the LIVE timebase — never from the stored
+/// JIFFIES counter, whose tick-handler updates can lag the timebase by
+/// seconds under heavy load / TCG. This is the kernel's
+/// ktime_get_coarse_real_ts64 equivalent: every filesystem timestamp
+/// stamp AND every CLOCK_REALTIME_COARSE / CLOCK_MONOTONIC_COARSE read
+/// must route through the same source, or a timestamp bracketed by two
+/// coarse reads can fall outside it (LTP utime01: utime(NULL) stamped
+/// the inode with live seconds while tst_get_fs_timestamp()'s
+/// CLOCK_REALTIME_COARSE lagged 3s behind — st_mtime > post_time).
+/// Grid-snapping (not raw live time) keeps the "1/HZ granularity"
+/// coarse-clock contract while bounding the error to one tick.
+#[inline]
+pub fn coarse_ns_since_boot() -> u64 {
+    read_time() / TIME_SLICE_TICKS * (1_000_000_000 / HZ)
+}
+
 /// Advance jiffies from the TIMEBASE, not from IRQ counts.
 ///
 /// Review批次7 (TIMING 高): every hart's timer IRQ incremented the single

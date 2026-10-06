@@ -248,6 +248,15 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     crate::arch::riscv64::trap::init();
     crate::arch::riscv64::trap::enable_timer_interrupt();
 
+    // Per-hart counter access for U mode (see arch::init on the BSP —
+    // scounteren must be programmed on every hart for the vDSO's
+    // rdtime interpolation to be legal in user space).
+    // SAFETY: plain S-mode CSR write, no preconditions.
+    unsafe {
+        let all: u64 = 0xffff;
+        core::arch::asm!("csrw scounteren, {}", in(reg) all, options(nomem, nostack));
+    }
+
     // Wait for boot CPU to finish ALL single-CPU initialization.
     // WFI yields the CPU in QEMU tcg single-threaded mode.
     while !is_boot_complete() {

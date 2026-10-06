@@ -104,8 +104,15 @@ pub fn rtc_init_wall_clock() {
 /// Single canonical timestamp source for filesystems (ext4 mtime/ctime,
 /// tmpfs, rootfs) and UTIME_NOW: monotonic seconds + the wall offset.
 /// Once the RTC has been read (or settimeofday ran) this is real UTC.
+///
+/// Coarse, tick-grid-snapped (see drivers/timer::coarse_ns_since_boot):
+/// this MUST agree with what clock_gettime(CLOCK_REALTIME_COARSE)
+/// returns — LTP utime01 brackets a utime(NULL) stamp between two
+/// CLOCK_REALTIME_COARSE samples, and the old live-rdtime conversion
+/// here ran ahead of the coarse reads whenever tick-handler updates
+/// lagged the timebase.
 pub fn wall_secs() -> u64 {
-    let cycles = crate::drivers::intc::clint::read_time();
-    cycles / crate::config::TIMER_CLOCK_FREQ_HZ
-        + crate::syscall::time::wall_epoch_offset_secs()
+    (crate::drivers::timer::coarse_ns_since_boot()
+        + crate::syscall::time::wall_epoch_offset_ns())
+        / 1_000_000_000
 }

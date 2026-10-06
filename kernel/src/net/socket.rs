@@ -422,7 +422,29 @@ impl Socket {
     }
 
     /// Connect to remote address
-    pub fn connect(&self, addr: u32, port: u16) -> Result<(), i32> {
+    ///
+    /// `nonblock`: the fd's O_NONBLOCK — a handshake that has not resolved
+    /// yet returns EINPROGRESS instead of blocking (Linux).
+    pub fn connect(&self, addr: u32, port: u16, nonblock: bool) -> Result<(), i32> {
+        // Linux route lookup classifies 0.0.0.0 as a LOCAL address (it
+        // sits in the local routing table), so connect(INADDR_ANY) goes
+        // to loopback. Normalizing here keeps the whole stack consistent
+        // (source selection, loopback TX short-circuit, RST routing);
+        // without it the SYN went to ARP for 0.0.0.0, was never resolved,
+        // and the connect stayed in SYN_SENT forever (LTP connect01
+        // "connection refused" never saw its RST).
+        let addr = if addr == 0 { 0x7F00_0001 } else { addr };
+        // Linux tcp_v4_connect: connecting an already-connected (or
+        // mid-connect) stream socket fails before anything is sent —
+        // EISCONN when established, EALREADY while the first connect is
+        // still in flight (LTP connect01 "already connected").
+        if self.sock_type == SocketType::Tcp {
+            match *self.state.lock() {
+                SocketState::Connected => return Err(-106), // EISCONN
+                SocketState::Connecting => return Err(-114), // EALREADY
+                _ => {}
+            }
+        }
         *self.remote_addr.lock() = addr;
         *self.remote_port.lock() = port;
 
@@ -445,9 +467,18 @@ impl Socket {
                     // the protocol slot is ESTABLISHED. Harmless for real
                     // virtio-net peers (poll is a no-op without queued RX).
                     let mut established = false;
+                    let mut refused = 0u32;
                     for _ in 0..8 {
                         let done = crate::net::tcp::tcp_socket_get(tcp_fd)
                             .map(|ts| {
+                                if ts.state == crate::net::tcp::TcpState::TCP_CLOSE {
+                                    // RST in SYN_SENT (no listener on the
+                                    // loopback target) records ECONNREFUSED —
+                                    // surface it, connect() must not report
+                                    // success for a refused connection (LTP
+                                    // connect01 "connection refused").
+                                    refused = ts.pending_error as u32;
+                                }
                                 ts.state == crate::net::tcp::TcpState::TCP_ESTABLISHED
                                     || ts.state == crate::net::tcp::TcpState::TCP_CLOSE
                             })
@@ -457,6 +488,73 @@ impl Socket {
                             break;
                         }
                         crate::net::ethernet::ethernet_poll();
+                    }
+                    if refused != 0 {
+                        // The peer refused (RST in SYN_SENT): the connect
+                        // failed — report the errno (LTP connect01 case 6)
+                        // and mirror it into SO_ERROR.
+                        *self.state.lock() = SocketState::Unconnected;
+                        self.options.lock().error = refused as i32;
+                        return Err(-(refused as i32));
+                    }
+                    if !established && !nonblock {
+                        // Blocking connect, handshake still in flight (the
+                        // adaptive drain above only covers the immediate
+                        // loopback case). Linux blocks until ESTABLISHED,
+                        // RST (ECONNREFUSED) or SYN-retry exhaustion
+                        // (ETIMEDOUT — tcp_timer flips SYN_SENT to CLOSE
+                        // with pending_error and wakes the socket). The
+                        // old code fell through here and reported SUCCESS
+                        // from SYN_SENT — connect01 "connection refused"
+                        // returned 0 for a connect that never completed.
+                        loop {
+                            match socket_wait_round(self, WaitKind::Connect, None) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    // EINTR: the socket stays Connecting
+                                    // (the handshake continues async).
+                                    self.options.lock().error = -e;
+                                    return Err(e);
+                                }
+                            }
+                            // Drain the loopback backlog ourselves: with
+                            // this task asleep nothing else polls.
+                            crate::net::ethernet::ethernet_poll();
+                            let resolved = crate::net::tcp::tcp_socket_get(tcp_fd)
+                                .map(|ts| match ts.state {
+                                    crate::net::tcp::TcpState::TCP_ESTABLISHED => {
+                                        Some(true)
+                                    }
+                                    crate::net::tcp::TcpState::TCP_SYN_SENT
+                                    | crate::net::tcp::TcpState::TCP_SYN_RECV => None,
+                                    _ => Some(false),
+                                })
+                                .unwrap_or(Some(true));
+                            match resolved {
+                                Some(true) => {
+                                    established = true;
+                                    break;
+                                }
+                                Some(false) => {
+                                    // CLOSED: refused (111) or SYN-retry
+                                    // exhaustion (ETIMEDOUT 110) — take the
+                                    // protocol's errno.
+                                    let err = crate::net::tcp::tcp_socket_get(tcp_fd)
+                                        .map(|ts| ts.pending_error)
+                                        .filter(|e| *e != 0)
+                                        .unwrap_or(110) as i32;
+                                    *self.state.lock() = SocketState::Unconnected;
+                                    self.options.lock().error = err;
+                                    return Err(-err);
+                                }
+                                None => {} // still handshaking — wait again
+                            }
+                        }
+                    } else if !established {
+                        // O_NONBLOCK and unresolved: EINPROGRESS, exactly
+                        // Linux; completion arrives via poll/SO_ERROR.
+                        self.options.lock().error = 0;
+                        return Err(-115); // EINPROGRESS
                     }
                     // The client flips ESTABLISHED when it EMITS the final
                     // ACK — the peer still has to receive it. Two extra
@@ -493,6 +591,14 @@ impl Socket {
 
     /// P1 IPv6: connect to a pure v6 remote (same semantics as connect()).
     pub fn connect6(&self, addr: crate::net::ipv6::Ipv6Addr, port: u16) -> Result<(), i32> {
+        // Same stream-socket guards as connect() (EISCONN / EALREADY).
+        if self.sock_type == SocketType::Tcp {
+            match *self.state.lock() {
+                SocketState::Connected => return Err(-106), // EISCONN
+                SocketState::Connecting => return Err(-114), // EALREADY
+                _ => {}
+            }
+        }
         *self.remote_addr6.lock() = addr;
         *self.remote_port.lock() = port;
 
@@ -715,10 +821,32 @@ impl Socket {
                                         };
                                         Some(Ok((len, Some((src, socket.remote_port)))))
                                     }
-                                    // R22-4: zero-length read on a half/RST-closed
-                                    // connection is EOF — returning EAGAIN here made
-                                    // read() loops spin forever.
-                                    Ok(0) => Some(Ok((0, None))),
+                                    // R22-4: zero-length read on a
+                                    // closed/half-closed connection is EOF.
+                                    // But an ESTABLISHED (or handshake/
+                                    // half-close) socket with an empty
+                                    // buffer is "no data yet": reporting
+                                    // EOF made blocking readers return 0
+                                    // spuriously whenever the peer's data
+                                    // had not landed yet (LTP bind04 TCP
+                                    // variants, tight fork loops 12/12).
+                                    // Fall through to EAGAIN so the
+                                    // blocking engine waits; only these
+                                    // states are true read-half EOF:
+                                    // CLOSE_WAIT (peer FIN), LAST_ACK,
+                                    // TIME_WAIT, CLOSING, CLOSE.
+                                    Ok(0) => {
+                                        match socket.state {
+                                            crate::net::tcp::TcpState::TCP_CLOSE_WAIT
+                                            | crate::net::tcp::TcpState::TCP_LAST_ACK
+                                            | crate::net::tcp::TcpState::TCP_TIME_WAIT
+                                            | crate::net::tcp::TcpState::TCP_CLOSING
+                                            | crate::net::tcp::TcpState::TCP_CLOSE => {
+                                                Some(Ok((0, None)))
+                                            }
+                                            _ => None, // would-block → EAGAIN
+                                        }
+                                    }
                                     _ => None,
                                 }
                             }
@@ -944,6 +1072,9 @@ enum WaitKind {
     Send,
     /// accept(): an established child is pending
     Accept,
+    /// connect(): the handshake left SYN_SENT (established, refused or
+    /// timed out)
+    Connect,
 }
 
 /// W3: would recv() return data, EOF or an error (i.e. anything but
@@ -985,6 +1116,20 @@ fn socket_accept_ready(socket: &Socket) -> bool {
     if fd >= 0 { crate::net::tcp::tcp_accept_pending(fd) } else { true }
 }
 
+/// Has a connecting (client) TCP socket left SYN_SENT — established,
+/// refused or timed out? Anything but SYN_SENT/SYN_RECV resolves a
+/// blocking connect().
+fn socket_connect_ready(socket: &Socket) -> bool {
+    let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+    if fd < 0 { return true; }
+    crate::net::tcp::tcp_socket_get(fd)
+        .map(|ts| !matches!(
+            ts.state,
+            crate::net::tcp::TcpState::TCP_SYN_SENT
+                | crate::net::tcp::TcpState::TCP_SYN_RECV))
+        .unwrap_or(true)
+}
+
 /// One blocking wait round (pipe discipline: prepare → re-check → sleep →
 /// finish). Returns Ok(()) when the caller should re-check its condition,
 /// Err(errno) to abort the syscall (EINTR, SO_RCVTIMEO/SO_SNDTIMEO expiry
@@ -1005,6 +1150,7 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
         WaitKind::Recv => socket_recv_ready(socket),
         WaitKind::Send => socket_send_ready(socket),
         WaitKind::Accept => socket_accept_ready(socket),
+        WaitKind::Connect => socket_connect_ready(socket),
     };
     if ready {
         socket.wait_queue.finish_wait(current);

@@ -608,25 +608,15 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 (*task_ptr).set_fdtable(Some(parent_fdtable));
             }
         } else {
-            // Copy file descriptor table (fork semantics)
-            let child_fdtable = alloc::sync::Arc::new(FdTable::new());
-
-            // Copy all file descriptors from parent to child
-            if let Some(parent_fdtable) = (*current_ptr).try_fdtable() {
-                for fd in 0..crate::fs::file::MAX_FDS {
-                    if let Some(file) = parent_fdtable.get_file(fd) {
-                        // Copy the Arc to the child's fdtable
-                        let _ = child_fdtable.install_fd(fd, file);
-                        // FD_CLOEXEC belongs to the descriptor, so the bit
-                        // must be copied too (regression round 5, HIGH: fork
-                        // was dropping all CLOEXEC bits, leaking fds across
-                        // execve in children).
-                        if parent_fdtable.get_fd_cloexec(fd) {
-                            child_fdtable.set_fd_cloexec(fd, true);
-                        }
-                    }
+            // Copy file descriptor table (fork semantics) — single-lock
+            // deep copy (see FdTable::fork_from; FD_CLOEXEC bits are part
+            // of the snapshot, regression round 5's leak stays fixed).
+            let child_fdtable = match (*current_ptr).try_fdtable() {
+                Some(parent_fdtable) => {
+                    alloc::sync::Arc::new(FdTable::fork_from(&*parent_fdtable))
                 }
-            }
+                None => alloc::sync::Arc::new(FdTable::new()),
+            };
 
             (*task_ptr).set_fdtable(Some(child_fdtable));
         }

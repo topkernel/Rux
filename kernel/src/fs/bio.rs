@@ -747,6 +747,18 @@ impl BlockCache {
                         if !(*entry.bh).get_state().is_uptodate() {
                             continue;
                         }
+                        // HIT: zero it. The caller just ALLOCATED this
+                        // block for a partial-block first write and needs
+                        // the unwritten span to read back as zeros — the
+                        // cache may still hold the block's PREVIOUS life
+                        // (freed by truncate, reallocated from the bitmap
+                        // without an intervening eviction), and returning
+                        // that stale content spliced old file data around
+                        // the new write (LTP ftest05 "bad verify should be
+                        // 0" read back a previous iteration's pattern).
+                        // Dirty so the zeros also reach disk.
+                        (*entry.bh).b_data.fill(0);
+                        (*entry.bh).set_state_bit(BufferState::BH_Dirty);
                         (*entry.bh).get();
                         return Some(entry.bh);
                     }
@@ -790,6 +802,10 @@ impl BlockCache {
                             current = (*cp).hash_next;
                             continue;
                         }
+                        // Duplicate insert lost the race: same zero-on-hit
+                        // contract as Phase 1 (see the comment there).
+                        (*(*cp).bh).b_data.fill(0);
+                        (*(*cp).bh).set_state_bit(BufferState::BH_Dirty);
                         (*(*cp).bh).get();
                         let _ = Box::from_raw(entry_ptr);
                         return Some((*cp).bh);

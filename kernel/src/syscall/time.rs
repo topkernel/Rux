@@ -160,12 +160,16 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             }
             0
         }
-        // Coarse clocks: jiffies-granular timestamps (Linux CLOCK_*_COARSE
+        // Coarse clocks: tick-grid-granular timestamps (Linux CLOCK_*_COARSE
         // advances in 1/HZ steps — that IS the contract, and LTP
         // clock_gettime04 sizes its tolerance from clock_getres()).
+        // Computed from the LIVE timebase snapped to the nominal grid —
+        // the stored JIFFIES counter only advances in the tick handler,
+        // which can lag the timebase by seconds under load, and this
+        // clock must agree with rtc::wall_secs() (fs timestamps): LTP
+        // utime01 brackets utime(NULL) stamps between coarse samples.
         CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE => {
-            let j = crate::drivers::timer::get_jiffies();
-            let mut total_ns = (j * (1_000_000_000 / crate::drivers::timer::HZ)) as u64;
+            let mut total_ns = crate::drivers::timer::coarse_ns_since_boot();
             if clk_id == CLOCK_REALTIME_COARSE {
                 total_ns = total_ns.saturating_add(wall_epoch_offset_ns());
             }

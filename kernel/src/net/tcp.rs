@@ -3214,6 +3214,11 @@ pub fn tcp_connect(fd: i32, ip: u32, port: TcpPort) -> i32 {
         // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
         unsafe {
             if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+                // Fresh connect attempt: clear any stale protocol error
+                // recorded on a reused slot (Linux clears sk_err on
+                // connect) — a leftover ECONNREFUSED would fail a
+                // perfectly healthy reconnect.
+                socket.pending_error = 0;
                 // Auto-bind an ephemeral local port when the caller never bound
                 // (old code sent SYN with source port 0, review NET-M6).
                 if socket.local_port == 0 {
@@ -3256,6 +3261,9 @@ pub fn tcp_connect6(fd: i32, ip6: &crate::net::ipv6::Ipv6Addr, port: TcpPort) ->
         // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
         unsafe {
             if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
+                // See tcp_connect: stale protocol errors must not leak
+                // into a fresh connect attempt.
+                socket.pending_error = 0;
                 if socket.local_port == 0 {
                     socket.local_port = alloc_ephemeral_port();
                     socket.bound = true;
@@ -3355,8 +3363,14 @@ pub fn tcp_readable(fd: i32) -> bool {
                 !ts.recv_buffer.is_empty()
                     || ts.pending_error != 0
                     // Closed / peer-FINed: recv returns EOF, not EAGAIN.
+                    // (Same terminal set as Socket::recv's EOF mapping —
+                    // LAST_ACK/TIME_WAIT/CLOSING included so a reader on
+                    // a closing socket never waits forever.)
                     || ts.state == TcpState::TCP_CLOSE
                     || ts.state == TcpState::TCP_CLOSE_WAIT
+                    || ts.state == TcpState::TCP_LAST_ACK
+                    || ts.state == TcpState::TCP_TIME_WAIT
+                    || ts.state == TcpState::TCP_CLOSING
             }
             None => true, // slot gone — let recv() surface the error
         }

@@ -3380,18 +3380,26 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
             remaining -= written;
         }
 
-        // Write the advanced offsets back (file positions were never moved).
+        // Write the advanced offsets back. When off_in/off_out are NULL,
+        // Linux semantics advance the actual file positions by the number
+        // of bytes copied (see copy_file_range(2)); the old code never
+        // moved them, so every call re-copied from the same position and
+        // callers looping to EOF (e.g. coreutils cp) spun forever.
         if !off_in_ptr.is_null() {
             // SAFETY: off_in_ptr validated with access_ok(8).
             if unsafe { crate::arch::riscv64::uaccess::copy_to_user(off_in_ptr as *mut u8, cur_in.to_le_bytes().as_ptr(), 8) } != 0 {
                 return -(errno::EFAULT as i64);
             }
+        } else {
+            in_file.set_pos(in_file.get_pos() + total as u64);
         }
         if !off_out_ptr.is_null() {
             // SAFETY: off_out_ptr validated with access_ok(8).
             if unsafe { crate::arch::riscv64::uaccess::copy_to_user(off_out_ptr as *mut u8, cur_out.to_le_bytes().as_ptr(), 8) } != 0 {
                 return -(errno::EFAULT as i64);
             }
+        } else {
+            out_file.set_pos(out_file.get_pos() + total as u64);
         }
 
         if total > 0 {
