@@ -63,7 +63,7 @@ run_kernel() {
     qemu-system-riscv64 \
         -M virt \
         -accel tcg,thread=single \
-        -cpu rv64 \
+        -cpu rv64,zbb=true,zba=true,zbs=true \
         -m 2G \
         -smp 4 \
         -nographic \
@@ -83,7 +83,7 @@ run_kernel_gui() {
     qemu-system-riscv64 \
         -M virt \
         -accel tcg,thread=single \
-        -cpu rv64 \
+        -cpu rv64,zbb=true,zba=true,zbs=true \
         -m 2G \
         -smp 4 \
         -serial mon:stdio \
@@ -108,7 +108,7 @@ main() {
         qemu-system-riscv64 \
             -M virt \
             -accel tcg,thread=single \
-            -cpu rv64 \
+            -cpu rv64,zbb=true,zba=true,zbs=true \
             -m 2G \
             -smp 4 \
             -nographic \

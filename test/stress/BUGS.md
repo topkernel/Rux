@@ -57,3 +57,15 @@ Format:
   runs on writer do_exit even when the write itself errored. Fix S002 first,
   re-check whether S003 persists.
 
+
+## BUG-S004  (toolchain, resolved by CPU model) userspace SIGILL on Zbb instructions (zext.b) from partially-unpinned builds
+- Class: INIT-DEATH (userspace)
+- Signature: `SIGDEATH ... comm="sh" sig=4`, QEMU int log shows illegal_instruction with tval = zext.b encoding (0x9fe1 etc.)
+- First seen: LTP baseline attempts; repro `y=$((2+3))` in mrsh
+- Root cause: Ubuntu 25.10 cross-gcc default march includes Zbb/Zba/Zbs/Zcb(+V); the
+  -march=rv64gc_zicsr pins caught musl/toybox/LTP but some mrsh objects still got Zbb
+  (build plumbing TBD — flag was in config.mk yet objects contain zext.b).
+- Resolution: run QEMU with `-cpu rv64,zbb=true,zba=true,zbs=true` — stateless scalar
+  bitmanip, no context-switch impact (V stays forbidden: kernel saves no vector state).
+- Status: MITIGATED (CPU model); toolchain hygiene item OPEN (audit every build script
+  for the pin; add a post-build scan rejecting zext.b/rev8/andn/etc).

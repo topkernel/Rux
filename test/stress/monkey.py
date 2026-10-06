@@ -126,7 +126,7 @@ def run_one(idx: int, args, rng_seed: int, workdir: str) -> dict:
         full = cmdline + disk + kernel_args + ["-append", append]
     else:
         qemu = "qemu-system-riscv64"
-        full = [qemu, "-M", "virt", "-accel", "tcg,thread=single", "-cpu", "rv64",
+        full = [qemu, "-M", "virt", "-accel", "tcg,thread=single", "-cpu", "rv64,zbb=true,zba=true,zbs=true",
                 "-m", args.mem, "-smp", str(args.smp), "-nographic", "-serial", "mon:stdio",
                 "-drive", f"file={img},if=none,id=rootfs{idx},format=raw",
                 "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs" + str(idx),
