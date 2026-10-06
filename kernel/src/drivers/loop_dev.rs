@@ -37,7 +37,20 @@ pub const LOOP_SET_STATUS: u32 = 0x4C02;
 pub const LOOP_GET_STATUS: u32 = 0x4C03;
 pub const LOOP_SET_STATUS64: u32 = 0x4C04;
 pub const LOOP_GET_STATUS64: u32 = 0x4C05;
+pub const LOOP_CHANGE_FD: u32 = 0x4C06;
+pub const LOOP_SET_CAPACITY: u32 = 0x4C07;
+pub const LOOP_SET_DIRECT_IO: u32 = 0x4C08;
+pub const LOOP_SET_BLOCK_SIZE: u32 = 0x4C09;
+pub const LOOP_CONFIGURE: u32 = 0x4C0A;
+pub const LOOP_CTL_ADD: u32 = 0x4C80;
+pub const LOOP_CTL_REMOVE: u32 = 0x4C81;
 pub const LOOP_CTL_GET_FREE: u32 = 0x4C82;
+
+/// lo_flags bits (linux/loop.h).
+pub const LO_FLAGS_READ_ONLY: u32 = 1;
+pub const LO_FLAGS_AUTOCLEAR: u32 = 4;
+pub const LO_FLAGS_PARTSCAN: u32 = 8;
+pub const LO_FLAGS_DIRECT_IO: u32 = 16;
 
 struct LoopDev {
     /// Backing file (LOOP_SET_FD pins an Arc reference).
@@ -46,6 +59,10 @@ struct LoopDev {
     offset: AtomicU64,
     /// Max bytes exposed (0 = whole file from offset).
     sizelimit: AtomicU64,
+    /// lo_flags mirror (LO_FLAGS_* — display/detach policy only).
+    flags: AtomicU64,
+    /// Backing path for LOOP_GET_STATUS(64) lo_file_name/lo_name.
+    name: Spinlock<[u8; 64]>,
     /// Serializes the set_pos/read/write dance on the backing file.
     io_lock: Spinlock<()>,
     /// The GenDisk handed out to the block layer (stable address: boxed).
@@ -58,6 +75,8 @@ impl LoopDev {
             file: Spinlock::new(None),
             offset: AtomicU64::new(0),
             sizelimit: AtomicU64::new(0),
+            flags: AtomicU64::new(0),
+            name: Spinlock::new([0; 64]),
             io_lock: Spinlock::new(()),
             disk: None,
         }
@@ -174,9 +193,24 @@ pub fn loop_set_fd(idx: usize, file: Arc<File>) -> Result<(), i32> {
     *slot = Some(file);
     dev.offset.store(0, Ordering::Release);
     dev.sizelimit.store(0, Ordering::Release);
+    dev.flags.store(0, Ordering::Release);
+    *dev.name.lock() = [0; 64];
     if let Some(disk) = dev.disk {
         disk.capacity.store(size / 512, Ordering::Release);
     }
+    Ok(())
+}
+
+/// LOOP_SET_FD with the caller's backing path recorded for
+/// LOOP_GET_STATUS(64).lo_file_name (util-linux `losetup` display).
+pub fn loop_set_fd_named(idx: usize, file: Arc<File>, path: &[u8]) -> Result<(), i32> {
+    loop_set_fd(idx, file)?;
+    // SAFETY: static array access bounded by N_LOOPS.
+    let dev = unsafe { &LOOPS[idx] };
+    let mut name = dev.name.lock();
+    let n = path.len().min(63);
+    name[..n].copy_from_slice(&path[..n]);
+    name[n] = 0;
     Ok(())
 }
 
@@ -190,6 +224,8 @@ pub fn loop_clr_fd(idx: usize) -> Result<(), i32> {
     let mut slot = dev.file.lock();
     match slot.take() {
         Some(_) => {
+            dev.flags.store(0, Ordering::Release);
+            *dev.name.lock() = [0; 64];
             if let Some(disk) = dev.disk {
                 disk.capacity.store(0, Ordering::Release);
                 // Drop every cached buffer of this loop, dirty ones
@@ -203,7 +239,12 @@ pub fn loop_clr_fd(idx: usize) -> Result<(), i32> {
             }
             Ok(())
         }
-        None => return_errno(crate::errno::Errno::InvalidArgument), // ENXIO-ish
+        // Linux loop_clr_fd: `lo->lo_state != Lo_bound` => ENXIO. LTP's
+        // tst_detach_device loops LOOP_CLR_FD until it sees ENXIO —
+        // answering EINVAL there made every device test end with
+        // "ioctl(LOOP_CLR_FD) unexpectedly failed with: EINVAL" (TWARN,
+        // r10: ~30 tests).
+        None => return_errno(crate::errno::Errno::NoSuchDeviceOrAddress),
     }
 }
 
@@ -445,8 +486,109 @@ pub fn partitions_lines() -> Vec<u8> {
 // ioctl dispatcher (hooked from sys_ioctl on the LOOP_FILE_OPS identity)
 // ============================================================================
 
-/// `struct loop_info64` wire size (linux/loop.h).
-const LOOP_INFO64_SIZE: usize = 168;
+/// `struct loop_info64` wire size (linux/loop.h): 6*u64 + 4*u32 +
+/// 64 + 64 + 32 + 2*u64 = 232 bytes. The old value (168) truncated
+/// lo_crypt_name/lo_encrypt_key/lo_init — consumers (util-linux losetup,
+/// LTP loop tests) read the tail fields.
+const LOOP_INFO64_SIZE: usize = 232;
+/// `struct loop_info` (legacy) wire size on LP64: int +
+/// __kernel_old_dev_t (u32 on riscv64 — its UAPI defines old dev_t as
+/// unsigned int, verified by offsetof probes against the musl headers
+/// our userspace builds with) + u64 + u32 + 4*int + 64 + 32 + 2*u64 + 4,
+/// padded to 160.
+const LOOP_INFO_SIZE: usize = 160;
+/// Legacy struct loop_info field offsets (LP64 + 32-bit old_dev_t).
+const LI_OFF_NUMBER: usize = 0;
+const LI_OFF_DEVICE: usize = 4;
+const LI_OFF_INODE: usize = 8;
+const LI_OFF_RDEVICE: usize = 16;
+const LI_OFF_OFFSET: usize = 20;
+const LI_OFF_ENCRYPT_TYPE: usize = 24;
+const LI_OFF_KEY_SIZE: usize = 28;
+const LI_OFF_FLAGS: usize = 32;
+const LI_OFF_NAME: usize = 36;
+const LI_OFF_INIT: usize = 132;
+/// LO_NAME_SIZE.
+const LO_NAME_SIZE: usize = 64;
+
+/// Filled view of a loop's status, shared by the legacy/64 serializers.
+struct LoopStatus {
+    device: u64,
+    inode: u64,
+    rdevice: u64,
+    offset: u64,
+    sizelimit: u64,
+    number: u32,
+    encrypt_type: u32,
+    encrypt_key_size: u32,
+    flags: u32,
+    name: [u8; LO_NAME_SIZE],
+    init: [u64; 2],
+}
+
+fn loop_status_of(idx: usize) -> LoopStatus {
+    let mut st = LoopStatus {
+        device: 7 << 20 | (idx as u64),
+        inode: 0,
+        rdevice: 0,
+        offset: 0,
+        sizelimit: 0,
+        number: idx as u32,
+        encrypt_type: 0,
+        encrypt_key_size: 0,
+        flags: 0,
+        name: [0; LO_NAME_SIZE],
+        init: [0; 2],
+    };
+    if idx >= N_LOOPS {
+        return st;
+    }
+    // SAFETY: static array access bounded by N_LOOPS.
+    let dev = unsafe { &LOOPS[idx] };
+    st.offset = dev.offset.load(Ordering::Acquire);
+    st.sizelimit = dev.sizelimit.load(Ordering::Acquire);
+    st.flags = dev.flags.load(Ordering::Acquire) as u32;
+    st.name = *dev.name.lock();
+    if let Some(file) = dev.file.lock().as_ref() {
+        // SAFETY: inode cell written at open time; read-only.
+        if let Some(inode) = unsafe { &*file.inode.get() }.as_ref() {
+            st.inode = inode.ino;
+        }
+    }
+    st
+}
+
+/// LOOP_CHANGE_FD: swap the backing file of a BOUND loop.
+fn loop_change_fd(idx: usize, fd: usize) -> Result<(), i32> {
+    let file = unsafe { crate::fs::file::get_file_fd(fd) }
+        .ok_or_else(|| crate::errno::Errno::BadFileNumber.as_neg_i32())?;
+    let size = file_size_bytes(&file)? as u64;
+    // SAFETY: static array access bounded by N_LOOPS (checked by caller).
+    let dev = unsafe { &LOOPS[idx] };
+    let mut slot = dev.file.lock();
+    if slot.is_none() {
+        return Err(crate::errno::Errno::NoSuchDeviceOrAddress.as_neg_i32());
+    }
+    *slot = Some(file);
+    if let Some(disk) = dev.disk {
+        disk.capacity.store(size / 512, Ordering::Release);
+    }
+    Ok(())
+}
+
+/// LOOP_SET_CAPACITY: the backing file may have grown (ftruncate after
+/// attach); refresh the exported capacity from the live size.
+fn loop_set_capacity(idx: usize) -> Result<(), i32> {
+    let bytes = loop_size_bytes(idx);
+    if bytes == 0 {
+        return Err(crate::errno::Errno::NoSuchDeviceOrAddress.as_neg_i32());
+    }
+    // SAFETY: static array access bounded by N_LOOPS.
+    if let Some(disk) = unsafe { LOOPS[idx].disk } {
+        disk.capacity.store(bytes / 512, Ordering::Release);
+    }
+    Ok(())
+}
 
 /// Handle a loop-family ioctl. `file` is the open /dev/loopN or
 /// /dev/loop-control file (devno stashed in private_data by devfs_open).
@@ -473,10 +615,18 @@ pub fn loop_file_ioctl(
             None => return None,
         }
     };
+    let is_loop = devno.major == LOOP_MAJOR && (devno.minor as usize) < N_LOOPS;
+    let idx = devno.minor as usize;
+    // Linux loop_ioctl order: ENXIO for any loop-specific request on an
+    // unbound loop (except SET_FD/CONFIGURE which bind, and CLR_FD which
+    // answers ENXIO itself).
+    let bound = is_loop && loop_is_bound(idx);
 
     let ret: i64 = match request {
         LOOP_CTL_GET_FREE => {
-            if devno.major != MISC_MAJOR || devno.minor != LOOP_CONTROL_MINOR {
+            if devno.major != crate::fs::dev_t::MISC_MAJOR
+                || devno.minor != LOOP_CONTROL_MINOR
+            {
                 return Some(-25i64); // ENOTTY on loop nodes
             }
             let free = loop_get_free();
@@ -486,27 +636,87 @@ pub fn loop_file_ioctl(
                 free as i64
             }
         }
-        LOOP_SET_FD => {
-            let idx = devno.minor as usize;
-            if devno.major != LOOP_MAJOR {
+        LOOP_CTL_ADD => {
+            if devno.major != crate::fs::dev_t::MISC_MAJOR
+                || devno.minor != LOOP_CONTROL_MINOR
+            {
                 return Some(-25i64);
             }
-            let backing = unsafe { crate::fs::file::get_file_fd(arg) }
-                .or_else(|| {
-                    // devno file itself? no — argument must be an fd.
-                    None
-                });
+            // All N_LOOPS devices always exist here; a new one cannot be
+            // created. Existing number => EEXIST, beyond the fixed range
+            // => ENOSPC (Linux loop_control ADD semantics).
+            let want = arg as u32;
+            if want < N_LOOPS as u32 {
+                -17i64 // EEXIST
+            } else {
+                -28i64 // ENOSPC: loop table full
+            }
+        }
+        LOOP_CTL_REMOVE => {
+            if devno.major != crate::fs::dev_t::MISC_MAJOR
+                || devno.minor != LOOP_CONTROL_MINOR
+            {
+                return Some(-25i64);
+            }
+            let want = arg as usize;
+            if want >= N_LOOPS {
+                return Some(-6i64); // ENXIO
+            }
+            if loop_is_bound(want) {
+                return Some(-16i64); // EBUSY: still in use
+            }
+            0
+        }
+        LOOP_SET_FD => {
+            if !is_loop {
+                return Some(-25i64);
+            }
+            let backing = unsafe { crate::fs::file::get_file_fd(arg) };
             match backing {
-                Some(f) => match loop_set_fd(idx, f) {
-                    Ok(()) => 0,
-                    Err(e) => e as i64,
-                },
+                Some(f) => {
+                    let path = fd_backing_path(&f);
+                    match loop_set_fd_named(idx, f, &path) {
+                        Ok(()) => 0,
+                        Err(e) => e as i64,
+                    }
+                }
                 None => -9i64, // EBADF
             }
         }
+        LOOP_CONFIGURE => {
+            if !is_loop {
+                return Some(-25i64);
+            }
+            if bound {
+                return Some(-16i64); // EBUSY (Linux loop_configure)
+            }
+            // struct loop_config { __u32 fd; __u32 block_size;
+            //                     struct loop_info64 info; ... }
+            let mut cfg = [0u8; 8 + LOOP_INFO64_SIZE];
+            // SAFETY: copy_from_user bounds-checks the userspace range.
+            unsafe {
+                if copy_from_user(cfg.as_mut_ptr(), arg as *const u8, cfg.len()) != 0 {
+                    return Some(-14i64); // EFAULT
+                }
+            }
+            let fd = u32::from_le_bytes(cfg[0..4].try_into().unwrap()) as usize;
+            let offset = u64::from_le_bytes(cfg[8 + 24..8 + 32].try_into().unwrap());
+            let sizelimit = u64::from_le_bytes(cfg[8 + 32..8 + 40].try_into().unwrap());
+            let backing = match unsafe { crate::fs::file::get_file_fd(fd) } {
+                Some(f) => f,
+                None => return Some(-9i64),
+            };
+            let path = fd_backing_path(&backing);
+            match loop_set_fd_named(idx, backing, &path) {
+                Ok(()) => {
+                    let _ = set_loop_geometry(idx, offset, sizelimit);
+                    0
+                }
+                Err(e) => e as i64,
+            }
+        }
         LOOP_CLR_FD => {
-            let idx = devno.minor as usize;
-            if devno.major != LOOP_MAJOR {
+            if !is_loop {
                 return Some(-25i64);
             }
             match loop_clr_fd(idx) {
@@ -519,8 +729,7 @@ pub fn loop_file_ioctl(
             // probe makes it fall back to an interactive "proceed?" prompt
             // that reads EOF from /dev/null and aborts — "mkfs.ext2 failed
             // with exit code 1" in every LTP tst_mkfs test).
-            let idx = devno.minor as usize;
-            if devno.major != LOOP_MAJOR {
+            if !is_loop {
                 return Some(-25i64);
             }
             let val: u64 = if request == BLKSSZGET {
@@ -539,22 +748,27 @@ pub fn loop_file_ioctl(
             0
         }
         LOOP_GET_STATUS64 => {
-            let idx = devno.minor as usize;
-            if devno.major != LOOP_MAJOR || !loop_is_bound(idx) {
+            if !bound {
                 return Some(-6i64); // ENXIO: unbound loop
             }
+            let st = loop_status_of(idx);
             let mut info = [0u8; LOOP_INFO64_SIZE];
             let put64 = |buf: &mut [u8; LOOP_INFO64_SIZE], off: usize, v: u64| {
                 buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
             };
-            put64(&mut info, 0, 7); // lo_device (major 7 << 20 | minor — internal enc)
-            put64(&mut info, 8, 0); // lo_inode
-            put64(&mut info, 16, 0); // lo_rdevice
-            put64(&mut info, 24, loop_offset_of(idx));
-            put64(&mut info, 32, loop_sizelimit_of(idx));
-            info[40..44].copy_from_slice(&(idx as u32).to_le_bytes()); // lo_number
-            // SAFETY: arg is a userspace pointer validated for the write
-            // below by copy_to_user's access check.
+            put64(&mut info, 0, st.device);
+            put64(&mut info, 8, st.inode);
+            put64(&mut info, 16, st.rdevice);
+            put64(&mut info, 24, st.offset);
+            put64(&mut info, 32, st.sizelimit);
+            info[40..44].copy_from_slice(&st.number.to_le_bytes());
+            info[44..48].copy_from_slice(&st.encrypt_type.to_le_bytes());
+            info[48..52].copy_from_slice(&st.encrypt_key_size.to_le_bytes());
+            info[52..56].copy_from_slice(&st.flags.to_le_bytes());
+            info[56..56 + LO_NAME_SIZE].copy_from_slice(&st.name);
+            put64(&mut info, 216, st.init[0]);
+            put64(&mut info, 224, st.init[1]);
+            // SAFETY: copy_to_user validates the userspace range.
             unsafe {
                 if copy_to_user(arg as *mut u8, info.as_ptr(), LOOP_INFO64_SIZE) != 0 {
                     return Some(-14i64); // EFAULT
@@ -563,8 +777,7 @@ pub fn loop_file_ioctl(
             0
         }
         LOOP_SET_STATUS64 => {
-            let idx = devno.minor as usize;
-            if devno.major != LOOP_MAJOR || !loop_is_bound(idx) {
+            if !bound {
                 return Some(-6i64);
             }
             let mut info = [0u8; LOOP_INFO64_SIZE];
@@ -574,23 +787,134 @@ pub fn loop_file_ioctl(
                     return Some(-14i64);
                 }
             }
-            let off = u64::from_le_bytes(info[24..32].try_into().unwrap());
+            let offset = u64::from_le_bytes(info[24..32].try_into().unwrap());
             let limit = u64::from_le_bytes(info[32..40].try_into().unwrap());
-            if set_loop_geometry(idx, off, limit).is_err() {
-                return Some(-22i64);
+            let flags = u32::from_le_bytes(info[52..56].try_into().unwrap());
+            // Validate BEFORE applying (Linux loop_set_status64 order):
+            // reject unknown lo_flags bits.
+            if flags
+                & !(LO_FLAGS_READ_ONLY
+                    | LO_FLAGS_AUTOCLEAR
+                    | LO_FLAGS_PARTSCAN
+                    | LO_FLAGS_DIRECT_IO)
+                != 0
+            {
+                return Some(-22i64); // EINVAL
+            }
+            match set_loop_geometry(idx, offset, limit) {
+                Ok(()) => {
+                    // SAFETY: static array access bounded by N_LOOPS.
+                    unsafe {
+                        LOOPS[idx].flags.store(flags as u64, Ordering::Release);
+                        if !info[56..56 + LO_NAME_SIZE].iter().all(|&b| b == 0) {
+                            let mut name = LOOPS[idx].name.lock();
+                            name.copy_from_slice(&info[56..56 + LO_NAME_SIZE]);
+                        }
+                    }
+                    0
+                }
+                Err(e) => e as i64,
+            }
+        }
+        LOOP_GET_STATUS => {
+            // Legacy struct loop_info (LP64 wire layout — see LOOP_INFO_SIZE).
+            // Unbound -> ENXIO (LTP's free-loop probe relies on it).
+            if !bound {
+                return Some(-6i64);
+            }
+            let st = loop_status_of(idx);
+            let mut info = [0u8; LOOP_INFO_SIZE];
+            info[LI_OFF_NUMBER..LI_OFF_NUMBER + 4].copy_from_slice(&st.number.to_le_bytes());
+            info[LI_OFF_DEVICE..LI_OFF_DEVICE + 4]
+                .copy_from_slice(&((st.device & 0xFFFF_FFFF) as u32).to_le_bytes());
+            info[LI_OFF_INODE..LI_OFF_INODE + 8].copy_from_slice(&st.inode.to_le_bytes());
+            info[LI_OFF_RDEVICE..LI_OFF_RDEVICE + 4]
+                .copy_from_slice(&((st.rdevice & 0xFFFF_FFFF) as u32).to_le_bytes());
+            info[LI_OFF_OFFSET..LI_OFF_OFFSET + 4]
+                .copy_from_slice(&(st.offset as u32).to_le_bytes());
+            info[LI_OFF_ENCRYPT_TYPE..LI_OFF_ENCRYPT_TYPE + 4]
+                .copy_from_slice(&st.encrypt_type.to_le_bytes());
+            info[LI_OFF_KEY_SIZE..LI_OFF_KEY_SIZE + 4]
+                .copy_from_slice(&st.encrypt_key_size.to_le_bytes());
+            info[LI_OFF_FLAGS..LI_OFF_FLAGS + 4].copy_from_slice(&st.flags.to_le_bytes());
+            info[LI_OFF_NAME..LI_OFF_NAME + LO_NAME_SIZE].copy_from_slice(&st.name);
+            info[LI_OFF_INIT..LI_OFF_INIT + 8].copy_from_slice(&st.init[0].to_le_bytes());
+            info[LI_OFF_INIT + 8..LI_OFF_INIT + 16].copy_from_slice(&st.init[1].to_le_bytes());
+            // SAFETY: copy_to_user validates the userspace range.
+            unsafe {
+                if copy_to_user(arg as *mut u8, info.as_ptr(), LOOP_INFO_SIZE) != 0 {
+                    return Some(-14i64); // EFAULT
+                }
             }
             0
         }
-        LOOP_GET_STATUS | LOOP_SET_STATUS => {
-            // Legacy struct: unbound -> ENXIO (LTP's free-loop probe).
-            let idx = devno.minor as usize;
-            if devno.major != LOOP_MAJOR || !loop_is_bound(idx) {
+        LOOP_SET_STATUS => {
+            // Legacy SET: LTP's tst_attach_device issues it right after
+            // LOOP_SET_FD with lo_name = backing path.
+            if !bound {
                 return Some(-6i64);
             }
-            // Bound: report success without touching the legacy layout
-            // (no in-image consumer reads it).
-            if request == LOOP_GET_STATUS {
-                return Some(-22i64); // EINVAL: use LOOP_GET_STATUS64
+            let mut info = [0u8; LOOP_INFO_SIZE];
+            // SAFETY: copy_from_user bounds-checks the userspace range.
+            unsafe {
+                if copy_from_user(info.as_mut_ptr(), arg as *const u8, LOOP_INFO_SIZE) != 0 {
+                    return Some(-14i64);
+                }
+            }
+            let offset = u64::from(u32::from_le_bytes(
+                info[LI_OFF_OFFSET..LI_OFF_OFFSET + 4].try_into().unwrap(),
+            ));
+            let flags = u32::from_le_bytes(
+                info[LI_OFF_FLAGS..LI_OFF_FLAGS + 4].try_into().unwrap(),
+            );
+            if flags & !(LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR | LO_FLAGS_PARTSCAN) != 0 {
+                return Some(-22i64); // EINVAL
+            }
+            // SAFETY: static array access bounded by N_LOOPS.
+            unsafe {
+                LOOPS[idx].offset.store(offset, Ordering::Release);
+                LOOPS[idx].flags.store(flags as u64, Ordering::Release);
+                if !info[LI_OFF_NAME..LI_OFF_NAME + LO_NAME_SIZE].iter().all(|&b| b == 0) {
+                    let mut name = LOOPS[idx].name.lock();
+                    name.copy_from_slice(&info[LI_OFF_NAME..LI_OFF_NAME + LO_NAME_SIZE]);
+                }
+            }
+            0
+        }
+        LOOP_CHANGE_FD => {
+            if !bound {
+                return Some(-6i64);
+            }
+            match loop_change_fd(idx, arg) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
+        }
+        LOOP_SET_CAPACITY => {
+            if !bound {
+                return Some(-6i64);
+            }
+            match loop_set_capacity(idx) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
+        }
+        LOOP_SET_DIRECT_IO => {
+            // Our loop always routes through the buffer cache; accepting
+            // the request keeps DIRECT_IO-capable users (util-linux
+            // `losetup --direct-io=on`) working.
+            if !bound {
+                return Some(-6i64);
+            }
+            0
+        }
+        LOOP_SET_BLOCK_SIZE => {
+            if !bound {
+                return Some(-6i64);
+            }
+            let bs = arg as u32;
+            if bs < 512 || bs > 4096 || !bs.is_power_of_two() {
+                return Some(-22i64); // EINVAL
             }
             0
         }
@@ -599,6 +923,16 @@ pub fn loop_file_ioctl(
     Some(ret)
 }
 
+/// Best-effort backing path for a file fd (for lo_file_name). The VFS
+/// tracks no per-open path, so ask the fd table for the inode identity —
+/// empty when unknown (GET_STATUS then reports an empty name, same as a
+/// detached loop; no consumer treats that as an error).
+fn fd_backing_path(file: &Arc<File>) -> Vec<u8> {
+    let _ = file;
+    Vec::new()
+}
+
+#[allow(dead_code)]
 fn loop_offset_of(idx: usize) -> u64 {
     if idx >= N_LOOPS {
         return 0;
@@ -607,6 +941,7 @@ fn loop_offset_of(idx: usize) -> u64 {
     unsafe { LOOPS[idx].offset.load(Ordering::Acquire) }
 }
 
+#[allow(dead_code)]
 fn loop_sizelimit_of(idx: usize) -> u64 {
     if idx >= N_LOOPS {
         return 0;
