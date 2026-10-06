@@ -53,15 +53,21 @@ SECTIONS
     __kernel_start = .;
     __kernel_lma_start = KERNEL_LMA;
 
+    /* Single AT() on .text fixes the VMA-LMA delta for the whole image
+     * (0xffffffff80000000); every later section inherits it. Per-section
+     * AT(LOADADDR(prev)+SIZEOF(prev)) broke the delta by alignment slop,
+     * which misaligned absolute-addressed data (jump tables) by a few
+     * bytes while rip-relative code kept working. */
     .text : AT(KERNEL_LMA)
     {
         __stext = .;
         KEEP(*(.text.boot64))          /* first instructions in the high map */
         *(.text .text.*)
+        . = ALIGN(4096);
         __etext = .;
     }
 
-    .rodata : AT(LOADADDR(.text) + SIZEOF(.text))
+    .rodata :
     {
         __srodata = .;
         *(.rodata .rodata.*)
@@ -74,7 +80,7 @@ SECTIONS
         __end_rodata = .;
     }
 
-    .data : AT(LOADADDR(.rodata) + SIZEOF(.rodata))
+    .data :
     {
         __sdata = .;
         *(.data .data.*)
@@ -84,7 +90,7 @@ SECTIONS
         __edata = .;
     }
 
-    .bss : AT(LOADADDR(.data) + SIZEOF(.data))
+    .bss (NOLOAD) :
     {
         __sbss = .;
         *(.bss .bss.*)

@@ -41,6 +41,10 @@
 _start:
     cli
     cld
+    /* Alive beacon: write 'R' to COM1 before anything else can fail */
+    movw $0x3f8, %dx
+    movb $'R', %al
+    outb %al, %dx
     /* Save multiboot handoff for Rust (boot.rs reads these) */
     movl %eax, (boot_mb_magic)
     movl %ebx, (boot_mb_info)
@@ -61,16 +65,16 @@ _start:
     movl $boot_pml4, %eax
     movl $(boot_pdpt_lo + PDE_P | PDE_RW), (%eax)
     /* PML4[511] -> boot_pdpt_hi   (higher-half kernel map) */
-    movl $(boot_pdpt_hi + PDE_P | PDE_RW), 2044(%eax)   /* 511*4 */
+    movl $(boot_pdpt_hi + PDE_P | PDE_RW), 4088(%eax)   /* 511*8 */
 
     /* PDPT_lo[0] -> boot_pd0 : phys 0   .. 1GB */
     movl $(boot_pd0 + PDE_P | PDE_RW), (boot_pdpt_lo)
     /* PDPT_lo[1] -> boot_pd1 : phys 1GB .. 2GB */
-    movl $(boot_pd1 + PDE_P | PDE_RW), (boot_pdpt_lo + 4)
+    movl $(boot_pd1 + PDE_P | PDE_RW), (boot_pdpt_lo + 8)
 
     /* PDPT_hi[510] -> boot_pd_kernel : VMA ffffffff80000000..+128MB
      * (entry VMA - 0xffffffff80000000 == entry phys) */
-    movl $(boot_pd_kernel + PDE_P | PDE_RW), (boot_pdpt_hi + 2040)  /* 510*4 */
+    movl $(boot_pd_kernel + PDE_P | PDE_RW), (boot_pdpt_hi + 4080) /* 510*8 */
 
     /* Fill the three page directories (512 * 2MB each) */
     movl $boot_pd0, %edi
@@ -117,7 +121,7 @@ fill_pd:
 .fill:
     movl %esi, %eax
     orl $(PDE_P | PDE_RW | PDE_PS), %eax
-    movl %eax, (%edi,%ecx,4)
+    movl %eax, (%edi,%ecx,8)
     addl $0x200000, %esi
     incl %ecx
     cmpl $512, %ecx

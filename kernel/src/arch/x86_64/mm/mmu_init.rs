@@ -38,8 +38,18 @@ extern "C" {
     static boot_pdpt_lo: [u8; 4096];
 }
 
-/// Physical end of the kernel image (LMA of `__kernel_end`).
+/// Physical end of the mapped kernel image window.
+///
+/// `__kernel_end` (end of .bss) is NOT the true image end: the supplementary
+/// linker fragment (linker-x86-extra.ld) places `.got` AFTER .bss. Round the
+/// window up so everything past `__kernel_end` (GOT, any late fragments)
+/// stays mapped after the CR3 switch.
 pub fn kernel_image_phys_end() -> u64 {
+    let end = raw_image_phys_end();
+    (end + 0x1fffff) & !0x1fffff // round up to 2MB
+}
+
+fn raw_image_phys_end() -> u64 {
     // Linker symbol; address-of and arithmetic only.
     let vma_end = &raw const __kernel_end as usize as u64;
     vma_end - KERNEL_LINK_BASE as u64
