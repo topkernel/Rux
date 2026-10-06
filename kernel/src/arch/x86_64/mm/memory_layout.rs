@@ -137,6 +137,23 @@ pub static mut PHYS_RAM_BASE: usize = PHYS_MEMORY_BASE;
 
 // ==================== mmap constants ====================
 
+/// mmap flags (Linux ABI — arch-interface module name used by generic
+/// syscall code; same values as `prot` above)
+pub mod map {
+    pub const MAP_SHARED: u32 = 0x01;
+    pub const MAP_PRIVATE: u32 = 0x02;
+    pub const MAP_TYPE_MASK: u32 = 0x0f;
+    pub const MAP_FIXED: u32 = 0x10;
+    pub const MAP_ANONYMOUS: u32 = 0x20;
+    pub const MAP_STACK: u32 = 0x20000;
+    pub const MAP_FIXED_NOREPLACE: u32 = 0x100000;
+    pub const MAP_HUGETLB: u32 = 0x40000;
+    pub const MAP_LOCKED: u32 = 0x2000;
+    pub const MAP_NORESERVE: u32 = 0x4000;
+    pub const MAP_POPULATE: u32 = 0x8000;
+    pub const MAP_NODUMP: u32 = 0x10000;
+}
+
 /// mmap protection flags (Linux ABI — arch-independent values)
 pub mod prot {
     pub const PROT_READ: u32 = 0x1;
