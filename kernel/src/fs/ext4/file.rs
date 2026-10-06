@@ -1195,6 +1195,14 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: 
             None => return errno::Errno::IOError.as_neg_i32() as isize,
         };
 
+        // Serialize the whole get_pos → read → set_pos sequence against
+        // other readers/writers sharing this open file description
+        // (fork-inherited fds): without the lock, two CPUs can both read
+        // at the old pos and both store pos+1 — a lost offset update
+        // (LTP fork07: parent's EOF read() returned 1). Linux calls this
+        // f_pos_lock. Sleeping mutex — the read may block on disk I/O.
+        let _pos_guard = file.io_lock.guard();
+
         // Get current file position
         let offset = file.get_pos() as u64;
 
@@ -1271,6 +1279,8 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
             Some(ptr) => &*(ptr as *const super::inode::Ext4Inode),
             None => return errno::Errno::IOError.as_neg_i32() as isize,
         };
+        // Same pos-race serialization as ext4_file_read_vfs (LTP fork07).
+        let _pos_guard = file.io_lock.guard();
         let offset = file.get_pos() as u64;
 
         let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
@@ -1326,6 +1336,13 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         };
         let fs = &*fs_ptr;
         let ext4_ino = inode.ino as u32;
+
+        // Serialize the get_pos → write → set_pos sequence against
+        // concurrent readers of the same open file description (they hold
+        // no ext4 lock — see ext4_file_read_vfs). Taken BEFORE the big
+        // lock so a slow file-level waiter never pins the machine-wide
+        // ext4 lock (LTP fork07, Linux f_pos_lock discipline).
+        let _pos_guard = file.io_lock.guard();
 
         // SMP serialization for the write path (review 5.5 high: 写路径/位图
         // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group

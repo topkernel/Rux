@@ -127,10 +127,17 @@ pub struct File {
     /// Written once in File::new before the value is shared; readers only
     /// need a plain u64 load (the Arc publication orders it).
     pub file_id: u64,
-    /// Serializes write paths (O_APPEND end-of-file positioning + pos
-    /// update) so concurrent writers on SMP cannot interleave. Added for
-    /// review 5.2 (O_APPEND 写与 pos 更新无锁).
-    pub write_lock: Spinlock<()>,
+    /// Serializes the whole read/write position sequence (get_pos →
+    /// data op → set_pos) so concurrent readers/writers sharing this open
+    /// file description cannot interleave and lose offset updates
+    /// (LTP fork07: 100 forked children each read 1 byte; two CPUs both
+    /// observing pos=K and both storing K+1 left one byte unconsumed and
+    /// the parent's final read() returned 1 instead of 0). Sleeping
+    /// mutex, not a spinlock: the critical section spans inode read/write
+    /// which may sleep in block I/O (a Spinlock guard would pin
+    /// preempt_count across that window — the exact hazard b31ccab fixed
+    /// for VFS_MUTATION_LOCK). This is Linux's f_pos_lock role.
+    pub io_lock: crate::sync::semaphore::Mutex,
     /// O_ASYNC signal destination (F_SETOWN / F_SETOWN_EX). kind 0 none,
     /// 1 process, 2 process group, 3 thread (F_OWNER_TID).
     pub f_owner: Spinlock<FileOwner>,
@@ -179,7 +186,7 @@ impl File {
             close_pending: core::sync::atomic::AtomicBool::new(false),
             cloexec: Spinlock::new(false),  // Default: don't set close-on-exec
             file_id: FILE_ID_GENERATION.fetch_add(1, Ordering::Relaxed),
-            write_lock: Spinlock::new(()),
+            io_lock: crate::sync::semaphore::Mutex::new(),
             f_owner: Spinlock::new(FileOwner::none()),
             f_signum: core::sync::atomic::AtomicI32::new(0),
         }
@@ -377,7 +384,7 @@ impl File {
         }
         // Serialize concurrent explicit-offset writers like reg_file_write
         // does (O_APPEND/pos race class, review 5.2).
-        let _write_guard = self.write_lock.lock();
+        let _write_guard = self.io_lock.guard();
         let n = inode.write_data(offset as usize, slice);
         if n > 0 {
             // inotify IN_MODIFY on the pwrite(2) path (P0-4) — sqlite's
@@ -969,6 +976,15 @@ pub unsafe fn get_stderr() -> Option<Arc<File>> {
 
 fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
     if let Some(ref inode) = unsafe { &*file.inode.get() } {
+        // Serialize the whole get_pos → read_data → set_pos sequence with
+        // writers and other readers sharing this open file description:
+        // without the lock, two CPUs fork-inheriting the same fd could
+        // both read at the old pos and both store pos+1 — a lost update
+        // that left bytes unconsumed (LTP fork07, read() returned 1 at
+        // EOF). reg_file_write has always held the lock for the write
+        // side; this is the matching read side (Linux f_pos_lock).
+        let _io_guard = file.io_lock.guard();
+
         // Get current file position
         let offset = file.get_pos() as usize;
 
@@ -990,7 +1006,8 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
         // that two O_APPEND writers on SMP cannot interleave (their writes
         // would each position at the "old" end). Also protects plain
         // read/write pos racing. Review 5.2 (O_APPEND 与 pos 更新无锁).
-        let _write_guard = file.write_lock.lock();
+        // (Also against reg_file_read now — see the io_lock field note.)
+        let _write_guard = file.io_lock.guard();
 
         // O_APPEND: position at end of file for every write
         let offset = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {

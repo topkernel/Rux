@@ -860,6 +860,10 @@ fn tmpfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             Ok(n) => n,
             Err(_) => return -9,
         };
+        // Same pos-race serialization as reg_file_read: forked children
+        // sharing this open file description must not lose offset updates
+        // (LTP fork07 — see File::io_lock).
+        let _io_guard = file.io_lock.guard();
         let offset = file.get_pos() as usize;
         let n = node.read_at(offset, buf);
         if n > 0 {
@@ -870,7 +874,7 @@ fn tmpfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 }
 
 /// tmpfs regular-file write: demand page allocation, O_APPEND honored by
-/// the shared reg-file convention (write_lock + end positioning).
+/// the shared reg-file convention (io_lock + end positioning).
 fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: see tmpfs_file_read.
     unsafe {
@@ -882,7 +886,7 @@ fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
             Ok(n) => n,
             Err(_) => return -9,
         };
-        let _write_guard = file.write_lock.lock();
+        let _write_guard = file.io_lock.guard();
         let offset = if file.flags_bits() & crate::fs::FileFlags::O_APPEND != 0 {
             let end = node.file_size();
             file.set_pos(end);
