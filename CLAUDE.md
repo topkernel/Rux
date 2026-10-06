@@ -117,6 +117,10 @@ Work happens in per-task worktrees under `/home/william/rux-agents/<name>/`
    has been reworked more than once) need semantic reconciliation, not
    mechanical conflict resolution.
 
+**Concurrency: default to 3 background agents, not more.** Five burns the
+API quota before the work finishes; three survives a full workday. Pick the
+three highest-value tasks and queue the rest.
+
 **Resource discipline (mandatory — the host runs many QEMUs at once):**
 
 - Boot shared images with `-snapshot` and `file.locking=off` only.
