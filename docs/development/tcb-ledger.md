@@ -1,9 +1,10 @@
 # TCB Ledger — kernel `unsafe` accounting
 
-This is a **living document**. Regenerate after any subsystem-wide change:
+This is a **living document**. Regenerate the table after any subsystem-wide change (paste it under
+"Current baseline"; `--out` writes the bare table and is meant for temp files):
 
 ```sh
-python3 scripts/tcb_ledger.py --out docs/development/tcb-ledger.md
+python3 scripts/tcb_ledger.py
 ```
 
 ## What this number means
@@ -43,7 +44,6 @@ documented in the script header; the important ones:
   acceptable for a monotone budget metric.
 
 ## Current baseline
-
 | Subsystem | .rs files | .rs lines | unsafe blocks | unsafe lines | unsafe % |
 |---|---:|---:|---:|---:|---:|
 | fs | 66 | 42313 | 509 | 5352 | 12.6% |
@@ -60,11 +60,11 @@ documented in the script header; the important ones:
 | ipc | 6 | 4402 | 51 | 185 | 4.2% |
 | arch/x86_64 | 20 | 2498 | 41 | 150 | 6.0% |
 | io_uring | 1 | 1167 | 49 | 137 | 11.7% |
-| sync | 8 | 3596 | 51 | 103 | 2.9% |
+| sync | 8 | 3699 | 51 | 103 | 2.8% |
 | security | 4 | 559 | 6 | 40 | 7.2% |
 | module | 1 | 476 | 4 | 12 | 2.5% |
 | arch (shared) | 1 | 54 | 0 | 0 | 0.0% |
-| **Whole kernel** | **263** | **162574** | **2494** | **20926** | **12.9%** |
+| **Whole kernel** | **263** | **162677** | **2494** | **20926** | **12.9%** |
 
 Reading the baseline:
 
@@ -76,5 +76,5 @@ Reading the baseline:
   context switch, runqueue surgery) — the areas where raw `Task`
   pointers are most entrenched, and the natural first targets of the
   F2 newtype/guard migration.
-- `sync` at 2.9% shows the intended shape: one small unsafe core per
+- `sync` at 2.8% shows the intended shape: one small unsafe core per
   primitive, safe API above it (§1.5 of the best-practices guide).
