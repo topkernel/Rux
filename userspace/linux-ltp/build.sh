@@ -86,6 +86,9 @@ configure_ltp() {
     # Use -nostdinc to exclude glibc headers, then add musl and GCC headers
     export ADD_CFLAGS="-march=rv64gc_zicsr -nostdinc -U_FORTIFY_SOURCE -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
     export LDFLAGS="-static -L${MUSL_DIR}/lib"
+    # CFLAGS is what autoconf bakes into the generated Makefiles — ADD_CFLAGS
+    # alone never reaches the compiler (root cause of the vector/Zcb SIGILLs).
+    export CFLAGS="-march=rv64gc_zicsr -O2 -U_FORTIFY_SOURCE"
 
     # Configure with musl headers, disable features requiring external libs
     ./configure \
