@@ -306,6 +306,7 @@ pub mod sgid_mode;
 pub mod syscall_file;
 #[cfg(feature = "unit-test")]
 pub mod syscall_io;
+pub mod loop_flags;
 #[cfg(feature = "unit-test")]
 pub mod syscall_process;
 #[cfg(feature = "unit-test")]
@@ -529,6 +530,9 @@ pub fn run_all_tests() {
 
     test_group_start("syscall_io");
     syscall_io::test_syscall_io();
+
+    test_group_start("loop+flags");
+    loop_flags::test_loop_flags();
 
     test_group_start("syscall_process");
     syscall_process::test_syscall_process();

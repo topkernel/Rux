@@ -56,6 +56,31 @@ pub struct VfsDirEntry {
     pub file_type: u8,
 }
 
+/// chattr/lsattr file flags (linux/fs.h FS_*_FL). Bit values are shared
+/// with the ext4 on-disk i_flags encoding.
+#[allow(dead_code)]
+pub const FS_SECRM_FL: u32 = 0x0000_0001;
+#[allow(dead_code)]
+pub const FS_UNRM_FL: u32 = 0x0000_0002;
+#[allow(dead_code)]
+pub const FS_COMPR_FL: u32 = 0x0000_0004;
+#[allow(dead_code)]
+pub const FS_SYNC_FL: u32 = 0x0000_0008;
+#[allow(dead_code)]
+pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
+#[allow(dead_code)]
+pub const FS_APPEND_FL: u32 = 0x0000_0020;
+#[allow(dead_code)]
+pub const FS_NODUMP_FL: u32 = 0x0000_0040;
+#[allow(dead_code)]
+pub const FS_NOATIME_FL: u32 = 0x0000_0080;
+#[allow(dead_code)]
+pub const FS_NOCOW_FL: u32 = 0x0080_0000;
+/// Bits userland may see through FS_IOC_GETFLAGS.
+pub const FS_FL_USER_VISIBLE: u32 = 0x0003_DFFF;
+/// Bits userland may change through FS_IOC_SETFLAGS.
+pub const FS_FL_USER_MODIFIABLE: u32 = 0x0003_80FF;
+
 /// Inode mode (file type and permissions)
 ///
 #[repr(C)]
@@ -310,6 +335,13 @@ pub struct Inode {
     /// limitation; a real on-disk xattr block is future work).
     pub xattrs: Spinlock<Option<alloc::collections::BTreeMap<alloc::vec::Vec<u8>, alloc::vec::Vec<u8>>>>,
 
+    /// chattr-style file flags (FS_*_FL — FS_IMMUTABLE_FL 0x10,
+    /// FS_APPEND_FL 0x20, ...), as served by FS_IOC_GETFLAGS/SETFLAGS.
+    /// ext4 seeds this from the on-disk i_flags at iget and SETFLAGS
+    /// persists it back; all other filesystems keep it in-memory only
+    /// (same lifetime caveat as `xattrs`).
+    pub ioc_flags: AtomicU32,
+
     // ==================== Reference Counting ====================
 
     /// Reference count
@@ -374,6 +406,7 @@ impl Inode {
             private_data: None,
             data: Spinlock::new(None),
             xattrs: Spinlock::new(None),
+            ioc_flags: AtomicU32::new(0),
             ref_count: AtomicU64::new(1),
         }
     }
@@ -396,6 +429,7 @@ impl Inode {
             private_data: None,
             data: Spinlock::new(None),
             xattrs: Spinlock::new(None),
+            ioc_flags: AtomicU32::new(0),
             ref_count: AtomicU64::new(1),
         }
     }

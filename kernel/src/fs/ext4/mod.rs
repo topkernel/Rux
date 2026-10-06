@@ -2635,6 +2635,14 @@ pub fn create_vfs_inode_in(
     inode.uid.store(ext4_inode.uid as u32, core::sync::atomic::Ordering::Relaxed);
     inode.gid.store(ext4_inode.gid as u32, core::sync::atomic::Ordering::Relaxed);
     inode.size.store(ext4_inode.size, core::sync::atomic::Ordering::Relaxed);
+    // Seed the chattr view: on-disk i_flags shares bit values with the
+    // FS_*_FL UAPI words (EXT4_IMMUTABLE_FL == FS_IMMUTABLE_FL == 0x10,
+    // ...). Mask to the user-visible set so internal bits (EXTENTS etc.)
+    // never leak through FS_IOC_GETFLAGS.
+    inode.ioc_flags.store(
+        ext4_inode.flags & crate::fs::inode::FS_FL_USER_VISIBLE,
+        core::sync::atomic::Ordering::Relaxed,
+    );
     inode.ops = Some(&EXT4_INODE_OPS);
     inode.private_data = Some(fs_ptr as *mut u8);
 

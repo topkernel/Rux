@@ -1393,6 +1393,22 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
         vp.inode.as_ref().map(|i| (i.ino, i.fs_id))
     });
 
+    // chattr gate (Linux may_delete): IMMUTABLE and APPEND-only entries
+    // cannot be removed — EPERM, regardless of ownership. The flags come
+    // from FS_IOC_SETFLAGS (ext4 persists them in the on-disk i_flags).
+    if let Some(flags) = target_vpath.as_ref().and_then(|vp| {
+        vp.inode.as_ref().map(|i| {
+            i.ioc_flags.load(core::sync::atomic::Ordering::Acquire)
+        })
+    }) {
+        if flags
+            & (crate::fs::inode::FS_IMMUTABLE_FL | crate::fs::inode::FS_APPEND_FL)
+            != 0
+        {
+            return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+        }
+    }
+
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
     // Get parent inode
@@ -1482,6 +1498,22 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
     let target_ino_and_fs_id = target_vpath.as_ref().and_then(|vp| {
         vp.inode.as_ref().map(|i| (i.ino, i.fs_id))
     });
+
+    // chattr gate (Linux may_delete): IMMUTABLE and APPEND-only entries
+    // cannot be removed — EPERM, regardless of ownership. The flags come
+    // from FS_IOC_SETFLAGS (ext4 persists them in the on-disk i_flags).
+    if let Some(flags) = target_vpath.as_ref().and_then(|vp| {
+        vp.inode.as_ref().map(|i| {
+            i.ioc_flags.load(core::sync::atomic::Ordering::Acquire)
+        })
+    }) {
+        if flags
+            & (crate::fs::inode::FS_IMMUTABLE_FL | crate::fs::inode::FS_APPEND_FL)
+            != 0
+        {
+            return Err(errno::Errno::OperationNotPermitted.as_neg_i32());
+        }
+    }
 
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 

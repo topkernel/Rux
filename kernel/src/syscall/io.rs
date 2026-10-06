@@ -760,6 +760,110 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
     }
 
+    // FS_IOC_GETFLAGS / FS_IOC_SETFLAGS (chattr flags on regular files
+    // and directories). LTP unlink09 marks files IMMUTABLE/APPEND-only
+    // and expects unlink(2) to fail EPERM; before this the ioctls
+    // answered ENOTTY and the test TBROK'd in setup. Non-regular,
+    // non-directory fds keep ENOTTY (Linux file_ioctl gate).
+    if request == 0x8008_6601 || request == 0x4008_6602 {
+        const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
+        const FS_IOC_SETFLAGS: u32 = 0x4008_6602;
+        use crate::fs::inode::{
+            FS_APPEND_FL, FS_FL_USER_MODIFIABLE, FS_FL_USER_VISIBLE, FS_IMMUTABLE_FL,
+        };
+        // SAFETY: get_file_fd returns a valid Arc<File> or None; the fd
+        // existence was already validated above.
+        let Some(file) = (unsafe { crate::fs::file::get_file_fd(fd as usize) }) else {
+            return -errno::EBADF as i64;
+        };
+        // SAFETY: inode cell written once at open time; read-only here.
+        let inode_opt = unsafe { &*file.inode.get() };
+        let Some(inode) = inode_opt.as_ref() else {
+            return -errno::ENOTTY as i64;
+        };
+        if !inode.mode.is_regular_file() && !inode.mode.is_directory() {
+            return -errno::ENOTTY as i64;
+        }
+        if arg == 0 || !crate::arch::riscv64::uaccess::access_ok(arg, 4) {
+            return -errno::EFAULT as i64;
+        }
+        if request == FS_IOC_GETFLAGS {
+            let flags =
+                inode.ioc_flags.load(core::sync::atomic::Ordering::Acquire) & FS_FL_USER_VISIBLE;
+            // SAFETY: arg validated non-null, 4-byte writable.
+            if !unsafe {
+                crate::arch::riscv64::uaccess::put_user(
+                    arg as *mut u32,
+                    flags,
+                )
+            } {
+                return -errno::EFAULT as i64;
+            }
+            return 0;
+        }
+        // FS_IOC_SETFLAGS
+        // SAFETY: arg validated non-null, 4-byte readable.
+        let Some(new_flags) = (unsafe {
+            crate::arch::riscv64::uaccess::get_user(arg as *const u32)
+        }) else {
+            return -errno::EFAULT as i64;
+        };
+        if new_flags & !FS_FL_USER_MODIFIABLE != 0 {
+            return -errno::EOPNOTSUPP as i64;
+        }
+        // Owner or CAP_FOWNER (Linux ioctl_setflags).
+        let owner_ok = crate::sched::current().map(|t| {
+            t.cred().fsuid == inode.uid.load(core::sync::atomic::Ordering::Acquire)
+                || crate::security::capable(crate::security::CAP_FOWNER)
+        }).unwrap_or(false);
+        if !owner_ok {
+            return -errno::EACCES as i64;
+        }
+        let old = inode.ioc_flags.load(core::sync::atomic::Ordering::Acquire);
+        if (new_flags ^ old) & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0
+            && !crate::security::capable(crate::security::CAP_LINUX_IMMUTABLE)
+        {
+            return -errno::EPERM as i64;
+        }
+        let merged = (old & !FS_FL_USER_MODIFIABLE) | (new_flags & FS_FL_USER_MODIFIABLE);
+        inode.ioc_flags.store(merged, core::sync::atomic::Ordering::Release);
+        // ext4: persist into the on-disk i_flags so the flags survive an
+        // icache eviction (the VFS copy is reseeded from disk at iget).
+        if core::ptr::eq(
+            inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _,
+            &crate::fs::ext4::EXT4_INODE_OPS as *const _,
+        ) {
+            let _guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
+            if let Some(fs_ptr) = inode.private_data {
+                let fs = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
+                // SAFETY: private_data holds the Ext4FileSystem for
+                // EXT4_INODE_OPS inodes.
+                unsafe {
+                    if let Ok(mut on_disk) =
+                        crate::fs::ext4::inode::read_inode(&*fs, inode.ino as u32)
+                    {
+                        on_disk.i_flags = (on_disk.i_flags & !FS_FL_USER_MODIFIABLE)
+                            | (merged & FS_FL_USER_MODIFIABLE);
+                        if crate::fs::ext4::inode::write_inode_disk(
+                            &*fs,
+                            inode.ino as u32,
+                            &on_disk,
+                        )
+                        .is_ok()
+                        {
+                            // Keep the VFS-cached Ext4Inode copy in sync.
+                            if let Some(sb) = inode.sb {
+                                let cached = &mut *(sb as *mut crate::fs::ext4::inode::Ext4Inode);
+                                cached.flags = on_disk.i_flags;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
     // P0-2: interface-management ioctls (SIOCGIFCONF / SIOCGIFADDR /
     // SIOCSIFADDR / SIOCGIFFLAGS / SIOCSIFFLAGS / SIOCGIFHWADDR / ...) —
     // forwarded to the network layer when the fd is a socket (any family).
