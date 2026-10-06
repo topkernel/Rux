@@ -341,6 +341,23 @@ impl PageCache {
     /// The out-array API avoids a heap allocation per call (a Vec here
     /// measurably regressed the 4 KiB-read hot path). Returns the run
     /// length; 0 when `page_index` itself is not cached.
+    ///
+    /// CONTIGUITY CONTRACT: out[i] is exactly `page_index + i` for i < n.
+    /// The caller (ext4_file_read_cached_dst) consumes the run POSITIONALLY
+    /// — it ignores the returned index and serves run[i] as page_index+i.
+    /// BTreeMap::range() iterates only EXISTING keys, silently stepping
+    /// over missing ones, so a bare range walk violates that contract
+    /// whenever a page inside the window is absent:
+    ///   - eviction removed page_index itself while its neighbours stayed:
+    ///     the run started at page_index+1 and its content was served as
+    ///     page_index's; or
+    ///   - eviction removed a middle page (or fill_page_cache_batch skipped
+    ///     a hole): every later entry shifted one page early — VALID file
+    ///     data delivered at the WRONG offset.
+    /// That was the AC-2 CKSUM-MISMATCH family (300 MB read-only window
+    /// returning wrong bytes with a pristine disk and boot-deterministic
+    /// wrong content). The `expected` walk below stops at the first gap so
+    /// the caller re-fills from the missing page instead.
     pub fn get_range_into(
         &self,
         fs_id: u64,
@@ -358,7 +375,11 @@ impl PageCache {
         let Some(inode_cache) = cache.get(&key) else {
             return 0;
         };
+        let mut expected = page_index;
         for (&idx, page) in inode_cache.pages.range(page_index..page_index + count as u64) {
+            if idx != expected {
+                break; // gap: page `expected` is not cached — stop here
+            }
             if page.invalidated {
                 break;
             }
@@ -372,6 +393,7 @@ impl PageCache {
             let phys = pfn_to_phys(page.pfn);
             out[n] = (idx, phys_to_virt_ptr(phys) as *const u8);
             n += 1;
+            expected += 1;
         }
         n
     }

@@ -24,3 +24,4 @@ pub mod umask_test;
 pub mod io_completion_test;
 pub mod page_offset_test;
 pub mod bio_test;
+pub mod page_cache_run_test;
