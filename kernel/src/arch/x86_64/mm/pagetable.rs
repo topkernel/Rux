@@ -52,6 +52,10 @@ impl PageTableEntry {
     /// Physical-address bits [51:12] mask
     const PHYS_MASK: u64 = 0x000f_ffff_ffff_f000;
 
+    /// Public alias of the physical-address bits mask (read-only codec
+    /// detail exposed for the mapping/walk code in mmu_init/mm_ops).
+    pub const PHYS_MASK_PUBLIC: u64 = Self::PHYS_MASK;
+
     pub const fn new() -> Self {
         PageTableEntry(0)
     }
