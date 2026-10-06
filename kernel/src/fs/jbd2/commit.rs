@@ -99,24 +99,39 @@ pub fn jbd2_journal_commit_transaction(
     // in <32B chunks blew the 30s wall clock) back to ~one wait.
     if journal.revoke_records.lock().is_empty() {
         let mut first_err: i32 = 0;
-        for (blocknr, ref data) in &dirty_buffers {
+        for (blocknr, ref _data) in &dirty_buffers {
+            // Write-through semantics: every jbd2_journal_dirty_metadata
+            // caller (write_inode, namei's write_block_from_vec) modifies
+            // the buffer IN PLACE before registering the snapshot, and the
+            // buffer cache syncs dirty victims before eviction-reuse. The
+            // live buffer content is therefore always at least as new as
+            // the registered snapshot — bread may even return a
+            // post-eviction copy that already carries the update on disk.
+            //
+            // Re-applying the snapshot here (the old code) stomped the
+            // block with its REGISTRATION-TIME image. On SMP, a concurrent
+            // write(2) on another CPU touching the same shared block —
+            // the 4 KiB inode-table slot of a second file, the block
+            // bitmap, a group descriptor — between this transaction's
+            // registration and commit got silently REVERTED. The victim's
+            // on-disk inode then mapped freed-and-reallocated blocks:
+            // ftest05 read sibling files' data through its own extents and
+            // later truncates double-freed live blocks ("rm: I/O error",
+            // bad-verify, cross-file corruption).
+            //
+            // So: sync the LIVE content, never the snapshot. If the buffer
+            // was evicted in between, its on-disk copy was synced at
+            // eviction with content >= the snapshot, and bread restores
+            // that; syncing it again is a no-op.
             // SAFETY: bio::bread on a valid device returns a buffer head
-            // for the cached block (cache hit) or a freshly-read one
-            // (after an eviction in between — whose on-disk copy may be
-            // stale). Re-apply the registered snapshot either way, then
-            // sync: the write-through design persists the update at its
-            // FINAL location without touching the journal area.
+            // for the cached block (cache hit) or a freshly-read one.
             match bio::bread(device, *blocknr) {
                 Some(bh) => {
-                    // SAFETY: bh is valid; b_data is block_size bytes and
-                    // data.len() <= block_size (journal block granularity).
+                    // SAFETY: bh is valid; b_data is block_size bytes.
                     unsafe {
                         let bh_ref = &mut *bh;
-                        let copy_len = core::cmp::min(data.len(), bh_ref.b_data.len());
-                        bh_ref.b_data[..copy_len].copy_from_slice(&data[..copy_len]);
-                        // Buffer content is the metadata update.
                         bh_ref.set_state_bit(bio::BufferState::BH_Dirty);
-                        // Sync writes the cached content out.
+                        // Sync writes the cached (current) content out.
                         let sync_res = bio::sync_dirty_buffer(bh);
                         // Release the cache reference taken by bread.
                         bio::brelse(bh);
