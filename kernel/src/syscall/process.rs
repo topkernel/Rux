@@ -25,8 +25,32 @@ use crate::process::exec::do_execve_elf;
 ///
 /// # Returns
 /// Returns child process PID in parent, 0 in child, negative error code on failure
+/// Heap headroom a task-creating clone must leave for the rest of the
+/// kernel (F12 thread-storm guard — see sys_clone). 8 MB ≈ 60 kernel
+/// stacks of slack: enough for exit-path bookkeeping of a mass unwind
+/// plus normal kernel traffic, small against the 128 MB heap.
+pub const CLONE_HEAP_RESERVE_BYTES: usize = 8 << 20;
+
+/// Whether the kernel heap is too low to safely create another task.
+pub fn clone_heap_reserve_low() -> bool {
+    let st = crate::mm::buddy_allocator::buddy_stats();
+    st.heap_size > 0 && st.free_bytes < CLONE_HEAP_RESERVE_BYTES
+}
+
 pub fn sys_clone(args: SyscallArgs) -> i64 {
     use crate::process::fork::{do_clone, CloneArgs};
+
+    // F12 heap-reserve gate: a thread storm (LTP pth_str02 spawns until
+    // failure) eats the 128 MB kernel heap with 128 KB kernel stacks;
+    // once the heap truly empties, the stack allocation fails cleanly
+    // but every FOLLOW-UP small allocation on the unwind path (280-byte
+    // BTree/Vec nodes) hit alloc_error_handler and PANICKED the kernel.
+    // Linux refuses clone with ENOMEM before exhausting the last of its
+    // allocator (musl maps that to EAGAIN for pthread_create callers —
+    // the graceful "unable to create more threads" path).
+    if clone_heap_reserve_low() {
+        return -(errno::ENOMEM as i64);
+    }
 
     let flags = args[0];
     let stack = args[1];
@@ -4497,6 +4521,11 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     // clone's a1 semantics when stack_size is present; if a caller passes
     // a range we honor sp = stack + size like musl's gcompat handling.
     let sp = if stack_size > 0 { stack.wrapping_add(stack_size) } else { stack };
+
+    // F12 heap-reserve gate — same rationale as sys_clone.
+    if clone_heap_reserve_low() {
+        return -(errno::ENOMEM as i64);
+    }
 
     let clone_args = CloneArgs {
         flags,
