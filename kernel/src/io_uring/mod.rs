@@ -578,7 +578,7 @@ pub fn io_uring_mmap_handler(
                 (*page).get_page();
             }
         }
-        core::arch::asm!("sfence.vma");
+        crate::arch::mm::asid::flush_tlb_all();
     }
 
     let mut vma_flags = VmaFlags::new();

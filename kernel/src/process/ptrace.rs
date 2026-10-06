@@ -590,7 +590,7 @@ fn dispatch_request(
                     (regs as *mut u64).add((addr / 8) as usize),
                     data,
                 );
-                core::arch::asm!("fence.i", options(nostack, preserves_flags));
+                crate::arch::cpu::isb();
             }
             0
         }

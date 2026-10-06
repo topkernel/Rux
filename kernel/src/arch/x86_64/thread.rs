@@ -136,7 +136,7 @@ impl ThreadStruct {
                     "pxor %xmm13, %xmm13",
                     "pxor %xmm14, %xmm14",
                     "pxor %xmm15, %xmm15",
-                    options(nostack),
+                    options(att_syntax, nostack),
                 );
             }
         }

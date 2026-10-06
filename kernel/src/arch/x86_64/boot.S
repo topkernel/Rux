@@ -144,11 +144,17 @@ mode64_low:
 /* ---- Early page tables (page-aligned region in .boot.pt) ---- */
 .section .boot.pt, "aw"
 .align 4096
+.global boot_pml4
 boot_pml4:       .space 4096
+.global boot_pdpt_lo
 boot_pdpt_lo:    .space 4096
+.global boot_pdpt_hi
 boot_pdpt_hi:    .space 4096
+.global boot_pd0
 boot_pd0:        .space 4096
+.global boot_pd1
 boot_pd1:        .space 4096
+.global boot_pd_kernel
 boot_pd_kernel:  .space 4096
 
 /* ---- Bootstrap GDT ---- */

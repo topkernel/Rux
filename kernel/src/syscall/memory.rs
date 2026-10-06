@@ -830,7 +830,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 address_space.add_rss(npages as u64);
                                 // SAFETY: sfence.vma is valid in S-mode; the
                                 // new PTEs need a flush before first use.
-                                unsafe { core::arch::asm!("sfence.vma"); }
+                                unsafe { crate::arch::mm::asid::flush_tlb_all(); }
                             }
 
                             mapped_addr.as_usize() as i64
@@ -1125,7 +1125,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // PTE lock so no stale entry survives the section).
             // SAFETY: sfence.vma is a valid RISC-V instruction; required after PTE modification.
             unsafe {
-                core::arch::asm!("sfence.vma");
+                crate::arch::mm::asid::flush_tlb_all();
             }
             drop(_pte_guard);
 

@@ -4412,11 +4412,11 @@ pub fn sys_riscv_flush_icache(args: SyscallArgs) -> i64 {
     if flags & SYS_RISCV_FLUSH_ICACHE_ALL != 0 {
         // Flush entire I-cache: use fence.i
         // SAFETY: fence.i is a valid RISC-V instruction, always safe to execute.
-        unsafe { core::arch::asm!("fence.i"); }
+        unsafe { crate::arch::cpu::isb(); }
     } else {
         // Flush specific range: fence.i is sufficient for RISC-V
         // SAFETY: fence.i is a valid RISC-V instruction, always safe to execute.
-        unsafe { core::arch::asm!("fence.i"); }
+        unsafe { crate::arch::cpu::isb(); }
     }
 
     0
