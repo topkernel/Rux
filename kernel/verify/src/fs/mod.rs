@@ -25,3 +25,4 @@ pub mod io_completion_test;
 pub mod page_offset_test;
 pub mod bio_test;
 pub mod page_cache_run_test;
+pub mod readlink_path_test;

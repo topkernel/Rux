@@ -650,6 +650,67 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // Empty pathname with a concrete dirfd: operate on the file referenced
+    // by the fd itself (man readlinkat: "If pathname is an empty string,
+    // operate on the file referred to by dirfd" — the fd must reference a
+    // symlink). resolve_user_path rejects empty paths outright, so this
+    // must run before it (LTP readlinkat01's fd-direct case).
+    {
+        let mut pbuf = [0u8; 1];
+        // SAFETY: copy_from_user probes with the exception table in play;
+        // an unreadable pointer falls through to the normal path.
+        let empty = unsafe {
+            crate::arch::riscv64::uaccess::copy_from_user(
+                pbuf.as_mut_ptr(),
+                pathname_ptr as *const u8,
+                1,
+            ) == 0
+                && pbuf[0] == 0
+        };
+        if empty && dirfd >= 0 {
+            let file = crate::sched::get_current_fdtable()
+                .and_then(|ft| ft.get_file(dirfd as usize));
+            if let Some(file) = file {
+                // SAFETY: file comes from the fd table; inode accessed
+                // read-only.
+                let is_symlink = unsafe {
+                    (*file.inode.get())
+                        .as_ref()
+                        .map(|i| i.mode.is_symlink())
+                        .unwrap_or(false)
+                };
+                if !is_symlink {
+                    return -(errno::EINVAL as i64);
+                }
+                // SAFETY: same inode validity as above; op_readlink fills
+                // a kernel buffer.
+                let target = unsafe {
+                    (*file.inode.get())
+                        .as_ref()
+                        .map(|i| {
+                            let mut tb = [0u8; 4096];
+                            let n = i.op_readlink(&mut tb);
+                            if n < 0 { None } else { Some((tb, n as usize)) }
+                        })
+                        .flatten()
+                };
+                if let Some((tb, n)) = target {
+                    let copy_len = n.min(bufsize);
+                    // SAFETY: buf validated with access_ok(bufsize);
+                    // exception-table copy.
+                    unsafe {
+                        if crate::arch::riscv64::uaccess::copy_to_user(buf, tb.as_ptr(), copy_len) != 0 {
+                            return -(errno::EFAULT as i64);
+                        }
+                    }
+                    return copy_len as i64;
+                }
+                return -(errno::ENOENT as i64);
+            }
+            return -(errno::EBADF as i64);
+        }
+    }
+
     // Resolve dirfd-relative paths like every other *at() syscall — the
     // old code ignored dirfd entirely for non-/proc paths.
     let pathname = match resolve_user_path(dirfd, pathname_ptr) {
@@ -765,13 +826,25 @@ fn resolve_proc_readlink_path(dirfd: i32, pathname: &str) -> alloc::string::Stri
         return path;
     }
 
-    // Relative path - try to resolve using dirfd
-    if dirfd == AT_FDCWD {
+    // Relative path - try to resolve using dirfd. An ABSOLUTE path must
+    // pass through untouched: the old code prepended the cwd to it too
+    // (readlink("/tmp") with cwd=/tmp became "/tmp/tmp"), so every
+    // readlink of an existing non-/proc absolute path returned ENOENT
+    // whenever the caller's cwd was not "/" — sys_readlinkat never
+    // reached its EINVAL-for-non-symlink branch, and libc realpath()
+    // (which probes each component with readlink) aborted with ENOENT
+    // (LTP acct01's ro_mntpoint TINFO; any realpath() from a non-root
+    // cwd on an absolute path).
+    if !pathname.starts_with('/') && dirfd == AT_FDCWD {
         if let Some(current) = crate::sched::current() {
             // SAFETY: current is the running task's Task pointer from sched::current().
             let cwd = unsafe { (*current).get_cwd() };
             let cwd_str = core::str::from_utf8(&cwd).unwrap_or("?");
-            let mut full = alloc::format!("{}{}", cwd_str, pathname);
+            let mut full = if cwd_str.ends_with('/') {
+                alloc::format!("{}{}", cwd_str, pathname)
+            } else {
+                alloc::format!("{}/{}", cwd_str, pathname)
+            };
             if full.contains("/self/") {
                 // SAFETY: current_pid() reads the current task's pid from scheduler.
                 let pid = unsafe { crate::process::current_pid() };
@@ -1015,10 +1088,6 @@ pub fn sys_getcwd(args: SyscallArgs) -> i64 {
     let buf = args[0] as *mut u8;
     let size = args[1] as usize;
 
-    if buf.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-
     // A zero-length buffer can never hold the cwd (+ NUL): ERANGE before
     // any range validation (Linux getcwd; LTP getcwd01 — the old order
     // ran access_ok first and returned EFAULT for size 0).
@@ -1026,18 +1095,42 @@ pub fn sys_getcwd(args: SyscallArgs) -> i64 {
         return -(errno::ERANGE as i64);
     }
 
-    // Check if buf is in valid user space
-    if !crate::arch::riscv64::uaccess::access_ok(buf as usize, size) {
-        return -(errno::EFAULT as i64);
-    }
-
     if let Some(current) = crate::sched::current() {
         // SAFETY: current is the running task's Task pointer from sched::current().
         let cwd = unsafe { (*current).get_cwd() };
+
+        // Linux walks the cwd dentry UP TO the process ROOT; after chroot()
+        // WITHOUT chdir() the cwd lies outside the root and that walk never
+        // terminates at the root — getcwd fails with ENOENT (the
+        // CVE-2018-1000001 shape; LTP realpath01 chroots into an empty dir
+        // and expects realpath(".") == NULL/ENOENT because getcwd does).
+        // Path-string approximation: the stored global cwd must run under
+        // the task's (global-namespace) root.
+        {
+            // SAFETY: same task pointer as above.
+            let root = unsafe { (*current).get_root() };
+            if root.as_ref() != b"/".as_slice() && !cwd.starts_with(&root[..]) {
+                return -(errno::ENOENT as i64);
+            }
+        }
+
         let cwd_len = cwd.len();
 
+        // Linux checks the length BEFORE the buffer: getcwd(NULL, 1) is
+        // ERANGE (the cwd + NUL cannot fit), not EFAULT — only a size that
+        // COULD hold the path proceeds to buffer validation/copy (LTP
+        // getcwd01 case 5: buf=NULL size=1 expected ERANGE, got EFAULT).
         if cwd_len >= size {
             return -(errno::ERANGE as i64);
+        }
+
+        if buf.is_null() {
+            return -(errno::EFAULT as i64);
+        }
+
+        // Check if buf is in valid user space
+        if !crate::arch::riscv64::uaccess::access_ok(buf as usize, size) {
+            return -(errno::EFAULT as i64);
         }
 
         // SAFETY: buf validated with access_ok(size); cwd_len < size; writes cwd_len + 1 bytes.
