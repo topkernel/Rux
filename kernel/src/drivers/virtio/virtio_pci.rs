@@ -994,6 +994,14 @@ pub fn read_block_using_configured_queue(
                 if retries >= MAX_RETRIES {
                     return Err(e);
                 }
+                // Drain completions first (process context, no virtio lock
+                // held — VIRTIO-WQ-1 safe): retires finished pendings so
+                // ordinal slots and descriptor windows free up before the
+                // retry, turning "table lag" and in-flight-guard rejections
+                // into one-shot retry conditions instead of a 5-attempt
+                // failure.
+                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_process_async_completions();
                 // Short delay before retry
                 for _ in 0..10000 {
                     core::hint::spin_loop();
@@ -1025,16 +1033,23 @@ fn read_block_once(
         // Reclaim descriptors that the device has finished with
         virt_queue.reclaim_descs();
 
-        // Window-reserved descriptor triple: the chain's descriptors must
-        // not overlap any live pending/tombstone window, or the device
-        // could execute a mixed chain and this chain's used-ring entry
-        // could be misattributed to another pending (device-truthed
-        // dispatch invariant — see pci_alloc_chain_window).
-        let (header_desc_idx, data_desc_idx, resp_desc_idx) =
-            match crate::drivers::virtio::pci_alloc_chain_window(virt_queue) {
-                Ok(triple) => triple,
-                Err(_) => return Err("Failed to reserve descriptor window"),
-            };
+        // Allocate the chain's three descriptors (consecutive free-running
+        // ids). Slot/window safety against live pendings is checked BELOW
+        // (pci_pending_slot_reservable) and is RETRYABLE — a still-live
+        // occupant means the completion walker is lagging, not a hard
+        // failure.
+        let header_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc header descriptor"),
+        };
+        let data_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc data descriptor"),
+        };
+        let resp_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc response descriptor"),
+        };
 
         // Construct VirtIO block request header
         let req_header = VirtIOBlkReqHeader {
@@ -1119,6 +1134,25 @@ fn read_block_once(
         // Get current expected value (used.idx expected value before submit)
         let prev_expected = crate::drivers::virtio::get_expected_used_idx();
 
+        // Reserve OUR ordinal slot (submission order) + verify the chain's
+        // descriptor window does not overlap a live pending/tombstone
+        // BEFORE touching the device: if this chain cannot be tracked,
+        // it must not be submitted (an untracked chain's used-ring entry
+        // would be misattributed). "Not reservable" = walker lag — the
+        // outer retry drains completions and tries again.
+        if !crate::drivers::virtio::pci_pending_slot_reservable(
+            virt_queue.queue_size as u32,
+            prev_expected,
+            header_desc_idx,
+        ) {
+            // SAFETY: io_buf was allocated above and nothing references it
+            // yet (no chain was built from these descriptors).
+            unsafe {
+                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            }
+            return Err("Pending table lag (completion walker behind)");
+        }
+
         // Submit to available ring (submit internally calls notify())
         virt_queue.submit(header_desc_idx);
 
@@ -1126,14 +1160,19 @@ fn read_block_once(
         crate::drivers::virtio::increment_expected_used_idx();
 
         // Publish a NULL-completion reservation ("tombstone") for this
-        // synchronous chain: keeps its descriptor window reserved until
-        // the completion walker consumes its used-ring entry, so (a) no
-        // async submit can recycle these descriptors while the chain is
-        // still at the device and (b) this chain's used-ring entry can
-        // never be misattributed to a later async pending that recycled
-        // the head descriptor id. Still under the BLK lock here — the
-        // walker cannot observe the used-ring advance first.
-        crate::drivers::virtio::pci_publish_sync_chain(header_desc_idx);
+        // synchronous chain AT ITS ORDINAL SLOT: keeps the chain's
+        // descriptor window reserved until the completion walker consumes
+        // its used-ring entry, so (a) no async submit can recycle these
+        // descriptors while the chain is still at the device and (b) this
+        // chain's used-ring entry can never be misattributed to a later
+        // async pending that recycled the head descriptor id. Still under
+        // the BLK lock here — the walker cannot observe the used-ring
+        // advance first, and the reservation above cannot be lost.
+        crate::drivers::virtio::pci_publish_sync_chain(
+            virt_queue.queue_size as u32,
+            prev_expected,
+            header_desc_idx,
+        );
 
         // Snapshot used ring pointer for interrupt-driven wait
         let used_ptr = virt_queue.used_ring_ptr();
@@ -1142,7 +1181,9 @@ fn read_block_once(
     };
     // PCI lock dropped here — other I/O operations can proceed while we wait
 
-    // Phase 2: Wait for completion (interrupt-driven, releases BKL during sleep)
+    // Phase 2: Wait for completion (interrupt-driven, releases BKL during
+    // sleep; bounded by a 10s wall-clock deadline — see
+    // wait_for_used_interruptible)
     let new_used = VirtQueue::wait_for_used_interruptible(
         used_ring_ptr,
         crate::drivers::virtio::get_pci_blk_wait_queue(),
@@ -1171,9 +1212,12 @@ fn read_block_once(
             core::hint::spin_loop();
         }
         if !late {
-            // True timeout: the chain may still be in flight on the device.
-            // Record the leak so (a) the in-flight guard stops counting it
+            // True timeout (10s deadline expired): the chain may still be
+            // in flight on the device. Flag our tombstone so the walker's
+            // eventual consumption pairs the leaked-chain accounting, and
+            // record the leak so (a) the in-flight guard stops counting it
             // and (b) the caller's retry cannot reuse its slots.
+            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(prev_expected);
             if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
                 vq.note_timed_out_chain();
             }
@@ -1220,6 +1264,9 @@ pub fn write_block_using_configured_queue(
                 if retries >= MAX_RETRIES {
                     return Err(e);
                 }
+                // Drain completions before retrying (see the read path).
+                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_process_async_completions();
                 // Short delay before retry
                 for _ in 0..10000 {
                     core::hint::spin_loop();
@@ -1251,13 +1298,20 @@ fn write_block_once(
         // Reclaim descriptors that the device has finished with
         virt_queue.reclaim_descs();
 
-        // Window-reserved descriptor triple (see pci_alloc_chain_window;
-        // same invariant as the read path).
-        let (header_desc_idx, data_desc_idx, resp_desc_idx) =
-            match crate::drivers::virtio::pci_alloc_chain_window(virt_queue) {
-                Ok(triple) => triple,
-                Err(_) => return Err("Failed to reserve descriptor window"),
-            };
+        // Allocate the chain's three descriptors (consecutive free-running
+        // ids); slot/window safety is checked below and is RETRYABLE.
+        let header_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc header descriptor"),
+        };
+        let data_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc data descriptor"),
+        };
+        let resp_desc_idx = match virt_queue.alloc_desc() {
+            Some(idx) => idx,
+            None => return Err("Failed to alloc response descriptor"),
+        };
 
         // Construct VirtIO block request header (WRITE type)
         let req_header = VirtIOBlkReqHeader {
@@ -1342,6 +1396,21 @@ fn write_block_once(
         // Get current expected value (used.idx expected value before submit)
         let prev_expected = crate::drivers::virtio::get_expected_used_idx();
 
+        // Reserve OUR ordinal slot + verify the window before submitting
+        // (same discipline as the read path — see read_block_once).
+        if !crate::drivers::virtio::pci_pending_slot_reservable(
+            virt_queue.queue_size as u32,
+            prev_expected,
+            header_desc_idx,
+        ) {
+            // SAFETY: io_buf was allocated above and nothing references it
+            // yet (no chain was built from these descriptors).
+            unsafe {
+                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            }
+            return Err("Pending table lag (completion walker behind)");
+        }
+
         // Submit to available ring (submit internally calls notify())
         virt_queue.submit(header_desc_idx);
 
@@ -1349,14 +1418,13 @@ fn write_block_once(
         crate::drivers::virtio::increment_expected_used_idx();
 
         // Publish a NULL-completion reservation ("tombstone") for this
-        // synchronous chain: keeps its descriptor window reserved until
-        // the completion walker consumes its used-ring entry, so (a) no
-        // async submit can recycle these descriptors while the chain is
-        // still at the device and (b) this chain's used-ring entry can
-        // never be misattributed to a later async pending that recycled
-        // the head descriptor id. Still under the BLK lock here — the
-        // walker cannot observe the used-ring advance first.
-        crate::drivers::virtio::pci_publish_sync_chain(header_desc_idx);
+        // synchronous chain AT ITS ORDINAL SLOT (same discipline as the
+        // read path — see read_block_once).
+        crate::drivers::virtio::pci_publish_sync_chain(
+            virt_queue.queue_size as u32,
+            prev_expected,
+            header_desc_idx,
+        );
 
         // Snapshot used ring pointer for interrupt-driven wait
         let used_ptr = virt_queue.used_ring_ptr();
@@ -1365,7 +1433,9 @@ fn write_block_once(
     };
     // PCI lock dropped here — other I/O operations can proceed while we wait
 
-    // Phase 2: Wait for completion (interrupt-driven, releases BKL during sleep)
+    // Phase 2: Wait for completion (interrupt-driven, releases BKL during
+    // sleep; bounded by a 10s wall-clock deadline — see
+    // wait_for_used_interruptible)
     let new_used = VirtQueue::wait_for_used_interruptible(
         used_ring_ptr,
         crate::drivers::virtio::get_pci_blk_wait_queue(),
@@ -1394,7 +1464,9 @@ fn write_block_once(
             core::hint::spin_loop();
         }
         if !late {
-            // True timeout — leak-note the chain (see the read path).
+            // True timeout (10s deadline expired) — flag the tombstone and
+            // leak-note the chain (same pairing as the read path).
+            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(prev_expected);
             if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
                 vq.note_timed_out_chain();
             }
@@ -1442,6 +1514,9 @@ pub fn flush_block_using_configured_queue(
                 if retries >= MAX_RETRIES {
                     return Err(e);
                 }
+                // Drain completions before retrying (see the read path).
+                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_process_async_completions();
                 for _ in 0..10000 {
                     core::hint::spin_loop();
                 }
@@ -1531,8 +1606,35 @@ fn flush_block_once() -> Result<usize, &'static str> {
         );
 
         let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+
+        // Reserve OUR ordinal slot + verify the window before submitting
+        // (same discipline as the read/write paths; a FLUSH chain is only
+        // 2 descriptors wide, covered conservatively by the 3-wide window
+        // check).
+        if !crate::drivers::virtio::pci_pending_slot_reservable(
+            virt_queue.queue_size as u32,
+            prev_expected,
+            header_desc_idx,
+        ) {
+            // SAFETY: io_buf was allocated above and nothing references it
+            // yet (no chain was built from these descriptors).
+            unsafe {
+                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
+            }
+            return Err("Pending table lag (completion walker behind)");
+        }
+
         virt_queue.submit(header_desc_idx);
         crate::drivers::virtio::increment_expected_used_idx();
+
+        // Publish the sync-chain tombstone at its ordinal slot (same
+        // discipline as the read/write paths): the flush's used-ring
+        // entry must be consumed as OURS, never misattributed.
+        crate::drivers::virtio::pci_publish_sync_chain(
+            virt_queue.queue_size as u32,
+            prev_expected,
+            header_desc_idx,
+        );
 
         let used_ptr = virt_queue.used_ring_ptr();
         (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr)
@@ -1563,7 +1665,9 @@ fn flush_block_once() -> Result<usize, &'static str> {
             core::hint::spin_loop();
         }
         if !late {
-            // True timeout — leak-note the chain (see the read path).
+            // True timeout (10s deadline expired) — flag the tombstone and
+            // leak-note the chain (same pairing as the read path).
+            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(prev_expected);
             if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
                 vq.note_timed_out_chain();
             }

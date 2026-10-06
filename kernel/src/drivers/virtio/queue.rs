@@ -436,7 +436,7 @@ impl VirtQueue {
         // interrupts are not enabled and there is no scheduler, so we must
         // use synchronous polling with a large timeout (matching the MMIO
         // path's budget). The normal path relies on interrupt-driven wakeup
-        // with a small safety-net timeout.
+        // with a 10s wall-clock deadline.
         let is_early_boot = match crate::sched::current() {
             Some(task) if task.pid() != 0 => false,
             _ => true,
@@ -451,100 +451,196 @@ impl VirtQueue {
         // runs on the timer cadence); the budget must comfortably exceed
         // that or the poll times out just before completion and the CALLER's
         // late-drain (which runs with the caller's locks held) burns seconds.
-        // Normal: small timeout — relies on interrupt wakeup via wait queue.
-        let max_iterations = if poll_only {
+        // Normal path: bounded by the 10s wall-clock deadline below, NOT by
+        // an iteration count — every Block softirq wakes the whole sync
+        // queue, so a 5000-wake cap could expire in well under a second of
+        // false wakes and convert healthy I/O into timeout+EIO storms (the
+        // AC-2 "leaked multi-block read" failure family).
+        let max_iterations: u64 = if poll_only {
             5_000_000
         } else {
-            5000
+            1 << 40
         };
 
-        for _iteration in 0..max_iterations {
-            // Early boot / lock holder: pure spin-poll (no scheduler).
-            if poll_only {
+        // 10s wall-clock deadline for the sleeping path (the
+        // IoCompletion::wait discipline): a wakeup timer armed AT the
+        // deadline guarantees schedule() returns even if no completion
+        // ever wakes us, so a lost interrupt or a wedged device cannot
+        // strand a synchronous waiter forever (one lost completion used
+        // to strand it permanently — no retry, no timeout, no way out).
+        let mut deadline = 0u64;
+        let mut deadline_timer = 0u64; // 0 = not armed
+        let mut poll_fallback = false; // timer budget exhausted: 1-jiffy re-arms
+        if !poll_only {
+            deadline = crate::drivers::timer::get_jiffies()
+                .saturating_add(crate::drivers::timer::msecs_to_jiffies(10_000));
+            let pid = crate::sched::get_current_pid();
+            deadline_timer = crate::timer::add_timer_wakeup(deadline, pid);
+            if deadline_timer == 0 {
+                poll_fallback = true;
+            }
+        }
+
+        let result = 'wait_done: {
+            for _iteration in 0..max_iterations {
+                // Early boot / lock holder: pure spin-poll (no scheduler).
+                if poll_only {
+                    // SAFETY: resp_done reads the caller-owned response byte.
+                    if unsafe { resp_done(resp_status) } {
+                        // SAFETY: used_ring offset 2 is the idx field.
+                        break 'wait_done unsafe {
+                            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                            core::ptr::read_volatile(used_idx_ptr)
+                        };
+                    }
+                    core::hint::spin_loop();
+                    continue;
+                }
+
+                // Normal path: get current task and sleep on wait queue.
+                // The idle task has SchedPolicy::Idle which enqueue_task() ignores,
+                // so sleeping would be a permanent deadlock.
+                let current = match crate::sched::current() {
+                    Some(task) if task.pid() != 0 => task,
+                    _ => {
+                        core::hint::spin_loop();
+                        continue;
+                    }
+                };
+
+                // Fast check: our own request may have completed already.
                 // SAFETY: resp_done reads the caller-owned response byte.
                 if unsafe { resp_done(resp_status) } {
                     // SAFETY: used_ring offset 2 is the idx field.
-                    return unsafe {
+                    break 'wait_done unsafe {
                         let used_idx_ptr = (used_ring as usize + 2) as *const u16;
                         core::ptr::read_volatile(used_idx_ptr)
                     };
                 }
-                core::hint::spin_loop();
-                continue;
-            }
 
-            // Normal path: get current task and sleep on wait queue.
-            // The idle task has SchedPolicy::Idle which enqueue_task() ignores,
-            // so sleeping would be a permanent deadlock.
-            let current = match crate::sched::current() {
-                Some(task) if task.pid() != 0 => task,
-                _ => {
-                    core::hint::spin_loop();
-                    continue;
+                // Register on the wait queue with the task state set to
+                // INTERRUPTIBLE under the queue lock (prepare_to_wait), then
+                // re-check the response and truly sleep in schedule().
+                //
+                // The old code only ran wait_queue.add() — the task state was
+                // never set to INTERRUPTIBLE, so schedule() found it still
+                // RUNNING and returned IMMEDIATELY: the "wait" was a 5000-lap
+                // spin that could expire before a TCG completion (10-20ms)
+                // landed. The caller then treated its still-healthy request as
+                // timed out, leaked the 64B block, and the retry's fresh
+                // descriptor chain overwrote the still-in-flight one — the
+                // device silently dropped the corrupted chain and every later
+                // waiter on those slots starved (observed: execve of a
+                // buffer-cold binary, e.g. toybox cp, hanging forever in this
+                // loop with 55s+ of CPU burned).
+                //
+                // prepare_to_wait closes the lost-wakeup race the old 256-lap
+                // spin patched over: the state change and queue insertion are
+                // atomic w.r.t. the IRQ handler's wake_up_all().
+                wait_queue.prepare_to_wait(current, false, true);
+
+                // Re-check AFTER registering: a completion whose interrupt
+                // fired between the fast check above and prepare_to_wait is
+                // caught here instead of sleeping on a queue nobody will wake.
+                if unsafe { resp_done(resp_status) } {
+                    wait_queue.finish_wait(current);
+                    // R36-B2 compensation (IoCompletion::wait discipline): a
+                    // racing fire may have enqueued us between prepare and
+                    // finish — take ourselves back off the GRQ or nr_running
+                    // stays inflated until our next context switch.
+                    crate::sched::dequeue_task(&*current);
+                    // SAFETY: used_ring offset 2 is the idx field.
+                    break 'wait_done unsafe {
+                        let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                        core::ptr::read_volatile(used_idx_ptr)
+                    };
                 }
-            };
 
-            // Fast check: our own request may have completed already.
-            // SAFETY: resp_done reads the caller-owned response byte.
-            if unsafe { resp_done(resp_status) } {
-                // SAFETY: used_ring offset 2 is the idx field.
-                return unsafe {
-                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                    core::ptr::read_volatile(used_idx_ptr)
-                };
-            }
+                // Deadline check AFTER prepare_to_wait: we are about to sleep,
+                // so this is the last point the deadline can abort without a
+                // wake. The deadline timer (or the 1-jiffy fallback re-arm)
+                // makes sure schedule() comes back at or after it.
+                if (deadline_timer != 0 || poll_fallback)
+                    && crate::drivers::timer::get_jiffies() >= deadline
+                {
+                    wait_queue.finish_wait(current);
+                    // Same R36-B2 compensation as above.
+                    crate::sched::dequeue_task(&*current);
+                    // Final chance: a lost KICK (quiet batch submit nobody
+                    // drained) recovers here — kick and walk once, then
+                    // re-check before reporting the timeout sentinel.
+                    crate::drivers::virtio::pci_blk_kick();
+                    crate::drivers::virtio::pci_process_async_completions();
+                    if unsafe { resp_done(resp_status) } {
+                        // SAFETY: used_ring offset 2 is the idx field.
+                        break 'wait_done unsafe {
+                            let used_idx_ptr = (used_ring as usize + 2) as *const u16;
+                            core::ptr::read_volatile(used_idx_ptr)
+                        };
+                    }
+                    // prev_used sentinel: caller runs its late-drain and
+                    // retry (R21-N2 — never free a buffer the device may
+                    // still DMA into).
+                    break 'wait_done prev_used;
+                }
 
-            // Register on the wait queue with the task state set to
-            // INTERRUPTIBLE under the queue lock (prepare_to_wait), then
-            // re-check the response and truly sleep in schedule().
-            //
-            // The old code only ran wait_queue.add() — the task state was
-            // never set to INTERRUPTIBLE, so schedule() found it still
-            // RUNNING and returned IMMEDIATELY: the "wait" was a 5000-lap
-            // spin that could expire before a TCG completion (10-20ms)
-            // landed. The caller then treated its still-healthy request as
-            // timed out, leaked the 64B block, and the retry's fresh
-            // descriptor chain overwrote the still-in-flight one — the
-            // device silently dropped the corrupted chain and every later
-            // waiter on those slots starved (observed: execve of a
-            // buffer-cold binary, e.g. toybox cp, hanging forever in this
-            // loop with 55s+ of CPU burned).
-            //
-            // prepare_to_wait closes the lost-wakeup race the old 256-lap
-            // spin patched over: the state change and queue insertion are
-            // atomic w.r.t. the IRQ handler's wake_up_all().
-            wait_queue.prepare_to_wait(current, false, true);
+                if poll_fallback {
+                    // Re-arm a 1-jiffy wake so the deadline check above runs
+                    // every jiffy even without a completion wake.
+                    let pid = crate::sched::get_current_pid();
+                    let dl = crate::drivers::timer::get_jiffies().saturating_add(1);
+                    let id = crate::timer::add_timer_wakeup(dl, pid);
+                    if id != 0 {
+                        // R54: schedule() now restores the caller's SIE state;
+                        // wait-path callers re-arm explicitly (semaphore.rs
+                        // discipline) so ticks/IPIs reach this CPU across the
+                        // wait loop.
+                        crate::arch::riscv64::cpu::restore_irq(true);
+                        crate::sched::schedule();
+                        crate::timer::del_timer(id);
+                    } else {
+                        // Timer table STILL exhausted: never schedule()
+                        // without a wake source — bounded spin with IRQs
+                        // enabled (the completion walker can still run) and
+                        // re-check.
+                        wait_queue.finish_wait(current);
+                        crate::arch::riscv64::cpu::restore_irq(true);
+                        for _ in 0..100_000 {
+                            core::hint::spin_loop();
+                        }
+                        continue;
+                    }
+                } else {
+                    // Sleep until woken by interrupt
+                    // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
+                    crate::arch::riscv64::cpu::restore_irq(true);
+                    crate::sched::schedule();
+                }
 
-            // Re-check AFTER registering: a completion whose interrupt
-            // fired between the fast check above and prepare_to_wait is
-            // caught here instead of sleeping on a queue nobody will wake.
-            if unsafe { resp_done(resp_status) } {
+                // Remove from wait queue and restore RUNNING state, then loop
+                // back to re-check the response.
                 wait_queue.finish_wait(current);
-                // SAFETY: used_ring offset 2 is the idx field.
-                return unsafe {
-                    let used_idx_ptr = (used_ring as usize + 2) as *const u16;
-                    core::ptr::read_volatile(used_idx_ptr)
-                };
             }
 
-            // Sleep until woken by interrupt
-            // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-            crate::arch::riscv64::cpu::restore_irq(true);
-            crate::sched::schedule();
+            // Budget exhausted without seeing OUR response (only reachable
+            // on the poll_only spin budgets): the prev_used sentinel.
+            // Callers treat `new_used == prev_expected` as "request
+            // possibly still in flight" and run their bounded late-drain
+            // before erroring (R21-N2: never free a buffer the device may
+            // still DMA into — a true timeout leaks the 64B block instead).
+            // Returning the current used-ring index here would let
+            // concurrent completions of OTHER requests mask our timeout
+            // and skip that protection.
+            prev_used
+        };
 
-            // Remove from wait queue and restore RUNNING state, then loop
-            // back to re-check the response.
-            wait_queue.finish_wait(current);
+        // Deadline-timer bookkeeping on EVERY exit path: an armed timer
+        // left behind would fire a stray wakeup into whatever the task is
+        // doing ten seconds later.
+        if deadline_timer != 0 {
+            crate::timer::del_timer(deadline_timer);
         }
-
-        // Timeout without seeing OUR response: return the caller's prev_used
-        // sentinel. Callers treat `new_used == prev_expected` as "request
-        // possibly still in flight" and run their bounded late-drain before
-        // erroring (R21-N2: never free a buffer the device may still DMA
-        // into — a true timeout leaks the 64B block instead). Returning the
-        // current used-ring index here would let concurrent completions of
-        // OTHER requests mask our timeout and skip that protection.
-        prev_used
+        result
     }
 
     /// Wait for a specific descriptor to appear in the used ring.
@@ -761,9 +857,15 @@ impl VirtQueue {
         // Discount chains that timed out and leaked: they will never
         // advance the used ring (or may do so arbitrarily late), but
         // counting them here forever would starve allocation after two
-        // timeouts — the permanent-I/O-wedge cascade.
+        // timeouts — the permanent-I/O-wedge cascade. SATURATING, never
+        // wrapping: leaked only ever counts UNRESOLVED timed-out chains
+        // (see note_timed_out_chain / resolve_leaked_chain), but a stale
+        // overcount must clamp in_flight to zero (queue very idle), not
+        // wrap it to ~65535 — the old wrapping_sub turned one accounting
+        // drift into a PERMANENT "all descriptors in flight" refusal and
+        // every submission failed with -5 forever after.
         let leaked = self.leaked_chains.load(Ordering::Acquire);
-        let in_flight = avail_idx.wrapping_sub(used_idx).wrapping_sub(leaked);
+        let in_flight = avail_idx.wrapping_sub(used_idx).saturating_sub(leaked);
         // Bound by the WORST-CASE chain length (3: blk header/data/resp),
         // not the caller's: a 2-descriptor flush admitted under the old
         // per-caller guard could become the 4th concurrent chain and wrap
@@ -787,23 +889,49 @@ impl VirtQueue {
 
     /// Record that a chain's wait TIMED OUT and its slots are leaked.
     ///
-    /// The caller's retry then allocates a FRESH chain; without skipping a
-    /// window here, the retry's slots (next_desc keeps cycling mod
-    /// queue_size) could land on the still-in-flight leaked chain and
-    /// overwrite its descriptors — the device then reads a header-less
-    /// chain and silently drops it, wedging every later waiter on those
-    /// slots (observed: execve of a buffer-cold binary spinning forever in
-    /// wait_for_used_interruptible). Skipping one full window guarantees
-    /// the retry cannot collide with the leaked chain.
+    /// The leaked count discounts the chain from the in-flight admission
+    /// guard until its (possibly very late) completion lands; the PCI
+    /// completion walker pairs every increment with resolve_leaked_chain
+    /// when it consumes a TIMED-OUT tombstone's used-ring entry, so the
+    /// counter tracks genuinely unresolved chains instead of accumulating
+    /// forever.
+    ///
+    /// Descriptor-slot safety no longer needs the old next_desc window
+    /// skip: timed-out PCI chains keep a tombstone in the pending table,
+    /// and pci_pending_slot_reservable refuses to publish any chain whose
+    /// descriptor window overlaps a live tombstone's. (The skip also raced
+    /// concurrent chain builds: it advanced next_desc from process
+    /// context while another CPU held the BLK lock mid-build, breaking
+    /// the three-descriptor consecutiveness the window math relies on.)
     pub fn note_timed_out_chain(&self) {
-        self.leaked_chains.fetch_add(1, Ordering::AcqRel);
-        // Advance to the start of the NEXT descriptor window so the very
-        // next allocation cannot reuse any slot of the leaked chain.
-        let q = self.queue_size as u16;
-        let cur = self.next_desc.load(Ordering::Acquire);
-        let into_window = cur % q;
-        let skip = (q - into_window) % q;
-        self.next_desc.fetch_add(if skip == 0 { q } else { skip }, Ordering::AcqRel);
+        let n = self.leaked_chains.fetch_add(1, Ordering::AcqRel) + 1;
+        // Cap warning: enough leaked chains to pin a meaningful slice of
+        // the descriptor ring (queue_size/3 windows) means the device or
+        // the completion path is losing I/Os — rate-limited, but loud.
+        let cap = (self.queue_size / 3) as u16;
+        if n >= cap && (n == cap || (n - cap) % 16 == 0) {
+            crate::pr_warn!(
+                "virtio-blk: {} chains leaked (timed out, unresolved) — \
+                 completion loss suspected",
+                n
+            );
+        }
+    }
+
+    /// Pair a note_timed_out_chain increment: a timed-out chain's
+    /// completion finally landed (the walker consumed its tombstone's
+    /// used-ring entry), so stop discounting it from the admission guard.
+    /// Saturating: never decrements past zero.
+    pub fn resolve_leaked_chain(&self) {
+        let _ = self
+            .leaked_chains
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            });
     }
 
     /// Reset descriptor allocator
