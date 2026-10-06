@@ -2172,6 +2172,19 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 /// spinlock (namei I/O sleeps under it after its 256-iteration spin
 /// window) remains a documented quality issue, not a correctness one:
 /// mutual exclusion holds either way.
+///
+/// LTP-F10: the pure-spin acquire was NOT merely noisy — it could wedge
+/// the whole machine. The holder legitimately sleeps in block I/O while
+/// a second task spins in lock_fair on the other CPU; when the holder
+/// is woken it is RUNNABLE but the kernel does not preempt a task
+/// spinning in kernel mode, so the spinner keeps the CPU forever and
+/// the holder never runs to release. Every ext4 op then piles up behind
+/// the big lock with all CPUs spinning (silent serial — not even the
+/// test-runner's watchdog can run to SIGKILL). Fixed by sleeping on a
+/// waitqueue instead of spinning, using the post-R7-B6b/R8-6/R32-F10
+/// discipline that R7-A2 predated: register on the queue BEFORE
+/// re-checking the state, EXCLUSIVE/FIFO, wake-one on release, and undo
+/// a spurious concurrent enqueue on the fast path.
 pub static EXT4_BIG_LOCK: Ext4BigLock = Ext4BigLock::new();
 
 /// Task-recursive big lock.
@@ -2185,6 +2198,9 @@ pub static EXT4_BIG_LOCK: Ext4BigLock = Ext4BigLock::new();
 /// outermost guard releases).
 pub struct Ext4BigLock {
     state: crate::sync::spinlock::Spinlock<Ext4BigState>,
+    /// Tasks blocked while another task holds the big lock (the holder
+    /// may sleep in block I/O for a long time — see the note above).
+    wait: crate::process::wait::WaitQueueHead,
 }
 
 struct Ext4BigState {
@@ -2201,44 +2217,109 @@ impl Ext4BigLock {
                 owner: 0,
                 depth: 0,
             }),
+            wait: crate::process::wait::WaitQueueHead::new(),
         }
     }
 
-    /// Acquire (fair-spinning on contention, recursive per task).
+    /// Try to take the lock / recurse into it. Returns the guard on
+    /// success. Caller must NOT hold the state spinlock.
+    fn try_acquire_or_recurse(&'static self, pid: u32) -> Option<Ext4BigGuard> {
+        let mut st = self.state.lock();
+        if !st.locked {
+            st.locked = true;
+            st.owner = pid;
+            st.depth = 1;
+            Some(Ext4BigGuard { lock: self })
+        } else if st.owner == pid {
+            st.depth += 1;
+            Some(Ext4BigGuard { lock: self })
+        } else {
+            None
+        }
+    }
+
+    /// Acquire (sleep on contention, recursive per task).
     pub fn lock_fair(&'static self) -> Ext4BigGuard {
         let pid = crate::process::current_pid();
-        loop {
-            {
-                let mut st = self.state.lock();
-                if !st.locked {
-                    st.locked = true;
-                    st.owner = pid;
-                    st.depth = 1;
-                    return Ext4BigGuard { lock: self };
-                }
-                if st.owner == pid {
-                    st.depth += 1;
-                    return Ext4BigGuard { lock: self };
-                }
+
+        // Adaptive: a short spin first covers the common case of a holder
+        // that is on-CPU and about to release (boot-time short sections
+        // never touch the waitqueue at all).
+        for _ in 0..4 {
+            if let Some(g) = self.try_acquire_or_recurse(pid) {
+                return g;
             }
-            // Contended by another task: brief pause and retry. The
-            // holder may sleep in block I/O — do not hold up this CPU's
-            // interrupts while spinning.
             for _ in 0..64 {
                 core::hint::spin_loop();
             }
         }
+
+        // Contended for real. If we have no task context (early boot /
+        // IRQ) we cannot sleep — degrade to the old pure spin.
+        let cur = match crate::sched::current() {
+            Some(t) => t,
+            None => {
+                loop {
+                    if let Some(g) = self.try_acquire_or_recurse(pid) {
+                        return g;
+                    }
+                    for _ in 0..64 {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
+        };
+
+        loop {
+            if let Some(g) = self.try_acquire_or_recurse(pid) {
+                return g;
+            }
+            // Register on the wait queue BEFORE re-checking the state
+            // (R7-B6b discipline): any release() that pairs with this
+            // attempt finds us queued and hands its wake token to us.
+            // EXCLUSIVE + tail insert => FIFO, one wake per release.
+            self.wait.prepare_to_wait(cur, true, false);
+            match self.try_acquire_or_recurse(pid) {
+                Some(g) => {
+                    self.wait.finish_wait(cur);
+                    // A concurrent release()'s wake_up_one may have seen
+                    // us queued+sleeping and enqueued us between the
+                    // registration and the acquire — undo it (the
+                    // per-class on_rq guards make this a no-op when we
+                    // were not actually enqueued). Mirrors Semaphore::down.
+                    crate::sched::dequeue_task(&*cur);
+                    return g;
+                }
+                None => {}
+            }
+            // Sleep until release() wakes us (UNINTERRUPTIBLE: ext4 ops
+            // are not signal-interruptible and the guard must be carried
+            // back out of the critical section).
+            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::sched::schedule();
+            self.wait.finish_wait(cur);
+            // Woken: loop and retry the acquire (another task may have
+            // barged past us — the release that woke us is not a
+            // reservation, just a retry token).
+        }
     }
 
     fn release(&'static self) {
-        let mut st = self.state.lock();
-        if st.depth > 0 {
-            st.depth -= 1;
-            if st.depth == 0 {
-                st.locked = false;
-                st.owner = 0;
+        {
+            let mut st = self.state.lock();
+            if st.depth > 0 {
+                st.depth -= 1;
+                if st.depth == 0 {
+                    st.locked = false;
+                    st.owner = 0;
+                }
             }
         }
+        // Hand the lock to one waiter. Done outside the state spinlock:
+        // the waker takes the waitqueue lock, the waiter's finish_wait
+        // takes it too — never both at once. Waking an empty queue is a
+        // no-op, so this is safe even without waiter accounting.
+        self.wait.wake_up_one();
     }
 }
 
