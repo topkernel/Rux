@@ -680,6 +680,12 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 
 /// Handle timer interrupt (PIC IRQ0) — faithful port of the riscv64 twin.
 fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
+    // EOI FIRST (early-Linux discipline): the handler below can call
+    // schedule(); with the ISR bit still set the PIC would block every
+    // same/lower-priority line — the timer included — until the task we
+    // switched away from happens to resume.
+    pic_send_eoi(IRQ_TIMER);
+
     // Increment interrupt counter for /proc/interrupts
     crate::fs::procfs::interrupts::timer_inc(cpu);
 
@@ -732,14 +738,10 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
 /// non-specific EOI (early-Linux style — unconditional, idempotent at
 /// the chip, and correct even for spurious IRQ7/IRQ15 storms).
 fn handle_external_interrupt(vector: u64) {
+    // The timer line never reaches here (vector 32 has its own gate and
+    // EOI-first handler), so every claimed line is a device line.
     let mut claimed = 0;
     while let Some(line) = pic_claim() {
-        if line == IRQ_TIMER as u8 && vector == PIC_IRQ_BASE as u64 {
-            // Timer is routed through its own vector; guard against a
-            // misrouted claim by dispatching it as the timer below.
-            pic_send_eoi(line);
-            continue;
-        }
         let h = IRQ_LINE_HANDLERS[line as usize].load(core::sync::atomic::Ordering::Acquire);
         if h != 0 {
             // SAFETY: nonzero values were stored from fn pointers by
@@ -756,8 +758,9 @@ fn handle_external_interrupt(vector: u64) {
         }
     }
     if claimed == 0 {
-        // Spurious (or an unexpected vector >= 48): EOI conservatively
-        // so the PIC never wedges; spurious IRQs must NOT EOI the slave.
+        // Spurious (or an unexpected vector >= 48): nothing is in
+        // service, so deliberately NO EOI (EOI-ing a spurious IRQ7/15
+        // confuses the PIC's in-service tracking).
         crate::pr_debug!("trap: spurious IRQ (vector {:#x})", vector);
     }
 }

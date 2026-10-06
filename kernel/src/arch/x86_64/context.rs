@@ -63,12 +63,27 @@ __switch_to:
     movq %r13, {task_thread}+{callee_r13}(%rdi)
     movq %r14, {task_thread}+{callee_r14}(%rdi)
     movq %r15, {task_thread}+{callee_r15}(%rdi)
-    movq %rsp, {task_thread}+{thread_sp}(%rdi)
+    # Return-address protocol (x86 keeps the return address on the
+    # stack, the twin's ra is a register): stash the live return address
+    # into callee.ret_addr and thread.sp = entry_rsp + 8 (the stack
+    # position ABOVE the return-address slot).  The resume side's
+    # `push callee.ret_addr; ret` then re-enters context_switch with
+    # exactly the post-call rsp; for newborn tasks fork sets
+    # thread.sp = stack_top - 168 (frame base) and ret_addr =
+    # ret_from_fork, so the same push/ret lands on the child frame.
+    movq 0(%rsp), %rax
+    movq %rax, {task_thread}+{callee_ret}(%rdi)
+    leaq 8(%rsp), %rax
+    movq %rax, {task_thread}+{thread_sp}(%rdi)
 
     # 2. prev/next survive the helper calls in callee-saved registers
     #    (safe: their interrupted values were just stored in prev->thread).
     movq %rdi, %rbx            # rbx = prev
     movq %rsi, %r12            # r12 = next
+
+    # ABI: entry rsp == 8 (mod 16); the resume point is already saved, so
+    # aligning down here is free scratch space for the C helper calls.
+    subq $8, %rsp
 
     # 3. Publish: current = next (release), prev->on_cpu = 0 (R8-1b
     #    parity — prev is fully saved above and now pickable), and
