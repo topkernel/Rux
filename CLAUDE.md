@@ -117,9 +117,16 @@ Work happens in per-task worktrees under `/home/william/rux-agents/<name>/`
    has been reworked more than once) need semantic reconciliation, not
    mechanical conflict resolution.
 
-**Concurrency: default to 3 background agents, not more.** Five burns the
-API quota before the work finishes; three survives a full workday. Pick the
-three highest-value tasks and queue the rest.
+**Concurrency: 5 background agents by default; auto-resume after quota
+exhaustion.** API quota limits kill all agents mid-work a few times a day.
+That is expected and handled: worktrees persist, so on session resume the
+main thread must automatically (1) inventory every worktree for uncommitted
+changes and unmerged branches, (2) cherry-pick/merge finished work into
+main (build + smoke-boot before push), (3) clean up QEMU processes whose
+owning agent is gone (map PID cmdline → worktree; never kill live agents'
+instances; `pkill` stays forbidden), and (4) relaunch the queue at full
+concurrency without waiting for instructions. The user only ever says
+"继续".
 
 **Resource discipline (mandatory — the host runs many QEMUs at once):**
 
