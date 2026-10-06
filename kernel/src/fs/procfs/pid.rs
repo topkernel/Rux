@@ -214,6 +214,9 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     content.push_str("VmStk:\t0 kB\n");
     content.push_str("VmExe:\t0 kB\n");
     content.push_str("VmLib:\t0 kB\n");
+    // No swap on Rux: report 0 like non-swapping Linux boxes. LTP
+    // getrusage03 scans this line after each mlockall+touch round.
+    content.push_str("VmSwap:\t0 kB\n");
 
     // Threads: live thread count from the thread-group leader (P2: real
     // count — single-threaded processes report 1, CLONE_THREAD groups
