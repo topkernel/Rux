@@ -231,6 +231,54 @@ fn free_waiter(index: usize) {
     *slot = None;
 }
 
+/// Back off one jiffy when the waiter pool is exhausted (see
+/// futex_wait_timeout). Sleeps INTERRUPTIBLE with a one-shot timer so a
+/// slot frees while we are parked; returns immediately if no task/timer
+/// context is available (caller retries anyway).
+fn pool_full_backoff() {
+    use crate::process::task::{Task, TaskState};
+
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => return,
+    };
+    let target = crate::drivers::timer::get_jiffies() + 1;
+    let pid = unsafe { (*current).pid() };
+    let timer_id = crate::timer::add_timer_wakeup(target, pid);
+    if timer_id == 0 {
+        return; // no timer slot: busy retry (rare, bounded by wakers)
+    }
+    loop {
+        if crate::drivers::timer::get_jiffies() >= target {
+            break;
+        }
+        // Mark INTERRUPTIBLE BEFORE the final re-check (state-first
+        // lost-wakeup discipline, same as sys_nanosleep).
+        // SAFETY: current is the running task's pointer.
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        if crate::drivers::timer::get_jiffies() >= target {
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                (*current).set_state(TaskState::new(TaskState::RUNNING));
+            }
+            // A racing wake may have enqueued us while still executing —
+            // take ourselves back off (NEW-C2 discipline).
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                crate::sched::dequeue_task(&*current);
+            }
+            break;
+        }
+        // SAFETY: schedule() operates on the current task.
+        unsafe {
+            crate::sched::schedule();
+        }
+    }
+    crate::timer::del_timer(timer_id);
+}
+
 /// Calculate futex hash value
 fn futex_hash(key: &FutexKey) -> usize {
     // Hash by uaddr ALONE. matches() compares uaddr in BOTH branches
@@ -251,7 +299,21 @@ fn futex_hash(key: &FutexKey) -> usize {
     // never-released lock word forever. Linux solves the same interop
     // with FLAG_IMMUTABLE (the cleartid wake matches both key variants);
     // uaddr-only bucketing gives this kernel the same reach.
-    key.uaddr % HASH_SIZE
+    //
+    // F12: the raw `uaddr % HASH_SIZE` clustered EVERY thread-stack
+    // futex into ONE bucket. musl hands out 1 MB pthread stacks with a
+    // fixed stride (0x101000 — stack + guard page), which is a multiple
+    // of 64, so the ctid/join futex words of all threads of a process
+    // landed in the same bucket: pth_str02's 1000-thread join chain
+    // serialised on a single spinlock (all 256 pool slots chained in one
+    // bucket, every wake/alloc walking 256 entries under that lock).
+    // Fibonacci-multiply the byte offset so any fixed stride spreads
+    // across the buckets.
+    let x = (key.uaddr >> 2) as u64;
+    let mixed = x.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    // Take the high bits (multiplicative hashing) modulo HASH_SIZE.
+    let bits = HASH_SIZE.trailing_zeros();
+    (mixed >> (64 - bits)) as usize
 }
 
 /// Wake up waiters on a futex, keyed on the CURRENT task's mm.
@@ -438,9 +500,27 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         }
 
         // Allocate waiter slot.
+        //
+        // F12: a full pool must NEVER fail the wait with ENOMEM. Linux
+        // parks futex waiters on a futex_q living on the CALLER'S KERNEL
+        // STACK (futex_wait_queue), so a futex wait cannot fail for
+        // capacity reasons, and userspace relies on that: musl's join /
+        // __timedwait loops only exit on ETIMEDOUT/EINVAL and blindly
+        // re-issue FUTEX_WAIT on any other error. With ENOMEM here,
+        // pth_str02's 1000-thread join chain live-locked — every joiner
+        // spinning lock-acquire → full-pool scan → ENOMEM, starving the
+        // exit-path wakes that would have freed slots. Instead: drop the
+        // bucket lock, back off one jiffy, and retry the whole sequence
+        // (value re-check included). Slots free as wakes progress; the
+        // exit path (ctid wake) never needs a slot, so forward progress
+        // is guaranteed.
         let waiter_idx = match alloc_waiter() {
             Some(idx) => idx,
-            None => return -ENOMEM as i64,
+            None => {
+                drop(head);
+                pool_full_backoff();
+                continue;
+            }
         };
 
         // Initialize and insert waiter into hash chain (fill the placeholder
