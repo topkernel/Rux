@@ -39,9 +39,15 @@ pub enum DfxSwitch {
     /// Heap-leak hunt: size-class alloc/free counters + big-object call
     /// site histogram, reported with the periodic dump (see memwatch.rs).
     MemWatch,
+    /// mm forensic rings: PTE-install ledger (PTEI_RING), double-teardown
+    /// detector (FUT_RING scan) and PT stamp/free rings. All per-PTE or
+    /// per-exit costs on the fork/exit hot path — OFF in production boots
+    /// (LTP fork_procs lost seconds per 1000 forks to them); enable only
+    /// while hunting the fake-OOM / stale-tree families.
+    MmForensics,
 }
 
-const SWITCH_COUNT: usize = 4;
+const SWITCH_COUNT: usize = 5;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -52,6 +58,7 @@ impl DfxSwitch {
             DfxSwitch::TaskDumpKey => 1,
             DfxSwitch::PeriodicDump => 2,
             DfxSwitch::MemWatch => 3,
+            DfxSwitch::MmForensics => 4,
         }
     }
 
@@ -61,6 +68,7 @@ impl DfxSwitch {
             "taskdump" => Some(DfxSwitch::TaskDumpKey),
             "periodic" => Some(DfxSwitch::PeriodicDump),
             "memwatch" => Some(DfxSwitch::MemWatch),
+            "mmforensics" => Some(DfxSwitch::MmForensics),
             _ => None,
         }
     }
