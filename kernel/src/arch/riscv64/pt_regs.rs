@@ -215,6 +215,20 @@ impl PtRegs {
     pub fn irqs_disabled(&self) -> bool {
         (self.status & SR_PIE) == 0
     }
+
+    /// Mark this frame as returning to user mode (clear SPP so sret
+    /// drops to U-mode). Interface parity with the x86_64 backend.
+    #[inline]
+    pub fn mark_user_frame(&mut self) {
+        self.status &= !SR_SPP;
+    }
+
+    /// Mark this frame as a supervisor-mode frame (set SPP so sret stays
+    /// in S-mode). Interface parity with the x86_64 backend.
+    #[inline]
+    pub fn mark_kernel_frame(&mut self) {
+        self.status |= SR_SPP;
+    }
 }
 
 // ==================== CSR bit definitions ====================

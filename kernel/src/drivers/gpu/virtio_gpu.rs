@@ -272,25 +272,15 @@ impl VirtioGpuDevice {
         )?;
 
         // Convert virtual addresses to physical addresses
-        #[cfg(feature = "riscv64")]
         let desc_phys = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(unsafe { queue.desc as u64 })
         ).0;
-        #[cfg(feature = "riscv64")]
         let avail_phys = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(unsafe { queue.avail as u64 })
         ).0;
-        #[cfg(feature = "riscv64")]
         let used_phys = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(unsafe { queue.used as u64 })
         ).0;
-
-        #[cfg(not(feature = "riscv64"))]
-        let desc_phys = unsafe { queue.desc as u64 };
-        #[cfg(not(feature = "riscv64"))]
-        let avail_phys = unsafe { queue.avail as u64 };
-        #[cfg(not(feature = "riscv64"))]
-        let used_phys = unsafe { queue.used as u64 };
 
         unsafe {
             write_volatile((common_cfg + offset::COMMON_CFG_QUEUE_DESC_LO as u64) as *mut u32, desc_phys as u32);
@@ -356,12 +346,9 @@ impl VirtioGpuDevice {
         self.create_resource_2d(width, height)?;
 
         // Step 4: Attach backing storage (use physical address)
-        #[cfg(feature = "riscv64")]
         let fb_phys = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(fb_ptr as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let fb_phys = fb_ptr as u64;
 
         self.attach_backing(fb_phys, fb_size as u32)?;
 
@@ -626,19 +613,12 @@ impl VirtioGpuDevice {
         let _cmd_guard = self.cmd_lock.lock();
 
         // Convert virtual addresses to physical addresses
-        #[cfg(feature = "riscv64")]
         let cmd_phys = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(cmd as *const CMD as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
         let resp_phys = crate::arch::mm::virt_to_phys(
             crate::arch::mm::VirtAddr::new(resp as *mut RESP as u64)
         ).0;
-
-        #[cfg(not(feature = "riscv64"))]
-        let cmd_phys = cmd as *const CMD as u64;
-        #[cfg(not(feature = "riscv64"))]
-        let resp_phys = resp as *mut RESP as u64;
 
         // Use first descriptor to send command, second descriptor to receive response
         // LIMITATION: Hardcodes descriptors 0 and 1, so only one GPU command can

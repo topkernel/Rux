@@ -282,10 +282,10 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
 
     // Restore the kernel page table on this hart (do_execve_elf left the
     // init mm active). ASID_KERNEL = 0.
-    // SAFETY: kernel_root_ppn is the boot page-table root; switch_mm only
-    // writes satp and issues an ASID-scoped sfence.
+    // SAFETY: kernel_root_ppn is the boot page-table root; the switch
+    // only activates it on this CPU.
     unsafe {
-        crate::arch::context::switch_mm(kernel_root_ppn, 0);
+        crate::mm::switch_address_space(kernel_root_ppn, 0);
     }
 
     // First entry into user mode happens through ret_from_exception with
@@ -298,13 +298,21 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             return Err(ElfError::OutOfMemory);
         }
         extern "C" {
+            /// riscv64 user-return trampoline; the x86_64 trap contract
+            /// exposes the same behavior as ret_from_fork.
+            #[cfg(feature = "riscv64")]
             fn ret_from_exception();
+            #[cfg(feature = "x86_64")]
+            fn ret_from_fork();
         }
         // Kernel is linked at KERNEL_LINK_ADDR, so function pointers are
         // already virtual addresses.
+        #[cfg(feature = "riscv64")]
+        let entry = ret_from_exception as u64;
+        #[cfg(feature = "x86_64")]
+        let entry = ret_from_fork as u64;
         let thread = (*task_ptr).thread_mut();
-        thread.ra = ret_from_exception as u64;
-        thread.sp = child_regs as u64;
+        crate::process::thread_set_entry(thread, entry, child_regs as u64);
     }
 
     Ok(())
@@ -345,6 +353,6 @@ pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
 /// Halt the system
 fn halt() -> ! {
     loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        crate::arch::cpu::wfi();
     }
 }

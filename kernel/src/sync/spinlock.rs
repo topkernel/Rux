@@ -66,6 +66,29 @@ use core::sync::atomic::AtomicUsize;
 
 // ==================== RawSpinlock (TTAS) ====================
 
+/// Capture this function's return address (the spinlock call site) for
+/// deadlock diagnostics.
+#[inline]
+fn caller_return_address() -> usize {
+    let ra: usize;
+    #[cfg(feature = "riscv64")]
+    // SAFETY: pure register read, no memory access or side effects.
+    unsafe {
+        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
+    }
+    #[cfg(feature = "x86_64")]
+    // SAFETY: frame pointers are forced on, so [rbp+8] is the return
+    // address of this inlined function's caller.
+    unsafe {
+        core::arch::asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack));
+    }
+    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+    {
+        ra = 0;
+    }
+    ra
+}
+
 pub struct RawSpinlock {
     locked: AtomicU32,
     /// Deadlock diagnostics: holder's hart id + 1 (0 = free).  Written
@@ -117,8 +140,7 @@ impl RawSpinlock {
     #[inline(never)]
     pub fn lock(&self) {
         // Capture caller's return address before spinning
-        let caller_ra: usize;
-        unsafe { core::arch::asm!("mv {}, ra", out(reg) caller_ra, lateout("x1") _, options(nomem, nostack)); }
+        let caller_ra = caller_return_address();
         let mut spins: u32 = 0;
         // TTAS (test-and-test-and-set, C7): one CAS to acquire; while
         // contended, spin on a plain Relaxed load until the word reads
@@ -156,7 +178,7 @@ impl RawSpinlock {
         }
         // Print CPU id as decimal digit
         if cpu < 10 {
-            unsafe { sbi_rt::legacy::console_putchar(b'0' as usize + cpu); }
+            unsafe { crate::console::putchar_no_lock(b'0' + cpu as u8); }
         }
         // Print lock address in hex
         let msg2 = b" lock=0x";

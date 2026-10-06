@@ -29,7 +29,8 @@ use crate::arch::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageTableEntry
 pub fn sys_brk(args: [u64; 6]) -> i64 {
     use crate::sched;
     use crate::mm::page::PAGE_SIZE;
-    use crate::arch::mm::{alloc_and_map_user_memory, PageTableEntry};
+    use crate::arch::mm::PageTableEntry;
+    use crate::mm::alloc_and_map_user_memory;
 
     let new_brk = args[0] as u64;
 
@@ -260,7 +261,8 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     use crate::mm::page::VirtAddr;
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
-    use crate::arch::mm::{prot, map, mmap_error};
+    use crate::arch::mm::{prot, mmap_error};
+    use crate::mm::map;
 
     let mut addr = args[0] as usize;
     let length = args[1] as usize;
@@ -610,6 +612,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // own physical pages into the caller (no anonymous
                     // backing, no demand paging — writes land in the
                     // scanout buffer; userspace flushes via FBIO_FLUSH).
+                    #[cfg(feature = "riscv64")]
                     if fd >= 0 {
                         let is_fb = unsafe { crate::fs::file::get_file_fd(fd as usize) }
                             .map(|f| crate::drivers::gpu::fbdev::is_fb_file(&f))
@@ -1607,7 +1610,8 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
-    use crate::arch::mm::{map, mmap_error};
+    use crate::arch::mm::mmap_error;
+    use crate::mm::map;
 
     let old_addr = args[0] as usize;
     let old_size = args[1] as usize;

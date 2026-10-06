@@ -300,9 +300,7 @@ fn rng_fill(buf: &mut [u8]) {
     let mut state = RNG_STATE.lock_irqsave();
     if *state == 0 {
         // Seed from the cycle counter (differs per call site/CPU/time).
-        let cycles: u64;
-        // SAFETY: rdcycle is a plain CSR read on this hart.
-        unsafe { core::arch::asm!("rdcycle {0}", out(reg) cycles, options(nomem, nostack)) };
+        let cycles = crate::arch::cpu::read_time();
         *state = cycles ^ 0xa0761d6478bd642f;
     }
     for b in buf.iter_mut() {

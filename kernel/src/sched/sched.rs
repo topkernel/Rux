@@ -794,17 +794,27 @@ pub fn init_secondary(cpu_id: usize) {
     unsafe {
         let idle_ptr = IDLE_TASK_STORAGES[cpu_id].as_ptr() as *mut Task;
 
-        // Verify tp matches the pre-created idle task
-        let current_tp: usize;
-        core::arch::asm!("mv {}, tp", out(reg) current_tp);
+        // Verify the current-task pointer matches the pre-created idle task
+        let current_tp = crate::arch::cpu::get_thread_id() as usize;
         debug_assert_eq!(current_tp, idle_ptr as usize,
-            "init_secondary: tp mismatch! tp={:#x}, expected={:#x}", current_tp, idle_ptr as usize);
+            "init_secondary: current-task ptr mismatch! tp={:#x}, expected={:#x}", current_tp, idle_ptr as usize);
 
-        core::arch::asm!("csrw sscratch, zero");
+        clear_trap_scratch();
 
         let pcpu = cpu_state_mut(cpu_id);
         pcpu.idle = idle_ptr;
         pcpu.current = idle_ptr;
+    }
+}
+
+/// Clear the trap-entry scratch register (riscv64 `sscratch`; no-op
+/// elsewhere — x86_64 keeps per-CPU state in memory, not a scratch reg).
+#[inline]
+fn clear_trap_scratch() {
+    #[cfg(feature = "riscv64")]
+    // SAFETY: writing 0 to sscratch is the standard usermode-entry setup.
+    unsafe {
+        core::arch::asm!("csrw sscratch, zero");
     }
 }
 
@@ -844,8 +854,8 @@ pub fn init() {
             __secondary_idle_tasks[cpu] = idle_ptr as usize;
 
             if cpu == boot_cpu {
-                core::arch::asm!("csrw sscratch, zero");
-                core::arch::asm!("mv tp, {0}", in(reg) idle_ptr);
+                clear_trap_scratch();
+                crate::arch::cpu::set_thread_id(idle_ptr as u64);
 
                 let pcpu = cpu_state_mut(cpu);
                 pcpu.idle = idle_ptr;
@@ -1097,8 +1107,7 @@ unsafe fn __schedule() {
     // proceed with the TRUE prev — so its dequeue/requeue bookkeeping
     // lands on the task that is actually leaving the CPU (the misdirect
     // shape that produced every phantom capture).
-    let tp: *mut Task;
-    core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack));
+    let tp: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
     if !tp.is_null() && tp != prev {
         // Locate the slot that still accounts tp (it was scheduled SOMEWHERE).
         let home = {
@@ -1457,9 +1466,7 @@ unsafe fn ensure_linked_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> boo
         while sh > 0 {
             sh -= 4;
             let nb = ((v >> sh) & 0xF) as u8;
-            sbi_rt::legacy::console_putchar(
-                (if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize,
-            );
+            crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
         }
         crate::console::putchar_no_lock(b'\n');
     }
@@ -1548,7 +1555,7 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             while sh > 0 {
                 sh -= 4;
                 let nb = ((v >> sh) & 0xF) as u8;
-                sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize);
+                crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
             }
             crate::console::putchar_no_lock(b'\n');
             return false;
@@ -1858,9 +1865,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                     while sh > 0 {
                         sh -= 4;
                         let nb = ((v >> sh) & 0xF) as u8;
-                        sbi_rt::legacy::console_putchar(
-                            (if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize,
-                        );
+                        crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                     }
                     crate::console::putchar_no_lock(b'\n');
                 }
@@ -1879,9 +1884,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((v >> sh) & 0xF) as u8;
-                    sbi_rt::legacy::console_putchar(
-                        (if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize,
-                    );
+                    crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
                 }
                 crate::console::putchar_no_lock(b'\n');
             }
@@ -2353,7 +2356,7 @@ pub fn scheduler_tick() {
                         use crate::arch::pt_regs::PtRegs;
                         let pr = current_pt_regs() as *const PtRegs;
                         if !pr.is_null() {
-                            let e = unsafe { (*pr).epc };
+                            let e = unsafe { (*pr).instruction_pointer() };
                             let mut sh = 64;
                             while sh > 0 { sh -= 4; let nb = ((e >> sh) & 0xF) as u8; putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
                         }

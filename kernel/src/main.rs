@@ -107,6 +107,7 @@ pub fn print_status_ex(module: &str, desc: &str, success: Option<bool>) {
     }
 }
 
+#[cfg(feature = "riscv64")]
 mod sbi;
 mod mm;
 mod console;
@@ -170,10 +171,10 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     taskdump_raw_line(b" align=");
     taskdump_dec(layout.align() as u64);
     let mut frames: [u64; 6] = [0; 6];
-    let s0: u64;
+    // SAFETY: reads the frame-pointer chain of the current stack.
     unsafe {
-        core::arch::asm!("mv {s}, s0", s = out(reg) s0, options(nomem, nostack));
-        crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+        let fp = crate::dfx::backtrace::current_frame_pointer();
+        crate::dfx::memwatch::walk_fp_chain(fp, &mut frames);
     }
     taskdump_raw_line(b" frames:");
     for f in frames.iter() {
@@ -232,6 +233,22 @@ fn format_hex(v: u64) -> &'static str {
     }
 }
 
+// x86_64 link shim for the trap-entry symbol generic process code
+// references. arch/x86_64/trap.S is not written yet (X86-TODO agent
+// x86-trap pins `ret_from_fork` in its contract); this WEAK definition
+// only satisfies the link — the trap.S global definition overrides it
+// automatically once that file lands.
+#[cfg(feature = "x86_64")]
+core::arch::global_asm!(
+    r#"
+.section .text.x86_trampoline_shim, "ax"
+.weak ret_from_fork
+ret_from_fork:
+    hlt
+    jmp ret_from_fork
+"#
+);
+
 // Include platform-specific assembly code
 #[cfg(feature = "aarch64")]
 global_asm!(include_str!("arch/aarch64/boot/boot.S"));
@@ -239,7 +256,41 @@ global_asm!(include_str!("arch/aarch64/boot/boot.S"));
 #[cfg(feature = "aarch64")]
 global_asm!(include_str!("arch/aarch64/trap.S"));
 
-// RISC-V kernel main function
+/// Kernel reservation at the RAM base (OpenSBI + kernel on riscv64; low
+/// memory + kernel on x86_64) and the heap's physical base.
+#[cfg(feature = "riscv64")]
+const KERNEL_RESERVE_SIZE: usize = 0xC0_0000; // 12MB
+#[cfg(feature = "x86_64")]
+const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
+#[cfg(feature = "riscv64")]
+const KERNEL_HEAP_PHYS: usize = 0x80C0_0000;
+#[cfg(feature = "x86_64")]
+const KERNEL_HEAP_PHYS: usize = 0x0200_0000;
+
+/// Physical base of RAM and the kernel's physical load address, per arch.
+#[cfg(feature = "riscv64")]
+const MEMORY_PHYS_BASE: usize = 0x8000_0000;
+#[cfg(feature = "riscv64")]
+const KERNEL_PHYS_LOAD_ADDR: usize = 0x8020_0000;
+#[cfg(feature = "x86_64")]
+const MEMORY_PHYS_BASE: usize = 0x0000_0000;
+#[cfg(feature = "x86_64")]
+const KERNEL_PHYS_LOAD_ADDR: usize = 0x0020_0000; // multiboot1 LMA
+
+/// Usable memory regions from the multiboot/e820 map (x86_64).
+#[cfg(feature = "x86_64")]
+fn x86_boot_memory_regions() -> alloc::vec::Vec<cmdline::MemoryRegion> {
+    arch::boot::boot_memory_regions()
+        .iter()
+        .filter(|r| r.usable)
+        .map(|r| cmdline::MemoryRegion {
+            base: r.start as usize,
+            size: (r.end - r.start) as usize,
+        })
+        .collect()
+}
+
+// Kernel main function
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     // Initialize SMP (multi-core support) - must run first!
@@ -324,12 +375,16 @@ pub extern "C" fn rust_main() -> ! {
         // Initialize memblock
         mm::memblock_init();
 
-        // Parse memory regions from device tree
-        // DTB is already mapped by boot.S early page table at its physical address
+        // Acquire the boot memory map: FDT on riscv64 (DTB is mapped by
+        // boot.S's early page table at its physical address), the
+        // bootloader-provided multiboot/e820 map (copied to BSS by
+        // early_boot_init) on x86_64.
+        #[cfg(feature = "riscv64")]
         let dtb_phys = arch::boot::get_dtb_pointer();
-        // DTB is identity-mapped in early_pg_dir, use physical address directly
-        // for early parsing (linear mapping not yet available)
+        #[cfg(feature = "riscv64")]
         let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
+        #[cfg(feature = "x86_64")]
+        let memory_regions = x86_boot_memory_regions();
 
         // Add memory regions to memblock
         for region in &memory_regions {
@@ -337,14 +392,15 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // Reserve memory regions (kernel, heap, slab)
-        const KERNEL_RESERVE_SIZE: usize = 0xC00000; // 12MB kernel reservation
-        const KERNEL_HEAP_PHYS: usize = 0x80C00000; // Physical address after kernel reservation
         let heap_start = KERNEL_HEAP_PHYS;
         let heap_size = crate::config::KERNEL_HEAP_SIZE;
         let slab_start = heap_start + heap_size;
         let slab_size = 4 * 1024 * 1024;
 
+        #[cfg(feature = "riscv64")]
         mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
+        #[cfg(feature = "x86_64")]
+        mm::memblock_reserve(0, KERNEL_RESERVE_SIZE).ok(); // low memory + kernel
         mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
         mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
 
@@ -367,7 +423,7 @@ pub extern "C" fn rust_main() -> ! {
     mm::init_heap();
 
     // Initialize Slab allocator (use virtual address in linear mapping region)
-    let slab_phys = 0x80C00000usize + crate::config::KERNEL_HEAP_SIZE;
+    let slab_phys = KERNEL_HEAP_PHYS + crate::config::KERNEL_HEAP_SIZE;
     let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
     mm::init_slab(slab_start, 4 * 1024 * 1024);  // 4MB for slab
 
@@ -416,15 +472,23 @@ pub extern "C" fn rust_main() -> ! {
 
     // Display heap size using config value
     let heap_mb = crate::config::KERNEL_HEAP_SIZE / (1024 * 1024);
-    let heap_info = format!("heap region {}MB @ {:#x}", heap_mb, 0x80C00000usize);
+    let heap_info = format!("heap region {}MB @ {:#x}", heap_mb, KERNEL_HEAP_PHYS);
     print_status("mm", &heap_info, true);
     print_status("mm", "slab allocator 4MB", true);
 
     // Initialize command line argument parsing (needs to be after heap initialization)
     {
-        let dtb_ptr = arch::boot::get_dtb_pointer();
-        cmdline::init(dtb_ptr);
-        print_status("boot", "FDT/DTB parsed", true);
+        #[cfg(feature = "riscv64")]
+        {
+            let dtb_ptr = arch::boot::get_dtb_pointer();
+            cmdline::init(dtb_ptr);
+            print_status("boot", "FDT/DTB parsed", true);
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            cmdline::init_from(arch::boot::boot_cmdline());
+            print_status("boot", "multiboot cmdline + e820 parsed", true);
+        }
         if let Some(cmdline) = cmdline::get_cmdline() {
             if !cmdline.is_empty() {
                 // Truncate long cmdline
@@ -447,12 +511,19 @@ pub extern "C" fn rust_main() -> ! {
         // Note: memblock_init, memory region parsing, memblock_reserve,
         // and setup_linear_mapping were already done above (before heap init).
         {
-            // Re-parse memory regions (now with linear mapping available)
-            let dtb_phys = arch::boot::get_dtb_pointer();
-            let dtb_virt = arch::mm::phys_to_virt(
-                arch::mm::PhysAddr::new(dtb_phys)
-            ).bits();
-            let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_virt) };
+            // Re-read memory regions (riscv64 re-parses the FDT via the
+            // linear mapping; the x86_64 multiboot copy in BSS is always
+            // valid, so just rebuild the list)
+            #[cfg(feature = "riscv64")]
+            let memory_regions = {
+                let dtb_phys = arch::boot::get_dtb_pointer();
+                let dtb_virt = arch::mm::phys_to_virt(
+                    arch::mm::PhysAddr::new(dtb_phys)
+                ).bits();
+                unsafe { cmdline::parse_memory_regions(dtb_virt) }
+            };
+            #[cfg(feature = "x86_64")]
+            let memory_regions = x86_boot_memory_regions();
 
             // Calculate total physical memory
             let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
@@ -461,7 +532,7 @@ pub extern "C" fn rust_main() -> ! {
                 total_phys_memory / (1024 * 1024)), true);
 
             // Initialize vmemmap mapping
-            let start_pfn = 0x80000000 / mm::PAGE_SIZE;
+            let start_pfn = MEMORY_PHYS_BASE / mm::PAGE_SIZE;
             let nr_pages = total_phys_memory / mm::PAGE_SIZE;
 
             if mm::vmemmap::init_vmemmap(start_pfn, nr_pages).is_ok() {
@@ -471,15 +542,13 @@ pub extern "C" fn rust_main() -> ! {
             }
 
             // Initialize kernel memory layout
-            const KERNEL_RESERVE_SIZE: usize = 0xC00000; // 12MB kernel reservation
-            const KERNEL_HEAP_PHYS: usize = 0x80C00000; // Physical address after kernel reservation
             let heap_size = crate::config::KERNEL_HEAP_SIZE;
             let slab_start = KERNEL_HEAP_PHYS + heap_size;
             let slab_size = 4 * 1024 * 1024;
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
-                0x80000000,
+                MEMORY_PHYS_BASE,
                 total_phys_memory, // phys SIZE (was phys_base+size — review 4.20)
-                0x80200000,
+                KERNEL_PHYS_LOAD_ADDR,
                 KERNEL_HEAP_PHYS,
             );
             mm::layout::kernel_layout_init(layout);
@@ -497,7 +566,7 @@ pub extern "C" fn rust_main() -> ! {
 
             // Initialize zone allocator
             let kernel_end = slab_start + slab_size;
-            mm::init_zone_system(0x80000000, total_phys_memory, kernel_end);
+            mm::init_zone_system(MEMORY_PHYS_BASE, total_phys_memory, kernel_end);
             print_status("mm", "zone allocator initialized", true);
 
             // Switch to late stage (use buddy allocator for page tables)
@@ -528,16 +597,20 @@ pub extern "C" fn rust_main() -> ! {
             print_status("irq", "irq_desc array initialized", true);
         }
 
-        // Initialize PLIC (interrupt controller)
+        // Initialize interrupt controller (PLIC on riscv64; the 8259 PIC
+        // on x86_64 is programmed by the arch trap bring-up)
         {
             drivers::intc::init();
+            #[cfg(feature = "riscv64")]
             print_status("intc", "PLIC @ 0x0C000000", true);
+            #[cfg(feature = "riscv64")]
             print_status("intc", "IRQ domain + chip registered", true);
         }
 
         // Initialize IPI (inter-processor interrupt)
         {
             arch::ipi::init();
+            #[cfg(feature = "riscv64")]
             print_status("ipi", "SSIP software IRQ + bitmap multiplexing", true);
         }
 
@@ -831,6 +904,7 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // ========== Graphics System Initialization (VirtIO-GPU) ==========
+        #[cfg(feature = "riscv64")]
         {
             // Probe VirtIO-GPU device
             if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
@@ -861,6 +935,7 @@ pub extern "C" fn rust_main() -> ! {
             print_status("fs", "devfs mounted /dev", true);
             // /dev/fb0 — framebuffer char device (registered when the GPU
             // initialized successfully above)
+            #[cfg(feature = "riscv64")]
             if drivers::gpu::get_framebuffer_info().is_some() {
                 match drivers::gpu::fbdev::init_fbdev() {
                     Ok(()) => print_status("driver", "/dev/fb0 registered", true),
@@ -926,7 +1001,7 @@ pub extern "C" fn rust_main() -> ! {
                 // All tests passed, normal exit
                 println!("\nAll tests passed! Halting...");
                 loop {
-                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+                    crate::arch::cpu::wfi();
                 }
             }
         }
@@ -969,6 +1044,8 @@ pub extern "C" fn rust_main() -> ! {
         // Signal secondary CPUs that they may now enable their timer interrupts.
         // This must happen AFTER boot CPU has finished all initialization
         // to prevent secondary timer interrupts from interfering with boot.
+        // (riscv64 SBI HSM broadcast; x86_64 SMP bring-up is single-CPU.)
+        #[cfg(feature = "riscv64")]
         arch::smp::signal_boot_complete();
 
         // ========== Enter scheduler main loop ==========
@@ -1006,6 +1083,7 @@ fn panic(info: &PanicInfo) -> ! {
     // Stop the other CPUs (Linux panic → smp_send_stop). Without this the
     // panicking CPU halts while the others keep running — corrupting state
     // under the panic dump and stealing the UART mid-print (review批次8).
+    #[cfg(feature = "riscv64")]
     {
         let me = arch::cpu_id() as usize;
         for cpu in 0..crate::config::MAX_CPUS {
@@ -1020,6 +1098,6 @@ fn panic(info: &PanicInfo) -> ! {
 
     // Halt
     loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        crate::arch::cpu::wfi();
     }
 }

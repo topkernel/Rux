@@ -1132,7 +1132,7 @@ static VIRTIO_LOCK_DEPTH: [core::sync::atomic::AtomicUsize; crate::config::MAX_C
 /// True while the current CPU holds any virtio driver lock (debug only).
 #[cfg(debug_assertions)]
 pub fn virtio_lock_held() -> bool {
-    let cpu = crate::arch::smp::cpu_id();
+    let cpu = crate::arch::smp::cpu_id() as usize;
     VIRTIO_LOCK_DEPTH[cpu.min(crate::config::MAX_CPUS - 1)]
         .load(core::sync::atomic::Ordering::Acquire)
         > 0
@@ -1149,7 +1149,7 @@ pub(crate) struct VirtioLockNest;
 impl VirtioLockNest {
     #[inline]
     pub(crate) fn new() -> Self {
-        let cpu = crate::arch::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
+        let cpu = (crate::arch::smp::cpu_id() as usize).min(crate::config::MAX_CPUS - 1);
         VIRTIO_LOCK_DEPTH[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         Self
     }
@@ -1159,7 +1159,7 @@ impl VirtioLockNest {
 impl core::ops::Drop for VirtioLockNest {
     #[inline]
     fn drop(&mut self) {
-        let cpu = crate::arch::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
+        let cpu = (crate::arch::smp::cpu_id() as usize).min(crate::config::MAX_CPUS - 1);
         VIRTIO_LOCK_DEPTH[cpu].fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
     }
 }
@@ -1542,24 +1542,15 @@ unsafe fn pci_submit_read_async(
     const VIRTQ_DESC_F_NEXT: u16 = 1;
     const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-    #[cfg(feature = "riscv64")]
     let header_phys = crate::arch::mm::virt_to_phys(
         crate::arch::mm::VirtAddr::new(header_ptr as u64),
     ).0;
-    #[cfg(feature = "riscv64")]
     let data_phys = crate::arch::mm::virt_to_phys(
         crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64),
     ).0;
-    #[cfg(feature = "riscv64")]
     let resp_phys = crate::arch::mm::virt_to_phys(
         crate::arch::mm::VirtAddr::new(resp_ptr as u64),
     ).0;
-    #[cfg(not(feature = "riscv64"))]
-    let header_phys = header_ptr as u64;
-    #[cfg(not(feature = "riscv64"))]
-    let data_phys = buf.as_ptr() as u64;
-    #[cfg(not(feature = "riscv64"))]
-    let resp_phys = resp_ptr as u64;
 
     // Submission attempts. "Walker lag" (ordinal slot still occupied or
     // descriptor window overlapping a live entry) and a full in-flight

@@ -32,6 +32,7 @@ pub mod bug;
 pub mod hexdump;
 pub mod softlockup;
 pub mod hung_task;
+#[cfg(feature = "riscv64")]
 pub mod sbi_debug;
 pub mod switches;
 pub mod taskdump;

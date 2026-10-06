@@ -21,7 +21,7 @@ const CLOCK_TAI: u32 = 11;
 
 /// Read the monotonic clock as (seconds, nanoseconds) from the CLINT.
 fn monotonic_time() -> (u64, u64) {
-    let cycles = crate::drivers::intc::clint::read_time();
+    let cycles = crate::arch::cpu::read_time();
     let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ; // 10 MHz
     (cycles / freq_hz, (cycles % freq_hz) * 1_000_000_000 / freq_hz)
 }
@@ -65,7 +65,7 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
     // Get time from RISC-V timer + wall-clock epoch offset (ns-precise:
     // the sub-second part of a clock_settime must survive, LTP
     // clock_settime01 advances/recedes by 10 ms deltas).
-    let cycles = crate::drivers::intc::clint::read_time();
+    let cycles = crate::arch::cpu::read_time();
     let freq_hz: u64 = crate::config::TIMER_CLOCK_FREQ_HZ;  // 10 MHz
 
     let total_ns = cycles

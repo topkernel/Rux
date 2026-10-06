@@ -15,13 +15,13 @@ pub type SyscallArgs = [u64; 6];
 /// Get system call number from PtRegs
 #[inline]
 fn syscall_get_nr(regs: &PtRegs) -> u64 {
-    regs.a7
+    regs.syscall_nr() as u64
 }
 
 /// Get system call arguments from PtRegs
 #[inline]
 fn syscall_get_arguments(regs: &PtRegs) -> SyscallArgs {
-    [regs.orig_a0, regs.a1, regs.a2, regs.a3, regs.a4, regs.a5]
+    regs.syscall_args()
 }
 
 // FORENSIC: global syscall ring — replayed at NOVMA crashes to reconstruct
@@ -59,7 +59,7 @@ pub static SYSCALL_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic:
 /// Set system call return value
 #[inline]
 fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
-    regs.a0 = value as u64;
+    regs.set_return_value(value);
 }
 
 /// System call entry function

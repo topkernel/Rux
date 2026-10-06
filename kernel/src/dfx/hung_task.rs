@@ -26,14 +26,7 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Get nanosecond timestamp from RISC-V `rdtime`.
 fn now_ns() -> u64 {
-    let time: u64;
-    unsafe {
-        core::arch::asm!(
-            "rdtime {}",
-            out(reg) time,
-            options(nomem, nostack)
-        );
-    }
+    let time: u64 = crate::arch::cpu::read_time();
     // timebase ticks → ns (×100 for the 10 MHz CLINT; the old ×10
     // multiplier read every window 10x too small — review批次8).
     time.saturating_mul(1_000_000_000) / crate::config::TIMER_CLOCK_FREQ_HZ as u64

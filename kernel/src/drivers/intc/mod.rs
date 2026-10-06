@@ -30,3 +30,8 @@ pub fn init() {
     plic::init();
     clint::init();
 }
+
+// x86_64: the 8259 PIC lives in the arch trap/IRQ bring-up path
+// (X86-TODO agent x86-trap); no intc driver to initialize here yet.
+#[cfg(feature = "x86_64")]
+pub fn init() {}

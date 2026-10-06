@@ -679,14 +679,16 @@ fn compile_boot_asm() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
 
     if target.contains("x86_64") {
-        // x86_64 boot stub: 32-bit multiboot entry assembled with the host
-        // assembler (`as --32`; the file switches to .code64 itself).
+        // x86_64 boot stub: multiboot1 entry assembled with the host
+        // assembler. The object must be elf64 to link into the kernel
+        // image; the file itself starts in .code32 and switches to
+        // .code64, so only the output format is selected here.
         let boot_asm = PathBuf::from(&manifest_dir).join("src/arch/x86_64/boot.S");
         if !boot_asm.exists() {
             return;
         }
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-        let boot_obj = out_dir.join("boot_x86.o");
+        let boot_obj = out_dir.join("boot_x86_64.o");
         if boot_obj.exists() {
             let asm_time = fs::metadata(&boot_asm).and_then(|m| m.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
@@ -698,7 +700,7 @@ fn compile_boot_asm() {
             }
         }
         let status = std::process::Command::new("as")
-            .arg("--32")
+            .arg("--64")
             .arg("-o").arg(&boot_obj)
             .arg(&boot_asm)
             .status()

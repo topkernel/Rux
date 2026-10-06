@@ -1315,8 +1315,12 @@ impl Task {
             (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
             {
                 let mut thread = crate::arch::thread::ThreadStruct::new();
-                thread.ra = crate::sched::cpu_idle_loop as u64;  // Return address = idle loop
-                thread.sp = 0;  // Will be set when kernel stack is allocated
+                // Idle task: first switch-in enters the idle loop
+                crate::process::thread_set_entry(
+                    &mut thread,
+                    crate::sched::cpu_idle_loop as u64,
+                    0, // set when the kernel stack is allocated
+                );
                 thread
             },
         );
@@ -3517,14 +3521,14 @@ impl Task {
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((old as usize >> sh) & 0xF) as u8;
-                    unsafe { sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize); }
+                    unsafe { crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
                 }
                 for &b in b" new=0x" { unsafe { crate::console::putchar_no_lock(b); } }
                 sh = 64;
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((self as *const Task as usize >> sh) & 0xF) as u8;
-                    unsafe { sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize); }
+                    unsafe { crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
                 }
                 unsafe { crate::console::putchar_no_lock(b'\n'); }
             }

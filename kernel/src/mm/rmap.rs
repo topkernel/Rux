@@ -392,13 +392,7 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                         // cheap form; cross-CPU shootdown is issued in batch
                         // by the unmap/exit callers via IPI (see
                         // arch::ipi::flush_tlb_others, review 4.10).
-                        core::arch::asm!(
-                            "fence",
-                            "sfence.vma {}, zero",
-                            "fence",
-                            in(reg) target_vaddr,
-                            options(nostack, preserves_flags)
-                        );
+crate::mm::flush_tlb_page_local(target_vaddr as u64);
 
                         // Decrement mapcount
                         page.dec_mapcount();

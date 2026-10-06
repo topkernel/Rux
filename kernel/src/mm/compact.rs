@@ -496,13 +496,7 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         );
 
         // Flush TLB for this address
-        core::arch::asm!(
-            "fence",
-            "sfence.vma {}, zero",
-            "fence",
-            in(reg) old_vaddr,
-            options(nostack, preserves_flags)
-        );
+        crate::mm::flush_tlb_page_local(old_vaddr as u64);
         drop(_pte_g);
         // vma_mgr dropped here — lock released after PTE update
     });

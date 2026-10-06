@@ -157,6 +157,9 @@ static UART_READ_WAITQ: crate::process::wait::WaitQueueHead =
 #[cfg(feature = "aarch64")]
 const UART0_BASE: usize = 0x0900_0000;
 
+#[cfg(feature = "x86_64")]
+const COM1_BASE: u16 = 0x3f8;
+
 #[cfg(feature = "riscv64")]
 fn get_uart_base() -> usize {
     uart_virt_addr()
@@ -198,6 +201,17 @@ impl Uart {
                 in("t1") c,
                 options(nostack, nomem)
             );
+        }
+
+        #[cfg(feature = "x86_64")]
+        {
+            // Poll LSR bit 5 (THR Empty) before writing THR — the 8250
+            // drops characters written while the shift register is busy.
+            while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
+                core::hint::spin_loop();
+            }
+            // SAFETY: COM1 THR is the standard 8250 data port.
+            unsafe { write_reg(COM1_BASE, UART_THR, c) };
         }
     }
 }
@@ -246,7 +260,24 @@ pub fn early_init() {
     }
 }
 
-#[cfg(not(feature = "riscv64"))]
+#[cfg(feature = "x86_64")]
+pub fn early_init() {
+    // Standard 8250 bring-up on COM1: program the divisor latch (115200
+    // baud), 8N1, enable+clear FIFOs, and raise DTR/RTS/OUT2 so the
+    // serial link is live. Polling TX/RX only — no IRQ wiring here.
+    // SAFETY: COM1 ports 0x3f8..0x3ff are the canonical 8250 range.
+    unsafe {
+        write_reg(COM1_BASE, UART_IER, 0x00); // mask interrupts for now
+        write_reg(COM1_BASE, UART_LCR, 0x80); // DLAB on
+        write_reg(COM1_BASE, 0x00, 0x01); // divisor low = 1 (115200)
+        write_reg(COM1_BASE, 0x01, 0x00); // divisor high
+        write_reg(COM1_BASE, UART_LCR, 0x03); // 8N1, DLAB off
+        write_reg(COM1_BASE, UART_FCR, FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX);
+        write_reg(COM1_BASE, UART_MCR, 0x0b); // DTR | RTS | OUT2
+    }
+}
+
+#[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
 pub fn early_init() {}
 
 /// Legacy init — forwards to early_init for backward compatibility.
@@ -330,6 +361,17 @@ unsafe fn read_reg(base: usize, offset: usize) -> u8 {
         options(nostack)
     );
     val
+}
+
+#[cfg(feature = "x86_64")]
+unsafe fn write_reg(base: u16, offset: usize, val: u8) {
+    crate::arch::cpu::outb(base + offset as u16, val);
+}
+
+#[cfg(feature = "x86_64")]
+fn read_reg(base: u16, offset: usize) -> u8 {
+    // SAFETY: `base + offset` is a valid 8250 register port.
+    unsafe { crate::arch::cpu::inb(base + offset as u16) }
 }
 
 // ============================================================================
@@ -533,7 +575,7 @@ pub fn puts_no_lock(s: &str) {
 
 /// Check if UART has data ready to read (non-destructive).
 /// Used by poll() to check for readable data.
-#[cfg(feature = "riscv64")]
+#[cfg(any(feature = "riscv64", feature = "x86_64"))]
 pub fn uart_data_ready() -> bool {
     uart_has_data()
 }
@@ -601,6 +643,17 @@ pub fn getchar() -> Option<u8> {
         }
     }
 
+    #[cfg(feature = "x86_64")]
+    {
+        // Poll COM1 LSR for Data Ready (the 8259 IRQ4 path is not wired
+        // yet — bring-up uses polled RX only).
+        if read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0 {
+            // SAFETY: COM1 RBR read consumes the byte; single poller here.
+            let c = unsafe { read_reg(COM1_BASE, UART_RBR) };
+            return process_input(c);
+        }
+    }
+
     #[cfg(feature = "aarch64")]
     {
         // TODO: Implement aarch64 getchar
@@ -639,7 +692,12 @@ pub fn uart_has_data() -> bool {
     }
 }
 
-#[cfg(not(feature = "riscv64"))]
+#[cfg(feature = "x86_64")]
+pub fn uart_has_data() -> bool {
+    read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0
+}
+
+#[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
 pub fn uart_has_data() -> bool {
     false
 }

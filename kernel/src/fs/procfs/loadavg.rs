@@ -67,7 +67,7 @@ static LAST_TOTAL: AtomicU32 = AtomicU32::new(0);
 /// field, and generate() re-counts `total`/`last_pid` in the read
 /// (task) path, where taking bucket locks is legal.
 pub fn update_load_avg() {
-    let now = crate::drivers::timer::riscv64::get_jiffies();
+    let now = crate::drivers::timer::get_jiffies();
     let last = LAST_LOAD_JIFFIES.load(Ordering::Relaxed);
     if now.wrapping_sub(last) < LOAD_FREQ {
         return;

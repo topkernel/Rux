@@ -80,12 +80,12 @@ pub fn kernel_thread(
         );
     }
 
-    // 4b. Set sstatus.SPP = 1 so ret_from_exception returns to S-mode
-    //     (kernel threads must return to supervisor mode, not user mode)
+    // 4b. Mark the frame supervisor-mode so the return path stays in
+    //     kernel mode (kernel threads never enter user mode)
     // SAFETY: pt_regs_ptr was just zeroed above and points to valid memory
-    // on the kernel stack; SR_SPP is a constant with only the SPP bit set.
+    // on the kernel stack.
     unsafe {
-        (*pt_regs_ptr).status = crate::arch::pt_regs::SR_SPP;
+        (*pt_regs_ptr).mark_kernel_frame();
     }
 
     // 5. Set up thread context for ret_from_fork_kernel_asm
@@ -94,14 +94,31 @@ pub fn kernel_thread(
     //    - thread.s[0] = fn_ptr (restored to s0, read by asm)
     //    - thread.s[1] = arg    (restored to s1, read by asm)
     extern "C" {
+        /// riscv64 kernel-thread trampoline (reads fn/arg from s0/s1).
+        #[cfg(feature = "riscv64")]
         fn ret_from_fork_kernel_asm();
+        /// x86_64 trap entry (restores the pt_regs at thread.sp).
+        #[cfg(feature = "x86_64")]
+        fn ret_from_fork();
     }
     {
         let thread = task.thread_mut();
-        thread.ra = ret_from_fork_kernel_asm as u64;
-        thread.sp = pt_regs_ptr as u64;
-        thread.s[0] = fn_ptr as u64;
-        thread.s[1] = arg as u64;
+        #[cfg(feature = "riscv64")]
+        {
+            thread.ra = ret_from_fork_kernel_asm as u64;
+            thread.sp = pt_regs_ptr as u64;
+            thread.s[0] = fn_ptr as u64;
+            thread.s[1] = arg as u64;
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            // fn/arg stashed in the switch-restored r12/r13 slots until
+            // the x86_64 kthread trampoline contract is pinned.
+            thread.callee.ret_addr = ret_from_fork as u64;
+            thread.sp = pt_regs_ptr as u64;
+            thread.callee.r12 = fn_ptr as u64;
+            thread.callee.r13 = arg as u64;
+        }
     }
 
     // 6. Task state: stays TASK_NEW (written by new_task_at) until the

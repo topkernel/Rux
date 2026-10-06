@@ -216,7 +216,7 @@ pub fn printk(level: u8, args: fmt::Arguments) {
 
     // Write to ring buffer (if initialized)
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
-        let timestamp = crate::drivers::intc::clint::read_time();
+        let timestamp = crate::arch::cpu::read_time();
         write_to_ring_buffer(level, &buf[..text_len], timestamp);
     }
 
@@ -291,7 +291,7 @@ fn printk_bytes(level: u8, text: &[u8]) {
 
     // Write to ring buffer (if initialized)
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
-        let timestamp = crate::drivers::intc::clint::read_time();
+        let timestamp = crate::arch::cpu::read_time();
         write_to_ring_buffer(level, text, timestamp);
     }
 
