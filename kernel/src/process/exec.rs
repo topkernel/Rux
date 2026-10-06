@@ -35,6 +35,73 @@ const ZERO_NEW: ZeroEntry = ZeroEntry::new();
 pub static STACKZERO_RING: [ZeroEntry; 128] = [ZERO_NEW; 128];
 pub static STACKZERO_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+/// Kernel-side write into a freshly mapped USER address range, resolving
+/// each page through the page tables. The image mapping may span multiple
+/// buddy blocks (alloc_and_map_to_user_table chunks big requests), so
+/// physical contiguity must NOT be assumed.
+///
+/// Returns false when a page of the range has no mapping (the caller
+/// treats that as ENOMEM — the range was just mapped, so a miss is a
+/// kernel bug, not a malformed binary).
+///
+/// # Safety
+/// `root_ppn` must be a valid user page-table root whose range
+/// [vaddr, vaddr+src.len()) is fully mapped and exclusively owned by this
+/// in-construction address space.
+unsafe fn copy_user_image(root_ppn: u64, vaddr: u64, src: &[u8]) -> bool {
+    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
+
+    let mut done = 0usize;
+    while done < src.len() {
+        let va = vaddr + done as u64;
+        let in_page = (va as usize) & (PAGE_SIZE as usize - 1);
+        let Some((ppn, pte)) = PageTableWalker::walk(root_ppn, va) else {
+            return false;
+        };
+        if pte & 1 == 0 {
+            return false;
+        }
+        let chunk = core::cmp::min(src.len() - done, PAGE_SIZE as usize - in_page);
+        let kva = phys_to_virt(PhysAddr::new(ppn << PAGE_SHIFT)).bits() as usize + in_page;
+        // SAFETY: kva is the linear-map address of a page-table-resolved
+        // frame of this address space; chunk is bounded by the page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr().add(done), kva as *mut u8, chunk);
+        }
+        done += chunk;
+    }
+    true
+}
+
+/// Zero a freshly mapped user range page by page (same rationale as
+/// copy_user_image: no physical-contiguity assumptions).
+///
+/// # Safety
+/// `root_ppn` must be a valid user page-table root whose range
+/// [vaddr, vaddr+len) is fully mapped and exclusively owned.
+unsafe fn zero_user_range(root_ppn: u64, vaddr: u64, len: usize) {
+    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
+
+    let mut done = 0usize;
+    while done < len {
+        let va = vaddr + done as u64;
+        let in_page = (va as usize) & (PAGE_SIZE as usize - 1);
+        let chunk = core::cmp::min(len - done, PAGE_SIZE as usize - in_page);
+        if let Some((ppn, pte)) = PageTableWalker::walk(root_ppn, va) {
+            if pte & 1 != 0 {
+                let kva = phys_to_virt(PhysAddr::new(ppn << PAGE_SHIFT)).bits() as usize + in_page;
+                // SAFETY: page-resolved frame of this address space.
+                unsafe {
+                    core::ptr::write_bytes(kva as *mut u8, 0, chunk);
+                }
+            }
+        }
+        done += chunk;
+    }
+}
+
 /// Execute ELF loading (execve internal function)
 ///
 /// This function will:
@@ -214,7 +281,10 @@ pub(crate) fn do_execve_elf(
 
     // SAFETY: user_ppn is a freshly allocated page table root, virt_start..virt_start+total_size
     // is a valid range, and flags contains valid PTE bits for user pages.
-    let phys_base = unsafe {
+    // NOTE: with the chunked allocator the image may span MULTIPLE physical
+    // blocks — never write through phys_base + vaddr offset; the segment
+    // loader below walks the page tables page by page.
+    let _image_phys_base = unsafe {
         alloc_and_map_to_user_table(user_ppn, virt_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
@@ -233,11 +303,9 @@ pub(crate) fn do_execve_elf(
     // kept residue that ld.so parsed as garbage auxv/link_map state —
     // observed as jumps to parent-image addresses (0x1cbc0) and the
     // "main_map == _ns_loaded" assertion right after a successful exec.
-    // SAFETY: stack_phys_base..+initial_stack_size is the freshly mapped,
-    // exclusively owned stack region of this new address space.
+    // SAFETY: the walk touches only pages of this fresh address space.
     unsafe {
-        let base_kva = phys_to_virt(PhysAddr::new(stack_phys_base as u64)).bits() as usize;
-        core::ptr::write_bytes(base_kva as *mut u8, 0, initial_stack_size as usize);
+        zero_user_range(user_ppn, stack_bottom, initial_stack_size as usize);
         // FORENSIC ring: every initial-stack zeroing (pid, phys range). At a
         // crash, a victim stack page whose PPN falls in ANOTHER pid's range
         // proves the frame was handed out twice.
@@ -245,7 +313,7 @@ pub(crate) fn do_execve_elf(
             use core::sync::atomic::Ordering::Relaxed;
             let i = STACKZERO_CURSOR.fetch_add(1, Relaxed) % STACKZERO_RING.len();
             STACKZERO_RING[i].pid.store(crate::process::current_pid(), Relaxed);
-            STACKZERO_RING[i].base.store(stack_phys_base as u64, Relaxed);
+            STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
             STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
         }
     }
@@ -300,31 +368,25 @@ pub(crate) fn do_execve_elf(
                 return Err(crate::errno::Errno::ExecFormatError.as_neg_i32());
             }
 
-            let virt_offset = virt_addr - virt_start;
-            let phys_addr = (phys_base + virt_offset) as usize;
-
-            // Convert physical address to kernel virtual address for access
-            let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64)).bits() as *mut u8;
-
-            // Copy data
+            // The image mapping may span multiple physical blocks (chunked
+            // allocator) — resolve every page through the page tables
+            // instead of phys_base + offset. The old arithmetic worked
+            // only while the whole image happened to be contiguous AND
+            // the mapping never overran the buddy block (see
+            // alloc_and_map_to_user_table).
+            // Copy file data page by page.
             if file_size > 0 {
                 let src = &program_data[offset..offset + file_size as usize];
-                // SAFETY: virt_addr_ptr was derived from phys_to_virt of a freshly mapped
-                // physical page for this segment, and file_size is within the segment's memsz.
-                unsafe {
-                    let dst = slice::from_raw_parts_mut(virt_addr_ptr, file_size as usize);
-                    dst.copy_from_slice(src);
+                if !unsafe { copy_user_image(user_ppn, virt_addr, src) } {
+                    return Err(crate::errno::Errno::OutOfMemory.as_neg_i32());
                 }
             }
 
             // Zero BSS
             if mem_size > file_size {
                 let bss_size = (mem_size - file_size) as usize;
-                // SAFETY: bss_dst points into the same mapped region right after file data,
-                // and bss_size = mem_size - file_size which is within the total allocation.
                 unsafe {
-                    let bss_dst = virt_addr_ptr.add(file_size as usize);
-                    core::ptr::write_bytes(bss_dst, 0, bss_size);
+                    zero_user_range(user_ppn, virt_addr + file_size, bss_size);
                 }
             }
         }

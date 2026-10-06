@@ -1301,11 +1301,13 @@ pub unsafe fn alloc_and_map_to_kernel_table(
 
     if size == 0 { return None; }
 
-    let order = if page_count == 1 {
-        0
-    } else {
-        (page_count.next_power_of_two().trailing_zeros() as usize).min(10)
-    };
+    // Single contiguous block only (see alloc_and_map_to_user_table): a
+    // request no buddy block can cover must FAIL, not map past the block
+    // into frames the buddy still owns.
+    let order = (page_count.next_power_of_two().trailing_zeros() as usize).min(crate::mm::zone::MAX_ORDER);
+    if (1usize << order) < page_count {
+        return None;
+    }
     let alloc_size = (1usize << order) * PAGE_SIZE as usize;
 
     let phys_addr = alloc_pages(GfpFlags::GFP_USER, order);
@@ -1351,48 +1353,78 @@ pub unsafe fn alloc_and_map_to_user_table(
     size: u64,
     flags: u64,
 ) -> Option<u64> {
+    // The buddy allocator tops out at MAX_ORDER (2^10 pages = 4 MiB).
+    // The old single-block path allocated one order<=10 block and then
+    // mapped `size` bytes from its base regardless: any request larger
+    // than 4 MiB (exec images of big static binaries, a 5 MiB-BSS probe)
+    // had its tail PTEs pointed PAST the block into frames still owned by
+    // other users, and the exec loader's copy/BSS-zeroing then wrote
+    // through them — cross-frame corruption, and a deterministic KERNPANIC
+    // when the walk crossed the end of the linear map (pfault at exactly
+    // phys 0x40000000, the 1 GiB boundary, 3/3 boots).
+    //
+    // Chunked allocation instead: each chunk is mapped within its own
+    // block, exactly like alloc_and_map_user_memory (sys_brk). The
+    // returned phys base is the FIRST block only — callers that need to
+    // write the whole range must walk the page tables (see
+    // exec.rs's image-copy helpers), not assume phys contiguity.
     let page_count = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
 
     if size == 0 { return None; }
 
-    let order = if page_count == 1 {
-        0
-    } else {
-        (page_count.next_power_of_two().trailing_zeros() as usize).min(10)
-    };
-    let alloc_size = (1usize << order) * PAGE_SIZE as usize;
-
-    let phys_addr = alloc_pages(GfpFlags::GFP_USER, order);
-
-    if phys_addr == 0 {
-        return None;
-    }
-
     let user_flags = flags | PageTableEntry::U;
-    // Zero BEFORE mapping (same leak-window fix as alloc_and_map_user_memory).
-    let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
-    core::ptr::write_bytes(virt_addr_ptr.bits() as *mut u8, 0, alloc_size);
 
-    map_user_region(user_ppn, virt_addr, phys_addr as u64, size, user_flags);
-
-    // R7-C5: the rounded-up block allocated 2^order pages but the mapping
-    // only covers page_count — the unmapped excess has no PTE, so no
-    // teardown path would ever free it (~192KB leaked per execve; a shell
-    // loop drove the machine to OOM). Free the excess as order-0 pages
-    // right away; buddy coalescing rebuilds larger blocks lazily. The
-    // mapped prefix stays physically contiguous (exec writes via
-    // phys_base + vaddr offset).
-    {
+    let mut first_phys = 0u64;
+    let mut mapped_pages = 0usize;
+    while mapped_pages < page_count {
+        let remain = page_count - mapped_pages;
+        let order = if remain == 1 {
+            0
+        } else {
+            (remain.next_power_of_two().trailing_zeros() as usize).min(crate::mm::zone::MAX_ORDER)
+        };
         let block_pages = 1usize << order;
-        if block_pages > page_count {
+        let chunk_pages = remain.min(block_pages);
+        let chunk_bytes = chunk_pages * PAGE_SIZE as usize;
+
+        let phys_addr = alloc_pages(GfpFlags::GFP_USER, order);
+        if phys_addr == 0 {
+            return None; // all-or-nothing; the RAII guard frees partial tables
+        }
+
+        // Zero BEFORE mapping (same leak-window fix as
+        // alloc_and_map_user_memory): the frames come from the buddy and
+        // may carry a previous owner's data.
+        let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
+        core::ptr::write_bytes(
+            virt_addr_ptr.bits() as *mut u8,
+            0,
+            block_pages * PAGE_SIZE as usize,
+        );
+
+        map_user_region(
+            user_ppn,
+            virt_addr + (mapped_pages * PAGE_SIZE as usize) as u64,
+            phys_addr as u64,
+            chunk_bytes as u64,
+            user_flags,
+        );
+
+        // R7-C5: free the rounded-up block's unmapped excess at once.
+        if block_pages > chunk_pages {
             let base_pfn = phys_addr >> PAGE_SHIFT;
-            for pfn in (base_pfn + page_count)..(base_pfn + block_pages) {
+            for pfn in (base_pfn + chunk_pages)..(base_pfn + block_pages) {
                 crate::mm::page_alloc::free_pages(pfn << PAGE_SHIFT, 0);
             }
         }
+
+        if mapped_pages == 0 {
+            first_phys = phys_addr as u64;
+        }
+        mapped_pages += chunk_pages;
     }
 
-    Some(phys_addr as u64)
+    Some(first_phys)
 }
 
 // ==================== Copy-on-Write Support ====================
