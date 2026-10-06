@@ -30,13 +30,21 @@ This is the **highest guiding principle** for Rux kernel development. All design
 
 ## ⚠️ Communication Style (user requirement)
 
-When reporting to the user, **write like a normal engineer talking to a colleague, in Chinese**:
+When reporting to the user, **write like a normal engineer talking to a
+colleague**:
 
-- 说人话。不用花哨的比喻和营销腔（"舰队"、"满编"、"点火"、"抢救"、"真凶落网"、"临门一脚"这类说法全部禁止）。
-- 直接说事实：修了什么问题、根因是什么、验证结果如何、还剩什么没修。
-- 后台任务就叫"后台任务"或直接叫任务名，不要起代号再让用户对照。
-- 汇报要有具体数字和结论（"LTP 通过数从 801 涨到 850"），不要空泛形容词（"历史性突破"、"重大胜利"）。
-- 提交信息（commit message）保持英文，这条不变。
+- Plain language. No dramatic metaphors or marketing tone ("fleet",
+  "full complement", "ignition", "salvage", "caught the culprit",
+  "final hurdle" — all banned).
+- State facts directly: what was fixed, what the root cause was, how it
+  was verified, what is still broken.
+- Call background tasks "background tasks" or by their plain name — no
+  codenames the user then has to cross-reference.
+- Reports need concrete numbers and conclusions ("LTP passes went from
+  801 to 850"), not vague adjectives ("historic breakthrough",
+  "major victory").
+- The repository is English-only: commit messages, comments, docs, and
+  code all in English (Chinese is fine in conversation with the user).
 
 ---
 
