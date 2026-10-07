@@ -42,7 +42,7 @@ pub mod cgroup;
 
 pub use file::{File, FileFlags, FileOps, FdTable, get_file_fd, close_file_fd, set_cloexec_fd};
 pub use fs_struct::FsStruct;
-pub use stat::Stat;
+pub use stat::{copy_stat_to_user, user_stat_size, Stat};
 pub use pipe::create_pipe;
 pub use char_dev::CharDev;
 pub use rootfs::get_rootfs;

@@ -334,7 +334,39 @@ pub fn init_irq() {
     }
 }
 
-#[cfg(not(feature = "riscv64"))]
+/// x86_64: interrupt-driven RX on PIC line 4 (COM1). Same contract as the
+/// riscv64 twin — once armed, the IRQ handler is the only context that
+/// consumes hardware RX; task-context readers go through the ring.
+#[cfg(feature = "x86_64")]
+pub fn init_irq() {
+    fn uart4_irq_line() {
+        let mut received = 0usize;
+        while read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0 {
+            // SAFETY: COM1 RBR read consumes the byte; the handler owns
+            // hardware RX (see UART_IRQ_ARMED).
+            let c = unsafe { read_reg(COM1_BASE, UART_RBR) };
+            UART_RX_BUF.put(c);
+            tty_isig_record(c);
+            // DUMP!/Ctrl-Alt-Del magic matchers (riscv64 twin parity —
+            // the x86 handler used to lack both, costing a whole debug
+            // session on the INTx-storm hang: no diagnostic input path
+            // exists when every task is starved).
+            uart_rx_debug_magic(c);
+            received += 1;
+        }
+        if received > 0 {
+            UART_READ_WAITQ.wake_up_one();
+        }
+    }
+
+    if crate::arch::trap::request_irq_line(4, uart4_irq_line) {
+        // SAFETY: COM1 IER is the standard 8250 interrupt-enable port.
+        unsafe { write_reg(COM1_BASE, UART_IER, IER_RX_ENABLE) };
+        UART_IRQ_ARMED.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
 pub fn init_irq() {}
 
 // ============================================================================
@@ -378,6 +410,51 @@ fn read_reg(base: u16, offset: usize) -> u8 {
 // UART IRQ handler
 // ============================================================================
 
+/// RX-byte debug magics shared by both arch UART RX paths.
+///
+/// - "DUMP!" (armed by `dfx=taskdump`): the RX interrupt is the only code
+///   guaranteed to still run when every task is wedged (silent-hang form —
+///   no spinlock to trip the deadlock watchdog), which is exactly when a
+///   task snapshot is needed. Rolling-window match so the sequence may
+///   sit anywhere in the byte stream.
+/// - Serial Ctrl-Alt-Del (always armed — C.A.D is a standard console
+///   feature, not a debug switch): only latches an atomic; the actual
+///   signal/cascade runs in task context via cad_deliver_pending() (the
+///   ISIG rule: never walk the pid hash from the RX IRQ).
+fn uart_rx_debug_magic(c: u8) {
+    // SAFETY: RX-IRQ context only (single consumer), matching the riscv64
+    // original these matchers were factored out of.
+    unsafe {
+        // DFX taskdump magic trigger.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TaskDumpKey) {
+            const MAGIC: &[u8; 5] = b"DUMP!";
+            DUMP_MAGIC_POS = if DUMP_MAGIC_POS < MAGIC.len() && c == MAGIC[DUMP_MAGIC_POS] {
+                DUMP_MAGIC_POS + 1
+            } else if c == MAGIC[0] {
+                1
+            } else {
+                0
+            };
+            if DUMP_MAGIC_POS == MAGIC.len() {
+                DUMP_MAGIC_POS = 0;
+                crate::dfx::taskdump::dump_all_tasks("uart-magic");
+            }
+        }
+
+        CAD_SEQ_POS = if CAD_SEQ_POS < CAD_MAGIC.len() && c == CAD_MAGIC[CAD_SEQ_POS] {
+            CAD_SEQ_POS + 1
+        } else if c == CAD_MAGIC[0] {
+            1
+        } else {
+            0
+        };
+        if CAD_SEQ_POS == CAD_MAGIC.len() {
+            CAD_SEQ_POS = 0;
+            crate::syscall::process::ctrl_alt_del_latch();
+        }
+    }
+}
+
 /// UART interrupt handler — drain hardware FIFO into ring buffer.
 fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
     #[cfg(feature = "riscv64")]
@@ -385,79 +462,38 @@ fn uart_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
         let base = get_uart_base();
         let mut chars_received: usize = 0;
 
-        // SAFETY: base is a valid UART MMIO base address; reading IIR/LSR/RBR registers
-        // is safe in IRQ handler context.
-        unsafe {
-            // Check IIR to confirm interrupt source
-            let iir = read_reg(base, UART_IIR);
-            // Bit 0 = 0 means interrupt pending
-            if iir & 0x01 != 0 {
-                return crate::interrupt::IrqReturn::None;
-            }
+                // SAFETY: base is a valid UART MMIO base address; reading IIR/LSR/RBR registers
+                // is safe in IRQ handler context.
+                unsafe {
+                    // Check IIR to confirm interrupt source
+                    let iir = read_reg(base, UART_IIR);
+                    // Bit 0 = 0 means interrupt pending
+                    if iir & 0x01 != 0 {
+                        return crate::interrupt::IrqReturn::None;
+                    }
 
-            // Drain hardware FIFO — read while Data Ready
-            while read_reg(base, UART_LSR) & LSR_DR != 0 {
-                let c = read_reg(base, UART_RBR);
-                UART_RX_BUF.put(c);
-                chars_received += 1;
+                    // Drain hardware FIFO — read while Data Ready
+                    while read_reg(base, UART_LSR) & LSR_DR != 0 {
+                        let c = read_reg(base, UART_RBR);
+                        UART_RX_BUF.put(c);
+                        chars_received += 1;
 
-                // ^C interrupt path (review批次8): record ISIG characters
-                // the moment they arrive instead of waiting for a reader to
-                // consume them — a busy foreground task (not blocked in
-                // read) must still be interruptible. The byte STAYS in the
-                // ring buffer; the signal itself is delivered in TASK
-                // context (check_and_deliver_signals / process_input):
-                // send_signal_to_pgid walks the pid hash under bucket
-                // spinlocks, and the interrupted task may itself hold one —
-                // sending from the IRQ here could self-deadlock the CPU.
-                tty_isig_record(c);
+                        // ^C interrupt path (review批次8): record ISIG characters
+                        // the moment they arrive instead of waiting for a reader to
+                        // consume them — a busy foreground task (not blocked in
+                        // read) must still be interruptible. The byte STAYS in the
+                        // ring buffer; the signal itself is delivered in TASK
+                        // context (check_and_deliver_signals / process_input):
+                        // send_signal_to_pgid walks the pid hash under bucket
+                        // spinlocks, and the interrupted task may itself hold one —
+                        // sending from the IRQ here could self-deadlock the CPU.
+                        tty_isig_record(c);
 
-                // DFX taskdump magic trigger ("DUMP!"): the RX interrupt is
-                // the only code guaranteed to still run when every task is
-                // wedged (silent-hang form — no spinlock to trip the
-                // deadlock watchdog), which is exactly when a task snapshot
-                // is needed. Match a rolling window so the sequence may sit
-                // anywhere in the byte stream; armed only by dfx=taskdump.
-                if crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::TaskDumpKey,
-                ) {
-                    const MAGIC: &[u8; 5] = b"DUMP!";
-                    DUMP_MAGIC_POS = if DUMP_MAGIC_POS < MAGIC.len()
-                        && c == MAGIC[DUMP_MAGIC_POS]
-                    {
-                        DUMP_MAGIC_POS + 1
-                    } else if c == MAGIC[0] {
-                        1
-                    } else {
-                        0
-                    };
-                    if DUMP_MAGIC_POS == MAGIC.len() {
-                        DUMP_MAGIC_POS = 0;
-                        crate::dfx::taskdump::dump_all_tasks("uart-magic");
+                        // DUMP!/CAD magic matchers (shared with the x86_64 RX
+                        // path — see uart_rx_debug_magic).
+                        uart_rx_debug_magic(c);
                     }
                 }
-
-                // Serial Ctrl-Alt-Del: same rolling-window matcher, but
-                // always armed (C.A.D is a standard console feature, not a
-                // debug switch). Only latches an atomic — the actual
-                // signal/cascade runs in task context via
-                // cad_deliver_pending() (the ISIG rule: never walk the pid
-                // hash from the RX IRQ).
-                CAD_SEQ_POS = if CAD_SEQ_POS < CAD_MAGIC.len()
-                    && c == CAD_MAGIC[CAD_SEQ_POS]
-                {
-                    CAD_SEQ_POS + 1
-                } else if c == CAD_MAGIC[0] {
-                    1
-                } else {
-                    0
-                };
-                if CAD_SEQ_POS == CAD_MAGIC.len() {
-                    CAD_SEQ_POS = 0;
-                    crate::syscall::process::ctrl_alt_del_latch();
-                }
-            }
-        }
 
         if chars_received > 0 {
             UART_READ_WAITQ.wake_up_one();
@@ -645,12 +681,25 @@ pub fn getchar() -> Option<u8> {
 
     #[cfg(feature = "x86_64")]
     {
-        // Poll COM1 LSR for Data Ready (the 8259 IRQ4 path is not wired
-        // yet — bring-up uses polled RX only).
-        if read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0 {
-            // SAFETY: COM1 RBR read consumes the byte; single poller here.
-            let c = unsafe { read_reg(COM1_BASE, UART_RBR) };
-            return process_input(c);
+        // Ring first (IRQ-driven path), mirroring the riscv64 ordering.
+        let head = UART_RX_BUF.head.load(Ordering::Relaxed);
+        let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
+        if head != tail {
+            if let Some(c) = UART_RX_BUF.get() {
+                return process_input(c);
+            }
+        }
+
+        // Hardware polling fallback — ONLY before the RX IRQ is armed
+        // (same ownership rule as riscv64: once armed, RBR belongs to the
+        // IRQ handler; a task-context read would steal or duplicate bytes).
+        if !UART_IRQ_ARMED.load(Ordering::Acquire) {
+            if read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0 {
+                // SAFETY: COM1 RBR read consumes the byte; no IRQ handler
+                // competes for RBR while the flag is clear.
+                let c = unsafe { read_reg(COM1_BASE, UART_RBR) };
+                return process_input(c);
+            }
         }
     }
 
@@ -694,6 +743,16 @@ pub fn uart_has_data() -> bool {
 
 #[cfg(feature = "x86_64")]
 pub fn uart_has_data() -> bool {
+    // Ring first; LSR only while the RX IRQ is not armed (same ownership
+    // rule as riscv64 — an armed DR=1 byte is about to move to the ring).
+    let head = UART_RX_BUF.head.load(Ordering::Relaxed);
+    let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
+    if head != tail {
+        return true;
+    }
+    if UART_IRQ_ARMED.load(Ordering::Acquire) {
+        return false;
+    }
     read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0
 }
 

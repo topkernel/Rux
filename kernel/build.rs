@@ -150,6 +150,20 @@ fn main() {
         }
     }
 
+    // Consistency guard: a stale build/.config selecting a platform whose
+    // cargo feature is NOT enabled silently bakes mismatched constants into
+    // the kernel (observed: x86_64 config + riscv64 build = boot panic).
+    {
+        let feat_x86 = env::var_os("CARGO_FEATURE_X86_64").is_some();
+        let feat_rv = env::var_os("CARGO_FEATURE_RISCV64").is_some();
+        if platform == "x86_64" && !feat_x86 {
+            panic!("config platform x86_64 but cargo feature not enabled — stale build/.config? run make menuconfig");
+        }
+        if platform == "riscv64" && feat_x86 && !feat_rv {
+            panic!("config platform riscv64 but x86_64-only feature build running");
+        }
+    }
+
     println!("cargo:rustc-env=RUX_TARGET_PLATFORM={}", platform);
 
     // Note: [performance] settings in Kernel.toml (opt_level, lto, codegen_units)

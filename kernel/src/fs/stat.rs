@@ -201,6 +201,100 @@ impl Default for Stat {
     }
 }
 
+/// x86_64 glibc `struct stat` — the x86 ABI does NOT use the asm-generic
+/// layout above: nlink is 64-bit and precedes mode, there is a pad after
+/// gid and three trailing reserved words (144 bytes total). musl on
+/// riscv64 and glibc-on-x86 read different offsets for the same field,
+/// so copying the generic struct made every x86_64 stat() see scrambled
+/// fields (st_mode read st_uid → toybox ls listed directories as plain
+/// files).
+#[cfg(feature = "x86_64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct X86Stat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_nlink: u64,
+    pub st_mode: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    __pad0: u32,
+    pub st_rdev: u64,
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_atime: i64,
+    pub st_atime_nsec: i64,
+    pub st_mtime: i64,
+    pub st_mtime_nsec: i64,
+    pub st_ctime: i64,
+    pub st_ctime_nsec: i64,
+    __glibc_reserved: [i64; 3],
+}
+
+#[cfg(feature = "x86_64")]
+impl From<&Stat> for X86Stat {
+    fn from(s: &Stat) -> Self {
+        X86Stat {
+            st_dev: s.st_dev,
+            st_ino: s.st_ino,
+            st_nlink: s.st_nlink as u64,
+            st_mode: s.st_mode,
+            st_uid: s.st_uid,
+            st_gid: s.st_gid,
+            __pad0: 0,
+            st_rdev: s.st_rdev,
+            st_size: s.st_size,
+            st_blksize: s.st_blksize,
+            st_blocks: s.st_blocks,
+            st_atime: s.st_atime,
+            st_atime_nsec: s.st_atime_nsec as i64,
+            st_mtime: s.st_mtime,
+            st_mtime_nsec: s.st_mtime_nsec as i64,
+            st_ctime: s.st_ctime,
+            st_ctime_nsec: s.st_ctime_nsec as i64,
+            __glibc_reserved: [0; 3],
+        }
+    }
+}
+
+/// Size of the stat struct as the current build target's userspace ABI
+/// expects it (access_ok sizing and copy length).
+pub fn user_stat_size() -> usize {
+    #[cfg(feature = "x86_64")]
+    return core::mem::size_of::<X86Stat>();
+    #[cfg(not(feature = "x86_64"))]
+    core::mem::size_of::<Stat>()
+}
+
+/// Copy `stat` to a validated user buffer in the target ABI layout.
+/// Returns the number of bytes NOT copied (0 = success), matching
+/// arch::uaccess::copy_to_user.
+pub fn copy_stat_to_user(buf: *mut u8, stat: &Stat) -> usize {
+    #[cfg(feature = "x86_64")]
+    {
+        let x = X86Stat::from(stat);
+        // SAFETY: caller validated buf with access_ok over
+        // user_stat_size() bytes; exception-table copy faults safely.
+        unsafe {
+            crate::arch::uaccess::copy_to_user(
+                buf,
+                &x as *const X86Stat as *const u8,
+                core::mem::size_of::<X86Stat>(),
+            )
+        }
+    }
+    #[cfg(not(feature = "x86_64"))]
+    // SAFETY: see above.
+    unsafe {
+        crate::arch::uaccess::copy_to_user(
+            buf,
+            stat as *const Stat as *const u8,
+            core::mem::size_of::<Stat>(),
+        )
+    }
+}
+
 /// Extended file status information (statx)
 ///
 /// struct statx layout for RISC-V 64-bit (256 bytes).

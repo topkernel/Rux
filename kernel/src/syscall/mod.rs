@@ -16,6 +16,8 @@ pub mod time;
 pub mod network;
 pub mod sched;
 pub mod misc;
+#[cfg(feature = "x86_64")]
+pub mod x86_compat;
 
 // Re-export common types and functions
 pub use dispatch::{syscall_handler, SyscallArgs};

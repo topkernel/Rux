@@ -67,7 +67,28 @@ fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
 /// Called by trap.rs, dispatches to specific system call handlers
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let syscall_no = syscall_get_nr(regs);
-    let args = syscall_get_arguments(regs);
+    let mut args = syscall_get_arguments(regs);
+
+    // x86_64: translate the native number/ABI onto the generic table
+    // (identity for same-numbered entries, argument remaps for the
+    // legacy no-`at` ABI). Untranslatable numbers report as unknown.
+    // x86_64-native syscalls with no asm-generic equivalent.
+    #[cfg(feature = "x86_64")]
+    if syscall_no == 158 {
+        // arch_prctl(2): TLS base (glibc/musl startup requirement).
+        let result = crate::arch::process::sys_arch_prctl(args);
+        syscall_set_return_value(regs, result);
+        return;
+    }
+
+    #[cfg(feature = "x86_64")]
+    let syscall_no = match crate::syscall::x86_compat::translate(syscall_no as u64, &args) {
+        Some((generic_nr, generic_args)) => {
+            args = generic_args;
+            generic_nr as i64
+        }
+        None => syscall_no as i64,
+    };
 
     // Dispatch based on system call number (sorted by number)
     let result: i64 = match syscall_no as u32 {

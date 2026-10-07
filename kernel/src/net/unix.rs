@@ -420,14 +420,19 @@ fn key_shown(s: &str) -> &str {
 /// names ('\0'-prefixed) never come through here.
 ///
 /// Must be called OUTSIDE the UNIX_TABLE lock (the walk takes VFS locks).
-fn fs_reg_key(raw: &str) -> Option<String> {
+///
+/// `Err(code)` = the path itself failed to resolve — connect(2)/sendto(2)
+/// must surface that errno (ENOENT/ENOTDIR/EACCES), exactly like Linux's
+/// kern_path inside unix_find_other. A path that resolves but is not a
+/// bound socket is the CALLER's "no node" case (ECONNREFUSED).
+fn fs_reg_key(raw: &str) -> Result<String, i32> {
     const PATH_LIMIT: usize = 4096;
     if raw.len() > PATH_LIMIT {
-        return None;
+        return Err(-36); // ENAMETOOLONG
     }
-    let vp = crate::fs::vfs::path_lookup(raw, crate::fs::vfs::LOOKUP_FOLLOW).ok()?;
-    let inode = vp.inode?;
-    Some(alloc::format!("#{}:{}", inode.fs_id, inode.ino))
+    let vp = crate::fs::vfs::path_lookup(raw, crate::fs::vfs::LOOKUP_FOLLOW)?;
+    let inode = vp.inode.ok_or(-2i32)?;
+    Ok(alloc::format!("#{}:{}", inode.fs_id, inode.ino))
 }
 
 /// /proc/net/unix snapshot: one line per named socket, Linux layout
@@ -779,8 +784,10 @@ pub fn unix_connect(
             }
             // Filesystem paths resolve to the node's inode identity, so
             // alias paths (symlinks: /var/run vs /run) find the listener
-            // (Linux matches by inode — see fs_reg_key). An unresolvable
-            // path has no socket node: ECONNREFUSED. ABSTRACT names
+            // (Linux matches by inode — see fs_reg_key). A path that
+            // resolves but has no bound socket node: ECONNREFUSED; a
+            // path that does not resolve surfaces the lookup errno
+            // (ENOENT etc.) like Linux's kern_path. ABSTRACT names
             // (leading NUL) are already registry keys — never run them
             // through the filesystem resolver (path_lookup of a "\0..."
             // string always fails, so abstract connects were refused —
@@ -789,8 +796,8 @@ pub fn unix_connect(
                 addr.key.clone()
             } else {
                 match fs_reg_key(&addr.key) {
-                    Some(k) => k,
-                    None => return Err(-111), // ECONNREFUSED — no node
+                    Ok(k) => k,
+                    Err(e) => return Err(e), // lookup errno (ENOENT, ...)
                 }
             };
             let server = match lookup(&lookup_key) {
@@ -894,8 +901,8 @@ pub fn unix_connect(
                 addr.key.clone()
             } else {
                 match fs_reg_key(&addr.key) {
-                    Some(k) => k,
-                    None => return Err(-111), // ECONNREFUSED — no node
+                    Ok(k) => k,
+                    Err(e) => return Err(e), // lookup errno (ENOENT, ...)
                 }
             };
             if lookup(&lookup_key).is_none() {
@@ -1030,8 +1037,8 @@ pub fn unix_send(
                     // sendto resolves to the node's inode identity — a
                     // symlink alias reaches the same DGRAM target.
                     let key = match fs_reg_key(&a.key) {
-                        Some(k) => k,
-                        None => return Err(-111), // ECONNREFUSED — no node
+                        Ok(k) => k,
+                        Err(e) => return Err(e), // lookup errno (ENOENT, ...)
                     };
                     match lookup(&key) {
                         Some(t) => t,

@@ -409,7 +409,7 @@ impl VirtIOPCI {
             None => 0,
         };
 
-        Ok(Self {
+        let dev = Self {
             pci_config,
             pci_slot,
             common_cfg_bar: common_cfg_bar + common_offset as u64,
@@ -424,7 +424,54 @@ impl VirtIOPCI {
             isr_cfg_bar: isr_cfg_bar + isr_offset as u64,
             isr_cfg_offset: isr_offset,
             base_addr: common_cfg_bar + common_offset as u64,  // Use Common CFG as primary access address
-        })
+        };
+
+        // x86_64: every constructed function goes on the shared INTx
+        // dispatcher's poll list NOW, ack-only (see register_intx_ack).
+        // Construction precedes every device operation (feature writes,
+        // queue setup, DRIVER_OK), so no window exists where the function
+        // can assert the shared line before its ISR is reachable.
+        #[cfg(feature = "x86_64")]
+        dev.register_intx_ack();
+
+        Ok(dev)
+    }
+
+    /// x86_64/q35: put every live virtio-pci function on the shared INTx
+    /// dispatcher's poll list IMMEDIATELY, with an ack-only default
+    /// service that drivers may upgrade later
+    /// (`enable_pci_intx_irq`).
+    ///
+    /// Why this is not optional: virtio-pci INTx is level-triggered and
+    /// shared. The first registered device on a PIC line unmasks it, and
+    /// from then on ANY function on that line can assert it. A function
+    /// missing from the poll list asserts, nobody reads its ISR
+    /// capability (the virtio device-side EOI), the dispatcher EOIs the
+    /// PIC while the level is still high, and the line redelivers forever
+    /// — an interrupt storm that starves every task on the CPU (observed:
+    /// virtio-gpu's first eventq completion after DRIVER_OK wedged PID 1
+    /// before its first syscall on the Ubuntu amd64 image; riscv64 never
+    /// saw this because the PLIC masks IRQs nobody requested).
+    #[cfg(feature = "x86_64")]
+    pub fn register_intx_ack(&self) {
+        let int_pin = self.pci_config.read_config_byte(0x3D);
+        let int_line = self.pci_config.read_config_byte(0x3C);
+        if int_pin == 0 || int_line >= 16 {
+            crate::pr_warn!(
+                "virtio-pci: INTx unprogrammed (pin {} line {})",
+                int_pin,
+                int_line
+            );
+            return;
+        }
+        if intx::register(int_line, self.isr_cfg_bar, intx_ack_only_service) {
+            crate::pr_debug!(
+                "virtio-pci: INTx ack-registered pin {} line {} (ISR @{:#x})",
+                int_pin,
+                int_line,
+                self.isr_cfg_bar
+            );
+        }
     }
 
     /// Reset device
@@ -613,6 +660,7 @@ impl VirtIOPCI {
     /// RISC-V QEMU virt platform PCIe IRQ routing:
     /// PCIE_IRQ base = 32, total 4 IRQs (32-35)
     /// Formula: IRQ = 32 + ((INT_PIN + PCI_slot) % 4)
+    #[cfg(feature = "riscv64")]
     pub fn enable_device_interrupt(&self) {
         // Read INT_PIN to determine IRQ offset
         let int_pin = self.pci_config.read_config_byte(0x3D);
@@ -630,6 +678,50 @@ impl VirtIOPCI {
             "virtio-blk-pci",
             0,
         ).ok();
+    }
+
+    /// Enable device interrupt on x86_64/q35: PCI INTx through the PIC.
+    ///
+    /// SeaBIOS has already programmed the ICH9 PIRQ router and the device's
+    /// INT_LINE register with the PIC IRQ the function's INTx pin lands on
+    /// (observed q35 values: 10/11 for the virtio slots). Multiple
+    /// virtio-pci functions share one line, so the line carries a shared
+    /// dispatcher (see `intx`) that polls every registered device's ISR
+    /// capability instead of a single per-device handler.
+    #[cfg(feature = "x86_64")]
+    pub fn enable_device_interrupt(&self) {
+        self.enable_pci_intx_irq(intx_blk_service);
+    }
+
+    /// Register this device on its PIC INTx line with a shared dispatcher.
+    ///
+    /// `service` runs in hard-IRQ context only when THIS device's ISR
+    /// capability reads nonzero (the dispatcher's ISR read also drops the
+    /// device's level-triggered INTx assertion).
+    ///
+    /// Returns the PIC line on success, or None when the firmware left the
+    /// line unprogrammed (INT_PIN 0 / INT_LINE >= 16).
+    #[cfg(feature = "x86_64")]
+    pub fn enable_pci_intx_irq(&self, service: fn()) -> Option<u8> {
+        let int_pin = self.pci_config.read_config_byte(0x3D);
+        let int_line = self.pci_config.read_config_byte(0x3C);
+        if int_pin == 0 || int_line >= 16 {
+            crate::pr_warn!(
+                "virtio-pci: INTx unprogrammed (pin {} line {})",
+                int_pin, int_line
+            );
+            return None;
+        }
+        if intx::register(int_line, self.isr_cfg_bar, service) {
+            crate::pr_info!(
+                "virtio-pci: INTx pin {} routed to PIC line {} (shared dispatch)",
+                int_pin,
+                int_line
+            );
+            Some(int_line)
+        } else {
+            None
+        }
     }
 
     /// Set queue MSI-X vector
@@ -1683,4 +1775,170 @@ fn flush_block_once() -> Result<usize, &'static str> {
         crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(0),
         _ => Err("VirtIO block flush I/O error"),
     }
+}
+
+// ============================================================================
+// x86_64/q35 PCI INTx dispatch (minimal viable PCI IRQ path)
+//
+// q35 routes every virtio-pci function's INTx through the ICH9 PIRQ router
+// onto a PIC line (SeaBIOS programs the router AND the device's INT_LINE —
+// observed values 10/11 with several functions sharing each line). The
+// kernel's IRQ entry for PIC lines (arch::x86_64::trap) takes one `fn()`
+// per line with no sharing, so virtio devices register (ISR capability
+// address, service fn) pairs here and ONE dispatcher per claimed line
+// polls them all:
+//
+//   IRQ 10/11 → intx_dispatch() → for each registered device:
+//       read ISR cap (drops that device's level INTx assertion);
+//       if nonzero → service() (raise the device's softirq).
+//
+// The LAPIC/IOAPIC (GSI) path is x86-smp territory; this PIC path stays
+// until that lands.
+// ============================================================================
+
+/// Block-completion service: hand used-ring processing to the Block
+/// softirq (same bottom half the PLIC top half raises on riscv64).
+#[cfg(feature = "x86_64")]
+pub fn intx_blk_service() {
+    crate::interrupt::softirq::raise_softirq_irqoff(
+        crate::interrupt::softirq::SoftirqIndex::Block as usize,
+    );
+}
+
+#[cfg(feature = "x86_64")]
+mod intx {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// Registered virtio-pci functions per shared PIC line. 8 covers the
+    /// q35 device set with headroom.
+    const MAX_DEVICES: usize = 8;
+
+    /// (ISR capability address, service fn) pairs. The address doubles as
+    /// the occupancy marker (0 = free slot).
+    static ISR_ADDRS: [AtomicU64; MAX_DEVICES] =
+        [const { AtomicU64::new(0) }; MAX_DEVICES];
+    static SERVICES: [AtomicU64; MAX_DEVICES] =
+        [const { AtomicU64::new(0) }; MAX_DEVICES];
+
+    /// PIC lines already hooked by `intx_dispatch`.
+    static LINES_HOOKED: [AtomicBool; 16] = [const { AtomicBool::new(false) }; 16];
+
+    /// One-shot boot diagnostic: the first PCI INTx interrupt delivered
+    /// proves the SeaBIOS PIRQ routing + PIC delivery path end to end.
+    /// Its absence pinpoints a broken routing (firmware INT_LINE lies,
+    /// line masked, ExtINT gate off).
+    static FIRST_DELIVERY: AtomicBool = AtomicBool::new(true);
+
+    /// Per-slot one-shot: log the first INTx event each polling-driven
+    /// device (ack-only service) delivers, so "who asserted the shared
+    /// line" is visible in the boot log without a real bottom half.
+    static ACK_ONLY_LOGGED: [AtomicBool; MAX_DEVICES] =
+        [const { AtomicBool::new(false) }; MAX_DEVICES];
+
+    /// Shared per-line top half. Registered via
+    /// arch::x86_64::trap::request_irq_line (which also unmasks the line).
+    fn intx_dispatch() {
+        if FIRST_DELIVERY.swap(false, Ordering::AcqRel) {
+            crate::pr_info!("virtio-pci: first PCI INTx interrupt delivered");
+        }
+        for i in 0..MAX_DEVICES {
+            let isr_addr = ISR_ADDRS[i].load(Ordering::Acquire);
+            if isr_addr == 0 {
+                continue;
+            }
+            // SAFETY: registered addresses point at a virtio-pci ISR
+            // capability (MMIO, 1 meaningful byte); the read is the
+            // device-side interrupt acknowledge per virtio 1.0 spec 4.1.4.5
+            // and returns 0 when this device did not assert the line.
+            let isr = unsafe { core::ptr::read_volatile(isr_addr as *const u32) } & 0x3;
+            if isr != 0 {
+                let svc = SERVICES[i].load(Ordering::Acquire);
+                if svc != 0 {
+                    // One-shot visibility for polling-driven devices: their
+                    // events are consumed by poll loops, not this service.
+                    if svc == super::intx_ack_only_service as u64
+                        && !ACK_ONLY_LOGGED[i].swap(true, Ordering::AcqRel)
+                    {
+                        crate::pr_info!(
+                            "virtio-pci: INTx event for polling device (ISR @{:#x}) - acked",
+                            isr_addr
+                        );
+                    }
+                    // SAFETY: nonzero values were stored from fn pointers
+                    // by `register`.
+                    let f: fn() = unsafe { core::mem::transmute(svc) };
+                    f();
+                }
+            }
+        }
+    }
+
+    /// Add (isr_addr, service) to the shared registry and hook the PIC
+    /// line on first use. Registration happens during single-threaded
+    /// boot bring-up, before `sti`; the atomics keep the dispatcher's
+    /// reads race-free anyway.
+    ///
+    /// Re-registering an already-known `isr_addr` UPDATES the service in
+    /// place (construction installs `intx_ack_only_service`, drivers
+    /// later upgrade their slot to a real bottom-half raise) instead of
+    /// consuming a second slot for the same function.
+    pub fn register(int_line: u8, isr_addr: u64, service: fn()) -> bool {
+        // Upgrade path first: one slot per virtio function.
+        for i in 0..MAX_DEVICES {
+            if ISR_ADDRS[i].load(Ordering::Acquire) == isr_addr {
+                SERVICES[i].store(service as u64, Ordering::Release);
+                return hook_line(int_line);
+            }
+        }
+
+        let mut slot = usize::MAX;
+        for i in 0..MAX_DEVICES {
+            if ISR_ADDRS[i]
+                .compare_exchange(0, isr_addr, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                SERVICES[i].store(service as u64, Ordering::Release);
+                slot = i;
+                break;
+            }
+        }
+        if slot == usize::MAX {
+            crate::pr_err!("virtio-pci: INTx registry full");
+            return false;
+        }
+
+        if !hook_line(int_line) {
+            // Line taken by a non-virtio owner: back the entry out.
+            ISR_ADDRS[slot].store(0, Ordering::Release);
+            SERVICES[slot].store(0, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    /// Hook `intx_dispatch` onto a PIC line on first use (idempotent via
+    /// LINES_HOOKED; returns false when the line is owned by a non-virtio
+    /// handler).
+    fn hook_line(int_line: u8) -> bool {
+        if !LINES_HOOKED[int_line as usize].swap(true, Ordering::AcqRel) {
+            if !crate::arch::x86_64::trap::request_irq_line(int_line, intx_dispatch) {
+                LINES_HOOKED[int_line as usize].store(false, Ordering::Release);
+                crate::pr_err!("virtio-pci: PIC line {} unavailable", int_line);
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Default INTx service for functions whose driver is polling-based
+/// (virtio-gpu command completion, virtio-input event queues): the
+/// dispatcher's ISR-capability read has already acknowledged the device —
+/// this hook exists so those completions are visible in the boot log once
+/// (which function asserted) without a real bottom half.
+#[cfg(feature = "x86_64")]
+pub fn intx_ack_only_service() {
+    // Intentionally empty: the dispatcher's ISR read already acknowledged
+    // the asserting device (the whole point of the default registration).
+    // `intx_dispatch` logs, once per device, which function arrived here.
 }

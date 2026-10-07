@@ -38,6 +38,7 @@ pub fn clone_heap_reserve_low() -> bool {
 }
 
 pub fn sys_clone(args: SyscallArgs) -> i64 {
+
     use crate::process::fork::{do_clone, CloneArgs};
 
     // F12 heap-reserve gate: a thread storm (LTP pth_str02 spawns until
@@ -2700,26 +2701,17 @@ pub fn sys_membarrier(args: SyscallArgs) -> i64 {
             // Remote fence on every other started CPU, then fence locally.
             // smp_call_function spins for completion, so the caller returns
             // only after all peers have fenced.
-            #[cfg(feature = "riscv64")]
             fn remote_fence(_arg: *mut core::ffi::c_void) {
-                // SAFETY: fence.i not needed (no SYNC_CORE flag); the
-                // read/write fence orders this CPU's memory operations.
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            }
-            #[cfg(feature = "x86_64")]
-            fn remote_fence() {
+                // SAFETY: n/a — no unsafe. fence.i not needed (no
+                // SYNC_CORE flag); the read/write fence orders this CPU's
+                // memory operations.
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             }
             let online = crate::arch::smp::num_started_cpus().max(1);
             let me = crate::arch::cpu_id() as usize;
             for cpu in 0..online.min(crate::config::MAX_CPUS) {
                 if cpu != me {
-                    // riscv64 takes (target, fn(*mut c_void), arg); the
-                    // x86_64 interface takes a plain Fn() closure.
-                    #[cfg(feature = "riscv64")]
                     crate::arch::ipi::smp_call_function(cpu, remote_fence, core::ptr::null_mut());
-                    #[cfg(feature = "x86_64")]
-                    crate::arch::ipi::smp_call_function(remote_fence);
                 }
             }
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);

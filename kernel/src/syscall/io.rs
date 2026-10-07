@@ -321,9 +321,6 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                     let mut total_written = 0;
                     let mut user_ptr = buf;
 
-                    // UART fixmap virtual address (get from fixmap module)
-                    let uart_addr = crate::arch::mm::fixmap::uart_virt_addr() as *mut u8;
-
                     while remaining > 0 {
                         let to_copy = core::cmp::min(remaining, CHUNK_SIZE);
 
@@ -341,19 +338,24 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                             break;
                         }
 
-                        // Output the copied bytes directly to UART
+                        // Output the copied bytes through the console UART
+                        // (arch-generic: MMIO on riscv64, PIO 0x3f8 on
+                        // x86_64 — the old fixmap write_volatile addressed
+                        // a riscv-only MMIO window and silently dumped
+                        // user bytes into VA 0 on x86).
+                        let uart = crate::console::lock();
                         for &b in &kernel_buf[..to_copy] {
                             if b == b'\n' {
-                                core::ptr::write_volatile(uart_addr, b'\r');
+                                uart.putc(b'\r');
                             }
-                            core::ptr::write_volatile(uart_addr, b);
+                            uart.putc(b);
                         }
+                        drop(uart);
 
                         total_written += to_copy;
                         remaining -= to_copy;
                         user_ptr = user_ptr.add(to_copy);
                     }
-
                     return total_written as i64;
                 }
 
@@ -711,8 +713,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
 
     // Framebuffer ioctls dispatch on the FILE's ops identity (R22-2
     // spirit, minus the fd>=1000 heuristic that only worked for the
-    // side-namespace fd range).
-    #[cfg(feature = "riscv64")]
+    // side-namespace fd range). Arch-generic: /dev/fb0 and its ioctls
+    // exist on x86_64 too — the riscv64-only gate made every FBIOGET_*
+    // return ENOTTY there, so udesk fell back to a default 640x480 mode
+    // and died past-EOF on the resulting wrong-size mapping.
     if fd >= 0 {
         if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
             if crate::drivers::gpu::fbdev::is_fb_file(&file) {
@@ -1588,6 +1592,7 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
 
 /// sys_pipe2 - Create pipe with flags
 pub fn sys_pipe2(args: SyscallArgs) -> i64 {
+
     let pipefd = args[0] as *mut i32;
     let flags = args[1] as u32;
 

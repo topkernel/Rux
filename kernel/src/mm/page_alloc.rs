@@ -146,6 +146,16 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
     // Zone system not initialized yet, use memblock
     // This should only happen during early boot before zone is set up
     LEGACY_ALLOCS.fetch_add(1, Ordering::Relaxed);
+    // Flag any post-zone-init memblock page handout: memblock's bump
+    // cursor overlaps the zone's seeded free lists, so a handout here
+    // past zone init is a double-allocation in the making.
+    if super::memblock::memblock_available_memory() > 0 {
+        static LEG_WARN: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if LEG_WARN.fetch_add(1, Ordering::Relaxed) < 5 {
+            crate::pr_err!("page_alloc: legacy memblock alloc order={} after zone init", order);
+        }
+    }
     super::memblock::memblock_phys_alloc().unwrap_or(0)
 }
 
@@ -361,6 +371,20 @@ pub fn free_pages(addr: usize, order: usize) {
     // poisons the freelist — the next alloc returns it as a wild phys.
     // (x86_64 diagnostic from the feature branch; kept as a cheap guard.)
     if addr >= 0x1_0000_0000 {
+        // Caller diagnostic is x86-only (frame-pointer walk via att_syntax
+        // asm); the riscv64 build has no equivalent and just drops it.
+        #[cfg(feature = "x86_64")]
+        {
+            let ret: u64;
+            // SAFETY: frame pointers forced on; diagnostic return-address read.
+            unsafe { core::arch::asm!("movq 8(%rbp), {}", out(reg) ret, options(att_syntax)); }
+            crate::println!("free_pages: WILD addr={:#x} order={} caller={:#x}", addr, order, ret);
+        }
+        #[cfg(not(feature = "x86_64"))]
+        {
+            crate::println!("free_pages: WILD addr={:#x} order={}", addr, order);
+        }
+
         return;
     }
 
