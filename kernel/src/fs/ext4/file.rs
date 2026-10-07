@@ -517,7 +517,7 @@ fn drain_batch(
     let mut status = [0i32; MAX_BATCH_DRAIN];
     // One device kick for the whole quietly-submitted batch (see
     // pci_submit_read_async): publish N chains, notify once, then wait.
-    crate::drivers::virtio::pci_blk_kick();
+    crate::drivers::virtio::pci_blk_kick_all();
     for i in 0..count {
         status[i] = bio::bread_wait(bh_ptrs[i], &completions[i]);
     }

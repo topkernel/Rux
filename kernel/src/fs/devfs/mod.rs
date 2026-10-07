@@ -487,16 +487,24 @@ fn devtmpfs_populate() {
         );
     }
 
-    // --- root block device (whole disk) ---
+    // --- block devices (whole disks) ---
+    // Every PCI virtio-blk disk found by the boot probe gets its node:
+    // vda, vdb, ... (OH boots six disks; the node is what root= and
+    // userspace `mount /dev/vdX` resolve). MMIO boot disk = vda.
     if root_disk_present() {
-        children.insert(
-            String::from(ROOT_DISK_NAME),
-            Arc::new(DevfsEntry::new_block_device(
-                ROOT_DISK_NAME,
-                DevNo::new(VIRTIO_BLK_MAJOR, 0),
-                0o060000 | 0o660, // S_IFBLK | brw-rw----
-            )),
-        );
+        let pci_disks = crate::drivers::virtio::pci_blk_disk_count();
+        for slot in 0..pci_disks {
+            let letter = b'a' + slot as u8;
+            let name = alloc::format!("vd{}", letter as char);
+            children.insert(
+                name.clone(),
+                Arc::new(DevfsEntry::new_block_device(
+                    &name,
+                    DevNo::new(VIRTIO_BLK_MAJOR, (slot as u32) * 16),
+                    0o060000 | 0o660, // S_IFBLK | brw-rw----
+                )),
+            );
+        }
     }
     drop(children);
 }

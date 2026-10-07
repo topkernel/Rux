@@ -1198,12 +1198,23 @@ fn mount_root_filesystem() {
         return;
     }
 
-    if dev_name != "vda" {
+    // Name resolution (Linux semantics): root=/dev/vdX selects THAT disk.
+    // vda resolves to the first PCI disk, or the MMIO boot disk when no
+    // PCI virtio-blk was found; vdb..vdz resolve to the PCI slots.
+    if let Some(disk) = drivers::virtio::get_pci_gen_disk_by_name(&dev_name) {
         crate::pr_info!(
-            "root: cmdline root={} not mountable by name (only vda is I/O-wired); trying first ext4",
-            root
+            "root: {} -> PCI virtio-blk disk ({} sectors)",
+            root,
+            disk.get_capacity()
         );
+        mount_ext4_root_from(disk as *const drivers::blkdev::GenDisk);
+        return;
     }
+
+    crate::pr_info!(
+        "root: cmdline root={} not mountable by name; trying boot disk",
+        root
+    );
     mount_boot_disk_ext4();
 }
 
@@ -1222,7 +1233,12 @@ fn mount_boot_disk_ext4() {
         // No block device at all (initrd-only run) — nothing to mount.
         return;
     };
+    mount_ext4_root_from(disk);
+}
 
+/// Mount `disk`'s ext4 as THE root (full mount path with journal replay),
+/// then rebuild the /proc and cgroup2 mounts the ext4 overlay shadowed.
+fn mount_ext4_root_from(disk: *const drivers::blkdev::GenDisk) {
     let mount_result = fs::ext4::mount_ext4(disk);
     let mount_point = crate::config::EXT4_MOUNT_POINT;
     print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());

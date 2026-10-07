@@ -413,6 +413,7 @@ impl VirtQueue {
         wait_queue: &crate::process::wait::WaitQueueHead,
         prev_used: u16,
         resp_status: *const u8,
+        blk_slot: usize,
     ) -> u16 {
         if used_ring.is_null() {
             return prev_used;
@@ -569,8 +570,8 @@ impl VirtQueue {
                     // Final chance: a lost KICK (quiet batch submit nobody
                     // drained) recovers here — kick and walk once, then
                     // re-check before reporting the timeout sentinel.
-                    crate::drivers::virtio::pci_blk_kick();
-                    crate::drivers::virtio::pci_process_async_completions();
+                    crate::drivers::virtio::pci_blk_kick(blk_slot);
+                    crate::drivers::virtio::pci_process_async_completions_slot(blk_slot);
                     if unsafe { resp_done(resp_status) } {
                         // SAFETY: used_ring offset 2 is the idx field.
                         break 'wait_done unsafe {
