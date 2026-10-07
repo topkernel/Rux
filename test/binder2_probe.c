@@ -195,6 +195,7 @@ enum {
 #define CODE_TERM 103
 #define CODE_SENDFD 104 /* parcel carries a BINDER_TYPE_FD */
 #define CODE_SENDRAW 105 /* BC_TRANSACTION_SG with PTR + FDA */
+#define TF_ONE_WAY 0x01
 
 #define REQ_MAGIC 0xB1D2F00Du
 #define REP_MAGIC 0xB2D2F00Du
@@ -235,6 +236,28 @@ static int g_pending_done_n = 0;
 /* Death notifications and clear-dones can arrive bundled with ANY read
  * round (e.g. the reply of the very transaction that killed the service)
  * — record them globally like libbinder's pending derefs, then match. */
+/* Delivered transactions queue: one read round can stage several
+ * BR_TRANSACTIONs; like libbinder's executeCommand loop they must all be
+ * handled, not just the last one. */
+static struct binder_transaction_data g_pending_txn[8];
+static int g_pending_txn_n = 0;
+
+static void note_txn(struct binder_transaction_data *td)
+{
+    if (g_pending_txn_n < 8)
+        g_pending_txn[g_pending_txn_n++] = *td;
+}
+
+static int take_txn(struct binder_transaction_data *td)
+{
+    if (g_pending_txn_n == 0)
+        return 0;
+    *td = g_pending_txn[0];
+    memmove(g_pending_txn, g_pending_txn + 1, sizeof(g_pending_txn[0]) * (size_t)(g_pending_txn_n - 1));
+    g_pending_txn_n--;
+    return 1;
+}
+
 static uint64_t g_dead_seen[8];
 static int g_dead_seen_n = 0;
 static uint64_t g_clear_seen[8];
@@ -439,6 +462,7 @@ static void br_dispatch(uint32_t cmd, const uint8_t *payload, struct br_seen *s)
     case BR_TRANSACTION:
         memcpy(&s->txn, payload, sizeof(s->txn));
         s->have_txn = 1;
+        note_txn(&s->txn);
         return;
     case BR_REPLY:
         memcpy(&s->reply, payload, sizeof(s->reply));
@@ -752,7 +776,9 @@ static int run_samgr(int ready_pipe)
         if (s.have_clear_done)
             die2("samgr: unexpected CLEAR_DONE");
 
-        if (s.have_txn) {
+        struct binder_transaction_data td;
+        while (take_txn(&td)) {
+            s.txn = td;
             served++;
             uint8_t *buf = (uint8_t *)(uintptr_t)s.txn.data.ptr.buffer;
             uint32_t code = s.txn.code;
@@ -881,6 +907,7 @@ static int run_service(int ready_pipe, int ok_pipe)
         die("service ok pipe");
 
     int pings = 0;
+    int oneways = 0;
     while (1) {
         struct br_seen s;
         memset(&s, 0, sizeof(s));
@@ -895,9 +922,26 @@ static int run_service(int ready_pipe, int ok_pipe)
         if (s.have_clear_done)
             die2("service: unexpected CLEAR_DONE");
 
-        if (s.have_txn) {
+        struct binder_transaction_data td;
+        while (take_txn(&td)) {
+            s.txn = td;
             if (s.txn.target.ptr != SVC_PTR || s.txn.cookie != SVC_COOKIE)
                 die2("service: txn target not our object");
+            if (s.txn.flags & TF_ONE_WAY) {
+                /* oneway: no reply, no txn stack — just count and free */
+                uint8_t *obuf = (uint8_t *)(uintptr_t)s.txn.data.ptr.buffer;
+                struct req_parcel *oreq = (struct req_parcel *)obuf;
+                if (oreq->magic != REQ_MAGIC || fnv1a(oreq->data, oreq->len) != oreq->sum)
+                    die2("service: bad oneway parcel");
+                oneways++;
+                struct bcbuf f;
+                bc_reset(&f);
+                bc_u32(&f, BC_FREE_BUFFER);
+                bc_u64(&f, (uint64_t)(uintptr_t)obuf);
+                if (bwr_write_only(&f) < 0)
+                    die("service oneway free");
+                continue;
+            }
             uint8_t *buf = (uint8_t *)(uintptr_t)s.txn.data.ptr.buffer;
             uint32_t code = s.txn.code;
             size_t hdr = 0; /* leading object bytes before the req parcel */
@@ -958,7 +1002,7 @@ static int run_service(int ready_pipe, int ok_pipe)
             uint32_t term = (s.txn.code == CODE_TERM);
             struct rep_parcel *rep = (struct rep_parcel *)(g_map + SCRATCH_OFF2);
             rep->magic = REP_MAGIC;
-            rep->val = req->sum;
+            rep->val = (s.txn.code == CODE_ECHO) ? (uint32_t)oneways : req->sum;
             rep->sum2 = req->sum ^ 0xA5A5A5A5u;
             memset(rep->data, 0x5A, DATA_LEN);
 
@@ -998,7 +1042,7 @@ static int run_service(int ready_pipe, int ok_pipe)
 
             pings++;
             if (term) {
-                printf("B2 SERVICE DONE: pings=%d\n", pings);
+                printf("B2 SERVICE DONE: pings=%d oneways=%d\n", pings, oneways);
                 fflush(stdout);
                 munmap(g_map, MAP_SIZE);
                 close(g_fd); /* death notifications fire here */
@@ -1031,8 +1075,9 @@ static int run_hwmgr(int ready_pipe)
         queue_node_dones(&c);
         if (bwr_round(&c, &s) < 0 || s.fatal)
             die("hwmgr bwr");
-        if (!s.have_txn)
-            continue;
+        struct binder_transaction_data td;
+        while (take_txn(&td)) {
+        s.txn = td;
         served++;
         uint8_t *buf = (uint8_t *)(uintptr_t)s.txn.data.ptr.buffer;
         struct req_parcel *req = (struct req_parcel *)buf;
@@ -1071,6 +1116,7 @@ static int run_hwmgr(int ready_pipe)
             munmap(g_map, MAP_SIZE);
             close(g_fd);
             _exit(0);
+        }
         }
     }
     return 0;
@@ -1228,7 +1274,7 @@ static int run_client(int ready_pipe)
         handshakes += s.node_refs;
         uint8_t *rbuf = (uint8_t *)(uintptr_t)s.reply.data.ptr.buffer;
         struct rep_parcel *rep = (struct rep_parcel *)rbuf;
-        if (rep->magic != REP_MAGIC || rep->val == 0)
+        if (rep->magic != REP_MAGIC)
             die2("client: ping reply bad");
         if (free_buffer((uint64_t)(uintptr_t)rbuf) < 0)
             die("client free ping");
@@ -1388,6 +1434,57 @@ static int run_client(int ready_pipe)
             die2("client: no byte via fda fd1");
         close(pipeA[0]); close(pipeA[1]);
         close(pipeB[0]); close(pipeB[1]);
+    }
+
+    /* F3. oneway parking: three TF_ONE_WAY pings in a row — the node's
+     * async slot holds one, the rest must queue (node->async_todo), not
+     * fail; a sync probe then waits until all three were served. */
+    {
+        for (uint32_t k = 0; k < 3; k++) {
+            size_t ds = build_plain_req(90 + k);
+            uint64_t off0 = 0;
+            struct binder_transaction_data tr;
+            memset(&tr, 0, sizeof(tr));
+            tr.target.handle = svc;
+            tr.code = CODE_ECHO;
+            tr.flags = TF_ONE_WAY;
+            tr.data_size = ds;
+            tr.offsets_size = 0;
+            tr.data.ptr.buffer = (uintptr_t)(g_map + SCRATCH_OFF);
+            tr.data.ptr.offsets = (uintptr_t)&off0;
+
+            struct bcbuf c;
+            bc_reset(&c);
+            queue_node_dones(&c);
+            bc_u32(&c, BC_TRANSACTION);
+            bc_put(&c, &tr, sizeof(tr));
+
+            struct br_seen s;
+            memset(&s, 0, sizeof(s));
+            if (bwr_round(&c, &s) < 0 || s.fatal)
+                die("client oneway bwr");
+            if (s.failed_reply)
+                die2("client: oneway rejected (async slot busy)");
+            if (s.complete != 1)
+                die2("client: oneway missing BR_TRANSACTION_COMPLETE");
+        }
+        /* sync probe: ECHO replies with the service's oneway count */
+        int served = -1;
+        for (int k = 0; k < 20 && served < 3; k++) {
+            size_t ds = build_plain_req(93);
+            struct br_seen s;
+            if (do_txn(svc, CODE_ECHO, ds, 0, &s) < 0)
+                die("client chk txn");
+            if (!s.have_reply)
+                die2("client: no reply to oneway check");
+            uint8_t *rbuf = (uint8_t *)(uintptr_t)s.reply.data.ptr.buffer;
+            struct rep_parcel *rep = (struct rep_parcel *)rbuf;
+            served = (int)rep->val;
+            if (free_buffer((uint64_t)(uintptr_t)rbuf) < 0)
+                die("client free chk");
+        }
+        if (served != 3)
+            die2("client: parked oneways never fully drained");
     }
 
     /* 3. request (B) then clear -> CLEAR_DONE(B), no death

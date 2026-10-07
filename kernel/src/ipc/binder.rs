@@ -286,9 +286,13 @@ struct NodeState {
     pending_strong_ref: bool,
     pending_weak_ref: bool,
     /// TF_ONE_WAY serialization: one async transaction in flight per node
-    /// (Linux node->has_async_transaction; S1 rejects extra oneways instead
-    /// of parking them on node->async_todo).
+    /// (Linux node->has_async_transaction); extra oneways park on
+    /// node->async_todo until the in-flight buffer is freed.
     has_async_transaction: bool,
+    /// Oneway transactions waiting for the node's async slot (Linux
+    /// node->async_todo). Their buffers are already allocated and fixed
+    /// up; delivery is just deferred.
+    async_todo: VecDeque<Arc<BinderTxn>>,
 }
 
 struct BinderNode {
@@ -318,6 +322,7 @@ impl BinderNode {
                 pending_strong_ref: false,
                 pending_weak_ref: false,
                 has_async_transaction: false,
+                async_todo: VecDeque::new(),
             }),
         }
     }
@@ -418,12 +423,42 @@ impl BinderAlloc {
             return None;
         }
         let total = self.npages * PAGE_SIZE;
+        if is_async {
+            // Async buffers tail-allocate from the top half (a fresh
+            // region is one block at offset 0 — a head-only placement
+            // scan would never find an eligible block).
+            let mut hit: Option<usize> = None;
+            for (i, b) in self.blocks.iter().enumerate() {
+                if !b.free || b.len < need {
+                    continue;
+                }
+                if b.off + b.len - need >= total / 2 {
+                    hit = Some(i);
+                    break;
+                }
+            }
+            let i = hit?;
+            let cand = self.blocks[i].off + self.blocks[i].len - need;
+            self.blocks[i].len -= need;
+            self.blocks.push(BufBlock {
+                off: cand,
+                len: need,
+                free: false,
+                async_block: true,
+                allow_user_free: false,
+                data_size,
+                offsets_size,
+                extra_size,
+                txn: None,
+            });
+            self.blocks.sort_by_key(|b| b.off);
+            self.free_async_space -= need;
+            return Some(cand);
+        }
+        // Sync: first-fit from the low end.
         let mut off: Option<usize> = None;
         for b in self.blocks.iter() {
             if !b.free || b.len < need {
-                continue;
-            }
-            if is_async && b.off < total / 2 {
                 continue;
             }
             off = Some(b.off);
@@ -432,7 +467,7 @@ impl BinderAlloc {
         let o = off?;
         if let Some(b) = self.blocks.iter_mut().find(|b| b.off == o) {
             b.free = false;
-            b.async_block = is_async;
+            b.async_block = false;
             b.allow_user_free = false;
             b.data_size = data_size;
             b.offsets_size = offsets_size;
@@ -453,9 +488,6 @@ impl BinderAlloc {
                 self.blocks.push(rest);
                 self.blocks.sort_by_key(|b| b.off);
             }
-        }
-        if is_async {
-            self.free_async_space -= need;
         }
         Some(o)
     }
@@ -529,7 +561,9 @@ struct BinderTxn {
     to_tid: core::cell::UnsafeCell<Option<u32>>,
     target_node: Option<Arc<BinderNode>>,
     /// Set while this txn holds the node's async slot (TF_ONE_WAY).
-    holds_async_slot: bool,
+    /// Interior-mutable: a parked oneway claims the slot only when the
+    /// in-flight buffer is freed and it graduates to the proc todo.
+    holds_async_slot: core::cell::UnsafeCell<bool>,
     code: u32,
     flags: u32,
     sender_pid: i32,
@@ -547,6 +581,14 @@ impl BinderTxn {
     /// SAFETY: caller must hold WORLD.
     unsafe fn set_to_tid(&self, tid: u32) {
         *self.to_tid.get() = Some(tid);
+    }
+    fn holds_async_slot(&self) -> bool {
+        // SAFETY: single word read under WORLD (the access contract).
+        unsafe { *self.holds_async_slot.get() }
+    }
+    /// SAFETY: caller must hold WORLD.
+    unsafe fn set_holds_async_slot(&self, v: bool) {
+        *self.holds_async_slot.get() = v;
     }
 }
 
@@ -868,11 +910,23 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
             for wk in proc.im().todo.drain(..) {
                 finish_work(world, &proc, wk);
             }
+            // Parked oneway transactions on our nodes: their buffers live
+            // in our region — free them before the alloc goes away.
+            for node in proc.im().nodes.clone() {
+                for parked in node.st().async_todo.drain(..) {
+                    finish_work(world, &proc, Work::Transaction(parked));
+                }
+            }
             // Async buffers still held by userspace keep oneway txns
             // alive — release their node slots too.
             if let Some(alloc) = proc.im().alloc.as_mut() {
                 let pending: Vec<Arc<BinderTxn>> = alloc.blocks.iter().filter_map(|b| b.txn.clone()).collect();
                 for t in pending {
+                    if t.holds_async_slot() {
+                        if let Some(node) = &t.target_node {
+                            node.st().has_async_transaction = false;
+                        }
+                    }
                     unpin_txn_node(world, &t);
                 }
             }
@@ -922,8 +976,6 @@ unsafe fn unpin_txn_node(world: &World, t: &BinderTxn) {
         if ns.internal_strong_refs > 0 {
             ns.internal_strong_refs -= 1;
         }
-    } else if t.holds_async_slot {
-        ns.has_async_transaction = false;
     }
     // A ref-state transition may now be visible to the owner.
     let external = node_external_refs(world, node);
@@ -1406,35 +1458,62 @@ fn binder_thread_write(
                 };
                 ptr += 8;
                 {
-                    let w = world_lock();
-                    // SAFETY: all inner access below is under WORLD.
-                    unsafe {
-                        let world = w.as_ref().unwrap();
-                        let txn = match pm(world, proc).im().alloc.as_mut() {
-                            Some(alloc) => alloc.free_buf(data_ptr),
-                            None => None,
-                        };
-                        match txn {
-                            None => {
-                                crate::pr_info!(
-                                    "binder: pid {} BC_FREE_BUFFER {:#x} no match or not freeable",
-                                    proc.pid,
-                                    data_ptr
-                                );
-                            }
-                            Some(Some(t)) => {
-                                // Oneway buffer release: free the node's
-                                // async slot (Linux drains node->async_todo
-                                // here; S1 never parks, so just release).
-                                if t.holds_async_slot {
-                                    unpin_txn_node(world, &t);
+                    let mut drain_wake: Option<Arc<BinderProc>> = None;
+                    {
+                        let mut w = world_lock();
+                        // SAFETY: all inner access below is under WORLD.
+                        unsafe {
+                            let world = w.as_mut().unwrap();
+                            let txn = match pm(world, proc).im().alloc.as_mut() {
+                                Some(alloc) => alloc.free_buf(data_ptr),
+                                None => None,
+                            };
+                            match txn {
+                                None => {
+                                    crate::pr_info!(
+                                        "binder: pid {} BC_FREE_BUFFER {:#x} no match or not freeable",
+                                        proc.pid,
+                                        data_ptr
+                                    );
+                                }
+                                Some(Some(t)) => {
+                                    // Oneway buffer release: hand the node's
+                                    // async slot to the next parked txn or
+                                    // free it (Linux drains node->async_todo
+                                    // in binder_free_buf).
+                                    if t.holds_async_slot() {
+                                        let mut next: Option<Arc<BinderTxn>> = None;
+                                        if let Some(node) = &t.target_node {
+                                            let ns = node.st();
+                                            next = ns.async_todo.pop_front();
+                                            if next.is_none() {
+                                                ns.has_async_transaction = false;
+                                            }
+                                        }
+                                        if let Some(h) = next {
+                                            h.set_holds_async_slot(true);
+                                            let tp = h.to_proc.clone();
+                                            let tid = h.id;
+                                            let tpid = tp.pid;
+                                            pm(world, &tp).im().todo.push_back(Work::Transaction(h));
+                                            drain_wake = Some(tp);
+                                            crate::pr_info!(
+                                                "binder: oneway txn {} drained to proc {}",
+                                                tid,
+                                                tpid
+                                            );
+                                        }
+                                    }
+                                }
+                                Some(None) => {
+                                    // Sync buffer freed (its txn was unlinked
+                                    // at reply time).
                                 }
                             }
-                            Some(None) => {
-                                // Sync buffer freed (its txn was unlinked
-                                // at reply time).
-                            }
                         }
+                    }
+                    if let Some(tp) = drain_wake {
+                        wake_proc(&tp);
                     }
                 }
             }
@@ -1772,7 +1851,6 @@ fn binder_transaction(
     let mut in_reply_to: Option<Arc<BinderTxn>> = None;
     let mut target_proc: Option<Arc<BinderProc>> = None;
     let mut block_off: usize;
-    let mut holds_async_slot = false;
     // BINDER_TYPE_FD/FDA gate (binder_translate_fd): replies need the
     // original transaction's TF_ACCEPT_FDS; transactions need the target
     // node's FLAT_BINDER_FLAG_ACCEPTS_FDS.
@@ -1880,21 +1958,7 @@ fn binder_transaction(
             world.next_id += 1;
 
             let is_async = !reply && oneway;
-            if let Some(node) = &target_node {
-                let ns = node.st();
-                if is_async {
-                    if ns.has_async_transaction {
-                        // S1 limitation: the node's async slot is busy —
-                        // Linux parks this on node->async_todo and drains
-                        // it when the in-flight buffer is freed.
-                        *err_cmd = BR_FAILED_REPLY;
-                        crate::pr_info!("binder: oneway to busy node rejected (S1)");
-                        return;
-                    }
-                    ns.has_async_transaction = true;
-                    holds_async_slot = true;
-                }
-            }
+            let _ = is_async;
 
             let off = pm(world, tp)
                 .im()
@@ -1944,7 +2008,7 @@ fn binder_transaction(
             && crate::arch::uaccess::copy_from_user(dst, tr.data_buffer as *const u8, data_size) != 0
         {
             release_block(&target, block_off);
-            unpin_after_failure(&target, target_node.as_ref(), reply, oneway, holds_async_slot);
+            unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
             *err_cmd = BR_FAILED_REPLY;
             crate::pr_info!("binder: txn data copy fault from {:#x}", tr.data_buffer);
             return;
@@ -1957,7 +2021,7 @@ fn binder_transaction(
             ) != 0
         {
             release_block(&target, block_off);
-            unpin_after_failure(&target, target_node.as_ref(), reply, oneway, holds_async_slot);
+            unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
             *err_cmd = BR_FAILED_REPLY;
             crate::pr_info!("binder: txn offsets copy fault from {:#x}", tr.data_offsets);
             return;
@@ -1980,7 +2044,7 @@ fn binder_transaction(
                 core::ptr::read_volatile((kvirt.add(block_off + align8(data_size)) as *const u64).add(i)) as usize
             };
             if obj_off + 4 > data_size {
-                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                 crate::pr_info!("binder: object offset {} out of range", obj_off);
                 return;
             }
@@ -1988,7 +2052,7 @@ fn binder_transaction(
             let ty = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off) as *const u32) };
             let osz = binder_object_size(ty);
             if osz == 0 || obj_off + osz > data_size {
-                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                 crate::pr_info!("binder: object type {:#x} at {} out of range", ty, obj_off);
                 return;
             }
@@ -1998,12 +2062,12 @@ fn binder_transaction(
                     // SAFETY: validated within the data area.
                     let fd = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off + 8) as *const u32) };
                     if !allows_fd {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!("binder: fd {} to target that does not accept fds", fd);
                         return;
                     }
                     let Some(tfd) = translate_fd_into(fd, &target) else {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!("binder: fd {} install into pid {} failed", fd, target.pid);
                         return;
                     };
@@ -2019,7 +2083,7 @@ fn binder_transaction(
                     let mut bp = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderBufferObject).cast_mut()) };
                     let bp_len = bp.length as usize;
                     if bp_len > sg_size - sg_used {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!("binder: sg buffer overruns buffers_size");
                         return;
                     }
@@ -2031,7 +2095,7 @@ fn binder_transaction(
                             crate::arch::uaccess::copy_from_user(sg_dst, bp.buffer as *const u8, bp_len)
                         } != 0
                     {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!("binder: sg copy fault from {:#x}", bp.buffer);
                         return;
                     }
@@ -2047,12 +2111,12 @@ fn binder_transaction(
                         let Some((parent_kernel, parent_len)) =
                             (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_size, i, bp.parent) })
                         else {
-                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                             crate::pr_info!("binder: PTR fixup parent invalid");
                             return;
                         };
                         if parent_len < 8 || bp.parent_offset > (parent_len - 8) as u64 {
-                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                             crate::pr_info!("binder: PTR fixup offset out of parent");
                             return;
                         }
@@ -2066,24 +2130,24 @@ fn binder_transaction(
                     // SAFETY: validated within the data area.
                     let fda = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderFdArrayObject).cast_mut()) };
                     if !allows_fd {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!("binder: fda to target that does not accept fds");
                         return;
                     }
                     if fda.num_fds >= usize::MAX as u64 / 4 {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         return;
                     }
                     let Some((parent_kernel, parent_len)) =
                         (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_size, i, fda.parent) })
                     else {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!("binder: FDA parent invalid");
                         return;
                     };
                     let fd_buf_size = 4 * fda.num_fds as usize;
                     if fd_buf_size > parent_len || fda.parent_offset as usize > parent_len - fd_buf_size {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!("binder: FDA does not fit in parent buffer");
                         return;
                     }
@@ -2093,7 +2157,7 @@ fn binder_transaction(
                         // SAFETY: bounds validated above against the parent.
                         let fd = unsafe { core::ptr::read_volatile(fd_array.add(k)) };
                         let Some(tfd) = translate_fd_into(fd, &target) else {
-                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                             crate::pr_info!("binder: fda fd {} install into pid {} failed", fd, target.pid);
                             return;
                         };
@@ -2107,7 +2171,7 @@ fn binder_transaction(
                     // SAFETY: validated within the data area.
                     let obj = unsafe { &mut *(kvirt.add(block_off + obj_off) as *mut FlatBinderObject) };
                     if !translate_object(proc, obj, &target) {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!(
                             "binder: object type {:#x} handle {:#x} translate failed",
                             obj.hdr_type,
@@ -2134,7 +2198,7 @@ fn binder_transaction(
         to_proc: target.clone(),
         to_tid: core::cell::UnsafeCell::new(None),
         target_node: target_node.clone(),
-        holds_async_slot,
+        holds_async_slot: core::cell::UnsafeCell::new(false),
         code: tr.code,
         flags: tr.flags,
         sender_pid,
@@ -2199,15 +2263,38 @@ fn binder_transaction(
                 let th = thread.st();
                 th.todo.push_back(Work::TransactionComplete);
                 th.process_todo = true;
-                pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                // binder_proc_transaction: take the node's async slot or
+                // park on node->async_todo (buffer already allocated and
+                // fixed up; only the delivery is deferred).
+                let mut parked = false;
+                if let Some(node) = &target_node {
+                    let ns = node.st();
+                    if ns.has_async_transaction {
+                        ns.async_todo.push_back(txn.clone());
+                        parked = true;
+                        crate::pr_info!(
+                            "binder: oneway txn {} parked on node {} (queue len {})",
+                            txn.id,
+                            node.id,
+                            ns.async_todo.len()
+                        );
+                    } else {
+                        ns.has_async_transaction = true;
+                    }
+                }
+                if !parked {
+                    // SAFETY: under WORLD.
+                    unsafe { txn.set_holds_async_slot(true) };
+                    pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                    wakes.push(target.clone());
+                }
                 // The async buffer keeps its txn alive for the node-slot
-                // release at BC_FREE_BUFFER.
+                // release at BC_FREE_BUFFER (parked ones for close cleanup).
                 if let Some(a) = pm(world, &target).im().alloc.as_mut() {
                     if let Some(b) = a.blocks.iter_mut().find(|b| b.off == block_off) {
                         b.txn = Some(txn.clone());
                     }
                 }
-                wakes.push(target.clone());
                 wakes.push(proc.clone());
             } else {
                 // Sync: deferred TRANSACTION_COMPLETE (no process_todo) +
@@ -2240,12 +2327,11 @@ fn fail_txn_after_fixups(
     node: Option<&Arc<BinderNode>>,
     reply: bool,
     oneway: bool,
-    holds_async_slot: bool,
     err_cmd: &mut u32,
 ) {
     release_block(target, block_off);
     close_installed_fds(installed_fds);
-    unpin_after_failure(target, node, reply, oneway, holds_async_slot);
+    unpin_after_failure(target, node, reply, oneway);
     *err_cmd = BR_FAILED_REPLY;
 }
 
@@ -2299,7 +2385,6 @@ fn unpin_after_failure(
     node: Option<&Arc<BinderNode>>,
     reply: bool,
     oneway: bool,
-    holds_async_slot: bool,
 ) {
     let Some(node) = node else { return };
     let _w = world_lock();
@@ -2309,7 +2394,6 @@ fn unpin_after_failure(
         if !reply && !oneway && ns.internal_strong_refs > 0 {
             ns.internal_strong_refs -= 1;
         }
-        let _ = holds_async_slot;
     }
 }
 
