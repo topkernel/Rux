@@ -126,6 +126,7 @@ const MSR_STAR: u32 = 0xC000_0081;
 const MSR_LSTAR: u32 = 0xC000_0082;
 const MSR_FMASK: u32 = 0xC000_0084;
 const EFER_SCE: u64 = 1;
+const EFER_NXE: u64 = 1 << 11;
 
 // ============================================================================
 // GDT / TSS / IDT tables
@@ -208,17 +209,20 @@ impl Tss {
     }
 }
 
-/// The TSS referenced by trap.S (TSS_X86+4 = rsp0, +0x14 = sp2).
-#[no_mangle]
-pub static mut TSS_X86: Tss = Tss::zeroed();
+/// Per-CPU TSS tables (the TSS referenced by each CPU's own GDT at
+/// selector 0x38; IST1 = per-CPU double-fault stack, rsp0 = the current
+/// task's kernel stack top).
+static mut TSS_PER_CPU: [Tss; crate::config::MAX_CPUS] =
+    [const { Tss::zeroed() }; crate::config::MAX_CPUS];
 
-/// IST1 stack for the double-fault handler (16K, .bss.stack so it sits
-/// with the other privileged stacks).
+/// IST1 stack for the double-fault handler (16K per CPU, .bss.stack so
+/// it sits with the other privileged stacks).
 #[repr(align(16))]
 struct DoubleFaultStack([u8; 16384]);
 
 #[link_section = ".bss.stack"]
-static mut DOUBLE_FAULT_STACK: DoubleFaultStack = DoubleFaultStack([0; 16384]);
+static mut DOUBLE_FAULT_STACKS: [DoubleFaultStack; crate::config::MAX_CPUS] =
+    [const { DoubleFaultStack([0; 16384]) }; crate::config::MAX_CPUS];
 
 /// GDT: null, code64, data, (2 unused), user data, user code64, TSS(16B).
 #[repr(C, align(8))]
@@ -229,38 +233,85 @@ const fn seg_desc(access: u8, flags: u8) -> u64 {
     ((flags as u64) << 52) | ((access as u64) << 40) | 0xFFFF
 }
 
-static mut GDT_X86: Gdt = Gdt([
-    0,
-    seg_desc(0x9A, 0xA), // 0x08: code64 (L=1, D=0) — 0x00AF9A000000FFFF
-    seg_desc(0x92, 0xC), // 0x10: data — 0x00CF92000000FFFF
-    0,
-    0,
-    seg_desc(0xF2, 0xC), // 0x2b: user data (DPL 3)
-    seg_desc(0xFA, 0xA), // 0x33: user code64 (DPL 3)
-    0,                   // 0x38: TSS low word (filled at init)
-    0,                   //      TSS high word (base[63:32])
-]);
+/// Per-CPU GDTs (each points at that CPU's TSS through entries 7/8).
+static mut GDT_PER_CPU: [Gdt; crate::config::MAX_CPUS] = [const {
+    Gdt([
+        0,
+        seg_desc(0x9A, 0xA), // 0x08: code64 (L=1, D=0) — 0x00AF9A000000FFFF
+        seg_desc(0x92, 0xC), // 0x10: data — 0x00CF92000000FFFF
+        0,
+        0,
+        seg_desc(0xF2, 0xC), // 0x2b: user data (DPL 3)
+        seg_desc(0xFA, 0xA), // 0x33: user code64 (DPL 3)
+        0,                   // 0x38: TSS low word (filled at init)
+        0,                   //      TSS high word (base[63:32])
+    ])
+}; crate::config::MAX_CPUS];
 
 /// IDT — 256 gates; built at init from the trap.S stub symbols.
 static mut IDT_X86: [IdtEntry; 256] = [const { IdtEntry::empty() }; 256];
 
-/// Update TSS.rsp0 (the kernel stack top user entries switch to).
+/// Update TSS.rsp0 (the kernel stack top user entries switch to) and
+/// its %gs-readable mirror (syscall_entry).  Runs on the local CPU.
 pub fn set_tss_rsp0(top: u64) {
-    // SAFETY: single-CPU bring-up; the only racing context (an entry
-    // reading rsp0) either sees the old valid stack or the new one.
+    let cpu = crate::arch::cpu_id() as usize;
+    // SAFETY: the TSS slot belongs to this CPU; the only racing context
+    // (an entry reading rsp0) either sees the old valid stack or the new
+    // one.
     unsafe {
-        let tss = &raw mut TSS_X86;
-        (*tss).write_u64(TSS_OFF_RSP0, top);
+        let tss = &raw mut TSS_PER_CPU;
+        (*tss)[cpu].write_u64(TSS_OFF_RSP0, top);
     }
+    super::smp::PER_CPU[cpu].tss_rsp0.store(top, core::sync::atomic::Ordering::Release);
 }
 
 // ============================================================================
 // init
 // ============================================================================
 
-/// Initialize trap handling: GDT, TSS (with the double-fault IST), IDT,
-/// and the remapped PIC.  Called before `arch::mm::init()`, so all tables
-/// live in kernel .data/.bss already mapped by the boot page tables.
+/// Build and load this CPU's GDT/TSS (same selector layout on every
+/// CPU; the TSS descriptor points at THIS CPU's TSS), then re-assert
+/// the GS base (lgdt loads a null GS selector; the architectural GS
+/// base survives that, but re-writing it keeps the invariant explicit).
+fn init_cpu_state(cpu: usize) {
+    unsafe {
+        // ---- TSS ----
+        let tss = &raw mut TSS_PER_CPU;
+        let ist1 = DOUBLE_FAULT_STACKS[cpu].0.as_ptr() as usize + DOUBLE_FAULT_STACKS[cpu].0.len();
+        (*tss)[cpu].write_u64(TSS_OFF_IST1, ist1 as u64);
+        (*tss)[cpu].write_u64(TSS_OFF_RSP0, 0); // no task kernel stack until the scheduler starts
+
+        // ---- GDT: fill the TSS system descriptor (idx 7/8, sel 0x38) ----
+        // System-descriptor base layout: base[23:0] at bits 16..39,
+        // base[31:24] at bits 56..63, base[63:32] in the second word.
+        // (Dropping base[31:24] truncates the .bss VMA
+        // ffffffff80a53500 -> ffffffff00a53500; LTR then "works", but
+        // the first interrupt delivery from user mode reads TSS.rsp0
+        // from an unmapped page — #PF inside delivery, triple fault.)
+        let base = &raw const (*tss)[cpu] as usize as u64;
+        let limit = (TSS_SIZE - 1) as u64;
+        let gdt = &raw mut GDT_PER_CPU;
+        (*gdt)[cpu].0[7] = (limit & 0xFFFF)
+            | ((base & 0x00FF_FFFF) << 16)
+            | (0x89 << 40)
+            | (((base >> 24) & 0xFF) << 56);
+        (*gdt)[cpu].0[8] = base >> 32;
+
+        let gdtr = PseudoDescriptor {
+            limit: (core::mem::size_of::<Gdt>() - 1) as u16,
+            base: &raw const (*gdt)[cpu] as usize as u64,
+        };
+        // SAFETY: x86_load_gdt lgdt's the table initialized above (a
+        // static), reloads the segment registers and ltr's the TSS.
+        x86_load_gdt(&gdtr);
+    }
+    super::smp::load_per_cpu_base(cpu);
+}
+
+/// Initialize trap handling on the boot CPU: FPU, per-CPU GDT/TSS, the
+/// shared IDT, and the remapped PIC.  Called before `arch::mm::init()`,
+/// so all tables live in kernel .data/.bss already mapped by the boot
+/// page tables.
 pub fn init() {
     unsafe {
         // Enable the FPU before anything can touch FP state (context
@@ -268,26 +319,7 @@ pub fn init() {
         // SAFETY: one-time boot-CPU feature setup.
         super::thread::fpu_init();
 
-        // ---- TSS ----
-        let tss = &raw mut TSS_X86;
-        let ist1 = DOUBLE_FAULT_STACK.0.as_ptr() as usize + DOUBLE_FAULT_STACK.0.len();
-        (*tss).write_u64(TSS_OFF_IST1, ist1 as u64);
-        set_tss_rsp0(0); // no task kernel stack until the scheduler starts
-
-        // ---- GDT: fill the TSS system descriptor (idx 7/8, sel 0x38) ----
-        let base = tss as usize as u64;
-        let limit = (TSS_SIZE - 1) as u64;
-        let gdt = &raw mut GDT_X86;
-        (*gdt).0[7] = (limit & 0xFFFF) | ((base & 0xFF_FFFF) << 16) | (0x89 << 40);
-        (*gdt).0[8] = base >> 32;
-
-        let gdtr = PseudoDescriptor {
-            limit: (core::mem::size_of::<Gdt>() - 1) as u16,
-            base: gdt as usize as u64,
-        };
-        // SAFETY: x86_load_gdt lgdt's the table initialized above (a
-        // static), reloads the segment registers and ltr's the TSS.
-        x86_load_gdt(&gdtr);
+        init_cpu_state(0);
 
         // ---- IDT ----
         extern "C" {
@@ -340,9 +372,15 @@ pub fn init() {
             static stub_46: u8;
             static stub_47: u8;
             static stub_spurious: u8;
+            static stub_224: u8;
+            static stub_225: u8;
+            static stub_226: u8;
+            static stub_227: u8;
+            static stub_228: u8;
+            static stub_229: u8;
         }
 
-        let stubs: [*const u8; 50] = [
+        let stubs: [*const u8; 48] = [
             &raw const stub_0, &raw const stub_1, &raw const stub_2, &raw const stub_3,
             &raw const stub_4, &raw const stub_5, &raw const stub_6, &raw const stub_7,
             &raw const stub_8, &raw const stub_9, &raw const stub_10, &raw const stub_11,
@@ -355,14 +393,25 @@ pub fn init() {
             &raw const stub_36, &raw const stub_37, &raw const stub_38, &raw const stub_39,
             &raw const stub_40, &raw const stub_41, &raw const stub_42, &raw const stub_43,
             &raw const stub_44, &raw const stub_45, &raw const stub_46, &raw const stub_47,
-            &raw const stub_spurious, core::ptr::null(),
+        ];
+        // LAPIC timer (0xE0) + IPI vectors 0xE1..0xE5 (see arch/x86_64/ipi.rs).
+        let apic_stubs: [*const u8; 6] = [
+            &raw const stub_224, &raw const stub_225, &raw const stub_226,
+            &raw const stub_227, &raw const stub_228, &raw const stub_229,
         ];
 
         let idt = &raw mut IDT_X86;
         for (v, entry) in (*idt).iter_mut().enumerate() {
             // int1/int3/into are reachable from user mode (DPL 3); #DF
             // uses IST1; everything else is a plain kernel interrupt gate.
-            let stub = if v < 48 { stubs[v] } else { stubs[48] };
+            let lv = crate::drivers::intc::apic::LOCAL_TIMER_VECTOR as usize;
+            let stub: *const u8 = if v < 48 {
+                stubs[v]
+            } else if v >= lv && v <= crate::arch::ipi::IPI_LAST as usize {
+                apic_stubs[v - lv]
+            } else {
+                &raw const stub_spurious
+            };
             let dpl = if v == 1 || v == 3 || v == 4 { 3 } else { 0 };
             let ist = if v == 8 { 1 } else { 0 };
             entry.set_handler(stub as u64, ist, dpl);
@@ -381,7 +430,30 @@ pub fn init() {
     }
 }
 
+
+/// Per-CPU trap bring-up on an AP: FPU, its own GDT/TSS (LTR), the
+/// shared IDT, and the syscall MSRs (STAR/LSTAR/FMASK are per-CPU).
+pub fn init_secondary(cpu: usize) {
+    // SAFETY: one-time per-CPU feature setup, interrupts still off.
+    unsafe {
+        super::thread::fpu_init();
+        init_cpu_state(cpu);
+        let idtr = PseudoDescriptor {
+            limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
+            base: &raw mut IDT_X86 as usize as u64,
+        };
+        x86_load_idt(&idtr);
+    }
+    init_syscall();
+}
+
 /// Initialize syscall MSRs (STAR/LSTAR/FMASK) and EFER.SCE.
+///
+/// Also (re-)asserts EFER.NXE: user PTEs carry the NX bit (exec's
+/// per-segment W^X tighten), and with NXE=0 bit 63 is reserved — every
+/// access to a data page faults #PF e=0xC (RSVD).  The BSP gets NXE
+/// from boot.S; APs come out of the trampoline with only LME set, and
+/// this is the first EFER write on their kernel path.
 pub fn init_syscall() {
     extern "C" {
         static syscall_entry: u8;
@@ -390,7 +462,7 @@ pub fn init_syscall() {
     // constants documented at the top of this file.
     unsafe {
         let efer = rdmsr(MSR_EFER);
-        wrmsr(MSR_EFER, efer | EFER_SCE);
+        wrmsr(MSR_EFER, efer | EFER_SCE | EFER_NXE);
         wrmsr(MSR_STAR, MSR_STAR_VALUE);
         wrmsr(MSR_LSTAR, &raw const syscall_entry as u64);
         wrmsr(MSR_FMASK, MSR_FMASK_VALUE);
@@ -537,19 +609,32 @@ pub fn free_irq_line(line: u8) {
 // Interrupt control (doc-comment contracts from the skeleton)
 // ============================================================================
 
-/// Enable the timer interrupt: arm the PIT (set_next_trigger, driver
-/// owned), unmask PIC IRQ0, and enable the CPU gate (sti).
+/// Enable the timer interrupt: arm the per-CPU LAPIC timer when the
+/// APIC driver is up (SMP tick source), else the legacy PIT path
+/// (unmask PIC IRQ0), then open the CPU gate (STI).
 pub fn enable_timer_interrupt() {
-    crate::drivers::timer::set_next_trigger();
-    unmask_irq_line(IRQ_TIMER);
+    if crate::drivers::intc::apic::ready() {
+        crate::drivers::intc::apic::timer_start();
+        // The free-running PIT tick (if it was ever unmasked) would now
+        // race the LAPIC tick into the jiffies grid; mask it off.
+        mask_irq_line(IRQ_TIMER);
+    } else {
+        crate::drivers::timer::set_next_trigger();
+        unmask_irq_line(IRQ_TIMER);
+    }
     // SAFETY: sti enables interrupts at the end of boot bring-up, the
     // x86 mirror of the twin's sstatus.SIE step.
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
 }
 
-/// Disable the timer interrupt (mask PIC IRQ0).
+/// Disable the timer interrupt (mask the LAPIC timer, or PIC IRQ0 on
+/// the no-APIC fallback path).
 pub fn disable_timer_interrupt() {
-    mask_irq_line(IRQ_TIMER);
+    if crate::drivers::intc::apic::ready() {
+        crate::drivers::intc::apic::timer_mask();
+    } else {
+        mask_irq_line(IRQ_TIMER);
+    }
 }
 
 /// Enable external interrupts.  x86 has no per-source CPU gate (sie):
@@ -605,9 +690,12 @@ mod vec {
     pub const MF: u64 = 16; // x87 math fault
     pub const AC: u64 = 17; // alignment check
     pub const CP: u64 = 21; // control protection
-    pub const IRQ0: u64 = 32; // PIC timer vector
+    pub const IRQ0: u64 = 32; // PIC timer vector (virtual-wire fallback)
     pub const IRQ_LAST: u64 = 47; // PIC slave line 15 vector
 }
+
+/// LAPIC timer vector (per-CPU tick; same handler body as the PIC path).
+const LOCAL_TIMER: u64 = crate::drivers::intc::apic::LOCAL_TIMER_VECTOR as u64;
 
 /// Trap handler — called by trap.S stubs with the frame pointer, CPU id,
 /// and the raw vector number (third argument: x86 has no scause-like
@@ -657,6 +745,25 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     crate::pr_warn!("trap: unexpected NMI at rip={:#x}", regs_ref.rip);
                 }
 
+                LOCAL_TIMER => {
+                    crate::interrupt::preempt::irq_enter();
+                    // LAPIC EOI FIRST (same discipline as the PIC path):
+                    // the scheduler call below can switch tasks, and the
+                    // in-service bit would block further delivery.
+                    crate::drivers::intc::apic::eoi();
+                    handle_timer_tick(regs_ref, cpu_id);
+                    crate::interrupt::preempt::irq_exit();
+                }
+
+                v if (crate::arch::ipi::IPI_FIRST..=crate::arch::ipi::IPI_LAST)
+                    .contains(&v) =>
+                {
+                    crate::interrupt::preempt::irq_enter();
+                    crate::drivers::intc::apic::eoi();
+                    crate::arch::ipi::handle_ipi_vector(v);
+                    crate::interrupt::preempt::irq_exit();
+                }
+
                 vec::IRQ0 => {
                     crate::interrupt::preempt::irq_enter();
                     handle_timer_interrupt(regs_ref, cpu_id);
@@ -678,19 +785,11 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
     }
 }
 
-/// Handle timer interrupt (PIC IRQ0) — faithful port of the riscv64 twin.
-fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
-    // EOI FIRST (early-Linux discipline): the handler below can call
-    // schedule(); with the ISR bit still set the PIC would block every
-    // same/lower-priority line — the timer included — until the task we
-    // switched away from happens to resume.
-    pic_send_eoi(IRQ_TIMER);
-
+/// Shared timer-tick body (used by both the LAPIC-timer vector and the
+/// legacy PIC IRQ0 fallback) — faithful port of the riscv64 twin.
+fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // Increment interrupt counter for /proc/interrupts
     crate::fs::procfs::interrupts::timer_inc(cpu);
-
-    // Re-arm the PIT.
-    crate::drivers::timer::set_next_trigger();
 
     // Skip scheduler logic during early boot (no current task).
     if crate::sched::current().is_none() {
@@ -731,6 +830,25 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
     }
 }
 
+/// Handle timer interrupt on the legacy PIC IRQ0 vector (virtual-wire
+/// fallback; the LAPIC timer vector routes to `handle_timer_tick`
+/// directly with a LAPIC EOI).
+fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
+    // EOI FIRST (early-Linux discipline): the handler below can call
+    // schedule(); with the ISR bit still set the PIC would block every
+    // same/lower-priority line — the timer included — until the task we
+    // switched away from happens to resume.
+    pic_send_eoi(IRQ_TIMER);
+    // With the local APIC enabled, PIC lines arrive through LINT0 and
+    // the APIC needs its EOI as well or delivery wedges.
+    crate::drivers::intc::apic::eoi();
+
+    // Re-arm the PIT (no-op while it free-runs).
+    crate::drivers::timer::set_next_trigger();
+
+    handle_timer_tick(regs, cpu);
+}
+
 /// Handle an external IRQ (vectors 33..47 / spurious catch-all).
 ///
 /// PIC analogue of the twin's PLIC flow: claim the highest-priority
@@ -752,6 +870,9 @@ fn handle_external_interrupt(vector: u64) {
             crate::pr_debug!("trap: unhandled IRQ line {} (vector {:#x})", line, vector);
         }
         pic_send_eoi(line);
+        // PIC lines arrive through LINT0 (virtual wire) when the local
+        // APIC is enabled: the APIC EOI must pair with the PIC EOI.
+        crate::drivers::intc::apic::eoi();
         claimed += 1;
         if claimed >= 16 {
             break; // storm guard

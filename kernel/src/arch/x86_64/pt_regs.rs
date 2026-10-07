@@ -112,9 +112,18 @@ impl PtRegs {
     }
 
     /// Get syscall number
+    ///
+    /// Reads `orig_rax` (the frame slot at 0x78 that syscall_entry
+    /// pushes the live RAX/nr into), NOT `rax`: the syscall number and
+    /// the return value share RAX on x86, and handle_syscall pre-stores
+    /// the -ENOSYS default into `rax` BEFORE the dispatcher re-reads the
+    /// number — reading `rax` there dispatched every syscall as -38.
+    /// (Linux reads orig_ax here for the same reason.  Interrupt frames
+    /// keep their error code in this slot; syscall_nr is only meaningful
+    /// on syscall frames.)
     #[inline]
     pub fn syscall_nr(&self) -> i64 {
-        self.rax as i64
+        self.orig_rax as i64
     }
 
     /// Get syscall arguments (x86_64 kernel ABI: rdi rsi rdx r10 r8 r9)

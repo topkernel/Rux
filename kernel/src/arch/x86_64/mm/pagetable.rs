@@ -109,8 +109,17 @@ impl PageTableEntry {
     }
 
     /// Link entry pointing at the next-level table at `ppn`
+    ///
+    /// Carries U (US) in addition to P|RW: SDM 4.6 grants a CPL3 access
+    /// only when U/S = 1 in EVERY paging-structure entry of the
+    /// translation, so an intermediate link without U makes the whole
+    /// subtree supervisor-only even when the leaf has U — the user
+    /// image at 0x400000 faulted e=5 (present, user access denied)
+    /// forever on exactly this.  Kernel tables are unaffected: their
+    /// leaves keep U=0, and the combined rule still denies user access
+    /// one level below the link.
     pub const fn new_table(ppn: u64) -> Self {
-        PageTableEntry((ppn << 12) | Self::P | Self::RW)
+        PageTableEntry((ppn << 12) | Self::P | Self::RW | Self::US)
     }
 
     /// Kernel read/write page mapping

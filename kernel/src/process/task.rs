@@ -2215,10 +2215,17 @@ impl Task {
         // 0x00000000FFFFFFFF (u32::MAX zero-extended — GNOME panic at
         // guest+452s, epc=Task::pid offset 92, ra=Task::wake_up). Every
         // legitimate Task lives in the kernel linear map or the kernel
-        // image (>= 0xFFFFFFC000000000); anything lower is user range or
-        // an integer sentinel misread as a pointer. Dropping the wake
-        // loses one wakeup at worst; dereferencing panicked the kernel.
-        if (task as usize) < 0xFFFF_FFC0_0000_0000 {
+        // image; anything below the arch's kernel-half floor is user
+        // range or an integer sentinel misread as a pointer. Dropping
+        // the wake loses one wakeup at worst; dereferencing panicked
+        // the kernel.  (x86_64 floor is PAGE_OFFSET 0xffff8880_00000000
+        // — the riscv64 floor 0xffffffc0_000000000 sits ABOVE it and
+        // dropped every linear-map Task on x86.)
+        #[cfg(feature = "riscv64")]
+        const KERNEL_PTR_FLOOR: usize = 0xFFFF_FFC0_0000_0000;
+        #[cfg(feature = "x86_64")]
+        const KERNEL_PTR_FLOOR: usize = 0xFFFF_8880_0000_0000;
+        if (task as usize) < KERNEL_PTR_FLOOR {
             use crate::console::putchar;
             const MSG: &[u8] = b"WAKE-WILD-PTR dropped ptr=0x";
             for &b in MSG { unsafe { putchar(b); } }

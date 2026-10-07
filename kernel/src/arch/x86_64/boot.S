@@ -97,10 +97,13 @@ _start:
     movl $boot_pml4, %eax
     movl %eax, %cr3
 
-    /* EFER.LME (MSR 0xC0000080) */
+    /* EFER.LME|NXE (MSR 0xC0000080).  NXE must be on before any PTE
+     * carries NX: with EFER.NXE=0, bit 63 is RESERVED in a leaf, and
+     * exec's per-segment W^X tighten (NX on data pages) turned every
+     * user data access into #PF e=0xC (RSVD) in an unhandled loop. */
     movl $0xC0000080, %ecx
     rdmsr
-    orl $0x100, %eax
+    orl $0x900, %eax
     wrmsr
 
     /* Load bootstrap GDT (code64 @0x08, data @0x10 — same selector

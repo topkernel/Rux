@@ -15,6 +15,9 @@ pub mod plic;
 #[cfg(feature = "riscv64")]
 pub mod clint;
 
+#[cfg(feature = "x86_64")]
+pub mod apic;
+
 // Export corresponding interrupt controller based on platform
 #[cfg(feature = "aarch64")]
 pub use gicv3::*;
@@ -31,7 +34,10 @@ pub fn init() {
     clint::init();
 }
 
-// x86_64: the 8259 PIC lives in the arch trap/IRQ bring-up path
-// (X86-TODO agent x86-trap); no intc driver to initialize here yet.
+// x86_64: the 8259 PIC is programmed by the arch trap bring-up; the
+// local APIC (IPIs, per-CPU timer, SMP) comes up here, with the PIC
+// kept alive in virtual-wire mode through LVT LINT0.
 #[cfg(feature = "x86_64")]
-pub fn init() {}
+pub fn init() {
+    apic::init();
+}

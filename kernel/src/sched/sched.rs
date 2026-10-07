@@ -710,10 +710,21 @@ pub fn resched_cpu(cpu: usize) {
             NEED_RESCHED[cpu].store(true, core::sync::atomic::Ordering::Release);
             let this_cpu = crate::arch::cpu_id() as usize;
             if this_cpu != cpu {
-                #[cfg(feature = "riscv64")]
                 crate::arch::ipi::send_reschedule_ipi(cpu);
             }
         }
+    }
+}
+
+/// Idle-task pointer for a CPU (pre-created by `init`; used by the SMP
+/// bring-up to publish `current` on a secondary before its first tick).
+pub fn idle_task_ptr(cpu: usize) -> usize {
+    if cpu < MAX_CPUS {
+        // SAFETY: written once by init() before secondaries start; read
+        // only by the matching CPU's bring-up.
+        unsafe { __secondary_idle_tasks[cpu] }
+    } else {
+        0
     }
 }
 

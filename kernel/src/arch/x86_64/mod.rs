@@ -43,9 +43,9 @@ pub fn enable_interrupts() {
 
 /// Get current CPU number.
 ///
-/// Bring-up uses a single CPU: the boot CPU is always CPU 0. Secondary
-/// CPUs (SIPI) will publish their number through the per-CPU array
-/// before entering Rust (X86-TODO: SMP).
+/// Read from the GS-based per-CPU area (kernel GS base = &PerCpu[cpu],
+/// established by smp::init before any code that can call this; APs get
+/// theirs from the trampoline before executing any Rust).
 pub fn cpu_id() -> u64 {
-    0
+    smp::gs_cpu_id()
 }

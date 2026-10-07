@@ -64,8 +64,14 @@ pub fn flush_thread() {
             // pointer from the MSR (the twin's live-FS=Off discipline,
             // x86 form: the exec'ing image has no TLS until
             // set_thread_area/arch_prctl installs one).
+            //
+            // GS discipline note: the ACTIVE GS base (0xC0000101) is the
+            // CPU's per-CPU pointer (smp.rs) and must NEVER be cleared
+            // from task context.  The task's user GS base lives in the
+            // SWAPGS shadow (0xC0000102) — that is what "no TLS on a
+            // fresh image" clears here.
             super::cpu::wrmsr(0xC000_0100, 0); // MSR_FS_BASE
-            super::cpu::wrmsr(0xC000_0101, 0); // MSR_GS_BASE
+            super::cpu::wrmsr(0xC000_0102, 0); // MSR_KERNEL_GS_BASE (user shadow)
         }
     }
 }

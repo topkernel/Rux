@@ -36,6 +36,8 @@ use super::cpu::{read_cr3, rdmsr, wrmsr, write_cr3};
 
 /// MSR_FS_BASE — per-task TLS pointer.
 const MSR_FS_BASE: u32 = 0xC000_0100;
+/// MSR_KERNEL_GS_BASE — the SWAPGS shadow (task's user GS base).
+const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 extern "C" {
     fn __switch_to(prev: *mut Task, next: *mut Task);
@@ -241,9 +243,15 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
     // Step 3: FS base (TLS pointer).  Saved from the live MSR so a task
     // switched out inside a set_thread_area window resumes correctly.
+    // The GS shadow (IA32_KERNEL_GS_BASE) is programmed alongside so the
+    // swapgs pairing in trap.S holds per task: the kernel runs with GS =
+    // percpu and the SHADOW carries the task's user GS base (0 unless a
+    // task used ARCH_SET_GS), which SWAPGS installs on the user return.
     let fs = rdmsr(MSR_FS_BASE);
     prev.thread_mut().fs_base = fs;
+    prev.thread_mut().gs_base = rdmsr(MSR_KERNEL_GS_BASE);
     wrmsr(MSR_FS_BASE, next.thread().fs_base);
+    wrmsr(MSR_KERNEL_GS_BASE, next.thread().gs_base);
 
     // Step 4: registers + stacks + per-CPU current + TSS.rsp0.
     //

@@ -42,12 +42,26 @@
  * CPU-pushed frame cannot clobber live stack slots below the
  * interrupted RSP.
  *
- * ## No swapgs
+ * ## GS / swapgs pairing (SMP)
  *
- * The kernel never uses a user GS base (single kernel GS everywhere),
- * so entries do not swap GS.  SYSCALL therefore also cannot recover the
- * user stack from GS; it stashes RSP in TSS.sp2 instead (the Linux
+ * Kernel GS base = &PerCpu[cpu]; user GS base = 0 (glibc TLS lives on
+ * FS, so a NULL user GS is the correct ABI state).  User-origin entries
+ * (CS & 3 != 0) SWAPGS on entry and the user-return path SWAPGS pairs
+ * it back before IRETQ; kernel-origin entries never touch GS.  The
+ * SYSCALL entry SWAPGS first thing (hardware does not switch GS).
+ * SYSCALL therefore also cannot recover the user stack from GS; it
+ * stashes RSP in a per-CPU scratch slot instead (the Linux
  * entry_SYSCALL_64 trick).
+ */
+
+/* ## GS / per-CPU (SMP)
+ *
+ * Kernel GS base = &PerCpu[cpu] (established at CPU bring-up); user GS
+ * base = 0 (glibc TLS lives on FS).  Entries from user mode SWAPGS
+ * first (a user-origin frame has CPL3 in CS), the return-to-user path
+ * pairs it back before IRETQ; kernel-origin entries never touch GS.
+ * The stubs read the CPU number from %gs:PC_CPU_NUMBER for
+ * trap_handler's per-CPU pt_regs slot.
  */
 
 .section .text.trap
@@ -76,6 +90,11 @@
 .set PT_RSP,      0x98
 .set PT_SS,       0xa0
 .set PT_SIZE,     0xa8
+
+/* PerCpu offsets (pinned by the asserts in smp.rs) */
+.set PC_CPU_NUMBER,      0x00
+.set PC_TSS_RSP0,        0x08
+.set PC_SYSCALL_SCRATCH, 0x10
 
 /* selector values (GDT indices pinned in trap.rs) */
 .set __KERNEL_CS, 0x08
@@ -125,9 +144,12 @@ stub_\vec:
     /* frame complete; RBP is dead (saved above) — park frame ptr in it */
     movq %rsp, %rbp
     andq $-16, %rsp              /* SysV: RSP 16-aligned at call sites */
-    movq %rbp, %rdi              /* arg0: regs */
-    xorl %esi, %esi              /* arg1: cpu id (single CPU bring-up) */
-    movq $\vec, %rdx             /* arg2: vector */
+    testb $3, PT_CS(%rbp)
+    jz 8f
+    swapgs                       /* came from user: GS -> percpu       */
+8:  movl %gs:PC_CPU_NUMBER, %esi /* arg1: cpu id                      */
+    movq $\vec, %rdx             /* arg2: vector                      */
+    movq %rbp, %rdi              /* arg0: regs                        */
     call trap_handler
     movq %rbp, %rsp              /* unwind to the exact frame */
     jmp trap_exit
@@ -209,12 +231,23 @@ stub_spurious:
     pushq %r15
     movq %rsp, %rbp
     andq $-16, %rsp
+    testb $3, PT_CS(%rbp)
+    jz 8f
+    swapgs
+8:  movl %gs:PC_CPU_NUMBER, %esi
     movq %rbp, %rdi
-    xorl %esi, %esi
     movq $255, %rdx
     call trap_handler
     movq %rbp, %rsp
     jmp trap_exit
+
+/* ---- vectors 224..229: LAPIC timer + IPIs (see arch/x86_64/ipi.rs) ---- */
+TRAP_STUB 224
+TRAP_STUB 225
+TRAP_STUB 226
+TRAP_STUB 227
+TRAP_STUB 228
+TRAP_STUB 229
 
 /* ============================================================================
  * Double fault (#DF, vector 8) — IST1
@@ -239,23 +272,27 @@ stub_8:
  * On entry: RCX = user rip, R11 = user rflags, RSP = user rsp,
  * CS/SS loaded from STAR (0x08 / 0x10), RFLAGS &= ~FMASK (IF cleared).
  *
- * The CPU pushed NOTHING and did NOT switch stacks — unlike interrupts
- * there is no TSS.rsp0 switch for SYSCALL.  The stub builds the whole
- * frame itself on the TSS.rsp0 stack.  rcx/r11 are ABI-clobbered by the
+ * The CPU pushed NOTHING, switched NO stack and did NOT swap GS — the
+ * stub does all three itself: SWAPGS first (GS: user NULL -> percpu),
+ * then builds the whole frame on this CPU's kernel stack top, which it
+ * reads through %gs (PerCpu.tss_rsp0 — the same value trap.rs keeps in
+ * TSS.rsp0 for interrupt entries).  rcx/r11 are ABI-clobbered by the
  * syscall itself (hardware), so their pt_regs slots carry the user
  * rip/rflags — same as Linux.
  *
- * The user RSP is stashed in TSS.sp2 because the stack switch happens
- * before it can be pushed and no register is free to hold it.
+ * The user RSP is stashed in a per-CPU scratch slot because the stack
+ * switch happens before it can be pushed and no register is free to
+ * hold it.
  * ============================================================================
  */
 .global syscall_entry
 .hidden syscall_entry
 syscall_entry:
-    movq %rsp, TSS_X86+TSS_SP2(%rip)   /* stash user rsp (Linux trick) */
-    movq TSS_X86+TSS_RSP0(%rip), %rsp  /* kernel stack top (TSS.rsp0)  */
+    swapgs
+    movq %rsp, %gs:PC_SYSCALL_SCRATCH  /* stash user rsp                */
+    movq %gs:PC_TSS_RSP0, %rsp         /* kernel stack top (this CPU)  */
     pushq $__USER_DS                   /* 0xa0 ss                       */
-    pushq TSS_X86+TSS_SP2(%rip)        /* 0x98 rsp (user)               */
+    pushq %gs:PC_SYSCALL_SCRATCH       /* 0x98 rsp (user)               */
     pushq %r11                         /* 0x90 rflags (user)            */
     pushq $__USER_CS                   /* 0x88 cs                       */
     pushq %rcx                         /* 0x80 rip (user)               */
@@ -278,8 +315,8 @@ syscall_entry:
     /* frame at rsp0 - 168 == Task::pt_regs(), same as IRQ entries */
     movq %rsp, %rbp
     andq $-16, %rsp
+    movl %gs:PC_CPU_NUMBER, %esi
     movq %rbp, %rdi
-    xorl %esi, %esi
     movq $SYSCALL_VECTOR, %rdx
     call trap_handler
     movq %rbp, %rsp
@@ -327,7 +364,10 @@ trap_exit:
 
 .Lrestore_all:
     movq %rbp, %rsp
-    popq %r15
+    testb $3, PT_CS(%rsp)       /* pairing rule: swap GS only on the  */
+    jz 9f                       /* user-return path (mirror of the    */
+    swapgs                      /* entry-side CS test)                */
+9:  popq %r15
     popq %r14
     popq %r13
     popq %r12
