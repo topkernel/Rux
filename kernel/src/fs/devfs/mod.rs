@@ -331,6 +331,35 @@ static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     poll: Some(randdev_poll),
 };
 
+/// /dev/kmsg — kernel message sink (OH Phase 1b: OH's init and early
+/// services write boot markers here after mknod'ing it on their tmpfs
+/// /dev). Writes append to the kernel log (prefix-style passthrough to
+/// printk); reads return EOF (no readable record ring yet — consumers
+/// use the serial console); always writable, never readable-ready.
+fn kmsgdev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
+    // Print as one line chunk; control chars other than \n are passed
+    // through unchanged by printk's escapes.
+    crate::pr_info!("[kmsg] {}", core::str::from_utf8(buf).unwrap_or("<binary>"));
+    buf.len() as isize
+}
+
+fn kmsgdev_read(_file: &crate::fs::file::File, _buf: &mut [u8]) -> isize {
+    0 // EOF — no record ring to drain
+}
+
+fn kmsgdev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    POLLERR | POLLOUT | POLLWRNORM // not readable; writes never block
+}
+
+static KMSGDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+    read: Some(kmsgdev_read),
+    write: Some(kmsgdev_write),
+    lseek: None,
+    close: None,
+    poll: Some(kmsgdev_poll),
+};
+
 /// virtio-blk major on this platform (matches sysfs /sys/class/block/vda).
 pub const VIRTIO_BLK_MAJOR: u32 = 254;
 
@@ -369,6 +398,7 @@ fn devtmpfs_populate() {
     let _ = registry::register_char_device(DevNo::new(MEM_MAJOR, 7), &FULLDEV_OPS);
     let _ = registry::register_char_device(crate::fs::dev_t::DEV_RANDOM, &RANDDEV_OPS);
     let _ = registry::register_char_device(crate::fs::dev_t::DEV_URANDOM, &RANDDEV_OPS);
+    let _ = registry::register_char_device(crate::fs::dev_t::DEV_KMSG, &KMSGDEV_OPS);
 
     // --- OpenHarmony Phase 2 device nodes (port plan §6 items 2/3):
     // /dev/ashmem and /dev/access_token_id. Registered here (NOT via
@@ -401,6 +431,7 @@ fn devtmpfs_populate() {
         ("full", DevNo::new(MEM_MAJOR, 7), 0o666),
         ("random", crate::fs::dev_t::DEV_RANDOM, 0o666),
         ("urandom", crate::fs::dev_t::DEV_URANDOM, 0o666),
+        ("kmsg", crate::fs::dev_t::DEV_KMSG, 0o600),
         ("ashmem", crate::drivers::ashmem::DEV_ASHMEM, 0o666),
         (
             "access_token_id",
@@ -456,16 +487,24 @@ fn devtmpfs_populate() {
         );
     }
 
-    // --- root block device (whole disk) ---
+    // --- block devices (whole disks) ---
+    // Every PCI virtio-blk disk found by the boot probe gets its node:
+    // vda, vdb, ... (OH boots six disks; the node is what root= and
+    // userspace `mount /dev/vdX` resolve). MMIO boot disk = vda.
     if root_disk_present() {
-        children.insert(
-            String::from(ROOT_DISK_NAME),
-            Arc::new(DevfsEntry::new_block_device(
-                ROOT_DISK_NAME,
-                DevNo::new(VIRTIO_BLK_MAJOR, 0),
-                0o060000 | 0o660, // S_IFBLK | brw-rw----
-            )),
-        );
+        let pci_disks = crate::drivers::virtio::pci_blk_disk_count();
+        for slot in 0..pci_disks {
+            let letter = b'a' + slot as u8;
+            let name = alloc::format!("vd{}", letter as char);
+            children.insert(
+                name.clone(),
+                Arc::new(DevfsEntry::new_block_device(
+                    &name,
+                    DevNo::new(VIRTIO_BLK_MAJOR, (slot as u32) * 16),
+                    0o060000 | 0o660, // S_IFBLK | brw-rw----
+                )),
+            );
+        }
     }
     drop(children);
 }

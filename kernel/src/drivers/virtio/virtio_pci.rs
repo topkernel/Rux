@@ -86,6 +86,10 @@ pub struct VirtIOPCI {
     pub isr_cfg_offset: u32,
     /// Device base address
     pub base_addr: u64,
+    /// virtio-blk disk slot this function drives (multi-disk OH Phase 1b:
+    /// the I/O engine — queue, BLK lock, wait queue, pending table — is
+    /// selected through this number). 0 until the probe assigns it.
+    pub blk_slot: usize,
 }
 
 impl VirtIOPCI {
@@ -242,6 +246,7 @@ impl VirtIOPCI {
             isr_cfg_bar: 0,
             isr_cfg_offset: 0,
             base_addr: 0,
+            blk_slot: 0,
         };
 
         // ========== Scan VirtIO PCI capabilities ==========
@@ -424,6 +429,7 @@ impl VirtIOPCI {
             isr_cfg_bar: isr_cfg_bar + isr_offset as u64,
             isr_cfg_offset: isr_offset,
             base_addr: common_cfg_bar + common_offset as u64,  // Use Common CFG as primary access address
+            blk_slot: 0,
         };
 
         // x86_64: every constructed function goes on the shared INTx
@@ -670,13 +676,18 @@ impl VirtIOPCI {
         // the line was off by one for every device (review DRIV-H3).
         let irq = 32 + (((int_pin as u32).saturating_sub(1) + self.pci_slot as u32) % 4);
 
-        // Register handler via IRQ framework (unmasks automatically)
+        // Register handler via IRQ framework (unmasks automatically).
+        // IRQF_SHARED: QEMU's gpex swizzle maps slot n, pin A to IRQ
+        // 32 + (n % 4) — a sixth disk SHARES its line with the second.
+        // dev_id is this function's virtio-blk slot; the handler checks
+        // its own ISR register and returns None when the line was raised
+        // by another device (proper shared-IRQ discipline).
         crate::interrupt::request_irq(
             irq,
             super::interrupt_handler_pci,
-            0,
+            crate::interrupt::irqdesc::IRQF_SHARED,
             "virtio-blk-pci",
-            0,
+            self.blk_slot,
         ).ok();
     }
 
@@ -1085,6 +1096,7 @@ pub fn read_block_using_configured_queue(
     sector: u64,
     buf: &mut [u8]
 ) -> Result<usize, &'static str> {
+    let slot = pci_dev.blk_slot;
     // Add retry mechanism to resolve VirtIO block device random timeout issues
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
@@ -1105,7 +1117,7 @@ pub fn read_block_using_configured_queue(
                 // retry, turning "table lag" and in-flight-guard rejections
                 // into one-shot retry conditions instead of a 5-attempt
                 // failure.
-                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_blk_kick(slot);
                 crate::drivers::virtio::pci_process_async_completions();
                 // Short delay before retry
                 for _ in 0..10000 {
@@ -1118,19 +1130,20 @@ pub fn read_block_using_configured_queue(
 
 /// Single read attempt
 fn read_block_once(
-    _pci_dev: &VirtIOPCI,
+    pci_dev: &VirtIOPCI,
     sector: u64,
     buf: &mut [u8]
 ) -> Result<usize, &'static str> {
+    let slot = pci_dev.blk_slot;
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
 
     // Phase 1: Set up and submit request (under PCI lock)
     let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
-        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+        let _guard = crate::drivers::virtio::PCI_BLK_LOCKS[slot].lock_irqsave();
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
         // Get configured VirtQueue (mutable reference)
-        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
             Some(q) => q,
             None => return Err("No configured VirtQueue found"),
         };
@@ -1232,7 +1245,7 @@ fn read_block_once(
         );
 
         // Get current expected value (used.idx expected value before submit)
-        let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+        let prev_expected = crate::drivers::virtio::get_expected_used_idx_at(slot);
 
         // Reserve OUR ordinal slot (submission order) + verify the chain's
         // descriptor window does not overlap a live pending/tombstone
@@ -1241,6 +1254,7 @@ fn read_block_once(
         // would be misattributed). "Not reservable" = walker lag — the
         // outer retry drains completions and tries again.
         if !crate::drivers::virtio::pci_pending_slot_reservable(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1257,7 +1271,7 @@ fn read_block_once(
         virt_queue.submit(header_desc_idx);
 
         // Increment expected used.idx (track our expected completion count)
-        crate::drivers::virtio::increment_expected_used_idx();
+        crate::drivers::virtio::increment_expected_used_idx_at(slot);
 
         // Publish a NULL-completion reservation ("tombstone") for this
         // synchronous chain AT ITS ORDINAL SLOT: keeps the chain's
@@ -1269,6 +1283,7 @@ fn read_block_once(
         // the BLK lock here — the walker cannot observe the used-ring
         // advance first, and the reservation above cannot be lost.
         crate::drivers::virtio::pci_publish_sync_chain(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1286,11 +1301,12 @@ fn read_block_once(
     // wait_for_used_interruptible)
     let new_used = VirtQueue::wait_for_used_interruptible(
         used_ring_ptr,
-        crate::drivers::virtio::get_pci_blk_wait_queue(),
+        crate::drivers::virtio::get_pci_blk_wait_queue(slot),
         prev_expected,
         // SAFETY: resp_ptr was allocated above and stays owned by this
         // frame until the wait returns; the wait only reads its status.
         unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
+        slot,
     );
 
     // Phase 3: Check response
@@ -1317,8 +1333,8 @@ fn read_block_once(
             // eventual consumption pairs the leaked-chain accounting, and
             // record the leak so (a) the in-flight guard stops counting it
             // and (b) the caller's retry cannot reuse its slots.
-            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(prev_expected);
-            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
+            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(slot, prev_expected);
+            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue_at(slot) {
                 vq.note_timed_out_chain();
             }
             return Err("VirtIO request timeout");
@@ -1350,6 +1366,7 @@ pub fn write_block_using_configured_queue(
     sector: u64,
     buf: &[u8]
 ) -> Result<usize, &'static str> {
+    let slot = pci_dev.blk_slot;
     // Add retry mechanism to resolve VirtIO block device random timeout issues
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
@@ -1365,7 +1382,7 @@ pub fn write_block_using_configured_queue(
                     return Err(e);
                 }
                 // Drain completions before retrying (see the read path).
-                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_blk_kick(slot);
                 crate::drivers::virtio::pci_process_async_completions();
                 // Short delay before retry
                 for _ in 0..10000 {
@@ -1378,19 +1395,20 @@ pub fn write_block_using_configured_queue(
 
 /// Single write attempt using pre-configured VirtQueue
 fn write_block_once(
-    _pci_dev: &VirtIOPCI,
+    pci_dev: &VirtIOPCI,
     sector: u64,
     buf: &[u8]
 ) -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
+    let slot = pci_dev.blk_slot;
 
     // Phase 1: Set up and submit request (under PCI lock)
     let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
-        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+        let _guard = crate::drivers::virtio::PCI_BLK_LOCKS[slot].lock_irqsave();
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
         // Get configured VirtQueue (mutable reference)
-        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
             Some(q) => q,
             None => return Err("No configured VirtQueue found"),
         };
@@ -1489,11 +1507,12 @@ fn write_block_once(
         );
 
         // Get current expected value (used.idx expected value before submit)
-        let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+        let prev_expected = crate::drivers::virtio::get_expected_used_idx_at(slot);
 
         // Reserve OUR ordinal slot + verify the window before submitting
         // (same discipline as the read path — see read_block_once).
         if !crate::drivers::virtio::pci_pending_slot_reservable(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1510,12 +1529,13 @@ fn write_block_once(
         virt_queue.submit(header_desc_idx);
 
         // Increment expected used.idx (track our expected completion count)
-        crate::drivers::virtio::increment_expected_used_idx();
+        crate::drivers::virtio::increment_expected_used_idx_at(slot);
 
         // Publish a NULL-completion reservation ("tombstone") for this
         // synchronous chain AT ITS ORDINAL SLOT (same discipline as the
         // read path — see read_block_once).
         crate::drivers::virtio::pci_publish_sync_chain(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1533,11 +1553,12 @@ fn write_block_once(
     // wait_for_used_interruptible)
     let new_used = VirtQueue::wait_for_used_interruptible(
         used_ring_ptr,
-        crate::drivers::virtio::get_pci_blk_wait_queue(),
+        crate::drivers::virtio::get_pci_blk_wait_queue(slot),
         prev_expected,
         // SAFETY: resp_ptr was allocated above and stays owned by this
         // frame until the wait returns; the wait only reads its status.
         unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
+        slot,
     );
 
     // Phase 3: Check response
@@ -1561,8 +1582,8 @@ fn write_block_once(
         if !late {
             // True timeout (10s deadline expired) — flag the tombstone and
             // leak-note the chain (same pairing as the read path).
-            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(prev_expected);
-            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
+            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(slot, prev_expected);
+            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue_at(slot) {
                 vq.note_timed_out_chain();
             }
             return Err("VirtIO write request timeout");
@@ -1595,14 +1616,15 @@ fn write_block_once(
 /// # Returns
 /// Ok(0) when the device acknowledges the flush.
 pub fn flush_block_using_configured_queue(
-    _pci_dev: &VirtIOPCI,
+    pci_dev: &VirtIOPCI,
 ) -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
 
+    let slot = pci_dev.blk_slot;
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
     loop {
-        match flush_block_once() {
+        match flush_block_once(slot) {
             Ok(n) => return Ok(n),
             Err(e) => {
                 retries += 1;
@@ -1610,7 +1632,7 @@ pub fn flush_block_using_configured_queue(
                     return Err(e);
                 }
                 // Drain completions before retrying (see the read path).
-                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_blk_kick(slot);
                 crate::drivers::virtio::pci_process_async_completions();
                 for _ in 0..10000 {
                     core::hint::spin_loop();
@@ -1621,15 +1643,15 @@ pub fn flush_block_using_configured_queue(
 }
 
 /// Single flush attempt using the pre-configured VirtQueue.
-fn flush_block_once() -> Result<usize, &'static str> {
+fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
     use crate::arch::mm::VirtAddr;
 
     let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
-        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+        let _guard = crate::drivers::virtio::PCI_BLK_LOCKS[slot].lock_irqsave();
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
-        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
             Some(q) => q,
             None => return Err("No configured VirtQueue found"),
         };
@@ -1694,13 +1716,14 @@ fn flush_block_once() -> Result<usize, &'static str> {
             0,
         );
 
-        let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+        let prev_expected = crate::drivers::virtio::get_expected_used_idx_at(slot);
 
         // Reserve OUR ordinal slot + verify the window before submitting
         // (same discipline as the read/write paths; a FLUSH chain is only
         // 2 descriptors wide, covered conservatively by the 3-wide window
         // check).
         if !crate::drivers::virtio::pci_pending_slot_reservable(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1714,12 +1737,13 @@ fn flush_block_once() -> Result<usize, &'static str> {
         }
 
         virt_queue.submit(header_desc_idx);
-        crate::drivers::virtio::increment_expected_used_idx();
+        crate::drivers::virtio::increment_expected_used_idx_at(slot);
 
         // Publish the sync-chain tombstone at its ordinal slot (same
         // discipline as the read/write paths): the flush's used-ring
         // entry must be consumed as OURS, never misattributed.
         crate::drivers::virtio::pci_publish_sync_chain(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1731,11 +1755,12 @@ fn flush_block_once() -> Result<usize, &'static str> {
 
     let new_used = VirtQueue::wait_for_used_interruptible(
         used_ring_ptr,
-        crate::drivers::virtio::get_pci_blk_wait_queue(),
+        crate::drivers::virtio::get_pci_blk_wait_queue(slot),
         prev_expected,
         // SAFETY: resp_ptr was allocated above and stays owned by this
         // frame until the wait returns; the wait only reads its status.
         unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
+        slot,
     );
 
     if new_used == prev_expected {
@@ -1756,8 +1781,8 @@ fn flush_block_once() -> Result<usize, &'static str> {
         if !late {
             // True timeout (10s deadline expired) — flag the tombstone and
             // leak-note the chain (same pairing as the read path).
-            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(prev_expected);
-            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
+            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(slot, prev_expected);
+            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue_at(slot) {
                 vq.note_timed_out_chain();
             }
             return Err("VirtIO flush request timeout");

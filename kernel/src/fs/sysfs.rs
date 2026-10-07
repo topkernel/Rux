@@ -527,32 +527,124 @@ fn add_net_device(
 // Dynamic device registration (driver probe paths) — U3
 // ============================================================================
 
-/// Register a block disk under /sys/class/block/<name> (+ /sys/block/<name>
-/// and /sys/dev/block/<maj:min> symlinks) and broadcast the "add" uevent.
+/// Relative target for a `subsystem` symlink on a device directory at
+/// sysfs-internal path `dir` (e.g. "/devices/platform/30000000.pci")
+/// pointing at the bus hub "/bus/<bus>". Guest realpath() resolves the
+/// chain upward to the sysfs root and back down into bus/.
+fn subsystem_link_target(dir_components: usize, bus: &str) -> String {
+    let mut t = String::new();
+    for _ in 0..dir_components {
+        t.push_str("../");
+    }
+    t.push_str("bus/");
+    t.push_str(bus);
+    t
+}
+
+/// Walk (creating idempotently) the /devices hierarchy `chain` and return
+/// the final device directory. Each entry is (directory name, bus); every
+/// level gets a `subsystem` symlink into its bus hub so ueventd's
+/// GetBlockDeviceSymbolLinks ancestor walk (readlink
+/// /sys<devpath>/../subsystem, compare against /sys/bus/platform) works,
+/// exactly like the Linux device model.
+fn ensure_devices_chain(chain: &[(&str, &str)]) -> Option<Arc<KObject>> {
+    let mut cur = lookup_path("devices")?;
+    for (i, (dir, bus)) in chain.iter().enumerate() {
+        let child = match cur.find_child(dir.as_bytes()) {
+            Some(c) => c,
+            None => mk_dir(&cur, dir, KType::Generic),
+        };
+        // Attach/refresh the subsystem link (idempotent: add_child
+        // replaces an existing same-name child). The child sits at
+        // /devices/<chain[0..=i]> → (1 + i + 1) path components.
+        let target = subsystem_link_target(1 + i + 1, bus);
+        mk_link(&child, "subsystem", &target);
+        cur = child;
+    }
+    Some(cur)
+}
+
+/// Register a block disk in the Linux device-model shape (OH Phase 1b
+/// gap 3): the disk kobject lives under
+/// `/sys/devices/<chain>/virtio<N>/block/<name>` and
+///   - /sys/class/block/<name> → symlink into the /devices path,
+///   - /sys/block/<name> and /sys/dev/block/<maj:min> → symlinks,
+///   - DEVPATH in the "add" uevent is the /devices path
+///     ("/devices/platform/.../block/<name>").
+///
+/// OH ueventd requires exactly this: HandleBlockDeviceEvent only builds
+/// /dev/block/by-name symlinks for uevents whose DEVPATH starts with
+/// "/devices" (GetBlockDeviceSymbolLinks), and the walk upward from
+/// /sys<DEVPATH> finds the platform ancestor through its `subsystem`
+/// readlink. The old /class/block/<name> DEVPATH shape failed the
+/// STARTSWITH("/devices") gate and no by-name link was ever created.
+///
+/// `chain` is the device hierarchy below /sys/devices, innermost LAST:
+///   virtio-blk PCI (riscv64):
+///     [("platform", "platform"), ("30000000.pci", "platform"),
+///      ("pci0000:00", "pci"), ("0000:00:04.0", "pci")]
+///   virtio-blk PCI (x86_64/q35 — no platform root):
+///     [("pci0000:00", "pci"), ("0000:00:04.0", "pci")]
+///   virtio-blk MMIO:
+///     [("platform", "platform"), ("10008000.virtio_mmio", "platform")]
+/// The "virtio<N>" device level is assigned from a global counter and the
+/// disk is created under its "block" subdirectory (Linux gendisk layout:
+/// .../virtio1/block/vdb).
 ///
 /// Called by the virtio-blk probe at device discovery: the tree entry and
 /// the uevent are created at registration time (Linux add_disk() parity).
 /// `capacity_sectors` is captured once — virtio-blk capacity is fixed
-/// after device reset. Idempotent per name: a re-registration only updates
-/// the size attribute (no second uevent, matching Linux which fires "add"
-/// once per kobject birth).
+/// after device reset. Idempotent per name: a re-registration only
+/// returns 0 (no second uevent, matching Linux which fires "add" once
+/// per kobject birth).
 ///
 /// Returns the uevent SEQNUM, or 0 when sysfs is not up / already present.
-pub fn register_block_disk(name: &str, major: u32, minor: u32, capacity_sectors: u64) -> u64 {
+pub fn register_block_disk_at(
+    name: &str,
+    major: u32,
+    minor: u32,
+    capacity_sectors: u64,
+    chain: &[(&str, &str)],
+) -> u64 {
     if sysfs_root().is_none() {
         return 0;
     }
 
-    // /sys/class/block must exist (build_tree skeleton).
-    let class_block = match lookup_path("class/block") {
+    // /sys/class/block and /sys/block must exist (build_tree skeleton).
+    if lookup_path("class/block").is_none() || lookup_path("block").is_none() {
+        return 0;
+    }
+
+    // Device hierarchy: .../virtio<N>/block/<name>.
+    let parent_dev = match ensure_devices_chain(chain) {
         Some(d) => d,
         None => return 0,
     };
-    if class_block.find_child(name.as_bytes()).is_some() {
+    let virtio_idx = VIRTIO_DEV_INDEX.fetch_add(1, Ordering::Relaxed);
+    let virtio_dir_name = alloc::format!("virtio{}", virtio_idx);
+    let virtio_dev = match parent_dev.find_child(virtio_dir_name.as_bytes()) {
+        Some(d) => d,
+        None => {
+            let d = mk_dir(&parent_dev, &virtio_dir_name, KType::Generic);
+            // subsystem depth: /devices/<chain...>/<virtioN>
+            let depth = 1 + chain.len() + 1;
+            mk_link(
+                &d,
+                "subsystem",
+                &subsystem_link_target(depth, "virtio"),
+            );
+            d
+        }
+    };
+    let block_dir = match virtio_dev.find_child(b"block") {
+        Some(d) => d,
+        None => mk_dir(&virtio_dev, "block", KType::Block),
+    };
+    if block_dir.find_child(name.as_bytes()).is_some() {
         return 0; // already registered
     }
 
-    let dev = mk_dir(&class_block, name, KType::Block);
+    let dev = mk_dir(&block_dir, name, KType::Block);
     *dev.devno.lock() = Some((major, minor));
     *dev.devname.lock() = Some(String::from(name));
 
@@ -569,21 +661,29 @@ pub fn register_block_disk(name: &str, major: u32, minor: u32, capacity_sectors:
         format!("{}\n", "0 ".repeat(16) + "0").into_bytes()
     });
     add_uevent_attr(&dev);
+    // The disk's own subsystem link: .../block/<name>/subsystem → bus/block.
+    let depth = 1 + chain.len() + 1 + 2; // /devices/<chain>/<virtioN>/block/<name>
+    mk_link(&dev, "subsystem", &subsystem_link_target(depth, "block"));
 
-    // /sys/block/<name> → ../../class/block/<name>
-    if let Some(sys_block) = lookup_path("block") {
-        mk_link(&sys_block, name, &format!("../../class/block/{}", name));
+    // /sys/class/block/<name> → ../../devices/<chain>/<virtioN>/block/<name>
+    let devpath = dev.path(); // "/devices/<chain>/virtioN/block/<name>"
+    let devices_target = &devpath["/devices".len()..]; // "/<chain>/..."
+    if let Some(class_block) = lookup_path("class/block") {
+        mk_link(&class_block, name, &format!("../..{}", devices_target));
     }
-    // /sys/dev/block/<maj:min> → ../../../class/block/<name>
+    // /sys/block/<name> → ../devices/<chain>/virtioN/block/<name>
+    if let Some(sys_block) = lookup_path("block") {
+        mk_link(&sys_block, name, &format!("..{}", devices_target));
+    }
+    // /sys/dev/block/<maj:min> → ../../devices/<chain>/virtioN/block/<name>
     if let Some(dev_block) = lookup_path("dev/block") {
         mk_link(
             &dev_block,
             &format!("{}:{}", major, minor),
-            &format!("../../../class/block/{}", name),
+            &format!("../..{}", devices_target),
         );
     }
 
-    let devpath = dev.path();
     let maj = format!("{}", major);
     let min = format!("{}", minor);
     // Field set/order matches Linux dev_uevent() + disk_type for a whole
@@ -600,10 +700,20 @@ pub fn register_block_disk(name: &str, major: u32, minor: u32, capacity_sectors:
     uevent_send_full(&devpath, "add", "block", &extra)
 }
 
-/// Unregister a block disk: drop the tree entries and broadcast "remove".
-/// (No virtio-blk removal path exists yet — kept for device_del bring-up.)
+/// Global virtio device index — Linux assigns "virtio<N>" names from a
+/// global ida in probe order across transports (register_block_disk_at).
+static VIRTIO_DEV_INDEX: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Unregister a block disk: drop the class/sys-block/dev links, remove
+/// the disk from its /devices parent, and broadcast "remove". (No
+/// virtio-blk removal path exists yet — kept for device_del bring-up.)
 #[allow(dead_code)]
 pub fn unregister_block_disk(name: &str, major: u32, minor: u32) -> u64 {
+    let mut devpath = None;
+    // The class entry is a symlink into /devices; find the real disk
+    // kobject so the uevent DEVPATH matches the "add" that was sent.
+    // (Fall back to the pre-1b /class path when the link is gone.)
     if let Some(class_block) = lookup_path("class/block") {
         class_block.remove_child(name);
     }
@@ -613,7 +723,34 @@ pub fn unregister_block_disk(name: &str, major: u32, minor: u32) -> u64 {
     if let Some(dev_block) = lookup_path("dev/block") {
         dev_block.remove_child(&format!("{}:{}", major, minor));
     }
-    let devpath = format!("/class/block/{}", name);
+    // Depth-bounded scan of /sys/devices for the disk kobject by name
+    // (trees are small; unregister is a rare path).
+    fn find_disk(cur: &Arc<KObject>, name: &str, depth: usize) -> Option<(Arc<KObject>, String)> {
+        if depth > 8 {
+            return None;
+        }
+        let children = cur.children.lock().clone();
+        for (cname, child) in children.iter() {
+            if cname == name && child.devno.lock().is_some() {
+                let p = cur.path();
+                return Some((child.clone(), alloc::format!("{}/{}", p, name)));
+            }
+            if let Some(hit) = find_disk(child, name, depth + 1) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+    if let Some(devices) = lookup_path("devices") {
+        if let Some((disk, path)) = find_disk(&devices, name, 0) {
+            let parent = disk.parent.lock().as_ref().and_then(|w| w.upgrade());
+            if let Some(p) = parent {
+                p.children.lock().remove(name);
+            }
+            devpath = Some(path);
+        }
+    }
+    let devpath = devpath.unwrap_or_else(|| format!("/class/block/{}", name));
     let maj = format!("{}", major);
     let min = format!("{}", minor);
     let extra: [(&str, &str); 4] = [
@@ -804,6 +941,16 @@ fn build_tree() -> Arc<KObject> {
     // /sys/class; this symlink keeps DEVPATH-style walks working).
     mk_link(&devices, "virtual", "../../class");
 
+    // /sys/devices/platform — the platform-bus device parents (PCI host
+    // controller, virtio-mmio functions). Block disks attach below a
+    // platform device in the Linux device model, and OH ueventd's
+    // /dev/block/by-name walk needs a platform ancestor whose
+    // `subsystem` symlink resolves to /sys/bus/platform (see
+    // register_block_disk_at).
+    let platform = mk_dir(&devices, "platform", KType::Generic);
+    // /sys/devices/platform (2 components) → 2 ups to the sysfs root.
+    mk_link(&platform, "subsystem", "../../bus/platform");
+
     // /sys/class/graphics/fb0 → ../../devices/graphics/fb0 — Xorg's
     // fbdevhw fbdev_open() readlinks /sys/class/graphics/fb0 and
     // SILENTLY refuses the framebuffer when the readlink fails (no
@@ -921,6 +1068,12 @@ fn build_tree() -> Arc<KObject> {
             0
         },
     );
+    // Bus hubs the device-model `subsystem` symlinks resolve into
+    // (ueventd readlinks <devpath-parent>/subsystem and compares against
+    // /sys/bus/platform — the bus dirs must exist for realpath()).
+    mk_dir(&bus, "platform", KType::Generic);
+    let _virtio_bus = mk_dir(&bus, "virtio", KType::Generic);
+    let _block_bus = mk_dir(&bus, "block", KType::Block);
 
     root
 }

@@ -54,6 +54,13 @@ for m in \
     "INITTEST: cmdline: root=/dev/ram0" \
     "ohos.boot.hardware=virt" \
     "INITTEST: readlink /bin/lnk -> hello" \
+    "DEVTEST: mount tmpfs /dev ok" \
+    "DEVTEST: /dev/console gone after tmpfs overmount" \
+    "DEVTEST: mknod null/random/urandom/kmsg ok" \
+    "DEVTEST: stat /dev/null S_IFCHR rdev=1:3 ok" \
+    "DEVTEST: /dev/null write+read ok" \
+    "DEVTEST: /dev/urandom read ok" \
+    "DEVTEST: /dev/kmsg write ok" \
     ; do
     if grep -qF "$m" "$LOG"; then
         echo "PASS: $m"

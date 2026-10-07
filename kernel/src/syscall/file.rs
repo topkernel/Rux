@@ -2325,8 +2325,20 @@ pub fn sys_mknodat(args: SyscallArgs) -> i64 {
             }
         }
         0o140000 => {
-            // S_IFSOCK — no AF_UNIX filesystem binding yet.
-            -(errno::ENOSYS as i64)
+            // S_IFSOCK: create the node on the owning filesystem (Linux
+            // do_mknodat → vfs_mknod; no capability required). AF_UNIX
+            // bind(2) can later claim the name.
+            let umask = match crate::sched::current() {
+                Some(task) => {
+                    // SAFETY: sched::current() yields a valid task reference.
+                    unsafe { (*task).get_umask() }
+                }
+                None => 0o022,
+            };
+            match crate::fs::vfs::vfs_mknod(&path, 0o140000 | (mode & 0o7777 & !umask), 0) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
         }
         _ => -(errno::EINVAL as i64), // S_IFLNK (use symlink(2)) / unknown types
     }
@@ -2380,10 +2392,43 @@ fn mkfifo_at(path: &str, perm: u32) -> i64 {
     }
 }
 
-/// Create a device node (char/block) — devfs (/dev) only.
+/// Create a device node (char/block): on the filesystem that OWNS the
+/// parent directory (Linux do_mknodat semantics), with the legacy devfs
+/// registry route kept for the dentry-mounted devfs instance itself.
+///
+/// OH Phase 1b: OH's init mounts a tmpfs over /dev and mknods
+/// /dev/{null,random,urandom,kmsg} there — those nodes must land on the
+/// tmpfs (open() binds them through the CharDev registry by the stored
+/// rdev), not in the devfs tree the bare "/dev" prefix would select.
 fn mknod_device(path: &str, ftype: u32, dev: u32, perm: u32) -> i64 {
-    // Only devfs supports device nodes; look for the /dev prefix (the
-    // dentry-mounted devfs instance).
+    let type_bits = if ftype == 0o020000 { 0o020000 } else { 0o060000 };
+    // do_mknodat applies the umask before handing the mode down.
+    let umask = match crate::sched::current() {
+        Some(task) => {
+            // SAFETY: sched::current() yields a valid task reference.
+            unsafe { (*task).get_umask() }
+        }
+        None => 0o022,
+    };
+    let mode_bits = type_bits | (perm & !umask);
+
+    // Generic path: resolve the parent through the mount stack and use
+    // its mknod inode op when present (tmpfs today; devfs keeps mknod
+    // None on purpose — its internal registry route below also evicts
+    // stale dentries and checks the /dev shape).
+    match crate::fs::vfs::vfs_mknod(path, mode_bits, dev as u64) {
+        Ok(()) => return 0,
+        Err(e) => {
+            // EOPNOTSUPP = the owning filesystem has no mknod op — fall
+            // through to the devfs route when the path is under /dev and
+            // devfs still owns it (no tmpfs overmount). Any other error
+            // (EEXIST, ENOENT, ENOTDIR, EACCES, EROFS...) is final.
+            if e != -(errno::EOPNOTSUPP) {
+                return e as i64;
+            }
+        }
+    }
+
     let dev_path = match crate::fs::devfs::parse_dev_path(path) {
         Some(p) => p,
         None => {
@@ -2400,8 +2445,6 @@ fn mknod_device(path: &str, ftype: u32, dev: u32, perm: u32) -> i64 {
     // minor split across bits 0-7 and 20-31.
     let major = (dev & 0xfff00) >> 8;
     let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);
-    let type_bits = if ftype == 0o020000 { 0o020000 } else { 0o060000 };
-    let mode_bits = type_bits | (perm & 0o777);
     match crate::fs::devfs::mknod_user(dev_path, crate::fs::dev_t::DevNo::new(major, minor), mode_bits) {
         Ok(()) => 0,
         Err(()) => -(errno::EACCES as i64), // missing parent dir inside /dev
