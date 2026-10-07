@@ -586,10 +586,16 @@ pub fn register_block_disk(name: &str, major: u32, minor: u32, capacity_sectors:
     let devpath = dev.path();
     let maj = format!("{}", major);
     let min = format!("{}", minor);
-    let extra: [(&str, &str); 3] = [
+    // Field set/order matches Linux dev_uevent() + disk_type for a whole
+    // disk: MAJOR, MINOR, DEVNAME, DEVTYPE=disk (partitions would add
+    // DEVTYPE=partition + PARTN=N; no partition support yet). OH Phase 1
+    // (R7): ueventd consumes SUBSYSTEM/DEVNAME/MAJOR/MINOR to mknod
+    // /dev/block/<name>; DEVTYPE is Linux parity, ignored by ueventd.
+    let extra: [(&str, &str); 4] = [
         ("MAJOR", maj.as_str()),
         ("MINOR", min.as_str()),
         ("DEVNAME", name),
+        ("DEVTYPE", "disk"),
     ];
     uevent_send_full(&devpath, "add", "block", &extra)
 }
@@ -610,10 +616,11 @@ pub fn unregister_block_disk(name: &str, major: u32, minor: u32) -> u64 {
     let devpath = format!("/class/block/{}", name);
     let maj = format!("{}", major);
     let min = format!("{}", minor);
-    let extra: [(&str, &str); 3] = [
+    let extra: [(&str, &str); 4] = [
         ("MAJOR", maj.as_str()),
         ("MINOR", min.as_str()),
         ("DEVNAME", name),
+        ("DEVTYPE", "disk"),
     ];
     uevent_send_full(&devpath, "remove", "block", &extra)
 }
@@ -1010,13 +1017,17 @@ pub fn kobject_uevent(kobj: &KObject, action: &str) -> u64 {
         if let Some((major, minor)) = *kobj.devno.lock() {
         let maj = format!("{}", major);
         let min = format!("{}", minor);
+        let dn = kobj.devname.lock().clone();
         let mut extra: Vec<(&str, &str)> = vec![("MAJOR", maj.as_str()), ("MINOR", min.as_str())];
-        if let Some(dn) = kobj.devname.lock().clone() {
-            extra.push(("DEVNAME", dn.as_str()));
-            uevent_send_full(&devpath, action, subsystem, &extra)
-        } else {
-            uevent_send_full(&devpath, action, subsystem, &extra)
+        if let Some(name) = dn.as_deref() {
+            extra.push(("DEVNAME", name));
         }
+        // Whole-disk block kobjects report DEVTYPE=disk (Linux dev_uevent
+        // emits the device_type name — disk_type for a gendisk).
+        if kobj.ktype == KType::Block {
+            extra.push(("DEVTYPE", "disk"));
+        }
+        uevent_send_full(&devpath, action, subsystem, &extra)
     } else {
         uevent_send_full(&devpath, action, subsystem, &[])
     }

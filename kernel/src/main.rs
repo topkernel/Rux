@@ -126,6 +126,7 @@ mod errno;
 mod net;
 mod cmdline;
 mod init;
+mod initrd;
 mod syscall;
 mod interrupt;
 mod dfx;
@@ -317,6 +318,24 @@ pub fn rust_main_tail() -> ! {
                 print_status("boot", &display, true);
             }
         }
+
+        // OH Phase 1: console= names the primary console device (the last
+        // console= token, options stripped). riscv64 virt has exactly one
+        // serial device (ns16550a = ttyS0), which is what the printk
+        // console and /dev/console use; a cmdline naming anything else is
+        // reported as unavailable rather than silently ignored.
+        {
+            let primary = cmdline::get_console_device();
+            if primary == "ttyS0" {
+                print_status("console", "console=ttyS0 (ns16550a uart)", true);
+            } else {
+                print_status(
+                    "console",
+                    &format!("console={} unavailable, keeping ttyS0", primary),
+                    false,
+                );
+            }
+        }
     }
 
     // Boot hart continues with remaining init (only hart reaches here)
@@ -453,6 +472,26 @@ pub fn rust_main_tail() -> ! {
                 // Build dentry tree for rootfs
                 fs::vfs::vfs_mount("/", fs::rootfs::create_root_inode(),
                     fs::mount::MntFlags::new(0));
+
+                // OH Phase 1 prereq: unpack the boot initrd (gzip cpio
+                // newc) into the ramfs root. root=/dev/ram0 boots run
+                // entirely from this content; root=/dev/vdX boots with an
+                // initrd follow the Linux initramfs model (the archive's
+                // /init runs first and is responsible for switch_root).
+                match initrd::load() {
+                    Ok(stats) => {
+                        print_status("initrd", &format!(
+                            "{} files, {} dirs, {} links, {}KB, {} special skipped",
+                            stats.files, stats.dirs,
+                            stats.symlinks + stats.hardlinks,
+                            stats.total_bytes / 1024,
+                            stats.skipped_special), true);
+                    }
+                    Err("no initrd image") => {
+                        // Normal for -kernel-only boots; nothing to report.
+                    }
+                    Err(e) => print_status("initrd", &format!("unpack failed: {}", e), false),
+                }
             }
 
             // Initialize ProcFS and mount to /proc (if configured to enable)
@@ -522,68 +561,11 @@ pub fn rust_main_tail() -> ! {
                 print_status("driver", "GenDisk registered", true);
             }
 
-            // Auto-mount ext4 file system (if configured to enable)
-            if crate::config::AUTO_MOUNT_EXT4 {
-                // Try mounting from PCI device
-                if let Some(disk) = drivers::virtio::get_pci_gen_disk() {
-                    let mount_result = fs::ext4::mount_ext4(disk as *const _);
-                    let mount_point = crate::config::EXT4_MOUNT_POINT;
-                    print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
-                    if mount_result.is_ok() {
-                        if let Some(ext4_fs) = fs::ext4::get_ext4_fs() {
-                            // Build dentry tree for ext4 (overlays root)
-                            fs::vfs::vfs_mount("/", fs::ext4::create_root_inode(),
-                                fs::mount::MntFlags::new(0));
-                        }
-                    }
-
-                    // Remount procfs after ext4 mount (since ext4 overwrites root directory)
-                    if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
-                        let procfs_mount_result = fs::procfs::mount_procfs();
-                        print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
-                        if procfs_mount_result.is_ok() {
-                            // Rebuild dentry tree for procfs after ext4 overlay
-                            fs::vfs::vfs_mount("/proc", fs::procfs::create_root_inode(),
-                                fs::mount::MntFlags::new(0));
-                        }
-                    }
-
-                    // Re-link cgroup2 after ext4 overlay (U1b, same
-                    // defensive re-mount as procfs above).
-                    if mount_result.is_ok() {
-                        let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
-                    }
-                } else if let Some(virtio_dev) = drivers::virtio::get_device() {
-                    // Try mounting from MMIO device
-                    let disk_ptr = &virtio_dev.disk as *const drivers::blkdev::GenDisk;
-                    let mount_result = fs::ext4::mount_ext4(disk_ptr);
-                    let mount_point = crate::config::EXT4_MOUNT_POINT;
-                    print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
-                    if mount_result.is_ok() {
-                        if let Some(ext4_fs) = fs::ext4::get_ext4_fs() {
-                            // Build dentry tree for ext4 (overlays root)
-                            fs::vfs::vfs_mount("/", fs::ext4::create_root_inode(),
-                                fs::mount::MntFlags::new(0));
-                        }
-                    }
-
-                    // Remount procfs after ext4 mount
-                    if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
-                        let procfs_mount_result = fs::procfs::mount_procfs();
-                        print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
-                        if procfs_mount_result.is_ok() {
-                            // Rebuild dentry tree for procfs after ext4 overlay
-                            fs::vfs::vfs_mount("/proc", fs::procfs::create_root_inode(),
-                                fs::mount::MntFlags::new(0));
-                        }
-                    }
-
-                    // Re-link cgroup2 after ext4 overlay (U1b).
-                    if mount_result.is_ok() {
-                        let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
-                    }
-                }
-            }
+            // OH Phase 1 prereq: the kernel command line drives the root
+            // filesystem choice (root=/dev/ram0 | /dev/vda | ...). The old
+            // behavior (auto-mount the first ext4 found) survives as the
+            // fallback for unparsed root= values.
+            mount_root_filesystem();
         }
 
         // Initialize swap on the root block device (tail carve).
@@ -832,9 +814,9 @@ pub fn rust_main_tail() -> ! {
 
         // ========== Start init process ==========
         {
-            // Get init path
-            let init_path = cmdline::get_init_program();
-            print_status("init", &format!("loading {}", init_path), true);
+            // OH Phase 1: init::init() walks the Linux-ordered candidate
+            // chain (rdinit= → initrd /init → init= → /sbin/init …) and
+            // reports each attempt on the console.
             init::init();
             print_status("init", "ELF loaded to user space", true);
             print_status("init", "init task (PID 1) enqueued", true);
@@ -1098,6 +1080,26 @@ pub extern "C" fn rust_main() -> ! {
             mm::memblock_add(region.base, region.size).ok();
         }
 
+        // OH Phase 1 prereq: discover the boot initrd (QEMU `-initrd` puts
+        // linux,initrd-start/end into /chosen) and reserve its pages BEFORE
+        // the zone allocator exists — init_zone_system hands every
+        // memblock-free page to the buddy allocator, and the image is only
+        // consumed (unpacked into the rootfs) much later, after rootfs
+        // init. Runs on the early identity mapping, hence the physical
+        // dtb pointer like parse_memory_regions above.
+        #[cfg(feature = "riscv64")]
+        {
+            let dtb_phys = arch::boot::get_dtb_pointer();
+            if let Some((start, end)) = unsafe { cmdline::parse_initrd_region(dtb_phys) } {
+                let size = end - start;
+                if mm::memblock_reserve(start, size).is_ok() {
+                    // No print here — the heap does not exist yet (the
+                    // unpack status line after rootfs init reports it).
+                    initrd::set_region(start, end);
+                }
+            }
+        }
+
         // Reserve memory regions (kernel, heap, slab)
         let heap_start = KERNEL_HEAP_PHYS;
         let heap_size = crate::config::KERNEL_HEAP_SIZE;
@@ -1157,6 +1159,101 @@ pub extern "C" fn rust_main() -> ! {
     {
         crate::rust_main_tail();
     }
+}
+
+/// Mount the root filesystem according to the kernel command line
+/// (OH Phase 1 prereq).
+///
+/// - `root=/dev/ram0` (or any ram/rd name): the initrd content, already
+///   unpacked into the ramfs root, IS the root filesystem — no block
+///   device is mounted. This is the modern Linux initramfs path (no
+///   ramdisk block device involved).
+/// - `root=/dev/vda`: mount ext4 from the boot virtio-blk disk (PCI
+///   first, else MMIO — the disk the probe registers as vda).
+/// - other `root=/dev/vdX`: only the first virtio-blk disk is I/O-wired
+///   today; warn and fall back to the first-ext4 heuristic.
+/// - anything else (PARTUUID=, unparsable): same fallback with a warning.
+fn mount_root_filesystem() {
+    if !crate::config::AUTO_MOUNT_EXT4 {
+        return;
+    }
+    let root = cmdline::get_root_device();
+    let dev_name = alloc::string::String::from(
+        root.trim_start_matches("/dev/").trim_matches('/'),
+    );
+
+    // Ram-disk roots: initrd content is the root.
+    let is_ram = dev_name == "ram0"
+        || dev_name == "ram"
+        || dev_name == "initrd"
+        || dev_name.starts_with("ram")
+        || dev_name.starts_with("rd");
+    if is_ram {
+        let ok = initrd::loaded();
+        if ok {
+            print_status("fs", "root=/dev/ram0 — initrd ramfs root", true);
+        } else {
+            print_status("fs", "root=/dev/ram0 but no initrd unpacked", false);
+        }
+        return;
+    }
+
+    if dev_name != "vda" {
+        crate::pr_info!(
+            "root: cmdline root={} not mountable by name (only vda is I/O-wired); trying first ext4",
+            root
+        );
+    }
+    mount_boot_disk_ext4();
+}
+
+/// Mount the boot disk's ext4 over `/` (vda selection: PCI virtio-blk
+/// first, MMIO fallback), then rebuild the /proc and cgroup2 mounts the
+/// ext4 root overlay shadowed (same sequence the pre-OH boot used).
+fn mount_boot_disk_ext4() {
+    let disk: Option<*const drivers::blkdev::GenDisk> =
+        drivers::virtio::get_pci_gen_disk()
+            .map(|d| d as *const drivers::blkdev::GenDisk)
+            .or_else(|| {
+                drivers::virtio::get_device()
+                    .map(|v| &v.disk as *const drivers::blkdev::GenDisk)
+            });
+    let Some(disk) = disk else {
+        // No block device at all (initrd-only run) — nothing to mount.
+        return;
+    };
+
+    let mount_result = fs::ext4::mount_ext4(disk);
+    let mount_point = crate::config::EXT4_MOUNT_POINT;
+    print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
+    if mount_result.is_err() {
+        return;
+    }
+    if fs::ext4::get_ext4_fs().is_some() {
+        // Build dentry tree for ext4 (overlays root)
+        fs::vfs::vfs_mount(
+            "/",
+            fs::ext4::create_root_inode(),
+            fs::mount::MntFlags::new(0),
+        );
+    }
+
+    // Remount procfs after ext4 mount (ext4 overwrites the root directory).
+    if crate::config::AUTO_MOUNT_PROCFS {
+        let procfs_mount_result = fs::procfs::mount_procfs();
+        print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
+        if procfs_mount_result.is_ok() {
+            fs::vfs::vfs_mount(
+                "/proc",
+                fs::procfs::create_root_inode(),
+                fs::mount::MntFlags::new(0),
+            );
+        }
+    }
+
+    // Re-link cgroup2 after ext4 overlay (U1b, same defensive re-mount
+    // as procfs above).
+    let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
 }
 
 // Panic handler — uses dfx::backtrace for all output
