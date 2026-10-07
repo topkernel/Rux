@@ -174,10 +174,12 @@ pub fn set_thread_id(tid: u64) {
     crate::arch::smp::set_current_task_ptr(tid);
 }
 
-/// Get counter frequency (TSC nominal frequency, Hz — informational)
+/// Get counter frequency — the rate of [`read_counter`] in Hz, i.e. the
+/// raw TSC frequency (0 until the APIC driver calibrated it against the
+/// PIT; informational only — timekeeping uses [`read_time`]).
 #[inline]
 pub fn get_counter_freq() -> u64 {
-    2_000_000_000
+    crate::drivers::intc::apic::TSC_FREQ.load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Read the TSC cycle counter
@@ -188,6 +190,35 @@ pub fn read_counter() -> u64 {
     // SAFETY: RDTSC is a pure counter read.
     unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack)) };
     (lo as u64) | ((hi as u64) << 32)
+}
+
+/// Query CPUID. Returns (eax, ebx, ecx, edx) for (leaf, subleaf).
+///
+/// NOTE: `subleaf` is only meaningful for leaves that use ECX as a
+/// sub-leaf selector (4, 7, 0xb, 0xd, ...); pass 0 otherwise. rbx is
+/// reserved by LLVM, so save/restore it around the instruction.
+#[inline]
+pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let (a, b, c, d): (u32, u32, u32, u32);
+    // SAFETY: CPUID is a pure query. rbx is reserved by LLVM, so stash
+    // EBX in a scratch register around the push/pop (same discipline as
+    // cpu::isb, extended to recover the EBX result).
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {tmp:e}, ebx",
+            "pop rbx",
+            in("eax") leaf,
+            in("ecx") subleaf,
+            tmp = out(reg) b,
+            lateout("eax") a,
+            lateout("ecx") c,
+            lateout("edx") d,
+            options(nostack)
+        );
+    }
+    (a, b, c, d)
 }
 
 /// Enable interrupts (STI)
@@ -212,10 +243,21 @@ pub fn wfi() {
     unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
 }
 
-/// Read the wall-clock cycle counter (TSC)
+/// Read time since boot in the nominal clock domain
+/// (`config::TIMER_CLOCK_FREQ_HZ`, 10 MHz) — the same contract as the
+/// riscv64 `rdtime` twin.
+///
+/// X86-TIMEBASE: the raw TSC does NOT tick at the nominal frequency (its
+/// rate is hypervisor/model specific — ~2.5 GHz under QEMU TCG), so this
+/// must go through the timer driver instead of dividing
+/// [`read_counter`] by the nominal frequency. Priority: HPET main
+/// counter (QEMU virtual clock — exact), calibrated TSC (no HPET),
+/// jiffies-derived PIT clock (0 until the first tick). Callers that need
+/// the RAW cycle counter (TSC-frequency
+/// calibration, busy delays) use [`read_counter`] + [`get_counter_freq`].
 #[inline]
 pub fn read_time() -> u64 {
-    read_counter()
+    crate::drivers::timer::read_time()
 }
 
 /// Instruction serialization barrier

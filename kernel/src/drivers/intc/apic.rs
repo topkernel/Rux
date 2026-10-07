@@ -227,22 +227,29 @@ fn send_icr(dest: u32, cmd: u32) {
 pub const LOCAL_TIMER_VECTOR: u8 = 0xE0;
 
 /// Arm the periodic LAPIC timer on this CPU at KERNEL_HZ.  Idempotent.
-pub fn timer_start() {
+///
+/// Returns true when the timer is actually armed. A false return (no
+/// calibrated frequency / zero tick count) means this CPU has no LAPIC
+/// tick — the caller must keep another tick source alive (PIT IRQ0) or
+/// the system boots completely tick-less (X86-CLK: sleeps then hang
+/// forever because nothing raises the timer softirq).
+pub fn timer_start() -> bool {
     if !READY.load(Ordering::Acquire) {
-        return;
+        return false;
     }
     let freq = LAPIC_TIMER_FREQ.load(Ordering::Acquire);
     if freq == 0 {
-        return; // calibration never ran: keep the timer masked
+        return false; // calibration never ran: keep the timer masked
     }
     let ticks = freq / TIMER_DIVISOR / (crate::config::KERNEL_HZ as u64);
     if ticks == 0 {
-        return;
+        return false;
     }
     reg_write(XAPIC_TIMER_DIV, X2APIC_TIMER_DIV, TIMER_DIV_16 as u32);
     reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, ticks as u32);
     let lvt = (LOCAL_TIMER_VECTOR as u32) | LVT_TIMER_PERIODIC;
     reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
+    true
 }
 
 /// Mask the LAPIC timer on this CPU.
@@ -328,7 +335,26 @@ fn calibrate() {
     reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt_masked);
     reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, u32::MAX);
 
-    let (tsc_delta, lapic_delta) = calibration_window();
+    // Two windows: a transiently stuck CCR/OUT2 (observed under TCG when
+    // the register interface is half-broken) must not leave the system
+    // uncalibrated — the second window re-arms the free-running counter.
+    let mut tsc_delta = 0;
+    let mut lapic_delta = 0;
+    for _ in 0..2 {
+        reg_write(XAPIC_TIMER_DIV, X2APIC_TIMER_DIV, TIMER_DIV_16 as u32);
+        reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt_masked);
+        reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, u32::MAX);
+        let (t, l) = calibration_window();
+        if t > 0 {
+            tsc_delta = t;
+        }
+        if l > 0 {
+            lapic_delta = l;
+        }
+        if tsc_delta > 0 && lapic_delta > 0 {
+            break;
+        }
+    }
     let secs = CAL_MS as f64 / 1000.0;
 
     if lapic_delta > 0 && tsc_delta > 0 {
@@ -347,6 +373,23 @@ fn calibrate() {
     crate::drivers::timer::lapic_time_calibrated(
         LAPIC_TIMER_FREQ.load(Ordering::Acquire),
         TSC_FREQ.load(Ordering::Acquire),
+    );
+
+    // Boot diagnostic (Linux prints the same numbers): which rates the
+    // timekeeping chain actually calibrated to. A failed TSC calibration
+    // here means CLOCK_MONOTONIC stays on the coarse PIT clock; a failed
+    // LAPIC calibration means the periodic tick falls back to PIT IRQ0.
+    let tsc = TSC_FREQ.load(Ordering::Acquire);
+    let lapic = LAPIC_TIMER_FREQ.load(Ordering::Acquire);
+    crate::print_status(
+        "timer",
+        &alloc::format!(
+            "TSC {} MHz, LAPIC {} MHz ({} APIC)",
+            tsc / 1_000_000,
+            lapic / 1_000_000,
+            if X2APIC.load(Ordering::Acquire) { "x2" } else { "MMIO" }
+        ),
+        tsc != 0 && lapic != 0,
     );
 }
 
@@ -410,7 +453,7 @@ fn read_phys_u64(phys: usize) -> u64 {
 /// table area (0xE0000..0x100000) and the EBDA are e820-reserved, so
 /// `setup_linear_mapping` (usable regions only) skips them — map them
 /// here with the same flags the linear map uses.
-fn map_acpi_windows() {
+pub(crate) fn map_acpi_windows() {
     // Legacy EBDA area (segment read from 0x40E, up to 0x9FC00+1K).
     ensure_phys_mapped(0x9_F000, 0x1_000);
     // Firmware ACPI table area.
@@ -576,6 +619,32 @@ fn find_table(rsdp_phys: usize, want: &[u8; 4]) -> Option<usize> {
     None
 }
 
+/// Find the HPET MMIO base from the ACPI HPET table (used by the timer
+/// driver's HPET clocksource; the fixed q35 base 0xFED00000 is the
+/// caller's fallback).  Returns None when no table exists or the base
+/// address is not a system-memory address.
+pub fn find_hpet_base() -> Option<usize> {
+    // The RSDP scan touches the e820-reserved firmware windows, which
+    // the linear map skips — map them first (idempotent).
+    map_acpi_windows();
+    let tbl = find_rsdp().and_then(|rsdp| find_table(rsdp, b"HPET"))?;
+    // ACPI HPET table: 36-byte header, 8-byte event timer block ID,
+    // then a Generic Address Structure whose u64 address sits at
+    // offset 48 (space id at 44; 0 = system memory).
+    let space = read_phys_u32(tbl + 44) as u8;
+    if space != 0 {
+        return None;
+    }
+    let lo = read_phys_u32(tbl + 48) as usize;
+    let hi = read_phys_u32(tbl + 52) as usize;
+    let addr = lo | (hi << 32);
+    if addr == 0 {
+        None
+    } else {
+        Some(addr)
+    }
+}
+
 /// Parse the MADT: fill `CPU_LAPIC_IDS` with enabled CPU ids, BSP first.
 fn parse_madt(madt_phys: usize) -> usize {
     let va = crate::arch::mm::memory_layout::phys_to_virt(
@@ -687,25 +756,25 @@ pub fn this_lapic_id() -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Enable x2APIC when the CPU reports it; returns the new mode.
+///
+/// X86-CLK fix: the feature test reads CPUID leaf 1 ECX bit 21 (the
+/// actual x2APIC bit). The old inline-asm probe left EAX at 0, so it
+/// tested bit 21 of the LEAF-0 ECX — a third of the VENDOR STRING
+/// ("ntel" for GenuineIntel has bit 21 set, "cAMD" for AuthenticAMD
+/// does not). Every Intel-vendor CPU was therefore switched to x2APIC
+/// MSR mode whether or not x2APIC was real, and on QEMU TCG models
+/// where the MSR interface is not backed (Skylake-Client) every
+/// register access returned 0: dead LAPIC timer, failed calibration,
+/// and (because the boot path then masked the PIT fallback) a
+/// completely tick-less system — nanosleep hung forever.
+///
+/// Even a correctly advertised x2APIC is verified before use: after
+/// setting EXTD, the SVR MSR must read back nonzero (its reset value is
+/// 0xFF). A dead interface falls back to MMIO xAPIC, which works on
+/// every model seen so far.
 fn init_x2apic_or_mmio() -> bool {
     // CPUID leaf 1, ECX bit 21 = x2APIC.
-    let has_x2: bool;
-    // SAFETY: pure CPUID query; rbx is reserved by LLVM, save/restore it
-    // around the instruction (same pattern as cpu::isb).
-    unsafe {
-        let ecx: u32;
-        core::arch::asm!(
-            "xor eax, eax",
-            "push rbx",
-            "cpuid",
-            "pop rbx",
-            out("ecx") ecx,
-            out("eax") _,
-            out("edx") _,
-            options(nostack)
-        );
-        has_x2 = ecx & (1 << 21) != 0;
-    }
+    let has_x2 = crate::arch::cpu::cpuid(1, 0).2 & (1 << 21) != 0;
 
     // SAFETY: IA32_APIC_BASE programming of this CPU.
     unsafe {
@@ -715,6 +784,23 @@ fn init_x2apic_or_mmio() -> bool {
             new |= APIC_BASE_X2APIC;
         }
         wrmsr(MSR_IA32_APIC_BASE, new);
+    }
+
+    if has_x2 {
+        // Verify the MSR interface actually responds before committing
+        // to it: any functioning APIC reads SVR nonzero (reset 0xFF);
+        // an unbacked range reads 0.
+        // SAFETY: x2APIC MSR read gated on the EXTD write above.
+        let svr = unsafe { rdmsr(X2APIC_SVR) };
+        if svr == 0 {
+            // Fall back to MMIO xAPIC: clear EXTD, keep global enable.
+            // SAFETY: IA32_APIC_BASE programming of this CPU.
+            unsafe {
+                let base = rdmsr(MSR_IA32_APIC_BASE);
+                wrmsr(MSR_IA32_APIC_BASE, base & !APIC_BASE_X2APIC | APIC_BASE_ENABLE);
+            }
+            return false;
+        }
     }
     has_x2
 }

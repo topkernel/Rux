@@ -417,6 +417,24 @@ pub fn rust_main_tail() -> ! {
         arch::mm::setup_device_mappings();
         print_status("mm", "device mappings created", true);
 
+        // x86_64: bring up the HPET clocksource before any timekeeper
+        // consumer (RTC epoch read below, vDSO page, printk stamps) so
+        // the whole boot runs on the exact virtual-clock timebase.
+        // Without an HPET the calibrated-TSC timebase applies (hpet.rs).
+        #[cfg(feature = "x86_64")]
+        {
+            let ok = drivers::timer::hpet::init();
+            print_status(
+                "timer",
+                if ok {
+                    "HPET clocksource (virtual-clock exact)"
+                } else {
+                    "HPET absent — calibrated-TSC timebase"
+                },
+                ok,
+            );
+        }
+
         // Arm the wall clock from the goldfish RTC (QEMU virt's default
         // RTC @ 0x101000): one boot-time read derives the REALTIME epoch
         // offset used by clock_gettime/gettimeofday, the vDSO fast path

@@ -616,13 +616,26 @@ pub fn free_irq_line(line: u8) {
 /// Enable the timer interrupt: arm the per-CPU LAPIC timer when the
 /// APIC driver is up (SMP tick source), else the legacy PIT path
 /// (unmask PIC IRQ0), then open the CPU gate (STI).
+///
+/// X86-CLK: the PIT IRQ0 line is only masked when the LAPIC timer
+/// actually armed. Masking it unconditionally used to leave a failed
+/// calibration (no LAPIC frequency) with NO tick source at all —
+/// jiffies frozen, timer softirq never raised, nanosleep asleep
+/// forever.
 pub fn enable_timer_interrupt() {
+    let mut lapic_armed = false;
     if crate::drivers::intc::apic::ready() {
-        crate::drivers::intc::apic::timer_start();
+        lapic_armed = crate::drivers::intc::apic::timer_start();
+    }
+    if lapic_armed {
         // The free-running PIT tick (if it was ever unmasked) would now
         // race the LAPIC tick into the jiffies grid; mask it off.
         mask_irq_line(IRQ_TIMER);
     } else {
+        // PIT fallback tick: program channel 0 at HZ (nothing programs
+        // it on the LAPIC path — QEMU's reset default is the 18.2 Hz
+        // DOS divider) and open the line.
+        crate::drivers::timer::init();
         crate::drivers::timer::set_next_trigger();
         unmask_irq_line(IRQ_TIMER);
     }

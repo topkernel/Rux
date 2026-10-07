@@ -8,12 +8,17 @@
 //!
 //! 1. **PIT (boot fallback)**: channel 0 free-runs at KERNEL_HZ (mode 3)
 //!    and IRQ0 drives the tick; `read_time()` is jiffies-derived.
-//! 2. **LAPIC timer (after APIC calibration)**: every CPU runs a
+//! 2. **HPET (exact timebase, x86_64)**: discovered right after the
+//!    device mappings exist; `read_time()` becomes the HPET main
+//!    counter (QEMU virtual clock — see `hpet.rs` for why a calibrated
+//!    TSC cannot hold wall time under TCG).  The TSC then serves only
+//!    short busy delays.
+//! 3. **LAPIC timer (after APIC calibration)**: every CPU runs a
 //!    periodic local APIC timer (vector 0xE0, programmed by the intc
-//!    driver); the TSC becomes the timekeeper — `read_time()` maps
-//!    `rdtsc` into the nominal 10 MHz domain through a calibrated
-//!    multiplier/shift pair, kept continuous with the jiffies-derived
-//!    pre-calibration clock via a one-time offset.
+//!    driver); without an HPET the TSC becomes the timekeeper —
+//!    `read_time()` maps `rdtsc` into the nominal 10 MHz domain through
+//!    a calibrated multiplier/shift pair, kept continuous with the
+//!    jiffies-derived pre-calibration clock via a one-time offset.
 //!
 //! With N CPUs ticking, jiffies must NOT be incremented once per IRQ
 //! (that ran 4x fast on the riscv64 twin before review批次7): the tick
@@ -93,10 +98,14 @@ pub const fn msecs_to_jiffies(msecs: u64) -> u64 {
 
 /// Read current time in the nominal CLOCK_FREQ clock domain.
 ///
-/// Jiffies-derived until the APIC driver calibrates the TSC; TSC-derived
-/// (with a continuity offset) afterwards.
+/// HPET-derived (exact) once the HPET clocksource initialized;
+/// TSC-derived (with a continuity offset) if only the APIC calibration
+/// ran; jiffies-derived before either.
 #[inline]
 pub fn read_time() -> u64 {
+    if crate::drivers::timer::hpet::ready() {
+        return crate::drivers::timer::hpet::read_time_nominal();
+    }
     if TSC_ACTIVE.load(Ordering::Acquire) != 0 {
         let mult = TSC_MULT.load(Ordering::Acquire);
         let now = crate::arch::cpu::read_counter();
@@ -111,8 +120,13 @@ pub fn read_time() -> u64 {
 
 /// Called by the intc/APIC driver after calibration: promote the TSC to
 /// timekeeper.  `tsc_freq == 0` (failed calibration) keeps the PIT phase.
+/// No-op when the HPET clocksource is active — the TSC then stays a
+/// delay-only counter (see `hpet.rs`).
 pub fn lapic_time_calibrated(_lapic_freq: u64, tsc_freq: u64) {
     if tsc_freq == 0 {
+        return;
+    }
+    if crate::drivers::timer::hpet::ready() {
         return;
     }
     // nominal = (tsc >> S) * (CLOCK_FREQ << S / tsc_freq) — pick the
@@ -128,7 +142,8 @@ pub fn lapic_time_calibrated(_lapic_freq: u64, tsc_freq: u64) {
 
 /// Program PIT channel 0 for KERNEL_HZ square-wave ticks.
 ///
-/// Called once from the x86_64 early boot path (main.rs).
+/// Called from the x86_64 timer-enable path when the LAPIC tick could
+/// not arm (IRQ0 fallback); idempotent.
 pub fn init() {
     let divisor = (PIT_INPUT_FREQ / HZ) as u16;
     // SAFETY: ports 0x40/0x43 are the fixed 8254 channel-0 data and
@@ -151,6 +166,19 @@ pub fn set_next_trigger() {}
 
 /// Re-arm for a high-resolution deadline — no-op (tick is periodic).
 pub fn rearm_for_hres() {}
+
+/// True when a precise (non-jiffies) timebase is active — the tick
+/// handler derives jiffies from it instead of counting IRQs.
+#[inline]
+fn timebase_precise() -> bool {
+    crate::drivers::timer::hpet::ready() || TSC_ACTIVE.load(Ordering::Acquire) != 0
+}
+
+/// Timebase value just before the HPET takes over (continuity offset
+/// for the switch; the HPET counter starts near 0 at its enable).
+pub fn pre_hpet_time() -> u64 {
+    read_time()
+}
 
 /// Advance jiffies from the TIMEBASE, not from IRQ counts (riscv64
 /// review批次7 discipline): with N CPUs each running a periodic LAPIC
@@ -180,7 +208,7 @@ fn increment_jiffies_from_timebase() {
 
 /// Clock interrupt handler (called from the x86_64 trap entry)
 pub fn timer_interrupt_handler() {
-    if TSC_ACTIVE.load(Ordering::Acquire) != 0 {
+    if timebase_precise() {
         // LAPIC-timer phase: idempotent, multi-CPU-safe jiffies.
         increment_jiffies_from_timebase();
     } else {
