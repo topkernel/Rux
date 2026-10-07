@@ -370,6 +370,20 @@ fn devtmpfs_populate() {
     let _ = registry::register_char_device(crate::fs::dev_t::DEV_RANDOM, &RANDDEV_OPS);
     let _ = registry::register_char_device(crate::fs::dev_t::DEV_URANDOM, &RANDDEV_OPS);
 
+    // --- OpenHarmony Phase 2 device nodes (port plan §6 items 2/3):
+    // /dev/ashmem and /dev/access_token_id. Registered here (NOT via
+    // mknod — the children guard below is held across this function, and
+    // mknod would self-deadlock on it); the nodes join the same
+    // char_nodes batch insert below.
+    let _ = registry::register_char_device(
+        crate::drivers::ashmem::DEV_ASHMEM,
+        &crate::drivers::ashmem::ASHMEM_OPS,
+    );
+    let _ = registry::register_char_device(
+        crate::drivers::access_tokenid::DEV_ACCESS_TOKENID,
+        &crate::drivers::access_tokenid::TOKENID_OPS,
+    );
+
     let mut root = DEVFS_ROOT.lock_irqsave();
     let root_entry = match root.as_ref() {
         Some(r) => r.clone(),
@@ -387,6 +401,12 @@ fn devtmpfs_populate() {
         ("full", DevNo::new(MEM_MAJOR, 7), 0o666),
         ("random", crate::fs::dev_t::DEV_RANDOM, 0o666),
         ("urandom", crate::fs::dev_t::DEV_URANDOM, 0o666),
+        ("ashmem", crate::drivers::ashmem::DEV_ASHMEM, 0o666),
+        (
+            "access_token_id",
+            crate::drivers::access_tokenid::DEV_ACCESS_TOKENID,
+            0o666,
+        ),
     ];
     // Loop family: /dev/loop-control (misc) + /dev/loop0..7 (BLOCK
     // majors) — LTP tst_acquire_device and losetup need both (the loop
@@ -1074,6 +1094,11 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if entry.devno == crate::ipc::binder::DEV_BINDER {
         // Allocate the per-open binder process context.
         return crate::ipc::binder::binder_open(file);
+    }
+    if entry.devno == crate::drivers::ashmem::DEV_ASHMEM {
+        // Fresh anonymous shared-memory area per open file description
+        // (Linux struct ashmem_area in file->private_data).
+        return crate::drivers::ashmem::ashmem_open(file);
     }
     if entry.devno == crate::fs::pty::DEV_PTMX {
         return crate::fs::pty::ptmx_open(file);

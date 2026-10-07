@@ -839,6 +839,11 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // Copy credentials from parent
         *(*task_ptr).cred_mut() = (*current_ptr).cred().clone();
 
+        // OpenHarmony access-token inheritance (upstream accesstokenid
+        // patch: child inherits the normal token, ftoken is cleared).
+        (*task_ptr).set_access_token((*current_ptr).access_token());
+        (*task_ptr).set_access_ftoken(0);
+
         // === U1c namespaces: default share the parent's namespace objects
         // (Arc clone); CLONE_NEW* bits give the child fresh ones. Fails the
         // clone with EPERM when a non-user ns was requested without

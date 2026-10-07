@@ -777,6 +777,32 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
     }
 
+    // ashmem ioctls (ASHMEM_SET_NAME/SET_SIZE/PIN/UNPIN/GET_PIN_STATUS/...
+    // on /dev/ashmem): dispatch on the File's ops identity (OH libc's
+    // buffer management; port plan §6 item 2).
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) = crate::drivers::ashmem::ashmem_file_ioctl(&file, request, arg) {
+                return ret;
+            }
+        }
+    }
+
+    // access_tokenid ioctls (GET/SET TOKENID/FTOKENID on
+    // /dev/access_token_id): dispatch on the File's ops identity (OH ATM;
+    // port plan §6 item 3).
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) =
+                crate::drivers::access_tokenid::tokenid_file_ioctl(&file, request, arg)
+            {
+                return ret;
+            }
+        }
+    }
+
     // FS_IOC_GETFLAGS / FS_IOC_SETFLAGS (chattr flags on regular files
     // and directories). LTP unlink09 marks files IMMUTABLE/APPEND-only
     // and expects unlink(2) to fail EPERM; before this the ioctls

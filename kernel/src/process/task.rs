@@ -565,6 +565,12 @@ pub struct Task {
     /// Process credentials
     cred: Cred,
 
+    /// OpenHarmony access token id (per-process, /dev/access_token_id).
+    /// Inherited by fork children.
+    pub access_token: AtomicU64,
+    /// OpenHarmony foreground token id. NOT inherited (fork clears it).
+    pub access_ftoken: AtomicU64,
+
     /// sigsuspend contract: the pre-suspend mask to reinstate when the
     /// waited-for signal is delivered (Linux TIF_RESTORE_SIGMASK
     /// equivalent — restoring it at EINTR return made the delivery filter
@@ -1055,6 +1061,11 @@ impl Task {
             nr_threads: AtomicU32::new(1),
             dead_threads: Spinlock::new(alloc::vec::Vec::new()),
             cred: Cred::new_init(),
+            // OpenHarmony access-token bookkeeping (see
+            // drivers/access_tokenid.rs); fork inherits token and clears
+            // ftoken (process/fork.rs).
+            access_token: AtomicU64::new(0),
+            access_ftoken: AtomicU64::new(0),
             policy,
             prio,
             static_prio,
@@ -2752,6 +2763,28 @@ impl Task {
     #[inline]
     pub fn cred_mut(&mut self) -> &mut Cred {
         &mut self.cred
+    }
+
+    /// OH access token id (/dev/access_token_id).
+    #[inline]
+    pub fn access_token(&self) -> u64 {
+        self.access_token.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_access_token(&self, token: u64) {
+        self.access_token.store(token, Ordering::Release);
+    }
+
+    /// OH foreground token id (/dev/access_token_id).
+    #[inline]
+    pub fn access_ftoken(&self) -> u64 {
+        self.access_ftoken.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_access_ftoken(&self, token: u64) {
+        self.access_ftoken.store(token, Ordering::Release);
     }
 
     /// Get mutable reference to address space
