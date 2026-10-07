@@ -70,7 +70,7 @@ stepping on concurrent agents.
 **Rux** is a Linux-like operating system kernel entirely written in Rust.
 
 - **Language**: Rust (no_std, except for necessary platform assembly)
-- **Architecture**: **RISC-V only (riscv64)**
+- **Architecture**: **riscv64 (primary) + x86_64 (q35)** — both boot Ubuntu 22.04; build via `PLATFORM=x86_64 make build` / `build/.config` `platform_target`
 - **Platform**: QEMU `virt` machine, TCG with MTTCG (`thread=multi`) by default
 - **Userspace**: Ubuntu 22.04 riscv64 rootfs (glibc), plus a musl-based
   minimal rootfs from `make rootfs`
