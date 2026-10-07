@@ -606,6 +606,9 @@ struct ThreadState {
 
 struct BinderThread {
     tid: u32,
+    /// Per-thread wait queue (Linux thread->wait): replies and tcomplete
+    /// wake the exact thread; proc work wakes one selected waiter.
+    wait: WaitQueueHead,
     st: core::cell::UnsafeCell<ThreadState>,
 }
 
@@ -613,6 +616,7 @@ impl BinderThread {
     fn new(tid: u32) -> Self {
         Self {
             tid,
+            wait: WaitQueueHead::new(),
             st: core::cell::UnsafeCell::new(ThreadState {
                 looper: 0,
                 todo: VecDeque::new(),
@@ -752,8 +756,32 @@ fn proc_alive(world: &World, p: &Arc<BinderProc>) -> bool {
     world.procs.iter().any(|x| Arc::ptr_eq(x, p))
 }
 
-fn wake_proc(p: &BinderProc) {
-    p.wait.wake_up(crate::process::wait::WakeUpHint::Normal, 0);
+fn wake_thread(t: &BinderThread) {
+    t.wait.wake_up(crate::process::wait::WakeUpHint::Normal, 0);
+}
+
+/// binder_select_thread_ilocked + wake: pick one thread of the proc that
+/// is blocked waiting for proc work (Linux keeps them on
+/// proc->waiting_threads) and wake just that one — no thundering herd
+/// across a 16-thread samgr pool.
+fn wake_proc_one(p: &Arc<BinderProc>) {
+    let w = world_lock();
+    // SAFETY: read-only scan under WORLD.
+    let pick = unsafe {
+        pm(w.as_ref().unwrap(), p)
+            .im()
+            .threads
+            .iter()
+            .find(|t| {
+                let th = t.st();
+                th.waiting_for_proc_work && th.todo.is_empty() && th.txn_stack.is_empty()
+            })
+            .cloned()
+    };
+    drop(w);
+    if let Some(t) = pick {
+        wake_thread(&t);
+    }
 }
 
 /// Number of refs (across all procs) pointing at a node.
@@ -935,7 +963,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
     }
     drop(proc);
     for p in wake_targets {
-        wake_proc(&p);
+        wake_proc_one(&p);
     }
     0
 }
@@ -983,7 +1011,17 @@ unsafe fn unpin_txn_node(world: &World, t: &BinderTxn) {
     if let Some(owner) = owner {
         if (!ns.strong() && ns.has_strong_ref) || (!ns.weak(external) && ns.has_weak_ref) {
             owner.im().todo.push_back(Work::Node(node.clone()));
-            wake_proc(owner);
+            // pick-one wake; runs under WORLD like the S1 wake did
+            let pick = {
+                let th = owner.im().threads.iter().find(|t| {
+                    let x = t.st();
+                    x.waiting_for_proc_work && x.todo.is_empty() && x.txn_stack.is_empty()
+                }).cloned();
+                th
+            };
+            if let Some(t) = pick {
+                wake_thread(&t);
+            }
         }
     }
 }
@@ -1447,7 +1485,7 @@ fn binder_thread_write(
                         th.process_todo = true;
                     }
                     drop(w);
-                    wake_proc(proc);
+                    wake_thread(thread);
                     break;
                 }
             }
@@ -1513,7 +1551,7 @@ fn binder_thread_write(
                         }
                     }
                     if let Some(tp) = drain_wake {
-                        wake_proc(&tp);
+                        wake_proc_one(&tp);
                     }
                 }
             }
@@ -1600,7 +1638,7 @@ fn binder_thread_write(
                     }
                 }
                 if let Some(owner) = wake_owner {
-                    wake_proc(&owner);
+                    wake_proc_one(&owner);
                 }
             }
             BC_INCREFS_DONE | BC_ACQUIRE_DONE => {
@@ -1767,7 +1805,7 @@ fn binder_thread_write(
                     }
                 }
                 if wake_self {
-                    wake_proc(proc);
+                    wake_thread(thread);
                 }
             }
             BC_DEAD_BINDER_DONE => {
@@ -1815,7 +1853,7 @@ fn binder_thread_write(
                     }
                 }
                 if wake_self {
-                    wake_proc(proc);
+                    wake_thread(thread);
                 }
             }
             _ => {
@@ -2238,6 +2276,9 @@ fn binder_transaction(
                     }
                     rth.todo.push_back(Work::Transaction(txn.clone()));
                     rth.process_todo = true;
+                    // exact-thread wake (wake_up_interruptible_sync on
+                    // target_thread->wait in Linux)
+                    wake_thread(&rthread);
                     // The original transaction is finished: unpin its node.
                     if let Some(orig) = &in_reply_to {
                         unpin_txn_node(world, orig);
@@ -2313,7 +2354,7 @@ fn binder_transaction(
         return;
     }
     for p in wakes {
-        wake_proc(&p);
+        wake_proc_one(&p);
     }
 }
 
@@ -2545,7 +2586,7 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
         }
     };
     if let Some(owner) = wake_owner {
-        wake_proc(&owner);
+        wake_proc_one(&owner);
     }
     result
 }
@@ -2653,7 +2694,7 @@ fn binder_thread_read(
                     thread.st().waiting_for_proc_work = true;
                 }
             }
-            let r = crate::wait_event_interruptible!(&proc.wait, {
+            let r = crate::wait_event_interruptible!(&thread.wait, {
                 let w = world_lock();
                 // SAFETY: under WORLD.
                 unsafe { thread_has_work(w.as_ref().unwrap(), proc, thread) }
