@@ -234,10 +234,37 @@ const LOOPER_REGISTERED: u32 = 0x01;
 const LOOPER_ENTERED: u32 = 0x02;
 const LOOPER_EXITED: u32 = 0x04;
 
-/// /dev/binder misc device number (Linux uses dynamic minors; 0xB0 is
-/// unused in-tree — loop-control owns 237 on major 10).
+/// /dev/binder misc device numbers (Linux uses dynamic minors; 0xB0-0xB2
+/// are unused in-tree — loop-control owns 237 on major 10).
 pub const BINDER_MINOR: u32 = 0xB0;
+pub const HWBINDER_MINOR: u32 = 0xB1;
+pub const VNDBINDER_MINOR: u32 = 0xB2;
 pub const DEV_BINDER: DevNo = DevNo::new(MISC_MAJOR, BINDER_MINOR);
+pub const DEV_HWBINDER: DevNo = DevNo::new(MISC_MAJOR, HWBINDER_MINOR);
+pub const DEV_VNDBINDER: DevNo = DevNo::new(MISC_MAJOR, VNDBINDER_MINOR);
+
+/// Which device context an open belongs to. /dev/binder, /dev/hwbinder
+/// and /dev/vndbinder each carry their OWN context-manager node (Linux
+/// binder_device.context); handle-0 resolves within the opener's context
+/// only. Ref tables are per-open, so handles cannot leak across contexts.
+#[derive(Clone, Copy, PartialEq)]
+pub enum BinderCtx {
+    Binder = 0,
+    HwBinder = 1,
+    VndBinder = 2,
+}
+
+pub fn devno_ctx(dev: &DevNo) -> Option<BinderCtx> {
+    if *dev == DEV_BINDER {
+        Some(BinderCtx::Binder)
+    } else if *dev == DEV_HWBINDER {
+        Some(BinderCtx::HwBinder)
+    } else if *dev == DEV_VNDBINDER {
+        Some(BinderCtx::VndBinder)
+    } else {
+        None
+    }
+}
 
 const BINDER_MMAP_MAX: usize = 4 << 20;
 const PAGE_SIZE: usize = crate::mm::page::PAGE_SIZE;
@@ -580,15 +607,17 @@ struct ProcInner {
 pub struct BinderProc {
     id: u64,
     pid: u32,
+    ctx: BinderCtx,
     wait: WaitQueueHead,
     inner: core::cell::UnsafeCell<ProcInner>,
 }
 
 impl BinderProc {
-    fn new(id: u64, pid: u32) -> Self {
+    fn new(id: u64, pid: u32, ctx: BinderCtx) -> Self {
         Self {
             id,
             pid,
+            ctx,
             wait: WaitQueueHead::new(),
             inner: core::cell::UnsafeCell::new(ProcInner {
                 alloc: None,
@@ -639,7 +668,8 @@ impl Drop for BinderAlloc {
 struct World {
     next_id: u64,
     procs: Vec<Arc<BinderProc>>,
-    mgr_node: Option<Arc<BinderNode>>,
+    /// Context-manager node per device context (index by BinderCtx).
+    mgr_node: [Option<Arc<BinderNode>>; 3],
 }
 
 static WORLD: Spinlock<Option<World>> = Spinlock::new(None);
@@ -662,7 +692,7 @@ unsafe impl Sync for BinderProc {}
 fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World>> {
     let mut g = WORLD.lock_irqsave();
     if g.is_none() {
-        *g = Some(World { next_id: 1, procs: Vec::new(), mgr_node: None });
+        *g = Some(World { next_id: 1, procs: Vec::new(), mgr_node: [None, None, None] });
     }
     g
 }
@@ -719,10 +749,10 @@ unsafe fn proc_ref(file: &crate::fs::File) -> Option<Arc<BinderProc>> {
 }
 
 /// Called from devfs_open: allocate the per-open process context.
-pub fn binder_open(file: &crate::fs::File) -> i32 {
+pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     let pid = crate::process::current_pid();
     let id = NEXT_PROC_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let proc = Arc::new(BinderProc::new(id, pid));
+    let proc = Arc::new(BinderProc::new(id, pid, ctx));
     {
         let mut w = world_lock();
         w.as_mut().unwrap().procs.push(proc.clone());
@@ -752,9 +782,9 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
         let mut w = world_lock();
         let world = w.as_mut().unwrap();
         world.procs.retain(|p| !Arc::ptr_eq(p, &proc));
-        if let Some(mgr) = &world.mgr_node {
+        if let Some(mgr) = &world.mgr_node[proc.ctx as usize] {
             if mgr.proc_id == proc.id {
-                world.mgr_node = None;
+                world.mgr_node[proc.ctx as usize] = None;
             }
         }
         // SAFETY: all inner access below is under WORLD.
@@ -1145,8 +1175,8 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
         BINDER_SET_CONTEXT_MGR => {
             let mut w = world_lock();
             let world = w.as_mut().unwrap();
-            if world.mgr_node.is_some() {
-                crate::pr_err!("binder: BINDER_SET_CONTEXT_MGR already set");
+            if world.mgr_node[proc.ctx as usize].is_some() {
+                crate::pr_err!("binder: BINDER_SET_CONTEXT_MGR already set (ctx {})", proc.ctx as u8);
                 return -(EBUSY as i64);
             }
             // Linux creates the node with local refs held and has_*_ref
@@ -1165,9 +1195,9 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 ns.has_weak_ref = true;
                 pm(world, &proc).im().nodes.push(node.clone());
             }
-            world.mgr_node = Some(node);
+            world.mgr_node[proc.ctx as usize] = Some(node);
             drop(w);
-            crate::pr_info!("binder: proc {} (pid {}) is the context manager", proc.id, proc.pid);
+            crate::pr_info!("binder: proc {} (pid {}) is the context manager (ctx {})", proc.id, proc.pid, proc.ctx as u8);
             0
         }
         BINDER_THREAD_EXIT => {
@@ -1802,10 +1832,10 @@ fn binder_transaction(
                 };
                 target_node = Some(node);
             } else {
-                let mgr = world.mgr_node.clone();
+                let mgr = world.mgr_node[proc.ctx as usize].clone();
                 let Some(mgr) = mgr else {
                     *err_cmd = BR_DEAD_REPLY;
-                    crate::pr_info!("binder: no context manager installed");
+                    crate::pr_info!("binder: no context manager installed (ctx {})", proc.ctx as u8);
                     return;
                 };
                 if mgr.proc_id == proc.id {
@@ -2784,7 +2814,7 @@ pub fn binder_dfx_dump() {
                 pim.is_dead,
                 pim.todo.len(),
                 pim.refs.len(),
-                world.mgr_node.as_ref().map(|m| m.proc_id).unwrap_or(0) == p.id
+                (0..3).any(|c| world.mgr_node[c].as_ref().map(|m| m.proc_id).unwrap_or(0) == p.id)
             );
             for t in &pim.threads {
                 let th = t.st();

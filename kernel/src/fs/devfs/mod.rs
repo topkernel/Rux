@@ -463,18 +463,27 @@ fn devtmpfs_populate() {
     }
     crate::drivers::loop_dev::init_loops();
 
-    // binder IPC device (OpenHarmony port Spike S1): misc char node with
-    // per-open process contexts; ioctls/mmap dispatch on the BINDER_OPS
-    // file identity (evdev/loop pattern).
+    // binder IPC devices (OpenHarmony port): /dev/binder, /dev/hwbinder
+    // and /dev/vndbinder each carry their own context (own context-manager
+    // node); misc char nodes with per-open process contexts; ioctls/mmap
+    // dispatch on the BINDER_OPS file identity (evdev/loop pattern).
     let _ = registry::register_char_device(crate::ipc::binder::DEV_BINDER, &crate::ipc::binder::BINDER_OPS);
-    children.insert(
-        String::from("binder"),
-        Arc::new(DevfsEntry::new_char_device_with_mode(
-            "binder",
-            crate::ipc::binder::DEV_BINDER,
-            0o020000 | 0o666,
-        )),
-    );
+    let _ = registry::register_char_device(crate::ipc::binder::DEV_HWBINDER, &crate::ipc::binder::BINDER_OPS);
+    let _ = registry::register_char_device(crate::ipc::binder::DEV_VNDBINDER, &crate::ipc::binder::BINDER_OPS);
+    for (name, devno) in [
+        ("binder", crate::ipc::binder::DEV_BINDER),
+        ("hwbinder", crate::ipc::binder::DEV_HWBINDER),
+        ("vndbinder", crate::ipc::binder::DEV_VNDBINDER),
+    ] {
+        children.insert(
+            String::from(name),
+            Arc::new(DevfsEntry::new_char_device_with_mode(
+                name,
+                devno,
+                0o020000 | 0o666,
+            )),
+        );
+    }
 
     for (name, devno, mode) in char_nodes.iter() {
         children.insert(
@@ -1130,9 +1139,9 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
         return 0;
     }
-    if entry.devno == crate::ipc::binder::DEV_BINDER {
-        // Allocate the per-open binder process context.
-        return crate::ipc::binder::binder_open(file);
+    if let Some(ctx) = crate::ipc::binder::devno_ctx(&entry.devno) {
+        // Allocate the per-open binder process context (device-scoped).
+        return crate::ipc::binder::binder_open(file, ctx);
     }
     if entry.devno == crate::drivers::ashmem::DEV_ASHMEM {
         // Fresh anonymous shared-memory area per open file description

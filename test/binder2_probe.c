@@ -226,6 +226,7 @@ struct rep_parcel {
 static int g_fd = -1;
 static uint8_t *g_map = NULL;
 static const char *g_role = "?";
+static const char *g_dev = "/dev/binder";
 
 /* pending node-handshake answers in BR arrival order */
 static struct binder_ptr_cookie g_pending_done[2];
@@ -534,9 +535,9 @@ static int wait_clear_done(uint64_t cookie)
 
 static void binder_setup(int become_mgr)
 {
-    g_fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
+    g_fd = open(g_dev, O_RDWR | O_CLOEXEC);
     if (g_fd < 0)
-        die("open /dev/binder");
+        die("open binder device");
 
     g_map = mmap(NULL, MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, g_fd, 0);
     if (g_map == MAP_FAILED)
@@ -1008,6 +1009,173 @@ static int run_service(int ready_pipe, int ok_pipe)
     return 0;
 }
 
+/* ---- hwbinder context manager: minimal echo server ---- */
+
+static int run_hwmgr(int ready_pipe)
+{
+    g_role = "hwmgr";
+    g_dev = "/dev/hwbinder";
+    signal(SIGALRM, on_alarm);
+    alarm(180);
+
+    binder_setup(1);
+    if (write(ready_pipe, "R", 1) != 1)
+        die("hwmgr ready pipe");
+
+    int served = 0;
+    while (1) {
+        struct br_seen s;
+        memset(&s, 0, sizeof(s));
+        struct bcbuf c;
+        bc_reset(&c);
+        queue_node_dones(&c);
+        if (bwr_round(&c, &s) < 0 || s.fatal)
+            die("hwmgr bwr");
+        if (!s.have_txn)
+            continue;
+        served++;
+        uint8_t *buf = (uint8_t *)(uintptr_t)s.txn.data.ptr.buffer;
+        struct req_parcel *req = (struct req_parcel *)buf;
+        if (req->magic != REQ_MAGIC)
+            die2("hwmgr: bad parcel");
+
+        uint32_t term = (s.txn.code == CODE_TERM);
+        struct rep_parcel *rep = (struct rep_parcel *)(g_map + SCRATCH_OFF2);
+        rep->magic = REP_MAGIC;
+        rep->val = req->sum ^ 0xA1A1A1A1u;
+        memset(rep->data, 0xA1, DATA_LEN);
+        memcpy(g_map + SCRATCH_OFF, rep, sizeof(*rep));
+
+        uint64_t off0 = 0;
+        struct binder_transaction_data rt;
+        memset(&rt, 0, sizeof(rt));
+        rt.code = s.txn.code;
+        rt.flags = 0;
+        rt.data_size = sizeof(*rep);
+        rt.offsets_size = 0;
+        rt.data.ptr.buffer = (uintptr_t)(g_map + SCRATCH_OFF);
+        rt.data.ptr.offsets = (uintptr_t)&off0;
+
+        struct bcbuf r;
+        bc_reset(&r);
+        bc_u32(&r, BC_REPLY);
+        bc_put(&r, &rt, sizeof(rt));
+        bc_u32(&r, BC_FREE_BUFFER);
+        bc_u64(&r, (uint64_t)(uintptr_t)buf);
+        if (bwr_write_only(&r) < 0)
+            die("hwmgr reply");
+
+        if (term) {
+            printf("B2 HWMGR DONE: served=%d\n", served);
+            fflush(stdout);
+            munmap(g_map, MAP_SIZE);
+            close(g_fd);
+            _exit(0);
+        }
+    }
+    return 0;
+}
+
+/* Context-isolation check (round 0 only): /dev/hwbinder has its own
+ * manager; /dev/vndbinder exists; handle 0 on hwbinder is dead until
+ * its manager installs; bogus handles stay invalid. */
+static int run_hwtest(void)
+{
+    g_role = "hwtest";
+    g_dev = "/dev/hwbinder";
+    signal(SIGALRM, on_alarm);
+    alarm(180);
+
+    /* vndbinder smoke: node exists and speaks protocol 8 */
+    {
+        int fd = open("/dev/vndbinder", O_RDWR | O_CLOEXEC);
+        if (fd < 0)
+            die("open /dev/vndbinder");
+        uint8_t *m = mmap(NULL, MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (m == MAP_FAILED)
+            die("mmap vndbinder");
+        struct binder_version v;
+        v.protocol_version = -1;
+        if (ioctl(fd, BINDER_VERSION, &v) < 0 || v.protocol_version != 8)
+            die2("vndbinder version");
+        munmap(m, MAP_SIZE);
+        close(fd);
+    }
+
+    binder_setup(0);
+
+    /* handle 0 on hwbinder with no manager installed -> BR_DEAD_REPLY */
+    {
+        size_t ds = build_plain_req(81);
+        struct br_seen s;
+        if (do_txn(0, CODE_ECHO, ds, 0, &s) < 0)
+            die("hwtest dead mgr txn");
+        if (!s.dead_reply)
+            die2("hwtest: handle 0 answered with no hwbinder manager");
+    }
+
+    /* bring up the hwbinder manager */
+    int p[2];
+    if (pipe(p) < 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        close(p[0]);
+        _exit(run_hwmgr(p[1]));
+    }
+    close(p[1]);
+    char r = 0;
+    if (read(p[0], &r, 1) != 1 || r != 'R')
+        die2("hwtest: hwmgr not ready");
+
+    /* handle 0 now routes to the HW manager */
+    {
+        size_t ds = build_plain_req(82);
+        struct br_seen s;
+        if (do_txn(0, CODE_ECHO, ds, 0, &s) < 0)
+            die("hwtest echo txn");
+        if (!s.have_reply)
+            die2("hwtest: no reply from hwbinder manager");
+        uint8_t *rbuf = (uint8_t *)(uintptr_t)s.reply.data.ptr.buffer;
+        struct rep_parcel *rep = (struct rep_parcel *)rbuf;
+        if (rep->magic != REP_MAGIC)
+            die2("hwtest: bad hwbinder reply");
+        free_buffer((uint64_t)(uintptr_t)rbuf);
+    }
+
+    /* bogus handle in THIS open (no refs imported) -> BR_FAILED_REPLY */
+    {
+        size_t ds = build_plain_req(83);
+        struct br_seen s;
+        if (do_txn(7, CODE_ECHO, ds, 0, &s) < 0)
+            die("hwtest bogus txn");
+        if (!s.failed_reply && !s.dead_reply)
+            die2("hwtest: bogus handle accepted");
+    }
+
+    /* TERM the HW manager */
+    {
+        size_t ds = build_plain_req(84);
+        struct br_seen s;
+        if (do_txn(0, CODE_TERM, ds, 0, &s) < 0)
+            die("hwtest term txn");
+        if (!s.have_reply)
+            die2("hwtest: no reply to TERM");
+        uint8_t *rbuf = (uint8_t *)(uintptr_t)s.reply.data.ptr.buffer;
+        free_buffer((uint64_t)(uintptr_t)rbuf);
+    }
+    int st;
+    if (waitpid(pid, &st, 0) < 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        die2("hwtest: hwmgr exit status");
+
+    munmap(g_map, MAP_SIZE);
+    close(g_fd);
+    g_dev = "/dev/binder";
+    return 0;
+}
+
 /* ---- client: the verifier ---- */
 
 static int run_client(int ready_pipe)
@@ -1431,6 +1599,13 @@ int main(void)
         if (!WIFEXITED(mgr_st) || WEXITSTATUS(mgr_st) != 0) {
             printf("B2 PROBE RESULT: FAIL samgr status %d (deaths!=1)\n", mgr_st);
             return 1;
+        }
+
+        if (round == 0) {
+            if (run_hwtest() != 0)
+                die("hwtest");
+            printf("B2 HWTEST DONE\n");
+            fflush(stdout);
         }
 
         long mf = read_memfree();
