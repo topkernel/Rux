@@ -361,9 +361,18 @@ pub fn free_pages(addr: usize, order: usize) {
     // poisons the freelist — the next alloc returns it as a wild phys
     // (observed: phys_to_virt overflow at 0xfffff80xxxxxx during x86 exec).
     if addr >= 0x1_0000_0000 {
-        let ret: u64;
-        // SAFETY: frame pointers forced on; diagnostic return-address read.
-        unsafe { core::arch::asm!("movq 8(%rbp), {}", out(reg) ret, options(att_syntax)); }
+        // Diagnostic caller read, x86_64 only: the raw att_syntax asm does
+        // not compile on riscv64 (arch-neutral file — this gate IS the
+        // riscv64 build fix; riscv64 logs addr/order without the caller).
+        #[cfg(feature = "x86_64")]
+        let ret: u64 = {
+            let ret: u64;
+            // SAFETY: frame pointers forced on; diagnostic return-address read.
+            unsafe { core::arch::asm!("movq 8(%rbp), {}", out(reg) ret, options(att_syntax)); }
+            ret
+        };
+        #[cfg(not(feature = "x86_64"))]
+        let ret: u64 = 0;
         crate::println!("free_pages: WILD addr={:#x} order={} caller={:#x}", addr, order, ret);
         return;
     }
