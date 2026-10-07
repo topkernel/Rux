@@ -130,9 +130,25 @@ fn main() {
 
     // Get target platform: the active cargo feature wins over Kernel.toml
     // (x86_64 builds pass --no-default-features --features x86_64)
+    // Get target platform from the active configuration.
     let platform = config.get("platform")
         .and_then(|p| p["default_platform"].as_str())
         .unwrap_or("riscv64");
+
+    // Consistency guard: a stale build/.config selecting a platform whose
+    // cargo feature is NOT enabled silently bakes mismatched constants into
+    // the kernel (observed: x86_64 config + riscv64 build = boot panic at
+    // linear-mapping time). Fail the build instead.
+    {
+        let feat_x86 = env::var_os("CARGO_FEATURE_X86_64").is_some();
+        let feat_rv = env::var_os("CARGO_FEATURE_RISCV64").is_some();
+        if platform == "x86_64" && !feat_x86 {
+            panic!("build/.config selects platform x86_64 but the x86_64 cargo feature is not enabled — run `make menuconfig` or remove build/.config");
+        }
+        if platform == "riscv64" && feat_x86 && !feat_rv {
+            panic!("build/.config selects platform riscv64 but an x86_64-only feature build is running");
+        }
+    }
 
     println!("cargo:rustc-env=RUX_TARGET_PLATFORM={}", platform);
 
