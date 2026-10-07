@@ -81,6 +81,23 @@ pub fn read_cr2() -> u64 {
 
 /// Read CR3 (page-table root)
 #[inline]
+/// Read CR0.
+pub fn read_cr0() -> u64 {
+    let value: u64;
+    // SAFETY: reading CR0 is always safe.
+    unsafe { core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack)) };
+    value
+}
+
+/// Write CR0.
+///
+/// # Safety
+/// The value must keep PE/PG/PAE as required by the current mode.
+pub unsafe fn write_cr0(value: u64) {
+    // SAFETY: caller keeps the mode-defining bits intact.
+    unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) };
+}
+
 pub fn read_cr3() -> u64 {
     let value: u64;
     // SAFETY: reading CR3 is always safe.

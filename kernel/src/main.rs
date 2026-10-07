@@ -869,9 +869,23 @@ pub fn rust_main_tail() -> ! {
         // Signal secondary CPUs that they may now enable their timer interrupts.
         // This must happen AFTER boot CPU has finished all initialization
         // to prevent secondary timer interrupts from interfering with boot.
-        // (riscv64 SBI HSM broadcast; x86_64 SMP bring-up is single-CPU.)
-        #[cfg(feature = "riscv64")]
+        // (riscv64 SBI HSM broadcast; x86_64 SIPI secondaries parked in
+        // ap_entry64's hlt loop.)
         arch::smp::signal_boot_complete();
+
+        // x86_64 SMP tick check: the per-CPU LAPIC timer was armed just
+        // above (enable_timer_interrupt); jiffies must advance under it.
+        #[cfg(feature = "x86_64")]
+        {
+            let t0 = drivers::timer::get_jiffies();
+            drivers::intc::apic::delay_ms(150);
+            let t1 = drivers::timer::get_jiffies();
+            print_status(
+                "timer",
+                &format!("lapic tick check: {} jiffies / 150ms", t1 - t0),
+                t1 > t0,
+            );
+        }
 
         // ========== Enter scheduler main loop ==========
         // Note: don't use println! here — it might deadlock if printk lock is held
@@ -1169,7 +1183,6 @@ fn panic(info: &PanicInfo) -> ! {
     // Stop the other CPUs (Linux panic → smp_send_stop). Without this the
     // panicking CPU halts while the others keep running — corrupting state
     // under the panic dump and stealing the UART mid-print (review批次8).
-    #[cfg(feature = "riscv64")]
     {
         let me = arch::cpu_id() as usize;
         for cpu in 0..crate::config::MAX_CPUS {

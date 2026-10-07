@@ -117,6 +117,13 @@ pub fn kernel_thread(
         }
         #[cfg(feature = "x86_64")]
         {
+            // Contract pinned by trap.S ret_from_fork_kernel: after
+            // __switch_to restores the callee-saved set, R12 = fn,
+            // R13 = fn_arg, RSP = the scratch pt_regs at thread.sp; the
+            // trampoline calls schedule_tail then the helper (which
+            // runs fn and do_exit).  Landing on ret_from_fork instead
+            // would trap_exit the ZEROED scratch frame — RIP 0, SP 0
+            // (tripped by the first kthread an SMP secondary picked up).
             thread.callee.ret_addr = ret_from_fork_kernel as u64;
             thread.sp = pt_regs_ptr as u64;
             thread.callee.r12 = fn_ptr as u64;
