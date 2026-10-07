@@ -146,6 +146,16 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
     // Zone system not initialized yet, use memblock
     // This should only happen during early boot before zone is set up
     LEGACY_ALLOCS.fetch_add(1, Ordering::Relaxed);
+    // Flag any post-zone-init memblock page handout: memblock's bump
+    // cursor overlaps the zone's seeded free lists, so a handout here
+    // past zone init is a double-allocation in the making.
+    if super::memblock::memblock_available_memory() > 0 {
+        static LEG_WARN: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if LEG_WARN.fetch_add(1, Ordering::Relaxed) < 5 {
+            crate::pr_err!("page_alloc: legacy memblock alloc order={} after zone init", order);
+        }
+    }
     super::memblock::memblock_phys_alloc().unwrap_or(0)
 }
 

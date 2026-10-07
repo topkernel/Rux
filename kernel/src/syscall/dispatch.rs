@@ -72,6 +72,15 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // x86_64: translate the native number/ABI onto the generic table
     // (identity for same-numbered entries, argument remaps for the
     // legacy no-`at` ABI). Untranslatable numbers report as unknown.
+    // x86_64-native syscalls with no asm-generic equivalent.
+    #[cfg(feature = "x86_64")]
+    if syscall_no == 158 {
+        // arch_prctl(2): TLS base (glibc/musl startup requirement).
+        let result = crate::arch::process::sys_arch_prctl(args);
+        syscall_set_return_value(regs, result);
+        return;
+    }
+
     #[cfg(feature = "x86_64")]
     let syscall_no = match crate::syscall::x86_compat::translate(syscall_no as u64, &args) {
         Some((generic_nr, generic_args)) => {

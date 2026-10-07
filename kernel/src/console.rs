@@ -334,7 +334,34 @@ pub fn init_irq() {
     }
 }
 
-#[cfg(not(feature = "riscv64"))]
+/// x86_64: interrupt-driven RX on PIC line 4 (COM1). Same contract as the
+/// riscv64 twin — once armed, the IRQ handler is the only context that
+/// consumes hardware RX; task-context readers go through the ring.
+#[cfg(feature = "x86_64")]
+pub fn init_irq() {
+    fn uart4_irq_line() {
+        let mut received = 0usize;
+        while read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0 {
+            // SAFETY: COM1 RBR read consumes the byte; the handler owns
+            // hardware RX (see UART_IRQ_ARMED).
+            let c = unsafe { read_reg(COM1_BASE, UART_RBR) };
+            UART_RX_BUF.put(c);
+            tty_isig_record(c);
+            received += 1;
+        }
+        if received > 0 {
+            UART_READ_WAITQ.wake_up_one();
+        }
+    }
+
+    if crate::arch::trap::request_irq_line(4, uart4_irq_line) {
+        // SAFETY: COM1 IER is the standard 8250 interrupt-enable port.
+        unsafe { write_reg(COM1_BASE, UART_IER, IER_RX_ENABLE) };
+        UART_IRQ_ARMED.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
 pub fn init_irq() {}
 
 // ============================================================================
@@ -645,12 +672,25 @@ pub fn getchar() -> Option<u8> {
 
     #[cfg(feature = "x86_64")]
     {
-        // Poll COM1 LSR for Data Ready (the 8259 IRQ4 path is not wired
-        // yet — bring-up uses polled RX only).
-        if read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0 {
-            // SAFETY: COM1 RBR read consumes the byte; single poller here.
-            let c = unsafe { read_reg(COM1_BASE, UART_RBR) };
-            return process_input(c);
+        // Ring first (IRQ-driven path), mirroring the riscv64 ordering.
+        let head = UART_RX_BUF.head.load(Ordering::Relaxed);
+        let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
+        if head != tail {
+            if let Some(c) = UART_RX_BUF.get() {
+                return process_input(c);
+            }
+        }
+
+        // Hardware polling fallback — ONLY before the RX IRQ is armed
+        // (same ownership rule as riscv64: once armed, RBR belongs to the
+        // IRQ handler; a task-context read would steal or duplicate bytes).
+        if !UART_IRQ_ARMED.load(Ordering::Acquire) {
+            if read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0 {
+                // SAFETY: COM1 RBR read consumes the byte; no IRQ handler
+                // competes for RBR while the flag is clear.
+                let c = unsafe { read_reg(COM1_BASE, UART_RBR) };
+                return process_input(c);
+            }
         }
     }
 
@@ -694,6 +734,16 @@ pub fn uart_has_data() -> bool {
 
 #[cfg(feature = "x86_64")]
 pub fn uart_has_data() -> bool {
+    // Ring first; LSR only while the RX IRQ is not armed (same ownership
+    // rule as riscv64 — an armed DR=1 byte is about to move to the ring).
+    let head = UART_RX_BUF.head.load(Ordering::Relaxed);
+    let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
+    if head != tail {
+        return true;
+    }
+    if UART_IRQ_ARMED.load(Ordering::Acquire) {
+        return false;
+    }
     read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0
 }
 

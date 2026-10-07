@@ -40,7 +40,9 @@
 	.short	0			/* 0x220 xloadflags */
 	.short	0			/* 0x222 heap_end_ptr */
 	.long	0			/* 0x224 ext_ramdisk_image */
-	.long	0			/* 0x228 ext_ramdisk_size */
+	.long	0x20000		/* 0x228 cmd_line_ptr - QEMU's linuxboot
+					 * ROM copies the -append string here;
+					 * boot.rs reads it back (0x10228) */
 	.long	0x7fffffff		/* 0x22c ramdisk_max */
 
 	.org 0x240

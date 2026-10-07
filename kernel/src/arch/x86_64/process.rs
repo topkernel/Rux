@@ -69,3 +69,74 @@ pub fn flush_thread() {
         }
     }
 }
+
+// ============================================================================
+// arch_prctl(2) — x86_64-only syscall (nr 158)
+// ============================================================================
+
+// Codes per asm/prctl.h (verified against the host header).
+const ARCH_SET_GS: u64 = 0x1001;
+const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_GET_GS: u64 = 0x1004;
+const MSR_FS_BASE: u32 = 0xC000_0100;
+
+/// arch_prctl(code, addr) — TLS base management. glibc/musl startup calls
+/// ARCH_SET_FS before anything else; without it every TLS access faults
+/// (the static-toybox SIGSEGV-at-startup shape).
+///
+/// FS is the kernel-managed TLS pointer (thread.fs_base, live MSR, both
+/// kept in sync — context_switch restores from thread.fs_base). GS is
+/// stored per-task only: nothing switches the live GS MSR on x86, so
+/// installing a user GS base there would leak into every other task.
+pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
+    let code = args[0];
+    let addr = args[1];
+
+    let Some(current) = crate::sched::current() else {
+        return -crate::errno::constants::ESRCH as i64;
+    };
+
+    match code {
+        ARCH_SET_FS => {
+            if addr >= 1 << 47 {
+                return -crate::errno::constants::EFAULT as i64;
+            }
+            // SAFETY: current is the running task; we are the only context
+            // that may touch our own thread state.
+            unsafe {
+                let thread = (*current).thread_mut();
+                thread.fs_base = addr;
+                thread.set_tp(addr);
+                super::cpu::wrmsr(MSR_FS_BASE, addr);
+            }
+            0
+        }
+        ARCH_GET_FS => {
+            // SAFETY: read-only access to the current task's thread state.
+            let fs = unsafe { (*current).thread().fs_base };
+            // SAFETY: writes one userspace word at a validated pointer.
+            let ok = unsafe {
+                crate::arch::uaccess::put_user(addr as *mut u64, fs)
+            };
+            if ok { 0 } else { -crate::errno::constants::EFAULT as i64 }
+        }
+        ARCH_SET_GS => {
+            // SAFETY: see ARCH_SET_FS.
+            unsafe {
+                (*current).thread_mut().gs_base = addr;
+            }
+            0
+        }
+        ARCH_GET_GS => {
+            // SAFETY: read-only access to the current task's thread state.
+            let gs = unsafe { (*current).thread().gs_base };
+            // SAFETY: writes one userspace word at a validated pointer.
+            let ok = unsafe {
+                crate::arch::uaccess::put_user(addr as *mut u64, gs)
+            };
+            if ok { 0 } else { -crate::errno::constants::EFAULT as i64 }
+        }
+        _ => -crate::errno::constants::EINVAL as i64,
+    }
+}

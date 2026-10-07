@@ -989,7 +989,6 @@ pub(crate) fn do_execve_elf(
     probe(adjusted_stack_top + (random_offset * 8) as u64, "at_random");
     probe(adjusted_stack_top + (execfn_string_offset * 8) as u64, "at_execfn");
 
-
     // Create new address space structure
     // SAFETY: user_ppn is a freshly allocated page table root with no prior users.
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };

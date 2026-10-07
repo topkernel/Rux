@@ -116,7 +116,7 @@ pub unsafe fn alloc_and_map_user_table(
     #[cfg(feature = "x86_64")]
     {
         // SAFETY: caller guarantees a valid root (see fn doc).
-        unsafe { alloc_and_map_user_pages_portable(user_ppn, virt_addr, size, flags) }
+        unsafe { crate::arch::mm::alloc_and_map_to_user_table(user_ppn, virt_addr, size, flags) }
     }
 }
 
@@ -139,38 +139,8 @@ pub unsafe fn alloc_and_map_user_memory(
     #[cfg(feature = "x86_64")]
     {
         // SAFETY: caller guarantees a valid root (see fn doc).
-        unsafe { alloc_and_map_user_pages_portable(user_root_ppn, virt_addr, size, flags) }
+        unsafe { crate::arch::mm::alloc_and_map_user_memory(user_root_ppn, virt_addr, size, flags) }
     }
-}
-
-/// Page-at-a-time alloc+map used by the x86_64 backend paths.
-#[cfg(feature = "x86_64")]
-unsafe fn alloc_and_map_user_pages_portable(
-    user_root_ppn: u64,
-    virt_addr: u64,
-    size: u64,
-    flags: u64,
-) -> Option<u64> {
-    use crate::arch::mm::{map_user_page, PageTableEntry, PhysAddr, VirtAddr};
-
-    if size == 0 {
-        return None;
-    }
-    let page_size = PAGE_SIZE as u64;
-    let page_count = ((size + page_size - 1) / page_size) as usize;
-    let user_flags = flags | PageTableEntry::U;
-
-    let mut first_phys: Option<u64> = None;
-    for i in 0..page_count {
-        let phys = crate::arch::mm::alloc_user_phys_page()?;
-        let virt = VirtAddr::new(virt_addr + i as u64 * page_size);
-        // SAFETY: fresh root, freshly allocated page, page-aligned virt.
-        unsafe { map_user_page(user_root_ppn, virt, PhysAddr::new(phys), user_flags) };
-        if first_phys.is_none() {
-            first_phys = Some(phys);
-        }
-    }
-    first_phys
 }
 
 /// Activate a page-table root on the current CPU.

@@ -964,6 +964,17 @@ fn x86_boot_memory_regions() -> &'static [cmdline::MemoryRegion] {
     unsafe { &REGIONS[..n] }
 }
 
+/// x86_64 boot diagnostic: print the e820 map the kernel seeded from.
+#[cfg(feature = "x86_64")]
+fn x86_dump_regions() {
+    for (i, r) in arch::boot::boot_memory_regions().iter().enumerate() {
+        crate::pr_err!(
+            "e820[{}] {:#x}-{:#x} usable={}",
+            i, r.start, r.end, r.usable
+        );
+    }
+}
+
 // Kernel main function
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
@@ -1065,6 +1076,8 @@ pub extern "C" fn rust_main() -> ! {
         let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
         #[cfg(feature = "x86_64")]
         let memory_regions = x86_boot_memory_regions();
+        #[cfg(feature = "x86_64")]
+        x86_dump_regions();
 
         // Add memory regions to memblock
         for region in memory_regions.iter() {
