@@ -37,10 +37,15 @@ SECTIONS
         __boot_page_tables_end = .;
     }
 
+    /* 256KB, riscv64 parity: rust_main (subsystem table + init exec's
+     * page-table phase) needs far more than 16KB of kernel stack. At 16KB
+     * the stack overflowed straight into the boot page tables below it —
+     * exec then read stack garbage (e.g. a text VMA | 0x83) as PMD entries
+     * and died in phys_to_virt. Region stays under the kernel LMA 0x200000. */
     .boot_stack (NOLOAD) : ALIGN(16)
     {
         __boot_stack_bottom = .;
-        . += 16K;
+        . += 256K;
         __boot_stack_top = .;
     }
 

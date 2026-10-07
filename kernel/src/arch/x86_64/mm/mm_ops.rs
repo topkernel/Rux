@@ -1377,6 +1377,10 @@ pub unsafe fn alloc_and_map_to_user_table(
             first_phys = phys_addr as u64;
         }
         mapped_pages += chunk_pages;
+        crate::pr_err!(
+            "STACKDBG chunk: order={} block={} chunk={} phys={:#x} first={:#x}",
+            order, block_pages, chunk_pages, phys_addr, first_phys
+        );
     }
 
     Some(first_phys)

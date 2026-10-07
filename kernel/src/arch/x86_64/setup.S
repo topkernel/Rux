@@ -47,10 +47,14 @@
 setup_entry16:
 	cli
 	cld
-	/* DS = setup segment (CS at entry is setup_seg + 0x20) */
+	/* DS = ES = setup segment (CS at entry is setup_seg + 0x20).
+	 * ES matters: the int 15h E820 buffer is written at ES:DI and the
+	 * entry count is stored ES-relative — with the ROM's leftover ES
+	 * those writes land at a random segment. */
 	mov	%cs, %ax
 	sub	$0x20, %ax
 	mov	%ax, %ds
+	mov	%ax, %es
 	mov	%ax, %ss
 	mov	$0x4000, %sp
 
