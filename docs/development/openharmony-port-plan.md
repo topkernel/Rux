@@ -335,7 +335,7 @@ script (new, modeled on `test/ubuntu-gui/verify.py`) passes.
 |---|---|---|---|
 | **S1: binder closed loop** | Can we implement the binder UAPI to OH's satisfaction? | On riscv64 main: minimal binder device, a probe doing BINDER_WRITE_READ loopback, then a samgr cross-check against a copied OH userspace | Phase 2 estimate confidence; surfaces ABI depth early |
 | **S2: selinuxfs tolerance** | Does OH init survive selinuxfs mount / policy-load failure? | Read `base/startup/init` + `libload_policy` failure paths; if unclear, emulate failure and observe | Phase 2 item 5: implement vs skip |
-| **S3: fbdev HDI composer** | Is Route A viable? | Inspect oh-robot display HDI interface definitions and composer_host; check whether the composer backend is pluggable without DRM | Phase 3 route selection |
+| **S3: fbdev HDI composer** | Is Route A viable? | **DONE 2026-10-07 — YES** (see openharmony-s3-fbdev-composer.md): VDI is dlopen-pluggable, fences -1, vsync timer; but Route A requires a GPU-off (Skia CPU raster) rebuild of the OH graphics stack — verify ArkUI raster launcher at Phase 3 entry | Phase 3 route selection |
 
 All three are read/prototype work on existing riscv64 main + the oh-robot
 tree; none blocks or depends on Phase 0.
