@@ -550,8 +550,14 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
     let mut total_added = 0usize;
 
     super::memblock::memblock_for_each_free_range(alloc_start, alloc_end, |free_start, free_end| {
-        // Convert to PFNs
-        let range_start_pfn = free_start / PAGE_SIZE;
+        // Convert to PFNs. Round the start UP and the end DOWN: a
+        // PARTIALLY-reserved page must never reach the buddy allocator —
+        // memblock reservations are byte ranges (e.g. the FDT /chosen
+        // initrd range), and truncating them onto page boundaries handed
+        // the tail page of a >4KB initrd to the allocator, whose first
+        // allocations overwrote the image (gzip "corrupt deflate
+        // stream" for every initrd larger than one page).
+        let range_start_pfn = (free_start + PAGE_SIZE - 1) / PAGE_SIZE;
         let range_end_pfn = free_end / PAGE_SIZE;
         let range_pages = range_end_pfn.saturating_sub(range_start_pfn);
 
