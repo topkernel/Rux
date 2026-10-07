@@ -379,6 +379,10 @@ fn devtmpfs_populate() {
         crate::drivers::ashmem::DEV_ASHMEM,
         &crate::drivers::ashmem::ASHMEM_OPS,
     );
+    let _ = registry::register_char_device(
+        crate::drivers::access_tokenid::DEV_ACCESS_TOKENID,
+        &crate::drivers::access_tokenid::TOKENID_OPS,
+    );
 
     let mut root = DEVFS_ROOT.lock_irqsave();
     let root_entry = match root.as_ref() {
@@ -398,6 +402,11 @@ fn devtmpfs_populate() {
         ("random", crate::fs::dev_t::DEV_RANDOM, 0o666),
         ("urandom", crate::fs::dev_t::DEV_URANDOM, 0o666),
         ("ashmem", crate::drivers::ashmem::DEV_ASHMEM, 0o666),
+        (
+            "access_token_id",
+            crate::drivers::access_tokenid::DEV_ACCESS_TOKENID,
+            0o666,
+        ),
     ];
     // Loop family: /dev/loop-control (misc) + /dev/loop0..7 (BLOCK
     // majors) — LTP tst_acquire_device and losetup need both (the loop
