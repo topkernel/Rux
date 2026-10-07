@@ -102,6 +102,12 @@ pub struct TmpfsNode {
     pub fs_id: u64,
     /// Owning superblock (leaked at mount; valid for the kernel's lifetime).
     sb: *const TmpfsSuperBlock,
+    /// Device number for device-typed nodes (S_IFCHR/S_IFBLK), USERSPACE
+    /// dev_t encoding (new_encode_dev — what mknod(2) passed and stat(2)
+    /// reports). 0 for non-device nodes. OH Phase 1b: OH's init mounts a
+    /// tmpfs over /dev and mknods /dev/{null,random,urandom,kmsg}; open()
+    /// binds those nodes to CharDev registry ops through this number.
+    rdev: AtomicU64,
     /// Owner uid/gid, chown-visible. Initialized from the creating task's
     /// fsuid/fsgid (Linux inode_init_owner()); updated by chown/setattr
     /// (LTP creat09 tmpfs round: chown(dir, uid, gid) then stat must
@@ -147,6 +153,7 @@ impl TmpfsNode {
             ino,
             fs_id,
             sb,
+            rdev: AtomicU64::new(0),
             uid: AtomicU32::new(uid),
             gid: AtomicU32::new(gid),
         }
@@ -406,6 +413,10 @@ fn tmpfs_make_inode(node: &Arc<TmpfsNode>) -> Arc<Inode> {
     inode.size.store(node.file_size(), Ordering::Release);
     inode.uid.store(node.uid.load(Ordering::Relaxed), Ordering::Relaxed);
     inode.gid.store(node.gid.load(Ordering::Relaxed), Ordering::Relaxed);
+    // Stamp the device number so mmap(2) can identify /dev/zero-style
+    // nodes through the inode's rdev without a getattr round trip (the
+    // devfs discipline — see devfs_iget).
+    inode.rdev = node.rdev.load(Ordering::Relaxed);
     inode.private_data = Some(Arc::into_raw(Arc::clone(node)) as *mut u8);
     inode.ops = Some(&TMPFS_INODE_OPS);
     Arc::new(inode)
@@ -565,6 +576,49 @@ unsafe fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<I
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
+unsafe fn tmpfs_mknod(
+    dir: &Inode,
+    name: &[u8],
+    mode: InodeMode,
+    dev: u64,
+) -> Result<Arc<Inode>, i32> {
+    let node = node_of(dir)?;
+    if !node.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+    if node.find_child(name).is_some() {
+        return Err(errno::Errno::FileExists.as_neg_i32());
+    }
+
+    // may_mknod (Linux): S_IFDIR → EPERM, S_IFLNK/unknown → EINVAL; a
+    // zero type field translates to S_IFREG (do_mknodat).
+    // (The syscall layer already rejects those for the syscall path; the
+    // op-level check keeps direct VFS callers honest.)
+    let ftype = mode.bits() & InodeMode::S_IFMT;
+    match ftype {
+        InodeMode::S_IFCHR | InodeMode::S_IFBLK | InodeMode::S_IFIFO
+        | InodeMode::S_IFSOCK | InodeMode::S_IFREG | 0 => {}
+        InodeMode::S_IFDIR => return Err(errno::Errno::OperationNotPermitted.as_neg_i32()),
+        _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+    }
+    let ftype = if ftype == 0 { InodeMode::S_IFREG } else { ftype };
+
+    let sb = node.sb as *const TmpfsSuperBlock;
+    // SAFETY: sb is a leaked mount-lifetime superblock.
+    let sb = unsafe { &*sb };
+
+    // Device nodes are stored as RegularFile nodes whose MODE word carries
+    // the type (the same representation the ATTR_MODE retype path uses for
+    // mkfifo'd FIFOs) plus the rdev in the node. Reads/writes never touch
+    // them: open() binds through the CharDev registry (get_file_ops).
+    let file = sb.new_node(name.to_vec(), TmpfsType::RegularFile);
+    *file.mode.lock() = ftype | (mode.bits() & 0o7777);
+    file.rdev.store(dev, Ordering::Release);
+    node.add_child(file.clone());
+    Ok(tmpfs_make_inode(&file))
+}
+
+// SAFETY: VFS callback contract — pointers are valid for the call.
 unsafe fn tmpfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     let dir_node = match node_of(dir) {
         Ok(n) => n,
@@ -596,6 +650,7 @@ unsafe fn tmpfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     new_node.pages = target_node.pages.clone();
     new_node.size.store(target_node.file_size(), Ordering::Release);
     *new_node.mode.lock() = *target_node.mode.lock();
+    new_node.rdev.store(target_node.rdev.load(Ordering::Acquire), Ordering::Release);
     // SAFETY: link_target is set before publication (add_child).
     let new_link = {
         let p = &mut new_node as *mut TmpfsNode;
@@ -742,7 +797,9 @@ unsafe fn tmpfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     };
     stat.st_uid = node.uid.load(Ordering::Relaxed) as u32;
     stat.st_gid = node.gid.load(Ordering::Relaxed) as u32;
-    stat.st_rdev = 0;
+    // st_rdev: the userspace dev_t of mknod-created device nodes (0 for
+    // everything else) — major()/minor() decode in userspace.
+    stat.st_rdev = node.rdev.load(Ordering::Relaxed);
     stat.st_blksize = PAGE_SIZE as i64;
     stat.st_blocks = (node.page_count() * (PAGE_SIZE as u64 / 512)) as i64;
     stat.st_atime = node.atime.load(Ordering::Relaxed) as i64;
@@ -843,6 +900,8 @@ unsafe fn tmpfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
             InodeMode::S_IFLNK => file_type::DT_LNK,
             InodeMode::S_IFIFO => file_type::DT_FIFO,
             InodeMode::S_IFSOCK => file_type::DT_SOCK,
+            InodeMode::S_IFCHR => file_type::DT_CHR,
+            InodeMode::S_IFBLK => file_type::DT_BLK,
             _ => {
                 if child.is_dir() {
                     file_type::DT_DIR
@@ -987,7 +1046,20 @@ unsafe fn tmpfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::
         Some(&crate::fs::file::DIR_FILE_OPS)
     } else if inode.mode.is_regular_file() {
         Some(&TMPFS_FILE_OPS)
+    } else if inode.mode.is_char_device() {
+        // mknod-created char nodes bind to the CharDev registry through
+        // the node's stored rdev (the devfs discipline without the
+        // DevfsEntry indirection). No registered driver → ENXIO at open,
+        // exactly like devfs.
+        let node = node_of(inode).ok()?;
+        let rdev = node.rdev.load(Ordering::Relaxed);
+        let devno = crate::fs::dev_t::DevNo::from_user_dev(rdev);
+        crate::fs::devfs::registry::get_char_device_ops(devno)
     } else {
+        // Block devices (and anything else): no block-driver open path —
+        // the VFS device-open gate fails with ENXIO, the Linux behavior
+        // for a node with no bound driver. FIFOs are dispatched by the
+        // open path before get_file_ops; unix sockets by the socket layer.
         None
     }
 }
@@ -1000,7 +1072,7 @@ pub static TMPFS_INODE_OPS: INodeOps = INodeOps {
     symlink: Some(tmpfs_symlink),
     mkdir: Some(tmpfs_mkdir),
     rmdir: Some(tmpfs_rmdir),
-    mknod: None, // tmpfs does not support device nodes in this wave
+    mknod: Some(tmpfs_mknod),
     rename: Some(tmpfs_rename),
     readlink: Some(tmpfs_readlink),
     get_file_ops: Some(tmpfs_get_file_ops),

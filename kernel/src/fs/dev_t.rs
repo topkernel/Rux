@@ -49,6 +49,18 @@ impl DevNo {
             | (self.minor as u64 & 0xff)
             | ((self.minor as u64 & 0xfffff00) << 12)
     }
+
+    /// Decode a USERSPACE dev_t (new_encode_dev layout: the `dev`
+    /// argument of mknod(2) or a node's st_rdev) into a DevNo — Linux
+    /// new_decode_dev parity. Needed to look up the CharDev registry from
+    /// a device node stored on a non-devfs filesystem (tmpfs-mounted
+    /// /dev, OH init's mknod path).
+    pub const fn from_user_dev(v: u64) -> Self {
+        Self {
+            major: ((v >> 8) & 0xfff) as u32,
+            minor: ((v & 0xff) | ((v >> 12) & 0xfff00)) as u32,
+        }
+    }
 }
 
 impl Default for DevNo {
