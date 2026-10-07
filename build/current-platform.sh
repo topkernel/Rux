@@ -8,11 +8,12 @@ OVERRIDE="${PLATFORM:-}"
 
 platform=""
 if [ -f "$ROOT/build/.config" ]; then
-    platform=$(sed -n 's/^platform_default_platform=//p' "$ROOT/build/.config" | head -1 | tr -d '[:space:]')
+    platform=$(sed -n 's/^platform_target=//p' "$ROOT/build/.config" | head -1 | tr -d '[:space:]')
+[ -z "$platform" ] && platform=$(sed -n 's/^platform_default_platform=//p' "$ROOT/build/.config" | head -1 | tr -d '[:space:]')
 fi
 if [ -z "$platform" ] && [ -f "$ROOT/Kernel.toml" ]; then
     platform=$(sed -n '/^\[platform\]/,/^\[/p' "$ROOT/Kernel.toml" \
-        | sed -n 's/^default_platform[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        | sed -n 's/^\(default_platform\|target\)[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\2/p' | head -1)
 fi
 [ -z "$platform" ] && platform="riscv64"
 

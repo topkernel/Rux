@@ -68,7 +68,7 @@ generate_config() {
 CONFIGEOF
 
     # Platform selection (drives `make`: target triple + cargo features)
-    write_config "platform" "default_platform" "$config_default_platform"
+    write_config "platform" "target" "$config_default_platform"
 
     # Memory configuration
     write_config "memory" "kernel_heap_size" "$config_kernel_heap_size"
@@ -351,7 +351,7 @@ save_and_exit() {
 
 # Main menu
 platform_menu() {
-    local cur=$(get_config_value "platform" "default_platform" "riscv64")
+    local cur=$(get_config_value "platform" "target" "riscv64")
     local choice
     choice=$(whiptail --title "Platform Selection" --menu \
         "Build target platform. This is what plain \'make\' builds;\nthe same value feeds kernel/src/config.rs via build.rs." \
@@ -364,7 +364,7 @@ platform_menu() {
 
 main_menu() {
     # Initialize configuration variables (from existing .config or Kernel.toml defaults)
-    config_default_platform=$(get_config_value "platform" "default_platform" "riscv64")
+    config_default_platform=$(get_config_value "platform" "target" "riscv64")
 
     config_kernel_heap_size=$(get_config_value "memory" "kernel_heap_size" "16")
     config_physical_memory=$(get_config_value "memory" "physical_memory" "2048")
