@@ -81,11 +81,19 @@ pub const BINDER_TYPE_WEAK_BINDER: u32 = u32::from_be_bytes([b'w', b'b', b'*', 0
 pub const BINDER_TYPE_HANDLE: u32 = u32::from_be_bytes([b's', b'h', b'*', 0x85]);
 pub const BINDER_TYPE_WEAK_HANDLE: u32 = u32::from_be_bytes([b'w', b'h', b'*', 0x85]);
 pub const BINDER_TYPE_FD: u32 = u32::from_be_bytes([b'f', b'd', b'*', 0x85]);
+pub const BINDER_TYPE_FDA: u32 = u32::from_be_bytes([b'f', b'd', b'a', 0x85]);
+pub const BINDER_TYPE_PTR: u32 = u32::from_be_bytes([b'p', b't', b'*', 0x85]);
 
 pub const TF_ONE_WAY: u32 = 0x01;
 pub const _TF_ROOT_OBJECT: u32 = 0x04;
 pub const _TF_STATUS_CODE: u32 = 0x08;
-pub const _TF_ACCEPT_FDS: u32 = 0x10;
+pub const TF_ACCEPT_FDS: u32 = 0x10;
+
+/// flat_binder_object.flags: the target accepts BINDER_TYPE_FD objects.
+pub const FLAT_BINDER_FLAG_ACCEPTS_FDS: u32 = 0x100;
+/// binder_buffer_object.flags: fix up the parent buffer with this
+/// object's translated address (binder_fixup_parent).
+pub const BINDER_BUFFER_FLAG_HAS_PARENT: u32 = 0x01;
 
 const BINDER_CURRENT_PROTOCOL_VERSION: i32 = 8;
 
@@ -178,6 +186,50 @@ pub struct FlatBinderObject {
 }
 const _: () = assert!(core::mem::size_of::<FlatBinderObject>() == 24);
 
+/// struct binder_buffer_object (40 bytes on LP64): BINDER_TYPE_PTR —
+/// points at additional data outside the parcel that the driver copies
+/// into the target's sg (extra) area and rewrites to a target address.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BinderBufferObject {
+    hdr_type: u32,
+    flags: u32,
+    buffer: u64,
+    length: u64,
+    /// index into the offsets array of the parent BINDER_TYPE_PTR object
+    parent: u64,
+    /// offset in the parent buffer where this buffer's address is written
+    parent_offset: u64,
+}
+const _: () = assert!(core::mem::size_of::<BinderBufferObject>() == 40);
+
+/// struct binder_fd_array_object (32 bytes on LP64): BINDER_TYPE_FDA —
+/// an array of u32 fds living inside the parent buffer object.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BinderFdArrayObject {
+    hdr_type: u32,
+    flags: u32,
+    num_fds: u64,
+    /// index into the offsets array of the parent BINDER_TYPE_PTR object
+    parent: u64,
+    /// offset of the fd array within the parent's buffer
+    parent_offset: u64,
+}
+const _: () = assert!(core::mem::size_of::<BinderFdArrayObject>() == 32);
+
+/// Minimum in-buffer size of each object type (binder_validate_object;
+/// on LP64 the fd object carries an 8-byte union like flat_binder_object).
+fn binder_object_size(ty: u32) -> usize {
+    match ty {
+        BINDER_TYPE_BINDER | BINDER_TYPE_WEAK_BINDER | BINDER_TYPE_HANDLE | BINDER_TYPE_WEAK_HANDLE => 24,
+        BINDER_TYPE_FD => 24,
+        BINDER_TYPE_FDA => 32,
+        BINDER_TYPE_PTR => 40,
+        _ => 0,
+    }
+}
+
 const LOOPER_REGISTERED: u32 = 0x01;
 const LOOPER_ENTERED: u32 = 0x02;
 const LOOPER_EXITED: u32 = 0x04;
@@ -217,16 +269,19 @@ struct BinderNode {
     ptr: u64,
     cookie: u64,
     proc_id: u64,
+    /// flat_binder_object.flags at registration (accept_fds bit).
+    flags: u32,
     st: core::cell::UnsafeCell<NodeState>,
 }
 
 impl BinderNode {
-    const fn new(id: u64, ptr: u64, cookie: u64, proc_id: u64) -> Self {
+    const fn new(id: u64, ptr: u64, cookie: u64, proc_id: u64, flags: u32) -> Self {
         Self {
             id,
             ptr,
             cookie,
             proc_id,
+            flags,
             st: core::cell::UnsafeCell::new(NodeState {
                 internal_strong_refs: 0,
                 local_strong_refs: 0,
@@ -295,6 +350,9 @@ struct BufBlock {
     allow_user_free: bool,
     data_size: usize,
     offsets_size: usize,
+    /// sg (extra) area size: BINDER_TYPE_PTR payload copies (layout:
+    /// [data][offsets][extra], each u64-aligned).
+    extra_size: usize,
     /// Oneway (async) buffers keep their transaction alive so the node's
     /// async slot is released when the receiver frees the buffer (Linux
     /// buffer->transaction). Sync buffers rely on the reply path instead.
@@ -312,10 +370,20 @@ struct BinderAlloc {
 }
 
 impl BinderAlloc {
+    fn block_need(data_size: usize, offsets_size: usize, extra_size: usize) -> usize {
+        align8(data_size) + align8(offsets_size) + align8(extra_size)
+    }
+
     /// binder_alloc_new_buf: sync first-fit from the low end, async from
     /// the top half against the free_async_space budget.
-    fn new_buf(&mut self, data_size: usize, offsets_size: usize, is_async: bool) -> Option<usize> {
-        let need = align8(data_size) + align8(offsets_size);
+    fn new_buf(
+        &mut self,
+        data_size: usize,
+        offsets_size: usize,
+        extra_size: usize,
+        is_async: bool,
+    ) -> Option<usize> {
+        let need = Self::block_need(data_size, offsets_size, extra_size);
         if need == 0 {
             return None;
         }
@@ -341,6 +409,7 @@ impl BinderAlloc {
             b.allow_user_free = false;
             b.data_size = data_size;
             b.offsets_size = offsets_size;
+            b.extra_size = extra_size;
             if b.len > need {
                 let rest = BufBlock {
                     off: o + need,
@@ -350,6 +419,7 @@ impl BinderAlloc {
                     allow_user_free: false,
                     data_size: 0,
                     offsets_size: 0,
+                    extra_size: 0,
                     txn: None,
                 };
                 b.len = need;
@@ -381,11 +451,12 @@ impl BinderAlloc {
         let was_async = self.blocks[idx].async_block;
         let ds = self.blocks[idx].data_size;
         let os = self.blocks[idx].offsets_size;
+        let es = self.blocks[idx].extra_size;
         let txn = self.blocks[idx].txn.take();
         self.blocks[idx].free = true;
         self.blocks[idx].allow_user_free = false;
         if was_async {
-            self.free_async_space += align8(ds) + align8(os);
+            self.free_async_space += Self::block_need(ds, os, es);
         }
         // Coalesce (blocks stay sorted by offset).
         let mut i = 0;
@@ -966,6 +1037,7 @@ pub fn binder_mmap_handler(
         allow_user_free: false,
         data_size: 0,
         offsets_size: 0,
+        extra_size: 0,
         txn: None,
     });
     {
@@ -1079,7 +1151,10 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             }
             // Linux creates the node with local refs held and has_*_ref
             // already true, so no INCREFS/ACQUIRE handshake fires for it.
-            let node = Arc::new(BinderNode::new(world.next_id, 0, 0, proc.id));
+            // The mgr node's flags are 0 (binder_new_node with fp==NULL):
+            // it does not accept BINDER_TYPE_FD objects, exactly like the
+            // un-extended BINDER_SET_CONTEXT_MGR ioctl.
+            let node = Arc::new(BinderNode::new(world.next_id, 0, 0, proc.id, 0));
             world.next_id += 1;
             // SAFETY: under WORLD.
             unsafe {
@@ -1255,9 +1330,21 @@ fn binder_thread_write(
                     *consumed = ptr as u64;
                     return -(EFAULT as i64);
                 };
+                // struct binder_transaction_data_sg: the trailing u64
+                // buffers_size covers the sg (extra) area the PTR objects
+                // will copy into (Linux extra_buffers_size).
+                let sg_size = if sg {
+                    let Some(bs) = get_user_at::<u64>(buffer, ptr + 64) else {
+                        *consumed = ptr as u64;
+                        return -(EFAULT as i64);
+                    };
+                    bs as usize
+                } else {
+                    0
+                };
                 ptr += if sg { 72 } else { 64 };
                 let mut err_cmd: u32 = 0;
-                binder_transaction(proc, thread, &mut tr, reply, &mut err_cmd);
+                binder_transaction(proc, thread, &mut tr, reply, sg_size, &mut err_cmd);
                 if err_cmd != 0 {
                     crate::pr_info!(
                         "binder: pid {} {} failed with BR {:#x} (code {}, ds {} os {})",
@@ -1642,6 +1729,7 @@ fn binder_transaction(
     thread: &Arc<BinderThread>,
     tr: &mut BinderTransactionData,
     reply: bool,
+    sg_size: usize,
     err_cmd: &mut u32,
 ) {
     let oneway = tr.flags & TF_ONE_WAY != 0;
@@ -1655,6 +1743,10 @@ fn binder_transaction(
     let mut target_proc: Option<Arc<BinderProc>> = None;
     let mut block_off: usize;
     let mut holds_async_slot = false;
+    // BINDER_TYPE_FD/FDA gate (binder_translate_fd): replies need the
+    // original transaction's TF_ACCEPT_FDS; transactions need the target
+    // node's FLAT_BINDER_FLAG_ACCEPTS_FDS.
+    let mut allows_fd = false;
     let txn_id;
 
     {
@@ -1694,6 +1786,7 @@ fn binder_transaction(
                 }
                 target_thread_key = Some((from_proc, from_tid));
                 target_proc = Some(target_thread_key.as_ref().unwrap().0.clone());
+                allows_fd = t.flags & TF_ACCEPT_FDS != 0;
                 in_reply_to = Some(t);
             } else if tr.target_handle != 0 {
                 let node = pm(world, proc)
@@ -1747,6 +1840,11 @@ fn binder_transaction(
                 *err_cmd = BR_FAILED_REPLY;
                 return;
             }
+            if !reply {
+                if let Some(node) = &target_node {
+                    allows_fd = node.flags & FLAT_BINDER_FLAG_ACCEPTS_FDS != 0;
+                }
+            }
 
             txn_id = world.next_id;
             world.next_id += 1;
@@ -1773,13 +1871,14 @@ fn binder_transaction(
                 .alloc
                 .as_mut()
                 .unwrap()
-                .new_buf(data_size, offsets_size, is_async);
+                .new_buf(data_size, offsets_size, sg_size, is_async);
             let Some(off) = off else {
                 *err_cmd = BR_FAILED_REPLY;
                 crate::pr_info!(
-                    "binder: buffer alloc failed (need {}+{})",
+                    "binder: buffer alloc failed (need {}+{}+{})",
                     align8(data_size),
-                    align8(offsets_size)
+                    align8(offsets_size),
+                    align8(sg_size)
                 );
                 return;
             };
@@ -1796,11 +1895,17 @@ fn binder_transaction(
 
     let target = target_proc.clone().unwrap();
 
+    // fd installs to undo if a later fixup step fails (Linux t->fd_count).
+    let mut installed_fds: Vec<(u32, usize)> = Vec::new();
+
     // ---- copy payload from the sender into the target's region ----------
-    let kvirt = {
+    let (kvirt, user_base) = {
         let w = world_lock();
         // SAFETY: under WORLD.
-        unsafe { pm(w.as_ref().unwrap(), &target).im().alloc.as_ref().unwrap().kvirt }
+        unsafe {
+            let a = pm(w.as_ref().unwrap(), &target).im().alloc.as_ref().unwrap();
+            (a.kvirt, a.user_base)
+        }
     };
     // SAFETY: the block is exclusively owned by this in-flight txn.
     unsafe {
@@ -1830,32 +1935,157 @@ fn binder_transaction(
     }
 
     // ---- translate flat binder objects ----------------------------------
+    // Block layout: [data][offsets][sg extra area]. The sg cursor follows
+    // BINDER_TYPE_PTR copies (Linux sg_bufp). Object fixups run WITHOUT the
+    // world lock: the block is exclusively ours and fd installs must never
+    // happen under WORLD.
     if offsets_size > 0 {
         let n = offsets_size / 8;
+        let extra_base = align8(data_size) + align8(offsets_size);
+        let mut sg_used = 0usize;
+        let block_user = user_base + block_off as u64;
         for i in 0..n {
             // SAFETY: offsets array inside the kernel-side block.
             let obj_off = unsafe {
                 core::ptr::read_volatile((kvirt.add(block_off + align8(data_size)) as *const u64).add(i)) as usize
             };
-            if obj_off + core::mem::size_of::<FlatBinderObject>() > data_size {
-                release_block(&target, block_off);
-                unpin_after_failure(&target, target_node.as_ref(), reply, oneway, holds_async_slot);
-                *err_cmd = BR_FAILED_REPLY;
+            if obj_off + 4 > data_size {
+                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
                 crate::pr_info!("binder: object offset {} out of range", obj_off);
                 return;
             }
-            // SAFETY: validated within the data area.
-            let obj = unsafe { &mut *(kvirt.add(block_off + obj_off) as *mut FlatBinderObject) };
-            if !translate_object(proc, obj, &target) {
-                release_block(&target, block_off);
-                unpin_after_failure(&target, target_node.as_ref(), reply, oneway, holds_async_slot);
-                *err_cmd = BR_FAILED_REPLY;
-                crate::pr_info!(
-                    "binder: object type {:#x} handle {:#x} translate failed",
-                    obj.hdr_type,
-                    obj.handle
-                );
+            // SAFETY: header word validated within the data area.
+            let ty = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off) as *const u32) };
+            let osz = binder_object_size(ty);
+            if osz == 0 || obj_off + osz > data_size {
+                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                crate::pr_info!("binder: object type {:#x} at {} out of range", ty, obj_off);
                 return;
+            }
+            match ty {
+                BINDER_TYPE_FD => {
+                    // fd lives in the handle field; pad/cookie cleared.
+                    // SAFETY: validated within the data area.
+                    let fd = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off + 8) as *const u32) };
+                    if !allows_fd {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        crate::pr_info!("binder: fd {} to target that does not accept fds", fd);
+                        return;
+                    }
+                    let Some(tfd) = translate_fd_into(fd, &target) else {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        crate::pr_info!("binder: fd {} install into pid {} failed", fd, target.pid);
+                        return;
+                    };
+                    installed_fds.push((target.pid, tfd));
+                    // SAFETY: validated within the data area.
+                    unsafe {
+                        core::ptr::write_volatile(kvirt.add(block_off + obj_off + 8) as *mut u32, tfd as u32);
+                        core::ptr::write_volatile(kvirt.add(block_off + obj_off + 12) as *mut u32, 0);
+                    }
+                }
+                BINDER_TYPE_PTR => {
+                    // SAFETY: validated within the data area.
+                    let mut bp = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderBufferObject).cast_mut()) };
+                    let bp_len = bp.length as usize;
+                    if bp_len > sg_size - sg_used {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        crate::pr_info!("binder: sg buffer overruns buffers_size");
+                        return;
+                    }
+                    // SAFETY: block layout bounds were validated above.
+                    let sg_dst = unsafe { kvirt.add(block_off + extra_base + sg_used) };
+                    // SAFETY: sg area sized for buffers_size.
+                    if bp_len > 0
+                        && unsafe {
+                            crate::arch::uaccess::copy_from_user(sg_dst, bp.buffer as *const u8, bp_len)
+                        } != 0
+                    {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        crate::pr_info!("binder: sg copy fault from {:#x}", bp.buffer);
+                        return;
+                    }
+                    let child_user = block_user + (extra_base + sg_used) as u64;
+                    sg_used += align8(bp_len);
+                    // Rewrite to the target's address of the copy.
+                    bp.buffer = child_user;
+                    // SAFETY: validated within the data area.
+                    unsafe { core::ptr::write_volatile(kvirt.add(block_off + obj_off) as *mut BinderBufferObject, bp) };
+                    if bp.flags as u64 & (BINDER_BUFFER_FLAG_HAS_PARENT as u64) != 0 {
+                        // binder_fixup_parent: write this buffer's target
+                        // address into the parent buffer at parent_offset.
+                        let Some((parent_kernel, parent_len)) =
+                            (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_size, i, bp.parent) })
+                        else {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                            crate::pr_info!("binder: PTR fixup parent invalid");
+                            return;
+                        };
+                        if parent_len < 8 || bp.parent_offset > (parent_len - 8) as u64 {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                            crate::pr_info!("binder: PTR fixup offset out of parent");
+                            return;
+                        }
+                        // SAFETY: parent buffer is inside our sg area.
+                        unsafe {
+                            core::ptr::write_volatile(parent_kernel.add(bp.parent_offset as usize) as *mut u64, child_user);
+                        }
+                    }
+                }
+                BINDER_TYPE_FDA => {
+                    // SAFETY: validated within the data area.
+                    let fda = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderFdArrayObject).cast_mut()) };
+                    if !allows_fd {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        crate::pr_info!("binder: fda to target that does not accept fds");
+                        return;
+                    }
+                    if fda.num_fds >= usize::MAX as u64 / 4 {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        return;
+                    }
+                    let Some((parent_kernel, parent_len)) =
+                        (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_size, i, fda.parent) })
+                    else {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        crate::pr_info!("binder: FDA parent invalid");
+                        return;
+                    };
+                    let fd_buf_size = 4 * fda.num_fds as usize;
+                    if fd_buf_size > parent_len || fda.parent_offset as usize > parent_len - fd_buf_size {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        crate::pr_info!("binder: FDA does not fit in parent buffer");
+                        return;
+                    }
+                    // SAFETY: fd array inside the parent's sg buffer.
+                    let fd_array = unsafe { parent_kernel.add(fda.parent_offset as usize) as *mut u32 };
+                    for k in 0..fda.num_fds as usize {
+                        // SAFETY: bounds validated above against the parent.
+                        let fd = unsafe { core::ptr::read_volatile(fd_array.add(k)) };
+                        let Some(tfd) = translate_fd_into(fd, &target) else {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                            crate::pr_info!("binder: fda fd {} install into pid {} failed", fd, target.pid);
+                            return;
+                        };
+                        installed_fds.push((target.pid, tfd));
+                        // SAFETY: same slot we read.
+                        unsafe { core::ptr::write_volatile(fd_array.add(k), tfd as u32) };
+                    }
+                }
+                _ => {
+                    // flat binder/handle objects (24 bytes).
+                    // SAFETY: validated within the data area.
+                    let obj = unsafe { &mut *(kvirt.add(block_off + obj_off) as *mut FlatBinderObject) };
+                    if !translate_object(proc, obj, &target) {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, holds_async_slot, err_cmd);
+                        crate::pr_info!(
+                            "binder: object type {:#x} handle {:#x} translate failed",
+                            obj.hdr_type,
+                            obj.handle
+                        );
+                        return;
+                    }
+                }
             }
         }
     }
@@ -1885,6 +2115,9 @@ fn binder_transaction(
     });
 
     let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    // BC_REPLY whose originating thread vanished: fail after WORLD is
+    // released (release_block/close_installed_fds must not run under it).
+    let mut reply_target_gone = false;
     {
         let w = world_lock();
         // SAFETY: all inner access in this block is under WORLD.
@@ -1911,22 +2144,27 @@ fn binder_transaction(
                     }
                     rth.todo.push_back(Work::Transaction(txn.clone()));
                     rth.process_todo = true;
+                    // The original transaction is finished: unpin its node.
+                    if let Some(orig) = &in_reply_to {
+                        unpin_txn_node(world, orig);
+                    }
+                    wakes.push(tproc.clone());
+                    wakes.push(proc.clone());
                 } else {
                     *err_cmd = BR_DEAD_REPLY;
-                    release_block(&target, block_off);
+                    reply_target_gone = true;
+                    // Unpin the original transaction's node while we still
+                    // hold WORLD (unpin_txn_node expects it); the buffer
+                    // and any installed fds are freed after the lock.
+                    if let Some(orig) = &in_reply_to {
+                        unpin_txn_node(world, orig);
+                    }
                     crate::pr_info!(
                         "binder: BC_REPLY originator thread {} gone (proc {})",
                         rtid,
                         tproc.pid
                     );
-                    return;
                 }
-                // The original transaction is finished: unpin its node.
-                if let Some(orig) = &in_reply_to {
-                    unpin_txn_node(world, orig);
-                }
-                wakes.push(tproc.clone());
-                wakes.push(proc.clone());
             } else if oneway {
                 let th = thread.st();
                 th.todo.push_back(Work::TransactionComplete);
@@ -1952,9 +2190,76 @@ fn binder_transaction(
             }
         }
     }
+    if reply_target_gone {
+        release_block(&target, block_off);
+        close_installed_fds(&installed_fds);
+        return;
+    }
     for p in wakes {
         wake_proc(&p);
     }
+}
+
+/// Common failure path after object fixups began: free the block, close
+/// fds already installed in the target (Linux binder_transaction_buffer_
+/// release fd cleanup), unpin the node, BR_FAILED_REPLY.
+fn fail_txn_after_fixups(
+    target: &Arc<BinderProc>,
+    block_off: usize,
+    installed_fds: &[(u32, usize)],
+    node: Option<&Arc<BinderNode>>,
+    reply: bool,
+    oneway: bool,
+    holds_async_slot: bool,
+    err_cmd: &mut u32,
+) {
+    release_block(target, block_off);
+    close_installed_fds(installed_fds);
+    unpin_after_failure(target, node, reply, oneway, holds_async_slot);
+    *err_cmd = BR_FAILED_REPLY;
+}
+
+/// Resolve the parent BINDER_TYPE_PTR object referenced by offsets-array
+/// index from an FDA or a PTR fixup (binder_validate_ptr): the parent must
+/// appear EARLIER in the offsets array (already fixed up) and be a PTR
+/// object. Returns the parent's kernel-side buffer address (in our sg
+/// area) and its length.
+/// SAFETY: caller owns the target block exclusively (in-flight txn).
+unsafe fn resolve_parent_ptr(
+    kvirt: *mut u8,
+    block_off: usize,
+    block_user: u64,
+    offsets_at: usize,
+    data_size: usize,
+    offsets_size: usize,
+    sg_size: usize,
+    cur_idx: usize,
+    parent_idx: u64,
+) -> Option<(*mut u8, usize)> {
+    if parent_idx >= cur_idx as u64 {
+        return None;
+    }
+    // SAFETY: offsets array inside the kernel-side block; index < cur_idx
+    // bounds it within offsets_size (validated 8-aligned at resolve time).
+    let parent_off =
+        core::ptr::read_volatile((kvirt.add(block_off + offsets_at) as *const u64).add(parent_idx as usize)) as usize;
+    if parent_off + core::mem::size_of::<BinderBufferObject>() > data_size {
+        return None;
+    }
+    // SAFETY: validated within the data area.
+    let p = core::ptr::read_volatile((kvirt.add(block_off + parent_off) as *const BinderBufferObject).cast_mut());
+    if p.hdr_type != BINDER_TYPE_PTR {
+        return None;
+    }
+    // The parent's .buffer was already rewritten to the target-user
+    // address of its sg copy; map it back to the kernel address and bound
+    // it inside the sg area.
+    let extra_base = offsets_at + align8(offsets_size);
+    let rel = p.buffer.checked_sub(block_user)? as usize;
+    if rel < extra_base || rel + p.length as usize > extra_base + sg_size {
+        return None;
+    }
+    Some((kvirt.add(block_off + rel), p.length as usize))
 }
 
 /// Undo the pins taken at resolve time when the transaction failed after
@@ -1993,6 +2298,60 @@ fn release_block(proc: &Arc<BinderProc>, off: usize) {
     }
 }
 
+/// binder_translate_fd: install a sender fd into the TARGET process's fd
+/// table (fget in the sender, get_unused_fd + fd_install on the target
+/// opener task). Runs in the sender's ioctl context and NEVER under WORLD
+/// — fd-table locks and file close ops may nest back into binder code.
+/// Returns the new target fd, or None (invalid fd / target gone / full).
+fn translate_fd_into(sender_fd: u32, target: &Arc<BinderProc>) -> Option<usize> {
+    let cur = crate::sched::current()?;
+    let sender_fdt = cur.try_fdtable()?;
+    let file = sender_fdt.get_file(sender_fd as usize)?;
+    let ttask = crate::process::pid_hash::pid_hash_lookup_pinned(target.pid);
+    if ttask.is_null() {
+        return None;
+    }
+    // SAFETY: pinned task pointer (task_refcnt held by the lookup).
+    let r = unsafe {
+        match (*ttask).try_fdtable().and_then(|t| t.alloc_fd()) {
+            Some(fd) => {
+                let fdt = (*ttask).try_fdtable().unwrap();
+                if fdt.install_fd(fd, file).is_err() {
+                    // Return the slot (cannot realistically fail on a
+                    // just-allocated fd, but do not leak it).
+                    let _ = fdt.close_fd(fd);
+                    None
+                } else {
+                    Some(fd)
+                }
+            }
+            None => None,
+        }
+    };
+    // SAFETY: drop the pin taken by pid_hash_lookup_pinned.
+    unsafe { crate::process::task::Task::task_put(ttask) };
+    r
+}
+
+/// Close fds installed into target processes when their transaction
+/// failed after the installs (binder_transaction_buffer_release's
+/// fd cleanup loop). NEVER under WORLD: close_fd runs file close ops.
+fn close_installed_fds(installed: &[(u32, usize)]) {
+    for (pid, fd) in installed {
+        let t = crate::process::pid_hash::pid_hash_lookup_pinned(*pid);
+        if t.is_null() {
+            continue;
+        }
+        // SAFETY: pinned task pointer.
+        unsafe {
+            if let Some(fdt) = (*t).try_fdtable() {
+                let _ = fdt.close_fd(*fd);
+            }
+            crate::process::task::Task::task_put(t);
+        }
+    }
+}
+
 /// flat_binder_object translation across processes: local binder -> handle
 /// for the target, handle -> handle rebind (or back to a local binder when
 /// the target IS the sender).
@@ -2012,7 +2371,13 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
                         match sp.im().nodes.iter().find(|n| n.ptr == ptr).cloned() {
                             Some(n) => n,
                             None => {
-                                let n = Arc::new(BinderNode::new(world.next_id, ptr, obj.cookie, sender.id));
+                                let n = Arc::new(BinderNode::new(
+                                    world.next_id,
+                                    ptr,
+                                    obj.cookie,
+                                    sender.id,
+                                    obj.flags,
+                                ));
                                 world.next_id += 1;
                                 sp.im().nodes.push(n.clone());
                                 n
@@ -2051,8 +2416,11 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
                     obj._handle_pad = 0;
                     true
                 }
-                BINDER_TYPE_FD => {
-                    crate::pr_info!("binder: BINDER_TYPE_FD translation unsupported in S1");
+                BINDER_TYPE_FD | BINDER_TYPE_FDA | BINDER_TYPE_PTR => {
+                    // Handled by the fd/sg machinery in binder_transaction
+                    // BEFORE the world lock (fd-table ops never run under
+                    // WORLD). Reaching here means a re-parse bug.
+                    crate::pr_info!("binder: object type {:#x} reached node translation", obj.hdr_type);
                     false
                 }
                 _ => {

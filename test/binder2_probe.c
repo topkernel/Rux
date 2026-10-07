@@ -104,7 +104,30 @@ enum {
     BINDER_TYPE_WEAK_BINDER = B_PACK_CHARS('w', 'b', '*', B_TYPE_LARGE),
     BINDER_TYPE_HANDLE = B_PACK_CHARS('s', 'h', '*', B_TYPE_LARGE),
     BINDER_TYPE_WEAK_HANDLE = B_PACK_CHARS('w', 'h', '*', B_TYPE_LARGE),
+    BINDER_TYPE_FD = B_PACK_CHARS('f', 'd', '*', B_TYPE_LARGE),
+    BINDER_TYPE_FDA = B_PACK_CHARS('f', 'd', 'a', B_TYPE_LARGE),
+    BINDER_TYPE_PTR = B_PACK_CHARS('p', 't', '*', B_TYPE_LARGE),
 };
+
+struct binder_buffer_object {
+    uint32_t hdr_type;
+    uint32_t flags;
+    uint64_t buffer;
+    uint64_t length;
+    uint64_t parent;
+    uint64_t parent_offset;
+};
+
+struct binder_fd_array_object {
+    uint32_t hdr_type;
+    uint32_t flags;
+    uint64_t num_fds;
+    uint64_t parent;
+    uint64_t parent_offset;
+};
+
+#define FLAT_BINDER_FLAG_ACCEPTS_FDS 0x100
+#define BINDER_BUFFER_FLAG_HAS_PARENT 0x01
 
 #define BINDER_WRITE_READ _IOWR('b', 1, struct binder_write_read)
 #define BINDER_SET_MAX_THREADS _IOW('b', 5, uint32_t)
@@ -115,8 +138,14 @@ struct binder_version {
     int32_t protocol_version;
 };
 
+struct binder_transaction_data_sg {
+    struct binder_transaction_data data;
+    binder_size_t buffers_size;
+};
+
 enum {
     BC_TRANSACTION = _IOW('c', 0, struct binder_transaction_data),
+    BC_TRANSACTION_SG = _IOW('c', 17, struct binder_transaction_data_sg),
     BC_REPLY = _IOW('c', 1, struct binder_transaction_data),
     BC_FREE_BUFFER = _IOW('c', 3, binder_uintptr_t),
     BC_INCREFS = _IOW('c', 4, uint32_t),
@@ -164,6 +193,8 @@ enum {
 #define CODE_GET 101
 #define CODE_ECHO 102
 #define CODE_TERM 103
+#define CODE_SENDFD 104 /* parcel carries a BINDER_TYPE_FD */
+#define CODE_SENDRAW 105 /* BC_TRANSACTION_SG with PTR + FDA */
 
 #define REQ_MAGIC 0xB1D2F00Du
 #define REP_MAGIC 0xB2D2F00Du
@@ -618,6 +649,52 @@ static int do_txn(uint32_t handle, uint32_t code, size_t data_size, size_t offse
     return 0;
 }
 
+/* Send a sync BC_TRANSACTION_SG with extra sg payload. */
+static int do_txn_sg(uint32_t handle, uint32_t code, size_t data_size, size_t offsets_size,
+                     size_t buffers_size, struct br_seen *out)
+{
+    uint64_t offs[4] = {0, 40, 0, 0};
+    struct binder_transaction_data_sg tsg;
+    memset(&tsg, 0, sizeof(tsg));
+    tsg.data.target.handle = handle;
+    tsg.data.code = code;
+    tsg.data.flags = 0x10; /* TF_ACCEPT_FDS */
+    tsg.data.data_size = data_size;
+    tsg.data.offsets_size = offsets_size;
+    tsg.data.data.ptr.buffer = (uintptr_t)(g_map + SCRATCH_OFF);
+    tsg.data.data.ptr.offsets = (uintptr_t)&offs;
+    tsg.buffers_size = buffers_size;
+
+    struct bcbuf c;
+    bc_reset(&c);
+    queue_node_dones(&c);
+    bc_u32(&c, BC_TRANSACTION_SG);
+    bc_put(&c, &tsg, sizeof(tsg));
+
+    memset(out, 0, sizeof(*out));
+    while (!out->have_reply && !out->dead_reply && !out->failed_reply && !out->fatal) {
+        struct br_seen r1;
+        memset(&r1, 0, sizeof(r1));
+        if (bwr_round(&c, &r1) < 0)
+            return -1;
+        bc_reset(&c);
+        queue_node_dones(&c);
+        out->complete += r1.complete;
+        out->node_refs += r1.node_refs;
+        if (r1.have_reply) {
+            out->reply = r1.reply;
+            out->have_reply = 1;
+            break;
+        }
+        if (r1.dead_reply || r1.failed_reply) {
+            out->dead_reply += r1.dead_reply;
+            out->failed_reply += r1.failed_reply;
+            break;
+        }
+    }
+    return 0;
+}
+
 static int free_buffer(uint64_t ptr)
 {
     struct bcbuf c;
@@ -774,10 +851,19 @@ static int run_service(int ready_pipe, int ok_pipe)
     if (read(ready_pipe, &r, 1) != 1 || r != 'R')
         die("service ready read");
 
-    /* register: ADD via handle 0 carrying our binder object */
+    /* service-side pipe whose write end travels back to the client in
+     * the CODE_SENDFD reply (cross-process fd install on the reply path) */
+    int pipeY[2];
+    if (pipe(pipeY) < 0)
+        die("service pipeY");
+
+    /* register: ADD via handle 0 carrying our binder object (registered
+     * with FLAT_BINDER_FLAG_ACCEPTS_FDS so it may receive fds) */
     {
         uint64_t off0 = 0;
         size_t ds = build_obj_req(BINDER_TYPE_BINDER, SVC_PTR, SVC_COOKIE, 7, &off0);
+        struct flat_binder_object *reg = (struct flat_binder_object *)(g_map + SCRATCH_OFF);
+        reg->flags = FLAT_BINDER_FLAG_ACCEPTS_FDS;
         struct br_seen s;
         if (do_txn(0, CODE_ADD, ds, 8, &s) < 0)
             die("service add txn");
@@ -812,14 +898,59 @@ static int run_service(int ready_pipe, int ok_pipe)
             if (s.txn.target.ptr != SVC_PTR || s.txn.cookie != SVC_COOKIE)
                 die2("service: txn target not our object");
             uint8_t *buf = (uint8_t *)(uintptr_t)s.txn.data.ptr.buffer;
-            if (s.txn.offsets_size == 8) {
+            uint32_t code = s.txn.code;
+            size_t hdr = 0; /* leading object bytes before the req parcel */
+            int reply_with_fd = -1; /* fd for the reply object, if >= 0 */
+
+            if (code == CODE_SENDFD) {
+                if (s.txn.offsets_size != 8)
+                    die2("service: SENDFD offsets");
+                uint64_t roff;
+                memcpy(&roff, (void *)(uintptr_t)s.txn.data.ptr.offsets, 8);
+                struct flat_binder_object *fo = (struct flat_binder_object *)(buf + roff);
+                if (fo->type != BINDER_TYPE_FD)
+                    die2("service: SENDFD object not an FD");
+                /* write through the installed fd: the client reads it on
+                 * its own read end — proves it is the same open file */
+                if (write((int)fo->handle, "S", 1) != 1)
+                    die2("service: write via translated fd");
+                reply_with_fd = pipeY[1];
+                hdr = sizeof(*fo);
+            } else if (code == CODE_SENDRAW) {
+                if (s.txn.offsets_size != 16)
+                    die2("service: SENDRAW offsets");
+                uint64_t offs[2];
+                memcpy(offs, (void *)(uintptr_t)s.txn.data.ptr.offsets, 16);
+                struct binder_buffer_object *bp = (struct binder_buffer_object *)(buf + offs[0]);
+                struct binder_fd_array_object *fda = (struct binder_fd_array_object *)(buf + offs[1]);
+                if (bp->hdr_type != BINDER_TYPE_PTR || fda->hdr_type != BINDER_TYPE_FDA)
+                    die2("service: SENDRAW object types");
+                if (bp->length != 64)
+                    die2("service: SENDRAW ptr length");
+                /* the PTR's buffer must now point INTO our own mapping */
+                uint8_t *raw = (uint8_t *)(uintptr_t)bp->buffer;
+                if (raw < g_map || raw + 64 > g_map + MAP_SIZE)
+                    die2("service: SENDRAW ptr not fixed up to our mapping");
+                if (memcmp(raw, "RAWDATA", 7) != 0 || memcmp(raw + 24, "TAILDATA", 8) != 0)
+                    die2("service: SENDRAW pattern mismatch");
+                if (fda->num_fds != 2 || fda->parent != 0 || fda->parent_offset != 16)
+                    die2("service: SENDRAW fda meta");
+                uint32_t fd0, fd1;
+                memcpy(&fd0, raw + 16, 4);
+                memcpy(&fd1, raw + 20, 4);
+                if (write((int)fd0, "1", 1) != 1 || write((int)fd1, "2", 1) != 1)
+                    die2("service: write via fda fds");
+                hdr = sizeof(*bp) + sizeof(*fda);
+            } else if (s.txn.offsets_size == 8) {
                 uint64_t roff;
                 memcpy(&roff, (void *)(uintptr_t)s.txn.data.ptr.offsets, 8);
                 struct flat_binder_object *fo = (struct flat_binder_object *)(buf + roff);
                 if (fo->type != BINDER_TYPE_BINDER || fo->binder != SVC_PTR)
                     die2("service: echo object not restored");
+                hdr = sizeof(*fo);
             }
-            struct req_parcel *req = (struct req_parcel *)(buf + (s.txn.offsets_size ? sizeof(struct flat_binder_object) : 0));
+
+            struct req_parcel *req = (struct req_parcel *)(buf + hdr);
             if (req->magic != REQ_MAGIC || fnv1a(req->data, req->len) != req->sum)
                 die2("service: bad ping parcel");
 
@@ -829,15 +960,29 @@ static int run_service(int ready_pipe, int ok_pipe)
             rep->val = req->sum;
             rep->sum2 = req->sum ^ 0xA5A5A5A5u;
             memset(rep->data, 0x5A, DATA_LEN);
-            memcpy(g_map + SCRATCH_OFF, rep, sizeof(*rep));
 
             uint64_t off0 = 0;
+            size_t rdata = sizeof(*rep);
+            size_t roffs = 0;
+            if (reply_with_fd >= 0) {
+                struct flat_binder_object rfo;
+                memset(&rfo, 0, sizeof(rfo));
+                rfo.type = BINDER_TYPE_FD;
+                rfo.handle = (uint32_t)reply_with_fd;
+                memcpy(g_map + SCRATCH_OFF, &rfo, sizeof(rfo));
+                memcpy(g_map + SCRATCH_OFF + sizeof(rfo), rep, sizeof(*rep));
+                rdata = sizeof(rfo) + sizeof(*rep);
+                roffs = 8;
+            } else {
+                memcpy(g_map + SCRATCH_OFF, rep, sizeof(*rep));
+            }
+
             struct binder_transaction_data rt;
             memset(&rt, 0, sizeof(rt));
             rt.code = s.txn.code;
             rt.flags = 0;
-            rt.data_size = sizeof(*rep);
-            rt.offsets_size = 0;
+            rt.data_size = rdata;
+            rt.offsets_size = roffs;
             rt.data.ptr.buffer = (uintptr_t)(g_map + SCRATCH_OFF);
             rt.data.ptr.offsets = (uintptr_t)&off0;
 
@@ -928,6 +1073,153 @@ static int run_client(int ready_pipe)
         queue_node_dones(&c);
         if (c.len && bwr_write_only(&c) < 0)
             die("client dones");
+    }
+
+    /* F1. fd passing both ways: send a pipe write end to the service
+     * (BINDER_TYPE_FD in the txn); the reply carries one of the service's
+     * own fds back. Requires the service node to accept fds and the txn
+     * to carry TF_ACCEPT_FDS for the reply fd. */
+    {
+        int pipeX[2];
+        if (pipe(pipeX) < 0)
+            die("client pipeX");
+        size_t ds = build_plain_req(61);
+        /* move the parcel behind the object, then place the fd object */
+        memmove(g_map + SCRATCH_OFF + sizeof(struct flat_binder_object),
+                g_map + SCRATCH_OFF, sizeof(struct req_parcel));
+        struct flat_binder_object fo;
+        memset(&fo, 0, sizeof(fo));
+        fo.type = BINDER_TYPE_FD;
+        fo.handle = (uint32_t)pipeX[1];
+        memcpy(g_map + SCRATCH_OFF, &fo, sizeof(fo));
+
+        uint64_t off0 = 0;
+        struct binder_transaction_data tr;
+        memset(&tr, 0, sizeof(tr));
+        tr.target.handle = svc;
+        tr.code = CODE_SENDFD;
+        tr.flags = 0x10;
+        tr.data_size = sizeof(fo) + sizeof(struct req_parcel);
+        tr.offsets_size = 8;
+        tr.data.ptr.buffer = (uintptr_t)(g_map + SCRATCH_OFF);
+        tr.data.ptr.offsets = (uintptr_t)&off0;
+        (void)ds;
+
+        struct bcbuf c;
+        bc_reset(&c);
+        queue_node_dones(&c);
+        bc_u32(&c, BC_TRANSACTION);
+        bc_put(&c, &tr, sizeof(tr));
+
+        struct br_seen s;
+        memset(&s, 0, sizeof(s));
+        while (!s.have_reply && !s.dead_reply && !s.failed_reply && !s.fatal) {
+            struct br_seen r1;
+            memset(&r1, 0, sizeof(r1));
+            if (bwr_round(&c, &r1) < 0)
+                die("client sendfd bwr");
+            bc_reset(&c);
+            queue_node_dones(&c);
+            if (r1.have_reply) {
+                s.reply = r1.reply;
+                s.have_reply = 1;
+            }
+            if (r1.dead_reply || r1.failed_reply) {
+                s.dead_reply += r1.dead_reply;
+                s.failed_reply += r1.failed_reply;
+                break;
+            }
+        }
+        if (!s.have_reply)
+            die2("client: no reply to SENDFD");
+        uint8_t *rbuf = (uint8_t *)(uintptr_t)s.reply.data.ptr.buffer;
+        if (s.reply.offsets_size != 8)
+            die2("client: SENDFD reply has no fd object");
+        struct flat_binder_object *rfo = (struct flat_binder_object *)rbuf;
+        if (rfo->type != BINDER_TYPE_FD)
+            die2("client: SENDFD reply object not an FD");
+        int svc_fd = (int)rfo->handle;
+        if (svc_fd <= 2)
+            die2("client: reply fd implausible");
+        struct rep_parcel *rep = (struct rep_parcel *)(rbuf + sizeof(*rfo));
+        if (rep->magic != REP_MAGIC)
+            die2("client: SENDFD reply bad");
+        if (free_buffer((uint64_t)(uintptr_t)rbuf) < 0)
+            die("client free sendfd");
+        /* write through the received fd; the service must observe it */
+        if (write(svc_fd, "R", 1) != 1)
+            die2("client: write via service fd");
+        close(svc_fd);
+        /* the service wrote 'S' through OUR pipe write end */
+        char b = 0;
+        if (read(pipeX[0], &b, 1) != 1 || b != 'S')
+            die2("client: no byte from service via translated fd");
+        close(pipeX[0]);
+        close(pipeX[1]);
+    }
+
+    /* F2. sg buffers + fd array: BC_TRANSACTION_SG with a BINDER_TYPE_PTR
+     * (extra raw data, copied into the target's sg area) and a
+     * BINDER_TYPE_FDA (two fds inside the parent buffer). */
+    {
+        int pipeA[2], pipeB[2];
+        if (pipe(pipeA) < 0 || pipe(pipeB) < 0)
+            die("client pipes");
+        uint8_t raw[64];
+        memset(raw, 0, sizeof(raw));
+        memcpy(raw, "RAWDATA", 7);
+        memcpy(raw + 24, "TAILDATA", 8);
+        uint32_t f0 = (uint32_t)pipeA[1];
+        uint32_t f1 = (uint32_t)pipeB[1];
+        memcpy(raw + 16, &f0, 4);
+        memcpy(raw + 20, &f1, 4);
+
+        /* parcel: [PTR(40)][FDA(32)][req] */
+        struct binder_buffer_object bp;
+        memset(&bp, 0, sizeof(bp));
+        bp.hdr_type = BINDER_TYPE_PTR;
+        bp.flags = 0; /* no parent fixup */
+        bp.buffer = (uintptr_t)raw;
+        bp.length = 64;
+        struct binder_fd_array_object fda;
+        memset(&fda, 0, sizeof(fda));
+        fda.hdr_type = BINDER_TYPE_FDA;
+        fda.num_fds = 2;
+        fda.parent = 0;
+        fda.parent_offset = 16;
+
+        uint8_t *base = g_map + SCRATCH_OFF;
+        memcpy(base, &bp, sizeof(bp));
+        memcpy(base + sizeof(bp), &fda, sizeof(fda));
+        struct req_parcel *req = (struct req_parcel *)(base + sizeof(bp) + sizeof(fda));
+        req->magic = REQ_MAGIC;
+        req->len = DATA_LEN;
+        req->pad = 71;
+        for (uint32_t i = 0; i < DATA_LEN; i++)
+            req->data[i] = (uint8_t)((71 * 131 + i * 7) & 0xff);
+        req->sum = fnv1a(req->data, DATA_LEN);
+
+        struct br_seen s;
+        if (do_txn_sg(svc, CODE_SENDRAW,
+                      sizeof(bp) + sizeof(fda) + sizeof(*req), 16,
+                      64, &s) < 0)
+            die("client sendraw txn");
+        if (!s.have_reply)
+            die2("client: no reply to SENDRAW");
+        uint8_t *rbuf = (uint8_t *)(uintptr_t)s.reply.data.ptr.buffer;
+        struct rep_parcel *rep = (struct rep_parcel *)rbuf;
+        if (rep->magic != REP_MAGIC)
+            die2("client: SENDRAW reply bad");
+        if (free_buffer((uint64_t)(uintptr_t)rbuf) < 0)
+            die("client free sendraw");
+
+        char b1 = 0, b2 = 0;
+        if (read(pipeA[0], &b1, 1) != 1 || b1 != '1')
+            die2("client: no byte via fda fd0");
+        if (read(pipeB[0], &b2, 1) != 1 || b2 != '2')
+            die2("client: no byte via fda fd1");
+        close(pipeA[0]); close(pipeA[1]);
+        close(pipeB[0]); close(pipeB[1]);
     }
 
     /* 3. request (B) then clear -> CLEAR_DONE(B), no death

@@ -105,8 +105,10 @@ def main():
                     print("[boot] KERNEL PANIC detected")
                     rc = 2
                     break
-                for line in text.split(b"\n"):
-                    if line.startswith(MARKER.encode()):
+                # Complete lines only: drop the trailing segment that a
+                # serial chunk boundary may have cut mid-line.
+                for line in text.split(b"\n")[:-1]:
+                    if line.startswith(MARKER.encode()) and len(line) > len(MARKER) + 1:
                         verdict = line.decode(errors="replace").strip()
                         print("[boot] %s" % verdict)
                         rc = 0 if " PASS " in verdict or verdict.endswith("PASS") or "PASS" in verdict else 1
