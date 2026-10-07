@@ -127,7 +127,19 @@ struct binder_fd_array_object {
 };
 
 #define FLAT_BINDER_FLAG_ACCEPTS_FDS 0x100
+#define FLAT_BINDER_FLAG_TXN_SECURITY_CTX 0x1000
 #define BINDER_BUFFER_FLAG_HAS_PARENT 0x01
+
+struct binder_transaction_data_secctx {
+    struct binder_transaction_data transaction_data;
+    binder_uintptr_t secctx;
+};
+
+struct binder_sender_info {
+    int32_t pid;
+    uint32_t uid;
+    uint64_t tokenid;
+};
 
 #define BINDER_WRITE_READ _IOWR('b', 1, struct binder_write_read)
 #define BINDER_SET_MAX_THREADS _IOW('b', 5, uint32_t)
@@ -178,6 +190,7 @@ enum {
     BR_NOOP = _IO('r', 12),
     BR_SPAWN_LOOPER = _IO('r', 13),
     BR_FAILED_REPLY = _IO('r', 17),
+    BR_TRANSACTION_SECCTX = _IOR('r', 42, struct binder_transaction_data_secctx),
 };
 
 /* ---- configuration ---- */
@@ -240,20 +253,26 @@ static int g_pending_done_n = 0;
  * BR_TRANSACTIONs; like libbinder's executeCommand loop they must all be
  * handled, not just the last one. */
 static struct binder_transaction_data g_pending_txn[8];
+static uint64_t g_pending_secctx[8];
 static int g_pending_txn_n = 0;
 
-static void note_txn(struct binder_transaction_data *td)
+static void note_txn(struct binder_transaction_data *td, uint64_t secctx)
 {
-    if (g_pending_txn_n < 8)
-        g_pending_txn[g_pending_txn_n++] = *td;
+    if (g_pending_txn_n < 8) {
+        g_pending_txn[g_pending_txn_n] = *td;
+        g_pending_secctx[g_pending_txn_n] = secctx;
+        g_pending_txn_n++;
+    }
 }
 
-static int take_txn(struct binder_transaction_data *td)
+static int take_txn(struct binder_transaction_data *td, uint64_t *secctx)
 {
     if (g_pending_txn_n == 0)
         return 0;
     *td = g_pending_txn[0];
+    *secctx = g_pending_secctx[0];
     memmove(g_pending_txn, g_pending_txn + 1, sizeof(g_pending_txn[0]) * (size_t)(g_pending_txn_n - 1));
+    memmove(g_pending_secctx, g_pending_secctx + 1, sizeof(g_pending_secctx[0]) * (size_t)(g_pending_txn_n - 1));
     g_pending_txn_n--;
     return 1;
 }
@@ -405,6 +424,8 @@ static size_t br_payload(uint32_t cmd)
     case BR_TRANSACTION:
     case BR_REPLY:
         return sizeof(struct binder_transaction_data);
+    case BR_TRANSACTION_SECCTX:
+        return sizeof(struct binder_transaction_data_secctx);
     case BR_INCREFS:
     case BR_ACQUIRE:
     case BR_RELEASE:
@@ -462,8 +483,16 @@ static void br_dispatch(uint32_t cmd, const uint8_t *payload, struct br_seen *s)
     case BR_TRANSACTION:
         memcpy(&s->txn, payload, sizeof(s->txn));
         s->have_txn = 1;
-        note_txn(&s->txn);
+        note_txn(&s->txn, 0);
         return;
+    case BR_TRANSACTION_SECCTX: {
+        struct binder_transaction_data_secctx ts;
+        memcpy(&ts, payload, sizeof(ts));
+        s->txn = ts.transaction_data;
+        s->have_txn = 1;
+        note_txn(&s->txn, ts.secctx);
+        return;
+    }
     case BR_REPLY:
         memcpy(&s->reply, payload, sizeof(s->reply));
         s->have_reply = 1;
@@ -777,7 +806,8 @@ static int run_samgr(int ready_pipe)
             die2("samgr: unexpected CLEAR_DONE");
 
         struct binder_transaction_data td;
-        while (take_txn(&td)) {
+        uint64_t sec;
+        while (take_txn(&td, &sec)) {
             s.txn = td;
             served++;
             uint8_t *buf = (uint8_t *)(uintptr_t)s.txn.data.ptr.buffer;
@@ -890,7 +920,7 @@ static int run_service(int ready_pipe, int ok_pipe)
         uint64_t off0 = 0;
         size_t ds = build_obj_req(BINDER_TYPE_BINDER, SVC_PTR, SVC_COOKIE, 7, &off0);
         struct flat_binder_object *reg = (struct flat_binder_object *)(g_map + SCRATCH_OFF);
-        reg->flags = FLAT_BINDER_FLAG_ACCEPTS_FDS;
+        reg->flags = FLAT_BINDER_FLAG_ACCEPTS_FDS | FLAT_BINDER_FLAG_TXN_SECURITY_CTX;
         struct br_seen s;
         if (do_txn(0, CODE_ADD, ds, 8, &s) < 0)
             die("service add txn");
@@ -908,6 +938,8 @@ static int run_service(int ready_pipe, int ok_pipe)
 
     int pings = 0;
     int oneways = 0;
+    int secctx_seen = 0;
+    int secctx_missing = 0;
     while (1) {
         struct br_seen s;
         memset(&s, 0, sizeof(s));
@@ -923,10 +955,21 @@ static int run_service(int ready_pipe, int ok_pipe)
             die2("service: unexpected CLEAR_DONE");
 
         struct binder_transaction_data td;
-        while (take_txn(&td)) {
+        uint64_t sec;
+        while (take_txn(&td, &sec)) {
             s.txn = td;
             if (s.txn.target.ptr != SVC_PTR || s.txn.cookie != SVC_COOKIE)
                 die2("service: txn target not our object");
+            if (sec != 0) {
+                struct binder_sender_info *si = (struct binder_sender_info *)(uintptr_t)sec;
+                if (si->pid != s.txn.sender_pid)
+                    die2("service: secctx pid mismatch");
+                if (si->uid != getuid())
+                    die2("service: secctx uid mismatch");
+                secctx_seen++;
+            } else {
+                secctx_missing++;
+            }
             if (s.txn.flags & TF_ONE_WAY) {
                 /* oneway: no reply, no txn stack — just count and free */
                 uint8_t *obuf = (uint8_t *)(uintptr_t)s.txn.data.ptr.buffer;
@@ -1042,7 +1085,8 @@ static int run_service(int ready_pipe, int ok_pipe)
 
             pings++;
             if (term) {
-                printf("B2 SERVICE DONE: pings=%d oneways=%d\n", pings, oneways);
+                printf("B2 SERVICE DONE: pings=%d oneways=%d secctx=%d missing=%d\n",
+                       pings, oneways, secctx_seen, secctx_missing);
                 fflush(stdout);
                 munmap(g_map, MAP_SIZE);
                 close(g_fd); /* death notifications fire here */
@@ -1076,7 +1120,8 @@ static int run_hwmgr(int ready_pipe)
         if (bwr_round(&c, &s) < 0 || s.fatal)
             die("hwmgr bwr");
         struct binder_transaction_data td;
-        while (take_txn(&td)) {
+        uint64_t sec;
+        while (take_txn(&td, &sec)) {
         s.txn = td;
         served++;
         uint8_t *buf = (uint8_t *)(uintptr_t)s.txn.data.ptr.buffer;

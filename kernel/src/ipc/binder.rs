@@ -91,6 +91,9 @@ pub const TF_ACCEPT_FDS: u32 = 0x10;
 
 /// flat_binder_object.flags: the target accepts BINDER_TYPE_FD objects.
 pub const FLAT_BINDER_FLAG_ACCEPTS_FDS: u32 = 0x100;
+/// flat_binder_object.flags: transactions to this node carry the sender's
+/// security context (upstream FLAT_BINDER_FLAG_TXN_SECURITY_CTX).
+pub const FLAT_BINDER_FLAG_TXN_SECURITY_CTX: u32 = 0x1000;
 /// binder_buffer_object.flags: fix up the parent buffer with this
 /// object's translated address (binder_fixup_parent).
 pub const BINDER_BUFFER_FLAG_HAS_PARENT: u32 = 0x01;
@@ -144,6 +147,10 @@ pub const BR_SPAWN_LOOPER: u32 = io(b'r' as u32, 13);
 pub const BR_DEAD_BINDER: u32 = ior(b'r' as u32, 11, SZ_U64);
 pub const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = ior(b'r' as u32, 14, SZ_U64);
 pub const BR_FAILED_REPLY: u32 = io(b'r' as u32, 17);
+/// struct binder_transaction_data_secctx (upstream): the transaction data
+/// followed by a pointer to a sender-info record in the buffer's extra
+/// area. OH's libbinder reads the sender identity from it.
+pub const BR_TRANSACTION_SECCTX: u32 = ior(b'r' as u32, 42, 72);
 
 /// struct binder_transaction_data (LP64)
 #[repr(C)]
@@ -217,6 +224,18 @@ struct BinderFdArrayObject {
     parent_offset: u64,
 }
 const _: () = assert!(core::mem::size_of::<BinderFdArrayObject>() == 32);
+
+/// Sender-info record copied into the transaction's sg area when the
+/// target node opted into FLAT_BINDER_FLAG_TXN_SECURITY_CTX (OH's
+/// GetCallerPid/GetCallerUid/GetCallerTokenID source).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BinderSenderInfo {
+    pid: i32,
+    uid: u32,
+    tokenid: u64,
+}
+const _: () = assert!(core::mem::size_of::<BinderSenderInfo>() == 16);
 
 /// Minimum in-buffer size of each object type (binder_validate_object;
 /// on LP64 the fd object carries an 8-byte union like flat_binder_object).
@@ -300,7 +319,8 @@ struct BinderNode {
     ptr: u64,
     cookie: u64,
     proc_id: u64,
-    /// flat_binder_object.flags at registration (accept_fds bit).
+    /// flat_binder_object.flags at registration (accept_fds and
+    /// txn_security_ctx bits).
     flags: u32,
     st: core::cell::UnsafeCell<NodeState>,
 }
@@ -571,6 +591,9 @@ struct BinderTxn {
     data_size: usize,
     offsets_size: usize,
     buffer_off: usize,
+    /// Target-user address of the BinderSenderInfo record in the sg area
+    /// (0: the target node did not request a security context).
+    security_ctx: u64,
 }
 
 impl BinderTxn {
@@ -1893,6 +1916,10 @@ fn binder_transaction(
     // original transaction's TF_ACCEPT_FDS; transactions need the target
     // node's FLAT_BINDER_FLAG_ACCEPTS_FDS.
     let mut allows_fd = false;
+    // Sender-info record space folded into the sg area for nodes opted
+    // into FLAT_BINDER_FLAG_TXN_SECURITY_CTX.
+    let mut secctx_space = 0usize;
+    let mut sg_total = sg_size;
     let txn_id;
 
     {
@@ -1989,6 +2016,9 @@ fn binder_transaction(
             if !reply {
                 if let Some(node) = &target_node {
                     allows_fd = node.flags & FLAT_BINDER_FLAG_ACCEPTS_FDS != 0;
+                    if node.flags & FLAT_BINDER_FLAG_TXN_SECURITY_CTX != 0 {
+                        secctx_space = align8(core::mem::size_of::<BinderSenderInfo>());
+                    }
                 }
             }
 
@@ -1998,12 +2028,13 @@ fn binder_transaction(
             let is_async = !reply && oneway;
             let _ = is_async;
 
+            sg_total += secctx_space;
             let off = pm(world, tp)
                 .im()
                 .alloc
                 .as_mut()
                 .unwrap()
-                .new_buf(data_size, offsets_size, sg_size, is_async);
+                .new_buf(data_size, offsets_size, sg_total, is_async);
             let Some(off) = off else {
                 *err_cmd = BR_FAILED_REPLY;
                 crate::pr_info!(
@@ -2066,6 +2097,29 @@ fn binder_transaction(
         }
     }
 
+    // ---- sender-info record (BR_TRANSACTION_SECCTX payload) ------------
+    // Written at the start of the sg area, ahead of any BINDER_TYPE_PTR
+    // payloads (upstream prepends the security context there).
+    let extra_base = align8(data_size) + align8(offsets_size);
+    let mut sg_used = 0usize;
+    let mut security_ctx: u64 = 0;
+    if secctx_space > 0 {
+        let (sender_pid, sender_euid) = match crate::sched::current() {
+            Some(t) => ((*t).pid() as i32, (*t).cred().euid),
+            None => (0, 0),
+        };
+        let info = BinderSenderInfo { pid: sender_pid, uid: sender_euid, tokenid: 0 };
+        // SAFETY: the sg area is sized for secctx_space.
+        unsafe {
+            core::ptr::write_volatile(
+                kvirt.add(block_off + extra_base) as *mut BinderSenderInfo,
+                info,
+            );
+        }
+        security_ctx = user_base + block_off as u64 + extra_base as u64;
+        sg_used += secctx_space;
+    }
+
     // ---- translate flat binder objects ----------------------------------
     // Block layout: [data][offsets][sg extra area]. The sg cursor follows
     // BINDER_TYPE_PTR copies (Linux sg_bufp). Object fixups run WITHOUT the
@@ -2073,8 +2127,6 @@ fn binder_transaction(
     // happen under WORLD.
     if offsets_size > 0 {
         let n = offsets_size / 8;
-        let extra_base = align8(data_size) + align8(offsets_size);
-        let mut sg_used = 0usize;
         let block_user = user_base + block_off as u64;
         for i in 0..n {
             // SAFETY: offsets array inside the kernel-side block.
@@ -2120,7 +2172,7 @@ fn binder_transaction(
                     // SAFETY: validated within the data area.
                     let mut bp = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderBufferObject).cast_mut()) };
                     let bp_len = bp.length as usize;
-                    if bp_len > sg_size - sg_used {
+                    if bp_len > sg_total - sg_used {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!("binder: sg buffer overruns buffers_size");
                         return;
@@ -2147,7 +2199,7 @@ fn binder_transaction(
                         // binder_fixup_parent: write this buffer's target
                         // address into the parent buffer at parent_offset.
                         let Some((parent_kernel, parent_len)) =
-                            (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_size, i, bp.parent) })
+                            (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_total, i, bp.parent) })
                         else {
                             fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                             crate::pr_info!("binder: PTR fixup parent invalid");
@@ -2177,7 +2229,7 @@ fn binder_transaction(
                         return;
                     }
                     let Some((parent_kernel, parent_len)) =
-                        (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_size, i, fda.parent) })
+                        (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_total, i, fda.parent) })
                     else {
                         fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                         crate::pr_info!("binder: FDA parent invalid");
@@ -2244,6 +2296,7 @@ fn binder_transaction(
         data_size,
         offsets_size,
         buffer_off: block_off,
+        security_ctx,
     });
 
     let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
@@ -2719,7 +2772,9 @@ fn binder_thread_read(
                 let world = w.as_ref().unwrap();
                 let mut stop_full = false;
                 loop {
-                    if staged.len() + 4 + core::mem::size_of::<BinderTransactionData>() > read_size {
+                    // Budget covers BR_TRANSACTION_SECCTX (transaction
+                    // data + trailing secctx pointer) even when unused.
+                    if staged.len() + 4 + core::mem::size_of::<BinderTransactionData>() + 8 > read_size {
                         stop_full = true;
                         break;
                     }
@@ -2843,12 +2898,22 @@ fn binder_thread_read(
                                 data_buffer: buf_user,
                                 data_offsets: off_user,
                             };
-                            stage_cmd!(if is_reply { BR_REPLY } else { BR_TRANSACTION });
+                            let sec = !is_reply && t.security_ctx != 0;
+                            stage_cmd!(if is_reply {
+                                BR_REPLY
+                            } else if sec {
+                                BR_TRANSACTION_SECCTX
+                            } else {
+                                BR_TRANSACTION
+                            });
                             // SAFETY: BinderTransactionData is Copy + repr(C).
                             staged.extend_from_slice(core::slice::from_raw_parts(
                                 &td as *const BinderTransactionData as *const u8,
                                 core::mem::size_of::<BinderTransactionData>(),
                             ));
+                            if sec {
+                                stage_u64!(t.security_ctx);
+                            }
                             // The receiving side now owns the buffer.
                             if let Some(a) = t.to_proc.im().alloc.as_mut() {
                                 if let Some(b) = a.blocks.iter_mut().find(|b| b.off == t.buffer_off) {
