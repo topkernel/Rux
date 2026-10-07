@@ -443,6 +443,30 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         }
     }
 
+    // Binder mmap: /dev/binder maps the per-open transaction buffer zone
+    // (kernel-allocated contiguous pages shared kernel<->user, like the
+    // io_uring rings; transaction payloads land there and userspace reads
+    // them via the offsets handed out in BR_TRANSACTION/BR_REPLY).
+    if fd >= 0 {
+        // SAFETY: fd is valid; get_file_fd returns a valid Arc<File>.
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ops) = file.get_ops() {
+                if core::ptr::eq(ops as *const _, &crate::ipc::binder::BINDER_OPS as *const _) {
+                    return match crate::ipc::binder::binder_mmap_handler(
+                        &file,
+                        addr,
+                        actual_length,
+                        offset,
+                        prot_flags,
+                    ) {
+                        Ok(mapped) => mapped as i64,
+                        Err(e) => -(e as i64),
+                    };
+                }
+            }
+        }
+    }
+
     // Non-anonymous mapping without file descriptor
     if (map_flags & map::MAP_ANONYMOUS == 0) && fd < 0 {
         return mmap_error::EBADF;
