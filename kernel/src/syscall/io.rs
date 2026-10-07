@@ -721,6 +721,18 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
     }
 
+    // Binder IPC ioctls (BINDER_WRITE_READ etc. on /dev/binder): dispatch
+    // on the File's ops identity (evdev/loop pattern). The driver handles
+    // its own version/size checks.
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) = crate::ipc::binder::binder_file_ioctl(&file, request, arg) {
+                return ret;
+            }
+        }
+    }
+
     // Per-fd evdev ioctls (EVIOCG*/EVIOCGBIT/EVIOCGRAB on
     // /dev/input/eventX): dispatch on the File's ops identity. Without
     // this, input-capability queries (EVIOCGBIT above all) failed with

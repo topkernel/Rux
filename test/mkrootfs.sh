@@ -210,6 +210,20 @@ if [ -f "$CLOEXEC_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null;
     fi
 fi
 
+# Build + install the binder closed-loop probe (OpenHarmony port Spike S1;
+# static — runs against /dev/binder with its own UAPI definitions).
+BINDER_PROBE_SRC="$PROJECT_ROOT/test/binder_probe.c"
+if [ -f "$BINDER_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing binder_probe to /test/binder_probe..."
+    if riscv64-linux-gnu-gcc -static -O2 -Wall \
+         -o "$STAGING/test/binder_probe" "$BINDER_PROBE_SRC"; then
+        chmod +x "$STAGING/test/binder_probe"
+    else
+        echo "Warning: binder_probe failed to compile (skipped)"
+        rm -f "$STAGING/test/binder_probe"
+    fi
+fi
+
 # Build + install the pure-exec leak probe (static glibc; fork+execve+wait
 # churn of a real dynamic binary, printing /proc/meminfo HeapUsed every
 # 100 rounds — the workload that exposed the free_task_slot exe_path

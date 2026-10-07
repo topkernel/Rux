@@ -411,6 +411,20 @@ fn devtmpfs_populate() {
         );
     }
     crate::drivers::loop_dev::init_loops();
+
+    // binder IPC device (OpenHarmony port Spike S1): misc char node with
+    // per-open process contexts; ioctls/mmap dispatch on the BINDER_OPS
+    // file identity (evdev/loop pattern).
+    let _ = registry::register_char_device(crate::ipc::binder::DEV_BINDER, &crate::ipc::binder::BINDER_OPS);
+    children.insert(
+        String::from("binder"),
+        Arc::new(DevfsEntry::new_char_device_with_mode(
+            "binder",
+            crate::ipc::binder::DEV_BINDER,
+            0o020000 | 0o666,
+        )),
+    );
+
     for (name, devno, mode) in char_nodes.iter() {
         children.insert(
             String::from(*name),
@@ -1056,6 +1070,10 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         let b = alloc::boxed::Box::new(entry.devno);
         file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
         return 0;
+    }
+    if entry.devno == crate::ipc::binder::DEV_BINDER {
+        // Allocate the per-open binder process context.
+        return crate::ipc::binder::binder_open(file);
     }
     if entry.devno == crate::fs::pty::DEV_PTMX {
         return crate::fs::pty::ptmx_open(file);
