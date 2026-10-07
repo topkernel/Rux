@@ -115,6 +115,8 @@ pub const BC_ACQUIRE_DONE: u32 = iow(b'c' as u32, 9, SZ_PTR_COOKIE);
 pub const BC_REGISTER_LOOPER: u32 = io(b'c' as u32, 11);
 pub const BC_ENTER_LOOPER: u32 = io(b'c' as u32, 12);
 pub const BC_EXIT_LOOPER: u32 = io(b'c' as u32, 13);
+pub const BC_REQUEST_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 14, SZ_PTR_COOKIE);
+pub const BC_CLEAR_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 15, SZ_PTR_COOKIE);
 pub const BC_DEAD_BINDER_DONE: u32 = iow(b'c' as u32, 16, SZ_U64);
 pub const BC_TRANSACTION_SG: u32 = iow(b'c' as u32, 17, SZ_TR_SG);
 pub const BC_REPLY_SG: u32 = iow(b'c' as u32, 18, SZ_TR_SG);
@@ -131,6 +133,8 @@ pub const BR_RELEASE: u32 = ior(b'r' as u32, 9, SZ_PTR_COOKIE);
 pub const BR_DECREFS: u32 = ior(b'r' as u32, 10, SZ_PTR_COOKIE);
 pub const BR_NOOP: u32 = io(b'r' as u32, 12);
 pub const BR_SPAWN_LOOPER: u32 = io(b'r' as u32, 13);
+pub const BR_DEAD_BINDER: u32 = ior(b'r' as u32, 11, SZ_U64);
+pub const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = ior(b'r' as u32, 14, SZ_U64);
 pub const BR_FAILED_REPLY: u32 = io(b'r' as u32, 17);
 
 /// struct binder_transaction_data (LP64)
@@ -257,6 +261,30 @@ struct BinderRef {
     node: Arc<BinderNode>,
     strong: i32,
     weak: i32,
+    /// Death-notification request on this handle (Linux ref->death).
+    death: Option<RefDeath>,
+}
+
+/// Death-notification request state (Linux struct binder_ref_death +
+/// its work-item states).
+struct RefDeath {
+    cookie: u64,
+    /// Armed: requested, node still alive. Queued: Work::DeadBinder sits
+    /// on the proc todo (node dead, BR not yet read). Delivered:
+    /// BR_DEAD_BINDER was read, awaiting BC_DEAD_BINDER_DONE.
+    phase: DeathPhase,
+    /// BC_CLEAR_DEATH_NOTIFICATION arrived while the notification was
+    /// queued or delivered: after BC_DEAD_BINDER_DONE, deliver
+    /// BR_CLEAR_DEATH_NOTIFICATION_DONE and drop the request (Linux
+    /// BINDER_WORK_DEAD_BINDER_AND_CLEAR).
+    clear_pending: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DeathPhase {
+    Armed,
+    Queued,
+    Delivered,
 }
 
 struct BufBlock {
@@ -385,6 +413,12 @@ enum Work {
     /// BINDER_WORK_NODE: ref-state change; the read side derives
     /// BR_INCREFS/ACQUIRE/RELEASE/DECREFS from the counters (like Linux).
     Node(Arc<BinderNode>),
+    /// BINDER_WORK_DEAD_BINDER(_AND_CLEAR): (ref desc, cookie). The node
+    /// died; deliver BR_DEAD_BINDER.
+    DeadBinder { desc: u32, cookie: u64 },
+    /// BINDER_WORK_CLEAR_DEATH_NOTIFICATION: deliver
+    /// BR_CLEAR_DEATH_NOTIFICATION_DONE (cookie).
+    ClearDeathDone { cookie: u64 },
 }
 
 struct BinderTxn {
@@ -460,6 +494,9 @@ struct ProcInner {
     alloc: Option<BinderAlloc>,
     nodes: Vec<Arc<BinderNode>>,
     refs: Vec<BinderRef>,
+    /// Next handle descriptor to hand out. Starts at 1: desc 0 is
+    /// reserved for the context manager in every process (Linux
+    /// binder_get_ref_for_node starts normal refs at 1).
     next_desc: u32,
     threads: Vec<Arc<BinderThread>>,
     todo: VecDeque<Work>,
@@ -486,7 +523,7 @@ impl BinderProc {
                 alloc: None,
                 nodes: Vec::new(),
                 refs: Vec::new(),
-                next_desc: 0,
+                next_desc: 1,
                 threads: Vec::new(),
                 todo: VecDeque::new(),
                 max_threads: 0,
@@ -588,6 +625,14 @@ fn node_external_refs(world: &World, node: &Arc<BinderNode>) -> usize {
     }
 }
 
+/// A node is dead when its owner is gone from the world (Linux sets
+/// node->proc = NULL in the owner's binder_release before delivering
+/// death notifications; here the owner is removed from world.procs
+/// first, under the same WORLD hold).
+fn node_is_dead(world: &World, node: &Arc<BinderNode>) -> bool {
+    !world.procs.iter().any(|p| p.id == node.proc_id)
+}
+
 // ============================================================================
 // open / close / mmap / poll
 // ============================================================================
@@ -644,6 +689,42 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
         // SAFETY: all inner access below is under WORLD.
         unsafe {
             proc.im().is_dead = true;
+
+            // Deliver death notifications: every ref in a surviving proc
+            // that points at one of our nodes and carries an Armed death
+            // request fires now (Linux binder_node_release walking
+            // node->refs).
+            for q in world.procs.clone() {
+                let mut deaths: Vec<(u32, u64)> = Vec::new();
+                {
+                    let qim = pm(world, &q).im();
+                    for r in qim.refs.iter_mut() {
+                        if r.node.proc_id != proc.id {
+                            continue;
+                        }
+                        if let Some(d) = r.death.as_mut() {
+                            if d.phase == DeathPhase::Armed {
+                                d.phase = DeathPhase::Queued;
+                                deaths.push((r.desc, d.cookie));
+                            }
+                        }
+                    }
+                }
+                if !deaths.is_empty() {
+                    let qim = pm(world, &q).im();
+                    for (desc, cookie) in deaths {
+                        crate::pr_info!(
+                            "binder: death notice pid {} desc {} cookie {:#x} (owner {} died)",
+                            q.pid,
+                            desc,
+                            cookie,
+                            proc.pid
+                        );
+                        qim.todo.push_back(Work::DeadBinder { desc, cookie });
+                    }
+                    wake_targets.push(q.clone());
+                }
+            }
 
             // Fail in-flight transactions of OTHER procs that involve us.
             for p in world.procs.clone() {
@@ -1178,6 +1259,15 @@ fn binder_thread_write(
                 let mut err_cmd: u32 = 0;
                 binder_transaction(proc, thread, &mut tr, reply, &mut err_cmd);
                 if err_cmd != 0 {
+                    crate::pr_info!(
+                        "binder: pid {} {} failed with BR {:#x} (code {}, ds {} os {})",
+                        proc.pid,
+                        if reply { "BC_REPLY" } else { "BC_TRANSACTION" },
+                        err_cmd,
+                        tr.code,
+                        tr.data_size,
+                        tr.offsets_size
+                    );
                     // Linux stops processing write commands and queues the
                     // error as thread work for the following read.
                     let w = world_lock();
@@ -1294,7 +1384,14 @@ fn binder_thread_write(
                             if pm(world, proc).im().refs[ridx].strong == 0
                                 && pm(world, proc).im().refs[ridx].weak == 0
                             {
+                                let desc = pm(world, proc).im().refs[ridx].desc;
                                 pm(world, proc).im().refs.remove(ridx);
+                                // Drop a still-queued death notification for
+                                // the removed handle (binder_free_ref
+                                // dequeues ref->death->work).
+                                pm(world, proc).im().todo.retain(|wk| {
+                                    !matches!(wk, Work::DeadBinder { desc: d, .. } if *d == desc)
+                                });
                             }
                         }
                         // Ref-state change: queue BINDER_WORK_NODE to the
@@ -1387,13 +1484,143 @@ fn binder_thread_write(
                     thread.st().looper |= LOOPER_REGISTERED;
                 }
             }
+            BC_REQUEST_DEATH_NOTIFICATION | BC_CLEAR_DEATH_NOTIFICATION => {
+                // Wire format (binder_thread_write): u32 target handle,
+                // then u64 cookie — 12 bytes consumed.
+                let Some(target) = get_user_at::<u32>(buffer, ptr) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                let Some(cookie) = get_user_at::<u64>(buffer, ptr + 4) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                ptr += 12;
+                let request = cmd == BC_REQUEST_DEATH_NOTIFICATION;
+                let mut wake_self = false;
+                {
+                    let mut w = world_lock();
+                    // SAFETY: all inner access below is under WORLD.
+                    unsafe {
+                        let world = w.as_mut().unwrap();
+                        let pim = pm(world, proc).im();
+                        let Some(ridx) = pim.refs.iter().position(|r| r.desc == target) else {
+                            drop(w);
+                            crate::pr_info!(
+                                "binder: pid {} death command on invalid handle {}",
+                                proc.pid,
+                                target
+                            );
+                            continue;
+                        };
+                        if request {
+                            if pim.refs[ridx].death.is_some() {
+                                drop(w);
+                                crate::pr_info!(
+                                    "binder: pid {} BC_REQUEST_DEATH_NOTIFICATION already set (desc {})",
+                                    proc.pid,
+                                    target
+                                );
+                                continue;
+                            }
+                            let already_dead = node_is_dead(world, &pim.refs[ridx].node);
+                            pim.refs[ridx].death = Some(RefDeath {
+                                cookie,
+                                phase: if already_dead { DeathPhase::Queued } else { DeathPhase::Armed },
+                                clear_pending: false,
+                            });
+                            if already_dead {
+                                // Linux queues the DEAD_BINDER work right
+                                // away when the node is already dead.
+                                pim.todo.push_back(Work::DeadBinder { desc: target, cookie });
+                                wake_self = true;
+                            }
+                        } else {
+                            let ok = pim.refs[ridx]
+                                .death
+                                .as_ref()
+                                .map(|d| d.cookie == cookie)
+                                .unwrap_or(false);
+                            if !ok {
+                                drop(w);
+                                crate::pr_info!(
+                                    "binder: pid {} BC_CLEAR_DEATH_NOTIFICATION not active or cookie mismatch (desc {})",
+                                    proc.pid,
+                                    target
+                                );
+                                continue;
+                            }
+                            match pim.refs[ridx].death.as_ref().unwrap().phase {
+                                DeathPhase::Armed => {
+                                    // Never fired: drop the request and
+                                    // deliver BR_CLEAR_DEATH_NOTIFICATION_DONE.
+                                    pim.refs[ridx].death = None;
+                                    let th = thread.st();
+                                    th.todo.push_back(Work::ClearDeathDone { cookie });
+                                    th.process_todo = true;
+                                    wake_self = true;
+                                }
+                                DeathPhase::Queued | DeathPhase::Delivered => {
+                                    // Notification already in flight
+                                    // (Linux retypes the queued work to
+                                    // DEAD_BINDER_AND_CLEAR).
+                                    pim.refs[ridx].death.as_mut().unwrap().clear_pending = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if wake_self {
+                    wake_proc(proc);
+                }
+            }
             BC_DEAD_BINDER_DONE => {
-                let Some(_cookie) = get_user_at::<u64>(buffer, ptr) else {
+                let Some(cookie) = get_user_at::<u64>(buffer, ptr) else {
                     *consumed = ptr as u64;
                     return -(EFAULT as i64);
                 };
                 ptr += 8;
-                // No death-notification support in S1: accept and ignore.
+                let mut wake_self = false;
+                {
+                    let mut w = world_lock();
+                    // SAFETY: all inner access below is under WORLD.
+                    unsafe {
+                        let world = w.as_mut().unwrap();
+                        let pim = pm(world, proc).im();
+                        let hit = pim
+                            .refs
+                            .iter()
+                            .find(|r| {
+                                r.death.as_ref().map(|d| d.cookie == cookie && d.phase == DeathPhase::Delivered).unwrap_or(false)
+                            })
+                            .map(|r| r.desc);
+                        let Some(desc) = hit else {
+                            drop(w);
+                            crate::pr_info!(
+                                "binder: pid {} BC_DEAD_BINDER_DONE {:#x} not found",
+                                proc.pid,
+                                cookie
+                            );
+                            continue;
+                        };
+                        let r = pim.refs.iter_mut().find(|r| r.desc == desc).unwrap();
+                        if r.death.as_ref().unwrap().clear_pending {
+                            r.death = None;
+                            let th = thread.st();
+                            th.todo.push_back(Work::ClearDeathDone { cookie });
+                            th.process_todo = true;
+                            wake_self = true;
+                        } else {
+                            // Dequeue from delivered_death; the record
+                            // stays armed on the ref (Linux keeps
+                            // ref->death until CLEAR or ref release).
+                            r.death.as_mut().unwrap().phase = DeathPhase::Armed;
+                        }
+                    }
+                }
+                if wake_self {
+                    wake_proc(proc);
+                }
             }
             _ => {
                 crate::pr_info!("binder: unknown BC command {:#x}, stopping", cmd);
@@ -1447,15 +1674,22 @@ fn binder_transaction(
                 };
                 if t.to_tid() != Some(thread.tid) || !Arc::ptr_eq(&t.to_proc, proc) {
                     *err_cmd = BR_FAILED_REPLY;
+                    crate::pr_info!(
+                        "binder: BC_REPLY stack top not ours (to_tid={:?}, me={})",
+                        t.to_tid(),
+                        thread.tid
+                    );
                     return;
                 }
                 let t = thread.st().txn_stack.pop().unwrap();
                 let (Some(from_proc), Some(from_tid)) = (t.from_proc.clone(), t.from_tid) else {
                     *err_cmd = BR_FAILED_REPLY;
+                    crate::pr_info!("binder: BC_REPLY on oneway");
                     return;
                 };
                 if from_proc.im().is_dead {
                     *err_cmd = BR_DEAD_REPLY;
+                    crate::pr_info!("binder: BC_REPLY requester dead");
                     return;
                 }
                 target_thread_key = Some((from_proc, from_tid));
@@ -1577,6 +1811,7 @@ fn binder_transaction(
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway, holds_async_slot);
             *err_cmd = BR_FAILED_REPLY;
+            crate::pr_info!("binder: txn data copy fault from {:#x}", tr.data_buffer);
             return;
         }
         if offsets_size > 0
@@ -1589,6 +1824,7 @@ fn binder_transaction(
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway, holds_async_slot);
             *err_cmd = BR_FAILED_REPLY;
+            crate::pr_info!("binder: txn offsets copy fault from {:#x}", tr.data_offsets);
             return;
         }
     }
@@ -1605,6 +1841,7 @@ fn binder_transaction(
                 release_block(&target, block_off);
                 unpin_after_failure(&target, target_node.as_ref(), reply, oneway, holds_async_slot);
                 *err_cmd = BR_FAILED_REPLY;
+                crate::pr_info!("binder: object offset {} out of range", obj_off);
                 return;
             }
             // SAFETY: validated within the data area.
@@ -1613,6 +1850,11 @@ fn binder_transaction(
                 release_block(&target, block_off);
                 unpin_after_failure(&target, target_node.as_ref(), reply, oneway, holds_async_slot);
                 *err_cmd = BR_FAILED_REPLY;
+                crate::pr_info!(
+                    "binder: object type {:#x} handle {:#x} translate failed",
+                    obj.hdr_type,
+                    obj.handle
+                );
                 return;
             }
         }
@@ -1672,6 +1914,11 @@ fn binder_transaction(
                 } else {
                     *err_cmd = BR_DEAD_REPLY;
                     release_block(&target, block_off);
+                    crate::pr_info!(
+                        "binder: BC_REPLY originator thread {} gone (proc {})",
+                        rtid,
+                        tproc.pid
+                    );
                     return;
                 }
                 // The original transaction is finished: unpin its node.
@@ -1852,6 +2099,7 @@ unsafe fn get_or_create_ref(
         node: node.clone(),
         strong: if strong { 1 } else { 0 },
         weak: if strong { 0 } else { 1 },
+        death: None,
     });
     if let Some(owner) = world.procs.iter().find(|p| p.id == node.proc_id) {
         owner.im().todo.push_back(Work::Node(node.clone()));
@@ -2026,6 +2274,27 @@ fn binder_thread_read(
                                 stage_u64!(cookie);
                             }
                         }
+                        Work::DeadBinder { desc, cookie } => {
+                            stage_cmd!(BR_DEAD_BINDER);
+                            stage_u64!(cookie);
+                            // Mark delivered on the ref (move onto the
+                            // delivered_death list).
+                            if let Some(r) = pm(world, proc).im().refs.iter_mut().find(|r| r.desc == desc) {
+                                if let Some(d) = r.death.as_mut() {
+                                    if d.cookie == cookie {
+                                        d.phase = DeathPhase::Delivered;
+                                    }
+                                }
+                            }
+                            // Linux "goto done": a death notification can
+                            // make userspace issue transactions at once —
+                            // stop reading more work in this round.
+                            break;
+                        }
+                        Work::ClearDeathDone { cookie } => {
+                            stage_cmd!(BR_CLEAR_DEATH_NOTIFICATION_DONE);
+                            stage_u64!(cookie);
+                        }
                         Work::Transaction(t) => {
                             got_transaction = true;
                             let is_reply = t.target_node.is_none();
@@ -2122,5 +2391,68 @@ impl BinderAlloc {
     }
     fn offsets_size_now(&self, off: usize) -> usize {
         self.blocks.iter().find(|b| b.off == off).map(|b| b.offsets_size).unwrap_or(0)
+    }
+}
+
+/// DFX: one-line-per-proc binder world snapshot for the UART magic dump.
+/// IRQ context: try-lock only — if WORLD is contended the binder state is
+/// mid-transition and the dump skips it (the task dump still runs).
+pub fn binder_dfx_dump() {
+    let Some(mut g) = WORLD.try_lock_irqsave() else {
+        crate::pr_info!("binder-dfx: world busy, skipped");
+        return;
+    };
+    let Some(world) = g.as_ref() else {
+        return;
+    };
+    // SAFETY: read-only under WORLD (the access contract).
+    unsafe {
+        for p in &world.procs {
+            let pim = p.im();
+            crate::pr_info!(
+                "binder-dfx: proc {} pid {} dead={} todo={} refs={} mgr={}",
+                p.id,
+                p.pid,
+                pim.is_dead,
+                pim.todo.len(),
+                pim.refs.len(),
+                world.mgr_node.as_ref().map(|m| m.proc_id).unwrap_or(0) == p.id
+            );
+            for t in &pim.threads {
+                let th = t.st();
+                crate::pr_info!(
+                    "binder-dfx:   tid {} looper={:#x} todo={} process_todo={} wfpw={} stack={} deathq={}",
+                    t.tid,
+                    th.looper,
+                    th.todo.len(),
+                    th.process_todo,
+                    th.waiting_for_proc_work,
+                    th.txn_stack.len(),
+                    pim.todo.iter().filter(|wk| matches!(wk, Work::DeadBinder { .. })).count()
+                );
+                for (i, wk) in th.todo.iter().enumerate() {
+                    let desc = match wk {
+                        Work::TransactionComplete => "tcomplete".into(),
+                        Work::Transaction(_) => "txn".into(),
+                        Work::ReturnError(c, _) => alloc::format!("err#{:#x}", c),
+                        Work::Node(_) => "node".into(),
+                        Work::DeadBinder { desc, cookie } => alloc::format!("dead d{} c{:#x}", desc, cookie),
+                        Work::ClearDeathDone { cookie } => alloc::format!("cleardone c{:#x}", cookie),
+                    };
+                    crate::pr_info!("binder-dfx:     thtodo[{}] {}", i, desc);
+                }
+            }
+            for (i, wk) in pim.todo.iter().enumerate() {
+                let desc = match wk {
+                    Work::TransactionComplete => "tcomplete".into(),
+                    Work::Transaction(_) => "txn".into(),
+                    Work::ReturnError(c, _) => alloc::format!("err#{:#x}", c),
+                    Work::Node(_) => "node".into(),
+                    Work::DeadBinder { desc, cookie } => alloc::format!("dead d{} c{:#x}", desc, cookie),
+                    Work::ClearDeathDone { cookie } => alloc::format!("cleardone c{:#x}", cookie),
+                };
+                crate::pr_info!("binder-dfx:     ptodo[{}] {}", i, desc);
+            }
+        }
     }
 }

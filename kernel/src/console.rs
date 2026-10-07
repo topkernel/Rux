@@ -438,6 +438,7 @@ fn uart_rx_debug_magic(c: u8) {
             if DUMP_MAGIC_POS == MAGIC.len() {
                 DUMP_MAGIC_POS = 0;
                 crate::dfx::taskdump::dump_all_tasks("uart-magic");
+                crate::ipc::binder::binder_dfx_dump();
             }
         }
 
