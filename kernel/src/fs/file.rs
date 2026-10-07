@@ -1000,6 +1000,28 @@ fn reg_file_read(file: &File, buf: &mut [u8]) -> isize {
     }
 }
 
+/// Public re-export of `reg_file_read` for file-op wrappers that delegate
+/// to the generic regular-file behavior after their own checks (memfd's
+/// seal-aware ops).
+pub(crate) fn reg_file_read_pub(file: &File, buf: &mut [u8]) -> isize {
+    reg_file_read(file, buf)
+}
+
+/// Public re-export of `reg_file_write` (see reg_file_read_pub).
+pub(crate) fn reg_file_write_pub(file: &File, buf: &[u8]) -> isize {
+    reg_file_write(file, buf)
+}
+
+/// Public re-export of `reg_file_lseek` (see reg_file_read_pub).
+pub(crate) fn reg_file_lseek_pub(file: &File, offset: isize, whence: i32) -> isize {
+    reg_file_lseek(file, offset, whence)
+}
+
+/// Public re-export of `reg_file_close` (see reg_file_read_pub).
+pub(crate) fn reg_file_close_pub(file: &File) -> i32 {
+    reg_file_close(file)
+}
+
 fn reg_file_write(file: &File, buf: &[u8]) -> isize {
     if let Some(ref inode) = unsafe { &*file.inode.get() } {
         // Serialize the whole read-offset → write → update-pos sequence so

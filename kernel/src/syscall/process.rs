@@ -4247,16 +4247,40 @@ pub fn sys_syncfs(_args: SyscallArgs) -> i64 {
     0
 }
 
-/// sys_memfd_create - Create anonymous memory file
+/// sys_memfd_create - Create anonymous memory file (NR 279)
+///
+/// Implemented by `fs::memfd` (anonymous memory-backed regular file;
+/// read/write/lseek/ftruncate/mmap all work, seals via fcntl
+/// F_ADD_SEALS/F_GET_SEALS when MFD_ALLOW_SEALING is passed).
 ///
 /// # Arguments
-/// - args[0]: name - file name (can be NULL)
-/// - args[1]: flags - MFD_CLOEXEC, MFD_ALLOW_SEALING
+/// - args[0]: name - file name (can be NULL; advisory only)
+/// - args[1]: flags - MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL,
+///   MFD_EXEC, MFD_NONBLOCK (MFD_HUGETLB is EINVAL — no hugetlbfs)
 pub fn sys_memfd_create(args: SyscallArgs) -> i64 {
-    let _name_ptr = args[0] as *const u8;
-    let _flags = args[1] as u32;
-    // TODO: implement memfd_create
-    -(errno::ENOSYS as i64)
+    let name_ptr = args[0] as *const u8;
+    let flags = args[1] as u32;
+
+    // Linux copies the name with strnlen_user(NAME_MAX + 1): NULL is fine,
+    // a name longer than NAME_MAX (255) is EINVAL. The name is advisory in
+    // this kernel (kept out — no dentry to name).
+    let mut name_buf = [0u8; 256];
+    let name: &[u8] = if name_ptr.is_null() {
+        &[]
+    } else {
+        match crate::arch::uaccess::strncpy_from_user(name_ptr, 256, &mut name_buf) {
+            Ok(s) => s,
+            Err(e) => return e as i64,
+        }
+    };
+    if name.len() > 255 {
+        return -(errno::EINVAL as i64);
+    }
+
+    match crate::fs::memfd::memfd_create(name, flags) {
+        Ok(fd) => fd as i64,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_ioprio_set - Set I/O scheduling priority

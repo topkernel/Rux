@@ -2843,6 +2843,10 @@ pub mod fcntl {
     pub const F_SETPIPE_SZ: usize = 1031;
     pub const F_GETPIPE_SZ: usize = 1032;
 
+    /// memfd seals (memfd_create(2); asm-generic numbering).
+    pub const F_ADD_SEALS: usize = 1033;
+    pub const F_GET_SEALS: usize = 1034;
+
     /// FD_CLOEXEC flag value
     pub const FD_CLOEXEC: usize = 1;
 }
@@ -3409,6 +3413,31 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 match crate::fs::pipe::pipe_get_sz(&file) {
                     Some(sz) => Ok(sz),
                     None => Err(errno::Errno::InvalidArgument.as_neg_i32()),
+                }
+            }
+
+            // F_ADD_SEALS (1033) / F_GET_SEALS (1034): memfd seals
+            // (memfd_create(2)). Only memfd files support seals; anything
+            // else answers EINVAL (Linux memfd_add_seals/get_seals on a
+            // non-shmem file).
+            fcntl::F_ADD_SEALS => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                match crate::fs::memfd::add_seals(&file, arg as u32) {
+                    Ok(()) => Ok(0),
+                    Err(e) => Err(e),
+                }
+            }
+            fcntl::F_GET_SEALS => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                match crate::fs::memfd::get_seals(&file) {
+                    Ok(seals) => Ok(seals as usize),
+                    Err(e) => Err(e),
                 }
             }
 
