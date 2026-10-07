@@ -805,6 +805,7 @@ fn handle_syscall(regs: &mut PtRegs) {
     }
 
     crate::syscall::syscall_handler(regs);
+
 }
 
 /// Handle illegal instruction (#UD).

@@ -38,6 +38,7 @@ pub fn clone_heap_reserve_low() -> bool {
 }
 
 pub fn sys_clone(args: SyscallArgs) -> i64 {
+
     use crate::process::fork::{do_clone, CloneArgs};
 
     // F12 heap-reserve gate: a thread storm (LTP pth_str02 spawns until
@@ -570,6 +571,27 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
 /// # Returns
 /// Does not return on success, negative error code on failure
 pub fn sys_execve(args: SyscallArgs) -> i64 {
+    // Boot-bring-up trace (bounded): who execs what.
+    {
+        static E_LOG: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if E_LOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+            let mut name = [0u8; 24];
+            let mut got = 0usize;
+            let p = args[0] as *const u8;
+            if crate::arch::uaccess::access_ok(p as usize, 24) {
+                while got < 24 {
+                    // SAFETY: bounded diagnostic read of a validated user ptr.
+                    let b = unsafe { core::ptr::read_unaligned(p.add(got)) };
+                    if b == 0 { break; }
+                    name[got] = b; got += 1;
+                }
+            }
+            let s = core::str::from_utf8(&name[..got]).unwrap_or("<utf8err>");
+            crate::pr_err!("exec pid={} {}", crate::process::current_pid(), s);
+        }
+    }
+
     let pathname_ptr = args[0] as *const u8;
     let argv_ptr = args[1] as *const *const u8;
     let envp_ptr = args[2] as *const *const u8;

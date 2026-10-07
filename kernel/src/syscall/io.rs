@@ -1590,6 +1590,7 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
 
 /// sys_pipe2 - Create pipe with flags
 pub fn sys_pipe2(args: SyscallArgs) -> i64 {
+
     let pipefd = args[0] as *mut i32;
     let flags = args[1] as u32;
 

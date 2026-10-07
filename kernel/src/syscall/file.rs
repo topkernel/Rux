@@ -253,7 +253,7 @@ pub fn sys_fstat(args: SyscallArgs) -> i64 {
     }
 
     // Check if statbuf is in valid user space
-    if !crate::arch::uaccess::access_ok(statbuf as usize, core::mem::size_of::<Stat>()) {
+    if !crate::arch::uaccess::access_ok(statbuf as usize, crate::fs::user_stat_size()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -263,15 +263,9 @@ pub fn sys_fstat(args: SyscallArgs) -> i64 {
     // Call VFS layer file_stat
     match file_stat(fd, &mut stat) {
         Ok(()) => {
-            // Exception-table copy (review SYSA-M4: raw dereference panics
-            // on unmapped user pointers).
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    statbuf as *mut u8,
-                    &stat as *const Stat as *const u8,
-                    core::mem::size_of::<Stat>(),
-                )
-            };
+            // Exception-table copy in the target ABI layout (review
+            // SYSA-M4: raw dereference panics on unmapped user pointers).
+            let uncopied = crate::fs::copy_stat_to_user(statbuf as *mut u8, &stat);
             if uncopied > 0 {
                 -(errno::EFAULT as i64)
             } else {
@@ -309,7 +303,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     if statbuf.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::uaccess::access_ok(statbuf as usize, core::mem::size_of::<Stat>()) {
+    if !crate::arch::uaccess::access_ok(statbuf as usize, crate::fs::user_stat_size()) {
         return -(errno::EFAULT as i64);
     }
 
@@ -355,15 +349,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
             // Already-negative errno (see sys_fstat): don't re-negate.
             Err(e) => return e as i64,
         }
-        let stat_size = core::mem::size_of::<Stat>();
-        // SAFETY: statbuf validated with access_ok; copies stat_size bytes to user.
-        let result = unsafe {
-            crate::arch::uaccess::copy_to_user(
-                statbuf as *mut u8,
-                &stat as *const Stat as *const u8,
-                stat_size
-            )
-        };
+        let result = crate::fs::copy_stat_to_user(statbuf as *mut u8, &stat);
         return if result != 0 { -(errno::EFAULT as i64) } else { 0 };
     }
 
@@ -381,15 +367,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
 
     let ret = match crate::fs::vfs::stat_file_by_path_with_flags(&full_path, &mut stat, lookup_flags) {
         Ok(()) => {
-            let stat_size = core::mem::size_of::<Stat>();
-            // SAFETY: statbuf validated with access_ok; copies stat_size bytes to user.
-            let result = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    statbuf as *mut u8,
-                    &stat as *const Stat as *const u8,
-                    stat_size
-                )
-            };
+            let result = crate::fs::copy_stat_to_user(statbuf as *mut u8, &stat);
             if result != 0 {
                 -(errno::EFAULT as i64)
             } else {
