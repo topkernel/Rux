@@ -77,9 +77,9 @@ esac
 #
 # virtio-gpu xres/yres pinned to the riscv64 default (1024x768, config
 # FB_DEFAULT_WIDTH/HEIGHT) so headless runs get the same pmode the riscv
-# desktop expects. virtio-net-pci is present for the userspace bring-up but
-# the kernel net driver is virtio-MMIO (riscv) only — the function sits
-# unclaimed until a PCI net driver lands.
+# desktop expects. virtio-net-pci is claimed by the kernel's PCI net driver
+# (eth0: firmware BARs + shared PIC INTx dispatch for completions);
+# keyboard and tablet are polled through evdev like on riscv64.
 exec "$QEMU" \
     -M q35 -m "$MEM" -smp "$SMP" \
     -accel tcg,thread=single \
