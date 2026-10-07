@@ -842,7 +842,15 @@ pub fn rust_main_tail() -> ! {
             // Print shell welcome message after boot
             unsafe {
                 use crate::console::putchar;
-                let msg = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(RISC-V 64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
+                // cfg-gated, NOT config::TARGET_PLATFORM: build.rs only
+                // reruns when Kernel.toml changes, so in a worktree that
+                // builds both arches the generated constant can be stale
+                // (x86 build inheriting a riscv64 config.rs). The riscv64
+                // string is unchanged byte-for-byte.
+                #[cfg(feature = "x86_64")]
+                let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(x86_64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
+                #[cfg(not(feature = "x86_64"))]
+                let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(RISC-V 64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
                 for &b in msg {
                     putchar(b);
                 }
@@ -1007,6 +1015,12 @@ pub extern "C" fn rust_main() -> ! {
 
         // Print version info
         for &b in GREEN { putchar(b); }
+        // Arch label cfg-gated per build features (see the welcome-message
+        // note on why not config::TARGET_PLATFORM); the riscv64 string is
+        // unchanged byte-for-byte.
+        #[cfg(feature = "x86_64")]
+        const VERSION: &[u8] = b"  [ x86_64 | POSIX Compatible | v";
+        #[cfg(not(feature = "x86_64"))]
         const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
         for &b in VERSION { putchar(b); }
         let ver = env!("CARGO_PKG_VERSION");
