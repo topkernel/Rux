@@ -713,8 +713,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
 
     // Framebuffer ioctls dispatch on the FILE's ops identity (R22-2
     // spirit, minus the fd>=1000 heuristic that only worked for the
-    // side-namespace fd range).
-    #[cfg(feature = "riscv64")]
+    // side-namespace fd range). Arch-generic: /dev/fb0 and its ioctls
+    // exist on x86_64 too — the riscv64-only gate made every FBIOGET_*
+    // return ENOTTY there, so udesk fell back to a default 640x480 mode
+    // and died past-EOF on the resulting wrong-size mapping.
     if fd >= 0 {
         if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
             if crate::drivers::gpu::fbdev::is_fb_file(&file) {

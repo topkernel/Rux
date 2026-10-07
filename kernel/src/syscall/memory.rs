@@ -612,7 +612,10 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // own physical pages into the caller (no anonymous
                     // backing, no demand paging — writes land in the
                     // scanout buffer; userspace flushes via FBIO_FLUSH).
-                    #[cfg(feature = "riscv64")]
+                    // Arch-generic: info.addr is the bounce buffer's
+                    // physical address on both arches, and the
+                    // PageTableEntry::{V,R,W,U,A,D} flag names alias the
+                    // identical bits in both mm layers.
                     if fd >= 0 {
                         let is_fb = unsafe { crate::fs::file::get_file_fd(fd as usize) }
                             .map(|f| crate::drivers::gpu::fbdev::is_fb_file(&f))
