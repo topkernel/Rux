@@ -681,6 +681,48 @@ unsafe fn deliver_unix_cmsgs(
     Ok(cmsg.len())
 }
 
+/// Write an SCM_CREDENTIALS cmsg (kernel sender: pid/uid/gid all 0) into
+/// the caller's msg_control buffer and update msg_controllen — the
+/// SO_PASSCRED delivery for AF_NETLINK receives. Returns the number of
+/// control bytes written (0 when the caller provided no room).
+///
+/// SAFETY: `msg_ptr` must have been access_ok-validated for at least 64
+/// bytes by the recvmsg entry (the msghdr header size).
+unsafe fn deliver_netlink_cred_cmsg(msg_ptr: *mut u8) -> Result<usize, i64> {
+    use crate::arch::uaccess::{access_ok, copy_to_user, get_user, put_user};
+
+    // One cmsg: { len: usize, level: SOL_SOCKET(1), type: SCM_CREDENTIALS(2) }
+    // + struct ucred { pid: i32, uid: u32, gid: u32 } = 16 + 12 = 28 bytes.
+    let cred = crate::net::unix::UnixCred { pid: 0, uid: 0, gid: 0 };
+    let payload = [cred.pid.to_ne_bytes(), cred.uid.to_ne_bytes(), cred.gid.to_ne_bytes()].concat();
+    let cmsg_len = 16 + payload.len();
+    let mut cmsg = alloc::vec![0u8; cmsg_len];
+    cmsg[0..8].copy_from_slice(&cmsg_len.to_ne_bytes());
+    cmsg[8..12].copy_from_slice(&crate::net::unix::SOL_SOCKET.to_ne_bytes());
+    cmsg[12..16].copy_from_slice(&crate::net::unix::SCM_CREDENTIALS.to_ne_bytes());
+    cmsg[16..].copy_from_slice(&payload);
+
+    // SAFETY: msg_ptr was validated by the caller.
+    let control = get_user::<usize>(msg_ptr.add(32) as *const usize).unwrap_or(0);
+    let controllen = get_user::<usize>(msg_ptr.add(40) as *const usize).unwrap_or(0);
+    if control == 0 || controllen < cmsg.len() {
+        // No room: nothing to report — zero msg_controllen so the caller's
+        // CMSG walk does not see stale user-memory cmsg_len values (same
+        // discipline as the AF_UNIX path above).
+        let _ = put_user(msg_ptr.add(40) as *mut usize, 0);
+        return Ok(0);
+    }
+    if !access_ok(control, cmsg.len()) {
+        return Err(-(errno::EFAULT as i64));
+    }
+    // SAFETY: control/cmsg.len() validated with access_ok above.
+    if copy_to_user(control as *mut u8, cmsg.as_ptr(), cmsg.len()) != 0 {
+        return Err(-(errno::EFAULT as i64));
+    }
+    let _ = put_user(msg_ptr.add(40) as *mut usize, cmsg.len());
+    Ok(cmsg.len())
+}
+
 fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
@@ -1605,6 +1647,16 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
                     } else {
                         opts.rcvbuf = doubled;
                     }
+                    0
+                }
+                // OH Phase 1 (R7): ueventd sets SO_PASSCRED and drops any
+                // uevent whose recvmsg lacks an SCM_CREDENTIALS cmsg.
+                SO_PASSCRED => {
+                    let v = match read_i32(4) {
+                        Some(v) => v,
+                        None => return -(errno::EFAULT as i64),
+                    };
+                    nlsock.options.lock().passcred = v != 0;
                     0
                 }
                 _ => 0, // accepted-and-ignored
@@ -2900,8 +2952,25 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 }
             }
         }
-        // Netlink receive writes no cmsgs — report 0 control bytes.
-        zero_controllen();
+        // OH Phase 1 (R7): SO_PASSCRED on a netlink socket attaches an
+        // SCM_CREDENTIALS cmsg to every receive — kernel-originated
+        // messages (uevents, rtnetlink replies) carry {pid=0, uid=0,
+        // gid=0}, matching Linux's netlink_recvmsg creds for kernel
+        // senders. Without it OH's ueventd (ReadUeventMessage) DROPS the
+        // message as "Unexpected control message".
+        if nlsock.options.lock().passcred {
+            // SAFETY: msg_ptr was access_ok(64)-validated at fn entry; the
+            // writer bounds everything against the caller's msg_control.
+            match unsafe { deliver_netlink_cred_cmsg(msg_ptr) } {
+                Ok(n) => {
+                    let _ = n; // msg_controllen updated by the writer
+                }
+                Err(e) => return e,
+            }
+        } else {
+            // No cmsgs: report 0 control bytes written.
+            zero_controllen();
+        }
         return n as i64;
     }
 

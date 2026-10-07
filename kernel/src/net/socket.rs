@@ -84,6 +84,11 @@ pub struct SocketOptions {
     pub mcast_groups: [u32; 4],
     /// Number of valid entries in mcast_groups.
     pub mcast_group_count: u8,
+    /// SO_PASSCRED: deliver an SCM_CREDENTIALS cmsg with every received
+    /// message (OH Phase 1: ueventd sets it and DROPS any uevent whose
+    /// recvmsg carries no credentials cmsg — Linux netlinkRecvmsg attaches
+    /// {0,0,0} creds for kernel-originated messages when the option is on).
+    pub passcred: bool,
 }
 
 impl SocketOptions {
@@ -106,6 +111,7 @@ impl SocketOptions {
             linger_secs: 0,
             mcast_groups: [0u32; 4],
             mcast_group_count: 0,
+            passcred: false,
         }
     }
 }
