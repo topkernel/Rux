@@ -130,25 +130,13 @@ fn main() {
 
     // Get target platform: the active cargo feature wins over Kernel.toml
     // (x86_64 builds pass --no-default-features --features x86_64)
-    // Get target platform from the active configuration.
-    let platform = config.get("platform")
-        .and_then(|p| p["default_platform"].as_str())
-        .unwrap_or("riscv64");
-
-    // Consistency guard: a stale build/.config selecting a platform whose
-    // cargo feature is NOT enabled silently bakes mismatched constants into
-    // the kernel (observed: x86_64 config + riscv64 build = boot panic at
-    // linear-mapping time). Fail the build instead.
-    {
-        let feat_x86 = env::var_os("CARGO_FEATURE_X86_64").is_some();
-        let feat_rv = env::var_os("CARGO_FEATURE_RISCV64").is_some();
-        if platform == "x86_64" && !feat_x86 {
-            panic!("build/.config selects platform x86_64 but the x86_64 cargo feature is not enabled — run `make menuconfig` or remove build/.config");
-        }
-        if platform == "riscv64" && feat_x86 && !feat_rv {
-            panic!("build/.config selects platform riscv64 but an x86_64-only feature build is running");
-        }
-    }
+    let platform = if env::var_os("CARGO_FEATURE_X86_64").is_some() {
+        "x86_64"
+    } else {
+        config.get("platform")
+            .and_then(|p| p["default_platform"].as_str())
+            .unwrap_or("riscv64")
+    };
 
     // Consistency guard: a stale build/.config selecting a platform whose
     // cargo feature is NOT enabled silently bakes mismatched constants into
@@ -703,6 +691,39 @@ pub const PRINTK_RING_BUFFER_SIZE: usize = {};
 fn compile_boot_asm() {
     let target = env::var("TARGET").unwrap_or_default();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    if target.contains("x86_64") {
+        // x86_64 boot stub: multiboot1 entry assembled with the host
+        // assembler. The object must be elf64 to link into the kernel
+        // image; the file itself starts in .code32 and switches to
+        // .code64, so only the output format is selected here.
+        let boot_asm = PathBuf::from(&manifest_dir).join("src/arch/x86_64/boot.S");
+        if !boot_asm.exists() {
+            return;
+        }
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let boot_obj = out_dir.join("boot_x86_64.o");
+        if boot_obj.exists() {
+            let asm_time = fs::metadata(&boot_asm).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let obj_time = fs::metadata(&boot_obj).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if asm_time <= obj_time {
+                println!("cargo:rustc-link-arg={}", boot_obj.display());
+                return;
+            }
+        }
+        let status = std::process::Command::new("as")
+            .arg("--64")
+            .arg("-o").arg(&boot_obj)
+            .arg(&boot_asm)
+            .status()
+            .expect("failed to run assembler for x86 boot.S");
+        assert!(status.success(), "failed to assemble x86 boot.S");
+        println!("cargo:rustc-link-arg={}", boot_obj.display());
+        println!("cargo:rerun-if-changed={}", boot_asm.display());
+        return;
+    }
 
     if !target.contains("riscv64") {
         return;
