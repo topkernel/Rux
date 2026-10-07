@@ -42,11 +42,7 @@ menuconfig:
 # falling back to Kernel.toml's default_platform. Override per-invocation
 # with `make PLATFORM=x86_64` (same spirit as Linux's ARCH=).
 PLATFORM := $(shell $(BUILD_DIR)/current-platform.sh)
-ifeq ($(PLATFORM),x86_64)
-CARGO_TARGET := x86_64-unknown-none
-CARGO_FEATURE_FLAGS := --no-default-features --features x86_64
-KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
-else ifeq ($(PLATFORM),riscv64)
+ifeq ($(PLATFORM),riscv64)
 CARGO_TARGET := riscv64gc-unknown-none-elf
 CARGO_FEATURE_FLAGS :=
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
@@ -58,21 +54,14 @@ endif
 build:
 	@echo "Building Rux kernel (platform=$(PLATFORM))..."
 	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
-ifeq ($(PLATFORM),x86_64)
-	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(KERNEL_BIN) $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/bzImage
-endif
+
 
 # Release build (without debug logs, per active configuration)
 build-release:
 	@echo "Building Rux kernel (Release, platform=$(PLATFORM))..."
 	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS) --release
-ifeq ($(PLATFORM),x86_64)
-	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/bzImage
-endif
 
-# x86_64 convenience alias — equivalent to `PLATFORM=x86_64 make build`
-build-x86:
-	@$(MAKE) -C $(PROJECT_ROOT)/build PLATFORM=x86_64 build
+
 
 # Quick build (compile only, no output)
 build-quiet:

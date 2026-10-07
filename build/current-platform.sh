@@ -25,6 +25,7 @@ if [ -n "$OVERRIDE" ]; then
 fi
 
 case "$platform" in
-    riscv64|x86_64) echo "$platform" ;;
-    *) echo "error: invalid platform '$platform' in config (riscv64|x86_64)" >&2; exit 1 ;;
+    riscv64) echo "$platform" ;;
+    x86_64) echo "error: x86_64 support lives on the feature/x86-64 branch" >&2; exit 1 ;;
+    *) echo "error: invalid platform '$platform' in config (riscv64)" >&2; exit 1 ;;
 esac

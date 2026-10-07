@@ -29,20 +29,3 @@ rustflags = [
     "-C", "target-feature=+crt-static",
 ]
 
-# x86_64 kernel target (QEMU q35, multiboot1 ELF via -kernel)
-[target.x86_64-unknown-none]
-rustflags = [
-    "-C", "link-arg=-Tkernel/src/arch/x86_64/linker.ld",
-    "-C", "link-arg=-Tkernel/linker-x86-extra.ld",
-    "-C", "force-frame-pointers=yes",
-    "-C", "code-model=kernel",
-    "-C", "link-arg=--no-gc-sections",
-    # the 32-bit multiboot stub uses absolute R_X86_64_32 relocations —
-    # a PIE link cannot relax them
-    "-C", "link-arg=-no-pie",
-    # static relocs: no .got generation (the kernel linker script does not
-    # place one); strip debug sections (it does not place .debug* either)
-    "-C", "relocation-model=static",
-    "-C", "link-arg=--strip-debug",
-    "-Z", "ub-checks=no",
-]
