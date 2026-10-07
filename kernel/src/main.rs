@@ -919,7 +919,9 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // ========== Graphics System Initialization (VirtIO-GPU) ==========
-        #[cfg(feature = "riscv64")]
+        // Arch-generic: the PCI transport honors firmware BARs on x86_64
+        // (same path that brought up virtio-blk) and self-assigned BARs on
+        // riscv64.
         {
             // Probe VirtIO-GPU device
             if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
@@ -950,7 +952,6 @@ pub extern "C" fn rust_main() -> ! {
             print_status("fs", "devfs mounted /dev", true);
             // /dev/fb0 — framebuffer char device (registered when the GPU
             // initialized successfully above)
-            #[cfg(feature = "riscv64")]
             if drivers::gpu::get_framebuffer_info().is_some() {
                 match drivers::gpu::fbdev::init_fbdev() {
                     Ok(()) => print_status("driver", "/dev/fb0 registered", true),

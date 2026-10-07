@@ -13,7 +13,7 @@ use crate::drivers::virtio::queue::VirtQueue;
 use crate::drivers::virtio::offset;
 use super::framebuffer::{FrameBuffer, FrameBufferInfo};
 use super::virtio_cmd::cmd;
-use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+use alloc::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 
@@ -612,12 +612,37 @@ impl VirtioGpuDevice {
         // device reads them.
         let _cmd_guard = self.cmd_lock.lock();
 
+        // DMA staging from the linear-mapped kernel heap, NOT from the
+        // caller's stack storage: on x86_64 the boot-time kernel stack
+        // lives at low identity VAs where virt_to_phys's linear-map
+        // VA-PA subtraction underflows (riscv64 kernel stacks satisfy
+        // the offset, which is why passing &cmd worked there). Same
+        // single-block discipline as the virtio-blk io_buf (R17-C).
+        let io_layout = Layout::from_size_align(cmd_size + resp_size, 16).ok()?;
+        // SAFETY: Layout is non-zero-sized (both parts are >= 24 bytes);
+        // null check follows immediately.
+        let io_buf = unsafe { alloc(io_layout) };
+        if io_buf.is_null() {
+            return None;
+        }
+        let cmd_ptr = io_buf as *const u8;
+        // SAFETY: io_buf is cmd_size + resp_size bytes; +cmd_size is in
+        // bounds and resp_size bytes remain after it.
+        let resp_ptr = unsafe { io_buf.add(cmd_size) } as *mut u8;
+        // SAFETY: cmd references at least cmd_size initialized bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(cmd as *const CMD as *const u8, io_buf, cmd_size);
+        }
+
+        // Set by the polling loop below; read after the block is released.
+        let mut completed = false;
+
         // Convert virtual addresses to physical addresses
         let cmd_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(cmd as *const CMD as u64)
+            crate::arch::mm::VirtAddr::new(cmd_ptr as u64)
         ).0;
         let resp_phys = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(resp as *mut RESP as u64)
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64)
         ).0;
 
         // Use first descriptor to send command, second descriptor to receive response
@@ -675,10 +700,28 @@ impl VirtioGpuDevice {
                 fence(Ordering::SeqCst);
                 let used = &*queue.used;
                 if used.idx as usize >= idx + 1 {
-                    return Some(());
+                    completed = true;
+                    break;
                 }
             }
 
+            if completed {
+                // Copy the device's response out of the staging block into
+                // the caller's buffer before the block is freed.
+                // SAFETY: the device wrote resp_size bytes at resp_ptr
+                // (desc1 was the device-writable half of the chain).
+                core::ptr::copy_nonoverlapping(resp_ptr, resp as *mut RESP as *mut u8, resp_size);
+            }
+        }
+
+        // SAFETY: io_buf was allocated above with io_layout; the chain is
+        // complete (or timed out) by this point, so the device no longer
+        // accesses the block.
+        unsafe { dealloc(io_buf, io_layout) };
+
+        if completed {
+            Some(())
+        } else {
             None
         }
     }

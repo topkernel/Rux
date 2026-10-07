@@ -1400,10 +1400,10 @@ pub mod cow_flags {
 /// translations) are copied as-is; user-writable leaves are downgraded to
 /// read-only + COW in BOTH parent and child (unless cow_exempt).
 ///
-/// NOTE vs riscv64 twin: the framebuffer physical-range exemption is
-/// dropped — the x86 port has no GPU framebuffer device yet (no
-/// drivers::gpu); when one lands, add the phys-range check here the same
-/// way the twin does.
+/// NOTE vs riscv64 twin: same discipline — the framebuffer physical-range
+/// exemption keys on the invariant device-shared frame range, not the
+/// (derived, fragile) VMA flags, so no fork can ever COW the scanout away
+/// (see the twin's comment for the fb0 read-regression history).
 pub unsafe fn copy_page_table_cow(
     parent_root_ppn: u64,
     cow_exempt: &[(u64, u64)],
@@ -1413,6 +1413,12 @@ pub unsafe fn copy_page_table_cow(
     // and exec/unmap teardown. Per-leaf PTL granularity (Linux-style) is
     // still a TODO for SMP scalability.
     use crate::mm::page_desc::pfn_to_page_mut;
+
+    // Framebuffer frames (virtio-gpu scanout backing store) are
+    // device-shared memory and must NEVER be COW-marked — mirror of the
+    // riscv64 twin (see its long comment for the failure history).
+    let fb_frame_range: Option<(u64, u64)> = crate::drivers::gpu::get_framebuffer_info()
+        .map(|i| (i.addr >> 12, (i.addr + i.size as u64 + 0xFFF) >> 12));
 
     if parent_root_ppn == 0 {
         return None;
@@ -1536,7 +1542,10 @@ pub unsafe fn copy_page_table_cow(
                         | ((vpn1 as u64) << 12);
                     let cow_exempt_leaf = cow_exempt
                         .iter()
-                        .any(|(s, e)| leaf_va >= *s && leaf_va < *e);
+                        .any(|(s, e)| leaf_va >= *s && leaf_va < *e)
+                        || fb_frame_range.map_or(false, |(lo, hi)| {
+                            pte1.ppn() >= lo && pte1.ppn() < hi
+                        });
 
                     let new_pte = if is_user {
                         let phys_ppn = pte1.ppn() as usize;

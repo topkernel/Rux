@@ -12,7 +12,9 @@ pub mod pci;
 pub mod virtio;
 pub mod net;
 
-#[cfg(feature = "riscv64")]
+// virtio-gpu is arch-generic since the PCI transport (virtio_pci.rs) keeps
+// firmware-assigned BARs on x86_64 and self-assigns them on riscv64; the
+// ECAM walker (pci::find_ecam_devices) is arch-generic too.
 pub mod gpu;
 
 pub mod input;
