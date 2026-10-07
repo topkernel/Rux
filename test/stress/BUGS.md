@@ -69,9 +69,14 @@ Format:
   bitmanip, no context-switch impact (V stays forbidden: kernel saves no vector state).
 - Status: MITIGATED (CPU model); toolchain hygiene item OPEN (audit every build script
   for the pin; add a post-build scan rejecting zext.b/rev8/andn/etc).
+  S005 progress on the hygiene item: the same unpinned-libgcc leak was confirmed
+  for Zcb (c.zext.w) and Zicond (czero.eqz) encodings, not just Zbb. mrsh and
+  toybox now link a pin-clean soft-fp overlay and carry build gates that reject
+  zcb1p0/zicond1p0 attributes in the final binary (see BUG-S005). LTP binaries
+  and the Ubuntu-rootfs programs remain unaudited until their next rebuild.
 
 ## BUG-S005  Repeated core-dumping children corrupt the parent shell (SIGILL after ~2 aborting children)
-- Class: CORRUPTION → INIT-DEATH
+- Class: CORRUPTION → INIT-DEATH  (misfiled: actually TOOLCHAIN/ISA, see root cause)
 - Signature: children die correctly (sig=6 SIGABRT, core dumped); after the 2nd-3rd
   such child, the PARENT sh (even PID 1) dies with sig=4 SIGILL
 - Repro (2-3 min, riscv64, -cpu rv64,zbb=true,zba=true,zbs=true, smp1 or smp2):
@@ -80,9 +85,26 @@ Format:
 - First seen: LTP r2 baseline runner death (run_ltp.sh stops after first test)
 - Frequency: deterministic (3 iterations)
 - Logs: /tmp/repro4.log
-- Status: OPEN
-- Notes: abort01 = LTP abort() test with "dumped core" TPASS — suspicion on
-  process/coredump.rs (core writer touching wrong pages / fd) or the SIGCHLD+
-  wait return path scribbling parent user memory under repeated core dumps.
-  This is THE LTP-runner blocker; every core-dumping test kills the runner.
-  abs01 loops (no core dump) are clean at 5+ iterations.
+- Status: FIXED (feature/s005-coredump: pinned soft-fp overlay in the userspace builds)
+- Root cause: NOT the coredump path. A plain `i=0; while ...; i=$((i+1)); done` loop
+  with zero children kills the shell identically (verified with a kernel-side
+  SIGILL forensic print: pid=1 sh, epc=0x3d99a, insn=0x9ff1, fs=Dirty — text page
+  byte-identical to the on-disk ELF). 0x9ff1 is `c.zext.w`, a Zcb encoding.
+  Ubuntu 25.10's riscv64 cross libgcc.a (gcc 15) is built with zbb+zba+zbs+zcb+
+  zicond, so every static link that resolves a __*tf3/__floatsitf/__clzdi2 member
+  through -lgcc ships those encodings; mrsh's musl libc pulls exactly that set
+  (strtold/floatscan → __floatsitf for the integer part). The pinned QEMU CPU
+  model has zbb/zba/zbs but NO Zcb/Zicond → illegal_instruction → correct SIGILL.
+  The "2-3 children" correlation was coincidence: the loop's arithmetic reaches
+  the first nonzero __floatsitf on the 3rd $(( )) evaluation, right after the
+  2nd child — abs01's loop just didn't hit that path as early.
+- Fix: vendor gcc's soft-fp sources (userspace/soft-fp/, from releases/gcc-15)
+  plus a plain-shift __clzdi2/__clzsi2, compile with the same -march=rv64gc_zicsr
+  pin, and link libsoftfp-pin.a ahead of every -lgcc in build-mrsh.sh and
+  build-toybox.sh (userspace/build-softfp.sh). Post-link gates fail the build if
+  the final binary's .riscv.attributes mention zcb1p0/zicond1p0. LTP's build.sh
+  got the same overlay for its next rebuild; the 5595 binaries currently in
+  userspace/linux-ltp/output still carry zcb/zicond (atof01 FAILs with SIGILL on
+  czero.eqz = Zicond from the same libgcc) — rebuilding LTP is follow-up work.
+- Verified: repro loop reaches iter7 + WHILE-OK with the shell alive (49/50 first
+  LTP runner tests PASS, runner proceeds well past abort01).
