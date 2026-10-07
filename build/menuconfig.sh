@@ -67,6 +67,9 @@ generate_config() {
 
 CONFIGEOF
 
+    # Platform selection (drives `make`: target triple + cargo features)
+    write_config "platform" "default_platform" "$config_default_platform"
+
     # Memory configuration
     write_config "memory" "kernel_heap_size" "$config_kernel_heap_size"
     write_config "memory" "physical_memory" "$config_physical_memory"
@@ -347,8 +350,22 @@ save_and_exit() {
 }
 
 # Main menu
+platform_menu() {
+    local cur=$(get_config_value "platform" "default_platform" "riscv64")
+    local choice
+    choice=$(whiptail --title "Platform Selection" --menu \
+        "Build target platform. This is what plain \'make\' builds;\nthe same value feeds kernel/src/config.rs via build.rs." \
+        12 60 2 \
+        "riscv64" "RISC-V 64-bit (QEMU virt)   [current: $([ "$cur" = riscv64 ] && echo '*' || echo ' ')]" \
+        "x86_64"  "x86_64 (QEMU q35, bzImage)  [current: $([ "$cur" = x86_64 ] && echo '*' || echo ' ')]" \
+        3>&1 1>&2 2>&3)
+    [ -n "$choice" ] && config_default_platform="$choice"
+}
+
 main_menu() {
     # Initialize configuration variables (from existing .config or Kernel.toml defaults)
+    config_default_platform=$(get_config_value "platform" "default_platform" "riscv64")
+
     config_kernel_heap_size=$(get_config_value "memory" "kernel_heap_size" "16")
     config_physical_memory=$(get_config_value "memory" "physical_memory" "2048")
     config_user_stack_size=$(get_config_value "memory" "user_stack_size" "8")
@@ -389,36 +406,38 @@ main_menu() {
     config_opt_level=$(get_config_value "performance" "opt_level" "3")
 
     while true; do
-        choice=$(whiptail --title "Rux Kernel Configuration" --menu "Select configuration category:" 18 60 12 \
-            "1" "Memory Management" \
-            "2" "SMP Multi-core" \
-            "3" "Scheduler" \
-            "4" "Network" \
-            "5" "Features" \
-            "6" "Drivers" \
-            "7" "Boot" \
-            "8" "Debug" \
-            "9" "Performance" \
-            "10" "Security" \
-            "11" "View Configuration" \
-            "12" "Save and Exit" \
+        choice=$(whiptail --title "Rux Kernel Configuration" --menu "Select configuration category:" 20 62 14 \
+            "1" "Platform (target: $config_default_platform)" \
+            "2" "Memory Management" \
+            "3" "SMP Multi-core" \
+            "4" "Scheduler" \
+            "5" "Network" \
+            "6" "Features" \
+            "7" "Drivers" \
+            "8" "Boot" \
+            "9" "Debug" \
+            "10" "Performance" \
+            "11" "Security" \
+            "12" "View Configuration" \
+            "13" "Save and Exit" \
             3>&1 1>&2 2>&3)
 
         [ $? != 0 ] && exit 0
 
         case $choice in
-            1) memory_menu ;;
-            2) smp_menu ;;
-            3) scheduler_menu ;;
-            4) network_menu ;;
-            5) features_menu ;;
-            6) drivers_menu ;;
-            7) boot_menu ;;
-            8) debug_menu ;;
-            9) performance_menu ;;
-            10) security_menu ;;
-            11) show_config ;;
-            12) save_and_exit ;;
+            1) platform_menu ;;
+            2) memory_menu ;;
+            3) smp_menu ;;
+            4) scheduler_menu ;;
+            5) network_menu ;;
+            6) features_menu ;;
+            7) drivers_menu ;;
+            8) boot_menu ;;
+            9) debug_menu ;;
+            10) performance_menu ;;
+            11) security_menu ;;
+            12) show_config ;;
+            13) save_and_exit ;;
         esac
     done
 }

@@ -414,39 +414,91 @@ pub(crate) fn do_execve_elf(
             // Walk page table for each page in the segment and update PTE flags.
             // SAFETY: We are walking the freshly created user page tables (user_ppn)
             // and modifying PTE permission bits only — PPN (physical page number) is preserved.
-            let mut vaddr = seg_start;
-            while vaddr < seg_end {
-                let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
-                let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
-                let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
-
-                // SAFETY: user_ppn is a valid page table root allocated above.
-                unsafe {
-                    let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
-                        user_ppn << crate::arch::mm::PAGE_SHIFT,
-                    );
-                    let pte2 = (*root_table).get(vpn2);
-                    if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                    let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
-                        pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
-                    );
-                    let pte1 = (*table1).get(vpn1);
-                    if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                    let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
-                        pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
-                    );
-                    let old_pte = (*table0).get(vpn0);
-                    if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                    // Preserve PPN, replace permission bits
-                    let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
-                    (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                #[cfg(feature = "riscv64")]
+                {
+                let mut vaddr = seg_start;
+                while vaddr < seg_end {
+                    let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+                    let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+                    let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+    
+                    // SAFETY: user_ppn is a valid page table root allocated above.
+                    unsafe {
+                        let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                            user_ppn << crate::arch::mm::PAGE_SHIFT,
+                        );
+                        let pte2 = (*root_table).get(vpn2);
+                        if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                        let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                            pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                        );
+                        let pte1 = (*table1).get(vpn1);
+                        if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                        let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
+                            pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
+                        );
+                        let old_pte = (*table0).get(vpn0);
+                        if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                        // Preserve PPN, replace permission bits
+                        let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
+                        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                    }
+    
+                    vaddr += PAGE_SIZE as u64;
+                }
                 }
 
-                vaddr += PAGE_SIZE as u64;
-            }
+                #[cfg(feature = "x86_64")]
+                {
+                    let mut vaddr = seg_start;
+                    while vaddr < seg_end {
+                        // 4-level x86_64 walk (PML4/PDPT/PD/PT)
+                        let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+                        let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+                        let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+                        let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+
+                        // SAFETY: walking the freshly created user page tables
+                        // (user_ppn); permission-bit updates only, PPN preserved.
+                        unsafe {
+                            let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                                user_ppn << crate::arch::mm::PAGE_SHIFT,
+                            );
+                            let pte4 = (*root_table).get(i4);
+                            if !pte4.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+                            let table3 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                pte4.ppn() << crate::arch::mm::PAGE_SHIFT,
+                            );
+                            let pte3 = (*table3).get(i3);
+                            if !pte3.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+                            let table2 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                pte3.ppn() << crate::arch::mm::PAGE_SHIFT,
+                            );
+                            let pte2 = (*table2).get(i2);
+                            if !pte2.is_valid() || pte2.is_leaf() { vaddr += PAGE_SIZE as u64; continue; }
+                            let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                            );
+                            let old_pte = (*table1).get(i1);
+                            if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+
+                            // x86 permission bits: clear W|U|NX, then set from the
+                            // semantic aliases (V=P, W=RW, U=US; R/X are no-ops —
+                            // non-exec is expressed via NX).
+                            let clear = PageTableEntry::W | PageTableEntry::U | PageTableEntry::NX;
+                            let mut new_bits = (old_pte.bits() & !clear) | seg_flags;
+                            if !phdr.is_executable() {
+                                new_bits |= PageTableEntry::NX;
+                            }
+                            (*table1).set(i1, PageTableEntry::from_bits(new_bits));
+                        }
+                        vaddr += PAGE_SIZE as u64;
+                    }
+                }
+
         }
     }
 
@@ -571,38 +623,90 @@ pub(crate) fn do_execve_elf(
                     if phdr.is_writable() { seg_flags |= PageTableEntry::W | PageTableEntry::D; }
                     if phdr.is_executable() { seg_flags |= PageTableEntry::X; }
 
-                    let mut vaddr = seg_start;
-                    while vaddr < seg_end {
-                        let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
-                        let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
-                        let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
-
-                        // SAFETY: walking the user page tables for interpreter PTE updates.
-                        unsafe {
-                            let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
-                                user_ppn << crate::arch::mm::PAGE_SHIFT,
-                            );
-                            let pte2 = (*root_table).get(vpn2);
-                            if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                            let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
-                                pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
-                            );
-                            let pte1 = (*table1).get(vpn1);
-                            if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                            let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
-                                pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
-                            );
-                            let old_pte = (*table0).get(vpn0);
-                            if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                            let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
-                            (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                    #[cfg(feature = "riscv64")]
+                    {
+                        let mut vaddr = seg_start;
+                        while vaddr < seg_end {
+                            let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+                            let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+                            let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+    
+                            // SAFETY: walking the user page tables for interpreter PTE updates.
+                            unsafe {
+                                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    user_ppn << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte2 = (*root_table).get(vpn2);
+                                if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte1 = (*table1).get(vpn1);
+                                if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                                let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let old_pte = (*table0).get(vpn0);
+                                if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                                let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
+                                (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                            }
+    
+                            vaddr += PAGE_SIZE as u64;
                         }
-
-                        vaddr += PAGE_SIZE as u64;
                     }
+
+                    #[cfg(feature = "x86_64")]
+                    {
+                        let mut vaddr = seg_start;
+                        while vaddr < seg_end {
+                            // 4-level x86_64 walk (PML4/PDPT/PD/PT)
+                            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+                            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+                            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+                            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+    
+                            // SAFETY: walking the freshly created user page tables
+                            // (user_ppn); permission-bit updates only, PPN preserved.
+                            unsafe {
+                                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    user_ppn << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte4 = (*root_table).get(i4);
+                                if !pte4.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+                                let table3 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte4.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte3 = (*table3).get(i3);
+                                if !pte3.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+                                let table2 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte3.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte2 = (*table2).get(i2);
+                                if !pte2.is_valid() || pte2.is_leaf() { vaddr += PAGE_SIZE as u64; continue; }
+                                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let old_pte = (*table1).get(i1);
+                                if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                                // x86 permission bits: clear W|U|NX, then set from the
+                                // semantic aliases (V=P, W=RW, U=US; R/X are no-ops —
+                                // non-exec is expressed via NX).
+                                let clear = PageTableEntry::W | PageTableEntry::U | PageTableEntry::NX;
+                                let mut new_bits = (old_pte.bits() & !clear) | seg_flags;
+                                if !phdr.is_executable() {
+                                    new_bits |= PageTableEntry::NX;
+                                }
+                                (*table1).set(i1, PageTableEntry::from_bits(new_bits));
+                            }
+                            vaddr += PAGE_SIZE as u64;
+                        }
+                    }
+    
                 }
             }
         }

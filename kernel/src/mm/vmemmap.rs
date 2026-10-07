@@ -131,11 +131,14 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // Use memblock to find a contiguous region for vmemmap pages
     let vmemmap_size = vmemmap_pages * PAGE_SIZE;
 
-    // Calculate the actual physical memory end address
-    let phys_end = 0x80000000 + effective_nr_pages * PAGE_SIZE;
+    // Calculate the actual physical memory end address (arch-aware base:
+    // riscv64 RAM starts at 0x80000000, x86_64 at 0 — the old hardcoded
+    // base made the search range land outside RAM on x86 and init fail)
+    let phys_base = super::page_desc::PHYS_MEMORY_BASE;
+    let phys_end = phys_base + effective_nr_pages * PAGE_SIZE;
     let vmemmap_phys = super::memblock::memblock_find_in_range(
         vmemmap_size,
-        0x80000000,
+        phys_base,
         phys_end,
     );
 

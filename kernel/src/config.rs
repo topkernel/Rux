@@ -13,14 +13,14 @@ pub const KERNEL_NAME: &str = "Rux";
 pub const KERNEL_VERSION: &str = "0.1.0";
 
 /// Target platform
-pub const TARGET_PLATFORM: &str = "riscv64";
+pub const TARGET_PLATFORM: &str = "x86_64";
 
 // ============================================================
 // Memory Configuration
 // ============================================================
 
 /// Kernel heap size (bytes)
-pub const KERNEL_HEAP_SIZE: usize = 134217728;
+pub const KERNEL_HEAP_SIZE: usize = 16777216;
 
 /// Physical memory size (bytes)
 pub const PHYS_MEMORY_SIZE: usize = 2147483648;
@@ -41,7 +41,7 @@ pub const USER_STACK_MAX_SIZE: usize = 8388608;
 pub const USER_HEAP_MAX_SIZE: usize = 134217728;
 
 /// Kernel stack size (bytes)
-pub const KERNEL_STACK_SIZE: usize = 131072;
+pub const KERNEL_STACK_SIZE: usize = 32768;
 
 /// User stack top address
 pub const USER_STACK_TOP: u64 = 0x0000_003f_ffff_f000;

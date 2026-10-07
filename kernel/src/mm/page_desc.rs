@@ -696,7 +696,12 @@ pub unsafe fn copy_page_contents(src_pfn: usize, dst_pfn: usize) {
 // ========== Global page array (mem_map) ==========
 
 /// Physical memory constants
-pub const PHYS_MEMORY_BASE: usize = 0x8000_0000; // QEMU virt: physical memory start address
+// Physical memory base: riscv64 QEMU virt RAM starts at 0x80000000; x86_64
+// RAM starts at 0 (the PFN formulas below are base-relative by design).
+#[cfg(feature = "riscv64")]
+pub const PHYS_MEMORY_BASE: usize = 0x8000_0000;
+#[cfg(feature = "x86_64")]
+pub const PHYS_MEMORY_BASE: usize = 0x0000_0000;
 
 // Use physical memory size from config (Kernel.toml: memory.physical_memory)
 pub const PHYS_MEMORY_SIZE: usize = crate::config::PHYS_MEMORY_SIZE;

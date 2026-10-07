@@ -1,0 +1,19 @@
+kernel=target/riscv64gc-unknown-none-elf/debug/rux
+arch=riscv64
+instances=12
+minutes=10.0
+cmds=150
+seed=7
+WEDGE=12
+00 WEDGE       seed=700000 rc=0 sec=248.0 log=test/stress/runs/wave-20261007-071315/serial-0.log
+01 WEDGE       seed=700001 rc=0 sec=232.0 log=test/stress/runs/wave-20261007-071315/serial-1.log
+02 WEDGE       seed=700002 rc=0 sec=232.0 log=test/stress/runs/wave-20261007-071315/serial-2.log
+03 WEDGE       seed=700003 rc=0 sec=252.0 log=test/stress/runs/wave-20261007-071315/serial-3.log
+04 WEDGE       seed=700004 rc=0 sec=254.0 log=test/stress/runs/wave-20261007-071315/serial-4.log
+05 WEDGE       seed=700005 rc=0 sec=254.0 log=test/stress/runs/wave-20261007-071315/serial-5.log
+06 WEDGE       seed=700006 rc=0 sec=182.0 log=test/stress/runs/wave-20261007-071315/serial-6.log
+07 WEDGE       seed=700007 rc=0 sec=254.0 log=test/stress/runs/wave-20261007-071315/serial-7.log
+08 WEDGE       seed=700008 rc=0 sec=256.0 log=test/stress/runs/wave-20261007-071315/serial-8.log
+09 WEDGE       seed=700009 rc=0 sec=258.0 log=test/stress/runs/wave-20261007-071315/serial-9.log
+10 WEDGE       seed=700010 rc=0 sec=256.0 log=test/stress/runs/wave-20261007-071315/serial-10.log
+11 WEDGE       seed=700011 rc=0 sec=256.0 log=test/stress/runs/wave-20261007-071315/serial-11.log

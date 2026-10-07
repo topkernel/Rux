@@ -309,7 +309,30 @@ impl PhysAddr {
 
 /// Physical → virtual via the linear map
 pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
-    VirtAddr(phys.0 + VA_PA_OFFSET as u64)
+    // Diagnostic: a bogus "phys" here (riscv-base leftovers, a VA passed by
+    // mistake, or wrapped pfn math) overflows the huge VA_PA_OFFSET silently
+    // in release — fail loud with the offending value.
+    match phys.0.checked_add(VA_PA_OFFSET as u64) {
+        Some(v) => VirtAddr(v),
+        None => {
+            let (ret1, ret2): (u64, u64);
+            // SAFETY: frame pointers are forced on; walk the rbp chain two
+            // frames up for this diagnostic only.
+            unsafe {
+                core::arch::asm!(
+                    "movq 8(%rbp), {}",
+                    "movq (%rbp), %rax",
+                    "movq 8(%rax), {}",
+                    out(reg) ret1,
+                    out(reg) ret2,
+                    out("rax") _,
+                    options(att_syntax)
+                );
+            }
+            crate::println!("phys_to_virt OVERFLOW: bogus phys={:#x} ret1={:#x} ret2={:#x}", phys.0, ret1, ret2);
+            panic!("phys_to_virt overflow");
+        }
+    }
 }
 
 /// Virtual → physical via the linear map (only valid in the linear region)
