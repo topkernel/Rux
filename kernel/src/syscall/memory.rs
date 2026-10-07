@@ -668,6 +668,34 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         }
                     }
 
+                    // ashmem mmap (/dev/ashmem, OH port plan §6 item 2):
+                    // map the area's private page pool. MAP_SHARED
+                    // mappings alias the pool pages across fork; MAP_PRIVATE
+                    // mappings are read-only+COW. The handler validates
+                    // size/prot against the ioctl-established state and
+                    // reuses the fb0 placement discipline.
+                    if fd >= 0 {
+                        // SAFETY: fd validated above; get_file_fd returns a
+                        // valid Arc<File> or None.
+                        let ashmem_file = unsafe { crate::fs::file::get_file_fd(fd as usize) };
+                        if let Some(file) = ashmem_file {
+                            if crate::drivers::ashmem::is_ashmem_file(&file) {
+                                let shared = map_flags & map::MAP_SHARED != 0;
+                                return match crate::drivers::ashmem::ashmem_mmap(
+                                    &file,
+                                    addr,
+                                    actual_length,
+                                    offset,
+                                    prot_flags,
+                                    shared,
+                                ) {
+                                    Ok(placement) => placement as i64,
+                                    Err(e) => e as i64, // already negative errno
+                                };
+                            }
+                        }
+                    }
+
                     // Call AddressSpace::mmap
                     let result = address_space.mmap(
                         VirtAddr::new(addr),

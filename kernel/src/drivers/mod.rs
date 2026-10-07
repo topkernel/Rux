@@ -17,6 +17,7 @@ pub mod gpu;
 
 pub mod input;
 pub mod loop_dev;
+pub mod ashmem;
 
 // Re-export VirtIO probe module for backward compatibility
 pub use virtio::probe;
