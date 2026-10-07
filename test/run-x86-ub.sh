@@ -75,11 +75,12 @@ esac
 # Shared-discipline boot: -snapshot (writes go to a temp overlay) and
 # file.locking=off so concurrent agents can boot the same image.
 #
-# virtio-gpu xres/yres pinned to the riscv64 default (1024x768, config
-# FB_DEFAULT_WIDTH/HEIGHT) so headless runs get the same pmode the riscv
-# desktop expects. virtio-net-pci is present for the userspace bring-up but
-# the kernel net driver is virtio-MMIO (riscv) only — the function sits
-# unclaimed until a PCI net driver lands.
+# virtio-gpu xres/yres pinned to 1280x800 — the pmode the riscv64 flow
+# probes (QEMU's default on `virt`; commit 262d21b2 verified riscv64
+# 1280x800 vs the old x86 pin of 1024x768), so both arches present the
+# same scanout to udesk. virtio-net-pci is present for the userspace
+# bring-up but the kernel net driver is virtio-MMIO (riscv) only — the
+# function sits unclaimed until a PCI net driver lands.
 exec "$QEMU" \
     -M q35 -m "$MEM" -smp "$SMP" \
     -accel tcg,thread=single \
@@ -92,7 +93,7 @@ exec "$QEMU" \
     -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
     -netdev user,id=net0 \
     -device virtio-net-pci,disable-legacy=on,netdev=net0 \
-    -device virtio-gpu-pci,xres=1024,yres=768 \
+    -device virtio-gpu-pci,xres=1280,yres=800 \
     -device virtio-keyboard-pci,disable-legacy=on \
     -device virtio-tablet-pci,disable-legacy=on \
     -kernel "$BZIMAGE" \
