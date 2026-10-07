@@ -4,6 +4,19 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-10-07 — x86_64 platform support merged to main
+
+- Ubuntu 22.04 amd64 boots to the graphical desktop on q35 (login,
+  keyboard input, apps) — the same gate riscv64 passes
+- Full x86_64 bring-up: multiboot/long-mode boot, PML4, IDT/TSS,
+  syscall/sysret, LAPIC SMP (4 CPUs), port-I/O 8250 console,
+  virtio-blk/net/gpu/input over PCI with shared-INTx dispatch
+- Userspace: static + glibc 2.35 dynamic; x86 stat(2) ABI, arch_prctl
+  TLS, orig_rax syscall numbers, 16-byte entry-stack alignment
+- Build: `PLATFORM=x86_64 make build`; build/.config is now an overlay
+  over Kernel.toml (a partial .config no longer resets memory sizes);
+  platform key renamed to `platform_target` (old spelling deprecated)
+
 ### 2026-04-14 — Soft Lockup Fix: Enable Interrupts During Syscalls
 
 **Root cause**: All syscalls ran with `sstatus.SIE=0` (cleared by ecall), preventing timer interrupts from firing. Any syscall taking > 10s triggered a false soft lockup. The Concurrent I/O smoke tests were the main victim — their multi-child fork+read patterns kept the timer suppressed long enough.

@@ -1,5 +1,46 @@
 # Rux Development Roadmap
 
+## Current Phase (2026-10-07): x86_64 lands on main; OpenHarmony program starts
+
+**Milestone: x86_64 is a supported platform on main — Ubuntu 22.04 amd64
+boots to the graphical desktop (login screen, keyboard login, apps), the
+same gate riscv64 passes.**
+
+### x86_64 bring-up (merged to main)
+
+- Full boot chain on QEMU q35: SeaBIOS/multiboot → 32-bit trampoline →
+  long mode → kernel banner → PML4 switch → the whole subsystem table
+  (buddy/slab, e820, CFS, softirqs, cgroups, vdso) → virtio-blk/net/gpu
+  over PCI → ext4 root → exec → userspace
+- Userspace: static binaries, then glibc 2.35 dynamic linking
+  (arch_prctl TLS, x86 stat(2) layout, 16-byte-aligned entry stacks,
+  orig_rax syscall numbers, NXE, U/S bits on user page-table walks)
+- SMP: SIPI AP startup, LAPIC + IPIs, per-CPU GS/swapgs, TLB shootdown
+  (4 CPUs online, IPI selftest green)
+- The final Ubuntu blocker was a virtio INTx interrupt storm (an
+  unregistered device's level-triggered line re-delivered forever,
+  starving PID 1 of every syscall) — every virtio PCI function now
+  registers in the shared INTx dispatcher at construction
+- Build: Linux-style platform selection (`PLATFORM=x86_64 make build`,
+  `platform_target` in build/.config, config-overlay semantics)
+- Dual-arch regression standard: riscv64 build+smoke must stay green on
+  every x86 change and vice versa
+
+### OpenHarmony port program (started)
+
+- Plan: `docs/development/openharmony-port-plan.md` — replace the Linux
+  kernel under the OpenHarmony x86_64_virt emulator image with Rux;
+  estimated 25-40k new lines across binder (6-10k), graphics (1-8k) and
+  the platform port (done)
+- Spike S1 (binder): closed loop DONE — cross-process TRANSACTION/REPLY
+  with object translation and ref handshake, 325 transactions across 6
+  boots, zero leaks (feature/oh-s1-binder)
+- Spike S3 (graphics route): fbdev HDI composer route judged viable at
+  zero kernel cost (VDI is dlopen-pluggable); requires a GPU-off rebuild
+  of the OH graphics stack — see openharmony-s3-fbdev-composer.md
+- Phase 1 (initrd boot chain) and Phase 2 prerequisites (ashmem, memfd
+  wiring, access_tokenid) in flight on feature branches
+
 ## Current Phase (2026-10-04): X11 on Rux → GNOME
 
 **Milestone reached: Xorg runs on Rux — full server initialization, X client

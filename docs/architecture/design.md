@@ -87,7 +87,8 @@ All external interfaces, system calls, and user-visible data structures must be 
   - Unified interrupt handling framework
   - Unified device driver interface
 
-**Note**: ARM64 (aarch64) architecture has been removed and is no longer maintained.
+**Note**: ARM64 (aarch64) architecture has been removed and is no longer
+maintained. x86_64 (q35) is supported since 2026-10-07 alongside riscv64.
 
 ### 4. **Modular Design**
 
