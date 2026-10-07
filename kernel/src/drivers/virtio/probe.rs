@@ -180,6 +180,65 @@ pub fn init_network_devices() -> usize {
         device_count += virtio_count;
     }
 
+    // 3. PCI virtio-net (virtio-net-pci). Runs after the MMIO probe: the
+    // eth0 singleton belongs to whichever transport found a device first
+    // (on QEMU virt/riscv64 that is the MMIO function; on x86_64/q35 there
+    // is no virtio-mmio and this is the only path).
+    device_count += init_pci_net_devices();
+
+    device_count
+}
+
+/// Initialize PCI network devices (virtio-net-pci)
+///
+/// # Notes
+/// Probes and initializes the first VirtIO-Net function on the PCI bus
+/// through the shared ECAM walker. The virtio-net layer owns a single
+/// global device/NetDevice pair (same policy as virtio-blk's boot disk).
+///
+/// # Returns
+/// Number of initialized devices
+pub fn init_pci_net_devices() -> usize {
+    // The MMIO probe already published eth0 — leave the singleton alone.
+    if crate::drivers::net::virtio_net::get_device().is_some() {
+        return 0;
+    }
+
+    let ecam_addresses = crate::drivers::pci::find_ecam_devices(
+        crate::drivers::pci::vendor::RED_HAT,
+        &[
+            crate::drivers::pci::virtio_device::VIRTIO_NET,
+            crate::drivers::pci::virtio_device::VIRTIO_NET_MODERN,
+        ],
+    );
+
+    let mut device_count = 0;
+    for ecam_addr in ecam_addresses {
+        match crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
+            Ok(mut virtio_dev) => {
+                match crate::drivers::net::virtio_net::init_pci(&mut virtio_dev) {
+                    Ok(()) => {
+                        device_count += 1;
+                        // U3: registration-time uevent — notify udev/mdev
+                        // the netdev exists (device is named "eth0").
+                        crate::fs::sysfs::netdev_uevent("eth0", "add");
+                        break; // single global net device
+                    }
+                    Err(e) => {
+                        crate::pr_err!(
+                            "virtio-net: PCI init failed at {:#x}: {}",
+                            ecam_addr,
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                crate::pr_err!("virtio-net: PCI probe failed at {:#x}: {}", ecam_addr, e);
+            }
+        }
+    }
+
     device_count
 }
 

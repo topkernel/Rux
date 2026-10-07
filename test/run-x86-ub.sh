@@ -76,11 +76,10 @@ esac
 # file.locking=off so concurrent agents can boot the same image.
 #
 # virtio-gpu xres/yres pinned to 1280x800 — the pmode the riscv64 flow
-# probes (QEMU's default on `virt`; commit 262d21b2 verified riscv64
-# 1280x800 vs the old x86 pin of 1024x768), so both arches present the
-# same scanout to udesk. virtio-net-pci is present for the userspace
-# bring-up but the kernel net driver is virtio-MMIO (riscv) only — the
-# function sits unclaimed until a PCI net driver lands.
+# probes (QEMU's default on `virt`), so both arches present the same
+# scanout to udesk. virtio-net-pci is claimed by the kernel's PCI net
+# driver (eth0: firmware BARs + shared PIC INTx dispatch for completions);
+# keyboard and tablet are polled through evdev like on riscv64.
 exec "$QEMU" \
     -M q35 -m "$MEM" -smp "$SMP" \
     -accel tcg,thread=single \

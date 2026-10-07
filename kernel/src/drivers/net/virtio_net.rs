@@ -5,6 +5,7 @@
 //! VirtIO network device driver
 
 use crate::drivers::virtio::queue;
+use crate::drivers::virtio::virtio_pci::VirtIOPCI;
 use crate::drivers::net::space::{NetDevice, NetDeviceOps, DeviceStats, ArpHrdType, dev_flags};
 use crate::net::buffer::SkBuff;
 use crate::sync::spinlock::Spinlock;
@@ -768,41 +769,49 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
 
         device.init()?;
 
-        // Get MAC address
-        let mac = device.get_mac();
-
-        // Create NetDevice
-        let mut net_device = NetDevice {
-            name: [0u8; 16],
-            ifindex: 0,
-            mtu: device.get_mtu() as u32,
-            type_: ArpHrdType::ARPHRD_ETHER,
-            addr: [0u8; 32],
-            addr_len: 6,
-            netdev_ops: &VIRTIO_NET_OPS,
-            priv_: core::ptr::null_mut(),
-            stats: DeviceStats::default(),
-            flags: dev_flags::IFF_UP | dev_flags::IFF_RUNNING | dev_flags::IFF_BROADCAST,
-            rx_queue_len: 0,
-        };
-
-        // Set device name
-        let name = b"eth0\0";
-        net_device.name[..name.len()].copy_from_slice(name);
-
-        // Set MAC address
-        net_device.set_address(&mac, 6);
-
-        // Store device
-        VIRTIO_NET = Some(device);
-        VIRTIO_NET_DEVICE = Some(net_device);
-
-        // Register network device
-        if let Some(ref mut dev) = VIRTIO_NET_DEVICE {
-            crate::drivers::net::register_netdevice(dev);
-        }
+        publish_eth0(device);
 
         Ok(())
+    }
+}
+
+/// Publish a fully initialized VirtIONetDevice as eth0 (shared tail of the
+/// MMIO and PCI transport init paths).
+///
+/// SAFETY: Called once during kernel init from a single thread.
+unsafe fn publish_eth0(device: VirtIONetDevice) {
+    // Get MAC address
+    let mac = device.get_mac();
+
+    // Create NetDevice
+    let mut net_device = NetDevice {
+        name: [0u8; 16],
+        ifindex: 0,
+        mtu: device.get_mtu() as u32,
+        type_: ArpHrdType::ARPHRD_ETHER,
+        addr: [0u8; 32],
+        addr_len: 6,
+        netdev_ops: &VIRTIO_NET_OPS,
+        priv_: core::ptr::null_mut(),
+        stats: DeviceStats::default(),
+        flags: dev_flags::IFF_UP | dev_flags::IFF_RUNNING | dev_flags::IFF_BROADCAST,
+        rx_queue_len: 0,
+    };
+
+    // Set device name
+    let name = b"eth0\0";
+    net_device.name[..name.len()].copy_from_slice(name);
+
+    // Set MAC address
+    net_device.set_address(&mac, 6);
+
+    // Store device
+    VIRTIO_NET = Some(device);
+    VIRTIO_NET_DEVICE = Some(net_device);
+
+    // Register network device
+    if let Some(ref mut dev) = VIRTIO_NET_DEVICE {
+        crate::drivers::net::register_netdevice(dev);
     }
 }
 
@@ -887,4 +896,234 @@ pub fn enable_device_interrupt(base_addr: u64) {
         "virtio-net",
         base_addr as usize,
     ).ok();
+}
+
+// ============================================================================
+// PCI transport (virtio-net-pci)
+//
+// The MMIO `init()` path drives the virtio-mmio register block (riscv64
+// QEMU virt). This path drives the same VirtIO 1.0 state machine through
+// the PCI common config parsed by VirtIOPCI — on x86_64/q35 the firmware
+// (SeaBIOS) has already assigned the BARs, exactly like the virtio-blk PCI
+// path. Queue roles follow the single queue pair the driver negotiates:
+// queue 0 = receiveq1, queue 1 = transmitq1 (virtio spec 5.1.3).
+// ============================================================================
+
+/// ISR capability address of the PCI net device (riscv64 PLIC path top
+/// half; the x86_64 INTx dispatcher keeps its own registry).
+#[cfg(feature = "riscv64")]
+static PCI_ISR_ADDR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Select `queue_index` in the PCI common config and return its maximum
+/// size (0 = queue not available).
+fn pci_select_queue(pci_dev: &VirtIOPCI, queue_index: u16) -> u16 {
+    let common = pci_dev.common_cfg_bar;
+    // SAFETY: common_cfg_bar points to the MMIO-mapped virtio PCI common
+    // config; queue_select is a standard per-queue register.
+    unsafe {
+        core::ptr::write_volatile(
+            (common + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SELECT as u64) as *mut u16,
+            queue_index,
+        );
+        core::ptr::read_volatile(
+            (common + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as u64) as *const u16,
+        )
+    }
+}
+
+/// Program a smaller queue size than the device maximum.
+///
+/// `setup_queue` (virtio_pci.rs) only publishes ring addresses and enables
+/// the queue; the size register must be programmed while the queue is
+/// selected and still disabled.
+fn pci_set_queue_size(pci_dev: &VirtIOPCI, queue_size: u16) {
+    // SAFETY: queue still selected by pci_select_queue and not yet enabled.
+    unsafe {
+        core::ptr::write_volatile(
+            (pci_dev.common_cfg_bar
+                + crate::drivers::virtio::offset::COMMON_CFG_QUEUE_SIZE as u64) as *mut u16,
+            queue_size,
+        );
+    }
+}
+
+/// Initialize a PCI virtio-net device.
+///
+/// On success the device is DRIVER_OK, its queues hold the posted RX
+/// buffers, and eth0 is registered (the MMIO path's global device and
+/// NetDevice singletons are reused).
+pub fn init_pci(pci_dev: &mut VirtIOPCI) -> Result<(), &'static str> {
+    use crate::drivers::virtio::offset::status;
+
+    // Word 0: accept only VIRTIO_NET_F_MAC. Word 1 VIRTIO_F_VERSION_1 is
+    // added unconditionally by write_driver_features (required for
+    // modern-only devices with disable-legacy=on).
+    const F_NET_MAC: u32 = 1 << 5;
+    // RX ring depth: the MMIO path runs with 8 and DHCP over slirp is
+    // proven at that depth; 32 gives headroom without 256 x ~1.6KB of
+    // posted RX buffers on a 256-deep default queue.
+    const QUEUE_SIZE_CAP: u16 = 32;
+
+    // VirtIO 1.0 state machine: reset, ACK|DRIVER, features, FEATURES_OK.
+    pci_dev.reset_device();
+    let mut reset_timeout = crate::config::VIRTIO_RESET_TIMEOUT_TICKS;
+    while pci_dev.get_status() != 0 && reset_timeout > 0 {
+        core::hint::spin_loop();
+        reset_timeout -= 1;
+    }
+    if pci_dev.get_status() != 0 {
+        return Err("virtio-net-pci: reset did not complete");
+    }
+
+    pci_dev.set_status(status::ACKNOWLEDGE | status::DRIVER);
+
+    let features = pci_dev.read_device_features();
+    pci_dev.write_driver_features(features & F_NET_MAC);
+
+    pci_dev.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
+    if pci_dev.get_status() & status::FEATURES_OK == 0 {
+        return Err("virtio-net-pci: device rejected negotiated features");
+    }
+
+    // Device config (virtio_net_config): mac[6] at +0, status u16 at +6,
+    // max_virtqueue_pairs u16 at +8, mtu u16 at +10.
+    let cfg_base = pci_dev.device_cfg_bar;
+    if cfg_base == 0 {
+        return Err("virtio-net-pci: no device config capability");
+    }
+    let mut mac = [0u8; 6];
+    let mut mtu;
+    // SAFETY: cfg_base is the MMIO-mapped device config region from the
+    // parsed DEVICE_CFG capability; byte reads at 0..6 and 10..12 are the
+    // virtio-net config fields.
+    unsafe {
+        for (i, m) in mac.iter_mut().enumerate() {
+            *m = core::ptr::read_volatile((cfg_base + i as u64) as *const u8);
+        }
+        let dev_mtu = u16::from_le(core::ptr::read_volatile((cfg_base + 10) as *const u16));
+        // 0 means VIRTIO_NET_F_MTU was not offered — fall back to 1500.
+        mtu = dev_mtu;
+        if mtu == 0 || mtu > 1500 {
+            mtu = 1500;
+        }
+    }
+
+    // RX queue (queue 0).
+    let rx_max = pci_select_queue(pci_dev, 0);
+    if rx_max == 0 {
+        return Err("virtio-net-pci: no RX queue");
+    }
+    let queue_size = if rx_max < 8 { rx_max } else { rx_max.min(QUEUE_SIZE_CAP) };
+    pci_set_queue_size(pci_dev, queue_size);
+    let isr_base = pci_dev.isr_cfg_bar;
+    let rx_queue = queue::VirtQueue::new(
+        queue_size,
+        0,
+        pci_dev.get_notify_addr(0),
+        isr_base,
+        isr_base,
+    )
+    .ok_or("virtio-net-pci: RX vring allocation failed")?;
+    pci_dev.setup_queue(0, &rx_queue)?;
+
+    // TX queue (queue 1).
+    let tx_max = pci_select_queue(pci_dev, 1);
+    if tx_max < queue_size {
+        return Err("virtio-net-pci: TX queue smaller than RX queue");
+    }
+    pci_set_queue_size(pci_dev, queue_size);
+    let tx_queue = queue::VirtQueue::new(
+        queue_size,
+        1,
+        pci_dev.get_notify_addr(1),
+        isr_base,
+        isr_base,
+    )
+    .ok_or("virtio-net-pci: TX vring allocation failed")?;
+    pci_dev.setup_queue(1, &tx_queue)?;
+
+    pci_dev.set_status(
+        status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK,
+    );
+
+    // IRQ hookup. x86_64/q35: shared PIC line via the INTx dispatcher.
+    // riscv64: PCIe swizzle formula (same as virtio-blk-pci).
+    #[cfg(feature = "x86_64")]
+    {
+        pci_dev.enable_pci_intx_irq(intx_net_service);
+    }
+    #[cfg(feature = "riscv64")]
+    {
+        PCI_ISR_ADDR.store(pci_dev.isr_cfg_bar, core::sync::atomic::Ordering::Release);
+        let int_pin = pci_dev.pci_config.read_config_byte(0x3D);
+        let irq = 32 + (((int_pin as u32).saturating_sub(1) + pci_dev.pci_slot as u32) % 4);
+        crate::interrupt::request_irq(
+            irq,
+            interrupt_handler_pci,
+            0,
+            "virtio-net-pci",
+            pci_dev.isr_cfg_bar as usize,
+        )
+        .ok();
+    }
+
+    crate::pr_info!(
+        "virtio-net-pci: eth0 up, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, queues rx0/tx1 depth {}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        queue_size
+    );
+
+    // SAFETY: called once during single-threaded kernel init; the device
+    // holds no concurrently accessed state yet.
+    unsafe {
+        let mut device = VirtIONetDevice::new(0);
+        device.mac = mac;
+        device.mtu = mtu;
+        device.queue_size = queue_size;
+        *device.rx_queue.lock() = Some(rx_queue);
+        *device.tx_queue.lock() = Some(tx_queue);
+        *device.initialized.lock() = true;
+
+        // Post initial RX buffers (ethernet_poll drains them from the
+        // NetRx softirq the INTx/PLIC top half raises). Runs on the local
+        // device before publication — nothing can poll eth0 yet.
+        device.refill_rx_buffers();
+
+        publish_eth0(device);
+    }
+
+    Ok(())
+}
+
+/// NetRx-completion service for the x86_64 shared INTx dispatcher: the
+/// dispatcher already read (and thereby acknowledged) this device's ISR
+/// capability; hand packet processing to the NetRx softirq bottom half.
+#[cfg(feature = "x86_64")]
+pub fn intx_net_service() {
+    crate::interrupt::softirq::raise_softirq_irqoff(
+        crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
+    );
+}
+
+/// VirtIO-Net PCI interrupt handler (top half, riscv64 PLIC path).
+///
+/// Reads the ISR capability (which acknowledges the device's INTx) and
+/// defers packet processing to the NetRx softirq.
+#[cfg(feature = "riscv64")]
+pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
+    let isr_addr = PCI_ISR_ADDR.load(core::sync::atomic::Ordering::Acquire);
+    if isr_addr == 0 {
+        return crate::interrupt::IrqReturn::None;
+    }
+    // SAFETY: isr_addr was stored from a VirtIOPCI whose ISR capability is
+    // MMIO-mapped; the read is the device-side interrupt acknowledge.
+    let isr = unsafe { core::ptr::read_volatile(isr_addr as *const u32) };
+    if isr == 0 {
+        // Not ours — spurious or another device on the shared line.
+        return crate::interrupt::IrqReturn::None;
+    }
+    crate::interrupt::softirq::raise_softirq_irqoff(
+        crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
+    );
+    crate::interrupt::IrqReturn::Handled
 }
