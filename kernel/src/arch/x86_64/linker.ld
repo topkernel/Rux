@@ -85,6 +85,11 @@ SECTIONS
         __sdata = .;
         *(.data .data.*)
         *(.sdata .sdata.*)
+        /* .got is an orphan otherwise: ld parks it AFTER __kernel_end, past
+         * the image mapping, and any GOT-indirect call (debug builds emit
+         * them across CGUs) page-faults on an unmapped address. Absorb it
+         * (and .got.plt, were it ever emitted) inside the loaded image. */
+        *(.got .got.plt)
         . = ALIGN(4096);
         *(.bss.stack)                    /* per-CPU IRQ stacks etc. */
         __edata = .;
