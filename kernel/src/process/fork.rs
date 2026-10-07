@@ -174,6 +174,25 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
             regs.set_user_stack_pointer(args.stack);
         }
 
+        // ===== Inherit FS/GS bases (x86_64 TLS) =====
+        // Linux copy_thread copies current->thread.{fsbase,gsbase} into
+        // the child: a plain fork() child (no CLONE_SETTLS) starts with
+        // the parent's TLS layout, and glibc touches TLS (errno et al.)
+        // on its very first instructions in the child — with the base
+        // left 0 the first access faults at ~(0 + slot offset).
+        #[cfg(feature = "x86_64")]
+        if let Some(parent_task) = crate::sched::current() {
+            // SAFETY: parent_task is the currently running task; we only
+            // read its thread state before the child ever runs.
+            unsafe {
+                let pfs = (*parent_task).thread().fs_base;
+                let pgs = (*parent_task).thread().gs_base;
+                let ct = task.thread_mut();
+                ct.fs_base = pfs;
+                ct.gs_base = pgs;
+            }
+        }
+
         // Set TLS if requested
         if args.flags & CLONE_SETTLS != 0 {
             crate::process::set_user_tls(task, args.tls);
