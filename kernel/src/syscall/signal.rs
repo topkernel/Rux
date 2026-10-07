@@ -333,8 +333,11 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
         let frame_addr = {
             let sp = regs.user_stack_pointer() as usize;
             let base = sp.saturating_sub(8);
+            // setup_frame_x86_64 places frames at ≡ 8 (mod 16) (the SysV
+            // as-if-called rule, Linux align_sigframe parity), so the
+            // forged-frame residue check must expect 8, not 0.
             let sp_ok = base != 0
-                && base % 16 == 0
+                && base % 16 == 8
                 && crate::arch::uaccess::access_ok(
                     base,
                     core::mem::size_of::<crate::signal::SignalFrame>(),
@@ -352,6 +355,14 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
             false
         };
         if !ok {
+            // X3 hunt: name the rejected frame so sigreturn-path kills are
+            // attributable (sp alignment, record fallback, restore failure).
+            crate::pr_err!(
+                "rt_sigreturn: frame rejected sp={:#x} rec={:#x} pid={}",
+                regs.user_stack_pointer(),
+                (*current).sigframe_addr,
+                (*current).pid()
+            );
             let pid = crate::process::current_pid();
             let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
         }

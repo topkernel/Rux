@@ -1207,7 +1207,8 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
         }
         MmFaultResult::PermissionDenied => {
-            crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
+            crate::pr_err!("pagefault: Permission denied at {:#x}, rip={:#x}, pid={}",
+                fault_addr, regs.rip, crate::sched::get_current_pid());
             if regs.user_mode() {
                 // Handler-first routing like Segfault (PROT_NONE access).
                 let pid = crate::process::current_pid();

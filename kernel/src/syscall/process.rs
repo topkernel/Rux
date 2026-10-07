@@ -56,15 +56,24 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     let flags = args[0];
     let stack = args[1];
     let parent_tid = args[2] as *mut i32;
-    // musl riscv64 clone.s (verified in toolchain/musl-1.2.5):
-    //   syscall(SYS_clone, flags, stack, ptid, tls, ctid)
-    //     -> a2=ptid, a3=tls, a4=ctid. The batch-1 review claimed
-    //     a3=child_tid/a4=tls and W1 "fixed" to that order — inverted
-    //     against the real musl ABI, so SETTLS programmed tp with the
-    //     ctid pointer and every new thread segfaulted at TLS access
-    //     (pthread acceptance: fault at 0x10, epc in user text).
-    let tls = args[3];
-    let child_tid = args[4] as *mut i32;
+    // clone syscall argument ORDER differs by arch (verified against
+    // toolchain/musl-1.2.5 clone.s for both):
+    //
+    // - riscv64: musl passes (flags, stack, ptid, TLS, CTID) — a2=ptid,
+    //   a3=tls, a4=ctid, and the riscv Linux ABI adopted that order.
+    //
+    // - x86_64: the STANDARD order (flags, stack, ptid, CTID, TLS):
+    //   musl's wrapper moves ctid into r10 (arg 4) and tls into r8
+    //   (arg 5). Reading the riscv order here programmed fsbase with
+    //   the CHILD-TID POINTER, so every pthread's `mov %fs:0x0,%rbp`
+    //   loaded the tid integer as the TCB self-pointer and the next
+    //   `0x40(%rbp)` access faulted at tid+0x40 (observed: fcntl34_64
+    //   threads faulting at 0x40 and 0x181 with tid 0x141 — the X3
+    //   thread-crash family).
+    #[cfg(feature = "riscv64")]
+    let (tls, child_tid) = (args[3], args[4] as *mut i32);
+    #[cfg(feature = "x86_64")]
+    let (tls, child_tid) = (args[4], args[3] as *mut i32);
 
     // Legacy clone: the low byte of `flags` is the exit signal (Linux
     // copy_process: p->exit_signal = args->exit_signal == CSIGNAL mask).

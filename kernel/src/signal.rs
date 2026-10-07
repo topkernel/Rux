@@ -1632,8 +1632,25 @@ unsafe fn setup_frame_x86_64(
         user_sp - SIGNAL_FRAME_SIZE
     };
 
-    // SysV ABI: 16-byte aligned rsp at handler entry (and the frame base).
-    let frame_addr = frame_addr & !0xF;
+    // SysV ABI as-if-called rule: at handler entry rsp must be ≡ 8
+    // (mod 16) — exactly as if the handler had been CALLed (the return
+    // address slot at rsp+0 makes up the other 8 bytes). Linux x86_64
+    // does this in align_sigframe (`sp -= 8; sp &= -16`). Entering with
+    // rsp ≡ 0 (mod 16) leaves every compiler-assumed 16-byte stack slot
+    // off by 8, and the handler's first aligned SSE access (`movaps
+    // %xmm0,0x30(%rsp)` after a 6-push + 0x158 prologue) raises #GP →
+    // SIGSEGV with si_code 0 — the x86 LTP X3 crash storm (91 riscv-PASS
+    // tests dying in alarm_handler/heartbeat_handler/test handlers).
+    // Round DOWN first, then subtract 8: the result is always ≡ 8
+    // (mod 16) and always ≤ (sp - 600) - 8, so the frame's tail can
+    // never cover the qword AT the interrupted user_sp. (Plain +8 after
+    // the mask — the obvious reading of "as-if-called" — lets frame_end
+    // reach user_sp+8 when (sp-600) ≡ 0 (mod 16); retcode[8..16] then
+    // clobbers the interrupted function's return-address slot with 5
+    // (the trampoline's `05` syscall byte), and its eventual `ret` jumps
+    // to rip=0x5 — the second half of the X3 storm: 31/35 residual
+    // crashes in the crash-262 rescan were exactly this signature.)
+    let frame_addr = (frame_addr & !0xF) - 8;
 
     // SA_SIGINFO handlers decode the payload fields, so prefer the siginfo
     // queued by the sender; fall back to a generic SI_KERNEL placeholder.
@@ -1721,6 +1738,16 @@ unsafe fn setup_frame_x86_64(
         frame_size,
     );
     if uncopied != 0 {
+        // X3 hunt: the silent SIGSEGV path — name the frame target so a
+        // copy failure here (altstack not mapped / bad ss_sp) is
+        // attributable from the console.
+        crate::pr_err!(
+            "sigframe: copy_to_user failed frame={:#x} sig={} pid={} altstack={}",
+            frame_addr,
+            sig,
+            (*task).pid(),
+            use_altstack
+        );
         (*task).sigframe = None;
         (*task).sigframe_addr = 0;
         handle_default_signal(11);

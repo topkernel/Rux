@@ -141,13 +141,16 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         if regs.kernel_mode() { "kernel" } else { "user" }
     );
 
-    // Kernel-mode fault inside a uaccess window → fixup (returns EFAULT path)
-    if regs.kernel_mode() && !exception_table_empty() {
-        if let Some(fixup) = fixup_exception(regs.rip) {
-            regs.rip = fixup;
-            return MmFaultResult::Handled;
-        }
-    }
+    // X3 fix: do NOT fixup uaccess-window kernel faults here. The early
+    // check below intercepted EVERY kernel #PF inside copy_to/from_user
+    // and routed it to the fixup (EFAULT) BEFORE the kernel_data_fill
+    // branch lower down could demand-fill a VMA-covered user page — so
+    // the FIRST kernel touch of any not-yet-faulted anonymous page
+    // (malloc'd sigaltstack, fresh stdio buffers) reported EFAULT
+    // instead of faulting the page in (sigaltstack01: sigframe
+    // copy_to_user onto the never-touched altstack → forced SIGSEGV).
+    // The fixup still applies at the tail of the kernel path, after
+    // demand-fill had its chance.
 
     // Get current process's address space
     let current = match crate::sched::current() {
