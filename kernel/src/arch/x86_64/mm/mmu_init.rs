@@ -172,6 +172,11 @@ pub fn pt_ops_set_late() {
 /// - Early: static BSS pool inside the kernel image
 /// - Fixmap: memblock allocation (linear mapped)
 /// - Late: buddy allocator (linear mapped)
+/// Diagnostic: early-pool tables consumed so far.
+pub fn early_tables_used() -> usize {
+    EARLY_TABLE_NEXT.load(Ordering::Acquire)
+}
+
 pub unsafe fn alloc_page_table() -> Option<u64> {
     let stage = get_alloc_stage();
     match stage {
