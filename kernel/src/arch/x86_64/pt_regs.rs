@@ -112,9 +112,16 @@ impl PtRegs {
     }
 
     /// Get syscall number
+    ///
+    /// Reads orig_rax (Linux's regs->orig_ax): rax is ALSO the return-value
+    /// register, so reading it here returns -ENOSYS whenever the entry path
+    /// pre-seeded the default return value — the unknown-syscall loop where
+    /// every real syscall (write args were correct) dispatched as -38.
+    /// syscall_entry pushes the user rax into the orig_rax slot before any
+    /// Rust code can clobber rax.
     #[inline]
     pub fn syscall_nr(&self) -> i64 {
-        self.rax as i64
+        self.orig_rax as i64
     }
 
     /// Get syscall arguments (x86_64 kernel ABI: rdi rsi rdx r10 r8 r9)

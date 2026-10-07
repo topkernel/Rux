@@ -97,9 +97,14 @@ pub fn kernel_thread(
         /// riscv64 kernel-thread trampoline (reads fn/arg from s0/s1).
         #[cfg(feature = "riscv64")]
         fn ret_from_fork_kernel_asm();
-        /// x86_64 trap entry (restores the pt_regs at thread.sp).
+        /// x86_64 kernel-thread trampoline: schedule_tail, then calls
+        /// fn(arg) via ret_from_fork_kernel_helper (fn/arg arrive in the
+        /// switch-restored r12/r13).  Must NOT be ret_from_fork — that
+        /// path returns through trap_exit's iretq, which for a kernel
+        /// thread pops the zeroed supervisor pt_regs and executes RIP=0
+        /// (the boot-time triple fault).
         #[cfg(feature = "x86_64")]
-        fn ret_from_fork();
+        fn ret_from_fork_kernel();
     }
     {
         let thread = task.thread_mut();
@@ -112,9 +117,7 @@ pub fn kernel_thread(
         }
         #[cfg(feature = "x86_64")]
         {
-            // fn/arg stashed in the switch-restored r12/r13 slots until
-            // the x86_64 kthread trampoline contract is pinned.
-            thread.callee.ret_addr = ret_from_fork as u64;
+            thread.callee.ret_addr = ret_from_fork_kernel as u64;
             thread.sp = pt_regs_ptr as u64;
             thread.callee.r12 = fn_ptr as u64;
             thread.callee.r13 = arg as u64;

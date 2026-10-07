@@ -1451,7 +1451,14 @@ pub unsafe fn copy_page_table_cow(
 
         let child_pud_phys = alloc_page_table()?;
         let child_ppn3 = child_pud_phys >> PAGE_SHIFT;
-        (*child_root).set(vpn4, PageTableEntry::new_table(child_ppn3));
+        // Child links inherit the parent link's USER bit — x86 enforces
+        // U/S at every walk level (see map_page_noflush's link_user).
+        (*child_root).set(
+            vpn4,
+            PageTableEntry::from_bits(
+                PageTableEntry::new_table(child_ppn3).bits() | (pte4.bits() & PageTableEntry::US),
+            ),
+        );
 
         let parent_pud = get_page_table_virt(ppn3 << PAGE_SHIFT);
         let child_pud_ref = &mut *get_page_table_virt(child_pud_phys);
@@ -1482,7 +1489,12 @@ pub unsafe fn copy_page_table_cow(
 
             let child_pmd_phys = alloc_page_table()?;
             let child_ppn2 = child_pmd_phys >> PAGE_SHIFT;
-            (*child_pud_ref).set(vpn3, PageTableEntry::new_table(child_ppn2));
+            (*child_pud_ref).set(
+                vpn3,
+                PageTableEntry::from_bits(
+                    PageTableEntry::new_table(child_ppn2).bits() | (pte3.bits() & PageTableEntry::US),
+                ),
+            );
 
             let parent_pmd = get_page_table_virt(ppn2 << PAGE_SHIFT);
             let child_pmd_ref = &mut *get_page_table_virt(child_pmd_phys);
@@ -1512,7 +1524,12 @@ pub unsafe fn copy_page_table_cow(
 
                 let child_pt_phys = alloc_page_table()?;
                 let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
-                (*child_pmd_ref).set(vpn2, PageTableEntry::new_table(child_ppn1));
+                (*child_pmd_ref).set(
+                    vpn2,
+                    PageTableEntry::from_bits(
+                        PageTableEntry::new_table(child_ppn1).bits() | (pte2.bits() & PageTableEntry::US),
+                    ),
+                );
 
                 let parent_pt = get_page_table_virt(ppn1 << PAGE_SHIFT);
                 let child_pt_ref = &mut *get_page_table_virt(child_pt_phys);

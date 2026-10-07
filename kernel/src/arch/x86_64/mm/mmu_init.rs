@@ -1093,14 +1093,33 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
     let root = &mut *root_table;
 
+    // x86 checks U/S at EVERY walk level: a user mapping (flags carry US)
+    // must reach the leaf through links that all carry US, or a CPL3
+    // access faults with P=1 (protection) even though the leaf itself is
+    // user-accessible. `link_user` is OR'd into every link this walk
+    // creates and upgrades pre-existing user-half links that lack it
+    // (e.g. the supervisor-only links create_user_address_space /
+    // earlier kernel-side installs left behind). Kernel mappings pass
+    // link_user=0 and never widen anything.
+    let link_user = flags & PageTableEntry::US;
+
     // PML4 -> PUD (PML4 leaves do not exist on x86_64)
     let pte4 = root.get(vpn4);
     let ppn3 = if pte4.is_valid() {
+        if link_user != 0 && pte4.bits() & PageTableEntry::US == 0 {
+            root.set(
+                vpn4,
+                PageTableEntry::from_bits(pte4.bits() | PageTableEntry::US),
+            );
+        }
         pte4.ppn()
     } else {
         let table_phys = alloc_page_table().expect("map_page: failed to allocate PUD table");
         let ppn = table_phys >> PAGE_SHIFT;
-        root.set(vpn4, PageTableEntry::new_table(ppn));
+        root.set(
+            vpn4,
+            PageTableEntry::from_bits(PageTableEntry::new_table(ppn).bits() | link_user),
+        );
         ppn
     };
 
@@ -1127,7 +1146,10 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
             // identically. The caller's page is overwritten afterwards; the
             // flush in map_page / region batch publishes both writes.
             let pmd_ppn = pmd_phys >> PAGE_SHIFT;
-            table3_ref.set(vpn3, PageTableEntry::new_table(pmd_ppn));
+            table3_ref.set(
+                vpn3,
+                PageTableEntry::from_bits(PageTableEntry::new_table(pmd_ppn).bits() | link_user),
+            );
             pte3 = table3_ref.get(vpn3);
         } else {
             crate::pr_err!(
@@ -1138,11 +1160,20 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
         }
     }
     let ppn2 = if pte3.is_valid() {
+        if link_user != 0 && pte3.bits() & PageTableEntry::US == 0 {
+            table3_ref.set(
+                vpn3,
+                PageTableEntry::from_bits(pte3.bits() | PageTableEntry::US),
+            );
+        }
         pte3.ppn()
     } else {
         let table_phys = alloc_page_table().expect("map_page: failed to allocate PMD table");
         let ppn = table_phys >> PAGE_SHIFT;
-        table3_ref.set(vpn3, PageTableEntry::new_table(ppn));
+        table3_ref.set(
+            vpn3,
+            PageTableEntry::from_bits(PageTableEntry::new_table(ppn).bits() | link_user),
+        );
         ppn
     };
 
@@ -1165,7 +1196,10 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
                 );
             }
             let pt_ppn = pt_phys >> PAGE_SHIFT;
-            table2_ref.set(vpn2, PageTableEntry::new_table(pt_ppn));
+            table2_ref.set(
+                vpn2,
+                PageTableEntry::from_bits(PageTableEntry::new_table(pt_ppn).bits() | link_user),
+            );
             pte2 = table2_ref.get(vpn2);
         } else {
             crate::pr_err!(
@@ -1176,11 +1210,20 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
         }
     }
     let ppn1 = if pte2.is_valid() {
+        if link_user != 0 && pte2.bits() & PageTableEntry::US == 0 {
+            table2_ref.set(
+                vpn2,
+                PageTableEntry::from_bits(pte2.bits() | PageTableEntry::US),
+            );
+        }
         pte2.ppn()
     } else {
         let table_phys = alloc_page_table().expect("map_page: failed to allocate PT table");
         let ppn = table_phys >> PAGE_SHIFT;
-        table2_ref.set(vpn2, PageTableEntry::new_table(ppn));
+        table2_ref.set(
+            vpn2,
+            PageTableEntry::from_bits(PageTableEntry::new_table(ppn).bits() | link_user),
+        );
         ppn
     };
 

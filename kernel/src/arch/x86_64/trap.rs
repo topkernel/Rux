@@ -126,6 +126,11 @@ const MSR_STAR: u32 = 0xC000_0081;
 const MSR_LSTAR: u32 = 0xC000_0082;
 const MSR_FMASK: u32 = 0xC000_0084;
 const EFER_SCE: u64 = 1;
+/// EFER.NXE — without it every PTE carrying NX (all non-executable user
+/// mappings: stacks, data, bss) raises a reserved-bit #PF (ec bit 3) on
+/// ANY access, which the dispatcher then misreads as a read fault and
+/// "handles" into an infinite loop.
+const EFER_NXE: u64 = 1 << 11;
 
 // ============================================================================
 // GDT / TSS / IDT tables
@@ -275,10 +280,20 @@ pub fn init() {
         set_tss_rsp0(0); // no task kernel stack until the scheduler starts
 
         // ---- GDT: fill the TSS system descriptor (idx 7/8, sel 0x38) ----
+        // System-segment descriptor layout: base[15:0] in bits 16..31,
+        // base[23:0] spread as base[23:16] at bits 32..39 and base[31:24]
+        // at bits 56..63 of the low word; base[63:32] is the high word.
+        // The old build omitted base[31:24]: with the TSS in .bss at
+        // 0xffffffff80xxxxxx the 0x80 byte vanished and TR named
+        // 0xffffffff00xxxxxx — unmapped, so the FIRST user->kernel stack
+        // switch (TSS.rsp0 read) triple-faulted.
         let base = tss as usize as u64;
         let limit = (TSS_SIZE - 1) as u64;
         let gdt = &raw mut GDT_X86;
-        (*gdt).0[7] = (limit & 0xFFFF) | ((base & 0xFF_FFFF) << 16) | (0x89 << 40);
+        (*gdt).0[7] = (limit & 0xFFFF)
+            | ((base & 0xFF_FFFF) << 16)
+            | (0x89 << 40)
+            | (((base >> 24) & 0xFF) << 56);
         (*gdt).0[8] = base >> 32;
 
         let gdtr = PseudoDescriptor {
@@ -390,7 +405,7 @@ pub fn init_syscall() {
     // constants documented at the top of this file.
     unsafe {
         let efer = rdmsr(MSR_EFER);
-        wrmsr(MSR_EFER, efer | EFER_SCE);
+        wrmsr(MSR_EFER, efer | EFER_SCE | EFER_NXE);
         wrmsr(MSR_STAR, MSR_STAR_VALUE);
         wrmsr(MSR_LSTAR, &raw const syscall_entry as u64);
         wrmsr(MSR_FMASK, MSR_FMASK_VALUE);
@@ -1011,6 +1026,16 @@ fn handle_page_fault(regs: &mut PtRegs) {
     }
     if error_code & 0x4 != 0 {
         access |= crate::arch::mm::page_fault::FaultFlags::USER;
+    }
+    // Reserved-bit walk fault (ec bit 3): a paging-structure entry carries
+    // a bit the current CR4/EFER setup reserves (classically NX with
+    // EFER.NXE=0). Never a legitimate user condition — fail loudly
+    // instead of letting it decode as a plain read fault and loop.
+    if error_code & 0x8 != 0 {
+        panic!(
+            "#PF RSVD-bit set in paging structures: addr={:#x} rip={:#x} ec={:#x} (EFER.NXE off with NX PTEs?)",
+            fault_addr, regs.rip, error_code
+        );
     }
 
     crate::pr_debug!(

@@ -321,9 +321,6 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                     let mut total_written = 0;
                     let mut user_ptr = buf;
 
-                    // UART fixmap virtual address (get from fixmap module)
-                    let uart_addr = crate::arch::mm::fixmap::uart_virt_addr() as *mut u8;
-
                     while remaining > 0 {
                         let to_copy = core::cmp::min(remaining, CHUNK_SIZE);
 
@@ -341,19 +338,24 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                             break;
                         }
 
-                        // Output the copied bytes directly to UART
+                        // Output the copied bytes through the console UART
+                        // (arch-generic: MMIO on riscv64, PIO 0x3f8 on
+                        // x86_64 — the old fixmap write_volatile addressed
+                        // a riscv-only MMIO window and silently dumped
+                        // user bytes into VA 0 on x86).
+                        let uart = crate::console::lock();
                         for &b in &kernel_buf[..to_copy] {
                             if b == b'\n' {
-                                core::ptr::write_volatile(uart_addr, b'\r');
+                                uart.putc(b'\r');
                             }
-                            core::ptr::write_volatile(uart_addr, b);
+                            uart.putc(b);
                         }
+                        drop(uart);
 
                         total_written += to_copy;
                         remaining -= to_copy;
                         user_ptr = user_ptr.add(to_copy);
                     }
-
                     return total_written as i64;
                 }
 
