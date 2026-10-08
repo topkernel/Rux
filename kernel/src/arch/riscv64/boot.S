@@ -123,7 +123,20 @@ _start:
     add t4, t2, t4
     sd t3, 0(t4)
 
-    // trampoline_pmd: map first 4MB of kernel (need 2 PMD entries for stack)
+    // trampoline_pmd: map the SAME 10MB kernel window as early_pmd below.
+    // The virtual-address stage at "2:" runs on THIS table (Step 7 switches
+    // to early_pg_dir only later), and every `la` there assembles to an
+    // auipc+ld GOT-indirect pair — the first `ld` reads the .got section,
+    // whose address depends on the FEATURE BUILD's image size. When a
+    // bigger build (observed: --features riscv64,unit-test after the
+    // oh-phase1 merge 89955420; .got at VA 0xffffffff80416ba0) pushes
+    // .got past the old 4MB window, that ld page-faults with stvec still
+    // pointing at "2:" — an infinite silent trap loop before the first
+    // console byte (unit-test build hung right after OpenSBI; the normal
+    // build's .got sat 158KB below the boundary and booted). Mapping the
+    // full early window here removes the build-layout sensitivity; both
+    // tables must stay in sync with the memory layout budget (see the
+    // early_pmd 8MB->10MB history below).
     // PMD[0]: VA -> PA first 2MB
     la t3, trampoline_pmd
     sub t3, t3, t1               // t3 = trampoline_pmd (physical)
@@ -141,6 +154,30 @@ _start:
     or t4, t4, t5
     sd t4, 8(t3)
 
+    // PMD[2]: VA -> PA third 2MB
+    li t4, KERNEL_PHYS
+    li t6, 0x400000              // 4MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 16(t3)
+
+    // PMD[3]: VA -> PA fourth 2MB
+    li t4, KERNEL_PHYS
+    li t6, 0x600000              // 6MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 24(t3)
+
+    // PMD[4]: VA -> PA fifth 2MB
+    li t4, KERNEL_PHYS
+    li t6, 0x800000              // 8MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 32(t3)
+
     // --- Create early page table (full kernel mapping) ---
     // early_pg_dir: same as trampoline but points to early_pmd
     la t2, early_pg_dir
@@ -156,7 +193,8 @@ _start:
     add t4, t2, t4
     sd t3, 0(t4)
 
-    // early_pmd: map first 8MB of kernel (4 PMD entries for text/rodata/data/bss/stack)
+    // early_pmd: map first 10MB of kernel (5 PMD entries for
+    // text/rodata/data/bss/stack — must match trampoline_pmd above)
     // PMD[0]: VA 0xFFFFFFFF80000000 -> PA 0x80200000 (first 2MB: text)
     la t3, early_pmd
     sub t3, t3, t1               // physical
