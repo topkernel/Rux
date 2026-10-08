@@ -720,6 +720,28 @@ const LOCAL_TIMER: u64 = crate::drivers::intc::apic::LOCAL_TIMER_VECTOR as u64;
 /// the orig_rax slot).
 #[no_mangle]
 pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
+    // RACE-FORENSICS (x86-smprace): the stub read the CPU number from
+    // %gs:PC_CPU_NUMBER — an out-of-range value means the active GS base
+    // is NOT the per-CPU slot (GS pairing broken): every %gs-relative
+    // access below would hit arbitrary memory. Name it and halt instead
+    // of corrupting.
+    if cpu_id >= crate::config::MAX_CPUS {
+        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        taskdump_raw_line(b"\nGS-HELL cpu_id=");
+        taskdump_dec(cpu_id as u64);
+        taskdump_raw_line(b" vector=0x");
+        taskdump_dec(vector);
+        taskdump_raw_line(b" rip=0x");
+        taskdump_dec(unsafe { (*regs).rip });
+        taskdump_raw_line(b" gsbase_msr=0x");
+        let gsbase = unsafe { rdmsr(0xC000_0101) };
+        taskdump_dec(gsbase);
+        taskdump_raw_line(b"\n");
+        // SAFETY: the kernel cannot proceed with a broken GS base.
+        loop {
+            unsafe { core::arch::asm!("cli; hlt") };
+        }
+    }
     // SAFETY: regs points to a valid PtRegs built by a trap.S stub; the
     // pointer stays valid for the duration of this handler.
     unsafe {
@@ -1255,29 +1277,34 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // Raw serial print (printk may be wedged on a lock this CPU
             // holds), then halt — the twin's R9 discipline.
             // putchar_no_lock writes the serial port directly (no locks).
-            let put = |b: u8| crate::console::putchar_no_lock(b);
+            // (x86-smprace: the old (0..64).step_by(4).rev() loops hit a
+            // shift-overflow panic on their final iterator step; the
+            // explicit while form below cannot.)
+            fn kp_put_hex(v: u64) {
+                let mut sh: i32 = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((v >> sh) & 0xF) as u8;
+                    crate::console::putchar_no_lock(if nb < 10 {
+                        b'0' + nb
+                    } else {
+                        b'a' + nb - 10
+                    });
+                }
+            }
             for &b in b"trap: KERNPANIC pfault badaddr=0x" {
-                put(b);
+                crate::console::putchar_no_lock(b);
             }
-            for sh in (0..64).step_by(4).rev() {
-                let n = ((fault_addr >> sh) & 0xF) as u8;
-                put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-            }
+            kp_put_hex(fault_addr);
             for &b in b" rip=0x" {
-                put(b);
+                crate::console::putchar_no_lock(b);
             }
-            for sh in (0..64).step_by(4).rev() {
-                let n = ((regs.rip >> sh) & 0xF) as u8;
-                put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-            }
+            kp_put_hex(regs.rip);
             for &b in b" rsp=0x" {
-                put(b);
+                crate::console::putchar_no_lock(b);
             }
-            for sh in (0..64).step_by(4).rev() {
-                let n = ((regs.rsp >> sh) & 0xF) as u8;
-                put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
-            }
-            put(b'\n');
+            kp_put_hex(regs.rsp);
+            crate::console::putchar_no_lock(b'\n');
             // SAFETY: hlt halts until the next interrupt; safe in a halt loop.
             loop {
                 unsafe { core::arch::asm!("hlt") };

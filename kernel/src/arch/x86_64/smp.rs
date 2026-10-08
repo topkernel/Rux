@@ -510,6 +510,14 @@ fn wait_started(cpu: usize, spins: u64) -> bool {
 pub extern "C" fn ap_entry64() -> ! {
     let cpu = crate::arch::cpu_id() as usize;
 
+    // RACE-FORENSICS (x86-smprace): a second execution of ap_entry64 for
+    // an already-started CPU is the ghost-CPU signature (re-SIPI/reset of
+    // a running AP): it would clobber the per-CPU slots while the real
+    // scheduler state keeps running tasks. Never observed; cheap to keep.
+    if PER_CPU[cpu].started.load(Ordering::Acquire) == 1 {
+        crate::println!("\nAP-REENTRY!!! cpu={} already started — ghost bring-up", cpu);
+    }
+
     // The AP inherits the power-on CR0 with CD|NW set (uncached, no
     // write-through) — the trampoline only adds PE/PG.  Clear them so
     // this CPU runs cached like the BSP (NW=1 also violates the
