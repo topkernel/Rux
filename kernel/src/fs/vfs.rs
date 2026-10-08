@@ -2819,6 +2819,9 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 if crate::fs::char_dev::char_dev_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }
+                if mem_file_stat(&file, stat).is_some() {
+                    return Ok(());
+                }
                 return Err(errno::Errno::BadFileNumber.as_neg_i32());
             }
         };
@@ -3787,6 +3790,38 @@ fn mem_file_read(file: &File, buf: &mut [u8]) -> isize {
             0
         }
     }
+}
+
+/// Stat a memory file (procfs shortcut content, open_mem_file): Linux
+/// stats /proc files as S_IFREG with the generated content as size.
+/// fstat(2) on these used to fall through to EBADF, so every coreutils
+/// `cat/grep/ps /proc/<pid>/<file>` failed with "Bad file descriptor"
+/// even though the open had succeeded (anonymous file, no VFS inode).
+pub fn mem_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &MEM_FILE_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity confirms this is a mem File; private_data was
+    // installed by open_mem_file as Box::into_raw(MemFileContent) and
+    // remains valid while the File exists.
+    let ptr = unsafe { *file.private_data.get() }?;
+    // SAFETY: read-only access to the content length for st_size.
+    let size = unsafe { (*(ptr as *const MemFileContent)).data.len() };
+    stat.st_dev = 0;
+    // Distinct identity per content instance (the raw pointer is unique).
+    stat.st_ino = ptr as usize as u64;
+    stat.st_nlink = 1;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = 0;
+    stat.st_size = size as i64;
+    stat.st_blocks = (size as u64).div_ceil(512) as i64;
+    stat.st_blksize = 4096;
+    stat.set_regular_file();
+    // procfs tree files are 0444 (oom_score_adj 0644) — read-only here.
+    stat.st_mode |= 0o444;
+    Some(0)
 }
 
 /// Lseek operation for memory files
