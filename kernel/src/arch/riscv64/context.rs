@@ -103,10 +103,25 @@ __switch_to:
     # it pickable by other CPUs. The release fence guarantees that a CPU
     # observing on_cpu == 0 also observes the register stores above (its
     # load of thread.sp will see the values stored here).
+    #
+    # R65-timer (timer regression fix): the release store must write the
+    # FULL ownership qword — ti_on_cpu=false AND running_on_cpu=-1 — not
+    # plain zero. ti_on_cpu (1 byte) and running_on_cpu (4 bytes at +4)
+    # share one 8-byte word; the old `sd zero` cleared BOTH halves to 0,
+    # leaving running_on_cpu == 0 == "claimed by CPU 0". With the dual-bit
+    # pick predicate (R65, e87a8b40: pickable only when claim == -1 or the
+    # picker's own id), every switched-out task became pickable by CPU 0
+    # ALONE — CPUs 1..N starved and timer wakes stalled 6x (timer_probe
+    # TIMER-STALL, state=R). The claim itself is acquired at switch-in by
+    # the Rust wrapper (the twin of x86_switch_publish's claim swap);
+    # releasing both bits in one aligned 8-byte store keeps the word
+    # internally consistent for the non-atomic pick-side readers.
     fence rw, rw
     li    t0, {task_on_cpu}
     add   t0, a0, t0
-    sd    zero, 0(t0)
+    li    t1, -1
+    slli  t1, t1, 32          # 0xFFFFFFFF_00000000: on_cpu=0, claim=-1
+    sd    t1, 0(t0)
 
     # Restore next's context
     # Restore SUM bit: clear first, then conditionally set from next's
@@ -166,6 +181,20 @@ __switch_to:
     thread_sum = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, sum),
     sr_sum = const SR_SUM,
 );
+
+// R65-timer: __switch_to releases the ownership qword with a single
+// aligned 8-byte store of 0xFFFFFFFF_00000000. Pin the two layout facts
+// that store assumes at compile time — ti_on_cpu is 8-byte aligned (the
+// `sd` must be naturally aligned) and running_on_cpu sits at +4 inside
+// the same qword — so a future Task field reorder fails the build here
+// instead of silently corrupting a neighboring field.
+const _: () = {
+    assert!(core::mem::offset_of!(Task, ti_on_cpu) % 8 == 0);
+    assert!(
+        core::mem::offset_of!(Task, running_on_cpu)
+            == core::mem::offset_of!(Task, ti_on_cpu) + 4
+    );
+};
 
 // ============================================================================
 // Per-CPU variable for prev task
@@ -330,6 +359,25 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
     // Step 3: __switch_to() - Switch registers
     //
+    // R65-timer (twin of x86_switch_publish's claim swap): record that
+    // THIS cpu owns next's resumed continuation. riscv64 previously never
+    // touched running_on_cpu, so the dual-bit pick predicate (R65) had no
+    // valid claim to test: combined with the switch-out `sd zero` (which
+    // left claim == 0), every task read as CPU 0's property after its
+    // first switch-out. Acquiring the claim here at switch-in gives the
+    // predicate the same protection x86 has: a stray write that clears
+    // only ti_on_cpu while the task runs leaves claim == the running cpu,
+    // so the task stays unpickable instead of double-running. The claim
+    // is released together with ti_on_cpu by __switch_to's full-word
+    // {false, -1} store at the next switch-out. A plain store suffices —
+    // next is already dequeued and on_cpu-marked here, so no picker can
+    // observe the word until the switch-out release makes it {false, -1}
+    // again.
+    next.running_on_cpu.store(
+        crate::arch::cpu_id() as i32,
+        core::sync::atomic::Ordering::Release,
+    );
+
     // WARNING: After __switch_to returns, ALL local variables are INVALID.
     // __switch_to restores callee-saved registers (s0-s11) from the new
     // task's saved state, so any values the compiler stored there are gone.
