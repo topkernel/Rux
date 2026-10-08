@@ -339,3 +339,15 @@ pub fn phys_to_virt(phys: PhysAddr) -> VirtAddr {
 pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
     PhysAddr(virt.0 - VA_PA_OFFSET as u64)
 }
+
+// ==================== MMIO alias (interface parity with riscv64) ====================
+
+/// On x86_64 the firmware already places device windows in the kernel
+/// half (MMIO hole), so the alias used by shared driver code for MMIO
+/// dereferences is the identity passthrough. Shared constants
+/// (GOLDFISH_RTC_VA, legacy virtio-mmio probes) call this; keeping the
+/// same function name in both backends lets them compile unchanged.
+#[inline]
+pub const fn mmio_alias(low: u64) -> u64 {
+    low
+}

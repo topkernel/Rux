@@ -2552,7 +2552,8 @@ pub fn enable_device_interrupt(base_addr: u64) {
     // - VirtIO devices start at 0x10001000
     // - Each device occupies 0x1000 bytes
     // - IRQ starts at 1, one IRQ per device
-    const VIRTIO_MMIO_BASE: u64 = 0x10001000;
+    const VIRTIO_MMIO_BASE: u64 =
+        crate::arch::mm::memory_layout::mmio_alias(0x10001000);
     const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 
     let slot = ((base_addr - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_SIZE) as u32;

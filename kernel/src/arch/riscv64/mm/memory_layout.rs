@@ -147,6 +147,47 @@ pub const PCIE_ECAM_BASE: u64 = 0x30000000;
 /// PCI MMIO base address
 pub const PCI_MMIO_BASE: u64 = 0x40000000;
 
+// ==================== Kernel-half MMIO alias ====================
+//
+// The kernel used to dereference the identity (va == phys) low device
+// windows — PLIC at 0x0c000000, ECAM at 0x30000000, the PCI MMIO BAR
+// window at 0x40000000 — which copy_kernel_mappings clones into every
+// USER address space root. A user MAP_FIXED mapping over one of those
+// low VAs (gjs/mozjs reserves its heap cage at exactly 0x0c000000) now
+// legitimately REPLACES the cloned device translation in its own root
+// (Linux semantics, map_page's megapage demote), and the next kernel
+// access from that context — e.g. the PLIC claim read in IRQ entry —
+// takes a page fault in S-mode: KERNPANIC.
+//
+// The alias re-maps the entire low device/PCI physical window at a
+// KERNEL-half VA range the user can never reach (TASK_SIZE caps user
+// space far below). All runtime MMIO accessors translate their low
+// identity addresses through `mmio_alias()`; the low windows stay
+// mapped for boot-time and compat access, but no runtime path depends
+// on them surviving in a user root.
+
+/// Base of the kernel-half alias of the low device/PCI window: the
+/// (currently unused) vmalloc region's floor — canonical Sv39 kernel
+/// half, far from every user VA.
+pub const MMIO_ALIAS_BASE: usize = VMALLOC_START;
+
+/// Size of the alias window: covers phys [0, 2 GiB) — PLIC, CLINT,
+/// ECAM, the 256 MiB PCI MMIO BAR window, UART and virtio-mmio slots.
+/// Phys RAM starts at 0x80000000, so the alias never double-maps RAM.
+pub const MMIO_ALIAS_SIZE: usize = 0x8000_0000;
+
+/// Compile-time placement guards: the alias must stay inside the
+/// vmalloc band (canonical kernel half) and below the linear map.
+const _: () = assert!(MMIO_ALIAS_BASE >= 0xffff_ffc0_0000_0000_usize);
+const _: () = assert!(MMIO_ALIAS_BASE + MMIO_ALIAS_SIZE <= PAGE_OFFSET);
+
+/// Translate a low identity device/PCI address (va == phys, below
+/// MMIO_ALIAS_SIZE) to its permanent kernel-half alias.
+#[inline]
+pub const fn mmio_alias(low: u64) -> u64 {
+    MMIO_ALIAS_BASE as u64 + low
+}
+
 // ==================== Kernel Mapping ====================
 
 /// Runtime kernel mapping information

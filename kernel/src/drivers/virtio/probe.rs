@@ -37,7 +37,8 @@ pub enum VirtIODeviceId {
 ///
 /// VirtIO device address range for QEMU virt platform
 /// Uses identity mapping: VIRTIO_MMIO_BASE near 0x10000000
-const VIRTIO_MMIO_BASE: u64 = 0x10001000;
+const VIRTIO_MMIO_BASE: u64 =
+    crate::arch::mm::memory_layout::mmio_alias(0x10001000);
 const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 
 /// Number of VirtIO devices - from config
