@@ -287,6 +287,17 @@ pub fn register(task: *mut Task) {
     if !ENABLED.load(Ordering::Relaxed) || task.is_null() {
         return;
     }
+    // Reclaimed-page guard: a Task page freed without its unregister
+    // landing (exit raced the table-full path, or the free came from an
+    // error path that bypassed free_task_slot) leaves a STALE armed slot
+    // for this address; the slot_of probe would then hand verify() a
+    // half-old shadow for the NEW occupant (the TASK_NEW + zeroed-thread
+    // HIT family on reused pages, u-series). Reset any such slot first.
+    if let Some(idx) = slot_of(task) {
+        SLOTS[idx].gen.fetch_add(1, Ordering::AcqRel);
+        SLOTS[idx].task.store(0, Ordering::Release);
+        SLOTS[idx].armed.store(0, Ordering::Release);
+    }
     let h = hash_of(task as usize);
     for i in 0..SCRIBBLE_SLOTS {
         let idx = (h + i) & (SCRIBBLE_SLOTS - 1);
@@ -465,6 +476,35 @@ pub fn verify() {
         let task = t as *mut Task;
         if cur == Some(task) {
             continue;
+        }
+        // A task running on ANOTHER CPU also moves its sp/fpu state
+        // legitimately between our read and its next quiesce — the
+        // sp-only WEAK reports on cross-CPU running tasks were pure
+        // detector noise (u-series logs). Skip anything a CPU actually
+        // runs or is picking right now; only fully quiescent sleepers
+        // can be judged.
+        if unsafe { (*task).on_cpu() }
+            || (0..crate::config::MAX_CPUS)
+                .any(|c| crate::sched::sched::cpu_state(c).current == task)
+        {
+            continue;
+        }
+        // Recycled-page race: unregister (free_task_slot) bumps gen and
+        // clears the task pointer, but verify may already hold the old
+        // pointer while the page is re-born as a fork child — TASK_NEW
+        // (0x80, half-built thread fields) or ZOMBIE/DEAD (exit path
+        // rewriting them). Neither is a judgeable quiescent sleeper;
+        // both produced the state=0x80/empty-comm HIT spam (u5, v1).
+        {
+            let st = unsafe { (*task).state().bits() };
+            if st
+                & (crate::process::task::TaskState::TASK_NEW
+                    | crate::process::task::TaskState::ZOMBIE
+                    | crate::process::task::TaskState::DEAD)
+                != 0
+            {
+                continue;
+            }
         }
         let s = &SLOTS[idx];
         if s.armed.load(Ordering::Acquire) == 0 {
@@ -887,6 +927,111 @@ pub static REPORT_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::Ato
 static REPORTING: AtomicBool = AtomicBool::new(false);
 static REPORT_POS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static REPORT_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// R63 crash capture: on a kernel-mode fatal trap (#GP/#UD/#PF-to-panic),
+/// serialize a full picture BEFORE the (4-CPU-interleaving) panic printer
+/// runs: the faulting pt_regs verbatim, the per-CPU ownership picture
+/// (sched current slots, arch hardware current_task, switch-out marks),
+/// the current task identity, and the pick/publish ring tail. One CPU at
+/// a time via REPORT_LOCK, so at least one clean copy reaches the serial
+/// log even when several CPUs die together.
+pub fn crash_report(vector: &[u8], regs: &crate::arch::pt_regs::PtRegs) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    // Bounded spin (a concurrent panic path may hold the lock; never
+    // wedge the crash report itself).
+    let mut spins = 0u32;
+    while REPORT_LOCK
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+        && spins < 200_000
+    {
+        spins += 1;
+        core::hint::spin_loop();
+    }
+    REPORT_POS.store(0, Ordering::Relaxed);
+    REPORTING.store(true, Ordering::Relaxed);
+
+    puts(b"\n=== SCRIBBLE-CRASH ");
+    puts(vector);
+    puts(b" rip=");
+    put_hex(regs.rip);
+    puts(b" cs=");
+    put_hex(regs.cs);
+    puts(b" err=");
+    put_hex(regs.orig_rax);
+    puts(b" cr2-ish rsp=");
+    put_hex(regs.rsp);
+    puts(b"\n");
+    // Full pt_regs (fault frame verbatim).
+    dump_qwords(b"PTREGS", regs as *const _ as usize, 21);
+
+    // Stack window around the faulting rsp — the recursion signature:
+    // a repeated return address across this band names the function
+    // that burned the stack (R64: the overflow-into-neighbor engine).
+    {
+        let rsp = regs.rsp as usize;
+        let lo = rsp.saturating_sub(0x40) & !0xF;
+        let hi = rsp + 0x380;
+        dump_qwords(b"STACKWIN", lo, (hi - lo) / 8);
+    }
+
+    // Ownership picture.
+    let tp = crate::arch::cpu::get_thread_id() as *mut Task;
+    puts(b"OWNER cpu=");
+    put_dec(crate::arch::cpu_id() as u64);
+    puts(b" tp=");
+    put_hex(tp as u64);
+    if !tp.is_null() {
+        // SAFETY: diagnostic header reads of the task the hardware runs.
+        unsafe {
+            puts(b" pid=");
+            put_dec((*tp).pid() as u64);
+            puts(b" st=0x");
+            put_hex((*tp).state().bits() as u64);
+            puts(b" oncpu=");
+            put_dec((*tp).on_cpu() as u64);
+            puts(b" claim=");
+            put_dec((*tp).running_on_cpu.load(Ordering::Relaxed) as i64 as u64);
+            puts(b" onrq=");
+            put_dec((*tp).sched_entity().is_on_rq() as u64);
+            if let Some(kstack) = (*tp).get_kernel_stack() {
+                puts(b" kstack=");
+                put_hex(kstack as u64);
+            }
+        }
+    }
+    puts(b"\nSLOTS:");
+    for c in 0..crate::config::MAX_CPUS {
+        puts(b" c");
+        put_dec(c as u64);
+        puts(b"=");
+        put_hex(crate::sched::sched::cpu_state(c).current as u64);
+        puts(b"/");
+        put_hex(
+            crate::arch::smp::PER_CPU[c]
+                .current_task
+                .load(Ordering::Relaxed),
+        );
+    }
+    puts(b"\n");
+
+    // Victim task header + thread struct (thread.sp / kernel_stack /
+    // callee.ret_addr live here — a torn value names which field the
+    // scribbler rewrote to route this CPU onto a foreign stack).
+    if !tp.is_null() {
+        dump_qwords(b"TPHDR", tp as usize, 16);
+        dump_qwords(b"THRD", (tp as usize) + OFF_THREAD, 76);
+    }
+
+    // Pick/publish ring tail — the scheduling history into the crash.
+    ring_dump();
+
+    REPORTING.store(false, Ordering::Relaxed);
+    REPORT_LEN.store(REPORT_POS.load(Ordering::Relaxed), Ordering::Release);
+    REPORT_LOCK.store(false, Ordering::Release);
+}
 
 fn report(task: *mut Task, idx: usize, phase: &[u8]) {
     // One writer at a time (bounded spin — never deadlock a panic path).

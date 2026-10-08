@@ -975,6 +975,8 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     } else {
         // A kernel-mode #UD is always a kernel bug; skipping it would
         // corrupt execution.  Die loudly (twin discipline).
+        #[cfg(feature = "x86_64")]
+        crate::dfx::scribble::crash_report(b"#UD", regs);
         panic!("trap: illegal instruction in kernel mode at rip={:#x}", regs.rip);
     }
 }
@@ -996,6 +998,8 @@ fn handle_general_protection(regs: &mut PtRegs) {
         let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
     } else {
+        #[cfg(feature = "x86_64")]
+        crate::dfx::scribble::crash_report(b"#GP", regs);
         panic!(
             "trap: #GP in kernel mode at rip={:#x}, error={:#x}",
             regs.rip, regs.orig_rax
@@ -1227,6 +1231,8 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
+                #[cfg(feature = "x86_64")]
+                crate::dfx::scribble::crash_report(b"#PF-segv", regs);
                 // The riscv64 mm layer returns KernelPanic for kernel
                 // faults; until the x86 twin grows that, do NOT silently
                 // iretq back into the faulting rip (infinite fault loop).
@@ -1248,6 +1254,8 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 }
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
+                #[cfg(feature = "x86_64")]
+                crate::dfx::scribble::crash_report(b"#PF-perm", regs);
                 panic!(
                     "pagefault: PermissionDenied in kernel mode at {:#x}, rip={:#x}",
                     fault_addr, regs.rip
@@ -1263,6 +1271,8 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
                 }
             } else {
+                #[cfg(feature = "x86_64")]
+                crate::dfx::scribble::crash_report(b"#PF-bus", regs);
                 panic!(
                     "pagefault: BusError in kernel mode at {:#x}, rip={:#x}",
                     fault_addr, regs.rip

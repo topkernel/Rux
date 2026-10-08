@@ -199,7 +199,22 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
 }
 
 /// Set TSS.rsp0 (and only that) to the task's kernel stack top.
-/// Called from `__switch_to`; also usable by the boot path.
+/// Called from `__switch_to`; also usable from the boot path.
+///
+/// R64 (cross-stack execution guard): TSS.rsp0 is the stack EVERY
+/// user-origin trap/syscall entry on this CPU pushes its frame onto. A
+/// garbage value (scribbled `kernel_stack` field — the byte-flip family)
+/// silently redirects every subsequent ring crossing onto a foreign
+/// stack: frames tear the owner's data, the victim returns through
+/// corrupted slots (single-byte rip flips), and the switch path itself
+/// then reads ITS fields from the torn pages — the self-propagating
+/// cross-stack engine caught twice with the scribble detector (c1/e2:
+/// tasks executing 4MB away from their own stacks with intact
+/// kernel_stack fields, i.e. an earlier bad rsp0 install). Validate
+/// before installing: the top must be a canonical heap-range,
+/// 16-aligned, non-zero address. On failure keep the PREVIOUS rsp0 (the
+/// task's next entry lands on the old stack — wrong but mapped and
+/// attributable) and report loudly.
 ///
 /// # Safety
 /// `task` must be a valid Task (or null).
@@ -212,6 +227,41 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
         // Option's niche encodes None as 0.
         unsafe { (*task).get_kernel_stack().map_or(0, |p| p as u64) }
     };
+    // Kernel stacks live in the 128MB heap region of the direct map
+    // (VIRTUAL 0xffff8880_40000000 — the physical 0x40000000 base plus
+    // the linear-map prefix). Byte-flipped stack pointers can still land
+    // inside — this catches the coarse corruption classes (null, small
+    // ints, user pointers, text/data addresses, prefix-byte flips).
+    const HEAP_LO: u64 = 0xffff_8880_4000_0000;
+    const HEAP_HI: u64 = 0xffff_8880_4800_0000;
+    if top != 0 && (top < HEAP_LO || top >= HEAP_HI || top & 0xF != 0) {
+        use crate::console::putchar_no_lock as putchar;
+        const MSG: &[u8] = b"\nR64-BAD-RSP0 task=0x";
+        // SAFETY: raw console write, no locks, no allocation.
+        unsafe {
+            for &b in MSG {
+                putchar(b);
+            }
+            let mut v = task as u64;
+            for _ in 0..16 {
+                let n = (v >> 60) as u8;
+                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                v <<= 4;
+            }
+            const M2: &[u8] = b" top=0x";
+            for &b in M2 {
+                putchar(b);
+            }
+            let mut v = top;
+            for _ in 0..16 {
+                let n = (v >> 60) as u8;
+                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                v <<= 4;
+            }
+            putchar(b'\n');
+        }
+        return; // keep the previous (valid) rsp0
+    }
     super::trap::set_tss_rsp0(top);
 }
 
