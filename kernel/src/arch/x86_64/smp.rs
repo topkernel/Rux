@@ -53,6 +53,15 @@ pub const PC_CURRENT_TASK: usize = 0x18;
 pub const PC_KERNEL_STACK_TOP: usize = 0x20;
 pub const PC_CPU_ONLINE: usize = 0x28;
 pub const PC_STARTED: usize = 0x2C;
+/// GS-base authenticity magic (SCRIBBLE2): low dword mirrors the CPU
+/// number, high dword is a fixed pattern.  Trap/syscall entries whose
+/// %gs-relative read does not show the pattern know the ACTIVE GS base is
+/// not a PerCpu slot and heal with SWAPGS before touching anything else.
+/// A zero page (the classic user mapping at VA 0 that defeated the old
+/// "cpu number < 64" heuristic) can never match.
+pub const PC_MAGIC: usize = 0x30;
+/// The high-dword pattern (0x52585258 = "RXRX").
+pub const PC_MAGIC_HI: u32 = 0x5258_5258;
 
 #[repr(C)]
 #[repr(align(64))]
@@ -79,7 +88,9 @@ pub struct PerCpu {
     pub cpu_online: AtomicU32,
     /// Started-secondary wait flag (SIPI handshake)
     pub started: AtomicU32,
-    _pad: [u32; 14],
+    /// Authenticity magic (see PC_MAGIC): {pattern, cpu_number}.
+    pub magic: AtomicU64,
+    _pad: [u32; 12],
 }
 
 impl PerCpu {
@@ -93,8 +104,15 @@ impl PerCpu {
             kernel_stack_top: AtomicU64::new(0),
             cpu_online: AtomicU32::new(0),
             started: AtomicU32::new(0),
-            _pad: [0; 14],
+            magic: AtomicU64::new(0),
+            _pad: [0; 12],
         }
+    }
+
+    /// Arm this slot's authenticity magic (cpu embedded, pattern on top).
+    fn arm_magic(&self, cpu: usize) {
+        let m = ((PC_MAGIC_HI as u64) << 32) | cpu as u64;
+        self.magic.store(m, Ordering::Release);
     }
 }
 
@@ -110,6 +128,7 @@ const _: () = assert!(core::mem::offset_of!(PerCpu, current_task) == PC_CURRENT_
 const _: () = assert!(core::mem::offset_of!(PerCpu, kernel_stack_top) == PC_KERNEL_STACK_TOP);
 const _: () = assert!(core::mem::offset_of!(PerCpu, cpu_online) == PC_CPU_ONLINE);
 const _: () = assert!(core::mem::offset_of!(PerCpu, started) == PC_STARTED);
+const _: () = assert!(core::mem::offset_of!(PerCpu, magic) == PC_MAGIC);
 
 // ============================================================================
 // GS base management
@@ -163,6 +182,7 @@ pub fn init() {
     PER_CPU[0].cpu_number.store(0, Ordering::Release);
     PER_CPU[0].cpu_online.store(1, Ordering::Release);
     PER_CPU[0].started.store(1, Ordering::Release);
+    PER_CPU[0].arm_magic(0);
 }
 
 /// (interface parity — per-CPU interrupt stacks are IST/TSS on x86)
@@ -399,6 +419,7 @@ pub fn start_secondaries() {
         PER_CPU[cpu].lapic_id.store(lapic, Ordering::Release);
         PER_CPU[cpu].started.store(0, Ordering::Release);
         PER_CPU[cpu].cpu_online.store(0, Ordering::Release);
+        PER_CPU[cpu].arm_magic(cpu);
 
         let stack_top = AP_BOOT_STACKS[cpu].0.as_ptr() as usize + STACK_SIZE;
         tramp_write_u32(TRAMP_CPU, cpu as u32);

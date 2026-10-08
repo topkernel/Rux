@@ -684,6 +684,103 @@ pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
     }
 }
 
+/// Is `frame` inside `task`'s kernel stack [bottom, top)?  False for null
+/// tasks and unowned early-boot entries (caller checks null separately).
+fn frame_in_task_stack(task: *mut crate::process::task::Task, frame: usize) -> bool {
+    // SAFETY: header reads of a task the per-CPU slot names as current.
+    unsafe {
+        let top = (*task).get_kernel_stack().map_or(0, |p| p as usize);
+        if top == 0 {
+            // No owned stack recorded (early boot / idle special paths) —
+            // cannot validate; allow rather than false-positive.
+            return true;
+        }
+        let bottom = (*task).kernel_stack_bottom();
+        frame >= bottom && frame < top
+    }
+}
+
+fn scribble_put_hex(mut v: u64) {
+    for _ in 0..16 {
+        let n = (v >> 60) as u8;
+        crate::console::putchar_no_lock(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        v <<= 4;
+    }
+}
+
+fn scribble_put_str(s: &[u8]) {
+    for &b in s {
+        crate::console::putchar_no_lock(b);
+    }
+}
+
+/// Raw (lock-free) report of a user-origin trap frame landing outside the
+/// current task's kernel stack — the cross-stack scribble engine, named at
+/// the moment of entry with the full per-CPU ownership picture.
+fn scribble_foreign_entry(
+    cpu: usize,
+    vector: u64,
+    regs: *mut PtRegs,
+    tp: *mut crate::process::task::Task,
+    frame: usize,
+) {
+    scribble_put_str(b"\n=== FOREIGN-ENTRY cpu=");
+    scribble_put_hex(cpu as u64);
+    scribble_put_str(b" vector=0x");
+    scribble_put_hex(vector);
+    scribble_put_str(b" frame=0x");
+    scribble_put_hex(frame as u64);
+    // SAFETY: diagnostic header reads of the task named by the slot.
+    unsafe {
+        scribble_put_str(b" task=0x");
+        scribble_put_hex(tp as u64);
+        scribble_put_str(b" pid=");
+        scribble_put_hex((*tp).pid() as u64);
+        scribble_put_str(b" kstack=[0x");
+        scribble_put_hex((*tp).kernel_stack_bottom() as u64);
+        scribble_put_str(b",0x");
+        scribble_put_hex((*tp).get_kernel_stack().map_or(0, |p| p as u64));
+        scribble_put_str(b") rsp0_mirror=0x");
+        scribble_put_hex(super::smp::PER_CPU[cpu].tss_rsp0.load(core::sync::atomic::Ordering::Relaxed));
+        scribble_put_str(b" TSS.rsp0=0x");
+        let tss = &raw mut TSS_PER_CPU;
+        scribble_put_hex((*tss)[cpu].read_u64(TSS_OFF_RSP0));
+        scribble_put_str(b"\nFRAME:");
+        for i in 0..21usize {
+            if i % 4 == 0 {
+                scribble_put_str(b"\n  ");
+            }
+            scribble_put_str(b" ");
+            scribble_put_hex(core::ptr::read_volatile((frame + i * 8) as *const u64));
+        }
+        // Frame surroundings: the slots just above the frame belong to the
+        // stack owner's earlier execution — torn words there name what the
+        // two interleaved contexts were doing.
+        scribble_put_str(b"\nABOVE:");
+        let mut a = frame + 0xa8;
+        while a < frame + 0xa8 + 0x100 {
+            scribble_put_str(b" ");
+            scribble_put_hex(core::ptr::read_volatile(a as *const u64));
+            a += 8;
+        }
+    }
+    scribble_put_str(b"\nSLOTS:");
+    for c in 0..crate::config::MAX_CPUS {
+        let t = super::smp::PER_CPU[c].current_task.load(core::sync::atomic::Ordering::Relaxed);
+        scribble_put_str(b" c");
+        let mut cc = c as u64;
+        if cc >= 10 {
+            crate::console::putchar_no_lock(b'0' + (cc / 10) as u8);
+            cc %= 10;
+        }
+        crate::console::putchar_no_lock(b'0' + cc as u8);
+        scribble_put_str(b"=0x");
+        scribble_put_hex(t);
+    }
+    scribble_put_str(b"\n");
+    crate::dfx::scribble::ring_dump();
+}
+
 // ============================================================================
 // Trap dispatch
 // ============================================================================
@@ -740,6 +837,31 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         // SAFETY: the kernel cannot proceed with a broken GS base.
         loop {
             unsafe { core::arch::asm!("cli; hlt") };
+        }
+    }
+    // SCRIBBLE2-GUARD (foreign-frame entry): a user-origin entry (trap,
+    // IRQ, or syscall) must land inside the CURRENT task's kernel stack —
+    // TSS.rsp0 / PER_CPU.tss_rsp0 name exactly that stack.  A frame
+    // anywhere else is the cross-stack engine caught in the act: this CPU
+    // would push frames through the victim's live data (torn return
+    // addresses — the byte-flip/#GP/#UD family).  Report the full
+    // ownership picture on raw serial and park THIS CPU (the others keep
+    // their state for their own reports).
+    if cpu_id < crate::config::MAX_CPUS {
+        let user_entry = unsafe { ((*regs).cs & 3) != 0 || vector == SYSCALL_VECTOR };
+        if user_entry {
+            let tp = super::smp::PER_CPU[cpu_id]
+                .current_task
+                .load(core::sync::atomic::Ordering::Relaxed) as *mut crate::process::task::Task;
+            let frame = regs as usize;
+            if !tp.is_null() && !frame_in_task_stack(tp, frame) {
+                scribble_foreign_entry(cpu_id, vector, regs, tp, frame);
+                // SAFETY: executing further on a foreign stack only tears
+                // the victim more; park this CPU with interrupts off.
+                loop {
+                    unsafe { core::arch::asm!("cli; hlt") };
+                }
+            }
         }
     }
     // SAFETY: regs points to a valid PtRegs built by a trap.S stub; the
@@ -1292,6 +1414,12 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
         }
         MmFaultResult::KernelPanic => {
+            // Raw serial print (printk may be wedged on a lock this CPU
+            // holds), then halt — the twin's R9 discipline.
+            // SCRIBBLE2: park hook for gdb (walk the faulting CR3's page
+            // tables live from the debugger).
+            #[cfg(feature = "x86_64")]
+            crate::dfx::scribble::kernpanic_park(fault_addr, regs.rip, regs.rsp);
             // Raw serial print (printk may be wedged on a lock this CPU
             // holds), then halt — the twin's R9 discipline.
             // putchar_no_lock writes the serial port directly (no locks).

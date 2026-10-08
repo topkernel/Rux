@@ -183,6 +183,71 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
         }
     }
     crate::arch::smp::set_current_task_ptr(next as u64);
+    // SCRIBBLE2-GUARD (switch-in sp): the resume point __switch_to is
+    // about to load must lie inside next's own kernel stack.  A foreign
+    // sp (stale/double-run save or a scribbled thread.sp) makes the task
+    // execute on someone else's stack — frames tear both owners' data
+    // while kernel_stack stays pristine.  NOTE: report-only — the idle
+    // tasks intentionally run on the static boot stacks, so the report
+    // is a lead, not proof.
+    if !next.is_null() {
+        // SAFETY: header reads of the task we are switching into; its
+        // thread.sp/kstack fields are stable during the switch.
+        unsafe {
+            let sp = (*next).thread().sp as usize;
+            let top = (*next).get_kernel_stack().map_or(0, |p| p as usize);
+            let bottom = (*next).kernel_stack_bottom();
+            if top != 0 && !(sp > bottom && sp <= top) {
+                use crate::console::putchar_no_lock as putchar;
+                const M: &[u8] = b"\nSWITCHIN-FOREIGN-SP task=0x";
+                for &b in M {
+                    putchar(b);
+                }
+                let mut v = next as u64;
+                for _ in 0..16 {
+                    let n = (v >> 60) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                const M2: &[u8] = b" sp=0x";
+                for &b in M2 {
+                    putchar(b);
+                }
+                let mut v = sp as u64;
+                for _ in 0..16 {
+                    let n = (v >> 60) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                const M3: &[u8] = b" kstack=[0x";
+                for &b in M3 {
+                    putchar(b);
+                }
+                let mut v = bottom as u64;
+                for _ in 0..16 {
+                    let n = (v >> 60) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                putchar(b',');
+                let mut v = top as u64;
+                for _ in 0..16 {
+                    let n = (v >> 60) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                const M4: &[u8] = b") report-only\n";
+                for &b in M4 {
+                    putchar(b);
+                }
+                // Report-only (SCRIBBLE2 lesson): the AP idles legitimately
+                // run on the static AP boot stacks (their kstack fields are
+                // never used), so a "foreign" sp here is not automatically
+                // corruption — repinning would break a mid-loop resume.
+                crate::dfx::scribble::ring_dump();
+            }
+        }
+    }
     // Scribble hunter (dfx=scribble): record the switch completion.
     crate::dfx::scribble::ring_log(
         crate::arch::cpu_id() as usize,

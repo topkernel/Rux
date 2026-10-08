@@ -93,6 +93,7 @@ static REG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32:
 static VERIFY_TICK: AtomicU32 = AtomicU32::new(0);
 static DIVERGE: AtomicU32 = AtomicU32::new(0);
 static GS_FIX_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+static BADIRET_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 
 // ---- pick/publish event ring (dfx=scribble) -------------------------
 // Every mark_picked_on_cpu and x86_switch_publish appends here; the CONS
@@ -627,6 +628,14 @@ pub fn verify_gs() {
         put_dec(fixes as u64);
         puts(b" (kernel ran with a wild GS base; stub guard healed)\n");
     }
+    // Bad-iret repair counter: non-zero proves the mis-pairing SOURCE
+    // (faulting user-return iretq) actually fires under this load.
+    let badiret = scribble_badiret_fixups.load(Ordering::Relaxed);
+    if badiret != 0 && !BADIRET_ANNOUNCED.swap(true, Ordering::AcqRel) {
+        puts(b"SCRIBBLE-BADIRET-REPAIRS n=");
+        put_dec(badiret as u64);
+        puts(b" (faulting user-return iretq repaired: SIGSEGV routed)\n");
+    }
     // SAFETY: one %gs-relative u32 read; MSR reads are data-safe.
     let (gscpu, gsbase, kgsbase) = unsafe {
         let id: u32;
@@ -909,6 +918,21 @@ pub fn double_run(pid: u64, newcpu: u64, oldcpu: u64, prevpid: u64, next: u64) {
 /// base — the scribble engine — and that the guard neutralized it.
 #[no_mangle]
 pub static scribble_gs_fixups: AtomicU32 = AtomicU32::new(0);
+
+/// Count of bad-iret frame repairs (trap.S reads this symbol from asm):
+/// exceptions whose faulting rip is trap_exit's user-path iretq -- the
+/// mis-pairing source that fed the cross-stack scribble engine.
+#[no_mangle]
+pub static scribble_badiret_fixups: AtomicU32 = AtomicU32::new(0);
+
+/// GDB park hook for the #PF KernelPanic path (x86_64): `break
+/// kernpanic_park` under `qemu -s`; args are (badaddr, rip, rsp). The
+/// debugger then walks the live CR3 to see which root was active and
+/// which PTE was missing.
+#[no_mangle]
+pub extern "C" fn kernpanic_park(badaddr: u64, rip: u64, rsp: u64) {
+    let _ = (badaddr, rip, rsp);
+}
 
 /// GDB park hook: `break scribble_park` under `qemu -s`; `$rdi` holds
 /// the most diagnostic scribbled field address to watch.

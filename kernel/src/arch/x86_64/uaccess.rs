@@ -172,7 +172,7 @@ pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
 
 /// Copy a NUL-terminated string from user memory into `buf`.
 pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8]) -> Result<&'a [u8], i64> {
-    if from as usize == 0 || !access_ok(from as usize, 1) {
+    if from as usize == 0 || !access_ok(from as usize, max_len.min(buf.len())) {
         return Err(-14); // EFAULT
     }
     let limit = max_len.min(buf.len());
@@ -189,7 +189,7 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
 
 /// Length of a NUL-terminated user string, 0 on fault/too long.
 pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
-    if str as usize == 0 || !access_ok(str as usize, 1) {
+    if str as usize == 0 || !access_ok(str as usize, maxlen) {
         return 0;
     }
     for i in 0..maxlen {

@@ -2995,7 +2995,76 @@ pub fn cpu_idle_loop() -> ! {
 
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
+    // SCRIBBLE2-GUARD (idle depth): the idle loop's frame position is
+    // fixed for the life of the CPU — every pass must return to the same
+    // sp.  A monotonic drop means each resume lands deeper than the
+    // matching switch-out saved (double-resume / wrong resume point: the
+    // engine that burns whole stacks in small strides and finally
+    // overflows into the neighboring allocations).
+    static IDLE_SP_FLOOR: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+        [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+    #[cfg(feature = "x86_64")]
+    fn idle_guard_sp() -> usize {
+        let sp: usize;
+        // SAFETY: reading rsp is side-effect free.
+        unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack)) };
+        sp
+    }
+    #[cfg(feature = "riscv64")]
+    fn idle_guard_sp() -> usize {
+        let sp: usize;
+        // SAFETY: reading sp is side-effect free.
+        unsafe { core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack)) };
+        sp
+    }
+    fn idle_guard_report(cpu: usize, sp: u64, floor: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        fn ph(mut v: u64) {
+            for _ in 0..16 {
+                let n = (v >> 60) as u8;
+                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                v <<= 4;
+            }
+        }
+        const M: &[u8] = b"\nIDLE-DEPTH-DROP cpu=";
+        for &b in M {
+            putchar(b);
+        }
+        ph(cpu as u64);
+        const M2: &[u8] = b" sp=0x";
+        for &b in M2 {
+            putchar(b);
+        }
+        ph(sp);
+        const M3: &[u8] = b" floor=0x";
+        for &b in M3 {
+            putchar(b);
+        }
+        ph(floor);
+        const M4: &[u8] = b" delta=0x";
+        for &b in M4 {
+            putchar(b);
+        }
+        ph(floor.wrapping_sub(sp));
+        putchar(b'\n');
+        #[cfg(feature = "x86_64")]
+        crate::dfx::scribble::ring_dump();
+    }
+
     loop {
+        // Idle-depth guard: measure at the same point every pass.
+        {
+            let sp = idle_guard_sp() as u64;
+            let floor = IDLE_SP_FLOOR[cpu_id].load(core::sync::atomic::Ordering::Relaxed);
+            if floor == 0 {
+                IDLE_SP_FLOOR[cpu_id].store(sp, core::sync::atomic::Ordering::Relaxed);
+            } else if sp + 0x400 < floor {
+                idle_guard_report(cpu_id, sp, floor);
+                // Re-baseline so the next report names the NEXT drop.
+                IDLE_SP_FLOOR[cpu_id].store(sp, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
         // R56 orphan harvest: the multi-thread gate still produces (rarely)
         // tasks left RUNNING + off-queue after pick — every in-tree
         // pick→switch path is atomic under SIE=0, so the surviving suspects

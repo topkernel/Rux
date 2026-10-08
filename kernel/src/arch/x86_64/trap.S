@@ -95,6 +95,8 @@
 .set PC_CPU_NUMBER,      0x00
 .set PC_TSS_RSP0,        0x08
 .set PC_SYSCALL_SCRATCH, 0x10
+.set PC_MAGIC_HI,        0x34             /* high dword of the magic  */
+.set PC_MAGIC_PATTERN,   0x52585258
 
 /* selector values (GDT indices pinned in trap.rs) */
 .set __KERNEL_CS, 0x08
@@ -147,22 +149,49 @@ stub_\vec:
     testb $3, PT_CS(%rbp)
     jz 8f
     swapgs                       /* came from user: GS -> percpu       */
-8:  movl %gs:PC_CPU_NUMBER, %esi /* arg1: cpu id                      */
-    /* GS-pairing self-heal (x86-scribble): a kernel-origin entry that
-     * lands while the CPU runs with the USER GS base (the residue of a
-     * swapgs whose iretq never completed — an exception inside the
-     * cli..iretq window, NMI, or a corrupted frame's #GP) reads a
-     * garbage cpu number here and every %gs-relative store in the
-     * handler then writes through a wild base (frames on foreign
-     * stacks, PER_CPU/CURRENT_PT_REGS miswrites — the byte-level
-     * scribble family). Detect (cpu number out of range), swap back to
-     * the kernel base, count, and re-read. Any legit value is < 64. */
-    cmpl $64, %esi
-    jb 7f
+    jmp 9f
+8:  /* Kernel-origin.  Bad-iret repair (SCRIBBLE2, Linux error_entry
+     * discipline): trap_exit's user return runs `cli; pops; swapgs;
+     * iretq` — an iretq that faults (#GP on a non-canonical user rip,
+     * #SS/#PF on the user stack words) pushes THIS frame with CS=0x08
+     * even though the exit path already swapgs'ed to the USER base.
+     * Running the handler on the user GS base is the scribble engine:
+     * with the segv-test habit of mapping page 0, every %gs-relative
+     * read then goes through mapped user bytes (a zero page yields
+     * "cpu 0") and the handler silently operates on the WRONG CPU's
+     * slots — foreign rsp0 installs, cross-stack frames, torn return
+     * addresses.  Repair: SWAPGS back to the kernel base and overlay
+     * the pending user words onto the frame so the handler classifies
+     * the fault as user-origin (SIGSEGV routing) and the exit path's
+     * pairing stays balanced. */
+    cmpq $user_iret_label, PT_RIP(%rbp)
+    jne 9f
+    swapgs
+    movq PT_RIP+0x28(%rbp), %rax /* pending user rip  (frame + 0xa8)  */
+    movq %rax, PT_RIP(%rbp)
+    movq PT_CS+0x28(%rbp), %rax
+    movq %rax, PT_CS(%rbp)
+    movq PT_RFLAGS+0x28(%rbp), %rax
+    movq %rax, PT_RFLAGS(%rbp)
+    movq PT_RSP+0x28(%rbp), %rax
+    movq %rax, PT_RSP(%rbp)
+    movq PT_SS+0x28(%rbp), %rax
+    movq %rax, PT_SS(%rbp)
+    incl scribble_badiret_fixups(%rip)
+9:  /* GS-base authenticity check (SCRIBBLE2): the magic's HIGH dword is
+     * a fixed pattern present only inside a real PerCpu slot.  A wrong
+     * base (user GS 0 — the residue the repair above plus NMI-style
+     * windows can leave — or a garbage base) reads user/BIOS bytes and
+     * cannot match.  The old "cpu number < 64" heuristic was blind to
+     * a zero-mapped page 0 and silently ran whole handlers on the
+     * wrong CPU's slots. */
+    movl %gs:PC_MAGIC_HI, %esi
+    cmpl $PC_MAGIC_PATTERN, %esi
+    je 7f
     swapgs
     incl scribble_gs_fixups(%rip)
-    movl %gs:PC_CPU_NUMBER, %esi
-7:  movq $\vec, %rdx             /* arg2: vector                      */
+7:  movl %gs:PC_CPU_NUMBER, %esi /* arg1: cpu id                      */
+    movq $\vec, %rdx             /* arg2: vector                      */
     movq %rbp, %rdi              /* arg0: regs                        */
     call trap_handler
     movq %rbp, %rsp              /* unwind to the exact frame */
@@ -248,14 +277,29 @@ stub_spurious:
     testb $3, PT_CS(%rbp)
     jz 8f
     swapgs
-8:  movl %gs:PC_CPU_NUMBER, %esi
-    /* GS-pairing self-heal (see TRAP_STUB) */
-    cmpl $64, %esi
-    jb 7f
+    jmp 9f
+8:  cmpq $user_iret_label, PT_RIP(%rbp)
+    jne 9f
+    swapgs
+    movq PT_RIP+0x28(%rbp), %rax
+    movq %rax, PT_RIP(%rbp)
+    movq PT_CS+0x28(%rbp), %rax
+    movq %rax, PT_CS(%rbp)
+    movq PT_RFLAGS+0x28(%rbp), %rax
+    movq %rax, PT_RFLAGS(%rbp)
+    movq PT_RSP+0x28(%rbp), %rax
+    movq %rax, PT_RSP(%rbp)
+    movq PT_SS+0x28(%rbp), %rax
+    movq %rax, PT_SS(%rbp)
+    incl scribble_badiret_fixups(%rip)
+9:  movl %gs:PC_MAGIC_HI, %esi
+    /* GS-base authenticity check (see TRAP_STUB) */
+    cmpl $PC_MAGIC_PATTERN, %esi
+    je 7f
     swapgs
     incl scribble_gs_fixups(%rip)
-    movl %gs:PC_CPU_NUMBER, %esi
-7:  movq %rbp, %rdi
+7:  movl %gs:PC_CPU_NUMBER, %esi
+    movq %rbp, %rdi
     movq $255, %rdx
     call trap_handler
     movq %rbp, %rsp
@@ -309,14 +353,18 @@ stub_8:
 .hidden syscall_entry
 syscall_entry:
     swapgs
-    /* GS-pairing self-heal (x86-scribble): a syscall that arrives while
-     * the CPU already runs the KERNEL GS (a mis-paired residue) would be
-     * flipped to the USER base by the swapgs above and then push its
-     * frame onto whatever rsp the user-GS slot holds — the foreign-
-     * stack frame scribble. Compare in memory (rcx/r10/r11 all carry
-     * live ABI values here); detect, swap back, count. */
-    cmpl $64, %gs:PC_CPU_NUMBER
-    jb 1f
+    /* GS-base authenticity check (SCRIBBLE2): compare the magic pattern
+     * IN MEMORY (rcx/r10/r11 all carry live ABI values here).  A CPU
+     * that was already on the KERNEL base (mis-paired residue) just got
+     * flipped to the USER base by the swapgs above — every following
+     * %gs-relative access would then go through near-null addresses
+     * (with page 0 user-mapped, through USER BYTES: a zero page made
+     * the old cpu-number heuristic read "cpu 0" and silently build the
+     * whole syscall frame on the wrong per-CPU slots — the foreign-rsp0
+     * scribble).  The pattern check is content-independent: swap back
+     * unless the real PerCpu magic answers. */
+    cmpl $PC_MAGIC_PATTERN, %gs:PC_MAGIC_HI
+    je 1f
     swapgs
     incl scribble_gs_fixups(%rip)
 1:  movq %rsp, %gs:PC_SYSCALL_SCRATCH  /* stash user rsp                */
@@ -427,6 +475,11 @@ trap_exit:
     popq %rdi
     addq $8, %rsp                /* skip orig_rax/error-code slot */
     swapgs
+    /* user_iret_label: the iretq exception stubs compare PT_RIP against
+     * (bad-iret repair, see TRAP_STUB).  Keep it directly ON the iretq. */
+.global user_iret_label
+.hidden user_iret_label
+user_iret_label:
     iretq                        /* pops rip,cs,rflags,rsp,ss */
 
 .Lrestore_kernel_tail:
