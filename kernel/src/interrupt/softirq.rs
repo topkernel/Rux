@@ -221,6 +221,15 @@ pub fn invoke_softirq() {
     }
 }
 
+/// Raw per-CPU pending mask (VW forensic instrumentation).
+pub fn softirq_pending_raw(cpu: usize) -> u32 {
+    if cpu >= MAX_CPUS {
+        return 0;
+    }
+    // SAFETY: bounded read of a per-CPU static.
+    unsafe { SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) }
+}
+
 /// Run `__do_softirq()` on the per-CPU interrupt stack.
 ///
 /// Process softirqs on a separate stack.

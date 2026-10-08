@@ -363,6 +363,11 @@ pub fn timer_softirq_handler(_nr: usize) {
     // full scan ran on every raise (TIMERS/ACTIONS lock churn).
     LAST_TICK.store(current, Ordering::Release);
 
+    // VW forensic instrumentation: per-jiffy virtio completion-lag
+    // watchdog (prints walker/ring state when PENDING_LAST lags the used
+    // ring with no scheduled consumer — the ftest01 wedge family).
+    crate::drivers::virtio::vw_lag_watchdog(current);
+
     // Collect expired timers under locks; deliver AFTER releasing them
     // (R12-3 — see the moved delivery block below).
     // R34: capacity reserved OUTSIDE the lock; the budget counter below

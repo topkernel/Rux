@@ -9,7 +9,7 @@
 //! from completion: the submitter creates an IoCompletion, passes it to
 //! an async I/O function, then calls `wait()` later (or never, if polling).
 
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use crate::drivers::timer::msecs_to_jiffies;
 use crate::process::wait::WaitQueueHead;
 
@@ -42,6 +42,24 @@ pub struct IoCompletion {
     done: AtomicBool,
     /// 0 = success, negative = errno (e.g. -EIO).
     status: AtomicI32,
+    /// In-flight delivery count (the walker-vs-abandon race fix).
+    ///
+    /// A completion walker takes a pending entry out of the device table
+    /// under the table lock but DELIVERS (calls [`Self::complete`]) after
+    /// dropping it. A waiter whose 10s deadline expires concurrently
+    /// retires its entries via `abandon_pending_completion` — which scans
+    /// the tables under the same locks and cannot see the already-taken
+    /// entry. Without a handshake the waiter would return -ETIMEDOUT, its
+    /// kernel-stack `IoCompletion` would be recycled, and the late
+    /// `complete()` would fire a wake_up_all into freed stack memory —
+    /// the wandering corruption behind ftest01's cross-file bad-verify.
+    ///
+    /// Protocol: the walker increments before dropping the table lock
+    /// ([`Self::begin_delivery`]) and decrements after `complete()`
+    /// ([`Self::end_delivery`]); `wait()` drains the count to zero before
+    /// every return (its frame — and the completion with it — often dies
+    /// at return), and abandon drains it before reporting -ETIMEDOUT.
+    delivering: AtomicUsize,
     /// Tasks sleeping for completion.
     wait_queue: WaitQueueHead,
 }
@@ -52,8 +70,37 @@ impl IoCompletion {
         Self {
             done: AtomicBool::new(false),
             status: AtomicI32::new(0),
+            delivering: AtomicUsize::new(0),
             wait_queue: WaitQueueHead::new(),
         }
+    }
+
+    /// Delivery-protocol arm: called by a completion walker under the
+    /// device pending-table lock, before the entry leaves the table.
+    pub fn begin_delivery(&self) {
+        self.delivering.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Delivery-protocol release: called after `complete()` returned.
+    pub fn end_delivery(&self) {
+        self.delivering.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Spin until every in-flight delivery of this completion has called
+    /// `complete()` and released it. Returns false only if the bounded
+    /// spin expired (a walker wedged mid-delivery) — callers log loudly;
+    /// correctness no longer depends on the bound under the fixed wake
+    /// discipline, but the residual case must stay visible.
+    pub fn wait_deliveries(&self) -> bool {
+        let mut spins = 0u64;
+        while self.delivering.load(Ordering::Acquire) != 0 {
+            core::hint::spin_loop();
+            spins += 1;
+            if spins >= 800_000_000 {
+                return false;
+            }
+        }
+        true
     }
 
     /// Mark completion as done with the given status.
@@ -168,6 +215,7 @@ impl IoCompletion {
                 crate::sched::dequeue_task(&*current);
                 // Final chance (GSD fix): kick the queue and drain
                 // completions once — recovers lost-kick stalls.
+                crate::drivers::virtio::vw_report("async-deadline");
                 crate::drivers::virtio::pci_blk_kick_all();
                 crate::drivers::virtio::pci_process_async_completions();
                 if self.done.load(Ordering::Acquire) {
@@ -180,10 +228,18 @@ impl IoCompletion {
                 );
                 // Abandon our pending-table entries so nothing
                 // dereferences this memory after we return (GSD fix).
+                // This also waits out any walker delivery of OUR entries
+                // that is still in flight (see `delivering`).
                 crate::drivers::virtio::abandon_pending_completion(
                     self as *const _ as *mut _,
                 );
-                result = WAIT_TIMED_OUT;
+                // The drained delivery may have completed us after the
+                // re-check above — prefer the real status if so.
+                if self.done.load(Ordering::Acquire) {
+                    result = self.status.load(Ordering::Acquire);
+                } else {
+                    result = WAIT_TIMED_OUT;
+                }
                 break;
             }
 
@@ -227,6 +283,13 @@ impl IoCompletion {
         }
         if deadline_armed && deadline_timer != 0 {
             crate::timer::del_timer(deadline_timer);
+        }
+        // Frame-safety handshake on EVERY return path: a walker may be
+        // between complete() and end_delivery() right now — it still owns
+        // a reference to `self`, which usually lives on THIS stack frame.
+        // Drain before the frame dies (see `delivering`).
+        if !self.wait_deliveries() {
+            crate::pr_err!("io_completion: delivery handoff overran spin budget");
         }
         result
     }
