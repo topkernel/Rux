@@ -148,7 +148,21 @@ stub_\vec:
     jz 8f
     swapgs                       /* came from user: GS -> percpu       */
 8:  movl %gs:PC_CPU_NUMBER, %esi /* arg1: cpu id                      */
-    movq $\vec, %rdx             /* arg2: vector                      */
+    /* GS-pairing self-heal (x86-scribble): a kernel-origin entry that
+     * lands while the CPU runs with the USER GS base (the residue of a
+     * swapgs whose iretq never completed — an exception inside the
+     * cli..iretq window, NMI, or a corrupted frame's #GP) reads a
+     * garbage cpu number here and every %gs-relative store in the
+     * handler then writes through a wild base (frames on foreign
+     * stacks, PER_CPU/CURRENT_PT_REGS miswrites — the byte-level
+     * scribble family). Detect (cpu number out of range), swap back to
+     * the kernel base, count, and re-read. Any legit value is < 64. */
+    cmpl $64, %esi
+    jb 7f
+    swapgs
+    incl scribble_gs_fixups(%rip)
+    movl %gs:PC_CPU_NUMBER, %esi
+7:  movq $\vec, %rdx             /* arg2: vector                      */
     movq %rbp, %rdi              /* arg0: regs                        */
     call trap_handler
     movq %rbp, %rsp              /* unwind to the exact frame */
@@ -235,7 +249,13 @@ stub_spurious:
     jz 8f
     swapgs
 8:  movl %gs:PC_CPU_NUMBER, %esi
-    movq %rbp, %rdi
+    /* GS-pairing self-heal (see TRAP_STUB) */
+    cmpl $64, %esi
+    jb 7f
+    swapgs
+    incl scribble_gs_fixups(%rip)
+    movl %gs:PC_CPU_NUMBER, %esi
+7:  movq %rbp, %rdi
     movq $255, %rdx
     call trap_handler
     movq %rbp, %rsp
@@ -289,7 +309,17 @@ stub_8:
 .hidden syscall_entry
 syscall_entry:
     swapgs
-    movq %rsp, %gs:PC_SYSCALL_SCRATCH  /* stash user rsp                */
+    /* GS-pairing self-heal (x86-scribble): a syscall that arrives while
+     * the CPU already runs the KERNEL GS (a mis-paired residue) would be
+     * flipped to the USER base by the swapgs above and then push its
+     * frame onto whatever rsp the user-GS slot holds — the foreign-
+     * stack frame scribble. Compare in memory (rcx/r10/r11 all carry
+     * live ABI values here); detect, swap back, count. */
+    cmpl $64, %gs:PC_CPU_NUMBER
+    jb 1f
+    swapgs
+    incl scribble_gs_fixups(%rip)
+1:  movq %rsp, %gs:PC_SYSCALL_SCRATCH  /* stash user rsp                */
     movq %gs:PC_TSS_RSP0, %rsp         /* kernel stack top (this CPU)  */
     pushq $__USER_DS                   /* 0xa0 ss                       */
     pushq %gs:PC_SYSCALL_SCRATCH       /* 0x98 rsp (user)               */
@@ -365,22 +395,43 @@ trap_exit:
 .Lrestore_all:
     movq %rbp, %rsp
     testb $3, PT_CS(%rsp)       /* pairing rule: swap GS only on the  */
-    jz 9f                       /* user-return path (mirror of the    */
-    /* SMP GS-pairing fix (x86-smprace): from swapgs until iretq the CPU
-     * runs with the USER GS base. The syscall path arrives here with IF=1
-     * (handle_syscall re-enabled it), so an IRQ in this ~15-instruction
-     * window enters as KERNEL-origin (CS RPL=0 — we have not iret'd yet),
-     * the stub correctly performs NO swapgs, and the whole handler runs
-     * against the USER (NULL) GS base: %gs:PC_CPU_NUMBER reads linear ~0,
-     * CURRENT_PT_REGS indexes with a garbage cpu, syscall_entry would
-     * load a garbage TSS.rsp0 — the SMP fork/exec/exit crash family
-     * (frames landing on foreign stacks, both CPUs dying at once).
-     * Interrupts off across swapgs..iretq closes the window; iretq
-     * itself re-arms IF from the saved user rflags. Kernel-origin
-     * returns (jz 9f) never swap GS and keep their saved IF semantics. */
+    jz .Lrestore_kernel_tail    /* user-return path (mirror of the    */
+    /* SMP GS-pairing fix (x86-smprace), second phase (x86-scribble):
+     * the original order ran `cli; swapgs` BEFORE the sixteen register
+     * pops, so any exception landing in that ~20-instruction window
+     * (an iretq-frame #GP, a faulting pop, an NMI — IF does not mask
+     * those) entered as kernel-origin, correctly performed no swapgs,
+     * and ran the WHOLE handler on the USER GS base: every %gs-relative
+     * access then read/wrote through a wild base (garbage cpu ids,
+     * PER_CPU/CURRENT_PT_REGS miswrites, foreign rsp0 → frames pushed
+     * onto other tasks' stacks — the byte-level scribble family).
+     * Popping FIRST keeps the kernel GS active through the pops, and
+     * swapgs becomes the immediately-preceding instruction of iretq.
+     * The residual bad window is the iretq itself (frame still bad);
+     * the stub-side GS self-heal (see TRAP_STUB) covers that entry. */
     cli
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rsi
+    popq %rdi
+    addq $8, %rsp                /* skip orig_rax/error-code slot */
     swapgs
-9:  popq %r15
+    iretq                        /* pops rip,cs,rflags,rsp,ss */
+
+.Lrestore_kernel_tail:
+    /* no signal delivery on kernel-origin returns */
+    popq %r15
     popq %r14
     popq %r13
     popq %r12

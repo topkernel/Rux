@@ -2092,6 +2092,10 @@ impl Task {
             }
             return false;
         }
+        // Scribble hunter (dfx=scribble): track this Task's scheduling
+        // fields from birth. No-op unless the runtime switch is on.
+        #[cfg(feature = "x86_64")]
+        crate::dfx::scribble::register(ptr);
         return true;
     }
 

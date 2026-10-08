@@ -442,6 +442,16 @@ fn grq() -> &'static GlobalRunQueue {
     unsafe { GRQ.assume_init_ref() }
 }
 
+/// Scribble hunter (dfx=scribble): trylock the GRQ for the diagnostic
+/// consistency scan. None when uninitialized or currently held.
+pub fn try_grq_lock() -> Option<GrqGuard<'static>> {
+    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: guarded by GRQ_READY above.
+    unsafe { GRQ.assume_init_ref() }.try_lock_irqsave()
+}
+
 /// Per-CPU state array (indexed by cpu_id)
 static mut PER_CPU: [PerCpuState; MAX_CPUS] = [
     PerCpuState::new(),
@@ -457,6 +467,41 @@ static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
     core::sync::atomic::AtomicBool::new(false),
 ];
+
+// R63 (byte-scribble root cause — the R49 heal's live-window blind spot):
+// between `__schedule`'s current-slot update (this_cpu_mut().current =
+// next, under the GRQ lock) and the register-save publish inside
+// context_switch (x86: __switch_to's callee-saved save, then
+// x86_switch_publish's prev->on_cpu = false; riscv64: the full
+// ra/sp/s0-s11 save, then the post-fence on_cpu clear), a task being
+// switched OUT reads as RUNNING ∧ unlinked ∧ owned-by-no-current-slot —
+// the exact shape the R46/R49 phantom heal treats as an orphaned mark
+// and clears. Clearing ti_on_cpu in that window lets any CPU's pick
+// pass the on_cpu skip and resume a HALF-SAVED context (stale
+// thread.sp / callee.ret_addr, torn fxsave) while the outgoing CPU is
+// still writing the same task's thread struct and kernel stack — two
+// CPUs executing one task on one stack. That is the engine behind the
+// x86 fork/exec-storm scribble family (torn ret_addr bytes, gs_base <-
+// 1033 from a torn pt_regs syscall-arg fetch, 0xf000ff53 IVT-pattern
+// fills through a wild per-CPU base, R55 slot divergence, wedged
+// spinlocks; caught live as DOUBLE-RUN pid=320 cpu2-vs-cpu3 with the
+// R49-ONCPU-ORPHAN print in the same capture). This marker names the
+// task each CPU is actively switching out, from before the GRQ release
+// until after context_switch returns, so the heal can tell a LIVE mark
+// from an orphaned one. Written only from __schedule on the local CPU
+// (set under the GRQ lock, cleared on the same hardware CPU after the
+// coroutine switch), so the waker's under-lock read is race-free.
+static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// R63: whether `task` is the prev of a context switch in flight on any
+/// CPU. Called with the GRQ lock held (same discipline as the R49
+/// current-slot scan).
+fn task_is_mid_switch_out(task: *mut Task) -> bool {
+    (0..MAX_CPUS).any(|c| {
+        SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64
+    })
+}
 
 /// Per-CPU reschedule flags
 static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
@@ -1019,6 +1064,58 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+        // Scribble hunter (dfx=scribble): stop tracking before the page
+        // is dropped/deallocated (it may be recycled immediately).
+        #[cfg(feature = "x86_64")]
+        crate::dfx::scribble::unregister(task_ptr);
+        // Scribble hunter: freed-while-linked UAF check — a Task page
+        // returned to the heap while still linked in its class tree
+        // gets recycled as BTreeMap nodes / new Tasks, and subsequent
+        // tree ops write node pointers into the recycled page (the
+        // Task-pointer-fragment scribble family). Loud if it happens.
+        #[cfg(feature = "x86_64")]
+        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            if let Some(grq_guard) = try_grq_lock() {
+                use core::sync::atomic::Ordering as O;
+                let policy = unsafe { (*task_ptr).policy() };
+                let linked = match policy {
+                    SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task_ptr),
+                    SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task_ptr),
+                    _ => grq_guard.cfs_rq.is_linked(task_ptr),
+                };
+                let flagged = unsafe { (*task_ptr).pid() } == TASK_POISON;
+                if linked || flagged {
+                    use crate::console::putchar_no_lock as putchar;
+                    const MSG: &[u8] = b"\nFREED-WHILE-LINKED task=0x";
+                    for &b in MSG {
+                        putchar(b);
+                    }
+                    let mut v = task_ptr as usize;
+                    for _ in 0..16 {
+                        let n = (v >> 60) as u8;
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                        v <<= 4;
+                    }
+                    const M2: &[u8] = b" linked=0x";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    putchar(b'0' + linked as u8);
+                    const M3: &[u8] = b" poison=0x";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    let p = unsafe { (*task_ptr).pid() } as usize;
+                    for sh in (0..8u32).rev() {
+                        let n = ((p >> (sh * 4)) & 0xF) as u8;
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    }
+                    putchar(b'\n');
+                }
+                drop(grq_guard);
+                let _ = O::Relaxed;
+            }
+        }
         // Heap-v3 leak fix: run the Task field destructors BEFORE returning
         // the page. The Task owns heap memory in plain (non-Arc) fields —
         // exe_path: Box<[u8]> (re-set on every execve by set_exe_path),
@@ -1120,6 +1217,12 @@ unsafe fn __schedule() {
     // shape that produced every phantom capture).
     let tp: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
     if !tp.is_null() && tp != prev {
+        // Scribble hunter tripwire: name the divergence the moment the
+        // scheduler sees it (slot task vs the task the hardware runs).
+        #[cfg(feature = "x86_64")]
+        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            crate::dfx::scribble::slot_divergence(cpu_id, tp, prev);
+        }
         // Locate the slot that still accounts tp (it was scheduled SOMEWHERE).
         let home = {
             let mut found = usize::MAX;
@@ -1263,6 +1366,15 @@ unsafe fn __schedule() {
     // Clear idle bit since we're about to run something
     grq().clear_idle(cpu_id);
 
+    // R63: publish the switch-out ownership BEFORE releasing the GRQ (a
+    // waker serialized by this lock must see it), so wake_up_enqueue's
+    // phantom heal cannot clear prev's on_cpu mark while prev's context
+    // is still being saved below.
+    let switching = next != prev && !next.is_null();
+    if switching {
+        SWITCHING_OUT[cpu_id].store(prev as u64, core::sync::atomic::Ordering::Release);
+    }
+
     // Release lock but keep IRQs disabled for context_switch
     let flags = grq_guard.unlock_irqretain();
 
@@ -1282,6 +1394,14 @@ unsafe fn __schedule() {
     // IRQs remain disabled on this CPU, preventing concurrent scheduling.
     if !next.is_null() {
         context_switch(&mut *prev, &mut *next);
+    }
+
+    // R63: the switch completed on this hardware CPU — prev's context is
+    // fully saved and published; retire the ownership mark. (Runs in the
+    // incoming task's coroutine frame, but on the SAME CPU, and cpu_id()
+    // reads the per-CPU hardware slot, so it still names this CPU.)
+    if switching {
+        SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
     }
 
     // After context_switch, the NEW task is running.  The exiting task
@@ -1403,6 +1523,14 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
 #[inline]
 unsafe fn mark_picked_on_cpu(task: *mut Task) {
     if !task.is_null() {
+        // Scribble hunter: record the pick (dfx=scribble).
+        #[cfg(feature = "x86_64")]
+        crate::dfx::scribble::ring_log(
+            crate::arch::cpu_id() as usize,
+            1,
+            task as u64,
+            0,
+        );
         (*task).set_on_cpu(true);
     }
 }
@@ -1622,6 +1750,14 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
     // wake — the idle fast path in __schedule then never triggered again.
     let inserted = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
+            // Scribble hunter: record the class insert (dfx=scribble).
+            #[cfg(feature = "x86_64")]
+            crate::dfx::scribble::ring_log(
+                crate::arch::cpu_id() as usize,
+                3,
+                task as u64,
+                1,
+            );
             grq.rt_rq.enqueue(task, false)
         }
         SchedPolicy::Deadline => {
@@ -1654,6 +1790,14 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             grq.dl_rq.enqueue(task)
         }
         SchedPolicy::Normal | SchedPolicy::Batch => {
+            // Scribble hunter: record the class insert (dfx=scribble).
+            #[cfg(feature = "x86_64")]
+            crate::dfx::scribble::ring_log(
+                crate::arch::cpu_id() as usize,
+                3,
+                task as u64,
+                0,
+            );
             grq.cfs_rq.enqueue(task)
         }
         SchedPolicy::Idle => {
@@ -1860,11 +2004,25 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 }
             };
             let curr_on = (0..MAX_CPUS).any(|c| cpu_state(c).current == task);
-            let phantom = st == TaskState::new(TaskState::RUNNING) && !linked && !curr_on;
-            if !phantom {
+            // Not RUNNING-and-unowned: ZOMBIE/DEAD/TASK_NEW, already linked,
+            // or some CPU's current — refuse exactly as before.
+            if st != TaskState::new(TaskState::RUNNING) || linked || curr_on {
                 return false;
             }
-            if (*task).on_cpu() {
+            // R63: RUNNING ∧ unlinked ∧ owned by no current slot still has
+            // TWO producers. (a) A CPU is INSIDE context_switch with this
+            // task as prev right now (its current slot already shows next,
+            // but its callee-saved/fpu context is not saved until the
+            // switch publish). (b) A genuinely orphaned mark (the R49
+            // capture family). Only (b) may be cleared; for (a) the mark
+            // is the ONLY thing holding every class pick's skip, and the
+            // outgoing publish clears it itself once the context is fully
+            // saved. Either way we fall through to the enqueue below —
+            // linking the task is always safe (the pick skip sequences
+            // the actual resume); the difference is solely whether the
+            // mark survives until the publish.
+            let mid_switch_out = task_is_mid_switch_out(task);
+            if !mid_switch_out && (*task).on_cpu() {
                 // R34: SBI direct write — we hold the GRQ lock here.
                 {
                     const MSG: &[u8] = b"R49-ONCPU-ORPHAN healed pid=0x";
@@ -1880,8 +2038,9 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                     }
                     crate::console::putchar_no_lock(b'\n');
                 }
-                // No CPU owns this mark (curr_on == false under the lock):
-                // clearing it cannot break the NEW2 pick-skip protocol.
+                // No CPU owns this mark (curr_on == false under the lock AND
+                // no in-flight switch names it): clearing it cannot break
+                // the NEW2 pick-skip protocol.
                 (*task).set_on_cpu(false);
             }
             // R34: SBI direct write — we hold the GRQ lock here.
@@ -2635,6 +2794,12 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
     // pipelines). Process it here; the slot clear makes this idempotent
     // with the __schedule tail.
     process_deferred_exit_notify_cpu(crate::arch::cpu_id() as usize);
+    // R63: for the same reason, retire the switch-out ownership mark the
+    // replaced task's __schedule set on this CPU — a newborn's first
+    // resume bypasses __schedule's tail, so without this the mark would
+    // linger until this CPU's next context switch and keep the phantom
+    // heal conservative for a task that is already fully switched out.
+    SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
 }
 
 // ==================== Utility Functions ====================

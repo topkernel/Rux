@@ -45,9 +45,23 @@ pub enum DfxSwitch {
     /// (LTP fork_procs lost seconds per 1000 forks to them); enable only
     /// while hunting the fake-OOM / stale-tree families.
     MmForensics,
+    /// Byte-level scribble hunter (dfx/scribble.rs): shadow-canary over
+    /// every live Task's thread.{fs,gs,sp,ret} + parked pt_regs control
+    /// words, verified at switch-out quiesce and from the timer tick.
+    Scribble,
+    /// Also park (scribble_park breakpoint) on the first confirmed hit
+    /// so a gdb session can arm QEMU watchpoints on the victim address.
+    ScribblePark,
+    /// Park when pid 1 registers — the init task's Task struct and
+    /// kernel stack live at boot-fixed addresses for the whole run, so
+    /// a gdb session can arm persistent watchpoints on them.
+    ScribblePid1,
+    /// Park when the 64th task registers (early in the fork/exec storm)
+    /// so gdb can arm quiet-region watchpoints across the live set.
+    ScribbleSweep,
 }
 
-const SWITCH_COUNT: usize = 5;
+const SWITCH_COUNT: usize = 9;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -59,6 +73,10 @@ impl DfxSwitch {
             DfxSwitch::PeriodicDump => 2,
             DfxSwitch::MemWatch => 3,
             DfxSwitch::MmForensics => 4,
+            DfxSwitch::Scribble => 5,
+            DfxSwitch::ScribblePark => 6,
+            DfxSwitch::ScribblePid1 => 7,
+            DfxSwitch::ScribbleSweep => 8,
         }
     }
 
@@ -69,6 +87,10 @@ impl DfxSwitch {
             "periodic" => Some(DfxSwitch::PeriodicDump),
             "memwatch" => Some(DfxSwitch::MemWatch),
             "mmforensics" => Some(DfxSwitch::MmForensics),
+            "scribble" => Some(DfxSwitch::Scribble),
+            "scribblepark" => Some(DfxSwitch::ScribblePark),
+            "scribblepid1" => Some(DfxSwitch::ScribblePid1),
+            "scribblesweep" => Some(DfxSwitch::ScribbleSweep),
             _ => None,
         }
     }
@@ -84,6 +106,40 @@ pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
     if let DfxSwitch::MemWatch = switch {
         super::memwatch::ENABLED.store(on, Ordering::Relaxed);
+    }
+    if let DfxSwitch::Scribble = switch {
+        #[cfg(feature = "x86_64")]
+        super::scribble::ENABLED.store(on, Ordering::Relaxed);
+    }
+    if let DfxSwitch::ScribblePark = switch {
+        #[cfg(feature = "x86_64")]
+        {
+            super::scribble::PARK.store(on, Ordering::Relaxed);
+            if on {
+                #[cfg(feature = "x86_64")]
+                super::scribble::ENABLED.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+    if let DfxSwitch::ScribbleSweep = switch {
+        #[cfg(feature = "x86_64")]
+        {
+            super::scribble::PARK_SWEEP.store(on, Ordering::Relaxed);
+            if on {
+                #[cfg(feature = "x86_64")]
+                super::scribble::ENABLED.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+    if let DfxSwitch::ScribblePid1 = switch {
+        #[cfg(feature = "x86_64")]
+        {
+            super::scribble::PARK_PID1.store(on, Ordering::Relaxed);
+            if on {
+                #[cfg(feature = "x86_64")]
+                super::scribble::ENABLED.store(true, Ordering::Relaxed);
+            }
+        }
     }
 }
 
