@@ -37,6 +37,8 @@ pub mod sbi_debug;
 pub mod switches;
 pub mod taskdump;
 pub mod memwatch;
+#[cfg(feature = "x86_64")]
+pub mod scribble;
 
 /// Initialize the DFX subsystem.
 ///

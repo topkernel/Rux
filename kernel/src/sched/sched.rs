@@ -442,6 +442,16 @@ fn grq() -> &'static GlobalRunQueue {
     unsafe { GRQ.assume_init_ref() }
 }
 
+/// Scribble hunter (dfx=scribble): trylock the GRQ for the diagnostic
+/// consistency scan. None when uninitialized or currently held.
+pub fn try_grq_lock() -> Option<GrqGuard<'static>> {
+    if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: guarded by GRQ_READY above.
+    unsafe { GRQ.assume_init_ref() }.try_lock_irqsave()
+}
+
 /// Per-CPU state array (indexed by cpu_id)
 static mut PER_CPU: [PerCpuState; MAX_CPUS] = [
     PerCpuState::new(),
@@ -1019,6 +1029,58 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+        // Scribble hunter (dfx=scribble): stop tracking before the page
+        // is dropped/deallocated (it may be recycled immediately).
+        #[cfg(feature = "x86_64")]
+        crate::dfx::scribble::unregister(task_ptr);
+        // Scribble hunter: freed-while-linked UAF check — a Task page
+        // returned to the heap while still linked in its class tree
+        // gets recycled as BTreeMap nodes / new Tasks, and subsequent
+        // tree ops write node pointers into the recycled page (the
+        // Task-pointer-fragment scribble family). Loud if it happens.
+        #[cfg(feature = "x86_64")]
+        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            if let Some(grq_guard) = try_grq_lock() {
+                use core::sync::atomic::Ordering as O;
+                let policy = unsafe { (*task_ptr).policy() };
+                let linked = match policy {
+                    SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task_ptr),
+                    SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task_ptr),
+                    _ => grq_guard.cfs_rq.is_linked(task_ptr),
+                };
+                let flagged = unsafe { (*task_ptr).pid() } == TASK_POISON;
+                if linked || flagged {
+                    use crate::console::putchar_no_lock as putchar;
+                    const MSG: &[u8] = b"\nFREED-WHILE-LINKED task=0x";
+                    for &b in MSG {
+                        putchar(b);
+                    }
+                    let mut v = task_ptr as usize;
+                    for _ in 0..16 {
+                        let n = (v >> 60) as u8;
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                        v <<= 4;
+                    }
+                    const M2: &[u8] = b" linked=0x";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    putchar(b'0' + linked as u8);
+                    const M3: &[u8] = b" poison=0x";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    let p = unsafe { (*task_ptr).pid() } as usize;
+                    for sh in (0..8u32).rev() {
+                        let n = ((p >> (sh * 4)) & 0xF) as u8;
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    }
+                    putchar(b'\n');
+                }
+                drop(grq_guard);
+                let _ = O::Relaxed;
+            }
+        }
         // Heap-v3 leak fix: run the Task field destructors BEFORE returning
         // the page. The Task owns heap memory in plain (non-Arc) fields —
         // exe_path: Box<[u8]> (re-set on every execve by set_exe_path),
@@ -1120,6 +1182,11 @@ unsafe fn __schedule() {
     // shape that produced every phantom capture).
     let tp: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
     if !tp.is_null() && tp != prev {
+        // Scribble hunter tripwire: name the divergence the moment the
+        // scheduler sees it (slot task vs the task the hardware runs).
+        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            crate::dfx::scribble::slot_divergence(cpu_id, tp, prev);
+        }
         // Locate the slot that still accounts tp (it was scheduled SOMEWHERE).
         let home = {
             let mut found = usize::MAX;
@@ -1403,6 +1470,13 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
 #[inline]
 unsafe fn mark_picked_on_cpu(task: *mut Task) {
     if !task.is_null() {
+        // Scribble hunter: record the pick (dfx=scribble).
+        crate::dfx::scribble::ring_log(
+            crate::arch::cpu_id() as usize,
+            1,
+            task as u64,
+            0,
+        );
         (*task).set_on_cpu(true);
     }
 }
@@ -1622,6 +1696,13 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
     // wake — the idle fast path in __schedule then never triggered again.
     let inserted = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
+            // Scribble hunter: record the class insert (dfx=scribble).
+            crate::dfx::scribble::ring_log(
+                crate::arch::cpu_id() as usize,
+                3,
+                task as u64,
+                1,
+            );
             grq.rt_rq.enqueue(task, false)
         }
         SchedPolicy::Deadline => {
@@ -1654,6 +1735,13 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             grq.dl_rq.enqueue(task)
         }
         SchedPolicy::Normal | SchedPolicy::Batch => {
+            // Scribble hunter: record the class insert (dfx=scribble).
+            crate::dfx::scribble::ring_log(
+                crate::arch::cpu_id() as usize,
+                3,
+                task as u64,
+                0,
+            );
             grq.cfs_rq.enqueue(task)
         }
         SchedPolicy::Idle => {

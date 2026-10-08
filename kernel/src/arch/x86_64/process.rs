@@ -73,6 +73,8 @@ pub fn flush_thread() {
             super::cpu::wrmsr(0xC000_0100, 0); // MSR_FS_BASE
             super::cpu::wrmsr(0xC000_0102, 0); // MSR_KERNEL_GS_BASE (user shadow)
         }
+        // Scribble hunter: absorb this legitimate in-run write.
+        crate::dfx::scribble::note_thread_write(current);
     }
 }
 
@@ -116,6 +118,8 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
                 thread.set_tp(addr);
                 super::cpu::wrmsr(MSR_FS_BASE, addr);
             }
+            // Scribble hunter: absorb this legitimate in-run write.
+            crate::dfx::scribble::note_thread_write(current);
             0
         }
         ARCH_GET_FS => {
@@ -132,6 +136,8 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
             unsafe {
                 (*current).thread_mut().gs_base = addr;
             }
+            // Scribble hunter: absorb this legitimate in-run write.
+            crate::dfx::scribble::note_thread_write(current);
             0
         }
         ARCH_GET_GS => {

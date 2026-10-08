@@ -166,23 +166,36 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
             (*next).running_on_cpu.swap(cpu, core::sync::atomic::Ordering::AcqRel)
         };
         if old != -1 {
-            use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
-            taskdump_raw_line(b"\nDOUBLE-RUN-DETECTED pid=");
-            taskdump_dec(unsafe { (*next).pid() } as u64);
-            taskdump_raw_line(b" newcpu=");
-            taskdump_dec(cpu as u64);
-            taskdump_raw_line(b" oldcpu=");
-            taskdump_dec(old as i64 as u64);
-            taskdump_raw_line(b" prevpid=");
-            if prev.is_null() {
-                taskdump_dec(0);
-            } else {
-                taskdump_dec(unsafe { (*prev).pid() } as u64);
-            }
-            taskdump_raw_line(b"\n");
+            // Scribble hunter: report through the locked buffer (the
+            // raw print raced the concurrent panic output in earlier
+            // captures), dump the event ring, and park for gdb.
+            crate::dfx::scribble::double_run(
+                unsafe { (*next).pid() } as u64,
+                cpu as u64,
+                old as i64 as u64,
+                if prev.is_null() {
+                    0
+                } else {
+                    unsafe { (*prev).pid() as u64 }
+                },
+                next as u64,
+            );
         }
     }
     crate::arch::smp::set_current_task_ptr(next as u64);
+    // Scribble hunter (dfx=scribble): record the switch completion.
+    crate::dfx::scribble::ring_log(
+        crate::arch::cpu_id() as usize,
+        2,
+        prev as u64,
+        next as u64,
+    );
+    // Scribble hunter (dfx=scribble): quiesce point — prev's context is
+    // fully saved here, so any tracked field off its shadow was written
+    // by someone else while it ran.
+    if !prev.is_null() {
+        crate::dfx::scribble::quiesce(prev);
+    }
 }
 
 /// Set TSS.rsp0 (and only that) to the task's kernel stack top.

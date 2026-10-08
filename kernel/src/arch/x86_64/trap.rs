@@ -855,6 +855,14 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();
 
+    // 1.5 Scribble hunter (dfx=scribble): GS-pairing tripwire + verify
+    // quiescent tasks' tracked scheduling fields against their shadows +
+    // scheduler-consistency scan (double-run seed detection).
+    // Throttled inside; no-op unless the runtime switch is on.
+    crate::dfx::scribble::verify_gs();
+    crate::dfx::scribble::verify();
+    crate::dfx::scribble::verify_consistency();
+
     // 2. Scheduler tick
     crate::sched::scheduler_tick();
 
