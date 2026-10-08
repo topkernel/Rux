@@ -366,7 +366,20 @@ trap_exit:
     movq %rbp, %rsp
     testb $3, PT_CS(%rsp)       /* pairing rule: swap GS only on the  */
     jz 9f                       /* user-return path (mirror of the    */
-    swapgs                      /* entry-side CS test)                */
+    /* SMP GS-pairing fix (x86-smprace): from swapgs until iretq the CPU
+     * runs with the USER GS base. The syscall path arrives here with IF=1
+     * (handle_syscall re-enabled it), so an IRQ in this ~15-instruction
+     * window enters as KERNEL-origin (CS RPL=0 — we have not iret'd yet),
+     * the stub correctly performs NO swapgs, and the whole handler runs
+     * against the USER (NULL) GS base: %gs:PC_CPU_NUMBER reads linear ~0,
+     * CURRENT_PT_REGS indexes with a garbage cpu, syscall_entry would
+     * load a garbage TSS.rsp0 — the SMP fork/exec/exit crash family
+     * (frames landing on foreign stacks, both CPUs dying at once).
+     * Interrupts off across swapgs..iretq closes the window; iretq
+     * itself re-arms IF from the saved user rflags. Kernel-origin
+     * returns (jz 9f) never swap GS and keep their saved IF semantics. */
+    cli
+    swapgs
 9:  popq %r15
     popq %r14
     popq %r13

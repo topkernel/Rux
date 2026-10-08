@@ -512,6 +512,13 @@ pub struct Task {
     /// The CPU switching the task out may still re-pick ITSELF (fast path).
     pub ti_on_cpu: core::sync::atomic::AtomicBool,
 
+    /// RACE-FORENSICS (x86-smprace): CPU that currently owns the task's
+    /// RESUMED continuation (-1 = none). Claimed at __switch_to's publish
+    /// (right before the saved context is restored), released at the next
+    /// publish. Unlike ti_on_cpu, nothing but the switch path touches it —
+    /// a second claim while one is held is an unambiguous double-run.
+    pub running_on_cpu: core::sync::atomic::AtomicI32,
+
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
     ti_a0: core::sync::atomic::AtomicU64,
     ti_a1: core::sync::atomic::AtomicU64,
@@ -1043,6 +1050,7 @@ impl Task {
             cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
+            running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
             journal_handle: core::cell::Cell::new(core::ptr::null_mut()),
             task_refcnt: core::sync::atomic::AtomicU32::new(1),
             ti_a0: core::sync::atomic::AtomicU64::new(0),
@@ -1202,6 +1210,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
             core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, running_on_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
@@ -1665,6 +1677,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
             core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, running_on_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,

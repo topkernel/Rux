@@ -147,11 +147,39 @@ __switch_to:
 /// Called only from `__switch_to` with the prev context fully saved.
 #[no_mangle]
 pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
+    let cpu = crate::arch::cpu_id() as i32;
     if !prev.is_null() {
         // SAFETY: prev is not running anywhere anymore (we are on the
         // switch path); the bool write only needs release ordering.
         unsafe {
             (*prev).ti_on_cpu.store(false, core::sync::atomic::Ordering::Release);
+            (*prev).running_on_cpu.store(-1, core::sync::atomic::Ordering::Release);
+        }
+    }
+    // RACE-FORENSICS (x86-smprace): claim next's continuation BEFORE its
+    // registers are restored. A claim held by another CPU is a double-run
+    // — the two CPUs would execute one task on one kernel stack (the SMP
+    // fork/exec/exit crash family; caught live twice with the pre-GS-fix
+    // kernel, silent since the trap_exit cli/swapgs fix).
+    if !next.is_null() {
+        let old = unsafe {
+            (*next).running_on_cpu.swap(cpu, core::sync::atomic::Ordering::AcqRel)
+        };
+        if old != -1 {
+            use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+            taskdump_raw_line(b"\nDOUBLE-RUN-DETECTED pid=");
+            taskdump_dec(unsafe { (*next).pid() } as u64);
+            taskdump_raw_line(b" newcpu=");
+            taskdump_dec(cpu as u64);
+            taskdump_raw_line(b" oldcpu=");
+            taskdump_dec(old as i64 as u64);
+            taskdump_raw_line(b" prevpid=");
+            if prev.is_null() {
+                taskdump_dec(0);
+            } else {
+                taskdump_dec(unsafe { (*prev).pid() } as u64);
+            }
+            taskdump_raw_line(b"\n");
         }
     }
     crate::arch::smp::set_current_task_ptr(next as u64);
