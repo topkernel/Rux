@@ -1261,9 +1261,34 @@ unsafe fn __schedule() {
             // Resync the poisoned identity: tp executes HERE, on cpu_id.
             (*tp).set_ti_cpu(cpu_id as i32);
             prev = tp;
+        } else if (tp as usize) >= 0x80000000
+            && (*tp).pid() == 0
+            && !prev.is_null()
+            && (*prev).pid() != 0
+        {
+            // R56d (slot-capture self-heal): tp is the idle task but this
+            // CPU's slot names a REAL task — the pick that published the
+            // slot never reached its context switch, and control fell back
+            // into the idle loop. Every pass of that loop re-enters
+            // __schedule here, resolves prev from the LYING slot, requeues
+            // the orphan and re-picks it via the next == prev fast path
+            // (which never restores its context) — a permanent busy wedge
+            // in which the orphan is linked only inside GRQ-locked windows
+            // and therefore invisible to every other CPU's pick. The slot
+            // is this CPU's own (nobody else writes it under the GRQ except
+            // the lying-slot heal, which stores this same idle task), so
+            // resyncing it here is safe: prev becomes the idle task, the
+            // idle loop marks itself idle, and the orphan — now slotless —
+            // is harvestable through wake_up_enqueue's phantom path.
+            this_cpu_mut().current = tp;
+            prev = tp;
+            const MSG: &[u8] = b"R56-SLOT-SELF-HEALED\n";
+            for &b in MSG {
+                crate::console::putchar_no_lock(b);
+            }
         }
-        // home == MAX: tp has no slot at all (exited?) — leave prev as the
-        // slot's task; the exit path owns that case.
+        // home == MAX otherwise: tp has no slot at all (exited?) — leave
+        // prev as the slot's task; the exit path owns that case.
     }
 
     if prev.is_null() {
@@ -2051,9 +2076,42 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                     grq_guard.cfs_rq.is_linked(task)
                 }
             };
-            let curr_on = (0..MAX_CPUS).any(|c| cpu_state(c).current == task);
+            // R56c (slot-capture orphan): a slot that names this task while
+            // its CPU is IDLE-MARKED is lying. In-tree the combination is
+            // unconstructible: a pick publishes current=next and clears its
+            // idle bit BEFORE releasing this lock, and mark_idle runs only
+            // from the idle loop with the slot naming the idle task
+            // (current.pid == 0), so no interleaving of the scheduler itself
+            // can leave a real task named in an idle-marked slot. Reaching
+            // this state means the pick that published the slot never
+            // reached its context switch (the orphaned-mark capture family).
+            // Heal the lying slots (rewrite them to the idle task — a wedged
+            // CPU resolving prev from its slot would otherwise re-queue and
+            // re-pick the orphan forever without ever running it) and treat
+            // the task as unowned. A BUSY slot that names the task keeps
+            // refusing the wake exactly as before: it is either genuinely
+            // running it or mid-switch-to-it, and the idle-loop harvester's
+            // time-confirmed steal (harvest_relink) owns that shape.
+            let mut curr_on = false;
+            for c in 0..MAX_CPUS {
+                if cpu_state(c).current == task {
+                    let slot_idle = grq()
+                        .idle_cpus
+                        .load(core::sync::atomic::Ordering::Acquire)
+                        & (1u32 << c)
+                        != 0;
+                    if !slot_idle {
+                        curr_on = true;
+                    } else {
+                        let idle_task = cpu_state(c).idle;
+                        if !idle_task.is_null() && idle_task != task {
+                            cpu_state_mut(c).current = idle_task;
+                        }
+                    }
+                }
+            }
             // Not RUNNING-and-unowned: ZOMBIE/DEAD/TASK_NEW, already linked,
-            // or some CPU's current — refuse exactly as before.
+            // or some (live) CPU's current — refuse exactly as before.
             if st != TaskState::new(TaskState::RUNNING) || linked || curr_on {
                 return false;
             }
@@ -3016,49 +3074,374 @@ pub fn cpu_rq(_cpu_id: usize) -> Option<&'static crate::sync::spinlock::Spinlock
 
 // ==================== CPU Idle Loop ====================
 
-/// R56: re-link picked-but-lost tasks (multi-mode emulator-race orphan).
-/// Runs from the idle loop (nothing else to do on this CPU). A task is an
-/// orphan when it is RUNNING, not linked on any class queue, and the slot
-/// its ti_cpu names is NOT running it (slot current differs or is idle).
-/// Such a task will never be picked again and nothing will wake it — every
-/// recorded capture of the multi-thread pipe hang had exactly this shape.
-unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
-    // Cheap pre-check: only when the global count says the queue is empty
-    // (an idle CPU with queued work is about to schedule anyway).
-    if GlobalRunQueue::grq_nr_running() != 0 {
-        return;
+/// R56 round 2: one sighting record for an orphan shape that needs TIME
+/// confirmation before the harvester may act. The slot-capture family (a
+/// busy slot still names the orphan while no context switch ever runs it)
+/// is indistinguishable from a healthy long runner in every scheduler
+/// state — only persistence across ticks separates them, and a task that
+/// has been "mid-pick" for several jiffies is not mid-pick.
+struct OrphanWatchSlot {
+    task: core::sync::atomic::AtomicU64,
+    pid: core::sync::atomic::AtomicU32,
+    seen_at: core::sync::atomic::AtomicU64,
+}
+
+const EMPTY_ORPHAN_WATCH: OrphanWatchSlot = OrphanWatchSlot {
+    task: core::sync::atomic::AtomicU64::new(0),
+    pid: core::sync::atomic::AtomicU32::new(0),
+    seen_at: core::sync::atomic::AtomicU64::new(0),
+};
+
+static ORPHAN_WATCH: [OrphanWatchSlot; 16] =
+    [const { EMPTY_ORPHAN_WATCH }; 16];
+
+/// Returns true when the same (task, pid) sighting has already been
+/// recorded at least `threshold` jiffies ago; records/refreshes the
+/// sighting otherwise. The caller clears the entry (orphan_watch_clear)
+/// once it acts on a confirmed orphan.
+fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> bool {
+    use core::sync::atomic::Ordering;
+    let raw = task as u64;
+    let mut free_idx: usize = usize::MAX;
+    let mut oldest_idx = 0usize;
+    let mut oldest_at = u64::MAX;
+    for i in 0..ORPHAN_WATCH.len() {
+        let s = &ORPHAN_WATCH[i];
+        let t = s.task.load(Ordering::Acquire);
+        if t == raw {
+            if s.pid.load(Ordering::Acquire) == pid {
+                let first = s.seen_at.load(Ordering::Acquire);
+                if first != 0 && now >= first && now - first >= threshold {
+                    return true;
+                }
+                // Re-record when the record is stale (the shape was absent
+                // between sightings — a healthy mid-switch-out transient
+                // must not pre-age a later genuine orphan).
+                if first == 0 || now < first || now - first > 60 {
+                    s.seen_at.store(now, Ordering::Release);
+                }
+                return false;
+            }
+            // Same pointer, different pid — the task was freed and the page
+            // reused. Re-record under the new identity.
+            s.pid.store(pid, Ordering::Release);
+            s.seen_at.store(now, Ordering::Release);
+            return false;
+        }
+        if t == 0 && free_idx == usize::MAX {
+            free_idx = i;
+        }
+        let at = s.seen_at.load(Ordering::Acquire);
+        if at < oldest_at {
+            oldest_at = at;
+            oldest_idx = i;
+        }
     }
-    crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
-        if (*t).state().is_running()
-            && !(*t).sched_entity().is_on_rq()
-            && (*t).on_cpu()
-        {
-            let home = (*t).ti_cpu() as usize;
-            if home < crate::config::MAX_CPUS {
-                // R56b (slot-capture shape, gate mrun2): the slot's current
-                // can STILL name the orphan (pick set current=next, then the
-                // switch never ran) while every CPU actually idles. The
-                // decisive evidence: the home slot's IDLE BIT is set — a
-                // CPU running the orphan would not be marked idle. Both
-                // shapes (slot moved on / slot captured) are orphans.
-                let slot_idle = {
-                    let g = grq();
-                    g.idle_cpus.load(core::sync::atomic::Ordering::Acquire) & (1u32 << home) != 0
-                };
-                let slot_cur = cpu_state(home).current;
-                let slot_is_me = slot_cur == t as *const Task as *mut Task;
-                if !slot_is_me || slot_idle {
-                    // The slot moved on — the pick that marked on_cpu never
-                    // reached __switch_to. Re-link under the GRQ lock with a
-                    // one-shot tripwire; wake_up_enqueue refuses non-wakeable
-                    // states, so RUNNING passes its filter and the class
-                    // insert links it for the next pick.
-                    if wake_up_enqueue(t) {
-                        const MSG: &[u8] = b"R56-ORPHAN-HARVESTED\n";
-                        for &b in MSG {
-                            unsafe { crate::console::putchar_no_lock(b); }
+    let i = if free_idx != usize::MAX { free_idx } else { oldest_idx };
+    ORPHAN_WATCH[i].task.store(raw, Ordering::Release);
+    ORPHAN_WATCH[i].pid.store(pid, Ordering::Release);
+    ORPHAN_WATCH[i].seen_at.store(now, Ordering::Release);
+    false
+}
+
+fn orphan_watch_clear(task: *mut Task) {
+    use core::sync::atomic::Ordering;
+    let raw = task as u64;
+    for s in ORPHAN_WATCH.iter() {
+        if s.task.load(Ordering::Acquire) == raw {
+            s.task.store(0, Ordering::Release);
+        }
+    }
+}
+
+/// Per-policy on_rq flag read (cheap, unlocked — a pre-filter only; the
+/// GRQ-locked paths never trust it).
+unsafe fn task_onrq_flag(t: *mut Task) -> bool {
+    match (*t).policy() {
+        SchedPolicy::Fifo | SchedPolicy::Rr => (*t).rt_entity().is_on_rq(),
+        SchedPolicy::Deadline => (*t)
+            .dl_entity()
+            .on_rq
+            .load(core::sync::atomic::Ordering::Acquire),
+        SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+            (*t).sched_entity().is_on_rq()
+        }
+    }
+}
+
+/// Milliseconds since the given CPU last took a scheduler tick (0 when
+/// unknown/early-boot). A slot owned by a CPU that keeps ticking names a
+/// healthy runner; a frozen TOUCH_TS names a hart that stopped executing
+/// kernel code entirely.
+fn cpu_tick_stale_ms(cpu: usize) -> u64 {
+    let last = crate::dfx::softlockup::last_touch_ns(cpu);
+    if last == 0 {
+        return 0;
+    }
+    let now = crate::arch::cpu::read_time()
+        .saturating_mul(1_000_000_000)
+        / crate::config::TIMER_CLOCK_FREQ_HZ as u64;
+    now.saturating_sub(last) / 1_000_000
+}
+
+fn r56_print_msg(msg: &[u8]) {
+    // R34 discipline: callers may hold the GRQ and/or a PID-hash bucket
+    // lock here — SBI/direct console writes only.
+    for &b in msg {
+        unsafe { crate::console::putchar_no_lock(b); }
+    }
+}
+
+fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
+    r56_print_msg(prefix);
+    let v = pid as u64;
+    let mut buf = [0u8; 8];
+    let mut n = 0;
+    if v == 0 {
+        buf[0] = b'0';
+        n = 1;
+    } else {
+        let mut x = v;
+        while x > 0 {
+            buf[n] = b'0' + (x % 10) as u8;
+            x /= 10;
+            n += 1;
+        }
+    }
+    for i in (0..n).rev() {
+        unsafe { crate::console::putchar_no_lock(buf[i]); }
+    }
+    r56_print_msg(suffix);
+}
+
+/// R56 round 2: authoritative GRQ-locked heal for the two orphan shapes
+/// `wake_up_enqueue` cannot fix on its own:
+///
+/// (a) QUEUED-UNPICKABLE — the task is linked on its class queue but still
+///     carries an on_cpu mark that no slot owns (and no in-flight switch
+///     is saving it). The class pick refuses on_cpu-marked tasks (the
+///     NEW2 skip: "context not saved yet"), so the task sits counted in
+///     nr_running, unpickable forever, and the idle CPUs spin on the
+///     R20-2 re-check. Legitimate producers of linked ∧ on_cpu are (i)
+///     mid switch-out — excluded because __schedule publishes
+///     SWITCHING_OUT before releasing the GRQ and __switch_to clears the
+///     mark when the save completes — and (ii) the next == prev fast-path
+///     re-pick — excluded because the switching CPU's slot still names
+///     the task. Under the GRQ lock neither can present this shape, so
+///     the mark is stale: clear it and the task becomes pickable.
+///
+/// (b) SLOT-CAPTURE — the task is RUNNING, unlinked, and a BUSY slot
+///     still names it, but the caller (the idle-loop harvester) has
+///     time-confirmed the shape across ticks AND verified the naming
+///     CPU has not taken a scheduler tick in seconds: the pick that
+///     published the slot never ran its switch and the hart is no longer
+///     executing kernel code. Clear the pick marks, re-link the task and
+///     rewrite the lying slots to their idle tasks so no wedged loop can
+///     re-consume the link.
+///
+/// Returns true when something was healed.
+pub fn harvest_relink(task: *mut Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    let cpus_allowed;
+    let outcome;
+    {
+        let mut g = grq().lock_irqsave();
+        // SAFETY: the caller (idle-loop harvester) passes pid-hash-derived
+        // task pointers that the bucket lock pins in the table; all state
+        // transitions below run under the GRQ lock.
+        unsafe {
+            let pid = (*task).pid();
+            if pid == 0 || pid == TASK_POISON {
+                return false;
+            }
+            let st = (*task).state();
+            if !st.is_running() {
+                return false;
+            }
+            cpus_allowed = (*task).cpus_allowed();
+            let linked = match (*task).policy() {
+                SchedPolicy::Fifo | SchedPolicy::Rr => g.rt_rq.is_linked(task),
+                SchedPolicy::Deadline => g.dl_rq.is_linked(task),
+                SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                    g.cfs_rq.is_linked(task)
+                }
+            };
+
+            // (a) queued but unpickable: orphaned on_cpu mark.
+            if linked && (*task).on_cpu() && !task_is_mid_switch_out(task) {
+                // No live owner may exist: mid switch-out is excluded by the
+                // SWITCHING_OUT check above and a fast-path re-pick keeps
+                // the switching CPU's slot naming the task — the caller's
+                // pre-filter passed only slotless tasks here.
+                (*task).set_on_cpu(false);
+                (*task)
+                    .running_on_cpu
+                    .store(-1, core::sync::atomic::Ordering::Release);
+                r56_print_pid(
+                    b"R56-QUEUED-MARK-CLEARED pid=",
+                    pid,
+                    b"\n",
+                );
+                outcome = true;
+            } else if linked {
+                return false;
+            } else if task_is_mid_switch_out(task) {
+                // Someone is genuinely saving this context right now (or a
+                // stale SWITCHING_OUT lingered — the harvester's watch
+                // table time-confirms before retrying).
+                return false;
+            } else {
+                // (b) slot-capture steal: rewrite every naming slot to its
+                // idle task, clear the pick marks, and re-link.
+                for c in 0..MAX_CPUS {
+                    if cpu_state(c).current == task {
+                        let idle_task = cpu_state(c).idle;
+                        if !idle_task.is_null() && idle_task != task {
+                            cpu_state_mut(c).current = idle_task;
+                            r56_print_pid(
+                                b"R56-SLOT-CAPTURE-HEALED cpu=",
+                                c as u32,
+                                b" pid=",
+                            );
+                            r56_print_pid(b"", pid, b"\n");
                         }
                     }
+                }
+                (*task).set_on_cpu(false);
+                (*task)
+                    .running_on_cpu
+                    .store(-1, core::sync::atomic::Ordering::Release);
+                outcome = enqueue_task_locked(&mut g, task);
+            }
+        }
+    }
+    // Nudge an idle CPU outside the lock (mirrors enqueue_task's tail).
+    if outcome {
+        if let Some(idle_cpu) = grq().find_idle_cpu(cpus_allowed) {
+            grq().clear_idle(idle_cpu);
+            resched_cpu(idle_cpu);
+        }
+    }
+    outcome
+}
+
+/// R56: re-link picked-but-lost tasks (multi-mode emulator-race orphan).
+/// Runs from the idle loop. A task is an orphan when it is RUNNING, not
+/// linked on any class queue, and no live CPU owns it. Such a task will
+/// never be picked again and nothing will wake it — every recorded capture
+/// of the multi-thread pipe hang had exactly this shape.
+///
+/// R56 round 2 (this rewrite) closes the three blind spots that made the
+/// original harvester miss permanently:
+///
+/// 1. The nr_running != 0 hard gate: the harvest only ran when the queue
+///    read empty. A queued-unpickable orphan (stale on_cpu mark) KEEPS
+///    nr_running above zero, so the gate made that shape permanent; and
+///    every other orphan had to wait for the whole queue to drain before
+///    anything looked for it (the f05rep2 corruption window). The scan is
+///    now rate-limited under load instead of suppressed.
+/// 2. The on_cpu() predicate requirement: a RUNNING ∧ unlinked ∧ !on_cpu
+///    phantom owned by no slot (the R46 smash family) is skipped by the
+///    pre-filter — and since no wake can reach a task that is not waiting
+///    on anything, nothing else ever healed it. The pre-filter now routes
+///    every slotless RUNNING-unlinked task through wake_up_enqueue, whose
+///    GRQ-locked classification is authoritative.
+/// 3. The slot-capture family (a busy slot still names the orphan): the
+///    outer check admitted it but wake_up_enqueue's curr_on scan refused
+///    it — silently, forever (the ftest01 permanent-hang shape). Live CPUs
+///    now self-heal (R56d in __schedule), lying idle-marked slots are
+///    healed inside wake_up_enqueue (R56c), and a truly dead hart is
+///    handled here by time-confirmed steal (harvest_relink).
+unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
+    // Rate gate. When the queue reads empty the scan runs on every pass —
+    // an idle CPU has nothing to lose and goes to WFI right after (the
+    // original R56 trigger). Under load the pid-hash walk (256 bucket
+    // locks) must NOT run on every idle-loop pass: the R20-2 recheck loop
+    // iterates in microseconds, so a pass-count limit still burned whole
+    // host CPUs in scan loops and starved the working vCPU threads under
+    // TCG (timer_probe slept 5x less often and stalled). Instead, at most
+    // ONE scan per 2 jiffies system-wide: a CAS on the last-scan jiffy
+    // makes one CPU the scanner and sends the rest straight back to their
+    // schedule() attempt.
+    static LAST_LOADED_SCAN: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    if GlobalRunQueue::grq_nr_running() != 0 {
+        let now = crate::drivers::timer::get_jiffies();
+        let last = LAST_LOADED_SCAN.load(core::sync::atomic::Ordering::Acquire);
+        if now.wrapping_sub(last) < 2 {
+            return;
+        }
+        if LAST_LOADED_SCAN
+            .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+        let pid = (*t).pid();
+        // Idle tasks are RUNNING ∧ unlinked by design; freed pages must
+        // not be touched further.
+        if pid == 0 || pid == TASK_POISON {
+            return;
+        }
+        if !(*t).state().is_running() {
+            return;
+        }
+        let onrq = task_onrq_flag(t);
+        let oncpu = (*t).on_cpu();
+        let slot = (0..MAX_CPUS).find(|&c| cpu_state(c).current == t);
+        if !onrq {
+            match slot {
+                None => {
+                    // Slot moved on (the classic R56 shape) or the mark was
+                    // never set (R46 family): wake_up_enqueue's GRQ-locked
+                    // phantom path verifies linkage/ownership and heals.
+                    if wake_up_enqueue(t) {
+                        r56_print_msg(b"R56-ORPHAN-HARVESTED\n");
+                    }
+                }
+                Some(c) => {
+                    let slot_idle = grq()
+                        .idle_cpus
+                        .load(core::sync::atomic::Ordering::Acquire)
+                        & (1u32 << c)
+                        != 0;
+                    if slot_idle {
+                        // Lying idle-marked slot — R56c inside
+                        // wake_up_enqueue heals the slot and admits the
+                        // re-link.
+                        if wake_up_enqueue(t) {
+                            r56_print_msg(b"R56-ORPHAN-HARVESTED\n");
+                        }
+                    } else if (*t).preempt_count() == 0
+                        && orphan_watch_confirm(t, pid, now, 3)
+                        && cpu_tick_stale_ms(c) >= 5000
+                    {
+                        // Busy slot naming a task that is off-queue while
+                        // the naming CPU has not taken a tick in 5s and the
+                        // shape persisted 3+ jiffies: the pick that set the
+                        // slot is dead, not in flight. A healthy runner is
+                        // excluded by every leg: it keeps its CPU ticking,
+                        // gets switched out within a slice, and a lock
+                        // holder carries a nonzero preempt_count.
+                        if harvest_relink(t) {
+                            orphan_watch_clear(t);
+                        }
+                    }
+                }
+            }
+        } else if oncpu && slot.is_none() {
+            // Linked but unpickable (orphaned on_cpu mark, NEW2 skip).
+            // Mid switch-out is the one legitimate producer — its
+            // SWITCHING_OUT mark is published under the GRQ; time-confirm
+            // before clearing through a mark that outlived its switch.
+            if !task_is_mid_switch_out(t) || orphan_watch_confirm(t, pid, now, 3) {
+                if harvest_relink(t) {
+                    orphan_watch_clear(t);
                 }
             }
         }
