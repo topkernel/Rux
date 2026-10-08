@@ -62,6 +62,19 @@ pub fn touch(cpu: usize) {
     REPORTED[cpu].store(false, Ordering::Release);
 }
 
+/// Last scheduler-tick timestamp (ns) recorded for the given CPU.
+///
+/// 0 when the CPU has never taken a tick (early boot) — callers must treat
+/// that as "unknown", never as "stale". Used by the scheduler's orphan
+/// harvester to distinguish a slot owned by a live, ticking CPU from one
+/// left behind by a hart that stopped taking interrupts entirely.
+pub fn last_touch_ns(cpu: usize) -> u64 {
+    if cpu >= MAX_CPUS {
+        return 0;
+    }
+    TOUCH_TS[cpu].load(Ordering::Acquire)
+}
+
 /// Check all CPUs for softlockup.
 ///
 /// Called periodically from timer interrupt handler.
