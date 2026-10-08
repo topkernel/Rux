@@ -336,11 +336,17 @@ impl RtRunQueue {
                     // pick would resume a STALE thread.sp — NEW2 root
                     // cause), except the switching CPU's own prev (fast
                     // path: next == prev early-returns without a restore).
+                    // R65: dual-bit ownership (on_cpu AND running_on_cpu
+                    // claim must both be free) — see the fair-class twin.
                     // cgroup v2 (U1b): skip cpu-throttled cgroup chains —
                     // see the fair-class twin for the unthrottle story.
                     let allowed = unsafe {
+                        let oncpu = (*task).on_cpu();
+                        let claim = (*task).running_on_cpu.load(Ordering::Acquire);
+                        let ownership_ok = task == prev
+                            || (!oncpu && (claim == -1 || claim as usize == cpu_id));
                         (*task).cpu_allowed(cpu_id)
-                            && (!(*task).on_cpu() || task == prev)
+                            && ownership_ok
                             && !crate::sched::cgroup::task_cgroup_throttled(task)
                     };
 

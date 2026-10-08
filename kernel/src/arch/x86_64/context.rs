@@ -99,15 +99,34 @@ __switch_to:
     # aligning down here is free scratch space for the C helper calls.
     subq $8, %rsp
 
-    # 3. Publish: current = next (release), prev->on_cpu = 0 (R8-1b
-    #    parity — prev is fully saved above and now pickable), and
-    #    TSS.rsp0 = next's kernel stack top so the next user entry lands
-    #    at stack_top - 168.
+    # 3. Publish: current = next (release), claim next for the double-run
+    #    detector, and TSS.rsp0 = next's kernel stack top so the next user
+    #    entry lands at stack_top - 168.
     movq %rbx, %rdi
     movq %r12, %rsi
     call x86_switch_publish
     movq %r12, %rdi
     call x86_update_rsp0
+
+    # R65 (pickability release point): prev becomes pickable ONLY HERE.
+    # The old discipline cleared prev->ti_on_cpu/running_on_cpu at the TOP
+    # of x86_switch_publish, while this CPU still had its whole switch
+    # chain (publish -> update_rsp0 -> diagnostics) living on PREV's
+    # kernel stack — and publish does real work after the clear (claim
+    # swap, the FOREIGN-SP report, a 40-entry ring dump, quiesce). A
+    # second CPU could legally pick prev the instant the bits read clear,
+    # resume it, and the resumed task's very next trap/frame would be
+    # pushed onto the frames the switching CPU was still executing in —
+    # torn return addresses, a switcher returning through foreign slots
+    # (the wild jumps to static-kernel addresses), two CPUs inside one
+    # task's trap path. The riscv64 twin never had the bug: it clears
+    # on_cpu in asm with only the register restore + ret left. Match it:
+    # everything below is register loads and the ret itself.
+    testq %rbx, %rbx
+    jz   1f
+    movq $0,  {task_on_cpu}(%rbx)   # prev->ti_on_cpu = false (x86-TSO release)
+    movq $-1, {task_claim}(%rbx)    # prev->running_on_cpu = -1
+1:
 
     # 4. Restore next's context.  r12 (holding `next`) is reloaded LAST.
     movq {task_thread}+{callee_r13}(%r12), %r13
@@ -127,6 +146,8 @@ __switch_to:
 .size __switch_to, . - __switch_to
 "#,
     task_thread = const core::mem::offset_of!(Task, thread),
+    task_on_cpu = const core::mem::offset_of!(Task, ti_on_cpu),
+    task_claim = const core::mem::offset_of!(Task, running_on_cpu),
     callee_rbx = const core::mem::offset_of!(crate::arch::thread::CalleeSaved, rbx),
     callee_rbp = const core::mem::offset_of!(crate::arch::thread::CalleeSaved, rbp),
     callee_r12 = const core::mem::offset_of!(crate::arch::thread::CalleeSaved, r12),
@@ -139,22 +160,33 @@ __switch_to:
 );
 
 /// Publish the switch (called from `__switch_to` between the prev-save
-/// and the next-restore).  Release semantics make prev's saved context
-/// visible to any CPU that observes the current-task slot change —
-/// the x86-TSO analogue of the riscv64 `fence rw,rw; on_cpu=0` pair.
+/// and the next-restore).  Claims next's continuation, publishes the
+/// per-CPU current slot, and runs the scribble diagnostics.
+///
+/// R65 (protocol order): prev's pickability bits ({ti_on_cpu,
+/// running_on_cpu}) are NOT cleared here anymore — `__switch_to` clears
+/// them in asm AFTER this helper and the rsp0 install return, right
+/// before the register restore. Clearing them at the top of this helper
+/// (the old order) left a window where another CPU could legally resume
+/// prev while THIS CPU was still executing the switch chain (helper
+/// calls, reports, ring dumps) on prev's kernel stack — the resumed
+/// task's traps then pushed frames through the switcher's live frames.
+/// Everything this helper does now runs while prev is still marked
+/// on-CPU, i.e. unpickable.
 ///
 /// # Safety
 /// Called only from `__switch_to` with the prev context fully saved.
 #[no_mangle]
 pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
     let cpu = crate::arch::cpu_id() as i32;
-    if !prev.is_null() {
-        // SAFETY: prev is not running anywhere anymore (we are on the
-        // switch path); the bool write only needs release ordering.
-        unsafe {
-            (*prev).ti_on_cpu.store(false, core::sync::atomic::Ordering::Release);
-            (*prev).running_on_cpu.store(-1, core::sync::atomic::Ordering::Release);
-        }
+    // R65 witness: prev must still carry its pick mark here. A clear mark
+    // at publish entry means the R49 heal (or a scribble) reset the
+    // ownership word inside the switch-out window — name it.
+    if !prev.is_null()
+        && crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        && !unsafe { (*prev).on_cpu() }
+    {
+        crate::dfx::scribble::switch_window_heal(prev as u64);
     }
     // RACE-FORENSICS (x86-smprace): claim next's continuation BEFORE its
     // registers are restored. A claim held by another CPU is a double-run
@@ -162,6 +194,23 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
     // fork/exec/exit crash family; caught live twice with the pre-GS-fix
     // kernel, silent since the trap_exit cli/swapgs fix).
     if !next.is_null() {
+        // R65 hunt: never publish a non-Task `next` into the per-CPU
+        // current slot — a poisoned slot makes the NEXT __schedule run
+        // its whole prev-side bookkeeping through garbage (the
+        // self-propagating half of the x86-scribble3 cascade). Report and
+        // keep the previous current instead.
+        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && !crate::dfx::scribble::task_plausible(next)
+        {
+            crate::dfx::scribble::bad_switch_arg(2, next as u64, prev as u64);
+            crate::dfx::scribble::ring_log(
+                crate::arch::cpu_id() as usize,
+                2,
+                prev as u64,
+                next as u64,
+            );
+            return;
+        }
         let old = unsafe {
             (*next).running_on_cpu.swap(cpu, core::sync::atomic::Ordering::AcqRel)
         };
@@ -197,7 +246,15 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
             let sp = (*next).thread().sp as usize;
             let top = (*next).get_kernel_stack().map_or(0, |p| p as usize);
             let bottom = (*next).kernel_stack_bottom();
-            if top != 0 && !(sp > bottom && sp <= top) {
+            // Static tasks (idle storages, the boot task) legitimately run
+            // on the static boot stacks — their kstack fields never match
+            // the live sp. Reporting them spammed the console on every
+            // idle switch-in (and, pre-R65, widened the on-prev-stack
+            // window of this very helper). Heap tasks only. (Range check:
+            // kernel-image addresses are numerically ABOVE the heap.)
+            let is_static =
+                !(0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&(next as usize));
+            if !is_static && top != 0 && !(sp > bottom && sp <= top) {
                 use crate::console::putchar_no_lock as putchar;
                 const M: &[u8] = b"\nSWITCHIN-FOREIGN-SP task=0x";
                 for &b in M {

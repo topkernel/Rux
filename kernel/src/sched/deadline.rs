@@ -258,8 +258,14 @@ impl DlRunQueue {
             // valid, live Task pointers inserted by enqueue().
             // R8-1b: skip tasks whose context is not yet saved, except
             // the switching CPU's own prev (fast path).
+            // R65: dual-bit ownership (on_cpu AND running_on_cpu claim
+            // must both be free) — see the fair-class twin.
             let allowed = unsafe {
-                (*task).cpu_allowed(cpu_id) && (!(*task).on_cpu() || task == prev)
+                let oncpu = (*task).on_cpu();
+                let claim = (*task).running_on_cpu.load(Ordering::Acquire);
+                let ownership_ok =
+                    task == prev || (!oncpu && (claim == -1 || claim as usize == cpu_id));
+                (*task).cpu_allowed(cpu_id) && ownership_ok
             };
             if allowed {
                 // Found a match — remove and return it

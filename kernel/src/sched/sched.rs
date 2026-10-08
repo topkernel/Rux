@@ -497,7 +497,7 @@ static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
 /// R63: whether `task` is the prev of a context switch in flight on any
 /// CPU. Called with the GRQ lock held (same discipline as the R49
 /// current-slot scan).
-fn task_is_mid_switch_out(task: *mut Task) -> bool {
+pub fn task_is_mid_switch_out(task: *mut Task) -> bool {
     (0..MAX_CPUS).any(|c| {
         SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64
     })
@@ -1205,6 +1205,29 @@ unsafe fn __schedule() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     let mut prev = this_cpu().current;
 
+    // R65 hunt (garbage-prev guard): the slot-resolved prev is dereferenced
+    // below (pid, state, policy) and handed to the switch path, which
+    // saves callee registers THROUGH it. A slot holding a non-Task pointer
+    // (the x86-scribble3 cascade: publish with garbage next -> current slot
+    // poisoned -> next __schedule runs on the poison) must be healed here,
+    // before any dereference: fall back to the hardware truth (tp, the
+    // arch per-CPU current_task) and resync the slot.
+    #[cfg(feature = "x86_64")]
+    if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        && !crate::dfx::scribble::task_plausible(prev)
+    {
+        let tp0: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
+        crate::dfx::scribble::bad_switch_arg(0, prev as u64, tp0 as u64);
+        if crate::dfx::scribble::task_plausible(tp0) {
+            this_cpu_mut().current = tp0;
+            prev = tp0;
+        } else {
+            // No sane task identity left on this CPU — freeze for gdb
+            // instead of switching through garbage.
+            crate::dfx::scribble::scribble_switch_park(prev as u64, 0);
+        }
+    }
+
     // R55 (multi-mode form-B): the slot-resolved prev must be the task the
     // hardware is actually executing (tp). A mismatch means ti_cpu was
     // steered mid-execution (every in-tree steer is gated, but out-of-tree
@@ -1523,6 +1546,31 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
 #[inline]
 unsafe fn mark_picked_on_cpu(task: *mut Task) {
     if !task.is_null() {
+        // Scribble hunter (R65 double-run seed tripwire): we hold the GRQ
+        // lock here, so the ownership picture is stable. A task that is
+        // STILL another CPU's published current (sched slot) or still
+        // carries another CPU's running_on_cpu claim is being resumed
+        // while it executes — the pick only got here because the on_cpu
+        // byte read false, i.e. the ownership word {ti_on_cpu, claim} was
+        // reset outside the publish protocol (x86-scribble3: the word
+        // held a kernel-static pointer; a single 8-byte store yields
+        // {false, -1}). Name the seed the moment the scheduler first
+        // sees it, with the pre-mark state.
+        #[cfg(feature = "x86_64")]
+        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            let me = crate::arch::cpu_id() as usize;
+            let mut owner_slot: i32 = -1;
+            for c in 0..crate::config::MAX_CPUS {
+                if c != me && cpu_state(c).current == task {
+                    owner_slot = c as i32;
+                    break;
+                }
+            }
+            let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+            if owner_slot >= 0 || (claim != -1 && claim as usize != me) {
+                crate::dfx::scribble::double_seed(task, me as u64, owner_slot, claim);
+            }
+        }
         // Scribble hunter: record the pick (dfx=scribble).
         #[cfg(feature = "x86_64")]
         crate::dfx::scribble::ring_log(
@@ -2774,6 +2822,37 @@ pub fn scheduler_tick() {
 
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+
+    // R65 hunt (garbage-next guard): __switch_to saves callee registers
+    // through `prev` and resumes through `next` (thread.sp/ret_addr are
+    // read from it), so a non-Task pointer here IS the self-propagating
+    // cross-stack engine (x86-scribble3 ring capture: PUB events whose
+    // prev/next are kernel-stack addresses, 0x18 apart). Refuse the
+    // garbage resume — switch to this CPU's idle task instead — and
+    // report; the pick-side seed tripwire names the producer.
+    #[cfg(feature = "x86_64")]
+    let next: &mut Task = {
+        let np = next as *mut Task;
+        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && !crate::dfx::scribble::task_plausible(np)
+        {
+            crate::dfx::scribble::bad_switch_arg(1, np as u64, prev as *mut Task as u64);
+            let idle = cpu_state(cpu_id).idle;
+            if !idle.is_null() {
+                // Keep the ownership slots consistent with what actually
+                // resumes (__schedule already published the garbage next
+                // into the sched slot before calling us).
+                this_cpu_mut().current = idle;
+                &mut *idle
+            } else {
+                // No idle pointer (early boot): freeze for gdb.
+                crate::dfx::scribble::scribble_switch_park(np as u64, 1);
+                &mut *np
+            }
+        } else {
+            next
+        }
+    };
 
     (*next).set_ti_cpu(cpu_id as i32);
 

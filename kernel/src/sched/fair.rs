@@ -663,13 +663,29 @@ impl CfsRunQueue {
             // picking one would resume a STALE thread.sp) UNLESS it is the
             // switching CPU's own prev, which re-picks itself only via the
             // next == prev early return (no context restore happens).
+            // R65 (dual-bit ownership): ti_on_cpu and running_on_cpu are
+            // set/cleared together by the switch protocol (mark at pick,
+            // publish at switch-out), so a pickable task must show
+            // on_cpu == false AND claim == -1 (or our own claim). Testing
+            // BOTH closes the single-word scribble: a stray 8-byte store
+            // of a kernel-static pointer over the ownership word resets
+            // it to {false, -1} (x86-scribble3: the word held
+            // 0xffffffff_80661100, a .rodata ops pointer), which let a
+            // second CPU resume a task that was live on the first CPU's
+            // stack — the shared-stack scribble engine. With the claim in
+            // the predicate the corrupted task simply stays unpickable
+            // (the detector names it) instead of double-running.
             // cgroup v2 (U1b): skip tasks whose cgroup chain is
             // cpu-throttled — they stay on the timeline and become
             // pickable again when the period rolls over (the same
             // affinity-style skip machinery above).
             let allowed = unsafe {
+                let oncpu = (*task).on_cpu();
+                let claim = (*task).running_on_cpu.load(Ordering::Acquire);
+                let ownership_ok = task == prev
+                    || (!oncpu && (claim == -1 || claim as usize == cpu_id));
                 (*task).cpu_allowed(cpu_id)
-                    && (!(*task).on_cpu() || task == prev)
+                    && ownership_ok
                     && !crate::sched::cgroup::task_cgroup_throttled(task)
             };
             if allowed {

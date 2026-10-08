@@ -40,6 +40,13 @@ const OFF_GS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::Th
 const OFF_SP: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, sp);
 const OFF_RET: usize =
     OFF_THREAD + core::mem::offset_of!(crate::arch::thread::CalleeSaved, ret_addr);
+/// Ownership word: {ti_on_cpu: bool, running_on_cpu: i32} share one
+/// aligned qword (R65 hunt). A single 8-byte store of a kernel-static
+/// pointer here yields {false, -1} — the double-run seed observed as
+/// ring "PUB" events without a preceding publish-out (x86-scribble3 g3:
+/// victim word held 0xffffffff_80661100, a .rodata ops pointer).
+const OFF_ONCPU: usize = core::mem::offset_of!(Task, ti_on_cpu);
+const OFF_CLAIM: usize = core::mem::offset_of!(Task, running_on_cpu);
 
 struct Slot {
     /// Task pointer this slot tracks (0 = free).
@@ -167,6 +174,245 @@ pub fn ring_dump() {
 const VERIFY_EVERY: u32 = 4;
 
 // ---------------------------------------------------------------------------
+// R65 hunt: pin park + scheduler consumption tripwires
+// ---------------------------------------------------------------------------
+
+static PIN_ADDR: AtomicU64 = AtomicU64::new(0);
+static PIN_PARSED: AtomicBool = AtomicBool::new(false);
+static PIN_DONE: AtomicBool = AtomicBool::new(false);
+
+fn parse_hex_u64(s: &str) -> Option<u64> {
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    if s.is_empty() || s.len() > 16 {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for b in s.bytes() {
+        let d = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return None,
+        };
+        v = (v << 4) | d as u64;
+    }
+    Some(v)
+}
+
+fn pin_park_check(task: *mut Task) {
+    if PIN_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    if !PIN_PARSED.swap(true, Ordering::AcqRel) {
+        if let Some(v) = crate::cmdline::get_param("scribblepin") {
+            if let Some(a) = parse_hex_u64(&v) {
+                PIN_ADDR.store(a, Ordering::Release);
+            }
+        }
+    }
+    let pin = PIN_ADDR.load(Ordering::Acquire);
+    if pin != 0 && pin == task as u64 {
+        PIN_DONE.store(true, Ordering::Release);
+        puts(b"SCRIBBLE-PIN task=");
+        put_hex(task as u64);
+        puts(b" oncpu=");
+        put_hex((task as usize + OFF_ONCPU) as u64);
+        puts(b" claim=");
+        put_hex((task as usize + OFF_CLAIM) as u64);
+        puts(b" ksp=");
+        put_hex((task as usize + 0x08) as u64);
+        puts(b"\n");
+        scribble_pin_park(task as u64, (task as usize + OFF_ONCPU) as u64);
+    }
+}
+
+/// Task-pointer authenticity probe for the scheduler consumption points
+/// (R65). The x86-scribble2/3 captures show `__switch_to` running with
+/// prev/next = kernel-stack addresses and Task ownership words holding
+/// kernel-static pointers — this predicate separates real Tasks from
+/// such garbage before it is dereferenced by the switch path.
+///
+/// Cheap by design: range check, then a pid bound and a kernel-stack
+/// sanity pass. Static (.bss) tasks (idle storages, the boot task) run on
+/// static stacks, so only the pid bound applies to them.
+pub fn task_plausible(task: *mut Task) -> bool {
+    if task.is_null() {
+        return true;
+    }
+    let a = task as usize;
+    let in_kimg = (0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&a);
+    let in_heap = (0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&a);
+    if !in_kimg && !in_heap {
+        return false;
+    }
+    // SAFETY: read-only probes of scheduler header fields. The range
+    // check above keeps us inside mapped memory for both known classes.
+    unsafe {
+        let pid = (*task).pid();
+        if pid == crate::sched::sched::TASK_POISON || pid > (1 << 22) {
+            return false;
+        }
+        if !in_heap {
+            return true; // static task (idle/boot): stacks are static too
+        }
+        let top = (*task).get_kernel_stack().map_or(0, |p| p as usize);
+        if top == 0 || top & 0xF != 0 {
+            return false;
+        }
+        if !(0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&top)
+            && !(0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&top)
+        {
+            return false;
+        }
+        let bottom = (*task).kernel_stack_bottom();
+        let sp = (*task).thread().sp as usize;
+        if bottom >= top || sp < bottom || sp > top {
+            return false;
+        }
+        true
+    }
+}
+
+/// R65 double-run seed report: `mark_picked_on_cpu` (GRQ held) is about to
+/// mark a task that is STILL another CPU's published current or still
+/// carries another CPU's running_on_cpu claim — the pick just passed the
+/// on_cpu skip, so the ownership word was reset outside the publish
+/// protocol. This is the earliest scheduler-visible instant of the
+/// shared-stack engine; dump the full ownership picture and park.
+pub fn double_seed(task: *mut Task, me: u64, owner_slot: i32, claim: i32) {
+    let mut spins = 0u32;
+    while REPORT_LOCK
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+        && spins < 200_000
+    {
+        spins += 1;
+        core::hint::spin_loop();
+    }
+    REPORT_POS.store(0, Ordering::Relaxed);
+    REPORTING.store(true, Ordering::Relaxed);
+    puts(b"\nDOUBLE-SEED task=");
+    put_hex(task as u64);
+    // SAFETY: diagnostic header reads of the seed task.
+    unsafe {
+        puts(b" pid=");
+        put_dec((*task).pid() as u64);
+        puts(b" oncpu=");
+        put_dec((*task).on_cpu() as u64);
+        puts(b" claim=");
+        put_dec(claim as i64 as u64);
+    }
+    puts(b" me=");
+    put_dec(me);
+    puts(b" owner_slot=");
+    put_dec(owner_slot as i64 as u64);
+    puts(b"\n");
+    // Ownership word + neighborhood (byte-flip / static-pointer shapes).
+    dump_qwords(b"OWN", (task as usize + OFF_ONCPU) & !0xF, 8);
+    for c in 0..crate::config::MAX_CPUS {
+        puts(b" slot");
+        put_dec(c as u64);
+        puts(b"=");
+        put_hex(crate::sched::sched::cpu_state(c).current as u64);
+        puts(b"/");
+        put_hex(crate::arch::smp::PER_CPU[c].current_task.load(Ordering::Relaxed));
+        puts(b"\n");
+    }
+    ring_dump();
+    REPORTING.store(false, Ordering::Relaxed);
+    REPORT_LEN.store(REPORT_POS.load(Ordering::Relaxed), Ordering::Release);
+    REPORT_LOCK.store(false, Ordering::Release);
+    if PARK.load(Ordering::Relaxed) {
+        puts(b"SCRIBBLE-SEEDPARK task=");
+        put_hex(task as u64);
+        puts(b" oncpu_addr=");
+        put_hex((task as usize + OFF_ONCPU) as u64);
+        puts(b"\n");
+        scribble_seed_park(task as u64);
+    }
+}
+
+/// R65 garbage argument report: the switch path is about to consume (or
+/// was offered) a task pointer that fails the authenticity probe.
+pub fn bad_switch_arg(which: u64, bad: u64, other: u64) {
+    let mut spins = 0u32;
+    while REPORT_LOCK
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+        && spins < 200_000
+    {
+        spins += 1;
+        core::hint::spin_loop();
+    }
+    REPORT_POS.store(0, Ordering::Relaxed);
+    REPORTING.store(true, Ordering::Relaxed);
+    puts(b"\nBAD-SWITCH-ARG which=");
+    put_dec(which);
+    puts(b" bad=");
+    put_hex(bad);
+    puts(b" other=");
+    put_hex(other);
+    puts(b" cpu=");
+    put_dec(crate::arch::cpu_id());
+    puts(b"\n");
+    for c in 0..crate::config::MAX_CPUS {
+        puts(b" slot");
+        put_dec(c as u64);
+        puts(b"=");
+        put_hex(crate::sched::sched::cpu_state(c).current as u64);
+        puts(b"/");
+        put_hex(crate::arch::smp::PER_CPU[c].current_task.load(Ordering::Relaxed));
+        puts(b"\n");
+    }
+    ring_dump();
+    REPORTING.store(false, Ordering::Relaxed);
+    REPORT_LEN.store(REPORT_POS.load(Ordering::Relaxed), Ordering::Release);
+    REPORT_LOCK.store(false, Ordering::Release);
+}
+
+/// R65 witness: x86_switch_publish observed prev WITHOUT its pick mark.
+/// With the asm-side release point the mark is always set here; a clear
+/// mark means the R49 heal (or a wild write) reset the ownership word
+/// inside the switch-out window. Rate-limited raw print.
+pub fn switch_window_heal(prev: u64) {
+    // Idle/boot tasks are never pick-marked (mark_picked_on_cpu is not
+    // called for them) — a clear mark at publish entry is their normal
+    // state, not a heal witness. Heap tasks only. (Note the direction:
+    // kernel-image addresses 0xffffffff8... are numerically ABOVE the
+    // direct-map heap prefix 0xffff8880...)
+    if !(0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&prev) {
+        return;
+    }
+    static SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let n = SEEN.fetch_add(1, Ordering::AcqRel) + 1;
+    if n > 8 {
+        return;
+    }
+    puts(b"SWITCH-WINDOW-HEAL #");
+    put_dec(n as u64);
+    puts(b" prev=");
+    put_hex(prev);
+    puts(b" cpu=");
+    put_dec(crate::arch::cpu_id());
+    puts(b"\n");
+}
+
+/// GDB park: pin victim registered — arm watchpoints on $rsi (oncpu addr).
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn scribble_pin_park(_task: u64, _oncpu_addr: u64) {}
+
+/// GDB park: double-run seed caught at pick time.
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn scribble_seed_park(_task: u64) {}
+
+/// GDB park: garbage switch argument caught before dereference.
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn scribble_switch_park(_bad: u64, _which: u64) {}
+
+// ---------------------------------------------------------------------------
 // Raw console helpers (lock-free, usable from any context)
 // ---------------------------------------------------------------------------
 
@@ -288,6 +534,13 @@ pub fn register(task: *mut Task) {
     if !ENABLED.load(Ordering::Relaxed) || task.is_null() {
         return;
     }
+    // R65 pin park (boot param `scribblepin=0x<hex>`): park exactly when
+    // the Task allocated at the given address registers, so a gdb session
+    // can arm QEMU write-watchpoints on the ownership word (task+0x38)
+    // BEFORE the engine strikes. The hunt victim's page is deterministic
+    // across boots (same allocation sequence), which is what makes the
+    // pin usable.
+    pin_park_check(task);
     // Reclaimed-page guard: a Task page freed without its unregister
     // landing (exit raced the table-full path, or the free came from an
     // error path that bypassed free_task_slot) leaves a STALE armed slot
@@ -703,11 +956,18 @@ pub fn verify_consistency() {
         //   (¬linked ∧ RUNNING ∧ on_cpu)              — running/picked
         //   (¬linked ∧ sleeping ∧ ¬on_cpu)            — blocked
         //   current (this CPU's or another's pick is excluded by the lock)
+        // R65: (linked ∧ on_cpu) is ALSO legitimate while the task's CPU
+        // is inside its switch-out (a wake links the task — the pick-side
+        // skip sequences the resume — while the on_cpu mark survives
+        // until __switch_to's asm-side release point). Exclude the
+        // SWITCHING_OUT-marked tasks from the anomaly classes; a mark
+        // that outlives the switch is still caught two scans later.
         // Anything else that persists across two scans is an invariant
         // break worth naming. (onrq+sleeping is also the pre-schedule
         // window ONLY when the sleeper itself is current on a CPU —
         // excluded via the current-slot scan.)
         let curr_any = cur == Some(task)
+            || crate::sched::sched::task_is_mid_switch_out(task)
             || (0..crate::config::MAX_CPUS)
                 .any(|c| crate::sched::sched::cpu_state(c).current == task);
         let anomaly: &[u8] = if curr_any {
