@@ -629,99 +629,63 @@ fn add_entry_to_block(
     block_data[new_offset + 8..new_offset + 8 + name.len()].copy_from_slice(name);
 }
 
-/// Crash-safe ordering barrier for directory-entry writes.
+/// Crash-safe ordering for directory-entry writes (deferred form).
 ///
 /// ROOT CAUSE CONTEXT (the "ghost empty file" after non-clean shutdown):
 /// while a journal handle is active, bio::sync_dirty_buffer defers EVERY
-/// write into the buffer cache (it returns Ok leaving the buffer dirty).
-/// The op-level durability points then drain those buffers in an order
-/// unrelated to the operation's logic: bio::sync_buffers (end of mkdir)
-/// walks the hash buckets; cache eviction and the commit fast path have
-/// their own orders. A crash mid-drain could therefore persist a parent
-/// directory's entry block — the block that PUBLISHES a freshly created
-/// inode — before that inode's table block, its bitmaps, or the new
-/// directory's data block. After the reboot the path still resolves (the
-/// entry survived) but to the inode slot's STALE contents — the mode and
-/// size of whatever occupied it before — turning `mkdir /x` into an empty
-/// 0644 regular file and losing x's subtree. The journal cannot repair
-/// it: commits without revoke records take the write-through fast path
-/// and write nothing to the journal area, so recovery has no records to
-/// replay over the torn state.
+/// write into the buffer cache. Op-level durability points (hash-order
+/// sync_buffers, cache eviction, the commit fast path) then drain those
+/// buffers in orders unrelated to the operation's logic, and a crash
+/// mid-drain could persist a parent directory's entry block — the block
+/// that PUBLISHES a freshly created inode — before that inode's table
+/// block, bitmaps, or data. After the reboot the path resolves to the
+/// inode slot's STALE contents (the ghost).
 ///
-/// This barrier establishes a crash-safe order around every entry write
-/// that publishes an inode (mkdir / create / symlink / link / rename):
-///   1. flush the running jbd2 transaction's registered buffers in
-///      REGISTRATION order — which is the logical modification order of
-///      the operation (bitmaps first, then the initialized inode, its
-///      data blocks, ...); re-registration keeps first position, so the
-///      order is stable,
-///   2. flush every other dirty buffer of this filesystem device except
-///      the entry block itself (the allocator's deliberately
-///      un-journaled writes: block/inode bitmaps, group descriptors,
-///      superblock counters),
-///   3. the caller then writes the entry block and syncs it DIRECTLY —
-///      last.
-/// A crash at any point leaves either "no entry" (the operation never
-/// happened; an orphan inode/block at worst) or "entry + fully
-/// initialized inode" — never an entry over a stale inode slot.
+/// The original fix (ae288274) ran a synchronous barrier on EVERY entry
+/// publication: flush the transaction's registered buffers, flush every
+/// other dirty buffer of the device, then write and sync the entry block
+/// last. Crash-safe, but 4-8 synchronous virtio round trips per
+/// creat/mkdir/link/unlink — any workload that creates or removes a few
+/// hundred files (LTP creat05/fork09 open 1021 in setup) blew the 30s
+/// per-test wall clock just crawling through the I/O.
 ///
-/// `skip` is the entry block about to be written (None flushes everything,
-/// used on the DELETE side: an entry removal must be durable before the
-/// inode/bitmap frees that follow it, or a crash leaves a stale entry
-/// naming a freed — and reallocatable — inode).
+/// This deferred form keeps the SAME ordering guarantee without the
+/// per-op I/O: the create-side operation brackets itself with a PRE
+/// capture window (begin_pre_capture right after journal_start), so
+/// every block IT dirties is recorded on the handle, and at the entry
+/// write that list becomes the publication's `pre` set — an exact
+/// snapshot of the operation's own metadata at O(own blocks) cost (the
+/// intermediate version snapshotted the WHOLE device dirty set: correct
+/// as a superset, but O(cache) per op with O(N)-growing pre sets across
+/// un-drained create loops, which still pushed creat05 over the cap).
+/// The entry block is written into the buffer cache as usual. Every
+/// durability point (fsync/sync, the forced jbd2 commit, eviction of an
+/// order-constrained buffer) first drains the queue in append order,
+/// pre blocks before entry blocks before post blocks (see the design
+/// comment in bio.rs). A crash between drains leaves either "no entry"
+/// (operation never persisted) or "entry + fully initialized inode".
 ///
-/// No-op without an active handle: nothing was deferred then (every
-/// metadata write synced itself in logical order already).
-fn ext4_entry_barrier(fs: &Ext4FileSystem, skip: Option<u64>) {
-    // SAFETY: get_current_handle reads this task's handle slot; null when
-    // no journaled ext4 operation is in progress on this task.
+/// Without an active journal handle nothing is deferred (every metadata
+/// write already syncs itself in logical order), so no publication is
+/// created — the capture window, if one was armed, is simply discarded.
+unsafe fn defer_entry_publication(fs: &Ext4FileSystem, entry_blocknr: u64) -> u64 {
+    // SAFETY: get_current_handle is task-local and null-safe.
     let handle_ptr = match unsafe { get_current_handle() } {
         Some(p) => p,
-        None => return, // no deferral in effect — ordering already safe
+        None => return 0,
     };
-    // SAFETY: the handle lives on this task's stack for the duration of
-    // the enclosing ext4_* operation (set/clear_current_handle bracket it);
-    // we only read h_transaction and the buffer list.
-    unsafe {
-        let handle = &*handle_ptr;
-        if let Some(txn) = handle.h_transaction.clone() {
-            // Snapshot block numbers under the lock (short critical
-            // section — the synchronous I/O happens outside it).
-            let blocks: alloc::vec::Vec<u64> = {
-                let bufs = txn.t_dirty_buffers.lock();
-                bufs.iter().map(|(nr, _)| *nr).collect()
-            };
-            for nr in blocks {
-                if Some(nr) == skip {
-                    continue;
-                }
-                if let Some(bh) = bio::bread(fs.device, nr) {
-                    // Direct sync: bio::sync_dirty_buffer would defer again
-                    // under this very handle.
-                    // SAFETY: bh is a valid BufferHead from bread.
-                    if let Err(e) = (*bh).sync() {
-                        crate::pr_warn!(
-                            "ext4: entry barrier sync blk {} failed (errno {})",
-                            nr,
-                            e
-                        );
-                    }
-                    bio::brelse(bh);
-                }
-            }
-        }
-    }
-    // Everything else dirty on this device — the allocator's un-journaled
-    // metadata — still excluding the entry block.
-    if let Err(e) = bio::sync_device_buffers_excluding(fs.device, skip) {
-        crate::pr_warn!("ext4: entry barrier device flush failed (errno {})", e);
-    }
+    // SAFETY: the handle lives on this task's stack for the enclosing
+    // ext4_* operation; take_pre_capture mutates capture state owned by
+    // this task (us) and returns exactly the blocks this operation
+    // dirtied since the window was armed.
+    let pre: alloc::vec::Vec<u64> = unsafe { (*handle_ptr).take_pre_capture() };
+    bio::publication_defer(fs.device, &pre, entry_blocknr)
 }
 
-/// Write a directory-entry block with crash-safe ordering: run the
-/// publication barrier first, write the block, then persist the block
-/// itself LAST (write_block_from_vec's internal sync is deferred under an
-/// active journal handle, so sync directly here).
+/// Write a directory-entry block with crash-safe ordering (deferred):
+/// snapshot the publication dependencies, write the block into the
+/// buffer cache, and record the publication. Persistence happens in
+/// order at the next drain point.
 ///
 /// SAFETY: same contract as write_block_from_vec (valid device, blocknr).
 unsafe fn write_entry_block_ordered(
@@ -729,30 +693,14 @@ unsafe fn write_entry_block_ordered(
     blocknr: u64,
     data: &[u8],
 ) -> Result<(), i32> {
-    ext4_entry_barrier(fs, Some(blocknr));
+    // SAFETY: fs is the enclosing filesystem; blocknr is the block about
+    // to be written.
+    unsafe { defer_entry_publication(fs, blocknr) };
     // SAFETY: fs.device is a valid GenDisk pointer; write_block_from_vec
-    // handles the buffer lifecycle.
-    unsafe { write_block_from_vec(fs.device, blocknr, data)? };
-
-    // Persist the publishing entry now — directly, bypassing the deferral.
-    // SAFETY: get_current_handle is task-local and null-safe; bread returns
-    // a valid BufferHead whose cache content is exactly what we just wrote.
-    if unsafe { get_current_handle() }.is_some() {
-        if let Some(bh) = bio::bread(fs.device, blocknr) {
-            // SAFETY: bh is valid; sync() writes the cached content out.
-            unsafe {
-                if let Err(e) = (*bh).sync() {
-                    crate::pr_warn!(
-                        "ext4: entry block sync blk {} failed (errno {})",
-                        blocknr,
-                        e
-                    );
-                }
-            }
-            bio::brelse(bh);
-        }
-    }
-    Ok(())
+    // handles the buffer lifecycle. Under a journal handle its sync is
+    // deferred (the entry block stays dirty until a drain point); without
+    // one it syncs inline — last write of the operation either way.
+    unsafe { write_block_from_vec(fs.device, blocknr, data) }
 }
 
 /// Create initial entry in empty block
@@ -1002,6 +950,9 @@ fn ext4_mkdir_inner(
     let mut handle = super::journal::ext4_journal_start(fs, 12)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
+    // PRE-capture window: record this operation's own metadata dirtied
+    // before the entry publication (see defer_entry_publication).
+    handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
 
     let result = ext4_mkdir_no_journal(fs, dir_ino, name, mode);
 
@@ -1056,6 +1007,8 @@ pub fn ext4_create(
         let mut handle = super::journal::ext4_journal_start(fs, 8)?;
         // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
+        // PRE-capture window (see defer_entry_publication).
+        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
         let result = ext4_create_inner(fs, dir_ino, name, mode);
         // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
@@ -1121,6 +1074,8 @@ pub fn ext4_symlink(
         let mut handle = super::journal::ext4_journal_start(fs, 8)?;
         // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
+        // PRE-capture window (see defer_entry_publication).
+        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
         let result = ext4_symlink_inner(fs, dir_ino, name, target);
         // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
@@ -1211,6 +1166,8 @@ pub fn ext4_link(
         let mut handle = super::journal::ext4_journal_start(fs, 6)?;
         // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
+        // PRE-capture window (see defer_entry_publication).
+        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
         let result = ext4_link_inner(fs, dir_ino, target_ino, name);
         // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
@@ -1548,25 +1505,30 @@ fn ext4_unlink_inner(
     // unlink(2) on a directory must fail EISDIR BEFORE the directory entry
     // is removed (review 5.5: unlink 目录无 EISDIR — the old code tore the
     // directory down and only then noticed).
+    let mut dir_block_hint: Option<u64> = None;
     {
         let dir_inode = super::inode::read_inode(fs, dir_ino)?;
-        let (_, _, entry_ino) = find_dir_entry(fs, &dir_inode, name)?;
+        let (blk, _, entry_ino) = find_dir_entry(fs, &dir_inode, name)?;
         let target = super::inode::read_inode(fs, entry_ino)?;
         if target.is_dir() {
             return Err(errno::Errno::IsADirectory.as_neg_i32());
         }
+        dir_block_hint = Some(blk);
     }
 
     // Delete directory entry
     let entry_ino = ext4_delete_entry(fs, dir_ino, name)?;
 
-    // CRASH-SAFETY (delete side): make the entry REMOVAL durable BEFORE
-    // any of the frees below (dead inode, data blocks, inode bitmap) can
-    // persist — under the active handle all of them are deferred, and the
-    // later unordered drains could otherwise land the bitmap free first,
-    // leaving a stale entry naming an inode the allocator can hand out
-    // again (the cross-link twin of the create-side ghost).
-    ext4_entry_barrier(fs, None);
+    // CRASH-SAFETY (delete side, deferred): the entry REMOVAL must be
+    // persisted BEFORE any of the frees below (dead inode, data blocks,
+    // inode bitmap) — a crash that lands the bitmap free first leaves a
+    // stale entry naming an inode the allocator can hand out again (the
+    // cross-link twin of the create-side ghost). Record the removal as a
+    // publication and capture every buffer the frees dirty into its
+    // `post` set; durability points drain pre -> entry -> post in order.
+    // No-op without an active journal handle (nothing is deferred then,
+    // so the frees' inline syncs already follow the removal's).
+    let _post_capture = PostCaptureGuard::new(fs, dir_block_hint);
 
     // Read the unlinked inode
     let mut inode = super::inode::read_inode(fs, entry_ino)?;
@@ -1595,6 +1557,54 @@ fn ext4_unlink_inner(
     super::inode::write_inode_disk(fs, entry_ino, &inode)?;
 
     Ok(())
+}
+
+/// Delete-side publication bracket: records the directory block whose
+/// entry was removed as an ordered publication and captures the buffers
+/// dirtied by the subsequent frees into its `post` set. Drop disarms on
+/// every exit path, so the capture window never leaks into unrelated
+/// writes.
+struct PostCaptureGuard {
+    armed: bool,
+}
+
+impl PostCaptureGuard {
+    fn new(fs: &Ext4FileSystem, dir_block: Option<u64>) -> Self {
+        if let Some(blk) = dir_block {
+            // SAFETY: get_current_handle is task-local and null-safe.
+            if unsafe { get_current_handle() }.is_some() {
+                let id = bio::publication_defer_entry_only(fs.device, blk);
+                // SAFETY: the handle is alive for this syscall and mutable
+                // from its owning task (us).
+                unsafe {
+                    if let Some(h) = get_current_handle() {
+                        let (mj, mi) = bio::dev_key_of(fs.device);
+                        (*h).begin_post_capture((mj, mi), id);
+                    }
+                }
+                return PostCaptureGuard { armed: true };
+            }
+        }
+        PostCaptureGuard { armed: false }
+    }
+
+    fn disarm(&mut self) {
+        if self.armed {
+            self.armed = false;
+            // SAFETY: handle still alive (same syscall).
+            unsafe {
+                if let Some(h) = get_current_handle() {
+                    (*h).end_post_capture();
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PostCaptureGuard {
+    fn drop(&mut self) {
+        self.disarm();
+    }
 }
 
 // ============================================================================
@@ -1644,7 +1654,7 @@ fn ext4_rmdir_inner(
 
     // Find the directory entry first
     let parent_inode = super::inode::read_inode(fs, dir_ino)?;
-    let (_, _, target_ino) = find_dir_entry(fs, &parent_inode, name)?;
+    let (parent_dir_block, _, target_ino) = find_dir_entry(fs, &parent_inode, name)?;
 
     // Read target directory inode
     let target_inode = super::inode::read_inode(fs, target_ino)?;
@@ -1662,9 +1672,10 @@ fn ext4_rmdir_inner(
     // Delete directory entry from parent
     ext4_delete_entry(fs, dir_ino, name)?;
 
-    // CRASH-SAFETY (delete side): the entry removal must be durable BEFORE
-    // the inode/bitmap/block frees below persist (see ext4_unlink_inner).
-    ext4_entry_barrier(fs, None);
+    // CRASH-SAFETY (delete side, deferred): the entry removal must be
+    // persisted BEFORE the inode/bitmap/block frees below (see
+    // ext4_unlink_inner).
+    let _post_capture = PostCaptureGuard::new(fs, Some(parent_dir_block));
 
     // Update parent link count
     let mut parent = parent_inode;
@@ -1959,6 +1970,11 @@ pub fn ext4_rename(
         let mut handle = super::journal::ext4_journal_start(fs, 16)?;
         // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
         unsafe { set_current_handle(&mut handle); }
+        // PRE-capture window for the new-name publication (see
+        // defer_entry_publication). A replace of an existing target
+        // separately arms the POST window (PostCaptureGuard) after this
+        // pre record has been published — the two never overlap.
+        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
         let result = ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name);
         // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
         unsafe { clear_current_handle(); }
@@ -2012,7 +2028,7 @@ fn ext4_rename_inner(
     // Check if new name already exists
     let target_exists = find_dir_entry(fs, &new_dir_inode, new_name).ok();
 
-    if let Some((_, _, target_ino)) = target_exists {
+    if let Some((target_dir_block, _, target_ino)) = target_exists {
         // Cannot rename to self
         if target_ino == old_ino {
             return Ok(());
@@ -2035,12 +2051,12 @@ fn ext4_rename_inner(
         // Delete existing target entry
         ext4_delete_entry(fs, new_dir_ino, new_name)?;
 
-        // CRASH-SAFETY (delete side, rename-replace): the target entry's
-        // removal must be durable BEFORE the inode/bitmap/block frees below
-        // persist — same rationale as ext4_unlink_inner (a stale entry
+        // CRASH-SAFETY (delete side, rename-replace, deferred): the target
+        // entry's removal must be persisted BEFORE the inode/bitmap/block
+        // frees below — same rationale as ext4_unlink_inner (a stale entry
         // naming a freed, reallocatable inode is the create-side ghost's
         // twin).
-        ext4_entry_barrier(fs, None);
+        let _post_capture = PostCaptureGuard::new(fs, Some(target_dir_block));
 
         // Clean up the replaced inode
         let mut target_mut = target_inode;

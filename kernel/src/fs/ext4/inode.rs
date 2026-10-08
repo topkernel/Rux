@@ -544,11 +544,9 @@ pub fn write_inode(
 
     // Journal the inode table block if a transaction is active
     // SAFETY: bh is a valid buffer head from bio::bread
-    let mut have_handle = false;
     unsafe {
         if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
             let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
-            have_handle = true;
         }
     }
 
@@ -556,13 +554,17 @@ pub fn write_inode(
     // fast path syncs the registered buffers); syncing here too would
     // restore the one-synchronous-I/O-per-write(2) cost this path just
     // lost. Without a handle (standalone inode updates outside a
-    // transaction) keep the direct sync for durability.
-    if !have_handle {
-        let sync_res = bio::sync_dirty_buffer(bh);
-        bio::brelse(bh);
-        sync_res?;
-        return Ok(());
-    }
+    // transaction — e.g. the O_TRUNC setattr of every open(O_CREAT|..))
+    // the buffer is now left DIRTY instead of synced inline: the write
+    // rides the buffer cache write-back (eviction sync, sync(2), and the
+    // fsync path — ext4_sync_file ends in bio::sync_buffers, which
+    // flushes everything). The inline sync cost one synchronous virtio
+    // round trip per open(O_TRUNC)/creat, which alone consumed >5s of
+    // the 30s budget of create-heavy LTP tests (creat05/fork09: 1021
+    // files in setup). Ordering safety is unchanged: an inode-table
+    // block never carries entry-publication obligations in the "after"
+    // direction (it is a `pre`-role block at most), and the publication
+    // guards keep entry blocks from jumping their prereqs.
     // SAFETY: bh valid; release the reference taken by bread above.
     bio::brelse(bh);
 
