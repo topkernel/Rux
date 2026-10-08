@@ -1115,6 +1115,10 @@ pub fn ext4_sync_file(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
 ) -> Result<(), i32> {
+    // Durability point: pending ordered publications (entry blocks and
+    // their dependencies) go out first, in queue order.
+    let _ = bio::flush_publications();
+
     // Sync all data blocks of file
     let blocks = inode.get_data_blocks(fs)?;
 

@@ -226,7 +226,18 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     //   - revoke records are pending (the slow path must suppress them).
     // Metadata durability between forced commits relies on the buffer
     // cache write-back (eviction syncs dirty buffers) and sync(2).
-    const LAZY_COMMIT_MAX_BUFFERS: usize = 64;
+    //
+    // 1024 (was 64): every forced commit drains the deferred entry
+    // publications (see bio::flush_publications) synchronously, and a
+    // block re-dirtied between two drains is re-synced by EACH of them —
+    // with the 64 threshold, a 1021-file create loop (LTP creat05/fork09
+    // setup) forced ~16-file batches and re-wrote the shared inode-table
+    // and bitmap blocks ~64 times, spending most of the 30s per-test
+    // budget in redundant virtio round trips. Fewer, larger batches write
+    // the same unique blocks once per (wider) window; fsync/sync still
+    // force immediate commits, and credit exhaustion in start_this_handle
+    // bounds the batch at j_max_transaction_buffers anyway.
+    const LAZY_COMMIT_MAX_BUFFERS: usize = 1024;
     if err == 0 && !handle.h_sync {
         let dirty_len = txn.t_dirty_buffers.lock().len();
         let revokes_pending = !journal.revoke_records.lock().is_empty();

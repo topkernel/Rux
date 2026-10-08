@@ -15,7 +15,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::drivers::blkdev;
 
@@ -148,8 +148,19 @@ impl BufferHead {
 
     /// Set state bit
     pub fn set_state_bit(&self, bit: u8) {
-        let mut state = self.b_state.lock();
-        state.set(bit);
+        {
+            let mut state = self.b_state.lock();
+            state.set(bit);
+        }
+        // Deferred-publication capture (see PENDING_PUBLICATIONS): every
+        // path that marks a buffer dirty passes through here, so this is
+        // the single hook that lets an enclosing ext4 operation record
+        // "these blocks were dirtied AFTER my entry-publication point"
+        // (the delete-side frees) without knowing which subsystem wrote
+        // them. Costs one task-local load when no capture is armed.
+        if bit == BufferState::BH_Dirty {
+            publication_capture_note_dirty(self.b_device, self.b_blocknr);
+        }
     }
 
     /// Clear state bit
@@ -546,6 +557,15 @@ impl BlockCache {
         // points to a valid BufferHead owned by this entry.
         unsafe {
             if (*(*victim).bh).is_dirty() {
+                // Ordered-publication guard: if this block is a pending
+                // entry/post block, writing it here (before its prereqs)
+                // would reopen the ghost-empty-file crash window. Flush
+                // the ordered queue first; it persists this block too, so
+                // the sync below usually becomes a no-op.
+                let vkey = (*victim).key;
+                if publication_constrained(vkey.0, vkey.1, vkey.2) {
+                    let _ = flush_publications();
+                }
                 let _ = (*(*victim).bh).sync();
             }
             let _ = Box::from_raw(victim);
@@ -1496,6 +1516,19 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     if journal_active {
         return Ok(());
     }
+    // Ordered-publication guard: this buffer may be a pending entry/post
+    // block whose order constraints a plain sync would violate. Flush the
+    // queue (which syncs it in order) first.
+    // SAFETY: bh is a raw pointer returned by bread().
+    unsafe {
+        let bh_ref = &*bh;
+        if let Some(dev) = bh_ref.b_device {
+            let (mj, mi) = dev_key(dev);
+            if publication_constrained(mj, mi, bh_ref.b_blocknr) {
+                let _ = flush_publications();
+            }
+        }
+    }
     // SAFETY: bh is a raw pointer returned by bread(); it points to a valid
     // BufferHead owned by a CacheEntry in the cache.
     unsafe {
@@ -1506,23 +1539,341 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
 
 /// Sync all dirty buffers
 pub fn sync_buffers() -> Result<(), i32> {
+    // Durability point: ordered publications must go out first (a plain
+    // hash-order drain could persist an entry block before its metadata).
+    let _ = flush_publications();
     get_block_cache().sync_all()
 }
 
 /// Sync all dirty buffers of ONE device, optionally skipping one block.
 ///
 /// Unlike sync_dirty_buffer this flushes regardless of any active ext4
-/// journal handle: it is the escape hatch the entry-publication barrier
-/// uses to order metadata that the handle-deferred path would otherwise
-/// write back in arbitrary (hash-bucket) order.
+/// journal handle.
 pub fn sync_device_buffers_excluding(
     device: *const crate::drivers::blkdev::GenDisk,
     skip: Option<u64>,
 ) -> Result<(), i32> {
+    // Ordered-publication guard (same rationale as sync_buffers).
+    let _ = flush_publications();
     get_block_cache().sync_all_excluding(device, skip)
 }
 
 /// Initialize block cache (lazy init on first use)
 pub fn init() {
     // Cache auto-initializes on first use
+}
+
+// ============================================================================
+// Deferred entry-publication ordering (crash-safe batching)
+// ============================================================================
+//
+// Replaces the per-operation synchronous entry barrier (ae288274) with a
+// deferred, ordered drain. The barrier flushed the running transaction's
+// buffers + every other dirty buffer of the device + the entry block
+// itself on EVERY directory-entry publication (creat/mkdir/link/symlink/
+// rename-add/unlink/rmdir/rename-replace) — 4-8 synchronous virtio round
+// trips (~10-20ms each under TCG) per operation. Any workload that
+// creates or removes a few hundred files (LTP creat05/fork09 open 1021
+// files in their setup loops) blew the 30s per-test wall clock with the
+// kernel merely crawling, not wedged.
+//
+// The crash-safety contract stays exactly the one the barrier bought
+// (the "ghost empty file" fix): a directory entry block must never reach
+// the disk before the metadata that initializes the inode it names
+// (create side), and an inode/bitmap FREE must never reach the disk
+// before the entry removal that makes the free safe (delete side — the
+// cross-link twin). Deferring does not weaken this as long as the write
+// ORDER at every durability point is: a publication's `pre` blocks,
+// then its `entry` block, then its `post` blocks.
+//
+// Structure: each publishing operation appends one `Publication` record
+// to PENDING_PUBLICATIONS:
+//   - create side: the operation brackets itself with a PRE capture
+//     window on its jbd2 handle (begin_pre_capture); every buffer it
+//     marks dirty lands on the handle's list, and at the entry write
+//     that list becomes the record's `pre` (an EXACT snapshot of this
+//     operation's own metadata — bitmaps, inode table block, group
+//     descriptors, superblock counters; the earlier device-wide dirty
+//     snapshot was a correct superset but cost O(cache) per op and grew
+//     the pre sets O(N) across un-drained create loops, which is what
+//     kept LTP creat05/fork09 — 1021 files in setup — over the 30s cap
+//     even after the synchronous barrier was removed), entry = the
+//     directory block being published, post = []
+//   - delete side: entry = the directory block the entry was removed
+//     from, pre = [], and the frees that follow in the same operation are
+//     captured into `post` by arming a POST capture window on the task's
+//     journal handle (every dirty-marking funnels through
+//     BufferHead::set_state_bit, which appends to the publication).
+//
+// Durability points call flush_publications(), which processes pending
+// records IN APPEND ORDER (the causal order of the operations), each
+// record pre -> entry -> post. Because the buffer cache is a single
+// cumulative copy of every block, writing a block always persists its
+// newest content; the per-record order is what keeps the crash windows
+// closed. A `post` capture that arrives after its record was flushed
+// (concurrent flush on another CPU) is appended as a fresh post-only
+// record at the END of the queue — still after the entry it follows.
+//
+// Flush triggers: fsync/sync (ext4_sync_file, sync_buffers), the forced
+// jbd2 commit path, and buffer-cache eviction of an order-constrained
+// block (a dirty victim whose block number is a pending entry/post).
+// Eviction of `pre`-role blocks is unconstrained: writing a pre block
+// early is always safe (pre blocks only have "before the entry"
+// obligations).
+//
+// Locking: PENDING_PUBLICATIONS is a Spinlock<Vec<_>> that is NEVER held
+// across I/O (flush snapshots with mem::take and syncs lock-free). The
+// capture hook may take it while the caller holds a bucket lock (the
+// cache-internal dirty paths) — nesting is bucket -> PENDING only; the
+// flush path takes PENDING without any bucket lock, so the order is
+// acyclic.
+
+/// One deferred directory-entry publication (see the block comment above).
+pub struct Publication {
+    /// Monotonic id; the delete-side capture window addresses its record.
+    pub id: u64,
+    /// (major, minor) of the owning device.
+    pub device: (u32, u32),
+    /// Blocks that must persist BEFORE `entry` (create-side metadata).
+    pub pre: Vec<u64>,
+    /// The publishing directory block (None for post-only stragglers).
+    pub entry: Option<u64>,
+    /// Blocks that must persist AFTER `entry` (delete-side frees).
+    pub post: Vec<u64>,
+}
+
+static PENDING_PUBLICATIONS: Spinlock<Vec<Publication>> = Spinlock::new(Vec::new());
+static NEXT_PUBLICATION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn dev_key(device: *const blkdev::GenDisk) -> (u32, u32) {
+    // SAFETY: callers pass a valid GenDisk pointer (the fs device).
+    unsafe { ((*device).major, (*device).first_minor) }
+}
+
+/// Public (major, minor) of a GenDisk — used by ext4 to address a
+/// handle's post-capture window to the right device.
+pub fn dev_key_of(device: *const blkdev::GenDisk) -> (u32, u32) {
+    dev_key(device)
+}
+
+/// Defer a create-side entry publication: `pre_blocks` must be persisted
+/// before `entry_block`. Returns the record id (used by the delete-side
+/// capture; create-side callers ignore it).
+pub fn publication_defer(
+    device: *const blkdev::GenDisk,
+    pre_blocks: &[u64],
+    entry_block: u64,
+) -> u64 {
+    let id = NEXT_PUBLICATION_ID.fetch_add(1, Ordering::Relaxed);
+    let mut pre = Vec::with_capacity(pre_blocks.len());
+    for &b in pre_blocks {
+        if b != entry_block && !pre.contains(&b) {
+            pre.push(b);
+        }
+    }
+    let mut pend = PENDING_PUBLICATIONS.lock();
+    pend.push(Publication {
+        id,
+        device: dev_key(device),
+        pre,
+        entry: Some(entry_block),
+        post: Vec::new(),
+    });
+    id
+}
+
+/// Defer a delete-side entry publication: `entry_block` (the directory
+/// block the entry was removed from) must persist BEFORE the frees the
+/// caller performs next, which it captures via
+/// jbd2::Handle::begin_post_capture. Returns the record id.
+pub fn publication_defer_entry_only(
+    device: *const blkdev::GenDisk,
+    entry_block: u64,
+) -> u64 {
+    let id = NEXT_PUBLICATION_ID.fetch_add(1, Ordering::Relaxed);
+    let mut pend = PENDING_PUBLICATIONS.lock();
+    pend.push(Publication {
+        id,
+        device: dev_key(device),
+        pre: Vec::new(),
+        entry: Some(entry_block),
+        post: Vec::new(),
+    });
+    id
+}
+
+/// Capture hook armed by jbd2::Handle's capture windows, driven from
+/// BufferHead::set_state_bit(BH_Dirty):
+/// - PRE mode (create side): the block is appended to the handle's
+///   h_pre_list — the exact "this operation's own metadata" set that
+///   becomes the publication's `pre` at the entry write. Replaces the
+///   earlier device-wide dirty snapshot, which cost O(cache) per op and
+///   grew the pre sets O(N) across un-drained create loops (LTP
+///   creat05/fork09: 1021 files in setup).
+/// - POST mode (delete side): the block is appended to the `post` set of
+///   the addressed publication record.
+/// Runs in the dirty-marking hot path; the unarmed fast path is two loads
+/// (task, handle).
+fn publication_capture_note_dirty(
+    device: Option<*const blkdev::GenDisk>,
+    blocknr: u64,
+) {
+    use crate::fs::jbd2::journal::{CAPTURE_POST, CAPTURE_PRE};
+    let dev = match device {
+        Some(d) => d,
+        None => return,
+    };
+    let task = match crate::sched::current() {
+        Some(t) => t,
+        None => return,
+    };
+    // SAFETY: journal_handle is set/cleared by this task around the
+    // enclosing ext4 operation; it is null outside one.
+    let hptr = unsafe { (*task).journal_handle.get() };
+    if hptr.is_null() {
+        return;
+    }
+    // SAFETY: the handle lives on the owner task's stack for the whole
+    // syscall (see namei::set_current_handle).
+    let (mode, capture_id, capture_dev) = unsafe {
+        let h = &*hptr;
+        (h.capture_mode(), h.capture_post_id(), h.capture_dev_key())
+    };
+    if capture_dev != dev_key(dev) {
+        return;
+    }
+    match mode {
+        CAPTURE_PRE => {
+            // SAFETY: same-task access (the hook runs in the owner's
+            // syscall context); the Spinlock also covers any stray
+            // cross-CPU marker (harmless superset — see the design note).
+            unsafe { (*hptr).h_pre_list.lock().push(blocknr) };
+        }
+        CAPTURE_POST => {
+            let mut pend = PENDING_PUBLICATIONS.lock();
+            for p in pend.iter_mut().rev() {
+                if p.id == capture_id {
+                    if !p.post.contains(&blocknr) {
+                        p.post.push(blocknr);
+                    }
+                    return;
+                }
+            }
+            // The record was flushed while our capture window was open
+            // (another CPU hit a durability point). Append a post-only
+            // record at the END of the queue — still after the entry
+            // removal, which that flush persisted before returning.
+            pend.push(Publication {
+                id: capture_id,
+                device: dev_key(dev),
+                pre: Vec::new(),
+                entry: None,
+                post: vec![blocknr],
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Is this block a pending `entry` or `post` block (order-constrained,
+/// must not be persisted out of band)?
+fn publication_constrained(mj: u32, mi: u32, blocknr: u64) -> bool {
+    let pend = PENDING_PUBLICATIONS.lock();
+    pend.iter().any(|p| {
+        p.device == (mj, mi)
+            && (p.entry == Some(blocknr) || p.post.contains(&blocknr))
+    })
+}
+
+/// Flush all pending publications in append order (pre -> entry -> post
+/// per record). Called from every durability point (fsync/sync, forced
+/// jbd2 commit) and from the eviction/sync guards. Never holds the
+/// pending lock across I/O; loops until a racing publisher stops
+/// refilling the queue.
+pub fn flush_publications() -> Result<(), i32> {
+    loop {
+        let batch = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let mut first_err: i32 = 0;
+        for p in &batch {
+            for &b in &p.pre {
+                if let Err(e) = sync_block_ordered(p.device, b) {
+                    if first_err == 0 {
+                        first_err = e;
+                    }
+                }
+            }
+            if let Some(e_blk) = p.entry {
+                if let Err(e) = sync_block_ordered(p.device, e_blk) {
+                    if first_err == 0 {
+                        first_err = e;
+                    }
+                }
+            }
+            for &b in &p.post {
+                if let Err(e) = sync_block_ordered(p.device, b) {
+                    if first_err == 0 {
+                        first_err = e;
+                    }
+                }
+            }
+        }
+        if first_err != 0 {
+            // Requeue what we did not get to; the error is reported.
+            let mut pend = PENDING_PUBLICATIONS.lock();
+            let drained = core::mem::take(&mut *pend);
+            let mut merged = batch;
+            merged.extend(drained);
+            *pend = merged;
+            return Err(first_err);
+        }
+        // Loop: a racing publisher may have appended during our I/O.
+    }
+}
+
+/// Sync one block by (major, minor, blocknr) without reading it into the
+/// cache on a miss (a miss means nothing cached is pending — the
+/// publisher's own cached copy may have been evicted, and eviction of a
+/// constrained block flushes first, so a miss here is benign).
+fn sync_block_ordered(dev: (u32, u32), blocknr: u64) -> Result<(), i32> {
+    match get_block_cache().peek_buffer(dev, blocknr) {
+        Some(bh) => {
+            // SAFETY: peek_buffer bumped the refcount; the bh stays valid
+            // until the matching put below. sync() skips clean buffers,
+            // so already-persisted blocks cost nothing.
+            let r = unsafe { (*bh).sync() };
+            get_block_cache().put(bh);
+            r
+        }
+        None => Ok(()),
+    }
+}
+
+impl BlockCache {
+    /// Lookup a cached buffer WITHOUT any disk read (bread reads on a
+    /// miss). Bumps the refcount on hit; caller must put(). Used by the
+    /// publication flush.
+    fn peek_buffer(&self, dev: (u32, u32), blocknr: u64) -> Option<*mut BufferHead> {
+        let index = self.hash_index(dev.0, dev.1, blocknr);
+        let bucket = self.buckets[index].lock();
+        let mut current = bucket.head;
+        while let Some(entry_ptr) = current {
+            // SAFETY: entry_ptr is from the hash chain; bucket lock held.
+            unsafe {
+                let entry = &*entry_ptr;
+                if entry.key == (dev.0, dev.1, blocknr)
+                    && !entry.evicting
+                    && !entry.bh.is_null()
+                    && (*entry.bh).b_data.len() == self.block_size as usize
+                {
+                    (*entry.bh).get();
+                    return Some(entry.bh);
+                }
+                current = entry.hash_next;
+            }
+        }
+        None
+    }
 }
