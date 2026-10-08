@@ -14,6 +14,12 @@ all: build
 config:
 	@echo "Current kernel configuration:"
 	@echo "=================="
+	@if [ -f $(BUILD_DIR)/.config ]; then \
+		echo "Active config : $(BUILD_DIR)/.config (make menuconfig)"; \
+	else \
+		echo "Active config : Kernel.toml (defaults; run make menuconfig to customize)"; \
+	fi
+	@echo "Platform      : $$( $(BUILD_DIR)/current-platform.sh )"
 	@echo "Kernel name: $$(grep '^name' $(PROJECT_ROOT)/Kernel.toml | head -1 | cut -d'"' -f2)"
 	@echo "Version: $$(grep '^version' $(PROJECT_ROOT)/Kernel.toml | head -1 | cut -d'"' -f2)"
 	@echo "Target platform: $$(grep '^default_platform' $(PROJECT_ROOT)/Kernel.toml | head -1 | cut -d'"' -f2)"
@@ -31,15 +37,42 @@ menuconfig:
 	@echo "Starting configuration menu..."
 	@$(BUILD_DIR)/menuconfig.sh
 
-# Build kernel
-build:
-	@echo "Building Rux kernel..."
-	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf
+# ---- Platform selection (Linux-style: config-driven) ----
+# The active platform comes from build/.config (set by `make menuconfig`),
+# falling back to Kernel.toml's default_platform. Override per-invocation
+# with `make PLATFORM=x86_64` (same spirit as Linux's ARCH=).
+PLATFORM := $(shell $(BUILD_DIR)/current-platform.sh)
+ifeq ($(PLATFORM),x86_64)
+CARGO_TARGET := x86_64-unknown-none
+CARGO_FEATURE_FLAGS := --no-default-features --features x86_64
+KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
+else ifeq ($(PLATFORM),riscv64)
+CARGO_TARGET := riscv64gc-unknown-none-elf
+CARGO_FEATURE_FLAGS :=
+KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
+else
+$(error Unsupported platform '$(PLATFORM)' — run `make menuconfig`)
+endif
 
-# Release build (without debug logs)
+# Build kernel (per active configuration)
+build:
+	@echo "Building Rux kernel (platform=$(PLATFORM))..."
+	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
+ifeq ($(PLATFORM),x86_64)
+	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(KERNEL_BIN) $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/bzImage
+endif
+
+# Release build (without debug logs, per active configuration)
 build-release:
-	@echo "Building Rux kernel (Release)..."
-	@cd $(PROJECT_ROOT) && cargo build --target riscv64gc-unknown-none-elf --release
+	@echo "Building Rux kernel (Release, platform=$(PLATFORM))..."
+	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS) --release
+ifeq ($(PLATFORM),x86_64)
+	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/bzImage
+endif
+
+# x86_64 convenience alias — equivalent to `PLATFORM=x86_64 make build`
+build-x86:
+	@$(MAKE) -C $(PROJECT_ROOT)/build PLATFORM=x86_64 build
 
 # Quick build (compile only, no output)
 build-quiet:

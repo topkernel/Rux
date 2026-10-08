@@ -275,14 +275,14 @@ impl VirtIOBlkDevice {
             const QUEUE_READY_OFFSET: u64 = 0x44;
 
             // Convert virtual addresses to physical addresses
-            let desc_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(desc_addr)
+            let desc_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(desc_addr)
             ).0;
-            let avail_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(avail_addr)
+            let avail_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(avail_addr)
             ).0;
-            let used_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(used_addr)
+            let used_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(used_addr)
             ).0;
 
             // Write descriptor table address (low 32 bits)
@@ -456,14 +456,14 @@ impl VirtIOBlkDevice {
             const VIRTQ_DESC_F_WRITE: u16 = 2;
 
             // Convert virtual addresses to physical addresses (VirtIO devices need physical addresses for DMA)
-            let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+            let header_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(header_ptr as u64)
             ).0;
-            let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+            let data_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
             ).0;
-            let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+            let resp_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(resp_ptr as u64)
             ).0;
 
             // Allocate three descriptors — R22-6: dealloc header/resp on
@@ -670,14 +670,14 @@ impl VirtIOBlkDevice {
             const VIRTQ_DESC_F_WRITE: u16 = 2;
 
             // Convert virtual addresses to physical addresses (VirtIO devices need physical addresses for DMA)
-            let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+            let header_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(header_ptr as u64)
             ).0;
-            let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+            let data_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
             ).0;
-            let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-                crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+            let resp_phys_addr = crate::arch::mm::virt_to_phys(
+                crate::arch::mm::VirtAddr::new(resp_ptr as u64)
             ).0;
 
             // Allocate three descriptors
@@ -875,14 +875,14 @@ impl VirtIOBlkDevice {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        let header_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64),
+        let header_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(header_ptr as u64),
         ).0;
-        let data_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64),
+        let data_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64),
         ).0;
-        let resp_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64),
+        let resp_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64),
         ).0;
 
         let header_desc_idx = match queue.alloc_desc() {
@@ -997,18 +997,31 @@ impl VirtIOBlkDevice {
 /// Global VirtIO block device (MMIO)
 static mut VIRTIO_BLK: Option<VirtIOBlkDevice> = None;
 
-/// Global VirtIO PCI block device (using raw pointer storage)
-static mut VIRTIO_PCI_BLK: Option<crate::drivers::virtio::virtio_pci::VirtIOPCI> = None;
+/// Maximum number of PCI virtio-blk disks (OH boots six: updater/system/
+/// vendor/sys_prod/chip_prod/userdata as vda..vdf; two spare letters).
+pub const MAX_PCI_BLK_DISKS: usize = 8;
 
-/// Global VirtIO PCI block device VirtQueue (configured queue)
-static mut VIRTIO_PCI_BLK_QUEUE: Option<queue::VirtQueue> = None;
+/// PCI virtio-blk devices (one per slot; slot 0 is the boot disk when the
+/// boot probe found PCI disks). Each slot owns its complete I/O engine:
+/// device, vring, BLK lock, sync wait queue, expected-used counter, pending
+/// table and unked counter — the singletons the pre-1b kernel had, per disk.
+static mut PCI_BLK_DEVICES: [Option<crate::drivers::virtio::virtio_pci::VirtIOPCI>; MAX_PCI_BLK_DISKS] =
+    [const { None }; MAX_PCI_BLK_DISKS];
 
-/// Spinlock to serialize all PCI VirtIO block I/O operations.
-pub(crate) static VIRTIO_PCI_BLK_LOCK: Spinlock<()> = Spinlock::new(());
+/// Configured VirtQueues, one per PCI virtio-blk slot.
+static mut PCI_BLK_QUEUES: [Option<queue::VirtQueue>; MAX_PCI_BLK_DISKS] =
+    [const { None }; MAX_PCI_BLK_DISKS];
 
-/// Wait queue for PCI VirtIO block I/O completion (interrupt-driven wakeup)
-static VIRTIO_PCI_BLK_WAIT_QUEUE: crate::process::wait::WaitQueueHead =
-    crate::process::wait::WaitQueueHead::new();
+/// Per-slot BLK lock: serializes all I/O operations on ONE disk (submit +
+/// pending-store under the lock, completion collection under the same
+/// lock). Disks never share a lock, and no path holds two disk locks
+/// nested (slot-loops take them strictly sequentially).
+pub(crate) static PCI_BLK_LOCKS: [Spinlock<()>; MAX_PCI_BLK_DISKS] =
+    [const { Spinlock::new(()) }; MAX_PCI_BLK_DISKS];
+
+/// Per-slot wait queue for PCI VirtIO block I/O completion (interrupt-driven wakeup).
+static PCI_BLK_WAIT_QUEUES: [crate::process::wait::WaitQueueHead; MAX_PCI_BLK_DISKS] =
+    [const { crate::process::wait::WaitQueueHead::new() }; MAX_PCI_BLK_DISKS];
 
 /// Wait queue for MMIO VirtIO block I/O completion (interrupt-driven wakeup)
 static VIRTIO_BLK_WAIT_QUEUE: crate::process::wait::WaitQueueHead =
@@ -1090,9 +1103,12 @@ fn increment_mmio_expected_used_idx() {
     VIRTIO_MMIO_EXPECTED_USED_IDX.fetch_add(1, core::sync::atomic::Ordering::Release);
 }
 
-/// Global VirtIO PCI block device expected used.idx (for tracking I/O completion status)
-/// Incremented each time request is submitted, used to detect if device completed request
-static VIRTIO_PCI_EXPECTED_USED_IDX: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+/// Per-slot expected used.idx (for tracking I/O completion status).
+/// Incremented each time a request is submitted on that slot's queue
+/// (under the slot's BLK lock); each submitter reads the value before
+/// submit to know which used-ring slot to wait for.
+static PCI_BLK_EXPECTED_USED_IDX: [core::sync::atomic::AtomicU16; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU16::new(0) }; MAX_PCI_BLK_DISKS];
 
 // ============================================================================
 // LOCK ORDER (virtio-blk ABBA fix — the GNOME final6 deadlock family)
@@ -1132,7 +1148,7 @@ static VIRTIO_LOCK_DEPTH: [core::sync::atomic::AtomicUsize; crate::config::MAX_C
 /// True while the current CPU holds any virtio driver lock (debug only).
 #[cfg(debug_assertions)]
 pub fn virtio_lock_held() -> bool {
-    let cpu = crate::arch::riscv64::smp::cpu_id();
+    let cpu = crate::arch::smp::cpu_id() as usize;
     VIRTIO_LOCK_DEPTH[cpu.min(crate::config::MAX_CPUS - 1)]
         .load(core::sync::atomic::Ordering::Acquire)
         > 0
@@ -1149,7 +1165,7 @@ pub(crate) struct VirtioLockNest;
 impl VirtioLockNest {
     #[inline]
     pub(crate) fn new() -> Self {
-        let cpu = crate::arch::riscv64::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
+        let cpu = (crate::arch::smp::cpu_id() as usize).min(crate::config::MAX_CPUS - 1);
         VIRTIO_LOCK_DEPTH[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         Self
     }
@@ -1159,7 +1175,7 @@ impl VirtioLockNest {
 impl core::ops::Drop for VirtioLockNest {
     #[inline]
     fn drop(&mut self) {
-        let cpu = crate::arch::riscv64::smp::cpu_id().min(crate::config::MAX_CPUS - 1);
+        let cpu = (crate::arch::smp::cpu_id() as usize).min(crate::config::MAX_CPUS - 1);
         VIRTIO_LOCK_DEPTH[cpu].fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
     }
 }
@@ -1259,26 +1275,44 @@ const MAX_PENDING_IO_PCI: usize = 64;
 /// because ordinal N+64 cannot publish until entry N was walked, the
 /// walker can never trail far enough for the used ring (queue_size deep)
 /// to overwrite an unconsumed entry.
-static VIRTIO_PCI_PENDING: Spinlock<[Option<PendingIo>; MAX_PENDING_IO_PCI]> =
-    Spinlock::new([const { None }; MAX_PENDING_IO_PCI]);
+static PCI_BLK_PENDING: [Spinlock<[Option<PendingIo>; MAX_PENDING_IO_PCI]>; MAX_PCI_BLK_DISKS] =
+    [const { Spinlock::new([const { None }; MAX_PENDING_IO_PCI]) }; MAX_PCI_BLK_DISKS];
 
-/// Last used-ring index processed by the async completion walker (PCI).
-static VIRTIO_PCI_PENDING_LAST: core::sync::atomic::AtomicU16 =
-    core::sync::atomic::AtomicU16::new(0);
+/// Last used-ring index processed by the async completion walker, per slot.
+static PCI_BLK_PENDING_LAST: [core::sync::atomic::AtomicU16; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU16::new(0) }; MAX_PCI_BLK_DISKS];
 
-/// Chains published to the PCI avail ring since the last device kick.
+/// Chains published to a slot's avail ring since the last device kick.
 /// Batch submitters publish quietly and the waiter kicks once — see
 /// pci_submit_read_async.
-static PCI_UNKICKED: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static PCI_BLK_UNKICKED: [core::sync::atomic::AtomicUsize; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_PCI_BLK_DISKS];
 
-/// Kick the PCI virtio-blk device if any quietly-submitted chains are
-/// pending. Callers must invoke this BEFORE sleeping on an async completion
-/// (drain paths); it is idempotent and cheap when nothing is unked.
-pub fn pci_blk_kick() {
-    if PCI_UNKICKED.swap(0, core::sync::atomic::Ordering::AcqRel) > 0 {
-        if let Some(q) = get_pci_device_queue() {
+/// Kick the PCI virtio-blk disk in `slot` if any quietly-submitted chains
+/// are pending. Callers must invoke this BEFORE sleeping on an async
+/// completion (drain paths); it is idempotent and cheap when nothing is
+/// unked.
+pub fn pci_blk_kick(slot: usize) {
+    if slot >= MAX_PCI_BLK_DISKS {
+        return;
+    }
+    if PCI_BLK_UNKICKED[slot].swap(0, core::sync::atomic::Ordering::AcqRel) > 0 {
+        if let Some(q) = get_pci_device_queue_at(slot) {
             q.notify();
+        }
+    }
+}
+
+/// Kick EVERY PCI virtio-blk disk with quietly-submitted chains. For
+/// disk-agnostic recovery paths (batch drains, lost-completion
+/// compensation) where the owning disk is not known; notify() on an idle
+/// queue is a harmless MMIO write.
+pub fn pci_blk_kick_all() {
+    for slot in 0..MAX_PCI_BLK_DISKS {
+        if PCI_BLK_UNKICKED[slot].swap(0, core::sync::atomic::Ordering::AcqRel) > 0 {
+            if let Some(q) = get_pci_device_queue_at(slot) {
+                q.notify();
+            }
         }
     }
 }
@@ -1322,9 +1356,12 @@ fn chain_windows_overlap(a: u32, b: u32, q: u32) -> bool {
 ///
 /// Caller must hold the PCI BLK lock (the walker collects under the same
 /// lock, so the reservation cannot race it).
-pub fn pci_pending_slot_reservable(queue_size: u32, ordinal: u16, head_desc: u16) -> bool {
+pub fn pci_pending_slot_reservable(disk: usize, queue_size: u32, ordinal: u16, head_desc: u16) -> bool {
+    if disk >= MAX_PCI_BLK_DISKS {
+        return false;
+    }
     let slot = ordinal as usize % MAX_PENDING_IO_PCI;
-    let table = VIRTIO_PCI_PENDING.lock_irqsave();
+    let table = PCI_BLK_PENDING[disk].lock_irqsave();
     if table[slot].is_some() {
         return false;
     }
@@ -1349,9 +1386,12 @@ pub fn pci_pending_slot_reservable(queue_size: u32, ordinal: u16, head_desc: u16
 /// reservation check and this publish only abandon_pending_completion can
 /// touch the table, and it never frees a slot — so the publish cannot
 /// fail; the debug assert documents that invariant.
-pub fn pci_publish_sync_chain(queue_size: u32, ordinal: u16, head_desc: u16) {
+pub fn pci_publish_sync_chain(disk: usize, queue_size: u32, ordinal: u16, head_desc: u16) {
+    if disk >= MAX_PCI_BLK_DISKS {
+        return;
+    }
     let slot = ordinal as usize % MAX_PENDING_IO_PCI;
-    let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
+    let mut table = PCI_BLK_PENDING[disk].lock_irqsave();
     debug_assert!(
         table[slot].is_none()
             || !table.iter().any(|e| match e {
@@ -1380,9 +1420,12 @@ pub fn pci_publish_sync_chain(queue_size: u32, ordinal: u16, head_desc: u16) {
 /// tombstone's used-ring entry it will pair the increment with
 /// resolve_leaked_chain instead of letting leaked_chains accumulate
 /// forever.
-pub fn pci_flag_sync_tombstone_timed_out(ordinal: u16) {
+pub fn pci_flag_sync_tombstone_timed_out(disk: usize, ordinal: u16) {
+    if disk >= MAX_PCI_BLK_DISKS {
+        return;
+    }
     let slot = ordinal as usize % MAX_PENDING_IO_PCI;
-    let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
+    let mut table = PCI_BLK_PENDING[disk].lock_irqsave();
     if let Some(p) = table[slot].as_mut() {
         if p.completion.is_null() {
             p.timed_out = true;
@@ -1431,13 +1474,18 @@ pub fn abandon_pending_completion(
     comp: *mut crate::fs::io_completion::IoCompletion,
 ) -> usize {
     let mut abandoned = 0usize;
+    // Per-disk tally so the admission-guard decrements land on the OWNING
+    // queue (note_timed_out_chain pairs with resolve_leaked_chain there).
+    let mut abandoned_per_disk = [0usize; MAX_PCI_BLK_DISKS];
 
-    // PCI table: tombstone (window stays reserved; nothing left to fire).
-    {
-        let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
+    // PCI tables: tombstone (window stays reserved; nothing left to fire).
+    // The completion may be in flight on ANY disk — sweep every slot.
+    for disk in 0..MAX_PCI_BLK_DISKS {
+        let mut table = PCI_BLK_PENDING[disk].lock_irqsave();
         for slot in table.iter_mut() {
             if let Some(p) = slot {
                 if p.completion == comp && !p.completion.is_null() {
+                    abandoned_per_disk[disk] += 1;
                     *slot = Some(PendingIo {
                         completion: core::ptr::null_mut(),
                         resp_ptr: core::ptr::null_mut(),
@@ -1464,9 +1512,17 @@ pub fn abandon_pending_completion(
         // skipping from process context could interleave with a
         // concurrent chain build under the BLK lock (its three
         // descriptors must stay consecutive for the window math).
-        if let Some(vq) = get_pci_device_queue() {
-            for _ in 0..abandoned {
-                vq.note_timed_out_chain();
+        // Multi-disk: bump each disk's queue for the chains abandoned from
+        // ITS table (tallied per disk above).
+        for disk in 0..MAX_PCI_BLK_DISKS {
+            let n = abandoned_per_disk[disk];
+            if n == 0 {
+                continue;
+            }
+            if let Some(vq) = get_pci_device_queue_at(disk) {
+                for _ in 0..n {
+                    vq.note_timed_out_chain();
+                }
             }
         }
     }
@@ -1507,14 +1563,19 @@ pub fn abandon_pending_completion(
 /// remain valid and unmodified until the completion fires; `completion` must
 /// outlive the I/O. Mirrors `VirtIOBlkDevice::submit_read_async`.
 unsafe fn pci_submit_read_async(
-    _disk: *const crate::drivers::blkdev::GenDisk,
+    disk: *const crate::drivers::blkdev::GenDisk,
     sector: u64,
     buf: &mut [u8],
     completion: &crate::fs::io_completion::IoCompletion,
 ) -> Result<(), i32> {
     use queue::{VirtIOBlkReqHeader, VirtIOBlkResp};
 
-    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
+    // Route to the disk's own slot: register_pci_gen_disk stashes the
+    // slot index in GenDisk.private_data.
+    let slot = (*disk).private_data.map(|p| p as usize).unwrap_or(0);
+    if slot >= MAX_PCI_BLK_DISKS
+        || !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire)
+    {
         return Err(-5); // EIO
     }
 
@@ -1542,24 +1603,15 @@ unsafe fn pci_submit_read_async(
     const VIRTQ_DESC_F_NEXT: u16 = 1;
     const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-    #[cfg(feature = "riscv64")]
-    let header_phys = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64),
+    let header_phys = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(header_ptr as u64),
     ).0;
-    #[cfg(feature = "riscv64")]
-    let data_phys = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64),
+    let data_phys = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64),
     ).0;
-    #[cfg(feature = "riscv64")]
-    let resp_phys = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64),
+    let resp_phys = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(resp_ptr as u64),
     ).0;
-    #[cfg(not(feature = "riscv64"))]
-    let header_phys = header_ptr as u64;
-    #[cfg(not(feature = "riscv64"))]
-    let data_phys = buf.as_ptr() as u64;
-    #[cfg(not(feature = "riscv64"))]
-    let resp_phys = resp_ptr as u64;
 
     // Submission attempts. "Walker lag" (ordinal slot still occupied or
     // descriptor window overlapping a live entry) and a full in-flight
@@ -1579,10 +1631,10 @@ unsafe fn pci_submit_read_async(
             // observe the used-ring advance before the pending entry is
             // published — the lost-completion race documented on the MMIO
             // path.
-            let _guard = VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+            let _guard = PCI_BLK_LOCKS[slot].lock_irqsave();
             let _nest = VirtioLockNest::new();
 
-            let virt_queue = match get_pci_device_queue_mut() {
+            let virt_queue = match get_pci_device_queue_mut_at(slot) {
                 Some(q) => q,
                 None => {
                     // SAFETY: io_buf was allocated with io_layout and is
@@ -1612,8 +1664,8 @@ unsafe fn pci_submit_read_async(
                 // synchronous — takes one submission ordinal and
                 // publishes at `ordinal % MAX_PENDING_IO_PCI`; the
                 // walker's positional fast path expects it there.
-                let prev_expected = get_expected_used_idx();
-                if !pci_pending_slot_reservable(q, prev_expected, header_desc_idx) {
+                let prev_expected = get_expected_used_idx_at(slot);
+                if !pci_pending_slot_reservable(slot, q, prev_expected, header_desc_idx) {
                     // Walker lag: retry after drain below.
                     lagging = true;
                 } else {
@@ -1639,10 +1691,10 @@ unsafe fn pci_submit_read_async(
                     // Keep the submission counter aligned with the used
                     // ring: the walker's positional fast path maps
                     // used-ring entry i to slot i % MAX_PENDING_IO_PCI.
-                    increment_expected_used_idx();
-                    let unkicked = PCI_UNKICKED.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
+                    increment_expected_used_idx_at(slot);
+                    let unkicked = PCI_BLK_UNKICKED[slot].fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
                     if unkicked >= 32 {
-                        PCI_UNKICKED.store(0, core::sync::atomic::Ordering::Release);
+                        PCI_BLK_UNKICKED[slot].store(0, core::sync::atomic::Ordering::Release);
                         virt_queue.notify();
                     }
 
@@ -1652,7 +1704,7 @@ unsafe fn pci_submit_read_async(
                     // held, so the completion walker (same lock) cannot
                     // observe the used-ring advance before this entry is
                     // visible — no matter how fast the device completes.
-                    VIRTIO_PCI_PENDING.lock_irqsave()
+                    PCI_BLK_PENDING[slot].lock_irqsave()
                         [prev_expected as usize % MAX_PENDING_IO_PCI] = Some(PendingIo {
                         completion: completion as *const _ as *mut _,
                         resp_ptr: resp_ptr as *mut u8,
@@ -1677,8 +1729,8 @@ unsafe fn pci_submit_read_async(
         }
         // Outside every virtio lock: kick the device and run the walker
         // once so finished entries retire and slots/windows free up.
-        pci_blk_kick();
-        pci_process_async_completions();
+        pci_blk_kick(slot);
+        pci_process_async_completions_slot(slot);
     }
 
     // Still lagging after the retries — fail; the caller (bread_async)
@@ -1746,6 +1798,16 @@ static VIRTIO_PCI_REORDER_EVENTS: core::sync::atomic::AtomicU64 =
 /// Collection is chunked (16 entries per lock pass) so each irqsave section
 /// stays short even when a large batch lands at once.
 pub fn pci_process_async_completions() {
+    for disk in 0..MAX_PCI_BLK_DISKS {
+        if PCI_BLK_READY[disk].load(core::sync::atomic::Ordering::Acquire) {
+            pci_process_async_completions_slot(disk);
+        }
+    }
+}
+
+/// Per-disk completion walker (see pci_process_async_completions for the
+/// design notes; every table/lock reference below is disk-local).
+pub fn pci_process_async_completions_slot(slot: usize) {
     /// Collected-per-lock-pass bound. 16 × sizeof(PendingIo) ≈ 1.3 KiB of
     /// stack per pass; the outer loop repeats until caught up or the total
     /// budget (one queue window) is spent.
@@ -1753,7 +1815,7 @@ pub fn pci_process_async_completions() {
 
     // Fast path: nothing pending. Read the used ring first; if the walker is
     // already caught up, skip the lock entirely.
-    let (used_ring, queue_sz) = match get_pci_device_queue() {
+    let (used_ring, queue_sz) = match get_pci_device_queue_at(slot) {
         Some(q) => (q.used_ring_ptr(), q.queue_size),
         None => return,
     };
@@ -1765,7 +1827,7 @@ pub fn pci_process_async_completions() {
     let used_idx = unsafe {
         core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
     };
-    let last = VIRTIO_PCI_PENDING_LAST.load(core::sync::atomic::Ordering::Acquire);
+    let last = PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire);
     if used_idx == last {
         return;
     }
@@ -1777,14 +1839,14 @@ pub fn pci_process_async_completions() {
         let mut done: [Option<PendingIo>; CHUNK] = [const { None }; CHUNK];
         let mut collected = 0usize;
         {
-            let _guard = VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+            let _guard = PCI_BLK_LOCKS[slot].lock_irqsave();
             let _nest = VirtioLockNest::new();
             // Re-read under the lock (a submission may have landed since).
             // SAFETY: same field, queue alive.
             let used_idx = unsafe {
                 core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
             };
-            let mut i = VIRTIO_PCI_PENDING_LAST.load(core::sync::atomic::Ordering::Acquire);
+            let mut i = PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire);
             while i != used_idx && budget > 0 && collected < CHUNK {
                 budget -= 1;
                 core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
@@ -1798,19 +1860,20 @@ pub fn pci_process_async_completions() {
                         (used_ring as usize + 4 + ring_pos * 8) as *const u32
                     )
                 };
-                // Positional fast path: entry i belongs at slot
+                // Positional fast path: entry i belongs at ordinal slot
                 // i % MAX_PENDING_IO_PCI when completion order equals
-                // submission order.
-                let slot = i as usize % MAX_PENDING_IO_PCI;
+                // submission order. (NOTE: `slot` is the DISK; the pending
+                // table index below is `ordinal_slot` — do not conflate.)
+                let ordinal_slot = i as usize % MAX_PENDING_IO_PCI;
                 let mut fired: Option<PendingIo> = None;
                 {
-                    let mut table = VIRTIO_PCI_PENDING.lock_irqsave();
-                    let positional_match = match table[slot].as_ref() {
+                    let mut table = PCI_BLK_PENDING[slot].lock_irqsave();
+                    let positional_match = match table[ordinal_slot].as_ref() {
                         Some(p) => p.head_desc == entry_id,
                         None => false,
                     };
                     if positional_match {
-                        fired = table[slot].take();
+                        fired = table[ordinal_slot].take();
                     } else {
                         // Out-of-order (or the positional slot holds a
                         // different live chain): scan for the entry whose
@@ -1852,7 +1915,7 @@ pub fn pci_process_async_completions() {
                 }
                 i = i.wrapping_add(1);
             }
-            VIRTIO_PCI_PENDING_LAST.store(i, core::sync::atomic::Ordering::Release);
+            PCI_BLK_PENDING_LAST[slot].store(i, core::sync::atomic::Ordering::Release);
             // _nest, table guards and the BLK lock all drop HERE.
         }
 
@@ -1878,7 +1941,7 @@ pub fn pci_process_async_completions() {
                 // (an ever-growing counter permanently shrank the
                 // in-flight admission guard).
                 if pending.timed_out {
-                    if let Some(vq) = get_pci_device_queue() {
+                    if let Some(vq) = get_pci_device_queue_at(slot) {
                         vq.resolve_leaked_chain();
                     }
                 }
@@ -1904,8 +1967,16 @@ pub fn pci_process_async_completions() {
     }
 }
 
-/// PCI device ready flag (using atomic type to ensure multi-core visibility)
-static VIRTIO_PCI_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Per-slot ready flags (set after the device + queue + GenDisk are all in
+/// place; multi-core visibility via SeqCst).
+static PCI_BLK_READY: [core::sync::atomic::AtomicBool; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; MAX_PCI_BLK_DISKS];
+
+/// Number of PCI virtio-blk slots actually registered (boot probe order:
+/// slot i is vd<'a'+i>). Exposed for devtmpfs node creation and letter->
+/// disk resolution.
+static PCI_BLK_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 /// Initialize VirtIO block device
 ///
@@ -1936,16 +2007,38 @@ pub fn init(base_addr: u64) -> Result<(), &'static str> {
 ///
 /// # Parameters
 /// - `device`: PCI VirtIO device
-pub fn register_pci_device(device: crate::drivers::virtio::virtio_pci::VirtIOPCI) {
+pub fn register_pci_device(slot: usize, mut device: crate::drivers::virtio::virtio_pci::VirtIOPCI) {
+    if slot >= MAX_PCI_BLK_DISKS {
+        return;
+    }
+    // Stamp the slot into the device: every I/O path reaches its queue,
+    // lock, wait queue and pending table THROUGH this number.
+    device.blk_slot = slot;
     // SAFETY: Called once during device probe before any I/O requests;
     // SeqCst fence ensures write visibility before ready flag is set.
     unsafe {
-        VIRTIO_PCI_BLK = Some(device);
+        PCI_BLK_DEVICES[slot] = Some(device);
         // Ensure device write is visible to all CPUs
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         // Set ready flag (must be set after writing device)
-        VIRTIO_PCI_READY.store(true, core::sync::atomic::Ordering::SeqCst);
+        PCI_BLK_READY[slot].store(true, core::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// Number of registered PCI virtio-blk disks (slots 0..n).
+pub fn pci_blk_disk_count() -> usize {
+    PCI_BLK_COUNT.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Register slot `slot` as a live disk (called by the probe after the
+/// GenDisk + sysfs registration, once per disk).
+pub fn pci_blk_slot_online(slot: usize) {
+    PCI_BLK_COUNT.fetch_max(slot + 1, core::sync::atomic::Ordering::AcqRel);
+}
+
+/// Is the PCI virtio-blk disk in `slot` ready for I/O?
+pub fn pci_blk_slot_ready(slot: usize) -> bool {
+    slot < MAX_PCI_BLK_DISKS && PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire)
 }
 
 /// Get VirtIO block device
@@ -1961,76 +2054,100 @@ pub fn get_device() -> Option<&'static VirtIOBlkDevice> {
     }
 }
 
-/// Get PCI VirtIO device
+/// Get the BOOT PCI virtio-blk device (slot 0). Legacy single-disk
+/// callers (flush, devfs presence checks) keep this view.
 pub fn get_pci_device() -> Option<&'static crate::drivers::virtio::virtio_pci::VirtIOPCI> {
-    // Check if device is ready
-    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
+    get_pci_device_at(0)
+}
+
+/// Get the PCI virtio-blk device in `slot`.
+pub fn get_pci_device_at(slot: usize) -> Option<&'static crate::drivers::virtio::virtio_pci::VirtIOPCI> {
+    if slot >= MAX_PCI_BLK_DISKS {
         return None;
     }
-    // SAFETY: Ready flag guarantees VIRTIO_PCI_BLK was written; returning
-    // immutable reference while device is initialized and not being mutated.
+    // Check if device is ready
+    if !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: The ready flag guarantees the slot was written; returning an
+    // immutable reference while the device is initialized and not being
+    // mutated.
     unsafe {
-        VIRTIO_PCI_BLK.as_ref()
+        PCI_BLK_DEVICES[slot].as_ref()
     }
 }
 
-/// Set PCI VirtIO block device's VirtQueue
-///
-/// # Parameters
-/// - `queue`: Configured VirtQueue
-pub fn set_pci_device_queue(queue: queue::VirtQueue) {
+/// Set a slot's configured VirtQueue.
+pub fn set_pci_device_queue(slot: usize, queue: queue::VirtQueue) {
+    if slot >= MAX_PCI_BLK_DISKS {
+        return;
+    }
     // SAFETY: Called once during device init before any I/O; stores
-    // the configured VirtQueue into the global static.
+    // the configured VirtQueue into the slot's array cell.
     unsafe {
-        // Store reference instead of moving queue
-        VIRTIO_PCI_BLK_QUEUE = Some(queue);
+        PCI_BLK_QUEUES[slot] = Some(queue);
         // Initialize expected used.idx to 0 (new queue starts at 0)
-        VIRTIO_PCI_EXPECTED_USED_IDX.store(0, core::sync::atomic::Ordering::Release);
+        PCI_BLK_EXPECTED_USED_IDX[slot].store(0, core::sync::atomic::Ordering::Release);
     }
 }
 
-/// Get PCI VirtIO block device's VirtQueue (mutable reference)
-pub fn get_pci_device_queue_mut() -> Option<&'static mut queue::VirtQueue> {
-    // Check if device is ready
-    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
+/// Get a slot's VirtQueue (mutable reference).
+///
+/// Caller must hold that slot's PCI_BLK_LOCKS[slot] for mutual exclusion.
+pub fn get_pci_device_queue_mut_at(slot: usize) -> Option<&'static mut queue::VirtQueue> {
+    if slot >= MAX_PCI_BLK_DISKS {
         return None;
     }
-    // SAFETY: Ready flag guarantees VIRTIO_PCI_BLK_QUEUE was initialized.
-    // Caller must hold VIRTIO_PCI_BLK_LOCK for mutual exclusion.
-    unsafe {
-        VIRTIO_PCI_BLK_QUEUE.as_mut()
-    }
-}
-
-/// Get PCI VirtIO block device's VirtQueue (read-only reference)
-pub fn get_pci_device_queue() -> Option<&'static queue::VirtQueue> {
     // Check if device is ready
-    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::Acquire) {
+    if !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire) {
         return None;
     }
-    // SAFETY: Ready flag guarantees VIRTIO_PCI_BLK_QUEUE was initialized.
+    // SAFETY: The ready flag guarantees the slot's queue was initialized;
+    // exclusion comes from the slot's BLK lock (caller-held).
     unsafe {
-        VIRTIO_PCI_BLK_QUEUE.as_ref()
+        PCI_BLK_QUEUES[slot].as_mut()
     }
 }
 
-/// Get expected used.idx (for waiting I/O completion)
-pub fn get_expected_used_idx() -> u16 {
-    VIRTIO_PCI_EXPECTED_USED_IDX.load(core::sync::atomic::Ordering::Acquire)
+/// Get a slot's VirtQueue (read-only reference).
+pub fn get_pci_device_queue_at(slot: usize) -> Option<&'static queue::VirtQueue> {
+    if slot >= MAX_PCI_BLK_DISKS {
+        return None;
+    }
+    // Check if device is ready
+    if !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: The ready flag guarantees the slot's queue was initialized.
+    unsafe {
+        PCI_BLK_QUEUES[slot].as_ref()
+    }
 }
 
-/// Increment expected used.idx (called after submitting request)
-pub fn increment_expected_used_idx() {
-    VIRTIO_PCI_EXPECTED_USED_IDX.fetch_update(
+/// Get a slot's expected used.idx (for waiting I/O completion).
+pub fn get_expected_used_idx_at(slot: usize) -> u16 {
+    if slot >= MAX_PCI_BLK_DISKS {
+        return 0;
+    }
+    PCI_BLK_EXPECTED_USED_IDX[slot].load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Increment a slot's expected used.idx (called after submitting request,
+/// under that slot's BLK lock).
+pub fn increment_expected_used_idx_at(slot: usize) {
+    if slot >= MAX_PCI_BLK_DISKS {
+        return;
+    }
+    PCI_BLK_EXPECTED_USED_IDX[slot].fetch_update(
         core::sync::atomic::Ordering::Release,
         core::sync::atomic::Ordering::Relaxed,
         |v| Some(v.wrapping_add(1))
     ).ok();
 }
 
-/// Get reference to PCI VirtIO block wait queue (for interrupt handler)
-pub fn get_pci_blk_wait_queue() -> &'static crate::process::wait::WaitQueueHead {
-    &VIRTIO_PCI_BLK_WAIT_QUEUE
+/// Get a slot's sync-I/O wait queue (for interrupt handler / softirq wake).
+pub fn get_pci_blk_wait_queue(slot: usize) -> &'static crate::process::wait::WaitQueueHead {
+    &PCI_BLK_WAIT_QUEUES[slot.min(MAX_PCI_BLK_DISKS - 1)]
 }
 
 /// Get reference to MMIO VirtIO block wait queue (for interrupt handler)
@@ -2041,39 +2158,51 @@ pub fn get_mmio_blk_wait_queue() -> &'static crate::process::wait::WaitQueueHead
 /// Register PCI VirtIO device's GenDisk
 ///
 /// Creates a GenDisk wrapper so ext4 driver can access PCI VirtIO device through standard block device interface
-pub fn register_pci_gen_disk() {
+pub fn register_pci_gen_disk(slot: usize) {
     use alloc::boxed::Box;
 
-    // SAFETY: Called once during device initialization; VIRTIO_PCI_BLK is already initialized.
-    unsafe {
-
-        // Create GenDisk
-        let mut disk = Box::new(GenDisk::new(
-            "pci-virtblk",
-            8,  // major number (arbitrary, but unique)
-            1,  // minors
-            512, // block size
-            None as Option<&BlockDeviceOps>,
-        ));
-
-        // Read device capacity
-        if let Some(pci_dev) = VIRTIO_PCI_BLK.as_ref() {
-            let device_cfg_addr = pci_dev.common_cfg_bar + 0x2000;
-            let capacity_ptr = device_cfg_addr as *const u64;
-            let capacity_sectors = core::ptr::read_volatile(capacity_ptr);
-            disk.set_capacity(capacity_sectors as u64);
-        }
-
-        // Set request handler function
-        disk.set_request_fn(pci_virtio_handle_request);
-        // Async read path: without this, bio::bread_async failed with ENXIO
-        // on the root disk and ext4 read-ahead was silently disabled there
-        // (every page miss = one synchronous virtio round trip).
-        disk.set_async_read_fn(pci_async_read_fn);
-
-        // Register to block device manager
-        let _ = crate::drivers::blkdev::register_disk(disk);
+    if slot >= MAX_PCI_BLK_DISKS {
+        return;
     }
+
+    // One GenDisk per PCI function. Majors are allocated 8+slot: the block
+    // device manager keys disks by major alone, so every disk needs its
+    // own. The slot index rides in GenDisk.private_data — request_fn and
+    // async_read_fn route to the disk's own queue/lock/wait-queue/pending
+    // table through it. (sysfs/devfs numbers stay Linux-shaped: the
+    // virtio-blk major 254 with per-disk minors.)
+    let mut disk = Box::new(GenDisk::new(
+        "pci-virtblk",
+        8 + slot as u32, // major number (unique per disk in the manager)
+        1,               // minors
+        512,             // block size
+        None as Option<&BlockDeviceOps>,
+    ));
+    disk.set_private_data(slot as *mut u8);
+
+    // Read device capacity from this slot's function.
+    if let Some(pci_dev) = get_pci_device_at(slot) {
+        let device_cfg_addr = if pci_dev.device_cfg_bar != 0 {
+            pci_dev.device_cfg_bar
+        } else {
+            pci_dev.common_cfg_bar + 0x2000
+        };
+        let capacity_ptr = device_cfg_addr as *const u64;
+        // SAFETY: the device cfg region is valid MMIO for this function.
+        let capacity_sectors = unsafe { core::ptr::read_volatile(capacity_ptr) };
+        disk.set_capacity(capacity_sectors as u64);
+    }
+
+    // Set request handler function
+    disk.set_request_fn(pci_virtio_handle_request);
+    // Async read path: without this, bio::bread_async failed with ENXIO
+    // on the root disk and ext4 read-ahead was silently disabled there
+    // (every page miss = one synchronous virtio round trip).
+    disk.set_async_read_fn(pci_async_read_fn);
+
+    // Register to block device manager
+    let _ = crate::drivers::blkdev::register_disk(disk);
+    pci_blk_slot_online(slot);
 }
 
 /// PCI VirtIO block device request handler
@@ -2084,8 +2213,11 @@ pub fn register_pci_gen_disk() {
 unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
     use crate::drivers::blkdev::ReqCmd;
 
+    // Route to the OWNING disk: GenDisk.private_data carries the slot.
+    let slot = (*req.device).private_data.map(|p| p as usize).unwrap_or(0);
+
     // Check if device is ready (use SeqCst for strongest memory visibility)
-    if !VIRTIO_PCI_READY.load(core::sync::atomic::Ordering::SeqCst) {
+    if slot >= MAX_PCI_BLK_DISKS || !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::SeqCst) {
         crate::pr_err!("virtio: PCI device not ready");
         req.error.store(-6, core::sync::atomic::Ordering::Release);
         if let Some(end_io) = req.end_io {
@@ -2095,7 +2227,7 @@ unsafe extern "C" fn pci_virtio_handle_request(req: &mut Request) {
     }
 
     // Get PCI device
-    let pci_dev = match VIRTIO_PCI_BLK.as_ref() {
+    let pci_dev = match get_pci_device_at(slot) {
         Some(dev) => dev,
         None => {
             crate::pr_err!("virtio: No PCI device for request");
@@ -2178,26 +2310,42 @@ fn pci_virtio_write_block(
 /// buffer cache has been drained. Returns Ok(()) when no PCI blk device
 /// is registered (nothing to flush) so callers can invoke it blindly.
 pub fn flush_pci_blk() -> Result<(), i32> {
-    let dev = get_pci_device();
-    match dev {
-        Some(pci_dev) => {
+    // Flush EVERY registered disk: callers (ext4 sync, fsync paths) want
+    // persistence guarantees and a disk name is not threaded through the
+    // generic paths. Sequential per-disk flushes — never nested locks.
+    for slot in 0..MAX_PCI_BLK_DISKS {
+        if let Some(pci_dev) = get_pci_device_at(slot) {
             use virtio_pci::flush_block_using_configured_queue;
-            match flush_block_using_configured_queue(&pci_dev) {
-                Ok(_) => Ok(()),
-                Err(_) => Err(-5),  // EIO
+            if flush_block_using_configured_queue(&pci_dev).is_err() {
+                return Err(-5); // EIO
             }
         }
-        None => Ok(()),
     }
+    Ok(())
 }
 
-/// Get PCI VirtIO GenDisk
-///
-/// Get PCI VirtIO device's GenDisk from block device manager
+/// Get the BOOT PCI VirtIO GenDisk (slot 0, major 8).
 pub fn get_pci_gen_disk() -> Option<&'static GenDisk> {
-    // PCI VirtIO device uses major number 8
+    get_pci_gen_disk_at(0)
+}
+
+/// Get the PCI VirtIO GenDisk in `slot` (major 8 + slot).
+pub fn get_pci_gen_disk_at(slot: usize) -> Option<&'static GenDisk> {
+    if slot >= MAX_PCI_BLK_DISKS || !pci_blk_slot_ready(slot) {
+        return None;
+    }
     // SAFETY: get_disk returns a valid raw pointer to a registered GenDisk.
-    crate::drivers::blkdev::get_disk(8).map(|ptr| unsafe { &*ptr })
+    crate::drivers::blkdev::get_disk(8 + slot as u32).map(|ptr| unsafe { &*ptr })
+}
+
+/// Resolve a vdX disk NAME to its GenDisk ("vdb" -> slot 1). Returns None
+/// for non-vdX names or slots with no registered disk.
+pub fn get_pci_gen_disk_by_name(name: &str) -> Option<&'static GenDisk> {
+    let b = name.as_bytes();
+    if b.len() != 3 || b[0] != b'v' || b[1] != b'd' || !b[2].is_ascii_lowercase() {
+        return None;
+    }
+    get_pci_gen_disk_at((b[2] - b'a') as usize)
 }
 
 /// PCI VirtIO-Blk interrupt handler (Modern VirtIO 1.0+)
@@ -2212,10 +2360,17 @@ pub fn get_pci_gen_disk() -> Option<&'static GenDisk> {
 /// each wake holds the wait-queue lock across wake_up_process (→ GRQ) for
 /// EVERY waiter, a long IRQ-off window that fed the BLK↔waitqueue lock
 /// convoy (VIRTIO-WQ-1) and stopped timer IRQs system-wide.
-pub fn interrupt_handler_pci(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
-    // SAFETY: VIRTIO_PCI_BLK is initialized before IRQ registration.
+pub fn interrupt_handler_pci(_irq: u32, dev_id: usize) -> crate::interrupt::IrqReturn {
+    // dev_id is the disk SLOT (registered with IRQF_SHARED so several
+    // virtio-blk functions can share a swizzled INTx line; the framework
+    // demuxes per dev_id and each instance checks its own ISR register).
+    let slot = dev_id;
+    if slot >= MAX_PCI_BLK_DISKS {
+        return crate::interrupt::IrqReturn::None;
+    }
+    // SAFETY: the slot's device is initialized before its IRQ registration.
     unsafe {
-        if let Some(pci_device) = VIRTIO_PCI_BLK.as_ref() {
+        if let Some(pci_device) = get_pci_device_at(slot) {
             // Read ISR status FIRST: per the virtio 1.1 spec the read drops
             // the device's interrupt line (device-side EOI for level-
             // triggered INTx). Skipping it caused immediate re-entry
@@ -2377,8 +2532,10 @@ pub fn block_bh_handler(_vec: usize) {
         // and cannot nest the wait-queue lock inside a virtio lock.
         // wake_up_all on an empty queue is a no-op.
         #[cfg(debug_assertions)]
-        crate::drivers::virtio::assert_no_virtio_lock("VIRTIO_PCI_BLK_WAIT_QUEUE wake (BH)");
-        VIRTIO_PCI_BLK_WAIT_QUEUE.wake_up_all();
+        crate::drivers::virtio::assert_no_virtio_lock("PCI_BLK_WAIT_QUEUES wake (BH)");
+        for disk in 0..MAX_PCI_BLK_DISKS {
+            PCI_BLK_WAIT_QUEUES[disk].wake_up_all();
+        }
         VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
     }
 }

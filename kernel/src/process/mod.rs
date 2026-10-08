@@ -26,6 +26,60 @@ pub use task::Task;
 pub use fork::do_fork;
 pub use pid::{alloc_pid, free_pid, PID_INIT, PID_SWAPPER, PID_MAX_LIMIT, PID_MAX_DEFAULT, RESERVED_PIDS};
 
+// ==================== Arch ThreadStruct bridges ====================
+// Small cfg helpers so generic process code never touches arch-specific
+// ThreadStruct field layouts directly.
+
+/// Zero the kernel-side callee-saved registers of a fresh task (the
+/// user-side copies live in its pt_regs).
+pub fn thread_clear_callee_saved(thread: &mut crate::arch::thread::ThreadStruct) {
+    #[cfg(feature = "riscv64")]
+    {
+        thread.s.fill(0);
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        thread.callee = Default::default();
+    }
+}
+
+/// Seed a fresh task's context-switch state: the first switch-in
+/// "returns" into `entry` with `sp` as the kernel stack pointer.
+pub fn thread_set_entry(
+    thread: &mut crate::arch::thread::ThreadStruct,
+    entry: u64,
+    sp: u64,
+) {
+    thread.sp = sp;
+    #[cfg(feature = "riscv64")]
+    {
+        thread.ra = entry;
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        thread.callee.ret_addr = entry;
+    }
+}
+
+/// Set the task's user TLS pointer (riscv64: tp register in pt_regs;
+/// x86_64: FS base restored on switch-in).
+pub fn set_user_tls(task: &mut Task, tls: u64) {
+    #[cfg(feature = "riscv64")]
+    {
+        // SAFETY: pt_regs() returns the task's outermost trap frame.
+        unsafe {
+            let regs = task.pt_regs();
+            if !regs.is_null() {
+                (*regs).tp = tls;
+            }
+        }
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        task.thread_mut().fs_base = tls;
+    }
+}
+
 /// Get current process ID
 pub fn current_pid() -> u32 {
     crate::sched::get_current_pid()

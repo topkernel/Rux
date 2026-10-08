@@ -201,6 +201,54 @@ pub fn do_mount(source: &str, target: &str, fs_type: &str, flags: u64) -> Result
 
     match fs_type {
         "ext4" => {
+            // SOURCE RESOLUTION (OH Phase 1b): the source names the disk —
+            // "/dev/vdb", "/dev/block/vdc" (ueventd's node dir), or bare
+            // "vdb" all resolve through the vdX letter. The named disk is
+            // mounted as a SEPARATE instance (the loop-device discipline)
+            // when a root ext4 is already live, so `mount /dev/block/vdb
+            // /usr` on an initrd root gives /usr the SECOND disk, not a
+            // second view of the first (the old code ignored the source
+            // and always mounted the boot disk — silently wrong for every
+            // multi-disk layout).
+            let disk_of_source = |src: &str| -> Option<*const crate::drivers::blkdev::GenDisk> {
+                let trimmed = src
+                    .trim_start_matches("/dev/block/")
+                    .trim_start_matches("/dev/")
+                    .trim_matches('/');
+                crate::drivers::virtio::get_pci_gen_disk_by_name(trimmed)
+                    .map(|d| d as *const _)
+            };
+
+            if let Some(disk) = disk_of_source(source) {
+                if !crate::fs::ext4::is_mounted() {
+                    // First ext4 becomes THE root instance (full mount
+                    // path, journal replay — the OH init mounting
+                    // /dev/block/vdb before any other ext4).
+                    crate::fs::ext4::mount_ext4(disk).map_err(|e| e as i32)?;
+                    crate::fs::vfs::vfs_mount(
+                        target,
+                        crate::fs::ext4::create_root_inode(),
+                        mnt_flags,
+                    );
+                } else {
+                    // Additional disks: separate instance (mount_loop_
+                    // instance discipline — no journal replay, like a
+                    // fresh scratch mount; the OH images are clean).
+                    let root = crate::fs::ext4::mount_loop_instance(disk)
+                        .map_err(|e| e as i32)?;
+                    crate::fs::vfs::vfs_mount(target, root, mnt_flags);
+                }
+                register_mount(
+                    source,
+                    target,
+                    fs_type,
+                    if mnt_flags.is_readonly() { "ro" } else { "rw" },
+                );
+                return Ok(());
+            }
+
+            // No source disk identity (anonymous "ext4" mount, LTP-style
+            // mount /dev/vda on the boot disk): the legacy boot-disk path.
             // R14-12 (F22): refuse to re-run mount_ext4 on a live
             // filesystem — a second `mount -t ext4` rebuilt the Ext4,
             // re-ran journal recovery on a live journal, swapped

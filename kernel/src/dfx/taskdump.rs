@@ -109,14 +109,14 @@ pub fn dump_syscall_ring_for(pid: u32) {    use crate::syscall::dispatch::{SYSCA
 /// DFX: read one user u32 through a task's page tables (diagnostic).
 #[cfg(feature = "dfx-futex-trace")]
 fn dfx_task_read_u32(t: &crate::process::Task, va: u64) -> Option<u32> {
-    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
-    use crate::arch::riscv64::mm::memory_layout::phys_to_virt;
+    use crate::arch::mm::mm_ops::PageTableWalker;
+    use crate::arch::mm::memory_layout::phys_to_virt;
     let as_arc = t.address_space_arc()?;
     let root = as_arc.root_ppn();
     // SAFETY: diagnostic walk + linear-map read of the task's own mm.
     unsafe {
         let (ppn, _) = PageTableWalker::walk(root, va)?;
-        let base = phys_to_virt(crate::arch::riscv64::mm::memory_layout::PhysAddr(
+        let base = phys_to_virt(crate::arch::mm::memory_layout::PhysAddr(
             (ppn << 12) as u64,
         ));
         Some(core::ptr::read_volatile(
@@ -144,8 +144,8 @@ fn dfx_track_word(t: &crate::process::Task, va: u64) {
 /// read through the task's own page tables (its mm is not active here).
 #[cfg(feature = "dfx-futex-trace")]
 fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
-    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
-    use crate::arch::riscv64::mm::memory_layout::phys_to_virt;
+    use crate::arch::mm::mm_ops::PageTableWalker;
+    use crate::arch::mm::memory_layout::phys_to_virt;
     taskdump_raw_line(b"FTX-USTACK sp=");
     taskdump_dec(usp);
     taskdump_raw_line(b"\n");
@@ -162,7 +162,7 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
     let read_u32 = |va: u64| -> Option<u32> {
         unsafe {
             let (ppn, _) = PageTableWalker::walk(root, va)?;
-            let base = phys_to_virt(crate::arch::riscv64::mm::memory_layout::PhysAddr(
+            let base = phys_to_virt(crate::arch::mm::memory_layout::PhysAddr(
                 (ppn << 12) as u64,
             ));
             Some(core::ptr::read_volatile(
@@ -173,7 +173,7 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
     let read_u64 = |va: u64| -> Option<u64> {
         unsafe {
             let (ppn, _) = PageTableWalker::walk(root, va)?;
-            let base = phys_to_virt(crate::arch::riscv64::mm::memory_layout::PhysAddr(
+            let base = phys_to_virt(crate::arch::mm::memory_layout::PhysAddr(
                 (ppn << 12) as u64,
             ));
             Some(core::ptr::read_volatile(
@@ -216,7 +216,7 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
                 continue;
             }
         };
-        let page_va = phys_to_virt(crate::arch::riscv64::mm::memory_layout::PhysAddr(
+        let page_va = phys_to_virt(crate::arch::mm::memory_layout::PhysAddr(
             (ppn << 12) as u64,
         ));
         let mut off = (addr & 0xfff) as usize;

@@ -121,6 +121,9 @@ impl SigFlags {
     pub const SA_RESTART: u64 = 0x10000000;    // Restart system call
     pub const SA_NODEFER: u64 = 0x40000000;    // Don't block self during handler
     pub const SA_RESETHAND: u64 = 0x80000000;  // Reset to default after handling
+    #[cfg_attr(not(feature = "x86_64"), allow(dead_code))] // riscv64 has no SA_RESTORER
+    pub const SA_RESTORER: u64 = 0x04000000;   // x86_64 ABI: sa_restorer is
+                                              // valid (unused on riscv64)
 
     pub fn new(flags: u64) -> Self {
         Self(flags)
@@ -162,6 +165,9 @@ pub struct SigAction {
     pub sa_flags: SigFlags,
     /// Signal mask
     pub sa_mask: u64,
+    /// Userspace restorer (x86_64 SA_RESTORER ABI; always 0 on riscv64,
+    /// where the kernel-owned SIGTRAMP page is the only return path)
+    pub sa_restorer: usize,
 }
 
 impl SigAction {
@@ -171,6 +177,7 @@ impl SigAction {
             sa_handler: SigAction::default_handler() as usize,
             sa_flags: SigFlags::new(0),
             sa_mask: 0,
+            sa_restorer: 0,
         }
     }
 
@@ -180,6 +187,7 @@ impl SigAction {
             sa_handler: SigAction::ignore_handler() as usize,
             sa_flags: SigFlags::new(0),
             sa_mask: 0,
+            sa_restorer: 0,
         }
     }
 
@@ -189,6 +197,7 @@ impl SigAction {
             sa_handler: handler as usize,
             sa_flags: flags,
             sa_mask: 0,
+            sa_restorer: 0,
         }
     }
 
@@ -663,8 +672,10 @@ pub mod si_code {
 /// RISC-V sigcontext structure
 ///
 /// Layout matches `struct sigcontext` from `arch/riscv/include/uapi/asm/sigcontext.h`.
+#[cfg(feature = "riscv64")]
 /// The sc_regs field maps to `struct user_regs_struct` (32 u64 values):
 ///   [0]=pc, [1]=ra, [2]=sp, [3]=gp, [4]=tp, [5]=t0, ..., [31]=t6
+#[cfg(feature = "riscv64")]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SigContext {
@@ -679,12 +690,14 @@ pub struct SigContext {
     pub sc_fcsr: u64,
 }
 
+#[cfg(feature = "riscv64")]
 impl Default for SigContext {
     fn default() -> Self {
         Self { sc_regs: [0u64; 32], sc_fpregs: [0u64; 32], sc_fcsr: 0 }
     }
 }
 
+#[cfg(feature = "riscv64")]
 impl SigContext {
     pub fn new() -> Self {
         Self::default()
@@ -695,6 +708,7 @@ impl SigContext {
 ///
 /// Layout matches `struct ucontext` from `arch/riscv/include/uapi/asm/ucontext.h`:
 ///   uc_flags, uc_link, uc_stack, uc_sigmask, __unused, uc_mcontext
+#[cfg(feature = "riscv64")]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct UContext {
@@ -719,6 +733,7 @@ pub struct UContext {
     __unused: [u8; 120],
 }
 
+#[cfg(feature = "riscv64")]
 impl UContext {
     /// Create new user context
     pub fn new() -> Self {
@@ -800,8 +815,9 @@ const SIGRETURN_TRAMPOLINE_RISCV: &[u8] = &[
     0x73, 0x00, 0x00, 0x00,  // ecall
 ];
 
-/// Signal frame - constructed on user stack
+/// Signal frame - constructed on user stack (riscv64 layout)
 ///
+#[cfg(feature = "riscv64")]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct SignalFrame {
@@ -815,7 +831,116 @@ pub struct SignalFrame {
     pub trampoline: [u8; 8],
 }
 
+#[cfg(feature = "riscv64")]
 impl SignalFrame {
+    /// Calculate total size of signal frame
+    pub const fn size() -> usize {
+        core::mem::size_of::<SignalFrame>()
+    }
+}
+
+// ============================================================================
+// x86_64 rt_sigframe (Linux x86_64 user ABI)
+// ============================================================================
+
+/// x86_64 sigcontext (`uc_mcontext`).
+///
+/// NOTE (bring-up layout): all fields are full u64s per the pinned x86_64
+/// port plan. The strict Linux ABI packs cs/gs/fs (+__pad0) into one 8-byte
+/// word (sizeof(sigcontext) = 256, glibc's CSGSFS greg); this layout is 8
+/// u64s longer (272). Register words r8..cr2 share their ABI offsets, so
+/// glibc's greg-indexed accesses are unaffected; the divergence only shows
+/// up if user code reads mcontext fields PAST fs directly, or dereferences
+/// fpstate_ptr (0 here — FP state is a bring-up stretch goal).
+#[cfg(feature = "x86_64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SigContext {
+    pub r8: u64, pub r9: u64, pub r10: u64, pub r11: u64,
+    pub r12: u64, pub r13: u64, pub r14: u64, pub r15: u64,
+    pub rdi: u64, pub rsi: u64, pub rbp: u64, pub rbx: u64,
+    pub rdx: u64, pub rax: u64, pub rcx: u64, pub rsp: u64,
+    pub rip: u64,
+    pub eflags: u64,
+    pub cs: u64, pub gs: u64, pub fs: u64,
+    pub err: u64, pub trapno: u64, pub oldmask: u64, pub cr2: u64,
+    /// Pointer to the fpstate area (0 = none; bring-up placeholder)
+    pub fpstate_ptr: u64,
+    pub reserved: [u64; 8],
+}
+
+#[cfg(feature = "x86_64")]
+impl SigContext {
+    fn zeroed() -> Self {
+        Self {
+            r8: 0, r9: 0, r10: 0, r11: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+            rdi: 0, rsi: 0, rbp: 0, rbx: 0, rdx: 0, rax: 0, rcx: 0, rsp: 0,
+            rip: 0, eflags: 0, cs: 0, gs: 0, fs: 0,
+            err: 0, trapno: 0, oldmask: 0, cr2: 0,
+            fpstate_ptr: 0,
+            reserved: [0; 8],
+        }
+    }
+}
+
+/// x86_64 stack_t: ss_sp, ss_flags(i32 + pad), ss_size = 24 bytes
+#[cfg(feature = "x86_64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct X86StackT {
+    pub ss_sp: u64,
+    pub ss_flags: i32,
+    pub _pad: i32,
+    pub ss_size: u64,
+}
+
+/// x86_64 ucontext_t: flags, link, stack(24), mcontext(272), sigmask(128)
+#[cfg(feature = "x86_64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct UContext {
+    pub uc_flags: u64,
+    pub uc_link: u64,
+    pub uc_stack: X86StackT,
+    pub uc_mcontext: SigContext,
+    /// sigset_t = 8 × u64 (kernel ABI; word 0 is the live mask)
+    pub uc_sigmask: [u64; 16],
+}
+
+#[cfg(feature = "x86_64")]
+impl UContext {
+    fn zeroed() -> Self {
+        Self {
+            uc_flags: 0,
+            uc_link: 0,
+            uc_stack: X86StackT { ss_sp: 0, ss_flags: 0, _pad: 0, ss_size: 0 },
+            uc_mcontext: SigContext::zeroed(),
+            uc_sigmask: [0; 16],
+        }
+    }
+}
+
+/// x86_64 rt_sigframe — built on the user stack:
+/// `pretcode, pad, ucontext, siginfo, retcode[]`
+#[cfg(feature = "x86_64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SignalFrame {
+    /// Handler `ret` pops this: userspace restorer (SA_RESTORER, the
+    /// glibc path) or the in-frame kernel trampoline below.
+    pub pretcode: u64,
+    pub _pad: u64,
+    pub uc: UContext,
+    pub info: SigInfo,
+    /// Classic trampoline: `mov rax, 15; syscall` (rt_sigreturn, NR 15)
+    pub retcode: [u8; 16],
+}
+
+#[cfg(feature = "x86_64")]
+impl SignalFrame {
+    /// mov rax, 15 (48 c7 c0 0f 00 00 00); syscall (0f 05)
+    const TRAMPOLINE: [u8; 9] = [0x48, 0xc7, 0xc0, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x05];
+
     /// Calculate total size of signal frame
     pub const fn size() -> usize {
         core::mem::size_of::<SignalFrame>()
@@ -848,7 +973,7 @@ pub mod consts {
 ///
 /// * `true` - If there are pending signals
 /// * `false` - If no pending signals
-pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
+pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
     use crate::sched;
     use crate::process::task::TaskState;
 
@@ -1039,25 +1164,53 @@ pub fn do_signal(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) -> bool {
 ///
 /// # Safety
 /// `regs` is the current task's live PtRegs (from the trap path).
-unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) {
-    use crate::arch::riscv64::pt_regs::Cause;
+unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
     const ERESTARTSYS: i64 = -512;
     const ERESTARTNOHAND: i64 = -514;
     let regs = &mut *regs;
 
-    // Only syscall frames (cause still EcallUser at trap exit) carry a
-    // restart sentinel in a0; interrupt/page-fault frames hold user data
-    // that may coincidentally equal -512.
-    if Cause::from_cause(regs.cause) != Cause::EcallUser {
-        return;
+    #[cfg(feature = "riscv64")]
+    {
+        use crate::arch::pt_regs::Cause;
+        // Only syscall frames (cause still EcallUser at trap exit) carry a
+        // restart sentinel in a0; interrupt/page-fault frames hold user data
+        // that may coincidentally equal -512.
+        if Cause::from_cause(regs.cause) != Cause::EcallUser {
+            return;
+        }
+        let a0 = regs.a0 as i64;
+        if a0 == ERESTARTSYS || a0 == ERESTARTNOHAND {
+            // ecall is a 4-byte instruction (there is no compressed encoding),
+            // and handle_syscall advanced epc by exactly 4 on this path.
+            if regs.epc >= 4 {
+                regs.epc -= 4;
+                regs.a0 = regs.orig_a0;
+            }
+        }
     }
-    let a0 = regs.a0 as i64;
-    if a0 == ERESTARTSYS || a0 == ERESTARTNOHAND {
-        // ecall is a 4-byte instruction (there is no compressed encoding),
-        // and handle_syscall advanced epc by exactly 4 on this path.
-        if regs.epc >= 4 {
-            regs.epc -= 4;
-            regs.a0 = regs.orig_a0;
+    #[cfg(feature = "x86_64")]
+    {
+        // x86_64 has no trap-cause field in PtRegs: verify the interrupted
+        // rip really sits right after a `syscall` (0f 05) instruction —
+        // only those frames can carry a restart sentinel in rax.
+        let mut insn = [0u8; 2];
+        // SAFETY: reads 2 user bytes through the exception-table path.
+        let bad = unsafe {
+            crate::arch::uaccess::copy_from_user(
+                insn.as_mut_ptr(),
+                (regs.rip - 2) as *const u8,
+                2,
+            )
+        };
+        if bad != 0 || insn != [0x0f, 0x05] {
+            return;
+        }
+        let rax = regs.rax as i64;
+        if rax == ERESTARTSYS || rax == ERESTARTNOHAND {
+            if regs.rip >= 2 {
+                regs.rip -= 2;
+                regs.rax = regs.orig_rax;
+            }
         }
     }
 }
@@ -1081,13 +1234,40 @@ unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::riscv64::pt_regs::P
 /// so the old stack-trampoline fallback returned into an NX stack page and
 /// every glibc signal handler died with SIGSEGV (dash exiting status=11
 /// the moment a child sent SIGCHLD was this bug).
+#[cfg(feature = "riscv64")]
 pub const SIGTRAMP_BASE: u64 = 0x3FBE_0000_00;
 
+/// Set up the arch-specific signal frame and redirect the trap frame into
+/// the handler.
 unsafe fn setup_frame(
     task: *mut crate::process::task::Task,
     sig: i32,
     action: &SigAction,
-    regs: *mut crate::arch::riscv64::pt_regs::PtRegs,
+    regs: *mut crate::arch::pt_regs::PtRegs,
+    queued_info: Option<SigInfo>,
+) -> bool {
+    #[cfg(feature = "riscv64")]
+    {
+        // SAFETY: forwarding the caller's validated pointers.
+        unsafe { setup_frame_riscv64(task, sig, action, regs, queued_info) }
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        // SAFETY: forwarding the caller's validated pointers.
+        unsafe { setup_frame_x86_64(task, sig, action, regs, queued_info) }
+    }
+}
+
+// ============================================================================
+// riscv64 frame construction
+// ============================================================================
+
+#[cfg(feature = "riscv64")]
+unsafe fn setup_frame_riscv64(
+    task: *mut crate::process::task::Task,
+    sig: i32,
+    action: &SigAction,
+    regs: *mut crate::arch::pt_regs::PtRegs,
     queued_info: Option<SigInfo>,
 ) -> bool {
     let regs = &mut *regs;
@@ -1233,7 +1413,7 @@ unsafe fn setup_frame(
 
     // Copy signal frame to user stack so the handler can access siginfo/ucontext
     let frame_size = core::mem::size_of::<SignalFrame>();
-    let uncopied = crate::arch::riscv64::uaccess::copy_to_user(
+    let uncopied = crate::arch::uaccess::copy_to_user(
         frame_addr as *mut u8,
         &frame as *const SignalFrame as *const u8,
         frame_size,
@@ -1294,7 +1474,29 @@ unsafe fn setup_frame(
 pub unsafe fn restore_sigcontext(
     task: *mut crate::process::task::Task,
     frame_addr: u64,
-    regs: *mut crate::arch::riscv64::pt_regs::PtRegs,
+    regs: *mut crate::arch::pt_regs::PtRegs,
+) -> bool {
+    #[cfg(feature = "riscv64")]
+    {
+        // SAFETY: forwarding the caller's validated pointers.
+        unsafe { restore_sigcontext_riscv64(task, frame_addr, regs) }
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        // SAFETY: forwarding the caller's validated pointers.
+        unsafe { restore_sigcontext_x86_64(task, frame_addr, regs) }
+    }
+}
+
+// ============================================================================
+// riscv64 frame restore
+// ============================================================================
+
+#[cfg(feature = "riscv64")]
+unsafe fn restore_sigcontext_riscv64(
+    task: *mut crate::process::task::Task,
+    frame_addr: u64,
+    regs: *mut crate::arch::pt_regs::PtRegs,
 ) -> bool {
     // Validate signal frame address
     if frame_addr == 0 {
@@ -1308,7 +1510,7 @@ pub unsafe fn restore_sigcontext(
     // backup only when the user copy is unreadable.
     let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
     let copied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(
+        crate::arch::uaccess::copy_from_user(
             &mut user_frame as *mut SignalFrame as *mut u8,
             frame_addr as *const u8,
             core::mem::size_of::<SignalFrame>(),
@@ -1397,9 +1599,248 @@ pub unsafe fn restore_sigcontext(
     true
 }
 
+// ============================================================================
+// x86_64 frame construction (Linux rt_sigframe ABI)
+// ============================================================================
+
+#[cfg(feature = "x86_64")]
+unsafe fn setup_frame_x86_64(
+    task: *mut crate::process::task::Task,
+    sig: i32,
+    action: &SigAction,
+    regs: *mut crate::arch::pt_regs::PtRegs,
+    queued_info: Option<SigInfo>,
+) -> bool {
+    let regs = &mut *regs;
+
+    // Check if need to use signal stack
+    let use_altstack = (action.sa_flags.bits() & SigFlags::SA_ONSTACK) != 0;
+
+    // Get user stack pointer
+    let user_sp = regs.user_stack_pointer();
+    const SIGNAL_FRAME_SIZE: u64 = SignalFrame::size() as u64;
+
+    // Decide which stack to use based on flags
+    let frame_addr = if use_altstack {
+        let sigstack = &(*task).sigstack;
+        if sigstack.is_disabled() || sigstack.ss_sp == 0 {
+            user_sp - SIGNAL_FRAME_SIZE
+        } else {
+            sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE
+        }
+    } else {
+        user_sp - SIGNAL_FRAME_SIZE
+    };
+
+    // SysV ABI as-if-called rule: at handler entry rsp must be ≡ 8
+    // (mod 16) — exactly as if the handler had been CALLed (the return
+    // address slot at rsp+0 makes up the other 8 bytes). Linux x86_64
+    // does this in align_sigframe (`sp -= 8; sp &= -16`). Entering with
+    // rsp ≡ 0 (mod 16) leaves every compiler-assumed 16-byte stack slot
+    // off by 8, and the handler's first aligned SSE access (`movaps
+    // %xmm0,0x30(%rsp)` after a 6-push + 0x158 prologue) raises #GP →
+    // SIGSEGV with si_code 0 — the x86 LTP X3 crash storm (91 riscv-PASS
+    // tests dying in alarm_handler/heartbeat_handler/test handlers).
+    // Round DOWN first, then subtract 8: the result is always ≡ 8
+    // (mod 16) and always ≤ (sp - 600) - 8, so the frame's tail can
+    // never cover the qword AT the interrupted user_sp. (Plain +8 after
+    // the mask — the obvious reading of "as-if-called" — lets frame_end
+    // reach user_sp+8 when (sp-600) ≡ 0 (mod 16); retcode[8..16] then
+    // clobbers the interrupted function's return-address slot with 5
+    // (the trampoline's `05` syscall byte), and its eventual `ret` jumps
+    // to rip=0x5 — the second half of the X3 storm: 31/35 residual
+    // crashes in the crash-262 rescan were exactly this signature.)
+    let frame_addr = (frame_addr & !0xF) - 8;
+
+    // SA_SIGINFO handlers decode the payload fields, so prefer the siginfo
+    // queued by the sender; fall back to a generic SI_KERNEL placeholder.
+    let mut frame = SignalFrame {
+        pretcode: 0,
+        _pad: 0,
+        uc: UContext::zeroed(),
+        info: queued_info
+            .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0)),
+        retcode: [0u8; 16],
+    };
+    frame.retcode[..SignalFrame::TRAMPOLINE.len()]
+        .copy_from_slice(&SignalFrame::TRAMPOLINE);
+
+    // Save the trap frame into uc_mcontext
+    {
+        let mc = &mut frame.uc.uc_mcontext;
+        let r: &crate::arch::pt_regs::PtRegs = regs;
+        mc.r8 = r.r8; mc.r9 = r.r9; mc.r10 = r.r10; mc.r11 = r.r11;
+        mc.r12 = r.r12; mc.r13 = r.r13; mc.r14 = r.r14; mc.r15 = r.r15;
+        mc.rdi = r.rdi; mc.rsi = r.rsi; mc.rbp = r.rbp; mc.rbx = r.rbx;
+        mc.rdx = r.rdx; mc.rax = r.rax; mc.rcx = r.rcx; mc.rsp = r.rsp;
+        mc.rip = r.rip;
+        mc.eflags = r.rflags;
+        mc.cs = r.cs;
+        mc.gs = 0;
+        mc.fs = 0;
+        // fpstate_ptr stays 0 (bring-up placeholder; see SigContext doc)
+    }
+
+    // Syscall restart handling — same contract as the riscv64 path, with
+    // the x86_64 encodings: `syscall` is 2 bytes, the return register is
+    // rax, and the pre-syscall value lives in orig_rax.
+    const ERESTARTSYS: i64 = -512;
+    const ERESTARTNOHAND: i64 = -514;
+    let rax_val = regs.rax as i64;
+    if rax_val == ERESTARTSYS || rax_val == ERESTARTNOHAND {
+        if action.sa_flags.bits() & SigFlags::SA_RESTART != 0 && rax_val == ERESTARTSYS {
+            frame.uc.uc_mcontext.rip = regs.rip - 2;
+            frame.uc.uc_mcontext.rax = regs.orig_rax;
+        } else {
+            frame.uc.uc_mcontext.rax = (-(crate::errno::constants::EINTR as i64)) as u64;
+        }
+    }
+
+    // Signal mask during handler execution (POSIX): old mask | sa_mask |
+    // the signal itself (unless SA_NODEFER); SIGKILL/SIGSTOP unblockable.
+    let mut new_sigmask = (*task).sigmask | action.sa_mask;
+    if (action.sa_flags.bits() & SigFlags::SA_NODEFER) == 0 {
+        new_sigmask |= 1u64 << ((sig as u32) - 1);
+    }
+    new_sigmask &= !((1u64 << 8) | (1u64 << 18));
+    // The frame's uc_sigmask is what rt_sigreturn reinstates — it must
+    // hold the PRE-handler mask (see the riscv64 twin's M-01/M-04 notes).
+    frame.uc.uc_sigmask[0] = (*task).sigmask;
+    (*task).sigmask = new_sigmask;
+
+    // Save signal stack info
+    frame.uc.uc_stack = X86StackT {
+        ss_sp: (*task).sigstack.ss_sp,
+        ss_flags: (*task).sigstack.ss_flags,
+        _pad: 0,
+        ss_size: (*task).sigstack.ss_size,
+    };
+
+    // Handler return path: glibc ALWAYS sets SA_RESTORER on x86_64 — use
+    // the userspace restorer when provided, else the in-frame trampoline.
+    frame.pretcode = if (action.sa_flags.bits() & SigFlags::SA_RESTORER) != 0
+        && action.sa_restorer != 0
+    {
+        action.sa_restorer as u64
+    } else {
+        frame_addr + core::mem::offset_of!(SignalFrame, retcode) as u64
+    };
+
+    // Save signal frame to task structure
+    (*task).sigframe_addr = frame_addr;
+    (*task).sigframe = Some(frame);
+
+    // Copy signal frame to user stack
+    let frame_size = core::mem::size_of::<SignalFrame>();
+    let uncopied = crate::arch::uaccess::copy_to_user(
+        frame_addr as *mut u8,
+        &frame as *const SignalFrame as *const u8,
+        frame_size,
+    );
+    if uncopied != 0 {
+        // X3 hunt: the silent SIGSEGV path — name the frame target so a
+        // copy failure here (altstack not mapped / bad ss_sp) is
+        // attributable from the console.
+        crate::pr_err!(
+            "sigframe: copy_to_user failed frame={:#x} sig={} pid={} altstack={}",
+            frame_addr,
+            sig,
+            (*task).pid(),
+            use_altstack
+        );
+        (*task).sigframe = None;
+        (*task).sigframe_addr = 0;
+        handle_default_signal(11);
+        return false;
+    }
+
+    // SysV handler arguments: rdi, rsi, rdx.
+    // SA_SIGINFO: handler(int sig, siginfo_t *info, void *uc)
+    // otherwise:   handler(int sig) — rsi/rdx zeroed.
+    if action.sa_flags.bits() & SigFlags::SA_SIGINFO != 0 {
+        regs.rdi = sig as u64;
+        regs.rsi = frame_addr + core::mem::offset_of!(SignalFrame, info) as u64;
+        regs.rdx = frame_addr + core::mem::offset_of!(SignalFrame, uc) as u64;
+    } else {
+        regs.rdi = sig as u64;
+        regs.rsi = 0;
+        regs.rdx = 0;
+    }
+
+    // Enter the handler on the frame
+    regs.rip = action.sa_handler as u64;
+    regs.rsp = frame_addr;
+
+    true
+}
+
+// ============================================================================
+// x86_64 frame restore (rt_sigreturn, NR 15)
+// ============================================================================
+
+#[cfg(feature = "x86_64")]
+unsafe fn restore_sigcontext_x86_64(
+    task: *mut crate::process::task::Task,
+    frame_addr: u64,
+    regs: *mut crate::arch::pt_regs::PtRegs,
+) -> bool {
+    if frame_addr == 0 {
+        return false;
+    }
+
+    // The user copy wins over the kernel backup (handler/swapcontext
+    // edits must be honored — M-04).
+    let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
+    let copied = unsafe {
+        crate::arch::uaccess::copy_from_user(
+            &mut user_frame as *mut SignalFrame as *mut u8,
+            frame_addr as *const u8,
+            core::mem::size_of::<SignalFrame>(),
+        )
+    };
+    let frame = if copied == 0 {
+        user_frame
+    } else {
+        match (*task).sigframe {
+            Some(f) => f,
+            None => return false,
+        }
+    };
+
+    let regs = &mut *regs;
+    let mc = &frame.uc.uc_mcontext;
+
+    regs.r15 = mc.r15; regs.r14 = mc.r14; regs.r13 = mc.r13; regs.r12 = mc.r12;
+    regs.rbp = mc.rbp; regs.rbx = mc.rbx;
+    regs.r11 = mc.r11; regs.r10 = mc.r10; regs.r9 = mc.r9; regs.r8 = mc.r8;
+    regs.rax = mc.rax; regs.rcx = mc.rcx; regs.rdx = mc.rdx;
+    regs.rsi = mc.rsi; regs.rdi = mc.rdi;
+    regs.rip = mc.rip;
+    regs.rsp = mc.rsp;
+
+    // rflags came from USER memory: keep only user-mode-writable arith
+    // flags and FORCE IF (kernel policy: return to user with interrupts
+    // enabled — the x86 twin of the riscv64 SPIE rule).
+    const RFLAGS_USER_MASK: u64 = 0xCD5; // CF PF AF ZF SF TF DF OF
+    regs.rflags = (mc.eflags & RFLAGS_USER_MASK) | (1 << 9); // | IF
+
+    // Privilege is kernel policy, never the frame's: user segments.
+    regs.mark_user_frame();
+
+    // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
+    (*task).sigmask = frame.uc.uc_sigmask[0] & !((1u64 << 8) | (1u64 << 18));
+
+    // Clear signal frame
+    (*task).sigframe = None;
+    (*task).sigframe_addr = 0;
+
+    true
+}
+
 /// Get signal frame offsets
 ///
 /// Returns offsets of fields in signal frame, used to locate data on user stack
+#[cfg(feature = "riscv64")]
 pub mod frame_offsets {
     /// SigInfo offset in SignalFrame
     pub const SIGINFO_OFFSET: usize = 32;  // reserved [4 * u64]
@@ -1751,7 +2192,7 @@ pub unsafe fn park_stopped_task(task: *mut crate::process::task::Task) {
 
     // Sleeping with SIE=0 on this hart would starve the timer; every
     // blocking syscall re-enables IRQs before schedule() (see do_wait).
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     loop {
         crate::sched::schedule();
         if (*task).state().contains(TaskState::STOPPED) {
@@ -1776,7 +2217,7 @@ pub unsafe fn park_stopped_task(task: *mut crate::process::task::Task) {
 /// * `regs` - PtRegs pointer, passed from trap.S
 ///
 #[no_mangle]
-pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::riscv64::pt_regs::PtRegs) {
+pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
     use crate::sched;
 
     // ^C interrupt path (review批次8): deliver any ISIG character the UART

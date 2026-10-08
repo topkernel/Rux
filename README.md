@@ -6,12 +6,12 @@
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-riscv64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
+[![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-4%2C115%20cases-brightgreen.svg)](#-test-status)
 [![Verification](https://img.shields.io/badge/verification-4%20tools-brightgreen.svg)](#-formal-verification)
 [![Code](https://img.shields.io/badge/code-165%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
-**Default Platform: RISC-V 64-bit (RV64GC)**
+**Platforms: RISC-V 64-bit (RV64GC, primary) · x86_64 (q35)**
 
 </div>
 
@@ -19,7 +19,7 @@
 
 ## 🖥️ Rux Runs Ubuntu
 
-**A complete Ubuntu 22.04 (riscv64) userland — glibc dynamic binaries, real shells, D-Bus, a graphical desktop session, Xorg rendering X client windows, and an interactive xterm — boots on the Rux kernel today.**
+**A complete Ubuntu 22.04 userland — glibc dynamic binaries, real shells, D-Bus, a graphical desktop session, Xorg rendering X client windows, and an interactive xterm — boots on the Rux kernel today, on both riscv64 and x86_64 (amd64).**
 
 | | |
 |---|---|
@@ -133,7 +133,7 @@ python3 test/ubuntu-gui/verify.py --runs 2 --smp 4
 | **Smoke Tests** | 15 tests (all passing) | [Testing Guide](docs/test/testing.md) |
 | **Linux LTP** | 1,838 official tests; 6 fix rounds (~90 files, ~4,000 lines) | [Testing Guide](docs/test/testing.md) |
 | **LTP Full Sweeps** | PASS 35 → 524 → 659 → 677 → 602 (r1–r5, 1,869 tests each); round-6 rescan in progress | [Roadmap](docs/progress/roadmap.md) |
-| **Platform Support** | RISC-V 64-bit, 4-CPU SMP | [Roadmap](docs/progress/roadmap.md) |
+| **Platform Support** | RISC-V 64-bit + x86_64 (q35), 4-CPU SMP | [Roadmap](docs/progress/roadmap.md) |
 | **Syscall Numbers** | 345 dispatched | [Roadmap](docs/progress/roadmap.md) |
 | **Ubuntu Userland** | Ubuntu 22.04 riscv64 boots: graphical session, Xorg + X client windows, interactive xterm, bash, D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
 | **Memory** | Swap active: 2,064 MiB anonymous working set paged through 256 MB swap, verified | [Roadmap](docs/progress/roadmap.md) |
@@ -172,8 +172,11 @@ cargo --version
 # QEMU system emulator
 qemu-system-riscv64 --version
 
-# RISC-V target
+# RISC-V target (primary)
 rustup target add riscv64gc-unknown-none-elf
+
+# x86_64 target (optional)
+rustup target add x86_64-unknown-none
 ```
 
 ### Build and Run
@@ -305,7 +308,7 @@ Rux/
 │   │   │   ├── jbd2/     # JBD2 journaling layer
 │   │   │   ├── devfs/    # devfs device filesystem
 │   │   │   └── procfs/   # procfs process filesystem
-│   │   ├── arch/         # RISC-V architecture (11,999 lines)
+│   │   ├── arch/         # Architectures: riscv64 + x86_64
 │   │   │   ├── mm/       # Arch-specific MM (pt, fixmap, ASID, page fault)
 │   │   │   ├── boot.S    # MMU trampoline, VMA/LMA linking
 │   │   │   ├── trap.S    # PtRegs save/restore, ret_from_fork

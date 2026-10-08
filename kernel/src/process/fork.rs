@@ -12,7 +12,7 @@
 
 use crate::process::task::{Task, TaskState, Pid};
 use crate::fs::FdTable;
-use crate::arch::riscv64::pt_regs::PtRegs;
+use crate::arch::pt_regs::PtRegs;
 
 // ============================================================================
 // Clone flags
@@ -113,10 +113,11 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         let regs = &mut *child_regs;
 
         // ===== Clear callee-saved registers =====
-        // CRITICAL: Clear callee-saved registers (s0-s11) for child task
+        // CRITICAL: Clear kernel-side callee-saved registers for the child
+        // (its user-side values live in the copied pt_regs)
         {
             let thread = task.thread_mut();
-            thread.s.fill(0);
+            crate::process::thread_clear_callee_saved(thread);
         }
 
         // ===== Inherit the parent's floating-point state (POSIX) =====
@@ -126,14 +127,22 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         if let Some(parent_task) = crate::sched::current() {
             // SAFETY: parent_task is the currently running task.
             unsafe {
-                (*parent_task).thread_mut().save_fpu();
-                let (pfpu, _) = {
-                    let pt = (*parent_task).thread();
-                    (pt.fpu, pt.fs)
-                };
-                let ct = task.thread_mut();
-                ct.fpu.copy_from_slice(&pfpu);
-                ct.fs = super::super::arch::riscv64::pt_regs::SR_FS_CLEAN as u32;
+                #[cfg(feature = "riscv64")]
+                {
+                    (*parent_task).thread_mut().save_fpu();
+                    let pfpu = (*parent_task).thread().fpu;
+                    let ct = task.thread_mut();
+                    ct.fpu.copy_from_slice(&pfpu);
+                    ct.mark_fpu_clean();
+                }
+                #[cfg(feature = "x86_64")]
+                {
+                    (*parent_task).thread_mut().fpu_save_for_switch();
+                    let pfpu = (*parent_task).thread().fpu;
+                    let ct = task.thread_mut();
+                    ct.fpu.bytes.copy_from_slice(&pfpu.bytes);
+                    ct.mark_fpu_clean();
+                }
             }
         }
 
@@ -147,22 +156,46 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         // DO NOT clear pt_regs.s0-s11 - child should inherit parent's values!
 
         // Child process return value is 0
-        regs.a0 = 0;
-        regs.orig_a0 = 0;
+        regs.set_return_value(0);
+        #[cfg(feature = "riscv64")]
+        {
+            regs.orig_a0 = 0;
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            regs.orig_rax = 0;
+        }
 
-        // Clear SPP bit to ensure child returns to user mode
-        // SPP = bit 8 in sstatus
-        const SR_SPP: u64 = 1 << 8;
-        regs.status &= !SR_SPP;
+        // Mark the frame user-mode so the child returns to user mode
+        regs.mark_user_frame();
 
         // Use new stack if specified (CLONE_VM | CLONE_SETTLS uses this)
         if args.stack != 0 {
-            regs.sp = args.stack;
+            regs.set_user_stack_pointer(args.stack);
+        }
+
+        // ===== Inherit FS/GS bases (x86_64 TLS) =====
+        // Linux copy_thread copies current->thread.{fsbase,gsbase} into
+        // the child: a plain fork() child (no CLONE_SETTLS) starts with
+        // the parent's TLS layout, and glibc touches TLS (errno et al.)
+        // on its very first instructions in the child — with the base
+        // left 0 the first access faults at ~(0 + slot offset).
+        #[cfg(feature = "x86_64")]
+        if let Some(parent_task) = crate::sched::current() {
+            // SAFETY: parent_task is the currently running task; we only
+            // read its thread state before the child ever runs.
+            unsafe {
+                let pfs = (*parent_task).thread().fs_base;
+                let pgs = (*parent_task).thread().gs_base;
+                let ct = task.thread_mut();
+                ct.fs_base = pfs;
+                ct.gs_base = pgs;
+            }
         }
 
         // Set TLS if requested
         if args.flags & CLONE_SETTLS != 0 {
-            regs.tp = args.tls;
+            crate::process::set_user_tls(task, args.tls);
         }
 
         // Set up thread struct for context switch
@@ -171,8 +204,8 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
         }
 
         let thread = task.thread_mut();
-        thread.ra = ret_from_fork as u64;  // Return address = ret_from_fork
-        thread.sp = child_regs as u64;     // Stack pointer = pt_regs address
+        // First switch-in "returns" into ret_from_fork on the pt_regs stack
+        crate::process::thread_set_entry(thread, ret_from_fork as u64, child_regs as u64);
 
         // Callee-saved registers (s0-s11) are cleared to 0 above.
         // This is correct because:
@@ -243,7 +276,7 @@ fn efault() -> i32 { crate::errno::Errno::BadAddress.as_neg_i32() }
 ///   EAGAIN when the PID space is exhausted, ENOMEM for allocation
 ///   failures, EFAULT when a CLONE_*SETTID pointer is unwritable.
 pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
-    use crate::arch::riscv64::trap::current_pt_regs;
+    use crate::arch::trap::current_pt_regs;
 
     // Validate clone flag constraints (matches Linux kernel checks):
     // CLONE_THREAD requires CLONE_SIGHAND (kernel/fork.c clone3_args_check)
@@ -446,7 +479,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // permanent futex_wait(2) wedge).
         if args.flags & CLONE_PARENT_SETTID != 0 && !args.parent_tid.is_null() {
             let tid_val = pid as i32;
-            if crate::arch::riscv64::uaccess::copy_to_user(
+            if crate::arch::uaccess::copy_to_user(
                 args.parent_tid as *mut u8,
                 &tid_val as *const i32 as *const u8,
                 core::mem::size_of::<i32>(),
@@ -460,7 +493,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             if args.flags & CLONE_VM != 0 {
                 // Shared address space: the child's memory IS this memory.
                 let tid_val = pid as i32;
-                if crate::arch::riscv64::uaccess::copy_to_user(
+                if crate::arch::uaccess::copy_to_user(
                     args.child_tid as *mut u8,
                     &tid_val as *const i32 as *const u8,
                     core::mem::size_of::<i32>(),
@@ -492,10 +525,10 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             tid: i32,
             child_task: *mut Task,
         ) -> bool {
-            use crate::arch::riscv64::mm::memory_layout::{phys_to_virt, PhysAddr, PAGE_SIZE};
-            use crate::arch::riscv64::mm::mmu_init::get_page_table_virt;
-            use crate::arch::riscv64::mm::pagetable::PageTableEntry;
-            use crate::arch::riscv64::mm::cow_flags;
+            use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr, PAGE_SIZE};
+            use crate::arch::mm::mmu_init::get_page_table_virt;
+            use crate::arch::mm::pagetable::PageTableEntry;
+            use crate::arch::mm::cow_flags;
             use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
 
             let va = child_tid as u64;
@@ -527,7 +560,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             {
                 let old_ppn = pte0.ppn();
                 let old_page = pfn_to_page_mut(old_ppn as usize);
-                let new_phys = match crate::arch::riscv64::mm::mm_ops::alloc_user_phys_page() {
+                let new_phys = match crate::arch::mm::mm_ops::alloc_user_phys_page() {
                     Some(p) => p,
                     None => return false,
                 };
@@ -590,7 +623,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             );
             // The child has never run, so no TLB can hold a stale entry;
             // fence for ordering only.
-            core::arch::asm!("fence rw, rw");
+            crate::arch::cpu::dsb();
             true
         }
 
@@ -645,8 +678,8 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                             let p_root = parent_as.root_ppn();
                             let c_root = child_arc.root_ppn();                            for va in [0x1c8000u64, 0x1c9000, 0x100000] {
                                 unsafe {
-                                    let p = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(p_root, va);
-                                    let c = crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(c_root, va);
+                                    let p = crate::arch::mm::mm_ops::PageTableWalker::walk(p_root, va);
+                                    let c = crate::arch::mm::mm_ops::PageTableWalker::walk(c_root, va);
                                     taskdump_raw_line(b"FTX-COWCHK parent=");
                                     taskdump_dec((*current_ptr).pid() as u64);
                                     taskdump_raw_line(b" child=");
@@ -690,7 +723,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                             // any free of this root from a context that is
                             // NOT the owner while the owner is still alive —
                             // the early-teardown seed.
-                            crate::arch::riscv64::mm::mmu_init::register_fork_root(
+                            crate::arch::mm::mmu_init::register_fork_root(
                                 c_root as u64,
                                 pid as u32,
                             );
@@ -805,6 +838,11 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // Copy credentials from parent
         *(*task_ptr).cred_mut() = (*current_ptr).cred().clone();
+
+        // OpenHarmony access-token inheritance (upstream accesstokenid
+        // patch: child inherits the normal token, ftoken is cleared).
+        (*task_ptr).set_access_token((*current_ptr).access_token());
+        (*task_ptr).set_access_ftoken(0);
 
         // === U1c namespaces: default share the parent's namespace objects
         // (Arc clone); CLONE_NEW* bits give the child fresh ones. Fails the

@@ -26,14 +26,7 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Get nanosecond timestamp from RISC-V `rdtime`.
 fn now_ns() -> u64 {
-    let time: u64;
-    unsafe {
-        core::arch::asm!(
-            "rdtime {}",
-            out(reg) time,
-            options(nomem, nostack)
-        );
-    }
+    let time: u64 = crate::arch::cpu::read_time();
     // timebase ticks → ns (×100 for the 10 MHz CLINT; the old ×10
     // multiplier read every window 10x too small — review批次8).
     time.saturating_mul(1_000_000_000) / crate::config::TIMER_CLOCK_FREQ_HZ as u64
@@ -113,7 +106,7 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 crate::timer::del_timer(timer_id);
             } else {
                 // Enable interrupts so the tick can reach us, then sleep.
-                crate::arch::riscv64::cpu::restore_irq(true);
+                crate::arch::cpu::restore_irq(true);
                 crate::sched::schedule();
                 // Spurious wake before the deadline: drop the timer and
                 // loop (re-armed next iteration).

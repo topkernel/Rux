@@ -271,7 +271,7 @@ fn read_target_user_mm(
     start: usize,
     len: usize,
 ) -> Vec<u8> {
-    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr};
+    use crate::arch::mm::{phys_to_virt, PhysAddr};
 
     let root_ppn = addr_space.root_ppn();
     if root_ppn == 0 || len == 0 {
@@ -563,7 +563,7 @@ pub fn generate_smaps(pid: u64) -> Vec<u8> {
             while p < end {
                 // SAFETY: read-only walk of this task's own page tables.
                 if unsafe {
-                    crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root, p as u64)
+                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, p as u64)
                 }
                 .is_some()
                 {

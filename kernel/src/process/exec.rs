@@ -49,8 +49,8 @@ pub static STACKZERO_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomi
 /// [vaddr, vaddr+src.len()) is fully mapped and exclusively owned by this
 /// in-construction address space.
 unsafe fn copy_user_image(root_ppn: u64, vaddr: u64, src: &[u8]) -> bool {
-    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
-    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
+    use crate::arch::mm::mm_ops::PageTableWalker;
+    use crate::arch::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
 
     let mut done = 0usize;
     while done < src.len() {
@@ -81,8 +81,8 @@ unsafe fn copy_user_image(root_ppn: u64, vaddr: u64, src: &[u8]) -> bool {
 /// `root_ppn` must be a valid user page-table root whose range
 /// [vaddr, vaddr+len) is fully mapped and exclusively owned.
 unsafe fn zero_user_range(root_ppn: u64, vaddr: u64, len: usize) {
-    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
-    use crate::arch::riscv64::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
+    use crate::arch::mm::mm_ops::PageTableWalker;
+    use crate::arch::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
 
     let mut done = 0usize;
     while done < len {
@@ -123,10 +123,11 @@ pub(crate) fn do_execve_elf(
     interp_data: Option<&[u8]>,
     secure_exec: bool,
 ) -> Result<(), i32> {
-    use crate::arch::riscv64::mm::{
-        alloc_and_map_to_user_table, create_user_address_space,
+    use crate::arch::mm::{
+        create_user_address_space,
         PAGE_SIZE, PageTableEntry, phys_to_virt, PhysAddr,
     };
+    use crate::mm::alloc_and_map_user_table as alloc_and_map_to_user_table;
 
     // Capture the trap frame ONCE, before any blocking I/O below — but
     // derive it from THE TASK, never from the per-CPU current_pt_regs()
@@ -269,7 +270,7 @@ pub(crate) fn do_execve_elf(
         fn drop(&mut self) {
             // SAFETY: user_ppn was allocated by create_user_address_space;
             // on error path, free all page tables to avoid physical page leaks.
-            unsafe { crate::arch::riscv64::mm::mmu_init::free_user_page_tables(self.0); }
+            unsafe { crate::arch::mm::mmu_init::free_user_page_tables(self.0); }
         }
     }
     let _guard = UserAddrSpaceGuard(user_ppn);
@@ -290,7 +291,7 @@ pub(crate) fn do_execve_elf(
 
     // Initial stack at the top of user space (one guard page below
     // USER_END). Mapped RW here; the VMA below marks it GROWSDOWN.
-    let user_end = crate::arch::riscv64::mm::user_addr::USER_END as u64;
+    let user_end = crate::arch::mm::user_addr::USER_END as u64;
     let stack_top = user_end - PAGE_SIZE as u64;
     let stack_bottom = stack_top - initial_stack_size;
     let stack_phys_base = unsafe {
@@ -322,6 +323,8 @@ pub(crate) fn do_execve_elf(
     // without sa_restorer and returns through this fixed page (the Linux
     // kernel uses the vDSO __vdso_rt_sigreturn stub for the same purpose;
     // Rux's vDSO is disabled). Contents: li a7,139 (rt_sigreturn); ecall.
+    // x86_64 needs no trampoline page: glibc always passes SA_RESTORER.
+    #[cfg(feature = "riscv64")]
     {
         // SAFETY: user_ppn is a fresh user page-table root; RX U flags are
         // valid PTE bits. The returned frame is freshly allocated and
@@ -411,39 +414,91 @@ pub(crate) fn do_execve_elf(
             // Walk page table for each page in the segment and update PTE flags.
             // SAFETY: We are walking the freshly created user page tables (user_ppn)
             // and modifying PTE permission bits only — PPN (physical page number) is preserved.
-            let mut vaddr = seg_start;
-            while vaddr < seg_end {
-                let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
-                let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
-                let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
-
-                // SAFETY: user_ppn is a valid page table root allocated above.
-                unsafe {
-                    let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                        user_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
-                    );
-                    let pte2 = (*root_table).get(vpn2);
-                    if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                    let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                        pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
-                    );
-                    let pte1 = (*table1).get(vpn1);
-                    if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                    let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                        pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
-                    );
-                    let old_pte = (*table0).get(vpn0);
-                    if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                    // Preserve PPN, replace permission bits
-                    let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
-                    (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                #[cfg(feature = "riscv64")]
+                {
+                let mut vaddr = seg_start;
+                while vaddr < seg_end {
+                    let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+                    let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+                    let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+    
+                    // SAFETY: user_ppn is a valid page table root allocated above.
+                    unsafe {
+                        let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                            user_ppn << crate::arch::mm::PAGE_SHIFT,
+                        );
+                        let pte2 = (*root_table).get(vpn2);
+                        if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                        let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                            pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                        );
+                        let pte1 = (*table1).get(vpn1);
+                        if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                        let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
+                            pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
+                        );
+                        let old_pte = (*table0).get(vpn0);
+                        if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                        // Preserve PPN, replace permission bits
+                        let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
+                        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                    }
+    
+                    vaddr += PAGE_SIZE as u64;
+                }
                 }
 
-                vaddr += PAGE_SIZE as u64;
-            }
+                #[cfg(feature = "x86_64")]
+                {
+                    let mut vaddr = seg_start;
+                    while vaddr < seg_end {
+                        // 4-level x86_64 walk (PML4/PDPT/PD/PT)
+                        let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+                        let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+                        let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+                        let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+
+                        // SAFETY: walking the freshly created user page tables
+                        // (user_ppn); permission-bit updates only, PPN preserved.
+                        unsafe {
+                            let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                                user_ppn << crate::arch::mm::PAGE_SHIFT,
+                            );
+                            let pte4 = (*root_table).get(i4);
+                            if !pte4.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+                            let table3 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                pte4.ppn() << crate::arch::mm::PAGE_SHIFT,
+                            );
+                            let pte3 = (*table3).get(i3);
+                            if !pte3.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+                            let table2 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                pte3.ppn() << crate::arch::mm::PAGE_SHIFT,
+                            );
+                            let pte2 = (*table2).get(i2);
+                            if !pte2.is_valid() || pte2.is_leaf() { vaddr += PAGE_SIZE as u64; continue; }
+                            let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                            );
+                            let old_pte = (*table1).get(i1);
+                            if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+
+                            // x86 permission bits: clear W|U|NX, then set from the
+                            // semantic aliases (V=P, W=RW, U=US; R/X are no-ops —
+                            // non-exec is expressed via NX).
+                            let clear = PageTableEntry::W | PageTableEntry::U | PageTableEntry::NX;
+                            let mut new_bits = (old_pte.bits() & !clear) | seg_flags;
+                            if !phdr.is_executable() {
+                                new_bits |= PageTableEntry::NX;
+                            }
+                            (*table1).set(i1, PageTableEntry::from_bits(new_bits));
+                        }
+                        vaddr += PAGE_SIZE as u64;
+                    }
+                }
+
         }
     }
 
@@ -452,6 +507,9 @@ pub(crate) fn do_execve_elf(
     // virt_to_phys warnings on every exec while AT_SYSINFO_EHDR stays
     // commented out — skipped until the vDSO pages come from linear-mapped
     // memory.
+    // (riscv64-only: the block encodes the riscv map_user_region ABI;
+    // x86_64 has no vDSO mapping — AT_SYSINFO_EHDR stays absent.)
+    #[cfg(feature = "riscv64")]
     #[allow(unused_variables)]
     if false {
     // P2 vDSO: map the shared time-data page (RW) and the vDSO ELF page
@@ -466,7 +524,7 @@ pub(crate) fn do_execve_elf(
         // physical frames are the aligned 4 KiB vDSO statics; flags are
         // valid user PTE bits.
         unsafe {
-            crate::arch::riscv64::mm::mm_ops::map_user_region(
+            crate::arch::mm::mm_ops::map_user_region(
                 user_ppn,
                 crate::mm::vdso::VDSO_BASE,
                 data_paddr,
@@ -474,7 +532,7 @@ pub(crate) fn do_execve_elf(
                 PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
                     | PageTableEntry::W | PageTableEntry::A | PageTableEntry::D,
             );
-            crate::arch::riscv64::mm::mm_ops::map_user_region(
+            crate::arch::mm::mm_ops::map_user_region(
                 user_ppn,
                 crate::mm::vdso::VDSO_BASE + 4096,
                 code_paddr,
@@ -532,7 +590,7 @@ pub(crate) fn do_execve_elf(
         // linear-map view. A mismatch means ld.so executes different bytes
         // than we verified.
         {
-            use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+            use crate::arch::mm::mm_ops::PageTableWalker;
             let entry_va = interp_base + entry_offset;
             let lin = unsafe {
                 core::ptr::read_volatile((interp_kva + entry_offset) as *const u64)
@@ -565,38 +623,90 @@ pub(crate) fn do_execve_elf(
                     if phdr.is_writable() { seg_flags |= PageTableEntry::W | PageTableEntry::D; }
                     if phdr.is_executable() { seg_flags |= PageTableEntry::X; }
 
-                    let mut vaddr = seg_start;
-                    while vaddr < seg_end {
-                        let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
-                        let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
-                        let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
-
-                        // SAFETY: walking the user page tables for interpreter PTE updates.
-                        unsafe {
-                            let root_table = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                                user_ppn << crate::arch::riscv64::mm::PAGE_SHIFT,
-                            );
-                            let pte2 = (*root_table).get(vpn2);
-                            if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                            let table1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                                pte2.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
-                            );
-                            let pte1 = (*table1).get(vpn1);
-                            if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                            let table0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
-                                pte1.ppn() << crate::arch::riscv64::mm::PAGE_SHIFT,
-                            );
-                            let old_pte = (*table0).get(vpn0);
-                            if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
-
-                            let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
-                            (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                    #[cfg(feature = "riscv64")]
+                    {
+                        let mut vaddr = seg_start;
+                        while vaddr < seg_end {
+                            let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+                            let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+                            let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+    
+                            // SAFETY: walking the user page tables for interpreter PTE updates.
+                            unsafe {
+                                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    user_ppn << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte2 = (*root_table).get(vpn2);
+                                if !pte2.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte1 = (*table1).get(vpn1);
+                                if !pte1.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                                let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let old_pte = (*table0).get(vpn0);
+                                if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                                let new_bits = (old_pte.bits() & !(0xFFu64)) | seg_flags;
+                                (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+                            }
+    
+                            vaddr += PAGE_SIZE as u64;
                         }
-
-                        vaddr += PAGE_SIZE as u64;
                     }
+
+                    #[cfg(feature = "x86_64")]
+                    {
+                        let mut vaddr = seg_start;
+                        while vaddr < seg_end {
+                            // 4-level x86_64 walk (PML4/PDPT/PD/PT)
+                            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+                            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+                            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+                            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+    
+                            // SAFETY: walking the freshly created user page tables
+                            // (user_ppn); permission-bit updates only, PPN preserved.
+                            unsafe {
+                                let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    user_ppn << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte4 = (*root_table).get(i4);
+                                if !pte4.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+                                let table3 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte4.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte3 = (*table3).get(i3);
+                                if !pte3.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+                                let table2 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte3.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let pte2 = (*table2).get(i2);
+                                if !pte2.is_valid() || pte2.is_leaf() { vaddr += PAGE_SIZE as u64; continue; }
+                                let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
+                                    pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
+                                );
+                                let old_pte = (*table1).get(i1);
+                                if !old_pte.is_valid() { vaddr += PAGE_SIZE as u64; continue; }
+    
+                                // x86 permission bits: clear W|U|NX, then set from the
+                                // semantic aliases (V=P, W=RW, U=US; R/X are no-ops —
+                                // non-exec is expressed via NX).
+                                let clear = PageTableEntry::W | PageTableEntry::U | PageTableEntry::NX;
+                                let mut new_bits = (old_pte.bits() & !clear) | seg_flags;
+                                if !phdr.is_executable() {
+                                    new_bits |= PageTableEntry::NX;
+                                }
+                                (*table1).set(i1, PageTableEntry::from_bits(new_bits));
+                            }
+                            vaddr += PAGE_SIZE as u64;
+                        }
+                    }
+    
                 }
             }
         }
@@ -665,6 +775,13 @@ pub(crate) fn do_execve_elf(
     let execfn_string_offset: usize = string_offset + (string_space + 7) / 8;
     let total_slots: usize = execfn_string_offset + (execfn_space + 7) / 8;
     let adjusted_stack_top = stack_top.saturating_sub((total_slots * 8) as u64);
+    // SysV x86-64 ABI (and Linux for every ABI it supports): the process
+    // entry rsp — the word holding argc — is 16-byte aligned. All slot
+    // math above is 8-byte granular, so without this the entry rsp can
+    // land ≡8 (mod 16) and ld.so's first aligned access (movaps on the
+    // entry frame chain) takes a #GP. riscv64 hardware tolerates
+    // misaligned accesses, which is why the twin never tripped.
+    let adjusted_stack_top = adjusted_stack_top & !0xFu64;
 
     let adjusted_phys_stack_top =
         stack_phys_base + (adjusted_stack_top - stack_bottom) as usize;
@@ -841,7 +958,7 @@ pub(crate) fn do_execve_elf(
 
         // 16 random bytes AT AT_RANDOM's address (time-seeded LCG; a real
         // entropy source is a separate work item).
-        let seed = crate::drivers::intc::clint::read_time();
+        let seed = crate::arch::cpu::read_time();
         let mut state = seed;
         state = state.wrapping_mul(1103515245).wrapping_add(12345);
         let rand0 = state;
@@ -854,7 +971,7 @@ pub(crate) fn do_execve_elf(
     // DIVERGENCE CHECK: read the just-written stack back through the USER
     // PTE path and compare with the phys-pointer view.
     let probe = |vaddr: u64, label: &str| unsafe {
-        use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+        use crate::arch::mm::mm_ops::PageTableWalker;
         let phys_view = core::ptr::read_volatile(
             (adjusted_stack_virt_addr + (vaddr - adjusted_stack_top)) as *const u64
         );
@@ -878,7 +995,6 @@ pub(crate) fn do_execve_elf(
     probe(adjusted_stack_top, "argc");
     probe(adjusted_stack_top + (random_offset * 8) as u64, "at_random");
     probe(adjusted_stack_top + (execfn_string_offset * 8) as u64, "at_execfn");
-
 
     // Create new address space structure
     // SAFETY: user_ppn is a freshly allocated page table root with no prior users.
@@ -1032,7 +1148,9 @@ pub(crate) fn do_execve_elf(
         // 10s soft-lockups, task-list damage, do_wait children-list panics).
         // The exit path (exit_mm) already switches satp before dropping;
         // exec must too.
-        crate::arch::riscv64::context::switch_mm(user_ppn, new_asid);
+        // SAFETY: user_ppn is the new image's page-table root with the
+        // kernel half mapped (create_user_address_space links it).
+        unsafe { crate::mm::switch_address_space(user_ppn, new_asid) };
 
         // Set new address space (this will drop old Arc if no other
         // references — with satp already on the new root, freeing the old
@@ -1054,7 +1172,7 @@ pub(crate) fn do_execve_elf(
         // had zero callers). Sets thread.fs=Off and the live sstatus.FS=Off
         // so the new image's first FP instruction goes through the lazy
         // fpu_init path with zeroed registers.
-        crate::arch::riscv64::process::flush_thread();
+        crate::arch::process::flush_thread();
 
         // R11-5: use the entry-captured frame (see fn head).
         if current_regs.is_null() {
@@ -1081,32 +1199,47 @@ pub(crate) fn do_execve_elf(
         // SAFETY: current_regs was obtained from current_pt_regs() and checked for null above.
         // We are modifying the trap frame to set up the new program's entry point and stack.
         unsafe {
-            (*current_regs).epc = actual_entry;         // Entry point (interpreter or program)
-            (*current_regs).sp = adjusted_stack_top;   // New user stack
-            (*current_regs).status = SR_SPIE;          // Clear SPP, set SPIE
-            (*current_regs).tp = 0;                   // Clear TLS pointer - musl libc will reinitialize
-            (*current_regs).a0 = argc;                 // argc for C runtime
+            // Entry-frame setup per arch. Both follow the ELF_PLAT_INIT
+            // discipline: a fresh image must not inherit the old image's
+            // register state — the old frame carried the CALLER's ra, gp,
+            // and temporaries; startup code that consumes an unsaved slot
+            // (rtld_fini in a5 to __libc_start_main, lazy prologues,
+            // assertion backtraces) jumps through them — observed as fetch
+            // faults at parent-image addresses right after a successful
+            // exec. Zero everything except the ABI-defined inputs.
+            #[cfg(feature = "riscv64")]
+            {
+                (*current_regs).epc = actual_entry;         // Entry point (interpreter or program)
+                (*current_regs).sp = adjusted_stack_top;   // New user stack
+                (*current_regs).status = SR_SPIE;          // Clear SPP, set SPIE
+                (*current_regs).tp = 0;                   // Clear TLS pointer - musl libc will reinitialize
+                (*current_regs).a0 = argc;                 // argc for C runtime
 
-            // ELF_PLAT_INIT discipline: a fresh image must not inherit the
-            // old image's register state. The old frame carried the CALLER's
-            // ra (e.g. 0x10706), gp, and temporaries; startup code that
-            // consumes an unsaved slot (rtld_fini passed in a5 to
-            // __libc_start_main, lazy prologues, assertion backtraces)
-            // jumps through them — observed as fetch faults at parent-image
-            // addresses right after a successful exec. Zero everything
-            // except the ABI-defined inputs: epc, sp, tp=0, a0=argc.
-            let r = &mut *current_regs;
-            r.ra = 0;
-            r.gp = 0;
-            r.t0 = 0; r.t1 = 0; r.t2 = 0; r.t3 = 0; r.t4 = 0; r.t5 = 0; r.t6 = 0;
-            r.s0 = 0; r.s1 = 0;
-            r.s2 = 0; r.s3 = 0; r.s4 = 0; r.s5 = 0;
-            r.s6 = 0; r.s7 = 0; r.s8 = 0; r.s9 = 0; r.s10 = 0; r.s11 = 0;
-            r.a1 = 0; r.a2 = 0; r.a3 = 0; r.a4 = 0;
-            r.a5 = 0; r.a6 = 0; r.a7 = 0;
+                let r = &mut *current_regs;
+                r.ra = 0;
+                r.gp = 0;
+                r.t0 = 0; r.t1 = 0; r.t2 = 0; r.t3 = 0; r.t4 = 0; r.t5 = 0; r.t6 = 0;
+                r.s0 = 0; r.s1 = 0;
+                r.s2 = 0; r.s3 = 0; r.s4 = 0; r.s5 = 0;
+                r.s6 = 0; r.s7 = 0; r.s8 = 0; r.s9 = 0; r.s10 = 0; r.s11 = 0;
+                r.a1 = 0; r.a2 = 0; r.a3 = 0; r.a4 = 0;
+                r.a5 = 0; r.a6 = 0; r.a7 = 0;
+            }
+            #[cfg(feature = "x86_64")]
+            {
+                let r = &mut *current_regs;
+                // Fresh zeroed frame: entry, user stack, user segments,
+                // rflags.IF, and argc in the System V first-argument slot.
+                *r = crate::arch::pt_regs::PtRegs::new();
+                r.rip = actual_entry;
+                r.rsp = adjusted_stack_top;
+                r.mark_user_frame();
+                r.rflags = 1 << 9; // IF
+                r.rdi = argc;
+            }
 
             {
-            use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+            use crate::arch::mm::mm_ops::PageTableWalker;
             if let Some((gp, _)) = unsafe { PageTableWalker::walk(user_ppn, 0x17208) } {
                 LAST_GOT_PPN.store(gp, core::sync::atomic::Ordering::Relaxed);
             }
@@ -1116,7 +1249,7 @@ pub(crate) fn do_execve_elf(
             // stale ksp (frame pushed off-slot), every later user trap
             // and the final sret must anchor to the exec-updated frame,
             // not to wherever the entry slot happened to land.
-            (*task_ptr).set_ti_kernel_sp(current_regs as u64 + core::mem::size_of::<crate::arch::riscv64::pt_regs::PtRegs>() as u64);
+            (*task_ptr).set_ti_kernel_sp(current_regs as u64 + core::mem::size_of::<crate::arch::pt_regs::PtRegs>() as u64);
 
             // Other registers remain 0
 

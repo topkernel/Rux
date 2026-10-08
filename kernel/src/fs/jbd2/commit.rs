@@ -36,6 +36,13 @@ pub fn jbd2_journal_commit_transaction(
     journal: &Arc<Journal>,
     commit_transaction: &Arc<Transaction>,
 ) -> Result<(), i32> {
+    // Durability point: pending ordered publications (directory entry
+    // blocks and their pre/post dependencies) must be persisted in queue
+    // order BEFORE this commit's write-through fast path syncs registered
+    // buffers — the fast path could otherwise persist an entry block
+    // ahead of the metadata that initializes the inode it names.
+    let _ = crate::fs::bio::flush_publications();
+
     let device = journal.j_bio_device;
     if device.is_null() {
         return Ok(());

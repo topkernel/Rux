@@ -17,8 +17,8 @@ use core::ptr;
 
 use super::PAGE_SIZE;
 use super::page_desc::Page;
-use crate::arch::riscv64::mm::{VMEMMAP_START, VMEMMAP_END};
-use crate::arch::riscv64::mm::{PageTableEntry, map_kernel_page, phys_to_virt, PhysAddr};
+use crate::arch::mm::{VMEMMAP_START, VMEMMAP_END};
+use crate::arch::mm::{PageTableEntry, map_kernel_page, phys_to_virt, PhysAddr};
 
 /// Page descriptor size (64 bytes for struct Page)
 pub const STRUCT_PAGE_SIZE: usize = core::mem::size_of::<Page>();
@@ -131,11 +131,14 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // Use memblock to find a contiguous region for vmemmap pages
     let vmemmap_size = vmemmap_pages * PAGE_SIZE;
 
-    // Calculate the actual physical memory end address
-    let phys_end = 0x80000000 + effective_nr_pages * PAGE_SIZE;
+    // Calculate the actual physical memory end address (arch-aware base:
+    // riscv64 RAM starts at 0x80000000, x86_64 at 0 — the old hardcoded
+    // base made the search range land outside RAM on x86 and init fail)
+    let phys_base = super::page_desc::PHYS_MEMORY_BASE;
+    let phys_end = phys_base + effective_nr_pages * PAGE_SIZE;
     let vmemmap_phys = super::memblock::memblock_find_in_range(
         vmemmap_size,
-        0x80000000,
+        phys_base,
         phys_end,
     );
 
@@ -175,11 +178,7 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     }
 
     // Final TLB flush after all mappings - MUST flush before accessing!
-    // SAFETY: sfence.vma is a valid RISC-V instruction; must be issued after
-    // new page table entries are written.
-    unsafe {
-        core::arch::asm!("sfence.vma zero, zero", options(nomem, nostack));
-    }
+    crate::arch::mm::flush_tlb_all();
 
     // Store statistics
     // SAFETY: VMEMMAP_INIT guard ensures single initialization; no concurrent

@@ -1325,6 +1325,77 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     }
 }
 
+/// Create a special node (device / FIFO / socket) on the filesystem that
+/// OWNS the parent directory — Linux do_mknodat + vfs_mknod parity (OH
+/// Phase 1b: OH's init mounts its own tmpfs over /dev and mknods
+/// /dev/{null,random,urandom,kmsg}; the node must land on that tmpfs, not
+/// in the devfs tree the string prefix alone would suggest).
+///
+/// `mode` carries the S_IFMT type bits plus permissions; `dev` is the
+/// USERSPACE dev_t exactly as the syscall received it (new_encode_dev
+/// layout — the filesystem stores it verbatim so stat() reports what
+/// userspace makedev(3) built).
+///
+/// Filesystems without an mknod inode op report EOPNOTSUPP so the caller
+/// can fall back to legacy paths (devfs's registry-internal mknod).
+/// umask is applied by the caller (sys_mknodat), matching
+/// do_mknodat's `mode &= ~current_umask()`.
+pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
+    check_not_readonly(pathname)?;
+
+    // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
+    let _mutation_guard = VFS_MUTATION_LOCK.guard();
+
+    // EEXIST before any mutation (do_mknodat resolves through
+    // user_path_create, which fails on an existing name).
+    match path_lookup(pathname, LOOKUP_NOFOLLOW) {
+        Ok(_) => return Err(errno::Errno::FileExists.as_neg_i32()),
+        Err(e) if e == -(errno::constants::ENOENT) => {}
+        Err(e) => return Err(e),
+    }
+
+    let (parent_vpath, name) = lookup_parent_dir(pathname)?;
+    let parent_inode = parent_vpath.inode.as_ref()
+        .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+
+    check_parent_write_permission(parent_inode)?;
+    check_parent_exec_permission(parent_inode)?;
+
+    let ops = parent_inode.ops.as_ref()
+        .ok_or(-(errno::constants::EOPNOTSUPP))?;
+
+    // SAFETY: ops.mknod is a VFS callback; parent_inode Arc is valid in
+    // scope.
+    unsafe {
+        match ops.mknod {
+            Some(mknod_fn) => {
+                let inode_mode =
+                    crate::fs::inode::InodeMode::new(mode & 0o170000 | (mode & 0o7777));
+                mknod_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode, dev)?;
+
+                // Invalidate any stale (negative) dentry, the same
+                // discipline as vfs_mkdir. The mknod callback returns no
+                // inode here, so the next lookup repopulates it lazily.
+                if let Some(ref parent_dentry) = parent_vpath.dentry {
+                    parent_dentry.remove_child(&name);
+                }
+
+                // inotify: IN_CREATE (named) on the parent.
+                crate::fs::inotify::notify(
+                    Some(parent_inode),
+                    None,
+                    ino::IN_CREATE,
+                    Some(name.as_bytes()),
+                    0,
+                );
+
+                Ok(())
+            }
+            None => Err(-(errno::constants::EOPNOTSUPP)),
+        }
+    }
+}
+
 /// Create symbolic link - unified implementation using inode_operations
 pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
     check_not_readonly(pathname)?;
@@ -2843,6 +2914,10 @@ pub mod fcntl {
     pub const F_SETPIPE_SZ: usize = 1031;
     pub const F_GETPIPE_SZ: usize = 1032;
 
+    /// memfd seals (memfd_create(2); asm-generic numbering).
+    pub const F_ADD_SEALS: usize = 1033;
+    pub const F_GET_SEALS: usize = 1034;
+
     /// FD_CLOEXEC flag value
     pub const FD_CLOEXEC: usize = 1;
 }
@@ -3050,12 +3125,12 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                if arg == 0 || !crate::arch::riscv64::uaccess::access_ok(arg, 32) {
+                if arg == 0 || !crate::arch::uaccess::access_ok(arg, 32) {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
                 let mut fl = [0u8; 32];
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_from_user(
+                    crate::arch::uaccess::copy_from_user(
                         fl.as_mut_ptr(),
                         arg as *const u8,
                         32,
@@ -3129,7 +3204,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     out
                 };
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         arg as *mut u8,
                         out.as_ptr(),
                         32,
@@ -3150,12 +3225,12 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                if arg == 0 || !crate::arch::riscv64::uaccess::access_ok(arg, 32) {
+                if arg == 0 || !crate::arch::uaccess::access_ok(arg, 32) {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
                 let mut fl = [0u8; 32];
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_from_user(
+                    crate::arch::uaccess::copy_from_user(
                         fl.as_mut_ptr(),
                         arg as *const u8,
                         32,
@@ -3288,13 +3363,13 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
                 if arg == 0
-                    || !crate::arch::riscv64::uaccess::access_ok(arg, 8)
+                    || !crate::arch::uaccess::access_ok(arg, 8)
                 {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
                 let mut buf = [0u8; 8];
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_from_user(
+                    crate::arch::uaccess::copy_from_user(
                         buf.as_mut_ptr(),
                         arg as *const u8,
                         8,
@@ -3342,7 +3417,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
                 if arg == 0
-                    || !crate::arch::riscv64::uaccess::access_ok(arg, 8)
+                    || !crate::arch::uaccess::access_ok(arg, 8)
                 {
                     return Err(errno::Errno::BadAddress.as_neg_i32());
                 }
@@ -3362,7 +3437,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 buf[0..4].copy_from_slice(&otype.to_le_bytes());
                 buf[4..8].copy_from_slice(&opid.to_le_bytes());
                 if unsafe {
-                    crate::arch::riscv64::uaccess::copy_to_user(
+                    crate::arch::uaccess::copy_to_user(
                         arg as *mut u8,
                         buf.as_ptr(),
                         8,
@@ -3409,6 +3484,31 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 match crate::fs::pipe::pipe_get_sz(&file) {
                     Some(sz) => Ok(sz),
                     None => Err(errno::Errno::InvalidArgument.as_neg_i32()),
+                }
+            }
+
+            // F_ADD_SEALS (1033) / F_GET_SEALS (1034): memfd seals
+            // (memfd_create(2)). Only memfd files support seals; anything
+            // else answers EINVAL (Linux memfd_add_seals/get_seals on a
+            // non-shmem file).
+            fcntl::F_ADD_SEALS => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                match crate::fs::memfd::add_seals(&file, arg as u32) {
+                    Ok(()) => Ok(0),
+                    Err(e) => Err(e),
+                }
+            }
+            fcntl::F_GET_SEALS => {
+                let file = match get_file_fd(fd) {
+                    Some(f) => f,
+                    None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+                };
+                match crate::fs::memfd::get_seals(&file) {
+                    Ok(seals) => Ok(seals as usize),
+                    Err(e) => Err(e),
                 }
             }
 

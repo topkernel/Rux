@@ -45,66 +45,109 @@ pub fn init_task_storage_addr() -> usize {
 /// 3. Set up standard file descriptors
 /// 4. Add init process to scheduler
 ///
+/// # Init selection (OH Phase 1 — mirrors Linux kernel_init())
+///
+/// Candidates are tried in order; the first one that loads and starts
+/// becomes PID 1:
+/// 1. `rdinit=` (initramfs init override, absolutized)
+/// 2. `/init` — only when an initrd was unpacked into the rootfs
+///    (Linux's `ramdisk_execute_command`)
+/// 3. `init=` (absolutized; OH passes `init=init` → `/init`)
+/// 4. `/sbin/init`, `/etc/init`, `/bin/init`, `/bin/sh`
+///
 /// # Note
 /// - Init process is the ancestor of all userspace processes
 /// - If init exits, kernel will panic
 pub fn init() {
-    // Get init program path from command line
-    let init_path = cmdline::get_init_program();
-
-    // Try loading init program from RootFS
-    let program_data = load_init_program(&init_path);
-
-    if let Some(data) = program_data {
-        // Create and start init process
-        if create_and_start_init_process(&data, &init_path).is_none() {
+    let rootfs_first = crate::initrd::loaded();
+    for init_path in init_candidates() {
+        println!("init: trying {}", init_path);
+        let program_data = load_init_program(&init_path, rootfs_first);
+        if let Some(data) = program_data {
+            if create_and_start_init_process(&data, &init_path, rootfs_first).is_some() {
+                return;
+            }
             println!("init: Failed to create init process for {}", init_path);
-            halt();
+        } else {
+            println!("init: {} not found on any filesystem", init_path);
         }
-    } else {
-        println!("init: Failed to load {} from filesystem", init_path);
-        halt();
     }
+    println!("init: no init program could be loaded — halting");
+    halt();
+}
+
+/// Build the init candidate list (see `init()` for the ordering contract).
+fn init_candidates() -> Vec<alloc::string::String> {
+    use alloc::string::String;
+    let mut candidates: Vec<String> = Vec::new();
+
+    let mut push = |p: String, v: &mut Vec<String>| {
+        if !v.contains(&p) {
+            v.push(p);
+        }
+    };
+
+    // 1. rdinit= (initramfs override).
+    if let Some(rd) = cmdline::get_rdinit_program() {
+        push(rd, &mut candidates);
+    }
+    // 2. /init — the initramfs init, only when an initrd was unpacked
+    //    (Linux keeps ramdisk_execute_command NULL without an initrd).
+    if crate::initrd::loaded() {
+        push(String::from("/init"), &mut candidates);
+    }
+    // 3. init= (bare names resolve against /, e.g. OH's init=init).
+    if let Some(init) = cmdline::get_param("init") {
+        push(cmdline::absolutize_init_path(&init), &mut candidates);
+    }
+    // 4. Linux's default fallback chain.
+    for def in ["/sbin/init", "/etc/init", "/bin/init", "/bin/sh"] {
+        push(String::from(def), &mut candidates);
+    }
+    candidates
 }
 
 /// Load init program data
 ///
 /// # Arguments
 /// - `path`: init program path
+/// - `rootfs_first`: try the ramfs rootfs before the ext4 disk (initrd
+///   boot: the unpacked rootfs IS the root; a stray ext4 disk must not
+///   shadow its init)
 ///
 /// # Returns
 /// - `Some(data)`: Program data
 /// - `None`: Load failed
 ///
 /// # Loading order
-/// 1. Try reading from PCI VirtIO block device's ext4 filesystem
-/// 2. Try reading from MMIO VirtIO block device's ext4 filesystem
-/// 3. Try reading from RootFS (memory filesystem)
-fn load_init_program(path: &str) -> Option<Vec<u8>> {
-    // 1. First try reading from PCI VirtIO block device's ext4 filesystem
-    if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
-        match crate::fs::ext4::read_file(disk as *const _, path) {
-            Some(data) => {
+/// rootfs_first: rootfs → PCI ext4 → MMIO ext4
+/// otherwise:    PCI ext4 → MMIO ext4 → rootfs (pre-OH behavior)
+fn load_init_program(path: &str, rootfs_first: bool) -> Option<Vec<u8>> {
+    let read_ext4 = |path: &str| -> Option<Vec<u8>> {
+        // 1. PCI VirtIO block device's ext4 filesystem
+        if let Some(disk) = crate::drivers::virtio::get_pci_gen_disk() {
+            if let Some(data) = crate::fs::ext4::read_file(disk as *const _, path) {
                 return Some(data);
             }
-            None => {}
         }
-    }
-
-    // 2. Try reading from MMIO VirtIO block device's ext4 filesystem
-    if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
-        let disk_ptr = &virtio_dev.disk as *const crate::drivers::blkdev::GenDisk;
-
-        match crate::fs::ext4::read_file(disk_ptr, path) {
-            Some(data) => {
+        // 2. MMIO VirtIO block device's ext4 filesystem
+        if let Some(virtio_dev) = crate::drivers::virtio::get_device() {
+            let disk_ptr = &virtio_dev.disk as *const crate::drivers::blkdev::GenDisk;
+            if let Some(data) = crate::fs::ext4::read_file(disk_ptr, path) {
                 return Some(data);
             }
-            None => {}
         }
-    }
+        None
+    };
 
-    // 3. Try reading from RootFS (memory filesystem)
-    crate::fs::read_file_from_rootfs(path)
+    if rootfs_first {
+        if let Some(data) = crate::fs::read_file_from_rootfs(path) {
+            return Some(data);
+        }
+        read_ext4(path)
+    } else {
+        read_ext4(path).or_else(|| crate::fs::read_file_from_rootfs(path))
+    }
 }
 
 /// Create and start init process
@@ -114,7 +157,11 @@ fn load_init_program(path: &str) -> Option<Vec<u8>> {
 /// 2. Load ELF program into memory
 /// 3. Mark init process as user process
 /// 4. Add to scheduler run queue
-fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option<*mut Task> {
+fn create_and_start_init_process(
+    program_data: &[u8],
+    init_path: &str,
+    rootfs_first: bool,
+) -> Option<*mut Task> {
     unsafe {
         let task_ptr = INIT_TASK_STORAGE.as_mut_ptr();
 
@@ -151,7 +198,7 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
         }
 
         // Load ELF program into memory and set up user context
-        if let Err(e) = load_and_setup_elf(task_ptr, program_data, init_path) {
+        if let Err(e) = load_and_setup_elf(task_ptr, program_data, init_path, rootfs_first) {
             println!("init: ELF load failed err={:?} path={} len={} first8={:02x}{:02x}{:02x}{:02x}",
                 e, init_path, program_data.len(),
                 program_data.get(0).copied().unwrap_or(0),
@@ -202,7 +249,12 @@ fn create_and_start_init_process(program_data: &[u8], init_path: &str) -> Option
 /// entry: after it returns, the caller still has to point thread.ra at
 /// ret_from_exception with thread.sp at the task's pt_regs so the first
 /// __switch_to lands in user mode.
-fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str) -> Result<(), ElfError> {
+fn load_and_setup_elf(
+    task_ptr: *mut Task,
+    program_data: &[u8],
+    init_path: &str,
+    rootfs_first: bool,
+) -> Result<(), ElfError> {
     use alloc::string::String;
 
     // Validate ELF format and pull the pieces do_execve_elf wants pre-parsed.
@@ -222,10 +274,10 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             Err(_) => return Err(ElfError::InvalidHeader),
         };
         // The interpreter lives on the same filesystem as the init image.
-        let mut data = load_init_program(interp_str);
+        let mut data = load_init_program(interp_str, rootfs_first);
         let mut attempt = 1;
         while data.is_none() && attempt < 3 {
-            data = load_init_program(interp_str);
+            data = load_init_program(interp_str, rootfs_first);
             attempt += 1;
         }
         match data {
@@ -253,7 +305,7 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
     // space; capture the kernel root so boot continues on the kernel page
     // table afterwards, exactly as before this call existed.
     // SAFETY: reads the boot-time root PPN, no invariants to uphold.
-    let kernel_root_ppn = unsafe { crate::arch::riscv64::mm::mmu_init::root_page_table_ppn() };
+    let kernel_root_ppn = unsafe { crate::arch::mm::mmu_init::root_page_table_ppn() };
 
     // SAFETY: task_ptr points to the freshly built PID 1 task (static
     // INIT_TASK_STORAGE); do_execve_elf only needs it to carry a valid
@@ -282,10 +334,10 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
 
     // Restore the kernel page table on this hart (do_execve_elf left the
     // init mm active). ASID_KERNEL = 0.
-    // SAFETY: kernel_root_ppn is the boot page-table root; switch_mm only
-    // writes satp and issues an ASID-scoped sfence.
+    // SAFETY: kernel_root_ppn is the boot page-table root; the switch
+    // only activates it on this CPU.
     unsafe {
-        crate::arch::riscv64::context::switch_mm(kernel_root_ppn, 0);
+        crate::mm::switch_address_space(kernel_root_ppn, 0);
     }
 
     // First entry into user mode happens through ret_from_exception with
@@ -298,13 +350,21 @@ fn load_and_setup_elf(task_ptr: *mut Task, program_data: &[u8], init_path: &str)
             return Err(ElfError::OutOfMemory);
         }
         extern "C" {
+            /// riscv64 user-return trampoline; the x86_64 trap contract
+            /// exposes the same behavior as ret_from_fork.
+            #[cfg(feature = "riscv64")]
             fn ret_from_exception();
+            #[cfg(feature = "x86_64")]
+            fn ret_from_fork();
         }
         // Kernel is linked at KERNEL_LINK_ADDR, so function pointers are
         // already virtual addresses.
+        #[cfg(feature = "riscv64")]
+        let entry = ret_from_exception as u64;
+        #[cfg(feature = "x86_64")]
+        let entry = ret_from_fork as u64;
         let thread = (*task_ptr).thread_mut();
-        thread.ra = ret_from_exception as u64;
-        thread.sp = child_regs as u64;
+        crate::process::thread_set_entry(thread, entry, child_regs as u64);
     }
 
     Ok(())
@@ -345,6 +405,6 @@ pub fn init_std_fds_for_task(fdtable: &crate::fs::FdTable) {
 /// Halt the system
 fn halt() -> ! {
     loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        crate::arch::cpu::wfi();
     }
 }

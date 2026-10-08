@@ -532,7 +532,7 @@ fn kroot_pollution() {
     let mut max_va = 0u64;
     let mut user_leaves = 0u64;
     unsafe {
-        let root_ptr = &raw const crate::arch::riscv64::mm::mmu_init::ROOT_PAGE_TABLE;
+        let root_ptr = &raw const crate::arch::mm::mmu_init::ROOT_PAGE_TABLE;
         let root = &*root_ptr;
         for i in 0..2usize {
             let pte2 = root.get(i);
@@ -540,7 +540,7 @@ fn kroot_pollution() {
                 continue;
             }
             l1n += 1;
-            let t1 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+            let t1 = crate::arch::mm::mmu_init::get_page_table_virt(
                 pte2.ppn() << 12,
             );
             if t1.is_null() {
@@ -559,7 +559,7 @@ fn kroot_pollution() {
                     continue;
                 }
                 l0n += 1;
-                let t0 = crate::arch::riscv64::mm::mmu_init::get_page_table_virt(
+                let t0 = crate::arch::mm::mmu_init::get_page_table_virt(
                     pte1.ppn() << 12,
                 );
                 if t0.is_null() {

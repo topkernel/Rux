@@ -72,7 +72,7 @@ cd "$EDITLINE_BUILD"
     --disable-termcap \
     --enable-static \
     --disable-shared \
-    CFLAGS="-static -nostdinc -fno-stack-protector -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include" \
+    CFLAGS="-static -march=rv64gc_zicsr -nostdinc -fno-stack-protector -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include" \
     LDFLAGS="-static -nostdlib ${MUSL_DIR}/lib/crt1.o ${MUSL_DIR}/lib/crti.o -L${MUSL_DIR}/lib -lc -lgcc ${MUSL_DIR}/lib/crtn.o"
 
 # Patch config.h: force HAVE_TCGETATTR since musl has tcgetattr() but
@@ -116,6 +116,15 @@ else
     echo "mrsh source already exists at $MRSH_DIR"
 fi
 
+# ==================== Pinned soft-fp overlay (BUG-S005) ====================
+# Ubuntu's cross libgcc.a is built with zbb+zcb; its __*tf3/__floatsitf
+# members carry c.zext.w halfwords that SIGILL on the pinned QEMU CPU model
+# (no Zcb) — /bin/sh died inside `i=$((i+1))` loops (BUG-S005, misfiled as
+# coredump corruption). Build the same routines from gcc soft-fp sources
+# with our march pin and link them ahead of -lgcc. See ../soft-fp/README.md.
+"${SCRIPT_DIR}/../build-softfp.sh"
+SOFTFP_DIR="$(cd "${SCRIPT_DIR}/../soft-fp" && pwd)"
+
 # ==================== Build mrsh ====================
 
 cd "$MRSH_DIR"
@@ -123,7 +132,7 @@ cd "$MRSH_DIR"
 # Set cross-compile environment variables - using musl libc
 # Note: -fno-stack-protector is needed because musl doesn't provide __stack_chk_guard
 export CC=riscv64-linux-gnu-gcc
-export CFLAGS="-static -nostdinc -fno-stack-protector -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include -DHAVE_EDITLINE -I${SCRIPT_DIR}/include -I${EDITLINE_INSTALL}/include"
+export CFLAGS="-static -march=rv64gc_zicsr -nostdinc -fno-stack-protector -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include -DHAVE_EDITLINE -I${SCRIPT_DIR}/include -I${EDITLINE_INSTALL}/include"
 export PKG_CONFIG=""
 
 echo ""
@@ -140,9 +149,9 @@ CONFIG_MK=".build/config.mk"
 # The mrsh Makefile link line is: $(CC) -o $@ $(LDFLAGS) $(objects) -L$(OUTDIR) -lmrsh $(LIBS)
 # We want: $(CC) -static crt1.o crti.o [objects] -lmrsh -lc -lgcc crtn.o -leditline
 # Note: LDFLAGS has continuation lines (\), use awk to replace the whole block
-awk -v musl="$MUSL_DIR" -v editline="$EDITLINE_INSTALL" '
+awk -v musl="$MUSL_DIR" -v editline="$EDITLINE_INSTALL" -v softfp="$SOFTFP_DIR" '
     /^LDFLAGS=/ { skip=1; print "LDFLAGS=-static -nostdlib " musl "/lib/crt1.o " musl "/lib/crti.o"; next }
-    /^LIBS=/ { skip=0; print "LIBS=-L" editline "/lib -leditline -L" musl "/lib -lc -lgcc " musl "/lib/crtn.o"; next }
+    /^LIBS=/ { skip=0; print "LIBS=-L" editline "/lib -leditline -L" musl "/lib -lc -L" softfp " -lsoftfp-pin -lgcc " musl "/lib/crtn.o"; next }
     !skip { print }
 ' "$CONFIG_MK" > "$CONFIG_MK.tmp" && mv "$CONFIG_MK.tmp" "$CONFIG_MK"
 
@@ -158,6 +167,13 @@ make -j$(nproc) mrsh
 
 # Verify build result
 if [ -f "$MRSH_DIR/mrsh" ]; then
+    # BUG-S005 gate: the final binary must not carry Zcb-capable members.
+    # A zcb1p0 attribute means some path still reached the unpinned libgcc
+    # and the shell will SIGILL on the project's QEMU CPU model.
+    if riscv64-linux-gnu-readelf -A "$MRSH_DIR/mrsh" | grep -qE "zcb1p0|zicond1p0"; then
+        echo "Error: mrsh still carries zcb/zicond attributes (unpinned libgcc member linked)" >&2
+        exit 1
+    fi
     echo ""
     echo "========================================"
     echo "mrsh built successfully (with editline)!"

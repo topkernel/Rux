@@ -36,9 +36,17 @@ const MIN_ORDER: usize = 0;
 
 // Hardcoded heap start address for early boot.
 // Uses phys_to_virt() to get the virtual address in the linear mapping region.
-// VA_PA_OFFSET = PAGE_OFFSET - PHYS_MEMORY_BASE = 0xffffffd600000000 - 0x80000000
+// riscv64: PAGE_OFFSET 0xffffffd600000000 over PHYS base 0x80000000.
+// x86_64: linear map at 0xffff888000000000 over phys 0; heap placed at 1GB
+// (clear of the image window 0x200000..0xa00000 and the q35 ECAM hole).
+#[cfg(feature = "riscv64")]
 const KERNEL_HEAP_PHYS: usize = 0x80C0_0000;
+#[cfg(feature = "riscv64")]
 const VA_PA_OFFSET: usize = 0xffffffd600000000 - 0x80000000;
+#[cfg(feature = "x86_64")]
+const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
+#[cfg(feature = "x86_64")]
+const VA_PA_OFFSET: usize = 0xffff_8880_0000_0000;
 const HEAP_START: usize = KERNEL_HEAP_PHYS + VA_PA_OFFSET;
 
 // Heap size - read from configuration file
@@ -456,10 +464,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // before the note call (see below). -O0 riscv64 frames keep
         // s0 = frame TOP: [s0-8] = own saved ra, [s0-0x10] = caller's s0,
         // so walking from s0 yields [ra-into-__rust_alloc, callers...].
-        let mw_s0: u64;
-        unsafe {
-            core::arch::asm!("mv {s}, s0", s = out(reg) mw_s0, options(nomem, nostack));
-        }
+        let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
 
         // Check magic number and initialization state
         if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
@@ -515,8 +520,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
             [0; crate::dfx::memwatch::SITE_FRAMES];
         if crate::dfx::memwatch::armed() {
-            let mut fp: u64;
-            core::arch::asm!("mv {f}, s0", f = out(reg) fp, options(nomem, nostack));
+            let mut fp: u64 = crate::dfx::backtrace::current_frame_pointer();
             // f[0] = return address out of this method (into __rust_realloc);
             // f[1..] ascend the caller chain through the growth machinery.
             unsafe {

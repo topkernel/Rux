@@ -459,12 +459,12 @@ fn preempt_enable() {
 
 #[inline]
 fn irq_save() -> bool {
-    crate::arch::riscv64::cpu::save_and_disable_irq()
+    crate::arch::cpu::save_and_disable_irq()
 }
 
 #[inline]
 fn irq_restore(flags: bool) {
-    crate::arch::riscv64::cpu::restore_irq(flags);
+    crate::arch::cpu::restore_irq(flags);
 }
 
 #[inline]

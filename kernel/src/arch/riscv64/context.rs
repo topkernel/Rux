@@ -160,10 +160,10 @@ __switch_to:
 "#,
     task_thread = const core::mem::offset_of!(Task, thread),
     task_on_cpu = const core::mem::offset_of!(Task, ti_on_cpu),
-    thread_ra = const core::mem::offset_of!(crate::arch::riscv64::thread::ThreadStruct, ra),
-    thread_sp = const core::mem::offset_of!(crate::arch::riscv64::thread::ThreadStruct, sp),
-    thread_s0 = const core::mem::offset_of!(crate::arch::riscv64::thread::ThreadStruct, s),
-    thread_sum = const core::mem::offset_of!(crate::arch::riscv64::thread::ThreadStruct, sum),
+    thread_ra = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, ra),
+    thread_sp = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, sp),
+    thread_s0 = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, s),
+    thread_sum = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, sum),
     sr_sum = const SR_SUM,
 );
 

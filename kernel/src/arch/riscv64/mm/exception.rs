@@ -29,8 +29,8 @@
 //! If a page fault occurs on these instructions, the kernel jumps to the fixup handler
 //! instead of crashing.
 
-use crate::arch::riscv64::pt_regs::PtRegs;
-use crate::arch::riscv64::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault, handle_mm_fault};
+use crate::arch::pt_regs::PtRegs;
+use crate::arch::mm::{VirtAddr, FaultFlags, AddressSpace, handle_cow_fault, handle_mm_fault};
 
 // Re-export MmFaultResult from page_fault (canonical definition)
 pub use super::page_fault::MmFaultResult;
@@ -125,7 +125,7 @@ pub fn exception_table_count() -> usize {
 /// - `epc`: Instruction address where exception occurred
 /// - `access_type`: Access type
 /// - `regs`: PtRegs pointer, used to get user mode tp
-fn send_signal(sig: i32, _code: i32, _addr: u64, _epc: u64, _access_type: u32, _regs: &crate::arch::riscv64::pt_regs::PtRegs) {
+fn send_signal(sig: i32, _code: i32, _addr: u64, _epc: u64, _access_type: u32, _regs: &crate::arch::pt_regs::PtRegs) {
     // Send signal using real signal mechanism
     if let Some(current) = crate::sched::current() {
         let pid = current.pid();
@@ -246,7 +246,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         // looping. Verified by GDB-forced S-mode pc injection into a
         // user RWX page: unfixed loops forever; fixed panics.
         let kernel_data_fill = fault_addr.bits()
-            < crate::arch::riscv64::mm::user_addr::USER_END as u64
+            < crate::arch::mm::user_addr::USER_END as u64
             && (access_type & FaultFlags::EXEC) == 0;
         if kernel_data_fill {
             let covered = addr_space
@@ -296,17 +296,17 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     let result = handle_mm_fault(&addr_space, fault_addr, access_type | FaultFlags::USER);
 
     match result {
-        crate::arch::riscv64::mm::MmFaultResult::Handled => {
+        crate::arch::mm::MmFaultResult::Handled => {
             // Page mapped, can re-execute instruction
             return MmFaultResult::Handled;
         }
-        crate::arch::riscv64::mm::MmFaultResult::CowPending => {
+        crate::arch::mm::MmFaultResult::CowPending => {
             // COW page, try copy-on-write
             match unsafe { handle_cow_fault(addr_space.root_ppn(), fault_addr) } {
-                crate::arch::riscv64::mm::CowFaultResult::Resolved => {
+                crate::arch::mm::CowFaultResult::Resolved => {
                     return MmFaultResult::Handled;
                 }
-                crate::arch::riscv64::mm::CowFaultResult::Retry => {
+                crate::arch::mm::CowFaultResult::Retry => {
                     // The PTE changed between handle_mm_fault's lock-free
                     // is_cow_page() check and the locked re-walk — a
                     // sibling thread sharing this mm broke the COW first
@@ -317,19 +317,19 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     // state and takes the proper path.
                     return MmFaultResult::Handled;
                 }
-                crate::arch::riscv64::mm::CowFaultResult::OutOfMemory => {
+                crate::arch::mm::CowFaultResult::OutOfMemory => {
                     // Allocating the private copy genuinely failed
                     return MmFaultResult::OutOfMemory;
                 }
             }
         }
-        crate::arch::riscv64::mm::MmFaultResult::AlreadyMapped => {
+        crate::arch::mm::MmFaultResult::AlreadyMapped => {
             // Mapped but permission issue
             // Possibly writing to read-only page etc.
             send_signal(11, 2, fault_addr.bits(), regs.epc, access_type, regs);  // SIGSEGV, SEGV_ACCERR = 2
             return MmFaultResult::PermissionDenied;
         }
-        crate::arch::riscv64::mm::MmFaultResult::Segfault => {
+        crate::arch::mm::MmFaultResult::Segfault => {
             // Address not in any VMA
             // FORENSIC: identify mixed-state tasks — exe_path tells whether
             // exec completed for THIS task; satp vs pgd tells whether the
@@ -357,7 +357,7 @@ crate::pr_err!(
                 // the victim dies in ld.so's pure-memory phase, so a bad
                 // value on this stack is the remaining candidate source.
                 {
-                    use crate::arch::riscv64::uaccess::copy_from_user;
+                    use crate::arch::uaccess::copy_from_user;
                     let base = 0x3fffffe_a80u64; // exec-built argv/envp/auxv zone (fixed layout for this rootfs)
                     let mut buf = [0u8; 128];
                     let unc = unsafe { copy_from_user(buf.as_mut_ptr(), base as *const u8, 128) };
@@ -365,7 +365,7 @@ crate::pr_err!(
                     // a higher count means a fork/teardown lost an update and
                     // someone else still maps (and zeroes) this frame.
                     {
-                        use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+                        use crate::arch::mm::mm_ops::PageTableWalker;
                         if let Some((ppn, bits)) = unsafe { PageTableWalker::walk(addr_space.pgd() as u64, 0x3fffffe000u64) } {
                             use crate::mm::page_desc::pfn_to_page_mut;
                             let page = pfn_to_page_mut(ppn as usize);
@@ -378,7 +378,7 @@ crate::pr_err!(
                             // PTE-install replay: which roots EVER mapped this ppn.
                             {
                                 use core::sync::atomic::Ordering::Relaxed;
-                                use crate::arch::riscv64::mm::mmu_init::{PTEI_RING, PTEI_CUR};
+                                use crate::arch::mm::mmu_init::{PTEI_RING, PTEI_CUR};
                                 let my_root = addr_space.pgd() as u64;
                                 let mut n = 0;
                                 for i in 0..PTEI_RING.len() {
@@ -475,10 +475,10 @@ crate::pr_err!(
                     if unc == 0 {
                         // 整页首 256B：判别"整页清零"(fill/预零) vs "定点清零"
                         let page_va = {
-                            use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+                            use crate::arch::mm::mm_ops::PageTableWalker;
                             match unsafe { PageTableWalker::walk(addr_space.pgd() as u64, 0x3fffffe000u64) } {
-                                Some(p) => crate::arch::riscv64::mm::phys_to_virt(
-                                    crate::arch::riscv64::mm::PhysAddr::new(p.0 as u64 * 4096)
+                                Some(p) => crate::arch::mm::phys_to_virt(
+                                    crate::arch::mm::PhysAddr::new(p.0 as u64 * 4096)
                                 ).bits() as usize,
                                 None => 0,
                             }
@@ -498,12 +498,12 @@ crate::pr_err!(
                 }
                 // Read the victim's PLTGOT through its page tables.
                 {
-                    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+                    use crate::arch::mm::mm_ops::PageTableWalker;
                     for probe in [0x1842usize, 0x184eusize, 0x17208usize, 0x17210usize, 0x17218usize, 0x17330usize] {
                         match unsafe { PageTableWalker::walk(addr_space.pgd() as u64, probe as u64) } {
                             Some((ppn, bits)) => {
-                                let va = crate::arch::riscv64::mm::phys_to_virt(
-                                    crate::arch::riscv64::mm::PhysAddr::new(ppn as u64 * 4096)
+                                let va = crate::arch::mm::phys_to_virt(
+                                    crate::arch::mm::PhysAddr::new(ppn as u64 * 4096)
                                 ).bits() as usize + (probe & 0xFFF);
                                 let v = unsafe { core::ptr::read_volatile(va as *const u64) };
                                 crate::pr_err!("  GPROBE {:#x} -> ppn={:#x} pte={:#x} val={:#x}", probe, ppn, bits, v);
@@ -516,10 +516,10 @@ crate::pr_err!(
                 // different ppn than the crash-time PTE, a post-relocation
                 // page replacement reset the file-initial contents.
                 {
-                    use crate::arch::riscv64::mm::mm_ops::PageTableWalker;
+                    use crate::arch::mm::mm_ops::PageTableWalker;
                     if let Some((gppn, _)) = unsafe { PageTableWalker::walk(addr_space.pgd() as u64, 0x17208) } {
                         use core::sync::atomic::Ordering::Relaxed;
-                        use crate::arch::riscv64::mm::mmu_init::{PTEI_RING, PTEI_CUR};
+                        use crate::arch::mm::mmu_init::{PTEI_RING, PTEI_CUR};
                         let mut n = 0;
                         for i in 0..PTEI_RING.len() {
                             let e = &PTEI_RING[i];
@@ -580,24 +580,24 @@ crate::pr_err!(
             }
             return bad_area(regs, access_type, fault_addr);
         }
-        crate::arch::riscv64::mm::MmFaultResult::PermissionDenied => {
+        crate::arch::mm::MmFaultResult::PermissionDenied => {
             // Insufficient permissions
             send_signal(11, 2, fault_addr.bits(), regs.epc, access_type, regs);  // SIGSEGV, SEGV_ACCERR = 2
             return MmFaultResult::PermissionDenied;
         }
-        crate::arch::riscv64::mm::MmFaultResult::OutOfMemory => {
+        crate::arch::mm::MmFaultResult::OutOfMemory => {
             // Out of memory, send SIGKILL
             send_signal(9, 0, fault_addr.bits(), regs.epc, access_type, regs);  // SIGKILL
             return MmFaultResult::OutOfMemory;
         }
-        crate::arch::riscv64::mm::MmFaultResult::BusError => {
+        crate::arch::mm::MmFaultResult::BusError => {
             // File-backed fault past EOF: SIGBUS with si_code BUS_ADRERR (2)
             send_signal(7, 2, fault_addr.bits(), regs.epc, access_type, regs);
             return MmFaultResult::BusError;
         }
         // Fixed and KernelPanic are handled by bad_area/no_context, not by handle_mm_fault
-        crate::arch::riscv64::mm::MmFaultResult::Fixed
-        | crate::arch::riscv64::mm::MmFaultResult::KernelPanic => {
+        crate::arch::mm::MmFaultResult::Fixed
+        | crate::arch::mm::MmFaultResult::KernelPanic => {
             return bad_area(regs, access_type, fault_addr);
         }
     }

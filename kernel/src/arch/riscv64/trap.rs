@@ -282,17 +282,17 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
 
             // Instruction page fault
             Cause::InstructionPageFault => {
-                handle_page_fault(regs_ref, crate::arch::riscv64::mm::FaultFlags::EXEC);
+                handle_page_fault(regs_ref, crate::arch::mm::FaultFlags::EXEC);
             }
 
             // Load page fault
             Cause::LoadPageFault => {
-                handle_page_fault(regs_ref, crate::arch::riscv64::mm::FaultFlags::READ);
+                handle_page_fault(regs_ref, crate::arch::mm::FaultFlags::READ);
             }
 
             // Store page fault
             Cause::StoreAmoPageFault => {
-                handle_page_fault(regs_ref, crate::arch::riscv64::mm::FaultFlags::WRITE);
+                handle_page_fault(regs_ref, crate::arch::mm::FaultFlags::WRITE);
             }
 
             // Other exceptions
@@ -417,7 +417,7 @@ fn handle_syscall(regs: &mut PtRegs) {
     // Linux does the same via syscall_enter_from_user_mode() → local_irq_enable().
     // The saved sstatus in pt_regs (SIE=0) is restored unmodified by the
     // trap-return path, so user-mode return semantics are preserved.
-    crate::arch::riscv64::cpu::enable_irq();
+    crate::arch::cpu::enable_irq();
 
     let orig_epc = regs.epc;
     let syscall_num = regs.a7;  // syscall number is in a7, not orig_a0!
@@ -563,6 +563,26 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     crate::pr_debug!("trap: illegal instruction at epc={:#x}, mode={}",
         epc, if regs.user_mode() { "user" } else { "kernel" });
 
+    // Forensics for user SIGILL deaths (BUG-S004/S005 family: userspace
+    // built for extensions the QEMU CPU model lacks): the re-fetched
+    // instruction word + task identity. This is how "sh died at iter2" was
+    // traced to a c.zext.w (Zcb) halfword from an unpinned libgcc member.
+    if regs.user_mode() {
+        static EMPTY_COMM: [u8; 16] = [0u8; 16];
+        let (pid, comm) = crate::sched::current()
+            .map(|t| unsafe { ((*t).pid(), (*t).comm()) })
+            .unwrap_or((0, &EMPTY_COMM));
+        let comm_len = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+        crate::pr_info!(
+            "trap: user SIGILL pid={} comm={:?} epc={:#x} insn16={:#06x} fs={:#x}",
+            pid,
+            core::str::from_utf8(&comm[..comm_len]),
+            epc,
+            instr16,
+            regs.status & SR_FS
+        );
+    }
+
     if regs.user_mode() {
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
     }
@@ -660,7 +680,7 @@ fn sigbus_has_handler() -> bool {
 }
 
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
-    use crate::arch::riscv64::mm::exception::{do_page_fault, MmFaultResult};
+    use crate::arch::mm::exception::{do_page_fault, MmFaultResult};
 
     let fault_addr = regs.badaddr;
 

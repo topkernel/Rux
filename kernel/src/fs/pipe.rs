@@ -159,7 +159,7 @@ impl PipeBuffer {
     /// # Safety
     /// `dst` must be a user pointer validated for `max` bytes (access_ok).
     pub unsafe fn read_user(&mut self, dst: *mut u8, max: usize) -> usize {
-        use crate::arch::riscv64::uaccess::copy_to_user;
+        use crate::arch::uaccess::copy_to_user;
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
 
@@ -229,7 +229,7 @@ impl PipeBuffer {
     /// # Safety
     /// `src` must be a user pointer validated for `max` bytes (access_ok).
     pub unsafe fn write_user(&mut self, src: *const u8, max: usize) -> usize {
-        use crate::arch::riscv64::uaccess::copy_from_user;
+        use crate::arch::uaccess::copy_from_user;
         let read_pos = self.read_pos.load(Ordering::Acquire);
         let write_pos = self.write_pos.load(Ordering::Acquire);
 
@@ -422,7 +422,7 @@ pub fn is_pipe_file(file: &File) -> bool {
 /// `iovs` are (user_base, len) pairs already validated in kernel space.
 /// Returns bytes moved, or a negative errno.
 pub fn pipe_vmsplice_to(file: &File, iovs: &[(usize, usize)], nonblock: bool) -> isize {
-    use crate::arch::riscv64::uaccess::copy_from_user;
+    use crate::arch::uaccess::copy_from_user;
 
     let Some(pipe) = pipe_of_file(file) else {
         return -9; // EBADF
@@ -509,7 +509,7 @@ pub fn pipe_vmsplice_to(file: &File, iovs: &[(usize, usize)], nonblock: bool) ->
             crate::sched::dequeue_task(&*current);
             return -(crate::errno::constants::EINTR) as isize;
         }
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
         pipe.write_queue().finish_wait(current);
         if crate::signal::signal_pending() {
@@ -522,7 +522,7 @@ pub fn pipe_vmsplice_to(file: &File, iovs: &[(usize, usize)], nonblock: bool) ->
 /// into user memory (LTP vmsplice03). Returns bytes moved (0 = EOF) or a
 /// negative errno.
 pub fn pipe_vmsplice_from(file: &File, iovs: &[(usize, usize)], nonblock: bool) -> isize {
-    use crate::arch::riscv64::uaccess::copy_to_user;
+    use crate::arch::uaccess::copy_to_user;
 
     let Some(pipe) = pipe_of_file(file) else {
         return -9; // EBADF
@@ -595,7 +595,7 @@ pub fn pipe_vmsplice_from(file: &File, iovs: &[(usize, usize)], nonblock: bool) 
             crate::sched::dequeue_task(&*current);
             return -(crate::errno::constants::EINTR) as isize;
         }
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
         pipe.read_queue().finish_wait(current);
         if crate::signal::signal_pending() {
@@ -720,7 +720,7 @@ fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isiz
                 }
 
                 // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-                crate::arch::riscv64::cpu::restore_irq(true);
+                crate::arch::cpu::restore_irq(true);
                 crate::sched::schedule();
 
                 pipe.read_queue().finish_wait(current);
@@ -891,7 +891,7 @@ fn pipe_write_common(file: &File, src: *const u8, count: usize, user: bool) -> i
                 }
 
                 // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-                crate::arch::riscv64::cpu::restore_irq(true);
+                crate::arch::cpu::restore_irq(true);
                 crate::sched::schedule();
 
                 pipe.write_queue().finish_wait(current);

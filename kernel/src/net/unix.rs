@@ -248,7 +248,7 @@ impl UnixSocket {
     /// family). Linux charges skb->truesize for exactly this reason.
     fn queued_truesize(&self) -> usize {
         const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-            + crate::arch::riscv64::mm::PAGE_SIZE as usize;
+            + crate::arch::mm::PAGE_SIZE as usize;
         let q = self.recv_queue.lock();
         q.iter()
             .map(|s| s.data.len() + SEG_OVERHEAD)
@@ -420,14 +420,19 @@ fn key_shown(s: &str) -> &str {
 /// names ('\0'-prefixed) never come through here.
 ///
 /// Must be called OUTSIDE the UNIX_TABLE lock (the walk takes VFS locks).
-fn fs_reg_key(raw: &str) -> Option<String> {
+///
+/// `Err(code)` = the path itself failed to resolve — connect(2)/sendto(2)
+/// must surface that errno (ENOENT/ENOTDIR/EACCES), exactly like Linux's
+/// kern_path inside unix_find_other. A path that resolves but is not a
+/// bound socket is the CALLER's "no node" case (ECONNREFUSED).
+fn fs_reg_key(raw: &str) -> Result<String, i32> {
     const PATH_LIMIT: usize = 4096;
     if raw.len() > PATH_LIMIT {
-        return None;
+        return Err(-36); // ENAMETOOLONG
     }
-    let vp = crate::fs::vfs::path_lookup(raw, crate::fs::vfs::LOOKUP_FOLLOW).ok()?;
-    let inode = vp.inode?;
-    Some(alloc::format!("#{}:{}", inode.fs_id, inode.ino))
+    let vp = crate::fs::vfs::path_lookup(raw, crate::fs::vfs::LOOKUP_FOLLOW)?;
+    let inode = vp.inode.ok_or(-2i32)?;
+    Ok(alloc::format!("#{}:{}", inode.fs_id, inode.ino))
 }
 
 /// /proc/net/unix snapshot: one line per named socket, Linux layout
@@ -508,7 +513,7 @@ pub unsafe fn put_sockaddr_un(
     addrlen_ptr: *mut u32,
     name: Option<&str>,
 ) -> bool {
-    use crate::arch::riscv64::uaccess::{copy_to_user, put_user};
+    use crate::arch::uaccess::{copy_to_user, put_user};
     let mut buf = [0u8; SOCKADDR_UN_LEN];
     buf[0] = AF_UNIX as u8;
     buf[1] = 0;
@@ -583,7 +588,7 @@ fn unix_wait_round(
 
     // R54: schedule() restores the caller's SIE state; re-arm IRQs so
     // ticks/IPIs reach this CPU across the wait.
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     crate::sched::schedule();
 
     if timer_id != 0 {
@@ -779,8 +784,10 @@ pub fn unix_connect(
             }
             // Filesystem paths resolve to the node's inode identity, so
             // alias paths (symlinks: /var/run vs /run) find the listener
-            // (Linux matches by inode — see fs_reg_key). An unresolvable
-            // path has no socket node: ECONNREFUSED. ABSTRACT names
+            // (Linux matches by inode — see fs_reg_key). A path that
+            // resolves but has no bound socket node: ECONNREFUSED; a
+            // path that does not resolve surfaces the lookup errno
+            // (ENOENT etc.) like Linux's kern_path. ABSTRACT names
             // (leading NUL) are already registry keys — never run them
             // through the filesystem resolver (path_lookup of a "\0..."
             // string always fails, so abstract connects were refused —
@@ -789,8 +796,8 @@ pub fn unix_connect(
                 addr.key.clone()
             } else {
                 match fs_reg_key(&addr.key) {
-                    Some(k) => k,
-                    None => return Err(-111), // ECONNREFUSED — no node
+                    Ok(k) => k,
+                    Err(e) => return Err(e), // lookup errno (ENOENT, ...)
                 }
             };
             let server = match lookup(&lookup_key) {
@@ -894,8 +901,8 @@ pub fn unix_connect(
                 addr.key.clone()
             } else {
                 match fs_reg_key(&addr.key) {
-                    Some(k) => k,
-                    None => return Err(-111), // ECONNREFUSED — no node
+                    Ok(k) => k,
+                    Err(e) => return Err(e), // lookup errno (ENOENT, ...)
                 }
             };
             if lookup(&lookup_key).is_none() {
@@ -963,7 +970,7 @@ pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
 /// heap allocates whole pages).
 fn seg_charge(len: usize) -> usize {
     const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-        + crate::arch::riscv64::mm::PAGE_SIZE as usize;
+        + crate::arch::mm::PAGE_SIZE as usize;
     len + SEG_OVERHEAD
 }
 
@@ -1030,8 +1037,8 @@ pub fn unix_send(
                     // sendto resolves to the node's inode identity — a
                     // symlink alias reaches the same DGRAM target.
                     let key = match fs_reg_key(&a.key) {
-                        Some(k) => k,
-                        None => return Err(-111), // ECONNREFUSED — no node
+                        Ok(k) => k,
+                        Err(e) => return Err(e), // lookup errno (ENOENT, ...)
                     };
                     match lookup(&key) {
                         Some(t) => t,

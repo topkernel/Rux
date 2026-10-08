@@ -6,7 +6,7 @@
 //!
 //! Implements VirtIO device PCI transport (Modern VirtIO 1.0+)
 
-use crate::drivers::pci::{PCIConfig, vendor, virtio_device, BARType};
+use crate::drivers::pci::{PCIConfig, vendor, virtio_device, BARType, PCIBAR};
 use crate::drivers::virtio::queue;
 use crate::drivers::virtio::offset;
 use alloc::collections::btree_map::BTreeMap;
@@ -86,6 +86,10 @@ pub struct VirtIOPCI {
     pub isr_cfg_offset: u32,
     /// Device base address
     pub base_addr: u64,
+    /// virtio-blk disk slot this function drives (multi-disk OH Phase 1b:
+    /// the I/O engine — queue, BLK lock, wait queue, pending table — is
+    /// selected through this number). 0 until the probe assigns it.
+    pub blk_slot: usize,
 }
 
 impl VirtIOPCI {
@@ -183,8 +187,13 @@ impl VirtIOPCI {
         // True PCI slot number: ECAM addr bit 15..19. Dividing by the ECAM
         // function size (0x1000) inflated the slot 8x and fed a wrong IRQ
         // swizzle (review DRIV NEW-1).
+        #[cfg(feature = "riscv64")]
         let pci_slot =
             (((pci_base - crate::drivers::pci::RISCV_PCIE_ECAM_BASE) >> 15) & 0x1F) as u8;
+        // x86_64: no ECAM slot derivation until the PCI host bridge driver
+        // lands; the IRQ path is unreachable with an empty probe set.
+        #[cfg(feature = "x86_64")]
+        let pci_slot = 0u8;
 
         // Verify vendor ID and device ID
         let vendor_id = pci_config.vendor_id();
@@ -237,6 +246,7 @@ impl VirtIOPCI {
             isr_cfg_bar: 0,
             isr_cfg_offset: 0,
             base_addr: 0,
+            blk_slot: 0,
         };
 
         // ========== Scan VirtIO PCI capabilities ==========
@@ -281,7 +291,15 @@ impl VirtIOPCI {
         // ========== PCI BAR address assignment ==========
         // VirtIO PCI devices require kernel to assign BAR addresses
         // Use fixed MMIO region: 0x40000000 - 0x50000000 (256MB)
+        #[cfg(feature = "riscv64")]
         const PCI_MMIO_BASE: u64 = 0x40000000;
+        // x86_64/q35: the BIOS has already enumerated PCI and assigned BARs
+        // inside the 32-bit MMIO hole; re-assigning them at a fixed window
+        // would fight the firmware (and the old window overlaps the kernel
+        // heap at phys 0x40000000). Keep the firmware values: BAR_ASSIGN_BASE
+        // is only used for size probing fallback.
+        #[cfg(feature = "x86_64")]
+        const PCI_MMIO_BASE: u64 = 0xfd000000;
 
         // Use global static variable to track MMIO offset, avoiding address conflicts between devices
         use core::sync::atomic::{AtomicU64, Ordering};
@@ -303,7 +321,7 @@ impl VirtIOPCI {
         }
 
         // Store assigned BAR info
-        let mut assigned_bars = alloc::collections::btree_map::BTreeMap::new();
+        let mut assigned_bars: alloc::collections::btree_map::BTreeMap<u8, PCIBAR> = alloc::collections::btree_map::BTreeMap::new();
 
         // Assign address for each BAR
         for &bar_idx in &bars_to_assign {
@@ -317,9 +335,18 @@ impl VirtIOPCI {
                 mmio_offset
             };
 
+            #[cfg(feature = "riscv64")]
             let bar_addr = PCI_MMIO_BASE + aligned_addr;
 
+            // x86_64: use the firmware-assigned address verbatim.
+            #[cfg(feature = "x86_64")]
+            let bar_addr = {
+                let _ = (mmio_offset, aligned_addr); // silence unused on x86
+                pci_config.read_bar(bar_idx).base_addr
+            };
+
             // Write BAR address and store returned PCIBAR object
+            #[cfg(feature = "riscv64")]
             match pci_config.assign_bar(bar_idx, bar_addr) {
                 Ok(bar_obj) => {
                     mmio_offset = aligned_addr + bar_size;
@@ -329,6 +356,17 @@ impl VirtIOPCI {
                     crate::println!("virtio-pci: ERROR - Failed to assign BAR{}: {}", bar_idx, e);
                     return Err("Failed to assign PCI BAR");
                 }
+            }
+
+            // x86_64: the firmware BAR is already programmed; keep it.
+            #[cfg(feature = "x86_64")]
+            {
+                let bar_obj = pci_config.read_bar(bar_idx);
+                if bar_obj.base_addr == 0 {
+                    crate::println!("virtio-pci: BAR{} unassigned by firmware", bar_idx);
+                    return Err("Firmware left PCI BAR unassigned");
+                }
+                assigned_bars.insert(bar_idx, bar_obj);
             }
         }
 
@@ -376,7 +414,7 @@ impl VirtIOPCI {
             None => 0,
         };
 
-        Ok(Self {
+        let dev = Self {
             pci_config,
             pci_slot,
             common_cfg_bar: common_cfg_bar + common_offset as u64,
@@ -391,7 +429,55 @@ impl VirtIOPCI {
             isr_cfg_bar: isr_cfg_bar + isr_offset as u64,
             isr_cfg_offset: isr_offset,
             base_addr: common_cfg_bar + common_offset as u64,  // Use Common CFG as primary access address
-        })
+            blk_slot: 0,
+        };
+
+        // x86_64: every constructed function goes on the shared INTx
+        // dispatcher's poll list NOW, ack-only (see register_intx_ack).
+        // Construction precedes every device operation (feature writes,
+        // queue setup, DRIVER_OK), so no window exists where the function
+        // can assert the shared line before its ISR is reachable.
+        #[cfg(feature = "x86_64")]
+        dev.register_intx_ack();
+
+        Ok(dev)
+    }
+
+    /// x86_64/q35: put every live virtio-pci function on the shared INTx
+    /// dispatcher's poll list IMMEDIATELY, with an ack-only default
+    /// service that drivers may upgrade later
+    /// (`enable_pci_intx_irq`).
+    ///
+    /// Why this is not optional: virtio-pci INTx is level-triggered and
+    /// shared. The first registered device on a PIC line unmasks it, and
+    /// from then on ANY function on that line can assert it. A function
+    /// missing from the poll list asserts, nobody reads its ISR
+    /// capability (the virtio device-side EOI), the dispatcher EOIs the
+    /// PIC while the level is still high, and the line redelivers forever
+    /// — an interrupt storm that starves every task on the CPU (observed:
+    /// virtio-gpu's first eventq completion after DRIVER_OK wedged PID 1
+    /// before its first syscall on the Ubuntu amd64 image; riscv64 never
+    /// saw this because the PLIC masks IRQs nobody requested).
+    #[cfg(feature = "x86_64")]
+    pub fn register_intx_ack(&self) {
+        let int_pin = self.pci_config.read_config_byte(0x3D);
+        let int_line = self.pci_config.read_config_byte(0x3C);
+        if int_pin == 0 || int_line >= 16 {
+            crate::pr_warn!(
+                "virtio-pci: INTx unprogrammed (pin {} line {})",
+                int_pin,
+                int_line
+            );
+            return;
+        }
+        if intx::register(int_line, self.isr_cfg_bar, intx_ack_only_service) {
+            crate::pr_debug!(
+                "virtio-pci: INTx ack-registered pin {} line {} (ISR @{:#x})",
+                int_pin,
+                int_line,
+                self.isr_cfg_bar
+            );
+        }
     }
 
     /// Reset device
@@ -492,25 +578,15 @@ impl VirtIOPCI {
         let used_addr = virt_queue.get_used_addr();
 
         // Convert to physical addresses
-        #[cfg(feature = "riscv64")]
-        let desc_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(desc_addr)
+        let desc_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(desc_addr)
         ).0;
-        #[cfg(feature = "riscv64")]
-        let avail_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(avail_addr)
+        let avail_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(avail_addr)
         ).0;
-        #[cfg(feature = "riscv64")]
-        let used_phys = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(used_addr)
+        let used_phys = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(used_addr)
         ).0;
-
-        #[cfg(not(feature = "riscv64"))]
-        let desc_phys = desc_addr;
-        #[cfg(not(feature = "riscv64"))]
-        let avail_phys = avail_addr;
-        #[cfg(not(feature = "riscv64"))]
-        let used_phys = used_addr;
 
         // SAFETY: common_cfg_bar points to a valid MMIO-mapped VirtIO common config region;
         // writing descriptor table physical address split into two 32-bit writes per spec.
@@ -590,6 +666,7 @@ impl VirtIOPCI {
     /// RISC-V QEMU virt platform PCIe IRQ routing:
     /// PCIE_IRQ base = 32, total 4 IRQs (32-35)
     /// Formula: IRQ = 32 + ((INT_PIN + PCI_slot) % 4)
+    #[cfg(feature = "riscv64")]
     pub fn enable_device_interrupt(&self) {
         // Read INT_PIN to determine IRQ offset
         let int_pin = self.pci_config.read_config_byte(0x3D);
@@ -599,14 +676,63 @@ impl VirtIOPCI {
         // the line was off by one for every device (review DRIV-H3).
         let irq = 32 + (((int_pin as u32).saturating_sub(1) + self.pci_slot as u32) % 4);
 
-        // Register handler via IRQ framework (unmasks automatically)
+        // Register handler via IRQ framework (unmasks automatically).
+        // IRQF_SHARED: QEMU's gpex swizzle maps slot n, pin A to IRQ
+        // 32 + (n % 4) — a sixth disk SHARES its line with the second.
+        // dev_id is this function's virtio-blk slot; the handler checks
+        // its own ISR register and returns None when the line was raised
+        // by another device (proper shared-IRQ discipline).
         crate::interrupt::request_irq(
             irq,
             super::interrupt_handler_pci,
-            0,
+            crate::interrupt::irqdesc::IRQF_SHARED,
             "virtio-blk-pci",
-            0,
+            self.blk_slot,
         ).ok();
+    }
+
+    /// Enable device interrupt on x86_64/q35: PCI INTx through the PIC.
+    ///
+    /// SeaBIOS has already programmed the ICH9 PIRQ router and the device's
+    /// INT_LINE register with the PIC IRQ the function's INTx pin lands on
+    /// (observed q35 values: 10/11 for the virtio slots). Multiple
+    /// virtio-pci functions share one line, so the line carries a shared
+    /// dispatcher (see `intx`) that polls every registered device's ISR
+    /// capability instead of a single per-device handler.
+    #[cfg(feature = "x86_64")]
+    pub fn enable_device_interrupt(&self) {
+        self.enable_pci_intx_irq(intx_blk_service);
+    }
+
+    /// Register this device on its PIC INTx line with a shared dispatcher.
+    ///
+    /// `service` runs in hard-IRQ context only when THIS device's ISR
+    /// capability reads nonzero (the dispatcher's ISR read also drops the
+    /// device's level-triggered INTx assertion).
+    ///
+    /// Returns the PIC line on success, or None when the firmware left the
+    /// line unprogrammed (INT_PIN 0 / INT_LINE >= 16).
+    #[cfg(feature = "x86_64")]
+    pub fn enable_pci_intx_irq(&self, service: fn()) -> Option<u8> {
+        let int_pin = self.pci_config.read_config_byte(0x3D);
+        let int_line = self.pci_config.read_config_byte(0x3C);
+        if int_pin == 0 || int_line >= 16 {
+            crate::pr_warn!(
+                "virtio-pci: INTx unprogrammed (pin {} line {})",
+                int_pin, int_line
+            );
+            return None;
+        }
+        if intx::register(int_line, self.isr_cfg_bar, service) {
+            crate::pr_info!(
+                "virtio-pci: INTx pin {} routed to PIC line {} (shared dispatch)",
+                int_pin,
+                int_line
+            );
+            Some(int_line)
+        } else {
+            None
+        }
     }
 
     /// Set queue MSI-X vector
@@ -641,7 +767,7 @@ impl VirtIOPCI {
     /// Returns bytes read on success, error code on failure
     pub fn read_block(&self, sector: u64, buf: &mut [u8]) -> Result<usize, &'static str> {
         use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type};
-        use crate::arch::riscv64::mm::VirtAddr;
+        use crate::arch::mm::VirtAddr;
 
         // Allocate three descriptors
         let virt_queue_opt: Option<queue::VirtQueue> = queue::VirtQueue::new(8u16,
@@ -713,12 +839,10 @@ impl VirtIOPCI {
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // Convert virtual addresses to physical addresses
-        #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(resp_ptr as u64)
         ).0;
 
@@ -733,12 +857,9 @@ impl VirtIOPCI {
 
         // Set data buffer descriptor (device writes)
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
-        #[cfg(feature = "riscv64")]
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let data_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(buf.as_ptr() as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let data_phys_addr = buf.as_ptr() as u64;
 
         virt_queue.set_desc(
             data_desc_idx,
@@ -806,7 +927,7 @@ impl VirtIOPCI {
     /// Returns bytes written on success, error on failure
     pub fn write_block(&self, sector: u64, buf: &[u8]) -> Result<usize, &'static str> {
         use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type};
-        use crate::arch::riscv64::mm::VirtAddr;
+        use crate::arch::mm::VirtAddr;
 
         let virt_queue_opt: Option<queue::VirtQueue> = queue::VirtQueue::new(8u16,
             0,
@@ -890,12 +1011,10 @@ impl VirtIOPCI {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(resp_ptr as u64)
         ).0;
 
@@ -909,12 +1028,9 @@ impl VirtIOPCI {
         );
 
         // Data: device reads from host (no F_WRITE, opposite of read)
-        #[cfg(feature = "riscv64")]
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let data_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(buf.as_ptr() as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let data_phys_addr = buf.as_ptr() as u64;
 
         virt_queue.set_desc(
             data_desc_idx,
@@ -980,6 +1096,7 @@ pub fn read_block_using_configured_queue(
     sector: u64,
     buf: &mut [u8]
 ) -> Result<usize, &'static str> {
+    let slot = pci_dev.blk_slot;
     // Add retry mechanism to resolve VirtIO block device random timeout issues
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
@@ -1000,7 +1117,7 @@ pub fn read_block_using_configured_queue(
                 // retry, turning "table lag" and in-flight-guard rejections
                 // into one-shot retry conditions instead of a 5-attempt
                 // failure.
-                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_blk_kick(slot);
                 crate::drivers::virtio::pci_process_async_completions();
                 // Short delay before retry
                 for _ in 0..10000 {
@@ -1013,19 +1130,20 @@ pub fn read_block_using_configured_queue(
 
 /// Single read attempt
 fn read_block_once(
-    _pci_dev: &VirtIOPCI,
+    pci_dev: &VirtIOPCI,
     sector: u64,
     buf: &mut [u8]
 ) -> Result<usize, &'static str> {
+    let slot = pci_dev.blk_slot;
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
 
     // Phase 1: Set up and submit request (under PCI lock)
     let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
-        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+        let _guard = crate::drivers::virtio::PCI_BLK_LOCKS[slot].lock_irqsave();
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
         // Get configured VirtQueue (mutable reference)
-        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
             Some(q) => q,
             None => return Err("No configured VirtQueue found"),
         };
@@ -1087,22 +1205,17 @@ fn read_block_once(
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // Convert virtual addresses to physical addresses
-        #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64)
         ).0;
 
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
-        #[cfg(feature = "riscv64")]
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+        let data_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let data_phys_addr = buf.as_ptr() as u64;
 
         // Set request header descriptor
         virt_queue.set_desc(
@@ -1132,7 +1245,7 @@ fn read_block_once(
         );
 
         // Get current expected value (used.idx expected value before submit)
-        let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+        let prev_expected = crate::drivers::virtio::get_expected_used_idx_at(slot);
 
         // Reserve OUR ordinal slot (submission order) + verify the chain's
         // descriptor window does not overlap a live pending/tombstone
@@ -1141,6 +1254,7 @@ fn read_block_once(
         // would be misattributed). "Not reservable" = walker lag — the
         // outer retry drains completions and tries again.
         if !crate::drivers::virtio::pci_pending_slot_reservable(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1157,7 +1271,7 @@ fn read_block_once(
         virt_queue.submit(header_desc_idx);
 
         // Increment expected used.idx (track our expected completion count)
-        crate::drivers::virtio::increment_expected_used_idx();
+        crate::drivers::virtio::increment_expected_used_idx_at(slot);
 
         // Publish a NULL-completion reservation ("tombstone") for this
         // synchronous chain AT ITS ORDINAL SLOT: keeps the chain's
@@ -1169,6 +1283,7 @@ fn read_block_once(
         // the BLK lock here — the walker cannot observe the used-ring
         // advance first, and the reservation above cannot be lost.
         crate::drivers::virtio::pci_publish_sync_chain(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1186,11 +1301,12 @@ fn read_block_once(
     // wait_for_used_interruptible)
     let new_used = VirtQueue::wait_for_used_interruptible(
         used_ring_ptr,
-        crate::drivers::virtio::get_pci_blk_wait_queue(),
+        crate::drivers::virtio::get_pci_blk_wait_queue(slot),
         prev_expected,
         // SAFETY: resp_ptr was allocated above and stays owned by this
         // frame until the wait returns; the wait only reads its status.
         unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
+        slot,
     );
 
     // Phase 3: Check response
@@ -1217,8 +1333,8 @@ fn read_block_once(
             // eventual consumption pairs the leaked-chain accounting, and
             // record the leak so (a) the in-flight guard stops counting it
             // and (b) the caller's retry cannot reuse its slots.
-            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(prev_expected);
-            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
+            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(slot, prev_expected);
+            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue_at(slot) {
                 vq.note_timed_out_chain();
             }
             return Err("VirtIO request timeout");
@@ -1250,6 +1366,7 @@ pub fn write_block_using_configured_queue(
     sector: u64,
     buf: &[u8]
 ) -> Result<usize, &'static str> {
+    let slot = pci_dev.blk_slot;
     // Add retry mechanism to resolve VirtIO block device random timeout issues
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
@@ -1265,7 +1382,7 @@ pub fn write_block_using_configured_queue(
                     return Err(e);
                 }
                 // Drain completions before retrying (see the read path).
-                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_blk_kick(slot);
                 crate::drivers::virtio::pci_process_async_completions();
                 // Short delay before retry
                 for _ in 0..10000 {
@@ -1278,19 +1395,20 @@ pub fn write_block_using_configured_queue(
 
 /// Single write attempt using pre-configured VirtQueue
 fn write_block_once(
-    _pci_dev: &VirtIOPCI,
+    pci_dev: &VirtIOPCI,
     sector: u64,
     buf: &[u8]
 ) -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
+    let slot = pci_dev.blk_slot;
 
     // Phase 1: Set up and submit request (under PCI lock)
     let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
-        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+        let _guard = crate::drivers::virtio::PCI_BLK_LOCKS[slot].lock_irqsave();
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
         // Get configured VirtQueue (mutable reference)
-        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
             Some(q) => q,
             None => return Err("No configured VirtQueue found"),
         };
@@ -1349,22 +1467,17 @@ fn write_block_once(
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // Convert virtual addresses to physical addresses
-        #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(header_ptr as u64)
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(resp_ptr as u64)
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64)
         ).0;
 
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
-        #[cfg(feature = "riscv64")]
-        let data_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
-            crate::arch::riscv64::mm::VirtAddr::new(buf.as_ptr() as u64)
+        let data_phys_addr = crate::arch::mm::virt_to_phys(
+            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let data_phys_addr = buf.as_ptr() as u64;
 
         // Set request header descriptor (device reads this)
         virt_queue.set_desc(
@@ -1394,11 +1507,12 @@ fn write_block_once(
         );
 
         // Get current expected value (used.idx expected value before submit)
-        let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+        let prev_expected = crate::drivers::virtio::get_expected_used_idx_at(slot);
 
         // Reserve OUR ordinal slot + verify the window before submitting
         // (same discipline as the read path — see read_block_once).
         if !crate::drivers::virtio::pci_pending_slot_reservable(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1415,12 +1529,13 @@ fn write_block_once(
         virt_queue.submit(header_desc_idx);
 
         // Increment expected used.idx (track our expected completion count)
-        crate::drivers::virtio::increment_expected_used_idx();
+        crate::drivers::virtio::increment_expected_used_idx_at(slot);
 
         // Publish a NULL-completion reservation ("tombstone") for this
         // synchronous chain AT ITS ORDINAL SLOT (same discipline as the
         // read path — see read_block_once).
         crate::drivers::virtio::pci_publish_sync_chain(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1438,11 +1553,12 @@ fn write_block_once(
     // wait_for_used_interruptible)
     let new_used = VirtQueue::wait_for_used_interruptible(
         used_ring_ptr,
-        crate::drivers::virtio::get_pci_blk_wait_queue(),
+        crate::drivers::virtio::get_pci_blk_wait_queue(slot),
         prev_expected,
         // SAFETY: resp_ptr was allocated above and stays owned by this
         // frame until the wait returns; the wait only reads its status.
         unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
+        slot,
     );
 
     // Phase 3: Check response
@@ -1466,8 +1582,8 @@ fn write_block_once(
         if !late {
             // True timeout (10s deadline expired) — flag the tombstone and
             // leak-note the chain (same pairing as the read path).
-            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(prev_expected);
-            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
+            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(slot, prev_expected);
+            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue_at(slot) {
                 vq.note_timed_out_chain();
             }
             return Err("VirtIO write request timeout");
@@ -1500,14 +1616,15 @@ fn write_block_once(
 /// # Returns
 /// Ok(0) when the device acknowledges the flush.
 pub fn flush_block_using_configured_queue(
-    _pci_dev: &VirtIOPCI,
+    pci_dev: &VirtIOPCI,
 ) -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
 
+    let slot = pci_dev.blk_slot;
     const MAX_RETRIES: usize = 5;
     let mut retries = 0;
     loop {
-        match flush_block_once() {
+        match flush_block_once(slot) {
             Ok(n) => return Ok(n),
             Err(e) => {
                 retries += 1;
@@ -1515,7 +1632,7 @@ pub fn flush_block_using_configured_queue(
                     return Err(e);
                 }
                 // Drain completions before retrying (see the read path).
-                crate::drivers::virtio::pci_blk_kick();
+                crate::drivers::virtio::pci_blk_kick(slot);
                 crate::drivers::virtio::pci_process_async_completions();
                 for _ in 0..10000 {
                     core::hint::spin_loop();
@@ -1526,15 +1643,15 @@ pub fn flush_block_using_configured_queue(
 }
 
 /// Single flush attempt using the pre-configured VirtQueue.
-fn flush_block_once() -> Result<usize, &'static str> {
+fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
-    use crate::arch::riscv64::mm::VirtAddr;
+    use crate::arch::mm::VirtAddr;
 
     let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
-        let _guard = crate::drivers::virtio::VIRTIO_PCI_BLK_LOCK.lock_irqsave();
+        let _guard = crate::drivers::virtio::PCI_BLK_LOCKS[slot].lock_irqsave();
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
-        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut() {
+        let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
             Some(q) => q,
             None => return Err("No configured VirtQueue found"),
         };
@@ -1577,18 +1694,12 @@ fn flush_block_once() -> Result<usize, &'static str> {
         const VIRTQ_DESC_F_NEXT: u16 = 1;
         const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-        #[cfg(feature = "riscv64")]
-        let header_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let header_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(header_ptr as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let header_phys_addr = header_ptr as u64;
-        #[cfg(feature = "riscv64")]
-        let resp_phys_addr = crate::arch::riscv64::mm::virt_to_phys(
+        let resp_phys_addr = crate::arch::mm::virt_to_phys(
             VirtAddr::new(resp_ptr as u64)
         ).0;
-        #[cfg(not(feature = "riscv64"))]
-        let resp_phys_addr = resp_ptr as u64;
 
         virt_queue.set_desc(
             header_desc_idx,
@@ -1605,13 +1716,14 @@ fn flush_block_once() -> Result<usize, &'static str> {
             0,
         );
 
-        let prev_expected = crate::drivers::virtio::get_expected_used_idx();
+        let prev_expected = crate::drivers::virtio::get_expected_used_idx_at(slot);
 
         // Reserve OUR ordinal slot + verify the window before submitting
         // (same discipline as the read/write paths; a FLUSH chain is only
         // 2 descriptors wide, covered conservatively by the 3-wide window
         // check).
         if !crate::drivers::virtio::pci_pending_slot_reservable(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1625,12 +1737,13 @@ fn flush_block_once() -> Result<usize, &'static str> {
         }
 
         virt_queue.submit(header_desc_idx);
-        crate::drivers::virtio::increment_expected_used_idx();
+        crate::drivers::virtio::increment_expected_used_idx_at(slot);
 
         // Publish the sync-chain tombstone at its ordinal slot (same
         // discipline as the read/write paths): the flush's used-ring
         // entry must be consumed as OURS, never misattributed.
         crate::drivers::virtio::pci_publish_sync_chain(
+            slot,
             virt_queue.queue_size as u32,
             prev_expected,
             header_desc_idx,
@@ -1642,11 +1755,12 @@ fn flush_block_once() -> Result<usize, &'static str> {
 
     let new_used = VirtQueue::wait_for_used_interruptible(
         used_ring_ptr,
-        crate::drivers::virtio::get_pci_blk_wait_queue(),
+        crate::drivers::virtio::get_pci_blk_wait_queue(slot),
         prev_expected,
         // SAFETY: resp_ptr was allocated above and stays owned by this
         // frame until the wait returns; the wait only reads its status.
         unsafe { core::ptr::addr_of!((*resp_ptr).status) as *const u8 },
+        slot,
     );
 
     if new_used == prev_expected {
@@ -1667,8 +1781,8 @@ fn flush_block_once() -> Result<usize, &'static str> {
         if !late {
             // True timeout (10s deadline expired) — flag the tombstone and
             // leak-note the chain (same pairing as the read path).
-            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(prev_expected);
-            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue() {
+            crate::drivers::virtio::pci_flag_sync_tombstone_timed_out(slot, prev_expected);
+            if let Some(vq) = crate::drivers::virtio::get_pci_device_queue_at(slot) {
                 vq.note_timed_out_chain();
             }
             return Err("VirtIO flush request timeout");
@@ -1686,4 +1800,170 @@ fn flush_block_once() -> Result<usize, &'static str> {
         crate::drivers::virtio::queue::status::VIRTIO_BLK_S_OK => Ok(0),
         _ => Err("VirtIO block flush I/O error"),
     }
+}
+
+// ============================================================================
+// x86_64/q35 PCI INTx dispatch (minimal viable PCI IRQ path)
+//
+// q35 routes every virtio-pci function's INTx through the ICH9 PIRQ router
+// onto a PIC line (SeaBIOS programs the router AND the device's INT_LINE —
+// observed values 10/11 with several functions sharing each line). The
+// kernel's IRQ entry for PIC lines (arch::x86_64::trap) takes one `fn()`
+// per line with no sharing, so virtio devices register (ISR capability
+// address, service fn) pairs here and ONE dispatcher per claimed line
+// polls them all:
+//
+//   IRQ 10/11 → intx_dispatch() → for each registered device:
+//       read ISR cap (drops that device's level INTx assertion);
+//       if nonzero → service() (raise the device's softirq).
+//
+// The LAPIC/IOAPIC (GSI) path is x86-smp territory; this PIC path stays
+// until that lands.
+// ============================================================================
+
+/// Block-completion service: hand used-ring processing to the Block
+/// softirq (same bottom half the PLIC top half raises on riscv64).
+#[cfg(feature = "x86_64")]
+pub fn intx_blk_service() {
+    crate::interrupt::softirq::raise_softirq_irqoff(
+        crate::interrupt::softirq::SoftirqIndex::Block as usize,
+    );
+}
+
+#[cfg(feature = "x86_64")]
+mod intx {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// Registered virtio-pci functions per shared PIC line. 8 covers the
+    /// q35 device set with headroom.
+    const MAX_DEVICES: usize = 8;
+
+    /// (ISR capability address, service fn) pairs. The address doubles as
+    /// the occupancy marker (0 = free slot).
+    static ISR_ADDRS: [AtomicU64; MAX_DEVICES] =
+        [const { AtomicU64::new(0) }; MAX_DEVICES];
+    static SERVICES: [AtomicU64; MAX_DEVICES] =
+        [const { AtomicU64::new(0) }; MAX_DEVICES];
+
+    /// PIC lines already hooked by `intx_dispatch`.
+    static LINES_HOOKED: [AtomicBool; 16] = [const { AtomicBool::new(false) }; 16];
+
+    /// One-shot boot diagnostic: the first PCI INTx interrupt delivered
+    /// proves the SeaBIOS PIRQ routing + PIC delivery path end to end.
+    /// Its absence pinpoints a broken routing (firmware INT_LINE lies,
+    /// line masked, ExtINT gate off).
+    static FIRST_DELIVERY: AtomicBool = AtomicBool::new(true);
+
+    /// Per-slot one-shot: log the first INTx event each polling-driven
+    /// device (ack-only service) delivers, so "who asserted the shared
+    /// line" is visible in the boot log without a real bottom half.
+    static ACK_ONLY_LOGGED: [AtomicBool; MAX_DEVICES] =
+        [const { AtomicBool::new(false) }; MAX_DEVICES];
+
+    /// Shared per-line top half. Registered via
+    /// arch::x86_64::trap::request_irq_line (which also unmasks the line).
+    fn intx_dispatch() {
+        if FIRST_DELIVERY.swap(false, Ordering::AcqRel) {
+            crate::pr_info!("virtio-pci: first PCI INTx interrupt delivered");
+        }
+        for i in 0..MAX_DEVICES {
+            let isr_addr = ISR_ADDRS[i].load(Ordering::Acquire);
+            if isr_addr == 0 {
+                continue;
+            }
+            // SAFETY: registered addresses point at a virtio-pci ISR
+            // capability (MMIO, 1 meaningful byte); the read is the
+            // device-side interrupt acknowledge per virtio 1.0 spec 4.1.4.5
+            // and returns 0 when this device did not assert the line.
+            let isr = unsafe { core::ptr::read_volatile(isr_addr as *const u32) } & 0x3;
+            if isr != 0 {
+                let svc = SERVICES[i].load(Ordering::Acquire);
+                if svc != 0 {
+                    // One-shot visibility for polling-driven devices: their
+                    // events are consumed by poll loops, not this service.
+                    if svc == super::intx_ack_only_service as u64
+                        && !ACK_ONLY_LOGGED[i].swap(true, Ordering::AcqRel)
+                    {
+                        crate::pr_info!(
+                            "virtio-pci: INTx event for polling device (ISR @{:#x}) - acked",
+                            isr_addr
+                        );
+                    }
+                    // SAFETY: nonzero values were stored from fn pointers
+                    // by `register`.
+                    let f: fn() = unsafe { core::mem::transmute(svc) };
+                    f();
+                }
+            }
+        }
+    }
+
+    /// Add (isr_addr, service) to the shared registry and hook the PIC
+    /// line on first use. Registration happens during single-threaded
+    /// boot bring-up, before `sti`; the atomics keep the dispatcher's
+    /// reads race-free anyway.
+    ///
+    /// Re-registering an already-known `isr_addr` UPDATES the service in
+    /// place (construction installs `intx_ack_only_service`, drivers
+    /// later upgrade their slot to a real bottom-half raise) instead of
+    /// consuming a second slot for the same function.
+    pub fn register(int_line: u8, isr_addr: u64, service: fn()) -> bool {
+        // Upgrade path first: one slot per virtio function.
+        for i in 0..MAX_DEVICES {
+            if ISR_ADDRS[i].load(Ordering::Acquire) == isr_addr {
+                SERVICES[i].store(service as u64, Ordering::Release);
+                return hook_line(int_line);
+            }
+        }
+
+        let mut slot = usize::MAX;
+        for i in 0..MAX_DEVICES {
+            if ISR_ADDRS[i]
+                .compare_exchange(0, isr_addr, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                SERVICES[i].store(service as u64, Ordering::Release);
+                slot = i;
+                break;
+            }
+        }
+        if slot == usize::MAX {
+            crate::pr_err!("virtio-pci: INTx registry full");
+            return false;
+        }
+
+        if !hook_line(int_line) {
+            // Line taken by a non-virtio owner: back the entry out.
+            ISR_ADDRS[slot].store(0, Ordering::Release);
+            SERVICES[slot].store(0, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    /// Hook `intx_dispatch` onto a PIC line on first use (idempotent via
+    /// LINES_HOOKED; returns false when the line is owned by a non-virtio
+    /// handler).
+    fn hook_line(int_line: u8) -> bool {
+        if !LINES_HOOKED[int_line as usize].swap(true, Ordering::AcqRel) {
+            if !crate::arch::x86_64::trap::request_irq_line(int_line, intx_dispatch) {
+                LINES_HOOKED[int_line as usize].store(false, Ordering::Release);
+                crate::pr_err!("virtio-pci: PIC line {} unavailable", int_line);
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Default INTx service for functions whose driver is polling-based
+/// (virtio-gpu command completion, virtio-input event queues): the
+/// dispatcher's ISR-capability read has already acknowledged the device —
+/// this hook exists so those completions are visible in the boot log once
+/// (which function asserted) without a real bottom half.
+#[cfg(feature = "x86_64")]
+pub fn intx_ack_only_service() {
+    // Intentionally empty: the dispatcher's ISR read already acknowledged
+    // the asserting device (the whole point of the default registration).
+    // `intx_dispatch` logs, once per device, which function arrived here.
 }

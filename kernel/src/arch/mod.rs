@@ -4,39 +4,51 @@
 //!
 //! Architecture-specific code
 //!
-//! Currently supported architectures:
-//! - **RISC-V (riscv64)** - Primary supported platform, enabled by default
+//! # Architecture interface layer
 //!
-//! Unsupported architectures:
-//! - aarch64 (ARM64) - Removed, not maintained
-//! - x86_64 - Not implemented
+//! Code outside `arch/` must depend only on `crate::arch::<item>` — never on
+//! a concrete backend (`crate::arch::...`). The backend is selected
+//! by cargo feature; this module re-exports the backend's module tree so the
+//! interface is a path-compatible set of items:
+//!
+//! - `arch::{uaccess, mm, cpu, pt_regs, smp, thread, trap, boot, ipi,
+//!   context, process}` — per-arch implementations of the same surface
+//! - `arch::{arch_init, init, enable_interrupts, cpu_id, context_switch}` —
+//!   top-level entry points
+//!
+//! A new backend implements the same module tree with matching signatures;
+//! adding a symbol to the interface requires both backends to provide it.
 
-// RISC-V architecture (currently the default and only supported architecture)
+// ---------------------------------------------------------------------------
+// Backends
+// ---------------------------------------------------------------------------
+
 #[cfg(feature = "riscv64")]
 pub mod riscv64;
 
-// Export trap module
-#[cfg(feature = "riscv64")]
-pub use riscv64::trap;
+#[cfg(feature = "x86_64")]
+pub mod x86_64;
 
-// Export smp module
-#[cfg(feature = "riscv64")]
-pub use riscv64::smp;
+// ---------------------------------------------------------------------------
+// Interface: re-export the active backend's surface
+// ---------------------------------------------------------------------------
 
-// Export ipi module
 #[cfg(feature = "riscv64")]
-pub use riscv64::ipi;
+pub use riscv64::{
+    arch_init, cpu_id, enable_interrupts, init, boot, context, cpu, ipi, mm, process, pt_regs,
+    smp, thread, trap, uaccess,
+};
 
-// Export cpu_id function
+#[cfg(feature = "x86_64")]
+pub use x86_64::{
+    arch_init, cpu_id, enable_interrupts, init, boot, context, cpu, ipi, mm, process, pt_regs,
+    smp, thread, trap, uaccess,
+};
+
+/// Direct switch of context (see backend `context` module for the exact
+/// semantics; both backends expose `context_switch` with the same signature).
 #[cfg(feature = "riscv64")]
-pub use riscv64::smp::cpu_id;
+pub use riscv64::context::context_switch;
 
-// Export context module
-#[cfg(feature = "riscv64")]
-pub use riscv64::context::{self, context_switch};
-
-// syscall module has moved to kernel/src/syscall/
-
-// Export mm module
-#[cfg(feature = "riscv64")]
-pub use riscv64::mm;
+#[cfg(feature = "x86_64")]
+pub use x86_64::context::context_switch;

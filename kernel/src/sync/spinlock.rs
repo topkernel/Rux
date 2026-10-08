@@ -10,9 +10,9 @@
 //!   lock_irqsave()  — save interrupt state + disable + preempt disable + lock
 //!   lock_bh()       — disable bottom-half (softirq) + lock
 //!
-//! Backend: TAS (test-and-set) via compare_exchange.
+//! Backend: TTAS (test-and-test-and-set) via compare_exchange.
 //! Ticket lock causes interactive-input deadlock on QEMU
-//! (likely QEMU's amoadd.w emulation bug), so TAS is used for now.
+//! (likely QEMU's amoadd.w emulation bug), so TTAS is used for now.
 //!
 //! # Safety Invariants — Lock Ordering & Deadlock Prevention
 //!
@@ -64,7 +64,30 @@ use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(feature = "dfx-lock-owner")]
 use core::sync::atomic::AtomicUsize;
 
-// ==================== RawSpinlock (TAS) ====================
+// ==================== RawSpinlock (TTAS) ====================
+
+/// Capture this function's return address (the spinlock call site) for
+/// deadlock diagnostics.
+#[inline]
+fn caller_return_address() -> usize {
+    let ra: usize;
+    #[cfg(feature = "riscv64")]
+    // SAFETY: pure register read, no memory access or side effects.
+    unsafe {
+        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
+    }
+    #[cfg(feature = "x86_64")]
+    // SAFETY: frame pointers are forced on, so [rbp+8] is the return
+    // address of this inlined function's caller.
+    unsafe {
+        core::arch::asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack));
+    }
+    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+    {
+        ra = 0;
+    }
+    ra
+}
 
 pub struct RawSpinlock {
     locked: AtomicU32,
@@ -90,7 +113,7 @@ impl RawSpinlock {
     #[inline]
     #[cfg(feature = "dfx-lock-owner")]
     fn record_owner(&self) {
-        self.owner.store(crate::arch::riscv64::smp::cpu_id() + 1, Ordering::Relaxed);
+        self.owner.store(crate::arch::smp::cpu_id() + 1, Ordering::Relaxed);
     }
 
     /// Clear the holder (dfx-lock-owner feature only).
@@ -111,22 +134,34 @@ impl RawSpinlock {
     /// Spinlock deadlock threshold (iterations before warning).
     /// On SMP with QEMU emulation, brief contention is normal — PLIC IRQ
     /// claim/release, GRQ lock, etc. can take 10-100ms of spin time.
-    /// 100M iterations ≈ 100-500ms depending on CAS latency.
+    /// 100M iterations ≈ 100-500ms depending on load/CAS latency.
     const DEADLOCK_WARN_ITERS: u32 = 100_000_000;
 
     #[inline(never)]
     pub fn lock(&self) {
         // Capture caller's return address before spinning
-        let caller_ra: usize;
-        unsafe { core::arch::asm!("mv {}, ra", out(reg) caller_ra, lateout("x1") _, options(nomem, nostack)); }
+        let caller_ra = caller_return_address();
         let mut spins: u32 = 0;
-        while self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_err() {
-            spins = spins.wrapping_add(1);
-            if spins == Self::DEADLOCK_WARN_ITERS {
-                Self::deadlock_warn(self as *const Self, caller_ra);
-                spins = 0; // continue spinning (might resolve)
+        // TTAS (test-and-test-and-set, C7): one CAS to acquire; while
+        // contended, spin on a plain Relaxed load until the word reads
+        // free, then retry the CAS. Relaxed is sufficient for the spin
+        // load: it only decides WHEN to retry — the acquiring CAS pairs
+        // with the holder's Release store in unlock() and provides all
+        // necessary synchronization. The old tight CAS loop kept issuing
+        // an atomic RMW on every iteration, hammering the cacheline (and
+        // the QEMU TCG atomic slow path) for the whole hold duration.
+        loop {
+            if self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
+                break;
             }
-            core::hint::spin_loop();
+            while self.locked.load(Ordering::Relaxed) != 0 {
+                spins = spins.wrapping_add(1);
+                if spins == Self::DEADLOCK_WARN_ITERS {
+                    Self::deadlock_warn(self as *const Self, caller_ra);
+                    spins = 0; // continue spinning (might resolve)
+                }
+                core::hint::spin_loop();
+            }
         }
         // Diagnostics: record the holder AFTER the acquire (a spinner's
         // watchdog may read a stale 0 in the tiny window — acceptable).
@@ -136,14 +171,14 @@ impl RawSpinlock {
     /// Print deadlock warning via SBI (works even with interrupts disabled).
     fn deadlock_warn(lock_addr: *const Self, caller_ra: usize) {
         // Use SBI putchar directly — printk might need locks we're spinning on
-        let cpu = crate::arch::riscv64::smp::cpu_id();
+        let cpu = crate::arch::smp::cpu_id();
         let msg = b"DEADLOCK: spinlock stuck cpu=";
         for &b in msg {
             unsafe { crate::console::putchar_no_lock(b); }
         }
         // Print CPU id as decimal digit
         if cpu < 10 {
-            unsafe { sbi_rt::legacy::console_putchar(b'0' as usize + cpu); }
+            unsafe { crate::console::putchar_no_lock(b'0' + cpu as u8); }
         }
         // Print lock address in hex
         let msg2 = b" lock=0x";
@@ -528,12 +563,12 @@ fn preempt_enable() {
 
 #[inline]
 fn irq_save() -> bool {
-    crate::arch::riscv64::cpu::save_and_disable_irq()
+    crate::arch::cpu::save_and_disable_irq()
 }
 
 #[inline]
 fn irq_restore(flags: bool) {
-    crate::arch::riscv64::cpu::restore_irq(flags);
+    crate::arch::cpu::restore_irq(flags);
 }
 
 #[inline]

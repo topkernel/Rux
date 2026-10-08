@@ -5,7 +5,7 @@
 
 // Test: SMP multi-core startup
 use crate::println;
-use crate::arch::riscv64::smp;
+use crate::arch::smp;
 use crate::config::MAX_CPUS;
 use alloc::format;
 use super::{test_pass, test_group_start};

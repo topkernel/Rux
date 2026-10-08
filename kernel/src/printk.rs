@@ -216,7 +216,7 @@ pub fn printk(level: u8, args: fmt::Arguments) {
 
     // Write to ring buffer (if initialized)
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
-        let timestamp = crate::drivers::intc::clint::read_time();
+        let timestamp = crate::arch::cpu::read_time();
         write_to_ring_buffer(level, &buf[..text_len], timestamp);
     }
 
@@ -291,7 +291,7 @@ fn printk_bytes(level: u8, text: &[u8]) {
 
     // Write to ring buffer (if initialized)
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
-        let timestamp = crate::drivers::intc::clint::read_time();
+        let timestamp = crate::arch::cpu::read_time();
         write_to_ring_buffer(level, text, timestamp);
     }
 
@@ -647,7 +647,7 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
     if maxlen == 0 || bufp.is_null() {
         return -(crate::syscall::errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(bufp as usize, maxlen) {
+    if !crate::arch::uaccess::access_ok(bufp as usize, maxlen) {
         return -(crate::syscall::errno::EFAULT as i64);
     }
     // Bound the transfer: maxlen is user-controlled and must never drive an
@@ -704,7 +704,7 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
 
     if produced > 0 {
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_to_user(bufp, kbuf.as_ptr(), produced)
+            crate::arch::uaccess::copy_to_user(bufp, kbuf.as_ptr(), produced)
         };
         if uncopied > 0 {
             return -(crate::syscall::errno::EFAULT as i64);
@@ -721,7 +721,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
     if maxlen == 0 || bufp.is_null() {
         return -(crate::syscall::errno::EINVAL as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(bufp as usize, maxlen) {
+    if !crate::arch::uaccess::access_ok(bufp as usize, maxlen) {
         return -(crate::syscall::errno::EFAULT as i64);
     }
     // Bound the transfer and stage into a kernel buffer: writing directly to
@@ -789,7 +789,7 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
 
     if produced > 0 {
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_to_user(bufp, kbuf.as_ptr(), produced)
+            crate::arch::uaccess::copy_to_user(bufp, kbuf.as_ptr(), produced)
         };
         if uncopied > 0 {
             return -(crate::syscall::errno::EFAULT as i64);

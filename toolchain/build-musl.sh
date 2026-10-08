@@ -86,6 +86,7 @@ build_musl() {
         --target=riscv64-linux-musl \
         --prefix="${INSTALL_DIR}" \
         --disable-gcc-wrapper \
+        CFLAGS="-march=rv64gc_zicsr -O2" \
         CROSS_COMPILE=riscv64-linux-gnu-
 
     # Compile

@@ -103,7 +103,9 @@ make build                          # Build
 make run                            # Run
 ```
 
-**Note**: ARM64 (aarch64) has been removed. x86_64 is not planned.
+**Note**: ARM64 (aarch64) has been removed. x86_64 (q35) joined riscv64
+as a supported platform on 2026-10-07 — boots Ubuntu 22.04 amd64;
+build with `PLATFORM=x86_64 make build`.
 
 ## Troubleshooting
 

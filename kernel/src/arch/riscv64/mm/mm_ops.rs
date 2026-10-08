@@ -1638,7 +1638,7 @@ pub unsafe fn copy_page_table_cow(
                 };
 
                 (*child_table0_ref).set(vpn0, new_pte);
-                crate::arch::riscv64::mm::mmu_init::pte_install_log(
+                crate::arch::mm::mmu_init::pte_install_log(
                     child_root_ppn,
                     (vpn2 << 30) as u64 | ((vpn1 as u64) << 21) | ((vpn0 as u64) << 12),
                     new_pte.ppn(),
@@ -1657,7 +1657,7 @@ pub unsafe fn copy_page_table_cow(
     // reads resurrected pre-fork page contents. PTE permission changes on
     // a live mm require a TLB shootdown on ALL harts (Linux
     // flush_tlb_mm-style): IPI the peers, full-flush locally.
-    crate::arch::riscv64::ipi::flush_tlb_others();
+    crate::arch::ipi::flush_tlb_others();
     asm!("sfence.vma zero, zero", options(nostack, preserves_flags));
 
     Some(child_root_ppn)
@@ -1776,7 +1776,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultR
         // entry down on all peers (the local flush below covers this hart;
         // the remote handler takes no locks, so doing this under
         // PTE_MODIFY_LOCK cannot deadlock).
-        crate::arch::riscv64::ipi::flush_tlb_others();
+        crate::arch::ipi::flush_tlb_others();
         let vaddr = virt_addr;
         asm!(
             "fence",
@@ -1828,7 +1828,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultR
     // splitting the task's memory view (kernel writes reach the new page,
     // user reads/writes from the stale hart hit the old one — the
     // lost-write/stale-read family behind the sigsuspend mask corruption).
-    crate::arch::riscv64::ipi::flush_tlb_others();
+    crate::arch::ipi::flush_tlb_others();
     asm!("sfence.vma zero, zero");
 
     // Now safe to release our share of the old page.

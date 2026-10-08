@@ -62,8 +62,17 @@ cd "$TOYBOX_DIR"
 # Set cross-compile environment variables - using musl libc
 # Include musl headers and system linux/asm headers
 export CC=riscv64-linux-gnu-gcc
-export CFLAGS="-static -nostdinc -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include"
-export LDFLAGS="-static -nostdlib -L${MUSL_DIR}/lib ${MUSL_DIR}/lib/crt1.o ${MUSL_DIR}/lib/crti.o -lgcc ${MUSL_DIR}/lib/crtn.o -lc -lgcc"
+export CFLAGS="-static -march=rv64gc_zicsr -nostdinc -isystem ${MUSL_DIR}/include -isystem /usr/riscv64-linux-gnu/include -isystem /usr/include"
+# BUG-S005: pin-clean soft-fp overlay preempts Ubuntu libgcc's zcb-bearing
+# __*tf3/__floatsitf members (see ../soft-fp/README.md).
+"${SCRIPT_DIR}/../build-softfp.sh"
+SOFTFP_DIR="${SCRIPT_DIR}/../soft-fp"
+# The overlay must flank every -lgcc: toybox's own objects reference
+# __extend*tf2 directly (resolved by the FIRST -lgcc), while libc.a members
+# reference the __*tf3 set (resolved by the TRAILING -lgcc after -lc). Only
+# symbols already undefined when an archive is scanned get extracted, so the
+# overlay is named before each -lgcc to win both resolutions.
+export LDFLAGS="-static -nostdlib -L${MUSL_DIR}/lib ${MUSL_DIR}/lib/crt1.o ${MUSL_DIR}/lib/crti.o -L${SOFTFP_DIR} -lsoftfp-pin -lgcc ${MUSL_DIR}/lib/crtn.o -lc -L${SOFTFP_DIR} -lsoftfp-pin -lgcc"
 
 echo ""
 echo "Configuring toybox..."
@@ -111,6 +120,11 @@ make -j$(nproc)
 
 # Verify build result
 if [ -f "$TOYBOX_DIR/toybox" ]; then
+    # BUG-S005 gate: reject the binary if a zcb-capable member got linked.
+    if riscv64-linux-gnu-readelf -A "$TOYBOX_DIR/toybox" | grep -qE "zcb1p0|zicond1p0"; then
+        echo "Error: toybox still carries zcb/zicond attributes (unpinned libgcc member linked)" >&2
+        exit 1
+    fi
     echo ""
     echo "========================================"
     echo "Toybox built successfully!"

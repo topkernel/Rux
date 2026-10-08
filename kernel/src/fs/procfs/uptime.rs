@@ -57,18 +57,10 @@ pub fn generate() -> Vec<u8> {
     content.into_bytes()
 }
 
-/// Read time cycles from RISC-V timer
+/// Read time cycles from the arch wall-clock counter
 #[inline]
 fn read_time_cycles() -> u64 {
-    let cycles: u64;
-    unsafe {
-        core::arch::asm!(
-            "rdtime {}",
-            out(reg) cycles,
-            options(nostack, readonly)
-        );
-    }
-    cycles
+    crate::arch::cpu::read_time()
 }
 
 /// Get boot time in cycles (for internal use)

@@ -811,14 +811,12 @@ pub trait AddressSpaceLayout {
 }
 
 // ============================================================================
-// RISC-V Address Space Layout Implementation
+// Address Space Layout Implementation
 // ============================================================================
 
-/// RISC-V 64-bit Address Space Layout (Sv39 compatible)
-///
-/// Sv39 Address Space:
-/// - User space: 0x0000000000000000 ~ 0x0000003FFFFFFFFF (256GB = TASK_SIZE)
-/// - Kernel space: 0xFFFFFFD600000000 ~ 0xFFFFFFFFFFFFFFFF (high canonical)
+/// Address space layout driven by the arch interface's `user_addr`
+/// constants (riscv64: Sv39 256GB user space; x86_64: 128TB 4-level user
+/// space — each backend publishes the same constant set).
 ///
 /// User space layout:
 /// - 0x0 ~ 0x1000: Null page (unmapped, null pointer guard)
@@ -826,44 +824,45 @@ pub trait AddressSpaceLayout {
 /// - brk area: follows ELF segments, grows up to TASK_SIZE/3
 /// - mmap area: TASK_SIZE/3 ~ TASK_SIZE (top-down allocation)
 /// - Stack: TASK_SIZE - stack_size, grows down
-#[cfg(target_arch = "riscv64")]
-pub struct RiscVAddressSpaceLayout;
+pub struct KernelAddressSpaceLayout;
 
-#[cfg(target_arch = "riscv64")]
-impl AddressSpaceLayout for RiscVAddressSpaceLayout {
+/// Historical name (Sv39 era) — same layout source.
+pub type RiscVAddressSpaceLayout = KernelAddressSpaceLayout;
+
+impl AddressSpaceLayout for KernelAddressSpaceLayout {
     /// User space start address (0, but null page protected)
     #[inline]
     fn user_start() -> usize {
-        crate::arch::riscv64::mm::user_addr::USER_START
+        crate::arch::mm::user_addr::USER_START
     }
 
     /// User space end address = TASK_SIZE = 256GB for Sv39
     #[inline]
     fn user_end() -> usize {
-        crate::arch::riscv64::mm::user_addr::TASK_SIZE
+        crate::arch::mm::user_addr::TASK_SIZE
     }
 
     /// Default stack size (8MB)
     #[inline]
     fn default_stack_size() -> usize {
-        crate::arch::riscv64::mm::user_addr::STACK_MAX_SIZE
+        crate::arch::mm::user_addr::STACK_MAX_SIZE
     }
 
     /// Default stack top (TASK_SIZE, stack grows down)
     #[inline]
     fn default_stack_top() -> usize {
-        crate::arch::riscv64::mm::user_addr::STACK_TOP
+        crate::arch::mm::user_addr::STACK_TOP
     }
 
     /// Heap start address (brk default)
     #[inline]
     fn heap_start() -> usize {
-        crate::arch::riscv64::mm::user_addr::BRK_DEFAULT
+        crate::arch::mm::user_addr::BRK_DEFAULT
     }
 
     /// Heap end address (maximum brk can grow to)
     #[inline]
     fn heap_end() -> usize {
-        crate::arch::riscv64::mm::user_addr::BRK_MAX
+        crate::arch::mm::user_addr::BRK_MAX
     }
 }

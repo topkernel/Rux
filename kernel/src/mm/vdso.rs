@@ -90,11 +90,11 @@ pub fn vdso_data_tick() {
 pub fn vdso_pages_phys() -> (u64, u64) {
     let data_va = core::ptr::addr_of!(VDSO_DATA_PAGE) as *const u8 as u64;
     let code_va = core::ptr::addr_of!(VDSO_CODE_PAGE) as *const u8 as u64;
-    let d = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(data_va),
+    let d = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(data_va),
     );
-    let c = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(code_va),
+    let c = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(code_va),
     );
     (d.bits(), c.bits())
 }

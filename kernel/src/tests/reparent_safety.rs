@@ -222,8 +222,8 @@ pub fn test_claim_child() {
 pub fn test_device_window_pte() {
     test_group_start("kernel_device_window_pte");
 
-    use crate::arch::riscv64::mm::mmu_init::kernel_device_window_pte;
-    use crate::arch::riscv64::mm::PageTableEntry;
+    use crate::arch::mm::mmu_init::kernel_device_window_pte;
+    use crate::arch::mm::PageTableEntry;
 
     // PLIC priority page (the gjs cage base): covered, identity-mapped,
     // kernel flags, no U.
@@ -287,12 +287,12 @@ pub fn test_device_window_pte() {
 pub fn test_megapage_demotion() {
     test_group_start("megapage demotion (4K map over 2MB leaf)");
 
-    use crate::arch::riscv64::mm::mm_ops::{
+    use crate::arch::mm::mm_ops::{
         create_user_address_space, PageTableWalker,
     };
-    use crate::arch::riscv64::mm::mmu_init::{free_user_page_tables, map_page};
-    use crate::arch::riscv64::mm::memory_layout::{PhysAddr, VirtAddr};
-    use crate::arch::riscv64::mm::PageTableEntry;
+    use crate::arch::mm::mmu_init::{free_user_page_tables, map_page};
+    use crate::arch::mm::memory_layout::{PhysAddr, VirtAddr};
+    use crate::arch::mm::PageTableEntry;
     use crate::mm::page_alloc::get_zeroed_page;
     use crate::mm::zone::GfpFlags;
 

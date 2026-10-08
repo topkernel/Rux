@@ -126,17 +126,28 @@ fn init_virtio_net(base_addr: u64) -> Result<(), &'static str> {
 /// - `base_addr`: Device MMIO base address
 ///
 /// # Returns
-/// Ok(()) on success, Err(&str) on failure
+/// Ok(()) on success, Err(&'static str) on failure
 fn init_virtio_blk(base_addr: u64) -> Result<(), &'static str> {
     crate::drivers::virtio::init(base_addr)?;
     // Enable device interrupt
     crate::drivers::virtio::enable_device_interrupt(base_addr);
     // U3: registration-time uevent for the (first) virtio-blk disk. The
     // MMIO GenDisk is "virtblk" (minor 0) and surfaces as /dev/vda.
+    // Linux device-model shape (OH Phase 1b): virtio-mmio functions are
+    // platform devices named "<addr>.virtio_mmio" (DT node form), and the
+    // disk lives at /devices/platform/<addr>.virtio_mmio/virtioN/block/vda
+    // — ueventd's /dev/block/by-name walk requires the platform ancestor.
     let capacity = crate::drivers::virtio::get_device()
         .map(|d| d.disk.get_capacity())
         .unwrap_or(0);
-    crate::fs::sysfs::register_block_disk("vda", crate::fs::devfs::VIRTIO_BLK_MAJOR, 0, capacity);
+    let mmio_host = alloc::format!("{:x}.virtio_mmio", base_addr);
+    crate::fs::sysfs::register_block_disk_at(
+        "vda",
+        crate::fs::devfs::VIRTIO_BLK_MAJOR,
+        0,
+        capacity,
+        &[("platform", "platform"), (mmio_host.as_str(), "platform")],
+    );
     Ok(())
 }
 
@@ -180,6 +191,65 @@ pub fn init_network_devices() -> usize {
         device_count += virtio_count;
     }
 
+    // 3. PCI virtio-net (virtio-net-pci). Runs after the MMIO probe: the
+    // eth0 singleton belongs to whichever transport found a device first
+    // (on QEMU virt/riscv64 that is the MMIO function; on x86_64/q35 there
+    // is no virtio-mmio and this is the only path).
+    device_count += init_pci_net_devices();
+
+    device_count
+}
+
+/// Initialize PCI network devices (virtio-net-pci)
+///
+/// # Notes
+/// Probes and initializes the first VirtIO-Net function on the PCI bus
+/// through the shared ECAM walker. The virtio-net layer owns a single
+/// global device/NetDevice pair (same policy as virtio-blk's boot disk).
+///
+/// # Returns
+/// Number of initialized devices
+pub fn init_pci_net_devices() -> usize {
+    // The MMIO probe already published eth0 — leave the singleton alone.
+    if crate::drivers::net::virtio_net::get_device().is_some() {
+        return 0;
+    }
+
+    let ecam_addresses = crate::drivers::pci::find_ecam_devices(
+        crate::drivers::pci::vendor::RED_HAT,
+        &[
+            crate::drivers::pci::virtio_device::VIRTIO_NET,
+            crate::drivers::pci::virtio_device::VIRTIO_NET_MODERN,
+        ],
+    );
+
+    let mut device_count = 0;
+    for ecam_addr in ecam_addresses {
+        match crate::drivers::virtio::virtio_pci::VirtIOPCI::new(ecam_addr) {
+            Ok(mut virtio_dev) => {
+                match crate::drivers::net::virtio_net::init_pci(&mut virtio_dev) {
+                    Ok(()) => {
+                        device_count += 1;
+                        // U3: registration-time uevent — notify udev/mdev
+                        // the netdev exists (device is named "eth0").
+                        crate::fs::sysfs::netdev_uevent("eth0", "add");
+                        break; // single global net device
+                    }
+                    Err(e) => {
+                        crate::pr_err!(
+                            "virtio-net: PCI init failed at {:#x}: {}",
+                            ecam_addr,
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                crate::pr_err!("virtio-net: PCI probe failed at {:#x}: {}", ecam_addr, e);
+            }
+        }
+    }
+
     device_count
 }
 
@@ -199,11 +269,15 @@ pub fn init_block_devices() -> usize {
 /// probe or a hotplug rescan (U4). Rescans only consider new functions.
 static CLAIMED_BLK_ECAM: Spinlock<Vec<u64>> = Spinlock::new(Vec::new());
 
-/// Next minor for a hotplug virtio-blk disk. vda (the boot disk, if any)
-/// holds minor 0; hotplug disks take 16, 32, ... matching the legacy
-/// per-disk minor stride of the 254 major.
-static HOTPLUG_BLK_MINOR: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(16);
+/// Hotplug disk ordinal (index past the boot-probe disks).
+static HOTPLUG_BLK_IDX: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Next minor for a hotplug virtio-blk disk. The boot probe assigns
+/// minors 16*slot to vda..; hotplug disks continue the same stride from
+/// the first free slot. (Boot-probe disks are I/O-wired per slot; rescan
+/// disks beyond MAX_PCI_BLK_DISKS or attached post-boot stay metadata-
+/// complete only — sysfs + uevent + node, no I/O slot.)
 
 /// Initialize PCI block devices
 ///
@@ -228,13 +302,13 @@ pub fn init_pci_block_devices() -> usize {
     );
 
     for ecam_addr in ecam_addresses {
-        // The virtio-blk layer owns ONE vring/GenDisk pair (single global
-        // queue + single GenDisk registry slot). A second full init would
-        // clobber those singletons and silently reroute the ROOT DISK's
-        // I/O to the new device — claim only the first function at boot;
-        // additional functions stay for the runtime rescan path
-        // (pci_rescan_block_hotplug: metadata bring-up + sysfs + uevent).
-        if device_count > 0 {
+        // OH Phase 1b (multi-disk): every virtio-blk function gets its own
+        // slot — own vring, BLK lock, sync wait queue, pending table and
+        // GenDisk (the per-slot arrays in virtio/mod.rs replaced the old
+        // singletons). Disks are named vda, vdb, ... in ECAM enumeration
+        // order; root= resolves the boot disk by that name. Up to
+        // MAX_PCI_BLK_DISKS (8) functions; the rest stay for rescan.
+        if device_count >= crate::drivers::virtio::MAX_PCI_BLK_DISKS {
             crate::pr_info!(
                 "virtio-blk: extra function at {:#x} deferred to PCI rescan",
                 ecam_addr
@@ -324,10 +398,20 @@ pub fn init_pci_block_devices() -> usize {
                         Some(virt_queue) => {
                             match virtio_dev.setup_queue(0, &virt_queue) {
                                 Ok(()) => {
-                                    // Store configured VirtQueue to global storage
-                                    crate::drivers::virtio::set_pci_device_queue(virt_queue);
+                                    let slot = device_count;
 
-                                    // Enable device interrupt
+                                    // Stamp the slot BEFORE anything I/O
+                                    // related: the IRQ handler demuxes on
+                                    // it and enable_device_interrupt
+                                    // registers with it as dev_id.
+                                    virtio_dev.blk_slot = slot;
+
+                                    // Store configured VirtQueue to the slot
+                                    crate::drivers::virtio::set_pci_device_queue(slot, virt_queue);
+
+                                    // Enable device interrupt (shared line:
+                                    // several virtio-blk functions can
+                                    // swizzle onto the same INTx IRQ).
                                     virtio_dev.enable_device_interrupt();
 
                                     // Set DRIVER_OK
@@ -338,27 +422,42 @@ pub fn init_pci_block_devices() -> usize {
                                         crate::drivers::virtio::offset::status::DRIVER_OK
                                     );
 
-                                    // Register PCI VirtIO device to global storage
-                                    crate::drivers::virtio::register_pci_device(virtio_dev);
+                                    // Register PCI VirtIO device to the slot
+                                    crate::drivers::virtio::register_pci_device(slot, virtio_dev);
 
-                                    // Register GenDisk wrapper (so ext4 driver can access)
-                                    crate::drivers::virtio::register_pci_gen_disk();
+                                    // Register the disk's GenDisk wrapper
+                                    // (major 8+slot, slot in private_data)
+                                    crate::drivers::virtio::register_pci_gen_disk(slot);
 
                                     // U3: registration-time sysfs entry + "add"
-                                    // uevent (the boot disk is /dev/vda).
-                                    let capacity = crate::drivers::virtio::get_pci_gen_disk()
+                                    // uevent — vd<'a'+slot>, minor 16*slot
+                                    // (the documented per-disk stride of the
+                                    // 254 major). /devices platform shape.
+                                    let letter = b'a' + slot as u8;
+                                    let name = alloc::format!("vd{}", letter as char);
+                                    let capacity = crate::drivers::virtio::get_pci_gen_disk_at(slot)
                                         .map(|d| d.get_capacity())
                                         .unwrap_or(0);
-                                    crate::fs::sysfs::register_block_disk(
-                                        "vda",
+                                    let hier = pci_dev_hierarchy(ecam_addr);
+                                    let chain: alloc::vec::Vec<(&str, &str)> = hier
+                                        .iter()
+                                        .map(|(n, b)| (n.as_str(), *b))
+                                        .collect();
+                                    crate::fs::sysfs::register_block_disk_at(
+                                        &name,
                                         crate::fs::devfs::VIRTIO_BLK_MAJOR,
-                                        0,
+                                        (slot as u32) * 16,
                                         capacity,
+                                        &chain,
                                     );
 
                                     // U4: remember the function for rescan diffing.
                                     CLAIMED_BLK_ECAM.lock().push(ecam_addr);
 
+                                    crate::pr_info!(
+                                        "virtio-blk: {} (slot {}) at {:#x}, {} sectors",
+                                        name, slot, ecam_addr, capacity
+                                    );
                                     device_count += 1;
                                 }
                                 Err(_) => {}
@@ -372,6 +471,41 @@ pub fn init_pci_block_devices() -> usize {
     }
 
     device_count
+}
+
+/// Linux device-model hierarchy for a virtio PCI function at `ecam_addr`
+/// (the sysfs DEVPATH shape — see sysfs::register_block_disk_at). ECAM
+/// layout: addr = ECAM | bus<<20 | dev<<15 | fn<<12.
+///
+/// riscv64 virt: the gpex PCI host controller is a PLATFORM device (DT
+/// node pci@<ecam-base> → "<hex-addr>.pci") and the root bus hangs below
+/// it — matching the real Linux tree
+/// /sys/devices/platform/30000000.pci/pci0000:00/0000:00:0X.0/virtioN.
+/// x86_64 q35: no platform wrapper (/sys/devices/pci0000:00/...), like
+/// real x86 hardware.
+fn pci_dev_hierarchy(ecam_addr: u64) -> alloc::vec::Vec<(alloc::string::String, &'static str)> {
+    let bus = (ecam_addr >> 20) & 0xFF;
+    let dev = (ecam_addr >> 15) & 0x1F;
+    let func = (ecam_addr >> 12) & 0x7;
+    let fn_name = alloc::format!("0000:{:02x}:{:02x}.{}", bus, dev, func);
+    let mut chain: alloc::vec::Vec<(alloc::string::String, &'static str)> =
+        alloc::vec::Vec::new();
+    #[cfg(feature = "riscv64")]
+    {
+        let host = alloc::format!(
+            "{:x}.pci",
+            crate::arch::mm::memory_layout::PCIE_ECAM_BASE
+        );
+        chain.push((alloc::string::String::from("platform"), "platform"));
+        chain.push((host, "platform"));
+        chain.push((alloc::string::String::from("pci0000:00"), "pci"));
+    }
+    #[cfg(not(feature = "riscv64"))]
+    {
+        chain.push((alloc::string::String::from("pci0000:00"), "pci"));
+    }
+    chain.push((fn_name, "pci"));
+    chain
 }
 
 /// Hotplug PCI rescan (U4): `echo 1 > /sys/bus/pci/rescan`.
@@ -453,19 +587,28 @@ pub fn pci_rescan_block_hotplug() -> usize {
         // config region (parsed from the device's PCI capabilities).
         let capacity = unsafe { core::ptr::read_volatile(cfg_base as *const u64) };
 
-        // Assign identity: vdX with minor stride 16 (vda holds minor 0).
-        let minor = HOTPLUG_BLK_MINOR.fetch_add(16, core::sync::atomic::Ordering::SeqCst);
-        if minor > 16 * 25 {
+        // Assign identity: vdX with minor stride 16, continuing past the
+        // boot-probe disks.
+        let idx = {
+            let base = crate::drivers::virtio::pci_blk_disk_count() as u32;
+            HOTPLUG_BLK_IDX.fetch_add(1, core::sync::atomic::Ordering::SeqCst) + base
+        };
+        if idx > 25 {
             break; // cap at vdz
         }
-        let letter = b'a' + (minor / 16) as u8;
+        let minor = idx * 16;
+        let letter = b'a' + idx as u8;
         let name = alloc::format!("vd{}", letter as char);
 
-        let seq = crate::fs::sysfs::register_block_disk(
+        let hier = pci_dev_hierarchy(ecam_addr);
+        let chain: alloc::vec::Vec<(&str, &str)> =
+            hier.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+        let seq = crate::fs::sysfs::register_block_disk_at(
             &name,
             crate::fs::devfs::VIRTIO_BLK_MAJOR,
             minor,
             capacity,
+            &chain,
         );
         CLAIMED_BLK_ECAM.lock().push(ecam_addr);
         found += 1;

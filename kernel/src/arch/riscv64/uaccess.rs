@@ -145,7 +145,7 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 /// return false so callers report EFAULT.
 unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
     use crate::mm::page::VirtAddr as PageVirtAddr;
-    use crate::arch::riscv64::mm::memory_layout::VirtAddr as ArchVirtAddr;
+    use crate::arch::mm::memory_layout::VirtAddr as ArchVirtAddr;
 
     let task = match crate::sched::current() {
         Some(t) => t,
@@ -164,9 +164,9 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
     loop {
         // Already writable?
         if let Some((_ppn, bits)) =
-            crate::arch::riscv64::mm::mm_ops::PageTableWalker::walk(root_ppn, page as u64)
+            crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, page as u64)
         {
-            if bits & crate::arch::riscv64::mm::PageTableEntry::W != 0 {
+            if bits & crate::arch::mm::PageTableEntry::W != 0 {
                 resolved_any = true;
                 if page == last_page { break; }
                 page += 0x1000;
@@ -174,7 +174,7 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
             }
             // Valid but read-only: COW? (COW software bit 8)
             if bits & (1 << 8) != 0 {
-                match crate::arch::riscv64::mm::mm_ops::handle_cow_fault(
+                match crate::arch::mm::mm_ops::handle_cow_fault(
                     root_ppn,
                     ArchVirtAddr::new(page as u64),
                 ) {
@@ -182,11 +182,11 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
                     // mapping changed) between our check and the locked
                     // re-walk — the following write either succeeds or
                     // faults again into the right path. Count as progress.
-                    crate::arch::riscv64::mm::CowFaultResult::Resolved
-                    | crate::arch::riscv64::mm::CowFaultResult::Retry => {
+                    crate::arch::mm::CowFaultResult::Resolved
+                    | crate::arch::mm::CowFaultResult::Retry => {
                         resolved_any = true;
                     }
-                    crate::arch::riscv64::mm::CowFaultResult::OutOfMemory => {}
+                    crate::arch::mm::CowFaultResult::OutOfMemory => {}
                 }
             }
             // Non-COW read-only is a genuine protection fault — give up.
@@ -197,26 +197,26 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
 
         // Not present: demand-map through the fault engine (anonymous
         // write fault / stack growth / file page).
-        match crate::arch::riscv64::mm::page_fault::handle_mm_fault(
+        match crate::arch::mm::page_fault::handle_mm_fault(
             &addr_space,
             ArchVirtAddr::new(page as u64),
-            crate::arch::riscv64::mm::page_fault::FaultFlags::WRITE,
+            crate::arch::mm::page_fault::FaultFlags::WRITE,
         ) {
-            crate::arch::riscv64::mm::page_fault::MmFaultResult::CowPending => {
+            crate::arch::mm::page_fault::MmFaultResult::CowPending => {
                 // handle_cow_fault resolves it
-                match crate::arch::riscv64::mm::mm_ops::handle_cow_fault(
+                match crate::arch::mm::mm_ops::handle_cow_fault(
                     root_ppn,
                     ArchVirtAddr::new(page as u64),
                 ) {
-                    crate::arch::riscv64::mm::CowFaultResult::Resolved
-                    | crate::arch::riscv64::mm::CowFaultResult::Retry => {
+                    crate::arch::mm::CowFaultResult::Resolved
+                    | crate::arch::mm::CowFaultResult::Retry => {
                         resolved_any = true;
                     }
-                    crate::arch::riscv64::mm::CowFaultResult::OutOfMemory => {}
+                    crate::arch::mm::CowFaultResult::OutOfMemory => {}
                 }
             }
-            crate::arch::riscv64::mm::page_fault::MmFaultResult::Handled
-            | crate::arch::riscv64::mm::page_fault::MmFaultResult::AlreadyMapped => {
+            crate::arch::mm::page_fault::MmFaultResult::Handled
+            | crate::arch::mm::page_fault::MmFaultResult::AlreadyMapped => {
                 resolved_any = true;
             }
             _ => {}

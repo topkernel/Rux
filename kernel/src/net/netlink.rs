@@ -558,7 +558,7 @@ fn netlink_wait_round(
         return Err(-12); // ENOMEM
     }
 
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     crate::sched::schedule();
 
     if timer_id != 0 {
@@ -1102,7 +1102,7 @@ pub unsafe fn put_sockaddr_nl(addr_ptr: *mut u8, addrlen_ptr: *mut u32) {
 /// (getsockname on a bound netlink socket).
 /// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
 pub unsafe fn put_sockaddr_nl_bound(addr_ptr: *mut u8, addrlen_ptr: *mut u32, portid: u32) {
-    use crate::arch::riscv64::uaccess::{copy_to_user, put_user};
+    use crate::arch::uaccess::{copy_to_user, put_user};
     let mut buf = [0u8; SOCKADDR_NL_LEN];
     buf[0] = AF_NETLINK as u8;
     buf[4..8].copy_from_slice(&portid.to_le_bytes());
@@ -1199,7 +1199,7 @@ pub fn is_if_ioctl(request: u32) -> bool {
 /// Interface-management ioctl dispatcher. `arg` is the user pointer to an
 /// ifreq (or an ifconf for SIOCGIFCONF). Returns 0 or a negative errno.
 pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
-    use crate::arch::riscv64::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
+    use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, get_user, put_user};
 
     if arg == 0 {
         // Linux dev_ioctl: a NULL user buffer for an interface request is
@@ -1251,7 +1251,7 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
         let dev_ptr = unsafe { get_user::<usize>((arg + 80) as *const usize).unwrap_or(0) };
         if dev_ptr != 0 {
             let mut buf = [0u8; 16];
-            match crate::arch::riscv64::uaccess::strncpy_from_user(
+            match crate::arch::uaccess::strncpy_from_user(
                 dev_ptr as *const u8,
                 15,
                 &mut buf,

@@ -15,6 +15,7 @@
 
 use crate::println;
 use core::sync::atomic::{AtomicPtr, Ordering};
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;
@@ -369,6 +370,141 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
     regions
 }
 
+/// Parse the initrd location from /chosen (QEMU `-initrd` sets these).
+///
+/// Returns `(start, end)` physical addresses from `linux,initrd-start` /
+/// `linux,initrd-end`. Both properties are 1 or 2 big-endian u32 cells
+/// (address-cells dependent); QEMU's generated DTB uses single u32 cells
+/// on 32-bit RAM layouts and u64 (2 cells) otherwise — accept both.
+///
+/// Like `parse_memory_regions`, this is called on the EARLY identity
+/// mapping, so `dtb_ptr` is a physical address here.
+///
+/// OH Phase 1: the OpenHarmony ramdisk (`-initrd ramdisk.img`, cmdline
+/// `root=/dev/ram0`) lands through this path.
+pub unsafe fn parse_initrd_region(dtb_ptr: u64) -> Option<(usize, usize)> {
+    let (start, end) = parse_chosen_u64_pair(dtb_ptr, "linux,initrd-start", "linux,initrd-end")?;
+    if end > start && start != 0 {
+        Some((start as usize, end as usize))
+    } else {
+        None
+    }
+}
+
+/// Read a pair of /chosen integer properties (used for the initrd range).
+unsafe fn parse_chosen_u64_pair(
+    dtb_ptr: u64,
+    name_a: &str,
+    name_b: &str,
+) -> Option<(u64, u64)> {
+    let a = parse_chosen_prop(dtb_ptr, name_a)?;
+    let b = parse_chosen_prop(dtb_ptr, name_b)?;
+    Some((a, b))
+}
+
+/// Read one /chosen integer property (1 or 2 big-endian u32 cells).
+unsafe fn parse_chosen_prop(dtb_ptr: u64, name: &str) -> Option<u64> {
+    let fdt = dtb_ptr as *const u8;
+
+    let read_u32 = |offset: usize| -> u32 {
+        let b0 = *fdt.offset(offset as isize) as u32;
+        let b1 = *fdt.offset(offset as isize + 1) as u32;
+        let b2 = *fdt.offset(offset as isize + 2) as u32;
+        let b3 = *fdt.offset(offset as isize + 3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    if read_u32(0) != 0xd00dfeed {
+        return None;
+    }
+    let off_dt_struct = read_u32(0x08) as usize;
+    let off_dt_strings = read_u32(0x0C) as usize;
+    let size_dt_struct = read_u32(0x24) as usize;
+
+    let mut ptr = fdt.offset(off_dt_struct as isize);
+    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt.offset(off_dt_strings as isize);
+
+    let read_u32_at = |p: *const u8| -> u32 {
+        let b0 = *p as u32;
+        let b1 = *p.offset(1) as u32;
+        let b2 = *p.offset(2) as u32;
+        let b3 = *p.offset(3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    };
+
+    let mut depth = 0;
+    let mut in_chosen = false;
+
+    while ptr < end {
+        let token = read_u32_at(ptr);
+        ptr = ptr.offset(4);
+
+        match token {
+            FDT_BEGIN_NODE => {
+                let mut nodename = [0u8; 64];
+                let mut i = 0;
+                while *ptr != 0 && i < 64 {
+                    nodename[i] = *ptr;
+                    ptr = ptr.offset(1);
+                    i += 1;
+                }
+                ptr = ptr.offset(1);
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+
+                let node_name = core::str::from_utf8(&nodename[..i]).ok()?;
+                if node_name == "chosen" || node_name.starts_with("chosen@") {
+                    in_chosen = true;
+                }
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                if in_chosen && depth == 1 {
+                    in_chosen = false;
+                }
+                depth -= 1;
+            }
+            FDT_PROP => {
+                let len = read_u32_at(ptr) as usize;
+                let nameoff = read_u32_at(ptr.offset(4)) as usize;
+                ptr = ptr.offset(8);
+
+                let mut name_ptr = strings.offset(nameoff as isize);
+                let mut prop_name = [0u8; 32];
+                let mut i = 0;
+                while *name_ptr != 0 && i < 32 {
+                    prop_name[i] = *name_ptr;
+                    name_ptr = name_ptr.offset(1);
+                    i += 1;
+                }
+                let pname = core::str::from_utf8(&prop_name[..i]).ok()?;
+
+                let mut result = None;
+                if in_chosen && pname == name {
+                    result = match len {
+                        4 => Some(read_u32_at(ptr) as u64),
+                        8 => Some(
+                            ((read_u32_at(ptr) as u64) << 32)
+                                | read_u32_at(ptr.offset(4)) as u64,
+                        ),
+                        _ => None,
+                    };
+                }
+
+                ptr = ptr.offset(len as isize);
+                ptr = ptr.offset(((4 - ((ptr as usize) & 3)) & 3) as isize);
+
+                if let Some(v) = result {
+                    return Some(v);
+                }
+            }
+            FDT_END => break,
+            _ => break,
+        }
+    }
+    None
+}
+
 /// Initialize command line arguments
 ///
 /// # Arguments
@@ -391,8 +527,8 @@ pub fn init(dtb_ptr: u64) {
     };
 
     // Convert physical address to kernel virtual address using linear mapping
-    let dtb_virt = crate::arch::riscv64::mm::phys_to_virt(
-        crate::arch::riscv64::mm::PhysAddr::new(dtb_phys)
+    let dtb_virt = crate::arch::mm::phys_to_virt(
+        crate::arch::mm::PhysAddr::new(dtb_phys)
     ).bits();
 
     let cmdline: &'static str = unsafe {
@@ -408,6 +544,28 @@ pub fn init(dtb_ptr: u64) {
         }
     };
 
+    install(cmdline);
+}
+
+/// Initialize from a bootloader-provided command line (x86_64 multiboot
+/// path — no device tree). `cmdline` may be empty, in which case the
+/// default command line applies.
+#[cfg(feature = "x86_64")]
+pub fn init_from(cmdline: &str) {
+    let cmdline: &'static str = if cmdline.is_empty() {
+        DEFAULT_CMDLINE
+    } else {
+        // Leak a heap copy so the global has 'static lifetime.
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(
+            alloc::string::String::from(cmdline),
+        ))
+    };
+    install(cmdline);
+}
+
+/// Publish the active command line and apply early printk loglevel
+/// parameters (`quiet`, `loglevel=`).
+fn install(cmdline: &'static str) {
     // Store command line arguments (use atomic operations to ensure multi-core visibility)
     let len = cmdline.len();
     let ptr = cmdline.as_ptr() as *mut u8;
@@ -567,6 +725,27 @@ pub fn get_init_program() -> String {
     get_param("init").unwrap_or_else(|| String::from("/sbin/init"))
 }
 
+/// Absolutize a (possibly relative) init/rdinit path.
+///
+/// OH's cmdline carries `init=init` (a bare name); Linux execs it via
+/// kernel_execve against PID 1's cwd "/", i.e. "/init". Normalize the same
+/// way so the loader can find it on the rootfs.
+pub fn absolutize_init_path(p: &str) -> String {
+    let trimmed = p.trim();
+    if trimmed.starts_with('/') {
+        String::from(trimmed)
+    } else if trimmed.is_empty() {
+        String::from("/init")
+    } else {
+        format!("/{}", trimmed)
+    }
+}
+
+/// `rdinit=` (initramfs init override), absolutized. None when absent.
+pub fn get_rdinit_program() -> Option<String> {
+    get_param("rdinit").map(|p| absolutize_init_path(&p))
+}
+
 /// Get the root filesystem type (U2 boot-parameter parsing).
 ///
 /// `rootfstype=ext4` → "ext4". Default "ext4" (the only root fs Rux
@@ -602,10 +781,45 @@ pub fn is_debug_mode() -> bool {
 }
 
 /// Get console device
+///
+/// Returns the PRIMARY console device name with any `,speed` suffix
+/// stripped (`console=ttyS0,115200` → `ttyS0`). Per Linux semantics the
+/// LAST `console=` token names the device behind /dev/console; earlier
+/// tokens are additional output consoles.
 pub fn get_console_device() -> String {
-    get_param("console").unwrap_or_else(|| {
-        String::from("ttyS0")
-    })
+    get_console_devices()
+        .last()
+        .cloned()
+        .unwrap_or_else(|| String::from("ttyS0"))
+}
+
+/// All console devices named on the command line, in order.
+///
+/// Each `console=` token may name one device plus options
+/// (`console=ttyS0,115200n8`); multiple `console=` tokens accumulate.
+/// Unknown devices are returned as named — the caller decides what it can
+/// provide (riscv64 virt has exactly one UART: ttyS0).
+pub fn get_console_devices() -> Vec<String> {
+    let cmdline = match get_cmdline() {
+        Some(c) => c,
+        None => return alloc::vec![String::from("ttyS0")],
+    };
+    let mut devices = Vec::new();
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix("console=") {
+            // First comma-separated field is the device name; the rest is
+            // options (speed, parity, ...).
+            if let Some(dev) = value.split(',').next() {
+                if !dev.is_empty() {
+                    devices.push(String::from(dev));
+                }
+            }
+        }
+    }
+    if devices.is_empty() {
+        devices.push(String::from("ttyS0"));
+    }
+    devices
 }
 
 #[cfg(test)]

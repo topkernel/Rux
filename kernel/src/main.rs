@@ -107,6 +107,7 @@ pub fn print_status_ex(module: &str, desc: &str, success: Option<bool>) {
     }
 }
 
+#[cfg(feature = "riscv64")]
 mod sbi;
 mod mm;
 mod console;
@@ -125,6 +126,7 @@ mod errno;
 mod net;
 mod cmdline;
 mod init;
+mod initrd;
 mod syscall;
 mod interrupt;
 mod dfx;
@@ -170,10 +172,10 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     taskdump_raw_line(b" align=");
     taskdump_dec(layout.align() as u64);
     let mut frames: [u64; 6] = [0; 6];
-    let s0: u64;
+    // SAFETY: reads the frame-pointer chain of the current stack.
     unsafe {
-        core::arch::asm!("mv {s}, s0", s = out(reg) s0, options(nomem, nostack));
-        crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+        let fp = crate::dfx::backtrace::current_frame_pointer();
+        crate::dfx::memwatch::walk_fp_chain(fp, &mut frames);
     }
     taskdump_raw_line(b" frames:");
     for f in frames.iter() {
@@ -194,7 +196,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     // flag dies with the task, so later failures on other tasks keep the
     // task-kill defense.
     let kill_self = crate::interrupt::preempt::in_task()
-        && crate::arch::riscv64::cpu::get_interrupts_state()
+        && crate::arch::cpu::get_interrupts_state()
         && match crate::sched::current() {
             Some(task) => {
                 use crate::process::task::TIF_MEMDIE;
@@ -232,143 +234,14 @@ fn format_hex(v: u64) -> &'static str {
     }
 }
 
-// Include platform-specific assembly code
-#[cfg(feature = "aarch64")]
-global_asm!(include_str!("arch/aarch64/boot/boot.S"));
 
-#[cfg(feature = "aarch64")]
-global_asm!(include_str!("arch/aarch64/trap.S"));
-
-// RISC-V kernel main function
-#[no_mangle]
-pub extern "C" fn rust_main() -> ! {
-    // Initialize SMP (multi-core support) - must run first!
-    // On QEMU virt, OpenSBI only starts one hart into S-mode.
-    // Other harts will be started later via SBI HSM.
-    arch::smp::init();
-
-    // Initialize per-CPU interrupt stacks (must be before any traps)
-    arch::smp::init_per_cpu_intr_stacks();
-
-    // ========== The following code is only executed by the boot hart ==========
-
-    // Initialize console (must be first, so other initialization can print)
-    console::init();
-    printk::init();
-    printk::init_logger();
-
-    // Print boot banner with ASCII art logo
-    unsafe {
-        use crate::console::putchar;
-
-        // ANSI colors
-        const CYAN: &[u8] = b"\x1b[36m";
-        const BOLD: &[u8] = b"\x1b[1m";
-        const GREEN: &[u8] = b"\x1b[32m";
-        const RESET: &[u8] = b"\x1b[0m";
-
-        // Print logo in cyan bold
-        for &b in CYAN { putchar(b); }
-        for &b in BOLD { putchar(b); }
-
-        // ASCII Art Logo - RUX (using UTF-8 block character)
-        // Block = 0xE2 0x96 0x88 (3 bytes in UTF-8)
-        const L1: &[u8] = b"\n\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
-        const L2: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
-        const L3: &[u8] = b"\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\n";
-        const L4: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
-        const L5: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
-
-        for &b in L1 { putchar(b); }
-        for &b in L2 { putchar(b); }
-        for &b in L3 { putchar(b); }
-        for &b in L4 { putchar(b); }
-        for &b in L5 { putchar(b); }
-
-        // Reset before version info
-        for &b in RESET { putchar(b); }
-
-        // Print version info
-        for &b in GREEN { putchar(b); }
-        const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
-        for &b in VERSION { putchar(b); }
-        let ver = env!("CARGO_PKG_VERSION");
-        for b in ver.as_bytes() { putchar(*b); }
-        const END: &[u8] = b" ]\n\n";
-        for &b in END { putchar(b); }
-        for &b in RESET { putchar(b); }
-    }
-
-    // Initialize trap handling
-    arch::trap::init();
-
-    arch::trap::init_syscall();
-
-    // Initialize MMU (must be before heap initialization)
-    arch::mm::init();
-
-    // Set va_pa_offset so phys_to_virt() works for subsequent initialization
-    // This must be done before any code that uses phys_to_virt() or
-    // accesses physical memory via linear mapping
-    unsafe {
-        arch::riscv64::mm::memory_layout::KERNEL_MAP.va_pa_offset =
-            arch::riscv64::mm::VA_PA_OFFSET;
-    }
-
-    // ===== Setup linear mapping BEFORE heap (heap needs phys_to_virt) =====
-    // paging_init approach:
-    // 1. Initialize memblock
-    // 2. Parse memory regions from DTB
-    // 3. Create linear mapping at PAGE_OFFSET
-    {
-        // Initialize memblock
-        mm::memblock_init();
-
-        // Parse memory regions from device tree
-        // DTB is already mapped by boot.S early page table at its physical address
-        let dtb_phys = arch::riscv64::boot::get_dtb_pointer();
-        // DTB is identity-mapped in early_pg_dir, use physical address directly
-        // for early parsing (linear mapping not yet available)
-        let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
-
-        // Add memory regions to memblock
-        for region in &memory_regions {
-            mm::memblock_add(region.base, region.size).ok();
-        }
-
-        // Reserve memory regions (kernel, heap, slab)
-        const KERNEL_RESERVE_SIZE: usize = 0xC00000; // 12MB kernel reservation
-        const KERNEL_HEAP_PHYS: usize = 0x80C00000; // Physical address after kernel reservation
-        let heap_start = KERNEL_HEAP_PHYS;
-        let heap_size = crate::config::KERNEL_HEAP_SIZE;
-        let slab_start = heap_start + heap_size;
-        let slab_size = 4 * 1024 * 1024;
-
-        mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
-        mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
-        mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
-
-        // Stay in Early stage for setup_linear_mapping (static BSS arrays always accessible)
-        // Don't switch to Fixmap yet — Fixmap stage uses identity mapping which
-        // doesn't exist in the permanent page table
-
-        // Setup linear mapping (PAGE_OFFSET region)
-        arch::riscv64::mm::setup_linear_mapping(&memory_regions);
-
-        // Now switch to fixmap stage (linear mapping is available)
-        arch::riscv64::mm::pt_ops_set_fixmap();
-
-        // Calculate total physical memory for later use
-        let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
-    }
-
-    // Now linear mapping is available, phys_to_virt() works for all physical memory
-    // Initialize heap allocator
-    mm::init_heap();
-
+/// The post-heap half of rust_main. x86_64 enters it on the fresh 4MB
+/// kernel stack via boot_stack_continuation; riscv64 calls it directly
+/// (its whole boot fits the .boot stack).
+pub fn rust_main_tail() -> ! {
     // Initialize Slab allocator (use virtual address in linear mapping region)
-    let slab_phys = 0x80C00000usize + crate::config::KERNEL_HEAP_SIZE;
-    let slab_start = slab_phys + arch::riscv64::mm::VA_PA_OFFSET;
+    let slab_phys = KERNEL_HEAP_PHYS + crate::config::KERNEL_HEAP_SIZE;
+    let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
     mm::init_slab(slab_start, 4 * 1024 * 1024);  // 4MB for slab
 
     // ========== Heap initialized, format! can be used below ==========
@@ -416,15 +289,23 @@ pub extern "C" fn rust_main() -> ! {
 
     // Display heap size using config value
     let heap_mb = crate::config::KERNEL_HEAP_SIZE / (1024 * 1024);
-    let heap_info = format!("heap region {}MB @ {:#x}", heap_mb, 0x80C00000usize);
+    let heap_info = format!("heap region {}MB @ {:#x}", heap_mb, KERNEL_HEAP_PHYS);
     print_status("mm", &heap_info, true);
     print_status("mm", "slab allocator 4MB", true);
 
     // Initialize command line argument parsing (needs to be after heap initialization)
     {
-        let dtb_ptr = arch::riscv64::boot::get_dtb_pointer();
-        cmdline::init(dtb_ptr);
-        print_status("boot", "FDT/DTB parsed", true);
+        #[cfg(feature = "riscv64")]
+        {
+            let dtb_ptr = arch::boot::get_dtb_pointer();
+            cmdline::init(dtb_ptr);
+            print_status("boot", "FDT/DTB parsed", true);
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            cmdline::init_from(arch::boot::boot_cmdline());
+            print_status("boot", "multiboot cmdline + e820 parsed", true);
+        }
         if let Some(cmdline) = cmdline::get_cmdline() {
             if !cmdline.is_empty() {
                 // Truncate long cmdline
@@ -437,6 +318,24 @@ pub extern "C" fn rust_main() -> ! {
                 print_status("boot", &display, true);
             }
         }
+
+        // OH Phase 1: console= names the primary console device (the last
+        // console= token, options stripped). riscv64 virt has exactly one
+        // serial device (ns16550a = ttyS0), which is what the printk
+        // console and /dev/console use; a cmdline naming anything else is
+        // reported as unavailable rather than silently ignored.
+        {
+            let primary = cmdline::get_console_device();
+            if primary == "ttyS0" {
+                print_status("console", "console=ttyS0 (ns16550a uart)", true);
+            } else {
+                print_status(
+                    "console",
+                    &format!("console={} unavailable, keeping ttyS0", primary),
+                    false,
+                );
+            }
+        }
     }
 
     // Boot hart continues with remaining init (only hart reaches here)
@@ -447,12 +346,19 @@ pub extern "C" fn rust_main() -> ! {
         // Note: memblock_init, memory region parsing, memblock_reserve,
         // and setup_linear_mapping were already done above (before heap init).
         {
-            // Re-parse memory regions (now with linear mapping available)
-            let dtb_phys = arch::riscv64::boot::get_dtb_pointer();
-            let dtb_virt = arch::riscv64::mm::phys_to_virt(
-                arch::riscv64::mm::PhysAddr::new(dtb_phys)
-            ).bits();
-            let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_virt) };
+            // Re-read memory regions (riscv64 re-parses the FDT via the
+            // linear mapping; the x86_64 multiboot copy in BSS is always
+            // valid, so just rebuild the list)
+            #[cfg(feature = "riscv64")]
+            let memory_regions = {
+                let dtb_phys = arch::boot::get_dtb_pointer();
+                let dtb_virt = arch::mm::phys_to_virt(
+                    arch::mm::PhysAddr::new(dtb_phys)
+                ).bits();
+                unsafe { cmdline::parse_memory_regions(dtb_virt) }
+            };
+            #[cfg(feature = "x86_64")]
+            let memory_regions = x86_boot_memory_regions();
 
             // Calculate total physical memory
             let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
@@ -461,7 +367,7 @@ pub extern "C" fn rust_main() -> ! {
                 total_phys_memory / (1024 * 1024)), true);
 
             // Initialize vmemmap mapping
-            let start_pfn = 0x80000000 / mm::PAGE_SIZE;
+            let start_pfn = MEMORY_PHYS_BASE / mm::PAGE_SIZE;
             let nr_pages = total_phys_memory / mm::PAGE_SIZE;
 
             if mm::vmemmap::init_vmemmap(start_pfn, nr_pages).is_ok() {
@@ -471,15 +377,13 @@ pub extern "C" fn rust_main() -> ! {
             }
 
             // Initialize kernel memory layout
-            const KERNEL_RESERVE_SIZE: usize = 0xC00000; // 12MB kernel reservation
-            const KERNEL_HEAP_PHYS: usize = 0x80C00000; // Physical address after kernel reservation
             let heap_size = crate::config::KERNEL_HEAP_SIZE;
             let slab_start = KERNEL_HEAP_PHYS + heap_size;
             let slab_size = 4 * 1024 * 1024;
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
-                0x80000000,
+                MEMORY_PHYS_BASE,
                 total_phys_memory, // phys SIZE (was phys_base+size — review 4.20)
-                0x80200000,
+                KERNEL_PHYS_LOAD_ADDR,
                 KERNEL_HEAP_PHYS,
             );
             mm::layout::kernel_layout_init(layout);
@@ -497,11 +401,11 @@ pub extern "C" fn rust_main() -> ! {
 
             // Initialize zone allocator
             let kernel_end = slab_start + slab_size;
-            mm::init_zone_system(0x80000000, total_phys_memory, kernel_end);
+            mm::init_zone_system(MEMORY_PHYS_BASE, total_phys_memory, kernel_end);
             print_status("mm", "zone allocator initialized", true);
 
             // Switch to late stage (use buddy allocator for page tables)
-            arch::riscv64::mm::pt_ops_set_late();
+            arch::mm::pt_ops_set_late();
 
             // Print memblock summary
             let total_mb = mm::memblock_total_memory() / (1024 * 1024);
@@ -510,8 +414,26 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // Setup device mappings (PLIC, VirtIO, CLINT, etc.)
-        arch::riscv64::mm::setup_device_mappings();
+        arch::mm::setup_device_mappings();
         print_status("mm", "device mappings created", true);
+
+        // x86_64: bring up the HPET clocksource before any timekeeper
+        // consumer (RTC epoch read below, vDSO page, printk stamps) so
+        // the whole boot runs on the exact virtual-clock timebase.
+        // Without an HPET the calibrated-TSC timebase applies (hpet.rs).
+        #[cfg(feature = "x86_64")]
+        {
+            let ok = drivers::timer::hpet::init();
+            print_status(
+                "timer",
+                if ok {
+                    "HPET clocksource (virtual-clock exact)"
+                } else {
+                    "HPET absent — calibrated-TSC timebase"
+                },
+                ok,
+            );
+        }
 
         // Arm the wall clock from the goldfish RTC (QEMU virt's default
         // RTC @ 0x101000): one boot-time read derives the REALTIME epoch
@@ -528,16 +450,20 @@ pub extern "C" fn rust_main() -> ! {
             print_status("irq", "irq_desc array initialized", true);
         }
 
-        // Initialize PLIC (interrupt controller)
+        // Initialize interrupt controller (PLIC on riscv64; the 8259 PIC
+        // on x86_64 is programmed by the arch trap bring-up)
         {
             drivers::intc::init();
+            #[cfg(feature = "riscv64")]
             print_status("intc", "PLIC @ 0x0C000000", true);
+            #[cfg(feature = "riscv64")]
             print_status("intc", "IRQ domain + chip registered", true);
         }
 
         // Initialize IPI (inter-processor interrupt)
         {
             arch::ipi::init();
+            #[cfg(feature = "riscv64")]
             print_status("ipi", "SSIP software IRQ + bitmap multiplexing", true);
         }
 
@@ -564,6 +490,26 @@ pub extern "C" fn rust_main() -> ! {
                 // Build dentry tree for rootfs
                 fs::vfs::vfs_mount("/", fs::rootfs::create_root_inode(),
                     fs::mount::MntFlags::new(0));
+
+                // OH Phase 1 prereq: unpack the boot initrd (gzip cpio
+                // newc) into the ramfs root. root=/dev/ram0 boots run
+                // entirely from this content; root=/dev/vdX boots with an
+                // initrd follow the Linux initramfs model (the archive's
+                // /init runs first and is responsible for switch_root).
+                match initrd::load() {
+                    Ok(stats) => {
+                        print_status("initrd", &format!(
+                            "{} files, {} dirs, {} links, {}KB, {} special skipped",
+                            stats.files, stats.dirs,
+                            stats.symlinks + stats.hardlinks,
+                            stats.total_bytes / 1024,
+                            stats.skipped_special), true);
+                    }
+                    Err("no initrd image") => {
+                        // Normal for -kernel-only boots; nothing to report.
+                    }
+                    Err(e) => print_status("initrd", &format!("unpack failed: {}", e), false),
+                }
             }
 
             // Initialize ProcFS and mount to /proc (if configured to enable)
@@ -633,68 +579,11 @@ pub extern "C" fn rust_main() -> ! {
                 print_status("driver", "GenDisk registered", true);
             }
 
-            // Auto-mount ext4 file system (if configured to enable)
-            if crate::config::AUTO_MOUNT_EXT4 {
-                // Try mounting from PCI device
-                if let Some(disk) = drivers::virtio::get_pci_gen_disk() {
-                    let mount_result = fs::ext4::mount_ext4(disk as *const _);
-                    let mount_point = crate::config::EXT4_MOUNT_POINT;
-                    print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
-                    if mount_result.is_ok() {
-                        if let Some(ext4_fs) = fs::ext4::get_ext4_fs() {
-                            // Build dentry tree for ext4 (overlays root)
-                            fs::vfs::vfs_mount("/", fs::ext4::create_root_inode(),
-                                fs::mount::MntFlags::new(0));
-                        }
-                    }
-
-                    // Remount procfs after ext4 mount (since ext4 overwrites root directory)
-                    if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
-                        let procfs_mount_result = fs::procfs::mount_procfs();
-                        print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
-                        if procfs_mount_result.is_ok() {
-                            // Rebuild dentry tree for procfs after ext4 overlay
-                            fs::vfs::vfs_mount("/proc", fs::procfs::create_root_inode(),
-                                fs::mount::MntFlags::new(0));
-                        }
-                    }
-
-                    // Re-link cgroup2 after ext4 overlay (U1b, same
-                    // defensive re-mount as procfs above).
-                    if mount_result.is_ok() {
-                        let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
-                    }
-                } else if let Some(virtio_dev) = drivers::virtio::get_device() {
-                    // Try mounting from MMIO device
-                    let disk_ptr = &virtio_dev.disk as *const drivers::blkdev::GenDisk;
-                    let mount_result = fs::ext4::mount_ext4(disk_ptr);
-                    let mount_point = crate::config::EXT4_MOUNT_POINT;
-                    print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
-                    if mount_result.is_ok() {
-                        if let Some(ext4_fs) = fs::ext4::get_ext4_fs() {
-                            // Build dentry tree for ext4 (overlays root)
-                            fs::vfs::vfs_mount("/", fs::ext4::create_root_inode(),
-                                fs::mount::MntFlags::new(0));
-                        }
-                    }
-
-                    // Remount procfs after ext4 mount
-                    if mount_result.is_ok() && crate::config::AUTO_MOUNT_PROCFS {
-                        let procfs_mount_result = fs::procfs::mount_procfs();
-                        print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
-                        if procfs_mount_result.is_ok() {
-                            // Rebuild dentry tree for procfs after ext4 overlay
-                            fs::vfs::vfs_mount("/proc", fs::procfs::create_root_inode(),
-                                fs::mount::MntFlags::new(0));
-                        }
-                    }
-
-                    // Re-link cgroup2 after ext4 overlay (U1b).
-                    if mount_result.is_ok() {
-                        let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
-                    }
-                }
-            }
+            // OH Phase 1 prereq: the kernel command line drives the root
+            // filesystem choice (root=/dev/ram0 | /dev/vda | ...). The old
+            // behavior (auto-mount the first ext4 found) survives as the
+            // fallback for unparsed root= values.
+            mount_root_filesystem();
         }
 
         // Initialize swap on the root block device (tail carve).
@@ -831,6 +720,9 @@ pub extern "C" fn rust_main() -> ! {
         }
 
         // ========== Graphics System Initialization (VirtIO-GPU) ==========
+        // Arch-generic: the PCI transport honors firmware BARs on x86_64
+        // (same path that brought up virtio-blk) and self-assigned BARs on
+        // riscv64.
         {
             // Probe VirtIO-GPU device
             if let Some(mut gpu_device) = drivers::gpu::probe_virtio_gpu() {
@@ -926,7 +818,7 @@ pub extern "C" fn rust_main() -> ! {
                 // All tests passed, normal exit
                 println!("\nAll tests passed! Halting...");
                 loop {
-                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+                    crate::arch::cpu::wfi();
                 }
             }
         }
@@ -940,9 +832,9 @@ pub extern "C" fn rust_main() -> ! {
 
         // ========== Start init process ==========
         {
-            // Get init path
-            let init_path = cmdline::get_init_program();
-            print_status("init", &format!("loading {}", init_path), true);
+            // OH Phase 1: init::init() walks the Linux-ordered candidate
+            // chain (rdinit= → initrd /init → init= → /sbin/init …) and
+            // reports each attempt on the console.
             init::init();
             print_status("init", "ELF loaded to user space", true);
             print_status("init", "init task (PID 1) enqueued", true);
@@ -950,7 +842,15 @@ pub extern "C" fn rust_main() -> ! {
             // Print shell welcome message after boot
             unsafe {
                 use crate::console::putchar;
-                let msg = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(RISC-V 64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
+                // cfg-gated, NOT config::TARGET_PLATFORM: build.rs only
+                // reruns when Kernel.toml changes, so in a worktree that
+                // builds both arches the generated constant can be stale
+                // (x86 build inheriting a riscv64 config.rs). The riscv64
+                // string is unchanged byte-for-byte.
+                #[cfg(feature = "x86_64")]
+                let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(x86_64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
+                #[cfg(not(feature = "x86_64"))]
+                let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(RISC-V 64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
                 for &b in msg {
                     putchar(b);
                 }
@@ -969,7 +869,23 @@ pub extern "C" fn rust_main() -> ! {
         // Signal secondary CPUs that they may now enable their timer interrupts.
         // This must happen AFTER boot CPU has finished all initialization
         // to prevent secondary timer interrupts from interfering with boot.
+        // (riscv64 SBI HSM broadcast; x86_64 SIPI secondaries parked in
+        // ap_entry64's hlt loop.)
         arch::smp::signal_boot_complete();
+
+        // x86_64 SMP tick check: the per-CPU LAPIC timer was armed just
+        // above (enable_timer_interrupt); jiffies must advance under it.
+        #[cfg(feature = "x86_64")]
+        {
+            let t0 = drivers::timer::get_jiffies();
+            drivers::intc::apic::delay_ms(150);
+            let t1 = drivers::timer::get_jiffies();
+            print_status(
+                "timer",
+                &format!("lapic tick check: {} jiffies / 150ms", t1 - t0),
+                t1 > t0,
+            );
+        }
 
         // ========== Enter scheduler main loop ==========
         // Note: don't use println! here — it might deadlock if printk lock is held
@@ -980,6 +896,398 @@ pub extern "C" fn rust_main() -> ! {
         // Boot hart enters idle loop, participates in task scheduling
         sched::cpu_idle_loop();
     }
+}
+
+/// x86_64 boot-stack continuation target: entered with rsp on the fresh
+/// 4MB kernel stack; shares the original stack contents below it are dead.
+#[cfg(feature = "x86_64")]
+#[no_mangle]
+extern "C" fn boot_stack_continuation() -> ! {
+    crate::rust_main_tail()
+}
+
+// x86_64 link shim for the trap-entry symbol generic process code
+// references. arch/x86_64/trap.S is not written yet (X86-TODO agent
+// x86-trap pins `ret_from_fork` in its contract); this WEAK definition
+// only satisfies the link — the trap.S global definition overrides it
+// automatically once that file lands.
+#[cfg(feature = "x86_64")]
+core::arch::global_asm!(
+    r#"
+.section .text.x86_trampoline_shim, "ax"
+.weak ret_from_fork
+ret_from_fork:
+    hlt
+    jmp ret_from_fork
+"#
+);
+
+// Include platform-specific assembly code
+#[cfg(feature = "aarch64")]
+global_asm!(include_str!("arch/aarch64/boot/boot.S"));
+
+#[cfg(feature = "aarch64")]
+global_asm!(include_str!("arch/aarch64/trap.S"));
+
+/// Kernel reservation at the RAM base (OpenSBI + kernel on riscv64; low
+/// memory + kernel on x86_64) and the heap's physical base.
+#[cfg(feature = "riscv64")]
+const KERNEL_RESERVE_SIZE: usize = 0xC0_0000; // 12MB
+#[cfg(feature = "x86_64")]
+const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
+#[cfg(feature = "riscv64")]
+const KERNEL_HEAP_PHYS: usize = 0x80C0_0000;
+#[cfg(feature = "x86_64")]
+const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
+
+/// Physical base of RAM and the kernel's physical load address, per arch.
+#[cfg(feature = "riscv64")]
+const MEMORY_PHYS_BASE: usize = 0x8000_0000;
+#[cfg(feature = "riscv64")]
+const KERNEL_PHYS_LOAD_ADDR: usize = 0x8020_0000;
+#[cfg(feature = "x86_64")]
+const MEMORY_PHYS_BASE: usize = 0x0000_0000;
+#[cfg(feature = "x86_64")]
+const KERNEL_PHYS_LOAD_ADDR: usize = 0x0020_0000; // multiboot1 LMA
+
+/// Usable memory regions from the multiboot/e820 map (x86_64).
+///
+/// Allocation-free: this runs BEFORE the heap exists (setup_linear_mapping
+/// needs the regions first). Fill a static BSS array instead of collecting
+/// into a Vec.
+#[cfg(feature = "x86_64")]
+fn x86_boot_memory_regions() -> &'static [cmdline::MemoryRegion] {
+    static mut REGIONS: [cmdline::MemoryRegion; 64] =
+        [cmdline::MemoryRegion { base: 0, size: 0 }; 64];
+    let mut n = 0usize;
+    for r in arch::boot::boot_memory_regions() {
+        if !r.usable || n >= 64 {
+            continue;
+        }
+        // SAFETY: single-threaded early boot; the array is written once
+        // before any reference to it escapes.
+        unsafe {
+            REGIONS[n] = cmdline::MemoryRegion {
+                base: r.start as usize,
+                size: (r.end - r.start) as usize,
+            };
+        }
+        n += 1;
+    }
+    // SAFETY: the first n entries were just initialized.
+    unsafe { &REGIONS[..n] }
+}
+
+/// x86_64 boot diagnostic: print the e820 map the kernel seeded from.
+#[cfg(feature = "x86_64")]
+fn x86_dump_regions() {
+    for (i, r) in arch::boot::boot_memory_regions().iter().enumerate() {
+        crate::pr_err!(
+            "e820[{}] {:#x}-{:#x} usable={}",
+            i, r.start, r.end, r.usable
+        );
+    }
+}
+
+// Kernel main function
+#[no_mangle]
+pub extern "C" fn rust_main() -> ! {
+    // Initialize SMP (multi-core support) - must run first!
+    // On QEMU virt, OpenSBI only starts one hart into S-mode.
+    // Other harts will be started later via SBI HSM.
+    arch::smp::init();
+
+    // Initialize per-CPU interrupt stacks (must be before any traps)
+    arch::smp::init_per_cpu_intr_stacks();
+
+    // ========== The following code is only executed by the boot hart ==========
+
+    // Initialize console (must be first, so other initialization can print)
+    console::init();
+    printk::init();
+    printk::init_logger();
+
+    // Print boot banner with ASCII art logo
+    unsafe {
+        use crate::console::putchar;
+
+        // ANSI colors
+        const CYAN: &[u8] = b"\x1b[36m";
+        const BOLD: &[u8] = b"\x1b[1m";
+        const GREEN: &[u8] = b"\x1b[32m";
+        const RESET: &[u8] = b"\x1b[0m";
+
+        // Print logo in cyan bold
+        for &b in CYAN { putchar(b); }
+        for &b in BOLD { putchar(b); }
+
+        // ASCII Art Logo - RUX (using UTF-8 block character)
+        // Block = 0xE2 0x96 0x88 (3 bytes in UTF-8)
+        const L1: &[u8] = b"\n\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
+        const L2: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
+        const L3: &[u8] = b"\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\n";
+        const L4: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
+        const L5: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
+
+        for &b in L1 { putchar(b); }
+        for &b in L2 { putchar(b); }
+        for &b in L3 { putchar(b); }
+        for &b in L4 { putchar(b); }
+        for &b in L5 { putchar(b); }
+
+        // Reset before version info
+        for &b in RESET { putchar(b); }
+
+        // Print version info
+        for &b in GREEN { putchar(b); }
+        // Arch label cfg-gated per build features (see the welcome-message
+        // note on why not config::TARGET_PLATFORM); the riscv64 string is
+        // unchanged byte-for-byte.
+        #[cfg(feature = "x86_64")]
+        const VERSION: &[u8] = b"  [ x86_64 | POSIX Compatible | v";
+        #[cfg(not(feature = "x86_64"))]
+        const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
+        for &b in VERSION { putchar(b); }
+        let ver = env!("CARGO_PKG_VERSION");
+        for b in ver.as_bytes() { putchar(*b); }
+        const END: &[u8] = b" ]\n\n";
+        for &b in END { putchar(b); }
+        for &b in RESET { putchar(b); }
+    }
+
+    // Initialize trap handling
+    arch::trap::init();
+
+    arch::trap::init_syscall();
+
+    // Initialize MMU (must be before heap initialization)
+    arch::mm::init();
+
+    // Set va_pa_offset so phys_to_virt() works for subsequent initialization
+    // This must be done before any code that uses phys_to_virt() or
+    // accesses physical memory via linear mapping
+    unsafe {
+        arch::mm::memory_layout::KERNEL_MAP.va_pa_offset =
+            arch::mm::VA_PA_OFFSET;
+    }
+
+    // ===== Setup linear mapping BEFORE heap (heap needs phys_to_virt) =====
+    // paging_init approach:
+    // 1. Initialize memblock
+    // 2. Parse memory regions from DTB
+    // 3. Create linear mapping at PAGE_OFFSET
+    {
+        // Initialize memblock
+        mm::memblock_init();
+
+        // Acquire the boot memory map: FDT on riscv64 (DTB is mapped by
+        // boot.S's early page table at its physical address), the
+        // bootloader-provided multiboot/e820 map (copied to BSS by
+        // early_boot_init) on x86_64.
+        #[cfg(feature = "riscv64")]
+        let dtb_phys = arch::boot::get_dtb_pointer();
+        #[cfg(feature = "riscv64")]
+        let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
+        #[cfg(feature = "x86_64")]
+        let memory_regions = x86_boot_memory_regions();
+        #[cfg(feature = "x86_64")]
+        x86_dump_regions();
+
+        // Add memory regions to memblock
+        for region in memory_regions.iter() {
+            mm::memblock_add(region.base, region.size).ok();
+        }
+
+        // OH Phase 1 prereq: discover the boot initrd (QEMU `-initrd` puts
+        // linux,initrd-start/end into /chosen) and reserve its pages BEFORE
+        // the zone allocator exists — init_zone_system hands every
+        // memblock-free page to the buddy allocator, and the image is only
+        // consumed (unpacked into the rootfs) much later, after rootfs
+        // init. Runs on the early identity mapping, hence the physical
+        // dtb pointer like parse_memory_regions above.
+        #[cfg(feature = "riscv64")]
+        {
+            let dtb_phys = arch::boot::get_dtb_pointer();
+            if let Some((start, end)) = unsafe { cmdline::parse_initrd_region(dtb_phys) } {
+                let size = end - start;
+                if mm::memblock_reserve(start, size).is_ok() {
+                    // No print here — the heap does not exist yet (the
+                    // unpack status line after rootfs init reports it).
+                    initrd::set_region(start, end);
+                }
+            }
+        }
+
+        // Reserve memory regions (kernel, heap, slab)
+        let heap_start = KERNEL_HEAP_PHYS;
+        let heap_size = crate::config::KERNEL_HEAP_SIZE;
+        let slab_start = heap_start + heap_size;
+        let slab_size = 4 * 1024 * 1024;
+
+        #[cfg(feature = "riscv64")]
+        mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
+        #[cfg(feature = "x86_64")]
+        mm::memblock_reserve(0, KERNEL_RESERVE_SIZE).ok(); // low memory + kernel
+        mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
+        mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
+
+        // Stay in Early stage for setup_linear_mapping (static BSS arrays always accessible)
+        // Don't switch to Fixmap yet — Fixmap stage uses identity mapping which
+        // doesn't exist in the permanent page table
+
+        // Setup linear mapping (PAGE_OFFSET region)
+        arch::mm::setup_linear_mapping(&memory_regions);
+
+        // Now switch to fixmap stage (linear mapping is available)
+        arch::mm::pt_ops_set_fixmap();
+
+        // Calculate total physical memory for later use
+        let total_phys_memory: usize = memory_regions.iter().map(|r| r.size).sum();
+    }
+
+    // Now linear mapping is available, phys_to_virt() works for all physical memory
+    // Initialize heap allocator
+    mm::init_heap();
+
+    // x86_64: leave the .boot stack (limited by the LMA window, ~1MB) for a
+    // 4MB heap-backed kernel stack. The whole init chain — including exec's
+    // page-table phase with its nested spinlock/preempt frames — runs here;
+    // on the boot stack it overflowed into the bootstrap page tables no
+    // matter the size (observed with 16K/256K/992K), corrupting them with
+    // stack data that the exec walk then read as PTEs.
+    #[cfg(feature = "x86_64")]
+    {
+        const BOOT_KSTACK_SIZE: usize = 4 << 20;
+        let kstack = alloc::vec![0u8; BOOT_KSTACK_SIZE].into_boxed_slice();
+        let top = kstack.as_ptr() as usize + BOOT_KSTACK_SIZE;
+        core::mem::forget(kstack); // live for the whole boot; freed never
+        unsafe {
+            core::arch::asm!(
+                "mov rsp, {0}",
+                "jmp {1}",
+                in(reg) top,
+                sym boot_stack_continuation,
+                options(noreturn)
+            );
+        }
+    }
+
+    // riscv64: no stack switch needed — continue on the .boot stack.
+    #[cfg(not(feature = "x86_64"))]
+    {
+        crate::rust_main_tail();
+    }
+}
+
+/// Mount the root filesystem according to the kernel command line
+/// (OH Phase 1 prereq).
+///
+/// - `root=/dev/ram0` (or any ram/rd name): the initrd content, already
+///   unpacked into the ramfs root, IS the root filesystem — no block
+///   device is mounted. This is the modern Linux initramfs path (no
+///   ramdisk block device involved).
+/// - `root=/dev/vda`: mount ext4 from the boot virtio-blk disk (PCI
+///   first, else MMIO — the disk the probe registers as vda).
+/// - other `root=/dev/vdX`: only the first virtio-blk disk is I/O-wired
+///   today; warn and fall back to the first-ext4 heuristic.
+/// - anything else (PARTUUID=, unparsable): same fallback with a warning.
+fn mount_root_filesystem() {
+    if !crate::config::AUTO_MOUNT_EXT4 {
+        return;
+    }
+    let root = cmdline::get_root_device();
+    let dev_name = alloc::string::String::from(
+        root.trim_start_matches("/dev/").trim_matches('/'),
+    );
+
+    // Ram-disk roots: initrd content is the root.
+    let is_ram = dev_name == "ram0"
+        || dev_name == "ram"
+        || dev_name == "initrd"
+        || dev_name.starts_with("ram")
+        || dev_name.starts_with("rd");
+    if is_ram {
+        let ok = initrd::loaded();
+        if ok {
+            print_status("fs", "root=/dev/ram0 — initrd ramfs root", true);
+        } else {
+            print_status("fs", "root=/dev/ram0 but no initrd unpacked", false);
+        }
+        return;
+    }
+
+    // Name resolution (Linux semantics): root=/dev/vdX selects THAT disk.
+    // vda resolves to the first PCI disk, or the MMIO boot disk when no
+    // PCI virtio-blk was found; vdb..vdz resolve to the PCI slots.
+    if let Some(disk) = drivers::virtio::get_pci_gen_disk_by_name(&dev_name) {
+        crate::pr_info!(
+            "root: {} -> PCI virtio-blk disk ({} sectors)",
+            root,
+            disk.get_capacity()
+        );
+        mount_ext4_root_from(disk as *const drivers::blkdev::GenDisk);
+        return;
+    }
+
+    crate::pr_info!(
+        "root: cmdline root={} not mountable by name; trying boot disk",
+        root
+    );
+    mount_boot_disk_ext4();
+}
+
+/// Mount the boot disk's ext4 over `/` (vda selection: PCI virtio-blk
+/// first, MMIO fallback), then rebuild the /proc and cgroup2 mounts the
+/// ext4 root overlay shadowed (same sequence the pre-OH boot used).
+fn mount_boot_disk_ext4() {
+    let disk: Option<*const drivers::blkdev::GenDisk> =
+        drivers::virtio::get_pci_gen_disk()
+            .map(|d| d as *const drivers::blkdev::GenDisk)
+            .or_else(|| {
+                drivers::virtio::get_device()
+                    .map(|v| &v.disk as *const drivers::blkdev::GenDisk)
+            });
+    let Some(disk) = disk else {
+        // No block device at all (initrd-only run) — nothing to mount.
+        return;
+    };
+    mount_ext4_root_from(disk);
+}
+
+/// Mount `disk`'s ext4 as THE root (full mount path with journal replay),
+/// then rebuild the /proc and cgroup2 mounts the ext4 overlay shadowed.
+fn mount_ext4_root_from(disk: *const drivers::blkdev::GenDisk) {
+    let mount_result = fs::ext4::mount_ext4(disk);
+    let mount_point = crate::config::EXT4_MOUNT_POINT;
+    print_status("fs", &format!("ext4 mounted {}", mount_point), mount_result.is_ok());
+    if mount_result.is_err() {
+        return;
+    }
+    if fs::ext4::get_ext4_fs().is_some() {
+        // Build dentry tree for ext4 (overlays root)
+        fs::vfs::vfs_mount(
+            "/",
+            fs::ext4::create_root_inode(),
+            fs::mount::MntFlags::new(0),
+        );
+    }
+
+    // Remount procfs after ext4 mount (ext4 overwrites the root directory).
+    if crate::config::AUTO_MOUNT_PROCFS {
+        let procfs_mount_result = fs::procfs::mount_procfs();
+        print_status("fs", "procfs remounted /proc", procfs_mount_result.is_ok());
+        if procfs_mount_result.is_ok() {
+            fs::vfs::vfs_mount(
+                "/proc",
+                fs::procfs::create_root_inode(),
+                fs::mount::MntFlags::new(0),
+            );
+        }
+    }
+
+    // Re-link cgroup2 after ext4 overlay (U1b, same defensive re-mount
+    // as procfs above).
+    let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
 }
 
 // Panic handler — uses dfx::backtrace for all output
@@ -1020,6 +1328,6 @@ fn panic(info: &PanicInfo) -> ! {
 
     // Halt
     loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        crate::arch::cpu::wfi();
     }
 }

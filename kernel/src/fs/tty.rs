@@ -734,7 +734,7 @@ impl TtyDevice {
             }
 
             // R54: re-arm interrupts so ticks/IPIs reach this CPU.
-            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
 
             self.read_waitq.finish_wait(current);

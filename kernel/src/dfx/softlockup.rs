@@ -29,16 +29,9 @@ static REPORTED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX
 /// Whether the softlockup detector is enabled
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Get nanosecond timestamp from RISC-V `rdtime`.
+/// Get nanosecond timestamp from the arch wall-clock counter.
 fn now_ns() -> u64 {
-    let time: u64;
-    unsafe {
-        core::arch::asm!(
-            "rdtime {}",
-            out(reg) time,
-            options(nomem, nostack)
-        );
-    }
+    let time: u64 = crate::arch::cpu::read_time();
     // timebase ticks → ns: for the 10 MHz CLINT that is exactly 100 ns per
     // tick. The old `time * (FREQ / 1_000_000)` computed ×10 instead of
     // ×100 — every elapsed window read 10x too small, delaying a 10s

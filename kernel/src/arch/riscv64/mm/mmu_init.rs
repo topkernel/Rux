@@ -1391,7 +1391,7 @@ pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
 /// L1 leaves the same windows cost ~132 PTEs and zero L0 tables.
 /// Unaligned head/tail pages still map at 4KB granularity.
 pub unsafe fn map_kernel_region(virt: u64, phys: u64, size: u64, flags: u64) {
-    use crate::arch::riscv64::mm::memory_layout::PMD_SIZE;
+    use crate::arch::mm::memory_layout::PMD_SIZE;
 
     let mut v = virt;
     let mut p = phys;
@@ -1543,7 +1543,7 @@ pub unsafe extern "C" fn setup_vm() {
     map_region(early_ppn, UART_BASE, 0x1000, device_flags);
 
     // Map DTB area (identity mapping) - use actual DTB pointer from OpenSBI
-    let dtb_addr = crate::arch::riscv64::boot::get_dtb_pointer();
+    let dtb_addr = crate::arch::boot::get_dtb_pointer();
     if dtb_addr != 0 {
         // Align down to page boundary
         let dtb_page = dtb_addr & !0xFFF;
@@ -1612,7 +1612,7 @@ pub fn init() {
         map_region(root_ppn, UART_BASE, 0x1000, device_flags);
 
         // Map DTB at linear mapping address
-        let dtb_addr = crate::arch::riscv64::boot::get_dtb_pointer();
+        let dtb_addr = crate::arch::boot::get_dtb_pointer();
         if dtb_addr != 0 {
             let dtb_page = dtb_addr & !0xFFF;
             let dtb_virt = phys_to_virt(PhysAddr::new(dtb_page));

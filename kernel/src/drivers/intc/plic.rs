@@ -242,7 +242,7 @@ fn plic_unmask(data: &IrqData) {
 }
 
 fn plic_eoi(data: &IrqData) {
-    let hart = crate::arch::riscv64::smp::cpu_id() as usize;
+    let hart = crate::arch::smp::cpu_id() as usize;
     PLIC.complete(hart, data.hwirq as usize);
 }
 

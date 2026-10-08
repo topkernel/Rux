@@ -47,10 +47,71 @@ impl fmt::Write for ConsoleWriter {
 // Frame Pointer Stack Walk
 // ============================================================================
 
+/// Read the current frame pointer register (`s0` on riscv64, `rbp` on x86_64).
+#[inline]
+pub fn current_frame_pointer() -> u64 {
+    let fp: u64;
+    #[cfg(feature = "riscv64")]
+    // SAFETY: pure register read, no memory access or side effects.
+    unsafe {
+        core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack));
+    }
+    #[cfg(feature = "x86_64")]
+    // SAFETY: pure register read, no memory access or side effects.
+    unsafe {
+        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
+    }
+    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+    {
+        fp = 0;
+    }
+    fp
+}
+
+/// Return address of the calling function (for "current" trace entries).
+#[inline]
+fn caller_return_address() -> u64 {
+    let ra: u64;
+    #[cfg(feature = "riscv64")]
+    // SAFETY: pure register read, no memory access or side effects.
+    unsafe {
+        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
+    }
+    #[cfg(feature = "x86_64")]
+    // SAFETY: frame pointers are forced on (force-frame-pointers=yes), so
+    // [rbp+8] is this function's return address.
+    unsafe {
+        core::arch::asm!("mov {}, [rbp + 8]", out(reg) ra, options(nomem, nostack));
+    }
+    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+    {
+        ra = 0;
+    }
+    ra
+}
+
+/// Unwind one frame: given a frame pointer, return (return_addr, next_fp).
+///
+/// riscv64 frame layout: [fp] = saved_fp, [fp+8] = return_addr.
+/// x86_64 frame layout:  [rbp] = saved_rbp, [rbp+8] = return_addr.
+#[inline]
+fn unwind_frame(fp: u64) -> Option<(u64, u64)> {
+    // SAFETY: caller validated `fp` (kernel range, aligned); reads of the
+    // two frame words are the standard unwind operation.
+    unsafe {
+        let ret_addr = *((fp + 8) as *const u64);
+        let next_fp = *(fp as *const u64);
+        if ret_addr == 0 {
+            return None;
+        }
+        Some((ret_addr, next_fp))
+    }
+}
+
 /// Walk frame pointers and call the callback for each frame.
 ///
-/// Reads the current `s0` (frame pointer) via inline asm, then iterates
-/// the frame pointer chain: `[fp]` = saved_fp, `[fp+8]` = return_addr.
+/// Reads the current frame pointer via inline asm, then iterates the frame
+/// pointer chain: `[fp]` = saved_fp, `[fp+8]` = return_addr.
 ///
 /// # Arguments
 /// * `cb` - Callback called as `cb(program_counter, frame_pointer)` for each frame.
@@ -59,10 +120,7 @@ impl fmt::Write for ConsoleWriter {
 /// Reads from memory via frame pointer chain. Caller must ensure the stack
 /// is in a valid state (not corrupted). Validates alignment and address range.
 pub fn walk_stack_trace(cb: &mut dyn FnMut(u64, u64)) {
-    let mut fp: u64;
-    unsafe {
-        core::arch::asm!("mv {}, s0", out(reg) fp, options(nomem, nostack));
-    }
+    let mut fp: u64 = current_frame_pointer();
 
     let mut frame_count = 0u32;
     while fp != 0 && frame_count < 32 {
@@ -71,22 +129,16 @@ pub fn walk_stack_trace(cb: &mut dyn FnMut(u64, u64)) {
             break;
         }
 
-        unsafe {
-            let fp_val = *(fp as *const u64);
-            let ret_addr = *((fp + 8) as *const u64);
-
-            // Validate return address
-            if ret_addr == 0 {
-                break;
-            }
-
+        if let Some((ret_addr, next_fp)) = unwind_frame(fp) {
             cb(ret_addr, fp);
 
             // Check if next fp is valid (should be > current fp or 0)
-            if fp_val <= fp {
+            if next_fp <= fp {
                 break;
             }
-            fp = fp_val;
+            fp = next_fp;
+        } else {
+            break;
         }
         frame_count += 1;
     }
@@ -105,10 +157,7 @@ pub fn dump_stack() {
     let mut w = ConsoleWriter::new();
 
     // Print current ra first
-    let mut ra: u64;
-    unsafe {
-        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
-    }
+    let ra: u64 = caller_return_address();
 
     let _ = w.write_str("Call trace:\n");
     let _ = write!(w, "  [<{:016x}>] (current)\n", ra);
@@ -124,7 +173,8 @@ pub fn dump_stack() {
 // Register and CSR Dump
 // ============================================================================
 
-/// RISC-V register names in order (x1..x31)
+/// Register names in order matching `save_regs()` layout
+#[cfg(feature = "riscv64")]
 const REG_NAMES: [&str; 31] = [
     "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0",
     "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6",
@@ -132,9 +182,20 @@ const REG_NAMES: [&str; 31] = [
     "s9", "s10", "s11", "t3", "t4", "t5", "t6",
 ];
 
+/// x86_64: only the callee-saved GPRs are captured (slots 0..6); the
+/// remaining slots stay zero.
+#[cfg(feature = "x86_64")]
+const REG_NAMES: [&str; 31] = [
+    "rbx", "rbp", "r12", "r13", "r14", "r15", "", "",
+    "", "", "", "", "", "", "", "",
+    "", "", "", "", "", "", "", "",
+    "", "", "", "", "", "", "",
+];
+
 /// Save all integer registers to a stack buffer via inline assembly.
 ///
 /// Returns an array of 31 u64 values representing x1..x31.
+#[cfg(feature = "riscv64")]
 pub fn save_regs() -> [u64; 31] {
     let mut regs: [u64; 31] = [0; 31];
     unsafe {
@@ -177,6 +238,35 @@ pub fn save_regs() -> [u64; 31] {
     regs
 }
 
+/// x86_64 register capture: spill the callee-saved GPRs (rbx is reserved
+/// in LLVM, so push/spill/pop is the reliable way to read it).
+#[cfg(feature = "x86_64")]
+pub fn save_regs() -> [u64; 31] {
+    let mut regs: [u64; 31] = [0; 31];
+    // SAFETY: the pushes are balanced by the rsp adjustment; only this
+    // stack scratch area is touched.
+    unsafe {
+        core::arch::asm!(
+            "push rbx", "push rbp", "push r12", "push r13", "push r14", "push r15",
+            "mov {rbx_v}, [rsp + 5*8]",
+            "mov {rbp_v}, [rsp + 4*8]",
+            "mov {r12_v}, [rsp + 3*8]",
+            "mov {r13_v}, [rsp + 2*8]",
+            "mov {r14_v}, [rsp + 1*8]",
+            "mov {r15_v}, [rsp + 0*8]",
+            "add rsp, 6*8",
+            rbx_v = out(reg) regs[0],
+            rbp_v = out(reg) regs[1],
+            r12_v = out(reg) regs[2],
+            r13_v = out(reg) regs[3],
+            r14_v = out(reg) regs[4],
+            r15_v = out(reg) regs[5],
+            options(preserves_flags)
+        );
+    }
+    regs
+}
+
 /// Print register dump captured via inline assembly.
 ///
 /// Captures all integer registers (x1..x31) and prints them 4 per line.
@@ -202,6 +292,7 @@ pub fn dump_regs(regs: &[u64; 31]) {
 }
 
 /// Read and print CSR state (sstatus, scause, stval, sepc).
+#[cfg(feature = "riscv64")]
 pub fn dump_csrs() {
     let mut w = ConsoleWriter::new();
 
@@ -221,4 +312,12 @@ pub fn dump_csrs() {
     let _ = write!(w, "Scause : {:016x}\n", scause);
     let _ = write!(w, "Stval  : {:016x}\n", stval);
     let _ = write!(w, "Sepc   : {:016x}\n\n", sepc);
+}
+
+/// x86_64: print the fault/control registers instead of RISC-V CSRs.
+#[cfg(feature = "x86_64")]
+pub fn dump_csrs() {
+    let mut w = ConsoleWriter::new();
+    let _ = write!(w, "CR2    : {:016x}\n", crate::arch::cpu::read_cr2());
+    let _ = write!(w, "CR3    : {:016x}\n\n", crate::arch::cpu::read_cr3());
 }

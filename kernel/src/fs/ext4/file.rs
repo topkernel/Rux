@@ -122,7 +122,7 @@ impl ReadDst {
             ReadDst::User(dst, _) => {
                 // SAFETY: exception-table copy; uncopied bytes truncate.
                 let uncopied = unsafe {
-                    crate::arch::riscv64::uaccess::copy_to_user(dst.add(off), src, bytes)
+                    crate::arch::uaccess::copy_to_user(dst.add(off), src, bytes)
                 };
                 if uncopied >= bytes {
                     // Nothing delivered: the page is unmapped — report the
@@ -517,7 +517,7 @@ fn drain_batch(
     let mut status = [0i32; MAX_BATCH_DRAIN];
     // One device kick for the whole quietly-submitted batch (see
     // pci_submit_read_async): publish N chains, notify once, then wait.
-    crate::drivers::virtio::pci_blk_kick();
+    crate::drivers::virtio::pci_blk_kick_all();
     for i in 0..count {
         status[i] = bio::bread_wait(bh_ptrs[i], &completions[i]);
     }
@@ -1115,6 +1115,10 @@ pub fn ext4_sync_file(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
 ) -> Result<(), i32> {
+    // Durability point: pending ordered publications (entry blocks and
+    // their dependencies) go out first, in queue order.
+    let _ = bio::flush_publications();
+
     // Sync all data blocks of file
     let blocks = inode.get_data_blocks(fs)?;
 

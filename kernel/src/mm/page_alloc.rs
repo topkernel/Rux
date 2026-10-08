@@ -37,10 +37,7 @@ pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
     if !crate::dfx::memwatch::armed() {
         return alloc_pages_inner(gfp_flags, order);
     }
-    let mw_s0: u64;
-    unsafe {
-        core::arch::asm!("mv {s}, s0", s = out(reg) mw_s0, options(nomem, nostack));
-    }
+    let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
     let phys = alloc_pages_inner(gfp_flags, order);
     if phys != 0 {
         let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
@@ -149,6 +146,16 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
     // Zone system not initialized yet, use memblock
     // This should only happen during early boot before zone is set up
     LEGACY_ALLOCS.fetch_add(1, Ordering::Relaxed);
+    // Flag any post-zone-init memblock page handout: memblock's bump
+    // cursor overlaps the zone's seeded free lists, so a handout here
+    // past zone init is a double-allocation in the making.
+    if super::memblock::memblock_available_memory() > 0 {
+        static LEG_WARN: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if LEG_WARN.fetch_add(1, Ordering::Relaxed) < 5 {
+            crate::pr_err!("page_alloc: legacy memblock alloc order={} after zone init", order);
+        }
+    }
     super::memblock::memblock_phys_alloc().unwrap_or(0)
 }
 
@@ -340,8 +347,8 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
         // phys_to_virt converts it to the corresponding virtual address in the
         // kernel linear mapping region, which is safe to write to.
         // Writing PAGE_SIZE bytes is within the allocated page.
-        let virt = crate::arch::riscv64::mm::phys_to_virt(
-            crate::arch::riscv64::mm::PhysAddr::new(addr as u64),
+        let virt = crate::arch::mm::phys_to_virt(
+            crate::arch::mm::PhysAddr::new(addr as u64),
         );
         unsafe {
             core::ptr::write_bytes(virt.0 as *mut u8, 0, PAGE_SIZE);
@@ -357,6 +364,27 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
 /// - `order`: Order of the allocation
 pub fn free_pages(addr: usize, order: usize) {
     if addr == 0 {
+        return;
+    }
+
+    // Sentinel: a kernel VMA (or any address >= 4GB "phys") entering the zone
+    // poisons the freelist — the next alloc returns it as a wild phys.
+    // (x86_64 diagnostic from the feature branch; kept as a cheap guard.)
+    if addr >= 0x1_0000_0000 {
+        // Caller diagnostic is x86-only (frame-pointer walk via att_syntax
+        // asm); the riscv64 build has no equivalent and just drops it.
+        #[cfg(feature = "x86_64")]
+        {
+            let ret: u64;
+            // SAFETY: frame pointers forced on; diagnostic return-address read.
+            unsafe { core::arch::asm!("movq 8(%rbp), {}", out(reg) ret, options(att_syntax)); }
+            crate::println!("free_pages: WILD addr={:#x} order={} caller={:#x}", addr, order, ret);
+        }
+        #[cfg(not(feature = "x86_64"))]
+        {
+            crate::println!("free_pages: WILD addr={:#x} order={}", addr, order);
+        }
+
         return;
     }
 
@@ -434,8 +462,8 @@ pub fn virt_to_page(addr: usize) -> *mut Page {
 
 /// Get page frame number from a kernel virtual address.
 pub fn virt_to_pfn(addr: usize) -> usize {
-    let phys = crate::arch::riscv64::mm::virt_to_phys(
-        crate::arch::riscv64::mm::VirtAddr::new(addr as u64),
+    let phys = crate::arch::mm::virt_to_phys(
+        crate::arch::mm::VirtAddr::new(addr as u64),
     );
     (phys.bits() as usize) / PAGE_SIZE
 }
@@ -448,8 +476,8 @@ pub fn page_to_phys(page: &Page) -> usize {
 /// Get the kernel-linear virtual address of a page described by `page`.
 pub fn page_to_virt(page: &Page) -> usize {
     let phys = page_to_phys(page);
-    crate::arch::riscv64::mm::phys_to_virt(
-        crate::arch::riscv64::mm::PhysAddr::new(phys as u64),
+    crate::arch::mm::phys_to_virt(
+        crate::arch::mm::PhysAddr::new(phys as u64),
     )
     .bits() as usize
 }
@@ -522,8 +550,14 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
     let mut total_added = 0usize;
 
     super::memblock::memblock_for_each_free_range(alloc_start, alloc_end, |free_start, free_end| {
-        // Convert to PFNs
-        let range_start_pfn = free_start / PAGE_SIZE;
+        // Convert to PFNs. Round the start UP and the end DOWN: a
+        // PARTIALLY-reserved page must never reach the buddy allocator —
+        // memblock reservations are byte ranges (e.g. the FDT /chosen
+        // initrd range), and truncating them onto page boundaries handed
+        // the tail page of a >4KB initrd to the allocator, whose first
+        // allocations overwrote the image (gzip "corrupt deflate
+        // stream" for every initrd larger than one page).
+        let range_start_pfn = (free_start + PAGE_SIZE - 1) / PAGE_SIZE;
         let range_end_pfn = free_end / PAGE_SIZE;
         let range_pages = range_end_pfn.saturating_sub(range_start_pfn);
 

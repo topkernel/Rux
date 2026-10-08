@@ -516,8 +516,8 @@ impl Zone {
         // stays live, so the alloc side can also catch the frame being
         // handed out again ("DOUBLE-ALLOC still live"). Print with a
         // frame-pointer chain to name the offender.
-        if crate::arch::riscv64::mm::mmu_init::alloc_stage_is_late()
-            && crate::arch::riscv64::mm::mmu_init::PtLedger::is_live_table(pfn as u64)
+        if crate::arch::mm::mmu_init::alloc_stage_is_late()
+            && crate::arch::mm::mmu_init::PtLedger::is_live_table(pfn as u64)
         {
             static RAWFREE_REPORTS: AtomicUsize = AtomicUsize::new(0);
             if RAWFREE_REPORTS.fetch_add(1, Ordering::Relaxed) < 6 {
@@ -527,9 +527,9 @@ impl Zone {
                     crate::process::current_pid()
                 );
                 let mut frames: [u64; 10] = [0; 10];
-                let s0: u64;
+                // SAFETY: reads the frame-pointer chain of the current stack.
                 unsafe {
-                    core::arch::asm!("mv {}, s0", out(reg) s0, options(nomem, nostack));
+                    let s0 = crate::dfx::backtrace::current_frame_pointer();
                     crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
                 }
                 for f in frames.iter() {

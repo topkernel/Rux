@@ -20,6 +20,9 @@ Welcome to the Rux operating system kernel documentation center!
 - **[Testing Guide](test/testing.md)** - Unit tests + proptest + Kani proofs + SPIN models
 - **[Formal Verification](development/formal-verification.md)** - 4-layer verification strategy (proptest + Kani + SPIN + Miri)
 - **[Lock Hierarchy](architecture/lock-ordering.md)** - Kernel lock ordering and nesting rules
+- **[OpenHarmony Port Plan](development/openharmony-port-plan.md)** - Feasibility analysis + phased plan for running the OpenHarmony x86_64_virt system on Rux (x86_64 port, binder, graphics)
+- **[Rust Kernel Survey & x86_64 Refactor Notes](development/rust-kernel-survey.md)** - Engineering practices adopted for the x86_64 port (unattributed how-to) + 2020-2026 Rust kernel landscape survey (Asterinas, Theseus, Rust-for-Linux, Hubris, ...) with a concrete refactor list
+- **[Rust Kernel Best Practices](development/rust-kernel-best-practices.md)** - Project-wide engineering standard: type-level design, error/unsafe/concurrency discipline, TCB accounting, funded whole-tree refactor program (F1-F7), and safety innovations beyond the classic microkernel (framekernel, verified kernels, PKS/MPK compartments, capabilities)
 
 ### 🔍 Code Review & Fix Tracking
 - **[Code Review 2026-09-12 (3rd round)](development/code-review-2026-09-12.md)** - Full-repo review findings (~440 issues, 34 Critical)

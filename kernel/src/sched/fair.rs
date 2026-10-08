@@ -865,15 +865,8 @@ const TIMEBASE_MULT: u64 = 100;
 ///
 /// Use RISC-V time register
 pub fn sched_clock() -> u64 {
-    // SAFETY: rdtime reads the RISC-V time CSR, a read-only hardware register.
-    let time: u64;
-    unsafe {
-        core::arch::asm!(
-            "rdtime {time}",
-            time = out(reg) time,
-            options(nomem, nostack)
-        );
-    }
+    // Arch wall-clock counter (rdtime on riscv64, TSC on x86_64).
+    let time: u64 = crate::arch::cpu::read_time();
     // Assume clock frequency is 10MHz (100ns precision)
     // Actual value needs adjustment based on platform
     time * TIMEBASE_MULT

@@ -84,6 +84,11 @@ pub struct SocketOptions {
     pub mcast_groups: [u32; 4],
     /// Number of valid entries in mcast_groups.
     pub mcast_group_count: u8,
+    /// SO_PASSCRED: deliver an SCM_CREDENTIALS cmsg with every received
+    /// message (OH Phase 1: ueventd sets it and DROPS any uevent whose
+    /// recvmsg carries no credentials cmsg — Linux netlinkRecvmsg attaches
+    /// {0,0,0} creds for kernel-originated messages when the option is on).
+    pub passcred: bool,
 }
 
 impl SocketOptions {
@@ -106,6 +111,7 @@ impl SocketOptions {
             linger_secs: 0,
             mcast_groups: [0u32; 4],
             mcast_group_count: 0,
+            passcred: false,
         }
     }
 }
@@ -1181,7 +1187,7 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
 
     // R54: schedule() restores the caller's SIE state; re-arm IRQs so
     // ticks/IPIs reach this CPU across the wait.
-    crate::arch::riscv64::cpu::restore_irq(true);
+    crate::arch::cpu::restore_irq(true);
     crate::sched::schedule();
 
     if timer_id != 0 {
@@ -1886,7 +1892,7 @@ fn linger_drain_wait(tcp_fd: i32, secs: u32) {
             return;
         }
         // R54: re-arm IRQs so the timer tick reaches this CPU.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
     }
 }

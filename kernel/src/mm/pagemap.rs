@@ -9,8 +9,8 @@
 //!
 //! High-level VMA operations (brk, mmap, munmap) are provided in platform implementations
 
-// Platform-specific AddressSpace re-export
-pub use crate::arch::riscv64::mm::AddressSpace;
+// Platform-specific AddressSpace re-export (canonical type: crate::mm)
+pub use crate::mm::mm_struct::AddressSpace;
 
 // Re-export common types
 pub use crate::mm::page::{VirtAddr, PhysAddr, PAGE_SIZE};

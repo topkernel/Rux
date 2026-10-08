@@ -10,6 +10,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 MUSL_DIR="${PROJECT_ROOT}/toolchain/riscv64-rux-linux-musl"
+
+# BUG-S005: pin-clean soft-fp overlay. Ubuntu's cross libgcc.a members are
+# built with zbb+zcb+zicond encodings; any static link that resolves a
+# __*tf3/__floatsitf/__clz* helper from -lgcc ships instructions the pinned
+# QEMU CPU model cannot execute (SIGILL). The overlay preempts those members.
+"${PROJECT_ROOT}/userspace/build-softfp.sh"
+SOFTFP_LIBS="-L${PROJECT_ROOT}/userspace/soft-fp -lsoftfp-pin"
 LTP_VERSION="20240524"
 LTP_SRC_DIR="${SCRIPT_DIR}/ltp-full-${LTP_VERSION}"
 
@@ -84,8 +91,11 @@ configure_ltp() {
     export CROSS_COMPILE=riscv64-linux-gnu-
 
     # Use -nostdinc to exclude glibc headers, then add musl and GCC headers
-    export ADD_CFLAGS="-nostdinc -U_FORTIFY_SOURCE -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
-    export LDFLAGS="-static -L${MUSL_DIR}/lib"
+    export ADD_CFLAGS="-march=rv64gc_zicsr -nostdinc -U_FORTIFY_SOURCE -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
+    export LDFLAGS="-static -L${MUSL_DIR}/lib ${SOFTFP_LIBS}"
+    # CFLAGS is what autoconf bakes into the generated Makefiles — ADD_CFLAGS
+    # alone never reaches the compiler (root cause of the vector/Zcb SIGILLs).
+    export CFLAGS="-march=rv64gc_zicsr -O2 -U_FORTIFY_SOURCE"
 
     # Configure with musl headers, disable features requiring external libs
     ./configure \
@@ -159,14 +169,14 @@ AUTODUMMY
     export AR=riscv64-linux-gnu-ar
     export RANLIB=riscv64-linux-gnu-ranlib
     export STRIP=riscv64-linux-gnu-strip
-    export ADD_CFLAGS="-static -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
+    export ADD_CFLAGS="-static -march=rv64gc_zicsr -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
 
     # Build all library paths for linking
     LIB_PATHS="-L${MUSL_DIR}/lib -L${LTP_SRC_DIR}/lib -L${LTP_SRC_DIR}/libs/lib -L${LTP_SRC_DIR}/libs/libltp -L${LTP_SRC_DIR}/libs/libnewipc -L${LTP_SRC_DIR}/libs/libnuma_helper"
     for libdir in ${LTP_SRC_DIR}/libs/*/; do
         LIB_PATHS="$LIB_PATHS -L$libdir"
     done
-    export LDFLAGS="-static $LIB_PATHS"
+    export LDFLAGS="-static $LIB_PATHS ${SOFTFP_LIBS}"
 
     # Build all libraries first (skip if already built)
     info "Building LTP libraries..."
@@ -192,8 +202,8 @@ AUTODUMMY
         make -C "$dir" -j1 \
             AUTOHEADER=true \
             CC=riscv64-linux-gnu-gcc \
-            ADD_CFLAGS="-static -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
-            LDFLAGS="-static $LIB_PATHS" 2>/dev/null || true
+            ADD_CFLAGS="-static -march=rv64gc_zicsr -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
+            LDFLAGS="-static $LIB_PATHS ${SOFTFP_LIBS}" 2>/dev/null || true
     done
 
     # Build other kernel subdirectories
@@ -202,8 +212,8 @@ AUTODUMMY
             make -C "testcases/kernel/$subdir" -j$(nproc) -k \
                 AUTOHEADER=true \
                 CC=riscv64-linux-gnu-gcc \
-                ADD_CFLAGS="-static -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
-                LDFLAGS="-static $LIB_PATHS" 2>/dev/null || true
+                ADD_CFLAGS="-static -march=rv64gc_zicsr -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
+                LDFLAGS="-static $LIB_PATHS ${SOFTFP_LIBS}" 2>/dev/null || true
         fi
     done
 
@@ -213,8 +223,8 @@ AUTODUMMY
         make -C $dir -j$(nproc) -k \
             AUTOHEADER=true \
             CC=riscv64-linux-gnu-gcc \
-            ADD_CFLAGS="-static -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
-            LDFLAGS="-static $LIB_PATHS" 2>/dev/null || true
+            ADD_CFLAGS="-static -march=rv64gc_zicsr -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
+            LDFLAGS="-static $LIB_PATHS ${SOFTFP_LIBS}" 2>/dev/null || true
     done
 
     # Count built binaries (ELF executables only)

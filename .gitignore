@@ -102,3 +102,7 @@ kernel/verify/kani-output.txt
 .x11work/
 /.udev/
 .ltp/
+
+# soft-fp overlay build artifacts
+userspace/soft-fp/*.o
+userspace/soft-fp/libsoftfp-pin.a

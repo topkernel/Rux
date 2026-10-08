@@ -357,7 +357,7 @@ pub fn sys_init_module_impl(umod: usize, len: usize) -> i64 {
     if len == 0 || len > MAX_MODULE_SIZE {
         return -(errno::Errno::InvalidArgument.as_i32() as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(umod, len) {
+    if !crate::arch::uaccess::access_ok(umod, len) {
         return -(errno::Errno::BadAddress.as_i32() as i64);
     }
 
@@ -365,7 +365,7 @@ pub fn sys_init_module_impl(umod: usize, len: usize) -> i64 {
     // SAFETY: umod/len validated with access_ok; copy_from_user faults
     // safely on bad pages and reports the uncopied tail.
     let uncopied = unsafe {
-        crate::arch::riscv64::uaccess::copy_from_user(blob.as_mut_ptr(), umod as *const u8, len)
+        crate::arch::uaccess::copy_from_user(blob.as_mut_ptr(), umod as *const u8, len)
     };
     if uncopied > 0 {
         return -(errno::Errno::BadAddress.as_i32() as i64);
@@ -430,7 +430,7 @@ pub fn sys_delete_module_impl(name_user: usize, _flags: u64) -> i64 {
     if !check_cap_sys_module() {
         return -(errno::Errno::OperationNotPermitted.as_i32() as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(name_user, 1) {
+    if !crate::arch::uaccess::access_ok(name_user, 1) {
         return -(errno::Errno::BadAddress.as_i32() as i64);
     }
 
@@ -442,7 +442,7 @@ pub fn sys_delete_module_impl(name_user: usize, _flags: u64) -> i64 {
         // handles faulting pages (returns uncopied count).
         let mut one = [0u8; 1];
         let uncopied = unsafe {
-            crate::arch::riscv64::uaccess::copy_from_user(
+            crate::arch::uaccess::copy_from_user(
                 one.as_mut_ptr(),
                 (name_user + i) as *const u8,
                 1,

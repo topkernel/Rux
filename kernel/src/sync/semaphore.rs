@@ -113,7 +113,7 @@ impl Semaphore {
         }
 
         // Slow path: our decrement is queued; the pairing up() will wake us.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
 
         // Woken up — finish_wait restores RUNNING and removes from queue.
@@ -205,7 +205,7 @@ impl Semaphore {
         }
 
         // Slow path: our decrement is queued; the pairing up() will wake us.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
 
         // Woken up — finish_wait restores RUNNING and removes from queue.

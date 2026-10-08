@@ -632,7 +632,7 @@ fn inotify_read(file: &File, buf: &mut [u8]) -> isize {
             crate::sched::dequeue_task(&*current);
             return -crate::errno::constants::EINTR as isize;
         }
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
         instance.wait_queue.finish_wait(current);
         if crate::signal::signal_pending() {

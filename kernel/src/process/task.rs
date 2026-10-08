@@ -512,6 +512,13 @@ pub struct Task {
     /// The CPU switching the task out may still re-pick ITSELF (fast path).
     pub ti_on_cpu: core::sync::atomic::AtomicBool,
 
+    /// RACE-FORENSICS (x86-smprace): CPU that currently owns the task's
+    /// RESUMED continuation (-1 = none). Claimed at __switch_to's publish
+    /// (right before the saved context is restored), released at the next
+    /// publish. Unlike ti_on_cpu, nothing but the switch path touches it —
+    /// a second claim while one is held is an unambiguous double-run.
+    pub running_on_cpu: core::sync::atomic::AtomicI32,
+
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
     ti_a0: core::sync::atomic::AtomicU64,
     ti_a1: core::sync::atomic::AtomicU64,
@@ -564,6 +571,12 @@ pub struct Task {
 
     /// Process credentials
     cred: Cred,
+
+    /// OpenHarmony access token id (per-process, /dev/access_token_id).
+    /// Inherited by fork children.
+    pub access_token: AtomicU64,
+    /// OpenHarmony foreground token id. NOT inherited (fork clears it).
+    pub access_ftoken: AtomicU64,
 
     /// sigsuspend contract: the pre-suspend mask to reinstate when the
     /// waited-for signal is delivered (Linux TIF_RESTORE_SIGMASK
@@ -649,7 +662,7 @@ pub struct Task {
     /// Architecture-specific thread state
     ///
     /// Stores FPU state, TLS pointer, etc.
-    pub thread: crate::arch::riscv64::thread::ThreadStruct,
+    pub thread: crate::arch::thread::ThreadStruct,
 
     /// File descriptor table (files_struct)
     /// Use Arc for CLONE_FILES sharing between threads
@@ -1037,6 +1050,7 @@ impl Task {
             cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
+            running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
             journal_handle: core::cell::Cell::new(core::ptr::null_mut()),
             task_refcnt: core::sync::atomic::AtomicU32::new(1),
             ti_a0: core::sync::atomic::AtomicU64::new(0),
@@ -1055,6 +1069,11 @@ impl Task {
             nr_threads: AtomicU32::new(1),
             dead_threads: Spinlock::new(alloc::vec::Vec::new()),
             cred: Cred::new_init(),
+            // OpenHarmony access-token bookkeeping (see
+            // drivers/access_tokenid.rs); fork inherits token and clears
+            // ftoken (process/fork.rs).
+            access_token: AtomicU64::new(0),
+            access_ftoken: AtomicU64::new(0),
             policy,
             prio,
             static_prio,
@@ -1072,7 +1091,7 @@ impl Task {
             fork_pt_regs: core::sync::atomic::AtomicU64::new(0),
             address_space: None,
             active_mm: None,
-            thread: crate::arch::riscv64::thread::ThreadStruct::new(),
+            thread: crate::arch::thread::ThreadStruct::new(),
             fdtable,
             signal,
             pending,
@@ -1191,6 +1210,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
             core::sync::atomic::AtomicBool::new(false),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, running_on_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
@@ -1312,11 +1335,15 @@ impl Task {
         // because WFI in QEMU TCG can starve the IO thread when stdin
         // is a blocking pipe, preventing timer interrupt delivery.
         ptr::write(
-            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::riscv64::thread::ThreadStruct,
+            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
             {
-                let mut thread = crate::arch::riscv64::thread::ThreadStruct::new();
-                thread.ra = crate::sched::cpu_idle_loop as u64;  // Return address = idle loop
-                thread.sp = 0;  // Will be set when kernel stack is allocated
+                let mut thread = crate::arch::thread::ThreadStruct::new();
+                // Idle task: first switch-in enters the idle loop
+                crate::process::thread_set_entry(
+                    &mut thread,
+                    crate::sched::cpu_idle_loop as u64,
+                    0, // set when the kernel stack is allocated
+                );
                 thread
             },
         );
@@ -1652,6 +1679,10 @@ impl Task {
             core::sync::atomic::AtomicBool::new(false),
         );
         ptr::write(
+            (ptr as usize + offset_of!(Task, running_on_cpu)) as *mut core::sync::atomic::AtomicI32,
+            core::sync::atomic::AtomicI32::new(-1),
+        );
+        ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
             core::cell::Cell::new(core::ptr::null_mut()),
         );
@@ -1790,8 +1821,8 @@ impl Task {
             None,
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::riscv64::thread::ThreadStruct,
-            crate::arch::riscv64::thread::ThreadStruct::new(),
+            (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
+            crate::arch::thread::ThreadStruct::new(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, fdtable)) as *mut Option<alloc::sync::Arc<FdTable>>,
@@ -2061,6 +2092,10 @@ impl Task {
             }
             return false;
         }
+        // Scribble hunter (dfx=scribble): track this Task's scheduling
+        // fields from birth. No-op unless the runtime switch is on.
+        #[cfg(feature = "x86_64")]
+        crate::dfx::scribble::register(ptr);
         return true;
     }
 
@@ -2127,7 +2162,7 @@ impl Task {
 
         // Trigger scheduling, select other process to run
         // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
     }
 
@@ -2179,7 +2214,7 @@ impl Task {
         // unit test — sits above it), and every pointer that DOES pass
         // is inside mapped memory, so the poison reads below cannot
         // fault. 64GiB linear span: generous against RAM growth.
-        const MAP_BASE: usize = crate::arch::riscv64::mm::memory_layout::PAGE_OFFSET;
+        const MAP_BASE: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
         const MAP_SPAN: usize = 0x10_0000_0000; // 64 GiB
         let a = task as usize;
         if task.is_null()
@@ -2211,10 +2246,18 @@ impl Task {
         // 0x00000000FFFFFFFF (u32::MAX zero-extended — GNOME panic at
         // guest+452s, epc=Task::pid offset 92, ra=Task::wake_up). Every
         // legitimate Task lives in the kernel linear map or the kernel
-        // image (>= 0xFFFFFFC000000000); anything lower is user range or
-        // an integer sentinel misread as a pointer. Dropping the wake
-        // loses one wakeup at worst; dereferencing panicked the kernel.
-        if (task as usize) < 0xFFFF_FFC0_0000_0000 {
+        // image; anything below the arch's floor is user range or an
+        // integer sentinel misread as a pointer. Dropping the wake loses
+        // one wakeup at worst; dereferencing panicked the kernel.
+        // (Per-arch floor: 0xFFFFFFC000000000 is the riscv64 layout — on
+        // x86_64 every legitimate linear-map Task sits at 0xFFFF8880...,
+        // below that constant, so the riscv floor dropped them all and
+        // stranded fork children forever.)
+        #[cfg(feature = "x86_64")]
+        const WAKE_PTR_FLOOR: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
+        #[cfg(not(feature = "x86_64"))]
+        const WAKE_PTR_FLOOR: usize = 0xFFFF_FFC0_0000_0000;
+        if (task as usize) < WAKE_PTR_FLOOR {
             use crate::console::putchar;
             const MSG: &[u8] = b"WAKE-WILD-PTR dropped ptr=0x";
             for &b in MSG { unsafe { putchar(b); } }
@@ -2568,15 +2611,15 @@ impl Task {
 
     /// Set as fork child process
     #[inline]
-    pub fn set_fork_child(&self, pt_regs_ptr: *const crate::arch::riscv64::pt_regs::PtRegs) {
+    pub fn set_fork_child(&self, pt_regs_ptr: *const crate::arch::pt_regs::PtRegs) {
         self.is_fork_child.store(true, core::sync::atomic::Ordering::Relaxed);
         self.fork_pt_regs.store(pt_regs_ptr as u64, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get fork child's PtRegs pointer
     #[inline]
-    pub fn fork_pt_regs(&self) -> *const crate::arch::riscv64::pt_regs::PtRegs {
-        self.fork_pt_regs.load(core::sync::atomic::Ordering::Relaxed) as *const crate::arch::riscv64::pt_regs::PtRegs
+    pub fn fork_pt_regs(&self) -> *const crate::arch::pt_regs::PtRegs {
+        self.fork_pt_regs.load(core::sync::atomic::Ordering::Relaxed) as *const crate::arch::pt_regs::PtRegs
     }
 
     /// Clear fork child flag (called after child is first scheduled).
@@ -2742,6 +2785,28 @@ impl Task {
         &mut self.cred
     }
 
+    /// OH access token id (/dev/access_token_id).
+    #[inline]
+    pub fn access_token(&self) -> u64 {
+        self.access_token.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_access_token(&self, token: u64) {
+        self.access_token.store(token, Ordering::Release);
+    }
+
+    /// OH foreground token id (/dev/access_token_id).
+    #[inline]
+    pub fn access_ftoken(&self) -> u64 {
+        self.access_ftoken.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_access_ftoken(&self, token: u64) {
+        self.access_ftoken.store(token, Ordering::Release);
+    }
+
     /// Get mutable reference to address space
     /// Note: AddressSpace has interior mutability, so &self is sufficient
     pub fn address_space_mut(&mut self) -> Option<&AddressSpace> {
@@ -2820,12 +2885,12 @@ pub unsafe fn vfork_wake_parent(task: *mut Task) {
 
 impl Task {
     /// Get architecture-specific thread state
-    pub fn thread(&self) -> &crate::arch::riscv64::thread::ThreadStruct {
+    pub fn thread(&self) -> &crate::arch::thread::ThreadStruct {
         &self.thread
     }
 
     /// Get mutable reference to architecture-specific thread state
-    pub fn thread_mut(&mut self) -> &mut crate::arch::riscv64::thread::ThreadStruct {
+    pub fn thread_mut(&mut self) -> &mut crate::arch::thread::ThreadStruct {
         &mut self.thread
     }
 
@@ -3154,10 +3219,10 @@ impl Task {
     /// # Returns
     /// Pointer to pt_regs structure at top of kernel stack, or null if no stack
     #[inline]
-    pub fn pt_regs(&self) -> *mut super::super::arch::riscv64::pt_regs::PtRegs {
+    pub fn pt_regs(&self) -> *mut super::super::arch::pt_regs::PtRegs {
         if let Some(stack_top) = self.kernel_stack {
-            let pt_regs_addr = stack_top as usize - core::mem::size_of::<super::super::arch::riscv64::pt_regs::PtRegs>();
-            pt_regs_addr as *mut super::super::arch::riscv64::pt_regs::PtRegs
+            let pt_regs_addr = stack_top as usize - core::mem::size_of::<super::super::arch::pt_regs::PtRegs>();
+            pt_regs_addr as *mut super::super::arch::pt_regs::PtRegs
         } else {
             core::ptr::null_mut()
         }
@@ -3517,14 +3582,14 @@ impl Task {
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((old as usize >> sh) & 0xF) as u8;
-                    unsafe { sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize); }
+                    unsafe { crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
                 }
                 for &b in b" new=0x" { unsafe { crate::console::putchar_no_lock(b); } }
                 sh = 64;
                 while sh > 0 {
                     sh -= 4;
                     let nb = ((self as *const Task as usize >> sh) & 0xF) as u8;
-                    unsafe { sbi_rt::legacy::console_putchar((if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }) as usize); }
+                    unsafe { crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 }); }
                 }
                 unsafe { crate::console::putchar_no_lock(b'\n'); }
             }

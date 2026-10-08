@@ -2,7 +2,7 @@
 //!
 //! Implements semget, semctl, semop, semtimedop following the Linux kernel design.
 
-use crate::arch::riscv64::uaccess::{access_ok, copy_to_user, get_user, put_user};
+use crate::arch::uaccess::{access_ok, copy_to_user, get_user, put_user};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
@@ -300,7 +300,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             // SAFETY: buf_ptr was access_ok-validated above; ds is a
             // stack-local repr(C) struct of exactly that size.
             if unsafe {
-                crate::arch::riscv64::uaccess::copy_from_user(
+                crate::arch::uaccess::copy_from_user(
                     &mut ds as *mut SemidDsUapi as *mut u8,
                     buf_ptr,
                     core::mem::size_of::<SemidDsUapi>(),
@@ -623,7 +623,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     // above; sops holds exactly that many SemBuf values.
     unsafe {
         sops.set_len(nsops);
-        if crate::arch::riscv64::uaccess::copy_from_user(
+        if crate::arch::uaccess::copy_from_user(
             sops.as_mut_ptr() as *mut u8,
             sops_ptr as *const u8,
             nsops * core::mem::size_of::<SemBuf>(),

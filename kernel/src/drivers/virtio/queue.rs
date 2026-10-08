@@ -413,6 +413,7 @@ impl VirtQueue {
         wait_queue: &crate::process::wait::WaitQueueHead,
         prev_used: u16,
         resp_status: *const u8,
+        blk_slot: usize,
     ) -> u16 {
         if used_ring.is_null() {
             return prev_used;
@@ -569,8 +570,8 @@ impl VirtQueue {
                     // Final chance: a lost KICK (quiet batch submit nobody
                     // drained) recovers here — kick and walk once, then
                     // re-check before reporting the timeout sentinel.
-                    crate::drivers::virtio::pci_blk_kick();
-                    crate::drivers::virtio::pci_process_async_completions();
+                    crate::drivers::virtio::pci_blk_kick(blk_slot);
+                    crate::drivers::virtio::pci_process_async_completions_slot(blk_slot);
                     if unsafe { resp_done(resp_status) } {
                         // SAFETY: used_ring offset 2 is the idx field.
                         break 'wait_done unsafe {
@@ -595,7 +596,7 @@ impl VirtQueue {
                         // wait-path callers re-arm explicitly (semaphore.rs
                         // discipline) so ticks/IPIs reach this CPU across the
                         // wait loop.
-                        crate::arch::riscv64::cpu::restore_irq(true);
+                        crate::arch::cpu::restore_irq(true);
                         crate::sched::schedule();
                         crate::timer::del_timer(id);
                     } else {
@@ -604,7 +605,7 @@ impl VirtQueue {
                         // enabled (the completion walker can still run) and
                         // re-check.
                         wait_queue.finish_wait(current);
-                        crate::arch::riscv64::cpu::restore_irq(true);
+                        crate::arch::cpu::restore_irq(true);
                         for _ in 0..100_000 {
                             core::hint::spin_loop();
                         }
@@ -613,7 +614,7 @@ impl VirtQueue {
                 } else {
                     // Sleep until woken by interrupt
                     // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-                    crate::arch::riscv64::cpu::restore_irq(true);
+                    crate::arch::cpu::restore_irq(true);
                     crate::sched::schedule();
                 }
 
@@ -746,7 +747,7 @@ impl VirtQueue {
 
             // Sleep until woken by interrupt
             // R54: schedule() now restores the caller's SIE state; wait-path callers re-arm explicitly (semaphore.rs discipline) so ticks/IPIs reach this CPU across the wait loop.
-            crate::arch::riscv64::cpu::restore_irq(true);
+            crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
             wait_queue.finish_wait(current);
         }

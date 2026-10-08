@@ -2,9 +2,9 @@
 //!
 //! Implements shmget, shmctl, shmat, shmdt following the Linux kernel design.
 
-use crate::arch::riscv64::uaccess::{access_ok, clear_user, copy_to_user, put_user};
-use crate::arch::riscv64::mm::map_user_page;
-use crate::arch::riscv64::mm::memory_layout::{VirtAddr as MmVirtAddr, PhysAddr as MmPhysAddr};
+use crate::arch::uaccess::{access_ok, clear_user, copy_to_user, put_user};
+use crate::arch::mm::map_user_page;
+use crate::arch::mm::memory_layout::{VirtAddr as MmVirtAddr, PhysAddr as MmPhysAddr};
 use crate::mm::page::{PAGE_SIZE, PAGE_MASK, VirtAddr};
 use crate::mm::page_alloc::{free_pages, get_zeroed_page};
 use crate::mm::zone::GfpFlags;
@@ -425,7 +425,7 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             // SAFETY: buf_ptr was access_ok-validated above; ds is a
             // stack-local repr(C) struct of exactly that size.
             if unsafe {
-                crate::arch::riscv64::uaccess::copy_from_user(
+                crate::arch::uaccess::copy_from_user(
                     &mut ds as *mut ShmidDsUapi as *mut u8,
                     buf_ptr,
                     core::mem::size_of::<ShmidDsUapi>(),
@@ -721,13 +721,13 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     }
 
     // Build PTE flags
-    let mut pte_flags = crate::arch::riscv64::mm::PageTableEntry::V
-        | crate::arch::riscv64::mm::PageTableEntry::A
-        | crate::arch::riscv64::mm::PageTableEntry::D
-        | crate::arch::riscv64::mm::PageTableEntry::U
-        | crate::arch::riscv64::mm::PageTableEntry::R;
+    let mut pte_flags = crate::arch::mm::PageTableEntry::V
+        | crate::arch::mm::PageTableEntry::A
+        | crate::arch::mm::PageTableEntry::D
+        | crate::arch::mm::PageTableEntry::U
+        | crate::arch::mm::PageTableEntry::R;
     if !shm_readonly {
-        pte_flags |= crate::arch::riscv64::mm::PageTableEntry::W;
+        pte_flags |= crate::arch::mm::PageTableEntry::W;
     }
 
     // Map each page — OUTSIDE the SHM_IDS lock.
@@ -753,7 +753,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
         unsafe {
             // R7-A5: map+refcount under the PTE lock (same discipline as
             // the demand-fault paths).
-            let _pte_guard = crate::arch::riscv64::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+            let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
             map_user_page(
                 root_ppn,
                 MmVirtAddr::new((attach_addr + i * PAGE_SIZE) as u64),
@@ -802,10 +802,8 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     // Update segment metadata (nattch was already incremented atomically
     // with the mapping above)
 
-    // Flush TLB
-    // SAFETY: sfence.vma is a RISC-V privileged instruction valid in S-mode;
-    // required after modifying page table entries for the mapping to take effect.
-    unsafe { core::arch::asm!("sfence.vma"); }
+    // Flush TLB after modifying page table entries for the mapping.
+    crate::arch::mm::flush_tlb_all();
 
     attach_addr as i64
 }
@@ -883,10 +881,8 @@ pub fn sys_shmdt(args: [u64; 6]) -> i64 {
         SHM_IDS.free_slot(shm_id);
     }
 
-    // Flush TLB
-    // SAFETY: sfence.vma is a RISC-V privileged instruction valid in S-mode;
-    // required after unmapping page table entries to flush stale TLB entries.
-    unsafe { core::arch::asm!("sfence.vma"); }
+    // Flush TLB after unmapping page table entries.
+    crate::arch::mm::flush_tlb_all();
 
     0
 }

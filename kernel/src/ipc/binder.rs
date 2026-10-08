@@ -1,0 +1,3046 @@
+//! MIT License
+//!
+//! Copyright (c) 2026 Fei Wang
+//!
+
+//! Android/OpenHarmony binder IPC driver — Spike S1 minimal implementation
+//!
+//! OpenHarmony port plan §7 Spike S1: enough of the Linux binder UAPI
+//! (include/uapi/linux/android/binder.h, stable public ABI; semantics
+//! mirrored from the OH kernel_linux tree's drivers/android/binder.c) to
+//! run a real BC_TRANSACTION/BC_REPLY closed loop between two processes
+//! over /dev/binder, including the node/ref handshake and the mmap'd
+//! buffer zone with separate sync/async space.
+//!
+//! Implemented subset:
+//! * misc char device /dev/binder (major 10, minor 0xB0)
+//! * mmap buffer zone (silently truncated to 4 MiB like Linux binder_mmap);
+//!   sync buffers first-fit from the low end, async (TF_ONE_WAY) buffers
+//!   from the top half against a free_async_space budget
+//! * BINDER_VERSION (protocol 8), BINDER_SET_MAX_THREADS,
+//!   BINDER_SET_CONTEXT_MGR, BINDER_THREAD_EXIT, BINDER_WRITE_READ
+//! * BC_*: TRANSACTION/REPLY (also _SG with 0 extra buffers), FREE_BUFFER,
+//!   INCREFS/ACQUIRE/RELEASE/DECREFS, INCREFS_DONE/ACQUIRE_DONE,
+//!   ENTER/EXIT/REGISTER_LOOPER, DEAD_BINDER_DONE (accepted, ignored)
+//! * BR_*: ERROR, TRANSACTION, REPLY, DEAD_REPLY, TRANSACTION_COMPLETE,
+//!   INCREFS/ACQUIRE/RELEASE/DECREFS, NOOP (leading, like
+//!   binder_thread_read), SPAWN_LOOPER, FAILED_REPLY
+//! * flat_binder_object translation for BINDER_TYPE_{WEAK_}BINDER and
+//!   _HANDLE across processes; the BR_INCREFS/BR_ACQUIRE ->
+//!   BC_INCREFS_DONE/BC_ACQUIRE_DONE node handshake works
+//! * deferred BR_TRANSACTION_COMPLETE for sync transactions (the sender's
+//!   read keeps sleeping until the reply carries it out — one wakeup)
+//!
+//! Deliberate S1 gaps (documented in the spike report):
+//! * one device context (/dev/binder); hwbinder/vndbinder need their OWN
+//!   contexts when added — the context-manager node must not be shared
+//! * BINDER_TYPE_FD/FDA/PTR rejected with BR_FAILED_REPLY (no cross-process
+//!   fd installation)
+//! * a second TF_ONE_WAY transaction to a node whose async slot is busy
+//!   fails with BR_FAILED_REPLY instead of parking on node->async_todo
+//! * no death notifications, no priority inheritance, no freeze,
+//!   no oneway-spam detection, no /dev/binderfs, no sender-info exts
+//! * one wait queue per process (Linux uses per-thread queues; conforming
+//!   userspace cannot observe the difference)
+//!
+//! Locking: the single WORLD spinlock guards every binder object; no
+//! user-memory copies and no sleeping happen under it (BC payloads are
+//! copied in before locking, BR payloads are staged into a kernel Vec
+//! under the lock and copied out after release). Rux process exit tears
+//! down the mm before fds, so the region's last page reference is dropped
+//! by binder_close — the io_uring ring lifetime model.
+
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use crate::errno::constants::{EBADF, EBUSY, EFAULT, EAGAIN, EINTR, EINVAL, ESRCH};
+use crate::fs::dev_t::{DevNo, MISC_MAJOR};
+use crate::process::wait::WaitQueueHead;
+use crate::sync::spinlock::Spinlock;
+
+// ============================================================================
+// UAPI (include/uapi/linux/android/binder.h; LP64/riscv64 _IOC encoding)
+// ============================================================================
+
+const fn ioc(dir: u32, typ: u32, nr: u32, size: u32) -> u32 {
+    (dir << 30) | (size << 16) | (typ << 8) | nr
+}
+const fn iow(typ: u32, nr: u32, size: u32) -> u32 {
+    ioc(1, typ, nr, size)
+}
+const fn ior(typ: u32, nr: u32, size: u32) -> u32 {
+    ioc(2, typ, nr, size)
+}
+const fn io(typ: u32, nr: u32) -> u32 {
+    ioc(0, typ, nr, 0)
+}
+
+pub const BINDER_TYPE_BINDER: u32 = u32::from_be_bytes([b's', b'b', b'*', 0x85]);
+pub const BINDER_TYPE_WEAK_BINDER: u32 = u32::from_be_bytes([b'w', b'b', b'*', 0x85]);
+pub const BINDER_TYPE_HANDLE: u32 = u32::from_be_bytes([b's', b'h', b'*', 0x85]);
+pub const BINDER_TYPE_WEAK_HANDLE: u32 = u32::from_be_bytes([b'w', b'h', b'*', 0x85]);
+pub const BINDER_TYPE_FD: u32 = u32::from_be_bytes([b'f', b'd', b'*', 0x85]);
+pub const BINDER_TYPE_FDA: u32 = u32::from_be_bytes([b'f', b'd', b'a', 0x85]);
+pub const BINDER_TYPE_PTR: u32 = u32::from_be_bytes([b'p', b't', b'*', 0x85]);
+
+pub const TF_ONE_WAY: u32 = 0x01;
+pub const _TF_ROOT_OBJECT: u32 = 0x04;
+pub const _TF_STATUS_CODE: u32 = 0x08;
+pub const TF_ACCEPT_FDS: u32 = 0x10;
+
+/// flat_binder_object.flags: the target accepts BINDER_TYPE_FD objects.
+pub const FLAT_BINDER_FLAG_ACCEPTS_FDS: u32 = 0x100;
+/// flat_binder_object.flags: transactions to this node carry the sender's
+/// security context (upstream FLAT_BINDER_FLAG_TXN_SECURITY_CTX).
+pub const FLAT_BINDER_FLAG_TXN_SECURITY_CTX: u32 = 0x1000;
+/// binder_buffer_object.flags: fix up the parent buffer with this
+/// object's translated address (binder_fixup_parent).
+pub const BINDER_BUFFER_FLAG_HAS_PARENT: u32 = 0x01;
+
+const BINDER_CURRENT_PROTOCOL_VERSION: i32 = 8;
+
+const SZ_BWR: u32 = 48;
+const SZ_TR: u32 = 64;
+const SZ_PTR_COOKIE: u32 = 16;
+const SZ_U32: u32 = 4;
+const SZ_U64: u32 = 8;
+const SZ_VERSION: u32 = 4;
+const SZ_TR_SG: u32 = 72;
+
+pub const BINDER_WRITE_READ: u32 = ioc(3, b'b' as u32, 1, SZ_BWR);
+pub const BINDER_SET_MAX_THREADS: u32 = iow(b'b' as u32, 5, SZ_U32);
+pub const BINDER_SET_CONTEXT_MGR: u32 = iow(b'b' as u32, 7, SZ_U32);
+pub const BINDER_THREAD_EXIT: u32 = iow(b'b' as u32, 8, SZ_U32);
+pub const BINDER_VERSION: u32 = ioc(3, b'b' as u32, 9, SZ_VERSION);
+
+pub const BC_TRANSACTION: u32 = iow(b'c' as u32, 0, SZ_TR);
+pub const BC_REPLY: u32 = iow(b'c' as u32, 1, SZ_TR);
+pub const BC_FREE_BUFFER: u32 = iow(b'c' as u32, 3, SZ_U64);
+pub const BC_INCREFS: u32 = iow(b'c' as u32, 4, SZ_U32);
+pub const BC_ACQUIRE: u32 = iow(b'c' as u32, 5, SZ_U32);
+pub const BC_RELEASE: u32 = iow(b'c' as u32, 6, SZ_U32);
+pub const BC_DECREFS: u32 = iow(b'c' as u32, 7, SZ_U32);
+pub const BC_INCREFS_DONE: u32 = iow(b'c' as u32, 8, SZ_PTR_COOKIE);
+pub const BC_ACQUIRE_DONE: u32 = iow(b'c' as u32, 9, SZ_PTR_COOKIE);
+pub const BC_REGISTER_LOOPER: u32 = io(b'c' as u32, 11);
+pub const BC_ENTER_LOOPER: u32 = io(b'c' as u32, 12);
+pub const BC_EXIT_LOOPER: u32 = io(b'c' as u32, 13);
+pub const BC_REQUEST_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 14, SZ_PTR_COOKIE);
+pub const BC_CLEAR_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 15, SZ_PTR_COOKIE);
+pub const BC_DEAD_BINDER_DONE: u32 = iow(b'c' as u32, 16, SZ_U64);
+pub const BC_TRANSACTION_SG: u32 = iow(b'c' as u32, 17, SZ_TR_SG);
+pub const BC_REPLY_SG: u32 = iow(b'c' as u32, 18, SZ_TR_SG);
+
+pub const BR_ERROR: u32 = ior(b'r' as u32, 0, SZ_U32);
+pub const BR_OK: u32 = io(b'r' as u32, 1);
+pub const BR_TRANSACTION: u32 = ior(b'r' as u32, 2, SZ_TR);
+pub const BR_REPLY: u32 = ior(b'r' as u32, 3, SZ_TR);
+pub const BR_DEAD_REPLY: u32 = io(b'r' as u32, 5);
+pub const BR_TRANSACTION_COMPLETE: u32 = io(b'r' as u32, 6);
+pub const BR_INCREFS: u32 = ior(b'r' as u32, 7, SZ_PTR_COOKIE);
+pub const BR_ACQUIRE: u32 = ior(b'r' as u32, 8, SZ_PTR_COOKIE);
+pub const BR_RELEASE: u32 = ior(b'r' as u32, 9, SZ_PTR_COOKIE);
+pub const BR_DECREFS: u32 = ior(b'r' as u32, 10, SZ_PTR_COOKIE);
+pub const BR_NOOP: u32 = io(b'r' as u32, 12);
+pub const BR_SPAWN_LOOPER: u32 = io(b'r' as u32, 13);
+pub const BR_DEAD_BINDER: u32 = ior(b'r' as u32, 11, SZ_U64);
+pub const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = ior(b'r' as u32, 14, SZ_U64);
+pub const BR_FAILED_REPLY: u32 = io(b'r' as u32, 17);
+/// struct binder_transaction_data_secctx (upstream): the transaction data
+/// followed by a pointer to a sender-info record in the buffer's extra
+/// area. OH's libbinder reads the sender identity from it.
+pub const BR_TRANSACTION_SECCTX: u32 = ior(b'r' as u32, 42, 72);
+
+/// struct binder_transaction_data (LP64)
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BinderTransactionData {
+    pub target_handle: u32,
+    pub _target_pad: u32,
+    pub cookie: u64,
+    pub code: u32,
+    pub flags: u32,
+    pub sender_pid: i32,
+    pub sender_euid: u32,
+    pub data_size: u64,
+    pub offsets_size: u64,
+    pub data_buffer: u64,
+    pub data_offsets: u64,
+}
+const _: () = assert!(core::mem::size_of::<BinderTransactionData>() == 64);
+
+/// struct binder_write_read (LP64)
+#[repr(C)]
+pub struct BinderWriteRead {
+    pub write_size: u64,
+    pub write_consumed: u64,
+    pub write_buffer: u64,
+    pub read_size: u64,
+    pub read_consumed: u64,
+    pub read_buffer: u64,
+}
+const _: () = assert!(core::mem::size_of::<BinderWriteRead>() == 48);
+
+/// struct flat_binder_object (24 bytes on LP64)
+#[repr(C)]
+pub struct FlatBinderObject {
+    pub hdr_type: u32,
+    pub flags: u32,
+    pub handle: u32,
+    pub _handle_pad: u32,
+    pub cookie: u64,
+}
+const _: () = assert!(core::mem::size_of::<FlatBinderObject>() == 24);
+
+/// struct binder_buffer_object (40 bytes on LP64): BINDER_TYPE_PTR —
+/// points at additional data outside the parcel that the driver copies
+/// into the target's sg (extra) area and rewrites to a target address.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BinderBufferObject {
+    hdr_type: u32,
+    flags: u32,
+    buffer: u64,
+    length: u64,
+    /// index into the offsets array of the parent BINDER_TYPE_PTR object
+    parent: u64,
+    /// offset in the parent buffer where this buffer's address is written
+    parent_offset: u64,
+}
+const _: () = assert!(core::mem::size_of::<BinderBufferObject>() == 40);
+
+/// struct binder_fd_array_object (32 bytes on LP64): BINDER_TYPE_FDA —
+/// an array of u32 fds living inside the parent buffer object.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BinderFdArrayObject {
+    hdr_type: u32,
+    flags: u32,
+    num_fds: u64,
+    /// index into the offsets array of the parent BINDER_TYPE_PTR object
+    parent: u64,
+    /// offset of the fd array within the parent's buffer
+    parent_offset: u64,
+}
+const _: () = assert!(core::mem::size_of::<BinderFdArrayObject>() == 32);
+
+/// Sender-info record copied into the transaction's sg area when the
+/// target node opted into FLAT_BINDER_FLAG_TXN_SECURITY_CTX (OH's
+/// GetCallerPid/GetCallerUid/GetCallerTokenID source).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BinderSenderInfo {
+    pid: i32,
+    uid: u32,
+    tokenid: u64,
+}
+const _: () = assert!(core::mem::size_of::<BinderSenderInfo>() == 16);
+
+/// Minimum in-buffer size of each object type (binder_validate_object;
+/// on LP64 the fd object carries an 8-byte union like flat_binder_object).
+fn binder_object_size(ty: u32) -> usize {
+    match ty {
+        BINDER_TYPE_BINDER | BINDER_TYPE_WEAK_BINDER | BINDER_TYPE_HANDLE | BINDER_TYPE_WEAK_HANDLE => 24,
+        BINDER_TYPE_FD => 24,
+        BINDER_TYPE_FDA => 32,
+        BINDER_TYPE_PTR => 40,
+        _ => 0,
+    }
+}
+
+const LOOPER_REGISTERED: u32 = 0x01;
+const LOOPER_ENTERED: u32 = 0x02;
+const LOOPER_EXITED: u32 = 0x04;
+
+/// /dev/binder misc device numbers (Linux uses dynamic minors; 0xB0-0xB2
+/// are unused in-tree — loop-control owns 237 on major 10).
+pub const BINDER_MINOR: u32 = 0xB0;
+pub const HWBINDER_MINOR: u32 = 0xB1;
+pub const VNDBINDER_MINOR: u32 = 0xB2;
+pub const DEV_BINDER: DevNo = DevNo::new(MISC_MAJOR, BINDER_MINOR);
+pub const DEV_HWBINDER: DevNo = DevNo::new(MISC_MAJOR, HWBINDER_MINOR);
+pub const DEV_VNDBINDER: DevNo = DevNo::new(MISC_MAJOR, VNDBINDER_MINOR);
+
+/// Which device context an open belongs to. /dev/binder, /dev/hwbinder
+/// and /dev/vndbinder each carry their OWN context-manager node (Linux
+/// binder_device.context); handle-0 resolves within the opener's context
+/// only. Ref tables are per-open, so handles cannot leak across contexts.
+#[derive(Clone, Copy, PartialEq)]
+pub enum BinderCtx {
+    Binder = 0,
+    HwBinder = 1,
+    VndBinder = 2,
+}
+
+pub fn devno_ctx(dev: &DevNo) -> Option<BinderCtx> {
+    if *dev == DEV_BINDER {
+        Some(BinderCtx::Binder)
+    } else if *dev == DEV_HWBINDER {
+        Some(BinderCtx::HwBinder)
+    } else if *dev == DEV_VNDBINDER {
+        Some(BinderCtx::VndBinder)
+    } else {
+        None
+    }
+}
+
+const BINDER_MMAP_MAX: usize = 4 << 20;
+const PAGE_SIZE: usize = crate::mm::page::PAGE_SIZE;
+
+fn align8(v: usize) -> usize {
+    (v + 7) & !7
+}
+
+// ============================================================================
+// Core state — everything behind UnsafeCell is mutated ONLY under WORLD.
+// ============================================================================
+
+struct NodeState {
+    internal_strong_refs: i32,
+    local_strong_refs: i32,
+    local_weak_refs: i32,
+    has_strong_ref: bool,
+    has_weak_ref: bool,
+    pending_strong_ref: bool,
+    pending_weak_ref: bool,
+    /// TF_ONE_WAY serialization: one async transaction in flight per node
+    /// (Linux node->has_async_transaction); extra oneways park on
+    /// node->async_todo until the in-flight buffer is freed.
+    has_async_transaction: bool,
+    /// Oneway transactions waiting for the node's async slot (Linux
+    /// node->async_todo). Their buffers are already allocated and fixed
+    /// up; delivery is just deferred.
+    async_todo: VecDeque<Arc<BinderTxn>>,
+}
+
+struct BinderNode {
+    id: u64,
+    ptr: u64,
+    cookie: u64,
+    proc_id: u64,
+    /// flat_binder_object.flags at registration (accept_fds and
+    /// txn_security_ctx bits).
+    flags: u32,
+    st: core::cell::UnsafeCell<NodeState>,
+}
+
+impl BinderNode {
+    const fn new(id: u64, ptr: u64, cookie: u64, proc_id: u64, flags: u32) -> Self {
+        Self {
+            id,
+            ptr,
+            cookie,
+            proc_id,
+            flags,
+            st: core::cell::UnsafeCell::new(NodeState {
+                internal_strong_refs: 0,
+                local_strong_refs: 0,
+                local_weak_refs: 0,
+                has_strong_ref: false,
+                has_weak_ref: false,
+                pending_strong_ref: false,
+                pending_weak_ref: false,
+                has_async_transaction: false,
+                async_todo: VecDeque::new(),
+            }),
+        }
+    }
+
+    /// SAFETY: caller must hold WORLD.
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn st(&self) -> &mut NodeState {
+        &mut *self.st.get()
+    }
+}
+
+impl NodeState {
+    fn strong(&self) -> bool {
+        self.internal_strong_refs > 0 || self.local_strong_refs > 0
+    }
+    fn weak(&self, external_ref_count: usize) -> bool {
+        external_ref_count > 0 || self.local_weak_refs > 0 || self.strong()
+    }
+}
+
+struct BinderRef {
+    desc: u32,
+    node: Arc<BinderNode>,
+    strong: i32,
+    weak: i32,
+    /// Death-notification request on this handle (Linux ref->death).
+    death: Option<RefDeath>,
+}
+
+/// Death-notification request state (Linux struct binder_ref_death +
+/// its work-item states).
+struct RefDeath {
+    cookie: u64,
+    /// Armed: requested, node still alive. Queued: Work::DeadBinder sits
+    /// on the proc todo (node dead, BR not yet read). Delivered:
+    /// BR_DEAD_BINDER was read, awaiting BC_DEAD_BINDER_DONE.
+    phase: DeathPhase,
+    /// BC_CLEAR_DEATH_NOTIFICATION arrived while the notification was
+    /// queued or delivered: after BC_DEAD_BINDER_DONE, deliver
+    /// BR_CLEAR_DEATH_NOTIFICATION_DONE and drop the request (Linux
+    /// BINDER_WORK_DEAD_BINDER_AND_CLEAR).
+    clear_pending: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DeathPhase {
+    Armed,
+    Queued,
+    Delivered,
+}
+
+struct BufBlock {
+    off: usize,
+    len: usize,
+    free: bool,
+    async_block: bool,
+    allow_user_free: bool,
+    data_size: usize,
+    offsets_size: usize,
+    /// sg (extra) area size: BINDER_TYPE_PTR payload copies (layout:
+    /// [data][offsets][extra], each u64-aligned).
+    extra_size: usize,
+    /// Oneway (async) buffers keep their transaction alive so the node's
+    /// async slot is released when the receiver frees the buffer (Linux
+    /// buffer->transaction). Sync buffers rely on the reply path instead.
+    txn: Option<Arc<BinderTxn>>,
+}
+
+struct BinderAlloc {
+    kvirt: *mut u8,
+    phys: usize,
+    npages: usize,
+    order: usize,
+    user_base: u64,
+    blocks: Vec<BufBlock>,
+    free_async_space: usize,
+}
+
+impl BinderAlloc {
+    fn block_need(data_size: usize, offsets_size: usize, extra_size: usize) -> usize {
+        align8(data_size) + align8(offsets_size) + align8(extra_size)
+    }
+
+    /// binder_alloc_new_buf: sync first-fit from the low end, async from
+    /// the top half against the free_async_space budget.
+    fn new_buf(
+        &mut self,
+        data_size: usize,
+        offsets_size: usize,
+        extra_size: usize,
+        is_async: bool,
+    ) -> Option<usize> {
+        let need = Self::block_need(data_size, offsets_size, extra_size);
+        if need == 0 {
+            return None;
+        }
+        if is_async && self.free_async_space < need {
+            return None;
+        }
+        let total = self.npages * PAGE_SIZE;
+        if is_async {
+            // Async buffers tail-allocate from the top half (a fresh
+            // region is one block at offset 0 — a head-only placement
+            // scan would never find an eligible block).
+            let mut hit: Option<usize> = None;
+            for (i, b) in self.blocks.iter().enumerate() {
+                if !b.free || b.len < need {
+                    continue;
+                }
+                if b.off + b.len - need >= total / 2 {
+                    hit = Some(i);
+                    break;
+                }
+            }
+            let i = hit?;
+            let cand = self.blocks[i].off + self.blocks[i].len - need;
+            self.blocks[i].len -= need;
+            self.blocks.push(BufBlock {
+                off: cand,
+                len: need,
+                free: false,
+                async_block: true,
+                allow_user_free: false,
+                data_size,
+                offsets_size,
+                extra_size,
+                txn: None,
+            });
+            self.blocks.sort_by_key(|b| b.off);
+            self.free_async_space -= need;
+            return Some(cand);
+        }
+        // Sync: first-fit from the low end.
+        let mut off: Option<usize> = None;
+        for b in self.blocks.iter() {
+            if !b.free || b.len < need {
+                continue;
+            }
+            off = Some(b.off);
+            break;
+        }
+        let o = off?;
+        if let Some(b) = self.blocks.iter_mut().find(|b| b.off == o) {
+            b.free = false;
+            b.async_block = false;
+            b.allow_user_free = false;
+            b.data_size = data_size;
+            b.offsets_size = offsets_size;
+            b.extra_size = extra_size;
+            if b.len > need {
+                let rest = BufBlock {
+                    off: o + need,
+                    len: b.len - need,
+                    free: true,
+                    async_block: false,
+                    allow_user_free: false,
+                    data_size: 0,
+                    offsets_size: 0,
+                    extra_size: 0,
+                    txn: None,
+                };
+                b.len = need;
+                self.blocks.push(rest);
+                self.blocks.sort_by_key(|b| b.off);
+            }
+        }
+        Some(o)
+    }
+
+    /// binder_alloc_free_buf + adjacent coalescing. Returns Some(txn) when
+    /// the buffer was freed and it kept an async (oneway) transaction
+    /// alive, Some(none) when freed without one, None when the pointer
+    /// does not match a freeable buffer.
+    fn free_buf(&mut self, user_ptr: u64) -> Option<Option<Arc<BinderTxn>>> {
+        let Some(d) = user_ptr.checked_sub(self.user_base) else {
+            return None;
+        };
+        let d = d as usize;
+        let Some(idx) = self.blocks.iter().position(|b| b.off == d && !b.free) else {
+            return None;
+        };
+        if !self.blocks[idx].allow_user_free {
+            return None;
+        }
+        let was_async = self.blocks[idx].async_block;
+        let ds = self.blocks[idx].data_size;
+        let os = self.blocks[idx].offsets_size;
+        let es = self.blocks[idx].extra_size;
+        let txn = self.blocks[idx].txn.take();
+        self.blocks[idx].free = true;
+        self.blocks[idx].allow_user_free = false;
+        if was_async {
+            self.free_async_space += Self::block_need(ds, os, es);
+        }
+        // Coalesce (blocks stay sorted by offset).
+        let mut i = 0;
+        while i + 1 < self.blocks.len() {
+            if self.blocks[i].free
+                && self.blocks[i + 1].free
+                && self.blocks[i].off + self.blocks[i].len == self.blocks[i + 1].off
+            {
+                self.blocks[i].len += self.blocks[i + 1].len;
+                self.blocks.remove(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+        Some(txn)
+    }
+}
+
+enum Work {
+    TransactionComplete,
+    Transaction(Arc<BinderTxn>),
+    /// (cmd, param): BR_ERROR carries an s32 payload, the *_REPLY
+    /// variants carry none.
+    ReturnError(u32, i32),
+    /// BINDER_WORK_NODE: ref-state change; the read side derives
+    /// BR_INCREFS/ACQUIRE/RELEASE/DECREFS from the counters (like Linux).
+    Node(Arc<BinderNode>),
+    /// BINDER_WORK_DEAD_BINDER(_AND_CLEAR): (ref desc, cookie). The node
+    /// died; deliver BR_DEAD_BINDER.
+    DeadBinder { desc: u32, cookie: u64 },
+    /// BINDER_WORK_CLEAR_DEATH_NOTIFICATION: deliver
+    /// BR_CLEAR_DEATH_NOTIFICATION_DONE (cookie).
+    ClearDeathDone { cookie: u64 },
+}
+
+struct BinderTxn {
+    id: u64,
+    from_proc: Option<Arc<BinderProc>>,
+    from_tid: Option<u32>,
+    to_proc: Arc<BinderProc>,
+    /// Set when the transaction is delivered (BR_TRANSACTION): the
+    /// receiving thread, which will later issue BC_REPLY.
+    to_tid: core::cell::UnsafeCell<Option<u32>>,
+    target_node: Option<Arc<BinderNode>>,
+    /// Set while this txn holds the node's async slot (TF_ONE_WAY).
+    /// Interior-mutable: a parked oneway claims the slot only when the
+    /// in-flight buffer is freed and it graduates to the proc todo.
+    holds_async_slot: core::cell::UnsafeCell<bool>,
+    code: u32,
+    flags: u32,
+    sender_pid: i32,
+    sender_euid: u32,
+    data_size: usize,
+    offsets_size: usize,
+    buffer_off: usize,
+    /// Target-user address of the BinderSenderInfo record in the sg area
+    /// (0: the target node did not request a security context).
+    security_ctx: u64,
+}
+
+impl BinderTxn {
+    /// SAFETY: caller must hold WORLD.
+    unsafe fn to_tid(&self) -> Option<u32> {
+        *self.to_tid.get()
+    }
+    /// SAFETY: caller must hold WORLD.
+    unsafe fn set_to_tid(&self, tid: u32) {
+        *self.to_tid.get() = Some(tid);
+    }
+    fn holds_async_slot(&self) -> bool {
+        // SAFETY: single word read under WORLD (the access contract).
+        unsafe { *self.holds_async_slot.get() }
+    }
+    /// SAFETY: caller must hold WORLD.
+    unsafe fn set_holds_async_slot(&self, v: bool) {
+        *self.holds_async_slot.get() = v;
+    }
+}
+
+struct ThreadState {
+    looper: u32,
+    todo: VecDeque<Work>,
+    /// process_todo: a deferred TRANSACTION_COMPLETE on the todo does NOT
+    /// set this — the thread keeps sleeping until real work arrives.
+    process_todo: bool,
+    /// True while blocked in binder_thread_read waiting for proc work
+    /// (Linux waiting_threads list, drives BR_SPAWN_LOOPER).
+    waiting_for_proc_work: bool,
+    txn_stack: Vec<Arc<BinderTxn>>,
+}
+
+struct BinderThread {
+    tid: u32,
+    /// Per-thread wait queue (Linux thread->wait): replies and tcomplete
+    /// wake the exact thread; proc work wakes one selected waiter.
+    wait: WaitQueueHead,
+    st: core::cell::UnsafeCell<ThreadState>,
+}
+
+impl BinderThread {
+    fn new(tid: u32) -> Self {
+        Self {
+            tid,
+            wait: WaitQueueHead::new(),
+            st: core::cell::UnsafeCell::new(ThreadState {
+                looper: 0,
+                todo: VecDeque::new(),
+                process_todo: false,
+                waiting_for_proc_work: false,
+                txn_stack: Vec::new(),
+            }),
+        }
+    }
+
+    /// SAFETY: caller must hold WORLD.
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn st(&self) -> &mut ThreadState {
+        &mut *self.st.get()
+    }
+}
+
+struct ProcInner {
+    alloc: Option<BinderAlloc>,
+    nodes: Vec<Arc<BinderNode>>,
+    refs: Vec<BinderRef>,
+    /// Next handle descriptor to hand out. Starts at 1: desc 0 is
+    /// reserved for the context manager in every process (Linux
+    /// binder_get_ref_for_node starts normal refs at 1).
+    next_desc: u32,
+    threads: Vec<Arc<BinderThread>>,
+    todo: VecDeque<Work>,
+    max_threads: i32,
+    requested_threads: i32,
+    requested_threads_started: i32,
+    is_dead: bool,
+}
+
+pub struct BinderProc {
+    id: u64,
+    pid: u32,
+    ctx: BinderCtx,
+    wait: WaitQueueHead,
+    inner: core::cell::UnsafeCell<ProcInner>,
+}
+
+impl BinderProc {
+    fn new(id: u64, pid: u32, ctx: BinderCtx) -> Self {
+        Self {
+            id,
+            pid,
+            ctx,
+            wait: WaitQueueHead::new(),
+            inner: core::cell::UnsafeCell::new(ProcInner {
+                alloc: None,
+                nodes: Vec::new(),
+                refs: Vec::new(),
+                next_desc: 1,
+                threads: Vec::new(),
+                todo: VecDeque::new(),
+                max_threads: 0,
+                requested_threads: 0,
+                requested_threads_started: 0,
+                is_dead: false,
+            }),
+        }
+    }
+
+    /// SAFETY: caller must hold WORLD.
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn im(&self) -> &mut ProcInner {
+        &mut *self.inner.get()
+    }
+}
+
+impl Drop for BinderAlloc {
+    /// io_uring ring-free discipline: pages carry one owner reference plus
+    /// one per live user mapping (taken at mmap). Rux process exit unmaps
+    /// before fds close, so by the time we get here the owner reference is
+    /// the last one for each page — free the buddy block.
+    fn drop(&mut self) {
+        let base_pfn = crate::mm::phys_to_pfn(self.phys);
+        let mut still_pinned = false;
+        for i in 0..self.npages {
+            let page = crate::mm::pfn_to_page_mut(base_pfn + i);
+            if !page.is_null() {
+                // SAFETY: page descriptor exists for this in-RAM page.
+                let r = unsafe { (*page).put_page() };
+                if r > 0 {
+                    still_pinned = true;
+                }
+            }
+        }
+        if !still_pinned {
+            crate::mm::page_alloc::free_pages(self.phys, self.order);
+        }
+    }
+}
+
+struct World {
+    next_id: u64,
+    procs: Vec<Arc<BinderProc>>,
+    /// Context-manager node per device context (index by BinderCtx).
+    mgr_node: [Option<Arc<BinderNode>>; 3],
+}
+
+static WORLD: Spinlock<Option<World>> = Spinlock::new(None);
+static NEXT_PROC_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+// SAFETY: binder state is shared across CPUs strictly under the WORLD
+// spinlock; the wait queues are internally synchronized; the kvirt raw
+// pointer is only dereferenced under WORLD while the mmap is alive.
+unsafe impl Send for BinderAlloc {}
+unsafe impl Sync for BinderAlloc {}
+unsafe impl Send for BinderNode {}
+unsafe impl Sync for BinderNode {}
+unsafe impl Send for BinderThread {}
+unsafe impl Sync for BinderThread {}
+unsafe impl Send for BinderTxn {}
+unsafe impl Sync for BinderTxn {}
+unsafe impl Send for BinderProc {}
+unsafe impl Sync for BinderProc {}
+
+fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World>> {
+    let mut g = WORLD.lock_irqsave();
+    if g.is_none() {
+        *g = Some(World { next_id: 1, procs: Vec::new(), mgr_node: [None, None, None] });
+    }
+    g
+}
+
+/// &mut BinderProc for an Arc found in the world, without borrowing the
+/// World — legal because every caller holds WORLD (the access contract).
+/// SAFETY: caller must hold WORLD.
+#[allow(clippy::mut_from_ref)]
+unsafe fn pm<'a>(_world: &World, p: &Arc<BinderProc>) -> &'a mut BinderProc {
+    let found = _world.procs.iter().find(|x| Arc::ptr_eq(x, p)).expect("proc not in world");
+    &mut *(Arc::as_ptr(found) as *mut BinderProc)
+}
+
+fn proc_alive(world: &World, p: &Arc<BinderProc>) -> bool {
+    world.procs.iter().any(|x| Arc::ptr_eq(x, p))
+}
+
+fn wake_thread(t: &BinderThread) {
+    t.wait.wake_up(crate::process::wait::WakeUpHint::Normal, 0);
+}
+
+/// binder_select_thread_ilocked + wake: pick one thread of the proc that
+/// is blocked waiting for proc work (Linux keeps them on
+/// proc->waiting_threads) and wake just that one — no thundering herd
+/// across a 16-thread samgr pool.
+fn wake_proc_one(p: &Arc<BinderProc>) {
+    let w = world_lock();
+    // SAFETY: read-only scan under WORLD.
+    let pick = unsafe {
+        pm(w.as_ref().unwrap(), p)
+            .im()
+            .threads
+            .iter()
+            .find(|t| {
+                let th = t.st();
+                th.waiting_for_proc_work && th.todo.is_empty() && th.txn_stack.is_empty()
+            })
+            .cloned()
+    };
+    drop(w);
+    if let Some(t) = pick {
+        wake_thread(&t);
+    }
+}
+
+/// Number of refs (across all procs) pointing at a node.
+fn node_external_refs(world: &World, node: &Arc<BinderNode>) -> usize {
+    // SAFETY: read-only counting under WORLD.
+    unsafe {
+        world
+            .procs
+            .iter()
+            .map(|p| (*Arc::as_ptr(p)).im().refs.iter().filter(|r| Arc::ptr_eq(&r.node, node)).count())
+            .sum()
+    }
+}
+
+/// A node is dead when its owner is gone from the world (Linux sets
+/// node->proc = NULL in the owner's binder_release before delivering
+/// death notifications; here the owner is removed from world.procs
+/// first, under the same WORLD hold).
+fn node_is_dead(world: &World, node: &Arc<BinderNode>) -> bool {
+    !world.procs.iter().any(|p| p.id == node.proc_id)
+}
+
+// ============================================================================
+// open / close / mmap / poll
+// ============================================================================
+
+/// Borrow the open's BinderProc Arc without changing the refcount.
+/// SAFETY: ptr came from Arc::into_raw and the fd still owns it.
+unsafe fn proc_ref(file: &crate::fs::File) -> Option<Arc<BinderProc>> {
+    let raw = (*file.private_data.get())? as *const BinderProc;
+    let arc = core::mem::ManuallyDrop::new(Arc::from_raw(raw));
+    // SAFETY: ManuallyDrop never drops, so the count is unchanged; the
+    // clone below is a proper +1 that the caller owns.
+    Some((*arc).clone())
+}
+
+/// Called from devfs_open: allocate the per-open process context.
+pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
+    let pid = crate::process::current_pid();
+    let id = NEXT_PROC_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let proc = Arc::new(BinderProc::new(id, pid, ctx));
+    {
+        let mut w = world_lock();
+        w.as_mut().unwrap().procs.push(proc.clone());
+    }
+    crate::pr_info!("binder: pid {} opened the device (proc {})", pid, id);
+    // SAFETY: private_data slot written once at open; reclaimed in
+    // binder_close (the only other accessor).
+    file.set_private_data(Arc::into_raw(proc) as *mut u8);
+    0
+}
+
+/// FileOps.close: drop the process context. Drains all work lists (breaking
+/// txn->proc Arc cycles), fails in-flight transactions targeting or
+/// originating here, and releases the mmap region.
+pub fn binder_close(file: &crate::fs::File) -> i32 {
+    // SAFETY: private_data holds the Arc<BinderProc> from binder_open.
+    let raw = match unsafe { *file.private_data.get() } {
+        Some(p) => p as *const BinderProc,
+        None => return 0,
+    };
+    // SAFETY: reclaim the single strong reference stashed at open.
+    let proc = unsafe { Arc::from_raw(raw) };
+    unsafe { *file.private_data.get() = None };
+
+    let mut wake_targets: Vec<Arc<BinderProc>> = Vec::new();
+    {
+        let mut w = world_lock();
+        let world = w.as_mut().unwrap();
+        world.procs.retain(|p| !Arc::ptr_eq(p, &proc));
+        if let Some(mgr) = &world.mgr_node[proc.ctx as usize] {
+            if mgr.proc_id == proc.id {
+                world.mgr_node[proc.ctx as usize] = None;
+            }
+        }
+        // SAFETY: all inner access below is under WORLD.
+        unsafe {
+            proc.im().is_dead = true;
+
+            // Deliver death notifications: every ref in a surviving proc
+            // that points at one of our nodes and carries an Armed death
+            // request fires now (Linux binder_node_release walking
+            // node->refs).
+            for q in world.procs.clone() {
+                let mut deaths: Vec<(u32, u64)> = Vec::new();
+                {
+                    let qim = pm(world, &q).im();
+                    for r in qim.refs.iter_mut() {
+                        if r.node.proc_id != proc.id {
+                            continue;
+                        }
+                        if let Some(d) = r.death.as_mut() {
+                            if d.phase == DeathPhase::Armed {
+                                d.phase = DeathPhase::Queued;
+                                deaths.push((r.desc, d.cookie));
+                            }
+                        }
+                    }
+                }
+                if !deaths.is_empty() {
+                    let qim = pm(world, &q).im();
+                    for (desc, cookie) in deaths {
+                        crate::pr_info!(
+                            "binder: death notice pid {} desc {} cookie {:#x} (owner {} died)",
+                            q.pid,
+                            desc,
+                            cookie,
+                            proc.pid
+                        );
+                        qim.todo.push_back(Work::DeadBinder { desc, cookie });
+                    }
+                    wake_targets.push(q.clone());
+                }
+            }
+
+            // Fail in-flight transactions of OTHER procs that involve us.
+            for p in world.procs.clone() {
+                let mut needs_wake = false;
+                for t in pm(world, &p).im().threads.clone() {
+                    let th = t.st();
+                    th.txn_stack.retain(|x| {
+                        let involved = x.from_proc.as_ref().map(|fp| Arc::ptr_eq(fp, &proc)).unwrap_or(false)
+                            || Arc::ptr_eq(&x.to_proc, &proc);
+                        if involved && x.from_proc.is_some() {
+                            // Someone is waiting for a reply from us.
+                            th.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+                            th.process_todo = true;
+                            needs_wake = true;
+                        }
+                        !involved
+                    });
+                    if !th.todo.is_empty() {
+                        needs_wake = true;
+                    }
+                    th.todo.retain(|wk| !work_involves(wk, &proc));
+                }
+                if !pm(world, &p).im().todo.is_empty() {
+                    needs_wake = true;
+                }
+                pm(world, &p).im().todo.retain(|wk| !work_involves(wk, &proc));
+                if needs_wake {
+                    wake_targets.push(p.clone());
+                }
+            }
+
+            // Drop our remaining work, releasing buffers and node pins.
+            for t in proc.im().threads.clone() {
+                let th = t.st();
+                for wk in th.todo.drain(..) {
+                    finish_work(world, &proc, wk);
+                }
+                th.txn_stack.clear();
+            }
+            for wk in proc.im().todo.drain(..) {
+                finish_work(world, &proc, wk);
+            }
+            // Parked oneway transactions on our nodes: their buffers live
+            // in our region — free them before the alloc goes away.
+            for node in proc.im().nodes.clone() {
+                for parked in node.st().async_todo.drain(..) {
+                    finish_work(world, &proc, Work::Transaction(parked));
+                }
+            }
+            // Async buffers still held by userspace keep oneway txns
+            // alive — release their node slots too.
+            if let Some(alloc) = proc.im().alloc.as_mut() {
+                let pending: Vec<Arc<BinderTxn>> = alloc.blocks.iter().filter_map(|b| b.txn.clone()).collect();
+                for t in pending {
+                    if t.holds_async_slot() {
+                        if let Some(node) = &t.target_node {
+                            node.st().has_async_transaction = false;
+                        }
+                    }
+                    unpin_txn_node(world, &t);
+                }
+            }
+            proc.im().alloc = None; // frees the region pages (see Drop)
+        }
+    }
+    drop(proc);
+    for p in wake_targets {
+        wake_proc_one(&p);
+    }
+    0
+}
+
+fn work_involves(wk: &Work, dead: &Arc<BinderProc>) -> bool {
+    match wk {
+        Work::Transaction(t) => {
+            t.from_proc.as_ref().map(|fp| Arc::ptr_eq(fp, dead)).unwrap_or(false) || Arc::ptr_eq(&t.to_proc, dead)
+        }
+        _ => false,
+    }
+}
+
+/// End-of-life cleanup for one work item of a dying proc: release the
+/// target buffer and un-pin the node.
+/// SAFETY: caller holds WORLD.
+unsafe fn finish_work(world: &World, dying: &Arc<BinderProc>, wk: Work) {
+    let Work::Transaction(t) = wk else { return };
+    if Arc::ptr_eq(&t.to_proc, dying) {
+        if let Some(alloc) = pm(world, dying).im().alloc.as_mut() {
+            if let Some(b) = alloc.blocks.iter_mut().find(|b| b.off == t.buffer_off) {
+                b.allow_user_free = true;
+            }
+            let user_ptr = alloc.user_base + t.buffer_off as u64;
+            let _ = alloc.free_buf(user_ptr);
+        }
+    }
+    unpin_txn_node(world, &t);
+}
+
+/// Node un-pinning when a transaction finishes (sync: at reply time or
+/// close; async: at close).
+/// SAFETY: caller holds WORLD.
+unsafe fn unpin_txn_node(world: &World, t: &BinderTxn) {
+    let Some(node) = &t.target_node else { return };
+    let ns = node.st();
+    if t.flags & TF_ONE_WAY == 0 {
+        if ns.internal_strong_refs > 0 {
+            ns.internal_strong_refs -= 1;
+        }
+    }
+    // A ref-state transition may now be visible to the owner.
+    let external = node_external_refs(world, node);
+    let owner = world.procs.iter().find(|p| p.id == node.proc_id);
+    if let Some(owner) = owner {
+        if (!ns.strong() && ns.has_strong_ref) || (!ns.weak(external) && ns.has_weak_ref) {
+            owner.im().todo.push_back(Work::Node(node.clone()));
+            // pick-one wake; runs under WORLD like the S1 wake did
+            let pick = {
+                let th = owner.im().threads.iter().find(|t| {
+                    let x = t.st();
+                    x.waiting_for_proc_work && x.todo.is_empty() && x.txn_stack.is_empty()
+                }).cloned();
+                th
+            };
+            if let Some(t) = pick {
+                wake_thread(&t);
+            }
+        }
+    }
+}
+
+/// mmap handler (sys_mmap dispatch for BINDER_OPS files).
+pub fn binder_mmap_handler(
+    file: &crate::fs::File,
+    addr: usize,
+    length: usize,
+    offset: u64,
+    prot: u32,
+) -> Result<usize, i32> {
+    use crate::arch::mm::{map_page, PageTableEntry, PhysAddr, VirtAddr};
+    use crate::mm::GfpFlags;
+    use crate::mm::page_alloc::{alloc_pages, free_pages};
+    use crate::mm::vma::{Vma, VmaFlags};
+
+    if offset != 0 {
+        return Err(-22); // EINVAL
+    }
+    // Linux binder_mmap silently truncates to 4 MiB.
+    let length = length.min(BINDER_MMAP_MAX);
+    if length == 0 {
+        return Err(-22);
+    }
+
+    // SAFETY: fd-backed lifetime; see proc_ref.
+    let Some(proc) = (unsafe { proc_ref(file) }) else {
+        return Err(-6); // ENXIO
+    };
+
+    let task = crate::sched::current().ok_or(-12)?;
+    let addr_space = task.address_space().ok_or(-12)?;
+
+    let npages = length.div_ceil(PAGE_SIZE);
+    let order = npages.next_power_of_two().trailing_zeros() as usize;
+    let phys = alloc_pages(GfpFlags::GFP_KERNEL, order);
+    if phys == 0 {
+        return Err(-12);
+    }
+    let size = (1usize << order) * PAGE_SIZE;
+    // SAFETY: fresh buddy allocation of 2^order contiguous pages.
+    let kvirt = crate::arch::mm::phys_to_virt(PhysAddr::new(phys as u64)).bits() as *mut u8;
+    unsafe { core::ptr::write_bytes(kvirt, 0, size) };
+
+    {
+        let w = world_lock();
+        // SAFETY: under WORLD.
+        unsafe {
+            if pm(w.as_ref().unwrap(), &proc).im().alloc.is_some() {
+                free_pages(phys, order);
+                return Err(-16); // EBUSY: already mapped
+            }
+        }
+    }
+
+    let vaddr = if addr == 0 {
+        match addr_space.find_free_area(size) {
+            Ok(v) => v.as_usize(),
+            Err(_) => {
+                free_pages(phys, order);
+                return Err(-12);
+            }
+        }
+    } else {
+        addr & !(PAGE_SIZE - 1)
+    };
+    {
+        let user_end = crate::arch::mm::user_addr::USER_END;
+        let Some(end) = vaddr.checked_add(size) else {
+            free_pages(phys, order);
+            return Err(-22);
+        };
+        if end > user_end {
+            free_pages(phys, order);
+            return Err(-22);
+        }
+    }
+
+    let root = addr_space.root_ppn();
+    let mut pte_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
+    if prot & 0x1 != 0 {
+        pte_flags |= PageTableEntry::R;
+    }
+    if prot & 0x2 != 0 {
+        pte_flags |= PageTableEntry::R | PageTableEntry::W;
+    }
+    // SAFETY: root is the task's page-table root; phys..phys+size is our
+    // fresh contiguous allocation.
+    unsafe {
+        for i in 0..(size / PAGE_SIZE) {
+            let va = vaddr + i * PAGE_SIZE;
+            let pa = phys + i * PAGE_SIZE;
+            map_page(root, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
+            // Mapping reference (io_uring discipline): munmap drops one,
+            // binder_close drops the owner one, the last drop frees.
+            let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(pa));
+            if !page.is_null() {
+                (*page).get_page();
+            }
+        }
+        crate::arch::mm::asid::flush_tlb_all();
+    }
+
+    let mut vma_flags = VmaFlags::new();
+    vma_flags.insert(VmaFlags::READ);
+    vma_flags.insert(VmaFlags::WRITE);
+    vma_flags.insert(VmaFlags::SHARED);
+    let vma = Vma::new(
+        crate::mm::page::VirtAddr::new(vaddr),
+        crate::mm::page::VirtAddr::new(vaddr + size),
+        vma_flags,
+    );
+    if addr_space.vma_write().add(vma).is_err() {
+        free_pages(phys, order);
+        return Err(-12);
+    }
+
+    let mut alloc = BinderAlloc {
+        kvirt,
+        phys,
+        npages: size / PAGE_SIZE,
+        order,
+        user_base: vaddr as u64,
+        blocks: Vec::new(),
+        free_async_space: size / 2,
+    };
+    alloc.blocks.push(BufBlock {
+        off: 0,
+        len: size,
+        free: true,
+        async_block: false,
+        allow_user_free: false,
+        data_size: 0,
+        offsets_size: 0,
+        extra_size: 0,
+        txn: None,
+    });
+    {
+        let mut w = world_lock();
+        // SAFETY: under WORLD.
+        unsafe {
+            pm(w.as_mut().unwrap(), &proc).im().alloc = Some(alloc);
+        }
+    }
+    crate::pr_info!("binder: proc {} mapped {:#x} bytes at {:#x}", proc.id, size, vaddr);
+    Ok(vaddr)
+}
+
+/// FileOps.poll: readable while work is pending for this open.
+fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
+    // SAFETY: fd-backed lifetime; see proc_ref.
+    let Some(proc) = (unsafe { proc_ref(file) }) else {
+        return 0;
+    };
+    let tid = current_tid();
+    let w = world_lock();
+    // SAFETY: under WORLD.
+    let has = unsafe {
+        let p = pm(w.as_ref().unwrap(), &proc);
+        !p.im().todo.is_empty() || p.im().threads.iter().any(|t| t.tid == tid && !t.st().todo.is_empty())
+    };
+    drop(w);
+    if has {
+        crate::syscall::misc::poll_events::POLLIN | crate::syscall::misc::poll_events::POLLRDNORM
+    } else {
+        0
+    }
+}
+
+/// File operations for /dev/binder (registered in the devfs char registry).
+pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps {
+    read: None,
+    write: None,
+    lseek: None,
+    close: Some(binder_close),
+    poll: Some(binder_poll),
+};
+
+// ============================================================================
+// ioctl entry (sys_ioctl dispatch for BINDER_OPS files)
+// ============================================================================
+
+fn current_tid() -> u32 {
+    crate::sched::current().map(|t| (*t).ns_pid_local()).unwrap_or(0)
+}
+
+/// Returns Some(ret) when the file is a binder fd, None otherwise.
+pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Option<i64> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &BINDER_OPS as *const _) {
+        return None;
+    }
+    Some(binder_ioctl(file, request, arg))
+}
+
+fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
+    // SAFETY: fd-backed lifetime; see proc_ref.
+    let Some(proc) = (unsafe { proc_ref(file) }) else {
+        return -(EBADF as i64);
+    };
+    let tid = current_tid();
+
+    // binder_get_thread: find or create the calling thread's state.
+    let thread = {
+        let mut w = world_lock();
+        let world = w.as_mut().unwrap();
+        if !proc_alive(world, &proc) {
+            return -(ESRCH as i64);
+        }
+        // SAFETY: under WORLD.
+        unsafe {
+            let existing = pm(world, &proc).im().threads.iter().find(|t| t.tid == tid).cloned();
+            match existing {
+                Some(t) => t,
+                None => {
+                    let t = Arc::new(BinderThread::new(tid));
+                    pm(world, &proc).im().threads.push(t.clone());
+                    t
+                }
+            }
+        }
+    };
+
+    match request {
+        BINDER_WRITE_READ => binder_ioctl_write_read(&proc, &thread, arg, file),
+        BINDER_SET_MAX_THREADS => {
+            // SAFETY: get_user is fault-safe.
+            match unsafe { crate::arch::uaccess::get_user(arg as *const u32) } {
+                Some(v) => {
+                    let w = world_lock();
+                    // SAFETY: under WORLD.
+                    unsafe {
+                        pm(w.as_ref().unwrap(), &proc).im().max_threads = v as i32;
+                    }
+                    0
+                }
+                None => -(EINVAL as i64),
+            }
+        }
+        BINDER_SET_CONTEXT_MGR => {
+            let mut w = world_lock();
+            let world = w.as_mut().unwrap();
+            if world.mgr_node[proc.ctx as usize].is_some() {
+                crate::pr_err!("binder: BINDER_SET_CONTEXT_MGR already set (ctx {})", proc.ctx as u8);
+                return -(EBUSY as i64);
+            }
+            // Linux creates the node with local refs held and has_*_ref
+            // already true, so no INCREFS/ACQUIRE handshake fires for it.
+            // The mgr node's flags are 0 (binder_new_node with fp==NULL):
+            // it does not accept BINDER_TYPE_FD objects, exactly like the
+            // un-extended BINDER_SET_CONTEXT_MGR ioctl.
+            let node = Arc::new(BinderNode::new(world.next_id, 0, 0, proc.id, 0));
+            world.next_id += 1;
+            // SAFETY: under WORLD.
+            unsafe {
+                let ns = node.st();
+                ns.local_strong_refs = 1;
+                ns.local_weak_refs = 1;
+                ns.has_strong_ref = true;
+                ns.has_weak_ref = true;
+                pm(world, &proc).im().nodes.push(node.clone());
+            }
+            world.mgr_node[proc.ctx as usize] = Some(node);
+            drop(w);
+            crate::pr_info!("binder: proc {} (pid {}) is the context manager (ctx {})", proc.id, proc.pid, proc.ctx as u8);
+            0
+        }
+        BINDER_THREAD_EXIT => {
+            let mut w = world_lock();
+            // SAFETY: under WORLD.
+            unsafe {
+                let world = w.as_mut().unwrap();
+                let t = pm(world, &proc).im().threads.iter().find(|t| t.tid == tid).cloned();
+                if let Some(t) = t {
+                    let th = t.st();
+                    for wk in th.todo.drain(..) {
+                        finish_work(world, &proc, wk);
+                    }
+                    th.txn_stack.clear();
+                }
+                pm(world, &proc).im().threads.retain(|t| t.tid != tid);
+            }
+            0
+        }
+        BINDER_VERSION => {
+            if arg == 0 || !crate::arch::uaccess::access_ok(arg, 4) {
+                return -(EFAULT as i64);
+            }
+            // SAFETY: arg validated non-null, 4-byte writable.
+            if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, BINDER_CURRENT_PROTOCOL_VERSION) } {
+                return -(EFAULT as i64);
+            }
+            0
+        }
+        _ => {
+            crate::pr_info!("binder: unhandled ioctl {:#x}", request);
+            -(EINVAL as i64)
+        }
+    }
+}
+
+// ============================================================================
+// BINDER_WRITE_READ
+// ============================================================================
+
+fn binder_ioctl_write_read(
+    proc: &Arc<BinderProc>,
+    thread: &Arc<BinderThread>,
+    arg: usize,
+    file: &crate::fs::File,
+) -> i64 {
+    let mut bwr = BinderWriteRead {
+        write_size: 0,
+        write_consumed: 0,
+        write_buffer: 0,
+        read_size: 0,
+        read_consumed: 0,
+        read_buffer: 0,
+    };
+    // SAFETY: arg points to a 48-byte user binder_write_read.
+    if unsafe {
+        crate::arch::uaccess::copy_from_user(
+            &mut bwr as *mut BinderWriteRead as *mut u8,
+            arg as *const u8,
+            core::mem::size_of::<BinderWriteRead>(),
+        )
+    } != 0
+    {
+        return -(EFAULT as i64);
+    }
+
+    if bwr.write_size > 0 {
+        let ret = binder_thread_write(
+            proc,
+            thread,
+            bwr.write_buffer,
+            bwr.write_size as usize,
+            &mut bwr.write_consumed,
+        );
+        if ret < 0 {
+            bwr.read_consumed = 0;
+            // SAFETY: 48-byte copy back to the same location.
+            unsafe {
+                crate::arch::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    &bwr as *const BinderWriteRead as *const u8,
+                    core::mem::size_of::<BinderWriteRead>(),
+                );
+            }
+            return ret;
+        }
+    }
+    if bwr.read_size > 0 {
+        let non_block = file.flags_bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
+        let ret = binder_thread_read(
+            proc,
+            thread,
+            bwr.read_buffer,
+            bwr.read_size as usize,
+            &mut bwr.read_consumed,
+            non_block,
+        );
+        if ret < 0 {
+            // SAFETY: same 48-byte copy-back.
+            unsafe {
+                crate::arch::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    &bwr as *const BinderWriteRead as *const u8,
+                    core::mem::size_of::<BinderWriteRead>(),
+                );
+            }
+            return ret;
+        }
+    }
+    // SAFETY: same 48-byte copy-back.
+    unsafe {
+        if crate::arch::uaccess::copy_to_user(
+            arg as *mut u8,
+            &bwr as *const BinderWriteRead as *const u8,
+            core::mem::size_of::<BinderWriteRead>(),
+        ) != 0
+        {
+            return -(EFAULT as i64);
+        }
+    }
+    0
+}
+
+// ============================================================================
+// binder_thread_write (BC commands)
+// ============================================================================
+
+fn get_user_at<T: Copy>(base: u64, off: usize) -> Option<T> {
+    let addr = base.checked_add(off as u64)?;
+    if !crate::arch::uaccess::access_ok(addr as usize, core::mem::size_of::<T>()) {
+        return None;
+    }
+    // SAFETY: access_ok validated the range; get_user is fault-safe.
+    unsafe { crate::arch::uaccess::get_user(addr as *const T) }
+}
+
+fn binder_thread_write(
+    proc: &Arc<BinderProc>,
+    thread: &Arc<BinderThread>,
+    buffer: u64,
+    size: usize,
+    consumed: &mut u64,
+) -> i64 {
+    let mut ptr = *consumed as usize;
+    loop {
+        if ptr + 4 > size {
+            break;
+        }
+        let Some(cmd) = get_user_at::<u32>(buffer, ptr) else {
+            *consumed = ptr as u64;
+            return -(EFAULT as i64);
+        };
+        ptr += 4;
+
+        match cmd {
+            BC_TRANSACTION | BC_REPLY | BC_TRANSACTION_SG | BC_REPLY_SG => {
+                let sg = cmd == BC_TRANSACTION_SG || cmd == BC_REPLY_SG;
+                let reply = cmd == BC_REPLY || cmd == BC_REPLY_SG;
+                let Some(mut tr) = get_user_at::<BinderTransactionData>(buffer, ptr) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                // struct binder_transaction_data_sg: the trailing u64
+                // buffers_size covers the sg (extra) area the PTR objects
+                // will copy into (Linux extra_buffers_size).
+                let sg_size = if sg {
+                    let Some(bs) = get_user_at::<u64>(buffer, ptr + 64) else {
+                        *consumed = ptr as u64;
+                        return -(EFAULT as i64);
+                    };
+                    bs as usize
+                } else {
+                    0
+                };
+                ptr += if sg { 72 } else { 64 };
+                let mut err_cmd: u32 = 0;
+                binder_transaction(proc, thread, &mut tr, reply, sg_size, &mut err_cmd);
+                if err_cmd != 0 {
+                    crate::pr_info!(
+                        "binder: pid {} {} failed with BR {:#x} (code {}, ds {} os {})",
+                        proc.pid,
+                        if reply { "BC_REPLY" } else { "BC_TRANSACTION" },
+                        err_cmd,
+                        tr.code,
+                        tr.data_size,
+                        tr.offsets_size
+                    );
+                    // Linux stops processing write commands and queues the
+                    // error as thread work for the following read.
+                    let w = world_lock();
+                    // SAFETY: under WORLD.
+                    unsafe {
+                        let th = thread.st();
+                        th.todo.push_back(Work::ReturnError(err_cmd, 0));
+                        th.process_todo = true;
+                    }
+                    drop(w);
+                    wake_thread(thread);
+                    break;
+                }
+            }
+            BC_FREE_BUFFER => {
+                let Some(data_ptr) = get_user_at::<u64>(buffer, ptr) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                ptr += 8;
+                {
+                    let mut drain_wake: Option<Arc<BinderProc>> = None;
+                    {
+                        let mut w = world_lock();
+                        // SAFETY: all inner access below is under WORLD.
+                        unsafe {
+                            let world = w.as_mut().unwrap();
+                            let txn = match pm(world, proc).im().alloc.as_mut() {
+                                Some(alloc) => alloc.free_buf(data_ptr),
+                                None => None,
+                            };
+                            match txn {
+                                None => {
+                                    crate::pr_info!(
+                                        "binder: pid {} BC_FREE_BUFFER {:#x} no match or not freeable",
+                                        proc.pid,
+                                        data_ptr
+                                    );
+                                }
+                                Some(Some(t)) => {
+                                    // Oneway buffer release: hand the node's
+                                    // async slot to the next parked txn or
+                                    // free it (Linux drains node->async_todo
+                                    // in binder_free_buf).
+                                    if t.holds_async_slot() {
+                                        let mut next: Option<Arc<BinderTxn>> = None;
+                                        if let Some(node) = &t.target_node {
+                                            let ns = node.st();
+                                            next = ns.async_todo.pop_front();
+                                            if next.is_none() {
+                                                ns.has_async_transaction = false;
+                                            }
+                                        }
+                                        if let Some(h) = next {
+                                            h.set_holds_async_slot(true);
+                                            let tp = h.to_proc.clone();
+                                            let tid = h.id;
+                                            let tpid = tp.pid;
+                                            pm(world, &tp).im().todo.push_back(Work::Transaction(h));
+                                            drain_wake = Some(tp);
+                                            crate::pr_info!(
+                                                "binder: oneway txn {} drained to proc {}",
+                                                tid,
+                                                tpid
+                                            );
+                                        }
+                                    }
+                                }
+                                Some(None) => {
+                                    // Sync buffer freed (its txn was unlinked
+                                    // at reply time).
+                                }
+                            }
+                        }
+                    }
+                    if let Some(tp) = drain_wake {
+                        wake_proc_one(&tp);
+                    }
+                }
+            }
+            BC_INCREFS | BC_ACQUIRE | BC_RELEASE | BC_DECREFS => {
+                let Some(desc) = get_user_at::<u32>(buffer, ptr) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                ptr += 4;
+                let strong = cmd == BC_ACQUIRE || cmd == BC_RELEASE;
+                let increment = cmd == BC_INCREFS || cmd == BC_ACQUIRE;
+                let mut wake_owner: Option<Arc<BinderProc>> = None;
+                {
+                    let w = world_lock();
+                    // SAFETY: all inner access below is under WORLD.
+                    unsafe {
+                        let world = w.as_ref().unwrap();
+                        let ridx = pm(world, proc)
+                            .im()
+                            .refs
+                            .iter()
+                            .position(|r| r.desc == desc);
+                        let Some(ridx) = ridx else {
+                            drop(w);
+                            crate::pr_info!("binder: pid {} ref command on invalid handle {}", proc.pid, desc);
+                            continue;
+                        };
+                        let node = pm(world, proc).im().refs[ridx].node.clone();
+                        let owner = world.procs.iter().find(|p| p.id == node.proc_id).cloned();
+                        let ns = node.st();
+
+                        if increment {
+                            if strong {
+                                pm(world, proc).im().refs[ridx].strong += 1;
+                                ns.internal_strong_refs += 1;
+                            } else {
+                                pm(world, proc).im().refs[ridx].weak += 1;
+                            }
+                        } else {
+                            let (s, wk) = {
+                                let r = &mut pm(world, proc).im().refs[ridx];
+                                (r.strong, r.weak)
+                            };
+                            if strong {
+                                if s == 0 {
+                                    drop(w);
+                                    crate::pr_info!("binder: pid {} BC_RELEASE on 0 strong refs", proc.pid);
+                                    continue;
+                                }
+                                let r = &mut pm(world, proc).im().refs[ridx];
+                                r.strong -= 1;
+                                if r.strong == 0 && ns.internal_strong_refs > 0 {
+                                    ns.internal_strong_refs -= 1;
+                                }
+                            } else {
+                                if wk == 0 {
+                                    drop(w);
+                                    crate::pr_info!("binder: pid {} BC_DECREFS on 0 weak refs", proc.pid);
+                                    continue;
+                                }
+                                let r = &mut pm(world, proc).im().refs[ridx];
+                                r.weak -= 1;
+                            }
+                            if pm(world, proc).im().refs[ridx].strong == 0
+                                && pm(world, proc).im().refs[ridx].weak == 0
+                            {
+                                let desc = pm(world, proc).im().refs[ridx].desc;
+                                pm(world, proc).im().refs.remove(ridx);
+                                // Drop a still-queued death notification for
+                                // the removed handle (binder_free_ref
+                                // dequeues ref->death->work).
+                                pm(world, proc).im().todo.retain(|wk| {
+                                    !matches!(wk, Work::DeadBinder { desc: d, .. } if *d == desc)
+                                });
+                            }
+                        }
+                        // Ref-state change: queue BINDER_WORK_NODE to the
+                        // owner (read derives the actual BR_*_REFS from
+                        // the counters; a no-op if nothing transitioned).
+                        if let Some(owner) = &owner {
+                            owner.im().todo.push_back(Work::Node(node.clone()));
+                            wake_owner = Some(owner.clone());
+                        }
+                    }
+                }
+                if let Some(owner) = wake_owner {
+                    wake_proc_one(&owner);
+                }
+            }
+            BC_INCREFS_DONE | BC_ACQUIRE_DONE => {
+                let Some(node_ptr) = get_user_at::<u64>(buffer, ptr) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                let Some(_cookie) = get_user_at::<u64>(buffer, ptr + 8) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                ptr += 16;
+                let w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe {
+                    let world = w.as_ref().unwrap();
+                    let node = pm(world, proc)
+                        .im()
+                        .nodes
+                        .iter()
+                        .find(|n| n.ptr == node_ptr)
+                        .cloned();
+                    let Some(node) = node else {
+                        drop(w);
+                        crate::pr_info!(
+                            "binder: pid {} BC_{}_DONE: no node {:#x}",
+                            proc.pid,
+                            if cmd == BC_ACQUIRE_DONE { "ACQUIRE" } else { "DECREFS" },
+                            node_ptr
+                        );
+                        continue;
+                    };
+                    let ns = node.st();
+                    if cmd == BC_ACQUIRE_DONE {
+                        if !ns.pending_strong_ref {
+                            drop(w);
+                            crate::pr_info!("binder: BC_ACQUIRE_DONE without pending acquire");
+                            continue;
+                        }
+                        ns.pending_strong_ref = false;
+                        ns.local_strong_refs -= 1;
+                    } else {
+                        if !ns.pending_weak_ref {
+                            drop(w);
+                            crate::pr_info!("binder: BC_INCREFS_DONE without pending increfs");
+                            continue;
+                        }
+                        ns.pending_weak_ref = false;
+                        ns.local_weak_refs -= 1;
+                    }
+                }
+            }
+            BC_ENTER_LOOPER => {
+                let _w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe {
+                    thread.st().looper |= LOOPER_ENTERED;
+                }
+            }
+            BC_EXIT_LOOPER => {
+                let _w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe {
+                    thread.st().looper |= LOOPER_EXITED;
+                }
+            }
+            BC_REGISTER_LOOPER => {
+                let w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe {
+                    let world = w.as_ref().unwrap();
+                    let p = pm(world, proc);
+                    if p.im().requested_threads > 0 {
+                        p.im().requested_threads -= 1;
+                        p.im().requested_threads_started += 1;
+                    }
+                    thread.st().looper |= LOOPER_REGISTERED;
+                }
+            }
+            BC_REQUEST_DEATH_NOTIFICATION | BC_CLEAR_DEATH_NOTIFICATION => {
+                // Wire format (binder_thread_write): u32 target handle,
+                // then u64 cookie — 12 bytes consumed.
+                let Some(target) = get_user_at::<u32>(buffer, ptr) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                let Some(cookie) = get_user_at::<u64>(buffer, ptr + 4) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                ptr += 12;
+                let request = cmd == BC_REQUEST_DEATH_NOTIFICATION;
+                let mut wake_self = false;
+                {
+                    let mut w = world_lock();
+                    // SAFETY: all inner access below is under WORLD.
+                    unsafe {
+                        let world = w.as_mut().unwrap();
+                        let pim = pm(world, proc).im();
+                        let Some(ridx) = pim.refs.iter().position(|r| r.desc == target) else {
+                            drop(w);
+                            crate::pr_info!(
+                                "binder: pid {} death command on invalid handle {}",
+                                proc.pid,
+                                target
+                            );
+                            continue;
+                        };
+                        if request {
+                            if pim.refs[ridx].death.is_some() {
+                                drop(w);
+                                crate::pr_info!(
+                                    "binder: pid {} BC_REQUEST_DEATH_NOTIFICATION already set (desc {})",
+                                    proc.pid,
+                                    target
+                                );
+                                continue;
+                            }
+                            let already_dead = node_is_dead(world, &pim.refs[ridx].node);
+                            pim.refs[ridx].death = Some(RefDeath {
+                                cookie,
+                                phase: if already_dead { DeathPhase::Queued } else { DeathPhase::Armed },
+                                clear_pending: false,
+                            });
+                            if already_dead {
+                                // Linux queues the DEAD_BINDER work right
+                                // away when the node is already dead.
+                                pim.todo.push_back(Work::DeadBinder { desc: target, cookie });
+                                wake_self = true;
+                            }
+                        } else {
+                            let ok = pim.refs[ridx]
+                                .death
+                                .as_ref()
+                                .map(|d| d.cookie == cookie)
+                                .unwrap_or(false);
+                            if !ok {
+                                drop(w);
+                                crate::pr_info!(
+                                    "binder: pid {} BC_CLEAR_DEATH_NOTIFICATION not active or cookie mismatch (desc {})",
+                                    proc.pid,
+                                    target
+                                );
+                                continue;
+                            }
+                            match pim.refs[ridx].death.as_ref().unwrap().phase {
+                                DeathPhase::Armed => {
+                                    // Never fired: drop the request and
+                                    // deliver BR_CLEAR_DEATH_NOTIFICATION_DONE.
+                                    pim.refs[ridx].death = None;
+                                    let th = thread.st();
+                                    th.todo.push_back(Work::ClearDeathDone { cookie });
+                                    th.process_todo = true;
+                                    wake_self = true;
+                                }
+                                DeathPhase::Queued | DeathPhase::Delivered => {
+                                    // Notification already in flight
+                                    // (Linux retypes the queued work to
+                                    // DEAD_BINDER_AND_CLEAR).
+                                    pim.refs[ridx].death.as_mut().unwrap().clear_pending = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if wake_self {
+                    wake_thread(thread);
+                }
+            }
+            BC_DEAD_BINDER_DONE => {
+                let Some(cookie) = get_user_at::<u64>(buffer, ptr) else {
+                    *consumed = ptr as u64;
+                    return -(EFAULT as i64);
+                };
+                ptr += 8;
+                let mut wake_self = false;
+                {
+                    let mut w = world_lock();
+                    // SAFETY: all inner access below is under WORLD.
+                    unsafe {
+                        let world = w.as_mut().unwrap();
+                        let pim = pm(world, proc).im();
+                        let hit = pim
+                            .refs
+                            .iter()
+                            .find(|r| {
+                                r.death.as_ref().map(|d| d.cookie == cookie && d.phase == DeathPhase::Delivered).unwrap_or(false)
+                            })
+                            .map(|r| r.desc);
+                        let Some(desc) = hit else {
+                            drop(w);
+                            crate::pr_info!(
+                                "binder: pid {} BC_DEAD_BINDER_DONE {:#x} not found",
+                                proc.pid,
+                                cookie
+                            );
+                            continue;
+                        };
+                        let r = pim.refs.iter_mut().find(|r| r.desc == desc).unwrap();
+                        if r.death.as_ref().unwrap().clear_pending {
+                            r.death = None;
+                            let th = thread.st();
+                            th.todo.push_back(Work::ClearDeathDone { cookie });
+                            th.process_todo = true;
+                            wake_self = true;
+                        } else {
+                            // Dequeue from delivered_death; the record
+                            // stays armed on the ref (Linux keeps
+                            // ref->death until CLEAR or ref release).
+                            r.death.as_mut().unwrap().phase = DeathPhase::Armed;
+                        }
+                    }
+                }
+                if wake_self {
+                    wake_thread(thread);
+                }
+            }
+            _ => {
+                crate::pr_info!("binder: unknown BC command {:#x}, stopping", cmd);
+                ptr -= 4; // not consumed
+                break;
+            }
+        }
+    }
+    *consumed = ptr as u64;
+    0
+}
+
+// ============================================================================
+// binder_transaction
+// ============================================================================
+
+fn binder_transaction(
+    proc: &Arc<BinderProc>,
+    thread: &Arc<BinderThread>,
+    tr: &mut BinderTransactionData,
+    reply: bool,
+    sg_size: usize,
+    err_cmd: &mut u32,
+) {
+    let oneway = tr.flags & TF_ONE_WAY != 0;
+    let data_size = tr.data_size as usize;
+    let offsets_size = tr.offsets_size as usize;
+
+    // ---- resolve target + allocate the target buffer ------------------
+    let mut target_node: Option<Arc<BinderNode>> = None;
+    let mut target_thread_key: Option<(Arc<BinderProc>, u32)> = None;
+    let mut in_reply_to: Option<Arc<BinderTxn>> = None;
+    let mut target_proc: Option<Arc<BinderProc>> = None;
+    let mut block_off: usize;
+    // BINDER_TYPE_FD/FDA gate (binder_translate_fd): replies need the
+    // original transaction's TF_ACCEPT_FDS; transactions need the target
+    // node's FLAT_BINDER_FLAG_ACCEPTS_FDS.
+    let mut allows_fd = false;
+    // Sender-info record space folded into the sg area for nodes opted
+    // into FLAT_BINDER_FLAG_TXN_SECURITY_CTX.
+    let mut secctx_space = 0usize;
+    let mut sg_total = sg_size;
+    let txn_id;
+
+    {
+        let mut w = world_lock();
+        // SAFETY: all inner access in this block is under WORLD.
+        unsafe {
+            let world = w.as_mut().unwrap();
+
+            if reply {
+                // BC_REPLY: the thread's transaction stack top must be a
+                // transaction delivered TO this thread.
+                let stack_top = thread.st().txn_stack.last().cloned();
+                let Some(t) = stack_top else {
+                    *err_cmd = BR_FAILED_REPLY;
+                    crate::pr_info!("binder: BC_REPLY with empty transaction stack");
+                    return;
+                };
+                if t.to_tid() != Some(thread.tid) || !Arc::ptr_eq(&t.to_proc, proc) {
+                    *err_cmd = BR_FAILED_REPLY;
+                    crate::pr_info!(
+                        "binder: BC_REPLY stack top not ours (to_tid={:?}, me={})",
+                        t.to_tid(),
+                        thread.tid
+                    );
+                    return;
+                }
+                let t = thread.st().txn_stack.pop().unwrap();
+                let (Some(from_proc), Some(from_tid)) = (t.from_proc.clone(), t.from_tid) else {
+                    *err_cmd = BR_FAILED_REPLY;
+                    crate::pr_info!("binder: BC_REPLY on oneway");
+                    return;
+                };
+                if from_proc.im().is_dead {
+                    *err_cmd = BR_DEAD_REPLY;
+                    crate::pr_info!("binder: BC_REPLY requester dead");
+                    return;
+                }
+                target_thread_key = Some((from_proc, from_tid));
+                target_proc = Some(target_thread_key.as_ref().unwrap().0.clone());
+                allows_fd = t.flags & TF_ACCEPT_FDS != 0;
+                in_reply_to = Some(t);
+            } else if tr.target_handle != 0 {
+                let node = pm(world, proc)
+                    .im()
+                    .refs
+                    .iter()
+                    .find(|r| r.desc == tr.target_handle)
+                    .map(|r| r.node.clone());
+                let Some(node) = node else {
+                    *err_cmd = BR_FAILED_REPLY;
+                    crate::pr_info!("binder: transaction to invalid handle {}", tr.target_handle);
+                    return;
+                };
+                target_node = Some(node);
+            } else {
+                let mgr = world.mgr_node[proc.ctx as usize].clone();
+                let Some(mgr) = mgr else {
+                    *err_cmd = BR_DEAD_REPLY;
+                    crate::pr_info!("binder: no context manager installed (ctx {})", proc.ctx as u8);
+                    return;
+                };
+                if mgr.proc_id == proc.id {
+                    // Linux: a transaction to the context manager from its
+                    // own process is a protocol error.
+                    *err_cmd = BR_FAILED_REPLY;
+                    return;
+                }
+                target_node = Some(mgr);
+            }
+
+            if target_proc.is_none() {
+                let node = target_node.as_ref().unwrap();
+                match world.procs.iter().find(|p| p.id == node.proc_id) {
+                    Some(p) if !p.im().is_dead => target_proc = Some(p.clone()),
+                    _ => {
+                        *err_cmd = BR_DEAD_REPLY;
+                        return;
+                    }
+                }
+            }
+            let tp = target_proc.as_ref().unwrap();
+            if !reply && Arc::ptr_eq(tp, proc) {
+                *err_cmd = BR_FAILED_REPLY;
+                return;
+            }
+            if tp.im().alloc.is_none() {
+                *err_cmd = BR_FAILED_REPLY;
+                return;
+            }
+            if offsets_size % 8 != 0 {
+                *err_cmd = BR_FAILED_REPLY;
+                return;
+            }
+            if !reply {
+                if let Some(node) = &target_node {
+                    allows_fd = node.flags & FLAT_BINDER_FLAG_ACCEPTS_FDS != 0;
+                    if node.flags & FLAT_BINDER_FLAG_TXN_SECURITY_CTX != 0 {
+                        secctx_space = align8(core::mem::size_of::<BinderSenderInfo>());
+                    }
+                }
+            }
+
+            txn_id = world.next_id;
+            world.next_id += 1;
+
+            let is_async = !reply && oneway;
+            let _ = is_async;
+
+            sg_total += secctx_space;
+            let off = pm(world, tp)
+                .im()
+                .alloc
+                .as_mut()
+                .unwrap()
+                .new_buf(data_size, offsets_size, sg_total, is_async);
+            let Some(off) = off else {
+                *err_cmd = BR_FAILED_REPLY;
+                crate::pr_info!(
+                    "binder: buffer alloc failed (need {}+{}+{})",
+                    align8(data_size),
+                    align8(offsets_size),
+                    align8(sg_size)
+                );
+                return;
+            };
+            block_off = off;
+
+            // Sync transactions pin a strong node ref for their lifetime.
+            if !reply && !oneway {
+                if let Some(node) = &target_node {
+                    node.st().internal_strong_refs += 1;
+                }
+            }
+        }
+    } // -- WORLD released: user copies below --------------------------------
+
+    let target = target_proc.clone().unwrap();
+
+    // fd installs to undo if a later fixup step fails (Linux t->fd_count).
+    let mut installed_fds: Vec<(u32, usize)> = Vec::new();
+
+    // ---- copy payload from the sender into the target's region ----------
+    let (kvirt, user_base) = {
+        let w = world_lock();
+        // SAFETY: under WORLD.
+        unsafe {
+            let a = pm(w.as_ref().unwrap(), &target).im().alloc.as_ref().unwrap();
+            (a.kvirt, a.user_base)
+        }
+    };
+    // SAFETY: the block is exclusively owned by this in-flight txn.
+    unsafe {
+        let dst = kvirt.add(block_off);
+        if data_size > 0
+            && crate::arch::uaccess::copy_from_user(dst, tr.data_buffer as *const u8, data_size) != 0
+        {
+            release_block(&target, block_off);
+            unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            *err_cmd = BR_FAILED_REPLY;
+            crate::pr_info!("binder: txn data copy fault from {:#x}", tr.data_buffer);
+            return;
+        }
+        if offsets_size > 0
+            && crate::arch::uaccess::copy_from_user(
+                dst.add(align8(data_size)),
+                tr.data_offsets as *const u8,
+                offsets_size,
+            ) != 0
+        {
+            release_block(&target, block_off);
+            unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            *err_cmd = BR_FAILED_REPLY;
+            crate::pr_info!("binder: txn offsets copy fault from {:#x}", tr.data_offsets);
+            return;
+        }
+    }
+
+    // ---- sender-info record (BR_TRANSACTION_SECCTX payload) ------------
+    // Written at the start of the sg area, ahead of any BINDER_TYPE_PTR
+    // payloads (upstream prepends the security context there).
+    let extra_base = align8(data_size) + align8(offsets_size);
+    let mut sg_used = 0usize;
+    let mut security_ctx: u64 = 0;
+    if secctx_space > 0 {
+        let (sender_pid, sender_euid) = match crate::sched::current() {
+            Some(t) => ((*t).pid() as i32, (*t).cred().euid),
+            None => (0, 0),
+        };
+        let info = BinderSenderInfo { pid: sender_pid, uid: sender_euid, tokenid: 0 };
+        // SAFETY: the sg area is sized for secctx_space.
+        unsafe {
+            core::ptr::write_volatile(
+                kvirt.add(block_off + extra_base) as *mut BinderSenderInfo,
+                info,
+            );
+        }
+        security_ctx = user_base + block_off as u64 + extra_base as u64;
+        sg_used += secctx_space;
+    }
+
+    // ---- translate flat binder objects ----------------------------------
+    // Block layout: [data][offsets][sg extra area]. The sg cursor follows
+    // BINDER_TYPE_PTR copies (Linux sg_bufp). Object fixups run WITHOUT the
+    // world lock: the block is exclusively ours and fd installs must never
+    // happen under WORLD.
+    if offsets_size > 0 {
+        let n = offsets_size / 8;
+        let block_user = user_base + block_off as u64;
+        for i in 0..n {
+            // SAFETY: offsets array inside the kernel-side block.
+            let obj_off = unsafe {
+                core::ptr::read_volatile((kvirt.add(block_off + align8(data_size)) as *const u64).add(i)) as usize
+            };
+            if obj_off + 4 > data_size {
+                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                crate::pr_info!("binder: object offset {} out of range", obj_off);
+                return;
+            }
+            // SAFETY: header word validated within the data area.
+            let ty = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off) as *const u32) };
+            let osz = binder_object_size(ty);
+            if osz == 0 || obj_off + osz > data_size {
+                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                crate::pr_info!("binder: object type {:#x} at {} out of range", ty, obj_off);
+                return;
+            }
+            match ty {
+                BINDER_TYPE_FD => {
+                    // fd lives in the handle field; pad/cookie cleared.
+                    // SAFETY: validated within the data area.
+                    let fd = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off + 8) as *const u32) };
+                    if !allows_fd {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        crate::pr_info!("binder: fd {} to target that does not accept fds", fd);
+                        return;
+                    }
+                    let Some(tfd) = translate_fd_into(fd, &target) else {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        crate::pr_info!("binder: fd {} install into pid {} failed", fd, target.pid);
+                        return;
+                    };
+                    installed_fds.push((target.pid, tfd));
+                    // SAFETY: validated within the data area.
+                    unsafe {
+                        core::ptr::write_volatile(kvirt.add(block_off + obj_off + 8) as *mut u32, tfd as u32);
+                        core::ptr::write_volatile(kvirt.add(block_off + obj_off + 12) as *mut u32, 0);
+                    }
+                }
+                BINDER_TYPE_PTR => {
+                    // SAFETY: validated within the data area.
+                    let mut bp = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderBufferObject).cast_mut()) };
+                    let bp_len = bp.length as usize;
+                    if bp_len > sg_total - sg_used {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        crate::pr_info!("binder: sg buffer overruns buffers_size");
+                        return;
+                    }
+                    // SAFETY: block layout bounds were validated above.
+                    let sg_dst = unsafe { kvirt.add(block_off + extra_base + sg_used) };
+                    // SAFETY: sg area sized for buffers_size.
+                    if bp_len > 0
+                        && unsafe {
+                            crate::arch::uaccess::copy_from_user(sg_dst, bp.buffer as *const u8, bp_len)
+                        } != 0
+                    {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        crate::pr_info!("binder: sg copy fault from {:#x}", bp.buffer);
+                        return;
+                    }
+                    let child_user = block_user + (extra_base + sg_used) as u64;
+                    sg_used += align8(bp_len);
+                    // Rewrite to the target's address of the copy.
+                    bp.buffer = child_user;
+                    // SAFETY: validated within the data area.
+                    unsafe { core::ptr::write_volatile(kvirt.add(block_off + obj_off) as *mut BinderBufferObject, bp) };
+                    if bp.flags as u64 & (BINDER_BUFFER_FLAG_HAS_PARENT as u64) != 0 {
+                        // binder_fixup_parent: write this buffer's target
+                        // address into the parent buffer at parent_offset.
+                        let Some((parent_kernel, parent_len)) =
+                            (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_total, i, bp.parent) })
+                        else {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                            crate::pr_info!("binder: PTR fixup parent invalid");
+                            return;
+                        };
+                        if parent_len < 8 || bp.parent_offset > (parent_len - 8) as u64 {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                            crate::pr_info!("binder: PTR fixup offset out of parent");
+                            return;
+                        }
+                        // SAFETY: parent buffer is inside our sg area.
+                        unsafe {
+                            core::ptr::write_volatile(parent_kernel.add(bp.parent_offset as usize) as *mut u64, child_user);
+                        }
+                    }
+                }
+                BINDER_TYPE_FDA => {
+                    // SAFETY: validated within the data area.
+                    let fda = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderFdArrayObject).cast_mut()) };
+                    if !allows_fd {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        crate::pr_info!("binder: fda to target that does not accept fds");
+                        return;
+                    }
+                    if fda.num_fds >= usize::MAX as u64 / 4 {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        return;
+                    }
+                    let Some((parent_kernel, parent_len)) =
+                        (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_total, i, fda.parent) })
+                    else {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        crate::pr_info!("binder: FDA parent invalid");
+                        return;
+                    };
+                    let fd_buf_size = 4 * fda.num_fds as usize;
+                    if fd_buf_size > parent_len || fda.parent_offset as usize > parent_len - fd_buf_size {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        crate::pr_info!("binder: FDA does not fit in parent buffer");
+                        return;
+                    }
+                    // SAFETY: fd array inside the parent's sg buffer.
+                    let fd_array = unsafe { parent_kernel.add(fda.parent_offset as usize) as *mut u32 };
+                    for k in 0..fda.num_fds as usize {
+                        // SAFETY: bounds validated above against the parent.
+                        let fd = unsafe { core::ptr::read_volatile(fd_array.add(k)) };
+                        let Some(tfd) = translate_fd_into(fd, &target) else {
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                            crate::pr_info!("binder: fda fd {} install into pid {} failed", fd, target.pid);
+                            return;
+                        };
+                        installed_fds.push((target.pid, tfd));
+                        // SAFETY: same slot we read.
+                        unsafe { core::ptr::write_volatile(fd_array.add(k), tfd as u32) };
+                    }
+                }
+                _ => {
+                    // flat binder/handle objects (24 bytes).
+                    // SAFETY: validated within the data area.
+                    let obj = unsafe { &mut *(kvirt.add(block_off + obj_off) as *mut FlatBinderObject) };
+                    if !translate_object(proc, obj, &target) {
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        crate::pr_info!(
+                            "binder: object type {:#x} handle {:#x} translate failed",
+                            obj.hdr_type,
+                            obj.handle
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- queue the transaction ------------------------------------------
+    let (sender_pid, sender_euid) = match crate::sched::current() {
+        // SAFETY: current task is valid; a cred read here races at most
+        // with a setuid on the same task, which is benign for IPC labels.
+        Some(t) => ((*t).pid() as i32, (*t).cred().euid),
+        None => (0, 0),
+    };
+    let txn = Arc::new(BinderTxn {
+        id: txn_id,
+        from_proc: if !reply && !oneway { Some(proc.clone()) } else { None },
+        from_tid: if !reply && !oneway { Some(thread.tid) } else { None },
+        to_proc: target.clone(),
+        to_tid: core::cell::UnsafeCell::new(None),
+        target_node: target_node.clone(),
+        holds_async_slot: core::cell::UnsafeCell::new(false),
+        code: tr.code,
+        flags: tr.flags,
+        sender_pid,
+        sender_euid,
+        data_size,
+        offsets_size,
+        buffer_off: block_off,
+        security_ctx,
+    });
+
+    let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    // BC_REPLY whose originating thread vanished: fail after WORLD is
+    // released (release_block/close_installed_fds must not run under it).
+    let mut reply_target_gone = false;
+    {
+        let w = world_lock();
+        // SAFETY: all inner access in this block is under WORLD.
+        unsafe {
+            let world = w.as_ref().unwrap();
+            if reply {
+                // tcomplete to the replier (non-deferred) ...
+                let th = thread.st();
+                th.todo.push_back(Work::TransactionComplete);
+                th.process_todo = true;
+                // ... and the reply to the exact originating thread.
+                let (tproc, rtid) = target_thread_key.as_ref().unwrap();
+                let rthread = pm(world, tproc)
+                    .im()
+                    .threads
+                    .iter()
+                    .find(|t| t.tid == *rtid)
+                    .cloned();
+                if let Some(rthread) = rthread {
+                    let rth = rthread.st();
+                    match &in_reply_to {
+                        Some(orig) => rth.txn_stack.retain(|t| !Arc::ptr_eq(t, orig)),
+                        None => {}
+                    }
+                    rth.todo.push_back(Work::Transaction(txn.clone()));
+                    rth.process_todo = true;
+                    // exact-thread wake (wake_up_interruptible_sync on
+                    // target_thread->wait in Linux)
+                    wake_thread(&rthread);
+                    // The original transaction is finished: unpin its node.
+                    if let Some(orig) = &in_reply_to {
+                        unpin_txn_node(world, orig);
+                    }
+                    wakes.push(tproc.clone());
+                    wakes.push(proc.clone());
+                } else {
+                    *err_cmd = BR_DEAD_REPLY;
+                    reply_target_gone = true;
+                    // Unpin the original transaction's node while we still
+                    // hold WORLD (unpin_txn_node expects it); the buffer
+                    // and any installed fds are freed after the lock.
+                    if let Some(orig) = &in_reply_to {
+                        unpin_txn_node(world, orig);
+                    }
+                    crate::pr_info!(
+                        "binder: BC_REPLY originator thread {} gone (proc {})",
+                        rtid,
+                        tproc.pid
+                    );
+                }
+            } else if oneway {
+                let th = thread.st();
+                th.todo.push_back(Work::TransactionComplete);
+                th.process_todo = true;
+                // binder_proc_transaction: take the node's async slot or
+                // park on node->async_todo (buffer already allocated and
+                // fixed up; only the delivery is deferred).
+                let mut parked = false;
+                if let Some(node) = &target_node {
+                    let ns = node.st();
+                    if ns.has_async_transaction {
+                        ns.async_todo.push_back(txn.clone());
+                        parked = true;
+                        crate::pr_info!(
+                            "binder: oneway txn {} parked on node {} (queue len {})",
+                            txn.id,
+                            node.id,
+                            ns.async_todo.len()
+                        );
+                    } else {
+                        ns.has_async_transaction = true;
+                    }
+                }
+                if !parked {
+                    // SAFETY: under WORLD.
+                    unsafe { txn.set_holds_async_slot(true) };
+                    pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                    wakes.push(target.clone());
+                }
+                // The async buffer keeps its txn alive for the node-slot
+                // release at BC_FREE_BUFFER (parked ones for close cleanup).
+                if let Some(a) = pm(world, &target).im().alloc.as_mut() {
+                    if let Some(b) = a.blocks.iter_mut().find(|b| b.off == block_off) {
+                        b.txn = Some(txn.clone());
+                    }
+                }
+                wakes.push(proc.clone());
+            } else {
+                // Sync: deferred TRANSACTION_COMPLETE (no process_todo) +
+                // push on the sender's txn stack + queue on the target.
+                let th = thread.st();
+                th.todo.push_back(Work::TransactionComplete);
+                th.txn_stack.push(txn.clone());
+                pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                wakes.push(target.clone());
+            }
+        }
+    }
+    if reply_target_gone {
+        release_block(&target, block_off);
+        close_installed_fds(&installed_fds);
+        return;
+    }
+    for p in wakes {
+        wake_proc_one(&p);
+    }
+}
+
+/// Common failure path after object fixups began: free the block, close
+/// fds already installed in the target (Linux binder_transaction_buffer_
+/// release fd cleanup), unpin the node, BR_FAILED_REPLY.
+fn fail_txn_after_fixups(
+    target: &Arc<BinderProc>,
+    block_off: usize,
+    installed_fds: &[(u32, usize)],
+    node: Option<&Arc<BinderNode>>,
+    reply: bool,
+    oneway: bool,
+    err_cmd: &mut u32,
+) {
+    release_block(target, block_off);
+    close_installed_fds(installed_fds);
+    unpin_after_failure(target, node, reply, oneway);
+    *err_cmd = BR_FAILED_REPLY;
+}
+
+/// Resolve the parent BINDER_TYPE_PTR object referenced by offsets-array
+/// index from an FDA or a PTR fixup (binder_validate_ptr): the parent must
+/// appear EARLIER in the offsets array (already fixed up) and be a PTR
+/// object. Returns the parent's kernel-side buffer address (in our sg
+/// area) and its length.
+/// SAFETY: caller owns the target block exclusively (in-flight txn).
+unsafe fn resolve_parent_ptr(
+    kvirt: *mut u8,
+    block_off: usize,
+    block_user: u64,
+    offsets_at: usize,
+    data_size: usize,
+    offsets_size: usize,
+    sg_size: usize,
+    cur_idx: usize,
+    parent_idx: u64,
+) -> Option<(*mut u8, usize)> {
+    if parent_idx >= cur_idx as u64 {
+        return None;
+    }
+    // SAFETY: offsets array inside the kernel-side block; index < cur_idx
+    // bounds it within offsets_size (validated 8-aligned at resolve time).
+    let parent_off =
+        core::ptr::read_volatile((kvirt.add(block_off + offsets_at) as *const u64).add(parent_idx as usize)) as usize;
+    if parent_off + core::mem::size_of::<BinderBufferObject>() > data_size {
+        return None;
+    }
+    // SAFETY: validated within the data area.
+    let p = core::ptr::read_volatile((kvirt.add(block_off + parent_off) as *const BinderBufferObject).cast_mut());
+    if p.hdr_type != BINDER_TYPE_PTR {
+        return None;
+    }
+    // The parent's .buffer was already rewritten to the target-user
+    // address of its sg copy; map it back to the kernel address and bound
+    // it inside the sg area.
+    let extra_base = offsets_at + align8(offsets_size);
+    let rel = p.buffer.checked_sub(block_user)? as usize;
+    if rel < extra_base || rel + p.length as usize > extra_base + sg_size {
+        return None;
+    }
+    Some((kvirt.add(block_off + rel), p.length as usize))
+}
+
+/// Undo the pins taken at resolve time when the transaction failed after
+/// them.
+fn unpin_after_failure(
+    _target: &Arc<BinderProc>,
+    node: Option<&Arc<BinderNode>>,
+    reply: bool,
+    oneway: bool,
+) {
+    let Some(node) = node else { return };
+    let _w = world_lock();
+    // SAFETY: under WORLD.
+    unsafe {
+        let ns = node.st();
+        if !reply && !oneway && ns.internal_strong_refs > 0 {
+            ns.internal_strong_refs -= 1;
+        }
+    }
+}
+
+fn release_block(proc: &Arc<BinderProc>, off: usize) {
+    let w = world_lock();
+    // SAFETY: under WORLD.
+    unsafe {
+        let world = w.as_ref().unwrap();
+        if let Some(alloc) = pm(world, proc).im().alloc.as_mut() {
+            if let Some(b) = alloc.blocks.iter_mut().find(|b| b.off == off) {
+                b.allow_user_free = true;
+            }
+            let user_ptr = alloc.user_base + off as u64;
+            let _ = alloc.free_buf(user_ptr);
+        }
+    }
+}
+
+/// binder_translate_fd: install a sender fd into the TARGET process's fd
+/// table (fget in the sender, get_unused_fd + fd_install on the target
+/// opener task). Runs in the sender's ioctl context and NEVER under WORLD
+/// — fd-table locks and file close ops may nest back into binder code.
+/// Returns the new target fd, or None (invalid fd / target gone / full).
+fn translate_fd_into(sender_fd: u32, target: &Arc<BinderProc>) -> Option<usize> {
+    let cur = crate::sched::current()?;
+    let sender_fdt = cur.try_fdtable()?;
+    let file = sender_fdt.get_file(sender_fd as usize)?;
+    let ttask = crate::process::pid_hash::pid_hash_lookup_pinned(target.pid);
+    if ttask.is_null() {
+        return None;
+    }
+    // SAFETY: pinned task pointer (task_refcnt held by the lookup).
+    let r = unsafe {
+        match (*ttask).try_fdtable().and_then(|t| t.alloc_fd()) {
+            Some(fd) => {
+                let fdt = (*ttask).try_fdtable().unwrap();
+                if fdt.install_fd(fd, file).is_err() {
+                    // Return the slot (cannot realistically fail on a
+                    // just-allocated fd, but do not leak it).
+                    let _ = fdt.close_fd(fd);
+                    None
+                } else {
+                    Some(fd)
+                }
+            }
+            None => None,
+        }
+    };
+    // SAFETY: drop the pin taken by pid_hash_lookup_pinned.
+    unsafe { crate::process::task::Task::task_put(ttask) };
+    r
+}
+
+/// Close fds installed into target processes when their transaction
+/// failed after the installs (binder_transaction_buffer_release's
+/// fd cleanup loop). NEVER under WORLD: close_fd runs file close ops.
+fn close_installed_fds(installed: &[(u32, usize)]) {
+    for (pid, fd) in installed {
+        let t = crate::process::pid_hash::pid_hash_lookup_pinned(*pid);
+        if t.is_null() {
+            continue;
+        }
+        // SAFETY: pinned task pointer.
+        unsafe {
+            if let Some(fdt) = (*t).try_fdtable() {
+                let _ = fdt.close_fd(*fd);
+            }
+            crate::process::task::Task::task_put(t);
+        }
+    }
+}
+
+/// flat_binder_object translation across processes: local binder -> handle
+/// for the target, handle -> handle rebind (or back to a local binder when
+/// the target IS the sender).
+fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target: &Arc<BinderProc>) -> bool {
+    let mut wake_owner: Option<Arc<BinderProc>> = None;
+    let result = {
+        let mut w = world_lock();
+        // SAFETY: all inner access below is under WORLD.
+        unsafe {
+            let world = w.as_mut().unwrap();
+            match obj.hdr_type {
+                BINDER_TYPE_BINDER | BINDER_TYPE_WEAK_BINDER => {
+                    let strong = obj.hdr_type == BINDER_TYPE_BINDER;
+                    let ptr = (obj.handle as u64) | ((obj._handle_pad as u64) << 32);
+                    let node = {
+                        let sp = pm(world, sender);
+                        match sp.im().nodes.iter().find(|n| n.ptr == ptr).cloned() {
+                            Some(n) => n,
+                            None => {
+                                let n = Arc::new(BinderNode::new(
+                                    world.next_id,
+                                    ptr,
+                                    obj.cookie,
+                                    sender.id,
+                                    obj.flags,
+                                ));
+                                world.next_id += 1;
+                                sp.im().nodes.push(n.clone());
+                                n
+                            }
+                        }
+                    };
+                    let desc = get_or_create_ref(world, target, &node, strong, &mut wake_owner);
+                    obj.hdr_type = if strong { BINDER_TYPE_HANDLE } else { BINDER_TYPE_WEAK_HANDLE };
+                    obj.handle = desc;
+                    obj._handle_pad = 0;
+                    obj.cookie = 0;
+                    true
+                }
+                BINDER_TYPE_HANDLE | BINDER_TYPE_WEAK_HANDLE => {
+                    let strong = obj.hdr_type == BINDER_TYPE_HANDLE;
+                    let node = pm(world, sender)
+                        .im()
+                        .refs
+                        .iter()
+                        .find(|r| r.desc == obj.handle)
+                        .map(|r| r.node.clone());
+                    let Some(node) = node else { return false };
+                    // Sending a handle BACK to the node's owner restores
+                    // the local BINDER_TYPE_*BINDER object.
+                    let target_is_owner =
+                        world.procs.iter().any(|p| Arc::ptr_eq(p, target) && p.id == node.proc_id);
+                    if target_is_owner {
+                        obj.hdr_type = if strong { BINDER_TYPE_BINDER } else { BINDER_TYPE_WEAK_BINDER };
+                        obj.handle = node.ptr as u32;
+                        obj._handle_pad = (node.ptr >> 32) as u32;
+                        obj.cookie = node.cookie;
+                        return true;
+                    }
+                    let desc = get_or_create_ref(world, target, &node, strong, &mut wake_owner);
+                    obj.handle = desc;
+                    obj._handle_pad = 0;
+                    true
+                }
+                BINDER_TYPE_FD | BINDER_TYPE_FDA | BINDER_TYPE_PTR => {
+                    // Handled by the fd/sg machinery in binder_transaction
+                    // BEFORE the world lock (fd-table ops never run under
+                    // WORLD). Reaching here means a re-parse bug.
+                    crate::pr_info!("binder: object type {:#x} reached node translation", obj.hdr_type);
+                    false
+                }
+                _ => {
+                    crate::pr_info!("binder: object type {:#x} unsupported in S1", obj.hdr_type);
+                    false
+                }
+            }
+        }
+    };
+    if let Some(owner) = wake_owner {
+        wake_proc_one(&owner);
+    }
+    result
+}
+
+/// get_or_create_ref + node pinning (binder_get_ref_for_node semantics).
+/// SAFETY: caller holds WORLD.
+unsafe fn get_or_create_ref(
+    world: &mut World,
+    proc: &Arc<BinderProc>,
+    node: &Arc<BinderNode>,
+    strong: bool,
+    wake_owner: &mut Option<Arc<BinderProc>>,
+) -> u32 {
+    let p = pm(world, proc);
+    if let Some(r) = p.im().refs.iter_mut().find(|r| Arc::ptr_eq(&r.node, node)) {
+        if strong {
+            r.strong += 1;
+            let ns = node.st();
+            ns.internal_strong_refs += 1;
+        } else {
+            r.weak += 1;
+        }
+        return r.desc;
+    }
+    let desc = p.im().next_desc;
+    p.im().next_desc += 1;
+    // A new reference holds the node alive (internal strong) and triggers
+    // the owner-side INCREFS/ACQUIRE handshake if not yet reported.
+    let ns = node.st();
+    ns.internal_strong_refs += 1;
+    p.im().refs.push(BinderRef {
+        desc,
+        node: node.clone(),
+        strong: if strong { 1 } else { 0 },
+        weak: if strong { 0 } else { 1 },
+        death: None,
+    });
+    if let Some(owner) = world.procs.iter().find(|p| p.id == node.proc_id) {
+        owner.im().todo.push_back(Work::Node(node.clone()));
+        if wake_owner.is_none() {
+            *wake_owner = Some(owner.clone());
+        }
+    }
+    desc
+}
+
+// ============================================================================
+// binder_thread_read (BR commands)
+// ============================================================================
+
+/// has_work under WORLD (the wait_event condition).
+/// SAFETY: caller holds WORLD.
+unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<BinderThread>) -> bool {
+    let th = thread.st();
+    let avail_for_proc = th.txn_stack.is_empty()
+        && th.todo.is_empty()
+        && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
+    th.process_todo || (avail_for_proc && !pm(world, proc).im().todo.is_empty())
+}
+
+fn binder_thread_read(
+    proc: &Arc<BinderProc>,
+    thread: &Arc<BinderThread>,
+    read_buffer: u64,
+    read_size: usize,
+    consumed: &mut u64,
+    non_block: bool,
+) -> i64 {
+    let mut staged: Vec<u8> = Vec::new();
+
+    macro_rules! stage_cmd {
+        ($cmd:expr) => {
+            staged.extend_from_slice(&$cmd.to_ne_bytes())
+        };
+    }
+    macro_rules! stage_u64 {
+        ($v:expr) => {
+            staged.extend_from_slice(&$v.to_ne_bytes())
+        };
+    }
+
+    if *consumed == 0 && read_size >= 4 {
+        stage_cmd!(BR_NOOP);
+    }
+
+    let mut got_transaction = false;
+    loop {
+        // ---- wait for work (binder_wait_for_work) ------------------------
+        let has_work = {
+            let w = world_lock();
+            // SAFETY: under WORLD.
+            unsafe { thread_has_work(w.as_ref().unwrap(), proc, thread) }
+        };
+        if !has_work {
+            if non_block {
+                if staged.len() > 4 || *consumed != 0 {
+                    break;
+                }
+                return -(EAGAIN as i64);
+            }
+            {
+                let _w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe {
+                    thread.st().waiting_for_proc_work = true;
+                }
+            }
+            let r = crate::wait_event_interruptible!(&thread.wait, {
+                let w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe { thread_has_work(w.as_ref().unwrap(), proc, thread) }
+            });
+            {
+                let _w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe {
+                    thread.st().waiting_for_proc_work = false;
+                }
+            }
+            if r != 0 {
+                return -(EINTR as i64);
+            }
+        }
+
+        // ---- drain work into the staging buffer ---------------------------
+        let stop_full = {
+            let w = world_lock();
+            // SAFETY: all inner access below is under WORLD.
+            unsafe {
+                let world = w.as_ref().unwrap();
+                let mut stop_full = false;
+                loop {
+                    // Budget covers BR_TRANSACTION_SECCTX (transaction
+                    // data + trailing secctx pointer) even when unused.
+                    if staged.len() + 4 + core::mem::size_of::<BinderTransactionData>() + 8 > read_size {
+                        stop_full = true;
+                        break;
+                    }
+                    let from_thread = !thread.st().todo.is_empty();
+                    let avail_for_proc = {
+                        let th = thread.st();
+                        th.txn_stack.is_empty() && th.todo.is_empty() && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
+                    };
+                    let work = if from_thread {
+                        thread.st().todo.pop_front()
+                    } else if avail_for_proc && !pm(world, proc).im().todo.is_empty() {
+                        pm(world, proc).im().todo.pop_front()
+                    } else {
+                        None
+                    };
+                    let Some(work) = work else { break };
+                    if from_thread && thread.st().todo.is_empty() {
+                        thread.st().process_todo = false;
+                    }
+                    match work {
+                        Work::TransactionComplete => {
+                            stage_cmd!(BR_TRANSACTION_COMPLETE);
+                        }
+                        Work::ReturnError(cmd, param) => {
+                            stage_cmd!(cmd);
+                            if cmd == BR_ERROR {
+                                staged.extend_from_slice(&(param as u32).to_ne_bytes());
+                            }
+                        }
+                        Work::Node(node) => {
+                            // BINDER_WORK_NODE: derive the BR_*_REFS
+                            // commands from the counters, exactly like the
+                            // Linux read-side handler.
+                            let external_refs = node_external_refs(world, &node);
+                            let ns = node.st();
+                            let strong = ns.strong();
+                            let weak = ns.weak(external_refs);
+                            let had_weak = ns.has_weak_ref;
+                            let had_strong = ns.has_strong_ref;
+                            if weak && !had_weak {
+                                ns.has_weak_ref = true;
+                                ns.pending_weak_ref = true;
+                                ns.local_weak_refs += 1;
+                            }
+                            if strong && !had_strong {
+                                ns.has_strong_ref = true;
+                                ns.pending_strong_ref = true;
+                                ns.local_strong_refs += 1;
+                            }
+                            if !weak && had_weak {
+                                ns.has_weak_ref = false;
+                            }
+                            if !strong && had_strong {
+                                ns.has_strong_ref = false;
+                            }
+                            let (ptr, cookie) = (node.ptr, node.cookie);
+                            if weak && !had_weak {
+                                stage_cmd!(BR_INCREFS);
+                                stage_u64!(ptr);
+                                stage_u64!(cookie);
+                            }
+                            if strong && !had_strong {
+                                stage_cmd!(BR_ACQUIRE);
+                                stage_u64!(ptr);
+                                stage_u64!(cookie);
+                            }
+                            if !strong && had_strong {
+                                stage_cmd!(BR_RELEASE);
+                                stage_u64!(ptr);
+                                stage_u64!(cookie);
+                            }
+                            if !weak && had_weak {
+                                stage_cmd!(BR_DECREFS);
+                                stage_u64!(ptr);
+                                stage_u64!(cookie);
+                            }
+                        }
+                        Work::DeadBinder { desc, cookie } => {
+                            stage_cmd!(BR_DEAD_BINDER);
+                            stage_u64!(cookie);
+                            // Mark delivered on the ref (move onto the
+                            // delivered_death list).
+                            if let Some(r) = pm(world, proc).im().refs.iter_mut().find(|r| r.desc == desc) {
+                                if let Some(d) = r.death.as_mut() {
+                                    if d.cookie == cookie {
+                                        d.phase = DeathPhase::Delivered;
+                                    }
+                                }
+                            }
+                            // Linux "goto done": a death notification can
+                            // make userspace issue transactions at once —
+                            // stop reading more work in this round.
+                            break;
+                        }
+                        Work::ClearDeathDone { cookie } => {
+                            stage_cmd!(BR_CLEAR_DEATH_NOTIFICATION_DONE);
+                            stage_u64!(cookie);
+                        }
+                        Work::Transaction(t) => {
+                            got_transaction = true;
+                            let is_reply = t.target_node.is_none();
+                            let (tptr, tcookie) = match &t.target_node {
+                                Some(n) => (n.ptr, n.cookie),
+                                None => (0, 0),
+                            };
+                            let (buf_user, data_size, offsets_size) = {
+                                let a = t.to_proc.im().alloc.as_ref().unwrap();
+                                (a.user_base + t.buffer_off as u64, a.data_size_now(t.buffer_off), a.offsets_size_now(t.buffer_off))
+                            };
+                            let off_user = buf_user + align8(data_size) as u64;
+                            let td = BinderTransactionData {
+                                target_handle: tptr as u32,
+                                _target_pad: (tptr >> 32) as u32,
+                                cookie: tcookie,
+                                code: t.code,
+                                flags: t.flags,
+                                sender_pid: t.sender_pid,
+                                sender_euid: t.sender_euid,
+                                data_size: data_size as u64,
+                                offsets_size: offsets_size as u64,
+                                data_buffer: buf_user,
+                                data_offsets: off_user,
+                            };
+                            let sec = !is_reply && t.security_ctx != 0;
+                            stage_cmd!(if is_reply {
+                                BR_REPLY
+                            } else if sec {
+                                BR_TRANSACTION_SECCTX
+                            } else {
+                                BR_TRANSACTION
+                            });
+                            // SAFETY: BinderTransactionData is Copy + repr(C).
+                            staged.extend_from_slice(core::slice::from_raw_parts(
+                                &td as *const BinderTransactionData as *const u8,
+                                core::mem::size_of::<BinderTransactionData>(),
+                            ));
+                            if sec {
+                                stage_u64!(t.security_ctx);
+                            }
+                            // The receiving side now owns the buffer.
+                            if let Some(a) = t.to_proc.im().alloc.as_mut() {
+                                if let Some(b) = a.blocks.iter_mut().find(|b| b.off == t.buffer_off) {
+                                    b.allow_user_free = true;
+                                }
+                            }
+                            if !is_reply && t.flags & TF_ONE_WAY == 0 {
+                                // The receiver stacks it for its BC_REPLY.
+                                t.set_to_tid(thread.tid);
+                                thread.st().txn_stack.push(t);
+                            }
+                        }
+                    }
+                }
+                // Linux done: BR_SPAWN_LOOPER when no transaction was read
+                // and more threads are allowed and none are ready.
+                if !got_transaction {
+                    let pim = pm(world, proc).im();
+                    let ready = pim
+                        .threads
+                        .iter()
+                        .any(|t| t.st().waiting_for_proc_work && t.st().todo.is_empty() && t.st().txn_stack.is_empty());
+                    if pim.requested_threads == 0
+                        && !ready
+                        && pim.max_threads > 0
+                        && pim.threads.len() < pim.max_threads as usize
+                        && staged.len() + 4 <= read_size
+                    {
+                        pim.requested_threads += 1;
+                        stage_cmd!(BR_SPAWN_LOOPER);
+                    }
+                }
+                stop_full
+            }
+        };
+        if stop_full {
+            break;
+        }
+        if staged.len() > 4 || *consumed != 0 {
+            break;
+        }
+        // Only the leading BR_NOOP staged and no work found: retry the wait
+        // (Linux "goto retry").
+    }
+
+    // Copy the staged commands out to user memory.
+    let Some(dst) = read_buffer.checked_add(*consumed) else {
+        return -(EFAULT as i64);
+    };
+    // SAFETY: staged is a kernel Vec; copy_to_user is fault-safe.
+    unsafe {
+        if crate::arch::uaccess::copy_to_user(dst as *mut u8, staged.as_ptr(), staged.len()) != 0 {
+            return -(EFAULT as i64);
+        }
+    }
+    *consumed += staged.len() as u64;
+    0
+}
+
+impl BinderAlloc {
+    fn data_size_now(&self, off: usize) -> usize {
+        self.blocks.iter().find(|b| b.off == off).map(|b| b.data_size).unwrap_or(0)
+    }
+    fn offsets_size_now(&self, off: usize) -> usize {
+        self.blocks.iter().find(|b| b.off == off).map(|b| b.offsets_size).unwrap_or(0)
+    }
+}
+
+/// DFX: one-line-per-proc binder world snapshot for the UART magic dump.
+/// IRQ context: try-lock only — if WORLD is contended the binder state is
+/// mid-transition and the dump skips it (the task dump still runs).
+pub fn binder_dfx_dump() {
+    let Some(mut g) = WORLD.try_lock_irqsave() else {
+        crate::pr_info!("binder-dfx: world busy, skipped");
+        return;
+    };
+    let Some(world) = g.as_ref() else {
+        return;
+    };
+    // SAFETY: read-only under WORLD (the access contract).
+    unsafe {
+        for p in &world.procs {
+            let pim = p.im();
+            crate::pr_info!(
+                "binder-dfx: proc {} pid {} dead={} todo={} refs={} mgr={}",
+                p.id,
+                p.pid,
+                pim.is_dead,
+                pim.todo.len(),
+                pim.refs.len(),
+                (0..3).any(|c| world.mgr_node[c].as_ref().map(|m| m.proc_id).unwrap_or(0) == p.id)
+            );
+            for t in &pim.threads {
+                let th = t.st();
+                crate::pr_info!(
+                    "binder-dfx:   tid {} looper={:#x} todo={} process_todo={} wfpw={} stack={} deathq={}",
+                    t.tid,
+                    th.looper,
+                    th.todo.len(),
+                    th.process_todo,
+                    th.waiting_for_proc_work,
+                    th.txn_stack.len(),
+                    pim.todo.iter().filter(|wk| matches!(wk, Work::DeadBinder { .. })).count()
+                );
+                for (i, wk) in th.todo.iter().enumerate() {
+                    let desc = match wk {
+                        Work::TransactionComplete => "tcomplete".into(),
+                        Work::Transaction(_) => "txn".into(),
+                        Work::ReturnError(c, _) => alloc::format!("err#{:#x}", c),
+                        Work::Node(_) => "node".into(),
+                        Work::DeadBinder { desc, cookie } => alloc::format!("dead d{} c{:#x}", desc, cookie),
+                        Work::ClearDeathDone { cookie } => alloc::format!("cleardone c{:#x}", cookie),
+                    };
+                    crate::pr_info!("binder-dfx:     thtodo[{}] {}", i, desc);
+                }
+            }
+            for (i, wk) in pim.todo.iter().enumerate() {
+                let desc = match wk {
+                    Work::TransactionComplete => "tcomplete".into(),
+                    Work::Transaction(_) => "txn".into(),
+                    Work::ReturnError(c, _) => alloc::format!("err#{:#x}", c),
+                    Work::Node(_) => "node".into(),
+                    Work::DeadBinder { desc, cookie } => alloc::format!("dead d{} c{:#x}", desc, cookie),
+                    Work::ClearDeathDone { cookie } => alloc::format!("cleardone c{:#x}", cookie),
+                };
+                crate::pr_info!("binder-dfx:     ptodo[{}] {}", i, desc);
+            }
+        }
+    }
+}

@@ -312,7 +312,7 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
 
         // Syscall context runs with SIE=0 — re-arm so the timer tick can
         // reach this CPU and wake us.
-        crate::arch::riscv64::cpu::restore_irq(true);
+        crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
         // Woke up (timer expiry or signal): loop tail re-checks and exits.
     }
@@ -517,7 +517,7 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
     /// Copy `data` out honoring the length encoded in the ioctl command.
     /// Returns the ioctl return value.
     fn copy_out(arg: usize, cmd: u32, data: &[u8]) -> i64 {
-        use crate::arch::riscv64::uaccess::{access_ok, copy_to_user};
+        use crate::arch::uaccess::{access_ok, copy_to_user};
         let len = ioc_size(cmd).min(data.len());
         if len == 0 {
             return 0;

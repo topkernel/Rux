@@ -302,6 +302,14 @@ pub mod boundary;
 #[cfg(feature = "unit-test")]
 pub mod sgid_mode;
 
+// ===== initrd (gzip inflate + cpio newc unpack) =====
+#[cfg(feature = "unit-test")]
+pub mod initrd;
+
+// ===== tmpfs mknod (OH Phase 1b: device nodes on a tmpfs /dev) =====
+#[cfg(feature = "unit-test")]
+pub mod tmpfs_mknod;
+
 // ===== System call interface =====
 #[cfg(feature = "unit-test")]
 pub mod syscall_file;
@@ -379,6 +387,12 @@ pub fn run_all_tests() {
 
     test_group_start("config");
     config_test::test_config();
+
+    test_group_start("initrd");
+    initrd::test_initrd();
+
+    test_group_start("tmpfs-mknod");
+    tmpfs_mknod::test_tmpfs_mknod();
 
     test_group_start("vma_flags");
     vma_flags::test_vma_flags();

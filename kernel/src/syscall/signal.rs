@@ -47,11 +47,11 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
     // Read new signal mask
     let new_mask = if !set_ptr.is_null() {
         // Validate user pointer
-        if !crate::arch::riscv64::uaccess::access_ok(set_ptr as usize, 8) {
+        if !crate::arch::uaccess::access_ok(set_ptr as usize, 8) {
             return -(errno::EFAULT as i64);
         }
         // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
-        match unsafe { crate::arch::riscv64::uaccess::get_user(set_ptr) } {
+        match unsafe { crate::arch::uaccess::get_user(set_ptr) } {
             Some(v) => v,
             None => return -(errno::EFAULT as i64),
         }
@@ -115,11 +115,11 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
     // Return old signal mask
     if !oldset_ptr.is_null() {
         // Validate user pointer
-        if !crate::arch::riscv64::uaccess::access_ok(oldset_ptr as usize, 8) {
+        if !crate::arch::uaccess::access_ok(oldset_ptr as usize, 8) {
             return -(errno::EFAULT as i64);
         }
         // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
-        if !unsafe { crate::arch::riscv64::uaccess::put_user(oldset_ptr, old_mask) } {
+        if !unsafe { crate::arch::uaccess::put_user(oldset_ptr, old_mask) } {
             return -(errno::EFAULT as i64);
         }
     }
@@ -146,10 +146,22 @@ pub fn sys_rt_sigprocmask(args: SyscallArgs) -> i64 {
 /// restorer. A 32-byte parse with restorer at +16 misread libc's sa_mask
 /// (e.g. dash's sigfillset mask 0xfffffffe_7fffffff) as a return address
 /// and jumped execution into it on handler return.
+#[cfg(feature = "riscv64")]
 #[repr(C)]
 struct SigActionUser {
     sa_handler: usize,
     sa_flags: u64,
+    sa_mask: u64,
+}
+
+/// x86_64 user ABI: {sa_handler +0, sa_flags +8, sa_restorer +16,
+/// sa_mask +24} — 32 bytes. glibc ALWAYS sets SA_RESTORER here.
+#[cfg(feature = "x86_64")]
+#[repr(C)]
+struct SigActionUser {
+    sa_handler: usize,
+    sa_flags: u64,
+    sa_restorer: usize,
     sa_mask: u64,
 }
 
@@ -194,7 +206,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
         // Save old signal handling action (converted to the user ABI layout)
         if !oldact_ptr.is_null() {
             // Validate user pointer
-            if !crate::arch::riscv64::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigActionUser>()) {
+            if !crate::arch::uaccess::access_ok(oldact_ptr as usize, core::mem::size_of::<SigActionUser>()) {
                 return -(errno::EFAULT as i64);
             }
             // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
@@ -202,11 +214,13 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             let user_action = SigActionUser {
                 sa_handler: old_action.sa_handler,
                 sa_flags: old_action.sa_flags.bits(),
+                #[cfg(feature = "x86_64")]
+                sa_restorer: old_action.sa_restorer,
                 sa_mask: old_action.sa_mask,
             };
             let src = &user_action as *const SigActionUser as *const u8;
             let uncopied = unsafe {
-                crate::arch::riscv64::uaccess::copy_to_user(
+                crate::arch::uaccess::copy_to_user(
                     oldact_ptr as *mut u8,
                     src,
                     core::mem::size_of::<SigActionUser>(),
@@ -220,18 +234,20 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
         // Set new signal handling action (parsed from the user ABI layout)
         if !act_ptr.is_null() {
             // Validate user pointer
-            if !crate::arch::riscv64::uaccess::access_ok(act_ptr as usize, core::mem::size_of::<SigActionUser>()) {
+            if !crate::arch::uaccess::access_ok(act_ptr as usize, core::mem::size_of::<SigActionUser>()) {
                 return -(errno::EFAULT as i64);
             }
             // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
             let mut user_action = SigActionUser {
                 sa_handler: 0,
                 sa_flags: 0,
+                #[cfg(feature = "x86_64")]
+                sa_restorer: 0,
                 sa_mask: 0,
             };
             let dst = &mut user_action as *mut SigActionUser as *mut u8;
             let uncopied = unsafe {
-                crate::arch::riscv64::uaccess::copy_from_user(
+                crate::arch::uaccess::copy_from_user(
                     dst,
                     act_ptr as *const u8,
                     core::mem::size_of::<SigActionUser>(),
@@ -249,6 +265,12 @@ let new_action = SigAction {
                 sa_handler: user_action.sa_handler,
                 sa_flags: crate::signal::SigFlags::new(user_action.sa_flags),
                 sa_mask: user_action.sa_mask,
+                sa_restorer: {
+                    #[cfg(feature = "x86_64")]
+                    { user_action.sa_restorer }
+                    #[cfg(feature = "riscv64")]
+                    { 0 }
+                },
             };
             match sig_struct.set_action(signum, new_action) {
                 Ok(_) => 0,  // Success
@@ -269,7 +291,7 @@ let new_action = SigAction {
 ///
 /// # Returns
 /// Returns system call return value before signal interruption
-pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> i64 {
+pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
     // Get current process
     let current = match crate::sched::current() {
         Some(c) => c as *const _ as *mut crate::process::task::Task,
@@ -291,17 +313,36 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> i64
         // forged ecall (SIGSEGV). The record stays as a fallback for a
         // frame whose page turned unreadable (restore_sigcontext then
         // uses the kernel backup copy).
-        let sp = regs.sp as usize;
-        let sp_ok = sp != 0
-            && sp % 16 == 0 // setup_frame aligns frames to 16
-            && crate::arch::riscv64::uaccess::access_ok(
-                sp,
-                core::mem::size_of::<crate::signal::SignalFrame>(),
-            );
-        let frame_addr = if sp_ok {
-            sp as u64
-        } else {
-            (*current).sigframe_addr
+        // Frame location: on riscv64 the handler is entered with
+        // sp == frame_addr and the 2-instruction trampoline never moves
+        // sp, so the frame is AT the user sp. On x86_64 the handler `ret`
+        // first pops the pretcode slot (rsp = frame + 8) before the
+        // restorer calls rt_sigreturn, so the frame is at sp - 8.
+        #[cfg(feature = "riscv64")]
+        let frame_addr = {
+            let sp = regs.user_stack_pointer() as usize;
+            let sp_ok = sp != 0
+                && sp % 16 == 0 // setup_frame aligns frames to 16
+                && crate::arch::uaccess::access_ok(
+                    sp,
+                    core::mem::size_of::<crate::signal::SignalFrame>(),
+                );
+            if sp_ok { sp as u64 } else { (*current).sigframe_addr }
+        };
+        #[cfg(feature = "x86_64")]
+        let frame_addr = {
+            let sp = regs.user_stack_pointer() as usize;
+            let base = sp.saturating_sub(8);
+            // setup_frame_x86_64 places frames at ≡ 8 (mod 16) (the SysV
+            // as-if-called rule, Linux align_sigframe parity), so the
+            // forged-frame residue check must expect 8, not 0.
+            let sp_ok = base != 0
+                && base % 16 == 8
+                && crate::arch::uaccess::access_ok(
+                    base,
+                    core::mem::size_of::<crate::signal::SignalFrame>(),
+                );
+            if sp_ok { base as u64 } else { (*current).sigframe_addr }
         };
 
         // A zero frame address means rt_sigreturn was invoked without an
@@ -314,14 +355,26 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::riscv64::pt_regs::PtRegs) -> i64
             false
         };
         if !ok {
+            // X3 hunt: name the rejected frame so sigreturn-path kills are
+            // attributable (sp alignment, record fallback, restore failure).
+            crate::pr_err!(
+                "rt_sigreturn: frame rejected sp={:#x} rec={:#x} pid={}",
+                regs.user_stack_pointer(),
+                (*current).sigframe_addr,
+                (*current).pid()
+            );
             let pid = crate::process::current_pid();
             let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
         }
 
         // Return original return value saved in signal frame
-        // Usually the value returned from interrupted system call (a0 = x10)
-        // Note: restore_sigcontext has already restored regs, so just return regs.a0
-        regs.a0 as i64
+        // Usually the value returned from interrupted system call.
+        // Note: restore_sigcontext has already restored regs, so just
+        // return the ABI return register (a0 on riscv64, rax on x86_64).
+        #[cfg(feature = "riscv64")]
+        { regs.a0 as i64 }
+        #[cfg(feature = "x86_64")]
+        { regs.rax as i64 }
     }
 }
 
@@ -347,7 +400,7 @@ pub fn sys_sigpending(args: SyscallArgs) -> i64 {
     }
 
     // Validate user pointer
-    if !crate::arch::riscv64::uaccess::access_ok(set_ptr as usize, 8) {
+    if !crate::arch::uaccess::access_ok(set_ptr as usize, 8) {
         return -(errno::EFAULT as i64);
     }
 
@@ -368,7 +421,7 @@ pub fn sys_sigpending(args: SyscallArgs) -> i64 {
 
         // Exception-table write (the old naked store could not produce
         // EFAULT on a bad page — it took a kernel fault instead).
-        if !crate::arch::riscv64::uaccess::put_user(set_ptr, pending_and_blocked) {
+        if !crate::arch::uaccess::put_user(set_ptr, pending_and_blocked) {
             return -(errno::EFAULT as i64);
         }
     }
@@ -403,11 +456,11 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
         // Save old signal stack configuration
         if !old_ss_ptr.is_null() {
             // Validate user pointer
-            if !crate::arch::riscv64::uaccess::access_ok(old_ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
+            if !crate::arch::uaccess::access_ok(old_ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
                 return -(errno::EFAULT as i64);
             }
             let old_ss = (*current).sigstack;
-            if crate::arch::riscv64::uaccess::copy_to_user(
+            if crate::arch::uaccess::copy_to_user(
                 old_ss_ptr as *mut u8,
                 &old_ss as *const SignalStack as *const u8,
                 core::mem::size_of::<SignalStack>(),
@@ -419,11 +472,11 @@ pub fn sys_sigaltstack(args: SyscallArgs) -> i64 {
         // Set new signal stack configuration
         if !ss_ptr.is_null() {
             // Validate user pointer
-            if !crate::arch::riscv64::uaccess::access_ok(ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
+            if !crate::arch::uaccess::access_ok(ss_ptr as usize, core::mem::size_of::<SignalStack>()) {
                 return -(errno::EFAULT as i64);
             }
             let mut new_ss = core::mem::MaybeUninit::<SignalStack>::zeroed();
-            if crate::arch::riscv64::uaccess::copy_from_user(
+            if crate::arch::uaccess::copy_from_user(
                 new_ss.as_mut_ptr() as *mut u8,
                 ss_ptr as *const u8,
                 core::mem::size_of::<SignalStack>(),
@@ -488,12 +541,12 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
     if mask_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if !crate::arch::riscv64::uaccess::access_ok(mask_ptr as usize, 8) {
+    if !crate::arch::uaccess::access_ok(mask_ptr as usize, 8) {
         return -(errno::EFAULT as i64);
     }
 
     // Exception-table copy: unmapped page → EFAULT, not a kernel fault.
-    let new_mask = match unsafe { crate::arch::riscv64::uaccess::get_user(mask_ptr) } {
+    let new_mask = match unsafe { crate::arch::uaccess::get_user(mask_ptr) } {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
     };

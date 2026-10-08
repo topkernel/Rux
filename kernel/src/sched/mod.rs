@@ -58,6 +58,7 @@ pub use sched::{
     // SMP multi-core support
     cpu_idle_loop,
     init_secondary,
+    idle_task_ptr,
 };
 
 // Re-export process lifecycle functions from process::exit for backward compatibility
