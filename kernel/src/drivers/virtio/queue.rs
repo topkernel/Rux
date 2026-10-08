@@ -381,6 +381,12 @@ impl VirtQueue {
         self.used
     }
 
+    /// Kernel-side submission ordinal snapshot (VW forensic
+    /// instrumentation): equals avail.idx under a healthy submit path.
+    pub fn avail_shadow_snapshot(&self) -> u16 {
+        self.avail_shadow.load(core::sync::atomic::Ordering::Acquire)
+    }
+
     /// Wait for device to complete request using interrupt-driven sleep.
     ///
     /// Instead of busy-wait polling, the current task sleeps on a wait queue
@@ -570,6 +576,7 @@ impl VirtQueue {
                     // Final chance: a lost KICK (quiet batch submit nobody
                     // drained) recovers here — kick and walk once, then
                     // re-check before reporting the timeout sentinel.
+                    crate::drivers::virtio::vw_report("sync-deadline");
                     crate::drivers::virtio::pci_blk_kick(blk_slot);
                     crate::drivers::virtio::pci_process_async_completions_slot(blk_slot);
                     if unsafe { resp_done(resp_status) } {
@@ -621,6 +628,17 @@ impl VirtQueue {
                 // Remove from wait queue and restore RUNNING state, then loop
                 // back to re-check the response.
                 wait_queue.finish_wait(current);
+
+                // Waiter-side rescue (the ftest01 lost-wakeup fix): a wake
+                // whose response is still pending can mean the used ring is
+                // ahead of the completion walker AND no interrupt is coming
+                // (the device is idle; the walker exited with lag and the
+                // softirq pending bits are clear — freeze-dumped live with
+                // PENDING_LAST one behind used.idx and six waiters asleep).
+                // Drain the lag ourselves before re-sleeping: this is cheap
+                // when caught up (two loads) and converts a lost wake into
+                // at most one extra loop. No-op on MMIO-only boots.
+                crate::drivers::virtio::pci_rescue_lagged_completions(blk_slot);
             }
 
             // Budget exhausted without seeing OUR response (only reachable

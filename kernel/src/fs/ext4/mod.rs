@@ -2331,6 +2331,30 @@ impl Ext4BigLock {
         // no-op, so this is safe even without waiter accounting.
         self.wait.wake_up_one();
     }
+
+    /// Diagnostic snapshot (VW forensic instrumentation): (locked, owner,
+    /// depth, queued, woken-flagged). Called from the UART dump path (RX
+    /// IRQ context) — uses TRY-locks only: a blocking lock here would
+    /// self-deadlock against an interrupted holder on this CPU and wedge
+    /// the dump itself. queued=usize::MAX means "list lock busy".
+    pub fn vw_state(&'static self) -> (bool, u32, u32, usize, usize) {
+        let mut locked = false;
+        let mut owner = 0u32;
+        let mut depth = 0u32;
+        if let Some(st) = self.state.try_lock() {
+            locked = st.locked;
+            owner = st.owner;
+            depth = st.depth;
+        } else {
+            owner = u32::MAX; // state lock busy marker
+        }
+        let (queued, woken) = if let Some((t, w)) = self.wait.vw_queue_census_try() {
+            (t, w)
+        } else {
+            (usize::MAX, 0)
+        };
+        (locked, owner, depth, queued, woken)
+    }
 }
 
 /// Guard: releases on drop (outermost only).

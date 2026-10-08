@@ -1554,6 +1554,18 @@ pub fn abandon_pending_completion(
             abandoned
         );
     }
+    // Wait out any walker delivery of THIS completion that is still in
+    // flight (the entry was taken from a table before our scan, so the
+    // tombstone pass above could not retire it — see IoCompletion's
+    // `delivering` protocol). The waiter returns as soon as we do, and its
+    // IoCompletion usually lives on its kernel stack: without this
+    // handoff, a late complete() fired into the recycled stack page was
+    // the wandering corruption behind ftest01's cross-file bad-verify.
+    if !unsafe { (*comp).wait_deliveries() } {
+        crate::pr_err!(
+            "virtio: delivery handoff overran spin budget during abandon"
+        );
+    }
     abandoned
 }
 
@@ -1770,6 +1782,192 @@ unsafe fn pci_async_read_fn(
 static VIRTIO_PCI_REORDER_EVENTS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
+/// Used-ring entries the walker consumed that matched NO live pending
+/// (neither positionally nor by head_desc). Under the ordinal+window
+/// publish discipline every entry must match — a nonzero count means a
+/// submit path published a chain without a pending (or a pending was
+/// consumed twice), and the entry's chain has no completion to fire.
+/// Counted loudly (rate-limited) so a dispatch bug cannot hide.
+static VIRTIO_PCI_UNMATCHED_EVENTS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+// ---- VW forensic instrumentation (temporary; wedge hunt r3) ----------
+// Counters that make the ftest01 wedge self-describing: which exit the
+// completion walker last took, how many PCI IRQs actually fired per disk,
+// and a timer-cadence watchdog that prints the full ring/walker state the
+// moment PENDING_LAST lags the used ring with no scheduled consumer.
+pub static VW_IRQS: [core::sync::atomic::AtomicU64; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PCI_BLK_DISKS];
+pub static VW_WALKS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// Exit-kind tally: 0=fast-path caught up, 1=loop caught up,
+/// 2=watermark moved by other, 3=budget exhaustion (re-armed),
+/// 4=collected==0 (loop re-check).
+pub static VW_EXITS: [core::sync::atomic::AtomicU64; 5] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 5];
+/// Jiffy when the walker last exited WITH residual lag (0 = never).
+pub static VW_LAST_LAG_EXIT_AT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+fn vw_exit(kind: usize, lag: bool) {
+    VW_EXITS[kind].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    if lag {
+        VW_LAST_LAG_EXIT_AT.store(
+            crate::drivers::timer::get_jiffies(),
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+}
+
+/// On-demand VW forensic report (called from waiter deadline paths and
+/// the DUMP! handler — contexts that run even when timers die).
+pub fn vw_report(tag: &str) {
+    // EXT4 big lock census first (VW forensic): the f05rep2 wedge leaves
+    // children D-sleeping while the virtio rings are fully drained.
+    {
+        let (locked, owner, depth, queued, woken) =
+            crate::fs::ext4::EXT4_BIG_LOCK.vw_state();
+        crate::pr_err!(
+            "VW-EXT4LOCK {} locked={} owner={} depth={} queued={} wokenflag={}",
+            tag,
+            locked,
+            owner,
+            depth,
+            queued,
+            woken
+        );
+    }
+    for disk in 0..MAX_PCI_BLK_DISKS {
+        if !PCI_BLK_READY[disk].load(core::sync::atomic::Ordering::Acquire) {
+            continue;
+        }
+        let (used_ring, queue_sz, avail_shadow) = match get_pci_device_queue_at(disk) {
+            Some(q) => (q.used_ring_ptr(), q.queue_size, q.avail_shadow_snapshot()),
+            None => continue,
+        };
+        if queue_sz == 0 {
+            continue;
+        }
+        // SAFETY: same idx read as the walker's fast path.
+        let used_idx = unsafe {
+            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+        };
+        let last = PCI_BLK_PENDING_LAST[disk].load(core::sync::atomic::Ordering::Acquire);
+        crate::pr_err!(
+            "VW-REPORT {} disk={} used={} last={} lag={} expected={} \
+             unkicked={} at_device={} walks={} exits fp={} cu={} wm={} \
+             budget={} zero={} last_lag_exit={} softirq=0x{:x}/0x{:x}",
+            tag,
+            disk,
+            used_idx,
+            last,
+            (used_idx.wrapping_sub(last)) & 0xFFFF,
+            PCI_BLK_EXPECTED_USED_IDX[disk]
+                .load(core::sync::atomic::Ordering::Acquire),
+            PCI_BLK_UNKICKED[disk]
+                .load(core::sync::atomic::Ordering::Acquire),
+            (avail_shadow.wrapping_sub(used_idx)) & 0xFFFF,
+            VW_WALKS.load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[0].load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[1].load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[2].load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[3].load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[4].load(core::sync::atomic::Ordering::Acquire),
+            VW_LAST_LAG_EXIT_AT.load(core::sync::atomic::Ordering::Acquire),
+            crate::interrupt::softirq::softirq_pending_raw(0),
+            crate::interrupt::softirq::softirq_pending_raw(1),
+        );
+    }
+}
+
+/// Timer-cadence lag watchdog: called once per jiffy from the Timer
+/// softirq (the context that keeps running when everything else wedges).
+/// When a ready disk's used ring runs ahead of the walker for >= 3s,
+/// print the full forensic snapshot (rate-limited to one per 10s).
+pub fn vw_lag_watchdog(now: u64) {
+    static FIRST_LAG: [core::sync::atomic::AtomicU64; MAX_PCI_BLK_DISKS] =
+        [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PCI_BLK_DISKS];
+    static LAST_PRINT: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    for disk in 0..MAX_PCI_BLK_DISKS {
+        if !PCI_BLK_READY[disk].load(core::sync::atomic::Ordering::Acquire) {
+            continue;
+        }
+        let (used_ring, queue_sz) = match get_pci_device_queue_at(disk) {
+            Some(q) => (q.used_ring_ptr(), q.queue_size),
+            None => continue,
+        };
+        if queue_sz == 0 {
+            continue;
+        }
+        // SAFETY: same idx read as the walker's fast path.
+        let used_idx = unsafe {
+            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+        };
+        let last = PCI_BLK_PENDING_LAST[disk].load(core::sync::atomic::Ordering::Acquire);
+        // Device-side stall component: chains published to the avail ring
+        // that the device has NOT completed (avail_shadow - used). Combined
+        // with unkicked, separates "device working" from "LOST KICK"
+        // (quiet-submitted chains nobody ever notified).
+        let _ = &used_ring; // keep the ptr alive for both branches
+        let lag_used = used_idx != last;
+        // avail_shadow lives in the VirtQueue; get it via the queue helper.
+        let avail_shadow = get_pci_device_queue_at(disk)
+            .map(|q| q.avail_shadow_snapshot())
+            .unwrap_or(0);
+        let at_device = (avail_shadow.wrapping_sub(used_idx)) & 0xFFFF;
+        let unkicked_now = PCI_BLK_UNKICKED[disk]
+            .load(core::sync::atomic::Ordering::Acquire);
+        let stalled = lag_used || (at_device != 0 && unkicked_now != 0);
+        if !stalled {
+            FIRST_LAG[disk].store(0, core::sync::atomic::Ordering::Release);
+            continue;
+        }
+        let first = FIRST_LAG[disk].load(core::sync::atomic::Ordering::Acquire);
+        if first == 0 {
+            FIRST_LAG[disk].store(now, core::sync::atomic::Ordering::Release);
+            continue;
+        }
+        if now.saturating_sub(first) < 300 {
+            continue; // < 3s of lag: not yet a wedge
+        }
+        let last_print = LAST_PRINT.load(core::sync::atomic::Ordering::Acquire);
+        if now.saturating_sub(last_print) < 1000 {
+            continue; // rate limit 10s
+        }
+        LAST_PRINT.store(now, core::sync::atomic::Ordering::Release);
+        let expected = PCI_BLK_EXPECTED_USED_IDX[disk]
+            .load(core::sync::atomic::Ordering::Acquire);
+        let unkicked = PCI_BLK_UNKICKED[disk]
+            .load(core::sync::atomic::Ordering::Acquire);
+        crate::pr_err!(
+            "VW-WEDGE disk={} used={} last={} lag={} expected={} unkicked={} \
+             at_device={} avail_shadow={} \
+             irqs={} walks={} exits fp={} cu={} wm={} budget={} zero={} \
+             last_lag_exit={} softirq_pending=0x{:x}/0x{:x}",
+            disk,
+            used_idx,
+            last,
+            (used_idx.wrapping_sub(last)) & 0xFFFF,
+            expected,
+            unkicked,
+            at_device,
+            avail_shadow,
+            VW_IRQS[disk].load(core::sync::atomic::Ordering::Acquire),
+            VW_WALKS.load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[0].load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[1].load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[2].load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[3].load(core::sync::atomic::Ordering::Acquire),
+            VW_EXITS[4].load(core::sync::atomic::Ordering::Acquire),
+            VW_LAST_LAG_EXIT_AT.load(core::sync::atomic::Ordering::Acquire),
+            crate::interrupt::softirq::softirq_pending_raw(0),
+            crate::interrupt::softirq::softirq_pending_raw(1),
+        );
+    }
+}
+
 /// Process completed PCI async reads: walk the used ring from the last
 /// processed index and fire the pending I/O matching each entry's chain.
 ///
@@ -1787,16 +1985,32 @@ static VIRTIO_PCI_REORDER_EVENTS: core::sync::atomic::AtomicU64 =
 /// check (pci_pending_slot_reservable).
 ///
 /// Runs in the Block softirq (raised by the PCI IRQ handler) — never in
-/// hard-IRQ context. VIRTIO-WQ-1 discipline (the virtio-blk ABBA fix): the
-/// walk COLLECTS finished PendingIo entries under the BLK lock, then drops
-/// every lock before delivering (dealloc + IoCompletion::complete, which
-/// takes a wait-queue lock and calls wake_up_process per waiter). The old
-/// code completed in-lock: a BLK holder blocked on a wait-queue lock while
-/// waiters and submitters piled onto the BLK lock with IRQs off — the
-/// final6 GNOME deadlock (timer IRQ stop, all-vruntime freeze).
+/// hard-IRQ context — and from process-context drain/rescue paths.
+/// VIRTIO-WQ-1 discipline (the virtio-blk ABBA fix): the walk COLLECTS
+/// finished PendingIo entries under the BLK lock, then drops every lock
+/// before delivering (dealloc + IoCompletion::complete, which takes a
+/// wait-queue lock and calls wake_up_process per waiter).
 ///
-/// Collection is chunked (16 entries per lock pass) so each irqsave section
-/// stays short even when a large batch lands at once.
+/// LOSSLESS DISPATCH (the ftest01 lost-wakeup fix): the walk loops until
+/// it is caught up with the used ring (or its one-window budget is
+/// spent), and on EVERY exit with residual lag — budget exhaustion, or a
+/// completion that landed mid-pass — it re-raises the Block softirq. The
+/// old walker could return with used.idx ahead of PENDING_LAST and NO
+/// interrupt scheduled: the device was idle (nothing will interrupt
+/// again), the softirq pending bits were clear, and the waiters of the
+/// unconsumed entries slept until their 10s deadlines — the ftest01
+/// wedge (freeze-dumped live: PENDING_LAST one behind, everything else
+/// quiescent, six children asleep).
+///
+/// The sync-queue wake is GATED on real progress: wake_up_all on the
+/// disk's sync queue costs a wake_up_process (GRQ lock) per waiter, and
+/// firing it from every Block softirq — including timer-driven passes
+/// that consumed nothing — put the six ftest01 children into a permanent
+/// wake/re-queue herd that starved the very completions they waited for
+/// (freeze-dumps show both CPUs grinding in the GRQ/CFS btree while the
+/// used ring runs 1-8 entries ahead of the walker).
+///
+/// Returns the number of used-ring entries consumed (matched or skipped).
 pub fn pci_process_async_completions() {
     for disk in 0..MAX_PCI_BLK_DISKS {
         if PCI_BLK_READY[disk].load(core::sync::atomic::Ordering::Acquire) {
@@ -1807,7 +2021,7 @@ pub fn pci_process_async_completions() {
 
 /// Per-disk completion walker (see pci_process_async_completions for the
 /// design notes; every table/lock reference below is disk-local).
-pub fn pci_process_async_completions_slot(slot: usize) {
+pub fn pci_process_async_completions_slot(slot: usize) -> usize {
     /// Collected-per-lock-pass bound. 16 × sizeof(PendingIo) ≈ 1.3 KiB of
     /// stack per pass; the outer loop repeats until caught up or the total
     /// budget (one queue window) is spent.
@@ -1817,27 +2031,33 @@ pub fn pci_process_async_completions_slot(slot: usize) {
     // already caught up, skip the lock entirely.
     let (used_ring, queue_sz) = match get_pci_device_queue_at(slot) {
         Some(q) => (q.used_ring_ptr(), q.queue_size),
-        None => return,
+        None => return 0,
     };
     if queue_sz == 0 {
-        return;
+        return 0;
     }
     // SAFETY: used ring offset 2 is the idx field (u16); the queue is alive
-    // (VIRTIO_PCI_READY was checked by get_pci_device_queue).
+    // (PCI_BLK_READY was checked by get_pci_device_queue_at).
     let used_idx = unsafe {
         core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
     };
     let last = PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire);
     if used_idx == last {
-        return;
+        vw_exit(0, false);
+        return 0;
     }
+    VW_WALKS.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
 
     // Bounded by one queue window per call; u16 wrap-safe walk.
     let mut budget = MAX_PENDING_IO_PCI as u16;
+    let mut consumed_total = 0usize;
     loop {
         // ---- Phase 1: collect under the BLK lock (short irqsave section) --
         let mut done: [Option<PendingIo>; CHUNK] = [const { None }; CHUNK];
         let mut collected = 0usize;
+        let mut walked = 0usize; // entries consumed this pass (matched+skipped)
+        let mut unmatched = 0usize;
+        let i_end;
         {
             let _guard = PCI_BLK_LOCKS[slot].lock_irqsave();
             let _nest = VirtioLockNest::new();
@@ -1891,37 +2111,73 @@ pub fn pci_process_async_completions_slot(slot: usize) {
                             }
                         }
                     }
+                    // ABANDON-vs-DELIVERY protocol (the bad-verify fix):
+                    // mark the waiter's completion as under delivery BEFORE
+                    // the table lock drops. abandon_pending_completion
+                    // (the 10s-deadline retire path) scans the tables under
+                    // this same lock; if it does NOT find the entry it
+                    // knows a walker is mid-delivery and waits for this
+                    // count to drain — so a walker can never fire into a
+                    // waiter's kernel stack after its wait() returned (the
+                    // ftest01 "2048*25 bad verify" wandering corruption).
+                    if let Some(p) = fired.as_ref() {
+                        if !p.completion.is_null() {
+                            unsafe {
+                                (*p.completion).begin_delivery();
+                            }
+                        }
+                    }
                 }
-                if let Some(p) = fired.as_ref() {
-                    // Exact per-entry disorder measurement: the entry was
-                    // submitted at ordinal p.ordinal but completed at
-                    // used-ring index i. (A leaked chain's permanent skip
-                    // also lands here — those are rare and each already
-                    // prints its own loud timeout error.)
-                    if p.ordinal != i {
-                        let n = VIRTIO_PCI_REORDER_EVENTS
+                match fired.as_ref() {
+                    Some(p) => {
+                        // Exact per-entry disorder measurement: the entry
+                        // was submitted at ordinal p.ordinal but completed
+                        // at used-ring index i.
+                        if p.ordinal != i {
+                            let n = VIRTIO_PCI_REORDER_EVENTS
+                                .fetch_add(1, core::sync::atomic::Ordering::AcqRel)
+                                + 1;
+                            if n == 1 || n % 8192 == 0 {
+                                crate::pr_info!(
+                                    "virtio-blk: out-of-order completion #{} \
+                                     (used-ring order != submission order)",
+                                    n
+                                );
+                            }
+                        }
+                        done[collected] = fired.take();
+                        collected += 1;
+                    }
+                    None => {
+                        // No live pending claims this used-ring entry. Every
+                        // submitted chain publishes a pending or tombstone,
+                        // so this is a dispatch invariant violation — count
+                        // it loudly. The entry is consumed (PENDING_LAST
+                        // advances) so one bad entry cannot stall the whole
+                        // queue; the log makes the accounting hole visible.
+                        unmatched += 1;
+                        let n = VIRTIO_PCI_UNMATCHED_EVENTS
                             .fetch_add(1, core::sync::atomic::Ordering::AcqRel)
                             + 1;
-                        if n == 1 || n % 8192 == 0 {
-                            crate::pr_info!(
-                                "virtio-blk: out-of-order completion #{} \
-                                 (used-ring order != submission order)",
+                        if n == 1 || n % 4096 == 0 {
+                            crate::pr_err!(
+                                "virtio-blk: used entry {} (head {}) matched \
+                                 no pending — dispatch accounting hole #{}",
+                                i,
+                                entry_id,
                                 n
                             );
                         }
                     }
-                    done[collected] = fired.take();
-                    collected += 1;
                 }
+                walked += 1;
                 i = i.wrapping_add(1);
             }
+            i_end = i;
             PCI_BLK_PENDING_LAST[slot].store(i, core::sync::atomic::Ordering::Release);
             // _nest, table guards and the BLK lock all drop HERE.
         }
-
-        if collected == 0 {
-            break; // caught up (or nothing matched)
-        }
+        consumed_total += walked;
 
         // ---- Phase 2: deliver OUTSIDE every virtio lock (R12-3) -----------
         // Each complete() takes the waiter's wait-queue lock and runs
@@ -1955,15 +2211,81 @@ pub fn pci_process_async_completions_slot(slot: usize) {
             unsafe {
                 alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
             }
-            // SAFETY: the waiter keeps this completion alive until it
-            // fires (or converts its entry into a tombstone via
-            // abandon_pending_completion before leaving).
+            // SAFETY: the delivering-protocol count taken under the table
+            // lock keeps the waiter (and its stack) alive across this call
+            // — abandon waits for it before unwinding.
             unsafe { (*pending.completion).complete(io_status); }
+            unsafe { (*pending.completion).end_delivery(); }
         }
 
-        if budget == 0 {
+        if i_end != PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire) {
+            // Another CPU (or our own nested context) already moved the
+            // watermark — it owns the remaining entries.
+            vw_exit(2, true);
             break;
         }
+        // Caught up? Re-read the ring: completions may have landed while we
+        // delivered (budget re-check keeps the loop bounded either way).
+        // SAFETY: same field read as the fast path.
+        let fresh_used = unsafe {
+            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+        };
+        if fresh_used == i_end {
+            vw_exit(1, false);
+            break;
+        }
+        if budget == 0 {
+            // One queue window consumed; more remain. Re-arm the Block
+            // softirq so a scheduled consumer always exists for the rest.
+            vw_exit(3, true);
+            crate::interrupt::softirq::raise_softirq(
+                crate::interrupt::softirq::SoftirqIndex::Block as usize,
+            );
+            break;
+        }
+        vw_exit(4, true);
+    }
+
+    // GATED sync-queue wake: only when this pass actually consumed
+    // completions on THIS disk. The unconditional wake (every Block
+    // softirq pass, including timer-driven no-op passes) was the wake-all
+    // herd that turned six concurrent waiters into a GRQ convoy under
+    // TCG — the completion delivery starvation behind the ftest01 wedge.
+    // Waking here (rather than only in the BH) also covers the
+    // process-context drain/rescue callers: a sync waiter is why they ran.
+    if consumed_total > 0 {
+        #[cfg(debug_assertions)]
+        crate::drivers::virtio::assert_no_virtio_lock(
+            "PCI_BLK_WAIT_QUEUES wake (walker)",
+        );
+        PCI_BLK_WAIT_QUEUES[slot].wake_up_all();
+    }
+    consumed_total
+}
+
+/// Waiter-side rescue for lagged completions (companion to the walker's
+/// own re-arm): if this disk's used ring is ahead of the walker and no
+/// interrupt is coming (device idle, softirq bits clear), the sleeping
+/// waiter is the only context that can make progress — drain the ring
+/// ourselves before going back to sleep. Cheap when caught up (two
+/// loads). No-op for out-of-range/unready slots.
+pub fn pci_rescue_lagged_completions(slot: usize) {
+    if slot >= MAX_PCI_BLK_DISKS
+        || !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
+    let used_ring = match get_pci_device_queue_at(slot) {
+        Some(q) => q.used_ring_ptr(),
+        None => return,
+    };
+    // SAFETY: same used-ring idx read as the walker's fast path.
+    let used_idx = unsafe {
+        core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+    };
+    let last = PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire);
+    if used_idx != last {
+        pci_process_async_completions_slot(slot);
     }
 }
 
@@ -2387,6 +2709,7 @@ pub fn interrupt_handler_pci(_irq: u32, dev_id: usize) -> crate::interrupt::IrqR
             // deliver in the bottom half. The Block softirq runs at
             // irq_exit() time, so wakeup latency stays bounded while the
             // hard-IRQ section stays minimal.
+            VW_IRQS[slot].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
             crate::interrupt::softirq::raise_softirq_irqoff(
                 crate::interrupt::softirq::SoftirqIndex::Block as usize,
             );
@@ -2441,6 +2764,7 @@ pub fn block_bh_handler(_vec: usize) {
     // SAFETY: Runs in softirq context; VIRTIO_BLK is initialized. The irqsave
     // lock on virtqueue ensures mutual exclusion with hardirq handlers.
     unsafe {
+        let mut mmio_collected = 0usize;
         if let Some(device) = VIRTIO_BLK.as_ref() {
             // MMIO pending table holds at most MAX_PENDING_IO live entries,
             // so one collection array covers a full catch-up pass.
@@ -2469,6 +2793,11 @@ pub fn block_bh_handler(_vec: usize) {
                         let slot = i as usize % MAX_PENDING_IO;
                         let mut pending = VIRTIO_MMIO_PENDING.lock_irqsave();
                         if let Some(pending) = pending[slot].take() {
+                            // Same walker-vs-abandon delivery handshake as
+                            // the PCI path (see IoCompletion::delivering).
+                            if !pending.completion.is_null() {
+                                (*pending.completion).begin_delivery();
+                            }
                             if collected < MAX_PENDING_IO {
                                 done[collected] = Some(pending);
                                 collected += 1;
@@ -2512,31 +2841,43 @@ pub fn block_bh_handler(_vec: usize) {
 
                     // Signal completion
                     (*pending.completion).complete(io_status);
+                    (*pending.completion).end_delivery();
                 }
             }
+            mmio_collected = collected;
         }
         // PCI async reads complete here too (raised by
         // interrupt_handler_pci); independent of the MMIO device so a
-        // PCI-only boot still drains its pending table.
+        // PCI-only boot still drains its pending table. The per-disk
+        // walkers wake their own sync queues, gated on real progress.
         pci_process_async_completions();
 
         // FIX8 (lost-wakeup wedge), relocated from the PCI hard-ISR top
-        // half: the synchronous read_block/write_block request path waits on
-        // VIRTIO_BLK_WAIT_QUEUE (the MMIO-era sync queue) even for the PCI
-        // device, and the PCI sync paths wait on
-        // VIRTIO_PCI_BLK_WAIT_QUEUE. Both must be woken from the completion
-        // path — a completion landing between a waiter's used-ring re-check
-        // and its schedule() would otherwise sleep forever (the intermittent
-        // silent wedge after ~2MB of writes). Doing it here (softirq, no
-        // virtio lock held, IRQs enabled) keeps the hard-IRQ section minimal
-        // and cannot nest the wait-queue lock inside a virtio lock.
-        // wake_up_all on an empty queue is a no-op.
-        #[cfg(debug_assertions)]
-        crate::drivers::virtio::assert_no_virtio_lock("PCI_BLK_WAIT_QUEUES wake (BH)");
-        for disk in 0..MAX_PCI_BLK_DISKS {
-            PCI_BLK_WAIT_QUEUES[disk].wake_up_all();
+        // half: every sync waiter whose response byte landed between its
+        // used-ring re-check and its schedule() needs a wake from the
+        // completion path. Doing it here (softirq, no virtio lock held,
+        // IRQs enabled) keeps the hard-IRQ section minimal and cannot
+        // nest the wait-queue lock inside a virtio lock.
+        //
+        // GATED on real progress (the ftest01 herd fix): wake_up_all
+        // costs a wake_up_process (GRQ lock) per waiter and every woken
+        // waiter re-runs prepare_to_wait/finish_wait on this queue.
+        // Firing the wake from EVERY Block softirq pass — including
+        // passes raised by timer/other activity that consumed nothing —
+        // turned six concurrent sync waiters into a permanent
+        // wake/re-queue convoy that starved completion delivery itself
+        // (freeze-dumped: both CPUs in the GRQ/CFS machinery, used ring
+        // running 1-8 entries ahead of the walker, ftest01 wedged until
+        // its 30s kill). The PCI queues' wakes live INSIDE
+        // pci_process_async_completions_slot (gated on consumed > 0) so
+        // process-context rescue walks wake sync waiters too.
+        if mmio_collected > 0 {
+            #[cfg(debug_assertions)]
+            crate::drivers::virtio::assert_no_virtio_lock(
+                "VIRTIO_BLK_WAIT_QUEUE wake (BH)",
+            );
+            VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
         }
-        VIRTIO_BLK_WAIT_QUEUE.wake_up_all();
     }
 }
 

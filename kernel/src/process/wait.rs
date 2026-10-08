@@ -196,6 +196,28 @@ impl WaitQueueHead {
         self.wake_up(WakeUpHint::Normal, 1)
     }
 
+    /// Diagnostic: entries currently queued, and how many carry the
+    /// woken flag (VW forensic instrumentation — a woken-flagged entry
+    /// whose task sleeps is the sticky-skip lost-wake signature).
+    pub fn vw_queue_census(&self) -> (usize, usize) {
+        let list = self.list.lock_irqsave();
+        let total = list.len();
+        let woken = list.iter().filter(|e| e.is_woken()).count();
+        drop(list);
+        (total, woken)
+    }
+
+    /// Try-lock variant for IRQ-context diagnostics: None when the list
+    /// lock is held (never block — the holder may be the interrupted
+    /// context on this very CPU).
+    pub fn vw_queue_census_try(&self) -> Option<(usize, usize)> {
+        let list = self.list.try_lock_irqsave()?;
+        let total = list.len();
+        let woken = list.iter().filter(|e| e.is_woken()).count();
+        drop(list);
+        Some((total, woken))
+    }
+
     /// Prepare to wait: atomically add entry to queue AND set task state.
     ///
     /// This prevents the classic lost-wakeup race where a waker finds the

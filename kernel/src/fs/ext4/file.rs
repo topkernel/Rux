@@ -252,6 +252,23 @@ fn ext4_file_read_cached_dst(
         // covers the demand range plus (on sequential access) the read-ahead
         // window ahead of it; pages land in the cache and the loop serves
         // them through the fast path above.
+        //
+        // READ/WRITE COHERENCE (the ftest01/ftest05 bad-verify fix): this
+        // whole miss path — mapping resolution (get_data_block), the
+        // block-cache coherence guard, the multi-block DMA and the
+        // page-cache inserts — runs under the ext4 big lock, exactly like
+        // the write/truncate paths. Unlocked, it raced writers on OTHER
+        // files (writes serialize on the same global lock): between the
+        // `block_cached` guard and the DMA, a writer could reallocate,
+        // zero and rewrite the very blocks being DMA'd (freed by this
+        // file's truncate, recycled by the allocator to a concurrent
+        // writer), so the read-back spliced a stale disk image into the
+        // page cache — f05rep2's "read this file's other chunk / previous
+        // round's data / zeros for written data" corruption family, and
+        // ftest01/05's bad-verify TFAILs. Cached-page serving (the fast
+        // path above) stays lock-free: cached pages are immutable and the
+        // write path's invalidate already fences stale entries.
+        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
         let seq_contd = offset == ra_state.last_read_end || ra_state.active;
         let window = if seq_contd || offset == 0 {
             core::cmp::max(demand_pages, crate::fs::readahead::MAX_READAHEAD_BLOCKS as u64)
