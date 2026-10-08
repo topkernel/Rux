@@ -629,6 +629,18 @@ impl FdTable {
         self.entry.lock_irqsave().fds[fd].clone()
     }
 
+    /// Visit every open descriptor (fd, File) under one entry-lock hold.
+    /// The callback runs with IRQs off — it must be quick, allocation-free
+    /// where possible, and must NOT call back into FdTable mutators.
+    pub fn for_each_file(&self, mut f: impl FnMut(usize, &Arc<File>)) {
+        let entry = self.entry.lock_irqsave();
+        for (fd, slot) in entry.fds.iter().enumerate() {
+            if let Some(file) = slot {
+                f(fd, file);
+            }
+        }
+    }
+
     /// Close file descriptor
     pub fn close_fd(&self, fd: usize) -> Result<(), ()> {
         if fd >= MAX_FDS {
