@@ -16,7 +16,7 @@ use crate::println;
 use super::framebuffer::{FrameBuffer, FrameBufferInfo};
 
 /// QEMU RISC-V virt platform default framebuffer address
-const FB_DEFAULT_ADDR: u64 = 0x10000000;
+const FB_DEFAULT_ADDR: u64 = crate::arch::mm::memory_layout::mmio_alias(0x10000000);
 
 /// Default framebuffer dimensions - from config
 const FB_DEFAULT_WIDTH: u32 = crate::config::FB_DEFAULT_WIDTH as u32;

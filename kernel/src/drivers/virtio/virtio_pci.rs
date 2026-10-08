@@ -181,7 +181,9 @@ impl VirtIOPCI {
     /// # Parameters
     /// - `pci_base`: PCI configuration space base address (ECAM)
     pub fn new(pci_base: u64) -> Result<Self, &'static str> {
-        let pci_config = PCIConfig::new(pci_base);
+        // pci_base is a raw ECAM identity address; config access goes
+        // through the kernel-half alias (see ecam_va).
+        let pci_config = PCIConfig::new_at_ecam(pci_base);
 
         // Calculate PCI slot number (for IRQ calculation)
         // True PCI slot number: ECAM addr bit 15..19. Dividing by the ECAM
@@ -374,23 +376,40 @@ impl VirtIOPCI {
         MMIO_OFFSET.store(mmio_offset, Ordering::SeqCst);
 
         // ========== Use assigned BAR info ==========
+        // BAR base_addr values are hardware addresses in the PCI MMIO
+        // window (riscv64: 0x40000000+, identity-mapped). Translate them
+        // to the kernel-half MMIO alias before any dereference — a user
+        // MAP_FIXED mapping may replace the low identity copy in its own
+        // address space (gjs cage over 0x0c000000 PLIC did exactly that
+        // and KERNPANICed the PLIC claim read).
+        #[cfg(feature = "riscv64")]
+        fn bar_va(bar: u64) -> u64 {
+            crate::arch::mm::memory_layout::mmio_alias(bar)
+        }
+        #[cfg(feature = "x86_64")]
+        fn bar_va(bar: u64) -> u64 {
+            bar
+        }
+
         let common_bar_obj = assigned_bars.get(&common_bar)
             .ok_or("Common CFG BAR not assigned")?;
         if common_bar_obj.bar_type != BARType::MemoryMapped {
             return Err("Common CFG BAR is not memory mapped");
         }
-        let common_cfg_bar = common_bar_obj.base_addr;
+        let common_cfg_bar = bar_va(common_bar_obj.base_addr);
 
         let notify_bar_obj = assigned_bars.get(&notify_bar)
             .ok_or("Notify CFG BAR not assigned")?;
         if notify_bar_obj.bar_type != BARType::MemoryMapped {
             return Err("Notify CFG BAR is not memory mapped");
         }
-        let notify_cfg_bar = notify_bar_obj.base_addr;
+        let notify_cfg_bar = bar_va(notify_bar_obj.base_addr);
 
         let device_cfg_bar = if device_bar != 0xFF {
             match assigned_bars.get(&device_bar) {
-                Some(bar_obj) if bar_obj.bar_type == BARType::MemoryMapped => bar_obj.base_addr,
+                Some(bar_obj) if bar_obj.bar_type == BARType::MemoryMapped => {
+                    bar_va(bar_obj.base_addr)
+                }
                 _ => 0,
             }
         } else {
@@ -399,7 +418,9 @@ impl VirtIOPCI {
 
         // Extract ISR CFG BAR (critical for interrupt status reading)
         let isr_cfg_bar = match assigned_bars.get(&isr_bar) {
-            Some(bar_obj) if bar_obj.bar_type == BARType::MemoryMapped => bar_obj.base_addr,
+            Some(bar_obj) if bar_obj.bar_type == BARType::MemoryMapped => {
+                bar_va(bar_obj.base_addr)
+            }
             _ => return Err("ISR CFG BAR not assigned or not memory mapped"),
         };
 

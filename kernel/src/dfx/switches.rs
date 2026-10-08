@@ -59,9 +59,18 @@ pub enum DfxSwitch {
     /// Park when the 64th task registers (early in the fork/exec storm)
     /// so gdb can arm quiet-region watchpoints across the live set.
     ScribbleSweep,
+    /// Input-event payload trace: every event pushed into the evdev queues
+    /// prints a one-line record (device, type, code, value) plus the push
+    /// count. Used to hunt phantom input streams; printing happens on the
+    /// event path so it is OFF in production boots.
+    InputTrace,
+    /// epoll delivery trace: every (rate-limited) epoll_wait return prints
+    /// pid/comm plus each ready fd's number and event bits — hunts
+    /// permanently ready fds that spin epoll_pwait/ppoll callers.
+    EpollTrace,
 }
 
-const SWITCH_COUNT: usize = 9;
+const SWITCH_COUNT: usize = 11;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -77,6 +86,8 @@ impl DfxSwitch {
             DfxSwitch::ScribblePark => 6,
             DfxSwitch::ScribblePid1 => 7,
             DfxSwitch::ScribbleSweep => 8,
+            DfxSwitch::InputTrace => 9,
+            DfxSwitch::EpollTrace => 10,
         }
     }
 
@@ -91,6 +102,8 @@ impl DfxSwitch {
             "scribblepark" => Some(DfxSwitch::ScribblePark),
             "scribblepid1" => Some(DfxSwitch::ScribblePid1),
             "scribblesweep" => Some(DfxSwitch::ScribbleSweep),
+            "inputtrace" => Some(DfxSwitch::InputTrace),
+            "epolltrace" => Some(DfxSwitch::EpollTrace),
             _ => None,
         }
     }

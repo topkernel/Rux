@@ -33,6 +33,11 @@
 /// MMIO base of the goldfish RTC on the QEMU virt platform.
 pub const GOLDFISH_RTC_BASE: u64 = 0x101_000;
 
+/// Kernel-half alias of the device page used for actual register reads
+/// (see memory_layout::mmio_alias — the identity window is replaceable
+/// by user MAP_FIXED mappings in their own address space).
+pub const GOLDFISH_RTC_VA: u64 = crate::arch::mm::memory_layout::mmio_alias(0x101_000);
+
 /// Size of the mapped device region (one page — the register file is
 /// 0x20 bytes but the DTB reg spec is the full page).
 pub const GOLDFISH_RTC_SIZE: u64 = 0x1000;
@@ -47,7 +52,7 @@ const REG_TIME_HIGH: u64 = 0x04;
 /// `setup_device_mappings()`; this helper is only reachable after that.
 #[inline]
 fn read_reg(offset: u64) -> u32 {
-    unsafe { core::ptr::read_volatile((GOLDFISH_RTC_BASE + offset) as *const u32) }
+    unsafe { core::ptr::read_volatile((GOLDFISH_RTC_VA + offset) as *const u32) }
 }
 
 /// Read the RTC's nanosecond counter (host wall time at VM start + guest

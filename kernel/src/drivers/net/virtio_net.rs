@@ -880,7 +880,8 @@ pub fn net_rx_softirq_handler(_vec: usize) {
 ///
 /// Registers the handler via request_irq.
 pub fn enable_device_interrupt(base_addr: u64) {
-    const VIRTIO_MMIO_BASE: u64 = 0x10001000;
+    const VIRTIO_MMIO_BASE: u64 =
+        crate::arch::mm::memory_layout::mmio_alias(0x10001000);
     const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 
     let slot = ((base_addr - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_SIZE) as u32;

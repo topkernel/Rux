@@ -19,8 +19,12 @@ use crate::interrupt::{
     irq_domain_create_linear, irq_create_mapping,
 };
 
-// PLIC base address - QEMU virt platform uses 0x0c000000
-const PLIC_BASE: usize = 201326592;  // 0x0c000000 in decimal
+// PLIC base address - QEMU virt platform uses 0x0c000000. Accessed via
+// the kernel-half MMIO alias (mmio_alias): the identity low window is
+// cloned into every user root where a MAP_FIXED user mapping (gjs cage
+// at 0x0c000000) may replace it — the alias is user-unreachable.
+const PLIC_BASE: usize =
+    crate::arch::mm::memory_layout::mmio_alias(201326592) as usize; // alias of 0x0c000000
 
 mod offset {
     pub const PRIORITY: usize = 0x000000;

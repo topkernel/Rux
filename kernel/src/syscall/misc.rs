@@ -1291,9 +1291,22 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         0
     };
 
-    loop {
+        loop {
         let mut entries = epoll.entries.lock();
         let mut ready_events: alloc::vec::Vec<EPollEvent> = alloc::vec::Vec::new();
+        // dfx=epolltrace: identity of each ready fd (fd, file ops table) so
+        // the trace line can be symbolized against the kernel ELF.
+        let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> =
+            alloc::vec::Vec::new();
+        // Dead interests found during the scan (fd number no longer
+        // resolves to the registered description). Linux removes an
+        // epoll interest at close(2) (eventpoll_release); the wait path
+        // must never manufacture events for one. The old behavior
+        // reported EPOLLERR|EPOLLHUP on EVERY wait forever — a permanent
+        // phantom wakeup that spun GLib main loops. sys_close purges the
+        // common case; this catches anything that slips past (fd-number
+        // reuse without EPOLL_CTL_DEL).
+        let mut dead_fds: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
 
         for entry in entries.iter_mut() {
             // Linux epoll_wait never consumes readiness it does not deliver:
@@ -1326,11 +1339,12 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             let file = match fdtable.get_file(entry.fd as usize) {
                 Some(f) if f.file_id == entry.file_id => f,
                 _ => {
-                    // fd was closed (or its number reused), report error
-                    ready_events.push(EPollEvent {
-                        events: EPOLLERR | EPOLLHUP,
-                        data: entry.data,
-                    });
+                    // The interest is dead (closed fd / reused number).
+                    // Remove it silently — Linux delivers NOTHING for a
+                    // closed interest (removed at close), and the former
+                    // forever-EPOLLERR|EPOLLHUP report was a phantom
+                    // wakeup source.
+                    dead_fds.push(entry.fd as usize);
                     continue;
                 }
             };
@@ -1373,6 +1387,15 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                 // registration did not subscribe to them — they are not
                 // maskable. Only the I/O readiness bits honor entry.events.
                 let report_mask = entry.events | EPOLLERR | EPOLLHUP;
+                if crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::EpollTrace,
+                ) {
+                    trace_fds.push((
+                        entry.fd,
+                        ep_events & report_mask,
+                        file.get_ops().map_or(core::ptr::null(), |o| o as *const _ as *const ()),
+                    ));
+                }
                 ready_events.push(EPollEvent {
                     events: ep_events & report_mask,
                     data: entry.data,
@@ -1383,9 +1406,46 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                 entry.last_reported = 0;
             }
         }
+        if !dead_fds.is_empty() {
+            // Still under the entries lock here: remove the dead interests.
+            // One entry per fd number (ADD dedups), so matching by number is
+            // exact.
+            entries.retain(|e| !dead_fds.contains(&(e.fd as usize)));
+        }
         drop(entries);
 
         if !ready_events.is_empty() {
+            // dfx=epolltrace: who got woken by which fd. Rate-limited to the
+            // first 400 deliveries plus every 2000th after, so a spinning
+            // waiter does not flood the serial console.
+            if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::EpollTrace,
+            ) {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static N: AtomicU64 = AtomicU64::new(0);
+                let n = N.fetch_add(1, Ordering::Relaxed);
+                if n < 400 || n % 2000 == 0 {
+                    if let Some(cur) = crate::sched::current() {
+                        // SAFETY: read-only comm/pid access on the current task.
+                        let (pid, comm) =
+                            unsafe { ((*cur).pid(), (*cur).comm()) };
+                        let comm_str = core::str::from_utf8(comm)
+                            .unwrap_or("?\u{0}")
+                            .trim_end_matches('\u{0}');
+                        let mut line: alloc::string::String =
+                            alloc::format!("EPTRC[{}] pid={} {} n={}", n, pid, comm_str, ready_events.len());
+                        for (fd, ev, ops) in trace_fds.iter().take(8) {
+                            line.push_str(&alloc::format!(
+                                " fd={} ev={:#x} ops={:#x}",
+                                fd,
+                                ev,
+                                *ops as usize
+                            ));
+                        }
+                        crate::pr_info!("{}", line);
+                    }
+                }
+            }
             let count = ready_events.len().min(maxevents as usize);
             // SAFETY: events_ptr validated with access_ok; copy_to_user is
             // the exception-table copy path (SUM=0 safe). A fault (e.g. a
@@ -1416,6 +1476,32 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         }
 
         if crate::signal::signal_pending() {
+            // dfx=epolltrace: an EINTR-storm burns a waiter at ~100% CPU
+            // with ZERO ready deliveries (invisible to the delivery trace).
+            // Rate-limited print of the pending mask so a storm is obvious.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+            {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static N: AtomicU64 = AtomicU64::new(0);
+                let n = N.fetch_add(1, Ordering::Relaxed);
+                if n < 200 || n % 2000 == 0 {
+                    if let Some(cur) = crate::sched::current() {
+                        // SAFETY: read-only pid/comm/pending access on the
+                        // current task.
+                        let (pid, comm) = unsafe { ((*cur).pid(), (*cur).comm()) };
+                        let comm_str = core::str::from_utf8(comm)
+                            .unwrap_or("?")
+                            .trim_end_matches('\u{0}');
+                        crate::pr_info!(
+                            "EPTRC-EINTR[{}] pid={} {} sigpnd={:#x}",
+                            n,
+                            pid,
+                            comm_str,
+                            (*cur).pending.get_all()
+                        );
+                    }
+                }
+            }
             return -(errno::EINTR as i64);
         }
 
@@ -1461,6 +1547,27 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         if timer_id == 0 {
             // Timer pool exhausted: degrade to a single yield rather than
             // sleep forever (nothing else is guaranteed to wake us).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+            {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static N: AtomicU64 = AtomicU64::new(0);
+                let n = N.fetch_add(1, Ordering::Relaxed);
+                if n < 100 || n % 5000 == 0 {
+                    if let Some(cur) = crate::sched::current() {
+                        // SAFETY: read-only pid/comm access on the current task.
+                        let (pid, comm) = unsafe { ((*cur).pid(), (*cur).comm()) };
+                        let comm_str = core::str::from_utf8(comm)
+                            .unwrap_or("?")
+                            .trim_end_matches('\u{0}');
+                        crate::pr_info!(
+                            "EPTRC-YIELD[{}] pid={} {} (timer pool full)",
+                            n,
+                            pid,
+                            comm_str
+                        );
+                    }
+                }
+            }
             epoll.wait_queue.finish_wait(current);
             // SAFETY: current is the running task's pointer.
             unsafe { crate::sched::dequeue_task(&*current); }
@@ -2934,19 +3041,74 @@ static GETRANDOM_CRNG: crate::sync::spinlock::Spinlock<Option<ChaCha20Crng>> =
 /// (review批次1: close 后 epoll 条目不删; Linux removes entries on the
 /// file's last release).
 pub fn epoll_purge_closed_fd(fd: usize) {
-    // Iterate the caller's fd table; every epoll instance found has its
-    // entries re-checked: entries still pointing at THIS closed fd number
-    // are removed (their file_id no longer resolves).
+    // Linux eventpoll_release: closing a file descriptor removes every
+    // epoll interest still keyed to that fd number and open file
+    // description. The old stub left the entry in place, and the wait
+    // path's stale branch then reported EPOLLERR|EPOLLHUP on EVERY
+    // epoll_wait — a permanent phantom wakeup that spun GLib main loops
+    // (the dbus leftover-ready-fd burn: poll returns ready, the handler
+    // finds nothing actionable, the loop repeats). Purge the entry at
+    // close, exactly like Linux removes the interest when the fd's last
+    // table reference goes away.
     let fdtable = match crate::sched::current() {
         Some(t) => unsafe { (*t).try_fdtable() },
         None => return,
     };
-    let table = match fdtable { Some(f) => f, None => return };
-    let _ = &table;
-    let _ = fd;
-    // NOTE (review批次1): a full eventpoll_release needs an epoll-instance
-    // registry keyed by file identity. Until that lands, closed-fd entries
-    // keep the documented stale-report polarity (EPOLLERR|EPOLLHUP) in
-    // epoll_wait, which callers treat as re-armable — no silent data loss.
-    // The R36 file_id identity check already prevents cross-file confusion.
+    let fdtable = match fdtable {
+        Some(f) => f,
+        None => return,
+    };
+
+    // Epoll entries carry the CLOSER's fd numbers, so only epoll
+    // instances this task still holds can watch the closed number.
+    // Snapshot their EpollFile pointers under one fdtable lock hold;
+    // reading private_data needs no other lock (identity-checked below).
+    let mut epoll_ptrs: alloc::vec::Vec<*mut EpollFile> = alloc::vec::Vec::new();
+    fdtable.for_each_file(|_fdnum, file| {
+        if let Some(ops) = file.get_ops() {
+            if core::ptr::eq(ops as *const _, &EPOLL_OPS as *const _) {
+                // SAFETY: read-only snapshot of the raw pointer; the
+                // instance stays alive while this File is in the fd table
+                // (its close op only runs on the last Arc reference).
+                if let Some(p) = unsafe { *file.private_data.get() } {
+                    epoll_ptrs.push(p as *mut EpollFile);
+                }
+            }
+        }
+    });
+    if epoll_ptrs.is_empty() {
+        return;
+    }
+
+    for ep in epoll_ptrs {
+        // SAFETY: the instance is alive (its owning File holds an Arc in
+        // the fd table we just scanned; the box is freed only in its close
+        // op, which cannot run while that Arc exists).
+        let epoll = unsafe { &*ep };
+        let mut removed_ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        {
+            let mut entries = epoll.entries.lock();
+            entries.retain(|e| {
+                if e.fd as usize != fd {
+                    return true;
+                }
+                // The fd slot is empty at this point (close_fd cleared it
+                // before we run). If it somehow resolves again to the SAME
+                // description, the entry is live (immediate-reuse race);
+                // anything else is the closed interest — remove it.
+                let live = fdtable
+                    .get_file(fd)
+                    .map_or(false, |f| f.file_id == e.file_id);
+                if !live {
+                    removed_ids.push(e.file_id);
+                }
+                live
+            });
+        }
+        // Registry lock only after the entries lock is released (the
+        // documented nesting rule — registry helpers never nest entries).
+        for id in removed_ids {
+            epoll_wake_unregister(id, ep);
+        }
+    }
 }

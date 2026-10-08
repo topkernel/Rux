@@ -103,10 +103,30 @@ pub struct PCIConfig {
     pub base_addr: u64,
 }
 
+/// Translate an ECAM window address to the VA the kernel dereferences.
+/// riscv64: the identity ECAM window (0x30000000+) is cloned into every
+/// user root where a MAP_FIXED user mapping may replace it — all config
+/// access goes through the kernel-half MMIO alias instead. x86_64: the
+/// firmware's ECAM window already lives in the kernel half (kept verbatim).
+#[cfg(feature = "riscv64")]
+pub fn ecam_va(ecam_addr: u64) -> u64 {
+    crate::arch::mm::memory_layout::mmio_alias(ecam_addr)
+}
+#[cfg(feature = "x86_64")]
+pub fn ecam_va(ecam_addr: u64) -> u64 {
+    ecam_addr
+}
+
 impl PCIConfig {
     /// Create new PCI configuration space access
     pub const fn new(base_addr: u64) -> Self {
         Self { base_addr }
+    }
+
+    /// Create a config accessor for an ECAM identity address (translates
+    /// through ecam_va on riscv64; see ecam_va for why).
+    pub fn new_at_ecam(ecam_addr: u64) -> Self {
+        Self { base_addr: ecam_va(ecam_addr) }
     }
 
     /// Read 32-bit configuration space register
@@ -445,7 +465,7 @@ pub fn find_ecam_devices(vendor: u16, device_ids: &[u16]) -> alloc::vec::Vec<u64
                         + (bus << 20)
                         + (slot * 0x8000)
                         + (func * PCIE_ECAM_SIZE);
-                    let config = PCIConfig::new(ecam_addr);
+                    let config = PCIConfig::new_at_ecam(ecam_addr);
 
                     let vid = config.vendor_id();
                     if vid != vendor {
@@ -485,7 +505,7 @@ pub fn enumerate_virtio_devices() -> usize {
                 let ecam_addr = RISCV_PCIE_ECAM_BASE
                     + (slot as u64 * 0x8000)
                     + (func * PCIE_ECAM_SIZE);
-                let config = PCIConfig::new(ecam_addr);
+                let config = PCIConfig::new_at_ecam(ecam_addr);
 
                 let vendor_id = config.vendor_id();
                 let device_id = config.device_id();

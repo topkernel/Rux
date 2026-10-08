@@ -1723,6 +1723,21 @@ pub fn setup_device_mappings() {
         // BARs are assigned by writing config space only — nothing maps
         // inside this window at 4K granularity later.
         map_kernel_region_huge(PCI_MMIO_BASE as u64, 0x10000000, device_flags);
+
+        // Kernel-half MMIO alias of the whole low window (phys
+        // [0, MMIO_ALIAS_SIZE) at MMIO_ALIAS_BASE): the permanent,
+        // user-unreachable translation every runtime MMIO accessor uses
+        // via mmio_alias(). A user MAP_FIXED mapping may legitimately
+        // replace the low identity copies in its own root (gjs's heap
+        // cage at 0x0c000000 does); the kernel keeps working through
+        // the alias either way. 2MB leaves keep the clone cost per
+        // address space at a handful of L1 entries.
+        map_kernel_region(
+            MMIO_ALIAS_BASE as u64,
+            0,
+            MMIO_ALIAS_SIZE as u64,
+            device_flags,
+        );
     }
 }
 
