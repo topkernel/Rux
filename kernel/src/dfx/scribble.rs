@@ -764,6 +764,58 @@ pub fn verify() {
         if s.armed.load(Ordering::Acquire) == 0 {
             continue;
         }
+        // R67 (parked-tail tripwire): the exit-path frame validation in
+        // trap.S refuses scribbled control tails at load time; this scan
+        // catches them EARLY (while the task still sleeps — the report's
+        // ring tail is then at most 40ms from the write). A kernel-origin
+        // tail must name kernel text; a user tail must carry the exact
+        // user selectors. Heap tasks with a user mm only: kernel threads
+        // never build a user entry frame at their stack tops (their top
+        // region holds boot/idle residue like rip=0/cs=8 — the s1 run's
+        // false-positive storm).
+        if (0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&(task as usize))
+            && s.armed.load(Ordering::Acquire) != 0
+            && unsafe { (*task).has_address_space() }
+            // Latch: report each victim once (the kill comes at resume;
+            // re-reporting every scan floods the console and wedges the
+            // serial interleave — the s1 lesson).
+            && s.armed_swapped.fetch_or(8, Ordering::AcqRel) & 8 == 0
+        {
+            if let Some(stack_top) = unsafe { (*task).get_kernel_stack() } {
+                let pr = stack_top as usize - core::mem::size_of::<crate::arch::pt_regs::PtRegs>();
+                const OFF_RIP: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, rip);
+                const OFF_CS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, cs);
+                const OFF_SS: usize = core::mem::offset_of!(crate::arch::pt_regs::PtRegs, ss);
+                // SAFETY: diagnostic reads of the task's parked frame.
+                let (rip, cs, ss) = unsafe {
+                    (
+                        core::ptr::read_volatile((pr + OFF_RIP) as *const u64),
+                        core::ptr::read_volatile((pr + OFF_CS) as *const u64),
+                        core::ptr::read_volatile((pr + OFF_SS) as *const u64),
+                    )
+                };
+                let bad_tail = if cs & 3 == 0 {
+                    // kernel-origin tail: rip must be inside the kernel image
+                    !(0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&rip)
+                } else {
+                    cs != 0x33 || ss != 0x2b
+                };
+                if bad_tail {
+                    puts(b"\nSCRIBBLE-TAIL task=");
+                    put_hex(task as u64);
+                    puts(b" rip=");
+                    put_hex(rip);
+                    puts(b" cs=");
+                    put_hex(cs);
+                    puts(b" ss=");
+                    put_hex(ss);
+                    puts(b"\n");
+                    ring_dump();
+                    // The exit-path guard will kill the task when it
+                    // resumes; re-tripping later is fine and useful.
+                }
+            }
+        }
         // Stable read set (retry a couple of times when a concurrent
         // quiesce bumps the generation mid-read).
         let mut live_gs = 0;

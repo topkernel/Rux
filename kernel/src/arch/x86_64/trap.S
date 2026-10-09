@@ -444,6 +444,16 @@ trap_exit:
     movq %rbp, %rsp
     testb $3, PT_CS(%rsp)       /* pairing rule: swap GS only on the  */
     jz .Lrestore_kernel_tail    /* user-return path (mirror of the    */
+    /* R67 (scribbled-frame guard, user tail): the selectors are kernel
+     * policy, never data. A parked frame torn by a wild writer can carry
+     * half-kernel half-user control words (the observed cs=0x33-with-
+     * garbage-ss shapes); iretq would #GP inside the exit path at best
+     * and execute through a mixed frame at worst. Strict selectors or
+     * the task dies (Linux fixup_bad_iret discipline). */
+    cmpq $__USER_CS, PT_CS(%rsp)
+    jne .Lbad_frame
+    cmpq $__USER_DS, PT_SS(%rsp)
+    jne .Lbad_frame
     /* SMP GS-pairing fix (x86-smprace), second phase (x86-scribble):
      * the original order ran `cli; swapgs` BEFORE the sixteen register
      * pops, so any exception landing in that ~20-instruction window
@@ -484,6 +494,24 @@ user_iret_label:
 
 .Lrestore_kernel_tail:
     /* no signal delivery on kernel-origin returns */
+    /* R67 (scribbled-frame guard, kernel tail): a kernel-origin frame's
+     * rip is ALWAYS inside the kernel image [KIMG_BASE, KIMG_END) — the
+     * kernel has no modules, no exec anywhere else. The residual x86
+     * wild-jump family (scribble3/4 hunts: rip=0x4c with cs=8 and
+     * rflags=0xc13, rip=user-code with cs=8, torn rip=0x30ff03f8_80434c81,
+     * rip=stack-address) is exactly this check's complement: a parked
+     * frame whose control tail was overwritten by a wild writer, then
+     * loaded by this iretq — the kernel executed user page-0 bytes and
+     * cascaded. Refuse the frame: report forensics and kill the task
+     * (the frame's owner is doomed; the SYSTEM survives — the Linux
+     * fixup_bad_iret discipline for the bad-frame class). */
+    movq PT_RIP(%rbp), %rax
+    movabsq $0xffffffff80000000, %rdx
+    cmpq %rdx, %rax
+    jb .Lbad_frame
+    movabsq $0xffffffff81000000, %rdx
+    cmpq %rdx, %rax
+    jae .Lbad_frame
     popq %r15
     popq %r14
     popq %r13
@@ -501,6 +529,19 @@ user_iret_label:
     popq %rdi
     addq $8, %rsp                /* skip orig_rax/error-code slot */
     iretq                        /* pops rip,cs,rflags,rsp,ss */
+
+.Lbad_frame:
+    /* Frame failed the exit validation. RBP still holds the frame; hand
+     * it to the Rust validator which dumps forensics and do_exit()s the
+     * task (never returns). RSP is 16-aligned from .Lrestore_all's
+     * movq %rbp,%rsp path... it is whatever the frame gave us; align for
+     * the call. */
+    movq %rbp, %rdi
+    andq $-16, %rsp
+    call x86_bad_frame_exit
+1:  cli
+    hlt
+    jmp 1b
 
 /* ============================================================================
  * ret_from_fork — first instruction of a forked child

@@ -3535,7 +3535,25 @@ pub fn cpu_idle_loop() -> ! {
         // task whose owning slot is NOT actually running it (slot current
         // is idle or someone else). Genuine on-CPU tasks are skipped by
         // the slot check; re-linked ones print a one-shot tripwire.
-        unsafe { harvest_orphan_tasks(cpu_id); }
+        //
+        // x86-scribble4 gate: riscv64 only. The harvest's steal decision
+        // is a TIME heuristic (5s scheduler-tick staleness via softlockup
+        // TOUCH_TS, 3-jiffy shape persistence) calibrated on the riscv64
+        // TCG hosts the R56 forensics ran on. On x86_64 q35/MTTCG under
+        // concurrent host load a healthy vCPU is regularly starved past
+        // the 5s gate; the harvester then STEALS a task that is alive on
+        // its CPU (capture: "R56-SLOT-CAPTURE-HEALED cpu=2 pid=1" —
+        // pid 1 legitimately cycling on cpu 2 — followed within the same
+        // tick by the scribble crash chain: BAD-FRAME rip=02ffffff80444b60,
+        // #UD, byte-7-corrupted stack pointers). The steal re-opens the
+        // double-run window R65 closed. Until the confirmation gates are
+        // tuned for x86 timing, the harvest stays riscv64-only; R56c
+        // (lying-slot heal, refused unless idle-marked and unlinked) and
+        // R56d (own-slot resync) remain active on both arches.
+        #[cfg(feature = "riscv64")]
+        {
+            unsafe { harvest_orphan_tasks(cpu_id); }
+        }
 
         // Ensure IRQs are enabled before each schedule() call.
         // When the idle task is switched back to (from a task that called

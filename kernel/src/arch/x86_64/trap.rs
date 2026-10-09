@@ -684,6 +684,36 @@ pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
     }
 }
 
+/// R67 (scribbled-frame guard): trap_exit's exit validation rejected the
+/// frame `regs` — a kernel-origin tail whose rip is outside the kernel
+/// image, or a user tail without the exact user selectors. That is the
+/// residual x86 wild-jump family's loading point: a parked frame whose
+/// control words were overwritten by a wild writer (observed shapes:
+/// rip=0x4c/cs=8/rflags=0xc13, rip=user-code/cs=8, torn
+/// rip=0x30ff03f8_80434c81, rip=stack-address) used to be fed straight
+/// to iretq, executing user page-0 bytes in kernel mode and cascading
+/// into the panic-recursion captures (b18/w75: identical frames, rsi=0x40,
+/// rflags TF|DF set, IF clear). Linux's answer for this class is
+/// fixup_bad_iret: the frame's owner dies, the system lives. Dump
+/// forensics first (the moment of detection is the closest we ever get
+/// to the writer), then do_exit — this never returns.
+#[no_mangle]
+pub extern "C" fn x86_bad_frame_exit(regs: *mut PtRegs) -> ! {
+    // Forensics: full scribble crash capture (raw console; gated on
+    // dfx=scribble inside crash_report itself).
+    if !regs.is_null() {
+        // SAFETY: diagnostic reads of the frame trap_exit just validated
+        // (and rejected); the memory is the current task's stack.
+        unsafe {
+            crate::dfx::scribble::crash_report(b"BAD-FRAME", &*regs);
+        }
+    }
+    // Route the owner out like any fatal-user-fault: SIGSEGV, default
+    // disposition kills. do_exit never returns.
+    crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+    unreachable!("do_exit returned from bad-frame exit");
+}
+
 /// Is `frame` inside `task`'s kernel stack [bottom, top)?  False for null
 /// tasks and unowned early-boot entries (caller checks null separately).
 fn frame_in_task_stack(task: *mut crate::process::task::Task, frame: usize) -> bool {

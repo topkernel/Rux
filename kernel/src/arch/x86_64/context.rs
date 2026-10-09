@@ -124,8 +124,15 @@ __switch_to:
     # everything below is register loads and the ret itself.
     testq %rbx, %rbx
     jz   1f
-    movq $0,  {task_on_cpu}(%rbx)   # prev->ti_on_cpu = false (x86-TSO release)
-    movq $-1, {task_claim}(%rbx)    # prev->running_on_cpu = -1
+    # Single ALIGNED 8-byte store of the packed pair (ti_on_cpu=false,
+    # running_on_cpu=-1) (R67). The old form was TWO overlapping 8-byte
+    # stores — `movq $0, +0x38` then `movq $-1, +0x3c` — where the second,
+    # misaligned qword store also wrote 0xffffffff into the LOW half of
+    # the next field (ti_a0 at +0x40), and the first briefly published
+    # the transient pair (false, claim=0) ("cpu0 owns this continuation").
+    # The packed store is atomic on x86-TSO and touches nothing else.
+    movabsq $0xffffffff00000000, %rax
+    movq %rax, {task_on_cpu}(%rbx)
 1:
 
     # 4. Restore next's context.  r12 (holding `next`) is reloaded LAST.
@@ -147,7 +154,6 @@ __switch_to:
 "#,
     task_thread = const core::mem::offset_of!(Task, thread),
     task_on_cpu = const core::mem::offset_of!(Task, ti_on_cpu),
-    task_claim = const core::mem::offset_of!(Task, running_on_cpu),
     callee_rbx = const core::mem::offset_of!(crate::arch::thread::CalleeSaved, rbx),
     callee_rbp = const core::mem::offset_of!(crate::arch::thread::CalleeSaved, rbp),
     callee_r12 = const core::mem::offset_of!(crate::arch::thread::CalleeSaved, r12),
