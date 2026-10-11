@@ -35,6 +35,25 @@ impl FxsaveArea {
     pub const fn zeroed() -> Self {
         FxsaveArea { bytes: [0; 512] }
     }
+
+    /// ABI initial image — what Linux's fpstate_init hands a fresh task.
+    ///
+    /// fxsave64 layout: FCW at 0 (u16), abridged FTW at 4 (u8), MXCSR at
+    /// 24 (u32).  All-zero bytes decode as FCW=0 and MXCSR=0, i.e. every
+    /// x87 and SSE exception UNMASKED — fxrstor of a zeroed image leaves
+    /// the task one inexact libm result away from a #MF/#XM trap loop.
+    /// The ABI initial state masks all exceptions: FCW=0x037F, FTW=0xFF
+    /// (all registers empty), MXCSR=0x1F80 (masked, round-to-nearest).
+    /// MXCSR_MASK (offset 28) is ignored by fxrstor.
+    pub const fn initial() -> Self {
+        let mut a = FxsaveArea { bytes: [0; 512] };
+        a.bytes[0] = 0x7F; // FCW lo
+        a.bytes[1] = 0x03; // FCW hi  (0x037F)
+        a.bytes[4] = 0xFF; // abridged FTW: all registers empty
+        a.bytes[24] = 0x80; // MXCSR lo
+        a.bytes[25] = 0x1F; // MXCSR hi (0x1F80)
+        a
+    }
 }
 
 /// Thread structure — arch-specific task state
@@ -99,17 +118,20 @@ impl ThreadStruct {
 
     /// Restore FPU state after a switch-in (fxrstor64).
     ///
-    /// A task with no saved image (never ran FP since fork/exec) gets a
-    /// deterministic zeroed FPU instead of the previous task's registers —
-    /// cross-task numeric pollution plus information leakage otherwise
-    /// (review ARCH-H1 parity with the riscv64 twin).
+    /// A task with no saved image (never ran FP since fork/exec) gets the
+    /// deterministic ABI initial state instead of the previous task's
+    /// registers — cross-task numeric pollution plus information leakage
+    /// otherwise (review ARCH-H1 parity with the riscv64 twin).  fninit
+    /// fixes the x87 side but NOT MXCSR, so the fallback must also load
+    /// the default MXCSR: the live register still belongs to whichever
+    /// task ran last on this CPU.
     ///
     /// # Safety
     /// Must run in the task's own context on the local CPU.
     pub unsafe fn restore_fpu(&mut self) {
         // SAFETY: fxrstor64 reads the 512-byte image written by
-        // fpu_save_for_switch (or zeroed by mark_fpu_clean); fninit +
-        // pxor give the ABI initial state when no image exists.
+        // fpu_save_for_switch (or built by mark_fpu_clean); the fallback
+        // below establishes the ABI initial state when no image exists.
         unsafe {
             if self.fpu_valid {
                 core::arch::asm!(
@@ -120,6 +142,7 @@ impl ThreadStruct {
             } else {
                 core::arch::asm!(
                     "fninit",
+                    "ldmxcsr ({mxcsr})",
                     "pxor %xmm0, %xmm0",
                     "pxor %xmm1, %xmm1",
                     "pxor %xmm2, %xmm2",
@@ -136,16 +159,19 @@ impl ThreadStruct {
                     "pxor %xmm13, %xmm13",
                     "pxor %xmm14, %xmm14",
                     "pxor %xmm15, %xmm15",
+                    mxcsr = in(reg) &MXCSR_DEFAULT,
                     options(att_syntax, nostack),
                 );
             }
         }
     }
 
-    /// Mark the FPU area as a valid zeroed image (fork/exec parity with
-    /// riscv64's SR_FS_CLEAN semantics).
+    /// Mark the FPU area as a valid ABI-initial image (fork/exec parity
+    /// with riscv64's SR_FS_CLEAN semantics).  Must NOT be a plain zeroed
+    /// image: fxrstor would load FCW=0/MXCSR=0 and unmask every FP
+    /// exception (see FxsaveArea::initial).
     pub fn mark_fpu_clean(&mut self) {
-        self.fpu = FxsaveArea::zeroed();
+        self.fpu = FxsaveArea::initial();
         self.fpu_valid = true;
     }
 
@@ -188,6 +214,18 @@ pub unsafe fn fpu_init() {
         cr0 |= 1 << 1; // set MP (monitor coprocessor)
         core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
 
-        core::arch::asm!("fninit", options(nostack, preserves_flags));
+        // fninit alone leaves MXCSR at its reset-unknown value; load the
+        // ABI default explicitly so the boot CPU starts fully masked too.
+        // (ldmxcsr is m32-only — no register form.)
+        core::arch::asm!(
+            "fninit",
+            "ldmxcsr [{mxcsr}]",
+            mxcsr = in(reg) &MXCSR_DEFAULT,
+            options(nostack, preserves_flags),
+        );
     }
 }
+
+/// ABI-default MXCSR (all exceptions masked, round-to-nearest); kept in
+/// .rodata so ldmxcsr has an m32 operand without touching the stack.
+static MXCSR_DEFAULT: u32 = 0x1F80;

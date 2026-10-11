@@ -833,6 +833,7 @@ mod vec {
     pub const PF: u64 = 14;
     pub const MF: u64 = 16; // x87 math fault
     pub const AC: u64 = 17; // alignment check
+    pub const XM: u64 = 19; // SIMD (SSE) math fault
     pub const CP: u64 = 21; // control protection
     pub const IRQ0: u64 = 32; // PIC timer vector (virtual-wire fallback)
     pub const IRQ_LAST: u64 = 47; // PIC slave line 15 vector
@@ -922,7 +923,9 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                 vec::UD => handle_illegal_instruction(regs_ref),
                 vec::GP => handle_general_protection(regs_ref),
 
-                vec::DE | vec::OF | vec::BR | vec::MF => handle_arith_exception(regs_ref, vector),
+                vec::DE | vec::OF | vec::BR | vec::MF | vec::XM => {
+                    handle_arith_exception(regs_ref, vector)
+                }
                 vec::AC => handle_alignment_check(regs_ref),
 
                 vec::BP => handle_breakpoint(regs_ref),
@@ -1159,11 +1162,17 @@ fn handle_general_protection(regs: &mut PtRegs) {
     }
 }
 
-/// Arithmetic exceptions: #DE / #OF / #BR / #XM → SIGFPE.
+/// Arithmetic exceptions: #DE / #OF / #BR / #MF / #XM → SIGFPE.
 fn handle_arith_exception(regs: &mut PtRegs, vector: u64) {
     crate::pr_debug!("trap: arith exception {:#x} at rip={:#x}", vector, regs.rip);
     if regs.user_mode() {
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGFPE as i32));
+        // Linux delivers SIGFPE (catchable — fenv/overflow tests install
+        // handlers); only the default disposition kills the task.
+        let pid = crate::process::current_pid();
+        let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGFPE as i32);
+        if !sigfpe_has_handler() {
+            crate::process::exit::do_exit(-(crate::signal::Signal::SIGFPE as i32));
+        }
     } else {
         panic!("trap: arith exception {:#x} in kernel mode at rip={:#x}", vector, regs.rip);
     }
@@ -1310,6 +1319,14 @@ fn sigsegv_has_handler() -> bool {
 fn sigbus_has_handler() -> bool {
     crate::sched::current()
         .and_then(|t| (*t).signal.as_ref().map(|s| s.get_action(7)))
+        .map(|a| a.is_some_and(|a| a.has_handler()))
+        .unwrap_or(false)
+}
+
+/// SIGFPE (8) disposition check for the arith-exception path.
+fn sigfpe_has_handler() -> bool {
+    crate::sched::current()
+        .and_then(|t| (*t).signal.as_ref().map(|s| s.get_action(8)))
         .map(|a| a.is_some_and(|a| a.has_handler()))
         .unwrap_or(false)
 }
