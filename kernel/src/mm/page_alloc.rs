@@ -404,6 +404,78 @@ pub fn free_pages(addr: usize, order: usize) {
         return;
     }
 
+    // SIGILL-stamp tripwire (gnome-sigill diagnostic): a STAMPED frame
+    // (file-fill page of a user mapping) reached the allocator from a
+    // path the teardown adjudicator (mmu_init::release_user_leaf) does
+    // not cover.
+    //   owner == dying pid : legal final put of the owner's own frame —
+    //       drop the stamp and allow the free (counted, silent: printk
+    //       from free contexts wedges the box).
+    //   owner != dying pid : foreign free — the frame may still be mapped
+    //       by a live process (its r-x text); recycling it is the SIGILL
+    //       mechanism. Under dfx=mmforensics refuse the free (leak) and
+    //       print the evidence; with the switch off, clear the stamp and
+    //       keep the historical allocator behavior.
+    // The walk-path (exit/unmap) frees are adjudicated properly in
+    // release_user_leaf — owner-map scan, lifecycle replay, refusal.
+    static TEXT_OWN_FREES: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    {
+        let pfn = phys_to_pfn(addr);
+        let stamped = if order == 0 {
+            crate::mm::page_desc::text_stamp_get(pfn)
+        } else {
+            // block free: check the first and last member
+            match crate::mm::page_desc::text_stamp_get(pfn) {
+                Some(s) => Some(s),
+                None => crate::mm::page_desc::text_stamp_get(
+                    pfn + (1usize << order) - 1,
+                ),
+            }
+        };
+        if let Some((owner_pid, owner_va)) = stamped {
+            let dying = crate::process::current_pid();
+            if owner_pid == dying {
+                crate::mm::page_desc::text_stamp_remove(pfn);
+                // Silent by design: printing from free_pages contexts (any
+                // spinlock-holding path can free pages) floods printk and
+                // perturbs timing enough to soft-lockup the box. The count
+                // is readable from the FOREIGN report below.
+                TEXT_OWN_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            } else if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::MmForensics,
+            ) {
+                crate::mm::page_desc::text_stamp_remove(pfn);
+                #[cfg(feature = "riscv64")]
+                {
+                    // Attribution: the dying context's page-table ROOT (to
+                    // correlate with the FUT teardown ring / EARLY-ROOT-FREE
+                    // witnesses) plus a symbolizable kernel backtrace via
+                    // the dfx unwinder (printk-free console writer, safe
+                    // under the locks this path can hold).
+                    let root = crate::sched::current()
+                        .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
+                        .unwrap_or(0);
+                    crate::pr_err!(
+                        "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} dying_root={:#x} ownfrees={} — free REFUSED (leaked)",
+                        pfn, order, owner_pid, owner_va, dying, root,
+                        TEXT_OWN_FREES.load(core::sync::atomic::Ordering::Relaxed)
+                    );
+                    crate::dfx::backtrace::dump_stack();
+                }
+                #[cfg(not(feature = "riscv64"))]
+                crate::pr_err!(
+                    "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} — free REFUSED (leaked)",
+                    pfn, order, owner_pid, owner_va, dying
+                );
+                return;
+            } else {
+                // Switch off: keep historical behavior, just drop the stamp.
+                crate::mm::page_desc::text_stamp_remove(pfn);
+            }
+        }
+    }
+
     // DFX memwatch: attribute the free back to the site that stamped this
     // block (page-level leak accounting — see dfx::memwatch).
     crate::dfx::memwatch::note_page_free(addr, order);

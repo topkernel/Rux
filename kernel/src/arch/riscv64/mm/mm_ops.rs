@@ -667,16 +667,16 @@ impl MmStruct {
                             addr / PAGE_SIZE_USIZE,
                         );
                     }
-                    if unsafe { (*page).is_mapped() } {
-                        // SAFETY: page is non-null (checked above) and points to a valid page
-                        // descriptor for a mapped page in this address space.
-                        crate::mm::rmap::page_remove_rmap(unsafe { &*page });
-                    }
-                    // SAFETY: page descriptor for a page mapped by this address space.
-                    let new_ref = unsafe { (*page).put_page() };
-                    if new_ref == 0 {
-                        crate::mm::page_alloc::free_pages(
-                            (ppn_val as usize) << PAGE_SHIFT, 0,
+                    // SIGILL-stamp adjudicated release (gnome-sigill):
+                    // stamp lifecycle, put_page, and the foreign-free
+                    // refusal/refusal-report in one place.
+                    // SAFETY: page is non-null and is a leaf frame mapped
+                    // by this address space at `addr`.
+                    unsafe {
+                        crate::arch::mm::mmu_init::release_user_leaf(
+                            page,
+                            ppn_val as usize,
+                            addr,
                         );
                     }
                 }
@@ -1614,8 +1614,16 @@ pub unsafe fn copy_page_table_cow(
 
                     if !page.is_null() {
                         // Increment refcount for shared user pages (one ref per sharer)
-                        (*page).get_page();
+                        let after = (*page).get_page();
                         (*page).inc_mapcount();
+                        // Lifecycle ring (gnome-sigill): this fork just
+                        // took a reference on a stamped (file-fill) frame.
+                        crate::mm::page_desc::text_stamp_note(
+                            phys_ppn,
+                            crate::process::current_pid() as u32,
+                            'K',
+                            after,
+                        );
 
                         if is_writable && !cow_exempt_leaf {
                             // COW: mark both parent and child PTEs as read-only
@@ -1837,8 +1845,23 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultR
     // mapping reference.  Without dec_mapcount the count leaks across
     // COW cycles and eventually corrupts page reclaim / rmap decisions.
     if !old_page.is_null() {
-        (*old_page).put_page();
+        let after = (*old_page).put_page();
         (*old_page).dec_mapcount();
+        // Stamp lifecycle (gnome-sigill): the faulting process no longer
+        // maps the OLD frame — if it owned the text stamp, drop it, or
+        // the fork peer's later LEGAL final free is refused as foreign
+        // (the TEXTFREE-STALE false-positive family). Record the event
+        // either way for the lifecycle ring.
+        crate::mm::page_desc::text_stamp_note(
+            old_ppn as usize,
+            crate::process::current_pid() as u32,
+            'C',
+            after,
+        );
+        crate::mm::page_desc::text_stamp_remove_if_owner(
+            old_ppn as usize,
+            crate::process::current_pid() as u32,
+        );
     }
 
     // Set up reverse mapping for the new COW page

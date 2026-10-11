@@ -774,6 +774,236 @@ pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
     PTEI_RING[i].ppn.store(ppn, Relaxed);
 }
 
+// ==================== SIGILL foreign-free adjudication (gnome-sigill) ====================
+
+/// Scan `root_ppn`'s user half for leaf PTEs mapping `pfn`; returns
+/// (total_hits, up to 4 vas). Read-only, called only from the rare
+/// foreign-free report path.
+fn owner_maps_pfn(root_ppn: u64, pfn: usize) -> (usize, [usize; 4]) {
+    let mut hits = 0usize;
+    let mut vas = [0usize; 4];
+    if root_ppn == 0 {
+        return (hits, vas);
+    }
+    // SAFETY: diagnostic read-only walk of a live task's page-table tree
+    // (serialized by the caller's PTE_MODIFY_LOCK); every table pointer is
+    // derived from a valid PTE chain.
+    unsafe {
+        let root = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        for vpn2 in 0..crate::arch::mm::memory_layout::KERNEL_PGD_START {
+            let pte2 = (*root).get(vpn2);
+            if !pte2.is_valid() || pte2.is_leaf() {
+                continue; // 1G user leaf: no file text lives there in practice
+            }
+            let t1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+            for vpn1 in 0..512 {
+                let pte1 = (*t1).get(vpn1);
+                if !pte1.is_valid() || pte1.is_leaf() {
+                    continue;
+                }
+                let t0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+                for vpn0 in 0..512 {
+                    let pte0 = (*t0).get(vpn0);
+                    if !pte0.is_valid() || !pte0.is_leaf() || !pte0.is_user() {
+                        continue;
+                    }
+                    if pte0.ppn() as usize == pfn {
+                        if hits < vas.len() {
+                            vas[hits] = (vpn2 << 30) | (vpn1 << 21) | (vpn0 << 12);
+                        }
+                        hits += 1;
+                    }
+                }
+            }
+        }
+    }
+    (hits, vas)
+}
+
+/// Look up task `pid`; when alive, count its live PTEs mapping `pfn`
+/// (0 when the task is gone or maps it nowhere) — the shared adjudication
+/// probe for the TEXTFREE-* / FILL-DOUBLE reports (gnome-sigill).
+pub(crate) fn textfree_owner_maps(owner_pid: u32, pfn: usize) -> usize {
+    // SAFETY: pid-hash lookup; the returned Task is only read (pid, mm
+    // root) on this rare diagnostic path.
+    let owner_task = unsafe { crate::sched::find_task_by_pid(owner_pid) };
+    let owner_found = !owner_task.is_null() && unsafe { (*owner_task).pid() == owner_pid };
+    if !owner_found {
+        return 0;
+    }
+    let root = unsafe { (*owner_task).address_space() }
+        .map(|mm| mm.root_ppn())
+        .unwrap_or(0);
+    if root == 0 {
+        return 0;
+    }
+    let (hits, _) = owner_maps_pfn(root, pfn);
+    hits
+}
+
+/// Teardown-walker leaf release with stamp adjudication (gnome-sigill).
+/// The classic sequence (rmap drop, put_page, free at zero), but a frame
+/// whose refcount hits zero while the text stamp names a DIFFERENT owner
+/// is adjudicated first:
+///   - owner task gone, or owner no longer maps the frame anywhere:
+///     STALE STAMP (e.g. the owner COW-resolved away and left the stamp).
+///     The free is the legal final put — clear the stamp, allow it.
+///   - owner alive and STILL mapping the frame: REAL foreign free — the
+///     zeroed-text SIGILL mechanism (recycling a live text page). Refuse
+///     (leak) and print the frame's lifecycle from the event ring.
+/// Returns true when the frame was returned to the allocator.
+pub(crate) unsafe fn release_user_leaf(
+    page: *mut crate::mm::page_desc::Page,
+    pfn: usize,
+    va: usize,
+) -> bool {
+    use crate::mm::page_desc::PageFlag;
+    if page.is_null() {
+        return false;
+    }
+    let stamp = crate::mm::page_desc::text_stamp_get(pfn);
+    if (*page).is_mapped() {
+        crate::mm::rmap::page_remove_rmap(&*page);
+    }
+    let new_ref = (*page).put_page();
+    let dying = crate::process::current_pid() as u32;
+    if stamp.is_some() {
+        crate::mm::page_desc::text_stamp_note(pfn, dying, 'T', new_ref);
+    }
+    // Stamp visibility policy (gnome-sigill): do NOT clear the stamp when
+    // the owner exits with sharers remaining (new_ref > 0). The frame may
+    // be inherited by grandchildren whose later frees must stay visible to
+    // the tripwire; the owner-GONE case is adjudicated as a legal final
+    // free at refcount 0 instead (TEXTFREE-STALE). The stamp is cleared
+    // only when the frame actually returns to the allocator, when the
+    // owner's MAPPING goes away (COW/munmap), or at FILL time.
+    if new_ref != 0 {
+        return false;
+    }
+    if let Some((owner_pid, owner_va)) = stamp {
+        if owner_pid != dying
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics)
+        {
+            // Who is the owner right now?
+            let owner_task = crate::sched::find_task_by_pid(owner_pid);
+            let owner_found =
+                !owner_task.is_null() && (*owner_task).pid() == owner_pid;
+            let (maps, root) = if owner_found {
+                let root = (*owner_task)
+                    .address_space()
+                    .map(|mm| mm.root_ppn())
+                    .unwrap_or(0);
+                (owner_maps_pfn(root, pfn), root)
+            } else {
+                ((0, [0usize; 4]), 0)
+            };
+            // Unified adjudication: the stamp owner testifies when it can;
+            // whenever it cannot (gone, or maps the frame nowhere), scan
+            // EVERY live task — a refcount-0 free under ANY live PTE is
+            // the REAL crime (the zeroed-text SIGILL mechanism), even when
+            // the mapper is a grandchild the stamp never named.
+            let mut live_mapper: u32 = 0;
+            let mut mapper_va = 0usize;
+            if !owner_found {
+                let lm = core::sync::atomic::AtomicU32::new(0);
+                let mv = core::sync::atomic::AtomicUsize::new(0);
+                crate::sched::for_each_task(|t| {
+                    if lm.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+                        return;
+                    }
+                    if (*t).pid() == dying {
+                        return;
+                    }
+                    // SAFETY: diagnostic read-only pid + mm-root access on
+                    // the rare report path (same pattern as task_pid_alive).
+                    let root = unsafe { (*t).address_space() }
+                        .map(|mm| mm.root_ppn())
+                        .unwrap_or(0);
+                    if root != 0 {
+                        let (hits, vas) = owner_maps_pfn(root, pfn);
+                        if hits > 0 {
+                            lm.store((*t).pid(), core::sync::atomic::Ordering::Relaxed);
+                            mv.store(vas[0], core::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                });
+                live_mapper = lm.load(core::sync::atomic::Ordering::Relaxed);
+                mapper_va = mv.load(core::sync::atomic::Ordering::Relaxed);
+            }
+            if owner_found && maps.0 == 0 && live_mapper == 0 {
+                // STALE stamp: this free is the legal final put.
+                crate::mm::page_desc::text_stamp_note(pfn, dying, 'S', 0);
+                static STALE_REPORTS: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if STALE_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                    crate::pr_err!(
+                        "TEXTFREE-STALE pfn={:#x} dying={} dying_va={:#x} owner={} stamp_va={:#x} owner=alive, maps pfn NOWHERE — stamp cleared, free allowed",
+                        pfn, dying, va, owner_pid, owner_va
+                    );
+                }
+                crate::mm::page_desc::text_stamp_remove(pfn);
+            } else if !owner_found && live_mapper == 0 {
+                crate::mm::page_desc::text_stamp_note(pfn, dying, 'S', 0);
+                static STALE_REPORTS2: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if STALE_REPORTS2.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                    crate::pr_err!(
+                        "TEXTFREE-STALE pfn={:#x} dying={} dying_va={:#x} owner={} stamp_va={:#x} owner=task gone, no live mapper — stamp cleared, free allowed",
+                        pfn, dying, va, owner_pid, owner_va
+                    );
+                }
+                crate::mm::page_desc::text_stamp_remove(pfn);
+            } else {
+                // REAL foreign free: leak + full evidence.
+                crate::mm::page_desc::text_stamp_note(pfn, dying, 'R', 0);
+                let (rc, mc, cow, anon, lru, freelist) = (
+                    (*page).refcount(),
+                    (*page).mapcount(),
+                    (*page).test_flag(PageFlag::Cow),
+                    (*page).test_flag(PageFlag::Anonymous),
+                    (*page).test_flag(PageFlag::Lru),
+                    (*page).test_flag(PageFlag::OnFreelist),
+                );
+                crate::pr_err!(
+                    "TEXTFREE-REAL pfn={:#x} dying={} dying_va={:#x} owner={} stamp_va={:#x} owner_found={} owner_root={:#x} maps_pfn={}x first_vas={:#x},{:#x} other_mapper={}@{:#x} — free REFUSED (leak); page rc={} mc={} cow={} anon={} lru={} freelist={}",
+                    pfn, dying, va, owner_pid, owner_va, owner_found, root, maps.0,
+                    maps.1[0], maps.1[1], live_mapper, mapper_va,
+                    rc, mc, cow, anon, lru, freelist
+                );
+                // Replay this frame's recorded lifecycle (ring scan).
+                use core::sync::atomic::Ordering::Relaxed;
+                use crate::mm::page_desc::TEXT_EVT_RING;
+                let cur = crate::mm::page_desc::TEXT_EVT_CURSOR.load(Relaxed);
+                let mut shown = 0;
+                for k in 0..TEXT_EVT_RING.len() {
+                    let idx = (cur + TEXT_EVT_RING.len() - 1 - k) % TEXT_EVT_RING.len();
+                    let e = &TEXT_EVT_RING[idx];
+                    if e.pfn.load(Relaxed) as usize == pfn {
+                        let site = e.site.load(Relaxed) as u8 as char;
+                        crate::pr_err!(
+                            "  EVT[{}] pfn={:#x} pid={} site={} refc={}",
+                            k, pfn, e.pid.load(Relaxed), site, e.refc.load(Relaxed)
+                        );
+                        shown += 1;
+                        if shown >= 24 {
+                            break;
+                        }
+                    }
+                }
+                if shown == 0 {
+                    crate::pr_err!("  EVT: no ring history for pfn={:#x}", pfn);
+                }
+                return false;
+            }
+        } else {
+            crate::mm::page_desc::text_stamp_remove(pfn);
+        }
+    }
+    crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    free_pages(pfn << 12, 0);
+    true
+}
+
 pub unsafe fn free_user_page_tables(root_ppn: u64) {
     use crate::mm::{pfn_to_page, pfn_to_page_mut, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
     crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -851,14 +1081,8 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
             let pfn = phys_to_pfn(phys_addr as usize);
             let page = pfn_to_page(pfn);
             if !page.is_null() {
-                if (*page).is_mapped() {
-                    crate::mm::rmap::page_remove_rmap(&*page);
-                }
-                let new_ref = (*page).put_page();
-                if new_ref == 0 {
-                    crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    free_pages(phys_addr as usize, 0);
-                }
+                // SIGILL-stamp adjudicated release (gnome-sigill)
+                release_user_leaf(page as *mut _, pfn, vpn2 << 30);
             }
             continue;
         }
@@ -905,14 +1129,8 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 let pfn = phys_to_pfn(phys_addr as usize);
                 let page = pfn_to_page(pfn);
                 if !page.is_null() {
-                    if (*page).is_mapped() {
-                        crate::mm::rmap::page_remove_rmap(&*page);
-                    }
-                    let new_ref = (*page).put_page();
-                    if new_ref == 0 {
-                        crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        free_pages(phys_addr as usize, 0);
-                    }
+                    // SIGILL-stamp adjudicated release (gnome-sigill)
+                    release_user_leaf(page as *mut _, pfn, (vpn2 << 30) | (vpn1 << 21));
                 }
                 continue;
             }
@@ -960,15 +1178,12 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     continue;
                 }
 
-                if (*page).is_mapped() {
-                    crate::mm::rmap::page_remove_rmap(&*page);
-                }
-
-                let new_ref = (*page).put_page();
-                if new_ref == 0 {
-                    crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    free_pages(phys_addr as usize, 0);
-                }
+                // SIGILL-stamp adjudicated release (gnome-sigill)
+                release_user_leaf(
+                    page as *mut _,
+                    pfn,
+                    (vpn2 << 30) | (vpn1 << 21) | (vpn0 << 12),
+                );
             }
             // FORENSIC: census the L0 table before freeing it.
             if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn0) {

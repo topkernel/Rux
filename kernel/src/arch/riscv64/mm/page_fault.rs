@@ -666,6 +666,48 @@ file.set_pos(saved_pos);
                     }
                     _ => {
                         // File-backed: rmap not wired yet
+                        // SIGILL-stamp (gnome-sigill): record this frame as
+                        // a live file-fill page owned by (pid, va) — the
+                        // teardown walkers adjudicate frees against the
+                        // stamp (see mmu_init::release_user_leaf).
+                        let displaced =
+                            crate::mm::page_desc::text_stamp_insert(
+                                page_pfn,
+                                crate::process::current_pid() as u32,
+                                fault_addr.bits() as usize,
+                            );
+                        crate::mm::page_desc::text_stamp_note(
+                            page_pfn,
+                            crate::process::current_pid() as u32,
+                            'F',
+                            1,
+                        );
+                        if let Some((prev_pid, prev_va)) = displaced {
+                            // FILL-DOUBLE (gnome-sigill): this frame was
+                            // JUST filled for (pid, va) while still stamped
+                            // live for (prev_pid, prev_va). Either the
+                            // allocator handed the frame out twice, or a
+                            // free path returned it without clearing the
+                            // stamp — both are zeroed-text-SIGILL family.
+                            // Adjudicate the previous owner before printing.
+                            let alive_and_maps = crate::arch::mm::mmu_init::
+                                textfree_owner_maps(prev_pid, page_pfn);
+                            static FILLDOUBLE_REPORTS:
+                                core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if FILLDOUBLE_REPORTS.fetch_add(
+                                1, core::sync::atomic::Ordering::Relaxed,
+                            ) < 16 {
+                                crate::pr_err!(
+                                    "FILL-DOUBLE pfn={:#x} new=(pid={} va={:#x}) prev=(pid={} va={:#x}) prev_owner_maps={}",
+                                    page_pfn,
+                                    crate::process::current_pid(),
+                                    fault_addr.bits(),
+                                    prev_pid, prev_va,
+                                    alive_and_maps
+                                );
+                            }
+                        }
                     }
                 }
             }
