@@ -438,6 +438,28 @@ pub const TIF_UPROBE: u32 = 3;
 /// TIF_MEMDIE - exiting (out of memory)
 pub const TIF_MEMDIE: u32 = 4;
 
+/// R56-heal pick-state machine values (Task::ti_pick_state).
+/// PICKED: published by mark_picked_on_cpu under the GRQ.
+/// LIVE: affirmed by __switch_to's CAS(0 -> 1) right before the register
+/// restore (or by the next == prev fast-path repick publish).
+/// REVOKED: the harvester's CAS(0 -> 2) — the picker's switch-in aborts.
+pub const PICK_PICKED: u32 = 0;
+pub const PICK_LIVE: u32 = 1;
+pub const PICK_REVOKED: u32 = 2;
+
+/// R56-heal: pin the layout facts the aligned ownership-qword stores
+/// (publish_pick_ownership / release_pick_ownership, and the switch asm)
+/// rely on, at compile time — ti_on_cpu is 8-byte aligned and
+/// running_on_cpu sits at +4 inside the same qword.
+const _: () = {
+    assert!(core::mem::offset_of!(Task, ti_on_cpu) % 8 == 0);
+    assert!(
+        core::mem::offset_of!(Task, running_on_cpu)
+            == core::mem::offset_of!(Task, ti_on_cpu) + 4
+    );
+    assert!(core::mem::offset_of!(Task, ti_pick_state) % 4 == 0);
+};
+
 /// Task Control Block
 ///
 ///
@@ -518,6 +540,15 @@ pub struct Task {
     /// publish. Unlike ti_on_cpu, nothing but the switch path touches it —
     /// a second claim while one is held is an unambiguous double-run.
     pub running_on_cpu: core::sync::atomic::AtomicI32,
+
+    /// R56-heal pick-state machine (see PICK_PICKED/PICK_LIVE/PICK_REVOKED
+    /// above). Arbitrates the slot-capture steal against the picking CPU's
+    /// resume: the steal may only revoke a PICKED pick; a LIVE task is
+    /// never touched. This is what the m25/m26/m27 gnome-boot pfault
+    /// family (heal cpu=2 pid=311, Xorg) tripped over — a
+    /// TCG-starved-but-live vCPU resumed its pick right after the heal
+    /// re-enqueued it, running one task on two harts.
+    pub ti_pick_state: core::sync::atomic::AtomicU32,
 
     /// Scratch registers for trap handling (thread_info.a0/a1/a2)
     ti_a0: core::sync::atomic::AtomicU64,
@@ -1051,6 +1082,7 @@ impl Task {
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
             running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
+            ti_pick_state: core::sync::atomic::AtomicU32::new(PICK_PICKED),
             journal_handle: core::cell::Cell::new(core::ptr::null_mut()),
             task_refcnt: core::sync::atomic::AtomicU32::new(1),
             ti_a0: core::sync::atomic::AtomicU64::new(0),
@@ -1214,6 +1246,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, running_on_cpu)) as *mut core::sync::atomic::AtomicI32,
             core::sync::atomic::AtomicI32::new(-1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pick_state)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(PICK_PICKED),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
@@ -1681,6 +1717,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, running_on_cpu)) as *mut core::sync::atomic::AtomicI32,
             core::sync::atomic::AtomicI32::new(-1),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pick_state)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(PICK_PICKED),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, journal_handle)) as *mut core::cell::Cell<*mut crate::fs::jbd2::Handle>,
@@ -3045,6 +3085,43 @@ impl Task {
         }
     }
 
+    /// R56-heal (lifecycle pin): try to acquire a reference on a task that
+    /// the caller holds VALID ONLY UNDER THE PID-HASH BUCKET LOCK. The
+    /// harvest scan dereferences (and its heals WRITE) task pages far
+    /// beyond the bucket-lock section — an exiting task can complete
+    /// pid_hash_remove + synchronize_rcu + task_put in that window and the
+    /// page returns to the (non-zeroing) allocator, where fork's
+    /// new_task_at immediately reinitializes it: the m25 adjudication
+    /// capture (pb_7) caught exactly that — the steal's pre-revoke read
+    /// saw PICK_LIVE and microseconds later its CAS(PICKED → REVOKED)
+    /// won because fork had rewritten ti_pick_state on the recycled page;
+    /// the heal then linked the half-built child (queue corruption,
+    /// epc=0x0 double panic). A taken pin (same discipline as
+    /// collect_children_pinned / E8-REPAR) defers free_task_slot until
+    /// the healer's own task_put, and the heals' state re-checks refuse a
+    /// task that exited under the pin. Returns false when the page is at
+    /// (or past) its last reference — treat as not healable.
+    pub fn try_pin(task: *mut Task) -> bool {
+        if task.is_null() {
+            return false;
+        }
+        unsafe {
+            let prev = (*task)
+                .task_refcnt
+                .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            if prev == 0 {
+                // Freed (or hash-contract-broken) page: undo our own
+                // increment so a recycled owner is not left with a
+                // permanent extra reference, and refuse the pin.
+                (*task)
+                    .task_refcnt
+                    .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+                return false;
+            }
+            true
+        }
+    }
+
     /// R8-1b: on-CPU flag — set at pick time, cleared by __switch_to after
     /// this task's context is saved. Other CPUs' picks skip on-CPU tasks;
     /// the CPU switching the task out may re-pick itself (no restore).
@@ -3055,7 +3132,102 @@ impl Task {
 
     #[inline]
     pub fn set_on_cpu(&self, v: bool) {
-        self.ti_on_cpu.store(v, core::sync::atomic::Ordering::Release);
+        self.ti_on_cpu.store(v, core::sync::atomic::Ordering::Release)
+    }
+
+    /// R56-heal (pick ownership publish): write the FULL ownership qword
+    /// {ti_on_cpu = true, running_on_cpu = cpu} with one aligned 8-byte
+    /// store — the exact reverse of __switch_to's switch-out release
+    /// (0xFFFFFFFF_00000000) — and reset ti_pick_state for the new pick.
+    /// The claim previously appeared only at switch-in (the Rust wrapper /
+    /// x86 publish), leaving the whole pick → __switch_to window
+    /// claim-less: the slot-capture harvester could revoke a pick that a
+    /// TCG-starved (but perfectly live) vCPU was still about to resume,
+    /// and nothing at the resume point could detect the revocation.
+    /// Publishing the claim at pick time (under the GRQ lock, where no
+    /// other picker can observe the task) gives the switch-in a
+    /// validation point. The authoritative arbitration, however, is
+    /// ti_pick_state: `live` distinguishes a fresh pick (PICKED — the
+    /// resume path must CAS it LIVE before restoring registers) from the
+    /// next == prev fast-path repick (the task never stopped running —
+    /// publish LIVE directly).
+    #[inline]
+    pub fn publish_pick_ownership(&self, cpu: i32, live: bool) {
+        // SAFETY: ti_on_cpu is 8-byte aligned and running_on_cpu sits at
+        // +4 inside the same qword (asserted above); the overlaying
+        // AtomicU64 store keeps the pair consistent for the non-atomic
+        // pick-side readers.
+        let qword = (&self.ti_on_cpu as *const _ as usize)
+            as *const core::sync::atomic::AtomicU64;
+        unsafe {
+            (*qword).store(
+                ((cpu as u32 as u64) << 32) | 1,
+                core::sync::atomic::Ordering::Release,
+            );
+        }
+        self.ti_pick_state.store(
+            if live { PICK_LIVE } else { PICK_PICKED },
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// R56-heal: release both ownership bits with the single aligned
+    /// store the switch-out asm uses ({on_cpu = false, claim = -1}).
+    /// Healer-side twin of publish_pick_ownership.
+    #[inline]
+    pub fn release_pick_ownership(&self) {
+        let qword = (&self.ti_on_cpu as *const _ as usize)
+            as *const core::sync::atomic::AtomicU64;
+        unsafe {
+            (*qword).store(
+                0xFFFF_FFFF_0000_0000,
+                core::sync::atomic::Ordering::Release,
+            );
+        }
+    }
+
+    /// R56-heal (resume-side affirm): atomically PICKED → LIVE. Called by
+    /// the switch-in (__switch_to / x86_switch_publish) as the LAST step
+    /// before the task's registers are restored — winning this CAS is the
+    /// exclusive right to resume the pick. Ok(()) = affirmed (resume);
+    /// Err(observed) = PICK_REVOKED (the harvester stole the pick —
+    /// abort the resume) or a protocol breach (report and abort).
+    #[inline]
+    pub fn try_affirm_pick(&self) -> Result<(), u32> {
+        match self.ti_pick_state.compare_exchange(
+            PICK_PICKED,
+            PICK_LIVE,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(observed) => Err(observed),
+        }
+    }
+
+    /// R56-heal (pick state read) — for the wrapper's early check and the
+    /// harvester's pre-filter.
+    #[inline]
+    pub fn pick_state(&self) -> u32 {
+        self.ti_pick_state.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// R56-heal (healer-side revocation): atomically PICKED → REVOKED.
+    /// Called by the harvester under the GRQ. Returns false when the pick
+    /// must NOT be healed: PICK_LIVE (the task genuinely runs on its
+    /// picking CPU — the m25 lesson: tick staleness under MTTCG proves
+    /// nothing) or an already-consumed REVOKED marker.
+    #[inline]
+    pub fn revoke_pending_pick(&self) -> bool {
+        matches!(
+            self.ti_pick_state.compare_exchange(
+                PICK_PICKED,
+                PICK_REVOKED,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            ),
+            Ok(_)
+        )
     }
 
     /// Set CPU affinity mask.
@@ -4080,6 +4252,8 @@ pub mod task_offsets {
     pub const TI_A0: usize = core::mem::offset_of!(Task, ti_a0);
     pub const TI_A1: usize = core::mem::offset_of!(Task, ti_a1);
     pub const TI_A2: usize = core::mem::offset_of!(Task, ti_a2);
+    /// R56-heal: __switch_to's affirm gate CASes this word (PICKED → LIVE).
+    pub const TI_PICK_STATE: usize = core::mem::offset_of!(Task, ti_pick_state);
 
     // Other common field offsets
     pub const TASK_STATE: usize = core::mem::offset_of!(Task, state);

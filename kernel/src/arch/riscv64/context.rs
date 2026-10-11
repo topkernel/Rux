@@ -99,6 +99,28 @@ __switch_to:
     csrr  t0, sstatus
     sd    t0, {thread_sum}(a3)
 
+    # R56-heal (affirm gate): the pick published ti_pick_state = PICKED(0)
+    # under the GRQ (mark_picked_on_cpu). Atomically affirm it LIVE(1) —
+    # compare_exchange(0 -> 1) — as the LAST step before touching next's
+    # state. The slot-capture harvester revokes pending picks (0 -> 2)
+    # when it mistakes a TCG-starved picker for a dead one; a pick that
+    # fails this CAS (revoked, or already LIVE: protocol breach) must not
+    # be resumed — one task must never run on two harts (the gnome-boot
+    # pfault family). The idle task is never pick-marked — always switch
+    # to it.
+    lw    t5, {task_pid}(a1)        # next->pid
+    beqz  t5, .Lswitch_go           # idle target: never marked, go
+    li    t2, {task_pick_state}
+    add   t2, a1, t2                # &next->ti_pick_state
+.Lr56_affirm:
+    lr.w  t3, (t2)                  # acquire load of the pick state
+    li    t4, 1
+    beq   t3, t4, .Lswitch_abort    # already LIVE: protocol breach
+    bnez  t3, .Lswitch_abort        # 2 = revoked (anything else = garbage)
+    sc.w  t6, t4, (t2)              # try PICKED -> LIVE
+    bnez  t6, .Lr56_affirm          # lost the reservation: retry
+.Lswitch_go:
+
     # NEW2 root cause fix (R8-1b): prev's full context is now saved — make
     # it pickable by other CPUs. The release fence guarantees that a CPU
     # observing on_cpu == 0 also observes the register stores above (its
@@ -171,10 +193,32 @@ __switch_to:
     # the SUM (Supervisor User Memory Access) bit, never SIE.
 
     ret
+
+.Lswitch_abort:
+    # R56-heal: the pick was revoked between mark_picked_on_cpu and this
+    # resume (or the state was already LIVE: breach — same repair).
+    # NOTHING of next has been touched (no ownership release, no SUM
+    # change, no register restore, tp still prev) and prev's context save
+    # above is inert — prev never stopped running. Repair the two things
+    # the Rust wrapper did before us (satp) and the lying sched slot, from
+    # prev's live stack, then return to the wrapper as a no-op switch.
+    # a0/a1 and the t-regs are dead after the call (caller-saved), so the
+    # return path is rebuilt through tp (never switched: still prev) and
+    # prev's just-saved thread.ra — `call` clobbered the live ra with the
+    # address right here, and the callee's save/restore gives that value
+    # back, NOT the wrapper's return address.
+    call  riscv_switch_abort
+    mv    a0, tp                    # prev: tp was never switched
+    li    a4, {task_thread}
+    add   a3, a0, a4
+    ld    ra, {thread_ra}(a3)       # the wrapper's return address
+    ret
 .size __switch_to, . - __switch_to
 "#,
     task_thread = const core::mem::offset_of!(Task, thread),
     task_on_cpu = const core::mem::offset_of!(Task, ti_on_cpu),
+    task_pick_state = const crate::process::task::task_offsets::TI_PICK_STATE,
+    task_pid = const crate::process::task::task_offsets::TASK_PID,
     thread_ra = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, ra),
     thread_sp = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, sp),
     thread_s0 = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, s),
@@ -316,6 +360,22 @@ extern "C" {
 /// After __switch_to, the stack pointer changes, so we must use tp (thread pointer)
 /// to get the current task for FPU restoration.
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // R56-heal (early revoked-pick check): if the slot-capture steal
+    // already revoked this pick (the picking vCPU was TCG-starved past
+    // the whole GRQ-release → wrapper window), the pick state is
+    // REVOKED by now (or LIVE: breach). Abort before doing any work —
+    // no FPU save, no satp switch — repair the lying sched slot, and
+    // return as a no-op switch; the __switch_to asm's affirm CAS
+    // re-validates for steals that land later. The idle task is never
+    // pick-marked (state stays PICKED, unused): skip.
+    if (*next).pid() != 0 {
+        let st = next.pick_state();
+        if st != crate::process::task::PICK_PICKED {
+            riscv_switch_abort(prev, next);
+            return;
+        }
+    }
+
     // Step 1: Save prev FPU state
     prev.thread_mut().fpu_save_for_switch();
 
@@ -359,24 +419,11 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
     // Step 3: __switch_to() - Switch registers
     //
-    // R65-timer (twin of x86_switch_publish's claim swap): record that
-    // THIS cpu owns next's resumed continuation. riscv64 previously never
-    // touched running_on_cpu, so the dual-bit pick predicate (R65) had no
-    // valid claim to test: combined with the switch-out `sd zero` (which
-    // left claim == 0), every task read as CPU 0's property after its
-    // first switch-out. Acquiring the claim here at switch-in gives the
-    // predicate the same protection x86 has: a stray write that clears
-    // only ti_on_cpu while the task runs leaves claim == the running cpu,
-    // so the task stays unpickable instead of double-running. The claim
-    // is released together with ti_on_cpu by __switch_to's full-word
-    // {false, -1} store at the next switch-out. A plain store suffices —
-    // next is already dequeued and on_cpu-marked here, so no picker can
-    // observe the word until the switch-out release makes it {false, -1}
-    // again.
-    next.running_on_cpu.store(
-        crate::arch::cpu_id() as i32,
-        core::sync::atomic::Ordering::Release,
-    );
+    // R56-heal: no ownership bookkeeping here — the pick published the
+    // ownership qword AND the pick state under the GRQ
+    // (mark_picked_on_cpu), covering the whole pick → switch window.
+    // __switch_to's affirm CAS validates the pick right before restoring
+    // registers; a store here could only race it.
 
     // WARNING: After __switch_to returns, ALL local variables are INVALID.
     // __switch_to restores callee-saved registers (s0-s11) from the new
@@ -401,4 +448,49 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
             (*cur).thread_mut().restore_fpu();
         }
     }
+}
+
+/// R56-heal: switch-in abort repair (riscv64).
+///
+/// Called from __switch_to's asm (`.Lswitch_abort`) and from the
+/// context_switch wrapper's early check when the pick state failed the
+/// affirm gate (REVOKED by the slot-capture steal — it decided this pick's
+/// hart was dead while it was only TCG-starved mid-switch — or an
+/// already-LIVE breach). At the asm call site NOTHING of next has been
+/// touched and prev never stopped running; the wrapper early-check site
+/// has not saved/switched anything yet.
+///
+/// Repairs:
+/// 1. satp — only at the asm site, where the wrapper already switched
+///    to next's root; put prev's root (or the kernel root for kernel
+///    threads) back before prev continues.
+/// 2. the per-CPU sched slot — the steal rewrote it to this CPU's idle
+///    task while prev keeps executing here.
+///
+/// IRQs stay disabled (whole switch path); no scheduler locks are held
+/// on entry.
+#[no_mangle]
+pub unsafe extern "C" fn riscv_switch_abort(prev: *mut Task, next: *mut Task) {
+    // 1. Address space: compare-based so the wrapper's early-check site
+    //    (satp not yet switched) writes nothing.
+    let prev_root = if let Some(mm) = (*prev).address_space() {
+        mm.root_ppn()
+    } else {
+        super::mm::mmu_init::root_page_table_ppn()
+    };
+    if get_current_satp() & 0xFFFF_FFFF_FFFF != prev_root {
+        // Full-flush linear switch: this ran on next's page table for a
+        // few instructions of kernel-only execution, but a full sfence is
+        // the cheap, obviously-correct choice on this cold path.
+        __switch_mm_linear(prev_root);
+    }
+
+    // 2. Sched slot + tripwire.
+    let cpu = crate::arch::cpu_id() as usize;
+    crate::sched::sched::republish_current_after_abort(cpu, prev);
+    crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
+
+    // `next` needs no repair here: the steal already re-linked it (or a
+    // foreign picker owns it); its context was never touched by us.
+    let _ = next;
 }
