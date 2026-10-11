@@ -680,10 +680,11 @@ impl CfsRunQueue {
             // pickable again when the period rolls over (the same
             // affinity-style skip machinery above).
             let allowed = unsafe {
-                let oncpu = (*task).on_cpu();
-                let claim = (*task).running_on_cpu.load(Ordering::Acquire);
-                let ownership_ok = task == prev
-                    || (!oncpu && (claim == -1 || claim as usize == cpu_id));
+                // R65-pick (probe-slow): the dual-bit ownership test reads
+                // the whole qword in one load (Task::ownership_pickable) —
+                // same e87a8b40 semantics, half the loads per candidate.
+                let ownership_ok =
+                    task == prev || (*task).ownership_pickable(cpu_id);
                 (*task).cpu_allowed(cpu_id)
                     && ownership_ok
                     && !crate::sched::cgroup::task_cgroup_throttled(task)

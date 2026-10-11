@@ -261,10 +261,10 @@ impl DlRunQueue {
             // R65: dual-bit ownership (on_cpu AND running_on_cpu claim
             // must both be free) — see the fair-class twin.
             let allowed = unsafe {
-                let oncpu = (*task).on_cpu();
-                let claim = (*task).running_on_cpu.load(Ordering::Acquire);
+                // R65-pick (probe-slow): single-qword ownership read —
+                // see the fair-class twin.
                 let ownership_ok =
-                    task == prev || (!oncpu && (claim == -1 || claim as usize == cpu_id));
+                    task == prev || (*task).ownership_pickable(cpu_id);
                 (*task).cpu_allowed(cpu_id) && ownership_ok
             };
             if allowed {

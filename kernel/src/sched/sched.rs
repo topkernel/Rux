@@ -3355,22 +3355,29 @@ pub fn harvest_relink(task: *mut Task) -> bool {
 ///    healed inside wake_up_enqueue (R56c), and a truly dead hart is
 ///    handled here by time-confirmed steal (harvest_relink).
 unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
-    // Rate gate. When the queue reads empty the scan runs on every pass —
-    // an idle CPU has nothing to lose and goes to WFI right after (the
-    // original R56 trigger). Under load the pid-hash walk (256 bucket
-    // locks) must NOT run on every idle-loop pass: the R20-2 recheck loop
-    // iterates in microseconds, so a pass-count limit still burned whole
-    // host CPUs in scan loops and starved the working vCPU threads under
-    // TCG (timer_probe slept 5x less often and stalled). Instead, at most
-    // ONE scan per 2 jiffies system-wide: a CAS on the last-scan jiffy
-    // makes one CPU the scanner and sends the rest straight back to their
-    // schedule() attempt.
+    // Rate gate (probe-slow tightening). The loaded case keeps e90bc010's
+    // discipline: at most ONE scan per 2 jiffies system-wide (a CAS on the
+    // last-scan jiffy makes one CPU the scanner). The EMPTY case used to
+    // run the pid-hash walk on EVERY idle-loop pass — defensible when a
+    // pass meant "about to WFI for a long while", but each 10ms timer tick
+    // wakes both idle CPUs, so a quietly idle 2-vCPU system still paid
+    // ~200 full 256-bucket walks per second, pure overhead under TCG
+    // single-thread. An empty queue now scans at most once per jiffy
+    // system-wide (same CAS, interval 1): worst-case orphan-detection
+    // latency on an idle system becomes ~10-20ms — two orders below the
+    // harvester's own time-confirmation thresholds (3-jiffy watch, 5s
+    // stale-tick), so no heal is delayed meaningfully.
     static LAST_LOADED_SCAN: core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
-    if GlobalRunQueue::grq_nr_running() != 0 {
+    let scan_interval: u64 = if GlobalRunQueue::grq_nr_running() != 0 {
+        2
+    } else {
+        1
+    };
+    {
         let now = crate::drivers::timer::get_jiffies();
         let last = LAST_LOADED_SCAN.load(core::sync::atomic::Ordering::Acquire);
-        if now.wrapping_sub(last) < 2 {
+        if now.wrapping_sub(last) < scan_interval {
             return;
         }
         if LAST_LOADED_SCAN

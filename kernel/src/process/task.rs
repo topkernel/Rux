@@ -3058,6 +3058,46 @@ impl Task {
         self.ti_on_cpu.store(v, core::sync::atomic::Ordering::Release);
     }
 
+    /// R65-pick (probe-slow): dual-bit ownership test for the class picks,
+    /// read from the ownership qword in ONE naturally-aligned load.
+    ///
+    /// `ti_on_cpu` (1 byte) and `running_on_cpu` (i32 at +4) share one
+    /// 8-byte word (layout pinned by the asserts in
+    /// arch/riscv64/context.rs). The switch-out release writes the whole
+    /// word in a single `sd`; the pick-time mark and the switch-in claim
+    /// write the halves separately. A single volatile u64 load observes a
+    /// same-instant snapshot of both halves — a strict SUBSET of the
+    /// (earlier-byte, later-claim) combinations the old byte-load +
+    /// Acquire-atomic-load pair could observe, so every state the old
+    /// predicate handled correctly is handled identically, with one load
+    /// and no acquire fence per candidate instead of two loads. The
+    /// semantics are exactly e87a8b40's: pickable only when
+    /// on_cpu == false AND claim == -1 (or the picker's own claim).
+    #[inline]
+    pub fn ownership_pickable(&self, picker: usize) -> bool {
+        const _: () = {
+            assert!(core::mem::offset_of!(Task, ti_on_cpu) % 8 == 0);
+            assert!(
+                core::mem::offset_of!(Task, running_on_cpu)
+                    == core::mem::offset_of!(Task, ti_on_cpu) + 4
+            );
+        };
+        // Little-endian decode: byte at +0 is the low byte, i32 at +4 the
+        // high half. Both supported arches (riscv64, x86_64) are LE; the
+        // cfg gate keeps a BE port from silently misdecoding.
+        #[cfg(not(target_endian = "little"))]
+        compile_error!("ownership_pickable assumes little-endian qword decode");
+
+        let word = unsafe {
+            core::ptr::read_volatile(
+                core::ptr::addr_of!(self.ti_on_cpu) as *const u64
+            )
+        };
+        let oncpu = (word & 0xFF) != 0;
+        let claim = (word >> 32) as i32;
+        !oncpu && (claim == -1 || claim as usize == picker)
+    }
+
     /// Set CPU affinity mask.
     #[inline]
     pub fn set_cpus_allowed(&self, mask: u32) {
