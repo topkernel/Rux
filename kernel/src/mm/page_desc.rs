@@ -31,7 +31,7 @@
 //!   This is the COW pre-condition: the page is shared read-only among multiple mappings.
 //!
 
-use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use super::page::{PhysAddr, PhysFrame, PhysFrameNr, VirtAddr, PAGE_SIZE};
 
@@ -240,6 +240,152 @@ pub struct Page {
 
 /// Map count initial offset value (-1 means unmapped)
 pub const PAGE_MAPCOUNT_BIAS: i32 = -1;
+
+// ==================== SIGILL text-frame stamp table (gnome-sigill) ====================
+//
+// Records every frame handed to a user mapping by the file-backed demand
+// fault path (those frames carry no mapcount/rmap/LRU state). Teardown
+// walkers skip stamped frames in the diagnostic build (leak on purpose);
+// free_pages() on a stamped frame trips a loud line naming the owner.
+//
+// Entry value: (pid << 32) | (va >> 12); 0 = empty.
+
+/// Number of stamp slots (power of two). Sized so a GNOME-boot worth of
+/// live file-fill frames (~40k) loads the table under ~30% — the linear
+/// probe then essentially never reaches its eviction fallback.
+pub const TEXT_STAMP_SLOTS: usize = 131072;
+
+static TEXT_STAMPS: [AtomicU64; TEXT_STAMP_SLOTS] =
+    [const { AtomicU64::new(0) }; TEXT_STAMP_SLOTS];
+
+fn text_stamp_slot(pfn: usize) -> usize {
+    // cheap multiplicative hash; linear probe on lookup/insert
+    (pfn.wrapping_mul(0x9E37_79B9)) & (TEXT_STAMP_SLOTS - 1)
+}
+
+/// Record `pfn` as a live file-backed fill frame owned by (pid, va).
+/// Stamp layout (must fit 64 bits): [63:36] va>>12 (28b) | [35:24] pid
+/// (12b) | [23:0] pfn (24b). The pfn is part of the value so lookups can
+/// reject hash collisions (no false positives).
+///
+/// Returns the stamp it displaced (if any). A displaced stamp means the
+/// frame reached the allocator (or was double-handed out) while still
+/// tracked as LIVE for its previous owner — the callers report that as
+/// the FILL-DOUBLE family (gnome-sigill).
+pub fn text_stamp_insert(pfn: usize, pid: u32, va: usize) -> Option<(u32, usize)> {
+    debug_assert!(pfn < (1 << 24));
+    debug_assert!((pid as usize) < (1 << 12));
+    let val = ((va >> 12) as u64 & 0x0FFF_FFFF) << 36
+        | ((pid as u64 & 0xFFF) << 24)
+        | (pfn as u64 & 0xFF_FFFF);
+    let base = text_stamp_slot(pfn);
+    let mut displaced: Option<(u32, usize)> = None;
+    for i in 0..8 {
+        let slot = (base + i) & (TEXT_STAMP_SLOTS - 1);
+        let cur = TEXT_STAMPS[slot].load(Ordering::Relaxed);
+        if cur == 0 {
+            TEXT_STAMPS[slot].store(val, Ordering::Release);
+            return displaced;
+        }
+        if (cur & 0xFF_FFFF) == (pfn as u64 & 0xFF_FFFF) {
+            // Same frame re-filled: the previous stamp names who owned it
+            // when it was last live — hand that back for the report.
+            let p = ((cur >> 24) & 0xFFF) as u32;
+            let v = (((cur >> 36) & 0x0FFF_FFFF) as usize) << 12;
+            displaced = Some((p, v));
+            TEXT_STAMPS[slot].store(val, Ordering::Release);
+            return displaced;
+        }
+    }
+    TEXT_STAMPS[base].store(val, Ordering::Release);
+    displaced
+}
+
+/// Remove the stamp for `pfn` (frame is being legitimately released).
+pub fn text_stamp_remove(pfn: usize) {
+    let want = pfn as u64 & 0xFF_FFFF;
+    for i in 0..8 {
+        let slot = (text_stamp_slot(pfn) + i) & (TEXT_STAMP_SLOTS - 1);
+        let val = TEXT_STAMPS[slot].load(Ordering::Relaxed);
+        if val != 0 && val & 0xFF_FFFF == want {
+            TEXT_STAMPS[slot].store(0, Ordering::Release);
+            return;
+        }
+    }
+}
+
+/// Remove the stamp for `pfn` iff its current owner is `pid`
+/// (gnome-sigill): used when `pid`'s MAPPING of the frame goes away
+/// without a free — the COW resolver redirects the PTE to a private copy.
+/// Without this the stamp survives as a false "foreign owner" and the
+/// fork peer's later legal final free is refused as a leak.
+pub fn text_stamp_remove_if_owner(pfn: usize, pid: u32) {
+    if let Some((owner, _)) = text_stamp_get(pfn) {
+        if owner == pid {
+            text_stamp_remove(pfn);
+        }
+    }
+}
+
+/// Lifecycle event ring for STAMPED frames (gnome-sigill hunt): one entry
+/// per interesting event on a stamped frame, so the report printed when a
+/// foreign free fires can replay the frame's whole history — who filled
+/// it, which forks took references, and every put that dropped one.
+/// Site chars: 'F' fault-fill, 'K' fork get, 'T' teardown put,
+/// 'U' unmap put, 'C' cow put, 'R' refused(leak), 'S' stale-stamp freed.
+pub struct TextFrameEvent {
+    pub pfn: AtomicU64,
+    pub pid: AtomicU32,
+    pub site: AtomicU64,
+    pub refc: AtomicI32,
+}
+impl TextFrameEvent {
+    const fn new() -> Self {
+        Self {
+            pfn: AtomicU64::new(0),
+            pid: AtomicU32::new(0),
+            site: AtomicU64::new(0),
+            refc: AtomicI32::new(0),
+        }
+    }
+}
+const TEXT_EVT_NEW: TextFrameEvent = TextFrameEvent::new();
+pub static TEXT_EVT_RING: [TextFrameEvent; 8192] = [TEXT_EVT_NEW; 8192];
+pub static TEXT_EVT_CURSOR: AtomicUsize = AtomicUsize::new(0);
+
+/// Record one lifecycle event for a stamped frame (no-op for unstamped
+/// frames — the table IS the filter). `refc` is the refcount AFTER the
+/// operation (0 when not applicable).
+pub fn text_stamp_note(pfn: usize, pid: u32, site: char, refc: i32) {
+    if text_stamp_get(pfn).is_none() {
+        return;
+    }
+    let idx = TEXT_EVT_CURSOR.fetch_add(1, Ordering::Relaxed) % TEXT_EVT_RING.len();
+    let e = &TEXT_EVT_RING[idx];
+    e.pfn.store(pfn as u64, Ordering::Relaxed);
+    e.pid.store(pid, Ordering::Relaxed);
+    e.site.store(site as u64, Ordering::Relaxed);
+    e.refc.store(refc, Ordering::Relaxed);
+}
+
+/// Look up the stamp for `pfn`; returns Some((pid, va_page)). The stored
+/// pfn must match — a slot hit with a different pfn is a hash collision.
+pub fn text_stamp_get(pfn: usize) -> Option<(u32, usize)> {
+    let want = pfn as u64 & 0xFF_FFFF;
+    for i in 0..8 {
+        let slot = (text_stamp_slot(pfn) + i) & (TEXT_STAMP_SLOTS - 1);
+        let val = TEXT_STAMPS[slot].load(Ordering::Acquire);
+        if val == 0 {
+            return None;
+        }
+        if val & 0xFF_FFFF == want {
+            let pid = ((val >> 24) & 0xFFF) as u32;
+            let va = (((val >> 36) & 0x0FFF_FFFF) as usize) << 12;
+            return Some((pid, va));
+        }
+    }
+    None
+}
 
 impl Page {
     /// Create new page descriptor (initialized to free state)
@@ -515,6 +661,11 @@ impl Page {
     pub fn set_index(&self, index: usize) {
         self.index.store(index, Ordering::Release);
     }
+
+    // ========== SIGILL text-frame stamps (gnome-sigill diagnostic) ==========
+    //
+    // See the module-level TEXT_STAMPS table below the Page impl for the
+    // rationale; the accessors are free functions.
 
     // ========== Page type operations ==========
 
