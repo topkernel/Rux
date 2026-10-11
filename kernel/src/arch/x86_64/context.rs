@@ -105,6 +105,14 @@ __switch_to:
     movq %rbx, %rdi
     movq %r12, %rsi
     call x86_switch_publish
+    # R56-heal (revoked-pick guard): publish returns 1 when next's pick
+    # ownership claim was revoked (slot-capture steal racing this
+    # starved-but-live pick). Nothing of next has been touched yet and
+    # prev's bits are still claimed — abort the resume: repair CR3/FS/GS
+    # and the sched slot from prev's live stack, then return to the
+    # wrapper as a no-op switch.
+    testq %rax, %rax
+    jnz   .Lswitch_abort
     movq %r12, %rdi
     call x86_update_rsp0
 
@@ -133,6 +141,10 @@ __switch_to:
     # The packed store is atomic on x86-TSO and touches nothing else.
     movabsq $0xffffffff00000000, %rax
     movq %rax, {task_on_cpu}(%rbx)
+    # (r56-heal merge note: kept the R67 single packed atomic store —
+    # it covers exactly on_cpu+claim and cannot reach ti_pick_state, which
+    # now follows the claim field; the CAS protocol on ti_pick_state is
+    # untouched by this store.)
 1:
 
     # 4. Restore next's context.  r12 (holding `next`) is reloaded LAST.
@@ -149,6 +161,23 @@ __switch_to:
     #    ret_from_fork for a newborn child.
     pushq %rax
     ret
+
+.Lswitch_abort:
+    # R56-heal: pick revoked (or LIVE breach) — resume prev instead. rdx
+    # = 1 tells the handler the wrapper already switched CR3/FS/GS (so it
+    # must undo them); prev/next still live in rbx/r12 (callee-saved,
+    # borrowed at step 2). After the handler returns, RELOAD the
+    # wrapper's rbx/r12 from prev->thread — step 2 borrowed those
+    # registers and the wrapper's post-call code must get its own values
+    # back (a normal callee would have preserved them).
+    movq %rbx, %rdi
+    movq %r12, %rsi
+    movq $1, %rdx
+    call x86_switch_abort
+    movq {task_thread}+{callee_r12}(%rbx), %r12
+    movq {task_thread}+{callee_rbx}(%rbx), %rbx
+    addq $8, %rsp          # undo the entry alignment pad
+    ret                    # back to context_switch's post-call code
 
 .size __switch_to, . - __switch_to
 "#,
@@ -182,8 +211,17 @@ __switch_to:
 ///
 /// # Safety
 /// Called only from `__switch_to` with the prev context fully saved.
+///
+/// R56-heal: returns 1 (ABORT) when `next`'s pick failed the affirm gate
+/// — try_affirm_pick's CAS(PICKED → LIVE) lost to the harvester's
+/// revocation (the slot-capture steal decided the picking vCPU was dead
+/// while it was only TCG-starved mid-switch) or found a LIVE breach. The
+/// asm then skips the resume entirely and returns to the wrapper with
+/// prev still running. Returns 0 on the normal path. The pick state is
+/// published at pick time (mark_picked_on_cpu, under the GRQ); the idle
+/// task (pid 0) is never pick-marked and skips the gate.
 #[no_mangle]
-pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
+pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) -> u64 {
     let cpu = crate::arch::cpu_id() as i32;
     // R65 witness: prev must still carry its pick mark here. A clear mark
     // at publish entry means the R49 heal (or a scribble) reset the
@@ -215,26 +253,35 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
                 prev as u64,
                 next as u64,
             );
-            return;
+            return 1;
         }
-        let old = unsafe {
-            (*next).running_on_cpu.swap(cpu, core::sync::atomic::Ordering::AcqRel)
-        };
-        if old != -1 {
-            // Scribble hunter: report through the locked buffer (the
-            // raw print raced the concurrent panic output in earlier
-            // captures), dump the event ring, and park for gdb.
-            crate::dfx::scribble::double_run(
-                unsafe { (*next).pid() } as u64,
-                cpu as u64,
-                old as i64 as u64,
-                if prev.is_null() {
-                    0
-                } else {
-                    unsafe { (*prev).pid() as u64 }
-                },
-                next as u64,
-            );
+        // R56-heal (affirm gate): resume only what our pick still owns.
+        // try_affirm_pick CASes ti_pick_state PICKED → LIVE atomically —
+        // the exclusive right to restore this task's registers. The old
+        // unconditional claim swap() is gone (it clobbered the very state
+        // the harvester arbitrates on); a REVOKED pick (the steal won the
+        // race) or an already-LIVE breach aborts here.
+        if unsafe { (*next).pid() } != 0 {
+            if let Err(observed) = unsafe { (*next).try_affirm_pick() } {
+                // Not ours: REVOKED by the slot-capture steal, or a
+                // protocol breach. Report through the scribble hunter
+                // when armed, then abort — the asm repairs nothing of
+                // next and returns with prev still running.
+                if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                    crate::dfx::scribble::double_run(
+                        unsafe { (*next).pid() } as u64,
+                        cpu as u64,
+                        observed as u64,
+                        if prev.is_null() {
+                            0
+                        } else {
+                            unsafe { (*prev).pid() as u64 }
+                        },
+                        next as u64,
+                    );
+                }
+                return 1;
+            }
         }
     }
     crate::arch::smp::set_current_task_ptr(next as u64);
@@ -324,6 +371,7 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) {
     if !prev.is_null() {
         crate::dfx::scribble::quiesce(prev);
     }
+    0 // proceed with the resume
 }
 
 /// Set TSS.rsp0 (and only that) to the task's kernel stack top.
@@ -435,6 +483,22 @@ pub extern "C" fn get_prev_task() -> *mut Task {
 /// After `__switch_to` all locals are invalid; the incoming task is
 /// resolved through `sched::current()` (the per-CPU slot).
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // R56-heal (early revoked-pick check): if the slot-capture steal
+    // already revoked this pick (the picking vCPU was TCG-starved past
+    // the whole GRQ-release → wrapper window), the pick state is
+    // REVOKED by now (or LIVE: breach). Abort before doing any work —
+    // no FPU save, no CR3/MSR switches — repair the lying sched slot,
+    // and return as a no-op switch; __switch_to's publish re-affirms
+    // for steals that land later. The idle task is never pick-marked:
+    // skip.
+    if (*next).pid() != 0 {
+        let st = next.pick_state();
+        if st != crate::process::task::PICK_PICKED {
+            x86_switch_abort(prev, next, 0);
+            return;
+        }
+    }
+
     // Step 1: save prev FPU state
     prev.thread_mut().fpu_save_for_switch();
 
@@ -487,4 +551,47 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
             (*cur).thread_mut().restore_fpu();
         }
     }
+}
+
+/// R56-heal: switch-in abort repair (x86_64 twin of riscv_switch_abort).
+///
+/// Called from __switch_to's `.Lswitch_abort` (with `msrs_switched = 1`
+/// — the wrapper already switched CR3 and the FS/GS MSRs to next) and
+/// from the wrapper's early check (`msrs_switched = 0` — nothing was
+/// switched yet, so the MSRs must be left alone; prev->thread's saved
+/// bases would be stale there).
+///
+/// prev never stopped running; repair its address space, the per-task
+/// MSRs (asm site only), and the lying sched slot. IRQs stay disabled.
+#[no_mangle]
+pub unsafe extern "C" fn x86_switch_abort(
+    prev: *mut Task,
+    next: *mut Task,
+    msrs_switched: u64,
+) {
+    // Address space: compare-based — no write at the early-check site.
+    let prev_root = if let Some(mm) = (*prev).address_space() {
+        mm.root_ppn()
+    } else {
+        super::mm::mmu_init::root_page_table_ppn()
+    };
+    if read_cr3() >> 12 != prev_root {
+        write_cr3(super::mm::asid::build_satp(0, prev_root));
+    }
+
+    // Per-task MSRs: only when the wrapper already swapped them (the
+    // saved values in prev->thread are exactly the live-at-entry ones).
+    if msrs_switched != 0 {
+        wrmsr(MSR_FS_BASE, (*prev).thread().fs_base);
+        wrmsr(MSR_KERNEL_GS_BASE, (*prev).thread().gs_base);
+    }
+
+    // Sched slot + tripwire.
+    let cpu = crate::arch::cpu_id() as usize;
+    crate::sched::sched::republish_current_after_abort(cpu, prev);
+    crate::sched::sched::r56_report_switch_abort(cpu, (*prev).pid());
+
+    // `next` needs no repair here: the steal already re-linked it (or a
+    // foreign picker owns it); its context was never touched by us.
+    let _ = next;
 }

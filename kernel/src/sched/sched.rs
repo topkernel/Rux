@@ -26,7 +26,7 @@
 //! practice in OS kernel development.
 
 use crate::errno;
-use crate::process::task::{Task, TaskState, SchedPolicy, Pid};
+use crate::process::task::{Task, TaskState, SchedPolicy, Pid, PICK_LIVE, PICK_PICKED};
 use crate::arch;
 use crate::println;
 use crate::config::MAX_CPUS;
@@ -1511,7 +1511,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     // 2. Deadline — pick earliest-deadline task that can run on this CPU
     if !grq.dl_rq.is_empty() {
         if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id, prev) {
-            mark_picked_on_cpu(task);
+            mark_picked_on_cpu(task, task == prev);
             // R32-DL1: reset the CBS execution clock at pick (mirror of the
             // CFS R20-6 fix). exec_start otherwise still holds the
             // timestamp of the task's PREVIOUS switch-out (or 0 before its
@@ -1537,7 +1537,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     //    Skipped entirely while the RT bandwidth is throttled (batch 8).
     if !grq.rt_rq.is_empty() && !RT_THROTTLED.load(core::sync::atomic::Ordering::Acquire) {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id, prev) {
-            mark_picked_on_cpu(task);
+            mark_picked_on_cpu(task, task == prev);
             grq.nr_running.fetch_update(
                 core::sync::atomic::Ordering::SeqCst,
                 core::sync::atomic::Ordering::SeqCst,
@@ -1550,7 +1550,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     // 4. CFS — pick min-vruntime task that can run on this CPU
     if !grq.cfs_rq.is_empty() {
         if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id, prev) {
-            mark_picked_on_cpu(task);
+            mark_picked_on_cpu(task, task == prev);
             grq.nr_running.fetch_update(
                 core::sync::atomic::Ordering::SeqCst,
                 core::sync::atomic::Ordering::SeqCst,
@@ -1587,7 +1587,7 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
 /// twice — the NEW2 root cause. The idle task is never marked (it is not
 /// on the class queues; clearing a never-set flag is a harmless no-op).
 #[inline]
-unsafe fn mark_picked_on_cpu(task: *mut Task) {
+unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
     if !task.is_null() {
         // Scribble hunter (R65 double-run seed tripwire): we hold the GRQ
         // lock here, so the ownership picture is stable. A task that is
@@ -1622,7 +1622,14 @@ unsafe fn mark_picked_on_cpu(task: *mut Task) {
             task as u64,
             0,
         );
-        (*task).set_on_cpu(true);
+        // R56-heal: publish the FULL ownership qword {on_cpu = true,
+        // claim = this cpu} — not just the on_cpu byte — plus the pick
+        // state. A fresh pick publishes PICKED: the switch-in must affirm
+        // it LIVE (atomic CAS right before the register restore) or abort
+        // on a harvester revocation. The next == prev fast-path repick
+        // publishes LIVE directly — the task never stopped running, and
+        // marking it PICKED would leave a running task revocable.
+        (*task).publish_pick_ownership(crate::arch::cpu_id() as i32, is_repick);
     }
 }
 
@@ -3257,6 +3264,19 @@ fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
 ///     rewrite the lying slots to their idle tasks so no wedged loop can
 ///     re-consume the link.
 ///
+///     R56-heal hardening (gnome-boot pfault family, m25/m26/m27): tick
+///     staleness does NOT prove the naming hart is dead — under MTTCG a
+///     live vCPU that the host descheduled (or a long IRQ-off stretch)
+///     takes no ticks either, and the original steal double-ran such
+///     picks at nearly 100% during Xorg start. The steal is now gated by
+///     a per-task pick-state machine (Task::ti_pick_state): the pick
+///     publishes PICKED under the GRQ, the picking CPU's switch-in
+///     affirms it LIVE with an atomic CAS as the last step before
+///     restoring the task's registers, and the steal may only revoke
+///     (CAS PICKED → REVOKED) a still-pending pick. A starved-but-live
+///     picker therefore aborts its resume at the failed CAS (no double
+///     run), and a task that already resumed (LIVE) is never touched.
+///
 /// Returns true when something was healed.
 pub fn harvest_relink(task: *mut Task) -> bool {
     if task.is_null() {
@@ -3293,10 +3313,23 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                 // SWITCHING_OUT check above and a fast-path re-pick keeps
                 // the switching CPU's slot naming the task — the caller's
                 // pre-filter passed only slotless tasks here.
-                (*task).set_on_cpu(false);
-                (*task)
-                    .running_on_cpu
-                    .store(-1, core::sync::atomic::Ordering::Release);
+                //
+                // R56-heal: the pick state is the authority now. A LIVE
+                // task is executing on its picking CPU — its on_cpu mark
+                // is NOT stale (clearing it would let a second CPU pick a
+                // running task: the m25 double-run shape). A PICKED pick
+                // must be REVOKED first so a starved-but-live picker's
+                // switch-in aborts at the affirm CAS instead of resuming.
+                let st = (*task).pick_state();
+                if st == PICK_LIVE {
+                    return false;
+                }
+                if st == PICK_PICKED && !(*task).revoke_pending_pick() {
+                    // Lost the race against the picker's affirm CAS — the
+                    // task just went LIVE; not healable.
+                    return false;
+                }
+                (*task).release_pick_ownership();
                 r56_print_pid(
                     b"R56-QUEUED-MARK-CLEARED pid=",
                     pid,
@@ -3313,6 +3346,40 @@ pub fn harvest_relink(task: *mut Task) -> bool {
             } else {
                 // (b) slot-capture steal: rewrite every naming slot to its
                 // idle task, clear the pick marks, and re-link.
+                //
+                // R56-heal (affirm-gated steal): the revocation CAS
+                // (PICKED → REVOKED) is the ONLY gate. It succeeds
+                // exclusively while the picking CPU is still between the
+                // GRQ release and __switch_to's affirm — a picker that is
+                // merely TCG-starved (not dead) aborts the resume at the
+                // failed CAS and repairs itself. Once the picker affirmed
+                // LIVE, the task's registers are (or are about to be)
+                // restored on that hart and no steal may touch it — tick
+                // staleness proves nothing under MTTCG (the gnome-boot
+                // pfault family, m25/m26/m27: heal cpu=2 pid=311, instant
+                // KERNPANIC, epc/ra inside the task's own kernel stack).
+                // R56-STEAL tripwire (cold path — most boots never steal):
+                // the pre-revoke ownership picture and the post-enqueue
+                // outcome. st must read PICKED(0); a st=1 (LIVE) read whose
+                // CAS still wins means the page was recycled under us (the
+                // pb_7 adjudication capture that motivated the lifecycle
+                // pin). sw = bitmask of naming CPUs still mid-switch; rq=1
+                // means the re-link took.
+                let _pre_state = (*task).pick_state();
+                let mut _sw_mask: u32 = 0;
+                for c in 0..MAX_CPUS {
+                    if cpu_state(c).current == task
+                        && SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) != 0
+                    {
+                        _sw_mask |= 1 << c;
+                    }
+                }
+                if !(*task).revoke_pending_pick() {
+                    // LIVE (genuinely running — leave it alone) or an
+                    // already-consumed REVOKED marker (a previous heal
+                    // pass owns the recovery).
+                    return false;
+                }
                 for c in 0..MAX_CPUS {
                     if cpu_state(c).current == task {
                         let idle_task = cpu_state(c).idle;
@@ -3327,11 +3394,19 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         }
                     }
                 }
-                (*task).set_on_cpu(false);
-                (*task)
-                    .running_on_cpu
-                    .store(-1, core::sync::atomic::Ordering::Release);
+                // R56-heal: revoking the pick's ownership qword is what the
+                // picking CPU's switch-in validates — if that vCPU is
+                // merely TCG-starved mid-switch (not dead), its
+                // __switch_to sees claim != my-cpu and aborts the resume
+                // (riscv_switch_abort / x86_switch_abort repair the slot
+                // and page table), so this steal cannot double-run it.
+                (*task).release_pick_ownership();
                 outcome = enqueue_task_locked(&mut g, task);
+                // R56-STEAL diagnostics tail: st/sw/rq on ONE line.
+                r56_print_pid(b"R56-STEAL pid=", pid, b" st=");
+                r56_print_pid(b"", _pre_state, b" sw=");
+                r56_print_pid(b"", _sw_mask, b" rq=");
+                r56_print_pid(b"", if outcome { 1 } else { 0 }, b"\n");
             }
         }
     }
@@ -3343,6 +3418,59 @@ pub fn harvest_relink(task: *mut Task) -> bool {
         }
     }
     outcome
+}
+
+/// R56-heal (switch-in abort repair): the slot-capture steal revoked a
+/// pick that was still in flight (a TCG-starved vCPU between the GRQ
+/// release and __switch_to's register restore), and that vCPU's switch
+/// just aborted the resume. The steal rewrote this CPU's slot to its
+/// idle task, but the task actually continuing here is `prev` —
+/// republish the truth so the slot scans (harvest pre-filters, wake-side
+/// curr_on checks, task dumps) do not classify prev as a slotless
+/// orphan while it keeps running.
+///
+/// Called from the arch abort handlers (riscv_switch_abort /
+/// x86_switch_abort) with IRQs disabled and no scheduler locks held;
+/// takes the GRQ alone (no pid-hash bucket — complies with the
+/// bucket → GRQ order the harvester itself uses).
+pub fn republish_current_after_abort(cpu: usize, prev: *mut Task) {
+    if prev.is_null() || cpu >= MAX_CPUS {
+        return;
+    }
+    let _g = grq().lock_irqsave();
+    // SAFETY: prev is the task executing on this CPU right now (its
+    // context was never handed over); the slot write runs under the GRQ.
+    unsafe {
+        if cpu_state(cpu).current != prev {
+            cpu_state_mut(cpu).current = prev;
+        }
+        if (*prev).pid() == 0 {
+            // Continuing the idle task: restore the idle bit our pick
+            // cleared (idempotent with the idle loop's own mark_idle).
+            grq().mark_idle(cpu);
+        }
+    }
+}
+
+/// R56-heal: rate-limited tripwire for switch-in aborts (at most one
+/// line per jiffy system-wide — a pathological steal/abort ping-pong
+/// must not flood the serial console).
+pub fn r56_report_switch_abort(cpu: usize, pid: u32) {
+    static LAST_ABORT_JIFFY: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST_ABORT_JIFFY.load(core::sync::atomic::Ordering::Relaxed);
+    if now.wrapping_sub(last) < 1 {
+        return;
+    }
+    if LAST_ABORT_JIFFY
+        .compare_exchange(last, now, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    r56_print_pid(b"R56-SWITCH-ABORTED cpu=", cpu as u32, b" pid=");
+    r56_print_pid(b"", pid, b"\n");
 }
 
 /// R56: re-link picked-but-lost tasks (multi-mode emulator-race orphan).
@@ -3406,6 +3534,20 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
         if pid == 0 || pid == TASK_POISON {
             return;
         }
+        // R56-heal (lifecycle pin): the scan dereferences — and its heals
+        // WRITE — this task page far beyond the bucket-lock section this
+        // walk holds. An exiting task can finish pid_hash_remove +
+        // synchronize_rcu + task_put in that window and fork reuses the
+        // page mid-heal (the m25 adjudication capture: a steal whose
+        // pre-revoke read saw LIVE won its CAS only because new_task_at
+        // had rewritten ti_pick_state on the recycled page; the heal then
+        // linked the half-built child — epc=0x0 double panic). Pinning
+        // defers the free past every heal below; the heals' own RUNNING
+        // re-checks refuse a task that exits under the pin.
+        if !Task::try_pin(t) {
+            return;
+        }
+        let heal_body = || {
         if !(*t).state().is_running() {
             return;
         }
@@ -3463,6 +3605,9 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                 }
             }
         }
+        };
+        heal_body();
+        Task::task_put(t);
     });
 }
 
