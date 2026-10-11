@@ -45,12 +45,27 @@ pub struct SemInfoUapi {
 }
 
 /// struct semid64_ds — returned by IPC_STAT, IPC_SET
-/// Must match asm-generic/sembuf.h for RV64. Total: 88 bytes.
+///
+/// riscv64: asm-generic/sembuf.h — perm(48) + otime + ctime + nsems + 2
+/// unused = 88 bytes, sem_nsems at offset 64.
+///
+/// x86_64: the x86 uapi (arch/x86/include/uapi/asm/sembuf.h) pads EACH
+/// time_t with a high word, so glibc/musl `struct semid_ds` on x86_64
+/// reads sem_nsems at offset 80 in a 104-byte struct (verified against a
+/// real x86_64 host: semctl(IPC_STAT) fills nsems@80). Writing the
+/// asm-generic layout put nsems where x86_64 userspace sees
+/// __sem_ctime_high — LTP semget01 read 0 where the kernel wrote 10.
+/// The high words are pure padding on x86_64 (time_t is 64-bit), so they
+/// stay zero.
 #[repr(C)]
 pub struct SemidDsUapi {
     pub sem_perm: IpcPermUapi,
     pub sem_otime: i64,
+    #[cfg(feature = "x86_64")]
+    pub sem_otime_high: u64,
     pub sem_ctime: i64,
+    #[cfg(feature = "x86_64")]
+    pub sem_ctime_high: u64,
     pub sem_nsems: u64,
     pub __unused3: u64,
     pub __unused4: u64,
@@ -238,7 +253,11 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             let mut ds = SemidDsUapi {
                 sem_perm: IpcPermUapi::default(),
                 sem_otime: 0,
+                #[cfg(feature = "x86_64")]
+                sem_otime_high: 0,
                 sem_ctime: 0,
+                #[cfg(feature = "x86_64")]
+                sem_ctime_high: 0,
                 sem_nsems: 0,
                 __unused3: 0,
                 __unused4: 0,
@@ -292,7 +311,11 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             let mut ds = SemidDsUapi {
                 sem_perm: IpcPermUapi::default(),
                 sem_otime: 0,
+                #[cfg(feature = "x86_64")]
+                sem_otime_high: 0,
                 sem_ctime: 0,
+                #[cfg(feature = "x86_64")]
+                sem_ctime_high: 0,
                 sem_nsems: 0,
                 __unused3: 0,
                 __unused4: 0,

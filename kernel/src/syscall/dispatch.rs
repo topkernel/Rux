@@ -81,6 +81,69 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         return;
     }
 
+    // x86_64 legacy syscalls that have NO asm-generic number — handled
+    // BEFORE translate() so they can never collide with the same-numbered
+    // generic entry (poll(7) vs lsetxattr(7), select(23) vs dup(23),
+    // pause(34) vs mkdirat(34), epoll_create(213) vs readahead(213),
+    // epoll_wait(232) vs nothing → ENOSYS). asm-generic libc builds
+    // emulate these over ppoll/pselect6/sigsuspend, but x86_64 musl/glibc
+    // issue the native numbers (LTP x86-r2 N2 collaterals: poll01 EBADF,
+    // pause01 EFAULT-from-mkdirat, epoll_create01, epoll_wait01).
+    #[cfg(feature = "x86_64")]
+    match syscall_no {
+        7 => {
+            // poll(fds, nfds, timeout_ms) — handler exists, no generic slot.
+            syscall_set_return_value(regs, misc::sys_poll(args));
+            return;
+        }
+        23 => {
+            // select(nfds, r, w, e, timeval*) — timeval timeout variant.
+            syscall_set_return_value(regs, misc::sys_select(args));
+            return;
+        }
+        33 => {
+            // dup2(oldfd, newfd). musl/glibc on x86_64 issue the native
+            // NR 33 (on asm-generic archs their libc emulates the equal-fd
+            // case over fcntl+dup3 before reaching the kernel — musl
+            // dup2.c). Linux dup2 semantics: oldfd == newfd returns newfd
+            // if it is open, else EBADF; dup3() itself would EINVAL.
+            let result = if args[0] == args[1] {
+                let probe = io::sys_fcntl([args[0], 1 /* F_GETFD */, 0, 0, 0, 0]);
+                if probe < 0 {
+                    probe // -EBADF from the lookup itself
+                } else {
+                    args[0] as i64
+                }
+            } else {
+                io::sys_dup3([args[0], args[1], 0, 0, 0, 0])
+            };
+            syscall_set_return_value(regs, result);
+            return;
+        }
+        34 => {
+            // pause(): sleep until a signal; always -EINTR.
+            syscall_set_return_value(regs, signal::sys_pause(args));
+            return;
+        }
+        213 => {
+            // epoll_create(size): Linux rejects size <= 0 with EINVAL.
+            let result = if (args[0] as i64) <= 0 {
+                -(errno::EINVAL as i64)
+            } else {
+                misc::sys_epoll_create(args)
+            };
+            syscall_set_return_value(regs, result);
+            return;
+        }
+        232 => {
+            // epoll_wait(epfd, events, maxevents, timeout_ms) — handler
+            // exists, no generic slot (generic uses epoll_pwait).
+            syscall_set_return_value(regs, misc::sys_epoll_wait(args));
+            return;
+        }
+        _ => {}
+    }
+
     #[cfg(feature = "x86_64")]
     let syscall_no = match crate::syscall::x86_compat::translate(syscall_no as u64, &args) {
         Some((generic_nr, generic_args)) => {

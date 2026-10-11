@@ -17,9 +17,13 @@
 //! RCX = remaining iterations and RSI/RDI past the completed ones, so
 //! the fixup only has to move RCX into the return register.
 //!
-//! `get_user`/`put_user` (scalar accesses) remain direct loads/stores:
-//! they are access_ok-gated single-word touches whose fault window is
-//! one instruction; converting them is a later micro-hardening step.
+//! EVERY accessor — scalars included — routes through the extable copy
+//! cores. A bare `read_volatile`/`write_volatile` on an access_ok-gated
+//! user pointer still panics the kernel when the page is unmapped
+//! (LTP x86-r2 N1: 37 EFAULT-family tests hit `pagefault ... (no fixup)`
+//! with rip inside core::ptr::read_volatile). The riscv64 twin has the
+//! same shape: get_user/put_user = size-of-T copies, string walkers =
+//! per-byte get_user.
 
 use super::mm::memory_layout::user_addr::USER_END;
 
@@ -145,58 +149,140 @@ pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
 
 /// Read one value from user memory.
 ///
+/// Routes through the exception-table copy core: a fault on the user
+/// page returns a short copy → None (EFAULT), never a kernel panic.
+///
 /// # Safety
 /// `from` is validated by access_ok only in this phase.
 pub unsafe fn get_user<T: Copy>(from: *const T) -> Option<T> {
-    if !access_ok(from as usize, core::mem::size_of::<T>()) {
+    let size = core::mem::size_of::<T>();
+
+    if !access_ok(from as usize, size) {
         return None;
     }
-    // SAFETY: bounds-checked above.
-    unsafe { Some(core::ptr::read_volatile(from)) }
+
+    let mut value: core::mem::MaybeUninit<T> = core::mem::MaybeUninit::uninit();
+
+    // SAFETY: destination is a size-of-T kernel stack slot; the source
+    // read faults into the extable fixup which returns a short count.
+    let uncopied = unsafe {
+        __x64_copy_from_user(value.as_mut_ptr() as *mut u8, from as *const u8, size)
+    };
+
+    if uncopied == 0 {
+        // SAFETY: `size` bytes were copied into the slot.
+        Some(unsafe { value.assume_init() })
+    } else {
+        None
+    }
 }
 
 /// Write one value to user memory.
 ///
+/// Routes through the exception-table copy core (see get_user).
+///
 /// # Safety
 /// `to` is validated by access_ok only in this phase.
 pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
-    if !access_ok(to as usize, core::mem::size_of::<T>()) {
+    let size = core::mem::size_of::<T>();
+
+    if !access_ok(to as usize, size) {
         return false;
     }
-    // SAFETY: bounds-checked above.
-    unsafe {
-        core::ptr::write_volatile(to, value);
-    }
-    true
+
+    // SAFETY: source is a size-of-T kernel stack slot; the destination
+    // write faults into the extable fixup which returns a short count.
+    let uncopied =
+        unsafe { __x64_copy_to_user(to as *mut u8, &value as *const T as *const u8, size) };
+
+    uncopied == 0
 }
 
-/// Copy a NUL-terminated string from user memory into `buf`.
-pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8]) -> Result<&'a [u8], i64> {
-    if from as usize == 0 || !access_ok(from as usize, max_len.min(buf.len())) {
-        return Err(-14); // EFAULT
+/// Safely read a null-terminated string from user space
+///
+/// Uses `get_user` (backed by the exception-table copy core) for each
+/// byte, so a page fault in user memory returns an error instead of
+/// panicking the kernel. Ported verbatim from the riscv64 twin.
+///
+/// # Arguments
+/// - `from`: User space source address
+/// - `max_len`: Maximum bytes to read (including null terminator)
+/// - `buf`: Kernel buffer to store the string
+///
+/// # Returns
+/// Returns Ok(slice) on success (without null terminator), Err(-EFAULT) on failure
+pub fn strncpy_from_user<'a>(
+    from: *const u8,
+    max_len: usize,
+    buf: &'a mut [u8],
+) -> Result<&'a [u8], i64> {
+    // EFAULT = 14
+    const EFAULT: i64 = 14;
+
+    if from.is_null() {
+        return Err(-EFAULT);
     }
-    let limit = max_len.min(buf.len());
-    for i in 0..limit {
-        // SAFETY: single byte inside the checked window.
-        let b = unsafe { core::ptr::read_volatile(from.add(i)) };
-        buf[i] = b;
-        if b == 0 {
-            return Ok(&buf[..i]);
+
+    // Verify the pointer itself is in user space.
+    if !access_ok(from as usize, 1) {
+        return Err(-EFAULT);
+    }
+
+    // Compute max readable bytes as distance from pointer to
+    // USER_END. This avoids the old bug where access_ok(from, max_len)
+    // failed when from was near the end of user space.
+    let addr = from as usize;
+    let max = if addr < USER_END { USER_END - addr } else { return Err(-EFAULT) };
+    let limit = core::cmp::min(max_len, buf.len());
+    let limit = core::cmp::min(limit, max);
+
+    let mut i = 0;
+    while i < limit {
+        // get_user goes through __x64_copy_from_user (assembly) which has
+        // exception table entries, so page faults are handled safely.
+        // Note: a NUL at index 0 (empty string) is a SUCCESS returning an
+        // empty slice — rejecting it breaks empty-argument execs.
+        match unsafe { get_user(from.add(i)) } {
+            Some(byte) => {
+                buf[i] = byte;
+                if byte == 0 {
+                    break;
+                }
+                i += 1;
+            }
+            None => return Err(-EFAULT),
         }
     }
-    Err(-36) // ENAMETOOLONG
+
+    Ok(&buf[..i])
 }
 
-/// Length of a NUL-terminated user string, 0 on fault/too long.
+/// Get length of null-terminated string in user space
+///
+/// # Arguments
+/// - `str`: User space string address
+/// - `maxlen`: Maximum length to check
+///
+/// # Returns
+/// Returns the length of the string (excluding null) plus 1 on success,
+/// or 0 on failure (including if string is longer than maxlen).
 pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
-    if str as usize == 0 || !access_ok(str as usize, maxlen) {
+    if maxlen == 0 {
         return 0;
     }
-    for i in 0..maxlen {
-        // SAFETY: index within maxlen of a checked pointer.
-        if unsafe { core::ptr::read_volatile(str.add(i)) } == 0 {
-            return i;
+
+    if !access_ok(str as usize, 1) {
+        return 0;
+    }
+
+    let mut len = 0;
+    while len < maxlen {
+        match unsafe { get_user(str.add(len)) } {
+            Some(0) => return len + 1, // Include null terminator
+            Some(_) => len += 1,
+            None => return 0,
         }
     }
-    0
+
+    0 // String too long
 }
