@@ -673,6 +673,31 @@ impl CfsRunQueue {
         putchar(b'\n');
     }
 
+    /// dfx=claiminject adjudication scan (GNOME-wedge hunt): poison every
+    /// linked task that currently shows the fully-pickable ownership state
+    /// {on_cpu=false, claim=-1} with a claim from CPU 7 — a CPU that does
+    /// not exist on any board we boot, so no picker can ever own it. On an
+    /// unpatched kernel every poisoned task strands exactly like the g2
+    /// freeze (linked, counted, skipped forever); with the pick-side
+    /// stale-claim heal the poison is swept at the next pick. Caller holds
+    /// the GRQ lock.
+    pub fn claim_inject_scan(&mut self) -> usize {
+        let mut n = 0;
+        for (_, &task) in self.tasks_timeline.iter() {
+            // SAFETY: diagnostic write of one atomic field on a task pinned
+            // in the timeline by the caller's GRQ lock.
+            unsafe {
+                if !(*task).on_cpu()
+                    && (*task).running_on_cpu.load(Ordering::Acquire) == -1
+                {
+                    (*task).running_on_cpu.store(7, Ordering::Release);
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// Pick next task to run
     ///
     /// Select task with smallest vruntime

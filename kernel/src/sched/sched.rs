@@ -2266,6 +2266,19 @@ pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> Option<bool
     Some(guard.cfs_rq.is_linked(task))
 }
 
+/// dfx=claiminject adjudication hook (GNOME-wedge hunt): leak a claim of
+/// the nonexistent CPU 7 onto every linked CFS task currently showing the
+/// pickable state {on_cpu=false, claim=-1}. Called from the timer softirq
+/// every 50 jiffies. Returns the number of tasks poisoned (the caller
+/// prints it); a busy GRQ simply skips that round.
+pub fn dfx_claim_inject() -> usize {
+    match try_grq_lock() {
+        Some(mut g) => g.cfs_rq.claim_inject_scan(),
+        None => 0,
+    }
+}
+
+
 /// DFX diagnostic (4-thread hang hunt): grq.nr_running (the global runnable
 /// counter the idle fast path trusts) versus the per-class queue depths it is
 /// supposed to mirror. A divergence pins the counter-drift engine in one shot.
