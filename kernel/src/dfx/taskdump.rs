@@ -392,6 +392,29 @@ pub fn dump_all_tasks(reason: &str) {
             put_dec(t.ti_cpu() as u64);
             puts(" on_cpu=");
             put_dec(t.on_cpu() as u64);
+            // GNOME-wedge hunt: the CFS pick predicate refuses a task when
+            // its running_on_cpu claim names another CPU, so a leaked claim
+            // strands a linked task permanently (g2: 10 tasks linked, all
+            // CPUs idle-looping, nothing picked for 35 min). The claim was
+            // the ONE ownership field the dump never printed — add it.
+            {
+                let claim = t.running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
+                puts(" claim=");
+                if (claim as i64) < 0 {
+                    putc(b'-');
+                    put_dec((claim as i64).unsigned_abs());
+                } else {
+                    put_dec(claim as u64);
+                }
+            }
+            puts(" preempt=");
+            let pv = t.preempt_count() as u64;
+            if (pv as i64) < 0 {
+                putc(b'-');
+                put_dec((pv as i64).unsigned_abs());
+            } else {
+                put_dec(pv);
+            }
             // Authoritative linked-state (tree/list scan, not the flag) —
             // settles flag-desync vs really-off-queue in one shot. The scan
             // runs under the GRQ try-lock; a busy lock reports '?' (counted
