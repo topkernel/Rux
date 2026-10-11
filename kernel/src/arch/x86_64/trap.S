@@ -124,6 +124,23 @@
 .global stub_\vec
 .hidden stub_\vec
 stub_\vec:
+    /* R70 (direction-flag discipline, Linux entry-cld): user code may
+     * leave EFLAGS.DF set when an exception/IRQ arrives — interrupt-gate
+     * entry clears IF/TF but NOTHING clears DF (only SYSCALL masks it,
+     * via IA32_FMASK TF|IF|DF, see trap.rs). The kernel's compiled code
+     * and its rep movsb memcpy cores rely on the SysV ABI invariant
+     * DF=0; with DF=1 every kernel memcpy lands len-1 bytes BELOW its
+     * destination, smashing saved registers and return addresses with
+     * the copied bytes. That was the x86 "scribble engine": kernel-mode
+     * jumps to small integers / user addresses (#UD rip=0x4c, 0x1bf,
+     * 0x6776; #PF rip=user-text), ASCII comm bytes inside Task headers
+     * and callee-saved slots, byte-flipped stack pointers, locks stuck
+     * on garbage words, and the recursive panic-then-jump-to-garbage
+     * loop — with the ownership graph and allocator provably clean (the
+     * R69 audit stays silent; the corruption is a legitimate copy with
+     * a poisoned direction). Clear DF before anything else; iretq
+     * restores the user's own flags on return to user. */
+    cld
     .if \ec == 0
     pushq $0                     /* dummy error code -> orig_rax slot */
     .endif
@@ -325,6 +342,7 @@ TRAP_STUB 229
 .global stub_8
 .hidden stub_8
 stub_8:
+    cld                          /* R70: same DF discipline as TRAP_STUB */
     call x86_double_fault_dump
 1:  cli
     hlt
@@ -352,6 +370,10 @@ stub_8:
 .global syscall_entry
 .hidden syscall_entry
 syscall_entry:
+    /* R70: SYSCALL already masks DF via IA32_FMASK (TF|IF|DF, trap.rs),
+     * but defense-in-depth costs one byte — never run kernel code with a
+     * user-controlled direction flag. */
+    cld
     swapgs
     /* GS-base authenticity check (SCRIBBLE2): compare the magic pattern
      * IN MEMORY (rcx/r10/r11 all carry live ABI values here).  A CPU

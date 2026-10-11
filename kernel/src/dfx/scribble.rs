@@ -101,6 +101,8 @@ static VERIFY_TICK: AtomicU32 = AtomicU32::new(0);
 static DIVERGE: AtomicU32 = AtomicU32::new(0);
 static GS_FIX_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 static BADIRET_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+// R68: Task-header canary global one-shot (see verify()).
+static HEADER_HIT_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 
 // ---- pick/publish event ring (dfx=scribble) -------------------------
 // Every mark_picked_on_cpu and x86_switch_publish appends here; the CONS
@@ -168,6 +170,141 @@ pub fn ring_dump() {
         puts(b" ");
         put_hex(e.b.load(Ordering::Relaxed));
         puts(b"\n");
+    }
+}
+
+// ---- R69 allocator double-handoff audit (dfx=scribble) -----------------
+// The x86 scribble morphology (live Task headers carrying another
+// allocation's bytes, live stacks carrying foreign small-integer data)
+// is what a buddy page handed to a SECOND owner while the first still
+// lives looks like from the outside. The ownership bitmap (sched.rs,
+// marked by alloc/free_task_slot since R69) lets the allocator itself
+// name that moment. Records are lock-free atomics so the anomaly sites
+// can run under the buddy lock; printing happens from the verify
+// cadence — never from the allocator (the R43/SBI and R34 lock-ordering
+// lessons).
+pub const AUDIT_KIND_HANDOFF: u32 = 1; // alloc returned a live Task page
+pub const AUDIT_KIND_FREE_LIVE: u32 = 2; // free targeted a live Task page
+pub const AUDIT_KIND_DOUBLE_FREE: u32 = 3; // free of an already-free block
+
+pub struct AuditRec {
+    pub kind: AtomicU32,
+    pub addr: AtomicU64,
+    pub order: AtomicU32,
+    pub cpu: AtomicU32,
+    pub frames: [AtomicU64; 6],
+}
+
+const AUDIT_SLOTS: usize = 8;
+static ALLOC_AUDIT: [AuditRec; AUDIT_SLOTS] = [const {
+    AuditRec {
+        kind: AtomicU32::new(0),
+        addr: AtomicU64::new(0),
+        order: AtomicU32::new(0),
+        cpu: AtomicU32::new(0),
+        frames: [const { AtomicU64::new(0) }; 6],
+    }
+}; AUDIT_SLOTS];
+static AUDIT_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+/// Walk the frame-pointer chain at the call site (x86_64 rbp layout:
+/// [rbp] = saved rbp, [rbp+8] = return address).
+#[cfg(feature = "x86_64")]
+pub fn audit_frames() -> [u64; 6] {
+    let mut out = [0u64; 6];
+    let mut fp = crate::dfx::backtrace::current_frame_pointer();
+    for slot in out.iter_mut() {
+        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0) {
+            break;
+        }
+        // SAFETY: diagnostic reads of the live call stack.
+        let (ra, next) = unsafe {
+            (
+                core::ptr::read_volatile((fp + 8) as *const u64),
+                core::ptr::read_volatile(fp as *const u64),
+            )
+        };
+        if ra == 0 {
+            break;
+        }
+        *slot = ra;
+        if !(next > fp && next < 0xffff_ffff_ffff_f000) {
+            break;
+        }
+        fp = next;
+    }
+    out
+}
+
+#[cfg(not(feature = "x86_64"))]
+pub fn audit_frames() -> [u64; 6] {
+    [0u64; 6]
+}
+
+/// Record an allocator anomaly (lock-free, first empty slot).
+pub fn audit_record(kind: u32, addr: u64, order: u32, frames: &[u64]) {
+    for slot in ALLOC_AUDIT.iter() {
+        if slot
+            .kind
+            .compare_exchange(0, kind, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            slot.addr.store(addr, Ordering::Release);
+            slot.order.store(order, Ordering::Release);
+            slot.cpu.store(crate::arch::cpu_id() as u32, Ordering::Release);
+            for (i, f) in frames.iter().enumerate().take(6) {
+                slot.frames[i].store(*f, Ordering::Release);
+            }
+            return;
+        }
+    }
+    AUDIT_DROPPED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Print and clear pending audit records (verify cadence only).
+pub fn audit_drain() {
+    let mut any = false;
+    for slot in ALLOC_AUDIT.iter() {
+        let kind = slot.kind.load(Ordering::Acquire);
+        if kind == 0 {
+            continue;
+        }
+        any = true;
+        puts(b"\nALLOC-AUDIT ");
+        match kind {
+            AUDIT_KIND_HANDOFF => puts(b"HANDOFF"),
+            AUDIT_KIND_FREE_LIVE => puts(b"FREE-LIVE"),
+            AUDIT_KIND_DOUBLE_FREE => puts(b"DOUBLE-FREE"),
+            _ => puts(b"?"),
+        }
+        puts(b" addr=");
+        put_hex(slot.addr.load(Ordering::Relaxed));
+        puts(b" order=");
+        put_dec(slot.order.load(Ordering::Relaxed) as u64);
+        puts(b" cpu=");
+        put_dec(slot.cpu.load(Ordering::Relaxed) as u64);
+        for i in 0..6 {
+            let f = slot.frames[i].load(Ordering::Relaxed);
+            if f == 0 {
+                break;
+            }
+            puts(b" ra");
+            put_dec(i as u64 + 1);
+            puts(b"=");
+            put_hex(f);
+        }
+        puts(b"\n");
+        slot.kind.store(0, Ordering::Release);
+    }
+    let d = AUDIT_DROPPED.swap(0, Ordering::AcqRel);
+    if d != 0 {
+        puts(b"ALLOC-AUDIT dropped=");
+        put_dec(d as u64);
+        puts(b"\n");
+        any = true;
+    }
+    if any {
+        ring_dump();
     }
 }
 /// Verify cadence: every N timer ticks per CPU.
@@ -721,6 +858,9 @@ pub fn verify() {
     if n % VERIFY_EVERY != 0 {
         return;
     }
+    // R69: drain pending allocator audit records first — a double
+    // handoff recorded seconds ago ages out of the ring otherwise.
+    audit_drain();
     let cur = crate::sched::current().map(|t| t as *mut Task);
     for idx in 0..SCRIBBLE_SLOTS {
         let t = SLOTS[idx].task.load(Ordering::Acquire);
@@ -815,6 +955,49 @@ pub fn verify() {
                     // resumes; re-tripping later is fine and useful.
                 }
             }
+        }
+        // R68 (Task-header canary): the v12 residual crash showed the
+        // victim's own comm string ("accept02") written into
+        // hung_task_since (+0x20) while the ownership graph stayed
+        // clean — user-data shapes inside a live Task page. Two header
+        // invariants are false-positive-free on x86_64: hung_task_since
+        // is 0 or a boot-relative ns timestamp (init 0, writers store
+        // `now` — always far below 2^48 for any realistic uptime), and
+        // ti_a0/a1/a2 are never written after construction on x86 (the
+        // old misaligned switch-out store that dirtied ti_a0's low half
+        // is gone — R67). A violation names the wild writer's victim
+        // with the event ring at most one scan from the write. Global
+        // one-shot: a corrupted header re-trips every scan and would
+        // flood the serial interleave (the s1 lesson).
+        #[cfg(feature = "x86_64")]
+        if (0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&(task as usize))
+            && unsafe {
+                let hts = (*task).hung_task_since.load(Ordering::Acquire);
+                let a0 = core::ptr::read_volatile(
+                    (task as usize + crate::process::task::TI_A0) as *const u64,
+                );
+                hts >> 48 != 0 || a0 != 0
+            }
+            && !HEADER_HIT_ANNOUNCED.swap(true, core::sync::atomic::Ordering::AcqRel)
+        {
+            puts(b"\nSCRIBBLE-HDR task=");
+            put_hex(task as u64);
+            unsafe {
+                puts(b" pid=");
+                put_dec((*task).pid() as u64);
+                puts(b" hts=");
+                put_hex((*task).hung_task_since.load(Ordering::Acquire));
+                puts(b" a0=");
+                put_hex(core::ptr::read_volatile(
+                    (task as usize + crate::process::task::TI_A0) as *const u64,
+                ));
+                puts(b" comm=");
+                for &b in (*task).comm() {
+                    put_hex(b as u64);
+                }
+            }
+            puts(b"\n");
+            ring_dump();
         }
         // Stable read set (retry a couple of times when a concurrent
         // quiesce bumps the generation mid-read).

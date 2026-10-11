@@ -1223,6 +1223,18 @@ impl Task {
             (ptr as usize + offset_of!(Task, task_refcnt)) as *mut core::sync::atomic::AtomicU32,
             core::sync::atomic::AtomicU32::new(1),
         );
+        // R68a: hung_task_since was missing from this list — Task pages
+        // come from the non-zeroing buddy, so a fresh task could inherit
+        // a stale timestamp (or string residue) from the page's previous
+        // life. khungtaskd then computes a bogus elapsed on the first
+        // D-state sighting and prints a false "blocked for more than N
+        // seconds" report; the x86-scribble4 header canary also tripped
+        // on the residue (observed: freed IPI-selftest string bytes
+        // "e ticks" surviving inside live ksoftirqd/0).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
         // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
         // Task pages come from the non-zeroing buddy allocator, so every
         // fork inherited the previous occupant's bytes. The fatal one is
@@ -1689,6 +1701,18 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, task_refcnt)) as *mut core::sync::atomic::AtomicU32,
             core::sync::atomic::AtomicU32::new(1),
+        );
+        // R68a: hung_task_since was missing from this list — Task pages
+        // come from the non-zeroing buddy, so a fresh task could inherit
+        // a stale timestamp (or string residue) from the page's previous
+        // life. khungtaskd then computes a bogus elapsed on the first
+        // D-state sighting and prints a false "blocked for more than N
+        // seconds" report; the x86-scribble4 header canary also tripped
+        // on the residue (observed: freed IPI-selftest string bytes
+        // "e ticks" surviving inside live ksoftirqd/0).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
         );
         // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
         // Task pages come from the non-zeroing buddy allocator, so every

@@ -369,22 +369,29 @@ impl BuddyAllocator {
                 // Task allocator itself, the page just received its SECOND
                 // owner — the long-hunted first handoff, named at the
                 // moment it happens. ra identifies the taker.
-                // R34: SBI direct write — this fires while the BUDDY lock is
-                // held; console::putchar would take the UART lock under
-                // BUDDY (every other allocator on all CPUs then piles up
-                // behind it). Same discipline as the double-free tripwire
-                // below and RawSpinlock::deadlock_warn.
+                // R34/R43: never print here (BUDDY lock held; console would
+                // nest UART under BUDDY — the A-form wedge ingredient).
+                // R69: the ownership bitmap is actually populated now
+                // (task_page_mark from alloc_task_slot — before R69 the
+                // probe read a table nobody wrote and never fired), so the
+                // event is also recorded with a caller backtrace for the
+                // deferred audit printer in dfx=scribble mode.
                 if !crate::sched::sched::IN_TASK_ALLOC.load(core::sync::atomic::Ordering::Acquire)
                     && crate::sched::sched::task_page_is_owned(addr as *const u8)
                 {
-                    // R43: record WITHOUT printing. The old SBI ecall ran
-                    // while the BUDDY lock was held; OpenSBI's putchar holds
-                    // the firmware console lock and polls UART THRE — a
-                    // throttled chardev parks the calling hart (and any
-                    // other hart in the firmware) forever, each holding its
-                    // own kernel lock: the A-form wedge signature (no panic,
-                    // no output, migrating lock). Taint only; read via
-                    // /proc or the DFX taskdump later.
+                    // R69: also record the event with a caller backtrace
+                    // for the deferred audit printer (dfx=scribble,
+                    // x86_64 — the dfx scribble module is x86-only).
+                    #[cfg(feature = "x86_64")]
+                    if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                        let frames = crate::dfx::scribble::audit_frames();
+                        crate::dfx::scribble::audit_record(
+                            crate::dfx::scribble::AUDIT_KIND_HANDOFF,
+                            addr as u64,
+                            order as u32,
+                            &frames,
+                        );
+                    }
                     crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R18-1 double-handoff
                 }
                 return addr as *mut u8;
@@ -412,6 +419,18 @@ impl BuddyAllocator {
             if meta.free != 0 || meta.order != order as u8 {
                 // R43: taint-only (SBI ecall under the heap lock was an
                 // A-form wedge ingredient — see the R18-1 note above).
+                // R69: also record the event with a caller backtrace for
+                // the deferred audit printer (dfx=scribble, x86_64).
+                #[cfg(feature = "x86_64")]
+                if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                    let frames = crate::dfx::scribble::audit_frames();
+                    crate::dfx::scribble::audit_record(
+                        crate::dfx::scribble::AUDIT_KIND_DOUBLE_FREE,
+                        addr as u64,
+                        order as u32,
+                        &frames,
+                    );
+                }
                 crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
                 return;
             }
@@ -569,6 +588,31 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         }
 
         let order = self.size_to_order(size.max(align));
+
+        // R69 free-side probe (x86_64): a free targeting a page that
+        // still carries a live Task (ownership bitmap; alloc/
+        // free_task_slot maintain it) is the double-handoff engine's
+        // fuel — the page would return to the free lists while its Task
+        // still runs, and the next two allocations share it. Refuse
+        // under dfx=scribble (the bitmap is exact since R69; the old
+        // R17-B refusal was withdrawn because the pre-Batch-8 bitmap
+        // aliased) and record with a caller backtrace either way.
+        // IN_TASK_FREE marks the legitimate release path.
+        #[cfg(feature = "x86_64")]
+        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && !crate::sched::sched::IN_TASK_FREE.load(core::sync::atomic::Ordering::Acquire)
+            && crate::sched::sched::task_page_is_owned(ptr)
+        {
+            let frames = crate::dfx::scribble::audit_frames();
+            crate::dfx::scribble::audit_record(
+                crate::dfx::scribble::AUDIT_KIND_FREE_LIVE,
+                ptr_addr as u64,
+                order as u32,
+                &frames,
+            );
+            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R69 free-of-live
+            return;
+        }
 
         // Check if order exceeds MAX_ORDER
         if order > MAX_ORDER {

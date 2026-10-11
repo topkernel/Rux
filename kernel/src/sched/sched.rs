@@ -983,24 +983,29 @@ fn task_page_unmark(ptr: *mut u8) {
 pub static IN_TASK_ALLOC: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Word index in TASK_PAGE_OWNED for a page pointer, if representable.
-#[inline]
-fn task_page_word(ptr: *const u8) -> Option<usize> {
-    let base = 0x8000_0000usize;
-    let addr = ptr as usize;
-    if addr < base { return None; }
-    let page = (addr - base) >> 12;
-    Some((page >> 6) & 127)
-}
+/// Set while free_task_slot is releasing a Task page, so the heap's
+/// free-side probe (R69) does not flag the legitimate ownership release.
+pub static IN_TASK_FREE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// True if the page carrying `ptr` is marked as a live Task page.
+///
+/// R69: the old `task_page_word` helper indexed with the pre-Batch-8
+/// aliasing hash — `(page >> 6) & 127` against the riscv RAM base —
+/// while `task_page_mark`/`unmark` index by full physical page number
+/// (Batch 8). `task_page_is_owned` therefore read bits nobody ever
+/// wrote: the bitmap always read as zero and both probes built on it
+/// (R17-B free refusal, R18-1 alloc-side handoff taint) were inert.
+/// Index exactly like the mark side.
 
 /// True if the page carrying `ptr` is marked as a live Task page.
 #[inline]
 pub fn task_page_is_owned(ptr: *const u8) -> bool {
-    match task_page_word(ptr) {
-        Some(w) => {
-            let page = ((ptr as usize) - 0x8000_0000) >> 12;
-            TASK_PAGE_OWNED[w].load(core::sync::atomic::Ordering::Acquire) & (1u64 << (page & 63)) != 0
-        }
+    match task_page_index(ptr) {
+        Some(page) => TASK_PAGE_OWNED[page >> 6]
+            .load(core::sync::atomic::Ordering::Acquire)
+            & (1u64 << (page & 63))
+            != 0,
         None => false,
     }
 }
@@ -1049,6 +1054,13 @@ pub fn alloc_task_slot() -> Option<*mut Task> {
         }
         crate::process::pid_hash::pid_hash_insert(task_ptr);
     }
+
+    // R69: the ownership bitmap was never populated — task_page_mark had
+    // no callers, so every probe reading TASK_PAGE_OWNED (the R18-1
+    // alloc-side handoff taint in the buddy, the R69 free-side audit)
+    // saw a permanently-zero table. Mark live Task pages from the day
+    // one place that creates them.
+    task_page_mark(task_ptr as *mut u8);
 
     Some(task_ptr)
 }
@@ -1171,7 +1183,13 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 slot.add(crate::process::task::TASK_PID) as *mut u32,
                 TASK_POISON,
             );
+            // R69: release the ownership bit and tell the heap's free-side
+            // audit that THIS free is the legitimate one (anything else
+            // freeing a live Task page is the double-handoff engine).
+            task_page_unmark(slot);
+            IN_TASK_FREE.store(true, core::sync::atomic::Ordering::Release);
             alloc::alloc::dealloc(slot, core::alloc::Layout::new::<Task>());
+            IN_TASK_FREE.store(false, core::sync::atomic::Ordering::Release);
         }
 }
 
