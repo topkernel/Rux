@@ -608,6 +608,51 @@ pub fn sys_rt_sigsuspend(args: SyscallArgs) -> i64 {
     }
 }
 
+/// sys_pause - Wait for a signal (x86_64 legacy syscall)
+///
+/// pause(2) suspends the calling thread until a signal that is delivered
+/// (i.e. not blocked) arrives; its only return value is -1/EINTR — a
+/// terminating signal simply never returns. asm-generic has no pause
+/// number (libc emulates with ppoll there), so x86_64 binaries issuing
+/// the native NR 34 land here.
+///
+/// Same sleep-until-signal discipline as sys_rt_sigsuspend, minus the
+/// mask swap: pause never touches the blocked mask.
+pub fn sys_pause(_args: SyscallArgs) -> i64 {
+    let current = match crate::sched::current() {
+        Some(c) => c as *const _ as *mut crate::process::task::Task,
+        None => return -(errno::EINTR as i64),
+    };
+
+    // SAFETY: current is the running task's Task pointer from sched::current().
+    unsafe {
+        loop {
+            let pending = (*current).pending.get_all();
+            let blocked = (*current).sigmask;
+            if pending & !blocked != 0 {
+                return -(errno::EINTR as i64);
+            }
+            // Set state BEFORE re-checking to close the race window (same
+            // as sigsuspend): a wake-up between the check and schedule()
+            // finds us INTERRUPTIBLE and leaves us RUNNING.
+            (*current).set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::INTERRUPTIBLE,
+            ));
+            // Re-check after setting state (signal may have arrived)
+            let pending2 = (*current).pending.get_all();
+            if pending2 & !blocked != 0 {
+                (*current).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
+                // R8-5 (NEW-C2): undo a concurrent wake enqueue.
+                crate::sched::dequeue_task(&*current);
+                return -(errno::EINTR as i64);
+            }
+            crate::sched::schedule();
+        }
+    }
+}
+
 /// sys_tkill - Send signal to a thread
 ///
 /// # Arguments

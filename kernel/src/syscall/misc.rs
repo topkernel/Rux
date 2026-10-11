@@ -34,7 +34,14 @@ pub mod poll_events {
 }
 
 /// epoll_event structure
-#[repr(C)]
+// Linux uapi `struct epoll_event` is __attribute__((packed)): events@0,
+// data@4, 12 bytes total — glibc AND musl mirror that on every arch. The
+// former repr(C) layout padded data to @8 (16-byte stride), so any
+// epoll_wait/epoll_pwait delivering >1 event, or a userspace check of
+// `data` against the packed struct, read misaligned garbage (LTP x86
+// epoll_wait01: "epoll.data.fd 1835365160, expected 4"). Keep the kernel
+// struct byte-identical to the uapi on both arches.
+#[repr(C, packed)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct EPollEvent {
     pub events: u32,

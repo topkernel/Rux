@@ -58,8 +58,17 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         26 => Some((227, *args)), // msync
         27 => Some((232, *args)), // mincore
         28 => Some((233, *args)), // madvise
+        // SysV shm: x86_64 has direct calls (no ipc() multiplexer), same
+        // argument order as asm-generic — pure number remaps. Without
+        // these, shmget(29) fell through to generic 29 (ioctl → ENOTTY).
+        29 => Some((194, *args)), // shmget
+        30 => Some((196, *args)), // shmat
+        31 => Some((195, *args)), // shmctl
         32 => Some((23, *args)), // dup
-        33 => Some((24, [a0, a1, 0, 0, 0, 0])), // dup2
+        // 33 dup2: handled by the dispatch's x86_64 legacy block (needs the
+        // oldfd==newfd special case that dup3 rejects with EINVAL).
+        // 34 pause: handled by the dispatch's x86_64 legacy block (no
+        // asm-generic number exists; needs the pause sleep loop).
         35 => Some((101, *args)), // nanosleep
         36 => Some((102, *args)), // getitimer
         38 => Some((103, *args)), // setitimer
@@ -88,6 +97,18 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         61 => Some((260, *args)), // wait4
         62 => Some((129, *args)), // kill
         63 => Some((160, *args)), // uname
+        // SysV sem: same ABI, number remap only. Without these, semget(64)
+        // fell through to generic 64 (write → EBADF on the key-as-fd).
+        64 => Some((190, *args)), // semget
+        65 => Some((193, *args)), // semop
+        66 => Some((191, *args)), // semctl
+        // SysV msg: without these, msgget(68) fell through to generic 68
+        // (pwrite64 → EBADF) — the LTP x86-r2 N2 family (45+ tests).
+        67 => Some((197, *args)), // shmdt
+        68 => Some((186, *args)), // msgget
+        69 => Some((189, *args)), // msgsnd
+        70 => Some((188, *args)), // msgrcv
+        71 => Some((187, *args)), // msgctl
         72 => Some((25, *args)), // fcntl
         73 => Some((32, *args)), // flock
         74 => Some((82, *args)), // fsync
@@ -116,7 +137,11 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         98 => Some((165, *args)), // getrusage
         99 => Some((179, *args)), // sysinfo
         100 => Some((153, *args)), // times
+        // ptrace: was missing → generic 101 (nanosleep) EFAULTed on the
+        // request register (LTP x86-r2 ptrace03 "EFAULT").
+        101 => Some((117, *args)), // ptrace
         102 => Some((174, *args)), // getuid
+        103 => Some((116, *args)), // syslog
         104 => Some((176, *args)), // getgid
         105 => Some((146, *args)), // setuid
         106 => Some((144, *args)), // setgid
@@ -124,6 +149,7 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         108 => Some((177, *args)), // getegid
         109 => Some((154, *args)), // setpgid
         110 => Some((173, *args)), // getppid
+        111 => Some((155, [0, 0, 0, 0, 0, 0])), // getpgrp = getpgid(0)
         112 => Some((157, *args)), // setsid
         113 => Some((145, *args)), // setreuid
         114 => Some((143, *args)), // setregid
@@ -209,6 +235,7 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         217 => Some((61, *args)), // getdents64
         218 => Some((96, *args)), // set_tid_address
         219 => Some((128, *args)), // restart_syscall
+        220 => Some((192, *args)), // semtimedop
         221 => Some((223, *args)), // fadvise64
         222 => Some((107, *args)), // timer_create
         223 => Some((110, *args)), // timer_settime
@@ -225,10 +252,19 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         237 => Some((235, *args)), // mbind
         238 => Some((237, *args)), // set_mempolicy
         239 => Some((236, *args)), // get_mempolicy
+        // POSIX mq block: was missing → generic 240-245 dispatched
+        // rt_tgsigqueueinfo/perf_event_open/recvmmsg/fanotify/… instead.
+        240 => Some((180, *args)), // mq_open
+        241 => Some((181, *args)), // mq_unlink
+        242 => Some((182, *args)), // mq_timedsend
+        243 => Some((183, *args)), // mq_timedreceive
+        244 => Some((184, *args)), // mq_notify
+        245 => Some((185, *args)), // mq_getsetattr
         246 => Some((104, *args)), // kexec_load
         247 => Some((95, *args)), // waitid
         251 => Some((30, *args)), // ioprio_set
         252 => Some((31, *args)), // ioprio_get
+        253 => Some((26, [0, 0, 0, 0, 0, 0])), // inotify_init = inotify_init1(0)
         254 => Some((27, *args)), // inotify_add_watch
         255 => Some((28, *args)), // inotify_rm_watch
         256 => Some((238, *args)), // migrate_pages
@@ -256,6 +292,7 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         279 => Some((239, *args)), // move_pages
         280 => Some((88, *args)), // utimensat
         281 => Some((22, *args)), // epoll_pwait
+        282 => Some((74, [a0, a1, a2, 0, 0, 0])), // signalfd = signalfd4(…, flags=0)
         283 => Some((85, *args)), // timerfd_create
         285 => Some((47, *args)), // fallocate
         286 => Some((86, *args)), // timerfd_settime
@@ -263,6 +300,7 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         288 => Some((242, *args)), // accept4
         289 => Some((74, *args)), // signalfd4
         290 => Some((19, *args)), // eventfd2
+        284 => Some((19, [a0, 0, 0, 0, 0, 0])), // eventfd = eventfd2(init, flags=0)
         291 => Some((20, *args)), // epoll_create1
         292 => Some((24, *args)), // dup3
         293 => Some((59, *args)), // pipe2
