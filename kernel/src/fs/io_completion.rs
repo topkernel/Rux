@@ -77,13 +77,28 @@ impl IoCompletion {
 
     /// Delivery-protocol arm: called by a completion walker under the
     /// device pending-table lock, before the entry leaves the table.
+    ///
+    /// probe-slow: the increment is Relaxed. The ordering the protocol
+    /// needs against `abandon_pending_completion` ("if the entry is gone
+    /// from the table, the increment is already visible") is carried by
+    /// the pending-table lock itself: the walker increments while holding
+    /// the table lock, and abandon scans the table under the same lock —
+    /// its lock ACQUIRE synchronizes with the walker's lock RELEASE, so
+    /// the increment is ordered ahead of abandon's read without a fence
+    /// in the RMW. Both call sites (PCI and MMIO walkers) hold the table
+    /// lock across this call.
     pub fn begin_delivery(&self) {
-        self.delivering.fetch_add(1, Ordering::AcqRel);
+        self.delivering.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Delivery-protocol release: called after `complete()` returned.
+    ///
+    /// Release (kept from the original): `wait_deliveries` loads the
+    /// count with Acquire, so observing the decrement must make
+    /// `complete()`'s status store (Release, before this call) visible —
+    /// a Relaxed decrement could publish "delivered" ahead of the status.
     pub fn end_delivery(&self) {
-        self.delivering.fetch_sub(1, Ordering::AcqRel);
+        self.delivering.fetch_sub(1, Ordering::Release);
     }
 
     /// Spin until every in-flight delivery of this completion has called

@@ -341,10 +341,10 @@ impl RtRunQueue {
                     // cgroup v2 (U1b): skip cpu-throttled cgroup chains —
                     // see the fair-class twin for the unthrottle story.
                     let allowed = unsafe {
-                        let oncpu = (*task).on_cpu();
-                        let claim = (*task).running_on_cpu.load(Ordering::Acquire);
-                        let ownership_ok = task == prev
-                            || (!oncpu && (claim == -1 || claim as usize == cpu_id));
+                        // R65-pick (probe-slow): single-qword ownership
+                        // read — see the fair-class twin.
+                        let ownership_ok =
+                            task == prev || (*task).ownership_pickable(cpu_id);
                         (*task).cpu_allowed(cpu_id)
                             && ownership_ok
                             && !crate::sched::cgroup::task_cgroup_throttled(task)
