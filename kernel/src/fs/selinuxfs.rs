@@ -178,6 +178,7 @@ static SELINUXFS_FILE_OPS: FileOps = FileOps {
     lseek: None,
     close: None,
     poll: None,
+    read_at: None,
 };
 
 /// Build the root inode for a selinuxfs mount.
