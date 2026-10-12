@@ -241,6 +241,23 @@ _start:
     or t4, t4, t5
     sd t4, 32(t3)
 
+    // PMD[5]: VA 0xFFFFFFFF80A00000 -> PA 0x80C00000 (sixth 2MB)
+    // R3FIX: the unit-test build (feature "unit-test" compiles the whole
+    // boot-time test suite into the image) pushed text+rodata+bss+boot
+    // stack past the 10MB budget — the boot stack's top page sat on the
+    // first UNMAPPED page again, and the first trap whose frame landed
+    // there page-faulted inside trap_entry's register save (pfault at
+    // 0xffffffff80a00000, epc trap_entry+0x28, make-test boot). The
+    // mapping WINDOW is now 12MB; the heap stays at 0x80C00000 (the real
+    // image+stack ends at 0x80A01000, still ~2MB below the heap — see
+    // memory_layout.rs for why the heap must NOT move).
+    li t4, KERNEL_PHYS
+    li t6, 0xA00000              // 10MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 40(t3)
+
     // --- MMIO identity mapping (UART at 0x10000000) ---
     // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)
     // VPN2 for 0x10000000 = (0x10000000 >> 30) & 0x1FF = 0

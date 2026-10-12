@@ -112,10 +112,21 @@ pub const fn is_linear_mapping(virt: usize) -> bool {
 /// Kernel entry point (after OpenSBI)
 pub const KERNEL_ENTRY: u64 = 0x80200000;
 
-/// Kernel image mapping budget (entry 0x80200000 + 10MB). The debug image
-/// (text+rodata+bss+boot stack) outgrew 8MB; the heap now starts at
-/// 0x80C00000, one PMD past this budget (see boot.S PMD[4]).
-pub const KERNEL_SIZE: u64 = 0xA00000;
+/// Kernel image mapping budget (entry 0x80200000 + 12MB). The debug image
+/// (text+rodata+bss+boot stack) outgrew 8MB, and the unit-test build
+/// (feature "unit-test": the whole boot-time test suite compiled in)
+/// later outgrew 10MB — its boot-stack top page faulted at
+/// 0xffffffff80a00000 during the first trap (see boot.S PMD[5]).
+///
+/// The heap does NOT move with this window: the image+stack physically
+/// ends at 0x80A01000 (unit-test build), ~2MB below the heap base, and
+/// KERNEL_RESERVE_SIZE (12MB from the RAM base) still covers the real
+/// image with slack. Moving the heap one PMD past the window
+/// (0x80E00000) was tried and breaks the vmemmap backing search
+/// (deterministic pfault at vmemmap+0x1800000 in Page::init_free) — the
+/// early-boot allocator is sensitive to the 2MB free gap such a move
+/// opens between the kernel reservation and the heap.
+pub const KERNEL_SIZE: u64 = 0xC00000;
 
 /// Heap start address (after kernel)
 pub const HEAP_START: u64 = 0x80C00000;
