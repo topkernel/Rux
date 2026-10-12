@@ -4318,6 +4318,16 @@ pub mod task_offsets {
     pub const TI_A2: usize = core::mem::offset_of!(Task, ti_a2);
     /// R56-heal: __switch_to's affirm gate CASes this word (PICKED → LIVE).
     pub const TI_PICK_STATE: usize = core::mem::offset_of!(Task, ti_pick_state);
+    /// R57-scribble: the thread_info neighborhood map — the pk= garbage
+    /// captures prove a foreign store lands near ti_pick_state; these
+    /// offsets let the dump identify which 8-byte field's halves overlap
+    /// the pick-state word.
+    pub const TI_CPUS_ALLOWED: usize = core::mem::offset_of!(Task, cpus_allowed);
+    pub const TI_ON_CPU: usize = core::mem::offset_of!(Task, ti_on_cpu);
+    pub const TI_RUNNING_ON_CPU: usize = core::mem::offset_of!(Task, running_on_cpu);
+    pub const TI_HUNG_TASK_SINCE: usize = core::mem::offset_of!(Task, hung_task_since);
+    pub const TI_TASK_REFCNT: usize = core::mem::offset_of!(Task, task_refcnt);
+    pub const TI_JOURNAL_HANDLE: usize = core::mem::offset_of!(Task, journal_handle);
 
     // Other common field offsets
     pub const TASK_STATE: usize = core::mem::offset_of!(Task, state);

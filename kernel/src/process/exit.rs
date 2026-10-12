@@ -506,6 +506,15 @@ pub fn do_exit(exit_code: i32) -> ! {
     // SAFETY: current is the raw pointer to the calling task, guaranteed valid since
     // we are the currently executing task and will never return from this function.
     unsafe {
+        // Linux discipline: PF_EXITING is do_exit's FIRST store, so every
+        // other subsystem (the scheduler's R56/R57 harvest-steal machinery
+        // in particular) can refuse to "rescue" a task whose kernel stack
+        // is live in the exit path — re-enqueueing it hands that stack to
+        // a second hart (the n1-organic double-run panic).
+        (*current).set_ti_flags(
+            (*current).ti_flags()
+                | crate::process::task::task_flags::TaskFlags::PF_EXITING.bits(),
+        );
         let current_pid = (*current).pid();
         let leader = (*current).group_leader_ptr();
         let is_leader = leader == current;

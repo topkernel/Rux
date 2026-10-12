@@ -953,6 +953,11 @@ impl CfsRunQueue {
                             putchar(b'-');
                         }
                         pd((claim as i64).unsigned_abs());
+                        // R57: pick-state word (0=PICKED 1=LIVE 2=REVOKED) —
+                        // with oncpu/claim it names the exact protocol leg
+                        // that refused the candidate.
+                        ps(b" pk=");
+                        pd((*task).pick_state() as u64);
                         ps(b" aff=0x");
                         let mut v = (*task).cpus_allowed() as u64;
                         for sh in (0..8u32).rev() {

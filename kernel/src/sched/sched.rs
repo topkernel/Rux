@@ -1629,7 +1629,33 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
         // on a harvester revocation. The next == prev fast-path repick
         // publishes LIVE directly — the task never stopped running, and
         // marking it PICKED would leave a running task revocable.
-        (*task).publish_pick_ownership(crate::arch::cpu_id() as i32, is_repick);
+        //
+        // R57 (choke point): "never stopped running" must be decided by
+        // OWNERSHIP, not only by the caller's is_repick arithmetic. If
+        // this CPU's slot still names the task or the task's claim names
+        // this CPU, the task believes it is executing here RIGHT NOW
+        // (its callee-saved context is live on this hart's stack) —
+        // publish LIVE no matter which pick route arrived, or a
+        // mislabeled "fresh" pick would make the running task revocable
+        // by the next steal that reads it PICKED. The forced-LIVE
+        // correction is reported: seeing it means a caller computed
+        // is_repick=false for a task this CPU owns — a bug worth naming.
+        let me = crate::arch::cpu_id() as usize;
+        let owned_here = (me < MAX_CPUS && cpu_state(me).current == task)
+            || (*task).running_on_cpu.load(core::sync::atomic::Ordering::Acquire) == me as i32;
+        let live = is_repick || owned_here;
+        if owned_here && !is_repick {
+            // First-hit-only: an in-tree impossibility — if a caller ever
+            // computes is_repick=false for a task this CPU owns, say so
+            // once, loudly, then keep the machine safe (LIVE publish).
+            static PICK_LIVE_FORCED_SEEN: core::sync::atomic::AtomicBool =
+                core::sync::atomic::AtomicBool::new(false);
+            if !PICK_LIVE_FORCED_SEEN.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                r56_print_pid(b"PICK-LIVE-FORCED cpu=", me as u32, b" pid=");
+                r56_print_pid(b"", (*task).pid(), b"\n");
+            }
+        }
+        (*task).publish_pick_ownership(crate::arch::cpu_id() as i32, live);
     }
 }
 
@@ -3290,6 +3316,28 @@ fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
 ///     picker therefore aborts its resume at the failed CAS (no double
 ///     run), and a task that already resumed (LIVE) is never touched.
 ///
+/// R57: true when the task is on its way out — PF_EXITING set (do_exit's
+/// first store) or a SIGKILL pending. Such a task terminates through its
+/// own final schedule(); no heal may re-enqueue or re-offer it (the
+/// n1-organic kill chain: gsettings aborted → group SIGKILL → the steal
+/// re-linked the mid-do_exit dconf worker → double-run → epc-on-own-stack
+/// illegal-instruction panic).
+fn task_is_dying(task: *mut Task) -> bool {
+    use crate::process::task::task_flags::TaskFlags;
+    if task.is_null() {
+        return true;
+    }
+    unsafe {
+        if (*task).ti_flags() & TaskFlags::PF_EXITING.bits() != 0 {
+            return true;
+        }
+        (*task)
+            .pending
+            .peek_info(crate::signal::Signal::SIGKILL as i32)
+            .is_some()
+    }
+}
+
 /// Returns true when something was healed.
 pub fn harvest_relink(task: *mut Task) -> bool {
     if task.is_null() {
@@ -3386,6 +3434,21 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                     {
                         _sw_mask |= 1 << c;
                     }
+                }
+                // R57 (defense in depth for other callers): a naming CPU
+                // whose timer-IRQ count still moves is alive no matter how
+                // stale its scheduler tick reads (the n1-organic lesson:
+                // starved ≠ dead under MTTCG), and a dying task always
+                // leaves through its own final schedule(). Refuse both.
+                for c in 0..MAX_CPUS {
+                    if cpu_state(c).current == task
+                        && crate::dfx::softlockup::cpu_irq_frozen_ms(c) < 5000
+                    {
+                        return false;
+                    }
+                }
+                if task_is_dying(task) {
+                    return false;
                 }
                 if !(*task).revoke_pending_pick() {
                     // LIVE (genuinely running — leave it alone) or an
@@ -3600,6 +3663,22 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                     } else if (*t).preempt_count() == 0
                         && orphan_watch_confirm(t, pid, now, 3)
                         && cpu_tick_stale_ms(c) >= 5000
+                        // R57 (n1-organic postmortem): tick-staleness alone
+                        // convicted a TCG-starved-but-alive hart — CPU3
+                        // serviced 3-10 timer IRQs/s for 1600s while its
+                        // scheduler tick read stale; the steal re-enqueued
+                        // pid 365 mid-do_exit, another hart resumed its
+                        // live kernel stack, and the machine died at
+                        // epc=sp+0x26 (illegal instruction, the m25 shape).
+                        // A hart whose timer-IRQ count still MOVES is alive:
+                        // refuse the steal. Only a count frozen for as long
+                        // as the tick is stale may be read as a dead picker.
+                        && crate::dfx::softlockup::cpu_irq_frozen_ms(c) >= 5000
+                        // A dying task (PF_EXITING or SIGKILL pending)
+                        // terminates through its own final schedule();
+                        // re-enqueueing it mid-exit hands a live kernel
+                        // stack to a second hart.
+                        && !task_is_dying(t)
                     {
                         // Busy slot naming a task that is off-queue while
                         // the naming CPU has not taken a tick in 5s and the
