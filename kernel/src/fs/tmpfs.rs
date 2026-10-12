@@ -60,6 +60,49 @@ fn wall_secs() -> u64 {
     crate::drivers::rtc::wall_secs()
 }
 
+/// One 4 KiB data page of a tmpfs file, plus the owning superblock.
+///
+/// Drop releases the page back to the mount's page budget
+/// (`TmpfsSuperBlock::used_pages`), so EVERY removal path — truncate,
+/// unlink, hard-link-drop, whole-mount teardown — decrements exactly
+/// once, by construction. The size= budget is what keeps an
+/// unprivileged `mount -t tmpfs -o size=32M` from eating the whole
+/// kernel heap: tmpfs pages are kernel-heap boxes here (no swap, no
+/// page-cache reclaim), so without the limit a 118 MB write pattern
+/// (LTP preadv203) exhausts the 128 MB heap and the ALLOCTHROW path
+/// kills every later fork in the boot (x86-r3 chunk c8: 91 forkfail
+/// cascade).
+pub(crate) struct TmpfsPage {
+    data: Box<[u8; PAGE_SIZE]>,
+    sb: *const TmpfsSuperBlock,
+}
+
+impl TmpfsPage {
+    fn new(sb: *const TmpfsSuperBlock) -> Self {
+        // The caller must have reserved budget (used_pages already
+        // incremented) — see TmpfsNode::write_at.
+        Self {
+            data: Box::new([0u8; PAGE_SIZE]),
+            sb,
+        }
+    }
+}
+
+impl Drop for TmpfsPage {
+    fn drop(&mut self) {
+        if !self.sb.is_null() {
+            unsafe {
+                (*self.sb).used_pages.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+}
+
+// SAFETY: the raw superblock pointer is a leaked mount-lifetime
+// allocation (Box::into_raw in create_mount_instance); Drop only
+// touches an atomic through it.
+unsafe impl Send for TmpfsPage {}
+
 // ============================================================================
 // Node
 // ============================================================================
@@ -83,7 +126,7 @@ pub struct TmpfsNode {
     pub node_type: TmpfsType,
     /// Page-granular contents. Shared `Arc` between hard links so writes
     /// through one link are visible through the others (POSIX semantics).
-    pages: Arc<Spinlock<BTreeMap<usize, Box<[u8; PAGE_SIZE]>>>>,
+    pages: Arc<Spinlock<BTreeMap<usize, TmpfsPage>>>,
     /// Logical file size in bytes (independent of the allocated page set).
     size: AtomicU64,
     /// File-type + permission bits (chmod-visible).
@@ -234,7 +277,7 @@ impl TmpfsNode {
             let page_off = off % PAGE_SIZE;
             let chunk = (to_read - done).min(PAGE_SIZE - page_off);
             if let Some(page) = pages.get(&page_idx) {
-                buf[done..done + chunk].copy_from_slice(&page[page_off..page_off + chunk]);
+                buf[done..done + chunk].copy_from_slice(&page.data[page_off..page_off + chunk]);
             } else {
                 // Hole: zero-fill.
                 buf[done..done + chunk].fill(0);
@@ -248,36 +291,51 @@ impl TmpfsNode {
     }
 
     /// Write `data` at `offset`, allocating pages on demand. Extends the
-    /// logical size to cover the write.
+    /// logical size to cover the stored bytes.
+    ///
+    /// Returns the number of bytes stored. When the mount's page budget
+    /// (mount option `size=`/`nr_blocks=`) runs out mid-write, the stored
+    /// prefix is returned — a SHORT count; 0 when not even one new page
+    /// could be allocated. The file-op caller maps a zero return to
+    /// ENOSPC (POSIX: short write when some bytes fit, ENOSPC when none).
     pub fn write_at(&self, offset: usize, data: &[u8]) -> usize {
         if data.is_empty() {
             return 0;
         }
-        let end = offset + data.len();
 
+        let mut done = 0usize;
         {
             let mut pages = self.pages.lock();
-            let mut done = 0usize;
             while done < data.len() {
                 let off = offset + done;
                 let page_idx = off / PAGE_SIZE;
                 let page_off = off % PAGE_SIZE;
                 let chunk = (data.len() - done).min(PAGE_SIZE - page_off);
-                // Allocate the page on first touch (demand paging).
+                // Allocate the page on first touch (demand paging), under
+                // the mount's page budget. reserve_page() consumes one
+                // budget slot exactly when the entry is about to be
+                // inserted; on failure nothing was reserved (loop breaks).
+                if !pages.contains_key(&page_idx) && !self.reserve_page() {
+                    break; // budget exhausted: short write (0 => ENOSPC)
+                }
                 let page = pages
                     .entry(page_idx)
-                    .or_insert_with(|| Box::new([0u8; PAGE_SIZE]));
-                page[page_off..page_off + chunk].copy_from_slice(&data[done..done + chunk]);
+                    .or_insert_with(|| TmpfsPage::new(self.sb));
+                page.data[page_off..page_off + chunk]
+                    .copy_from_slice(&data[done..done + chunk]);
                 done += chunk;
             }
         }
 
-        // size = max(size, end) — no fetch_max on AtomicU64, CAS loop.
+        // size = max(size, offset + done) — only bytes that actually
+        // landed extend the logical size (no fetch_max on AtomicU64,
+        // CAS loop).
+        let end = (offset + done) as u64;
         let mut cur = self.size.load(Ordering::Acquire);
-        while end as u64 > cur {
+        while end > cur {
             match self
                 .size
-                .compare_exchange_weak(cur, end as u64, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange_weak(cur, end, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => break,
                 Err(actual) => cur = actual,
@@ -285,25 +343,69 @@ impl TmpfsNode {
         }
 
         self.mtime.store(wall_secs(), Ordering::Release);
-        data.len()
+        done
     }
 
     /// Truncate to `new_size`: drop whole pages beyond the new size and
     /// zero the tail of the (kept) partial last page so a later re-extend
-    /// exposes zeros, not stale data.
+    /// exposes zeros, not stale data. Dropping a `TmpfsPage` returns it
+    /// to the mount's page budget automatically.
     pub fn truncate(&self, new_size: usize) {
-        let last_kept_page = new_size / PAGE_SIZE;
-        let tail = new_size % PAGE_SIZE;
         let mut pages = self.pages.lock();
-        pages.retain(|&idx, _| idx <= last_kept_page);
-        if tail != 0 {
-            if let Some(page) = pages.get_mut(&last_kept_page) {
-                page[tail..PAGE_SIZE].fill(0);
+        if new_size == 0 {
+            // A 0-size file keeps NO pages. The old `idx <= new_size /
+            // PAGE_SIZE` retained page 0 for new_size == 0 — a leaked page
+            // (and, with the size= budget, a leaked budget charge that
+            // never returned; caught by the tmpfs-budget unit test).
+            pages.clear();
+        } else {
+            let last_kept_page = new_size / PAGE_SIZE;
+            let tail = new_size % PAGE_SIZE;
+            pages.retain(|&idx, _| idx <= last_kept_page);
+            if tail != 0 {
+                if let Some(page) = pages.get_mut(&last_kept_page) {
+                    page.data[tail..PAGE_SIZE].fill(0);
+                }
             }
         }
         drop(pages);
         self.size.store(new_size as u64, Ordering::Release);
         self.mtime.store(wall_secs(), Ordering::Release);
+    }
+
+    /// Reserve one page of the mount's `size=` budget (used_pages +1).
+    ///
+    /// CAS against `used_pages` so two concurrent writers cannot both
+    /// squeeze past the limit. Returns false when the budget is full —
+    /// the caller must not allocate. Unlimited mounts (page_limit 0)
+    /// always succeed and still count usage (statfs/df later).
+    fn reserve_page(&self) -> bool {
+        if self.sb.is_null() {
+            // Root node before stamp_final_address: directories never
+            // take data pages, and the root is always a directory.
+            return true;
+        }
+        unsafe {
+            let sb = &*self.sb;
+            let limit = sb.page_limit_pages.load(Ordering::Acquire);
+            if limit == 0 {
+                sb.used_pages.fetch_add(1, Ordering::AcqRel);
+                return true;
+            }
+            let mut cur = sb.used_pages.load(Ordering::Acquire);
+            loop {
+                if cur >= limit {
+                    return false;
+                }
+                match sb
+                    .used_pages
+                    .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+                {
+                    Ok(_) => return true,
+                    Err(actual) => cur = actual,
+                }
+            }
+        }
     }
 }
 
@@ -317,10 +419,18 @@ pub struct TmpfsSuperBlock {
     next_ino: AtomicU64,
     /// Instance id (icache key low bits).
     fs_id: u64,
+    /// Page budget from the mount option string (`size=`/`nr_blocks=`),
+    /// in 4 KiB pages. 0 = unlimited (Linux's default is half of RAM,
+    /// which for this heap-backed tmpfs means "bounded by the kernel
+    /// heap" — the pre-fix behavior).
+    page_limit_pages: AtomicU64,
+    /// Live data pages across ALL files of this mount. Incremented by
+    /// TmpfsNode::reserve_page, decremented by TmpfsPage::drop.
+    used_pages: AtomicU64,
 }
 
 impl TmpfsSuperBlock {
-    fn new(instance: u64) -> Self {
+    fn new(instance: u64, page_limit_pages: u64) -> Self {
         let fs_id = FS_ID_TMPFS_BASE | instance;
         let root_node = Arc::new(TmpfsNode::new(
             b"/".to_vec(),
@@ -337,6 +447,8 @@ impl TmpfsSuperBlock {
             root_node,
             next_ino: AtomicU64::new(2),
             fs_id,
+            page_limit_pages: AtomicU64::new(page_limit_pages),
+            used_pages: AtomicU64::new(0),
         }
     }
 
@@ -377,6 +489,71 @@ impl TmpfsSuperBlock {
 /// Instance counter + registry of leaked superblocks (mount-lifetime).
 static TMPFS_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Parse the tmpfs page budget out of a mount(2) options string.
+///
+/// Recognized (Linux tmpfs option table): `size=<bytes>` and the legacy
+/// alias `nr_blocks=<pages>`, each with optional k/K, m/M, g/G suffixes
+/// (powers of 1024, case-insensitive — mount(8) normalizes to lower
+/// case, tmpfs.kopt accepts both). `size` is rounded UP to whole pages,
+/// like Linux. A percentage (`size=50%`) maps to the kernel heap's page
+/// count (Linux uses totalram; the heap is what tmpfs draws from here).
+/// Everything else in the string (mode=, nr_inodes=, mpol=...) is
+/// accepted and ignored, like tmpfs does for options it does not
+/// implement. Returns 0 when no size option is present (unlimited —
+/// Linux's default is RAM/2, i.e. effectively unlimited for a heap of
+/// the same box's RAM).
+pub(crate) fn parse_size_pages(data: Option<&str>) -> u64 {
+    let data = match data {
+        Some(d) if !d.is_empty() => d,
+        _ => return 0,
+    };
+    for token in data.split(',') {
+        let token = token.trim();
+        let (key, value) = match token.split_once('=') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        let key = key.trim().to_ascii_lowercase();
+        if key != "size" && key != "nr_blocks" {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let (digits, percent) = match value.strip_suffix('%') {
+            Some(d) => (d, true),
+            None => (value, false),
+        };
+        let digits = digits.trim();
+        let (num_str, mult) = match digits.as_bytes().last() {
+            Some(b'k') | Some(b'K') => (&digits[..digits.len() - 1], 1024u64),
+            Some(b'm') | Some(b'M') => (&digits[..digits.len() - 1], 1024 * 1024),
+            Some(b'g') | Some(b'G') => (&digits[..digits.len() - 1], 1024 * 1024 * 1024),
+            _ => (digits, 1),
+        };
+        let num: u64 = match num_str.trim().parse() {
+            Ok(n) => n,
+            Err(_) => continue, // not a number: ignore the option
+        };
+        return if percent {
+            // percentage of the kernel heap (page count) — Linux maps a
+            // percentage onto totalram; the heap is what tmpfs draws
+            // from here.
+            let heap_pages = (crate::config::KERNEL_HEAP_SIZE / PAGE_SIZE) as u64;
+            num.min(100) * heap_pages / 100
+        } else if key == "nr_blocks" {
+            // nr_blocks counts PAGES (the pre-size= ABI), memparse
+            // suffix included.
+            num.saturating_mul(mult)
+        } else {
+            // size= counts bytes; round UP to whole pages like Linux.
+            num.saturating_mul(mult).div_ceil(PAGE_SIZE as u64)
+        };
+    }
+    0
+}
+
 /// Wrapper so the raw-pointer registry is `Send` (access only under the
 /// Spinlock; pointers are leaked mount-lifetime allocations, never freed).
 struct TmpfsInstances {
@@ -390,10 +567,11 @@ static TMPFS_INSTANCES: Spinlock<TmpfsInstances> =
     Spinlock::new(TmpfsInstances { list: Vec::new() });
 
 /// Create a new independent tmpfs instance and return its root VFS inode.
-/// Called by `mount::do_mount("tmpfs")`.
-pub fn create_mount_instance() -> Arc<Inode> {
+/// Called by `mount::do_mount("tmpfs")`. `data` is the mount(2) options
+/// string ("size=32M,mode=700,..."); None = defaults (unlimited).
+pub fn create_mount_instance(data: Option<&str>) -> Arc<Inode> {
     let instance = TMPFS_INSTANCE_COUNTER.fetch_add(1, Ordering::AcqRel);
-    let sb = Box::new(TmpfsSuperBlock::new(instance));
+    let sb = Box::new(TmpfsSuperBlock::new(instance, parse_size_pages(data)));
     let sb_ptr = Box::into_raw(sb) as *mut TmpfsSuperBlock; // leaked: mount lifetime
     // Stamp the root's sb back-pointer with the FINAL (heap) address.
     // SAFETY: sb_ptr is this superblock's final storage; the tree is not
@@ -974,6 +1152,11 @@ fn tmpfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
 
 /// tmpfs regular-file write: demand page allocation, O_APPEND honored by
 /// the shared reg-file convention (io_lock + end positioning).
+///
+/// A zero-byte write against a full `size=` budget returns ENOSPC
+/// (POSIX: "if some bytes can be written, the write shall return the
+/// number ... otherwise -1 with ENOSPC"). Short counts are returned as
+/// written and the caller retries — the next call hits ENOSPC.
 fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // SAFETY: see tmpfs_file_read.
     unsafe {
@@ -995,6 +1178,12 @@ fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         };
         let written = node.write_at(offset, buf);
         inode.size.store(node.file_size(), Ordering::Release);
+        if written == 0 && !buf.is_empty() {
+            // The mount's page budget (size=) is exhausted and this write
+            // could not store a single byte. (write_at only returns 0 for
+            // an empty buffer otherwise, handled above.)
+            return crate::errno::Errno::NoSpaceLeftOnDevice.as_neg_i32() as isize;
+        }
         if written > 0 {
             file.set_pos((offset + written) as u64);
         }
@@ -1091,7 +1280,7 @@ mod tests {
 
     #[test]
     fn test_tmpfs_page_roundtrip() {
-        let sb = TmpfsSuperBlock::new(9001);
+        let sb = TmpfsSuperBlock::new(9001, 0);
         let f = sb.new_node(b"file".to_vec(), TmpfsType::RegularFile);
         // Sparse write: page 0 and page 2, hole at page 1.
         f.write_at(0, b"hello");
@@ -1110,7 +1299,7 @@ mod tests {
 
     #[test]
     fn test_tmpfs_truncate_zero_tail() {
-        let sb = TmpfsSuperBlock::new(9002);
+        let sb = TmpfsSuperBlock::new(9002, 0);
         let f = sb.new_node(b"file".to_vec(), TmpfsType::RegularFile);
         f.write_at(0, &[0xAAu8; 64]);
         f.truncate(16);
@@ -1124,7 +1313,7 @@ mod tests {
 
     #[test]
     fn test_tmpfs_dir_ops() {
-        let sb = TmpfsSuperBlock::new(9003);
+        let sb = TmpfsSuperBlock::new(9003, 0);
         let root = sb.root_node.clone();
         let d = sb.new_node(b"d".to_vec(), TmpfsType::Directory);
         root.add_child(d.clone());
@@ -1133,4 +1322,91 @@ mod tests {
         assert!(root.remove_child(b"d"));
         assert!(root.find_child(b"d").is_none());
     }
+
+}
+
+// ============================================================================
+// In-kernel unit tests (unit-test feature)
+// ============================================================================
+
+/// Boot-time tests for the tmpfs page budget (mount options `size=` /
+/// `nr_blocks=`). Lives in this module rather than kernel/src/tests/
+/// because it needs private access: `TmpfsSuperBlock::new` with an
+/// explicit page limit plus the superblock's live counters. Registered
+/// from `crate::tests::run_all_tests()`.
+///
+/// Covers the LTP preadv203 regression shape: a size-capped tmpfs fed
+/// more data than its budget must stop granting pages (short write /
+/// ENOSPC), never eat the kernel heap.
+#[cfg(feature = "unit-test")]
+pub fn run_budget_tests() {
+    crate::tests::test_group_start("tmpfs-budget");
+
+    // ---- parse_size_pages: mount option string -> page budget ----------
+    crate::test_assert_eq!(parse_size_pages(None), 0, "parse: no options -> unlimited");
+    crate::test_assert_eq!(parse_size_pages(Some("")), 0, "parse: empty string -> unlimited");
+    crate::test_assert_eq!(parse_size_pages(Some("size=32M")), 8192, "parse: size=32M -> 8192 pages");
+    crate::test_assert_eq!(parse_size_pages(Some("size=32m")), 8192, "parse: size=32m (lowercase)");
+    crate::test_assert_eq!(parse_size_pages(Some("size=1G")), 256 * 1024, "parse: size=1G");
+    crate::test_assert_eq!(parse_size_pages(Some("size=512k")), 128, "parse: size=512k");
+    // Round UP to whole pages (Linux memparse + PAGE_ALIGN).
+    crate::test_assert_eq!(parse_size_pages(Some("size=1")), 1, "parse: size=1 rounds up to 1 page");
+    crate::test_assert_eq!(parse_size_pages(Some("size=4097")), 2, "parse: size=4097 rounds up to 2 pages");
+    // nr_blocks counts pages.
+    crate::test_assert_eq!(parse_size_pages(Some("nr_blocks=100")), 100, "parse: nr_blocks=100");
+    crate::test_assert_eq!(parse_size_pages(Some("nr_blocks=10k")), 10240, "parse: nr_blocks=10k");
+    // Mixed with other (ignored) options.
+    crate::test_assert_eq!(parse_size_pages(Some("mode=700,size=32M")), 8192, "parse: leading ignored option");
+    crate::test_assert_eq!(parse_size_pages(Some("size=32M,nr_inodes=1024")), 8192, "parse: trailing ignored option");
+    // Percent of the kernel heap.
+    let heap_pages = (crate::config::KERNEL_HEAP_SIZE / PAGE_SIZE) as u64;
+    crate::test_assert_eq!(parse_size_pages(Some("size=50%")), heap_pages / 2, "parse: size=50% of heap");
+    crate::test_assert_eq!(parse_size_pages(Some("size=200%")), heap_pages, "parse: size=200% clamps to heap");
+    // Unknown/garbage values ignored (unlimited).
+    crate::test_assert_eq!(parse_size_pages(Some("size=abc")), 0, "parse: garbage value ignored");
+    crate::test_assert_eq!(parse_size_pages(Some("nr_inodes=100")), 0, "parse: unrelated option ignored");
+
+    // ---- budget enforcement: short writes, ENOSPC shape -----------------
+    // LTP preadv203 pattern: a 32MB-capped tmpfs fed ~118MB of writes
+    // must stop granting pages, not eat the kernel heap.
+    let sb = TmpfsSuperBlock::new(9004, 2); // 2-page budget
+    crate::test_assert_eq!(sb.page_limit_pages.load(Ordering::Relaxed), 2, "budget: limit stored");
+    let f = sb.new_node(b"file".to_vec(), TmpfsType::RegularFile);
+
+    // Fill the budget: two distinct pages.
+    crate::test_assert_eq!(f.write_at(0, &[1u8; PAGE_SIZE]), PAGE_SIZE, "budget: page 0 stored");
+    crate::test_assert_eq!(f.write_at(PAGE_SIZE, &[2u8; PAGE_SIZE]), PAGE_SIZE, "budget: page 1 stored");
+    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 2, "budget: both pages charged");
+
+    // Third page: refused — short write of the bytes that DID fit
+    // (none here: the write starts on a fresh page).
+    crate::test_assert_eq!(f.write_at(PAGE_SIZE * 2, &[3u8; PAGE_SIZE]), 0, "budget: third page refused (0 -> ENOSPC)");
+    // Partial write: the first page of the range already exists, so
+    // its bytes store and the write stops at the page boundary.
+    let big = [7u8; PAGE_SIZE * 2];
+    let n = f.write_at(PAGE_SIZE, &big);
+    crate::test_assert_eq!(n, PAGE_SIZE, "budget: partial write stops at page boundary");
+    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 2, "budget: still two pages charged");
+
+    // Truncate returns pages to the budget and writes succeed again.
+    f.truncate(0);
+    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 0, "budget: truncate returns pages");
+    crate::test_assert_eq!(f.write_at(0, &[9u8; PAGE_SIZE]), PAGE_SIZE, "budget: write works after truncate");
+
+    // Dropping the node returns everything.
+    drop(f);
+    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 0, "budget: drop returns pages");
+
+    // ---- budget is per-MOUNT, shared across files -----------------------
+    // Two files on one 1-page tmpfs cannot each take a page.
+    let sb = TmpfsSuperBlock::new(9005, 1);
+    let a = sb.new_node(b"a".to_vec(), TmpfsType::RegularFile);
+    let b = sb.new_node(b"b".to_vec(), TmpfsType::RegularFile);
+    crate::test_assert_eq!(a.write_at(0, &[1u8; 16]), 16, "shared: first file takes the page");
+    crate::test_assert_eq!(b.write_at(0, &[1u8; 16]), 0, "shared: second file refused (ENOSPC)");
+    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 1, "shared: one page charged");
+    // Hard links share one pages map — no double charge.
+    let a2 = a.clone();
+    crate::test_assert_eq!(a2.write_at(100, &[5u8; 16]), 16, "shared: hard link writes into same page");
+    crate::test_assert_eq!(sb.used_pages.load(Ordering::Relaxed), 1, "shared: no double charge for links");
 }

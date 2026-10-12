@@ -172,8 +172,18 @@ pub fn translate_mnt_flags_public(ms_flags: u64) -> MntFlags {
 /// Perform a real mount: call the filesystem's mount callback, then build
 /// the dentry tree via `vfs_mount()`.
 ///
+/// `data` is the mount(2) options string (may be None). Only tmpfs
+/// consumes it today (its `size=` page budget); other filesystems accept
+/// and ignore it, like a filesystem with no .parse_monolithic hook.
+///
 /// This is the single entry point for both boot-time mounts and sys_mount().
-pub fn do_mount(source: &str, target: &str, fs_type: &str, flags: u64) -> Result<(), i32> {
+pub fn do_mount(
+    source: &str,
+    target: &str,
+    fs_type: &str,
+    flags: u64,
+    data: Option<&str>,
+) -> Result<(), i32> {
     let mnt_flags = translate_mnt_flags(flags);
 
     // ext2/ext4 from a LOOP device: a second ext4 instance on the loop's
@@ -337,7 +347,7 @@ pub fn do_mount(source: &str, target: &str, fs_type: &str, flags: u64) -> Result
             // (own inode number space + icache fs_id). Register the fs type
             // so the registry-based mount path also accepts "tmpfs".
             crate::fs::tmpfs::ensure_registered();
-            let root_inode = crate::fs::tmpfs::create_mount_instance();
+            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
             crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
             register_mount("tmpfs", target, "tmpfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }

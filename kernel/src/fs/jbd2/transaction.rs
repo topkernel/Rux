@@ -329,7 +329,6 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut crate::fs
     // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
     unsafe {
         let blocknr = (*bio_bh).b_blocknr;
-        let data = (*bio_bh).b_data.clone();
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         // Check if already tracked
@@ -338,7 +337,10 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut crate::fs
                 return Ok(()); // Already tracked
             }
         }
-        dirty_bufs.push((blocknr, data));
+        // R3FIX: no data clone — the commit paths read the live
+        // buffer-cache content through the block number (see
+        // Transaction::t_dirty_buffers).
+        dirty_bufs.push((blocknr, super::journal::TxnBufferKind::Live));
     }
 
     Ok(())
@@ -364,8 +366,9 @@ pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut crate::f
                 return Ok(()); // Already tracked
             }
         }
-        // For create access, we store the new data (will be updated by dirty_metadata)
-        dirty_bufs.push((blocknr, alloc::vec::Vec::new()));
+        // For create access, the entry carries no data yet (the real
+        // bytes arrive via dirty_metadata, which flips the kind to Live).
+        dirty_bufs.push((blocknr, super::journal::TxnBufferKind::Created));
     }
 
     Ok(())
@@ -373,8 +376,10 @@ pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut crate::f
 
 /// Mark a buffer as dirty metadata
 ///
-/// This updates the frozen copy of the buffer data to the current state.
-/// The journal will write this data during commit.
+/// R3FIX: this no longer clones the block contents (see
+/// `Transaction::t_dirty_buffers`). The commit paths snapshot the LIVE
+/// buffer-cache content through the block number at commit time, which
+/// is always at least as new as any registration-time image (R20).
 pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
@@ -385,17 +390,16 @@ pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut crate::fs::
     // SAFETY: bio_bh is a valid BufferHead pointer passed from the caller.
     unsafe {
         let blocknr = (*bio_bh).b_blocknr;
-        let data = (*bio_bh).b_data.clone();
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
-        for (existing_nr, existing_data) in dirty_bufs.iter_mut() {
+        for (existing_nr, existing_kind) in dirty_bufs.iter_mut() {
             if *existing_nr == blocknr {
-                *existing_data = data;
+                *existing_kind = super::journal::TxnBufferKind::Live;
                 return Ok(());
             }
         }
         // Not previously registered via get_write_access — register now
-        dirty_bufs.push((blocknr, data));
+        dirty_bufs.push((blocknr, super::journal::TxnBufferKind::Live));
     }
 
     Ok(())

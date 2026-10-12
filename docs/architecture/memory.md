@@ -235,15 +235,19 @@ pub fn virt_to_phys(virt: VirtAddr) -> PhysAddr {
 0x8000_0000 +-----------------------------+
             |     OpenSBI (128KB)         |
 0x8002_0000 +-----------------------------+
-            |     Kernel (text/data/bss)  |
+            |     Kernel (text/data/bss   |
+            |     + 256KB boot stack)     |
             |     Linked at KERNEL_LINK_ADDR |
-            |     ~8MB                     |
-0x80A0_0000 +-----------------------------+
+            |     Mapping window 12MB     |
+            |     (unit-test builds are   |
+            |     the largest; image+     |
+            |     stack ends ~0x80A01000) |
+0x80C0_0000 +-----------------------------+
             |     Kernel Heap             |
-            |     Configurable (default 32MB) |
-0x82A0_0000 +-----------------------------+
+            |     Configurable (default 128MB) |
+0x88C0_0000 +-----------------------------+
             |     Slab Allocator (4MB)    |
-0x82E0_0000 +-----------------------------+
+0x8900_0000 +-----------------------------+
             |     Available physical memory |
             |     Managed by zone/buddy allocator |
             |     ~2GB (depends on QEMU -m)  |
@@ -260,7 +264,7 @@ pub struct KernelMemoryLayout {
     pub phys_memory_size: usize,   // Total physical memory
     pub kernel_start: usize,       // 0x80200000
     pub kernel_end: usize,         // kernel_start + kernel_size
-    pub heap_start: usize,         // 0x80A00000
+    pub heap_start: usize,         // 0x80C00000
     pub heap_end: usize,           // heap_start + heap_size
     pub slab_start: usize,         // heap_end
     pub slab_end: usize,           // slab_start + slab_size

@@ -64,22 +64,22 @@ pub fn jbd2_journal_commit_transaction(
     }
 
     // Collect dirty buffers
-    let dirty_buffers: Vec<(u64, Vec<u8>)>;
+    let dirty_buffers: Vec<(u64, super::journal::TxnBufferKind)>;
     {
         let mut bufs = commit_transaction.t_dirty_buffers.lock();
         dirty_buffers = core::mem::take(&mut *bufs);
     }
 
-    // R20-FS6 (F4): create-access entries are tracked with EMPTY data (the
-    // real bytes arrive via dirty_metadata, which replaces the entry). An
-    // empty entry must NOT consume a tag slot: the old code still emitted
-    // its tag while skipping the data block, shifting every subsequent
-    // tag↔journal-block pairing by one — replay then wrote buffer N's data
-    // over the block named by tag N+1. Drop empty entries up front so tags
-    // and data blocks stay 1:1.
-    let dirty_buffers: Vec<(u64, Vec<u8>)> = dirty_buffers
+    // R20-FS6 (F4): create-access entries are tracked with the Created
+    // kind (the real bytes arrive via dirty_metadata, which flips the
+    // entry to Live). A Created entry must NOT consume a tag slot: the
+    // old code still emitted its tag while skipping the data block,
+    // shifting every subsequent tag↔journal-block pairing by one —
+    // replay then wrote buffer N's data over the block named by tag N+1.
+    // Drop them up front so tags and data blocks stay 1:1.
+    let dirty_buffers: Vec<(u64, super::journal::TxnBufferKind)> = dirty_buffers
         .into_iter()
-        .filter(|(_, data)| !data.is_empty())
+        .filter(|(_, kind)| *kind == super::journal::TxnBufferKind::Live)
         .collect();
 
     // A transaction with NEITHER data NOR revoke records commits nothing.
@@ -106,7 +106,7 @@ pub fn jbd2_journal_commit_transaction(
     // in <32B chunks blew the 30s wall clock) back to ~one wait.
     if journal.revoke_records.lock().is_empty() {
         let mut first_err: i32 = 0;
-        for (blocknr, ref _data) in &dirty_buffers {
+        for (blocknr, _kind) in &dirty_buffers {
             // Write-through semantics: every jbd2_journal_dirty_metadata
             // caller (write_inode, namei's write_block_from_vec) modifies
             // the buffer IN PLACE before registering the snapshot, and the
@@ -300,14 +300,20 @@ pub fn jbd2_journal_commit_transaction(
         }
 
         // --- Write data blocks referenced by this descriptor ---
+        // R3FIX: the journal-area image is copied from the LIVE buffer
+        // cache at commit time (bread below), not from a
+        // registration-time clone — the live content is always at least
+        // as new as any registration image (same R20 argument as the
+        // write-through fast path above).
         for _ in 0..tags_this_block {
-            let (blocknr, ref data) = dirty_buffers[buf_idx];
+            let (blocknr, _kind) = dirty_buffers[buf_idx];
             buf_idx += 1;
 
-            let data_abs_block = blk_offset + current_journal_block;
-            // SAFETY: bio::bread returns a valid BufferHead or None (handled by ?).
-            let data_bh = unsafe {
-                match bio::bread(device, data_abs_block) {
+            // Source: the live buffer-cache copy of the metadata block.
+            // SAFETY: bread on a valid device returns a cached (or
+            // freshly-read) BufferHead for any valid block number.
+            let src_bh = unsafe {
+                match bio::bread(device, blocknr) {
                     Some(b) => b,
                     None => {
                         journal.abort(EIO);
@@ -317,16 +323,33 @@ pub fn jbd2_journal_commit_transaction(
                 }
             };
 
-            let copy_len = core::cmp::min(data.len(), block_size);
-            // SAFETY: data_bh is a valid BufferHead; b_data is block_size bytes; copy_len is min of data/block size.
+            let data_abs_block = blk_offset + current_journal_block;
+            // SAFETY: bio::bread returns a valid BufferHead or None (handled by ?).
+            let data_bh = unsafe {
+                match bio::bread(device, data_abs_block) {
+                    Some(b) => b,
+                    None => {
+                        bio::brelse(src_bh);
+                        journal.abort(EIO);
+                        *commit_transaction.t_state.lock() = TransactionState::Finished;
+                        return Err(EIO);
+                    }
+                }
+            };
+
+            // SAFETY: data_bh is a valid BufferHead; b_data is block_size
+            // bytes on both heads; the copy length is the journal block
+            // size.
             unsafe {
                 let data_bh_ref = &mut *data_bh;
-                core::ptr::copy_nonoverlapping(data.as_ptr(), data_bh_ref.b_data.as_mut_ptr(), copy_len);
-                for b in data_bh_ref.b_data.iter_mut().skip(copy_len) {
-                    *b = 0;
-                }
+                core::ptr::copy_nonoverlapping(
+                    (*src_bh).b_data.as_ptr(),
+                    data_bh_ref.b_data.as_mut_ptr(),
+                    block_size,
+                );
                 data_bh_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             }
+            bio::brelse(src_bh);
             current_journal_block = wrap_journal_block(current_journal_block, journal_first, journal_last);
 
             let sync_res = bio::sync_dirty_buffer(data_bh);

@@ -486,6 +486,22 @@ impl Default for TransactionStats {
     }
 }
 
+/// How a buffer entered the transaction's dirty list (R3FIX, see
+/// `Transaction::t_dirty_buffers`). The commit paths read the LIVE
+/// buffer-cache content through the block number; the kind only decides
+/// whether the entry is published.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TxnBufferKind {
+    /// Registered via get_write_access / dirty_metadata: commit persists
+    /// it (fast path syncs the live cache; journal path copies the live
+    /// cache into the journal area).
+    Live,
+    /// Registered via get_create_access only: no meaningful content yet.
+    /// Dropped before tag counting (R20-FS6: an empty registration must
+    /// not consume a descriptor tag slot).
+    Created,
+}
+
 /// Transaction structure - the guts of the journaling mechanism
 pub struct Transaction {
     /// Pointer to the journal for this transaction
@@ -496,9 +512,24 @@ pub struct Transaction {
     pub t_state: Spinlock<TransactionState>,
     /// Where in the log does this transaction's commit start?
     pub t_log_start: u64,
-    /// Tracked dirty metadata buffers: (filesystem blocknr, frozen data copy)
-    /// Replaces raw linked list with Rust-idiomatic Vec for single-core no_std
-    pub t_dirty_buffers: Spinlock<alloc::vec::Vec<(u64, alloc::vec::Vec<u8>)>>,
+    /// Tracked dirty metadata buffers: (filesystem blocknr, registration
+    /// kind). Replaces raw linked list with Rust-idiomatic Vec for
+    /// single-core no_std.
+    ///
+    /// R3FIX (write throughput): this used to be (blocknr, Vec<u8>) with
+    /// a FULL BLOCK CLONE taken by every get_write_access and
+    /// jbd2_journal_dirty_metadata call — a 4 KiB alloc + memcpy + free
+    /// per metadata registration, paid on EVERY write(2) (write_inode
+    /// registers the inode-table block each time). Measured on the LTP
+    /// x86 image, an 8-byte append cost ~288 us of which the clones were
+    /// the bulk; the gen* family (40k such writes per test) sat at
+    /// 17-21s of the runner's 30s budget and flipped to TIMEOUT under
+    /// host load. The registration-time image is not needed by either
+    /// commit path: the write-through fast path syncs the LIVE
+    /// buffer-cache content (R20: never the snapshot), and the
+    /// journal-area path now also snapshots the live buffer at commit
+    /// time (content >= any registration image by the same argument).
+    pub t_dirty_buffers: Spinlock<alloc::vec::Vec<(u64, TxnBufferKind)>>,
     /// Number of buffers on the t_buffers list
     pub t_nr_buffers: i32,
     /// Doubly-linked circular list of all reserved but not yet modified buffers
