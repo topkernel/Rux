@@ -128,22 +128,27 @@ __switch_to:
     # TEXT) and every subsequent store scribbles executable pages. The
     # producer of the bad value is hunted separately (R74-SLOTLESS-TP
     # tripwire); this gate contains the damage at the resume point.
-    # Valid sp: kernel half (bit 63), 16-byte aligned, below the kernel
-    # image (task kernel stacks live in the linear map at
-    # 0xffffffd6xxxxxxxx; the kernel image starts at 0xffffffff80000000).
-    # A bad sp is REPAIRED to the task's own stack top: the resumed
-    # context crashes on its first return (ra is equally suspect), but
-    # with the CORRECT task identity and stack — a diagnosable task
-    # death instead of machine-wide corruption.
+    # Valid sp: kernel half (bit 63), 16-byte aligned, and NOT inside the
+    # kernel's executable text [_stext, _etext]. The kernel-IMAGE region
+    # as a whole MUST stay legal: idle tasks legitimately run on the
+    # static boot stack and the SECONDARY_BOOT_STACKS arrays in .bss
+    # (r74f lesson: rejecting the whole image and "repairing" idle sp to
+    # the alloc'd stack killed boot with manufactured ra=0 frames).
+    # A bad sp is REPAIRED to the task's own alloc'd stack top: the
+    # resumed context crashes on its first return (ra is equally
+    # suspect), but with the CORRECT task identity and a writable stack —
+    # a diagnosable task death instead of machine-wide corruption.
     ld    t6, {thread_sp}(a4)
     beqz  t6, .Lswitch_sp_bad
     andi  t1, t6, 0xF
     bnez  t1, .Lswitch_sp_bad
     bltz  t6, 1f
     j     .Lswitch_sp_bad
-1:   li    t1, 0xffffffff
-    slli  t1, t1, 32          # 0xffffffff_00000000
-    bgeu  t6, t1, .Lswitch_sp_bad
+1:   la    t1, _stext
+    bltu  t6, t1, 2f              # below text: fine (.bss stacks may sit low)
+    la    t1, _etext
+    bltu  t6, t1, .Lswitch_sp_bad # inside [_stext, _etext): reject
+2:
 .Lswitch_go_after_sp:
 
     # NEW2 root cause fix (R8-1b): prev's full context is now saved — make
