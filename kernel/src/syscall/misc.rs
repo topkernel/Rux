@@ -291,8 +291,8 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         // copy it in, compute revents, copy it back — all through the
         // exception-table paths (SUM=0 safe; raw derefs fault the kernel).
         // SAFETY: fds_ptr validated with access_ok; nfds bounded to 1024.
+        let mut pollfds = alloc::vec![PollFd { fd: -1, events: 0, revents: 0 }; nfds];
         unsafe {
-            let mut pollfds = alloc::vec![PollFd { fd: -1, events: 0, revents: 0 }; nfds];
             crate::arch::uaccess::copy_from_user(
                 pollfds.as_mut_ptr() as *mut u8,
                 fds_ptr as *const u8,
@@ -403,6 +403,83 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
             return -(errno::EINTR as i64);
         }
 
+        // P3 (event-driven wait): register on every polled file's readiness
+        // queue and sleep until a producer event (or the timeout timer, or a
+        // signal) — instead of waking at tick rate to re-poll. This is what
+        // keeps idle GLib/Xorg/dbus main loops at 0% CPU. Falls back to the
+        // old timed re-check slice (P1) whenever any polled fd has no wake
+        // path registered (poll_wait_impls None), preserving behavior for
+        // exotic fd types.
+        {
+            let mut files: alloc::vec::Vec<alloc::sync::Arc<crate::fs::File>> =
+                alloc::vec::Vec::with_capacity(nfds);
+            let mut wired = true;
+            for i in 0..nfds {
+                let pollfd = &pollfds[i];
+                if pollfd.fd < 0 {
+                    // Ignored slot (glib pads with fd=-1): no wait target.
+                    continue;
+                }
+                match fdtable.get_file(pollfd.fd as usize) {
+                    Some(f) => files.push(f),
+                    None => {
+                        // fd closed under us: the next scan reports
+                        // POLLNVAL — fall back to one slice round.
+                        wired = false;
+                        break;
+                    }
+                }
+            }
+            if wired && !files.is_empty() {
+                let task = match crate::sched::current() {
+                    Some(t) => t,
+                    None => return -(errno::EINTR as i64),
+                };
+                // Quick readiness re-check used inside the wait round: any
+                // polled fd reporting nonzero revents ends the sleep.
+                let pollfds_ref = &pollfds;
+                let fdtable_ref = &fdtable;
+                let quick_ready = || -> bool {
+                    for pfd in pollfds_ref.iter() {
+                        if pfd.fd < 0 {
+                            continue;
+                        }
+                        let f = match fdtable_ref.get_file(pfd.fd as usize) {
+                            Some(f) => f,
+                            None => return true, // POLLNVAL
+                        };
+                        match f.get_ops() {
+                            Some(ops) => match ops.poll {
+                                Some(poll_fn) => {
+                                    if poll_fn(&f, pfd.events) & (pfd.events |
+                                        POLLERR | POLLHUP | POLLNVAL) != 0 {
+                                        return true;
+                                    }
+                                }
+                                None => return true, // default always-ready
+                            },
+                            None => return true,
+                        }
+                    }
+                    false
+                };
+                match poll_event_wait_round(
+                    &files,
+                    task,
+                    if timeout_ms > 0 {
+                        Some(start_jiffies + timeout_jiffies)
+                    } else {
+                        None
+                    },
+                    &quick_ready,
+                ) {
+                    PollEventWait::Interrupted => return -(errno::EINTR as i64),
+                    PollEventWait::Woken => continue,
+                    PollEventWait::NotWired => {} // fall through to the slice
+                }
+            }
+        }
+
         // P1 (busy-yield elimination, same discipline as sys_epoll_wait):
         // block for one 10 ms re-check slice instead of yield_cpu()-ing.
         // The tight yield loop livelocked the machine under SMP — every
@@ -476,6 +553,204 @@ fn poll_sleep_slice(deadline_jiffies: Option<u64>) {
             crate::timer::del_timer(timer_id);
         }
     }
+}
+
+// ============================================================================
+// Event-driven poll waiting (P3: poll_wait queue registration)
+// ============================================================================
+
+/// Per-fd-type poll-wait registration pair, dispatched by FileOps identity.
+type PollWaitRegFn = fn(&crate::fs::File, *mut crate::process::task::Task) -> bool;
+type PollWaitUnregFn = fn(&crate::fs::File, *mut crate::process::task::Task);
+
+/// Resolve the poll-wait register/unregister pair for `file`, or None when
+/// the file type has no producer-woken readiness queue.
+///
+/// This is the poll_wait(2) analogue of Linux: instead of waking every
+/// 10ms to re-poll every fd (the old P1 slice, which made each idle
+/// GLib/Xorg/dbus main loop burn CPU at tick rate — and, with ~40 such
+/// waiters in a GNOME session, oversubscribed every CPU), a poll/select/
+/// epoll_wait blocker registers on the target's readiness queue and sleeps
+/// until a real producer event (data arrival, space freed, EOF, connect
+/// queued, inotify event, input event, timer expiry, signal arrival).
+fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnregFn)> {
+    let ops = file.get_ops()? as *const crate::fs::FileOps as *const ();
+    let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
+    if is(&crate::net::unix::UNIX_SOCKET_OPS) {
+        return Some((
+            crate::net::unix::unix_poll_wait,
+            crate::net::unix::unix_poll_unwait,
+        ));
+    }
+    if is(&crate::fs::pipe::PIPE_OPS) || is(&crate::fs::fifo::FIFO_OPS) {
+        return Some((
+            crate::fs::pipe::pipe_poll_wait,
+            crate::fs::pipe::pipe_poll_unwait,
+        ));
+    }
+    if is(&crate::net::socket::SOCKET_OPS) {
+        return Some((
+            crate::net::socket::socket_poll_wait,
+            crate::net::socket::socket_poll_unwait,
+        ));
+    }
+    if is(&crate::fs::inotify::INOTIFY_OPS) {
+        return Some((
+            crate::fs::inotify::inotify_poll_wait,
+            crate::fs::inotify::inotify_poll_unwait,
+        ));
+    }
+    if is(&crate::drivers::input::evdev::EVDEV_OPS) {
+        return Some((
+            crate::drivers::input::evdev::evdev_poll_wait,
+            crate::drivers::input::evdev::evdev_poll_unwait,
+        ));
+    }
+    if is(&TIMERFD_OPS) {
+        return Some((timerfd_poll_wait, timerfd_poll_unwait));
+    }
+    if is(&SIGNALFD_OPS) {
+        return Some((signalfd_poll_wait, signalfd_poll_unwait));
+    }
+    None
+}
+
+/// Result of one event-driven wait round.
+enum PollEventWait {
+    /// Slept and was woken (event, timeout, or spurious): re-check readiness.
+    Woken,
+    /// At least one polled file has no wake path (or the timer pool was
+    /// exhausted): the caller must fall back to a timed re-check slice.
+    NotWired,
+    /// A signal is pending: return EINTR.
+    Interrupted,
+}
+
+/// One event-driven sleep round across `files` (every fd the caller is
+/// waiting on): register on each file's readiness queue, re-check
+/// `ready()` under the registration (lost-wake discipline), arm a timeout
+/// timer for the full remaining deadline, and sleep until woken.
+///
+/// SAFETY contract: `task` is the current task; the caller keeps every
+/// Arc<File> in `files` alive for the duration (they are cloned from the
+/// caller's fdtable), so the private_data objects behind them outlive the
+/// registrations.
+fn poll_event_wait_round(
+    files: &[alloc::sync::Arc<crate::fs::File>],
+    task: *mut crate::process::task::Task,
+    deadline: Option<u64>,
+    ready: &dyn Fn() -> bool,
+) -> PollEventWait {
+    use crate::process::task::TaskState;
+    use crate::process::wait::WaitQueueEntry;
+
+    // 1. Resolve + register on every file's queues. Any file without a
+    //    wake path forces the caller back to the timed-slice fallback
+    //    (its readiness must still be re-checked periodically).
+    let mut regs: alloc::vec::Vec<PollWaitUnregFn> = alloc::vec::Vec::new();
+    for f in files.iter() {
+        match poll_wait_impls(f) {
+            Some((reg, unreg)) => {
+                if !reg(f, task) {
+                    for (i, r) in regs.iter().enumerate() {
+                        r(&files[i], task);
+                    }
+                    return PollEventWait::NotWired;
+                }
+                regs.push(unreg);
+            }
+            None => {
+                for (i, r) in regs.iter().enumerate() {
+                    r(&files[i], task);
+                }
+                return PollEventWait::NotWired;
+            }
+        }
+    }
+
+    let unwait_all = |task: *mut crate::process::task::Task| {
+        for (i, r) in regs.iter().enumerate() {
+            r(&files[i], task);
+        }
+    };
+
+    // 2. State transition BEFORE the readiness re-check: a wake racing
+    //    with step 3 enqueues us; the re-check then returns without
+    //    sleeping (dequeue_task undoes the racing enqueue below).
+    // SAFETY: task is the current task.
+    unsafe {
+        (*task).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+    }
+
+    // 3. Re-check readiness AFTER registering (lost-wake discipline): an
+    //    event that landed between the caller's readiness scan and the
+    //    queue registration is caught here.
+    if ready() {
+        unwait_all(task);
+        // SAFETY: current is the running task's pointer; a racing wake may
+        // have enqueued us while still executing — take ourselves back off
+        // (NEW-C2 discipline).
+        unsafe {
+            (*task).set_state(TaskState::new(TaskState::RUNNING));
+            crate::sched::dequeue_task(&*task);
+        }
+        return PollEventWait::Woken;
+    }
+
+    if crate::signal::signal_pending() {
+        unwait_all(task);
+        // SAFETY: see above.
+        unsafe {
+            (*task).set_state(TaskState::new(TaskState::RUNNING));
+            crate::sched::dequeue_task(&*task);
+        }
+        return PollEventWait::Interrupted;
+    }
+
+    // 4. Arm the timeout timer for the FULL remaining wait (no re-check
+    //    slice: fd-side events are the wake source now).
+    let timer_id = deadline
+        .map(|dl| {
+            crate::timer::add_timer_wakeup(
+                dl.max(crate::drivers::timer::get_jiffies() + 1),
+                // SAFETY: task is the current task; pid() is a read.
+                unsafe { (*task).pid() },
+            )
+        })
+        .unwrap_or(0);
+    if deadline.is_some() && timer_id == 0 {
+        // Timer pool exhausted: a timed wait would sleep forever — fall
+        // back to the slice path for this round.
+        unwait_all(task);
+        // SAFETY: see above.
+        unsafe {
+            (*task).set_state(TaskState::new(TaskState::RUNNING));
+        }
+        return PollEventWait::NotWired;
+    }
+
+    // 5. Sleep. Syscall context runs with SIE=0; __schedule must see
+    //    SIE=1 (same contract as wait_event! / sys_epoll_wait).
+    crate::arch::cpu::restore_irq(true);
+    crate::sched::schedule();
+
+    // 6. Cleanup: drop the timer so it cannot re-enqueue us while running,
+    //    remove every registration, restore RUNNING if we are still asleep
+    //    (a timeout/spurious wake path may have left the state).
+    if timer_id != 0 && crate::timer::timer_pending(timer_id) {
+        crate::timer::del_timer(timer_id);
+    }
+    unwait_all(task);
+    // SAFETY: task is the current task.
+    unsafe {
+        if (*task).state().is_sleeping() {
+            (*task).set_state(TaskState::new(TaskState::RUNNING));
+        }
+    }
+    if crate::signal::signal_pending() {
+        return PollEventWait::Interrupted;
+    }
+    PollEventWait::Woken
 }
 
 /// sys_ppoll - I/O multiplexing (ppoll style, syscall nr=73)
@@ -1522,15 +1797,105 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             return -(errno::EINTR as i64);
         }
 
-        // P1 (busy-yield elimination): block for one re-check interval
-        // instead of yield_cpu()-ing around the poll loop (which burned a
-        // full CPU per waiter under SMP). Wake sources:
+        // P3 (event-driven wait): register the WAITING TASK on every watched
+        // file's readiness queue (poll_wait dispatch) and sleep until a
+        // producer event on any of them — no tick-rate re-check wakeups.
+        // Falls back to the P1 10ms slice below when any watched fd has no
+        // wake path. ET snapshot semantics are unchanged: they are driven by
+        // the readiness scan (and epoll_notify_file for unix sockets), not
+        // by how the waiter slept.
+        {
+            let mut watched: alloc::vec::Vec<(
+                alloc::sync::Arc<crate::fs::File>,
+                u16,
+                Option<u32>,
+            )> = alloc::vec::Vec::new();
+            let mut wired = true;
+            {
+                let entries = epoll.entries.lock();
+                for entry in entries.iter() {
+                    match fdtable.get_file(entry.fd as usize) {
+                        Some(f) if f.file_id == entry.file_id => {
+                            let mut poll_mask: u16 = 0;
+                            if entry.events & EPOLLIN != 0 { poll_mask |= POLLIN; }
+                            if entry.events & EPOLLOUT != 0 { poll_mask |= POLLOUT; }
+                            let et_last = if entry.events & EPOLLET != 0 {
+                                Some(entry.last_reported)
+                            } else {
+                                None
+                            };
+                            watched.push((f, poll_mask, et_last));
+                        }
+                        // Dead interest: the slice path (and the next scan's
+                        // dead-fd purge) handles it.
+                        _ => {
+                            wired = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if wired && !watched.is_empty() {
+                let current = match crate::sched::current() {
+                    Some(t) => t,
+                    None => return 0, // no task context: cannot block
+                };
+                // Quick readiness re-check inside the wait round. Mirrors
+                // the scan's ET logic: an edge-triggered entry whose current
+                // readiness equals its last-reported snapshot contributes
+                // nothing (sleeping is correct — the scan would skip it).
+                let quick_ready = || -> bool {
+                    for (f, mask, et_last) in watched.iter() {
+                        let revents = match f.get_ops() {
+                            Some(ops) => match ops.poll {
+                                Some(poll_fn) => poll_fn(f, *mask),
+                                None => *mask,
+                            },
+                            None => *mask,
+                        };
+                        if revents == 0 {
+                            continue;
+                        }
+                        let mut ep_events: u32 = 0;
+                        if revents & (POLLIN | POLLRDNORM | POLLHUP) != 0 { ep_events |= EPOLLIN; }
+                        if revents & (POLLOUT | POLLWRNORM) != 0 { ep_events |= EPOLLOUT; }
+                        if revents & POLLERR != 0 { ep_events |= EPOLLERR; }
+                        if revents & POLLHUP != 0 { ep_events |= EPOLLHUP; }
+                        if let Some(last) = et_last {
+                            if ep_events == *last {
+                                continue; // same ET edge — already reported
+                            }
+                        }
+                        return true;
+                    }
+                    false
+                };
+                match poll_event_wait_round(
+                    &watched.iter().map(|(f, _, _)| alloc::sync::Arc::clone(f))
+                        .collect::<alloc::vec::Vec<_>>(),
+                    current,
+                    if timeout_ms > 0 {
+                        Some(start_jiffies + timeout_jiffies)
+                    } else {
+                        None
+                    },
+                    &quick_ready,
+                ) {
+                    PollEventWait::Interrupted => return -(errno::EINTR as i64),
+                    PollEventWait::Woken => continue,
+                    PollEventWait::NotWired => {} // fall through to the slice
+                }
+            }
+        }
+
+        // P1 (busy-yield elimination, fallback): block for one re-check
+        // interval instead of yield_cpu()-ing around the poll loop (which
+        // burned a full CPU per waiter under SMP). Wake sources:
         //   - the 10ms re-check timer armed below — readiness is re-polled
-        //     on every wake, so this timer bounds event latency until
-        //     fd-side producers call epoll_notify_file (registry above),
+        //     on every wake, so this timer bounds event latency for fd
+        //     types with no producer wake path,
         //   - signal delivery (INTERRUPTIBLE + signal_wake_up → EINTR),
-        //   - epoll_notify_file via EPOLL_WAKE_REGISTRY (dormant until the
-        //     pipe/socket write paths are wired by a later wave).
+        //   - epoll_notify_file via EPOLL_WAKE_REGISTRY.
         let current = match crate::sched::current() {
             Some(t) => t,
             None => return 0, // no task context: cannot block
@@ -2050,6 +2415,7 @@ fn tfd_remaining(tfd: &TimerFd) -> (i64, i64) {
 }
 
 /// TimerFd file operations
+/// TimerFd file operations
 static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     read: Some(timerfd_read),
     write: None,
@@ -2058,6 +2424,62 @@ static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     poll: Some(timerfd_poll),
     read_at: None,
 };
+
+// ============================================================================
+// Poll-wait registration: timerfd / signalfd (P3: event-driven poll)
+// ============================================================================
+
+/// Register `task` on the timerfd's wait queue; timerfd_expire_notify
+/// wakes it when the timer fires.
+fn timerfd_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Task) -> bool {
+    // SAFETY: the dispatcher identity-checked the File against TIMERFD_OPS;
+    // private_data was installed by sys_timerfd_create as Box::into_raw and
+    // stays valid while the File exists.
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return false,
+    };
+    // SAFETY: ptr came from Box::into_raw(TimerFd).
+    let tfd = unsafe { &*(ptr as *const TimerFd) };
+    tfd.wait_queue
+        .add(crate::process::wait::WaitQueueEntry::new(task, false));
+    true
+}
+
+/// Remove a registration added by timerfd_poll_wait.
+fn timerfd_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
+    // SAFETY: same contract as timerfd_poll_wait.
+    if let Some(ptr) = unsafe { *file.private_data.get() } {
+        let tfd = unsafe { &*(ptr as *const TimerFd) };
+        tfd.wait_queue.remove(task);
+    }
+}
+
+/// Register `task` on the signalfd's wait queue; signalfd_notify_task
+/// wakes it when a masked signal arrives.
+fn signalfd_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Task) -> bool {
+    // SAFETY: the dispatcher identity-checked the File against SIGNALFD_OPS;
+    // private_data was installed by sys_signalfd4_impl as Box::into_raw and
+    // stays valid while the File exists.
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return false,
+    };
+    // SAFETY: ptr came from Box::into_raw(SignalFd).
+    let sfd = unsafe { &*(ptr as *const SignalFd) };
+    sfd.wait_queue
+        .add(crate::process::wait::WaitQueueEntry::new(task, false));
+    true
+}
+
+/// Remove a registration added by signalfd_poll_wait.
+fn signalfd_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
+    // SAFETY: same contract as signalfd_poll_wait.
+    if let Some(ptr) = unsafe { *file.private_data.get() } {
+        let sfd = unsafe { &*(ptr as *const SignalFd) };
+        sfd.wait_queue.remove(task);
+    }
+}
 
 // ==================== signalfd (P1) ====================
 

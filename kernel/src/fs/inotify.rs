@@ -678,7 +678,7 @@ fn inotify_close(file: &File) -> i32 {
 }
 
 /// FileOps for inotify instance fds.
-static INOTIFY_OPS: FileOps = FileOps {
+pub static INOTIFY_OPS: FileOps = FileOps {
     read: Some(inotify_read),
     write: None,
     lseek: None,
@@ -686,3 +686,30 @@ static INOTIFY_OPS: FileOps = FileOps {
     poll: Some(inotify_poll),
     read_at: None,
 };
+
+// ============================================================================
+// Poll-wait registration (P3: event-driven poll/select)
+// ============================================================================
+
+/// Register `task` on the inotify instance's wait queue. Event enqueue
+/// paths do wait_queue.wake_up_all() on this same queue, so a poll/select
+/// waiter registered here is woken when events arrive instead of by the
+/// timed re-check slice.
+pub fn inotify_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+    match instance_of(file) {
+        Some(instance) => {
+            instance
+                .wait_queue
+                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Remove a registration added by inotify_poll_wait.
+pub fn inotify_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+    if let Some(instance) = instance_of(file) {
+        instance.wait_queue.remove(task);
+    }
+}

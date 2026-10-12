@@ -1434,6 +1434,44 @@ pub static SOCKET_OPS: FileOps = FileOps {
 };
 
 // ============================================================================
+// Poll-wait registration (P3: event-driven poll/select)
+// ============================================================================
+
+/// Recover the Arc<Socket> behind an AF_INET socket File.
+fn socket_of_file(file: &File) -> Option<Arc<Socket>> {
+    // SAFETY: the dispatcher identity-checked the File against SOCKET_OPS;
+    // private_data was installed by socket creation as Arc::into_raw and
+    // stays valid while the File exists. Clone without consuming.
+    let ptr = unsafe { *file.private_data.get() }?;
+    let arc = unsafe { Arc::from_raw(ptr as *const Socket) };
+    let cloned = Arc::clone(&arc);
+    core::mem::forget(arc);
+    Some(cloned)
+}
+
+/// Register `task` on the socket's wait queue. RX landing (wake_tcp_matches
+/// / wake_udp_matches / recv_queue enqueue) wakes this queue, so a poll/
+/// select waiter registered here is woken by packet arrival.
+pub fn socket_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+    match socket_of_file(file) {
+        Some(socket) => {
+            socket
+                .wait_queue
+                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Remove a registration added by socket_poll_wait.
+pub fn socket_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+    if let Some(socket) = socket_of_file(file) {
+        socket.wait_queue.remove(task);
+    }
+}
+
+// ============================================================================
 // Socket Creation and Management
 // ============================================================================
 

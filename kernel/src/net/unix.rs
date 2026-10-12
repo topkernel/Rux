@@ -1453,6 +1453,38 @@ pub static UNIX_SOCKET_OPS: FileOps = FileOps {
 };
 
 // ============================================================================
+// Poll-wait registration (P3: event-driven poll/select)
+// ============================================================================
+
+/// Register `task` on the socket's wait queue. Every readiness transition
+/// of this socket (peer data arrival, connect queued on a listener, send
+/// space freed by the peer's reads, peer EOF/HUP) does
+/// `wait_queue.wake_up_all()` on this same queue, so a poll/select waiter
+/// registered here is woken by real events.
+pub fn unix_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+    // SAFETY: ops identity was verified by the dispatcher (UNIX_SOCKET_OPS)
+    // before this is called; private_data holds Arc::into_raw(UnixSocket)
+    // and the caller's Arc<File> keeps the socket alive.
+    match unsafe { unix_of_file(file) } {
+        Some(socket) => {
+            socket
+                .wait_queue
+                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Remove a registration added by unix_poll_wait.
+pub fn unix_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+    // SAFETY: same identity/ownership contract as unix_poll_wait.
+    if let Some(socket) = unsafe { unix_of_file(file) } {
+        socket.wait_queue.remove(task);
+    }
+}
+
+// ============================================================================
 // Socket creation / fd plumbing
 // ============================================================================
 

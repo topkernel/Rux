@@ -154,6 +154,10 @@ pub struct EvdevDevice {
     led_state: AtomicU32,
     /// Event queue
     pub event_queue: Spinlock<VecDeque<InputEvent>>,
+    /// Poll/select waiters (P3: event-driven poll). Woken in push_event so
+    /// a waiter blocked in poll() on this device sleeps until a real input
+    /// event arrives instead of waking at tick rate to re-check.
+    pub poll_waitq: crate::process::wait::WaitQueueHead,
 }
 
 impl EvdevDevice {
@@ -177,6 +181,7 @@ impl EvdevDevice {
             grabbed: AtomicBool::new(false),
             led_state: AtomicU32::new(0),
             event_queue: Spinlock::new(VecDeque::with_capacity(EVENT_QUEUE_SIZE)),
+            poll_waitq: crate::process::wait::WaitQueueHead::new(),
         }
     }
 
@@ -203,11 +208,16 @@ impl EvdevDevice {
 
     /// Push event (called from softirq context)
     pub fn push_event(&self, event: InputEvent) {
-        let mut queue = self.event_queue.lock_irqsave();
-        if queue.len() >= EVENT_QUEUE_SIZE {
-            queue.pop_front();
+        {
+            let mut queue = self.event_queue.lock_irqsave();
+            if queue.len() >= EVENT_QUEUE_SIZE {
+                queue.pop_front();
+            }
+            queue.push_back(event);
         }
-        queue.push_back(event);
+        // Wake poll/select waiters OUTSIDE the event_queue lock (INV-LOCK-6
+        // discipline: never nest a wait-queue wake inside a held spinlock).
+        self.poll_waitq.wake_up_all();
     }
 
     /// Read event
@@ -426,6 +436,34 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
         // evdev is never writable.
     }
     ready
+}
+
+// ============================================================================
+// Poll-wait registration (P3: event-driven poll/select)
+// ============================================================================
+
+/// Register `task` on the device's poll wait queue; push_event wakes it.
+pub fn evdev_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+    // SAFETY: dispatcher identity-checked the File against EVDEV_OPS;
+    // private_data holds a DevNo installed at open and the EVDEV_* statics
+    // outlive every file.
+    match unsafe { device_of_file(file) } {
+        Some(device) => {
+            device
+                .poll_waitq
+                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Remove a registration added by evdev_poll_wait.
+pub fn evdev_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+    // SAFETY: same contract as evdev_poll_wait.
+    if let Some(device) = unsafe { device_of_file(file) } {
+        device.poll_waitq.remove(task);
+    }
 }
 
 /// Event type constants from <uapi/linux/input.h> needed by the write path.

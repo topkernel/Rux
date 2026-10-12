@@ -413,6 +413,51 @@ pub fn is_pipe_file(file: &File) -> bool {
         .is_some_and(|ops| core::ptr::eq(ops as *const _, &PIPE_OPS as *const _))
 }
 
+// ============================================================================
+// Poll-wait registration (P3: event-driven poll/select)
+// ============================================================================
+
+/// Recover the shared `Pipe` behind a pipe OR fifo `File`.
+/// FIFO_OPS files hold the same Arc<Pipe> in private_data (fifo_open_file).
+fn pipe_or_fifo_of_file(file: &File) -> Option<&'static Pipe> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &PIPE_OPS as *const _)
+        && !core::ptr::eq(ops as *const _, &crate::fs::fifo::FIFO_OPS as *const _)
+    {
+        return None;
+    }
+    // SAFETY: ops identity confirms the File was created by create_pipe /
+    // fifo_open_file, both of which install Arc::into_raw(Pipe); the Arc
+    // held by the File keeps it alive while the caller holds the File.
+    let ptr = unsafe { *file.private_data.get() }?;
+    Some(unsafe { &*(ptr as *const Pipe) })
+}
+
+/// Register `task` on the pipe's read AND write wait queues: producers
+/// (writer enqueue / reader drain / end-close) wake both on every
+/// readiness transition, so a poll/select waiter registered here is
+/// woken by real events instead of the timed re-check slice.
+pub fn pipe_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
+    match pipe_or_fifo_of_file(file) {
+        Some(pipe) => {
+            pipe.read_queue()
+                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            pipe.write_queue()
+                .add(crate::process::wait::WaitQueueEntry::new(task, false));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Remove a registration added by pipe_poll_wait.
+pub fn pipe_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
+    if let Some(pipe) = pipe_or_fifo_of_file(file) {
+        pipe.read_queue().remove(task);
+        pipe.write_queue().remove(task);
+    }
+}
+
 /// vmsplice(2) write direction: move user bytes into the pipe. Linux
 /// vmsplice_to_pipe fills whatever pipe space exists and returns a SHORT
 /// count (callers loop); it blocks only while the pipe is completely full

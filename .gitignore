@@ -106,3 +106,6 @@ kernel/verify/kani-output.txt
 # soft-fp overlay build artifacts
 userspace/soft-fp/*.o
 userspace/soft-fp/libsoftfp-pin.a
+runs/*/fire.img
+runs/*/qemu.sock
+runs/*/qemu.pid
