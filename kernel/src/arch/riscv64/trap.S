@@ -91,7 +91,7 @@
     // fields, corrupting the CPU ID with the affinity mask when it is
     // nonzero, producing a wrong interrupt stack address.
     li t0, TASK_STRUCT_THRESHOLD
-    lw t1, TASK_TI_CPU(tp)
+    lw t1, {task_ti_cpu}(tp)
     // Defensive: clamp invalid ti_cpu (negative or >= MAX_CPUS) to CPU 0.
     // ti_cpu is i32 sign-extended by lw; -1 becomes 0xFFFFFFFF which
     // causes index-out-of-bounds if used unclamped.
@@ -169,19 +169,22 @@
 // sstatus bits
 .set SR_SPP,      0x100
 
-// Task structure offsets (consistent with task.rs TASK_OFFSETS).
-// NOTE (R20): TASK_STATE/TASK_PID are NOT used by this file — kept in sync
-// with the live layout for reference only. task_refcnt/journal_handle/
-// ti_on_cpu inserted before `state` moved state to 0x50 and pid to 0x54;
-// use task.rs::task_offsets (offset_of!) rather than adding new .set uses.
-.set TASK_TI_FLAGS,      0x00    // ti_flags offset
-.set TASK_TI_PREEMPT,    0x04    // ti_preempt_count offset
-.set TASK_TI_KERNEL_SP,  0x08    // ti_kernel_sp offset
-.set TASK_TI_USER_SP,    0x10    // ti_user_sp offset
-.set TASK_TI_CPU,        0x18    // ti_cpu offset (next field is cpus_allowed, NOT state)
-.set TASK_TI_A0,         0x40    // ti_a0 offset (thread_info scratch register)
-.set TASK_STATE,         0x50    // state offset (unused here; see task_offsets)
-.set TASK_PID,           0x54    // pid offset   (unused here; see task_offsets)
+
+// Task structure offsets: injected as global_asm! template constants from
+// task.rs task_offsets (offset_of!) by the global_asm! call in trap.rs.
+//
+// R57 (the ti_pick_state scribbler): these used to be hand-maintained
+// .set constants, and TASK_TI_A0 drifted by 8 when ti_pick_state (u32)
+// was inserted at offset 0x40 (ti_a0/a1/a2 moved to 0x48/0x50/0x58).
+// Every .Lfrom_user trap's scratch store sd-t0-to-TASK_TI_A0 then wrote
+// a live USER REGISTER over ti_pick_state plus its pad on EVERY syscall,
+// page fault, and user IRQ. The pick-state machine (publish PICKED,
+// affirm LIVE, revoke) then read user register values as its arbitration
+// word: the asm affirm gate aborted legitimate switches ("anything else
+// = garbage" branch to .Lswitch_abort), the harvester's revoke CAS won
+// on live tasks whenever the scribbled value happened to be 0, and the
+// whole GNOME wedge/SIGILL family traces back here. Derived constants
+// cannot drift.
 
 // Per-CPU interrupt stack constants
 .set INTR_STACK_SIZE,    16384   // 16KB per CPU
@@ -387,7 +390,7 @@ trap_entry:
 .Lfrom_user:
     // Stash user sp (ti_user_sp is a "last user sp" cache: written at exec
     // time and here; nothing reads it between traps).
-    sd sp, TASK_TI_USER_SP(tp)
+    sd sp, {task_ti_user_sp}(tp)
 
     // ROUTING FIX (the bash -i KERNPANIC engine): the sscratch-swap test
     // above assumes "sscratch = task pointer" implies the trap came from
@@ -409,14 +412,14 @@ trap_entry:
     // sp instead of reloading sp from ti_kernel_sp. t0 holds a live user
     // register here, so stash it in the thread_info scratch slot first
     // (same discipline as ARCH-C2: no register value is lost).
-    sd t0, TASK_TI_A0(tp)
+    sd t0, {task_ti_a0}(tp)
     csrr t0, sstatus
     andi t0, t0, SR_SPP
     bnez t0, .Lfrom_user_kernel_origin
-    ld t0, TASK_TI_A0(tp)
+    ld t0, {task_ti_a0}(tp)
 
     // Switch to the task kernel stack (safe: sp's user value is stashed)
-    ld sp, TASK_TI_KERNEL_SP(tp)
+    ld sp, {task_ti_kernel_sp}(tp)
     // No kernel stack (idle task during bringup) — defensive fallback
     beqz sp, .Luse_trap_stack_user
 
@@ -458,7 +461,7 @@ trap_entry:
 
     // NOW it's safe to use temp registers
     // Restore the stashed user sp into PtRegs
-    ld t0, TASK_TI_USER_SP(tp)
+    ld t0, {task_ti_user_sp}(tp)
     sd t0, PT_SP(sp)
 
     // Save user tp (held in sscratch since the entry swap)
@@ -498,7 +501,7 @@ trap_entry:
 // reusing the .Lfrom_kernel save sequence. The in-flight outer pt_regs at
 // the top of the kernel stack stays untouched.
 .Lfrom_user_kernel_origin:
-    ld t0, TASK_TI_A0(tp)
+    ld t0, {task_ti_a0}(tp)
     // Restore the kernel-mode sscratch protocol: this entry swapped the
     // task pointer into tp, leaving sscratch = old tp (also the task
     // pointer). .Lfrom_kernel expects sscratch=0 while in the kernel.
@@ -519,7 +522,7 @@ trap_entry:
     li t0, TASK_STRUCT_THRESHOLD
     bltu tp, t0, .Lcpu_id_from_tp_early
     // Normal path: tp is task_struct pointer, read ti_cpu
-    lw a1, TASK_TI_CPU(tp)
+    lw a1, {task_ti_cpu}(tp)
     // Defensive: clamp invalid ti_cpu to CPU 0
     li   t0, 4            // MAX_CPUS
     bltu a1, t0, .Ldo_call_handler
@@ -580,7 +583,7 @@ trap_exit:
     // after schedule() returns.
 
     addi t0, sp, PT_SIZE      // t0 = sp + PT_SIZE (unwound kernel stack pointer)
-    sd t0, TASK_TI_KERNEL_SP(tp)  // Save to task_struct.ti_kernel_sp
+    sd t0, {task_ti_kernel_sp}(tp)  // Save to task_struct.ti_kernel_sp
 
     // Check signals and need_resched in a loop
     //
@@ -628,7 +631,7 @@ trap_exit:
     // a task out of a kernel-mode trap exit is CONFIG_PREEMPT territory
     // and previously crashed boot (pid 1 SIGSEGV at a kernel epc in user
     // mode); kernel preemption stays opt-in via explicit schedule()s.
-    lw t0, TASK_TI_PREEMPT(tp)
+    lw t0, {task_ti_preempt}(tp)
     bnez t0, .Lrestore_and_exit
 
     // Need resched - call schedule()
@@ -666,7 +669,7 @@ trap_exit:
     // For newly forked children, thread.sp = pt_regs (set in copy_thread), but
     // __switch_to restores it to that value anyway. Reloading from ti_kernel_sp
     // is still correct because ti_kernel_sp = pt_regs + PT_SIZE.
-    ld t0, TASK_TI_KERNEL_SP(tp)
+    ld t0, {task_ti_kernel_sp}(tp)
     addi sp, t0, -PT_SIZE
 
     j .Lcheck_signals_and_resched
@@ -776,13 +779,13 @@ trap_exit:
     // NOTE: deliberately still `ld` (straddles ti_kernel_sp — see the
     // user-path note above); kernel-mode trap-exit preemption stays
     // disabled (CONFIG_PREEMPT territory; it crashed boot historically).
-    ld t0, TASK_TI_PREEMPT(tp)
+    ld t0, {task_ti_preempt}(tp)
     bnez t0, .Lrestore_kernel_csrs
 
     // About to schedule(): save the pt_regs pointer so the post-schedule
     // reload can find it (schedule() context-switches sp away).
     addi t0, sp, PT_SIZE
-    sd   t0, TASK_TI_KERNEL_SP(tp)
+    sd   t0, {task_ti_kernel_sp}(tp)
 
     // Need reschedule — call schedule().
     //
@@ -804,7 +807,7 @@ trap_exit:
 
     // Reload sp from ti_kernel_sp (schedule() may have context-switched
     // to a different task and back, so sp changed).
-    ld t0, TASK_TI_KERNEL_SP(tp)
+    ld t0, {task_ti_kernel_sp}(tp)
     addi sp, t0, -PT_SIZE
 
     // After context switch, the new task may have been interrupted from

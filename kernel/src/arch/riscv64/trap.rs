@@ -12,8 +12,22 @@ use crate::process::task::TaskState;
 use riscv::register::sie;
 use crate::fs::procfs::interrupts;
 
-// Include trap.S assembly code
-core::arch::global_asm!(include_str!("trap.S"));
+// Include trap.S assembly code.
+//
+// R57: the Task-field offsets this asm uses are injected as template
+// constants derived from offset_of! (task.rs task_offsets) — the
+// hand-maintained .set constants they replace drifted by 8 when
+// ti_pick_state was inserted into Task, and every user trap's scratch
+// store then wrote a live user register over the pick-state word (the
+// GNOME wedge scribbler). Derived constants cannot drift.
+core::arch::global_asm!(
+    include_str!("trap.S"),
+    task_ti_preempt = const crate::process::task::task_offsets::TI_PREEMPT_COUNT,
+    task_ti_kernel_sp = const crate::process::task::task_offsets::TI_KERNEL_SP,
+    task_ti_user_sp = const crate::process::task::task_offsets::TI_USER_SP,
+    task_ti_cpu = const crate::process::task::task_offsets::TI_CPU,
+    task_ti_a0 = const crate::process::task::task_offsets::TI_A0,
+);
 
 /// Get pt_regs for current task
 ///
