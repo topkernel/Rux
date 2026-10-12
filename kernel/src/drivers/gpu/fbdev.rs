@@ -317,6 +317,7 @@ pub static FB_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: None,
     poll: None,
+    read_at: None,
 };
 
 fn fb_read(_file: &crate::fs::File, _buf: &mut [u8]) -> isize {

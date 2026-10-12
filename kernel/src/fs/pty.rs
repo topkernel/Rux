@@ -505,6 +505,7 @@ pub static PTMX_OPS: FileOps = FileOps {
     lseek: None,
     close: Some(ptmx_close),
     poll: Some(ptmx_poll),
+    read_at: None,
 };
 
 // ============================================================================
@@ -659,6 +660,7 @@ pub static PTY_SLAVE_OPS: FileOps = FileOps {
     lseek: None,
     close: Some(pty_slave_close),
     poll: Some(pty_slave_poll),
+    read_at: None,
 };
 
 // ============================================================================

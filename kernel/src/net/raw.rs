@@ -523,6 +523,7 @@ pub static RAW_OPS: FileOps = FileOps {
     lseek: None,
     close: Some(raw_file_close),
     poll: Some(raw_file_poll),
+    read_at: None,
 };
 
 // ============================================================================

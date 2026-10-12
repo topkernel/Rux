@@ -1222,6 +1222,7 @@ pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(binder_close),
     poll: Some(binder_poll),
+    read_at: None,
 };
 
 // ============================================================================

@@ -91,6 +91,17 @@ pub struct FileOps {
     pub close: Option<fn(&File) -> i32>,
     /// Poll for readiness (takes requested events mask, returns ready events mask)
     pub poll: Option<fn(&File, u16) -> u16>,
+    /// Positional read at an explicit offset, never touching the shared
+    /// file position (R71 demand-fault race: the generic read_at fallback
+    /// swings the file position through set_pos/read/restore — two
+    /// threads sharing this open file description (CLONE_VM peers: one
+    /// demand-faulting an mmap page, one in plain read()) interleaved the
+    /// sequence and the faulting page got filled from the OTHER thread's
+    /// offset; a libc .text page served .rodata bytes and multithreaded
+    /// loaders crashed on their own libraries). File ops used for mmap or
+    /// pread at scale (ext4, tmpfs) provide a native entry; the generic
+    /// fallback in File::read_at covers the rest.
+    pub read_at: Option<fn(&File, u64, &mut [u8]) -> isize>,
 }
 
 /// R36-B1: monotonically increasing open-file-description generation.
@@ -303,10 +314,12 @@ impl File {
 
     /// Position-invariant read at an explicit offset (pread(2) backing).
     ///
-    /// Unlike read()+set_pos(), this never touches the shared file
-    /// position, so a concurrent read/write on another thread sharing the
-    /// fd cannot observe (or corrupt) the offset — pread/pwrite must be
-    /// atomic w.r.t. the file offset (review批次1 RACE).
+    /// Prefers the op's native read_at entry (R71): those never touch the
+    /// shared file position at all. The fd-backed fallback below still
+    /// swings the position — it is inherently not atomic against a
+    /// concurrent plain read() on the same description, which is exactly
+    /// why ops that userspace preads or demand-fault-maps at scale
+    /// (ext4/tmpfs) must carry ops.read_at.
     ///
     /// Returns -ESPIPE for non-seekable objects (pipes/sockets — Linux
     /// pread on them fails with ESPIPE).
@@ -314,6 +327,20 @@ impl File {
         // f_mode enforcement, same as read().
         if self.flags().is_writeonly() {
             return -9; // EBADF
+        }
+        // Native positional op: no shared-position access at all.
+        if let Some(ops) = *self.ops.get() {
+            if let Some(read_at_fn) = ops.read_at {
+                let slice = core::slice::from_raw_parts_mut(buf, count);
+                let n = read_at_fn(self, offset, slice);
+                if n > 0 {
+                    crate::fs::inotify::notify_file(
+                        self,
+                        crate::fs::inotify::inotify_events::IN_ACCESS,
+                    );
+                }
+                return n;
+            }
         }
         let inode_opt = &*self.inode.get();
         let inode = match inode_opt.as_ref() {
@@ -1108,6 +1135,7 @@ pub static REG_FILE_OPS: FileOps = FileOps {
     lseek: Some(reg_file_lseek),
     close: Some(reg_file_close),
     poll: None,
+    read_at: None,
 };
 
 pub static REG_RO_FILE_OPS: FileOps = FileOps {
@@ -1116,6 +1144,7 @@ pub static REG_RO_FILE_OPS: FileOps = FileOps {
     lseek: Some(reg_file_lseek),
     close: Some(reg_file_close),
     poll: None,
+    read_at: None,
 };
 
 /// Directory file operations (shared by all FS types).
@@ -1157,4 +1186,5 @@ pub static DIR_FILE_OPS: FileOps = FileOps {
     lseek: Some(dir_file_lseek),
     close: Some(dir_close),
     poll: None,
+    read_at: None,
 };

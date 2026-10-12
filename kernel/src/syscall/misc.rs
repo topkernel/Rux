@@ -34,14 +34,23 @@ pub mod poll_events {
 }
 
 /// epoll_event structure
-// Linux uapi `struct epoll_event` is __attribute__((packed)): events@0,
-// data@4, 12 bytes total — glibc AND musl mirror that on every arch. The
-// former repr(C) layout padded data to @8 (16-byte stride), so any
-// epoll_wait/epoll_pwait delivering >1 event, or a userspace check of
-// `data` against the packed struct, read misaligned garbage (LTP x86
-// epoll_wait01: "epoll.data.fd 1835365160, expected 4"). Keep the kernel
-// struct byte-identical to the uapi on both arches.
-#[repr(C, packed)]
+// Linux uapi packs epoll_event ONLY on x86-64
+// (include/uapi/linux/eventpoll.h: EPOLL_PACKED under __x86_64__); every
+// other arch — riscv64 included — uses the natural C layout: events@0,
+// data@8, 16-byte records. glibc and musl mirror the uapi (verified:
+// Ubuntu 22.04 riscv64 glibc sizeof(epoll_event)=16, data@8; musl 1.2.5
+// applies __packed__ only under __x86_64__).
+//
+// R72: making the struct unconditionally packed fixed the x86_64 stride
+// (LTP epoll_wait01) but broke riscv64: the kernel wrote 12-byte records
+// with data@4 while both riscv64 libcs read 16-byte records with data@8,
+// so every `data` cookie came back as a mix of padding and neighboring
+// bytes — Xorg's InputThread dereferenced a mangled epoll cookie and
+// SIGSEGV'd at 0x4000b80 on every boot (deterministic, t=8s), which with
+// force-unblocked synchronous signals took the whole server down. Keep
+// each arch byte-identical to its uapi shape.
+#[cfg_attr(feature = "x86_64", repr(C, packed))]
+#[cfg_attr(not(feature = "x86_64"), repr(C))]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct EPollEvent {
     pub events: u32,
@@ -224,6 +233,7 @@ static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(epoll_file_close),
     poll: None,
+    read_at: None,
 };
 
 /// sys_poll - I/O multiplexing (poll style)
@@ -1855,6 +1865,7 @@ pub static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(eventfd_close),
     poll: Some(eventfd_poll),
+    read_at: None,
 };
 
 // ==================== timerfd ====================
@@ -2045,6 +2056,7 @@ static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(timerfd_close),
     poll: Some(timerfd_poll),
+    read_at: None,
 };
 
 // ==================== signalfd (P1) ====================
@@ -2256,6 +2268,7 @@ static SIGNALFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(signalfd_close),
     poll: Some(signalfd_poll),
+    read_at: None,
 };
 
 /// signalfd4 core (NR 74): create a new signalfd, or re-arm the mask of an

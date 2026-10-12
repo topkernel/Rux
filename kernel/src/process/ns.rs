@@ -966,6 +966,7 @@ static NS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(ns_file_close),
     poll: None,
+    read_at: None,
 };
 
 /// Intercept /proc/[pid]/ns/<kind> opens from sys_openat. Returns

@@ -490,6 +490,7 @@ pub static IO_URING_OPS: FileOps = FileOps {
     lseek: None,
     close: Some(io_uring_close),
     poll: Some(io_uring_poll),
+    read_at: None,
 };
 
 // ==================== mmap Handler ====================

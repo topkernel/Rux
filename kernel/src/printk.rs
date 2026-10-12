@@ -969,6 +969,7 @@ static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     lseek: Some(kmsg_file_lseek),
     close: None,
     poll: None,
+    read_at: None,
 };
 
 /// Initialize /dev/kmsg device node.

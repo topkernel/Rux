@@ -166,6 +166,7 @@ static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     lseek: None,
     close: None,
     poll: Some(nulldev_poll),
+    read_at: None,
 };
 
 // ============================================================================
@@ -252,6 +253,7 @@ pub(crate) static CONDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOp
     lseek: None,
     close: None,
     poll: Some(condev_poll),
+    read_at: None,
 };
 
 /// /dev/zero — reads return zeros, writes discard.
@@ -276,6 +278,7 @@ static ZERODEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     lseek: None,
     close: None,
     poll: Some(zerodev_poll),
+    read_at: None,
 };
 
 /// /dev/full — reads return zeros, writes fail with ENOSPC.
@@ -289,6 +292,7 @@ static FULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     lseek: None,
     close: None,
     poll: Some(zerodev_poll),
+    read_at: None,
 };
 
 /// xorshift* PRNG state for /dev/random + /dev/urandom nodes (the real
@@ -329,6 +333,7 @@ static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     lseek: None,
     close: None,
     poll: Some(randdev_poll),
+    read_at: None,
 };
 
 /// /dev/kmsg — kernel message sink (OH Phase 1b: OH's init and early
@@ -358,6 +363,7 @@ static KMSGDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     lseek: None,
     close: None,
     poll: Some(kmsgdev_poll),
+    read_at: None,
 };
 
 /// virtio-blk major on this platform (matches sysfs /sys/class/block/vda).
@@ -1123,6 +1129,7 @@ pub static LOOP_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     lseek: Some(crate::drivers::loop_dev::loop_file_lseek),
     close: None,
     poll: None,
+    read_at: None,
 };
 
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block

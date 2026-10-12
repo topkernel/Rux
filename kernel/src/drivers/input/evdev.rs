@@ -488,6 +488,7 @@ pub static EVDEV_OPS: FileOps = FileOps {
     lseek: None,
     close: Some(evdev_file_close),
     poll: Some(evdev_file_poll),
+    read_at: None,
 };
 
 // ============================================================================

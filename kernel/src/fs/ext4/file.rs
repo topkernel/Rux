@@ -1489,7 +1489,75 @@ pub static EXT4_FILE_OPS: FileOps = FileOps {
     lseek: Some(reg_file_lseek),
     close: Some(ext4_file_close),
     poll: None,
+    read_at: Some(ext4_file_read_at_vfs),
 };
+
+/// ext4 positional read (R71): serve an explicit-offset read without
+/// touching the shared file position at all.
+///
+/// The generic File::read_at fallback (set_pos/read/restore) let a
+/// concurrent plain read() on another thread sharing this open file
+/// description interleave the sequence: the demand-fault path filled a
+/// mapping page from the OTHER thread's offset — a libc .text page served
+/// .rodata bytes and every multithreaded loader (Xorg, gnome-session,
+/// dbus-daemon) crashed or misbehaved on its own libraries. Reads here
+/// take io_lock only to serialize internal state (readahead window) with
+/// plain reads; the file position is never read or written.
+///
+/// SAFETY: file.inode.get() returns a valid pointer to Option<Arc<Inode>>;
+/// when Some, the Arc and its contents (private_data, sb) are valid for
+/// the lifetime of the file — identical setup to ext4_file_read_vfs.
+fn ext4_file_read_at_vfs(file: &File, offset: u64, buf: &mut [u8]) -> isize {
+    unsafe {
+        let inode_opt = &*file.inode.get();
+        let inode = match inode_opt {
+            Some(i) => i,
+            None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
+        };
+
+        let fs_ptr = match inode.private_data {
+            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
+        };
+        let fs = &*fs_ptr;
+
+        let ext4_inode = match inode.sb {
+            Some(ptr) => &*(ptr as *const super::inode::Ext4Inode),
+            None => return errno::Errno::IOError.as_neg_i32() as isize,
+        };
+
+        let _io_guard = file.io_lock.guard();
+
+        if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
+            match ext4_file_read(fs, ext4_inode, offset, buf) {
+                Ok(read_bytes) => {
+                    if read_bytes > 0 {
+                        crate::fs::inotify::notify_file(
+                            file,
+                            crate::fs::inotify::inotify_events::IN_ACCESS,
+                        );
+                    }
+                    read_bytes as isize
+                }
+                Err(e) => e as isize,
+            }
+        } else {
+            let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
+            match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
+                Ok(read_bytes) => {
+                    if read_bytes > 0 {
+                        crate::fs::inotify::notify_file(
+                            file,
+                            crate::fs::inotify::inotify_events::IN_ACCESS,
+                        );
+                    }
+                    read_bytes as isize
+                }
+                Err(e) => e as isize,
+            }
+        }
+    }
+}
 
 /// Default regular file lseek implementation
 fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {

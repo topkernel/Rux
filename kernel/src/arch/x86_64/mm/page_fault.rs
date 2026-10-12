@@ -452,8 +452,16 @@ pub fn handle_mm_fault(
                 // snapshot stays only as a fallback).
                 if vma_file_fd >= 0 {
                     if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
-                        if let Some(found_vma) = aspace.vma_read().find(page_virt_addr) {
-                            let vma_start = found_vma.start().as_usize();
+                        // R73: scope the VMA read guard to the lookup
+                        // itself — the guard disables preemption, and
+                        // holding it across file.read_at() forced the
+                        // EXT4_BIG_LOCK waiter into lock_fair's pure-spin
+                        // branch (4-CPU pinch; see the riscv64 twin).
+                        let vma_start_opt = {
+                            let vmas = aspace.vma_read();
+                            vmas.find(page_virt_addr).map(|v| v.start().as_usize())
+                        };
+                        if let Some(vma_start) = vma_start_opt {
                             let page_offset_in_mapping = page_virt_addr.as_usize() - vma_start;
                             let file_offset = vma_offset + page_offset_in_mapping;
 
@@ -479,16 +487,23 @@ pub fn handle_mm_fault(
                                     .get_vma_file(vma_start)
                                     .or_else(|| crate::fs::get_file_fd(vma_file_fd as usize));
                                 if let Some(file) = file {
-                                    let saved_pos = file.get_pos();
-                                    file.set_pos(file_offset as u64);
-
                                     let bytes_to_read = core::cmp::min(
                                         PAGE_SIZE_USIZE,
                                         effective_size.saturating_sub(file_offset),
                                     );
-                                    let bytes_read = file.read(page_ptr, bytes_to_read);
-
-                                    file.set_pos(saved_pos);
+                                    // R71: positional read — the old
+                                    // get_pos/set_pos/read/restore dance
+                                    // raced against concurrent plain
+                                    // read()s on the same pinned vm_file
+                                    // (CLONE_VM threads faulting while
+                                    // peers read) and served pages from
+                                    // the wrong offset. See the riscv64
+                                    // twin and File::read_at.
+                                    let bytes_read = file.read_at(
+                                        file_offset as u64,
+                                        page_ptr,
+                                        bytes_to_read,
+                                    );
 
                                     // Zero remaining bytes after file data (partial last page)
                                     if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {

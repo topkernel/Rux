@@ -854,4 +854,5 @@ pub static CGROUP_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: Some(cgroupfs_file_lseek),
     close: Some(cgroupfs_file_close),
     poll: None,
+    read_at: None,
 };
