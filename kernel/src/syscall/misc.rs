@@ -644,7 +644,20 @@ fn poll_event_wait_round(
     use crate::process::task::TaskState;
     use crate::process::wait::WaitQueueEntry;
 
-    // 1. Resolve + register on every file's queues. Any file without a
+    // 1. State transition BEFORE registering on the queues (the
+    //    prepare_to_wait discipline: a producer wake must never find the
+    //    task RUNNING with entries already on the queue — wake_up_process
+    //    would take the R46 refuse path and merely mark the entry woken;
+    //    with the state already INTERRUPTIBLE the wake enqueues us and the
+    //    re-check below catches the readiness). A wake racing with the
+    //    registration window enqueues us; step 3's ready() re-check then
+    //    returns without sleeping (dequeue_task undoes the racing enqueue).
+    // SAFETY: task is the current task.
+    unsafe {
+        (*task).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+    }
+
+    // 2. Resolve + register on every file's queues. Any file without a
     //    wake path forces the caller back to the timed-slice fallback
     //    (its readiness must still be re-checked periodically).
     let mut regs: alloc::vec::Vec<PollWaitUnregFn> = alloc::vec::Vec::new();
@@ -655,6 +668,12 @@ fn poll_event_wait_round(
                     for (i, r) in regs.iter().enumerate() {
                         r(&files[i], task);
                     }
+                    // SAFETY: restore RUNNING before returning (we never
+                    // slept; a racing wake may have enqueued us — undo).
+                    unsafe {
+                        (*task).set_state(TaskState::new(TaskState::RUNNING));
+                        crate::sched::dequeue_task(&*task);
+                    }
                     return PollEventWait::NotWired;
                 }
                 regs.push(unreg);
@@ -662,6 +681,11 @@ fn poll_event_wait_round(
             None => {
                 for (i, r) in regs.iter().enumerate() {
                     r(&files[i], task);
+                }
+                // SAFETY: see above.
+                unsafe {
+                    (*task).set_state(TaskState::new(TaskState::RUNNING));
+                    crate::sched::dequeue_task(&*task);
                 }
                 return PollEventWait::NotWired;
             }
@@ -673,14 +697,6 @@ fn poll_event_wait_round(
             r(&files[i], task);
         }
     };
-
-    // 2. State transition BEFORE the readiness re-check: a wake racing
-    //    with step 3 enqueues us; the re-check then returns without
-    //    sleeping (dequeue_task undoes the racing enqueue below).
-    // SAFETY: task is the current task.
-    unsafe {
-        (*task).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-    }
 
     // 3. Re-check readiness AFTER registering (lost-wake discipline): an
     //    event that landed between the caller's readiness scan and the
