@@ -2342,9 +2342,11 @@ impl Ext4BigLock {
     /// 4 CPUs wedged in lock_fair for 15+ min while gs-b and Xorg
     /// starved). Called from do_exit only — the dying task can no longer
     /// make forward progress in its critical section, so dropping the
-    /// lock is strictly better than stranding the whole filesystem. Wake
-    /// ALL waiters: any one of them may re-take the lock; the rest
-    /// re-check and re-sleep.
+    /// lock is strictly better than stranding the whole filesystem.
+    /// Hand out exactly ONE retry token, same as release(): the woken
+    /// waiter either takes the lock (and its later release() hands the
+    /// next token down the queue) or re-sleeps — a storm of woken
+    /// retryers is pointless load on the scheduler.
     pub fn release_if_owner(&'static self, pid: u32) {
         let was_held = {
             let mut st = self.state.lock();
@@ -2365,7 +2367,7 @@ impl Ext4BigLock {
             }
         };
         if was_held {
-            self.wait.wake_up_all();
+            self.wait.wake_up_one();
         }
     }
 

@@ -976,18 +976,26 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 // 0xFFFFFFFF task pointer whose origin lived two frames up).
                 // The kernel stack is always mapped; words that happen to
                 // be data are simply ignored during symbolization.
-                for &b in b"trap: stack:" { put(b); }
-                for i in 0..24usize {
-                    let addr = regs.sp as usize + i * 8;
-                    let v = unsafe { core::ptr::read_volatile(addr as *const usize) };
-                    put(b' ');
-                    for sh in (0..64).step_by(4).rev() {
-                        let n = ((v >> sh) & 0xF) as u8;
-                        put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                // R73: USER-origin faults skip the dump — their sp is a
+                // USER address, and reading it with a direct kernel VA
+                // faults again (nested panic on top of panic; the r72-fire3
+                // KERNPANIC prints tripled exactly this way).
+                if regs.kernel_mode() {
+                    for &b in b"trap: stack:" { put(b); }
+                    for i in 0..24usize {
+                        let addr = regs.sp as usize + i * 8;
+                        let v = unsafe { core::ptr::read_volatile(addr as *const usize) };
+                        put(b' ');
+                        for sh in (0..64).step_by(4).rev() {
+                            let n = ((v >> sh) & 0xF) as u8;
+                            put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                        }
+                        if i % 4 == 3 { put(b'\n'); }
                     }
-                    if i % 4 == 3 { put(b'\n'); }
+                    if 24 % 4 != 0 { put(b'\n'); }
+                } else {
+                    for &b in b"trap: user-sp (not dumped)\n" { put(b); }
                 }
-                if 24 % 4 != 0 { put(b'\n'); }
                 // R9: dump the faulting task's children list raw — the
                 // recurring NULL-walk corruption must be photographed at
                 // the instant it faults (other CPUs sanitize the list if
