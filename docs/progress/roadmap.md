@@ -1,6 +1,46 @@
 # Rux Development Roadmap
 
-## Current Phase (2026-10-07): x86_64 lands on main; OpenHarmony program starts
+## Current Phase (2026-10-12): Phase 0 COMPLETE — x86_64 at parity with riscv64
+
+**Milestone: the x86_64 port passes its full exit gate. LTP x86 r3 =
+850/1869 (102.2% of the riscv64 r11 baseline of 832, gate >=749 passed
+with +101 margin), on top of the already-passing Ubuntu amd64 desktop
+gate. 795/832 baseline passes preserved (95.6%), plus 55 x86-only
+passes.**
+
+### How the gap closed (r1 59 -> r2 692 -> r3 850)
+
+- r1 blockers: TSC timebase 100x under TCG (fixed: HPET primary clock,
+  +x2APIC probe), SIGSEGV storm (fixed: sigframe SysV alignment, clone
+  TLS argument order, uaccess demand-fill)
+- r2 -> r3: uaccess exception tables for string ops (37-test panic
+  family -> zero panics), syscall dispatch table x86_64 translations
+  (30+ entries; msg/sem/shm/ptrace/pause/poll/epoll families), fresh-task
+  FPU image (zero image meant all FP exceptions unmasked; MXCSR init;
+  #XM routing), semid64_ds layout, epoll_event packed layout
+- The memory-corruption saga (weeks of hunting) closed on three engines:
+  the R65 switch-out pickability window, the wild-GS entry class, and
+  R70 — EFLAGS.DF surviving from userspace into kernel entry paths
+  (every legal kernel memcpy ran BACKWARDS; one instruction, cld,
+  explained every recorded corruption shape)
+- Session-freeze root cause on riscv64: hand-maintained struct offsets
+  in trap.S drifted after a field insertion (a user register was
+  scribbled into the scheduler pick-state word on EVERY syscall);
+  offsets are now compile-time derived via offset_of!
+
+### OpenHarmony program status
+
+- Phase 0 (x86_64 port): **COMPLETE** — Ubuntu amd64 desktop boots,
+  LTP gate passed
+- Phase 1 (initrd boot chain): implementation merged (initrd/cmdline/
+  uevent credentials/DEVTYPE, tmpfs mknod, multi-disk virtio-blk,
+  /devices DEVPATH); OH image bring-up pending a built image set
+- Phase 2 (binder et al.): binder at samgr-lifecycle level (death
+  notifications, fd passing, three contexts, per-thread wake,
+  SECCTX); ashmem/memfd/access_tokenid landed
+- Phase 3 (graphics): route A validated (fbdev HDI composer, zero
+  kernel display code); needs the OH graphics stack rebuilt GPU-off
+
 
 **Milestone: x86_64 is a supported platform on main — Ubuntu 22.04 amd64
 boots to the graphical desktop (login screen, keyboard login, apps), the
