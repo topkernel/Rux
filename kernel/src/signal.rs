@@ -1950,6 +1950,30 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
     send_signal_with_info(pid, SigInfo::new(sig, si_code::SI_USER, sender_pid, sender_uid))
 }
 
+/// Force-unblock a SYNCHRONOUS signal in the current task (Linux
+/// force_sig parity for hardware faults).
+///
+/// A user-mode SIGSEGV/SIGBUS delivered to a thread that blocks the
+/// signal stays pending forever: do_signal's `first_unmasked` filter
+/// skips it, execution returns to the faulting pc, and the fault repeats
+/// — an unkillable kernel-visible livelock (observed: Xorg's
+/// InputThread, which blocks every signal via pthread_sigmask,
+/// refaulting 88k+ times at one address). POSIX leaves blocked
+/// synchronous signals undefined; Linux's observable behavior is that
+/// hardware-generated signals are delivered regardless of the mask, so
+/// the kernel clears the bit for the faulting thread before returning.
+pub fn force_unblock_current(sig: i32) {
+    if !(1..=64).contains(&sig) {
+        return;
+    }
+    if let Some(t) = crate::sched::current() {
+        // SAFETY: current() is valid for this call on the running CPU.
+        unsafe {
+            (*t).sigmask &= !(1u64 << (sig - 1));
+        }
+    }
+}
+
 pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {    // Check if signal number is valid
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());

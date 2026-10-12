@@ -891,6 +891,9 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                    // Synchronous fault: deliver despite a blocked mask
+                    // (Linux force_sig parity — see force_unblock_current).
+                    crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
                 let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
@@ -907,6 +910,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                    // Synchronous fault: deliver despite a blocked mask.
+                    crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
@@ -922,6 +927,8 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                 let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGBUS as i32);
                 if !sigbus_has_handler() {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
+                } else {
+                    crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
             }
         }

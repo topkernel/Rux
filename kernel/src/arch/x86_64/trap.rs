@@ -1148,6 +1148,9 @@ fn handle_general_protection(regs: &mut PtRegs) {
         let pid = crate::process::current_pid();
         if sigsegv_has_handler() {
             let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+            // Synchronous fault: deliver despite a blocked mask
+            // (Linux force_sig parity — see force_unblock_current).
+            crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
             return;
         }
         let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
