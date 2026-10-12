@@ -103,6 +103,17 @@ pub fn preempt_count_sub(val: i32) {
     }
 }
 
+/// R74: reset a corrupted (negative) preempt_count to zero. A negative
+/// count is never legal — it is the fingerprint of an unpaired decrement
+/// (double-executed guard drop during a double-run). Called only from
+/// the fault-path corruption self-heal, with a loud print alongside.
+#[inline]
+pub fn preempt_count_reset() {
+    if let Some(task) = crate::sched::current() {
+        task.ti_preempt_count_zero();
+    }
+}
+
 // ============================================================================
 // IRQ entry/exit helpers
 // ============================================================================

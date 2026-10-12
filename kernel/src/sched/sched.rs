@@ -1638,6 +1638,40 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
                 crate::dfx::scribble::double_seed(task, me as u64, owner_slot, claim);
             }
         }
+        // R74 (riscv64 double-run seed tripwire, always on): same check as
+        // the x86 scribble hunter's double_seed, SBI-direct and
+        // unconditional — the r74g capture ended with TWO harts both
+        // executing as pid 420 (both printed noctx with the same tp and a
+        // preempt_count of -1: double-executed guard drops), so the seed
+        // pick must be named the moment it happens. owner_slot = a foreign
+        // slot still naming the task; claim = a foreign claim on it.
+        #[cfg(feature = "riscv64")]
+        {
+            let me = crate::arch::cpu_id() as usize;
+            let mut owner_slot: i32 = -1;
+            for c in 0..crate::config::MAX_CPUS {
+                if c != me && cpu_state(c).current == task {
+                    owner_slot = c as i32;
+                    break;
+                }
+            }
+            let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+            let pick_st = (*task).pick_state();
+            let tp = crate::arch::cpu::get_thread_id() as usize;
+            let tp_is_task = tp == task as usize;
+            // NOTE: pick_st==LIVE alone is NOT a seed signal — it persists
+            // after a legitimate switch-out (the release store does not
+            // reset it). Only a foreign slot or a foreign claim convicts.
+            if owner_slot >= 0 || (claim != -1 && claim as usize != me) {
+                r56_print_pid(
+                    b"R74-DOUBLE-SEED cpu=", me as u32, b" pid=");
+                r56_print_pid(b"", (*task).pid(), b" owner_slot=");
+                r56_print_pid(b"", owner_slot as u32, b" claim=");
+                r56_print_pid(b"", claim as u32, b" pick_st=");
+                r56_print_pid(b"", pick_st, b" tp_is_task=");
+                r56_print_pid(b"", tp_is_task as u32, b"\n");
+            }
+        }
         // Scribble hunter: record the pick (dfx=scribble).
         #[cfg(feature = "x86_64")]
         crate::dfx::scribble::ring_log(

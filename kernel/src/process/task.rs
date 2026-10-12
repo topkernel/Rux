@@ -3056,6 +3056,15 @@ impl Task {
         self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
     }
 
+    /// R74: zero a corrupted (negative) preempt_count — the self-heal for
+    /// the double-run engine's unpaired-decrement fingerprint. A plain
+    /// store (not fetch) is intended: whatever the count was, it was
+    /// garbage.
+    #[inline]
+    pub fn ti_preempt_count_zero(&self) {
+        self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+    }
+
     /// Get kernel stack pointer (thread_info.kernel_sp)
     #[inline]
     pub fn ti_kernel_sp(&self) -> u64 {

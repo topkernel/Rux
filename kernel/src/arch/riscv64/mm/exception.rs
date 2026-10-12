@@ -212,8 +212,29 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
 
     // Check if in interrupt context
     if in_interrupt() {
-        // Cannot sleep in interrupt context
-        return no_context(regs, fault_addr);
+        // R74 (preempt-count corruption self-heal): a NEGATIVE
+        // preempt_count is never legal — it means an unpaired decrement
+        // (double-executed spinlock-guard drop: the double-run engine's
+        // fingerprint; r74g/r74h captures: two harts both executing as
+        // the same pid, both faulting in user mode with preempt == -1
+        // and dying through this no_context path as "in interrupt").
+        // Treat it as corruption, not an IRQ context: reset the count and
+        // let the fault be served as the ordinary user fault it is. The
+        // task keeps running (and scheduling) instead of taking the
+        // whole machine down; the R74-DOUBLE-SEED / noctx prints keep
+        // naming the underlying double-run for the producer hunt.
+        let pc = crate::interrupt::preempt::preempt_count();
+        if pc < 0 {
+            use core::fmt::Write;
+            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let _ = write!(w,
+                "trap: PREEMPT-UNDERFLOW pid={} pc={:#x} — healed to 0\n",
+                crate::sched::get_current_pid(), pc);
+            crate::interrupt::preempt::preempt_count_reset();
+        } else {
+            // Cannot sleep in interrupt context
+            return no_context(regs, fault_addr);
+        }
     }
 
     // Kernel mode access
@@ -223,6 +244,36 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         let fault_addr_usize = fault_addr.bits() as usize;
 
         if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.sp as usize) {
+            // R74 (stale-dead-context containment): a hart executing a
+            // context whose sp lives on ANOTHER task's stack, or faulting
+            // at that task's stack range, is the double-run engine's
+            // second half (r74i: pid 438's first hart exited cleanly
+            // after the PREEMPT-UNDERFLOW heal; the second hart's stale
+            // 438-context then faulted here cross-stack). If the named
+            // task is already dead/dying, this hart is running a corpse:
+            // panicking kills the whole machine for a one-hart loss.
+            // Park this hart loudly instead — the other CPUs (and the
+            // producer-hunt tripwires) keep running.
+            {
+                let dying = current.state().is_dead()
+                    || (current.ti_flags()
+                        & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                            .bits())
+                        != 0;
+                let cross_stack = !current.is_in_kernel_stack(regs.sp as usize);
+                if dying && cross_stack {
+                    use core::fmt::Write;
+                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let _ = write!(w,
+                        "trap: STALE-CONTEXT-PARK pid={} epc={:#x} sp={:#x} (dead task, foreign stack)\n",
+                        current.pid(), regs.epc, regs.sp);
+                    // SAFETY: wfi halts this hart until an interrupt; the
+                    // context is dead and must never resume.
+                    loop {
+                        unsafe { core::arch::asm!("wfi") };
+                    }
+                }
+            }
             panic!("Kernel stack overflow in task {} (fault_addr={:#x}, sp={:#x})",
                 current.pid(), fault_addr_usize, regs.sp);
         }
