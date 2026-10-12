@@ -545,6 +545,17 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::fs::ext4::namei::clear_current_handle();
         }
 
+        // ===== Ext4 big lock force-release =====
+        // Same leak family as the journal handle above: do_exit does not
+        // unwind Rust guards, so a task killed inside an ext4 critical
+        // section would strand EXT4_BIG_LOCK on a dead owner forever
+        // (GNOME r72-fire2: every CPU then spun or slept against the
+        // dead owner's pid — even a recycled one — while gs-b/Xorg
+        // starved). The dying task can make no forward progress in its
+        // section; drop the lock and wake all waiters so the filesystem
+        // survives the kill.
+        crate::fs::ext4::EXT4_BIG_LOCK.release_if_owner(current_pid);
+
         // ===== Ptrace tracer death: auto-detach tracees =====
         // Linux forgets the tracing relationship when the tracer exits
         // (ptrace_exit → every tracee is detached and resumed). Without

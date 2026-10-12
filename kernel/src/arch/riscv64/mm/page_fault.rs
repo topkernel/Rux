@@ -496,8 +496,22 @@ pub fn handle_mm_fault(
                 // stale zeros through the snapshot.)
                 if vma_file_fd >= 0 {
                     if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
-                        if let Some(found_vma) = aspace.vma_read().find(page_virt_addr) {
-                            let vma_start = found_vma.start().as_usize();
+                        // R73: scope the VMA read guard to the lookup
+                        // itself. The guard is a spinlock rwlock read
+                        // (preempt-disable while held); keeping it alive
+                        // across file.read_at() below meant every
+                        // demand-fault file read ran with preempt_count
+                        // != 0 — the EXT4_BIG_LOCK waiter then refused
+                        // its sleep path (lock_fair can_sleep) and
+                        // pure-spinned, pinching all 4 CPUs while the
+                        // lock holder waited for block I/O (GNOME
+                        // r72-fire2 wedge: 4 CPUs in lock_fair, gs-b
+                        // starved, screen frozen at M4).
+                        let vma_start_opt = {
+                            let vmas = aspace.vma_read();
+                            vmas.find(page_virt_addr).map(|v| v.start().as_usize())
+                        };
+                        if let Some(vma_start) = vma_start_opt {
                             let page_offset_in_mapping = page_virt_addr.as_usize() - vma_start;
                             let file_offset = vma_offset + page_offset_in_mapping;
 

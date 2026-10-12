@@ -452,8 +452,16 @@ pub fn handle_mm_fault(
                 // snapshot stays only as a fallback).
                 if vma_file_fd >= 0 {
                     if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
-                        if let Some(found_vma) = aspace.vma_read().find(page_virt_addr) {
-                            let vma_start = found_vma.start().as_usize();
+                        // R73: scope the VMA read guard to the lookup
+                        // itself — the guard disables preemption, and
+                        // holding it across file.read_at() forced the
+                        // EXT4_BIG_LOCK waiter into lock_fair's pure-spin
+                        // branch (4-CPU pinch; see the riscv64 twin).
+                        let vma_start_opt = {
+                            let vmas = aspace.vma_read();
+                            vmas.find(page_virt_addr).map(|v| v.start().as_usize())
+                        };
+                        if let Some(vma_start) = vma_start_opt {
                             let page_offset_in_mapping = page_virt_addr.as_usize() - vma_start;
                             let file_offset = vma_offset + page_offset_in_mapping;
 

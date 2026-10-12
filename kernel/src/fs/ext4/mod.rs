@@ -2332,6 +2332,43 @@ impl Ext4BigLock {
         self.wait.wake_up_one();
     }
 
+    /// R73 exit-path release: force-drop the lock when its owner dies.
+    ///
+    /// do_exit() does not unwind Rust guards — a task killed while inside
+    /// an ext4 critical section (signal during a slow TCG read, OOM kill,
+    /// abort) leaks the big lock forever: every later ext4 op then spins
+    /// or sleeps on a dead owner (GNOME r72-fire2: the dead owner's pid
+    /// was even reused by a new shell while the lock still recorded it;
+    /// 4 CPUs wedged in lock_fair for 15+ min while gs-b and Xorg
+    /// starved). Called from do_exit only — the dying task can no longer
+    /// make forward progress in its critical section, so dropping the
+    /// lock is strictly better than stranding the whole filesystem. Wake
+    /// ALL waiters: any one of them may re-take the lock; the rest
+    /// re-check and re-sleep.
+    pub fn release_if_owner(&'static self, pid: u32) {
+        let was_held = {
+            let mut st = self.state.lock();
+            if st.locked && st.owner == pid {
+                if st.depth != 1 {
+                    crate::pr_err!(
+                        "ext4: big lock force-released at exit: pid {} depth {} (nested sections abandoned)",
+                        pid,
+                        st.depth
+                    );
+                }
+                st.locked = false;
+                st.owner = 0;
+                st.depth = 0;
+                true
+            } else {
+                false
+            }
+        };
+        if was_held {
+            self.wait.wake_up_all();
+        }
+    }
+
     /// Diagnostic snapshot (VW forensic instrumentation): (locked, owner,
     /// depth, queued, woken-flagged). Called from the UART dump path (RX
     /// IRQ context) — uses TRY-locks only: a blocking lock here would
