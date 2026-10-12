@@ -1430,6 +1430,7 @@ pub static SOCKET_OPS: FileOps = FileOps {
     lseek: None,
     close: Some(socket_close),
     poll: Some(socket_file_poll),
+    read_at: None,
 };
 
 // ============================================================================

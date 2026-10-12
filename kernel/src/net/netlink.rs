@@ -987,6 +987,7 @@ pub static NETLINK_OPS: FileOps = FileOps {
     lseek: None,
     close: Some(netlink_file_close),
     poll: Some(netlink_file_poll),
+    read_at: None,
 };
 
 // ============================================================================

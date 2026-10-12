@@ -1770,6 +1770,7 @@ pub static ROOTFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: Some(rootfs_file_lseek),
     close: Some(rootfs_file_close),
     poll: None,
+    read_at: None,
 };
 
 /// RootFS get_file_ops

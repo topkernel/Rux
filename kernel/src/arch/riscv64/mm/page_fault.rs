@@ -523,16 +523,30 @@ pub fn handle_mm_fault(
                                     .get_vma_file(vma_start)
                                     .or_else(|| unsafe { crate::fs::get_file_fd(vma_file_fd as usize) });
                                 if let Some(file) = file {
-                                        let saved_pos = file.get_pos();
-                                    file.set_pos(file_offset as u64);
-
                                     let bytes_to_read = core::cmp::min(
                                         PAGE_SIZE_USIZE,
                                         effective_size.saturating_sub(file_offset),
                                     );
-                                    let bytes_read = file.read(page_ptr, bytes_to_read);
-
-file.set_pos(saved_pos);
+                                    // R71: positional read — the old
+                                    // get_pos/set_pos/read/restore dance
+                                    // raced against concurrent plain
+                                    // read()s on the same pinned vm_file
+                                    // (CLONE_VM threads faulting while
+                                    // peers read): the interleaving read
+                                    // from the OTHER thread's offset and
+                                    // mapped .rodata bytes over a .text
+                                    // page (GNOME family: Xorg InputThread
+                                    // refault livelock, gnome-session
+                                    // stack smash, lost tmpfs pages).
+                                    // read_at never touches the shared
+                                    // file position.
+                                    let bytes_read = unsafe {
+                                        file.read_at(
+                                            file_offset as u64,
+                                            page_ptr,
+                                            bytes_to_read,
+                                        )
+                                    };
 
                                     // Zero remaining bytes after file data (partial last page)
                                     if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {

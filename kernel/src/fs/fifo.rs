@@ -252,4 +252,5 @@ pub static FIFO_OPS: FileOps = FileOps {
     lseek: None, // unseekable (ESPIPE via the default in File::lseek)
     close: Some(fifo_file_close),
     poll: Some(fifo_file_poll),
+    read_at: None,
 };

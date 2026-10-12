@@ -123,6 +123,7 @@ pub static UART_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: None,
     poll: Some(uart_file_poll),
+    read_at: None,
 };
 
 /// Synthetic st_dev for kernel-console char-device Files (no other Rux

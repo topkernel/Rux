@@ -1449,6 +1449,7 @@ pub static UNIX_SOCKET_OPS: FileOps = FileOps {
     lseek: None,
     close: Some(unix_file_close),
     poll: Some(unix_file_poll),
+    read_at: None,
 };
 
 // ============================================================================

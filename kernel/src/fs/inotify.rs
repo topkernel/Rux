@@ -684,4 +684,5 @@ static INOTIFY_OPS: FileOps = FileOps {
     lseek: None,
     close: Some(inotify_close),
     poll: Some(inotify_poll),
+    read_at: None,
 };

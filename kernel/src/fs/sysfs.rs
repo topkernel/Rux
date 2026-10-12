@@ -1695,4 +1695,5 @@ pub static SYSFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: Some(sysfs_file_lseek),
     close: Some(sysfs_file_close),
     poll: None,
+    read_at: None,
 };

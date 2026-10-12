@@ -1038,7 +1038,40 @@ pub static TMPFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: Some(tmpfs_file_lseek),
     close: Some(tmpfs_file_close),
     poll: None,
+    read_at: Some(tmpfs_file_read_at),
 };
+
+/// tmpfs positional read (R71): explicit offset, shared file position
+/// untouched — the generic set_pos/read/restore fallback races against
+/// concurrent plain reads on the same open file description (demand
+/// faults + worker threads), which is how mapped tmpfs pages (dconf's
+/// /run/user/*/dc/shm) came back with wrong content.
+///
+/// SAFETY: inode/private_data installed by tmpfs_make_inode; the File
+/// holds an Arc<Inode> keeping the node reference alive.
+fn tmpfs_file_read_at(file: &crate::fs::File, offset: u64, buf: &mut [u8]) -> isize {
+    unsafe {
+        let inode = match (&*file.inode.get()).as_ref() {
+            Some(i) => i,
+            None => return -9,
+        };
+        let node = match node_of(inode) {
+            Ok(n) => n,
+            Err(_) => return -9,
+        };
+        // Serialize with plain read/write for node-page consistency; the
+        // file position is never accessed.
+        let _io_guard = file.io_lock.guard();
+        let n = node.read_at(offset as usize, buf);
+        if n > 0 {
+            crate::fs::inotify::notify_file(
+                file,
+                crate::fs::inotify::inotify_events::IN_ACCESS,
+            );
+        }
+        n as isize
+    }
+}
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
 unsafe fn tmpfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {

@@ -1503,6 +1503,7 @@ pub static PROCFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: Some(procfs_file_lseek),
     close: Some(procfs_file_close),
     poll: None,
+    read_at: None,
 };
 
 /// ProcFS get_file_ops: return ops based on inode type

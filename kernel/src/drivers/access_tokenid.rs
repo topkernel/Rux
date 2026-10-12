@@ -54,6 +54,7 @@ pub static TOKENID_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: None,
     poll: None,
+    read_at: None,
 };
 
 /// True when `file` is an open /dev/access_token_id description.

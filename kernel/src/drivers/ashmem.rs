@@ -388,6 +388,7 @@ pub static ASHMEM_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: Some(ashmem_file_lseek),
     close: Some(ashmem_file_close),
     poll: None,
+    read_at: None,
 };
 
 /// True when `file` is an open /dev/ashmem description.

@@ -1096,6 +1096,7 @@ pub static PIPE_OPS: FileOps = FileOps {
     lseek: None,  // Pipe doesn't support lseek
     close: Some(pipe_file_close),
     poll: Some(pipe_file_poll),
+    read_at: None,
 };
 
 /// Real readable byte count for FIONREAD on a pipe File.

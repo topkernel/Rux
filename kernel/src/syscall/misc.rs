@@ -224,6 +224,7 @@ static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(epoll_file_close),
     poll: None,
+    read_at: None,
 };
 
 /// sys_poll - I/O multiplexing (poll style)
@@ -1855,6 +1856,7 @@ pub static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(eventfd_close),
     poll: Some(eventfd_poll),
+    read_at: None,
 };
 
 // ==================== timerfd ====================
@@ -2045,6 +2047,7 @@ static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(timerfd_close),
     poll: Some(timerfd_poll),
+    read_at: None,
 };
 
 // ==================== signalfd (P1) ====================
@@ -2256,6 +2259,7 @@ static SIGNALFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
     lseek: None,
     close: Some(signalfd_close),
     poll: Some(signalfd_poll),
+    read_at: None,
 };
 
 /// signalfd4 core (NR 74): create a new signalfd, or re-arm the mask of an

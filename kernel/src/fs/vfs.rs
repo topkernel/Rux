@@ -3867,6 +3867,7 @@ static MEM_FILE_OPS: FileOps = FileOps {
     lseek: Some(mem_file_lseek),
     close: Some(mem_file_close),
     poll: None,
+    read_at: None,
 };
 
 // ============================================================================

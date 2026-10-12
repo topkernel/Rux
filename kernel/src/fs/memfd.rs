@@ -268,6 +268,7 @@ static MEMFD_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     lseek: Some(memfd_file_lseek),
     close: Some(memfd_file_close),
     poll: None,
+    read_at: None,
 };
 
 // ============================================================================
