@@ -1,5 +1,23 @@
 # Rux Development Roadmap
 
+## Current Phase (2026-10-13): GNOME full-session gate reached
+
+**Milestone: a complete 2100s GNOME ignition run passes with every
+milestone — M3 gnome-shell @238s, M1 @258s, M2 (17 gsd daemons) @363s,
+M4 screen-lit @601s (held through 2100s), M5 desktop-visible @901s —
+zero panics, zero soft lockups, zero tripwires.**
+
+The last leg decomposed the trap-entry scribbler into four distinct
+bugs, all fixed with live forensics: a pick-machine false heal that
+handed one task to two CPUs; a trap-entry path that pushed pt_regs
+onto a user stack and re-entered silently forever; sret of provably
+dead zero frames; and cross-stack resumption with corrupted thread.sp
+(validated at __switch_to, scoped to kernel text only). Residual
+double-run consequences are now contained (negative preempt-count
+self-heals; stale-context harts park instead of panicking). The
+producer of the last double-run shape remains instrumented
+(R74-DOUBLE-SEED/SLOTLESS-TP) but never fired in the final run.
+
 ## Current Phase (2026-10-12): Phase 0 COMPLETE — x86_64 at parity with riscv64
 
 **Milestone: the x86_64 port passes its full exit gate. LTP x86 r3 =
