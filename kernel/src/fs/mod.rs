@@ -37,6 +37,7 @@ pub mod tty;
 pub mod pty;
 pub mod xattr;
 pub mod memfd;
+pub mod selinuxfs;
 pub mod fifo;
 pub mod cgroup;
 

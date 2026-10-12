@@ -273,6 +273,30 @@ pub fn do_mount(source: &str, target: &str, fs_type: &str, flags: u64) -> Result
             crate::fs::vfs::vfs_mount(target, crate::fs::ext4::create_root_inode(), mnt_flags);
             register_mount("/dev/vda", target, fs_type, if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
+        // devpts (OpenHarmony Phase 1): init mounts devpts on /dev/pts.
+        // The kernel's pty devices live in devfs under pts/; an independent
+        // tmpfs-style instance keeps each mount isolated while the devfs
+        // /dev/pts directory (populated by pty allocation) stays the node
+        // source when the target is /dev/pts. Tolerated options
+        // (gid=,mode=,ptmxmode=,newinstance) are accepted and ignored.
+        "devpts" => {
+            crate::fs::tmpfs::ensure_registered();
+            let root_inode = crate::fs::tmpfs::create_mount_instance();
+            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+            register_mount(fs_type, target, "devpts", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
+        // selinuxfs (OpenHarmony Phase 1): a minimal read-only pseudo fs so
+        // mount("selinuxfs", "/sys/fs/selinux") succeeds and load_policy's
+        // open(".../load"/".../enforce") paths find nodes. Permissive by
+        // construction: "enforce" reads 0, "disable" reads 0; policy bytes
+        // written to "load" are accepted and discarded. This is S2
+        // insurance — OH init tolerates the mount failing, but a working
+        // mount keeps its failure-path retries quiet.
+        "selinuxfs" => {
+            let root_inode = crate::fs::selinuxfs::create_root_inode();
+            crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
+            register_mount(fs_type, target, "selinuxfs", if mnt_flags.is_readonly() { "ro" } else { "rw" });
+        }
         "proc" | "procfs" => {
             crate::fs::procfs::mount_procfs()
                 .map_err(|e| e as i32)?;
