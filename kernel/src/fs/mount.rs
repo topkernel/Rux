@@ -291,7 +291,10 @@ pub fn do_mount(
         // (gid=,mode=,ptmxmode=,newinstance) are accepted and ignored.
         "devpts" => {
             crate::fs::tmpfs::ensure_registered();
-            let root_inode = crate::fs::tmpfs::create_mount_instance();
+            // devpts mount data (gid=/mode=/ptmxmode=/newinstance) carries
+            // no page budget; pass it through so a hypothetical future
+            // size= is honored too, same as tmpfs.
+            let root_inode = crate::fs::tmpfs::create_mount_instance(data);
             crate::fs::vfs::vfs_mount(target, root_inode, mnt_flags);
             register_mount(fs_type, target, "devpts", if mnt_flags.is_readonly() { "ro" } else { "rw" });
         }
