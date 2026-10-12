@@ -368,6 +368,19 @@ pub fn timer_softirq_handler(_nr: usize) {
     // ring with no scheduled consumer — the ftest01 wedge family).
     crate::drivers::virtio::vw_lag_watchdog(current);
 
+    // dfx=claiminject (GNOME-wedge adjudication): every 50 jiffies, leak
+    // a foreign claim onto the linked pickable set. Unpatched kernels
+    // must wedge (the g2 stranding reproduced deterministically); kernels
+    // with the pick-side stale-claim heal must keep scheduling.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ClaimInject)
+        && current % 50 == 0
+    {
+        let n = crate::sched::sched::dfx_claim_inject();
+        if n > 0 {
+            crate::pr_err!("CLAIM-INJECT poisoned={}", n);
+        }
+    }
+
     // Collect expired timers under locks; deliver AFTER releasing them
     // (R12-3 — see the moved delivery block below).
     // R34: capacity reserved OUTSIDE the lock; the budget counter below

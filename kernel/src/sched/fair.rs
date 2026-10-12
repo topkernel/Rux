@@ -585,6 +585,119 @@ impl CfsRunQueue {
         self.tasks_timeline.iter().any(|(_, &ptr)| ptr == task)
     }
 
+    /// GNOME-wedge report for the stale-claim heal inside pick_next_cpu:
+    /// one line per incident, at most one per 2s system-wide (the picking
+    /// CPUs can pass here hot while the heal unwedges a queue). SBI direct
+    /// write discipline (R34): callers hold the GRQ lock.
+    fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32) {
+        use crate::console::putchar_no_lock as putchar;
+        static LAST_REPORT: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let now = crate::drivers::timer::get_jiffies();
+        let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
+        if now.wrapping_sub(last) < 2 {
+            return;
+        }
+        if LAST_REPORT
+            .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        const MSG: &[u8] = b"STALE-CLAIM-RESET by_cpu=";
+        for &b in MSG {
+            putchar(b);
+        }
+        let mut v = cpu_id as u64;
+        if v == 0 {
+            putchar(b'0');
+        }
+        while v > 0 {
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            while v > 0 {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(buf[n]);
+            }
+        }
+        const M2: &[u8] = b" pid=";
+        for &b in M2 {
+            putchar(b);
+        }
+        let mut v = pid as u64;
+        if v == 0 {
+            putchar(b'0');
+        }
+        while v > 0 {
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            while v > 0 {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(buf[n]);
+            }
+        }
+        const M3: &[u8] = b" from_claim=";
+        for &b in M3 {
+            putchar(b);
+        }
+        if (was as i64) < 0 {
+            putchar(b'-');
+        }
+        let mut v = (was as i64).unsigned_abs();
+        if v == 0 {
+            putchar(b'0');
+        }
+        while v > 0 {
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            while v > 0 {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(buf[n]);
+            }
+        }
+        putchar(b'\n');
+    }
+
+    /// dfx=claiminject adjudication scan (GNOME-wedge hunt): poison every
+    /// linked task that currently shows the fully-pickable ownership state
+    /// {on_cpu=false, claim=-1} with a claim from CPU 7 — a CPU that does
+    /// not exist on any board we boot, so no picker can ever own it. On an
+    /// unpatched kernel every poisoned task strands exactly like the g2
+    /// freeze (linked, counted, skipped forever); with the pick-side
+    /// stale-claim heal the poison is swept at the next pick. Caller holds
+    /// the GRQ lock.
+    pub fn claim_inject_scan(&mut self) -> usize {
+        let mut n = 0;
+        for (_, &task) in self.tasks_timeline.iter() {
+            // SAFETY: diagnostic write of one atomic field on a task pinned
+            // in the timeline by the caller's GRQ lock.
+            unsafe {
+                if !(*task).on_cpu()
+                    && (*task).running_on_cpu.load(Ordering::Acquire) == -1
+                {
+                    (*task).running_on_cpu.store(7, Ordering::Release);
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// Pick next task to run
     ///
     /// Select task with smallest vruntime
@@ -675,6 +788,30 @@ impl CfsRunQueue {
             // stack — the shared-stack scribble engine. With the claim in
             // the predicate the corrupted task simply stays unpickable
             // (the detector names it) instead of double-running.
+            //
+            // GNOME-wedge (stale-claim heal): a LINKED task showing
+            // {on_cpu == false, claim == X != -1} is unreachable by the
+            // switch protocol itself. The only legitimate linked states
+            // are {false, -1} (sleeping/woken, preempted-and-requeued
+            // after the switch-out release) and {true, X} (mid
+            // switch-out / fast-path re-pick, skipped on the on_cpu leg).
+            // The claim is published together with on_cpu at pick time
+            // under the GRQ (publish_pick_ownership), and released only
+            // by __switch_to's single full-qword {false, -1} store — no
+            // code path clears one bit without the other on a linked
+            // task. A linked task also cannot be
+            // executing anywhere (running tasks are dequeued by their
+            // pick), so resetting the claim cannot re-open the R65
+            // double-run window: that guard protects RUNNING tasks, which
+            // are unlinked and never reach this scan. Every producer of
+            // the impossible state (a heal path that cleared on_cpu
+            // alone, a qword-zeroing scribble, a wedged picker that never
+            // reached its switch-out release) left the task stranded
+            // permanently: linked, counted in nr_running, skipped by
+            // every CPU forever — the g2 GNOME freeze (10 tasks stuck,
+            // all CPUs idle-looping on the R20-2 recheck for 35 min,
+            // screen dead, khungtaskd itself stranded). Reset the stale
+            // claim, pick the task, and report loudly (rate-limited).
             // cgroup v2 (U1b): skip tasks whose cgroup chain is
             // cpu-throttled — they stay on the timeline and become
             // pickable again when the period rolls over (the same
@@ -683,8 +820,29 @@ impl CfsRunQueue {
                 // R65-pick (probe-slow): the dual-bit ownership test reads
                 // the whole qword in one load (Task::ownership_pickable) —
                 // same e87a8b40 semantics, half the loads per candidate.
-                let ownership_ok =
-                    task == prev || (*task).ownership_pickable(cpu_id);
+                // The GNOME-wedge stale-claim heal rides the REFUSAL path
+                // only: ownership_pickable is the fast path, and a refusal
+                // is split by re-reading the two bits — on_cpu=true is the
+                // legitimate NEW2 skip, while {on_cpu=false, foreign claim}
+                // on a LINKED candidate is the protocol-impossible state
+                // the heal resets (see the comment above).
+                let ownership_ok = if task == prev {
+                    true
+                } else if (*task).ownership_pickable(cpu_id) {
+                    true
+                } else {
+                    let claim = (*task).running_on_cpu.load(Ordering::Acquire);
+                    if !(*task).on_cpu()
+                        && claim != -1
+                        && claim as usize != cpu_id
+                    {
+                        (*task).running_on_cpu.store(-1, Ordering::Release);
+                        Self::stale_claim_healed(cpu_id, (*task).pid(), claim);
+                        true
+                    } else {
+                        false
+                    }
+                };
                 (*task).cpu_allowed(cpu_id)
                     && ownership_ok
                     && !crate::sched::cgroup::task_cgroup_throttled(task)
@@ -724,6 +882,95 @@ impl CfsRunQueue {
         for i in (0..skip_count).rev() {
             let (key, task) = skipped[i];
             self.tasks_timeline.insert(key, task);
+        }
+
+        // GNOME-wedge canary: the timeline held candidates but NONE was
+        // pickable by this CPU — the exact shape that stranded 10 linked
+        // tasks in the g2 freeze (Xorg/dbus/gmain linked, every CPU
+        // idle-looping on the R20-2 recheck, nothing picked for 35 min).
+        // The 5s DFX dump shows the state but never the REASON, so name it
+        // here at skip time: per task its on_cpu/claim/affinity/throttle
+        // legs. Rate-limited to one report per 100 jiffies system-wide so
+        // the hot idle-loop callers cannot flood the console. SBI direct
+        // write discipline (R34): we hold the GRQ lock here.
+        if result.is_none() && skip_count > 0 {
+            use crate::console::putchar_no_lock as putchar;
+            fn pd(mut v: u64) {
+                use crate::console::putchar_no_lock as putchar;
+                let mut buf = [0u8; 20];
+                let mut n = 0;
+                if v == 0 {
+                    putchar(b'0');
+                    return;
+                }
+                while v > 0 {
+                    buf[n] = b'0' + (v % 10) as u8;
+                    v /= 10;
+                    n += 1;
+                }
+                while n > 0 {
+                    n -= 1;
+                    putchar(buf[n]);
+                }
+            }
+            fn ps(s: &[u8]) {
+                for &b in s {
+                    crate::console::putchar_no_lock(b);
+                }
+            }
+            static LAST_REPORT: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now = crate::drivers::timer::get_jiffies();
+            let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
+            if now.wrapping_sub(last) >= 100
+                && LAST_REPORT
+                    .compare_exchange(
+                        last,
+                        now,
+                        core::sync::atomic::Ordering::AcqRel,
+                        core::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                ps(b"\nPICK-SKIP-ALL cpu=");
+                pd(cpu_id as u64);
+                ps(b" skipped=");
+                pd(skip_count as u64);
+                ps(b"\n");
+                for i in 0..skip_count {
+                    let (_, task) = skipped[i];
+                    // SAFETY: diagnostic read of stable Task fields of a task
+                    // that is linked on this queue (pinned by the GRQ lock we
+                    // hold).
+                    unsafe {
+                        let claim = (*task).running_on_cpu.load(Ordering::Relaxed);
+                        ps(b"  pid=");
+                        pd((*task).pid() as u64);
+                        ps(b" oncpu=");
+                        putchar(b'0' + (*task).on_cpu() as u8);
+                        ps(b" claim=");
+                        if (claim as i64) < 0 {
+                            putchar(b'-');
+                        }
+                        pd((claim as i64).unsigned_abs());
+                        // R57: pick-state word (0=PICKED 1=LIVE 2=REVOKED) —
+                        // with oncpu/claim it names the exact protocol leg
+                        // that refused the candidate.
+                        ps(b" pk=");
+                        pd((*task).pick_state() as u64);
+                        ps(b" aff=0x");
+                        let mut v = (*task).cpus_allowed() as u64;
+                        for sh in (0..8u32).rev() {
+                            let nb = ((v >> (sh * 4)) & 0xF) as u8;
+                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                        }
+                        if crate::sched::cgroup::task_cgroup_throttled(task) {
+                            ps(b" THROTTLED");
+                        }
+                        putchar(b'\n');
+                    }
+                }
+            }
         }
 
         result

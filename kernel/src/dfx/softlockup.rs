@@ -75,6 +75,62 @@ pub fn last_touch_ns(cpu: usize) -> u64 {
     TOUCH_TS[cpu].load(Ordering::Acquire)
 }
 
+/// R57 (vCPU-liveness under MTTCG starvation): last observed timer-IRQ
+/// count per CPU, and the CLINT ns timestamp at which it last CHANGED.
+/// A TCG-starved vCPU still services its timer ISR occasionally (3-10
+/// IRQs/s under host contention vs 100 nominal — observed on CPU3 of the
+/// n1-organic run: timer_irq 32604→33074 across a 1600s window while its
+/// scheduler tick read "stale" the whole time). The scheduler's
+/// slot-capture steal used tick-staleness alone as its "dead picker"
+/// test and stole a mid-exit task from that alive-but-slow hart
+/// (double-run, epc on the task's own kernel stack, illegal-instruction
+/// panic at t=1796s). A hart whose timer count still moves is alive
+/// no matter how stale its touch_ts reads.
+static IRQ_COUNT_SEEN: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static IRQ_COUNT_SEEN_AT_NS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Record each CPU's current timer-IRQ count; stamp the wall-clock ns of
+/// any change. Called from check(), which runs on every timer interrupt —
+/// healthy CPUs keep every CPU's "changed at" fresh, so a hart whose count
+/// is frozen accumulates real staleness visible to any observer.
+fn note_irq_counts(now: u64) {
+    for cpu in 0..MAX_CPUS {
+        let cnt = crate::fs::procfs::interrupts::timer_count(cpu);
+        if cnt == 0 {
+            // Hart has never taken a timer IRQ (early boot / not started):
+            // leave seen-at at 0 — cpu_irq_frozen_ms reports 0 ("alive")
+            // for that case so nothing is ever stolen from a never-started
+            // hart either.
+            continue;
+        }
+        let prev = IRQ_COUNT_SEEN[cpu].load(Ordering::Relaxed);
+        if cnt != prev {
+            IRQ_COUNT_SEEN[cpu].store(cnt, Ordering::Relaxed);
+            IRQ_COUNT_SEEN_AT_NS[cpu].store(now, Ordering::Release);
+        }
+    }
+}
+
+/// Milliseconds since the named CPU's timer-IRQ count last changed.
+/// 0 means "alive or unknown" (the count is currently moving, or the hart
+/// has never ticked) — the SAFE answer for any "may I steal from it"
+/// test: a wrong 0 merely refuses a heal, a wrong u64::MAX destroys a
+/// live task.
+pub fn cpu_irq_frozen_ms(cpu: usize) -> u64 {
+    if cpu >= MAX_CPUS {
+        return 0;
+    }
+    let seen_at = IRQ_COUNT_SEEN_AT_NS[cpu].load(Ordering::Acquire);
+    if seen_at == 0 {
+        return 0;
+    }
+    let now = now_ns();
+    if now <= seen_at {
+        return 0;
+    }
+    (now - seen_at) / 1_000_000
+}
+
 /// Check all CPUs for softlockup.
 ///
 /// Called periodically from timer interrupt handler.
@@ -86,6 +142,10 @@ pub fn check() {
 
     let now = now_ns();
     let threshold_ns = SOFTLOCKUP_THRESHOLD_SECS * 1_000_000_000;
+
+    // R57: refresh the timer-count liveness table before any consumer
+    // (the scheduler's slot-capture steal) reads it.
+    note_irq_counts(now);
 
     for cpu in 0..MAX_CPUS {
         // Skip CPUs that haven't received any timer interrupt yet.

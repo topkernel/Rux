@@ -68,9 +68,19 @@ pub enum DfxSwitch {
     /// pid/comm plus each ready fd's number and event bits — hunts
     /// permanently ready fds that spin epoll_pwait/ppoll callers.
     EpollTrace,
+    /// Adjudication injector (GNOME-wedge hunt): every 50 jiffies the
+    /// timer softirq leaks a claim of CPU 7 (nonexistent on any board we
+    /// boot) onto every LINKED CFS task that shows {on_cpu=false,
+    /// claim=-1} — exactly the protocol-impossible state the g2 freeze
+    /// left behind. On an unpatched kernel this reproduces the wedge
+    /// deterministically (tasks stranded on the timeline, every pick
+    /// skips them); with the pick-side stale-claim heal the system must
+    /// keep scheduling. OFF unless explicitly requested; never enable in
+    /// production or LTP runs.
+    ClaimInject,
 }
 
-const SWITCH_COUNT: usize = 11;
+const SWITCH_COUNT: usize = 12;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -88,6 +98,7 @@ impl DfxSwitch {
             DfxSwitch::ScribbleSweep => 8,
             DfxSwitch::InputTrace => 9,
             DfxSwitch::EpollTrace => 10,
+            DfxSwitch::ClaimInject => 11,
         }
     }
 
@@ -104,6 +115,7 @@ impl DfxSwitch {
             "scribblesweep" => Some(DfxSwitch::ScribbleSweep),
             "inputtrace" => Some(DfxSwitch::InputTrace),
             "epolltrace" => Some(DfxSwitch::EpollTrace),
+            "claiminject" => Some(DfxSwitch::ClaimInject),
             _ => None,
         }
     }

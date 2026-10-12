@@ -256,6 +256,38 @@ pub fn dump_all_tasks(reason: &str) {
     puts("\n=== DFX TASK DUMP (");
     puts(reason);
     puts(") ===\n");
+    // R57-scribble: one-time Task-field offset map — the pk= garbage
+    // captures (ti_pick_state reading 91/112/158/122400/0x38E0000 on
+    // live tasks) prove a writer lands inside the thread_info
+    // neighborhood; the exact offsets identify which 8-byte field's
+    // low/high half overlaps the pick-state word.
+    {
+        static OFFS_PRINTED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !OFFS_PRINTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+            use crate::process::task::task_offsets as to;
+            puts("taskoff:");
+            let offs: [(&str, usize); 11] = [
+                (" ti_flags", to::TI_FLAGS),
+                (" ti_kernel_sp", to::TI_KERNEL_SP),
+                (" ti_user_sp", to::TI_USER_SP),
+                (" ti_cpu", to::TI_CPU),
+                (" cpus_allowed", to::TI_CPUS_ALLOWED),
+                (" hung_task_since", to::TI_HUNG_TASK_SINCE),
+                (" task_refcnt", to::TI_TASK_REFCNT),
+                (" journal_handle", to::TI_JOURNAL_HANDLE),
+                (" ti_on_cpu", to::TI_ON_CPU),
+                (" running_on_cpu", to::TI_RUNNING_ON_CPU),
+                (" ti_pick_state", to::TI_PICK_STATE),
+            ];
+            for (name, off) in offs {
+                puts(name);
+                puts("=0x");
+                put_hex(off as u64);
+            }
+            putc(b'\n');
+        }
+    }
     // R56-diag: per-CPU slot currents (who each slot thinks is running).
     {
         let cs = crate::sched::sched::grq_diag_cpu_currents();
@@ -392,6 +424,42 @@ pub fn dump_all_tasks(reason: &str) {
             put_dec(t.ti_cpu() as u64);
             puts(" on_cpu=");
             put_dec(t.on_cpu() as u64);
+            // GNOME-wedge hunt: the CFS pick predicate refuses a task when
+            // its running_on_cpu claim names another CPU, so a leaked claim
+            // strands a linked task permanently (g2: 10 tasks linked, all
+            // CPUs idle-looping, nothing picked for 35 min). The claim was
+            // the ONE ownership field the dump never printed — add it.
+            {
+                let claim = t.running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
+                puts(" claim=");
+                if (claim as i64) < 0 {
+                    putc(b'-');
+                    put_dec((claim as i64).unsigned_abs());
+                } else {
+                    put_dec(claim as u64);
+                }
+            }
+            // R57: the pick-state word (0=PICKED 1=LIVE 2=REVOKED) is what
+            // arbitrates the slot-capture steal — printed beside the claim
+            // it settles "in-flight pick vs live runner vs already stolen"
+            // in one dump line (the n1-organic panic hinged on exactly
+            // this distinction).
+            puts(" pk=");
+            let pkv = t.pick_state();
+            put_dec(pkv as u64);
+            if pkv > 2 {
+                // Scribbler fingerprint: any other value is a foreign store
+                // landing on this word. Make it loud and unmistakable.
+                puts(" PK-GARBAGE");
+            }
+            puts(" preempt=");
+            let pv = t.preempt_count() as u64;
+            if (pv as i64) < 0 {
+                putc(b'-');
+                put_dec((pv as i64).unsigned_abs());
+            } else {
+                put_dec(pv);
+            }
             // Authoritative linked-state (tree/list scan, not the flag) —
             // settles flag-desync vs really-off-queue in one shot. The scan
             // runs under the GRQ try-lock; a busy lock reports '?' (counted
