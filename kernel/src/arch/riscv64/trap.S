@@ -240,6 +240,86 @@ trap_entry:
     // In early boot this is the hart id; no temp register required.
     csrr tp, sscratch
 
+    // R74 (bad-sp recovery — the boot-wedge / fault-loop family): a trap
+    // can arrive here with a USER sp in two ways: (a) user code ran with
+    // sscratch=0 (orphaned scratch: a nested kernel-mode trap return
+    // cleared it mid-restore), or (b) the trap landed in the
+    // .Lrestore_and_exit tail AFTER `ld x2, PT_SP(sp)` loaded the user
+    // sp but BEFORE the sret (SIE=1 via a scribbled PT_STATUS, or any
+    // future regression). Pushing the frame on the current sp then
+    // stores to a U-mode page (SUM=0) -> store access fault -> re-enter
+    // trap_entry -> unbounded silent loop with SIE=0 (r74b capture: CPU1
+    // spinning at `sd ra,8(sp)`, sp=runit's user stack, timer_irq frozen).
+    // Kernel VAs always have bit 63 set; validate before nesting.
+    bgez sp, .Lbadsp_route
+    j .Lsave_kernel_frame
+
+// Bad-sp routing: needs a live task pointer to recover. tp was just
+// re-loaded from sscratch (the pre-swap tp). A valid task pointer has
+// bit 63 set; tp==0 means the scratch was already consumed by a prior
+// loop iteration (or user genuinely ran with sscratch=0) — no recovery
+// context exists.
+.Lbadsp_route:
+    bgez tp, .Lbadsp_park
+    // ARCH-C2 discipline: t0 holds a live (possibly half-restored user)
+    // register value; stash it while using t0 as scratch, exactly like
+    // the .Lfrom_user SPP-check stash below.
+    sd t0, {task_ti_a0}(tp)
+.Lbadsp_recover:
+    // Nest BELOW the outermost user pt_regs (which occupies [top-PT_SIZE,
+    // top) while being restored): setting sp = top-PT_SIZE makes
+    // .Lsave_kernel_frame's own `addi sp,sp,-PT_SIZE` land at
+    // [top-2*PT_SIZE, top-PT_SIZE). The nested exit's PT_SP = top-PT_SIZE
+    // then resumes the outer restore tail, which re-executes ld x2 /
+    // csrw sscratch,tp / sret: the scratch is re-published and the return
+    // to user completes — closing the orphaned-sscratch chain itself.
+    ld t0, {task_ti_kernel_sp}(tp)
+    beqz t0, .Lbadsp_park
+    addi sp, t0, -PT_SIZE
+    ld t0, {task_ti_a0}(tp)      // unstash the live value for the save
+    j .Lsave_kernel_frame
+
+.Lbadsp_park:
+    // No task context: abandon this hart loudly (SBI console, no kernel
+    // locks). Print sepc/tp then wfi forever. Other CPUs keep running and
+    // the DFX taskdump names the frozen hart.
+    csrr t0, sepc
+    mv   t2, tp
+    la   t4, .Lbadsp_msg
+    li   t5, 10                 // nibble threshold for hex digits
+1:  lbu  a0, 0(t4)
+    beqz a0, 2f
+    li   a7, 1                  // SBI base putchar
+    ecall
+    addi t4, t4, 1
+    j 1b
+2:  mv   a1, t0                 // sepc
+3:  srli a0, a1, 60
+    bltu a0, t5, 4f
+    addi a0, a0, 39             // 'a'-10
+4:  addi a0, a0, 48             // '0'
+    li   a7, 1
+    ecall
+    slli a1, a1, 4
+    bnez a1, 3b
+    li   a0, ' '
+    li   a7, 1
+    ecall
+    mv   a1, t2                 // tp
+5:  srli a0, a1, 60
+    bltu a0, t5, 6f
+    addi a0, a0, 39
+6:  addi a0, a0, 48
+    li   a7, 1
+    ecall
+    slli a1, a1, 4
+    bnez a1, 5b
+    li   a0, '\n'
+    li   a7, 1
+    ecall
+7:  wfi
+    j 7b
+
 .Lsave_kernel_frame:
     // Allocate PtRegs on the current stack and save ALL registers first.
     addi sp, sp, -PT_SIZE
@@ -497,15 +577,21 @@ trap_entry:
 
 // Kernel-origin trap that arrived through the sscratch=tp window (see the
 // ROUTING FIX comment above). tp already holds the task pointer (correct
-// kernel tp) and the live sp is a KERNEL sp: save the frame nested BELOW it,
-// reusing the .Lfrom_kernel save sequence. The in-flight outer pt_regs at
-// the top of the kernel stack stays untouched.
+// kernel tp) and the live sp SHOULD be a KERNEL sp: save the frame nested
+// BELOW it, reusing the .Lfrom_kernel save sequence. The in-flight outer
+// pt_regs at the top of the kernel stack stays untouched.
+//
+// R74: the exception is the .Lrestore_and_exit tail AFTER `ld x2,
+// PT_SP(sp)`: the live sp is the USER sp (registers half-restored). The
+// old code pushed the frame on it -> store fault on a U page -> infinite
+// trap loop (see .Lbadsp_route). Route through the same recovery.
 .Lfrom_user_kernel_origin:
     ld t0, {task_ti_a0}(tp)
     // Restore the kernel-mode sscratch protocol: this entry swapped the
     // task pointer into tp, leaving sscratch = old tp (also the task
     // pointer). .Lfrom_kernel expects sscratch=0 while in the kernel.
     csrw sscratch, zero
+    bgez sp, .Lbadsp_recover
     j .Lsave_kernel_frame
 
 // ============================================================================
@@ -675,6 +761,18 @@ trap_exit:
     j .Lcheck_signals_and_resched
 
 .Lrestore_and_exit:
+    // R74 (garbage-frame gate): a zeroed or stale pt_regs must not reach
+    // the sret (r74d capture: epc=0 ra=0 sp=0xf — executing it jumps to
+    // 0 with a junk stack). epc==0 is never legal for a user task (page
+    // zero is unmapped) and a sub-0x1000 sp is never a valid user stack.
+    // Route to the Rust killer instead of restoring the garbage.
+    ld t0, PT_EPC(sp)
+    bnez t0, 8f
+    j .Lbad_user_frame
+8:  ld t0, PT_SP(sp)
+    li  t1, 0x1000
+    bltu t0, t1, .Lbad_user_frame
+
     // NOTE: sp is ALREADY at the pt_regs slot on every entry path:
     //   - direct from .Lcheck_signals_and_resched (no resched): sp == pt_regs
     //   - post-schedule: reloaded right after asm_schedule above
@@ -732,8 +830,18 @@ trap_exit:
     // Re-restore t0
     ld x5, PT_T0(sp)
 
-    // Save current task to sscratch
-    // Next trap entry can find kernel data structure
+    // Save current task to sscratch — the NEXT trap entry finds the task.
+    // R74 correction: this MUST run BEFORE `ld x4, PT_TP(sp)` loads the
+    // user tp into the tp register. Publishing after that load stores the
+    // USER tp into sscratch — for tasks whose user tp is 0 (static
+    // binaries, runit) user mode then runs with sscratch=0 and every
+    // subsequent user trap mis-enters .Lfrom_kernel, pushing pt_regs on
+    // the user stack (r74b silent fault loop / r74c TRAP-BADSP-PARK).
+    // The adjacent-window concern (a trap between this csrw and the sret
+    // returning through .Lrestore_kernel_csrs, which leaves sscratch=0)
+    // is covered by .Lbadsp_recover: such a trap arrives with the live
+    // sp already user (past `ld x2`), is recovered below the outer user
+    // frame, and the resumed tail re-executes this csrw before sret.
     csrw sscratch, tp
 
     // Restore user tp (from PtRegs)
@@ -878,6 +986,21 @@ trap_exit:
 
 .global trap_entry_end
 trap_entry_end:
+
+// R74 garbage-frame killer target (see .Lrestore_and_exit gate).
+.Lbad_user_frame:
+    mv a0, sp
+    call riscv_bad_user_frame
+    // never returns; park defensively if it ever does
+9:  wfi
+    j 9b
+
+// R74 bad-sp park message (SBI console output; no kernel locks touched).
+.section .rodata
+.Lbadsp_msg:
+    .asciz "\nTRAP-BADSP-PARK sepc="
+
+.section .text.trap
 
 // ============================================================================
 // ret_from_fork_user_asm - Fork child entry (user mode)

@@ -121,6 +121,31 @@ __switch_to:
     bnez  t6, .Lr56_affirm          # lost the reservation: retry
 .Lswitch_go:
 
+    # R74 (thread.sp validation — the cross-stack resume family): a
+    # corrupted/stale thread.sp resumed here puts the hart on a foreign
+    # stack: the first trap then pushes pt_regs over whatever the pointer
+    # names (r74e capture: CPU2's frame at fair::cmp+72, i.e. KERNEL
+    # TEXT) and every subsequent store scribbles executable pages. The
+    # producer of the bad value is hunted separately (R74-SLOTLESS-TP
+    # tripwire); this gate contains the damage at the resume point.
+    # Valid sp: kernel half (bit 63), 16-byte aligned, below the kernel
+    # image (task kernel stacks live in the linear map at
+    # 0xffffffd6xxxxxxxx; the kernel image starts at 0xffffffff80000000).
+    # A bad sp is REPAIRED to the task's own stack top: the resumed
+    # context crashes on its first return (ra is equally suspect), but
+    # with the CORRECT task identity and stack — a diagnosable task
+    # death instead of machine-wide corruption.
+    ld    t6, {thread_sp}(a4)
+    beqz  t6, .Lswitch_sp_bad
+    andi  t1, t6, 0xF
+    bnez  t1, .Lswitch_sp_bad
+    bltz  t6, 1f
+    j     .Lswitch_sp_bad
+1:   li    t1, 0xffffffff
+    slli  t1, t1, 32          # 0xffffffff_00000000
+    bgeu  t6, t1, .Lswitch_sp_bad
+.Lswitch_go_after_sp:
+
     # NEW2 root cause fix (R8-1b): prev's full context is now saved — make
     # it pickable by other CPUs. The release fence guarantees that a CPU
     # observing on_cpu == 0 also observes the register stores above (its
@@ -162,7 +187,7 @@ __switch_to:
 
     # Now restore callee-saved registers (s0 last)
     ld    ra,  {thread_ra}(a4)
-    ld    sp,  {thread_sp}(a4)
+    mv    sp,  t6              # validated thread.sp (R74)
     ld    s11, {thread_s0} + 11*8(a4)
     ld    s10, {thread_s0} + 10*8(a4)
     ld    s9,  {thread_s0} + 9*8(a4)
@@ -194,6 +219,52 @@ __switch_to:
 
     ret
 
+.Lswitch_sp_bad:
+    # R74: next's saved sp is garbage. Repair: point sp at next's own
+    # kernel-stack top (empty). The SBI print names the thread and the
+    # bad value so the scribble is attributable; the resumed context
+    # dies on its first ret with the CORRECT task identity. a0/a1 (prev/
+    # next) are preserved — the switch continues after the repair.
+    mv    t0, a0              # prev
+    mv    t1, a1              # next (task base)
+    li    a7, 1               # SBI putchar
+    la    t4, .Lswitch_sp_msg
+2:  lbu  a0, 0(t4)
+    beqz a0, 3f
+    ecall
+    addi t4, t4, 1
+    j 2b
+3:  mv   t2, a4               # next->thread pointer (diagnostic id)
+    li   t5, 10
+4:  srli a0, t2, 60
+    bltu a0, t5, 5f
+    addi a0, a0, 39
+5:  addi a0, a0, 48
+    ecall
+    slli t2, t2, 4
+    bnez t2, 4b
+    li   a0, ' '
+    ecall
+    mv   t2, t6               # the bad sp
+6:  srli a0, t2, 60
+    bltu a0, t5, 7f
+    addi a0, a0, 39
+7:  addi a0, a0, 48
+    ecall
+    slli t2, t2, 4
+    bnez t2, 6b
+    li   a0, '\n'
+    ecall
+    # t6 := kernel_stack_bottom(next) + KERNEL_STACK_SIZE (own stack top)
+    li    t3, {task_kstack_bottom}
+    add   t3, t1, t3
+    ld    t3, 0(t3)
+    li    t4, {kernel_stack_size}
+    add   t6, t3, t4
+    mv    a0, t0              # restore prev
+    mv    a1, t1              # restore next
+    j     .Lswitch_go_after_sp
+
 .Lswitch_abort:
     # R56-heal: the pick was revoked between mark_picked_on_cpu and this
     # resume (or the state was already LIVE: breach — same repair).
@@ -214,11 +285,18 @@ __switch_to:
     ld    ra, {thread_ra}(a3)       # the wrapper's return address
     ret
 .size __switch_to, . - __switch_to
+
+.section .rodata
+.Lswitch_sp_msg:
+    .asciz "\nSWITCH-BADSP task=0x"
+.section .text.__switch_to
 "#,
     task_thread = const core::mem::offset_of!(Task, thread),
     task_on_cpu = const core::mem::offset_of!(Task, ti_on_cpu),
     task_pick_state = const crate::process::task::task_offsets::TI_PICK_STATE,
     task_pid = const crate::process::task::task_offsets::TASK_PID,
+    task_kstack_bottom = const crate::process::task::task_offsets::TASK_KERNEL_STACK_BOTTOM,
+    kernel_stack_size = const crate::config::KERNEL_STACK_SIZE,
     thread_ra = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, ra),
     thread_sp = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, sp),
     thread_s0 = const core::mem::offset_of!(crate::arch::thread::ThreadStruct, s),

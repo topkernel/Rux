@@ -836,9 +836,32 @@ impl CfsRunQueue {
                         && claim != -1
                         && claim as usize != cpu_id
                     {
-                        (*task).running_on_cpu.store(-1, Ordering::Release);
-                        Self::stale_claim_healed(cpu_id, (*task).pid(), claim);
-                        true
+                        // R74 (double-run gate): a LIVE pick-state with a
+                        // live claiming hart means that CPU published this
+                        // ownership at pick time and has not released it —
+                        // the task may be mid-switch-in on the claimer
+                        // (the r74a capture: claim=0 while CPU0 was inside
+                        // its pick → reset → CPU3 picked → double-run
+                        // KERNPANIC). Only reset the claim when the
+                        // claiming hart is verifiably not servicing
+                        // interrupts (frozen >= 5s, the R57 discipline:
+                        // starved != dead) or the claim is out of range
+                        // (scribble garbage — reset as before). A genuinely
+                        // stuck claim on a live hart retries on later
+                        // picks; it does not strand the task while the
+                        // claimer still runs.
+                        let claiming = claim as usize;
+                        let claim_live = claiming < crate::config::MAX_CPUS
+                            && (*task).pick_state()
+                                == crate::process::task::PICK_LIVE
+                            && crate::dfx::softlockup::cpu_irq_frozen_ms(
+                                claiming)
+                                < 5000;
+                        if !claim_live {
+                            (*task).running_on_cpu.store(-1, Ordering::Release);
+                            Self::stale_claim_healed(cpu_id, (*task).pid(), claim);
+                        }
+                        !claim_live
                     } else {
                         false
                     }

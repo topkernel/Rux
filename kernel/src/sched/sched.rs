@@ -1307,6 +1307,30 @@ unsafe fn __schedule() {
         }
         // home == MAX otherwise: tp has no slot at all (exited?) — leave
         // prev as the slot's task; the exit path owns that case.
+        //
+        // R74 tripwire: a REAL, running tp-task with no slot is the
+        // orphan producer (it keeps executing while __schedule books the
+        // switch on the slot's task; its on_cpu mark outlives every
+        // protocol clear and the wake-side heals then refuse or
+        // double-run it). The exit path's genuine case (tp == the dying
+        // task mid-do_exit) has PF_EXITING set. Anything else gets named
+        // here, rate-limited.
+        if home == usize::MAX && (tp as usize) >= 0x8000_0000_0000_0000 {
+            use crate::process::task::task_flags::TaskFlags;
+            let exiting = unsafe {
+                (*tp).ti_flags() & TaskFlags::PF_EXITING.bits() != 0
+            };
+            let running = unsafe { (*tp).state().is_running() };
+            if !exiting && running {
+                r56_print_pid(
+                    b"R74-SLOTLESS-TP cpu=",
+                    cpu_id as u32,
+                    b" tp_pid=",
+                );
+                r56_print_pid(b"", unsafe { (*tp).pid() }, b" slot_pid=");
+                r56_print_pid(b"", unsafe { (*prev).pid() }, b"\n");
+            }
+        }
     }
 
     if prev.is_null() {
@@ -2180,6 +2204,34 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
             // mark survives until the publish.
             let mid_switch_out = task_is_mid_switch_out(task);
             if !mid_switch_out && (*task).on_cpu() {
+                // R74 (false-orphan double-run): the pick-state machine is
+                // AUTHORITATIVE while on_cpu is set — on_cpu/claim are
+                // published together at pick time (publish_pick_ownership)
+                // and released together by the switch-out, so {on_cpu=1,
+                // claim=X} means CPU X's pick is still in flight (or the
+                // task is LIVE on X). The slot scan above protects only the
+                // window where X's slot still names the task; once any
+                // heal/abort rewrote that slot, this branch was the last
+                // line of defense — and it cleared the mark anyway,
+                // producing linked+{on_cpu=0, claim=X}: the pick-side
+                // stale-claim reset then handed the LIVE task to a second
+                // CPU (r74a capture: R49-ONCPU-ORPHAN healed pid=344 with
+                // claim=0, STALE-CLAIM-RESET by_cpu=3, instant double-run
+                // KERNPANIC). Mirror harvest_relink's discipline: LIVE is
+                // executing somewhere — refuse; PICKED must be revoked so
+                // a starved-but-live picker aborts at its affirm CAS; only
+                // then may the orphaned mark be cleared.
+                let ps = (*task).pick_state();
+                if ps == crate::process::task::PICK_LIVE {
+                    return false;
+                }
+                if ps == crate::process::task::PICK_PICKED
+                    && !(*task).revoke_pending_pick()
+                {
+                    // The picker affirmed LIVE under us (it is resuming
+                    // the task right now) — not healable.
+                    return false;
+                }
                 // R34: SBI direct write — we hold the GRQ lock here.
                 {
                     const MSG: &[u8] = b"R49-ONCPU-ORPHAN healed pid=0x";
@@ -2196,9 +2248,14 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                     crate::console::putchar_no_lock(b'\n');
                 }
                 // No CPU owns this mark (curr_on == false under the lock AND
-                // no in-flight switch names it): clearing it cannot break
-                // the NEW2 pick-skip protocol.
-                (*task).set_on_cpu(false);
+                // no in-flight switch names it): clearing it cannot break the
+                // NEW2 pick-skip protocol.
+                // R74: release the FULL ownership qword ({on_cpu=false,
+                // claim=-1}), not the byte alone — a byte-only clear leaves
+                // {false, foreign-claim}, the protocol-impossible linked
+                // state the pick-side stale-claim reset was invented for;
+                // with a live claimer that reset double-ran the task (r74a).
+                (*task).release_pick_ownership();
             }
             // R34: SBI direct write — we hold the GRQ lock here.
             {

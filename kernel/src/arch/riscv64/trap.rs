@@ -216,23 +216,78 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
         match cause {
             // Timer interrupt
             Cause::SupervisorTimer => {
+                // FORENSIC (r74 irq-bracket leak hunt): the irq_enter/
+                // irq_exit pair books HARDIRQ_OFFSET on the task tp names.
+                // If tp changes between them (a context switch inside the
+                // handler), the decrement lands on the wrong task and the
+                // old task keeps a leaked +65536 — its next user-mode page
+                // fault then classifies as in_interrupt() and dies through
+                // the no_context → KERNPANIC path (r72-fire6 family).
+                let tp_entry = crate::arch::cpu::get_thread_id() as usize;
                 crate::interrupt::preempt::irq_enter();
                 handle_timer_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
+                let tp_exit = crate::arch::cpu::get_thread_id() as usize;
+                if tp_entry != tp_exit {
+                    let a = tp_entry as *mut crate::process::task::Task;
+                    let b = tp_exit as *mut crate::process::task::Task;
+                    let (pa, pb) = unsafe {
+                        ((*a).preempt_count(), (*b).preempt_count())
+                    };
+                    use core::fmt::Write;
+                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let _ = write!(w,
+                        "IRQ-BRACKET-LEAK timer cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x})\n",
+                        cpu_id, tp_entry,
+                        unsafe { (*a).pid() }, pa,
+                        tp_exit, unsafe { (*b).pid() }, pb);
+                }
             }
 
             // Software interrupt (IPI)
             Cause::SupervisorSoft => {
+                let tp_entry = crate::arch::cpu::get_thread_id() as usize;
                 crate::interrupt::preempt::irq_enter();
                 handle_software_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
+                let tp_exit = crate::arch::cpu::get_thread_id() as usize;
+                if tp_entry != tp_exit {
+                    let a = tp_entry as *mut crate::process::task::Task;
+                    let b = tp_exit as *mut crate::process::task::Task;
+                    let (pa, pb) = unsafe {
+                        ((*a).preempt_count(), (*b).preempt_count())
+                    };
+                    use core::fmt::Write;
+                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let _ = write!(w,
+                        "IRQ-BRACKET-LEAK soft cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x})\n",
+                        cpu_id, tp_entry,
+                        unsafe { (*a).pid() }, pa,
+                        tp_exit, unsafe { (*b).pid() }, pb);
+                }
             }
 
             // External interrupt
             Cause::SupervisorExternal => {
+                let tp_entry = crate::arch::cpu::get_thread_id() as usize;
                 crate::interrupt::preempt::irq_enter();
                 handle_external_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
+                let tp_exit = crate::arch::cpu::get_thread_id() as usize;
+                if tp_entry != tp_exit {
+                    let a = tp_entry as *mut crate::process::task::Task;
+                    let b = tp_exit as *mut crate::process::task::Task;
+                    let (pa, pb) = unsafe {
+                        ((*a).preempt_count(), (*b).preempt_count())
+                    };
+                    use core::fmt::Write;
+                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    let _ = write!(w,
+                        "IRQ-BRACKET-LEAK ext cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x})\n",
+                        cpu_id, tp_entry,
+                        unsafe { (*a).pid() }, pa,
+                        tp_exit, unsafe { (*b).pid() }, pb);
+                }
             }
 
             // User mode system call
@@ -860,8 +915,44 @@ fn sigbus_has_handler() -> bool {
         .unwrap_or(false)
 }
 
-fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
-    use crate::arch::mm::exception::{do_page_fault, MmFaultResult};
+/// R74 (garbage-frame gate): called from trap.S when a user-return frame
+/// is provably unexecutable (epc==0 or a sub-0x1000 sp) — the zeroed/
+/// stale-frame scribble family (r74d: epc=0 ra=0 sp=0xf). Restoring such
+/// a frame jumps to 0 with a junk stack; kill the task instead. The print
+/// is SBI-direct so a wedged printk cannot eat the evidence.
+#[no_mangle]
+pub extern "C" fn riscv_bad_user_frame(regs: *mut PtRegs) -> ! {
+    let r = unsafe { &*regs };
+    unsafe {
+        let mut put = |b: u8| crate::console::putchar_no_lock(b);
+        for &b in b"trap: BADFRAME pid=0x" { put(b); }
+        let pid = crate::sched::get_current_pid() as u64;
+        for sh in (0..32).step_by(4).rev() {
+            let n = ((pid >> sh) & 0xF) as u8;
+            put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+        for &b in b" epc=0x" { put(b); }
+        for sh in (0..64).step_by(4).rev() {
+            let n = ((r.epc >> sh) & 0xF) as u8;
+            put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+        for &b in b" sp=0x" { put(b); }
+        for sh in (0..64).step_by(4).rev() {
+            let n = ((r.sp >> sh) & 0xF) as u8;
+            put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+        put(b'\n');
+    }
+    crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+    // do_exit schedules away and never returns; park defensively.
+    loop {
+        // SAFETY: wfi halts the hart until an interrupt; safe in a dead
+        // task's final spin.
+        unsafe { core::arch::asm!("wfi") };
+    }
+}
+
+fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::mm::exception::{do_page_fault, MmFaultResult};
 
     let fault_addr = regs.badaddr;
 
@@ -934,6 +1025,28 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
         }
         MmFaultResult::OutOfMemory => {
             crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
+            // FORENSIC (r74): an SBI-direct line printk cannot lose. The
+            // r72-fire family's 570s gnome-shell-cal kill left NO trace in
+            // any serial — either printk was wedged on a lock the stuck
+            // allocator held, or the kill came from a different path
+            // entirely. This line names pid/comm/addr so the next
+            // occurrence is attributable; the full zone dump follows via
+            // oom_forensic_dump (printk-based, best effort).
+            unsafe {
+                let mut put = |b: u8| crate::console::putchar_no_lock(b);
+                for &b in b"trap: PF-OOM pid=0x" { put(b); }
+                let pid = crate::sched::get_current_pid() as u64;
+                for sh in (0..32).step_by(4).rev() {
+                    let n = ((pid >> sh) & 0xF) as u8;
+                    put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+                for &b in b" addr=0x" { put(b); }
+                for sh in (0..64).step_by(4).rev() {
+                    let n = ((fault_addr >> sh) & 0xF) as u8;
+                    put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+                put(b'\n');
+            }
             // FORENSIC (fake-OOM family): allocator state at the kill moment.
             crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
             // Terminate user process via do_exit (properly notifies parent)
@@ -995,6 +1108,39 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
                     if 24 % 4 != 0 { put(b'\n'); }
                 } else {
                     for &b in b"trap: user-sp (not dumped)\n" { put(b); }
+                }
+                // FORENSIC (r74): user-mode faults can only reach
+                // KernelPanic via no_context — current()==None,
+                // address_space()==None, or in_interrupt() (leaked
+                // preempt_count). Name which one fired. tp is validated
+                // first: a trap mis-entered through .Lfrom_kernel can
+                // leave a USER pointer in tp, and dereferencing it here
+                // would fault inside the panic printer (nested panic).
+                {
+                    let tp = crate::arch::cpu::get_thread_id() as usize;
+                    // Bit 63 set = kernel VA; Sv39 user pointers always
+                    // have bits 63:39 clear. Covers both heap task structs
+                    // (0xffffffd6...) and static idle tasks (0xffffffff...).
+                    let kernel_tp = (tp >> 63) == 1;
+                    use core::fmt::Write;
+                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                    if kernel_tp {
+                        let task = unsafe {
+                            &*(tp as *const crate::process::task::Task)
+                        };
+                        unsafe {
+                            let _ = write!(w,
+                                "trap: noctx pid={} preempt={:#x} in_intr={} aspace={}\n",
+                                (*task).pid(),
+                                (*task).preempt_count(),
+                                crate::interrupt::preempt::in_interrupt(),
+                                (*task).address_space().is_some());
+                        }
+                    } else {
+                        let _ = write!(w,
+                            "trap: noctx tp={:#x} NOT-A-KERNEL-TASK (misrouted entry?)\n",
+                            tp);
+                    }
                 }
                 // R9: dump the faulting task's children list raw — the
                 // recurring NULL-walk corruption must be photographed at
