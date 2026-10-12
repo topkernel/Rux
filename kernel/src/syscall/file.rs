@@ -1247,7 +1247,23 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         }
     }
 
-    match crate::fs::mount::do_mount(source, target, fs_type_str, args[3]) {
+    // Mount options string (mount(2) arg 5): consumed by tmpfs today
+    // (its size= page budget — LTP's all-filesystems harness mounts
+    // tmpfs with size=32M, and an unbounded tmpfs let preadv203's 118 MB
+    // write pattern exhaust the kernel heap). Other filesystem types
+    // accept and ignore it. NULL (the common case) passes through as
+    // None; a bad pointer is EFAULT like Linux's getname() copy.
+    let mut data_buf = [0u8; 256];
+    let mount_data: Option<&str> = if args[4] != 0 {
+        match read_user_str(args[4] as *const u8, &mut data_buf) {
+            Ok(s) => Some(s),
+            Err(e) => return e as i64,
+        }
+    } else {
+        None
+    };
+
+    match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }

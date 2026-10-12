@@ -771,7 +771,7 @@ pub fn rust_main_tail() -> ! {
             // /dev/shm/name, so a working tmpfs there is all the kernel
             // needs to provide. Independent instance per do_mount.
             {
-                let shm_result = fs::mount::do_mount("none", "/dev/shm", "tmpfs", 0);
+                let shm_result = fs::mount::do_mount("none", "/dev/shm", "tmpfs", 0, None);
                 print_status("fs", "tmpfs mounted /dev/shm", shm_result.is_ok());
             }
 
@@ -781,7 +781,7 @@ pub fn rust_main_tail() -> ! {
             // degrades to emergency mode. Mirrors the /dev/shm approach
             // (independent tmpfs instance via do_mount).
             {
-                let run_result = fs::mount::do_mount("none", "/run", "tmpfs", 0);
+                let run_result = fs::mount::do_mount("none", "/run", "tmpfs", 0, None);
                 print_status("fs", "tmpfs mounted /run", run_result.is_ok());
             }
 

@@ -394,6 +394,10 @@ pub fn run_all_tests() {
     test_group_start("tmpfs-mknod");
     tmpfs_mknod::test_tmpfs_mknod();
 
+    // tmpfs page-budget tests (mount option size=). Implemented in
+    // fs::tmpfs itself (needs private TmpfsSuperBlock access).
+    crate::fs::tmpfs::run_budget_tests();
+
     test_group_start("vma_flags");
     vma_flags::test_vma_flags();
 

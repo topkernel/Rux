@@ -48,7 +48,7 @@ pub fn test_tmpfs_mknod() {
 
     // ---- 2. mknod a char node on a fresh tmpfs mounted at /tmp/mknodtest -
     let mp = "/tmp/mknodtest";
-    match crate::fs::mount::do_mount("none", mp, "tmpfs", 0) {
+    match crate::fs::mount::do_mount("none", mp, "tmpfs", 0, None) {
         Ok(()) => test_pass("tmpfs mount /tmp/mknodtest"),
         Err(_) => test_fail("tmpfs mount /tmp/mknodtest", "do_mount failed"),
     }
