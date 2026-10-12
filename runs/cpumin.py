@@ -184,7 +184,10 @@ def main():
                 break
 
         # Stage C: quantified pollburn runs (foreground, 20s each) —
-        # busy = control, poll/ppoll/epoll/select = idle-blocked waits.
+        # busy = control, poll/ppoll/epoll/select = idle-blocked waits,
+        # wake = producer-wake latency (expect ~1s, 10s = missed wake).
+        send("/root/pollburn wake 1")
+        pump(20)
         send("/root/pollburn busy 20")
         pump(28)
         send("/root/pollburn poll 20")
