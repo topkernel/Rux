@@ -87,8 +87,14 @@ pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
 pub const FBIOPUT_VSCREENINFO: u32 = 0x4601;
 /// Get fixed screen information
 pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
-/// Pan/display offset control
-pub const FBIOPAN_DISPLAY: u32 = 0x4604;
+/// Pan/display offset control (Linux number; 0x4604 is FBIOGETCMAP —
+/// misnumbering it made Xorg's pan ioctl ENOTTY and worse, routed real
+/// FBIOGETCMAP callers into the pan handler, which copied a 160-byte
+/// FbVarScreeninfo over their 48-byte fb_cmap)
+pub const FBIOPAN_DISPLAY: u32 = 0x4606;
+/// Get color map (Linux 0x4604): palette read-back on a truecolor
+/// scanout — accepted and answered with an empty cmap
+pub const FBIOGETCMAP: u32 = 0x4604;
 /// Flush framebuffer (VirtIO-GPU specific)
 /// VirtIO-GPU requires explicit flush to display updated content
 pub const FBIO_FLUSH: u32 = 0x4610;
@@ -367,6 +373,71 @@ pub fn init_fbdev() -> Result<(), ()> {
 /// on truecolor frames by ignoring the content).
 const FBIOPUTCMAP: u32 = 0x4605;
 
+/// fb_cmap layout (Linux): { u32 start; u32 len; u16 *red, *green, *blue,
+/// *transp; } = 48 bytes on 64-bit. The channel pointers are user pointers.
+const FB_CMAP_HDR_SIZE: usize = 48;
+
+/// FBIOGETCMAP (Linux 0x4604): read back the palette. The scanout is
+/// truecolor (no hardware CLUT), so there is no real palette; answer with
+/// zeros for the requested entries, matching what callers of a truecolor
+/// fbdev see from the generic layer. Never fails on short cmaps — but a
+/// nonsensical length (> 4096 entries) gets EINVAL instead of unbounded
+/// copy work.
+fn fbioget_cmap(arg: usize) -> i64 {
+    // SAFETY of accesses below: access_ok validated the user pointers;
+    // the local header is properly initialized memory.
+    unsafe {
+        if !crate::arch::uaccess::access_ok(arg, FB_CMAP_HDR_SIZE) {
+            return -14; // EFAULT
+        }
+        let mut hdr = [0u8; FB_CMAP_HDR_SIZE];
+        if crate::arch::uaccess::copy_from_user(
+            hdr.as_mut_ptr(),
+            arg as *const u8,
+            FB_CMAP_HDR_SIZE,
+        ) != 0
+        {
+            return -14;
+        }
+        let start = u32::from_ne_bytes(hdr[0..4].try_into().unwrap());
+        let len = u32::from_ne_bytes(hdr[4..8].try_into().unwrap()) as usize;
+        let _ = start; // no CLUT: start selects nothing
+        if len > 4096 {
+            return -22; // EINVAL
+        }
+        let zeros = [0u8; 64];
+        let mut left = len * 2; // u16 entries
+        let chans: [usize; 4] = [
+            usize::from_ne_bytes(hdr[8..16].try_into().unwrap()),
+            usize::from_ne_bytes(hdr[16..24].try_into().unwrap()),
+            usize::from_ne_bytes(hdr[24..32].try_into().unwrap()),
+            usize::from_ne_bytes(hdr[32..40].try_into().unwrap()),
+        ];
+        for chan in chans {
+            if chan == 0 {
+                continue;
+            }
+            let mut off = 0usize;
+            while off < left {
+                if !crate::arch::uaccess::access_ok(chan + off, 1) {
+                    return -14;
+                }
+                let n = core::cmp::min(zeros.len(), left - off);
+                if crate::arch::uaccess::copy_to_user(
+                    (chan + off) as *mut u8,
+                    zeros.as_ptr(),
+                    n,
+                ) != 0
+                {
+                    return -14;
+                }
+                off += n;
+            }
+        }
+    }
+    0
+}
+
 /// Handle framebuffer ioctl commands
 /// Returns: 0 on success, negative error code on failure
 pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
@@ -457,6 +528,7 @@ pub fn fbdev_ioctl(cmd: u32, arg: usize) -> i64 {
             }
             0
         }
+        FBIOGETCMAP => fbioget_cmap(arg),
         FBIOPAN_DISPLAY => {
             // No hardware panning (single scanout); accept the ioctl and
             // report the only pannable offset (0,0). Xorg's
