@@ -237,13 +237,34 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         }
     }
 
-    // Kernel mode access
-    if regs.kernel_mode() {
-        // Check for kernel stack overflow
-        // If fault address is near current task's kernel stack, it's likely a stack overflow
-        let fault_addr_usize = fault_addr.bits() as usize;
+        // Kernel mode access
+        if regs.kernel_mode() {
+            // R78 (uaccess-first fixup discipline): the exception table has
+            // PRIORITY over the stack-overflow classification. A faulting
+            // epc that has a fixup entry is BY CONSTRUCTION inside a
+            // copy_to_user/copy_from_user window — the right recovery is
+            // the fixup (short copy → EFAULT), letting the syscall unwind
+            // normally (dropping any locks its frames hold). The old order
+            // ran the stack-overflow check first and PANICKED on the three
+            // GNOME full-session terminal captures (r75-full1 t≈360,
+            // inst-full1 t≈960, inst-full3 t≈110: copy_user load/store
+            // faults at wild user addresses on a cross-stack sp), each of
+            // which carried EXT4_BIG_LOCK into the grave and wedged every
+            // later ext4 user in D-state (VW-EXT4LOCK owner=<victim>
+            // queued=3). With fixup-first those deaths become an EFAULT
+            // return + clean task kill; genuine kernel corruption (no
+            // fixup entry) still reaches the loud stack-overflow panic
+            // below unchanged.
+            if let Some(fixup) = fixup_exception(regs.epc) {
+                regs.epc = fixup;
+                return MmFaultResult::Fixed;
+            }
 
-        if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.sp as usize) {
+            // Check for kernel stack overflow
+            // If fault address is near current task's kernel stack, it's likely a stack overflow
+            let fault_addr_usize = fault_addr.bits() as usize;
+
+            if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.sp as usize) {
             // R74 (stale-dead-context containment): a hart executing a
             // context whose sp lives on ANOTHER task's stack, or faulting
             // at that task's stack range, is the double-run engine's
