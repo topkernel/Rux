@@ -3532,7 +3532,11 @@ fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
         n = 1;
     } else {
         let mut x = v;
-        while x > 0 {
+        // Bound the digit count: a corrupted (>=9-digit) pid value must
+        // not panic the heal-path printer itself (bigalloc8: index 8 vs
+        // len 8 immediately after the R74-SLOTLESS-TP capture) — truncate
+        // the garbage rather than losing the diagnostic line.
+        while x > 0 && n < buf.len() {
             buf[n] = b'0' + (x % 10) as u8;
             x /= 10;
             n += 1;
