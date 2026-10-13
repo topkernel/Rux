@@ -126,10 +126,23 @@ confirmation all under one GRQ hold.
 
 ## Verification status
 
-- `make build`: clean on all commits through 8cf8e98e.
+- `make build`: clean on all commits through b6a5e19f.
 - Full-session runs at smp4/2G with R78+R80 (v1/v2/v3): zero kernel
   panics (the old binary panicked in 3/3 full runs — the
   stack-overflow-panic family is gone). Remaining failure shapes are
   the early session death (item 1) and the orphan-cycle noise (item 2).
-- final-r1 (2100 s validation) and min-r1 (minimal X+dbus session,
-  idle-CPU check) — numbers in the session report.
+- final-r1 (2100 s validation, smp4/2G): t~841 interim — 0 panics,
+  0 soft lockups, 0 SWITCH-BADSP; orphan-heal cycle active but bounded:
+  67 heals in ~14 min (pid 338 xterm-bash x44, 336 x12, 309 Xorg x5,
+  306 kfbflush x4) — worst inter-heal gap ~19 s, far inside the 60 s
+  starvation bound; every victim is re-linked and picked after each
+  heal.
+- min-r1 (minimal X+dbus session, smp2/1G): poll-fix win holds —
+  pollburn matrix over 20 s windows: poll/ppoll/epoll/select all
+  0.0% of one core (control busy loop 99.7%), producer-wake latency
+  1.009 s (expected ~1 s; 10 s = missed wake). The phase1.sh per-PID
+  utime/stime sampler did not complete inside its 600 s window at smp2
+  under heavy host load — pollburn numbers stand as the idle-CPU
+  evidence.
+- make test: blocked by the test-kernel boot panic (item 3); the
+  pselect6-suite wedge itself is fixed (372741ee).
