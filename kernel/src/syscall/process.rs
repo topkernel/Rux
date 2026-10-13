@@ -2180,8 +2180,12 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // Precise THREAD-directed delivery (no group spread).
-    crate::signal::send_signal(tid, sig)
+    // Precise THREAD-directed delivery (no group spread). Uses the
+    // SI_TKILL-attributed sender (Linux do_send_specific): glibc raise()
+    // and pthread_kill() both land here, so the queued siginfo must carry
+    // the sender's pid — otherwise a raise()d fatal signal (SIGTERM
+    // suicide etc.) reports si_pid=0 and the sender is unattributable.
+    crate::signal::send_signal_from_user_tkill(tid, sig)
         .map(|_| 0)
         .unwrap_or(-(errno::EINVAL as i64))
 }

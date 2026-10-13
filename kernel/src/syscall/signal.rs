@@ -689,11 +689,11 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // Send signal using the existing send_signal function.
-    // tkill is THREAD-directed: no group spread. Err values from
-    // send_signal are already negative errnos — the old `-(e as i64)`
-    // double-negated them into positive garbage return values.
-    match crate::signal::send_signal(tid, sig) {
+    // Send signal with SI_TKILL sender attribution (Linux do_send_specific:
+    // tkill/tgkill — and glibc raise(), which is tgkill — must queue the
+    // sender's pid so fatal self-raises are attributable at delivery time).
+    // Err values are already negative errnos.
+    match crate::signal::send_signal_from_user_tkill(tid, sig) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }

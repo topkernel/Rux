@@ -657,12 +657,22 @@ pub mod si_code {
     pub const SI_USER: i32 = 0;
     /// Signal sent by kernel
     pub const SI_KERNEL: i32 = 0x80;
+    /// Signal sent by tkill/tgkill (and glibc raise(), which is tgkill)
+    pub const SI_TKILL: i32 = -6;
+    /// Signal sent by rt_sigqueueinfo/sigqueue
+    pub const SI_QUEUE: i32 = -1;
+    /// Signal sent by POSIX timer expiry
+    pub const SI_TIMER: i32 = -2;
     /// Child process exited
     pub const CLD_EXITED: i32 = 1;
     /// Child process killed
     pub const CLD_KILLED: i32 = 2;
     /// Child process abnormal termination
     pub const CLD_DUMPED: i32 = 3;
+    /// SEGV: address not mapped (bad_area / SEGV_MAPERR)
+    pub const SEGV_MAPERR: i32 = 1;
+    /// SEGV: invalid permissions (SEGV_ACCERR)
+    pub const SEGV_ACCERR: i32 = 2;
 }
 
 // ============================================================================
@@ -1950,6 +1960,26 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
     send_signal_with_info(pid, SigInfo::new(sig, si_code::SI_USER, sender_pid, sender_uid))
 }
 
+/// Thread-directed user signal (tkill/tgkill — glibc raise() is tgkill):
+/// identical to send_signal_from_user but the queued siginfo carries
+/// si_code = SI_TKILL, exactly like Linux's do_send_specific(). Without
+/// it a raise()d fatal signal (e.g. a SIGTERM suicide) died with no
+/// sender information at all: the standard-signal bitmap-only path left
+/// nothing for the delivery-time siginfo reconstruction, so the SIGDEATH
+/// forensics printed si_pid=0/si_code=0 and the real sender stayed
+/// invisible (gnome-session-binary SIGTERM hunt, fire-gate-merged-r1).
+pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
+    if sig < 1 || sig > 64 {
+        return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    let (sender_pid, sender_uid) = match crate::sched::current() {
+        // SAFETY: the current task pointer is valid for the call duration.
+        Some(t) => unsafe { ((*t).pid(), (*t).cred().uid) },
+        None => (0, 0),
+    };
+    send_signal_with_info(tid, SigInfo::new(sig, si_code::SI_TKILL, sender_pid, sender_uid))
+}
+
 /// Force-unblock a SYNCHRONOUS signal in the current task (Linux
 /// force_sig parity for hardware faults).
 ///
@@ -2029,6 +2059,75 @@ unsafe fn send_signal_locked_info(
 
     let task = &*task_ptr;
 
+    // KILLTRACE (sigterm hunt): name the sender of fatal signals.
+    // Coverage: every SIGTERM (rare in practice), cross-group SIGKILLs, and
+    // SIGSEGV/SIGKILL to watched comms (gnome-session*/ls — the session
+    // chain forensics targets). Same-group SIGKILLs are skipped — that is
+    // exit_group's kill_other_threads teardown noise, not an external kill.
+    // The origin tag decodes as: 0=SI_USER(kill), -6=SI_TKILL(tgkill/raise),
+    // 1/2=SEGV_*(hardware fault), 0x80=SI_KERNEL; no tag = info-less
+    // kernel-internal sender (timer/mq/pdeathsig paths). Rate-limited so a
+    // runaway killer cannot flood the console.
+    if sig == Signal::SIGKILL as i32
+        || sig == Signal::SIGTERM as i32
+        || sig == Signal::SIGSEGV as i32
+    {
+        static KILLTRACE_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if let Some(cur) = crate::sched::current() {
+            unsafe {
+                let same_group = (*cur).tgid() == task.tgid();
+                let s_comm = (*cur).comm();
+                let s_len = s_comm
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(s_comm.len());
+                let t_comm = task.comm();
+                let t_len = t_comm
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(t_comm.len());
+                let t_str = core::str::from_utf8(&t_comm[..t_len]).unwrap_or("?");
+                let watched = t_str.starts_with("gnome-session") || t_str.starts_with("ls");
+                let group_teardown = same_group && sig == Signal::SIGKILL as i32;
+                let interesting = sig == Signal::SIGTERM as i32
+                    || (sig == Signal::SIGKILL as i32 && !same_group)
+                    || watched;
+                if interesting
+                    && !group_teardown
+                    && KILLTRACE_N.fetch_add(
+                        1, core::sync::atomic::Ordering::Relaxed) < 300
+                {
+                    match si {
+                        Some(i) => crate::pr_info!(
+                            "KILLTRACE: pid={}({}) -> pid={}({}) tgid={} ppid={} sig={} origin={:#x}",
+                            (*cur).pid(),
+                            core::str::from_utf8(&s_comm[..s_len])
+                                .unwrap_or("?"),
+                            task.pid(),
+                            t_str,
+                            task.tgid(),
+                            task.ppid(),
+                            sig,
+                            i.si_code,
+                        ),
+                        None => crate::pr_info!(
+                            "KILLTRACE: pid={}({}) -> pid={}({}) tgid={} ppid={} sig={} origin=none",
+                            (*cur).pid(),
+                            core::str::from_utf8(&s_comm[..s_len])
+                                .unwrap_or("?"),
+                            task.pid(),
+                            t_str,
+                            task.tgid(),
+                            task.ppid(),
+                            sig,
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
     // Linux prepare_signal(): the global init process only receives
     // signals it has explicitly installed a handler for — every other
     // signal, INCLUDING SIGKILL/SIGSTOP, is silently discarded. Without
@@ -2051,45 +2150,8 @@ unsafe fn send_signal_locked_info(
 
     // SIGKILL and SIGSTOP cannot be ignored
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
-        // KILLTRACE (dbus-death hunt): name the sender of every SIGKILL.
-        // Group teardown (exit_group killing sibling threads of the
-        // sender's own tgid) is skipped — it is not an external kill.
-        // Rate-limited so a runaway killer cannot flood the console.
-        if sig == Signal::SIGKILL as i32 {
-            static KILLTRACE_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if let Some(cur) = crate::sched::current() {
-                unsafe {
-                    let same_group = (*cur).tgid() == task.tgid();
-                    if !same_group
-                        && KILLTRACE_N.fetch_add(
-                            1, core::sync::atomic::Ordering::Relaxed) < 200
-                    {
-                        let s_comm = (*cur).comm();
-                        let s_len = s_comm
-                            .iter()
-                            .position(|&b| b == 0)
-                            .unwrap_or(s_comm.len());
-                        let t_comm = task.comm();
-                        let t_len = t_comm
-                            .iter()
-                            .position(|&b| b == 0)
-                            .unwrap_or(t_comm.len());
-                        crate::pr_info!(
-                            "KILLTRACE: pid={}({}) -> pid={}({}) tgid={} ppid={} SIGKILL",
-                            (*cur).pid(),
-                            core::str::from_utf8(&s_comm[..s_len])
-                                .unwrap_or("?"),
-                            task.pid(),
-                            core::str::from_utf8(&t_comm[..t_len])
-                                .unwrap_or("?"),
-                            task.tgid(),
-                            task.ppid(),
-                        );
-                    }
-                }
-            }
-        }
+        // (KILLTRACE logging happens at the top of this function — it
+        // covers SIGKILL/SIGTERM/SIGSEGV with sender attribution.)
         if let Some(info) = si {
             task.pending.add_info(info);
         } else {
