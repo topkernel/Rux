@@ -126,17 +126,19 @@ confirmation all under one GRQ hold.
 
 ## Verification status
 
-- `make build`: clean on all commits through b6a5e19f.
+- `make build`: clean on all commits through 2c044bb5.
 - Full-session runs at smp4/2G with R78+R80 (v1/v2/v3): zero kernel
   panics (the old binary panicked in 3/3 full runs — the
   stack-overflow-panic family is gone). Remaining failure shapes are
   the early session death (item 1) and the orphan-cycle noise (item 2).
-- final-r1 (2100 s validation, smp4/2G): t~841 interim — 0 panics,
-  0 soft lockups, 0 SWITCH-BADSP; orphan-heal cycle active but bounded:
-  67 heals in ~14 min (pid 338 xterm-bash x44, 336 x12, 309 Xorg x5,
-  306 kfbflush x4) — worst inter-heal gap ~19 s, far inside the 60 s
-  starvation bound; every victim is re-linked and picked after each
-  heal.
+- final-r1 (2100 s validation, smp4/2G): COMPLETED the full window
+  with 0 panics, 0 soft lockups, 0 SWITCH-BADSP, 0 BUG lines. The
+  orphan-heal cycle stayed bounded the whole run: 127 heals in 2100 s
+  (pid 338 xterm-bash x44+, 336, 309 Xorg, 306 kfbflush), worst
+  inter-heal gap ~19 s — far inside the 60 s starvation bound; the
+  end-of-run DUMP! shows slots naming live owners (339 sh on cpu0,
+  309 Xorg on cpu3), no stranded task. Milestones: xorg t=7 s,
+  gnome-session seen t=31 s; gnome-shell/gsd never reached (item 1).
 - min-r1 (minimal X+dbus session, smp2/1G): poll-fix win holds —
   pollburn matrix over 20 s windows: poll/ppoll/epoll/select all
   0.0% of one core (control busy loop 99.7%), producer-wake latency
