@@ -468,34 +468,43 @@ trap_entry:
 // no temp register; all GPRs are saved before any temp is used.
 //
 .Lfrom_user:
-    // Stash user sp (ti_user_sp is a "last user sp" cache: written at exec
-    // time and here; nothing reads it between traps).
-    sd sp, {task_ti_user_sp}(tp)
-
-    // ROUTING FIX (the bash -i KERNPANIC engine): the sscratch-swap test
-    // above assumes "sscratch = task pointer" implies the trap came from
-    // user mode. That assumption is FALSE in the return-to-user window
-    // (csrw sscratch, tp runs several instructions before the final sret)
-    // and in any state where a corrupted frame made an sret land in
-    // S-mode while sscratch still held the task pointer. Such a
-    // kernel-origin trap entering here reloaded sp from ti_kernel_sp and
-    // pushed its frame ONTO the live outermost pt_regs at the top of the
-    // kernel stack — photographied live (GDB watchpoint on PT_EPC): a
-    // cause=9 frame with sepc inside __schedule written by this path at
-    // the top slot, followed by an sret into kernel code with a mixed
-    // register set and finally a `ret` through a never-written stack slot
-    // → "KERNPANIC pfault badaddr=0 epc=0 ra=0".
+    // R83 (R74 producer fix — the thread_info smear engine): the OLD
+    // sequence stashed sp into ti_user_sp HERE, unconditionally, BEFORE
+    // the sstatus.SPP origin check below.
     //
-    // sstatus.SPP is the authoritative origin indicator (hardware-set on
-    // every trap). If SPP=1 the trap came from S-mode: treat it exactly
-    // like .Lfrom_kernel — nest the new frame BELOW the current (kernel)
-    // sp instead of reloading sp from ti_kernel_sp. t0 holds a live user
-    // register here, so stash it in the thread_info scratch slot first
-    // (same discipline as ARCH-C2: no register value is lost).
+    // Background (ROUTING FIX, retained): the sscratch-swap dispatcher
+    // test assumes "sscratch = task pointer" implies a user-origin trap.
+    // That is FALSE in the return-to-user window (csrw sscratch, tp runs
+    // several instructions before the final sret) and for any corrupted
+    // frame that made an sret land in S-mode while sscratch still held
+    // the task pointer. sstatus.SPP is the authoritative origin
+    // indicator; SPP=1 traps are treated like .Lfrom_kernel (frame
+    // nested below the live kernel sp instead of reloading sp from
+    // ti_kernel_sp and overwriting the outermost pt_regs — the
+    // photographed "KERNPANIC pfault badaddr=0 epc=0 ra=0" engine).
+    //
+    // The R83 defect: such a kernel-origin trap FIRST executed the
+    // unconditional `sd sp, ti_user_sp(tp)` and wrote its KERNEL sp
+    // into ti_user_sp; the SPP branch then left the garbage behind —
+    // photographed live by the R83b waiter self-watch (r74hunt-r3,
+    // jiffies=48248: parked pid 412's ti_user_sp changed
+    // 0x3fffffe400 -> 0xffffffff803c9740, an address inside the kernel
+    // TEXT, while the task slept in the ext4 biglock wait). Corrupted
+    // sp words are the seeds the double-run partner's exit stores smear
+    // into ti_kernel_sp (ksp = sp + PT_SIZE with a wild sp — the
+    // R74-SLOTLESS-TP / PREEMPT-UNDERFLOW family).
+    //
+    // Fix: stash t0 FIRST (it was already stashed one instruction later
+    // in the old sequence), read SPP, and only a GENUINE user trap
+    // (SPP=0) — where sp IS the user sp — stores ti_user_sp. Kernel-
+    // origin traps branch with t0 stashed exactly as the old code did;
+    // ti_user_sp keeps the last REAL user sp (its only readers are this
+    // path and exec).
     sd t0, {task_ti_a0}(tp)
     csrr t0, sstatus
     andi t0, t0, SR_SPP
     bnez t0, .Lfrom_user_kernel_origin
+    sd sp, {task_ti_user_sp}(tp)
     ld t0, {task_ti_a0}(tp)
 
     // Switch to the task kernel stack (safe: sp's user value is stashed)

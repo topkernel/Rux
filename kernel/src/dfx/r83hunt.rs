@@ -351,8 +351,11 @@ pub fn waitwatch_report(task: *mut Task, old: &WatchSnap, new: &WatchSnap) {
     pmsg(b" claim=");
     pdec(new.claim as i64 as u64);
     putchar(b'\n');
-    // Full header (0..0x40) + neighborhood: two qwords before the struct
-    // and the eight after the header, so an overrun's extent shows.
+    // Full header (0..0x40) + the eight qwords after it, so an
+    // overrun's extent shows. (No pre-struct reads: Task pages are
+    // page-aligned and ti_flags sits at offset 0 — reading backwards
+    // would cross into the previous page; the r3 hunt run panicked in
+    // this printer on the wrapped offset before that was caught.)
     for row in 0..2 {
         pmsg(b"R83-HDR ");
         pdec((row * 0x20) as u64);
@@ -363,13 +366,7 @@ pub fn waitwatch_report(task: *mut Task, old: &WatchSnap, new: &WatchSnap) {
         }
         putchar(b'\n');
     }
-    pmsg(b"R83-AROUND -0x10:");
-    unsafe {
-        phex(rq64(task, offs::TI_FLAGS.wrapping_sub(0x10)));
-        putchar(b' ');
-        phex(rq64(task, offs::TI_FLAGS.wrapping_sub(0x8)));
-    }
-    pmsg(b"\nR83-AROUND +0x40:");
+    pmsg(b"R83-AROUND +0x40:");
     for i in 0..8 {
         putchar(b' ');
         unsafe { phex(rq64(task, 0x40 + i * 8)); }
