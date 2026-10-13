@@ -125,12 +125,18 @@ pub fn exception_table_count() -> usize {
 /// - `epc`: Instruction address where exception occurred
 /// - `access_type`: Access type
 /// - `regs`: PtRegs pointer, used to get user mode tp
-fn send_signal(sig: i32, _code: i32, _addr: u64, _epc: u64, _access_type: u32, _regs: &crate::arch::pt_regs::PtRegs) {
-    // Send signal using real signal mechanism
+fn send_signal(sig: i32, code: i32, _addr: u64, _epc: u64, _access_type: u32, _regs: &crate::arch::pt_regs::PtRegs) {
+    // Send signal using real signal mechanism. The queued siginfo carries
+    // the si_code the caller classified (SEGV_MAPERR/SEGV_ACCERR): a fatal
+    // hardware-fault death then prints a real origin in SIGDEATH/KILLTRACE
+    // instead of the indistinguishable 0/0 of the info-less bitmap path.
     if let Some(current) = crate::sched::current() {
         let pid = current.pid();
-        // Call signal module's send_signal function
-        crate::signal::send_signal(pid, sig);
+        crate::signal::send_signal_with_info(
+            pid,
+            crate::signal::SigInfo::new(sig, code, 0, 0),
+        )
+        .ok();
 
         // Wake up process to handle signal (if it's sleeping)
         crate::signal::signal_wake_up(current as *mut _);
@@ -239,22 +245,81 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
 
         // Kernel mode access
         if regs.kernel_mode() {
-            // R78 (uaccess-first fixup discipline): the exception table has
-            // PRIORITY over the stack-overflow classification. A faulting
-            // epc that has a fixup entry is BY CONSTRUCTION inside a
-            // copy_to_user/copy_from_user window — the right recovery is
-            // the fixup (short copy → EFAULT), letting the syscall unwind
-            // normally (dropping any locks its frames hold). The old order
-            // ran the stack-overflow check first and PANICKED on the three
-            // GNOME full-session terminal captures (r75-full1 t≈360,
-            // inst-full1 t≈960, inst-full3 t≈110: copy_user load/store
-            // faults at wild user addresses on a cross-stack sp), each of
-            // which carried EXT4_BIG_LOCK into the grave and wedged every
-            // later ext4 user in D-state (VW-EXT4LOCK owner=<victim>
-            // queued=3). With fixup-first those deaths become an EFAULT
-            // return + clean task kill; genuine kernel corruption (no
-            // fixup entry) still reaches the loud stack-overflow panic
-            // below unchanged.
+            // R82 (uaccess demand-fill BEFORE fixup — the x86_64 "X3 fix"
+            // mirrored here): R78 hoisted the exception-table fixup above
+            // everything else in this block, which silently shadowed the
+            // kernel_data_fill branch below — every kernel uaccess fault on
+            // a VMA-covered but not-yet-present/COW page (first kernel touch
+            // of an untouched .rodata string, fresh stdio/NSS buffer, COW
+            // stack) returned EFAULT instead of faulting the page in. That
+            // re-introduced the exact family the fill branch was added to
+            // fix: dbus-daemon "Failed to open /dev/null: Bad address",
+            // getpwuid_r EFAULT, XIO fatal IO error 14, ls statfs/fstatat
+            // EFAULT -> uninitialized stat buffer -> SIGSEGV (fire-gate-
+            // merged-r1 t=125/142s). Linux resolves the fault via
+            // handle_mm_fault for kernel accesses too and only fixups to a
+            // short copy when the address is genuinely unresolvable.
+            //
+            // EXEC faults are EXCLUDED (see the comment on the fill below).
+            let kernel_data_fill = fault_addr.bits()
+                < crate::arch::mm::user_addr::USER_END as u64
+                && (access_type & FaultFlags::EXEC) == 0;
+            if kernel_data_fill {
+                let covered = addr_space
+                    .vma_read()
+                    .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
+                    .is_some();
+                if covered {
+                    let result = handle_mm_fault(
+                        &addr_space,
+                        fault_addr,
+                        access_type | FaultFlags::USER,
+                    );
+                    match result {
+                        MmFaultResult::Handled | MmFaultResult::Fixed => {
+                            // Re-execute the faulting kernel load/store.
+                            return MmFaultResult::Handled;
+                        }
+                        MmFaultResult::CowPending => {
+                            // Kernel WRITE uaccess onto a COW page: resolve
+                            // it like the user-mode path below (retry counts
+                            // as progress — the re-executed store either
+                            // succeeds or re-faults into the right path).
+                            match unsafe {
+                                handle_cow_fault(addr_space.root_ppn(), fault_addr)
+                            } {
+                                crate::arch::mm::CowFaultResult::Resolved
+                                | crate::arch::mm::CowFaultResult::Retry => {
+                                    return MmFaultResult::Handled;
+                                }
+                                crate::arch::mm::CowFaultResult::OutOfMemory => {}
+                            }
+                        }
+                        // Unresolvable (no perms, OOM, ...): fall through to
+                        // the exception-table fixup so the copy reports a
+                        // short copy.
+                        _ => {}
+                    }
+                }
+            }
+
+            // R78 (uaccess-first fixup discipline vs the stack-overflow
+            // panic): a faulting epc that has a fixup entry is BY
+            // CONSTRUCTION inside a copy_to_user/copy_from_user window —
+            // the right recovery is the fixup (short copy → EFAULT),
+            // letting the syscall unwind normally (dropping any locks its
+            // frames hold). The old order ran the stack-overflow check
+            // first and PANICKED on the three GNOME full-session terminal
+            // captures (r75-full1 t≈360, inst-full1 t≈960, inst-full3
+            // t≈110: copy_user load/store faults at wild user addresses on
+            // a cross-stack sp), each of which carried EXT4_BIG_LOCK into
+            // the grave and wedged every later ext4 user in D-state
+            // (VW-EXT4LOCK owner=<victim> queued=3). With fixup-first
+            // those deaths become an EFAULT return + clean task kill;
+            // genuine kernel corruption (no fixup entry) still reaches the
+            // loud stack-overflow panic below unchanged. Wild addresses
+            // are not VMA-covered, so the demand-fill above already
+            // declined them.
             if let Some(fixup) = fixup_exception(regs.epc) {
                 regs.epc = fixup;
                 return MmFaultResult::Fixed;
@@ -299,50 +364,9 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                 current.pid(), fault_addr_usize, regs.sp);
         }
 
-        // Kernel-mode access to a USER address whose VMA covers it: demand-
-        // fill the page and RETRY the instruction (Linux semantics — the
-        // kernel's copy_from_user on a not-yet-faulted user page, e.g.
-        // glibc's fstatat(fd, "", buf, AT_EMPTY_PATH) reading the "" con-
-        // stant off an untouched .rodata page, must fault the page in, not
-        // EFAULT through the exception table — that starved every stdio
-        // buffer allocation and NSS lookup in dynamically linked binaries).
-        //
-        // EXEC faults are EXCLUDED: an S-mode instruction fetch can NEVER be
-        // satisfied by a user page (U-pages are unfetchable in S-mode even
-        // when mapped), so "fixing" the VMA and retrying just refaults
-        // forever — a jump through a garbage function pointer in kernel
-        // context (value landing inside any user VMA) then wedges the CPU
-        // in an unbounded fault/retry loop (100% CPU, no output, no
-        // panic). Route kernel EXEC faults straight to the exception table
-        // / KernelPanic so the bug is loud and the CPU halts instead of
-        // looping. Verified by GDB-forced S-mode pc injection into a
-        // user RWX page: unfixed loops forever; fixed panics.
-        let kernel_data_fill = fault_addr.bits()
-            < crate::arch::mm::user_addr::USER_END as u64
-            && (access_type & FaultFlags::EXEC) == 0;
-        if kernel_data_fill {
-            let covered = addr_space
-                .vma_read()
-                .find(crate::mm::page::VirtAddr::new(fault_addr.as_usize()))
-                .is_some();
-            if covered {
-                let result = handle_mm_fault(
-                    &addr_space,
-                    fault_addr,
-                    access_type | FaultFlags::USER,
-                );
-                if matches!(result, MmFaultResult::Handled)
-                    || matches!(result, MmFaultResult::Fixed)
-                {
-                    // Re-execute the faulting kernel load/store.
-                    return MmFaultResult::Handled;
-                }
-                // Unresolvable (bad perms etc.): fall through to the
-                // exception-table fixup so the copy reports a short copy.
-            }
-        }
-
         // Check exception table (copy_to_user/copy_from_user etc.)
+        // Reachable for EXEC faults at user addresses (excluded from the
+        // demand-fill above) and unresolvable data faults with no VMA.
         if let Some(fixup) = fixup_exception(regs.epc) {
             regs.epc = fixup;
             return MmFaultResult::Fixed;
