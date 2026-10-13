@@ -171,19 +171,36 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     taskdump_dec(layout.size() as u64);
     taskdump_raw_line(b" align=");
     taskdump_dec(layout.align() as u64);
-    let mut frames: [u64; 6] = [0; 6];
-    // SAFETY: reads the frame-pointer chain of the current stack.
-    unsafe {
-        let fp = crate::dfx::backtrace::current_frame_pointer();
-        crate::dfx::memwatch::walk_fp_chain(fp, &mut frames);
+    if let Some(task) = crate::sched::current() {
+        taskdump_raw_line(b" comm=");
+        let comm = task.comm();
+        let end = comm.iter().position(|&c| c == 0).unwrap_or(16);
+        taskdump_raw_line(&comm[..end]);
+        taskdump_raw_line(b" pid=");
+        taskdump_dec(task.pid() as u64);
     }
-    taskdump_raw_line(b" frames:");
-    for f in frames.iter() {
-        if *f == 0 {
-            break;
+    // R75-followup: the validated walk (memwatch::walk_fp_chain) stops at the
+    // first frame that fails its `next > fp` plausibility check, which in the
+    // paint-agent capture yielded no usable frames. Dump the chain LENIENTLY
+    // instead: every ra slot is printed raw and the symbolization happens
+    // offline (addr2line over the built ELF; values outside kernel text are
+    // simply ignored there). 16 frames cover syscall → vfs → driver → alloc.
+    taskdump_raw_line(b" rawframes:");
+    unsafe {
+        let mut fp = crate::dfx::backtrace::current_frame_pointer();
+        for _ in 0..16 {
+            if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0) {
+                break;
+            }
+            let ra = core::ptr::read_volatile((fp - 8) as *const u64);
+            let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
+            taskdump_raw_line(b" ");
+            taskdump_raw_line(format_hex(ra).as_bytes());
+            if !(next & 7 == 0 && next > fp && next < 0xffff_ffff_ffff_f000) {
+                break;
+            }
+            fp = next;
         }
-        taskdump_raw_line(b" ");
-        taskdump_raw_line(format_hex(*f).as_bytes());
     }
     taskdump_raw_line(b"\n");
 

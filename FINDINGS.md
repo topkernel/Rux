@@ -1,208 +1,201 @@
-# GNOME CPU storm — findings
+# gnome-dbus2 — D-Bus reliability under the GNOME session
 
-Worktree: `/home/william/rux-agents/gnome-cpu` (branch `feature/gnome-cpu-storm`, from main @ 41d7aad1).
-Runs: `runs/base1`, `runs/base2` (baseline, kernel == main), `runs/fix1` (patched kernel).
-Driver: `runs/cpumin.py` (cold-copies the shared image, boots Xorg + session dbus only,
-samples /proc/PID/stat, runs the pollburn repro, triggers a manual DUMP!).
-Repro: `test/pollburn.c` (static riscv64 build placed in the image as /root/pollburn).
+Branch: feature/dbus-reply-loss (from main @ 41d7aad1)
+Worktree: /home/william/rux-agents/gnome-dbus2
+Runs: runs/ (r1-baseline, r2-activation, ...)
+Test rig: run/dbusdrv.py (cold-copies gnome.img, injects run/dbustest.sh +
+run/dbuswire.py, boots -smp 2 -m 1G tcg-multi, harvests `RSLT:` lines).
+dbuswire.py = pure-python3 D-Bus wire peer/caller (validated against the
+host dbus-daemon first; replies must carry DESTINATION to be routed).
 
-## Symptom recap (from r74j reference run)
+## Image facts (non-bugs, from debugfs inspection of gnome.img)
 
-- Almost every glib main-loop task (gmain, gdbus, gsd-*, Xorg, dbus-daemon) shows
-  `state=RUNNING on_rq=1` in periodic taskdumps.
-- dbus-daemon / Xorg appear to accumulate tens of seconds of vruntime per 110 s window.
-- Everything uniformly slow: component starts spaced ~100 s, driver xterm ~280 s to appear.
+- `/usr/bin/gjs` does NOT exist. org.gnome.ScreenSaver.service has
+  `Exec=/usr/bin/gjs /usr/share/gnome-shell/org.gnome.ScreenSaver`, so
+  "Failed to execute program org.gnome.ScreenSaver: No such file or
+  directory" is genuine ENOENT — image content, NOT a kernel bug.
+- The launch helper is at `/usr/lib/dbus-1.0/dbus-daemon-launch-helper`,
+  mode 0755 owner 1000:1000 — NOT setuid in this image. The setuid exec
+  path is not exercised as built.
+- org.freedesktop.login1.service (system bus) has `Exec=/bin/false` —
+  deliberately; Xorg's logind call must trigger activation → helper →
+  /bin/false exits → dbus-daemon sends an error reply. On Linux the
+  caller gets a fast error; in fire-r74j Xorg saw a 25s reply TIMEOUT
+  instead. That's the minimal system-bus repro (E1 in the matrix).
+- No python3-dbus / gi in the image; dbus-send, dbus-monitor, gdbus,
+  gsettings, dbus-run-session all present. No `dconf` CLI; dconf goes
+  through gsettings (GSETTINGS_BACKEND=dconf → dconf-service over the
+  session bus).
 
-## Root cause (two distinct mechanisms)
+## fire-r74j postmortem facts (reference, kernel == main)
 
-### 1. poll/ppoll/select busy-wait at tick rate (the real CPU burn)
+- SIGDEATH lines (serial.log):
+  - pid=389 dbus-daemon sig=9 ppid=331 si_pid=331 (t=415s)
+  - pid=450 dbus-daemon sig=9 ppid=329 si_pid=329 (t=641s)
+  - pid=451 dbus-daemon-lau sig=9 ppid=1 si_pid=329 (t=642s)
+  => si_code=SI_USER: a kill() from pid 329/331, each killing a
+  dbus-daemon listed as its child. start-gnome.sh spawns both buses
+  with `--fork`, whose pre-fork parent should have exited long before —
+  so either those parents are still alive (blocked readiness read?) or
+  our si_pid attribution is wrong. KILLTRACE instrumentation added
+  (signal.rs send path, sender pid+comm, skips same-tgid group kills).
+- No "oom-killer:" or "pagefault: Out of memory" lines in fire-r74j —
+  the dbus-daemon SIGKILLs are NOT OOM kills.
 
-`sys_poll` (kernel/src/syscall/misc.rs) has NO fd-side wake registration: when no fd is
-ready it calls `poll_sleep_slice()` which sleeps ONE 10 ms re-check slice (one jiffy at
-HZ=100), wakes, re-polls every fd (copy_from_user the pollfd array, run each fd's poll
-callback, copy_to_user), and sleeps again — forever. Every poll()/ppoll()/select() waiter
-in the system wakes 100x/second. With ~40 glib main loops in a GNOME session that is
-thousands of wakeups + full fd-array re-polls per second, all serialized on the global
-runqueue lock at every tick — this is the burn, and it also explains the uniform slowness
-(CPUs oversubscribed by poll bookkeeping).
+## r1-baseline (main kernel, minimal matrix, -smp 2 -m 1G)
 
-`sys_epoll_wait` has the same 10 ms re-check design but at least sleeps on the epoll
-instance's wait queue; only unix sockets call `epoll_notify_file()` on data arrival, so
-epoll over other fd types also re-checks at tick rate.
+| test | outcome |
+|---|---|
+| A1 dbus-send unknown name | fast ServiceUnknown (0s) OK |
+| A2 raw caller unknown name | ServiceUnknown in 36ms OK |
+| A3 100x ListNames | 100/100 returns, p50=9ms max=10ms OK |
+| B1 activation org.rux.Test | NOT triggered — MY BUG: dbus-daemon started before XDG_DATA_DIRS export, so /root/xdg never scanned → instant ServiceUnknown. Fixed for r2. |
+| B2 100x Echo to peer | n/a (no peer) |
+| C1 under 4 burners | n/a |
+| C2 100x ListNames under 4 burners | 100/100 returns, p50=10ms max=27ms OK — no starvation |
+| C3 unknown name under load | 64ms ServiceUnknown OK |
+| D1 gsettings/dconf | python harness crashed: **time.sleep → OSError EFAULT** (see below); dconf-service WAS activated (ps shows pid 338) |
+| E1 system bus login1 | dbus-send flag typo (--timeout vs --reply-timeout), retried in r2 |
 
-Evidence (baseline, minimal session = Xorg + dbus only, smp2, /proc/PID/stat deltas over
-30 s windows, CLK_TCK=100):
+### r1 anomalies (kernel-relevant)
 
-- Xorg pid 307: stime 275→284→303 ticks (3-6% of one core, pure system time; utime flat).
-- dbus-daemon pid 318: stime 16→29 (+13 ticks/30 s ≈ 4%).
-- Xorg InputThread pid 320: stime 15→26 (+11 ticks/30 s ≈ 4%).
-- pollburn busy-mode control validates the accounting: 2001 ticks / 20 s = exactly 100%.
+1. **nanosleep/clock_nanosleep sporadic EFAULT**: python
+   subprocess._wait → time.sleep raised OSError(14, 'Bad address').
+   EFAULT sources in sys_clock_nanosleep: access_ok fail, or
+   copy_from_user uncopied>0 (user page not resolvable at that instant).
+   Suspect ties to EARLY-ROOT-FREE page-table lifetime warnings seen in
+   the same run ("root owner pid=327 ALIVE, freed in pid=324 context")
+   — a fork/mm teardown freeing a page-table root still in use would
+   randomly unmap pages of live processes. (Same family as the known
+   fake-OOM blocker.) F1 test added: 200 sleeps interleaved with
+   fork/waitpid.
+2. **dbus-daemon pid=337 (session bus) SIGKILLed by pid=311 during D1**
+   (si_pid=311 SI_USER). pid 311 is most plausibly the session
+   dbus-daemon itself (it activated dconf-service as 338). A
+   dbus-daemon SIGKILLing another dbus-daemon child is bizarre;
+   KILLTRACE will name the sender in r2.
+3. EARLY-ROOT-FREE warnings at burner teardown.
 
-In the full GNOME session each of ~40 waiters burns a few percent and they also contend
-on the GRQ; that aggregate is the storm.
+## r2-activation (KILLTRACE kernel)
 
-### 2. The taskdump "RUNNING" flood is a sampling artifact (plus real load)
+| test | outcome |
+|---|---|
+| A1-A3 | same as r1: all pass, 100/100 ListNames p50=8ms |
+| B1 session activation (Exec=python3.10 dbuswire.py serve) | **org.freedesktop.DBus.Error.Spawn.ChildExited after 5.4s**; peer-owned marker missing — the activated child died before owning the name |
+| B2 retry | same ChildExited 5.4s |
+| C2 100x under 4 burners | 100/100 OK, p50=10ms max=27ms |
+| D1 gsettings/dconf set+get | **rc=0, set 5s / get 2-3s — dconf round-trips fine** in the minimal case (activation of ca.desrt.dconf via the session bus works) |
+| F1 200x time.sleep in python | **200/200 OSError EFAULT** — deterministic! |
+| E1 system bus login1 activation | **TimedOut after 25s (service_start_timeout)** — dbus-daemon never noticed the activation child exited. THE XORG LOGIND REPRO. |
 
-- `sleep 120` (blocked in clock_nanosleep) correctly reports INTERRUPTIBLE(sleep) in a
-  manual (serial-RX context) DUMP! — the state reporting itself is fine.
-- pollburn blocked in poll()/select() on an idle socketpair shows RUNNING on_rq=1 in the
-  same manual dump — because poll waiters are only ever asleep for 10 ms at a time; at
-  any instant they are frequently freshly woken/runnable (and each poll re-check pass is
-  expensive under TCG, so they spend real time on the runqueue).
-- Periodic dumps (dfx=periodic) run from the TIMER SOFTIRQ — the exact context in which
-  every 10 ms re-check timer fires — so a periodic dump sees ALL poll waiters freshly
-  enqueued: that is the "everything RUNNING" signature in r74j's M5 taskdump.
-- (Note: vruntime is NOT a valid burn metric on this kernel — sleeping tasks get clamped
-  up to min_vruntime on wake, so all frequently-woken tasks show near-identical vruntime.
-  Use /proc/PID/stat utime/stime instead.)
+KILLTRACE hit: `pid=311(dbus-daemon) -> pid=342(dbus-daemon) tgid=342
+ppid=311 SIGKILL` — the session dbus-daemon SIGKILLs its own fork child
+whose comm was still dbus-daemon (pre-exec), while dconf-service
+(pid 343) ran fine concurrently. => an activation-spawned child missed
+its exec deadline and was killed by the dbus spawn machinery.
 
-## Fix (this branch)
+## r3-exectrace (EXECTRACE kernel)
 
-Linux-style poll_wait for poll/ppoll/epoll_wait (P3):
-
-- New dispatch `poll_wait_impls(file)` (misc.rs) keyed on FileOps identity registers the
-  WAITING TASK on the target fd's readiness wait queue:
-  - unix sockets: per-socket queue, woken on peer data / accept / send-space / EOF
-    (all wake sites already existed for blocked readers).
-  - pipes + FIFOs: read_queue AND write_queue (producers wake both).
-  - AF_INET sockets: per-socket queue (wake_tcp_matches/wake_udp_matches).
-  - inotify: instance queue (event enqueue wakes it).
-  - evdev: NEW per-device poll_waitq woken in push_event (device had no queue before).
-  - timerfd: tfd.wait_queue (timerfd_expire_notify).
-  - signalfd: sfd.wait_queue (signalfd_notify_task on signal arrival).
-- `poll_event_wait_round()` (misc.rs): register on all polled files, re-check readiness
-  after registration (lost-wake discipline), arm ONE timeout timer for the full remaining
-  time, sleep until woken by a producer event / timeout / signal.
-- sys_poll: uses the event wait; falls back to the old 10 ms slice ONLY when some polled
-  fd has no wake path (exotic types) or the timer pool is exhausted.
-- sys_epoll_wait: registers the waiting task on every watched file's queue (ET snapshot
-  semantics unchanged); same slice fallback.
-- pselect6/select: unchanged (still slice-based) — nothing in the GNOME session waits in
-  select; glib/Xorg/dbus all use poll/ppoll.
-
-## Verification results
-
-### Isolated repro (pollburn), fixed kernel vs Linux expectations
-
-Minimal session (Xorg + session dbus only, smp2/1G), runs/fix1 + runs/fix2:
-
-```
-POLLBURN mode=wake  poll_ret=1 revents=POLLIN latency=1.010s
-                   (child writes at t=1s; parent woken instantly — the
-                    producer-wake path works, no latency regression from
-                    removing the 10ms re-check)
-POLLBURN mode=busy   wall=20.0s cpu_ticks=2000 (100.0%)   <- accounting control
-POLLBURN mode=poll   wall=20.0s cpu_ticks=1   (0.0%)
-POLLBURN mode=ppoll  wall=21.0s cpu_ticks=0   (0.0%)
-POLLBURN mode=epoll  wall=21.0s cpu_ticks=0   (0.0%)
-POLLBURN mode=select wall=21.0s cpu_ticks=0   (0.0%)
-```
-
-(A 1s-timeout wait on an idle socketpair in a loop; on Linux this is ~0 ticks.
-The OLD kernel burns at tick rate inside each wait — see the baseline numbers
-below; it also cannot complete an INFINITE poll(-1) round at all, which is why
-the repro uses 1s timeouts.)
-
-fix2 steady-state deltas (ticks per 30 s window): Xorg main stime
-+21/+9/+14/+10 (~3-7%... first window includes settle; utime growth 0),
-Xorg InputThread 0, dbus-daemon 0. pollburn tasks blocked in poll report
-INTERRUPTIBLE(sleep) in the manual dump.
-
-### Per-process CPU, /proc/PID/stat tick deltas per 30 s window (CLK_TCK=100)
-
-Baseline (stock kernel, runs/base2, minimal session):
-- Xorg main:     stime +9/+19/+13/+15 per 30s (3-6% of one core, utime flat)
-- dbus-daemon:   stime +13/+14/+11/+8  (~4%)
-- Xorg InputThread: stime +11/+13/+15/+20 (~4-6%)
-
-Fixed (runs/fix1, same session):
-- Xorg main:     stime +23(first)/+8/+4/+14 (steady ~1.3-4.6%)
-- dbus-daemon:   stime +0/+0/+0/+0  (0%)
-- InputThread:   stime +0/+0/+0/+0  (0%)
-
-Goal was < 10% each: PASS (dbus/InputThread exactly 0; Xorg main's remainder
-is its own periodic work / one non-wired fd slice fallback).
-
-### Taskdump state check
-
-Manual DUMP! (serial-RX context, not the timer softirq):
-- stock kernel: `sleep 120` -> INTERRUPTIBLE(sleep) (correct); pollburn
-  blocked in poll()/select() -> RUNNING on_rq=1 (the artifact: poll waiters
-  are only asleep 10ms at a time).
-- fixed kernel: pollburn blocked in poll() and epoll_wait() both report
-  INTERRUPTIBLE(sleep) on_rq=0. Xorg sleeping at sample time.
-- Conclusion: the r74j "everything RUNNING" taskdump flood was mostly the
-  timer-softirq sampling artifact over a real tick-rate wakeup loop. With
-  event-driven waiting both the loop and the artifact are gone. The state
-  reporting code itself was never broken.
-
-### Full GNOME session
-
-- runs/full1 (fixed kernel): chain ran ~10x faster than r74j (30+ processes
-  within 97s vs ~100s per component step on stock main), then hit a kernel
-  panic during the gsd fork/exec storm: R46/R56/R74 scheduler heal-path storm
-  (RUNNING-PHANTOM/SLOTLESS-TP) followed by a wild-epc trap — the
-  pre-existing pick-race family documented in sched.rs (r74a "double-run
-  KERNPANIC" captures predate this work). r74j (stock) shows the same heal
-  classes firing (1x R46, 8x R56, 339x PICK-SKIP-ALL) at its slower pace.
-- runs/full2: survived the fork storm, ran 452 s (Xorg + 2x dbus-daemon +
-  gnome-session + gsd daemons + gmain/gdbus/dconf threads, pids to ~580),
-  then panicked in the uaccess copy path during heavy process churn
-  (component sig=9 teardown storms — the same kill pattern r74j logged at
-  t=236s/415s/641s on stock).
-- runs/full3: no panic, but wedged at ~t=300 s (serial silent, QEMU at 270%
-  host CPU = guest CPUs busy-spinning). khungtaskd reported 8 freshly
-  spawned tasks (pids 576-599) blocked >120 s while the pick loop logged
-  PICK-SKIP-ALL for exactly those pids (`oncpu=0 claim=-1` — skipped by
-  every CPU, never scheduled). This is the pre-existing pick-skip
-  starvation / heal-path family in sched.rs, amplified by the much higher
-  event rate the session now generates. Full3's per-process samples before
-  the wedge showed the same shape as full2: heavy CPU only during the gsd
-  spawn/timeout/kill churn (gnome-session ~3-37%, Xorg ~2-11%), trending
-  down between churn bursts.
-- Component behavior otherwise matches r74j: gsd daemons start but miss the
-  gnome-session registration timeout (same WARNING lines as the stock run).
-- Minimal-session runs (fix1) were 100% stable through the whole scripted
-  sequence (boot, Xorg, dbus, 5 sampler rounds, 5 pollburn modes, DUMP!).
-
-## Open items / next experiments
-
-1. Full-session stability on the fixed kernel: 3 runs gave 1 scheduler-race
-   panic (t=97s, R46/R56/R74 heal storm), 1 uaccess-during-churn panic
-   (t=452s), 1 pick-skip starvation livelock (t=300s, tasks 576-599 never
-   scheduled while older tasks spun). All three are shapes the in-tree
-   heal machinery in kernel/src/sched/sched.rs already documents (R46/R49/
-   R56/R74 captures predate this work; r74j stock shows the same classes
-   firing), but the event-driven poll change shifts timing and may make
-   them more likely at the session's new, much higher event rate.
-   Suggested next experiments, in order:
-   a. Instrument PICK-SKIP-ALL to also dump the skipped task's pick_state
-      and ti_kernel_sp when the skip count for one pid crosses ~1000 —
-      catches the full3 starvation shape with hard data.
-   b. Bisect the wake sources: wire only unix sockets first (the dbus/Xorg
-      path), keep the 10ms slice for pipe/fifo/inotify/evdev, and see which
-      wiring step destabilizes the session.
-   c. Compare a full session on stock main driven from the SAME fast
-      auto.sh (no SLEEPs) — stock main may wedge too once the pace rises;
-      that would pin the instability on pace, not on the poll change.
-2. gsd registration timeouts (session-level): gsd daemons start under the
-   fixed kernel but still miss the gnome-session registration timeout;
-   worth checking gsd-side logs (dbus activation?) next.
-3. pselect6/select still use the 10ms slice fallback (nothing in the GNOME
-   chain waits in select; glib/Xorg/dbus all use poll/ppoll/epoll).
-4. eventfd/netlink/raw: socket.rs wired via per-socket queue; eventfd has
-   no queue -> slice fallback (unused by this session).
-
-## Repro / how to rerun
+peer-wrap.sh (sh wrapper capturing the activated child's stderr) shows:
 
 ```
-cd /home/william/rux-agents/gnome-cpu
-riscv64-linux-gnu-gcc -static -O2 -o /tmp/pollburn test/pollburn.c
-cd runs && python3 cpumin.py <name> 1300   # boots Xorg+dbus, sampler, pollburn, DUMP!
-grep POLLBURN <name>/serial.log
+Traceback ... self.sock.connect(addr)
+FileNotFoundError: [Errno 2] No such file or directory
 ```
 
-pollburn modes: busy (accounting control), poll/ppoll/epoll/select (1 s-timeout waits on
-an idle socketpair in a loop — on Linux ≈ 0 ticks), wake (child writes after 1 s while
-parent blocks in poll(10 s) — measures producer-wake latency; expect ~1 s, 10 s = missed
-wake).
+MY test bug: dbus passes DBUS_SESSION_BUS_ADDRESS with a `,guid=...`
+suffix to activated children; dbuswire's parser fed the whole string to
+connect() → ENOENT. Fixed in run/dbuswire.py (split on comma).
+
+EXECTRACE facts (jiffies @100Hz):
+- dbus-daemon's activation spawn shape: dbus-daemon forks a SITTER
+  (stays comm=dbus-daemon, no exec), sitter forks the exec child.
+- Wrapper chain exec'd FINE: /bin/sh in 12 jiffies, python3.10 in ~300
+  (3s, TCG). **execve of activated children works.**
+- dconf-service exec: 5 jiffies. launch-helper exec: 5 jiffies.
+- The launch helper (pid 573, direct child of the system dbus-daemon,
+  exec OK at jiffies 20209) **never exec'd /bin/false** — E1's 25s
+  service_start_timeout then fired. The helper either starved or
+  blocked after exec.
+- B1v2 (sh wrapper): python died at ~8s (my connect bug); dbus-daemon
+  NEVER reported ChildExited and the activation stayed pending — later
+  calls (B2/C1 50s later) timed out WITHOUT a respawn (peer.log has
+  only one "wrap start") => the sitter's exit never reached
+  dbus-daemon either.
+- G1 (bare python time.sleep, no fork): FAILS with EFAULT — and NONE
+  of the instrumented sleep-syscall EFAULT branches printed. The
+  failing syscall is something else entirely (EFAULTTRAC added for r4).
+- G2 (sleep right after fork+waitpid): EFAULT, same.
+
+## Working hypotheses
+
+1. **Lost child-exit notification** (exit.rs defer_exit_notify →
+   __schedule → SIGCHLD + wait_chldexit wake): system-bus activation
+   never notices the helper exit (E1, deterministic 2/2); session
+   activation loses the SITTER's forwarded exit sometimes (r3 B1v2).
+   r2's session ChildExited at 5.4s shows the machinery CAN work —
+   the loss is a race. EXITNOTIFY trace added for r4.
+2. **PICK-SKIP-ALL** scheduler pick anomalies appear exactly at the
+   stuck moments (pid 573 post-exec) — the freshly exec'd helper may be
+   stranded runnable while CPUs idle (transient claim states also
+   produce this print, so it is not yet conclusive).
+3. **python time.sleep EFAULT** — syscall-level EFAULTTRAC in r4 will
+   name the syscall.
+
+## r4-exitnotify (EXITNOTIFY + EFAULTTRAC + dfx=taskdump + guid fix)
+
+| test | outcome |
+|---|---|
+| B1v2 activation (guid fix) | peer-owned OK; first call 35s (TCG python startup dominated), B2: **100/100 Echo p50=18ms max=38ms** |
+| C1 100x Echo under 4 burners | **100/100 p50=28ms max=220ms — zero timeouts under load** |
+| C2 ListNames under load | 100/100 |
+| D1 gsettings/dconf | set 6s, get 3s rc=0 — fine |
+| F1/G1/G2 sleep | EFAULT still 200/200, G1 bare python fails |
+| E1 login1 system activation | TimedOut 25s — STILL (2nd deterministic repro) |
+
+### EFAULT root cause FOUND + FIXED
+
+EFAULTTRAC: `pid=<F1 python> nr=72 a0=0 a1=0` x59. Syscall 72 =
+**pselect6** — python's sleep path calls pselect6(0, NULL, NULL, NULL,
+&ts, NULL), the classic pure-sleep idiom. Our pselect6_common REJECTED
+all-NULL fd sets with EFAULT (bogus guard). Linux sleeps and returns 0.
+
+FIX (kernel/src/syscall/misc.rs): removed the EFAULT guard; empty fd
+sets + timeout = pure sleep, POSIX/Linux parity. This also fixes
+sys_select (same core).
+
+### E1 helper chain forensics (obs-sys.log + EXECTRACE + EXITNOTIFY)
+
+- system dbus-daemon = 568. Activation forked sitter 575 (comm stays
+  dbus-daemon) which forked 576 → exec'd launch-helper OK (10 jiffies).
+- **575 went ZOMBIE at t=0.25s and was NEVER reaped by 568** for the
+  whole run; **NO EXITNOTIFY line for child=575** → the deferred
+  exit-notification (do_exit → defer_exit_notify → __schedule consumer)
+  was never delivered. dbus-daemon 568 therefore never ran its child
+  watch → activation pending → 25s service_start_timeout. THIS IS THE
+  XORG/LOGIND REPRO AT KERNEL LEVEL.
+- 576 (helper) after exec: never appeared in /proc listing again, never
+  exec'd /bin/false, no EXITNOTIFY, no SIGDEATH — it was stranded
+  runnable (r3's PICK-SKIP-ALL showed pid=573, same role, with
+  oncpu=0 claim=-1 pk=1 — looks pickable but skipped).
+- The /proc observer python (571) ITSELF got stranded the same way at
+  t≈8s: repeated PICK-SKIP-ALL from BOTH CPUs with oncpu=0 claim=-1
+  pk=1, and it never reached the end of its loop.
+
+### Scheduler wedge instrumentation + holes fixed
+
+1. PICK-SKIP-ALL now prints the pick-time refusing leg (1=on_cpu set,
+   2=own-claim non-prev, 3=ownership refused (live claim), 4=affinity,
+   5=cgroup-throttled) instead of re-reading state later (racy).
+2. `__schedule`'s `next == prev` early return SKIPPED
+   process_deferred_exit_notify_cpu — a pending exit notify could sit
+   in the per-CPU slot until the next real switch on that CPU. Fixed:
+   process the slot on the early-return path too (guarded: never fire
+   prev's own notify while prev still runs — the deferred protocol
+   exists to prevent exactly that reap race).
+
+## Status
+
+- r5 running: pselect6 fix + EXITNOTIFY early-return fix + leg-named
+  PICK-SKIP-ALL. Win conditions to check: F1/G1 sleep OK, E1 fast
+  error reply.
