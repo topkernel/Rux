@@ -265,58 +265,116 @@ impl Default for AddressSpace {
     }
 }
 
+/// FileBuffer chunk granularity (R76). One contiguous heap allocation is
+/// capped at this size: memfd ftruncate of a large buffer (observed 64 MiB
+/// during gnome-shell init: ALLOCTHROW size=67108864 in the bigalloc3 run)
+/// used to be a single `Vec::resize`, which the 16 MiB buddy MAX_ORDER
+/// cannot satisfy — Linux serves the same ftruncate from tmpfs pages.
+pub const FILE_BUFFER_CHUNK: usize = 64 * 1024;
+
 pub struct FileBuffer {
-    /// Data
-    pub data: Vec<u8>,
+    /// Logical length in bytes (chunks may hold zeros past it).
+    len: usize,
+    /// Fixed-size heap chunks covering [0, chunks.len()*CHUNK). All chunks
+    /// up to ceil(len/CHUNK) are allocated; a shrink keeps them until the
+    /// trailing ones are dropped.
+    chunks: Vec<Vec<u8>>,
 }
 
 impl FileBuffer {
+    /// One zeroed chunk, allocated without transiting the (small) kernel
+    /// stack: with_capacity mmaps from the heap directly.
+    fn new_chunk() -> Vec<u8> {
+        let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);
+        unsafe {
+            core::ptr::write_bytes(c.as_mut_ptr(), 0, FILE_BUFFER_CHUNK);
+            c.set_len(FILE_BUFFER_CHUNK);
+        }
+        c
+    }
+
     /// Create new file buffer
     pub fn new() -> Self {
         Self {
-            data: Vec::new(),
+            len: 0,
+            chunks: Vec::new(),
         }
     }
 
     /// Create from byte data
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self {
-            data: bytes.to_vec(),
-        }
+        let mut fb = Self::new();
+        fb.write(0, bytes);
+        fb
     }
 
     /// Read data
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> usize {
-        if offset >= self.data.len() {
+        if offset >= self.len {
             return 0;
         }
-        let available = self.data.len() - offset;
+        let available = self.len - offset;
         let to_read = core::cmp::min(buf.len(), available);
-        buf[..to_read].copy_from_slice(&self.data[offset..offset + to_read]);
+        let mut done = 0;
+        while done < to_read {
+            let pos = offset + done;
+            let ci = pos / FILE_BUFFER_CHUNK;
+            let co = pos % FILE_BUFFER_CHUNK;
+            let n = core::cmp::min(FILE_BUFFER_CHUNK - co, to_read - done);
+            buf[done..done + n]
+                .copy_from_slice(&self.chunks[ci][co..co + n]);
+            done += n;
+        }
         to_read
     }
 
-    /// Write data
+    /// Write data (extends the buffer like Linux when offset+len exceeds
+    /// the current size, zero-filling any gap).
     pub fn write(&mut self, offset: usize, buf: &[u8]) -> usize {
-        if offset >= self.data.len() {
-            // Extend buffer
-            let new_len = offset + buf.len();
-            self.data.resize(new_len, 0);
+        if buf.is_empty() {
+            return 0;
         }
-        let available = self.data.len() - offset;
-        let to_write = core::cmp::min(buf.len(), available);
-        self.data[offset..offset + to_write].copy_from_slice(&buf[..to_write]);
-        to_write
+        let end = offset + buf.len();
+        if end > self.len {
+            self.resize(end);
+        }
+        let mut done = 0;
+        while done < buf.len() {
+            let pos = offset + done;
+            let ci = pos / FILE_BUFFER_CHUNK;
+            let co = pos % FILE_BUFFER_CHUNK;
+            let n = core::cmp::min(FILE_BUFFER_CHUNK - co, buf.len() - done);
+            self.chunks[ci][co..co + n].copy_from_slice(&buf[done..done + n]);
+            done += n;
+        }
+        buf.len()
+    }
+
+    /// Resize (ftruncate semantics: grow-with-zeros / shrink drops bytes).
+    /// Growth allocates one FILE_BUFFER_CHUNK at a time — never a single
+    /// oversized allocation (R76).
+    pub fn resize(&mut self, new_len: usize) {
+        let new_chunks = new_len.div_ceil(FILE_BUFFER_CHUNK);
+        while self.chunks.len() < new_chunks {
+            self.chunks.push(Self::new_chunk());
+        }
+        if new_len < self.len {
+            // Shrink: drop whole trailing chunks; the new last chunk keeps
+            // stale bytes past new_len, but len bounds every read.
+            let keep = new_len.div_ceil(FILE_BUFFER_CHUNK);
+            self.chunks.truncate(keep);
+        }
+        self.len = new_len;
     }
 
     /// Get size
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.len
     }
 
     /// Check if empty
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.len == 0
     }
 }
 
