@@ -19,14 +19,14 @@
 
 ## 🖥️ Rux Runs Ubuntu
 
-**A complete Ubuntu 22.04 userland — glibc dynamic binaries, real shells, D-Bus, a graphical desktop session, Xorg rendering X client windows, and an interactive xterm — boots on the Rux kernel today, on both riscv64 and x86_64 (amd64).**
+**A complete Ubuntu 22.04 userland — glibc dynamic binaries, real shells, D-Bus, Xorg rendering X client windows, an interactive xterm, and a real GNOME Shell desktop (gnome-shell + mutter compositing, the gsd settings daemons) — boots on the Rux kernel today, on both riscv64 and x86_64 (amd64).**
 
 | | |
 |---|---|
-| ![Ubuntu login](docs/images/ubuntu-login-2026-09-29.png) | ![Ubuntu desktop](docs/images/ubuntu-desktop-2026-09-29.png) |
-| *Login screen (native framebuffer session)* | *Desktop with dock, top panel and windows* |
-| ![Apps](docs/images/ubuntu-sysinfo-rux.png) | ![Terminal](docs/images/ubuntu-terminal-2026-09-29.png) |
-| *System Info — kernel row shows the Rux identity* | *Terminal running a real `/bin/dash` shell — real commands, real output* |
+| ![GNOME desktop](docs/images/gnome-desktop-2026-10-14.png) | ![Ubuntu desktop](docs/images/ubuntu-desktop-2026-09-29.png) |
+| *GNOME Shell overview on Rux — Activities, clock, workspace thumbnails and dash, rendered by gnome-shell/mutter over Xorg-fbdev with software GL* | *udesk desktop (dock, top panel, windows) — `make ubuntu-run`* |
+| ![Ubuntu login](docs/images/ubuntu-login-2026-09-29.png) | ![Terminal](docs/images/ubuntu-terminal-2026-09-29.png) |
+| *udesk login screen (native framebuffer session)* | *Terminal running a real `/bin/dash` shell — real commands, real output* |
 
 What is running in these screenshots, all on the Rux kernel:
 
