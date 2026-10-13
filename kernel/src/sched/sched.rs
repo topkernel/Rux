@@ -2340,9 +2340,52 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 // then may the orphaned mark be cleared.
                 let ps = (*task).pick_state();
                 if ps == crate::process::task::PICK_LIVE {
-                    return false;
-                }
-                if ps == crate::process::task::PICK_PICKED
+                    // R80 (LIVE-phantom heal, the v1-r1 Xorg capture): we
+                    // are holding the GRQ with the task RUNNING ∧ unlinked ∧
+                    // owned by no slot (the curr_on scan above — lying idle
+                    // slots were already rewritten — and no SWITCHING_OUT
+                    // names it). A LIVE pick-state is published together
+                    // with the publisher's slot naming the task (fresh
+                    // PICKED + slot at pick; LIVE either by the switch-in
+                    // affirm or by the repick/forced-LIVE publish — all
+                    // under this lock, all with slot == task). A hart
+                    // executing the task keeps its slot naming it until its
+                    // next __schedule, and that __schedule either releases
+                    // the ownership qword (full switch-out) or leaves the
+                    // mid-switch-out mark. NONE of those legs can present
+                    // LIVE ∧ unlinked ∧ slotless ∧ !SWITCHING_OUT — the
+                    // state is impossible in-tree, and the v1-r1 capture
+                    // held it for 30 minutes with every picker, waker and
+                    // harvester refusing on the LIVE word alone. Time-confirm
+                    // through the orphan watch (fed by the harvester's
+                    // retries): a LIVE mark that persists >=50 jiffies in this shape
+                    // is stale, and clearing it un-strands the task. The
+                    // m25 double-run lesson is respected — the r74a capture
+                    // cleared a mark whose claimer's slot STILL advanced only
+                    // because the R49 heal ran without the pick-state
+                    // adjudication; here the slot scan, the SWITCHING_OUT
+                    // check and the time confirmation all run under one GRQ
+                    // hold, and a hart that is genuinely resuming the task
+                    // keeps its slot naming it for the whole affirm window.
+                    if !orphan_watch_confirm(
+                        task,
+                        (*task).pid(),
+                        crate::drivers::timer::get_jiffies(),
+                        50,
+                    ) {
+                        return false;
+                    }
+                    // (Threshold 50 jiffies: the watch table re-records a
+                    // sighting once it ages past 60, so longer thresholds
+                    // would never mature. 500 ms is still two orders above
+                    // every legitimate in-flight window.)
+                    r56_print_pid(
+                        b"R80-LIVE-PHANTOM-CLEARED pid=",
+                        (*task).pid(),
+                        b"\n",
+                    );
+                    // Fall through to the release + insert below.
+                } else if ps == crate::process::task::PICK_PICKED
                     && !(*task).revoke_pending_pick()
                 {
                     // The picker affirmed LIVE under us (it is resuming
@@ -3525,7 +3568,14 @@ fn r56_print_msg(msg: &[u8]) {
 fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
     r56_print_msg(prefix);
     let v = pid as u64;
-    let mut buf = [0u8; 8];
+    // R81 (printer hardening, from the bigalloc8 adjudication): this
+    // printer is called from heal paths that read POSSIBLY CORRUPTED
+    // words (the R80 legs print a garbage claim; the integration
+    // branch's capture hit a >=9-digit value from a corrupted pid field
+    // and PANICKED here — index out of bounds len 8 index 8 — turning a
+    // contained heal into a kernel panic inside the diagnostic itself).
+    // u32::MAX is 10 digits; size for that and never index past it.
+    let mut buf = [0u8; 10];
     let mut n = 0;
     if v == 0 {
         buf[0] = b'0';
@@ -3546,6 +3596,100 @@ fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
         unsafe { crate::console::putchar_no_lock(buf[i]); }
     }
     r56_print_msg(suffix);
+}
+
+/// R80 (diag): one parked-context line for a harvested orphan, rate-limited
+/// to one per 25 jiffies system-wide (the v2 storm healed ~3 victims/s; the
+/// console must not become the bottleneck). Mirrors the R76 parked-stack
+/// walk: caller frames of the saved kernel sp (kernel-text words only,
+/// symbolizable with addr2line). Runs from the idle-loop harvester with NO
+/// GRQ held — reads are volatile and diagnostic-only; the task is pinned by
+/// the caller's try_pin.
+fn harvest_print_parked(task: *mut Task, pid: u32) {
+    use crate::console::putchar_no_lock as putchar;
+    static LAST: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(core::sync::atomic::Ordering::Relaxed);
+    if now.wrapping_sub(last) < 25 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    fn pdec(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+    }
+    fn phex(v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16u32).rev() {
+            let nb = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+        }
+    }
+    unsafe {
+        const M: &[u8] = b"  ORPHAN-CTX pid=";
+        for &b in M { putchar(b); }
+        pdec(pid as u64);
+        const O: &[u8] = b" o=";
+        for &b in O { putchar(b); }
+        putchar(b'0' + (*task).on_cpu() as u8);
+        let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
+        const C: &[u8] = b" cl=";
+        for &b in C { putchar(b); }
+        if (claim as i64) < 0 { putchar(b'-'); }
+        pdec((claim as i64).unsigned_abs() as u64);
+        const P: &[u8] = b" pk=";
+        for &b in P { putchar(b); }
+        pdec((*task).pick_state() as u64);
+        const T: &[u8] = b" ti_cpu=";
+        for &b in T { putchar(b); }
+        pdec((*task).ti_cpu() as i64 as u64);
+        let thsp = (*task).thread().sp;
+        const K: &[u8] = b" ksp=0x";
+        for &b in K { putchar(b); }
+        phex((*task).ti_kernel_sp());
+        if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
+            const S: &[u8] = b" stk=0x";
+            for &b in S { putchar(b); }
+            phex(thsp);
+            // Caller frames above the saved sp (stacks grow down).
+            let base = thsp as *const u64;
+            let mut shown = 0;
+            for k in 0..64 {
+                // SAFETY: diagnostic volatile read of the pinned task's own
+                // kernel-stack pages.
+                let w = core::ptr::read_volatile(base.add(k));
+                if w >= 0xffffffff80000000 && w < 0xffffffff80200000 && (w & 1) == 0 {
+                    putchar(b' ');
+                    phex(w);
+                    shown += 1;
+                    if shown >= 6 {
+                        break;
+                    }
+                }
+            }
+        }
+        putchar(b'\n');
+    }
 }
 
 /// R56 round 2: authoritative GRQ-locked heal for the two orphan shapes
@@ -3653,20 +3797,80 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                 // switch-in aborts at the affirm CAS instead of resuming.
                 let st = (*task).pick_state();
                 if st == PICK_LIVE {
-                    return false;
+                    // R80 (LIVE-on-linked stale-mark heal): under the GRQ we
+                    // hold, a LINKED task with on_cpu set and NO
+                    // SWITCHING_OUT mark is executing NOWHERE. Every leg is
+                    // provable: (1) mid switch-out publishes
+                    // SWITCHING_OUT[name] before releasing the GRQ —
+                    // excluded above; (2) an in-flight pick UNLINKS the task
+                    // under this same lock before publishing — a linked task
+                    // has no pending pick; (3) a task running as some CPU's
+                    // current is named by that CPU's slot until its next
+                    // __schedule, which links it only in the mid-switch-out
+                    // shape of (1); (4) a LIVE publish (fast-path repick /
+                    // R57 forced-LIVE) happens with the publisher's slot
+                    // naming the task under this lock. The v1-r1 full-session
+                    // capture stranded Xorg in exactly this shape for 30
+                    // minutes (linked ∧ {on_cpu=1, claim=1} ∧ LIVE ∧
+                    // slotless, every picker skipping why=1, every heal
+                    // refusing on LIVE) because the original unconditional
+                    // refusal trusted the LIVE word with no way to adjudicate
+                    // it. Re-verify the slot scan under THIS lock hold (the
+                    // caller's pre-filter raced nothing since it also holds
+                    // no slots, but do not trust it), then require the
+                    // orphan watch to have time-confirmed the shape for >=1s
+                    // — an impossible-in-tree state that PERSISTS is by
+                    // definition a stale mark, and leaving it strands the
+                    // task forever (the phantom holds whatever lock it took,
+                    // wedging everyone else: the EXT4-BIGLOCK stall family).
+                    // The m25 double-run fear does not apply: releasing the
+                    // qword of a task that provably executes nowhere cannot
+                    // hand it to a second hart.
+                    if (0..MAX_CPUS).any(|c| cpu_state(c).current == task) {
+                        // A slot names it after all (pre-filter raced a
+                        // pick's slot publish): genuinely owned — refuse.
+                        return false;
+                    }
+                    if !orphan_watch_confirm(
+                        task,
+                        pid,
+                        crate::drivers::timer::get_jiffies(),
+                        50,
+                    ) {
+                        // First (or recent) sighting — come back after the
+                        // shape has persisted half a second. (Threshold must
+                        // stay below the watch table's 60-jiffy re-record
+                        // guard, which would otherwise reset the aging.)
+                        return false;
+                    }
+                    (*task).release_pick_ownership();
+                    r56_print_pid(
+                        b"R80-LIVE-MARK-CLEARED pid=",
+                        pid,
+                        b" was_claim=",
+                    );
+                    r56_print_pid(
+                        b"",
+                        (*task).running_on_cpu.load(
+                            core::sync::atomic::Ordering::Acquire,
+                        ).unsigned_abs(),
+                        b"\n",
+                    );
+                    outcome = true;
+                } else {
+                    if st == PICK_PICKED && !(*task).revoke_pending_pick() {
+                        // Lost the race against the picker's affirm CAS — the
+                        // task just went LIVE; not healable.
+                        return false;
+                    }
+                    (*task).release_pick_ownership();
+                    r56_print_pid(
+                        b"R56-QUEUED-MARK-CLEARED pid=",
+                        pid,
+                        b"\n",
+                    );
+                    outcome = true;
                 }
-                if st == PICK_PICKED && !(*task).revoke_pending_pick() {
-                    // Lost the race against the picker's affirm CAS — the
-                    // task just went LIVE; not healable.
-                    return false;
-                }
-                (*task).release_pick_ownership();
-                r56_print_pid(
-                    b"R56-QUEUED-MARK-CLEARED pid=",
-                    pid,
-                    b"\n",
-                );
-                outcome = true;
             } else if linked {
                 return false;
             } else if task_is_mid_switch_out(task) {
@@ -3916,7 +4120,20 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                     // never set (R46 family): wake_up_enqueue's GRQ-locked
                     // phantom path verifies linkage/ownership and heals.
                     if wake_up_enqueue(t) {
-                        r56_print_msg(b"R56-ORPHAN-HARVESTED\n");
+                        // R80 (diag): name the healed pid — the v1-r1 wedge
+                        // printed hundreds of anonymous harvest lines while
+                        // the actual blocker (a LIVE-mark phantom) was
+                        // refused elsewhere and never named.
+                        r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                        // R80 (diag, producer hunt): the v2 storm showed
+                        // pids 306/336/338 cycling orphan -> heal -> orphan
+                        // every ~200ms through THIS plain-insert path (no
+                        // R49/R80 print — their marks were already clean).
+                        // Print the victim's parked context, rate-limited:
+                        // the saved thread.sp's caller frames name the exact
+                        // syscall/wait site the context was stranded in, and
+                        // repeated identical frames = one producer.
+                        harvest_print_parked(t, pid);
                     }
                 }
                 Some(c) => {
@@ -3930,7 +4147,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // wake_up_enqueue heals the slot and admits the
                         // re-link.
                         if wake_up_enqueue(t) {
-                            r56_print_msg(b"R56-ORPHAN-HARVESTED\n");
+                            r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
                         }
                     } else if (*t).preempt_count() == 0
                         && orphan_watch_confirm(t, pid, now, 3)

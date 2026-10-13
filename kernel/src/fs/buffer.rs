@@ -342,6 +342,17 @@ pub struct FileBuffer {
 }
 
 impl FileBuffer {
+    /// One zeroed chunk, allocated without transiting the (small) kernel
+    /// stack: with_capacity mmaps from the heap directly.
+    fn new_chunk() -> Vec<u8> {
+        let mut c = Vec::with_capacity(FILE_BUFFER_CHUNK);
+        unsafe {
+            core::ptr::write_bytes(c.as_mut_ptr(), 0, FILE_BUFFER_CHUNK);
+            c.set_len(FILE_BUFFER_CHUNK);
+        }
+        c
+    }
+
     /// Create new file buffer
     pub fn new() -> Self {
         Self {
