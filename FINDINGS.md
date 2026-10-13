@@ -84,20 +84,29 @@ Linux-style poll_wait for poll/ppoll/epoll_wait (P3):
 
 ### Isolated repro (pollburn), fixed kernel vs Linux expectations
 
-Minimal session (Xorg + session dbus only, smp2/1G), runs/fix1:
+Minimal session (Xorg + session dbus only, smp2/1G), runs/fix1 + runs/fix2:
 
 ```
-POLLBURN mode=busy   wall=20.0s cpu_ticks=2001 (100.0%)   <- accounting control
-POLLBURN mode=poll   wall=21.0s cpu_ticks=0   (0.0%)
-POLLBURN mode=ppoll  wall=21.0s cpu_ticks=1   (0.0%)
-POLLBURN mode=epoll  wall=21.0s cpu_ticks=1   (0.0%)
-POLLBURN mode=select wall=21.0s cpu_ticks=1   (0.0%)
+POLLBURN mode=wake  poll_ret=1 revents=POLLIN latency=1.010s
+                   (child writes at t=1s; parent woken instantly — the
+                    producer-wake path works, no latency regression from
+                    removing the 10ms re-check)
+POLLBURN mode=busy   wall=20.0s cpu_ticks=2000 (100.0%)   <- accounting control
+POLLBURN mode=poll   wall=20.0s cpu_ticks=1   (0.0%)
+POLLBURN mode=ppoll  wall=21.0s cpu_ticks=0   (0.0%)
+POLLBURN mode=epoll  wall=21.0s cpu_ticks=0   (0.0%)
+POLLBURN mode=select wall=21.0s cpu_ticks=0   (0.0%)
 ```
 
 (A 1s-timeout wait on an idle socketpair in a loop; on Linux this is ~0 ticks.
 The OLD kernel burns at tick rate inside each wait — see the baseline numbers
 below; it also cannot complete an INFINITE poll(-1) round at all, which is why
 the repro uses 1s timeouts.)
+
+fix2 steady-state deltas (ticks per 30 s window): Xorg main stime
++21/+9/+14/+10 (~3-7%... first window includes settle; utime growth 0),
+Xorg InputThread 0, dbus-daemon 0. pollburn tasks blocked in poll report
+INTERRUPTIBLE(sleep) in the manual dump.
 
 ### Per-process CPU, /proc/PID/stat tick deltas per 30 s window (CLK_TCK=100)
 
