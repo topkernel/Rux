@@ -12,6 +12,27 @@
 use core::sync::atomic::{AtomicI32, Ordering};
 use crate::process::wait::WaitQueueHead;
 
+/// R77 (semaphore CAS discipline): try to take one unit from `count` —
+/// succeeds only by atomically swapping a POSITIVE value to value-1. A
+/// failed attempt leaves the count untouched (no reservation, no restore),
+/// so the count is always exactly "units available", never a mix of
+/// availability and outstanding waiter reservations.
+fn cas_take(count: &AtomicI32) -> bool {
+    let mut c = count.load(Ordering::Acquire);
+    while c > 0 {
+        match count.compare_exchange_weak(
+            c,
+            c - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(v) => c = v,
+        }
+    }
+    false
+}
+
 /// Semaphore
 ///
 /// A semaphore is a non-negative integer used for process synchronization:
@@ -77,13 +98,24 @@ impl Semaphore {
     /// # }
     /// ```
     pub fn down(&self) {
-        // R7-B6b: register on the wait queue BEFORE decrementing. The old
-        // order (fetch_sub, then prepare_to_wait) had a lost-wakeup window:
-        // an up() landing between them incremented the count, saw old >= 0
-        // (or an empty queue) and woke NOBODY — our own fetch_sub had
-        // already consumed its +1, so the wake was lost forever and we
-        // slept eternally. Registering first means any up() that pairs
-        // with our decrement finds us on the queue.
+        // R77 (GNOME kill-storm wedge/corruption family — rewrite of the
+        // reservation protocol): the old down() reserved with an
+        // unconditional fetch_sub and, after schedule() returned, TRUSTED
+        // that the wake was an up() handoff. But signal_wake_up
+        // force-wakes UNINTERRUPTIBLE sleepers (kill -9 storms wake
+        // D-state waiters — the gsd teardown churn), so a signal-woken
+        // waiter returned WITHOUT owning the semaphore while its -1
+        // reservation stayed queued forever: two tasks walked into one
+        // critical section (the copy_user wild-pointer panics at
+        // guest+360s/+960s) and the poisoned count made every later up()
+        // pair against a ghost. The wake source cannot be distinguished
+        // from inside down(), so stop reserving: take a slot only via
+        // CAS on a POSITIVE count (no failed-attempt side effects), and
+        // after ANY wake simply retry. A spurious or signal wake now
+        // costs one extra prepare/sleep round instead of the mutex
+        // invariant. The R7-B6b lost-wake window stays closed by the
+        // post-registration recheck; R8-6's exclusive/FIFO registration
+        // discipline is unchanged.
         let current = match crate::sched::current() {
             Some(task) => task,
             None => {
@@ -95,30 +127,33 @@ impl Semaphore {
             }
         };
 
-        // Register + mark UNINTERRUPTIBLE (atomically under the waitqueue
-        // lock — see wait_event_interruptible!). EXCLUSIVE (tail insert,
-        // FIFO): a transient fast-path registrant must not sit ahead of a
-        // real sleeper and steal up()'s single wake token (R8-6).
-        self.wait.prepare_to_wait(current, true, false);
+        loop {
+            // Fast path: take a slot if one is visible.
+            if cas_take(&self.count) {
+                return;
+            }
 
-        let old = self.count.fetch_sub(1, Ordering::Acquire);
-        if old > 0 {
-            // Acquired on the fast path — unregister and go.
+            // Slow path: register EXCLUSIVE (tail insert, FIFO) + mark
+            // UNINTERRUPTIBLE atomically under the waitqueue lock.
+            self.wait.prepare_to_wait(current, true, false);
+
+            // Recheck after registering (R7-B6b): an up() between the
+            // failed CAS and the registration must find us queued.
+            if cas_take(&self.count) {
+                self.wait.finish_wait(current);
+                // finish_wait restored RUNNING; a concurrent up() may ALSO
+                // have seen us queued+sleeping and enqueued us (NEW-C2
+                // family) — undo that (per-class on_rq guards make it a
+                // no-op otherwise).
+                crate::sched::dequeue_task(&*current);
+                return;
+            }
+
+            crate::arch::cpu::restore_irq(true);
+            crate::sched::schedule();
             self.wait.finish_wait(current);
-            // finish_wait restored RUNNING; a concurrent up() may ALSO have
-            // seen us queued+sleeping and enqueued us (NEW-C2 family) —
-            // undo that (per-class on_rq guards make it a no-op otherwise).
-            crate::sched::dequeue_task(&*current);
-            return;
+            // R77: loop and retry — do NOT trust the wake source.
         }
-
-        // Slow path: our decrement is queued; the pairing up() will wake us.
-        crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
-
-        // Woken up — finish_wait restores RUNNING and removes from queue.
-        // The wake implies an up() paired with our reservation.
-        self.wait.finish_wait(current);
     }
 
     /// P operation (interruptible)
@@ -152,18 +187,12 @@ impl Semaphore {
     /// # }
     /// ```
     pub fn down_interruptible(&self) -> Result<(), ()> {
-        // R32-F10: register on the wait queue BEFORE decrementing — the
-        // same discipline as down() (R7-B6b). The old order (fetch_sub
-        // first, prepare_to_wait later, with a `count > 0` recheck) had a
-        // lost-wakeup window: an up() landing between the fetch_sub and
-        // the registration incremented the count back to exactly 0 (the +1
-        // paired with our reservation) and, seeing old < 0, called
-        // wake_up_one on an EMPTY queue. The recheck's `> 0` then missed
-        // the count of 0, so we slept anyway — and every later up() saw
-        // old >= 0 and woke NOBODY: the waiter slept forever (only a
-        // signal could break it out, and with none pending it never
-        // returned EINTR). Registering first means any up() that pairs
-        // with our decrement finds us on the queue and wakes us.
+        // R77: same CAS rewrite as down() — a returned-from-schedule wake
+        // is not proof of an up() handoff (spurious wakes, signal wakes),
+        // so retry the acquire instead of returning Ok(()) unowned. The
+        // signal path keeps its exact semantics: pending signal after a
+        // wake (or before sleeping) returns Err with NO count side
+        // effects (there is no reservation to roll back anymore).
         let current = match crate::sched::current() {
             Some(task) => task,
             None => {
@@ -173,55 +202,50 @@ impl Semaphore {
             }
         };
 
-        // Register + mark INTERRUPTIBLE (atomically under the waitqueue
-        // lock — see wait_event_interruptible!). EXCLUSIVE (tail insert,
-        // FIFO), matching down(): a transient fast-path registrant must
-        // not sit ahead of a real sleeper and steal up()'s single wake
-        // token (R8-6).
-        self.wait.prepare_to_wait(current, true, true);
+        loop {
+            // Fast path: take a slot if one is visible.
+            if cas_take(&self.count) {
+                return Ok(());
+            }
 
-        let old = self.count.fetch_sub(1, Ordering::Acquire);
-        if old > 0 {
-            // Acquired on the fast path — unregister and go.
+            // Register + mark INTERRUPTIBLE (atomically under the waitqueue
+            // lock). EXCLUSIVE (tail insert, FIFO), matching down().
+            self.wait.prepare_to_wait(current, true, true);
+
+            // Recheck after registering (R32-F10 / R7-B6b lost-wake
+            // discipline: any up() that pairs with this attempt must find
+            // us queued).
+            if cas_take(&self.count) {
+                self.wait.finish_wait(current);
+                crate::sched::dequeue_task(&*current);
+                return Ok(());
+            }
+
+            // A signal that arrived before we sleep must interrupt
+            // immediately (the caller maps Err to EINTR).
+            if crate::signal::signal_pending() {
+                self.wait.finish_wait(current);
+                // R9-17: NEW-C2 discipline for the signal path too — undo a
+                // concurrent wake enqueue before returning.
+                crate::sched::dequeue_task(&*current);
+                return Err(());
+            }
+
+            crate::arch::cpu::restore_irq(true);
+            crate::sched::schedule();
             self.wait.finish_wait(current);
-            // finish_wait restored RUNNING; a concurrent up() may ALSO have
-            // seen us queued+sleeping and enqueued us (NEW-C2 family) —
-            // undo that (per-class on_rq guards make it a no-op otherwise).
-            crate::sched::dequeue_task(&*current);
-            return Ok(());
+
+            // Interrupted by a signal rather than up(): report EINTR to
+            // the caller. No count side effects to undo (R77: the CAS
+            // discipline took nothing); if an up() raced the signal its +1
+            // stays in the count for the next down — no token is lost.
+            if crate::signal::signal_pending() {
+                crate::sched::dequeue_task(&*current);
+                return Err(());
+            }
+            // R77: otherwise loop and retry the acquire — the wake alone is
+            // not proof an up() handed us the slot.
         }
-
-        // A signal that arrived before we sleep must interrupt immediately
-        // (the caller maps Err to EINTR) rather than continuing into the
-        // sleep.
-        if crate::signal::signal_pending() {
-            self.wait.finish_wait(current);
-            // R9-17: NEW-C2 discipline for the signal path too — undo a
-            // concurrent wake enqueue before returning.
-            crate::sched::dequeue_task(&*current);
-            // Undo our decrement — we are not taking the semaphore.
-            self.count.fetch_add(1, Ordering::Release);
-            return Err(());
-        }
-
-        // Slow path: our decrement is queued; the pairing up() will wake us.
-        crate::arch::cpu::restore_irq(true);
-        crate::sched::schedule();
-
-        // Woken up — finish_wait restores RUNNING and removes from queue.
-        self.wait.finish_wait(current);
-
-        // Interrupted by a signal rather than up(): release the
-        // reservation and report EINTR to the caller. (If an up() raced
-        // the signal, its +1 stays in the count for the next down — no
-        // token is lost.)
-        if crate::signal::signal_pending() {
-            self.count.fetch_add(1, Ordering::Release);
-            return Err(());
-        }
-
-        // Woken by up(): our fetch_sub reserved the slot the up() released.
-        Ok(())
     }
 
     /// Try P operation (non-blocking)
@@ -255,15 +279,12 @@ impl Semaphore {
     /// # }
     /// ```
     pub fn down_trylock(&self) -> Result<(), ()> {
-        // Atomic decrement by 1
-        let old = self.count.fetch_sub(1, Ordering::Acquire);
-
-        if old > 0 {
-            // Successfully acquired semaphore
+        // R77: pure CAS take — the old fetch_sub/fetch_add restore pair
+        // briefly published a negative count that a concurrent up() could
+        // misread as a waiter reservation.
+        if cas_take(&self.count) {
             Ok(())
         } else {
-            // Semaphore not available, restore value
-            self.count.fetch_add(1, Ordering::Release);
             Err(())
         }
     }
@@ -286,20 +307,15 @@ impl Semaphore {
     /// # }
     /// ```
     pub fn up(&self) {
-        // Linux __up() semantics: wake a waiter if one is waiting,
-        // otherwise increment count.  This avoids the double-count bug
-        // where up() both increments count AND wakes a waiter (the waiter
-        // then also sees count > 0 and doesn't re-decrement, leaking count).
-        //
-        // We increment count first to signal that a slot is available,
-        // then wake one exclusive waiter.  The woken waiter's down() path
-        // will consume this count via its CAS loop.
-        let old = self.count.fetch_add(1, Ordering::Release);
-
-        if old < 0 {
-            // Waiters exist — wake one exclusive waiter.
-            self.wait.wake_up_one();
-        }
+        // R77: with the CAS discipline the count never goes negative on a
+        // FAILED down() (no reservations), so "old < 0" can no longer
+        // serve as the waiters-exist test. Publish the slot and always
+        // attempt one exclusive wake; waking an empty (or all-woken)
+        // queue is a cheap no-op scan under the queue lock. If a fast-path
+        // down() steals the slot before the woken waiter runs, the waiter
+        // simply re-sleeps — no token is lost.
+        self.count.fetch_add(1, Ordering::Release);
+        self.wait.wake_up_one();
     }
 
     /// Get current semaphore value
