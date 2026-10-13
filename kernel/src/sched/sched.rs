@@ -3587,6 +3587,100 @@ fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
     r56_print_msg(suffix);
 }
 
+/// R80 (diag): one parked-context line for a harvested orphan, rate-limited
+/// to one per 25 jiffies system-wide (the v2 storm healed ~3 victims/s; the
+/// console must not become the bottleneck). Mirrors the R76 parked-stack
+/// walk: caller frames of the saved kernel sp (kernel-text words only,
+/// symbolizable with addr2line). Runs from the idle-loop harvester with NO
+/// GRQ held — reads are volatile and diagnostic-only; the task is pinned by
+/// the caller's try_pin.
+fn harvest_print_parked(task: *mut Task, pid: u32) {
+    use crate::console::putchar_no_lock as putchar;
+    static LAST: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(core::sync::atomic::Ordering::Relaxed);
+    if now.wrapping_sub(last) < 25 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    fn pdec(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+    }
+    fn phex(v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16u32).rev() {
+            let nb = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+        }
+    }
+    unsafe {
+        const M: &[u8] = b"  ORPHAN-CTX pid=";
+        for &b in M { putchar(b); }
+        pdec(pid as u64);
+        const O: &[u8] = b" o=";
+        for &b in O { putchar(b); }
+        putchar(b'0' + (*task).on_cpu() as u8);
+        let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
+        const C: &[u8] = b" cl=";
+        for &b in C { putchar(b); }
+        if (claim as i64) < 0 { putchar(b'-'); }
+        pdec((claim as i64).unsigned_abs() as u64);
+        const P: &[u8] = b" pk=";
+        for &b in P { putchar(b); }
+        pdec((*task).pick_state() as u64);
+        const T: &[u8] = b" ti_cpu=";
+        for &b in T { putchar(b); }
+        pdec((*task).ti_cpu() as i64 as u64);
+        let thsp = (*task).thread().sp;
+        const K: &[u8] = b" ksp=0x";
+        for &b in K { putchar(b); }
+        phex((*task).ti_kernel_sp());
+        if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
+            const S: &[u8] = b" stk=0x";
+            for &b in S { putchar(b); }
+            phex(thsp);
+            // Caller frames above the saved sp (stacks grow down).
+            let base = thsp as *const u64;
+            let mut shown = 0;
+            for k in 0..64 {
+                // SAFETY: diagnostic volatile read of the pinned task's own
+                // kernel-stack pages.
+                let w = core::ptr::read_volatile(base.add(k));
+                if w >= 0xffffffff80000000 && w < 0xffffffff80200000 && (w & 1) == 0 {
+                    putchar(b' ');
+                    phex(w);
+                    shown += 1;
+                    if shown >= 6 {
+                        break;
+                    }
+                }
+            }
+        }
+        putchar(b'\n');
+    }
+}
+
 /// R56 round 2: authoritative GRQ-locked heal for the two orphan shapes
 /// `wake_up_enqueue` cannot fix on its own:
 ///
@@ -4020,6 +4114,15 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // the actual blocker (a LIVE-mark phantom) was
                         // refused elsewhere and never named.
                         r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                        // R80 (diag, producer hunt): the v2 storm showed
+                        // pids 306/336/338 cycling orphan -> heal -> orphan
+                        // every ~200ms through THIS plain-insert path (no
+                        // R49/R80 print — their marks were already clean).
+                        // Print the victim's parked context, rate-limited:
+                        // the saved thread.sp's caller frames name the exact
+                        // syscall/wait site the context was stranded in, and
+                        // repeated identical frames = one producer.
+                        harvest_print_parked(t, pid);
                     }
                 }
                 Some(c) => {

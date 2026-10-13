@@ -933,15 +933,9 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
         return -(errno::EFAULT as i64);
     }
 
-    // Linux semantics: all three fd-set pointers may be NULL — with a
-    // timeout that is the classic pure-sleep idiom (glibc/python sleep
-    // paths; pselect6(0, NULL, NULL, NULL, &ts, NULL) returns 0 after
-    // the timeout). Rejecting it with EFAULT broke python's time.sleep
-    // deterministically (OSError: [Errno 14] on every call) and any
-    // other sleeper that reaches select/pselect6 with no fds.
-    // Original_readfds/writefds/exceptfds below are empty FdSets in
-    // that case, so the loop just sleeps for the timeout / until a
-    // signal, exactly like Linux.
+    if readfds_ptr.is_null() && writefds_ptr.is_null() && exceptfds_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
 
     // Snapshot original fd_sets through the exception-table copy path
     // (SUM=0 safe; raw derefs of the user fd_sets fault the kernel).
