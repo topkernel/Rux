@@ -284,3 +284,95 @@ pub fn audit_tick() {
         }
     });
 }
+
+// ==================== R83b: ext4-biglock waiter self-watch ====================
+
+/// Header snapshot for the waiter self-watch: the exact words a foreign
+/// store has been observed to hit (ti_kernel_sp) plus their neighbors.
+#[derive(Copy, Clone, PartialEq)]
+pub struct WatchSnap {
+    pub ksp: u64,
+    pub user_sp: u64,
+    pub preempt: u32,
+    pub pick: u32,
+    pub claim: i32,
+    pub flags: u32,
+}
+
+pub fn watch_snap(task: *mut Task) -> WatchSnap {
+    unsafe {
+        WatchSnap {
+            ksp: rq64(task, offs::TI_KERNEL_SP),
+            user_sp: rq64(task, offs::TI_USER_SP),
+            preempt: rq32(task, offs::TI_PREEMPT_COUNT),
+            pick: rq32(task, offs::TI_PICK_STATE),
+            claim: rq32(task, offs::TI_RUNNING_ON_CPU) as i32,
+            flags: rq32(task, offs::TI_FLAGS),
+        }
+    }
+}
+
+/// A blocked task's header changed while it was parked in the EXT4
+/// big-lock wait — the R74 producer's write window (every R74 capture so
+/// far: the victim sat in this wait when its ti_kernel_sp turned to
+/// foreign data). Reports the before/after words, the full header, and
+/// the memory AROUND the struct (a neighboring-buffer overrun shows as a
+/// run of similar values). Raw UART only; the caller must hold no locks.
+pub fn waitwatch_report(task: *mut Task, old: &WatchSnap, new: &WatchSnap) {
+    DETECTED.fetch_add(1, Ordering::Relaxed);
+    if !may_report(task as u64) {
+        return;
+    }
+    REPORTS.fetch_add(1, Ordering::Relaxed);
+    pmsg(b"\nR83-WAITWATCH jiffies=");
+    pdec(crate::drivers::timer::get_jiffies());
+    pmsg(b" task=0x");
+    phex(task as u64);
+    pmsg(b" pid=");
+    unsafe { pdec(rq32(task, offs::TASK_PID) as u64); }
+    pmsg(b"\n  old: ksp=0x");
+    phex(old.ksp);
+    pmsg(b" user_sp=0x");
+    phex(old.user_sp);
+    pmsg(b" preempt=");
+    pdec(old.preempt as u64);
+    pmsg(b" pick=");
+    pdec(old.pick as u64);
+    pmsg(b" claim=");
+    pdec(old.claim as i64 as u64);
+    pmsg(b"\n  new: ksp=0x");
+    phex(new.ksp);
+    pmsg(b" user_sp=0x");
+    phex(new.user_sp);
+    pmsg(b" preempt=");
+    pdec(new.preempt as u64);
+    pmsg(b" pick=");
+    pdec(new.pick as u64);
+    pmsg(b" claim=");
+    pdec(new.claim as i64 as u64);
+    putchar(b'\n');
+    // Full header (0..0x40) + neighborhood: two qwords before the struct
+    // and the eight after the header, so an overrun's extent shows.
+    for row in 0..2 {
+        pmsg(b"R83-HDR ");
+        pdec((row * 0x20) as u64);
+        pmsg(b":");
+        for col in 0..4 {
+            putchar(b' ');
+            unsafe { phex(rq64(task, row * 0x20 + col * 8)); }
+        }
+        putchar(b'\n');
+    }
+    pmsg(b"R83-AROUND -0x10:");
+    unsafe {
+        phex(rq64(task, offs::TI_FLAGS.wrapping_sub(0x10)));
+        putchar(b' ');
+        phex(rq64(task, offs::TI_FLAGS.wrapping_sub(0x8)));
+    }
+    pmsg(b"\nR83-AROUND +0x40:");
+    for i in 0..8 {
+        putchar(b' ');
+        unsafe { phex(rq64(task, 0x40 + i * 8)); }
+    }
+    putchar(b'\n');
+}

@@ -2304,9 +2304,37 @@ impl Ext4BigLock {
             }
         };
 
+        // R83b: baseline header snapshot for the waiter self-watch below.
+        let mut wait_snap = crate::dfx::r83hunt::WatchSnap {
+            ksp: 0, user_sp: 0, preempt: 0, pick: 0, claim: 0, flags: 0,
+        };
+        let mut wait_snap_set = false;
+
         loop {
             if let Some(g) = self.try_acquire_or_recurse(pid) {
                 return g;
+            }
+            // R83b (R74 producer hunt): every capture so far had the victim
+            // parked in THIS wait when its ti_kernel_sp turned to foreign
+            // data. ti_kernel_sp/ti_user_sp have NO legal writer while a
+            // task sleeps here (their only writers are the task's own trap
+            // exit / exec paths), so any change between two iterations of
+            // this loop is the scribbler — reported with before/after
+            // words, the full header, and the neighborhood, from inside
+            // the exposure window itself.
+            {
+                let now_snap = crate::dfx::r83hunt::watch_snap(cur as *mut _);
+                if !wait_snap_set {
+                    wait_snap = now_snap;
+                    wait_snap_set = true;
+                } else if now_snap.ksp != wait_snap.ksp || now_snap.user_sp != wait_snap.user_sp {
+                    crate::dfx::r83hunt::waitwatch_report(
+                        cur as *mut _,
+                        &wait_snap,
+                        &now_snap,
+                    );
+                    wait_snap = now_snap;
+                }
             }
             // Register on the wait queue BEFORE re-checking the state
             // (R7-B6b discipline): any release() that pairs with this
