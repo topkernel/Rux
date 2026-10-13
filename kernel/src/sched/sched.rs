@@ -626,6 +626,19 @@ fn build_sigchld_info(child_pid: u32) -> Option<(crate::signal::SigInfo, u8)> {
 fn process_deferred_exit_pid(packed: i64) {
     use crate::signal::Signal;
     let (parent_pid, child_pid) = unpack_notify(packed);
+    // EXITNOTIFY (dbus-activation hunt): activation stalls were traced to
+    // the parent never learning its spawned child exited. Log each
+    // delivered exit notification (parent, child, signal rc).
+    {
+        static EN_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if EN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
+            crate::pr_info!(
+                "EXITNOTIFY: child={} parent={}",
+                child_pid, parent_pid
+            );
+        }
+    }
     match build_sigchld_info(child_pid) {
         Some((mut info, exit_sig)) => {
             // Rewrite si_signo: the siginfo builder hardcodes SIGCHLD,
@@ -1519,6 +1532,25 @@ unsafe fn __schedule() {
     let flags = grq_guard.unlock_irqretain();
 
     if next == prev {
+        // Same-task repick: no context switch happens, so the post-switch
+        // notify processing below would be skipped. A pending deferred
+        // exit notification from an EARLIER exiter on this CPU must not
+        // wait for the next real switch. Guard: if the pending child is
+        // prev itself (a racing wake re-enqueued the exiting task and it
+        // re-picked itself), do NOT fire its own notify — prev is still
+        // running here, and the deferred-delivery protocol exists
+        // precisely to keep an unreaped parent from freeing a task that
+        // is still on a CPU.
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < MAX_CPUS {
+            let packed = DEFERRED_EXIT_NOTIFY[cpu].load(core::sync::atomic::Ordering::Relaxed);
+            if packed != 0 {
+                let (_parent, child) = unpack_notify(packed);
+                if child != prev_pid {
+                    process_deferred_exit_notify_cpu(cpu);
+                }
+            }
+        }
         crate::arch::cpu::restore_irq(flags);
         return;
     }
