@@ -100,10 +100,13 @@ unsafe fn memfd_setattr(inode: &Inode, attr: u32, arg1: u64, _arg2: u64) -> i32 
             *guard = Some(crate::fs::buffer::FileBuffer::new());
         }
         if let Some(ref mut data) = *guard {
-            // R76: FileBuffer is chunk-backed; a large ftruncate (observed
-            // 64 MiB from gnome-shell init) allocates 64 KiB chunks instead
-            // of one oversized heap block that MAX_ORDER cannot serve.
-            data.resize(new_size);
+            // R76: FileBuffer is page-backed chunk storage; a large
+            // ftruncate (observed 64 MiB from gnome-shell init) draws
+            // order-4 pages from the zone allocator instead of exhausting
+            // the kernel heap.
+            if data.resize(new_size).is_err() {
+                return -(errno::constants::ENOMEM as i32);
+            }
             inode.set_size(new_size as u64);
             return 0;
         }

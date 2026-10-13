@@ -59,16 +59,25 @@ def qmp_send(obj):
     global qmp
     if qmp is None:
         return None
-    qmp.sendall((json.dumps(obj) + "\n").encode())
-    while True:
-        line = qmp.recv(65536).decode(errors="replace")
-        for l in line.splitlines():
+    try:
+        qmp.sendall((json.dumps(obj) + "\n").encode())
+        # A screendump under host contention can take >5 s; a timeout here
+        # must skip the reply wait, never crash the driver loop (bigalloc4).
+        while True:
             try:
-                r = json.loads(l)
-            except Exception:
-                continue
-            if "return" in r or "error" in r:
-                return r
+                line = qmp.recv(65536).decode(errors="replace")
+            except socket.timeout:
+                return None
+            for l in line.splitlines():
+                try:
+                    r = json.loads(l)
+                except Exception:
+                    continue
+                if "return" in r or "error" in r:
+                    return r
+    except Exception:
+        qmp = None
+        return None
     return None
 
 shot_i = 0
