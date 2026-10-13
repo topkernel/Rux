@@ -1225,6 +1225,33 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 slot.add(crate::process::task::TASK_PID) as *mut u32,
                 TASK_POISON,
             );
+            // R83 (R74 producer hunt): paint the whole freed header (0x100
+            // bytes) with a fixed pattern AFTER the field destructors and
+            // BEFORE the state/pid poison below is (re)written above. Any
+            // later reader of this page that still reaches it through a
+            // stale Task pointer sees the paint instead of stale task
+            // data — turning the "recycled page vs wild write" question
+            // into a one-bit answer at the R74/R83 detection sites.
+            {
+                let mut off = 0usize;
+                while off < 0x100 {
+                    core::ptr::write_volatile(
+                        slot.add(off) as *mut u64,
+                        crate::dfx::r83hunt::R83_FREED_PAINT,
+                    );
+                    off += 8;
+                }
+                // Keep the R47/R12-4 poison words authoritative over the
+                // paint (guards read state/pid to refuse stale wakes).
+                core::ptr::write_volatile(
+                    slot.add(crate::process::task::TASK_STATE) as *mut u32,
+                    TASK_POISON,
+                );
+                core::ptr::write_volatile(
+                    slot.add(crate::process::task::TASK_PID) as *mut u32,
+                    TASK_POISON,
+                );
+            }
             // R69: release the ownership bit and tell the heap's free-side
             // audit that THIS free is the legitimate one (anything else
             // freeing a live Task page is the double-handoff engine).
@@ -1391,6 +1418,9 @@ unsafe fn __schedule() {
                 r56_print_pid(b"", unsafe { (*tp).pick_state() }, b" ksp=0x");
                 r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() >> 32) as u32 }, b"");
                 r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() & 0xFFFF_FFFF) as u32 }, b"\n");
+                // R83: byte-level header dump of the victim — the scribble
+                // shape (extent + alignment) names the writer's store.
+                crate::dfx::r83hunt::dump_victim(b"R74", tp);
             }
         }
     }
@@ -4304,6 +4334,10 @@ pub fn cpu_idle_loop() -> ! {
         #[cfg(feature = "riscv64")]
         {
             unsafe { harvest_orphan_tasks(cpu_id); }
+            // R83 (R74 producer hunt): header audit on the same cadence —
+            // names the scribbled task within ~4 jiffies of the write,
+            // instead of at its next (fatal) schedule.
+            crate::dfx::r83hunt::audit_tick();
         }
 
         // Ensure IRQs are enabled before each schedule() call.

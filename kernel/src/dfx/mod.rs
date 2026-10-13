@@ -39,6 +39,9 @@ pub mod taskdump;
 pub mod memwatch;
 #[cfg(feature = "x86_64")]
 pub mod scribble;
+/// R83 (R74 producer hunt): live task-header audit + victim dumps.
+#[cfg(feature = "riscv64")]
+pub mod r83hunt;
 
 /// Initialize the DFX subsystem.
 ///
