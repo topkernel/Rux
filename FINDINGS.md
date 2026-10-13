@@ -317,3 +317,28 @@ raise the heap (384MB heap panics in BlockMeta, see gnome-paint).
 Run artifacts: runs/bigalloc3/ (serial.log has the capture; driver
 runs/bigalloc-hunt.py; image runs/gp3i.img boots X+dbus+shell
 unattended; kernel = this branch, built).
+
+# PAUSED for host reboot (2026-10-13) — resume plan
+
+bigalloc4 (R76 verification) aborted at t=68s from a DRIVER bug, not the
+kernel: qmp_send()'s recv hit its 5 s timeout during the first screendump
+(host contention) and the TimeoutError crashed the driver loop, whose
+finally-block terminated QEMU. Fix before rerun: wrap the recv loop in
+qmp_send with try/except socket.timeout (retry or skip that shot).
+
+RESUME SEQUENCE:
+1. Fix the qmp_send timeout handling in runs/bigalloc-hunt.py (one try).
+2. Rebuild nothing — kernel at be30f139 is current. Rerun:
+   cd runs && python3 bigalloc-hunt.py --img $PWD/gp3i.img --out bigalloc5 --timeout 1500
+   Watch: ALLOCTHROW 64MB must be GONE; screendumps for gnome-shell paint
+   (nonblack > 0 beyond the X-OK xterm); serial for progress.
+3. Relaunch the scheduler agent (worktree gnome-sched2, branch
+   feature/sched-fastpace — it has uncommitted WIP again from the resumed
+   session; review git diff first).
+4. On paint success: cherry-pick feature/gnome-integration into main,
+   run the 2100s full-session gate (fire6.py style), update README
+   screenshot with the real desktop.
+
+Branch state at pause: feature/gnome-integration @ be30f139 (poll fix +
+fbdev ioctls + R75 buddy + dbus2 fixes + ALLOCTHROW rawframes + R76
+chunked FileBuffer). Nothing pushed; main @ 41d7aad1 untouched.
