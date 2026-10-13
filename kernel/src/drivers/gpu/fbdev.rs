@@ -303,14 +303,19 @@ pub fn create_var_screeninfo(info: &FrameBufferInfo) -> FbVarScreeninfo {
     var.yres_virtual = info.height;
     var.bits_per_pixel = 32;
 
-    // Bitfields measured empirically against QEMU's virtio-gpu (resource
-    // created with format 3): on-screen R comes from V[15:8], G from
-    // V[23:16], B from V[31:24]; V[7:0] is ignored. Advertising these
-    // offsets lets generic fbdev programs build correct pixels.
-    var.red = FbBitfield { offset: 8, length: 8, msb_right: 0 };
-    var.green = FbBitfield { offset: 16, length: 8, msb_right: 0 };
-    var.blue = FbBitfield { offset: 24, length: 8, msb_right: 0 };
-    var.transp = FbBitfield { offset: 0, length: 0, msb_right: 0 };
+    // Resource format 3 (X8R8G8B8_UNORM, virtio_gpu.rs) is MSB-first
+    // X:R:G:B, i.e. little-endian memory bytes B,G,R,X: screen R comes
+    // from V[23:16], G from V[15:8], B from V[7:0]. The previously
+    // advertised offsets (R@8/G@16/B@24) rotated every pixel one byte:
+    // gray (35,35,35) rendered as (35,35,0) — blue landed in the ignored
+    // byte — which is exactly what the GNOME paint showed before this fix
+    // (bigalloc6: whole screen olive/yellow). udesk userspace packs
+    // R<<16|G<<8|B directly and was always correct; only clients that
+    // honor FBIOGET_VSCREENINFO (Xorg fbdev) followed the bad offsets.
+    var.red = FbBitfield { offset: 16, length: 8, msb_right: 0 };
+    var.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
+    var.blue = FbBitfield { offset: 0, length: 8, msb_right: 0 };
+    var.transp = FbBitfield { offset: 24, length: 0, msb_right: 0 };
 
     var
 }
