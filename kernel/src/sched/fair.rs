@@ -353,6 +353,30 @@ impl VruntimeKey {
     }
 }
 
+// R76 (fast-pace starvation hunt): per-pid pick-skip counters, direct-mapped
+// by pid into 64 slots. Only read/written from inside pick_next_cpu's report
+// block, which always runs under the GRQ lock — atomics are for the static's
+// Sync bound only. When one pid's skip count crosses 1000 the report emits a
+// SKIP-DEEP line with the task's state word, queue flag, cpu, and both stack
+// pointers so a post-mortem can tell a linked-but-starved task from a
+// phantom or a sleeper (the full3 wedge shape: PICK-SKIP-ALL naming pids
+// 576-599 for minutes with no other explanation in the log).
+pub(crate) struct SkipTrackEntry {
+    pub(crate) pid: core::sync::atomic::AtomicU32,
+    count: core::sync::atomic::AtomicU32,
+    dumped_at: core::sync::atomic::AtomicU32,
+}
+static SKIP_TRACK: [SkipTrackEntry; 64] = [
+    const {
+        SkipTrackEntry {
+            pid: core::sync::atomic::AtomicU32::new(0),
+            count: core::sync::atomic::AtomicU32::new(0),
+            dumped_at: core::sync::atomic::AtomicU32::new(0),
+        }
+    };
+    64
+];
+
 /// CFS run queue
 pub struct CfsRunQueue {
     /// Task queue sorted by vruntime
@@ -756,12 +780,18 @@ impl CfsRunQueue {
         // A fixed stack array of 32 entries needs no allocator at all;
         // overflow falls back to re-insert-and-give-up exactly like the
         // old capacity-overflow path. 32 stack slots of 24 bytes = 768B.
-        let mut skipped: [(VruntimeKey, *mut crate::process::Task); 32] =
-            [(VruntimeKey::new(0, 0), core::ptr::null_mut()); 32];
-        // STRAND-LEG codes at pick time (see the skip site): 1=on_cpu set,
-        // 2=own-claim non-prev, 3=ownership refused (live claim), 4=affinity,
-        // 5=cgroup-throttled.
-        let mut skip_legs: [u8; 32] = [0; 32];
+        // R76 (fast-pace starvation hunt): the third slot records the
+        // DECISION-TIME skip reason — the old report re-read on_cpu/claim
+        // at print time, microseconds AFTER the decision, and the
+        // switch-out release store (__switch_to, no GRQ) legally rewrites
+        // the qword in that window, so a genuine mid-switch-out skip
+        // printed as {oncpu=0, claim=-1} and was indistinguishable from
+        // "pickable but skipped". Reason codes:
+        // 1 = on_cpu set (mid switch-out / fast-path repick window),
+        // 2 = foreign live claim (claim=X, picker sees X as alive),
+        // 3 = affinity mask, 4 = cgroup throttled, 5 = stale claim healed.
+        let mut skipped: [(VruntimeKey, *mut crate::process::Task, u32); 32] =
+            [(VruntimeKey::new(0, 0), core::ptr::null_mut(), 0); 32];
         let mut skip_count = 0usize;
         let mut result = None;
 
@@ -820,7 +850,11 @@ impl CfsRunQueue {
             // cpu-throttled — they stay on the timeline and become
             // pickable again when the period rolls over (the same
             // affinity-style skip machinery above).
-            let mut skip_leg: u8 = 0;
+            // R76: skip_reason is written at DECISION time (see the array
+            // comment above) — 0 = none, 1 = on_cpu, 2 = foreign live
+            // claim, 3 = affinity, 4 = cgroup throttled, 5 = stale claim
+            // healed (pickable on the NEXT pass).
+            let mut skip_reason = 0u32;
             let allowed = unsafe {
                 // R65-pick (probe-slow): the dual-bit ownership test reads
                 // the whole qword in one load (Task::ownership_pickable) —
@@ -841,6 +875,12 @@ impl CfsRunQueue {
                         && claim != -1
                         && claim as usize != cpu_id
                     {
+                        // R74 (double-run gate): a LIVE pick-state with a
+                        // live claiming hart means that CPU published this
+                        // ownership at pick time and has not released it —
+                        // the task may be mid-switch-in on the claimer
+                        // (the r74a capture: claim=0 while CPU0 was inside
+                        // its pick → reset → CPU3 picked → double-run
                         // KERNPANIC). Only reset the claim when the
                         // claiming hart is verifiably not servicing
                         // interrupts (frozen >= 5s, the R57 discipline:
@@ -859,32 +899,25 @@ impl CfsRunQueue {
                         if !claim_live {
                             (*task).running_on_cpu.store(-1, Ordering::Release);
                             Self::stale_claim_healed(cpu_id, (*task).pid(), claim);
+                            skip_reason = 5;
+                        } else {
+                            skip_reason = 2;
                         }
                         !claim_live
                     } else {
-                        // STRAND-LEG (dbus-wedge hunt): on_cpu=true, or a
-                        // claim this CPU owns but the task is not prev —
-                        // name the exact pick-time state so a wedged task
-                        // is diagnosable from the console.
-                        skip_leg = if (*task).on_cpu() { 1 } else { 2 };
+                        skip_reason = 1;
                         false
                     }
                 };
-                if !ownership_ok && skip_leg == 0 {
-                    skip_leg = 3; // ownership refused, healed path taken
+                let affinity_ok = (*task).cpu_allowed(cpu_id);
+                if !affinity_ok {
+                    skip_reason = 3;
                 }
-                if ownership_ok && !(*task).cpu_allowed(cpu_id) {
-                    skip_leg = 4;
+                let throttled = crate::sched::cgroup::task_cgroup_throttled(task);
+                if throttled {
+                    skip_reason = 4;
                 }
-                if ownership_ok
-                    && (*task).cpu_allowed(cpu_id)
-                    && crate::sched::cgroup::task_cgroup_throttled(task)
-                {
-                    skip_leg = 5;
-                }
-                (*task).cpu_allowed(cpu_id)
-                    && ownership_ok
-                    && !crate::sched::cgroup::task_cgroup_throttled(task)
+                affinity_ok && ownership_ok && !throttled
             };
             if allowed {
                 // Found a match — remove and return it
@@ -908,10 +941,7 @@ impl CfsRunQueue {
             // Not allowed — remove temporarily and stash
             self.tasks_timeline.remove(&key);
             if skip_count < skipped.len() {
-                skipped[skip_count] = (key, task);
-                if skip_count < skip_legs.len() {
-                    skip_legs[skip_count] = skip_leg;
-                }
+                skipped[skip_count] = (key, task, skip_reason);
                 skip_count += 1;
             } else {
                 // Overflow — re-insert and give up (very unlikely)
@@ -922,7 +952,7 @@ impl CfsRunQueue {
 
         // Re-insert all skipped entries
         for i in (0..skip_count).rev() {
-            let (key, task) = skipped[i];
+            let (key, task, _) = skipped[i];
             self.tasks_timeline.insert(key, task);
         }
 
@@ -980,7 +1010,7 @@ impl CfsRunQueue {
                 pd(skip_count as u64);
                 ps(b"\n");
                 for i in 0..skip_count {
-                    let (_, task) = skipped[i];
+                    let (_, task, reason) = skipped[i];
                     // SAFETY: diagnostic read of stable Task fields of a task
                     // that is linked on this queue (pinned by the GRQ lock we
                     // hold).
@@ -988,12 +1018,13 @@ impl CfsRunQueue {
                         let claim = (*task).running_on_cpu.load(Ordering::Relaxed);
                         ps(b"  pid=");
                         pd((*task).pid() as u64);
-                        ps(b" leg=");
-                        if i < skip_legs.len() {
-                            pd(skip_legs[i] as u64);
-                        } else {
-                            putchar(b'?');
-                        }
+                        // R76: WHY the decision refused — captured at scan
+                        // time, immune to the switch-out release racing the
+                        // print. The oncpu/claim/pk fields below are the
+                        // print-time snapshot (kept for continuity with the
+                        // older captures).
+                        ps(b" why=");
+                        pd(reason as u64);
                         ps(b" oncpu=");
                         putchar(b'0' + (*task).on_cpu() as u8);
                         ps(b" claim=");
@@ -1016,6 +1047,70 @@ impl CfsRunQueue {
                             ps(b" THROTTLED");
                         }
                         putchar(b'\n');
+                        // R76 (fast-pace starvation hunt): per-pid skip
+                        // counting. The full3 wedge showed freshly spawned
+                        // tasks named in PICK-SKIP-ALL reports for minutes;
+                        // a task whose skip count crosses 1000 is either a
+                        // genuine starvation victim or a decision-time
+                        // transient that repeats forever — both deserve one
+                        // full-context dump (state word, queue flags, stack
+                        // pointers) so the post-mortem knows whether the
+                        // task was linked/sleeping/phantom at skip time.
+                        // Table is direct-mapped by pid (64 slots), only
+                        // ever touched under the GRQ lock this pick holds.
+                        {
+                            use core::sync::atomic::Ordering as Rel;
+                            let pid = (*task).pid();
+                            let slot = (pid as usize) & (SKIP_TRACK.len() - 1);
+                            let entry = &SKIP_TRACK[slot];
+                            if entry.pid.load(Rel::Relaxed) != pid {
+                                entry.pid.store(pid, Rel::Relaxed);
+                                entry.count.store(0, Rel::Relaxed);
+                                entry.dumped_at.store(0, Rel::Relaxed);
+                            }
+                            let count = {
+                                let c = entry.count.load(Rel::Relaxed);
+                                if c < u32::MAX { c + 1 } else { c }
+                            };
+                            entry.count.store(count, Rel::Relaxed);
+                            let dumped_at = entry.dumped_at.load(Rel::Relaxed);
+                            if count >= 1000 && count / 1000 > dumped_at {
+                                entry.dumped_at.store(count / 1000, Rel::Relaxed);
+                                ps(b"  SKIP-DEEP pid=");
+                                pd(pid as u64);
+                                ps(b" n=");
+                                pd(count as u64);
+                                ps(b" state=");
+                                let st = (*task).state().bits();
+                                let mut v = st as u64;
+                                for sh in (0..8u32).rev() {
+                                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
+                                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                                }
+                                ps(b" onrq=");
+                                putchar(b'0' + (*task).sched_entity().is_on_rq() as u8);
+                                ps(b" ti_cpu=");
+                                if ((*task).ti_cpu() as i64) < 0 {
+                                    putchar(b'-');
+                                }
+                                pd(((*task).ti_cpu() as i64).unsigned_abs() as u64);
+                                ps(b" ksp=0x");
+                                let mut v = (*task).ti_kernel_sp() as u64;
+                                for sh in (0..16u32).rev() {
+                                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
+                                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                                }
+                                ps(b" thsp=0x");
+                                let mut v = (*task).thread().sp;
+                                for sh in (0..16u32).rev() {
+                                    let nb = ((v >> (sh * 4)) & 0xF) as u8;
+                                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                                }
+                                ps(b" vrun=");
+                                pd((*task).sched_entity().get_vruntime());
+                                putchar(b'\n');
+                            }
+                        }
                     }
                 }
             }

@@ -188,6 +188,54 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
         elapsed_secs
     );
 
+    // R76 (fast-pace wedge hunt): the old report printed only CURRENT's
+    // backtrace — the khungtaskd scanner itself — which says nothing about
+    // where the D-state task is parked or which wake it lost. Dump the
+    // victim's scheduler-side context (ownership word, cpu, queue flag,
+    // vfork linkage) and up to 8 kernel-text words from its parked stack;
+    // symbolized offline these name the wait site directly.
+    {
+        use crate::process::task::Task;
+        let t: &Task = task_ref;
+        let claim = t.running_on_cpu.load(Ordering::Acquire);
+        let vfork_ppid = t.vfork_parent_ptr().map(|p| unsafe { (*p).pid() }).unwrap_or(0);
+        let _ = write!(
+            w,
+            "      HUNG-CTX pid={} state={:#x} oncpu={} claim={} pk={} ti_cpu={} onrq={} vfork_ppid={}\n",
+            t.pid(),
+            t.state().bits(),
+            t.on_cpu() as u8,
+            claim,
+            t.pick_state(),
+            t.ti_cpu(),
+            t.sched_entity().is_on_rq() as u8,
+            vfork_ppid,
+        );
+        let thsp = t.thread().sp;
+        if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
+            let _ = write!(w, "      HUNG-STK sp={:#x}", thsp);
+            let base = thsp as *const u64;
+            let mut shown = 0;
+            // R76: scan UPWARD from the parked sp — the caller frames of
+            // the parked chain live at HIGHER addresses (stacks grow down);
+            // the words below sp are the context-switch machinery, which is
+            // byte-identical for every parked task and names nothing.
+            for k in 0..80 {
+                // SAFETY: diagnostic read within the task's own kernel
+                // stack pages (the Task exists and pins them).
+                let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+                if v >= 0xffffffff80000000 && v < 0xffffffff80200000 && (v & 1) == 0 {
+                    let _ = write!(w, " {:#x}", v);
+                    shown += 1;
+                    if shown >= 8 {
+                        break;
+                    }
+                }
+            }
+            let _ = write!(w, "\n");
+        }
+    }
+
     let taint_str = taint::taint_string_arr();
     let taint_display = unsafe { core::str::from_utf8_unchecked(&taint_str) };
     let _ = write!(w, "      Tainted: {}\n", taint_display);

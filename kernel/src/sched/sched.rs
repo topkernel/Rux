@@ -511,6 +511,35 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
 ];
 
+// R76 (slot-divergence producer hunt): tag + task id of the LAST writer of
+// each per-CPU current slot. full1/full2's terminal shape (R74-SLOTLESS-TP:
+// hardware tp executing a real task while its slot names idle or a third
+// task) requires SOME writer to have rewritten the slot while the task kept
+// executing — but no heal fired in either capture, and three of the five
+// slot writers heal SILENTLY (R56c rewrites a foreign slot with no print;
+// the steal and the abort republish print only on their own paths). This
+// shadow names the writer site unconditionally, from the R74 print, with
+// zero behavioral change. Tags: 1 = __schedule pick publish, 2 = R56d
+// own-slot resync, 3 = R56c lying-idle-slot heal (wake path), 4 = harvest
+// steal, 5 = switch-abort republish.
+pub const SLOT_W_SCHED_PICK: u32 = 1;
+pub const SLOT_W_R56D: u32 = 2;
+pub const SLOT_W_R56C: u32 = 3;
+pub const SLOT_W_STEAL: u32 = 4;
+pub const SLOT_W_ABORT_REPUB: u32 = 5;
+pub static SLOT_WRITER: [core::sync::atomic::AtomicU32; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
+pub static SLOT_WRITER_TASK: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+#[inline]
+fn slot_tag_write(cpu: usize, tag: u32, task: *mut Task) {
+    if cpu < MAX_CPUS {
+        SLOT_WRITER[cpu].store(tag, core::sync::atomic::Ordering::Relaxed);
+        SLOT_WRITER_TASK[cpu].store(task as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 // ==================== Deferred Exit Notification ====================
 //
 // When a task exits (do_exit), it must notify its parent (SIGCHLD +
@@ -1313,6 +1342,7 @@ unsafe fn __schedule() {
             // is harvestable through wake_up_enqueue's phantom path.
             this_cpu_mut().current = tp;
             prev = tp;
+            slot_tag_write(cpu_id, SLOT_W_R56D, tp);
             const MSG: &[u8] = b"R56-SLOT-SELF-HEALED\n";
             for &b in MSG {
                 crate::console::putchar_no_lock(b);
@@ -1335,13 +1365,32 @@ unsafe fn __schedule() {
             };
             let running = unsafe { (*tp).state().is_running() };
             if !exiting && running {
+                // R76: name the writer that last touched this CPU's slot
+                // (tags: 1=pick 2=R56d 3=R56c 4=steal 5=abort-republish)
+                // plus tp's own ownership word — the R74 family needs a
+                // producer, not another symptom line.
                 r56_print_pid(
                     b"R74-SLOTLESS-TP cpu=",
                     cpu_id as u32,
                     b" tp_pid=",
                 );
                 r56_print_pid(b"", unsafe { (*tp).pid() }, b" slot_pid=");
-                r56_print_pid(b"", unsafe { (*prev).pid() }, b"\n");
+                r56_print_pid(b"", unsafe { (*prev).pid() }, b" slotw=");
+                r56_print_pid(
+                    b"",
+                    SLOT_WRITER[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
+                    b" tp_oncpu=",
+                );
+                let tpclaim = unsafe { (*tp).running_on_cpu.load(core::sync::atomic::Ordering::Acquire) };
+                r56_print_pid(b"", unsafe { (*tp).on_cpu() as u32 }, b" tp_claim=");
+                if (tpclaim as i64) < 0 {
+                    r56_print_pid(b"", (-tpclaim) as u32, b" tp_pk=");
+                } else {
+                    r56_print_pid(b"", tpclaim as u32, b" tp_pk=");
+                }
+                r56_print_pid(b"", unsafe { (*tp).pick_state() }, b" ksp=0x");
+                r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() >> 32) as u32 }, b"");
+                r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() & 0xFFFF_FFFF) as u32 }, b"\n");
             }
         }
     }
@@ -1465,6 +1514,7 @@ unsafe fn __schedule() {
 
     // Update per-CPU current under lock
     this_cpu_mut().current = next;
+    slot_tag_write(cpu_id, SLOT_W_SCHED_PICK, next);
 
     // Clear idle bit since we're about to run something
     grq().clear_idle(cpu_id);
@@ -2247,6 +2297,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                         let idle_task = cpu_state(c).idle;
                         if !idle_task.is_null() && idle_task != task {
                             cpu_state_mut(c).current = idle_task;
+                            slot_tag_write(c, SLOT_W_R56C, idle_task);
                         }
                     }
                 }
@@ -2335,6 +2386,98 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                     sh -= 4;
                     let nb = ((v >> sh) & 0xF) as u8;
                     crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                }
+                // R76 (phantom producer hunt): name the victim's context —
+                // pick/claim word, cpu, exit flags, and the top kernel-text
+                // words of its parked stack. The R46 family needs the
+                // PRODUCER (which path left a RUNNING task unlinked and
+                // slotless); the parked stack symbolizes to exactly the
+                // wait/exit/spawn site that orphaned it.
+                {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn pdec(mut v: u64) {
+                        use crate::console::putchar_no_lock as putchar;
+                        let mut buf = [0u8; 20];
+                        let mut n = 0;
+                        if v == 0 {
+                            putchar(b'0');
+                            return;
+                        }
+                        while v > 0 {
+                            buf[n] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            n += 1;
+                        }
+                        while n > 0 {
+                            n -= 1;
+                            putchar(buf[n]);
+                        }
+                    }
+                    fn phex(v: u64) {
+                        use crate::console::putchar_no_lock as putchar;
+                        for sh in (0..16u32).rev() {
+                            let nb = ((v >> (sh * 4)) & 0xF) as u8;
+                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                        }
+                    }
+                    let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
+                    let exiting = (*task)
+                        .ti_flags()
+                        & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
+                        != 0;
+                    putchar(b' ');
+                    putchar(b'o');
+                    putchar(b'0' + (*task).on_cpu() as u8);
+                    const C: &[u8] = b" cl=";
+                    for &b in C { putchar(b); }
+                    if (claim as i64) < 0 { putchar(b'-'); }
+                    pdec((claim as i64).unsigned_abs() as u64);
+                    const P: &[u8] = b" pk=";
+                    for &b in P { putchar(b); }
+                    pdec((*task).pick_state() as u64);
+                    const T: &[u8] = b" cpu=";
+                    for &b in T { putchar(b); }
+                    pdec((*task).ti_cpu() as i64 as u64);
+                    const E: &[u8] = b" exiting=";
+                    for &b in E { putchar(b); }
+                    putchar(b'0' + exiting as u8);
+                    const SW: &[u8] = b" sw=";
+                    for &b in SW { putchar(b); }
+                    let mut any_sw = false;
+                    for c in 0..MAX_CPUS {
+                        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64 {
+                            putchar(b'0' + c as u8);
+                            any_sw = true;
+                        }
+                    }
+                    if !any_sw { putchar(b'-'); }
+                    const K: &[u8] = b" ksp=0x";
+                    for &b in K { putchar(b); }
+                    phex((*task).ti_kernel_sp());
+                    let thsp = (*task).thread().sp;
+                    if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
+                        const S: &[u8] = b" stk=0x";
+                        for &b in S { putchar(b); }
+                        phex(thsp);
+                        // Caller frames of the victim's parked chain — scan
+                        // UPWARD from sp (stacks grow down; below-sp words
+                        // are the shared switch machinery and name nothing).
+                        let base = thsp as *const u64;
+                        let mut shown = 0;
+                        for k in 0..64 {
+                            // SAFETY: diagnostic read of the task's own
+                            // kernel-stack pages (the Task pins them).
+                            let w = core::ptr::read_volatile(base.add(k));
+                            if w >= 0xffffffff80000000 && w < 0xffffffff80200000 && (w & 1) == 0 {
+                                putchar(b' ');
+                                phex(w);
+                                shown += 1;
+                                if shown >= 6 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
                 crate::console::putchar_no_lock(b'\n');
             }
@@ -3584,6 +3727,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         let idle_task = cpu_state(c).idle;
                         if !idle_task.is_null() && idle_task != task {
                             cpu_state_mut(c).current = idle_task;
+                            slot_tag_write(c, SLOT_W_STEAL, idle_task);
                             r56_print_pid(
                                 b"R56-SLOT-CAPTURE-HEALED cpu=",
                                 c as u32,
@@ -3642,6 +3786,7 @@ pub fn republish_current_after_abort(cpu: usize, prev: *mut Task) {
     unsafe {
         if cpu_state(cpu).current != prev {
             cpu_state_mut(cpu).current = prev;
+            slot_tag_write(cpu, SLOT_W_ABORT_REPUB, prev);
         }
         if (*prev).pid() == 0 {
             // Continuing the idle task: restore the idle bit our pick
