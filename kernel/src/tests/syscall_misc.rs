@@ -167,11 +167,16 @@ fn test_sys_select() {
     // TimeVal structure (struct timeval)
     test_assert_eq!(core::mem::size_of::<TimeVal>(), 16, "sys_select timeout struct");
 
-    // Test: pselect6 with null fdsets returns -EFAULT
-    let ret = sys_pselect6([0, 0, 0, 0, 0, 0]);
-    let expected = -(errno::EFAULT as i64);
-    test_assert!(ret == expected, "sys_pselect6 all null fdsets returns -EFAULT",
-        &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
+    // Test update (pairs with the pure-sleep fix on this branch):
+    // pselect6 with
+    // all-NULL fd sets is LEGAL (Linux semantics — any fd-set pointer
+    // may be NULL; with a timeout it is the glibc/python pure-sleep
+    // idiom). The old assert expected -EFAULT and now sleeps forever in
+    // kernel context when the timeout pointer is also NULL, wedging the
+    // suite. The sleep path needs a user-space timeout pointer
+    // (access_ok rejects kernel pointers), so it is skipped here.
+    test_skip("sys_pselect6 all-null fdsets pure sleep",
+        "legal sleep idiom; requires user-space timeout pointer (kernel-context call with NULL timeout would sleep forever)");
 
     // Test: pselect6 with invalid nfds (negative)
     let mut readfds = FdSet::new();
