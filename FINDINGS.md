@@ -286,3 +286,34 @@ PermissionsInvalid early exit.
 - E2 gdbus login1 under 2 burners: PermissionsInvalid in 8s
 - F1 sleep loop: 0/200 errors (was 200/200 EFAULT)
 - G1/G2 python sleep: pass (was EFAULT)
+
+# bigalloc3 capture (main session, 2026-10-13) — 64MB caller NOT yet named
+
+Integration kernel (poll fix + fbdev fix + R75 + dbus2 fixes) booted
+gp3i.img (gp3 copy, auto.sh clears stale /tmp/.X0-lock, adds X-OK xterm
+probe). At gnome-shell deep init:
+
+  bigalloc: FAILED size=0x4000000
+  ALLOCTHROW size=67108864 align=1 comm=gnome-shell pid=325 rawframes:
+  0xffffffff801f15020 0xffffffff801f1dc20 0xffffffff8034b6c60
+  0xffffffff8034b6e00 0xffffffff802e4db20 0xffffffff802854be0
+  0xffffffff8027e35a0 0xffffffff8027e1660
+
+Symbolization learning: all 8 frames sit in the PRECOMPILED core/alloc
+rlib region (no DWARF, only .L0/.Lpcrel labels; objdump attributes them
+to an oversized memset). The fp chain broke inside hand-written memset
+(no s0 frame). The real kernel caller is ABOVE frame 8.
+
+NEXT EXPERIMENT (resume here): in alloc_error_handler, after the fp
+chain, also dump ~128 raw stack WORDS upward from the current sp/fp
+(taskdump_hex style, raw UART), then offline: symbolize every word with
+addr2line, keep the ones that resolve to kernel-crate functions — the
+first our-crate function above the alloc machinery is the 64MB caller.
+Likely suspects to check in parallel: a Vec staging buffer sized from a
+userspace length in one syscall (write/readv/sendmsg path), not chunked.
+Then fix the caller (chunk it or use the page allocator) — do NOT just
+raise the heap (384MB heap panics in BlockMeta, see gnome-paint).
+
+Run artifacts: runs/bigalloc3/ (serial.log has the capture; driver
+runs/bigalloc-hunt.py; image runs/gp3i.img boots X+dbus+shell
+unattended; kernel = this branch, built).
