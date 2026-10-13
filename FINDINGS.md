@@ -194,8 +194,95 @@ sys_select (same core).
    prev's own notify while prev still runs — the deferred protocol
    exists to prevent exactly that reap race).
 
-## Status
+## r5-fixes (both fixes in) — WIN CONDITIONS MET
 
-- r5 running: pselect6 fix + EXITNOTIFY early-return fix + leg-named
-  PICK-SKIP-ALL. Win conditions to check: F1/G1 sleep OK, E1 fast
-  error reply.
+| test | r2 (main kernel) | r5 (fixed kernel) |
+|---|---|---|
+| F1 sleep loop (python) | 200/200 EFAULT | **0/200 errors** |
+| G1 bare python sleep | fails rc=1 | **rc=0** |
+| G2 sleep after fork | EFAULT | **ok** |
+| E1 login1 system activation | TimedOut 25s (no reply) | **Spawn.PermissionsInvalid in 2s** (correct: the image's helper is 0755, not setuid 4750; Linux dbus returns exactly this error) |
+| A3 100x ListNames | 100/100 p50=9ms | 100/100 p50=13ms |
+| B2 100x Echo to activated peer | (didn't reach) | 100/100 p50=18ms |
+| C1 100x Echo under 4 burners | (didn't reach) | 100/100 p50=28ms max=220ms |
+| D1 gsettings/dconf | set 5s/get 2s rc=0 | set 6s/get 2s rc=0 |
+
+E1's PermissionsInvalid is the right Linux-visible behavior: the image
+ships /usr/lib/dbus-1.0/dbus-daemon-launch-helper mode 0755 (real
+Ubuntu: 4750 root:messagebus). On a properly-setuid image the helper
+would proceed to exec /bin/false and the caller would get the
+Spawn.ChildExited-style error instead. Either way: a fast error reply,
+never a silent 25s stall.
+
+## SIGKILL sender identified (fire-r74j + KILLTRACE runs)
+
+The mid-session dbus-daemon/launch-helper SIGKILLs (t=415 pid=389,
+t=641 pid=450/451) are **not OOM and not external**: KILLTRACE shows
+dbus-daemon killing its OWN activation spawn children (fork children
+whose comm is still dbus-daemon = pre-exec or mid-handshake). libdbus's
+spawn machinery kills children that miss their exec/own-name deadline
+(observed kills at ~5s). The children were slow/stranded because of (a)
+the lost exit-notify above and (b) the transient pick-skip contention
+(leg=1 prints). With the notify fix the machinery completes instead of
+killing.
+
+## Remaining known issues (other agents' territory)
+
+- Transient pick-skip contention still visible (PICK-SKIP-ALL leg=1/3,
+  tasks repeatedly skipped then picked) — the R65/R74 ownership
+  protocol family. The new leg codes make it diagnosable.
+- EARLY-ROOT-FREE page-table warnings at fork teardown (fake-OOM
+  family, under active work elsewhere).
+- One-off mremap EFAULT (nr=216) seen once in python startup — not
+  investigated.
+
+## Commits (branch feature/dbus-reply-loss)
+
+- 337a2dbf fix(syscall): allow pselect6/select with all-NULL fd sets
+- 44dd986a fix(sched): deliver deferred exit-notify on __schedule's
+  same-task repick
+- 61d2ac67 dfx: KILLTRACE/EXECTRACE/EXITNOTIFY/NSFAULT/EFAULTTRAC +
+  pick-skip legs
+- fc71620c test(dbus): minimal D-Bus matrix rig + wire peer
+
+## Full-session validation (runs/full-r1, fire6.py, 2100s, FIRE-PASS)
+
+Kernel = this branch (both fixes). All 5 milestones reached (screen
+lit t≈501s, desktop visible, 17 gsd daemons, gnome-shell up).
+
+| metric (postmortem) | reference fire-r74j (main) | full-r1 (fixed) |
+|---|---|---|
+| gsd/Shell "failed to register before timeout" | 18 | **0** |
+| "failed to commit changes to dconf: Timeout" | 1 | **0** |
+| ScreenSaver exec ENOENT spam | 1 | 0 |
+| Xorg "Did not receive a reply" (logind get-session) | 1 (t=157s) | 1 (t=169s) |
+| mid-session dbus-daemon SIGKILL deaths | 389@415s, 450+451@641s | 385+386@723s (one pair; session survived — gsd registrations still 0 timeouts) |
+
+The remaining Xorg login1 stall did NOT reproduce in the minimal rig
+even under load with a GDBus caller (r6 E2:
+GDBus.Error:...Spawn.PermissionsInvalid delivered in 8s with 2 CPU
+burners). Suspect residual: the transient pick-skip contention under
+the full-session load (PICK-SKIP-ALL leg=1/3 prints, R65/R74 family)
+or single-thread-TCG timing. NEXT EXPERIMENT if chasing it: full
+session with thread=multi + the new leg codes; watch the helper's
+EXITNOTIFY/EXECTRACE window around Xorg's first logind call; also try
+a properly setuid helper image (chmod 4750 in a test copy) so the
+activation path goes all the way to /bin/false instead of the
+PermissionsInvalid early exit.
+
+## Final minimal-matrix numbers (r5/r6, fixed kernel, -smp2 -m1G)
+
+- A1 dbus-send unknown name: instant ServiceUnknown
+- A2 raw caller unknown name: 65ms ServiceUnknown
+- A3 100x ListNames: 100/100, p50=13ms, max=21ms
+- B1 activation: peer owns name (chain ~35s under TCG incl. python
+  startup; dbus reports nothing lost)
+- B2 100x Echo to activated peer: 100/100, p50=18ms, max=29ms
+- C1 100x Echo under 4 burners: 100/100, p50=28ms, max=220ms
+- C2 100x ListNames under load: 100/100
+- D1 gsettings/dconf: set 6s / get 2s, rc=0, values round-trip
+- E1 dbus-send login1 system: PermissionsInvalid in 2-4s (was: 25s
+  TimedOut with no reply)
+- E2 gdbus login1 under 2 burners: PermissionsInvalid in 8s
+- F1 sleep loop: 0/200 errors (was 200/200 EFAULT)
+- G1/G2 python sleep: pass (was EFAULT)

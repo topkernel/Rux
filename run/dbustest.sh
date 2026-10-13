@@ -151,4 +151,24 @@ echo "RSLT: E1 dbus-send rc=$RC elapsed=$((E-S))s"
 wait $OBS2
 echo "--- obs-sys.log ---"
 /bin/cat /root/obs-sys.log 2>/dev/null | /bin/grep -v "comm=sh ppid" | head -60
+echo "== E2: gdbus system login1 under load (GDBus caller, Xorg-like) =="
+if [ ! -S /run/dbus/system_bus_socket ]; then
+    /usr/bin/dbus-daemon --system --fork --nopidfile \
+        --address=unix:path=/run/dbus/system_bus_socket \
+        >/root/dbus-system.log 2>&1
+fi
+sleep 1
+BP2=""
+for i in 1 2; do
+    /bin/sh -c 'while :; do :; done' &
+    BP2="$BP2 $!"
+done
+S=$(/bin/date +%s)
+/usr/bin/gdbus call --system --timeout 25000 \
+    --dest org.freedesktop.login1 --object-path /org/freedesktop/login1 \
+    --method org.freedesktop.login1.Manager.ListSeats
+RC=$?
+E=$(/bin/date +%s)
+echo "RSLT: E2 gdbus rc=$RC elapsed=$((E-S))s"
+kill $BP2 2>/dev/null
 echo "DBUSTEST-DONE"
