@@ -2203,10 +2203,32 @@ pub struct Ext4BigLock {
     wait: crate::process::wait::WaitQueueHead,
 }
 
+/// R77 (wedge hunt): is the recorded big-lock owner still a live task?
+/// (pid-hash lookup; the stall tripwire only fires while the owner lives —
+/// a DEAD owner means the lock leaked with its holder.)
+fn locked_owner_alive_wait(owner: &u32) -> bool {
+    if *owner == 0 {
+        return false;
+    }
+    let t = crate::process::pid_hash::pid_hash_lookup_pinned(*owner);
+    if t.is_null() {
+        return false;
+    }
+    let alive = unsafe { !(*t).state().is_dead() };
+    crate::process::task::Task::task_put(t);
+    alive
+}
+
 struct Ext4BigState {
     locked: bool,
     owner: u32,
     depth: u32,
+    /// R77 (wedge hunt): jiffies stamp of the outermost acquire — with the
+    /// waiters' tripwire below it names a holder that never releases (a
+    /// leaked lock after a synchronous kill inside the critical section
+    /// parks every later ext4 user in D-state forever: the full3/inst-full1
+    /// wedge shape).
+    acquired_at: u64,
 }
 
 impl Ext4BigLock {
@@ -2216,6 +2238,7 @@ impl Ext4BigLock {
                 locked: false,
                 owner: 0,
                 depth: 0,
+                acquired_at: 0,
             }),
             wait: crate::process::wait::WaitQueueHead::new(),
         }
@@ -2229,6 +2252,7 @@ impl Ext4BigLock {
             st.locked = true;
             st.owner = pid;
             st.depth = 1;
+            st.acquired_at = crate::drivers::timer::get_jiffies();
             Some(Ext4BigGuard { lock: self })
         } else if st.owner == pid {
             st.depth += 1;
@@ -2305,6 +2329,42 @@ impl Ext4BigLock {
             // Sleep until release() wakes us (UNINTERRUPTIBLE: ext4 ops
             // are not signal-interruptible and the guard must be carried
             // back out of the critical section).
+            //
+            // R77 (wedge hunt tripwire): a waiter parked here for many
+            // seconds means the holder leaked the lock (killed
+            // synchronously inside the critical section — RAII never runs
+            // through do_exit). Name the holder, its depth, and how long
+            // it has held, rate-limited to one line per 10 s.
+            {
+                static LAST_WAIT_REPORT: core::sync::atomic::AtomicU64 =
+                    core::sync::atomic::AtomicU64::new(0);
+                let now = crate::drivers::timer::get_jiffies();
+                let last = LAST_WAIT_REPORT.load(core::sync::atomic::Ordering::Relaxed);
+                let (owner, depth, held) = {
+                    let st = self.state.lock();
+                    (st.owner, st.depth, now.saturating_sub(st.acquired_at))
+                };
+                if locked_owner_alive_wait(&owner)
+                    && now.wrapping_sub(last) >= crate::config::KERNEL_HZ as u64 * 10
+                    && LAST_WAIT_REPORT
+                        .compare_exchange(
+                            last,
+                            now,
+                            core::sync::atomic::Ordering::Relaxed,
+                            core::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok()
+                {
+                    let cur_pid = crate::process::current_pid();
+                    crate::pr_err!(
+                        "EXT4-BIGLOCK-STALL waiter={} holder={} depth={} held={}j",
+                        cur_pid,
+                        owner,
+                        depth,
+                        held
+                    );
+                }
+            }
             crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
             self.wait.finish_wait(cur);
