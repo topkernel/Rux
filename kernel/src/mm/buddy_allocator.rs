@@ -294,13 +294,23 @@ impl BuddyAllocator {
     }
 
     /// Convert size to order (O(1) bit manipulation)
+    ///
+    /// R75 (GNOME scribbles): the old clamp `order > MAX_ORDER → MAX_ORDER`
+    /// made every allocation larger than the largest buddy block
+    /// (PAGE_SIZE << MAX_ORDER, 16 MB) come back as a MAX_ORDER block — a
+    /// 64 MB Vec growth received 16 MB and then overwrote the following
+    /// 48 MB of kernel heap (the R57 pick-state garbage / R46 phantoms /
+    /// R74 slotless-TP / PREEMPT-UNDERFLOW family all match that
+    /// fingerprint). Callers must never receive a block smaller than the
+    /// requested layout: `alloc` rejects oversized requests with null
+    /// (the GlobalAlloc failure contract) so the damage stays a loud,
+    /// scoped ENOMEM kill instead of silent corruption.
     fn size_to_order(&self, size: usize) -> usize {
         if size <= PAGE_SIZE {
             return 0;
         }
         let pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-        let order = (usize::BITS - (pages - 1).leading_zeros()) as usize;
-        if order > MAX_ORDER { MAX_ORDER } else { order }
+        (usize::BITS - (pages - 1).leading_zeros()) as usize
     }
 
     /// Get buddy page index for a block
@@ -496,6 +506,19 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let align = layout.align();
 
         let order = self.size_to_order(size.max(align));
+
+        // R75: requests larger than the biggest buddy block must FAIL, not
+        // come back as an undersized MAX_ORDER block (see size_to_order).
+        if order > MAX_ORDER {
+            if size > 4 * 1024 * 1024 {
+                crate::pr_err!(
+                    "bigalloc: REJECTED size={:#x} (> max block {:#x})",
+                    size,
+                    PAGE_SIZE << MAX_ORDER
+                );
+            }
+            return core::ptr::null_mut();
+        }
 
         let _guard = self.lock.lock_irqsave();
         let ptr = self.alloc_blocks(order);
