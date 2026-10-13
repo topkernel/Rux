@@ -244,6 +244,45 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    // EXECTRACE (dbus-activation hunt): activation children have been
+    // observed dying with their FORK comm (never exec'd). Trace execs of
+    // the binaries involved in D-Bus activation, and every exec issued by
+    // a task whose comm still says dbus-daemon (posix_spawn/vfork child
+    // pre-exec). Rate-limited; prints jiffies at start/end so the
+    // fork->exec latency is measurable from the console.
+    let xt_now = crate::drivers::timer::get_jiffies();
+    let xt_pid = crate::process::current_pid();
+    let xt_on = {
+        static XT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let caller_is_dbus = crate::sched::current()
+            .map(|c| unsafe {
+                let comm = (*c).comm();
+                comm.starts_with(b"dbus-daemon".as_slice())
+            })
+            .unwrap_or(false);
+        let path_interesting = pathname.contains("python3.10")
+            || pathname.contains("dconf-service")
+            || pathname.contains("launch-helper")
+            || pathname.contains("dbus-daemon");
+        (caller_is_dbus || path_interesting)
+            && recursion_depth == 0
+            && XT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400
+    };
+    if xt_on {
+        let comm = crate::sched::current()
+            .map(|c| unsafe {
+                let raw = (*c).comm();
+                let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                core::str::from_utf8(&raw[..len]).unwrap_or("?")
+            })
+            .unwrap_or("?");
+        crate::pr_info!(
+            "EXECTRACE: START pid={} comm={} path={} jiffies={}",
+            xt_pid, comm, pathname, xt_now
+        );
+    }
+
     // Build full path
     let full_path = if pathname.starts_with('/') {
         alloc::borrow::Cow::Borrowed(pathname)
@@ -551,10 +590,24 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
 
     match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec) {
         Ok(()) => {
+            if xt_on {
+                crate::pr_info!(
+                    "EXECTRACE: OK pid={} path={} dt_jiffies={}",
+                    xt_pid, full_path.as_ref(),
+                    crate::drivers::timer::get_jiffies().wrapping_sub(xt_now)
+                );
+            }
             crate::pr_debug!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
             0
         }
         Err(e) => {
+            if xt_on {
+                crate::pr_info!(
+                    "EXECTRACE: ERR pid={} path={} err={} dt_jiffies={}",
+                    xt_pid, full_path.as_ref(), e,
+                    crate::drivers::timer::get_jiffies().wrapping_sub(xt_now)
+                );
+            }
             // Roll back the credential changes: the old image keeps running.
             if let Some(saved) = cred_saved {
                 // SAFETY: current task pointer still valid on the error path.

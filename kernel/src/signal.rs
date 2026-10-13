@@ -2051,6 +2051,45 @@ unsafe fn send_signal_locked_info(
 
     // SIGKILL and SIGSTOP cannot be ignored
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
+        // KILLTRACE (dbus-death hunt): name the sender of every SIGKILL.
+        // Group teardown (exit_group killing sibling threads of the
+        // sender's own tgid) is skipped — it is not an external kill.
+        // Rate-limited so a runaway killer cannot flood the console.
+        if sig == Signal::SIGKILL as i32 {
+            static KILLTRACE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if let Some(cur) = crate::sched::current() {
+                unsafe {
+                    let same_group = (*cur).tgid() == task.tgid();
+                    if !same_group
+                        && KILLTRACE_N.fetch_add(
+                            1, core::sync::atomic::Ordering::Relaxed) < 200
+                    {
+                        let s_comm = (*cur).comm();
+                        let s_len = s_comm
+                            .iter()
+                            .position(|&b| b == 0)
+                            .unwrap_or(s_comm.len());
+                        let t_comm = task.comm();
+                        let t_len = t_comm
+                            .iter()
+                            .position(|&b| b == 0)
+                            .unwrap_or(t_comm.len());
+                        crate::pr_info!(
+                            "KILLTRACE: pid={}({}) -> pid={}({}) tgid={} ppid={} SIGKILL",
+                            (*cur).pid(),
+                            core::str::from_utf8(&s_comm[..s_len])
+                                .unwrap_or("?"),
+                            task.pid(),
+                            core::str::from_utf8(&t_comm[..t_len])
+                                .unwrap_or("?"),
+                            task.tgid(),
+                            task.ppid(),
+                        );
+                    }
+                }
+            }
+        }
         if let Some(info) = si {
             task.pending.add_info(info);
         } else {

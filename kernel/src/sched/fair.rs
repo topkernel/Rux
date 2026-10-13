@@ -758,6 +758,10 @@ impl CfsRunQueue {
         // old capacity-overflow path. 32 stack slots of 24 bytes = 768B.
         let mut skipped: [(VruntimeKey, *mut crate::process::Task); 32] =
             [(VruntimeKey::new(0, 0), core::ptr::null_mut()); 32];
+        // STRAND-LEG codes at pick time (see the skip site): 1=on_cpu set,
+        // 2=own-claim non-prev, 3=ownership refused (live claim), 4=affinity,
+        // 5=cgroup-throttled.
+        let mut skip_legs: [u8; 32] = [0; 32];
         let mut skip_count = 0usize;
         let mut result = None;
 
@@ -816,6 +820,7 @@ impl CfsRunQueue {
             // cpu-throttled — they stay on the timeline and become
             // pickable again when the period rolls over (the same
             // affinity-style skip machinery above).
+            let mut skip_leg: u8 = 0;
             let allowed = unsafe {
                 // R65-pick (probe-slow): the dual-bit ownership test reads
                 // the whole qword in one load (Task::ownership_pickable) —
@@ -836,12 +841,6 @@ impl CfsRunQueue {
                         && claim != -1
                         && claim as usize != cpu_id
                     {
-                        // R74 (double-run gate): a LIVE pick-state with a
-                        // live claiming hart means that CPU published this
-                        // ownership at pick time and has not released it —
-                        // the task may be mid-switch-in on the claimer
-                        // (the r74a capture: claim=0 while CPU0 was inside
-                        // its pick → reset → CPU3 picked → double-run
                         // KERNPANIC). Only reset the claim when the
                         // claiming hart is verifiably not servicing
                         // interrupts (frozen >= 5s, the R57 discipline:
@@ -863,9 +862,26 @@ impl CfsRunQueue {
                         }
                         !claim_live
                     } else {
+                        // STRAND-LEG (dbus-wedge hunt): on_cpu=true, or a
+                        // claim this CPU owns but the task is not prev —
+                        // name the exact pick-time state so a wedged task
+                        // is diagnosable from the console.
+                        skip_leg = if (*task).on_cpu() { 1 } else { 2 };
                         false
                     }
                 };
+                if !ownership_ok && skip_leg == 0 {
+                    skip_leg = 3; // ownership refused, healed path taken
+                }
+                if ownership_ok && !(*task).cpu_allowed(cpu_id) {
+                    skip_leg = 4;
+                }
+                if ownership_ok
+                    && (*task).cpu_allowed(cpu_id)
+                    && crate::sched::cgroup::task_cgroup_throttled(task)
+                {
+                    skip_leg = 5;
+                }
                 (*task).cpu_allowed(cpu_id)
                     && ownership_ok
                     && !crate::sched::cgroup::task_cgroup_throttled(task)
@@ -893,6 +909,9 @@ impl CfsRunQueue {
             self.tasks_timeline.remove(&key);
             if skip_count < skipped.len() {
                 skipped[skip_count] = (key, task);
+                if skip_count < skip_legs.len() {
+                    skip_legs[skip_count] = skip_leg;
+                }
                 skip_count += 1;
             } else {
                 // Overflow — re-insert and give up (very unlikely)
@@ -969,6 +988,12 @@ impl CfsRunQueue {
                         let claim = (*task).running_on_cpu.load(Ordering::Relaxed);
                         ps(b"  pid=");
                         pd((*task).pid() as u64);
+                        ps(b" leg=");
+                        if i < skip_legs.len() {
+                            pd(skip_legs[i] as u64);
+                        } else {
+                            putchar(b'?');
+                        }
                         ps(b" oncpu=");
                         putchar(b'0' + (*task).on_cpu() as u8);
                         ps(b" claim=");

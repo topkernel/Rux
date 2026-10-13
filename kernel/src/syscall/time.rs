@@ -245,11 +245,13 @@ pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
 
     // Check if req_ptr is in valid user space
     if !crate::arch::uaccess::access_ok(req_ptr as usize, core::mem::size_of::<Timespec>()) {
+        nsfault("nanosleep access_ok(req)", req_ptr as usize);
         return -(errno::EFAULT as i64);
     }
 
     // Check rem_ptr if provided
     if !rem_ptr.is_null() && !crate::arch::uaccess::access_ok(rem_ptr as usize, core::mem::size_of::<Timespec>()) {
+        nsfault("nanosleep access_ok(rem)", rem_ptr as usize);
         return -(errno::EFAULT as i64);
     }
 
@@ -257,11 +259,15 @@ pub fn sys_nanosleep(args: SyscallArgs) -> i64 {
     // exception-table copy path (SUM=0 safe) and zero-fills on fault.
     let mut req = Timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe {
-        crate::arch::uaccess::copy_from_user(
+        let uncopied = crate::arch::uaccess::copy_from_user(
             &mut req as *mut Timespec as *mut u8,
             req_ptr as *const u8,
             core::mem::size_of::<Timespec>(),
         );
+        if uncopied != 0 {
+            nsfault("nanosleep copy_from_user(req)", req_ptr as usize);
+            return -(errno::EFAULT as i64);
+        }
     }
 
     // POSIX: tv_nsec must be in [0, 999_999_999]; a negative tv_sec is also
@@ -311,7 +317,10 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // Get current task pointer + PID for timer wakeup
     let current = match crate::sched::current() {
         Some(c) => c as *mut process::task::Task,
-        None => return -(errno::EFAULT as i64),
+        None => {
+            nsfault("sched::current()=None", 0);
+            return -(errno::EFAULT as i64);
+        }
     };
     // SAFETY: current is the currently running task's pointer from
     // sched::current(), valid for the whole syscall (we are it).
@@ -449,6 +458,22 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // the loop keeps re-checking jiffies.
             crate::sched::schedule();
         }
+    }
+}
+
+/// NSFAULT (sleep-EFAULT hunt): python's time.sleep intermittently (and
+/// sometimes deterministically) surfaces EFAULT; name the refusing branch
+/// and the user pointer so the console distinguishes access_ok from the
+/// copy path from the current()-None path. Rate-limited.
+fn nsfault(site: &str, ptr: usize) {
+    static NS_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    if NS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+        crate::pr_info!(
+            "NSFAULT: pid={} site={} ptr={:#x}",
+            crate::process::current_pid(),
+            site, ptr
+        );
     }
 }
 
@@ -909,12 +934,14 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
 
     // Check if rqtp is in valid user space
     if !crate::arch::uaccess::access_ok(rqtp as usize, core::mem::size_of::<Timespec>()) {
+        nsfault("access_ok(rqtp)", rqtp as usize);
         return fail(errno::EFAULT);
     }
 
     // Check rmtp if provided (only meaningful without TIMER_ABSTIME, but
     // validate whatever the caller passed)
     if !rmtp.is_null() && !crate::arch::uaccess::access_ok(rmtp as usize, core::mem::size_of::<Timespec>()) {
+        nsfault("access_ok(rmtp)", rmtp as usize);
         return fail(errno::EFAULT);
     }
 
@@ -931,6 +958,7 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
             )
         };
         if uncopied != 0 {
+            nsfault("copy_from_user(rqtp)", rqtp as usize);
             return fail(errno::EFAULT);
         }
     }

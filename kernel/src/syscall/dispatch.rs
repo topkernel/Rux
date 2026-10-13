@@ -546,6 +546,21 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         }
     };
 
+    // EFAULTTRAC (sleep-EFAULT hunt): python's time.sleep surfaces EFAULT
+    // from some syscall, but not from any of the instrumented sleep paths.
+    // Name every syscall that returns exactly -EFAULT so the culprit is
+    // identifiable from the console. Rate-limited.
+    if result == -(errno::EFAULT as i64) {
+        static EFT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if EFT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+            crate::pr_info!(
+                "EFAULTTRAC: pid={} nr={} a0={:#x} a1={:#x}",
+                crate::process::current_pid(), syscall_no, args[0], args[1]
+            );
+        }
+    }
+
     syscall_set_return_value(regs, result);
 
     // FORENSIC ring: last N syscalls per boot (pid, nr, a0, a1, ret).
