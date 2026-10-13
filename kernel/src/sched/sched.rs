@@ -3568,14 +3568,21 @@ fn r56_print_msg(msg: &[u8]) {
 fn r56_print_pid(prefix: &[u8], pid: u32, suffix: &[u8]) {
     r56_print_msg(prefix);
     let v = pid as u64;
-    let mut buf = [0u8; 8];
+    // R81 (printer hardening, from the bigalloc8 adjudication): this
+    // printer is called from heal paths that read POSSIBLY CORRUPTED
+    // words (the R80 legs print a garbage claim; the integration
+    // branch's capture hit a >=9-digit value from a corrupted pid field
+    // and PANICKED here — index out of bounds len 8 index 8 — turning a
+    // contained heal into a kernel panic inside the diagnostic itself).
+    // u32::MAX is 10 digits; size for that and never index past it.
+    let mut buf = [0u8; 10];
     let mut n = 0;
     if v == 0 {
         buf[0] = b'0';
         n = 1;
     } else {
         let mut x = v;
-        while x > 0 {
+        while x > 0 && n < buf.len() {
             buf[n] = b'0' + (x % 10) as u8;
             x /= 10;
             n += 1;
