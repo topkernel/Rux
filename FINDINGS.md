@@ -342,3 +342,24 @@ RESUME SEQUENCE:
 Branch state at pause: feature/gnome-integration @ be30f139 (poll fix +
 fbdev ioctls + R75 buddy + dbus2 fixes + ALLOCTHROW rawframes + R76
 chunked FileBuffer). Nothing pushed; main @ 41d7aad1 untouched.
+
+# MILESTONE (2026-10-13 evening): GNOME desktop painted (bigalloc6)
+
+Integration kernel 8decfc8b (page-backed FileBuffer on top of the poll
+fix + fbdev ioctls + R75 + dbus2 fixes) booted gp3i.img at -smp 1:
+screen lit between t=421s and t=483s, 0.9999 non-black, held to the
+1500s timeout, ZERO ALLOCTHROW / bigalloc / KERNPANIC. The frame
+(bigalloc6/shots/s008..s024) is the GNOME Shell overview: top bar with
+Activities + clock "Oct 13 18:29", "Logged in as a privileged user"
+banner, workspace thumbnails, window previews, dash — gnome-shell owns
+the screen. Colors were byte-rotated (blue→ignored byte, gray showed as
+(35,35,0)); root cause = fbdev GET bitfields one byte off vs the
+format-3 scanout; fixed in 44c7c06f. bigalloc7 verifies color.
+
+Heap-exhaustion cascade confirmed resolved: bigalloc5's ext4-big-lock
+wedge + frozen bio counters were downstream of the 64 MiB memfd eating
+the kernel heap; with page-backed chunks nothing starves.
+
+Remaining to the goal: (1) color verification, (2) -smp 4 stability for
+the full 2100s fire6 gate (scheduler agent active), (3) merge to main,
+gate, swap README screenshot with the real desktop.
