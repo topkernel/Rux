@@ -1,0 +1,20 @@
+[
+  {
+    "nonblack_frac": 0.0065,
+    "topstrip_frac": 0.0,
+    "distinct_colors": 4,
+    "mean_lum": 0.4,
+    "sha": "cc8b4843a37c",
+    "file": "shots/p-boot.png",
+    "t": 0.3
+  },
+  {
+    "nonblack_frac": 0.0,
+    "topstrip_frac": 0.0,
+    "distinct_colors": 1,
+    "mean_lum": 0.0,
+    "sha": "bc4466467455",
+    "file": "shots/p-final.png",
+    "t": 212.1
+  }
+]

@@ -1,0 +1,112 @@
+verdict: FIRE-PARTIAL
+kernel: /home/william/rux-agents/gnome-int/target/riscv64gc-unknown-none-elf/debug/rux
+image:  /home/william/rux-agents/gnome-img/gnome.img -> runs/fire-r85/v1/fire.img
+elapsed: 452s (stop: kernel-panic)
+
+milestones (in order):
+- REACHED M1_migrations_done @248s: absent 6 dumps; last vruntime=79245897200 (~79s CPU), last seen t=213.5s
+- REACHED M2_gsd_daemon @353s: comm=gsd-wwan pid=391
+- REACHED M3_gnome_shell @233s: pid=369 state=RUNNING
+- not-reached M4_screen_lit
+- not-reached M5_desktop_visible
+
+X0-socket: YES; best nonblack=0.006; lit(>=0.05)=False
+
+markers:
+- dfx_watchdog_on @4s
+- dfx_periodic_on @4s
+- auto_mkdirs @5s
+- xorg_started @5s
+- xorg_banner @8s
+- p1_x0_probe @125s
+- start_gnome @126s
+- dbus_daemon @128s
+- gnome_session @133s
+- gnome_shell @233s
+- mutter_wm @316s
+- xterm_x_ok @344s
+- gsd @353s
+- kernpanic @452s
+
+SIGDEATH events (first 20):
+- t=210s pid=350 comm=dconf worker sig=9
+- t=210s pid=349 comm=gmain sig=9
+- t=216s pid=353 comm=dconf worker sig=9
+- t=216s pid=352 comm=gmain sig=9
+- t=228s pid=363 comm=gmain sig=9
+- t=228s pid=365 comm=gdbus sig=9
+- t=230s pid=367 comm=gdbus sig=9
+- t=230s pid=362 comm=gmain sig=9
+- t=371s pid=388 comm=dbus-daemon sig=9
+- t=452s pid=424 comm=sh sig=11
+
+vruntime tails (per comm, last 8 samples):
+- Xorg: [369s v214s RUNNING], [373s v218s RUNNING], [378s v221s RUNNING], [388s v228s RUNNING], [393s v232s RUNNING], [398s v235s RUNNING], [403s v239s RUNNING], [409s v243s RUNNING], [413s v247s RUNNING], [418s v251s INTERRUPTIBLE(sleep)], [423s v255s RUNNING], [428s v259s RUNNING], [434s v263s RUNNING], [438s v267s RUNNING], [443s v271s RUNNING], [449s v275s RUNNING]
+- dbus-daemon: [413s v142s INTERRUPTIBLE(sleep)], [413s v226s INTERRUPTIBLE(sleep)], [418s v142s INTERRUPTIBLE(sleep)], [418s v226s INTERRUPTIBLE(sleep)], [423s v142s INTERRUPTIBLE(sleep)], [423s v226s INTERRUPTIBLE(sleep)], [428s v142s INTERRUPTIBLE(sleep)], [428s v226s INTERRUPTIBLE(sleep)], [434s v142s INTERRUPTIBLE(sleep)], [434s v263s INTERRUPTIBLE(sleep)], [438s v142s INTERRUPTIBLE(sleep)], [438s v263s INTERRUPTIBLE(sleep)], [443s v142s INTERRUPTIBLE(sleep)], [443s v263s INTERRUPTIBLE(sleep)], [449s v142s INTERRUPTIBLE(sleep)], [449s v263s INTERRUPTIBLE(sleep)]
+- dbus-daemon-lau: [133s v27s RUNNING]
+- gnome-keyring-d: [423s v99s ZOMBIE], [428s v259s RUNNING], [428s v100s ZOMBIE], [428s v99s ZOMBIE], [434s v263s RUNNING], [434s v100s ZOMBIE], [434s v99s ZOMBIE], [438s v267s RUNNING], [438s v100s ZOMBIE], [438s v99s ZOMBIE], [443s v271s RUNNING], [443s v100s ZOMBIE], [443s v99s ZOMBIE], [449s v275s RUNNING], [449s v100s ZOMBIE], [449s v99s ZOMBIE]
+- gnome-session-b: [369s v214s INTERRUPTIBLE(sleep)], [373s v218s RUNNING], [378s v221s RUNNING], [388s v228s RUNNING], [393s v232s RUNNING], [398s v235s RUNNING], [403s v239s RUNNING], [409s v243s RUNNING], [413s v247s INTERRUPTIBLE(sleep)], [418s v251s RUNNING], [423s v255s INTERRUPTIBLE(sleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s RUNNING], [438s v267s INTERRUPTIBLE(sleep)], [443s v271s RUNNING], [449s v275s RUNNING]
+- gnome-session-c: [148s v38s INTERRUPTIBLE(sleep)], [154s v38s INTERRUPTIBLE(sleep)], [158s v39s RUNNING], [163s v44s RUNNING], [169s v47s INTERRUPTIBLE(sleep)], [169s v48s RUNNING], [173s v47s INTERRUPTIBLE(sleep)], [173s v53s RUNNING], [178s v47s INTERRUPTIBLE(sleep)], [178s v58s RUNNING], [188s v59s INTERRUPTIBLE(sleep)], [188s v66s RUNNING], [193s v59s INTERRUPTIBLE(sleep)], [193s v70s RUNNING], [198s v74s INTERRUPTIBLE(sleep)], [198s v75s RUNNING]
+- gnome-session-f: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s RUNNING], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- gnome-shell: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- gsd-a11y-settin: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s RUNNING], [398s v236s RUNNING], [403s v239s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v271s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- gsd-color: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s RUNNING], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s RUNNING], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v271s UNINTERRUPTIBLE(dsleep)], [449s v275s RUNNING]
+- gsd-datetime: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v218s RUNNING], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s RUNNING], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v267s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- gsd-housekeepin: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v239s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s RUNNING], [418s v251s RUNNING], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v275s UNINTERRUPTIBLE(dsleep)]
+- gsd-keyboard: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s RUNNING], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s RUNNING], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v239s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s RUNNING], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v275s RUNNING]
+- gsd-media-keys: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s RUNNING], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- gsd-power: [369s v214s RUNNING], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s RUNNING], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v271s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- gsd-print-notif: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s RUNNING], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v239s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v275s RUNNING]
+- gsd-rfkill: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s RUNNING], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s RUNNING], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v275s UNINTERRUPTIBLE(dsleep)]
+- gsd-screensaver: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s RUNNING], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- gsd-sharing: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v239s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s RUNNING], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v267s RUNNING], [443s v271s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- gsd-smartcard: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v239s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s RUNNING], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v271s RUNNING], [449s v275s UNINTERRUPTIBLE(dsleep)]
+- gsd-sound: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s RUNNING], [388s v228s RUNNING], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v239s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v275s UNINTERRUPTIBLE(dsleep)]
+- gsd-usb-protect: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s RUNNING], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v239s UNINTERRUPTIBLE(dsleep)], [409s v243s RUNNING], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- gsd-wacom: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s INTERRUPTIBLE(sleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v275s RUNNING]
+- gsd-wwan: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s RUNNING], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v238s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v271s UNINTERRUPTIBLE(dsleep)], [449s v275s RUNNING]
+- gsd-xsettings: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v239s RUNNING], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s RUNNING], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+- session-migrati: [203s v79s RUNNING], [203s v79s RUNNING], [208s v79s INTERRUPTIBLE(sleep)], [214s v79s INTERRUPTIBLE(sleep)]
+- xterm: [369s v214s UNINTERRUPTIBLE(dsleep)], [373s v217s UNINTERRUPTIBLE(dsleep)], [378s v221s UNINTERRUPTIBLE(dsleep)], [388s v228s UNINTERRUPTIBLE(dsleep)], [393s v232s UNINTERRUPTIBLE(dsleep)], [398s v235s UNINTERRUPTIBLE(dsleep)], [403s v239s UNINTERRUPTIBLE(dsleep)], [409s v243s UNINTERRUPTIBLE(dsleep)], [413s v247s UNINTERRUPTIBLE(dsleep)], [418s v251s UNINTERRUPTIBLE(dsleep)], [423s v255s UNINTERRUPTIBLE(dsleep)], [428s v259s UNINTERRUPTIBLE(dsleep)], [434s v263s UNINTERRUPTIBLE(dsleep)], [438s v266s UNINTERRUPTIBLE(dsleep)], [443s v270s UNINTERRUPTIBLE(dsleep)], [449s v274s UNINTERRUPTIBLE(dsleep)]
+
+
+chain progression:
+| t(s) | auto.sh line | result |
+|---|---|---|
+| 4 | `/bin/mkdir /run/user` |  |
+| 5 | `/bin/mkdir /run/user` | [st=0] |
+| 5 | `/bin/mkdir /run/user/0` |  |
+| 5 | `/bin/mkdir /run/user/0` | [st=0] |
+| 5 | `/bin/mkdir /run/dbus` |  |
+| 5 | `/bin/mkdir /run/dbus` | [st=0] |
+| 5 | `/bin/mkdir /tmp/.X11-unix` |  |
+| 5 | `/bin/mkdir /tmp/.X11-unix` | [st=256] |
+| 5 | `BG /usr/bin/Xorg -config /root/xorg-fbdev.conf -logfile /root/Xorg.0.log :0` |  |
+| 5 | `BG /usr/bin/Xorg -config /root/xorg-fbdev.conf -logfile /root/Xorg.0.log :0` | [bg pid=311] |
+| 5 | `SLEEP 120` |  |
+| 5 | `SLEEP 120` | [sleep 120] |
+| 125 | `/bin/echo FIRE-P1-X0-SOCKET-TEST` |  |
+| 125 | `/bin/echo FIRE-P1-X0-SOCKET-TEST` | [st=0] |
+| 125 | `/bin/ls -la /tmp/.X11-unix` |  |
+| 125 | `/bin/ls -la /tmp/.X11-unix` | [st=0] |
+| 125 | `/bin/test -S /tmp/.X11-unix/X0` |  |
+| 125 | `/bin/test -S /tmp/.X11-unix/X0` | [st=0] |
+| 125 | `/bin/echo FIRE-P1-DONE` |  |
+| 126 | `/bin/echo FIRE-P1-DONE` | [st=0] |
+| 126 | `BG /root/start-gnome.sh` |  |
+| 126 | `BG /root/start-gnome.sh` | [bg pid=321] |
+| 126 | `SLEEP 180` |  |
+| 126 | `SLEEP 180` | [sleep 180] |
+| 306 | `/bin/echo FIRE-P2-GNOME-STATUS` |  |
+| 309 | `/bin/echo FIRE-P2-GNOME-STATUS` | [st=0] |
+| 309 | `/bin/cat /root/dbus-session.log` |  |
+| 312 | `/bin/cat /root/dbus-session.log` | [st=0] |
+| 312 | `/bin/cat /root/dbus-system.log` |  |
+| 314 | `/bin/cat /root/dbus-system.log` | [st=0] |
+| 314 | `/usr/bin/tail -n 40 /root/gnome-session.log` |  |
+| 316 | `/usr/bin/tail -n 40 /root/gnome-session.log` | [st=0] |
+| 316 | `/bin/cat /root/start-gnome.log` |  |
+| 318 | `/bin/cat /root/start-gnome.log` | [st=256] |
+| 318 | `/bin/echo FIRE-P2-DONE` |  |
+| 344 | `/bin/echo FIRE-P2-DONE` | [st=0] |
+| 344 | `/usr/bin/xterm -geometry +0+0 -title X-OK` |  |

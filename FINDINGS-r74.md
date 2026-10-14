@@ -151,3 +151,87 @@ open item 3, from the previous session); GUI builds boot fine.
 4. R80 containment usually holds (r2 FIRE-PASS); under deeper load
    (gate-r2, 989s) the second hart escapes → PREEMPT-UNDERFLOW →
    KERNPANIC.
+
+## Producer #2 (R84/R85 session, 2026-10-14 ~07:30)
+
+Instrumentation (commit 436c5717): the R83 audit moved from the idle
+loop (which never idles during the dbus storm) into scheduler_tick —
+per-tick self-check, 4-jiffy pid-hash walk, and a 64-jiffy 2 MiB heap
+scan for the fingerprint qword (hi32 == 0x1999_9995), plus one-shot
+`r84_ksp_trap` reporters at all four trap.S ti_kernel_sp touch points.
+
+### What the widened trap caught (fire-r84/r1, 900 s, 2 R74s, 0 panics)
+
+- R74 #1 jiffies=31948 time=0xbfc80c0a (321.76 s): tp=pid 332
+  gnome-session-b, ksp=0x19999995_1ae18400 — garbage present at the
+  R74 read, ALREADY a legal sp+PT_SIZE value in the header dump
+  microseconds later.
+- tick-hash caught pid 392 (gsd-usb-protect) SIX jiffies before R74 #2:
+  ti_preempt_count == -1 (double-run shape) plus ASCII "AppI"
+  (a glib "AppInfo" string fragment) in journal_handle — user-data
+  debris inside the header.
+- R74 #2 jiffies=49143: tp = cpu2's STATIC IDLE TASK — its ksp read
+  the garbage mid-schedule. A static .bss Task cannot be a recycled
+  heap page: the page-reuse theory for producer #2 is dead.
+- ZERO R83-WAITWATCH hits (no victim was in the ext4 wait when the
+  value appeared) and ZERO fingerprint hits in the whole 128 MiB heap
+  across seven full scan cycles → the qword is NOT a standing heap
+  object; it exists at ti_kernel_sp only transiently (µs) around each
+  R74 window.
+- The same log shows gdbus executing at a garbage USER epc
+  (0x3000442e56) — user contexts are getting corrupted registers.
+
+### Value arithmetic (first-hand calibration)
+
+Every capture satisfies ksp == (2^64 − X)/10 EXACTLY, with
+X = 193.06e9, 193.41e9 (this run), 192.95e9, 192.71e9, 192.94e9
+(gate-r2/r74fix-v1) and 156.43e9 (r74hunt-r2) — five of six cluster
+inside 192.7–193.4 s. `objdump` shows the kernel binary contains NO
+division by 10 (constant or magic) at all — the arithmetic runs in
+USER code (glib clock math; the dbus storm's glib timeouts compute
+exactly such wrapped-negative µs values). The 0x400-aligned lo32 and
+the (2^32−46)/10 shape are artifacts of that user expression, not a
+kernel timekeeping constant.
+
+### Root cause
+
+The store is the victim's OWN trap-return ksp anchor:
+`.Lreturn_user` / `.Lcheck_resched_kernel` compute
+ti_kernel_sp = sp + PT_SIZE from the LIVE sp register with no
+validation. Writer enumeration is exhaustive — every Rust writer
+stores 0 or a stack-top/frame pointer; the two asm stores are the only
+writers that can propagate a corrupted sp. When the slotless
+double-run engine corrupts a context's registers (same engine that
+left gdbus at a garbage epc), the wild sp — a user-range value holding
+glib's wrapped-negative timestamp arithmetic — is written verbatim
+into ti_kernel_sp. Every ksp consumer then propagates it: the
+from-user entry stack switch and both post-schedule reloads load
+sp = ksp − PT_SIZE, pointing harts at unmapped frames (the smear that
+turns a contained double-run into R74-SLOTLESS-TP /
+PREEMPT-UNDERFLOW / panics). Producer #1 (c1539f6e) was the same
+engine's ti_user_sp hop; producer #2 is the sp→ti_kernel_sp hop.
+
+### Fix (commit 8b8bdd16, R85)
+
+Every ti_kernel_sp touch in trap.S is now gated (one-shot
+r84_ksp_trap report, then repair):
+
+- store sites anchor ksp at the task's OWN kernel-stack top whenever
+  sp+PT_SIZE is user-half — ksp can never again hold a user-range
+  value;
+- reload sites never load a user-half ksp into sp;
+- entry paths (.Lfrom_user stack switch, .Lsave_kernel_frame push)
+  repair a user-half sp to the stack top BEFORE any push — the old
+  path pushed pt_regs at the wild sp, faulted inside the save, and
+  cascaded with SIE off (silent hart wedge). The repaired frame
+  records the repaired sp in PT_SP so the unwind cannot re-enter the
+  wild pointer.
+
+The upstream register corruption (slotless double-run, R56/R46 hunt)
+remains a separate, already-contained hunt; R85 removes its ability to
+smear through the thread_info anchor.
+
+### Verification
+
+(pending — full 2100 s smp4 fire6 on the R85 build plus the
+minimal-session paint check; numbers appended when complete.)

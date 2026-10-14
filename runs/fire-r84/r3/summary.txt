@@ -1,0 +1,61 @@
+verdict: FIRE-FAIL
+kernel: /home/william/rux-agents/gnome-int/target/riscv64gc-unknown-none-elf/debug/rux
+image:  /home/william/rux-agents/gnome-img/gnome.img -> runs/fire-r84/r3/fire.img
+elapsed: 202s (stop: kernel-panic)
+
+milestones (in order):
+- not-reached M1_migrations_done
+- not-reached M2_gsd_daemon
+- not-reached M3_gnome_shell
+- not-reached M4_screen_lit
+- not-reached M5_desktop_visible
+
+X0-socket: YES; best nonblack=0.006; lit(>=0.05)=False
+
+markers:
+- dfx_watchdog_on @2s
+- dfx_periodic_on @2s
+- auto_mkdirs @3s
+- xorg_started @4s
+- xorg_banner @6s
+- p1_x0_probe @125s
+- start_gnome @125s
+- dbus_daemon @127s
+- gnome_session @133s
+- kernpanic @202s
+
+vruntime tails (per comm, last 8 samples):
+- Xorg: [118s v13s RUNNING], [123s v14s INTERRUPTIBLE(sleep)], [133s v19s INTERRUPTIBLE(sleep)], [138s v19s INTERRUPTIBLE(sleep)], [142s v19s INTERRUPTIBLE(sleep)], [148s v13369s INTERRUPTIBLE(sleep)], [153s v19s INTERRUPTIBLE(sleep)], [158s v33s RUNNING], [162s v38s INTERRUPTIBLE(sleep)], [168s v42s INTERRUPTIBLE(sleep)], [172s v46s RUNNING], [178s v50s RUNNING], [183s v55s INTERRUPTIBLE(sleep)], [187s v59s INTERRUPTIBLE(sleep)], [193s v60s INTERRUPTIBLE(sleep)], [198s v60s INTERRUPTIBLE(sleep)]
+- dbus-daemon: [162s v31s INTERRUPTIBLE(sleep)], [162s v24s INTERRUPTIBLE(sleep)], [168s v31s INTERRUPTIBLE(sleep)], [168s v24s INTERRUPTIBLE(sleep)], [172s v31s INTERRUPTIBLE(sleep)], [172s v24s INTERRUPTIBLE(sleep)], [178s v31s INTERRUPTIBLE(sleep)], [178s v24s INTERRUPTIBLE(sleep)], [183s v31s INTERRUPTIBLE(sleep)], [183s v24s INTERRUPTIBLE(sleep)], [187s v31s INTERRUPTIBLE(sleep)], [187s v24s INTERRUPTIBLE(sleep)], [193s v31s INTERRUPTIBLE(sleep)], [193s v60s INTERRUPTIBLE(sleep)], [198s v31s INTERRUPTIBLE(sleep)], [198s v60s INTERRUPTIBLE(sleep)]
+- gnome-session-b: [133s v21s RUNNING], [138s v25s INTERRUPTIBLE(sleep)], [142s v25s INTERRUPTIBLE(sleep)], [148s v25s INTERRUPTIBLE(sleep)], [153s v25s INTERRUPTIBLE(sleep)], [158s v25s INTERRUPTIBLE(sleep)], [162s v25s INTERRUPTIBLE(sleep)], [168s v25s INTERRUPTIBLE(sleep)], [172s v25s INTERRUPTIBLE(sleep)], [178s v25s INTERRUPTIBLE(sleep)], [183s v25s INTERRUPTIBLE(sleep)], [187s v25s INTERRUPTIBLE(sleep)], [193s v61s INTERRUPTIBLE(sleep)], [198s v61s INTERRUPTIBLE(sleep)]
+- gnome-session-c: [142s v30s INTERRUPTIBLE(sleep)], [148s v30s INTERRUPTIBLE(sleep)], [153s v30s INTERRUPTIBLE(sleep)], [158s v33s INTERRUPTIBLE(sleep)], [162s v36s INTERRUPTIBLE(sleep)], [162s v38s RUNNING], [168s v36s INTERRUPTIBLE(sleep)], [168s v42s RUNNING], [172s v45s INTERRUPTIBLE(sleep)], [172s v46s INTERRUPTIBLE(sleep)], [178s v45s INTERRUPTIBLE(sleep)], [178s v50s RUNNING], [183s v45s INTERRUPTIBLE(sleep)], [183s v55s RUNNING], [187s v59s INTERRUPTIBLE(sleep)], [187s v59s RUNNING]
+- session-migrati: [193s v63s RUNNING], [198s v65s RUNNING]
+
+
+chain progression:
+| t(s) | auto.sh line | result |
+|---|---|---|
+| 3 | `/bin/mkdir /run/user` |  |
+| 3 | `/bin/mkdir /run/user` | [st=0] |
+| 3 | `/bin/mkdir /run/user/0` |  |
+| 3 | `/bin/mkdir /run/user/0` | [st=0] |
+| 3 | `/bin/mkdir /run/dbus` |  |
+| 3 | `/bin/mkdir /run/dbus` | [st=0] |
+| 3 | `/bin/mkdir /tmp/.X11-unix` |  |
+| 4 | `/bin/mkdir /tmp/.X11-unix` | [st=256] |
+| 4 | `BG /usr/bin/Xorg -config /root/xorg-fbdev.conf -logfile /root/Xorg.0.log :0` |  |
+| 4 | `BG /usr/bin/Xorg -config /root/xorg-fbdev.conf -logfile /root/Xorg.0.log :0` | [bg pid=311] |
+| 4 | `SLEEP 120` |  |
+| 4 | `SLEEP 120` | [sleep 120] |
+| 124 | `/bin/echo FIRE-P1-X0-SOCKET-TEST` |  |
+| 124 | `/bin/echo FIRE-P1-X0-SOCKET-TEST` | [st=0] |
+| 124 | `/bin/ls -la /tmp/.X11-unix` |  |
+| 125 | `/bin/ls -la /tmp/.X11-unix` | [st=0] |
+| 125 | `/bin/test -S /tmp/.X11-unix/X0` |  |
+| 125 | `/bin/test -S /tmp/.X11-unix/X0` | [st=0] |
+| 125 | `/bin/echo FIRE-P1-DONE` |  |
+| 125 | `/bin/echo FIRE-P1-DONE` | [st=0] |
+| 125 | `BG /root/start-gnome.sh` |  |
+| 125 | `BG /root/start-gnome.sh` | [bg pid=321] |
+| 125 | `SLEEP 180` |  |
+| 125 | `SLEEP 180` | [sleep 180] |

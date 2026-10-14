@@ -1,0 +1,30 @@
+
+===== t=300s sample 1 =====
+59056219800 policy=CFS comm=gnome-session-b
+task @0xffffffd603941000 pid=336 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=? on_rq=0 affinity=0x00000000ffffffff vruntime=159056307900 policy=CFS comm=gmain
+task @0xffffffd601e34000 pid=337 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=159058106200 policy=CFS comm=gdbus
+task @0xffffffd6024b0000 pid=342 state=RUNNING ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=159058106200 policy=CFS comm=dconf worker
+task @0xffffffd603bcb000 pid=348 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=? on_rq=0 affinity=0x00000000ffffffff vruntime=81042423400 policy=CFS comm=InputThread
+task @0xffffffd60198c000 pid=359 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=159058464100 policy=CFS comm=gnome-keyring-d
+task @0xffffffd603f12000 pid=360 state=ZOMBIE ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=? on_rq=0 affinity=0x00000000ffffffff vruntime=100423197000 policy=CFS comm=gnome-keyring-d
+task @0xffffffd603ee0000 pid=361 state=ZOMBIE ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=99391233700 policy=CFS comm=gnome-keyring-d
+task @0xffffffd604048000 pid=364 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=159058821700 policy=CFS comm=gmain
+task @0xffffffd60408a000 pid=366 state=RUNNING ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=159074860200 policy=CFS comm=gdbus
+task @0xffffffd604115000 pid=368 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=99096326100 policy=CFS comm=timer
+task @0xffffffd603f0c000 pid=369 state=RUNNING ti_cpu=3 on_cpu=1 claim=3 pk=1 preempt=65537 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=159118216200 policy=CFS comm=gnome-shell
+task @0xffffffd601ea2000 pid=372 state=RUNNING ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=? on_rq=1 affinity=0x00000000ffffffff vruntime=159068544400 policy=CFS comm=gmain
+task @0xffffffd60494a000 pid=373 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=? on_rq=0 affinity=0x00000000ffffffff vruntime=153631576800 policy=CFS comm=pool-gnome-shel
+task @0xffffffd6021cf000 pid=374 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=159069024900 policy=CFS comm=gdbus
+task @0xffffffd603bc8000 pid=375 state=RUNNING ti_cpu=0 on_cpu=1 claim=0 pk=1 preempt=65536 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=159068672200 policy=CFS comm=dconf worker
+task @0xffffffd601ead000 pid=376 state=UNINTERRUPTIBLE(dsleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=159030050200 policy=CFS comm=[pango] FcInit
+task @0xffffffd60134e000 pid=377 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=154371724400 policy=CFS comm=JS Helper
+task @0xffffffd604dea000 pid=378 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=? on_rq=0 affinity=0x00000000ffffffff vruntime=154371910900 policy=CFS comm=JS Helper
+task @0xffffffd604da6000 pid=379 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=154371657700 policy=CFS comm=JS Helper
+task @0xffffffd604db1000 pid=380 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=154369497900 policy=CFS comm=JS Helper
+=== 37 tasks ===
+warning: 11 linked= probes skipped (GRQ lock busy)
+
+MEM heap 70548K/131072K a=0 f=0 | slab 0pg a=0 f=0
+PICK-SKIP-ALL cpu=1 skipped=1
+  pid=369 why=1 oncpu=1 claim=0 pk=1 aff=0xffffffff
+ | pages u=127198 r=53281
