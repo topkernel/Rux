@@ -135,6 +135,29 @@ int main(void) {
         }
     }
 
+    // Mode selection: /etc/runit-mode ("gs" or "session") so the same
+    // image boots either chain without a rebuild. Default "session"
+    // falls back to "gs" if the supervised session dies early.
+    // Rationale: gnome-session-binary kills the shell at its hardcoded
+    // 20s register timeout — far too short under single-threaded TCG,
+    // where the SpiderMonkey boot needs minutes. The gs mode runs
+    // gnome-shell --replace unsupervised (no register deadline).
+    char modebuf[16] = "";
+    {
+        int mf = open("/etc/runit-mode", O_RDONLY);
+        if (mf >= 0) {
+            ssize_t n = read(mf, modebuf, sizeof modebuf - 1);
+            close(mf);
+            if (n > 0) {
+                modebuf[n] = 0;
+                for (int i = 0; modebuf[i]; i++)
+                    if (modebuf[i] == '\n' || modebuf[i] == '\r') modebuf[i] = 0;
+            }
+        }
+    }
+    const char *MODE = (modebuf[0] == 'g') ? "gs" : "session";
+    printf("[runit] mode=%s\n", MODE);
+
     setenv("PATH", "/usr/bin:/usr/sbin:/bin:/sbin", 1);
     setenv("HOME", "/root", 1);
     setenv("USER", "root", 1);
@@ -188,7 +211,7 @@ int main(void) {
     wait_for_x(30);
     sleep(2); // let GLX initialize before the first client connects
 
-    printf("[runit] starting gnome-session (session=rux)\n");
+    printf("[runit] starting session chain (mode=%s)\n", MODE);
     // Periodic log tailer: every 20s push the tail of the session logs
     // to the console, so bring-up forensics do not depend on death
     // detection working.
@@ -207,6 +230,25 @@ int main(void) {
                 }
             }
             _exit(0);
+        }
+    }
+    if (strcmp(MODE, "gs") == 0) {
+        // Unsupervised shell: no register timeout, unlimited JS boot
+        // time (the TCG-friendly bring-up path).
+        pid_t gpid = launch_logged("/tmp/gnome-shell.log",
+                                   "/usr/bin/gnome-shell", "gnome-shell",
+                                   (const char *const []){
+                                       "gnome-shell", "--replace", NULL });
+        signal(SIGCHLD, SIG_DFL);
+        for (;;) {
+            int st;
+            pid_t p = wait(&st);
+            if (p > 0) {
+                printf("[runit] child %d exited st=%d\n", (int)p, st);
+                if (p == gpid) { dump_log("/tmp/gnome-shell.log"); dump_log("/tmp/Xorg.log"); }
+            } else {
+                sleep(2);
+            }
         }
     }
     {

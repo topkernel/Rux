@@ -443,6 +443,23 @@ impl VmaManager {
         let start = vma.start();
         let end = vma.end();
 
+        // TRIPWIRE: inserting a VMA whose start key already exists would
+        // silently REPLACE the incumbent (BTreeMap insert) — two owners
+        // for one range. Linux never adds an existing start; every caller
+        // removes first. (heapstress/gnome-shell corruption hunt.)
+        if self.vmas.contains_key(&start) {
+            static DUP_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if DUP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::pr_err!(
+                    "VMA-ADD-DUP start={:#x} end={:#x} pid={} — replacing incumbent",
+                    start.as_usize(),
+                    end.as_usize(),
+                    crate::process::current_pid()
+                );
+            }
+        }
+
         // Check if previous VMA overlaps
         if let Some((_, prev_vma)) = self.vmas.range(..start).next_back() {
             if prev_vma.end().as_usize() > start.as_usize() {
