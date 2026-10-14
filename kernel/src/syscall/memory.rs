@@ -674,6 +674,10 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // SAFETY: root is the task's page-table root;
                             // info.addr..+len is the linear-mapped framebuffer.
                             unsafe {
+                                crate::arch::mm::mm_ops::MM_CTX.store(
+                                    2,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                );
                                 crate::arch::mm::mm_ops::map_user_region(
                                     root,
                                     placement as u64,
@@ -841,6 +845,10 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                         let _pte_guard =
                                             crate::arch::mm::mm_ops::PTE_MODIFY_LOCK
                                                 .lock_irqsave();
+                                        crate::arch::mm::mm_ops::MM_CTX.store(
+                                            3,
+                                            core::sync::atomic::Ordering::Relaxed,
+                                        );
                                         crate::arch::mm::map_user_page(
                                             root_ppn,
                                             crate::arch::mm::memory_layout::VirtAddr::new(
@@ -1630,6 +1638,8 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
     use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
     use crate::mm::zone::GfpFlags;
 
+    crate::arch::mm::mm_ops::MM_CTX.store(4, core::sync::atomic::Ordering::Relaxed);
+
     // R7-A5: serialize leaf-PTE mutations against fork's table walk and COW
     // faults — the same discipline as the demand-fault paths.
     let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
@@ -1774,12 +1784,17 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
         None => return mmap_error::EFAULT,  // Address not mapped
     };
 
-    // Validate old_addr is VMA start address
-    if vma_start.as_usize() != old_addr {
-        return mmap_error::EFAULT;
-    }
-
-    // Validate old_size is within VMA range
+    // Linux mremap semantics: old_addr may sit ANYWHERE inside a VMA
+    // (VmaManager::add merges adjacent compatible VMAs, so glibc's run of
+    // neighboring mmap'd malloc chunks is ONE VMA). Only two conditions
+    // are errors: nothing mapped at old_addr, or the old range crossing
+    // the covering VMA's end. The former start-equality check returned
+    // EFAULT for every interior chunk — glibc then fell back to its
+    // malloc+memcpy+free path (safe, but a wrong EFAULT on a live
+    // mapping), while the chunks that DID sit at a merged VMA start hit
+    // the expand path below and were grown into their NEIGHBORS' pages
+    // (silent cross-chunk heap corruption: heapstress blk canary at
+    // +0x21000, gnome-shell malloc.c:4302 assert).
     if old_addr + old_size_aligned > vma_end.as_usize() {
         return mmap_error::EFAULT;
     }
@@ -1841,8 +1856,20 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
         let extra_size = new_size_aligned - old_size_aligned;
         let new_end = old_addr + new_size_aligned;
 
+        // In-place growth is legal only when the old range covers the
+        // WHOLE VMA (Linux: `old_addr == vma->vm_start && old_end ==
+        // vm_end`). The VMA may extend past old_addr + old_size because
+        // adjacent VMAs merged — that tail belongs to OTHER mappings
+        // (glibc's neighboring mmap'd chunks), and "expanding into it"
+        // hands the caller write access to a foreign chunk's header and
+        // data. This was the heapstress/gnome-shell cross-chunk heap
+        // corruption: chunk A at a merged VMA start grew 0x21000 ->
+        // 0x22000 and its realloc memcpy clobbered chunk B at +0x21000.
+        let whole_vma = vma_start.as_usize() == old_addr
+            && vma_end.as_usize() == old_addr + old_size_aligned;
+
         // Check if can expand in place (check if next VMA would conflict)
-        let can_expand = {
+        let can_expand = whole_vma && {
             let vma_mgr = address_space.vma_read();
             if let Some(next_vma) = vma_mgr.find_vma_after(VirtAddr::new(vma_end.as_usize())) {
                 next_vma.start().as_usize() >= new_end

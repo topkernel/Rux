@@ -1170,6 +1170,14 @@ pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysA
 pub static PTE_MODIFY_LOCK: crate::sync::spinlock::Spinlock<()> =
     crate::sync::spinlock::Spinlock::new(());
 
+/// map_page caller-context marker (corruption hunt, advisory): set right
+/// before the unchecked map helpers run so the PTE-OVERWRITE-LIVE
+/// tripwire can name the site. Values:
+/// 1 shmat attach, 2 mmap(/dev/fb0), 3 mmap MAP_SHARED|ANON eager,
+/// 4 mremap copy, 5 ashrem/ashmem pin, 6 brk growth, 7 anon demand fault,
+/// 8 file/shm demand fault, 9 swap-in. 0 = unset.
+pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Map a user region: `phys_start` pages mapped at `virt_start` in
 /// lockstep over `size` bytes.
 ///

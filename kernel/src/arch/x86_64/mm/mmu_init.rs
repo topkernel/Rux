@@ -1360,13 +1360,39 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
         {
             static OW_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if OW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            if OW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                // Name the caller: context marker set at candidate
+                // map_page call sites (mm_ops::MM_CTX).
+                let ctx = super::mm_ops::MM_CTX.load(core::sync::atomic::Ordering::Relaxed);
+                // Data verdict: does the new frame carry the old frame's
+                // contents (copy semantics) or is the mapping's data
+                // destroyed (fresh zero/garbage)?
+                let old_kv = phys_to_virt(PhysAddr::new(old.ppn() << PAGE_SHIFT)).bits()
+                    as *const u8;
+                let new_kv =
+                    phys_to_virt(PhysAddr::new(ppn << PAGE_SHIFT)).bits() as *const u8;
+                // SAFETY: both are kernel linear-map addresses of the two
+                // frames; read-only compare of 16 bytes each.
+                let equal = unsafe {
+                    core::slice::from_raw_parts(old_kv, 16)
+                        == core::slice::from_raw_parts(new_kv, 16)
+                };
+                let comm = crate::process::current_task()
+                    .map(|t| {
+                        core::str::from_utf8(t.comm())
+                            .unwrap_or("?")
+                            .trim_end_matches('\0')
+                    })
+                    .unwrap_or("?");
                 crate::pr_err!(
-                    "PTE-OVERWRITE-LIVE va={:#x} old={:#x} new={:#x} pid={} comm-overrides-pending",
+                    "PTE-OVERWRITE-LIVE va={:#x} old={:#x} new={:#x} pid={} comm={} ctx={} data_{}",
                     virt_addr,
                     old.bits(),
                     pte_bits,
-                    crate::process::current_pid()
+                    crate::process::current_pid(),
+                    comm,
+                    ctx,
+                    if equal { "COPIED" } else { "DESTROYED" }
                 );
             }
         }
