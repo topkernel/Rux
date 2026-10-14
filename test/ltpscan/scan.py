@@ -100,6 +100,13 @@ def run_chunk(image, kernel, tests, qemu_timeout, smp, mem, log_path):
                 if data.count(b"DEADLOCK: spinlock stuck") >= 3:
                     time.sleep(2)
                     break
+                # Hung-task detector storm: tasks blocked >120s with no RES
+                # progress (observed: heap-exhaustion SIGKILL leaves the
+                # sweep runner stuck in waitpid forever; retrying the tail
+                # in a fresh boot recovers everything after the culprit).
+                if data.count(b"blocked for more than") >= 3:
+                    time.sleep(2)
+                    break
             except OSError:
                 pass
         proc.terminate()

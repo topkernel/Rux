@@ -607,6 +607,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         let heap_end = self.heap_end.load(Ordering::Acquire);
 
         if ptr_addr < heap_start || ptr_addr >= heap_end {
+            crate::dfx::memwatch::DEALLOC_OUTSIDE.fetch_add(1, Ordering::Relaxed);
             return;
         }
 
@@ -639,6 +640,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
 
         // Check if order exceeds MAX_ORDER
         if order > MAX_ORDER {
+            crate::dfx::memwatch::DEALLOC_BIGORDER.fetch_add(1, Ordering::Relaxed);
             return;
         }
 
@@ -648,6 +650,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // carry consistent metadata, splicing bogus blocks into the
         // doubly-linked freelist.
         if self.addr_to_page_idx_checked(ptr as usize).map(|idx| idx % (1usize << order) != 0).unwrap_or(true) {
+            crate::dfx::memwatch::DEALLOC_MISALIGNED.fetch_add(1, Ordering::Relaxed);
             return;
         }
 
@@ -664,11 +667,19 @@ unsafe impl GlobalAlloc for BuddyAllocator {
 
 /// Global allocator (Buddy System)
 /// Note: This is the only allocator instance, used for kernel heap allocation and #[global_allocator]
-#[global_allocator]
 pub static GLOBAL_ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
 
 /// Compatibility alias
 pub use GLOBAL_ALLOCATOR as HEAP_ALLOCATOR;
+
+/// The actual #[global_allocator]: small (<=4KB, <=8-aligned) allocations
+/// pack into slab pages (16-byte header + 8-multiple object grids); larger
+/// or stricter layouts go to the page-granular buddy. Previously the raw
+/// buddy served everything and a 9-byte Box pinned a whole 4KB page —
+/// small-object-heavy workloads (LTP inode02/ftest family) exhausted the
+/// 128MB kernel heap in tens of seconds.
+#[global_allocator]
+pub static GLOBAL_COMBINED: CombinedAllocator = CombinedAllocator;
 
 pub fn init_heap() {
     GLOBAL_ALLOCATOR.init();
@@ -742,8 +753,16 @@ unsafe impl GlobalAlloc for CombinedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = layout.size();
 
-        // Small objects (<= 4096 bytes) try Slab allocator
-        if size <= 4096 && crate::mm::slab::is_slab_initialized() {
+        // Small objects (<= 4096 bytes) try Slab allocator. The align <= 8
+        // guard is load-bearing: slab objects are at least 8-aligned (16-byte
+        // header + 8-multiple object sizes) but NOT 16-aligned in general, so
+        // higher alignments must fall through to the buddy, which hands out
+        // naturally aligned power-of-two blocks. Routing an align-16 layout
+        // through the slab would hand back a misaligned pointer.
+        // Without the slab, EVERY small Rust allocation (Box/Arc/String/Vec)
+        // pinned a whole 4KB buddy page — a 30K-object workload exhausted the
+        // 128MB heap (LTP inode02 ALLOCTHROW storm).
+        if size <= 4096 && layout.align() <= 8 && crate::mm::slab::is_slab_initialized() {
             let ptr = crate::mm::kmalloc(size);
             if !ptr.is_null() {
                 return ptr;

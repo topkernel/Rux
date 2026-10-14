@@ -259,7 +259,7 @@ pub fn rust_main_tail() -> ! {
     // Initialize Slab allocator (use virtual address in linear mapping region)
     let slab_phys = KERNEL_HEAP_PHYS + crate::config::KERNEL_HEAP_SIZE;
     let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
-    mm::init_slab(slab_start, 4 * 1024 * 1024);  // 4MB for slab
+    mm::init_slab(slab_start, KERNEL_SLAB_SIZE);
 
     // ========== Heap initialized, format! can be used below ==========
 
@@ -396,7 +396,7 @@ pub fn rust_main_tail() -> ! {
             // Initialize kernel memory layout
             let heap_size = crate::config::KERNEL_HEAP_SIZE;
             let slab_start = KERNEL_HEAP_PHYS + heap_size;
-            let slab_size = 4 * 1024 * 1024;
+            let slab_size = KERNEL_SLAB_SIZE;
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
                 MEMORY_PHYS_BASE,
                 total_phys_memory, // phys SIZE (was phys_base+size — review 4.20)
@@ -957,6 +957,12 @@ const KERNEL_HEAP_PHYS: usize = 0x80C0_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 
+/// Physical size of the slab region (small-object caches for the global
+/// allocator). 16MB: the slab now serves every small kernel allocation, and
+/// the old 4MB filled under LTP fs-churn workloads before the buddy
+/// fallback kicked in.
+const KERNEL_SLAB_SIZE: usize = 16 * 1024 * 1024;
+
 /// Physical base of RAM and the kernel's physical load address, per arch.
 #[cfg(feature = "riscv64")]
 const MEMORY_PHYS_BASE: usize = 0x8000_0000;
@@ -1160,7 +1166,7 @@ pub extern "C" fn rust_main() -> ! {
         let heap_start = KERNEL_HEAP_PHYS;
         let heap_size = crate::config::KERNEL_HEAP_SIZE;
         let slab_start = heap_start + heap_size;
-        let slab_size = 4 * 1024 * 1024;
+        let slab_size = KERNEL_SLAB_SIZE;
 
         #[cfg(feature = "riscv64")]
         mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel

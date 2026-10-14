@@ -865,14 +865,15 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                             match lookup_fn(&*dir_inode, component.as_bytes()) {
                                 Ok(ino) => ino,
                                 Err(e) => {
-                                    // Cache negative dentry on ENOENT
-                                    if e == -(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()) {
-                                        let name = String::from(*component);
-                                        let d = Arc::new(Dentry::new(name.clone()));
-                                        d.set_negative();
-                                        d.set_parent(current.clone());
-                                        current.add_child(name, d);
-                                    }
+                                    // Do NOT cache a negative dentry here:
+                                    // with no dcache reclaim path, every
+                                    // ENOENT lookup would pin a Dentry +
+                                    // name String in the parent's child map
+                                    // forever (kernel-heap leak under
+                                    // existence-probe-heavy workloads; see
+                                    // the unlink detach note). Misses simply
+                                    // fall through to the filesystem next
+                                    // time.
                                     return Err(e);
                                 }
                             }
@@ -1088,13 +1089,9 @@ fn follow_symlink(
                             match lookup_fn(&*dir_inode, component.as_bytes()) {
                                 Ok(ino) => ino,
                                 Err(e) => {
-                                    if e == -(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()) {
-                                        let name = String::from(*component);
-                                        let d = alloc::sync::Arc::new(Dentry::new(name.clone()));
-                                        d.set_negative();
-                                        d.set_parent(current.clone());
-                                        current.add_child(name, d);
-                                    }
+                                    // No negative-dentry caching on ENOENT
+                                    // (same unbounded-leak reasoning as the
+                                    // other path-walk variant).
                                     return Err(e);
                                 }
                             }
@@ -1597,11 +1594,16 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
                 if let Some((ino, fs_id)) = target_ino_and_fs_id {
                     crate::fs::inode::icache_remove(ino, fs_id);
                 }
-                // Replace dentry with negative entry
+                // Kill the cached dentry the same way unlink does: negative
+                // flag for fds still holding an Arc (getdents02), inode
+                // dropped, entry detached from the parent's child map —
+                // cached-forever negative dentries are an unbounded heap
+                // leak under mkdir/rmdir churn.
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     if let Some(child) = parent_dentry.lookup_child(&name) {
                         child.set_negative();
                         *child.inode.lock() = None;
+                        parent_dentry.remove_child(&name);
                     }
                 }
                 // inotify: IN_DELETE|IN_ISDIR on the parent (named) and
@@ -1725,11 +1727,19 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                         }
                     }
                 }
-                // Replace dentry with negative entry
+                // Kill the cached dentry: mark it negative first (fds that
+                // still hold their own Arc must observe the deletion —
+                // getdents02's unlinked-directory readdir), clear its inode,
+                // then DETACH it from the parent's child map. Keeping the
+                // negative entry cached forever leaked one Dentry + name
+                // String per deleted file (no dcache reclaim exists), which
+                // exhausted the 128MB kernel heap under creat/unlink churn
+                // (LTP inode02: ALLOCTHROW storm ~40s into the run).
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     if let Some(child) = parent_dentry.lookup_child(&name) {
                         child.set_negative();
                         *child.inode.lock() = None;
+                        parent_dentry.remove_child(&name);
                     }
                 }
 
