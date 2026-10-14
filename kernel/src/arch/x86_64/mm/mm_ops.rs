@@ -286,6 +286,19 @@ impl MmStruct {
         let end_addr = addr.as_usize() + aligned_size;
         let has_brk_conflict = addr.as_usize() < MMAP_START && end_addr > BRK_DEFAULT;
 
+        // ATOMIC find + insert: the non-fixed paths pick the address AND
+        // install the VMA under ONE vma_write guard. The old shape
+        // (find_free_area on a read lock, then map_vma's add on a write
+        // lock) left a window where two threads of the same mm were both
+        // handed the same free address; the second VmaManager::add at the
+        // same start key silently REPLACED the first (BTreeMap insert),
+        // both mappings then demand-faulted the same VAs, and the PTE
+        // overwrite aliased the two mappings' frames — silent cross-task
+        // heap corruption (gnome-shell malloc.c:4302 _int_malloc assert;
+        // reproduced by test/gnome-x86/heapstress.c within a minute via
+        // glibc's own arena/mremap churn once blocks cross the mmap
+        // threshold).
+        let mut vma_installed = false;
         let start = if is_fixed {
             let start = addr;
             if start.as_usize() % PAGE_SIZE_USIZE != 0 {
@@ -319,20 +332,38 @@ impl MmStruct {
         } else if addr.as_usize() == 0 {
             self.find_free_area(aligned_size)?
         } else {
-            let end = PageVirtAddr::new(addr.as_usize() + aligned_size);
-            let test_vma = Vma::new(addr, end, flags);
-
-            let vma_mgr = self.vma_read();
-            let has_vma_conflict = vma_mgr.iter().any(|v| v.overlaps(&test_vma));
-            drop(vma_mgr);
-
-            let has_brk_conflict = addr.as_usize() < MMAP_START && addr.as_usize() >= BRK_DEFAULT;
-
-            if has_vma_conflict || has_brk_conflict {
-                self.find_free_area(aligned_size)?
+            // Non-fixed placement: reserve atomically (see the comment at
+            // vma_installed above). The hint (addr != 0) is honored only
+            // when the whole target range is free of VMAs and clear of the
+            // brk region — same predicate as before, now evaluated under
+            // the write lock so it cannot change between check and add.
+            let mut vma_mgr = self.vma_write();
+            let chosen = if addr.as_usize() != 0 {
+                let end = PageVirtAddr::new(addr.as_usize() + aligned_size);
+                let test_vma = Vma::new(addr, end, flags);
+                let has_vma_conflict =
+                    vma_mgr.iter().any(|v| v.overlaps(&test_vma));
+                let hint_brk_conflict =
+                    addr.as_usize() < MMAP_START && addr.as_usize() >= BRK_DEFAULT;
+                if !has_vma_conflict && !hint_brk_conflict {
+                    addr
+                } else {
+                    self.find_free_area_locked(&vma_mgr, aligned_size)?
+                }
             } else {
-                addr
-            }
+                self.find_free_area_locked(&vma_mgr, aligned_size)?
+            };
+            let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
+            let mut vma = Vma::new(chosen, vend, flags);
+            vma.set_type(vma_type);
+            vma_mgr
+                .add(vma)
+                .map_err(|_| MapError::Invalid)?;
+            drop(vma_mgr);
+            self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
+            self.update_highest_vm_end(chosen.as_usize() + aligned_size);
+            vma_installed = true;
+            chosen
         };
 
         if is_fixed {
@@ -411,10 +442,14 @@ impl MmStruct {
             self.unmap_pages(start, aligned_size)?;
         }
 
-        let end = PageVirtAddr::new(start.as_usize() + aligned_size);
-        let mut vma = Vma::new(start, end, flags);
-        vma.set_type(vma_type);
-        self.map_vma(vma, perm)?;
+        if !vma_installed {
+            // Fixed placement: the VMA is added only after the overlap
+            // surgery above has cleared the target range.
+            let end = PageVirtAddr::new(start.as_usize() + aligned_size);
+            let mut vma = Vma::new(start, end, flags);
+            vma.set_type(vma_type);
+            self.map_vma(vma, perm)?;
+        }
         Ok(start)
     }
 
@@ -459,13 +494,24 @@ impl MmStruct {
     }
 
     pub fn find_free_area(&self, size: usize) -> Result<PageVirtAddr, MapError> {
+        let vma_mgr = self.vma_read();
+        self.find_free_area_locked(&vma_mgr, size)
+    }
+
+    /// Scan body of find_free_area, run under a lock the CALLER holds
+    /// (read for the standalone wrapper, write for mmap's atomic
+    /// pick-and-insert — see the TOCTOU comment in mmap). Both guard
+    /// types deref to VmaManager.
+    fn find_free_area_locked(
+        &self,
+        vma_mgr: &crate::mm::vma::VmaManager,
+        size: usize,
+    ) -> Result<PageVirtAddr, MapError> {
         use user_addr::{MMAP_START, MMAP_END, USER_END};
         let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
         if aligned_size == 0 {
             return Err(MapError::Invalid);
         }
-
-        let vma_mgr = self.vma_read();
 
         let mut search_start = MMAP_START;
         let search_end = MMAP_END.min(USER_END.saturating_sub(aligned_size));

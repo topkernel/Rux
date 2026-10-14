@@ -243,6 +243,35 @@ pub fn page_record_mapping(page: &Page, mm_ptr: usize, vaddr: usize) {
     if page.index() == vpn {
         return; // re-recording the same mapping (index only) — no-op
     }
+
+    // TRIPWIRE (heapstress/gnome-shell corruption hunt): a SECOND mapping
+    // of the same frame into the SAME mm at a different va. In the
+    // anonymous single-mm workloads that reproduce the heap corruption
+    // this never happens legitimately — it means the frame was handed to
+    // two faults (allocator double-handout, or freed while still mapped
+    // and reused). Slot 0 carries no mm; only alt slots are checkable.
+    {
+        static DMAP_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let mut same_mm = false;
+        page.rmap_alt_for_each(|m, _v| {
+            if m == mm_ptr {
+                same_mm = true;
+            }
+        });
+        if same_mm && DMAP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            crate::pr_err!(
+                "FRAME-DOUBLE-MM page={:#x} slot0_vpn={} new_vpn={} mm={:#x} pid={} mapcount={}",
+                page as *const _ as usize,
+                page.index(),
+                vpn,
+                mm_ptr,
+                crate::process::current_pid(),
+                page.mapcount()
+            );
+        }
+    }
+
     if !page.rmap_alt_add(mm_ptr, vpn) {
         // All 3 alternate slots busy: degrade to single-value recording.
         page.set_flag(super::page_desc::PageFlag::RmapOverflow);

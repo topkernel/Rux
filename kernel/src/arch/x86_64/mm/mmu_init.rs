@@ -1345,6 +1345,32 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
             virt_addr, phys_addr, flags, root_ppn
         );
     }
+    // CORRUPTION TRIPWIRE: overwriting a PRESENT USER leaf with a
+    // different frame is the aliasing instant (one mapping's block reads
+    // another's data — heapstress blk canary, gnome-shell malloc assert).
+    // map_page legitimately installs each user page exactly once (fault
+    // path re-checks under PTE_MODIFY_LOCK), so a live-leaf overwrite is
+    // always a bug upstream.
+    {
+        let old = table1_ref.get(vpn1);
+        if old.is_valid()
+            && old.bits() & PageTableEntry::US != 0
+            && old.ppn() != ppn
+            && root_ppn != root_page_table_ppn()
+        {
+            static OW_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if OW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::pr_err!(
+                    "PTE-OVERWRITE-LIVE va={:#x} old={:#x} new={:#x} pid={} comm-overrides-pending",
+                    virt_addr,
+                    old.bits(),
+                    pte_bits,
+                    crate::process::current_pid()
+                );
+            }
+        }
+    }
     table1_ref.set(vpn1, PageTableEntry::from_bits(pte_bits));
     pte_install_log(root_ppn, virt_addr, ppn);
 }
