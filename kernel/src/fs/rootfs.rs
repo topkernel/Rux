@@ -22,6 +22,7 @@ use crate::fs::path::path_normalize;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use alloc::vec::Vec;
+use alloc::format;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::borrow::ToOwned;
@@ -1102,6 +1103,7 @@ impl RootFSSuperBlock {
     fn follow_link_internal(
         &self,
         link: &Arc<RootFSNode>,
+        dir_path: &str,
         depth: usize,
     ) -> Option<Arc<RootFSNode>> {
         // Check recursion depth
@@ -1113,11 +1115,24 @@ impl RootFSSuperBlock {
         let target_bytes = link.get_link_target()?;
         let target = core::str::from_utf8(&target_bytes).ok()?;
 
-        // Normalize target path
-        let normalized = path_normalize(target);
+        // Relative symlink targets resolve against the link's PARENT
+        // directory (POSIX), not the root — the old code looked them up
+        // from / which broke every relative link in the OH ramdisk
+        // (bin/ls -> "toybox" resolved as /toybox instead of /bin/toybox).
+        // `dir_path` is the traversal's directory prefix at this level.
+        let resolved = if target.starts_with('/') {
+            path_normalize(target)
+        } else {
+            let joined = if dir_path == "/" {
+                format!("/{}", target)
+            } else {
+                format!("{}/{}", dir_path, target)
+            };
+            path_normalize(&joined)
+        };
 
         // Lookup target node (recursive lookup)
-        self.lookup_follow(&normalized, depth + 1)
+        self.lookup_follow(&resolved, depth + 1)
     }
 
     /// Lookup path, supports following symbolic links (internal implementation)
@@ -1136,8 +1151,10 @@ impl RootFSSuperBlock {
             return Some(self.root_node.clone());
         }
 
-        // Traverse path starting from root node
+        // Traverse path starting from root node; `dir_prefix` tracks the
+        // current directory path so relative symlinks resolve against it.
         let mut current = self.root_node.clone();
+        let mut dir_prefix = String::from("/");
 
         for (i, component) in components.iter().enumerate() {
             let component_bytes = component.as_bytes();
@@ -1147,8 +1164,8 @@ impl RootFSSuperBlock {
                 Some(child) => {
                     // If it's a symbolic link, follow it
                     if child.is_symlink() {
-                        // Follow symbolic link
-                        let target = self.follow_link_internal(&child, depth)?;
+                        // Follow symbolic link (relative targets join dir_prefix)
+                        let target = self.follow_link_internal(&child, &dir_prefix, depth)?;
                         // Continue lookup from symbolic link target
                         current = target;
                     } else {
@@ -1158,6 +1175,15 @@ impl RootFSSuperBlock {
                     // Check if we need to continue traversing
                     if !current.is_dir() && i < components.len() - 1 {
                         return None;
+                    }
+
+                    // Advance dir_prefix for the next component
+                    if i < components.len() - 1 {
+                        dir_prefix = if dir_prefix == "/" {
+                            format!("/{}", component)
+                        } else {
+                            format!("{}/{}", dir_prefix, component)
+                        };
                     }
                 }
                 None => {
