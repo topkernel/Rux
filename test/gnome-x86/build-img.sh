@@ -83,42 +83,19 @@ cp /etc/resolv.conf "$ROOT/etc/resolv.conf" 2>/dev/null || true
 echo rux-gnome > "$ROOT/etc/hostname"
 : > "$ROOT/etc/mtab"
 
+# dbus refuses to start without its messagebus user (dpkg -x skips
+# maintainer scripts, so the adduser never ran)
+grep -q '^messagebus:' "$ROOT/etc/passwd" 2>/dev/null || \
+    echo 'messagebus:x:102:105::/nonexistent:/usr/sbin/nologin' >> "$ROOT/etc/passwd"
+grep -q '^messagebus:' "$ROOT/etc/group" 2>/dev/null || \
+    echo 'messagebus:x:105:' >> "$ROOT/etc/group" 
+
 # ---------------------------------------------------------------------------
 # /sbin/runit — the session bootstrap (same shape as the riscv64 gp3i image:
 # clear stale X locks, both dbus daemons, Xorg on fbdev, then shell out so
 # the serial console stays usable for bring-up).
 # ---------------------------------------------------------------------------
-cat > "$ROOT/sbin/runit" <<'EOI'
-#!/bin/sh
-export PATH=/usr/bin:/usr/sbin:/bin:/sbin
-export HOME=/root
-export XDG_RUNTIME_DIR=/tmp/xdg
-mkdir -p /tmp/xdg && chmod 700 /tmp/xdg
-
-# auto-clear stale X locks (the image boots snapshot-less under -snapshot;
-# an unclean previous run would wedge Xorg at "server already active")
-rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
-
-echo "[runit] starting dbus"
-mkdir -p /run/dbus
-dbus-daemon --system --fork --print-address > /tmp/dbus-system.addr
-dbus-daemon --session --fork --print-address > /tmp/dbus-session.addr \
-    --config-file=/usr/share/dbus-1/session.conf
-
-echo "[runit] starting Xorg (fbdev)"
-Xorg :0 -config /etc/X11/xorg-fbdev.conf -noreset -verbose 3 \
-    > /tmp/Xorg.log 2>&1 &
-sleep 8
-
-echo "[runit] starting gnome-shell (minimal gs path)"
-export DISPLAY=:0
-export DBUS_SESSION_BUS_ADDRESS="$(cat /tmp/dbus-session.addr 2>/dev/null)"
-gnome-shell --replace -d > /tmp/gnome-shell.log 2>&1 &
-
-echo "[runit] session launched; console shell follows"
-exec /bin/sh
-EOI
-chmod +x "$ROOT/sbin/runit"
+gcc -static -O2 -Wall -o "$ROOT/sbin/runit" "$WT/test/gnome-x86/runit.c"
 
 # Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only)
 mkdir -p "$ROOT/etc/X11"

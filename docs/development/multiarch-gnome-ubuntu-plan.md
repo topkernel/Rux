@@ -16,7 +16,8 @@
 | Ubuntu 22.04 amd64 rootfs | ✅ | `test/ubuntu-x86/build-img.sh` → `work/ubuntu-x86.img`（104MB，glibc 动态链 init 运行） |
 | 会话 | ✅ | **`[udesk] login screen up`**（fork 修复后零 EFAULT/零 respawn，console+GUI 通道） |
 | fork（glibc） | ✅ 已修复 | commit `5c32dad7`：write_child_settid 手写 SV39 三级 walk 在 x86 四级页表下全错 → 改走 arch 抽象（PageTableWalker + handle_cow_fault） |
-| GNOME 镜像 | 🔨 构建中 | `test/gnome-x86/build-img.sh`：Ubuntu base + Xorg-fbdev + dbus×2 + gnome-session/shell（apt download + dpkg-deb -x 免特权方案，后台运行） |
+| GNOME 镜像 | ✅ 已建成 | `work/gnome-x86.img`（3G，725 deb：Xorg-fbdev + dbus×2 + gnome-session/shell，`test/gnome-x86/build-img.sh` 免特权方案：apt download + dpkg-deb -x + mkfs -d） |
+| GNOME 会话链 | 🔶 至 GLX | 会话跑通到 **Xorg fbdev 探测 1280x800 + shadow fb + GLX DRISWRAST（软件 GL）初始化**；卡点：Xorg→xkbcomp 子进程 keymap 编译失败（`Keyboard initialization failed`）→ Xorg Fatal 退出（riscv64 当年同样深挖过 xkbcomp 链：input_mutex futex + System() 调用） |
 
 已知限制（x86_64）：
 - SMP 未上线（`single CPU (no APIC/MADT secondary)`），GNOME 门禁需补 APIC/IO-APIC/MADT 解析 + SMP 启动
@@ -33,8 +34,11 @@
 
 ## 2. x86_64 GNOME 收尾清单（按序）
 
-1. **GNOME 镜像构建完成**（后台跑）→ `ROOTFS=work/gnome-x86.img ./test/run-x86-ub.sh gui`
-   - 预期首障：udev/systemd 类依赖（我们的 runit 路径绕开）、Xorg 对 /dev/input 的 evdev 探测（已有 evdev）、fbdev ioctl 面（riscv64 已验证的 FBIOGET_FSCREENINFO 修复是通用代码 ✓）
+1. **[当前卡点] Xorg xkbcomp 链**：Xorg fork+pipe+exec `/usr/bin/xkbcomp`（动态链接 PIE），keymap 编译失败。排查顺序：
+   a. guest 内直接跑 `xkbcomp -xkm - -` 验证二进制本身可运行（PIE/interp 加载 vs dbus-daemon 成功案例对比——dbus 是 ET_EXEC）
+   b. Xorg 调用链：`xkb/... XkbDDXCompileKeymapByNames` → `System()` = pipe+fork+dup2+exec+read；x86 的该链若有 bug（pipe 读到 0/errno、wait 状态、SIGCHLD），对照 riscv64 修复（input_mutex futex 楔死族、EXITNOTIFY 配对）
+   c. 临时旁路：`Option "AutoAddDevices" "off"` + 预生成 xkm（xkbcomp 在 host 预编译放进 /var/lib/xkb），跳过运行时编译先点亮 paint 链
+2. gnome-shell 启动前置：Xorg 存活 + session bus 地址注入（runit 已注入 /tmp/dbus-session.addr）
 2. **SMP bring-up**：MADT 解析 + LAPIC init + INIT-SIPI-SIPI（x86_64/smp.rs 已有部分）——GNOME CPU-storm 修复（poll 事件唤醒等）是通用代码，SMP 上线即可继承
 3. **q35 PCI hole**：3GB+ 内存下 BAR 落在 0xc0000000 未映射（x86 mm territory，run-x86-ub.sh 注释）
 4. **2100s 门禁**（riscv64 的 fire-r74fix 同款：smp4、全链、零 KERNPANIC）
