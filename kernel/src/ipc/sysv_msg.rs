@@ -237,7 +237,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
     // find() gate rejected msgctl(0, IPC_INFO) with EINVAL before the cmd
     // match ever ran (LTP msgctl12, shmctl03's msg twin).
     match cmd {
-        IPC_INFO | 12 | 13 => {}
+        IPC_INFO | 11 | 12 | 13 => {}
         _ => {
             let _ = match MSG_IDS.find(msqid) {
                 Some(i) => i,
@@ -478,9 +478,13 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             msg_max_idx() as i64
         }
         13 => {
-            // MSG_STAT — like IPC_STAT but the first argument is a RAW kernel
-            // slot index (no seq); on success returns the real msqid. LTP
-            // msgctl12 walks indexes returned by IPC_INFO.
+            // MSG_STAT_ANY — MSG_STAT without the permission check (uapi:
+            // MSG_STAT=11, MSG_INFO=12, MSG_STAT_ANY=13; the old arm at 13
+            // implemented MSG_STAT and the real MSG_STAT(11) fell through
+            // to EINVAL — LTP msgctl12 via libc msgctl(MSG_STAT=11)).
+            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+                return -(errno::EPERM as i64);
+            }
             let raw_idx = msqid as usize;
             let buf_ptr = buf as *mut MsqidDsUapi;
             if buf_ptr.is_null()
@@ -511,8 +515,65 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                     if entry.deleted {
                         return -(errno::EINVAL as i64);
                     }
-                    // MSG_STAT is IPC_STAT addressed by index: S_IRUGO still
-                    // applies (R32 NEW-4 twin).
+                    // MSG_STAT_ANY skips the permission check entirely.
+                    ds.msg_perm = entry.inner.perm.to_uapi();
+                    ds.msg_stime = entry.inner.msg_stime.load(Ordering::Relaxed);
+                    ds.msg_rtime = entry.inner.msg_rtime.load(Ordering::Relaxed);
+                    ds.msg_ctime = entry.inner.msg_ctime.load(Ordering::Relaxed);
+                    ds.__msg_cbytes = entry.inner.cbytes.load(Ordering::Relaxed) as u64;
+                    ds.msg_qnum = entry.inner.qnum.load(Ordering::Relaxed) as u64;
+                    ds.msg_qbytes = entry.inner.qbytes.load(Ordering::Relaxed) as u64;
+                    ds.msg_lspid = entry.inner.msg_lspid.load(Ordering::Relaxed);
+                    ds.msg_lrpid = entry.inner.msg_lrpid.load(Ordering::Relaxed);
+                    result_id = ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated above;
+            // ds is a stack-local repr(C) struct of exactly that size.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const MsqidDsUapi as *const u8,
+                    core::mem::size_of::<MsqidDsUapi>(),
+                );
+            }
+            result_id as i64
+        }
+        11 => {
+            // MSG_STAT — IPC_STAT addressed by raw kernel slot index (no
+            // seq); on success returns the real msqid. S_IRUGO applies.
+            let raw_idx = msqid as usize;
+            let buf_ptr = buf as *mut MsqidDsUapi;
+            if buf_ptr.is_null()
+                || !access_ok(buf_ptr as usize, core::mem::size_of::<MsqidDsUapi>())
+            {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= IPC_IDS_MAX {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = MsqidDsUapi {
+                msg_perm: IpcPermUapi::default(),
+                msg_stime: 0,
+                msg_rtime: 0,
+                msg_ctime: 0,
+                __msg_cbytes: 0,
+                msg_qnum: 0,
+                msg_qbytes: 0,
+                msg_lspid: 0,
+                msg_lrpid: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            let result_id: i32;
+            {
+                let slots = MSG_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
+                    }
                     if !ipc_check_permissions(entry.inner.get_perm(), 0o4) {
                         return -(errno::EACCES as i64);
                     }

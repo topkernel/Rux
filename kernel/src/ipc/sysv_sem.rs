@@ -415,29 +415,34 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 Ok(i) => i,
                 Err(e) => return e as i64,
             };
-            let array_ptr = arg as *mut i32;
+            // union semun.array points at an unsigned short[] — the
+            // element size AND stride are 2 bytes (Linux GETALL writes
+            // ushort values; the old 4-byte writes corrupted every other
+            // entry of the caller's array, LTP semop01/semctl01).
+            let array_ptr = arg as *mut u16;
             if array_ptr.is_null() {
                 return -(errno::EFAULT as i64);
             }
             let slots = SEM_IDS.slots.lock();
             if let Some(ref entry) = slots[idx2] {
                 let nsems = entry.inner.nsems();
-                if !access_ok(array_ptr as usize, nsems * 4) {
+                if !access_ok(array_ptr as usize, nsems * 2) {
                     return -(errno::EFAULT as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     for i in 0..nsems {
                         let val = sems[i].value.load(Ordering::Relaxed);
-                        // SAFETY: array_ptr was access_ok-validated for nsems*4 bytes above;
+                        // SAFETY: array_ptr was access_ok-validated for nsems*2 bytes above;
                         // put_user is the exception-table copy path (SUM=0 safe).
-                        let _ = unsafe { put_user(array_ptr.add(i), val) };
+                        let _ = unsafe { put_user(array_ptr.add(i), val as u16) };
                     }
                 }
             }
             0
         }
         SETALL => {
-            let array_ptr = arg as *const i32;
+            // unsigned short[] ABI — see GETALL.
+            let array_ptr = arg as *const u16;
             if array_ptr.is_null() {
                 return -(errno::EFAULT as i64);
             }
@@ -448,14 +453,14 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             let mut slots = SEM_IDS.slots.lock();
             if let Some(ref mut entry) = slots[idx2] {
                 let nsems = entry.inner.nsems();
-                if !access_ok(array_ptr as usize, nsems * 4) {
+                if !access_ok(array_ptr as usize, nsems * 2) {
                     return -(errno::EFAULT as i64);
                 }
                 if let Some(ref mut sems) = *entry.inner.sems.lock() {
                     for i in 0..nsems {
-                        // SAFETY: array_ptr was access_ok-validated for nsems*4 bytes above;
+                        // SAFETY: array_ptr was access_ok-validated for nsems*2 bytes above;
                         // get_user is the exception-table copy path (SUM=0 safe).
-                        let val = unsafe { get_user(array_ptr.add(i)).unwrap_or(0) };
+                        let val = unsafe { get_user(array_ptr.add(i)).unwrap_or(0) } as i32;
                         if val < 0 || val > SEMVMX {
                             return -(errno::ERANGE as i64);
                         }
@@ -765,28 +770,50 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     let nsops = args[2] as usize;
     let timeout_ptr = args[3] as *const u8;
 
-    if nsops == 0 || nsops > 500 {
+    if nsops == 0 {
         return -(errno::EINVAL as i64);
+    }
+    if nsops > 500 {
+        // SEMOPM (semopm max) — Linux returns E2BIG (LTP semop02).
+        return -(errno::E2BIG as i64);
     }
     if sops_ptr.is_null() || !access_ok(sops_ptr as usize, nsops * core::mem::size_of::<SemBuf>()) {
         return -(errno::EFAULT as i64);
     }
 
-    // Compute deadline
+    // Compute deadline. A sub-jiffy timeout cannot be waited; when the ops
+    // cannot proceed immediately, Linux ipc/sem.c answers EAGAIN (not
+    // ETIMEDOUT) — LTP semop02 blocks ops behind a 10us timeout and
+    // expects EAGAIN.
+    let mut sub_jiffy_timeout = false;
     let deadline = if !timeout_ptr.is_null() {
         if !access_ok(timeout_ptr as usize, 16) {
             return -(errno::EFAULT as i64);
         }
         // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
-        // get_user is the exception-table copy path (SUM=0 safe).
-        let ts_sec = unsafe { get_user(timeout_ptr as *const i64).unwrap_or(0) };
-        let ts_nsec = unsafe { get_user((timeout_ptr as *const i64).add(1)).unwrap_or(0) };
+        // get_user is the exception-table copy path (SUM=0 safe). A failed
+        // read must be EFAULT — the old unwrap_or(0) turned an unmapped
+        // timeout page into {0,0} and later surfaced as ETIMEDOUT
+        // (LTP semop02 passes a bad timeout pointer and expects EFAULT).
+        let ts_sec = match unsafe { get_user(timeout_ptr as *const i64) } {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        };
+        let ts_nsec = match unsafe { get_user((timeout_ptr as *const i64).add(1)) } {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        };
         if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
             return -(errno::EINVAL as i64);
         }
         let timeout_jiffies = (ts_sec as u64) * crate::drivers::timer::HZ as u64
             + (ts_nsec as u64) * crate::drivers::timer::HZ as u64 / 1_000_000_000;
-        Some(crate::drivers::timer::get_jiffies() + timeout_jiffies)
+        if timeout_jiffies == 0 {
+            sub_jiffy_timeout = true;
+            None
+        } else {
+            Some(crate::drivers::timer::get_jiffies() + timeout_jiffies)
+        }
     } else {
         None
     };
@@ -826,7 +853,9 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
 
     for sop in &sops {
         if sop.sem_num as usize >= nsems_in_set {
-            return -(errno::EINVAL as i64);
+            // Linux ipc/sem.c: EFBIG when sem_num is out of range
+            // (LTP semop02 passes -1 and PSEMS+1 as sem_num).
+            return -(errno::EFBIG as i64);
         }
     }
 
@@ -843,6 +872,9 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
                     return -(errno::EAGAIN as i64);
                 }
                 if e == SEMOP_NEED_BLOCK {
+                    if sub_jiffy_timeout {
+                        return -(errno::EAGAIN as i64);
+                    }
                     // Blocking P/Z operation: sleep on the set's wait queue
                     let blocking_idx = find_blocking_op(idx, &sops);
                     match blocking_idx {
@@ -1228,5 +1260,14 @@ pub fn sem_undo_exit(task: *mut crate::process::Task) {
 /// sys_semop — Semaphore operations (NR 193)
 /// Delegates to sys_semtimedop with NULL timeout.
 pub fn sys_semop(args: [u64; 6]) -> i64 {
-    sys_semtimedop(args)
+    // semop has NO timeout argument (NR 193): the 4th register the caller's
+    // libc wrapper left in place is garbage, not a timespec pointer. Pass a
+    // NULL timeout down explicitly — forwarding args verbatim made
+    // access_ok/get_user fail with EFAULT (or, pre-uaccess-hardening,
+    // silently read {0,0} and behave like a zero timeout), so blocked
+    // semop() calls never actually blocked (LTP semctl01 GETNCNT=0,
+    // semop04 churn).
+    let mut a = args;
+    a[3] = 0;
+    sys_semtimedop(a)
 }
