@@ -46,7 +46,14 @@ enum SlabState {
 }
 
 /// Slab header (stored at the beginning of each slab page)
-#[repr(C)]
+///
+/// `repr(align(8))` + explicit padding pin the header at exactly 16 bytes:
+/// objects start at `header_size + i * object_size`, and with a 16-byte
+/// header and 8-multiple object sizes every handed-out pointer is at least
+/// 8-aligned. The unpadded 14-byte layout left odd-index 8-byte objects on
+/// a 2-mod-8 address — fine for the old u16 free-list writes, fatal once
+/// arbitrary GlobalAlloc layouts (Box<u64>, ArcInner<...>) flow through.
+#[repr(C, align(8))]
 struct SlabHeader {
     /// Cache index this slab belongs to
     cache_idx: u8,
@@ -60,8 +67,10 @@ struct SlabHeader {
     free_index: u16,
     /// Next slab page index (in slab_pages array)
     next: u16,
-    /// Previous slab page index
+    /// Previous slab page index (in slab_pages array)
     prev: u16,
+    /// Pad to 16 bytes (see the struct comment)
+    _pad: u16,
 }
 
 impl SlabHeader {
@@ -74,6 +83,7 @@ impl SlabHeader {
             free_index: 0,
             next: 0,
             prev: 0,
+            _pad: 0,
         }
     }
 }
