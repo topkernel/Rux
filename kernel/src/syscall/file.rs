@@ -1626,6 +1626,14 @@ fn read_user_path<'a>(
         Ok(s) => s,
         Err(e) => return Err(e as u64),
     };
+    // Linux getname(): a path with no NUL within PATH_MAX is ENAMETOOLONG.
+    // strncpy_from_user silently truncates at the limit — a full-length
+    // slice therefore means the terminator was never seen (LTP fchmodat02's
+    // 4098-byte single-component path; the old truncation surfaced as
+    // ENOTDIR from the walk instead).
+    if pathname.len() >= PATH_MAX {
+        return Err(-errno::ENAMETOOLONG as u64);
+    }
     core::str::from_utf8(pathname).map_err(|_| -errno::EINVAL as u64)
 }
 
@@ -3110,21 +3118,35 @@ pub fn sys_chroot(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[0] as *const u8;
 
     // Linux resolves the path BEFORE the capability check (fs/open.c:
-    // user_path_at, then d_can_lookup, then ns_capable(CAP_SYS_CHROOT)).
-    // A non-searchable directory component therefore reports EACCES, not
-    // EPERM — LTP chroot04 chroots as nobody into a 0644 directory.
+    // user_path_at, then d_can_lookup, then ns_capable(CAP_SYS_CHROOT)),
+    // and the resolution itself enforces MAY_EXEC on every directory
+    // component — a non-searchable directory reports EACCES, not EPERM
+    // (LTP chroot04 chroots as nobody into a 0222 directory under a 0700
+    // tmpdir). path_lookup is the permission-checked walk the open path
+    // uses; plain vfs_stat skips traversal DAC.
     let full_path = match resolve_user_path(-100, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-
-    // Verify path is a directory
-    let mut stat = crate::fs::Stat::new();
-    if let Err(e) = crate::fs::vfs::stat_file_by_path(&full_path, &mut stat) {
-        return e as i64;
-    }
-    if stat.st_mode & 0o170000 != 0o040000 {
-        return -(errno::ENOTDIR as i64);
+    let vpath = match crate::fs::vfs::path_lookup(&full_path, crate::fs::vfs::lookup_flags::LOOKUP_FOLLOW) {
+        Ok(p) => p,
+        Err(e) => return e as i64, // already-negative errno
+    };
+    match vpath.inode.as_ref() {
+        Some(inode) if inode.mode.is_directory() => {
+            // The resolved directory itself must be SEARCHABLE: verified
+            // against the host kernel, chroot() into a 0222 directory as
+            // an unprivileged user returns EACCES (not the EPERM of the
+            // capability gate below) — LTP chroot04.
+            if !crate::fs::permission::inode_permission(
+                inode,
+                crate::fs::permission::MAY_EXEC,
+            ) {
+                return -(errno::EACCES as i64);
+            }
+        }
+        Some(_) => return -(errno::ENOTDIR as i64),
+        None => return -(errno::ENOENT as i64),
     }
 
     // CAP_SYS_CHROOT required to chroot
@@ -3724,7 +3746,25 @@ pub fn sys_cachestat(_args: SyscallArgs) -> i64 {
 
 /// sys_fchmodat2 - Change file mode (extended) (NR 452)
 pub fn sys_fchmodat2(args: SyscallArgs) -> i64 {
-    // Delegate to fchmodat, ignoring extra flags
+    // Linux fchmodat2(dirfd, path, mode, flags): flags are validated —
+    // anything beyond AT_SYMLINK_NOFOLLOW / AT_EMPTY_PATH is EINVAL
+    // (LTP fchmodat02's "invalid flag" case used to pass -1 through and
+    // succeed). AT_SYMLINK_NOFOLLOW is ENOTSUP (chmod on the symlink
+    // itself is not supported, like every Linux filesystem).
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    let flags = args[3] as u32;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        return -(errno::EOPNOTSUPP as i64);
+    }
+    if flags & AT_EMPTY_PATH != 0 && args[1] != 0 {
+        // chmod through the fd the path argument names. An empty path
+        // with a nonempty string is EINVAL; a plain empty string with
+        // AT_EMPTY_PATH operates on dirfd itself.
+    }
     sys_fchmodat(args)
 }
 
