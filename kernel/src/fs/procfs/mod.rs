@@ -544,6 +544,11 @@ impl ProcFSSuperBlock {
             sysctl::write_hostname,
             self.alloc_ino(),
         )));
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"threads-max".to_vec(),
+            sysctl::generate_threads_max,
+            self.alloc_ino(),
+        )));
         kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"pid_max".to_vec(),
             sysctl::generate_pid_max,
