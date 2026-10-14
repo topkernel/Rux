@@ -257,9 +257,24 @@ pub fn sys_mq_open(args: [u64; 6]) -> i64 {
         if !access_ok(attr_ptr as usize, core::mem::size_of::<MqAttr>()) {
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: attr_ptr was null-checked and access_ok-validated above;
-        // MqAttr is #[repr(C)] and size_of matches the expected layout.
-        Some(unsafe { *attr_ptr })
+        // SAFETY: attr_ptr was access_ok-validated above; copy_from_user is
+        // the exception-table copy path (SUM=0 safe, zero-fills the tail on
+        // a partial fault). The old raw `*attr_ptr` deref took a kernel
+        // page fault on user addresses (SUM=0) the moment a test actually
+        // passed an attr — KERNPANIC "pfault" during LTP mq_open01.
+        let mut buf = core::mem::MaybeUninit::<MqAttr>::zeroed();
+        if unsafe {
+            copy_from_user(
+                buf.as_mut_ptr() as *mut u8,
+                attr_ptr as *const u8,
+                core::mem::size_of::<MqAttr>(),
+            )
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: fully initialized by zeroed() above.
+        Some(unsafe { buf.assume_init() })
     } else {
         None
     };
@@ -378,10 +393,17 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     if !access_ok(timeout_ptr as usize, 16) {
         return Err(-errno::EFAULT);
     }
-    // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above;
-    // casting to two consecutive i64 values (sec + nsec) is within bounds.
-    let ts_sec = unsafe { *(timeout_ptr as *const i64) };
-    let ts_nsec = unsafe { *((timeout_ptr as *const i64).add(1)) };
+    // SAFETY: timeout_ptr was access_ok-validated for 16 bytes above; the
+    // exception-table copy replaces the old raw i64 derefs (pfault hazard
+    // on user addresses under SUM=0). A partial fault still EFAULTs.
+    let mut ts = [0u8; 16];
+    if unsafe { copy_from_user(ts.as_mut_ptr(), timeout_ptr, 16) } != 0 {
+        return Err(-errno::EFAULT);
+    }
+    // SAFETY: ts is 16 initialized bytes; reading two little-endian i64s
+    // from it is within bounds.
+    let ts_sec = i64::from_le_bytes([ts[0], ts[1], ts[2], ts[3], ts[4], ts[5], ts[6], ts[7]]);
+    let ts_nsec = i64::from_le_bytes([ts[8], ts[9], ts[10], ts[11], ts[12], ts[13], ts[14], ts[15]]);
     if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
         return Err(-errno::EINVAL);
     }
@@ -739,10 +761,13 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
     }
 }
 
-/// SIGEV notification constants
-const SIGEV_NONE: i32 = 0;
-const SIGEV_SIGNAL: i32 = 1;
+/// SIGEV notification constants (UAPI values — same in musl, glibc and
+/// Linux asm-generic/siginfo.h; the old table had NONE/SIGNAL swapped,
+/// which made every SIGEV_SIGNAL registration take the SIGEV_NONE arm).
+const SIGEV_SIGNAL: i32 = 0;
+const SIGEV_NONE: i32 = 1;
 const SIGEV_THREAD: i32 = 2;
+const SIGEV_THREAD_ID: i32 = 4;
 
 /// struct sigevent layout for RV64 (first two fields needed for mq_notify).
 /// sigev_value (8 bytes) is at offset 8, but we only need sigev_notify (offset 0)
@@ -759,6 +784,45 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
     let mqdes = args[0] as i32;
     let sevp = args[1] as *const SigEvent;
 
+    // LTP mq_notify02: the sigevent is validated BEFORE the descriptor
+    // lookup (Linux do_mq_notify order), so mq_notify(0, sevp) with an
+    // invalid sigev_notify/sigev_signo reports EINVAL, not EBADF.
+    let mut sev: Option<SigEvent> = None;
+    if !sevp.is_null() {
+        if !access_ok(sevp as usize, core::mem::size_of::<SigEvent>()) {
+            return -(errno::EFAULT as i64);
+        }
+
+        // SAFETY: sevp was access_ok-validated for size_of::<SigEvent>()
+        // above; copy_from_user is the exception-table copy path (SUM=0
+        // safe) and zero-fills the tail on a partial fault, so the struct
+        // is fully initialized either way.
+        let mut sev_buf = core::mem::MaybeUninit::<SigEvent>::zeroed();
+        unsafe {
+            copy_from_user(
+                sev_buf.as_mut_ptr() as *mut u8,
+                sevp as *const u8,
+                core::mem::size_of::<SigEvent>(),
+            );
+        }
+        // SAFETY: fully initialized by the zeroed() above.
+        let s = unsafe { sev_buf.assume_init() };
+
+        // Validate the notification type and signal number up front.
+        match s.sigev_notify {
+            SIGEV_NONE => {}
+            SIGEV_SIGNAL => {
+                // sigev_signo must be a valid signal (LTP passes _NSIG+1
+                // and expects EINVAL). RT signals up to SIGRTMAX count.
+                if !(1..=crate::signal::SIGRTMAX).contains(&s.sigev_signo) {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            _ => return -(errno::EINVAL as i64),
+        }
+        sev = Some(s);
+    }
+
     // Get the MQ from the fd
     let mq = match get_mq_fd(mqdes as usize) {
         Some(m) => m,
@@ -770,36 +834,21 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
     }
 
     // Deregister if sevp is NULL or SIGEV_NONE
-    if sevp.is_null() {
-        mq.notify_pid.store(0, Ordering::Relaxed);
-        return 0;
-    }
-
-    if !access_ok(sevp as usize, core::mem::size_of::<SigEvent>()) {
-        return -(errno::EFAULT as i64);
-    }
-
-    // SAFETY: sevp was access_ok-validated for size_of::<SigEvent>() above;
-    // copy_from_user is the exception-table copy path (SUM=0 safe) and
-    // zero-fills the tail on a partial fault, so the struct is fully
-    // initialized either way.
-    let mut sev_buf = core::mem::MaybeUninit::<SigEvent>::zeroed();
-    unsafe {
-        copy_from_user(
-            sev_buf.as_mut_ptr() as *mut u8,
-            sevp as *const u8,
-            core::mem::size_of::<SigEvent>(),
-        );
-    }
-    // SAFETY: fully initialized by the zeroed() above.
-    let sev = unsafe { sev_buf.assume_init() };
+    let sev = match sev {
+        None => {
+            mq.notify_pid.store(0, Ordering::Relaxed);
+            return 0;
+        }
+        Some(s) => s,
+    };
 
     if sev.sigev_notify == SIGEV_NONE {
         mq.notify_pid.store(0, Ordering::Relaxed);
         return 0;
     }
 
-    if sev.sigev_notify == SIGEV_SIGNAL {
+    // SIGEV_SIGNAL (validated above)
+    {
         let pid = crate::sched::current().map(|t| t.pid() as i32).unwrap_or(0);
         // Only allow registration if no one else is registered
         let old_pid = mq.notify_pid.swap(pid, Ordering::Relaxed);
@@ -811,9 +860,6 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         mq.notify_signo.store(sev.sigev_signo, Ordering::Relaxed);
         return 0;
     }
-
-    // SIGEV_THREAD not supported
-    -(errno::ENOSYS as i64)
 }
 
 /// sys_mq_getsetattr — Get/set message queue attributes (NR 185)
@@ -833,9 +879,22 @@ pub fn sys_mq_getsetattr(args: [u64; 6]) -> i64 {
         if !access_ok(newattr_ptr as usize, core::mem::size_of::<MqAttr>()) {
             return -(errno::EFAULT as i64);
         }
-        // SAFETY: newattr_ptr was access_ok-validated for size_of::<MqAttr>() above;
-        // MqAttr is #[repr(C)] and the dereference is within validated bounds.
-        let newattr = unsafe { *newattr_ptr };
+        // SAFETY: newattr_ptr was access_ok-validated above; the
+        // exception-table copy path replaces a raw deref (same pfault
+        // hazard as the mq_open attr read).
+        let mut buf = core::mem::MaybeUninit::<MqAttr>::zeroed();
+        if unsafe {
+            copy_from_user(
+                buf.as_mut_ptr() as *mut u8,
+                newattr_ptr as *const u8,
+                core::mem::size_of::<MqAttr>(),
+            )
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: fully initialized by zeroed() above.
+        let newattr = unsafe { buf.assume_init() };
         let mut attr = mq.attr.lock();
         attr.mq_flags = newattr.mq_flags;
     }
