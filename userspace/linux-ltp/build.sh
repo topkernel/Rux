@@ -16,7 +16,19 @@ MUSL_DIR="${PROJECT_ROOT}/toolchain/riscv64-rux-linux-musl"
 # __*tf3/__floatsitf/__clz* helper from -lgcc ships instructions the pinned
 # QEMU CPU model cannot execute (SIGILL). The overlay preempts those members.
 "${PROJECT_ROOT}/userspace/build-softfp.sh"
-SOFTFP_LIBS="-L${PROJECT_ROOT}/userspace/soft-fp -lsoftfp-pin"
+# BUG-S005 follow-up: an overlay ARCHIVE cannot preempt libgcc here — LTP's
+# link rule (include/mk/rules.mk) expands to `$(CC) ... $(LDFLAGS) $^ $(LDLIBS)`,
+# so every user library is scanned BEFORE the objects, when nothing is yet
+# undefined; musl libc.a's fmodl.lo (which references __letf2 etc.) is only
+# pulled by the driver's trailing -lc, and the trailing -lgcc then resolves
+# those refs from Ubuntu's zbs/zicond libgcc members -> SIGILL on the pinned
+# QEMU CPU. The fix is search-path based: build-softfp.sh also produces
+# soft-fp/gcc-pin/libgcc.a (system libgcc with the quad-float members swapped
+# for pin-clean builds) and links below pass -B so the driver's -lgcc finds
+# that shadow first. The explicit -lsoftfp-pin stays for non-LTP-style links
+# that put user libs after objects.
+GCC_PIN="-B${PROJECT_ROOT}/userspace/soft-fp/gcc-pin/"
+SOFTFP_LIBS="${GCC_PIN} -L${PROJECT_ROOT}/userspace/soft-fp -lsoftfp-pin"
 LTP_VERSION="20240524"
 LTP_SRC_DIR="${SCRIPT_DIR}/ltp-full-${LTP_VERSION}"
 
@@ -92,7 +104,7 @@ configure_ltp() {
 
     # Use -nostdinc to exclude glibc headers, then add musl and GCC headers
     export ADD_CFLAGS="-march=rv64gc_zicsr -nostdinc -U_FORTIFY_SOURCE -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include"
-    export LDFLAGS="-static -L${MUSL_DIR}/lib ${SOFTFP_LIBS}"
+    export LDFLAGS="-static -L${MUSL_DIR}/lib"
     # CFLAGS is what autoconf bakes into the generated Makefiles — ADD_CFLAGS
     # alone never reaches the compiler (root cause of the vector/Zcb SIGILLs).
     export CFLAGS="-march=rv64gc_zicsr -O2 -U_FORTIFY_SOURCE"
@@ -196,15 +208,16 @@ AUTODUMMY
     # Library paths for linking (include all possible library directories)
     LIB_PATHS="-L${MUSL_DIR}/lib -L${LTP_SRC_DIR}/lib -L${LTP_SRC_DIR}/testcases/kernel/lib -L${LTP_SRC_DIR}/testcases/kernel/mem/lib -L${LTP_SRC_DIR}/testcases/kernel/mem/hugetlb/lib -L${LTP_SRC_DIR}/testcases/kernel/controllers/libcontrollers -L${LTP_SRC_DIR}/libs/libltpipc -L${LTP_SRC_DIR}/libs/libltpnewipc -L${LTP_SRC_DIR}/libs/libltpnuma -L${LTP_SRC_DIR}/libs/libltpsigwait -L${LTP_SRC_DIR}/libs/libltpswap -L${LTP_SRC_DIR}/libs/libltpuinput -L${LTP_SRC_DIR}/libs/libltpvdso"
 
-    # Build each syscall subdirectory individually to continue on errors
+    # Build each syscall subdirectory individually to continue on errors.
+    # The 460+ leaf dirs are independent make invocations: run them through
+    # xargs -P so the sweep finishes in minutes instead of an hour.
     info "Building syscall tests..."
-    for dir in testcases/kernel/syscalls/*/; do
-        make -C "$dir" -j1 \
+    find testcases/kernel/syscalls -mindepth 1 -maxdepth 1 -type d | \
+        xargs -P "$(nproc)" -I '{}' make -C '{}' -j2 \
             AUTOHEADER=true \
             CC=riscv64-linux-gnu-gcc \
             ADD_CFLAGS="-static -march=rv64gc_zicsr -O2 -U_FORTIFY_SOURCE -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem ${MUSL_DIR}/include" \
-            LDFLAGS="-static $LIB_PATHS ${SOFTFP_LIBS}" 2>/dev/null || true
-    done
+            LDFLAGS="-static $LIB_PATHS ${SOFTFP_LIBS}" > /dev/null 2>&1 || true
 
     # Build other kernel subdirectories
     for subdir in ipc io mem containers controllers fs security sched connectors crypto device-drivers firmware hotplug input irq lib logging numa power_management pty sound tracing uevents watchqueue; do

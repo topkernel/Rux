@@ -139,6 +139,36 @@ const MQ_MAX: usize = 256;
 static MQ_TABLE: Spinlock<[Option<alloc::sync::Arc<PosixMq>>; MQ_MAX]> =
     Spinlock::new([const { None }; MQ_MAX]);
 
+/// Runtime queues_max — number of POSIX message queues allowed system-wide,
+/// writable through /proc/sys/fs/mqueue/queues_max (LTP mq_open01 lowers it
+/// to 1 and expects the next mq_open(O_CREAT) to fail with ENOSPC). Capped
+/// by the slot-table size MQ_MAX; reads mirror Linux's fs.mqueue.queues_max.
+static MQ_QUEUES_MAX: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(256);
+
+/// Read the runtime queues_max limit (procfs sysctl).
+pub fn queues_max() -> i32 {
+    MQ_QUEUES_MAX.load(Ordering::Relaxed)
+}
+
+/// Set the runtime queues_max limit (procfs sysctl write).
+pub fn set_queues_max(v: i32) -> bool {
+    if v < 0 || v > MQ_MAX as i32 {
+        return false;
+    }
+    MQ_QUEUES_MAX.store(v, Ordering::Relaxed);
+    true
+}
+
+/// Count queues currently reachable by name (unlinked ones are invisible to
+/// new opens, matching /proc/sys/fs/mqueue accounting in spirit).
+fn mq_count_live() -> usize {
+    let table = MQ_TABLE.lock();
+    table.iter().filter(|s| match s {
+        Some(m) => !m.is_unlinked(),
+        None => false,
+    }).count()
+}
+
 // ============================================================================
 // Helper functions
 // ============================================================================
@@ -173,6 +203,16 @@ enum MqAlloc {
 
 fn mq_alloc(mq: PosixMq) -> MqAlloc {
     let mut table = MQ_TABLE.lock();
+    // ENOSPC at the runtime queues_max (Linux checks the ipc namespace's
+    // mq_queues_count against mq_queues_max before allocating a slot).
+    // Counted under the lock we already hold — mq_count_live() re-locks.
+    let live = table.iter().filter(|s| match s {
+        Some(m) => !m.is_unlinked(),
+        None => false,
+    }).count();
+    if live >= MQ_QUEUES_MAX.load(Ordering::Relaxed) as usize {
+        return MqAlloc::Full;
+    }
     for slot in table.iter() {
         if let Some(ref m) = slot {
             if !m.is_unlinked() && m.name == mq.name {
