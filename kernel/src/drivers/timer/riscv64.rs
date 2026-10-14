@@ -122,6 +122,17 @@ pub fn read_time() -> u64 {
     time::read() as u64
 }
 
+/// High-resolution nanoseconds since boot, straight from the time CSR
+/// (no jiffy quantization). Used by poll/select-style waits whose
+/// timeout contract must not expire early: jiffy floors turn a 1ms
+/// pselect into an instant return (LTP nanosleep01/select02/poll02
+/// "woken up early" family). u128 intermediate — a u64 multiply would
+/// overflow after ~30 minutes of uptime.
+#[inline]
+pub fn monotonic_ns_since_boot() -> u64 {
+    ((read_time() as u128) * 1_000_000_000u128 / (CLOCK_FREQ as u128)) as u64
+}
+
 /// Set timer using stimecmp CSR (sstc extension)
 ///
 /// This is more direct than SBI and avoids potential issues
