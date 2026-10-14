@@ -669,18 +669,22 @@ pub fn register_block_disk_at(
     let devpath = dev.path(); // "/devices/<chain>/virtioN/block/<name>"
     let devices_target = &devpath["/devices".len()..]; // "/<chain>/..."
     if let Some(class_block) = lookup_path("class/block") {
-        mk_link(&class_block, name, &format!("../..{}", devices_target));
+        mk_link(&class_block, name, &format!("../..{}", devpath));
     }
     // /sys/block/<name> → ../devices/<chain>/virtioN/block/<name>
+    // (relative from /sys/block: ".." is /sys, then devices/... — the
+    // old "..{devices_target}" resolved to /sys/<chain> which does not
+    // exist, so every stat/open THROUGH the link ENOENT'd. OH-lite
+    // forensics: readlink ok, stat("/sys/block/vdb") ENOENT.)
     if let Some(sys_block) = lookup_path("block") {
-        mk_link(&sys_block, name, &format!("..{}", devices_target));
+        mk_link(&sys_block, name, &format!("..{}", devpath));
     }
     // /sys/dev/block/<maj:min> → ../../devices/<chain>/virtioN/block/<name>
     if let Some(dev_block) = lookup_path("dev/block") {
         mk_link(
             &dev_block,
             &format!("{}:{}", major, minor),
-            &format!("../..{}", devices_target),
+            &format!("../..{}", devpath),
         );
     }
 

@@ -82,11 +82,34 @@ pub const DEVICE_ALIAS_PHYS_BASE: usize = 0xb000_0000;
 /// Window size: 0xb0000000..0x100000000 = 1.25GB.
 pub const DEVICE_ALIAS_SIZE: usize = 0x5000_0000;
 
-/// Translate a device physical address in [0xb0000000, 0x100000000) to its
-/// kernel-half alias VA. Panics outside the window (programming error).
+/// Second alias window: the ABOVE-4G PCI window. With several PCI devices
+/// (OH boot: 6 virtio-blk + net + keyboard + tablet) QEMU q35 places the
+/// 64-bit prefetchable BARs into the high PCI window (observed base
+/// 0xc00000000 = 48GB). One full PML4 slot (512GB) of PA
+/// [0x1_0000_0000, 0x81_0000_0000) mirrored with 1GB leaves — exactly one
+/// extra PDP table of page-table cost.
+pub const DEVICE_ALIAS64_BASE: usize = 0xffff_8a00_0000_0000;
+/// Physical base the 64-bit alias window mirrors (4GB).
+pub const DEVICE_ALIAS64_PHYS_BASE: usize = 0x1_0000_0000;
+/// Window size: 512GB (one PML4 slot).
+pub const DEVICE_ALIAS64_SIZE: usize = 0x80_0000_0000;
+
+/// Translate a device physical address into its kernel-half alias VA.
+/// Covers the two fixed windows (low [0xb0000000, 4GB), high
+/// [4GB, 4GB+512GB)); anything else falls back to the identity address
+/// (valid under the boot root where ioremap_device_window mapped it — an
+/// out-of-window access faults loudly instead of aliasing a wrong PA).
 #[inline]
 pub const fn device_alias(pa: u64) -> u64 {
-    DEVICE_ALIAS_BASE as u64 + (pa - DEVICE_ALIAS_PHYS_BASE as u64)
+    if pa >= DEVICE_ALIAS_PHYS_BASE as u64 && pa < 0x1_0000_0000 {
+        DEVICE_ALIAS_BASE as u64 + (pa - DEVICE_ALIAS_PHYS_BASE as u64)
+    } else if pa >= DEVICE_ALIAS64_PHYS_BASE as u64
+        && pa < DEVICE_ALIAS64_PHYS_BASE as u64 + DEVICE_ALIAS64_SIZE as u64
+    {
+        DEVICE_ALIAS64_BASE as u64 + (pa - DEVICE_ALIAS64_PHYS_BASE as u64)
+    } else {
+        pa
+    }
 }
 
 // ==================== Physical layout ====================

@@ -1408,6 +1408,40 @@ unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
     (*table2).set(vpn2, PageTableEntry::from_bits(entry_bits));
 }
 
+/// Install a 1GB PUD leaf mapping into the static kernel root (x86
+/// PDPTE-with-PS). Same contract as map_pmd_huge_page: boot-time windows
+/// only. Used for the above-4G device alias (DEVICE_ALIAS64), where 2MB
+/// leaves would cost hundreds of PD tables for one PML4 slot.
+unsafe fn map_pud_huge_page(virt: usize, phys: usize, flags: u64) {
+    let a = VirtAddr::new(virt as u64);
+    let vpn4 = a.pgd_index() as usize;
+    let vpn3 = a.pud_index() as usize;
+
+    let root = &mut ROOT_PAGE_TABLE;
+
+    // PML4 -> PUD
+    let pte4 = root.get(vpn4);
+    let ppn3 = if pte4.is_valid() {
+        pte4.ppn()
+    } else {
+        let table_phys = alloc_page_table().expect("map_pud_huge_page: failed to allocate PUD table");
+        let ppn = table_phys >> PAGE_SHIFT;
+        root.set(vpn4, PageTableEntry::new_table(ppn));
+        ppn
+    };
+
+    // PUD leaf (1GB huge page): bits [51:30] carry the 1GB-aligned
+    // physical address; PS (bit 7) marks the leaf. The entry must not
+    // already be a table link (that would orphan it).
+    assert!(phys % (PUD_SIZE as usize) == 0, "phys must be 1GB aligned for PUD leaf");
+    assert!(virt % (PUD_SIZE as usize) == 0, "virt must be 1GB aligned for PUD leaf");
+
+    let entry_bits = ((phys as u64) & PageTableEntry::PHYS_MASK_PUBLIC) | PageTableEntry::PS | flags;
+    let table3_phys = ppn3 << PAGE_SHIFT;
+    let table3 = get_page_table_virt(table3_phys);
+    (*table3).set(vpn3, PageTableEntry::from_bits(entry_bits));
+}
+
 /// Map a kernel virtual page to a physical page WITHOUT flushing the TLB.
 ///
 /// Internal batch primitive — region callers flush once via
@@ -1753,6 +1787,7 @@ pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
 /// needed; the ECAM window goes in as 2MB IO leaves (128 entries).
 pub fn setup_device_mappings() {
     use crate::arch::mm::memory_layout::{
+        DEVICE_ALIAS64_BASE, DEVICE_ALIAS64_PHYS_BASE, DEVICE_ALIAS64_SIZE,
         DEVICE_ALIAS_BASE, DEVICE_ALIAS_PHYS_BASE, DEVICE_ALIAS_SIZE,
     };
     unsafe {
@@ -1785,6 +1820,22 @@ pub fn setup_device_mappings() {
             DEVICE_ALIAS_SIZE as u64,
             device_flags,
         );
+
+        // Second alias window: the above-4G PCI window, one full PML4 slot
+        // of 1GB leaves. With the OH 6-disk layout QEMU places 64-bit BARs
+        // at 0xc00000000 (48GB) — bar_va()/device_alias() must resolve
+        // those under ANY CR3 too, or the first virtio MMIO write page
+        // faults (seen as the OH-lite boot KERNPANIC at
+        // device_alias(0xc000004014)).
+        let mut v = DEVICE_ALIAS64_BASE as u64;
+        let mut p = DEVICE_ALIAS64_PHYS_BASE as u64;
+        let end = v + DEVICE_ALIAS64_SIZE as u64;
+        while v < end {
+            map_pud_huge_page(v as usize, p as usize, device_flags);
+            v += PUD_SIZE;
+            p += PUD_SIZE;
+        }
+        crate::arch::mm::asid::flush_tlb_all();
     }
 }
 

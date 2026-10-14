@@ -242,6 +242,27 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             regs.rip,
             crate::sched::get_current_pid()
         );
+        // OH bring-up forensics: walk the frame-pointer chain so the
+        // faulting CALLER is visible (write_volatile-style leaf frames
+        // otherwise hide the driver that computed the bad address).
+        // SAFETY: best-effort kernel-stack reads; a bad frame just stops
+        // the walk (bounds + canonicality checked per hop).
+        unsafe {
+            let mut rbp = regs.rbp as *const u64;
+            let stack_top = (regs.rsp | 0x3FFF) + 1; // within this 16K kernel stack
+            for _ in 0..12 {
+                if (rbp as u64) & 7 != 0 || (rbp as u64) + 16 >= stack_top {
+                    break;
+                }
+                let ret = *rbp.offset(1);
+                let next = *rbp;
+                if ret < 0xffff_8000_0000_0000 || next <= rbp as u64 || next >= stack_top {
+                    break;
+                }
+                crate::println!("  pfault-frame: {:#x}", ret);
+                rbp = next as *const u64;
+            }
+        }
         return MmFaultResult::KernelPanic;
     }
 

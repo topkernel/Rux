@@ -1845,3 +1845,97 @@ pub unsafe fn check_pte_permissions(root_ppn: u64, addr: VirtAddr) -> Option<(bo
 
     Some((has_read, has_write, has_exec, is_user))
 }
+
+/// mprotect PTE rewrite for x86_64: set the protection bits of every leaf
+/// PTE in [start_virt, start_virt + num_pages * PAGE_SIZE).
+///
+/// The shared syscall code previously carried an Sv39-shaped 3-level walk
+/// (`vpn2/vpn1/vpn0`, `ppn << 10`): on the 4-level x86_64 table that
+/// indexed the wrong tables, "rebuilt" entries with the riscv PTE layout,
+/// and clobbered PMD link entries — while the real 4K leaf PTEs were left
+/// untouched. Every mprotect silently no-opped on the leaves, so a
+/// PROT_READ|PROT_WRITE JIT mapping later upgraded with
+/// mprotect(PROT_READ|PROT_EXEC) stayed NX and the first jump into the
+/// code died with `pagefault: Permission denied, rip == fault_addr`
+/// (gnome-shell: SpiderMonkey/llvmpipe executable pages).
+///
+/// x86 encoding notes (vs the riscv64 twin):
+/// - readable is implied by PRESENT; non-exec is the NX bit (bit 63), not
+///   a missing X bit;
+/// - PROT_NONE is expressed as P=0 plus an NX|U|A|D software marker:
+///   non-zero (not a hole), bits 61/62 clear (not a swap/migration
+///   entry) — any access faults and the VMA layer raises SIGSEGV. The
+///   PPN is preserved so a later re-protect restores the same page
+///   instead of the demand-fault path installing a fresh zero page over
+///   live data;
+/// - the COW software bit (bit 9) is preserved and W stays deferred to
+///   the COW fault, matching the fork protocol (INV-COW-1).
+///
+/// Caller must hold PTE_MODIFY_LOCK; swap/migration entries and huge
+/// leaves are left alone.
+pub unsafe fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64, prot: u32) {
+    // Base flag set for a present leaf. W adds RW; non-exec sets NX.
+    // Readable needs no bit (P implies it); PROT_WRITE without
+    // PROT_READ still gets P (W-requires-R fold, like the fault path).
+    let mut base = PageTableEntry::P | PageTableEntry::U
+        | PageTableEntry::A | PageTableEntry::D;
+    if prot & 0x2 != 0 {
+        base |= PageTableEntry::W;
+    }
+    if prot & 0x4 == 0 {
+        base |= PageTableEntry::NX;
+    }
+    // PROT_NONE: drop PRESENT, keep the software marker bits.
+    if prot & 0x7 == 0 {
+        base &= !PageTableEntry::P;
+    }
+
+    for i in 0..num_pages {
+        let va = start_virt.wrapping_add(i * PAGE_SIZE as u64);
+        let a = VirtAddr::new(va);
+
+        // SAFETY: root_ppn is the caller's live user page-table root;
+        // get_page_table_virt returns kernel-virtual pointers for
+        // page-table frames. Read-only walks of the upper levels.
+        let pml4 = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let e4 = (*pml4).get(a.pgd_index() as usize);
+        if !e4.is_valid() {
+            continue;
+        }
+        let pud = get_page_table_virt(e4.phys_addr());
+        let e3 = (*pud).get(a.pud_index() as usize);
+        if !e3.is_valid() || e3.is_leaf() {
+            continue; // 1GB leaves never cover mprotect'able user 4K pages
+        }
+        let pmd = get_page_table_virt(e3.phys_addr());
+        let e2 = (*pmd).get(a.pmd_index() as usize);
+        if !e2.is_valid() || e2.is_leaf() {
+            continue; // 2MB leaves: kernel/device windows only — skip
+        }
+        let pt = get_page_table_virt(e2.phys_addr());
+        let e1 = (*pt).get(a.pte_index() as usize);
+        let raw = e1.bits();
+        // Not populated at all, or a swap/migration entry (P=0 with the
+        // signature bits) — the latter must survive for swap-in.
+        if raw == 0
+            || crate::mm::swap::is_swap_entry(raw)
+            || crate::mm::swap::is_migration_entry(raw)
+        {
+            continue;
+        }
+        // A P=0 non-swap leaf is our own PROT_NONE marker: still rewrite
+        // (restoring P) while preserving its PPN.
+
+        let cow_bit = raw & cow_flags::COW;
+        let mut new_bits = (raw & PageTableEntry::PHYS_MASK_PUBLIC) | base;
+        if cow_bit != 0 {
+            new_bits |= cow_bit;
+            new_bits &= !PageTableEntry::W; // W deferred to the COW fault
+        }
+        (*pt).set(a.pte_index() as usize, PageTableEntry::from_bits(new_bits));
+
+        // SAFETY: invalidates the TLB entry for the rewritten leaf so the
+        // next access observes the new permissions.
+        crate::arch::cpu::invlpg(va);
+    }
+}

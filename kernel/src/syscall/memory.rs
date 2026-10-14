@@ -991,7 +991,10 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 /// # Description
 /// mprotect is used to change protection attributes of existing memory mapping
 pub fn sys_mprotect(args: [u64; 6]) -> i64 {
+    #[cfg(target_arch = "riscv64")]
     use crate::arch::mm::{PageTableEntry, PAGE_SIZE, PAGE_SHIFT, PageTable, VirtAddr};
+    #[cfg(target_arch = "x86_64")]
+    use crate::arch::mm::{PAGE_SIZE, PAGE_SHIFT};
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
@@ -1096,22 +1099,25 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                 return -12_i64;  // ENOMEM
             };
 
-            // Calculate new PTE flags
-            // Base flags: Valid + User + Accessed + Dirty
+            // Calculate new PTE flags (riscv64 Sv39 encoding; the x86_64
+            // path builds its flags inside mprotect_pte_range).
+            // Base flags: Valid + User + Accessed + Dirty. If prot == 0
+            // (PROT_NONE), only keep V and U, remove R/W/X.
+            #[cfg(target_arch = "riscv64")]
             let mut new_flags = PageTableEntry::V | PageTableEntry::U
                 | PageTableEntry::A | PageTableEntry::D;
-
+            #[cfg(target_arch = "riscv64")]
             if prot & 0x1 != 0 {  // PROT_READ
                 new_flags |= PageTableEntry::R;
             }
+            #[cfg(target_arch = "riscv64")]
             if prot & 0x2 != 0 {  // PROT_WRITE
                 new_flags |= PageTableEntry::W | PageTableEntry::R;  // W requires R
             }
+            #[cfg(target_arch = "riscv64")]
             if prot & 0x4 != 0 {  // PROT_EXEC
                 new_flags |= PageTableEntry::X;
             }
-
-            // If prot == 0 (PROT_NONE), only keep V and U, remove R/W/X
 
             // Traverse pages and update permissions
             let start_page = addr / PAGE_SIZE as usize;
@@ -1124,6 +1130,32 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // round 6 HIGH. The loop never sleeps, so one irqsave section
             // for the whole range is safe (fork holds it likewise).
             let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+
+            #[cfg(target_arch = "x86_64")]
+            {
+                // x86_64: 4-level tables and an NX-based exec model — the
+                // generic Sv39 walk below indexes the wrong levels and
+                // rebuilds entries with `ppn << 10` (riscv PTE layout),
+                // corrupting PMD links while leaving the real leaf PTEs
+                // untouched (every mprotect silently no-opped: JIT pages
+                // stayed NX after PROT_EXEC upgrades → SIGSEGV with
+                // rip == fault_addr in gnome-shell). The arch helper does
+                // the correct PML4→PUD→PMD→PT walk, P/preserve-PPN/NX
+                // semantics, PROT_NONE markers, and per-page invlpg.
+                // SAFETY: root_ppn is the current task's live user
+                // page-table root; the helper only rewrites existing
+                // non-swap leaf PTEs, under the PTE lock held above.
+                unsafe {
+                    crate::arch::mm::mm_ops::mprotect_pte_range(
+                        root_ppn,
+                        (start_page * PAGE_SIZE as usize) as u64,
+                        num_pages as u64,
+                        prot & 0x7,
+                    );
+                }
+            }
+
+            #[cfg(target_arch = "riscv64")]
             for i in 0..num_pages {
                 let virt = ((start_page + i) * PAGE_SIZE as usize) as u64;
                 // SAFETY: root_ppn is a valid page table root; we traverse 3-level Sv39 page

@@ -427,7 +427,24 @@ impl VirtioGpuDevice {
                 padding: 0,
             },
             resource_id: self.resource_id,
-            format: 3, // R8G8B8A8_UNORM (try different format)
+            // Format 2 = VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, which QEMU maps
+            // to PIXMAN_BE_b8g8r8x8: memory bytes B,G,R,X — i.e. the
+            // standard X TrueColor byte layout (screen R from V[23:16],
+            // G from V[15:8], B from V[7:0], V[31:24] ignored). This is
+            // the same format the Linux virtio-gpu DRM driver picks for
+            // DRM_FORMAT_XRGB8888, and it makes every pixel producer
+            // agree: Xorg's fbdev layer (which packs per the
+            // FBIOGET_VSCREENINFO bitfields), Mesa's GLX swrast (which
+            // ALWAYS packs the standard X layout and drops its alpha
+            // byte into V[31:24]), and native apps packing R<<16|G<<8|B.
+            // The old format 3 (PIXMAN_BE_a8r8g8b8: R=V[15:8],
+            // G=V[23:16], B=V[31:24]) forced a rotated bitfield
+            // advertisement to keep bitfield-honoring clients correct,
+            // while GLX swrast output (mutter/llvmpipe) rendered with
+            // blue pinned at the alpha byte's value — a full-screen
+            // color rotation measured via QEMU screendump on x86_64
+            // (2026-10-14, agent-paint calibration run).
+            format: 2,
             width,
             height,
         };

@@ -1334,6 +1334,77 @@ fn sigfpe_has_handler() -> bool {
         .unwrap_or(false)
 }
 
+/// Fatal user-mode SIGSEGV forensics: the GP register set, the VMA
+/// covering the faulting rip, and the first stack qwords (return
+/// addresses) — enough to identify which mapping jumped through a
+/// garbage pointer (the gnome-shell ELF-magic wild-jump class:
+/// fault == 0x010102464c457f == LE bytes "\x7fELF\x02\x01\x01\x00").
+/// Diagnostic only: every read is checked through the page-table walk.
+fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
+    let pid = crate::sched::get_current_pid();
+    crate::pr_err!(
+        "USEGV-FOR: pid={} rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
+        pid, regs.rip, fault_addr, regs.rsp, regs.rbp
+    );
+    crate::pr_err!(
+        "USEGV-FOR: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x}",
+        regs.rax, regs.rbx, regs.rcx, regs.rdx, regs.rsi, regs.rdi
+    );
+    crate::pr_err!(
+        "USEGV-FOR: r8={:#x} r9={:#x} r10={:#x} r11={:#x} r12={:#x} r13={:#x} r14={:#x} r15={:#x}",
+        regs.r8, regs.r9, regs.r10, regs.r11, regs.r12, regs.r13, regs.r14, regs.r15
+    );
+
+    // VMA covering the faulting rip (which library / JIT region ran).
+    let addr_space = crate::sched::current().and_then(|t| t.address_space());
+    if let Some(aspace) = addr_space.as_ref() {
+        let vmas = aspace.vma_read();
+        for &probe in &[regs.rip, fault_addr] {
+            match vmas.find(crate::mm::page::VirtAddr::new(probe as usize)) {
+                Some(v) => crate::pr_err!(
+                    "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x}",
+                    probe,
+                    v.start().as_usize(),
+                    v.end().as_usize(),
+                    v.flags().bits(),
+                    v.vma_type(),
+                    v.file_fd(),
+                    v.offset()
+                ),
+                None => crate::pr_err!("USEGV-FOR: vma({:#x}) = NONE", probe),
+            }
+        }
+    }
+
+    // Stack words (return-address chain): read through the page-table
+    // walk so a bad/absent rsp cannot take the kernel down.
+    fn fore_read_u64(root_ppn: u64, va: u64) -> Option<u64> {
+        // SAFETY: read-only page-table walk on a live root.
+        let phys = unsafe {
+            crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, va & !0xfff)?
+        };
+        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+            crate::arch::mm::memory_layout::PhysAddr::new((phys.0 << 12) | (va & 0xfff)),
+        );
+        // SAFETY: kv points at the mapped user page through the linear map.
+        Some(unsafe { core::ptr::read_volatile(kv.as_u64() as *const u64) })
+    }
+    if let Some(aspace) = addr_space.as_ref() {
+        let root = aspace.root_ppn();
+        let base = (regs.rsp & !0xf) as u64;
+        let mut line = alloc::string::String::new();
+        for i in 0..8usize {
+            let va = base + (i * 8) as u64;
+            let val = fore_read_u64(root, va)
+                .map(|v| alloc::format!("{:#x}", v))
+                .unwrap_or(alloc::string::String::from("????????????????"));
+            use core::fmt::Write;
+            let _ = write!(line, " {}:{}", i, val);
+        }
+        crate::pr_err!("USEGV-FOR: stack@rsp:{}", line);
+    }
+}
+
 /// Handle page fault (#PF): decode the error code (in the orig_rax slot)
 /// into FaultFlags and hand off to `exception::do_page_fault`, then
 /// mirror the twin's outcome routing.
@@ -1395,6 +1466,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // Linux semantics: route user-mode faults through signal
                 // delivery (force_sig_fault) — an installed SIGSEGV
                 // handler must run (LTP mmap05); default kills here.
+                user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
@@ -1419,6 +1491,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 fault_addr, regs.rip, crate::sched::get_current_pid());
             if regs.user_mode() {
                 // Handler-first routing like Segfault (PROT_NONE access).
+                user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);

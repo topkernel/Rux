@@ -390,6 +390,13 @@ pub fn init_pci_block_devices() -> usize {
 
                     // Create VirtQueue
                     let dummy_isr_addr = virtio_dev.common_cfg_bar;
+                    crate::pr_info!(
+                        "virtio-blk: slot {} queue0 notify {:#x} isr {:#x} common {:#x}",
+                        device_count,
+                        virtio_dev.get_notify_addr(0),
+                        dummy_isr_addr,
+                        virtio_dev.common_cfg_bar
+                    );
                     match crate::drivers::virtio::queue::VirtQueue::new(queue_max,
                         0,  // queue_index
                         virtio_dev.get_notify_addr(0),

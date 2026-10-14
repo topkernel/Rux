@@ -1647,6 +1647,9 @@ unsafe fn rootfs_setattr(inode: &Inode, attr: u32, value: u64, _value2: u64) -> 
             let mut buf = node.data.lock();
             buf.resize(new_size, 0);
         }
+        // Keep the generic Inode.size coherent (mmap/fault paths read it,
+        // not getattr) — same discipline as lookup/write.
+        inode.set_size(new_size as u64);
         node.mtime.store(wall_secs(), Ordering::Release);
         0
     } else if attr == setattr_attr::ATTR_MODE {
@@ -1683,7 +1686,7 @@ unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
 
     stat.st_ino = node.ino;
     stat.st_mode = *node.mode.lock();
-    stat.st_size = node.data.lock().len() as i64;
+    stat.st_size = rootfs_node_size(node) as i64;
     // Hard links share the ino; count directory entries referencing it by
     // walking the tree from the root (small in-memory fs — cheap enough,
     // and link(2) is rare).
@@ -1752,6 +1755,9 @@ fn rootfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         let written = node.write_data(offset, buf);
         if written > 0 {
             file.set_pos((offset + written) as u64);
+            // A write that grew the buffer must also grow the generic
+            // Inode.size (mmap snapshots / fault EOF checks read it).
+            inode.set_size(node.data.lock().len() as u64);
         }
         written as isize
     }
@@ -1894,7 +1900,29 @@ unsafe fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sy
     inode.private_data = Some(alloc::sync::Arc::into_raw(alloc::sync::Arc::clone(&child)) as *mut u8);
     inode.ops = Some(&ROOTFS_INODE_OPS);
 
+    // Sync the generic Inode.size from the node: mmap(2) snapshots
+    // inode.get_size() into the VMA and the demand-fault EOF check
+    // (page_fault.rs) compares the fault offset against it — a size-0
+    // inode turns every file-backed fault on a rootfs file into SIGBUS.
+    // This is exactly what killed OH's musl/glibc ld.so at its first
+    // libc.so page touch (m3 frontier "ld.so can't find libsec_shared").
+    inode.set_size(rootfs_node_size(&child) as u64);
+
     Ok(alloc::sync::Arc::new(inode))
+}
+
+/// Authoritative byte size of a rootfs node (single definition so lookup,
+/// getattr and the mmap/fault paths can never disagree).
+fn rootfs_node_size(node: &RootFSNode) -> usize {
+    match node.node_type {
+        RootFSType::RegularFile => node.data.lock().len(),
+        RootFSType::SymbolicLink => node
+            .link_target
+            .as_ref()
+            .map(|t| t.len())
+            .unwrap_or(0),
+        RootFSType::Directory => 0,
+    }
 }
 
 #[cfg(test)]

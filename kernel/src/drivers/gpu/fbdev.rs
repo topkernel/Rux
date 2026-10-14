@@ -303,14 +303,23 @@ pub fn create_var_screeninfo(info: &FrameBufferInfo) -> FbVarScreeninfo {
     var.yres_virtual = info.height;
     var.bits_per_pixel = 32;
 
-    // Bitfields measured empirically against QEMU's virtio-gpu (resource
-    // created with format 3): on-screen R comes from V[15:8], G from
-    // V[23:16], B from V[31:24]; V[7:0] is ignored. Advertising these
-    // offsets lets generic fbdev programs build correct pixels.
-    var.red = FbBitfield { offset: 8, length: 8, msb_right: 0 };
-    var.green = FbBitfield { offset: 16, length: 8, msb_right: 0 };
-    var.blue = FbBitfield { offset: 24, length: 8, msb_right: 0 };
-    var.transp = FbBitfield { offset: 0, length: 0, msb_right: 0 };
+    // Standard X TrueColor layout, matching the 2D resource's byte order
+    // (format 2 = B8G8R8X8 → memory B,G,R,X: R from V[23:16], G from
+    // V[15:8], B from V[7:0]). Advertising the standard offsets makes
+    // bitfield-honoring clients (Xorg fbdev) agree with
+    // standard-layout packers (Mesa GLX swrast — mutter/llvmpipe,
+    // native R<<16|G<<8|B apps) on the SAME bytes, so both render
+    // pixel-exact (verified via QEMU screendump calibration on x86_64,
+    // 2026-10-14: xsetroot primaries + asymmetric color exact through
+    // Xorg; mutter frames previously showed gray as (35,35,255) because
+    // its alpha byte landed in the advertised-blue slot). The earlier
+    // "measured" R@8/G@16/B@24 offsets were the format-3 (A8R8G8B8)
+    // byte-rotated truth — correct only while the resource used
+    // format 3.
+    var.red = FbBitfield { offset: 16, length: 8, msb_right: 0 };
+    var.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
+    var.blue = FbBitfield { offset: 0, length: 8, msb_right: 0 };
+    var.transp = FbBitfield { offset: 24, length: 0, msb_right: 0 };
 
     var
 }
