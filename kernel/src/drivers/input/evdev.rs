@@ -16,6 +16,8 @@
 
 use super::event::*;
 use alloc::collections::vec_deque::VecDeque;
+use alloc::format;
+use alloc::string::String;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::sync::spinlock::Spinlock;
@@ -714,6 +716,99 @@ pub fn evdev_file_ioctl(file: &File, cmd: u32, arg: usize) -> Option<i64> {
 // Initialization and registration
 // ============================================================================
 
+/// Format a capability bitmap the way Linux `input_print_bitmap()` prints
+/// it into uevent env vars and /sys capabilities attrs: space-separated
+/// lowercase-hex 64-bit words, most-significant word FIRST, leading zero
+/// words skipped, always at least one word.
+///
+/// OH's libudev shim parses exactly this format (BitVector reads hex
+/// u64 words high-word-first and reverses them), and libinput derives the
+/// ID_INPUT_KEYBOARD / ID_INPUT_MOUSE / ... tags from those lines to
+/// decide whether a device is usable at all.
+pub fn format_input_bitmap(bits: &[u8]) -> String {
+    fn word_at(bits: &[u8], w: usize) -> u64 {
+        let mut word: u64 = 0;
+        for i in 0..8 {
+            let idx = w * 8 + i;
+            if idx < bits.len() {
+                word |= (bits[idx] as u64) << (8 * i);
+            }
+        }
+        word
+    }
+
+    let words = (bits.len() + 7) / 8;
+    let mut hi = words;
+    while hi > 1 && word_at(bits, hi - 1) == 0 {
+        hi -= 1;
+    }
+
+    use core::fmt::Write as _;
+    let mut out = String::new();
+    for w in (0..hi).rev() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let _ = write!(out, "{:x}", word_at(bits, w));
+    }
+    if out.is_empty() {
+        out.push('0');
+    }
+    out
+}
+
+/// Build the sysfs registration (input_dev + event node pair) for one
+/// evdev device from the same capability bitmaps EVIOCGBIT serves, so the
+/// sysfs view and the ioctl view can never disagree.
+fn sysfs_registration(
+    input_name: &str,
+    event_name: &str,
+    devno: DevNo,
+    device: &EvdevDevice,
+) -> crate::fs::sysfs::InputEventReg {
+    let name_len = device.name.iter().position(|&c| c == 0).unwrap_or(31);
+    let dev_name = String::from(core::str::from_utf8(&device.name[..name_len]).unwrap_or("virtio input"));
+
+    // EV word: which event types exist (bits 0..EV_MAX live in one word).
+    let types = evtype_bitmap(&device.ev_bits);
+    let ev = format_input_bitmap(&types[..8.min(types.len())]);
+
+    // KEY/REL/ABS words only when the type is supported (Linux
+    // input_dev_uevent emits the bitmap line only for set types).
+    let type_bit = |t: usize| types[0] & (1u8 << (t & 7)) != 0;
+    let key = if type_bit(EV_KEY as usize) {
+        format_input_bitmap(&device.ev_bits[1])
+    } else {
+        String::new()
+    };
+    let rel = if type_bit(EV_REL as usize) {
+        format_input_bitmap(&device.ev_bits[2])
+    } else {
+        String::new()
+    };
+    let abs = if type_bit(EV_ABS as usize) {
+        format_input_bitmap(&device.ev_bits[3])
+    } else {
+        String::new()
+    };
+
+    crate::fs::sysfs::InputEventReg {
+        input_name: String::from(input_name),
+        event_name: String::from(event_name),
+        major: devno.major,
+        minor: devno.minor,
+        dev_name,
+        bustype: device.id.bustype as u32,
+        vendor: device.id.vendor as u32,
+        product: device.id.product as u32,
+        version: device.id.version as u32,
+        ev,
+        key,
+        rel,
+        abs,
+    }
+}
+
 /// Initialize evdev devices and register to devfs
 pub fn init_evdev() {
     // SAFETY: Called once during kernel init; no concurrent access is possible.
@@ -748,18 +843,29 @@ pub fn init_evdev() {
     devfs::mknod("/input/event1", DEV_EVDEV_POINTER, 0o666)
         .expect("Failed to create /dev/input/event1");
 
-    // U3: registration-time sysfs entries + "add" uevents (DEVNAME is
-    // "input/event0"/"input/event1" — the /dev-relative node path).
-    crate::fs::sysfs::register_input_event(
-        "event0",
-        DEV_EVDEV_KEYBOARD.major,
-        DEV_EVDEV_KEYBOARD.minor,
-    );
-    crate::fs::sysfs::register_input_event(
-        "event1",
-        DEV_EVDEV_POINTER.major,
-        DEV_EVDEV_POINTER.minor,
-    );
+    // U3: registration-time sysfs entries + "add" uevents. The
+    // two-kobject layout (inputN/eventM) mirrors Linux input_register_dev:
+    // the inputN uevent carries PRODUCT/NAME/EV/KEY/... which OH's libudev
+    // shim and libinput need to tag the device ID_INPUT_KEYBOARD etc.;
+    // DEVNAME is "input/event0" — the /dev-relative node path.
+    // SAFETY: EVDEV_KEYBOARD/EVDEV_POINTER were just initialized above and
+    // are only read here.
+    let kbd_reg = unsafe {
+        EVDEV_KEYBOARD
+            .as_ref()
+            .map(|d| sysfs_registration("input0", "event0", DEV_EVDEV_KEYBOARD, d))
+    };
+    let ptr_reg = unsafe {
+        EVDEV_POINTER
+            .as_ref()
+            .map(|d| sysfs_registration("input1", "event1", DEV_EVDEV_POINTER, d))
+    };
+    if let Some(reg) = kbd_reg {
+        crate::fs::sysfs::register_input_event(&reg);
+    }
+    if let Some(reg) = ptr_reg {
+        crate::fs::sysfs::register_input_event(&reg);
+    }
 }
 
 /// Fill an evdev device's capability bitmaps from the backing virtio
