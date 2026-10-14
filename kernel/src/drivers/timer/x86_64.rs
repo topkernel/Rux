@@ -96,6 +96,12 @@ pub const fn msecs_to_jiffies(msecs: u64) -> u64 {
     msecs * HZ / 1000
 }
 
+/// High-resolution nanoseconds since boot (see the riscv64 twin).
+#[inline]
+pub fn monotonic_ns_since_boot() -> u64 {
+    ((read_time() as u128) * 1_000_000_000u128 / (CLOCK_FREQ as u128)) as u64
+}
+
 /// Read current time in the nominal CLOCK_FREQ clock domain.
 ///
 /// HPET-derived (exact) once the HPET clocksource initialized;

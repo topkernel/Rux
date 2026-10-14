@@ -245,6 +245,33 @@ static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps {
 ///
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
+/// High-resolution ns deadline for a relative poll/select/epoll timeout.
+/// LTP timer-accuracy tests (nanosleep01/select02/poll02) measure the
+/// elapsed wall time and fail ANY early return: the old jiffy-floor
+/// arithmetic (ns -> ms floor -> jiffies floor) turned a 1 ms timeout
+/// into an instant return. The deadline gates the loop EXIT; the jiffy
+/// sleeps inside the loop only decide WHEN to re-check, so a tick that
+/// lands early just loops again.
+fn poll_deadline_ns(timeout_ns: i64) -> Option<u64> {
+    if timeout_ns <= 0 {
+        return None;
+    }
+    Some(
+        crate::drivers::timer::monotonic_ns_since_boot().saturating_add(timeout_ns as u64),
+    )
+}
+
+/// Jiffy-grid deadline that never falls before the ns deadline (ceil of
+/// the remaining ns, minimum 1 jiffy so a sub-tick wait still re-checks
+/// at the next tick instead of spinning).
+fn jiffies_covering_deadline(deadline_ns: u64) -> u64 {
+    let now_ns = crate::drivers::timer::monotonic_ns_since_boot();
+    let rem_ns = deadline_ns.saturating_sub(now_ns);
+    let j = ((rem_ns as u128 * crate::drivers::timer::HZ as u128)
+        .div_ceil(1_000_000_000u128)) as u64;
+    crate::drivers::timer::get_jiffies().saturating_add(j.max(1))
+}
+
 pub fn sys_poll(args: SyscallArgs) -> i64 {
     use poll_events::*;
 
@@ -276,13 +303,10 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    // Poll loop with timeout support
-    let start_jiffies = crate::drivers::timer::get_jiffies();
-    let timeout_jiffies = if timeout_ms > 0 {
-        crate::drivers::timer::msecs_to_jiffies(timeout_ms as u64)
-    } else {
-        0
-    };
+    // Poll loop with timeout support. The expiry decision runs on the
+    // high-res ns clock (see poll_deadline_ns); jiffies only schedule
+    // the intermediate re-check sleeps.
+    let deadline_ns = poll_deadline_ns(timeout_ms as i64 * 1_000_000);
 
     loop {
         let mut ready_count = 0usize;
@@ -391,10 +415,11 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
 
         // timeout_ms < 0 means wait forever (only break on data or signal)
         if timeout_ms > 0 {
-            // Check if timeout expired
-            let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
-            if elapsed >= timeout_jiffies {
-                return 0;
+            // Check if timeout expired (high-resolution; never early)
+            if let Some(dl) = deadline_ns {
+                if crate::drivers::timer::monotonic_ns_since_boot() >= dl {
+                    return 0;
+                }
             }
         }
 
@@ -466,11 +491,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                 match poll_event_wait_round(
                     &files,
                     task,
-                    if timeout_ms > 0 {
-                        Some(start_jiffies + timeout_jiffies)
-                    } else {
-                        None
-                    },
+                    deadline_ns.map(jiffies_covering_deadline),
                     &quick_ready,
                 ) {
                     PollEventWait::Interrupted => return -(errno::EINTR as i64),
@@ -486,11 +507,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         // iteration took the global runqueue lock against every CPU's
         // scheduler_tick (xkbcomp's ppoll ground three harts into a GRQ
         // spinlock storm and Xorg never progressed past XKB init).
-        poll_sleep_slice(if timeout_ms > 0 {
-            Some(start_jiffies + timeout_jiffies)
-        } else {
-            None
-        });
+        poll_sleep_slice(deadline_ns.map(jiffies_covering_deadline));
     }
 }
 
@@ -846,7 +863,7 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
     {
         return -(errno::EFAULT as i64);
     }
-    let (timeout_ms, has_timeout) = if timeout_ptr.is_null() {
+    let (timeout_ns, has_timeout) = if timeout_ptr.is_null() {
         (0i64, false)
     } else {
         // SAFETY: timeout_ptr validated with access_ok; get_user is the
@@ -859,19 +876,19 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
             }
             (
                 tv_sec
-                    .saturating_mul(1000)
-                    .saturating_add(tv_nsec / 1_000_000),
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(tv_nsec),
                 true,
             )
         }
     };
 
-    pselect6_common(args, timeout_ms, has_timeout)
+    pselect6_common(args, timeout_ns, has_timeout)
 }
 
 /// sys_select — same core, but the timeout argument is a *timeval*
 /// (tv_sec/tv_usec). It delegates to the pselect6 core with the timeout
-/// pre-converted to milliseconds.
+/// pre-converted to nanoseconds.
 pub fn sys_select(args: SyscallArgs) -> i64 {
     let timeout_ptr = args[4] as *const TimeVal;
     if !timeout_ptr.is_null()
@@ -882,19 +899,33 @@ pub fn sys_select(args: SyscallArgs) -> i64 {
     {
         return -(errno::EFAULT as i64);
     }
-    let (timeout_ms, has_timeout) = if timeout_ptr.is_null() {
+    let (timeout_ns, has_timeout) = if timeout_ptr.is_null() {
         (0i64, false)
     } else {
-        // SAFETY: timeout_ptr validated with access_ok above.
+        // SAFETY: timeout_ptr validated with access_ok above; the
+        // exception-table copy replaces the old raw `*timeout_ptr` deref
+        // (kernel pfault on unreadable user pointers — LTP select03
+        // "Faulty timeout").
         unsafe {
-            let tv = *timeout_ptr;
+            let mut tv = TimeVal {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
+            if crate::arch::uaccess::copy_from_user(
+                &mut tv as *mut TimeVal as *mut u8,
+                timeout_ptr as *const u8,
+                core::mem::size_of::<TimeVal>(),
+            ) != 0
+            {
+                return -(errno::EFAULT as i64);
+            }
             if tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1_000_000 {
                 return -(errno::EINVAL as i64);
             }
             (
                 tv.tv_sec
-                    .saturating_mul(1000)
-                    .saturating_add(tv.tv_usec / 1000),
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(tv.tv_usec.saturating_mul(1000)),
                 true,
             )
         }
@@ -902,12 +933,12 @@ pub fn sys_select(args: SyscallArgs) -> i64 {
 
     // select has no sigmask argument; clear args[5] before entering the core.
     let core_args: SyscallArgs = [args[0], args[1], args[2], args[3], args[4], 0];
-    pselect6_common(core_args, timeout_ms, has_timeout)
+    pselect6_common(core_args, timeout_ns, has_timeout)
 }
 
 /// Core fd-set multiplexing loop shared by select(2) and pselect6(2).
-/// `timeout_ms`/`has_timeout` are pre-parsed by the ABI-specific wrappers.
-fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64 {
+/// `timeout_ns`/`has_timeout` are pre-parsed by the ABI-specific wrappers.
+fn pselect6_common(args: SyscallArgs, timeout_ns: i64, has_timeout: bool) -> i64 {
     use poll_events::*;
 
     let nfds = args[0] as i32;
@@ -949,11 +980,15 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
     let original_readfds = unsafe {
         if readfds_ptr.is_null() { FdSet::new() } else {
             let mut v = FdSet::new();
-            crate::arch::uaccess::copy_from_user(
+            // A faulted copy must fail the call with EFAULT, not silently
+            // present an all-zero fd_set (LTP select03 "Faulty readfds").
+            if crate::arch::uaccess::copy_from_user(
                 &mut v as *mut FdSet as *mut u8,
                 readfds_ptr as *const u8,
                 fdset_size,
-            );
+            ) != 0 {
+                return -(errno::EFAULT as i64);
+            }
             v
         }
     };
@@ -961,11 +996,13 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
     let original_writefds = unsafe {
         if writefds_ptr.is_null() { FdSet::new() } else {
             let mut v = FdSet::new();
-            crate::arch::uaccess::copy_from_user(
+            if crate::arch::uaccess::copy_from_user(
                 &mut v as *mut FdSet as *mut u8,
                 writefds_ptr as *const u8,
                 fdset_size,
-            );
+            ) != 0 {
+                return -(errno::EFAULT as i64);
+            }
             v
         }
     };
@@ -973,11 +1010,13 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
     let original_exceptfds = unsafe {
         if exceptfds_ptr.is_null() { FdSet::new() } else {
             let mut v = FdSet::new();
-            crate::arch::uaccess::copy_from_user(
+            if crate::arch::uaccess::copy_from_user(
                 &mut v as *mut FdSet as *mut u8,
                 exceptfds_ptr as *const u8,
                 fdset_size,
-            );
+            ) != 0 {
+                return -(errno::EFAULT as i64);
+            }
             v
         }
     };
@@ -987,13 +1026,9 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
         None => return -(errno::EBADF as i64),
     };
 
-    // Busy-wait loop with timeout (matching sys_poll pattern)
-    let start_jiffies = crate::drivers::timer::get_jiffies();
-    let timeout_jiffies = if has_timeout && timeout_ms > 0 {
-        crate::drivers::timer::msecs_to_jiffies(timeout_ms as u64)
-    } else {
-        0
-    };
+    // Busy-wait loop with timeout (matching sys_poll pattern). Expiry is
+    // gated on the high-res ns clock; jiffies only schedule re-checks.
+    let deadline_ns = if has_timeout { poll_deadline_ns(timeout_ns) } else { None };
 
     loop {
         let mut result_readfds = FdSet::new();
@@ -1002,9 +1037,20 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
         let mut ready_count = 0usize;
 
         for fd in 0..nfds {
+            // An fd number that is set in one of the masks but has no open
+            // file is EBADF (Linux select semantics — LTP select03). Fds
+            // not named by any mask are simply skipped.
             let file = match fdtable.get_file(fd as usize) {
                 Some(f) => f,
-                None => continue,
+                None => {
+                    if original_readfds.is_set(fd)
+                        || original_writefds.is_set(fd)
+                        || original_exceptfds.is_set(fd)
+                    {
+                        return -(errno::EBADF as i64);
+                    }
+                    continue;
+                }
             };
 
             // Map select events to poll events
@@ -1098,7 +1144,7 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
         }
 
         // No fd ready — check timeout
-        if has_timeout && timeout_ms == 0 {
+        if has_timeout && timeout_ns == 0 {
             // SAFETY: fd set pointers validated with access_ok above;
             // copy_to_user is the exception-table copy path.
             unsafe {
@@ -1127,9 +1173,11 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
             return 0;
         }
 
-        if has_timeout && timeout_ms > 0 {
-            let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
-            if elapsed >= timeout_jiffies {
+        if has_timeout && timeout_ns > 0 {
+            let expired = deadline_ns
+                .map(|dl| crate::drivers::timer::monotonic_ns_since_boot() >= dl)
+                .unwrap_or(true);
+            if expired {
                 // SAFETY: fd set pointers validated with access_ok above;
                 // copy_to_user is the exception-table copy path.
                 unsafe {
@@ -1166,11 +1214,7 @@ fn pselect6_common(args: SyscallArgs, timeout_ms: i64, has_timeout: bool) -> i64
 
         // P1 (busy-yield elimination): block for one re-check slice
         // instead of yield_cpu()-ing — see sys_poll / poll_sleep_slice.
-        poll_sleep_slice(if has_timeout && timeout_ms > 0 {
-            Some(start_jiffies + timeout_jiffies)
-        } else {
-            None
-        });
+        poll_sleep_slice(deadline_ns.map(jiffies_covering_deadline));
     }
 }
 
@@ -1598,12 +1642,9 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
     // SAFETY: epoll_ptr came from Box::into_raw in sys_epoll_create; valid and unique.
     let epoll = unsafe { &mut *epoll_ptr };
 
-    let start_jiffies = crate::drivers::timer::get_jiffies();
-    let timeout_jiffies = if timeout_ms > 0 {
-        crate::drivers::timer::msecs_to_jiffies(timeout_ms as u64)
-    } else {
-        0
-    };
+    // High-resolution expiry gate (see poll_deadline_ns); jiffies only
+    // schedule the intermediate re-check sleeps.
+    let deadline_ns = poll_deadline_ns(timeout_ms as i64 * 1_000_000);
 
         loop {
         let mut entries = epoll.entries.lock();
@@ -1783,8 +1824,10 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             return 0;
         }
         if timeout_ms > 0 {
-            let elapsed = crate::drivers::timer::get_jiffies() - start_jiffies;
-            if elapsed >= timeout_jiffies {
+            let expired = deadline_ns
+                .map(|dl| crate::drivers::timer::monotonic_ns_since_boot() >= dl)
+                .unwrap_or(true);
+            if expired {
                 return 0;
             }
         }
@@ -1896,11 +1939,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                     &watched.iter().map(|(f, _, _)| alloc::sync::Arc::clone(f))
                         .collect::<alloc::vec::Vec<_>>(),
                     current,
-                    if timeout_ms > 0 {
-                        Some(start_jiffies + timeout_jiffies)
-                    } else {
-                        None
-                    },
+                    deadline_ns.map(jiffies_covering_deadline),
                     &quick_ready,
                 ) {
                     PollEventWait::Interrupted => return -(errno::EINTR as i64),
@@ -1934,14 +1973,12 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             return -(errno::EINTR as i64);
         }
         // One slice = min(remaining timeout, 10ms re-check interval).
-        let slice = if timeout_ms > 0 {
-            let now = crate::drivers::timer::get_jiffies();
-            let deadline = start_jiffies + timeout_jiffies;
-            let remaining = deadline.saturating_sub(now).max(1);
-            remaining.min(EPOLL_RECHECK_JIFFIES)
-        } else {
-            EPOLL_RECHECK_JIFFIES
-        };
+        let slice = deadline_ns
+            .map(|dl| jiffies_covering_deadline(dl)
+                .saturating_sub(crate::drivers::timer::get_jiffies())
+                .max(1)
+                .min(EPOLL_RECHECK_JIFFIES))
+            .unwrap_or(EPOLL_RECHECK_JIFFIES);
         // SAFETY: current is the running task's pointer.
         let my_pid = unsafe { (*current).pid() };
         let timer_id = crate::timer::add_timer_wakeup(
