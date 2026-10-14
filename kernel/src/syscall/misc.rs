@@ -2899,13 +2899,18 @@ pub fn sys_eventfd2(args: SyscallArgs) -> i64 {
         }
     };
 
-    // Handle EFD_CLOEXEC via the per-descriptor flag
-    if flags & EFD_CLOEXEC != 0 {
-        crate::fs::set_cloexec_fd(fd, true);
-    }
-
     match fdtable.install_fd(fd, file) {
-        Ok(()) => fd as i64,
+        Ok(()) => {
+            // Handle EFD_CLOEXEC via the per-descriptor flag — AFTER the
+            // install: install_fd resets the per-fd state, so a set before
+            // it was silently lost and fcntl(F_GETFD) read 0 (LTP
+            // eventfd2_01's EFD_CLOEXEC round; same wipe pattern the
+            // epoll_create1 fix at dispatch.rs already works around).
+            if flags & EFD_CLOEXEC != 0 {
+                crate::fs::set_cloexec_fd(fd, true);
+            }
+            fd as i64
+        }
         Err(_) => {
             // SAFETY: efd_ptr was created via Box::into_raw above; reclaim to free.
             unsafe { let _ = alloc::boxed::Box::from_raw(efd_ptr as *mut EventFd); }

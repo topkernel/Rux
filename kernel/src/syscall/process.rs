@@ -1238,9 +1238,16 @@ pub fn sys_setuid(args: SyscallArgs) -> i64 {
             }
             // Leaving euid 0 drops all capabilities (Linux commit_creds)
             // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id).
+            // RETURNING to euid 0 (ruid or suid still 0) restores them from
+            // the bounding set — see sys_setresuid for the full rationale.
             if cred.euid != 0 && !cred.keepcaps {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
+            } else if cred.euid == 0 && (cred.uid == 0 || cred.suid == 0) {
+                let restored =
+                    crate::security::capability::Cap::new(cred.cap_bounding.bits());
+                cred.cap_effective = restored;
+                cred.cap_permitted = restored;
             }
         }
         0
@@ -1318,14 +1325,25 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
             cred.uid = new_ruid;
             cred.euid = new_euid;
             cred.fsuid = new_euid;
-            if ruid != -1 {
+            // Linux sys_setreuid: the saved uid follows the new euid when
+            // EITHER argument is specified (not just when ruid is set).
+            if ruid != -1 || euid != -1 {
                 cred.suid = new_euid;
             }
             // Leaving euid 0 drops all capabilities (Linux commit_creds)
             // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id).
+            // RETURNING to euid 0 (ruid or suid still 0) restores them from
+            // the bounding set (LTP creat08: root → setreuid(-1,nobody) →
+            // setreuid(-1,0) must regain CAP_FSETID to keep S_ISGID on
+            // files created in a setgid directory).
             if cred.euid != 0 && !cred.keepcaps {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
+            } else if cred.euid == 0 && (new_ruid == 0 || cred.suid == 0) {
+                let restored =
+                    crate::security::capability::Cap::new(cred.cap_bounding.bits());
+                cred.cap_effective = restored;
+                cred.cap_permitted = restored;
             }
         }
         0
@@ -1372,7 +1390,9 @@ pub fn sys_setregid(args: SyscallArgs) -> i64 {
             cred.gid = new_rgid;
             cred.egid = new_egid;
             cred.fsgid = new_egid;
-            if rgid != -1 {
+            // Linux sys_setregid: the saved gid follows the new egid when
+            // EITHER argument is specified (mirror of setreuid).
+            if rgid != -1 || egid != -1 {
                 cred.sgid = new_egid;
             }
         }
