@@ -327,8 +327,7 @@ impl MmStruct {
                 let test_vma = Vma::new(addr, end, flags);
                 let has_vma_conflict =
                     vma_mgr.iter().any(|v| v.overlaps(&test_vma));
-                let hint_brk_conflict =
-                    addr.as_usize() < MMAP_START && addr.as_usize() >= BRK_DEFAULT;
+                let hint_brk_conflict = addr.as_usize() < MMAP_START;
                 if !has_vma_conflict && !hint_brk_conflict {
                     addr
                 } else {
@@ -1227,6 +1226,11 @@ pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysA
 pub static PTE_MODIFY_LOCK: crate::sync::spinlock::Spinlock<()> =
     crate::sync::spinlock::Spinlock::new(());
 
+/// map_page caller-context marker (corruption hunt, advisory; twin of the
+/// x86_64 MM_CTX): set right before the unchecked map helpers run so a
+/// PTE-overwrite tripwire can name the site. See arch/x86_64/mm/mm_ops.rs.
+pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub unsafe fn map_user_region(
     user_root_ppn: u64,
     virt_start: u64,
@@ -1319,13 +1323,44 @@ pub unsafe fn alloc_and_map_user_memory(
             block_pages * PAGE_SIZE as usize,
         );
 
-        map_user_region(
-            user_root_ppn,
-            virt_addr + (mapped_pages * PAGE_SIZE as usize) as u64,
-            phys_addr as u64,
-            chunk_bytes as u64,
-            flags,
-        );
+        // PRESERVE PRESENT LEAVES (Linux do_brk_flags only maps ABSENT
+        // pages — twin of the x86_64 fix): a stale leaf left in the brk
+        // growth window (shrink whose munmap failed) must not be
+        // re-mapped with the fresh zero block; that silently destroyed
+        // live user data.
+        {
+            let base_pfn = phys_addr >> PAGE_SHIFT;
+            for i in 0..chunk_pages {
+                let va = virt_addr + ((mapped_pages + i) * PAGE_SIZE as usize) as u64;
+                // SAFETY: user_root_ppn is a valid root and va is a
+                // page-aligned user address; walk is read-only.
+                let present = unsafe { PageTableWalker::walk(user_root_ppn, va) }
+                    .map_or(false, |(_p, bits)| {
+                        bits & PageTableEntry::V != 0
+                    });
+                if present {
+                    // SAFETY: freshly allocated, exclusively owned page.
+                    unsafe {
+                        crate::mm::page_alloc::free_pages(
+                            ((base_pfn + i) as usize) << PAGE_SHIFT,
+                            0,
+                        );
+                    }
+                    continue;
+                }
+                // SAFETY: user_root_ppn valid; the target leaf is absent;
+                // the frame is freshly zeroed and exclusively owned.
+                unsafe {
+                    map_user_region(
+                        user_root_ppn,
+                        va,
+                        ((base_pfn + i) as u64) << PAGE_SHIFT,
+                        PAGE_SIZE as u64,
+                        flags,
+                    );
+                }
+            }
+        }
 
         // R7-C5: the rounded-up block allocated 2^order pages but the
         // mapping only covers chunk_pages — the unmapped excess has no
