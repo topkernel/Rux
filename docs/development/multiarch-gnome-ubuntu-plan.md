@@ -1,0 +1,78 @@
+# Multi-arch GNOME Ubuntu Plan — x86_64 已通 / aarch64 路线
+
+> Date: 2026-10-14
+> Goal: GNOME Ubuntu 在 x86_64 与 aarch64 两个后端上达到 riscv64 的既有水位
+> （GNOME Shell overview 点亮 + 2100s 稳定门禁）
+> Baseline: riscv64 GNOME 已达成（FINDINGS.md：Xorg-fbdev + mutter + gnome-shell，
+> bigalloc11 t=1082s 点亮、fire-r74fix-v1 2100s 零 panic）
+
+## 1. 当前状态（本日实测）
+
+### x86_64 — **Ubuntu 会话已跑通**
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 内核构建 | ✅ | `cargo build --target x86_64-unknown-none --features x86_64` + `build/mkbzimage.py` → bzImage 6.7MB |
+| Ubuntu 22.04 amd64 rootfs | ✅ | `test/ubuntu-x86/build-img.sh` → `work/ubuntu-x86.img`（104MB，glibc 动态链 init 运行） |
+| 会话 | ✅ | **`[udesk] login screen up`**（fork 修复后零 EFAULT/零 respawn，console+GUI 通道） |
+| fork（glibc） | ✅ 已修复 | commit `5c32dad7`：write_child_settid 手写 SV39 三级 walk 在 x86 四级页表下全错 → 改走 arch 抽象（PageTableWalker + handle_cow_fault） |
+| GNOME 镜像 | 🔨 构建中 | `test/gnome-x86/build-img.sh`：Ubuntu base + Xorg-fbdev + dbus×2 + gnome-session/shell（apt download + dpkg-deb -x 免特权方案，后台运行） |
+
+已知限制（x86_64）：
+- SMP 未上线（`single CPU (no APIC/MADT secondary)`），GNOME 门禁需补 APIC/IO-APIC/MADT 解析 + SMP 启动
+- q35 3GB+ PCI hole 问题（run-x86-ub.sh 注释：MEM 固定 2G）
+- PTLEDGER/FUT-STALE-TREE 诊断噪声（非致命）
+
+### aarch64 — 骨架就位，全量移植未开始
+
+- `kernel/src/arch/aarch64/` 模块树（12 模块 + mm 子树 9 模块），接口面参照 x86_64
+- `pt_regs.rs` 为真实布局（31 GPR + sp/pc/pstate/esr/far，arm64 ABI 对齐 Linux）
+- `arch/mod.rs` 已挂 `#[cfg(feature = "aarch64")]`（feature 在 Cargo.toml 已存在）
+- **编译缺口基线（今日实测）：1354 个错误**。Top 连锁源：`arch::cpu::cpu_id`（43 处）、timer re-export（get_jiffies 109 处）——即少量顶层 re-export 缺失放大出绝大多数错误；真正需要新写的是后端本体
+- 目标 profile：QEMU `virt` / Cortex-A72 / GICv3 / virtio-mmio / 4K granule 4 级页表
+
+## 2. x86_64 GNOME 收尾清单（按序）
+
+1. **GNOME 镜像构建完成**（后台跑）→ `ROOTFS=work/gnome-x86.img ./test/run-x86-ub.sh gui`
+   - 预期首障：udev/systemd 类依赖（我们的 runit 路径绕开）、Xorg 对 /dev/input 的 evdev 探测（已有 evdev）、fbdev ioctl 面（riscv64 已验证的 FBIOGET_FSCREENINFO 修复是通用代码 ✓）
+2. **SMP bring-up**：MADT 解析 + LAPIC init + INIT-SIPI-SIPI（x86_64/smp.rs 已有部分）——GNOME CPU-storm 修复（poll 事件唤醒等）是通用代码，SMP 上线即可继承
+3. **q35 PCI hole**：3GB+ 内存下 BAR 落在 0xc0000000 未映射（x86 mm territory，run-x86-ub.sh 注释）
+4. **2100s 门禁**（riscv64 的 fire-r74fix 同款：smp4、全链、零 KERNPANIC）
+5. 参照 riscv64 的 paint-chain 修复清单逐项核对通用性：R75 buddy、R76 page-backed FileBuffer、fbdev bitfields（44c7c06f 通用）、D-Bus reply-loss 对（通用）、R82 EFAULT ordering（通用）
+
+## 3. aarch64 bring-up 顺序（映射 x86_64 的移植路径）
+
+估 8–12k 行新代码（x86_64 用了 11.4k）。顺序按依赖链：
+
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| A1 | boot.S（QEMU virt @0x40080000 入口、EL2→EL1、关 MMU 装恒等表）+ linker.ld + boot.rs（设备树解析复用通用 cmdline.rs）+ 串口 PL011 | 串口打出 "Kernel starting..." |
+| A2 | mm：4 级描述符/属性位、MAIR/TCR/TTBR、kernel 线性映射、vmemmap、get_page_table_virt、PT ledger | `mm: linear mapping [ok]`；`make test`（单核关中断模式）通过 |
+| A3 | trap：VBAR_EL1 向量表 + 异常路由 + SVC 分发（x8/x0-x5 ABI）+ uaccess（PAN 开关） | mrsh 起来（smoke 15 项） |
+| A4 | 进程：copy_thread（pstate=EL0）、context_switch（x19-28/sp/lr + FPSIMD 懒保存——注意 riscv64 的 ARCH-H1 FPU 只存不恢教训）、ret_from_fork | fork/exec/wait 全通；LTP 基础集 |
+| A5 | 中断/定时：GICv3（dist/redist/CPU iface，drivers/intc/gicv3.rs——模块声明已存在！）+ generic timer（CNTFRQ/CNTP）+ SMP（PSCI CPU_ON）+ SGI IPI | 4 核在线、tick 稳定 |
+| A6 | virtio-mmio（QEMU virt 默认无 PCI 也可用；PCI host 若走 -M virt,gic-version=3 + pcie 则另配） | vda 挂 ext4 rootfs |
+| A7 | Ubuntu arm64 rootfs（ubuntu-base arm64 tarball + 同 build-img 流程，host 侧 qemu-aarch64-static 或直接 dpkg -x）+ udesk 验证 | `[udesk] login screen up` |
+| A8 | GNOME arm64 镜像（同 §2 流程；mesa llvmpipe aarch64）+ 2100s 门禁 | GNOME Shell overview 点亮 |
+
+关键映射表（x86_64 → aarch64）：
+- multiboot/e820 → devicetree + FDT memory 节点
+- IDT/TSS/GDT → VBAR_EL1 向量表
+- CR3/invlpg → TTBR0_EL1/tlbi vmalle1（per-ASID：tlbi vae1is, asid）
+- LAPIC/IOAPIC/MADT → GICv3 + PPI/SPI 路由
+- SYSCALL MSR → SVC #0（无 fast-entry MSR 需求）
+- PT_P/PT_U/PT_W → AttrIndx + AP 位 + PXN/UXN（软件 COW 位沿用 cow_flags 抽象）
+- wp/post-boot SMP trampoline → PSCI CPU_ON（QEMU virt 默认 PSCI conduit）
+
+## 4. 风险与依赖
+
+1. **drivers 通用性**：virtio-pci 在 aarch64 走 PCIe host（-M virt + default）或 virtio-mmio——优先 virtio-mmio（QEMU virt 原生，无 PCI 枚举依赖）
+2. **gicv3.rs 模块已被 drivers/intc/mod.rs 声明**（本日缺口报告的 `file not found for module gicv3`）——A5 时补文件即消
+3. **FPU/FPSIMD**：GNOME 链（mutter/llvmpipe）重浮点——A4 的 FPSIMD 上下文切换必须真做（lazy trap 或 eager），不能重蹈 riscv64 ARCH-H1
+4. **镜像构建**：本机为 amd64，arm64 rootfs 组装用 dpkg -x（无 chroot 执行）——与 x86 GNOME 镜像同方案，已验证可行
+5. riscv64 的三份深度修复（trap 寄存器保存序、异常表、调度器 R7x 系列）全部在通用代码或已有 cfg 抽象——aarch64 直接继承，无需重修
+
+## 5. 下一步（next session）
+
+1. 等 GNOME x86 镜像出炉 → GUI 跑 paint 链，按 §2.1-2.5 收尾到 2100s 门禁
+2. aarch64 A1-A2（boot + mm 线性映射 + 串口）——最小可见验收：`Kernel starting...` 打印

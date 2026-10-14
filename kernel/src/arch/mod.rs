@@ -29,6 +29,12 @@ pub mod riscv64;
 #[cfg(feature = "x86_64")]
 pub mod x86_64;
 
+// aarch64 backend: interface skeleton only — does not build yet
+// (see docs/development/multiarch-gnome-ubuntu-plan.md for the gap
+// inventory and bring-up order).
+#[cfg(feature = "aarch64")]
+pub mod aarch64;
+
 // ---------------------------------------------------------------------------
 // Interface: re-export the active backend's surface
 // ---------------------------------------------------------------------------
