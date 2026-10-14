@@ -1205,10 +1205,18 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     };
     let target = target_owned.as_str();
 
+    // fstype is OPTIONAL for MS_MOVE/MS_REMOUNT-style calls (Linux
+    // path_mount only reads it for fresh mounts; OH's switch_root moves
+    // mounts with mount(src, dst, NULL, MS_MOVE, NULL)). NULL or an
+    // empty string passes through as "".
     let mut fstype_buf = [0u8; 64];
-    let fs_type_str = match read_user_str(args[2] as *const u8, &mut fstype_buf) {
-        Ok(s) => s,
-        Err(e) => return e as i64,
+    let fs_type_str = if args[2] == 0 {
+        ""
+    } else {
+        match read_user_str(args[2] as *const u8, &mut fstype_buf) {
+            Ok(s) => s,
+            Err(e) => return e as i64,
+        }
     };
 
     // The mount target must exist (Linux path_mount resolves it before the
@@ -1224,9 +1232,29 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     // mount(dev, mntpoint, fs, MS_REMOUNT|MS_RDONLY) — routing that through
     // do_mount replaced the tmpfs (the files vanished, ENOENT where EROFS
     // was expected) and never produced a read-only view.
+    // MS_MOVE: re-attach the mount at `source` over `target` (Linux
+    // move_mount semantics — OH's switch_root walks this path for
+    // /dev,/proc,/sys,/run and finally /usr→/). No fstype, no data, no
+    // fresh instance: the VfsMountInternal (flags included) moves.
+    const MS_MOVE: u64 = 8192;
+    if args[3] & MS_MOVE != 0 {
+        return match crate::fs::vfs::vfs_move_mount(source, target) {
+            Ok(()) => {
+                // Keep the /proc/mounts row pointed at the new target.
+                let existing = crate::fs::mount::get_mounts()
+                    .into_iter()
+                    .find(|(_, mp, _, _)| mp == source);
+                if let Some((device, _, fs_type, flags)) = existing {
+                    crate::fs::mount::register_mount(&device, target, &fs_type, &flags);
+                }
+                0
+            }
+            Err(e) => e as i64,
+        };
+    }
+
     const MS_REMOUNT: u64 = 32;
-    if args[3] & MS_REMOUNT != 0 {
-        let new_flags = crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
+    if args[3] & MS_REMOUNT != 0 {        let new_flags = crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
         match crate::fs::vfs::vfs_remount(target, new_flags) {
             Ok(()) => {
                 // Keep the /proc/mounts row in sync (ro/rw string).

@@ -23,6 +23,7 @@ pub mod indirect;
 pub mod extent;
 pub mod namei;
 pub mod journal;
+pub mod csum;
 
 use crate::sync::spinlock::Spinlock;
 use alloc::boxed::Box;
@@ -135,6 +136,14 @@ pub struct Ext4FileSystem {
     pub journal: Option<alloc::sync::Arc<crate::fs::jbd2::Journal>>,
     /// Block preallocation state (for mballoc)
     pub prealloc: Spinlock<Option<crate::fs::ext4::allocator::PreallocState>>,
+    /// metadata_csum (ro_compat 0x400): crc32c seed + verify on the read
+    /// path. Set once during init(), read by every inode load.
+    pub metadata_csum: bool,
+    /// crc32c seed (crc32c(~0, s_uuid), or s_checksum_seed when present).
+    pub csum_seed: u32,
+    /// Mount is read-only. metadata_csum images only mount read-only —
+    /// the write path does not maintain checksums yet.
+    pub read_only: bool,
 }
 
 // SAFETY: Ext4FileSystem is only accessed via &self methods that use bio layer
@@ -163,6 +172,9 @@ impl Ext4FileSystem {
             journal_ino: 0,
             journal: None,
             prealloc: Spinlock::new(None),
+            metadata_csum: false,
+            csum_seed: 0,
+            read_only: false,
         }
     }
 
@@ -257,9 +269,12 @@ impl Ext4FileSystem {
                 // We mount read-write and do not maintain ANY metadata
                 // checksums or cluster geometry — accepting these features
                 // would write checksum-invalid or cluster-misaligned
-                // metadata. Reject explicitly (review: metadata_csum 直接拒绝挂载).
-                if ro_compat & features::ro_compat::METADATA_CSUM != 0 {
-                    crate::pr_err!("ext4: metadata_csum not supported — refusing mount");
+                // metadata. metadata_csum mounts READ-ONLY with full
+                // read-path verification (csum.rs — OH Phase 1: the OH
+                // system/vendor images are mkfs'd with metadata_csum);
+                // bigalloc stays rejected outright.
+                if ro_compat & features::ro_compat::METADATA_CSUM != 0 && !self.read_only {
+                    crate::pr_err!("ext4: metadata_csum rw mount not supported — refusing mount");
                     bio::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
@@ -267,6 +282,23 @@ impl Ext4FileSystem {
                     crate::pr_err!("ext4: bigalloc not supported — refusing mount");
                     bio::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
+                }
+
+                // metadata_csum read-path setup (ro mounts only — gated
+                // above): compute the fs seed and verify the superblock
+                // checksum before trusting anything else in it.
+                if ro_compat & features::ro_compat::METADATA_CSUM != 0 {
+                    self.metadata_csum = true;
+                    self.csum_seed = csum::csum_seed(
+                        &ext4_sb.s_uuid,
+                        ext4_sb.s_checksum_seed,
+                    );
+                    let sb_raw = &sb_data[1024..1024 + 1024];
+                    if !csum::superblock_csum_ok(sb_raw) {
+                        crate::pr_err!("ext4: superblock checksum invalid — refusing mount");
+                        bio::brelse(sb_bh);
+                        return Err(errno::Errno::IOError.as_neg_i32()); // EIO
+                    }
                 }
             }
 
@@ -351,6 +383,26 @@ impl Ext4FileSystem {
                 let gd_data = &(*gd_bh).b_data;
                 // Use actual descriptor size for offset calculation
                 let gd_offset = gd_index * desc_size;
+
+                // metadata_csum: verify each group descriptor against its
+                // stored crc32c before trusting the geometry it carries
+                // (a corrupt descriptor would send inode/block reads to
+                // arbitrary disk locations).
+                if self.metadata_csum
+                    && !csum::group_desc_csum_ok(
+                        self.csum_seed,
+                        i as u32,
+                        &gd_data[gd_offset..gd_offset + desc_size],
+                    )
+                {
+                    crate::pr_err!(
+                        "ext4: group {} descriptor checksum invalid — refusing mount",
+                        i
+                    );
+                    bio::brelse(gd_bh);
+                    bio::brelse(sb_bh);
+                    return Err(errno::Errno::IOError.as_neg_i32()); // EIO
+                }
 
                 // Read descriptor safely based on desc_size.
                 // If desc_size < size_of::<Ext4GroupDesc>(), only read what's
@@ -456,6 +508,21 @@ impl Ext4FileSystem {
         if inode_offset + core::mem::size_of::<inode::Ext4InodeOnDisk>() > data.len() {
             bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
+        }
+
+        // metadata_csum: verify the inode's crc32c over the FULL
+        // inode_size bytes before parsing (Linux ext4_inode_csum_verify —
+        // a mismatched inode reads as EIO).
+        if self.metadata_csum {
+            let full = (inode_offset + self.inode_size as usize).min(data.len());
+            if !csum::inode_csum_ok(
+                self.csum_seed,
+                ino,
+                &data[inode_offset..full],
+            ) {
+                bio::brelse(bh);
+                return Err(errno::Errno::IOError.as_neg_i32()); // EIO
+            }
         }
 
         // Parse inode
@@ -964,6 +1031,16 @@ pub static GLOBAL_EXT4_FS: core::sync::atomic::AtomicPtr<Ext4FileSystem> =
 /// - `Ok(())`: Mount successful
 /// - `Err(code)`: Mount failed
 pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
+    mount_ext4_flags(device, false)
+}
+
+/// Mount with explicit read-only-ness: a metadata_csum filesystem only
+/// mounts read-only (the write path does not maintain checksums yet);
+/// the read path verifies superblock/group/inode crc32c (csum.rs).
+pub fn mount_ext4_flags(
+    device: *const blkdev::GenDisk,
+    read_only: bool,
+) -> Result<(), i32> {
     use core::sync::atomic::Ordering;
 
     if device.is_null() {
@@ -972,6 +1049,7 @@ pub fn mount_ext4(device: *const blkdev::GenDisk) -> Result<(), i32> {
 
     // Create ext4 filesystem instance
     let mut fs = Box::new(Ext4FileSystem::new(device));
+    fs.read_only = read_only;
 
     // Initialize filesystem
     fs.init()?;
@@ -1828,6 +1906,11 @@ unsafe fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
     };
     let ext4_inode = &*(ext4_inode_ptr as *const inode::Ext4Inode);
 
+    // st_dev = the filesystem instance's id (Linux s_dev): OH's
+    // switch_root stats "/" and "/usr" and SKIPS the root switch when
+    // they match — with st_dev 0 on both, the ramdisk root was never
+    // replaced and exec("/bin/init") failed ENOENT.
+    stat.st_dev = inode.fs_id;
     stat.st_ino = inode.ino;
     stat.st_mode = ext4_inode.mode as u32;  // u16 -> u32
     stat.st_size = ext4_inode.get_size() as i64;
@@ -2816,12 +2899,14 @@ pub fn create_vfs_inode_in(
 /// lifecycle; umount drops the dentry tree).
 pub fn mount_loop_instance(
     disk: *const blkdev::GenDisk,
+    read_only: bool,
 ) -> Result<alloc::sync::Arc<Inode>, i32> {
     if disk.is_null() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
     let mut fs = alloc::boxed::Box::new(Ext4FileSystem::new(disk));
+    fs.read_only = read_only;
     // Superblock/group/inode-table bootstrap; a non-ext image (missing
     // magic — e.g. unformatted loop) fails here.
     fs.init()?;

@@ -1684,6 +1684,7 @@ unsafe fn rootfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     };
     let node = &*(node_ptr as *const RootFSNode);
 
+    stat.st_dev = crate::fs::inode::FS_ID_ROOTFS;
     stat.st_ino = node.ino;
     stat.st_mode = *node.mode.lock();
     stat.st_size = rootfs_node_size(node) as i64;

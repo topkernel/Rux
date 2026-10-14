@@ -62,6 +62,79 @@ fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
     regs.set_return_value(value);
 }
 
+/// dfx=strace1: one console line per loader-relevant syscall of PID 1.
+///
+/// Numbers are the GENERIC (asm-generic) dispatch numbers — the x86_64
+/// native numbers were translated before the dispatch match.
+fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
+    // (name, pathname argument index or None)
+    let entry: Option<(&'static str, Option<usize>)> = match nr {
+        48 => Some(("faccessat", Some(1))),   // (dirfd, path, mode)
+        56 => Some(("openat", Some(1))),      // (dirfd, path, flags, mode)
+        57 => Some(("close", None)),
+        61 => Some(("getdents64", None)),
+        62 => Some(("lseek", None)),
+        63 => Some(("read", None)),
+        64 => Some(("write", None)),
+        67 => Some(("pread64", None)),
+        78 => Some(("readlinkat", Some(1))),
+        79 => Some(("fstatat", Some(1))),
+        80 => Some(("fstat", None)),
+        214 => Some(("brk", None)),
+        215 => Some(("munmap", None)),
+        221 => Some(("execve", Some(0))),
+        222 => Some(("mmap", None)),          // fd/off shown numerically
+        226 => Some(("mprotect", None)),
+        _ => None,
+    };
+    let (name, path_arg) = match entry {
+        Some(e) => e,
+        None => return,
+    };
+
+    let mut line: alloc::string::String = alloc::format!("S1 {}(", name);
+    match path_arg {
+        Some(i) => {
+            let mut buf = [0u8; 128];
+            let shown = match crate::arch::uaccess::strncpy_from_user(
+                args[i] as *const u8, buf.len(), &mut buf,
+            ) {
+                Ok(s) => core::str::from_utf8(s).unwrap_or("<non-utf8>"),
+                Err(_) => "<efault>",
+            };
+            line.push_str(&alloc::format!("\"{}\"", shown));
+            if i > 0 {
+                line.push_str(&alloc::format!(", dirfd={}", args[0]));
+            }
+            if name == "openat" {
+                line.push_str(&alloc::format!(", flags={:#x}", args[2]));
+            }
+        }
+        None => match name {
+            "mmap" => line.push_str(&alloc::format!(
+                "addr={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x}",
+                args[0], args[1], args[2], args[3], args[4] as i64, args[5]
+            )),
+            "read" | "pread64" => line.push_str(&alloc::format!(
+                "fd={} count={:#x}{}", args[0] as i64, args[2],
+                if name == "pread64" { alloc::format!(", off={:#x}", args[3]) } else { alloc::string::String::new() }
+            )),
+            _ => line.push_str(&alloc::format!(
+                "{}{}", args[0] as i64,
+                if name == "write" || name == "lseek" || name == "fstat" || name == "close" {
+                    alloc::format!(", {:#x}", args[1])
+                } else if name == "lseek" || name == "mprotect" {
+                    alloc::format!(", {:#x}, {:#x}", args[1], args[2])
+                } else {
+                    alloc::string::String::new()
+                }
+            )),
+        },
+    }
+    line.push_str(&alloc::format!(") = {}", result));
+    crate::pr_info!("{}", line);
+}
+
 /// System call entry function
 ///
 /// Called by trap.rs, dispatches to specific system call handlers
@@ -559,6 +632,17 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                 crate::process::current_pid(), syscall_no, args[0], args[1]
             );
         }
+    }
+
+    // STRACE1 (loader hunts, dfx=strace1): one line per file/memory
+    // syscall of PID 1, with the pathname decoded for path-taking calls.
+    // musl ld.so's "Error loading shared library" carries no errno — this
+    // turns that into "which step failed" (search-open, fstat, mmap,
+    // header read).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Strace1)
+        && crate::process::current_pid() == 1
+    {
+        strace1_line(syscall_no as u32, &args, result);
     }
 
     syscall_set_return_value(regs, result);

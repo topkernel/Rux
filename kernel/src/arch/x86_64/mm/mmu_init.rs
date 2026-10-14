@@ -1821,12 +1821,14 @@ pub fn setup_device_mappings() {
             device_flags,
         );
 
-        // Second alias window: the above-4G PCI window, one full PML4 slot
-        // of 1GB leaves. With the OH 6-disk layout QEMU places 64-bit BARs
-        // at 0xc00000000 (48GB) — bar_va()/device_alias() must resolve
-        // those under ANY CR3 too, or the first virtio MMIO write page
-        // faults (seen as the OH-lite boot KERNPANIC at
-        // device_alias(0xc000004014)).
+        // Second alias window: the above-4G PCI hole, eight PML4 slots of
+        // 1GB leaves. With the OH device set QEMU places 64-bit BARs at
+        // 0xc000000000 (768GB — it moves with device count/RAM; an earlier
+        // boot had them under 512GB) — bar_va()/device_alias() must resolve
+        // those under ANY CR3, or the first virtio MMIO access from
+        // interrupt context under a user CR3 page-faults (seen as the OH
+        // boot KERNPANIC at raw ISR address 0xc000005000 inside
+        // intx_dispatch, right after PID 1 started).
         let mut v = DEVICE_ALIAS64_BASE as u64;
         let mut p = DEVICE_ALIAS64_PHYS_BASE as u64;
         let end = v + DEVICE_ALIAS64_SIZE as u64;

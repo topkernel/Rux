@@ -418,6 +418,19 @@ pub fn read_inode(
             inode_size,
         )
     };
+
+    // metadata_csum: verify the inode's crc32c over the FULL inode_size
+    // bytes from the buffer (the 128..inode_size extra bytes are part of
+    // the checksum but not of the copied struct) — mismatched inodes read
+    // as EIO, like Linux.
+    if fs.metadata_csum {
+        let full = (in_block_offset + fs.inode_size as usize).min(data.len());
+        if !crate::fs::ext4::csum::inode_csum_ok(fs.csum_seed, ino, &data[in_block_offset..full]) {
+            bio::brelse(bh);
+            return Err(errno::Errno::IOError.as_neg_i32()); // EIO
+        }
+    }
+
     inode_bytes.copy_from_slice(&data[in_block_offset..in_block_offset + inode_size]);
 
     bio::brelse(bh);

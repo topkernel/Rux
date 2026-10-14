@@ -78,9 +78,15 @@ pub enum DfxSwitch {
     /// keep scheduling. OFF unless explicitly requested; never enable in
     /// production or LTP runs.
     ClaimInject,
+    /// Syscall trace for PID 1 (loader hunts): the file/memory syscalls
+    /// ld.so issues (openat/fstat/stat/mmap/read/lseek/close/...) each
+    /// print one line with decoded pathnames and results, so a musl
+    /// "library not found" can be attributed to the failing step instead
+    /// of guessed at.
+    Strace1,
 }
 
-const SWITCH_COUNT: usize = 12;
+const SWITCH_COUNT: usize = 13;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -99,6 +105,7 @@ impl DfxSwitch {
             DfxSwitch::InputTrace => 9,
             DfxSwitch::EpollTrace => 10,
             DfxSwitch::ClaimInject => 11,
+            DfxSwitch::Strace1 => 12,
         }
     }
 
@@ -116,6 +123,7 @@ impl DfxSwitch {
             "inputtrace" => Some(DfxSwitch::InputTrace),
             "epolltrace" => Some(DfxSwitch::EpollTrace),
             "claiminject" => Some(DfxSwitch::ClaimInject),
+            "strace1" => Some(DfxSwitch::Strace1),
             _ => None,
         }
     }
