@@ -315,6 +315,14 @@ pub fn write_msgmni(input: &[u8]) -> i32 {
     }
 }
 
+/// /proc/sys/kernel/threads-max — max threads system-wide (read by LTP
+/// tst_pid / msgstress01).
+pub fn generate_threads_max() -> Vec<u8> {
+    // Linux default for a 2GB machine (mempages / (8 * THREAD_SIZE/PAGE));
+    // tst_max_child_pids() scales fork workloads off this.
+    alloc::format!("31418\n").into_bytes()
+}
+
 /// /proc/sys/kernel/shmmax — max segment size. Mirrors the constant the
 /// shmctl(IPC_INFO) path reports (LTP shmctl03 asserts equality).
 pub fn generate_shmmax() -> Vec<u8> {
