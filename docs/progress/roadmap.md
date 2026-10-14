@@ -1,6 +1,33 @@
 # Rux Development Roadmap
 
-## Current Phase (2026-10-13): GNOME full-session gate reached
+## Current Phase (2026-10-14): GNOME Shell desktop on screen
+
+**Milestone: the real GNOME Shell desktop renders on the Rux framebuffer
+— Activities bar, clock, workspace thumbnails and dash painted by
+gnome-shell/mutter (X11 compositor) over Xorg-fbdev with software GL —
+and the kernel survives the full-chain 2100s smp4 gate with zero panics
+and the session alive (gnome-session + 17 gsd + gnome-shell).**
+
+The road there, in causal order (all fixes live-forensically verified):
+the poll/epoll 10ms re-check storm starved the session (event-driven
+wake registration dropped idle dbus/Xorg to 0% CPU, ~10x faster bring-up);
+R75 stopped >16MB heap allocations from under-allocating and scribbling
+48MB; R76 moved memfd storage to page-backed chunks after a 64MB ftruncate
+exhausted the kernel heap and froze ext4; the D-Bus reply-loss pair
+(pselect6 EFAULT + deferred exit-notify on same-task repicks) took
+"failed to register" from 18 to 0; R82 fixed the R78 ordering that turned
+every cold-page uaccess into EFAULT (which is what killed dbus-daemon at
+"/dev/null: Bad address" and made gnome-session SIGTERM itself); R83
+fixed the trap.S .Lfrom_user path that stored kernel sp into ti_user_sp
+before the SPP check — the smear engine behind the garbage-ksp double-run
+family. Verification: bigalloc11 (minimal session, -smp 4) paints the
+overview at t=1082s and holds to 1500s with zero panics/alloc-failures;
+fire-r74fix-v1 (full chain, smp4/2G) completes 2100s with 0 KERNPANIC /
+0 PREEMPT-UNDERFLOW. One more ti_kernel_sp scribbler (signature: hi32
+const 0x19999995, lo32 monotonic microseconds) is contained and
+instrumented; producer hunt is active.
+
+## (2026-10-13): GNOME full-session gate reached
 
 **Milestone: a complete 2100s GNOME ignition run passes with every
 milestone — M3 gnome-shell @238s, M1 @258s, M2 (17 gsd daemons) @363s,
