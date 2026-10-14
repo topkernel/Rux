@@ -660,6 +660,28 @@ impl ProcFSSuperBlock {
             sysctl::write_lease_break_time,
             self.alloc_ino(),
         )));
+        // /proc/sys/fs/inotify — the three tunables every inotify consumer
+        // (LTP inotify05/06/12, glib GFileMonitor) reads.
+        let inodir = Arc::new(ProcFSNode::new_dir(b"inotify".to_vec(), self.alloc_ino()));
+        fsdir.add_child(inodir.clone());
+        inodir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"max_queued_events".to_vec(),
+            sysctl::generate_inotify_max_queued_events,
+            sysctl::write_inotify_max_queued_events,
+            self.alloc_ino(),
+        )));
+        inodir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"max_user_instances".to_vec(),
+            sysctl::generate_inotify_max_user_instances,
+            sysctl::write_inotify_max_user_instances,
+            self.alloc_ino(),
+        )));
+        inodir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"max_user_watches".to_vec(),
+            sysctl::generate_inotify_max_user_watches,
+            sysctl::write_inotify_max_user_watches,
+            self.alloc_ino(),
+        )));
         // POSIX mq limits — LTP mq_open01 reads+writes queues_max.
         let mqdir = Arc::new(ProcFSNode::new_dir(b"mqueue".to_vec(), self.alloc_ino()));
         fsdir.add_child(mqdir.clone());

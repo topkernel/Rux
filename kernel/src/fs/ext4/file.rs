@@ -1321,6 +1321,15 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
                             atime,
                         );
                     }
+                    // inotify IN_ACCESS, same as the staged read path below
+                    // (line ~1240): this fast path bypasses File::read, so
+                    // without an explicit notify every read(2) on an ext4
+                    // file dropped the event (LTP inotify01: the whole
+                    // expected-event train shifted by one).
+                    crate::fs::inotify::notify_file(
+                        file,
+                        crate::fs::inotify::inotify_events::IN_ACCESS,
+                    );
                 }
                 read_bytes as isize
             }

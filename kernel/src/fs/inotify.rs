@@ -103,6 +103,17 @@ pub const IN_NONBLOCK: u32 = FileFlags::O_NONBLOCK; // 0o4000
 /// Default event-queue cap (Linux /proc/sys/fs/inotify/max_queued_events).
 pub const MAX_QUEUED_EVENTS: usize = 16384;
 
+/// Live /proc/sys/fs/inotify/max_queued_events value — the sysctl file in
+/// procfs/sysctl.rs reads and writes this (LTP inotify05 lowers/reads it).
+pub static MAX_QUEUED_EVENTS_SYSCTL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(MAX_QUEUED_EVENTS);
+
+/// Current queue cap (racy read is fine: it is advisory).
+#[inline]
+pub fn max_queued_events() -> usize {
+    MAX_QUEUED_EVENTS_SYSCTL.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 // ============================================================================
 // Instance structures
 // ============================================================================
@@ -181,8 +192,22 @@ impl InotifyInstance {
             if effective == 0 || effective == IN_ISDIR {
                 return;
             }
-            if inner.queue.len() >= MAX_QUEUED_EVENTS {
-                inner.overflow = true;
+            if inner.queue.len() >= max_queued_events() {
+                // Linux fsnotify queue overflow: drop the incoming event
+                // and append ONE IN_Q_OVERFLOW marker (wd=-1) at the TAIL
+                // of the queue — after the events already queued. Readers
+                // must see it LAST (LTP inotify05 "overflow event is not
+                // last"); further events are dropped until the queue
+                // drains past the marker.
+                if !inner.overflow {
+                    inner.overflow = true;
+                    inner.queue.push_back(QueuedEvent {
+                        wd: -1,
+                        mask: IN_Q_OVERFLOW,
+                        cookie: 0,
+                        name: None,
+                    });
+                }
                 return;
             }
             inner.queue.push_back(QueuedEvent {
@@ -566,27 +591,20 @@ fn inotify_read(file: &File, buf: &mut [u8]) -> isize {
         let mut total = 0usize;
         let stuck = {
             let mut inner = instance.inner.lock();
-            if inner.overflow {
-                // Report the overflow once, before anything else.
-                inner.overflow = false;
-                let ev = QueuedEvent {
-                    wd: -1,
-                    mask: IN_Q_OVERFLOW,
-                    cookie: 0,
-                    name: None,
-                };
-                let n = write_event(&mut buf[total..], &ev);
-                if n == 0 {
-                    inner.overflow = true;
-                    return -crate::errno::constants::EINVAL as isize;
-                }
-                total += n;
-            }
+            // The IN_Q_OVERFLOW marker is a NORMAL queued event (appended
+            // at the tail at overflow time); nothing special to do here —
+            // the drain below hands it out in order, LAST among the
+            // events that survived the overflow (LTP inotify05).
             // Drain whole events; never split a partial event.
             while let Some(ev) = inner.queue.front() {
                 let n = write_event(&mut buf[total..], ev);
                 if n == 0 {
                     break;
+                }
+                if ev.mask & IN_Q_OVERFLOW != 0 {
+                    // The overflow episode ends with the marker: further
+                    // events enqueue normally again.
+                    inner.overflow = false;
                 }
                 inner.queue.pop_front();
                 total += n;
