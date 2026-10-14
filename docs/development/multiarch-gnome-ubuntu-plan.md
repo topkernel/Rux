@@ -51,7 +51,15 @@
    - `map_page_noflush`（mmu_init.rs）的 **2MB-leaf demotion 分支**（E8-MM）：对 PID1 树 PMD[0][6] 的身份 2MB leaf 首次 demand-fill 时展开为 512×4K——demotion 后的 PT 分配/链接与其后 fork 的 copy_page_table_cow 对该 PT 的再处理之间，存在把 .text 物理地址写入 PMD 槽的路径（pte2.ppn() 对被涂写槽位的解析会从代码字节产生任意 ppn，`get_page_table_virt(pte2.ppn()<<12)` 随即把"PT 写入"定向到任意物理页——自传播涂写引擎，与 riscv64 zeroed-text 同构）
    - 注意 `pte2.is_valid() && pte2.is_leaf()` 对垃圾槽值的判定天然不可靠——demotion 分支需要在读 pte2 前校验 ppn 的物理合法域
 
-   **下一步（修复轮）**：① 在 map_page_noflush/copy_page_table_cow 的每级 pte 读取后加 ppn 物理域校验（< ram_top 且页对齐），非法即报错跳过而非继续展开；② 给 PID1 树 PMD[0][6] demotion 的 PT 帧打标验证是否被二次 demotion/copy 错误重写 PMD 槽；③ 修好后 GNOME x86 大概率直接点亮（会话链其余部分已全部验证）。
+   **修复轮进展（同日）**：
+   - ① 已实施：`valid_table_link_ppn` 物理域校验挂在 map_page_noflush 三级链接上（SCRIBBLE-GUARD，非法链接拒绝展开并打印）——forkloop 复现中 guard 零触发 + 旧签名 46 次依旧：**map_page 从未解析过垃圾链接**，涂写写入者不在 map 路径（防御保留，阻断自传播）。
+   - 结合"分配器陷阱零触发 + guard 零触发 + PT-HIST 同帧被 306/307 成功 free 两次 + EARLY-ROOT-FREE 目击"，机制最终闭环为**共享子树双重释放**：
+     1. 两个任务的树共享某中间表帧（fork/exec 交叉窗口的配对错误——EARLY-ROOT-FREE 即目击）
+     2. 任务 A teardown 第一次 free 成功 → 帧回 buddy
+     3. 任务 B teardown 第二次 free（DOUBLE-FREE REFUSED ✓ 但已晚）
+     4. 帧被 buddy 复用（页缓存/exec 装入文件数据——STALE-DUMP 看到的"函数序言字节"即文件内容）
+     5. 树 A 中残留链接现在指向文件数据 → 后续任何表遍历读写 = 涂写/垃圾解析（自传播）
+   - **下一步（精确目标）**：抓第 1 步的共享成因——在 free_page_table_checked 的 take() 成功时 dump 调用栈（dfx unwinder 已有），确认哪两条路径把同一帧 stamp 给两个树；重点审计 fork 失败 unwind 与 exec 替换 mm 的窗口（set_address_space 排空旧 Arc 的时点 vs child 树登记）。
 2. **SMP bring-up**：MADT 解析 + LAPIC init + INIT-SIPI-SIPI（x86_64/smp.rs 已有部分）——GNOME CPU-storm 修复（poll 事件唤醒等）是通用代码，SMP 上线即可继承
 3. **q35 PCI hole**：3GB+ 内存下 BAR 落在 0xc0000000 未映射（x86 mm territory，run-x86-ub.sh 注释）
 4. **2100s 门禁**（riscv64 的 fire-r74fix 同款：smp4、全链、零 KERNPANIC）

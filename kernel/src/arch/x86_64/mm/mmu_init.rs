@@ -1118,6 +1118,18 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 /// - virt: Virtual address
 /// - phys: Physical address
 /// - flags: Page table entry flag bits
+/// SCRIBBLE GUARD: a table-link PTE parsed out of a scribbled slot can
+/// carry an arbitrary ppn (we saw .text bytes parsed as links — the x86
+/// text-scribbler self-propagation). Every walk that FOLLOWS a link must
+/// validate the target lies inside physical RAM before touching it; a
+/// bad link is reported and the walk refuses to continue (the mapping
+/// fails loudly instead of writing a "page table" over kernel memory).
+#[inline]
+fn valid_table_link_ppn(ppn: u64) -> bool {
+    let ram_top = (crate::mm::page_desc::MAX_PFN as u64) << 12;
+    (ppn << 12) < ram_top
+}
+
 unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
@@ -1162,6 +1174,13 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     };
 
     // PUD -> PMD
+    if !valid_table_link_ppn(ppn3) {
+        crate::pr_err!(
+            "SCRIBBLE-GUARD map_page: PUD link ppn={:#x} out of RAM at va {:#x} — refusing",
+            ppn3, virt_addr
+        );
+        return;
+    }
     let table3_phys = ppn3 << PAGE_SHIFT;
     let table3 = get_page_table_virt(table3_phys);
     let table3_ref = &mut *table3;
@@ -1216,6 +1235,13 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     };
 
     // PMD -> PT
+    if !valid_table_link_ppn(ppn2) {
+        crate::pr_err!(
+            "SCRIBBLE-GUARD map_page: PMD link ppn={:#x} out of RAM at va {:#x} — refusing",
+            ppn2, virt_addr
+        );
+        return;
+    }
     let table2_phys = ppn2 << PAGE_SHIFT;
     let table2 = get_page_table_virt(table2_phys);
     let table2_ref = &mut *table2;
@@ -1266,6 +1292,13 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     };
 
     // PT -> physical page
+    if !valid_table_link_ppn(ppn1) {
+        crate::pr_err!(
+            "SCRIBBLE-GUARD map_page: PT link ppn={:#x} out of RAM at va {:#x} — refusing",
+            ppn1, virt_addr
+        );
+        return;
+    }
     let table1_phys = ppn1 << PAGE_SHIFT;
     let table1 = get_page_table_virt(table1_phys);
     let table1_ref = &mut *table1;
