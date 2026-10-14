@@ -1224,6 +1224,10 @@ pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysA
 /// parent PTE; exec/exit teardown frees them. With no per-PTE locks, any
 /// two of these racing on the same page produce stale refcounts and
 /// dangling child PTEs — the NEW2 class. One writer at a time.
+/// Shared mmap-context generation counter (interface parity with x86_64's
+/// MM_CTX — the mremap/IPC paths reference it generically).
+pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub static PTE_MODIFY_LOCK: crate::sync::spinlock::Spinlock<()> =
     crate::sync::spinlock::Spinlock::new(());
 
