@@ -176,60 +176,10 @@ fn get_current_pid() -> u32 {
     crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0)
 }
 
-// ============================================================================
-// Address allocation helper
-// ============================================================================
-
-/// Find a free virtual address range in the current process's address space.
-///
-/// Wedge fix (LTP shmt03/shmt08): two bugs livelocked this loop — one CPU
-/// spinning in shmat forever (unkillable by the test runner: whole-chunk
-/// WEDGE, photographed by the QEMU monitor at exactly this function):
-///
-/// 1. The conflict handler set `addr = vma.end()` — an address HIGHER
-///    than the candidate — so the next `addr -= size` reproduced the same
-///    candidate against the same VMA. Continue the DOWNWARD search:
-///    place the next candidate at the blocking VMA's start.
-/// 2. The conflict test used `vma.start() <= addr + size`, counting a
-///    candidate that ends EXACTLY at a VMA's start as a conflict. When
-///    `vma.start() - size` is page-aligned, the loop re-derived the same
-///    adjacent candidate forever. Back-to-back mappings are legal: use
-///    STRICT overlap (`vma.start() < addr + size`).
-///
-/// Termination: each conflict now yields candidate
-/// align_down(vma.start() - size) whose end is <= vma.start() — either
-/// conflict-free (return) or strictly lower than the previous candidate.
-fn find_free_shm_addr(size: usize) -> Option<VirtAddr> {
-    let current = crate::sched::current()?;
-    let addr_space = current.address_space()?;
-
-    let mmap_base = addr_space.mmap_base();
-    let vma_mgr = addr_space.vma_read();
-
-    // Search downward from mmap_base
-    let mut addr = mmap_base;
-    let min_addr: usize = 0x1000000; // 16MB minimum user address
-
-    while addr > min_addr && addr > size {
-        addr -= size;
-        addr &= !PAGE_MASK;
-
-        // Check for conflicts (strict overlap — see comment above)
-        let mut conflict = false;
-        for vma in vma_mgr.iter() {
-            if vma.start().as_usize() < addr + size && vma.end().as_usize() > addr {
-                // Restart the search just below this VMA.
-                addr = vma.start().as_usize();
-                conflict = true;
-                break;
-            }
-        }
-        if !conflict {
-            return Some(VirtAddr::new(addr));
-        }
-    }
-    None
-}
+// (Kernel-chosen shmat placement now goes through AddressSpace::
+// find_free_area — the mmap syscall's gap scan. The old private downward
+// scan from mm->mmap_base placed attachments in the VMA-less brk heap
+// region, overwriting the caller's live heap; see sys_shmat.)
 
 // ============================================================================
 // Syscall Implementations
@@ -667,6 +617,29 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     let size_aligned = ((segsz as usize) + PAGE_SIZE - 1) & !PAGE_MASK;
 
     // Determine attach address
+    // SHMTRAC (corruption hunt): shmat overwrote live ELF data pages in
+    // gnome-shell (PTE-OVERWRITE-LIVE ctx=1) — log every attach's inputs
+    // and chosen address to pin the bad placement source.
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    let addr_space = match current.address_space() {
+        Some(as_) => as_,
+        None => return -(errno::ENOMEM as i64),
+    };
+    static SHMTRAC_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    if SHMTRAC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+        crate::pr_info!(
+            "SHMTRAC: pid={} shmid={} shmaddr={:#x} shmflg={:#o} size={:#x}",
+            crate::process::current_pid(),
+            shmid,
+            shmaddr,
+            shmflg,
+            size_aligned
+        );
+    }
     let attach_addr = if shmaddr != 0 {
         if shmaddr & PAGE_MASK != 0 {
             if (shmflg & 0o20000) != 0 { // SHM_RND
@@ -678,19 +651,20 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             shmaddr
         }
     } else {
-        match find_free_shm_addr(size_aligned) {
-            Some(a) => a.as_usize(),
-            None => return -(errno::ENOMEM as i64),
+        // Linux do_shmat: the kernel-chosen address comes from
+        // get_unmapped_area — the SAME placement the mmap syscall uses
+        // (a gap scan inside the mmap region). The old private downward
+        // scan from mm->mmap_base walked the LOW half, where the only
+        // "VMA-free" hole is the brk heap: brk maps pages WITHOUT adding
+        // a VMA, so the heap is invisible to every VMA-based placement
+        // scan and shmat landed ON the caller's live heap ( gdk's
+        // 0x4000 MIT-SHM segments mapped over gnome-shell's brk heap at
+        // 0x501000+ — the [pango] FcInit abort; PTE-OVERWRITE-LIVE
+        // ctx=1, data_DESTROYED).
+        match addr_space.find_free_area(size_aligned) {
+            Ok(a) => a.as_usize(),
+            Err(_) => return -(errno::ENOMEM as i64),
         }
-    };
-
-    let current = match crate::sched::current() {
-        Some(t) => t,
-        None => return -(errno::ESRCH as i64),
-    };
-    let addr_space = match current.address_space() {
-        Some(as_) => as_,
-        None => return -(errno::ENOMEM as i64),
     };
 
     let root_ppn = addr_space.root_ppn();

@@ -334,17 +334,17 @@ impl MmStruct {
         } else {
             // Non-fixed placement: reserve atomically (see the comment at
             // vma_installed above). The hint (addr != 0) is honored only
-            // when the whole target range is free of VMAs and clear of the
-            // brk region — same predicate as before, now evaluated under
-            // the write lock so it cannot change between check and add.
+            // inside the mmap region — the brk heap maps pages WITHOUT a
+            // VMA, so a low hint that looks "VMA-free" can sit on live
+            // heap PTEs (same hole class as the shmat placement bug that
+            // mapped gdk MIT-SHM segments over gnome-shell's brk heap).
             let mut vma_mgr = self.vma_write();
             let chosen = if addr.as_usize() != 0 {
                 let end = PageVirtAddr::new(addr.as_usize() + aligned_size);
                 let test_vma = Vma::new(addr, end, flags);
                 let has_vma_conflict =
                     vma_mgr.iter().any(|v| v.overlaps(&test_vma));
-                let hint_brk_conflict =
-                    addr.as_usize() < MMAP_START && addr.as_usize() >= BRK_DEFAULT;
+                let hint_brk_conflict = addr.as_usize() < MMAP_START;
                 if !has_vma_conflict && !hint_brk_conflict {
                     addr
                 } else {
@@ -1269,13 +1269,51 @@ pub unsafe fn alloc_and_map_user_memory(
             block_pages * PAGE_SIZE as usize,
         );
 
-        map_user_region(
-            user_root_ppn,
-            virt_addr + (mapped_pages * PAGE_SIZE as usize) as u64,
-            phys_addr as u64,
-            chunk_bytes as u64,
-            flags,
-        );
+        // PRESERVE PRESENT LEAVES (Linux do_brk_flags only maps ABSENT
+        // pages). A brk shrink that failed to unmap (its munmap error is
+        // ignored), or any stale leaf left in the growth window, used to
+        // be blindly re-mapped with the fresh zero block — destroying
+        // whatever still lived there (PTE-OVERWRITE-LIVE burst
+        // 0x502000-0x519000 in gnome-shell's heap; the [pango] FcInit
+        // abort/SIGSEGV). Skip pages that already have a present
+        // translation; free the block's skipped pages back.
+        {
+            let mut skipped = 0usize;
+            let base_pfn = phys_addr >> PAGE_SHIFT;
+            for i in 0..chunk_pages {
+                let va = virt_addr + ((mapped_pages + i) * PAGE_SIZE as usize) as u64;
+                // SAFETY: user_root_ppn is a valid root and va is a
+                // page-aligned user address; walk is read-only.
+                let present = unsafe { PageTableWalker::walk(user_root_ppn, va) }
+                    .map_or(false, |(_p, bits)| {
+                        bits & PageTableEntry::P != 0
+                    });
+                if present {
+                    // SAFETY: freshly allocated, exclusively owned page.
+                    unsafe {
+                        crate::mm::page_alloc::free_pages(
+                            ((base_pfn + i) as usize) << PAGE_SHIFT,
+                            0,
+                        );
+                    }
+                    skipped += 1;
+                    continue;
+                }
+                // SAFETY: user_root_ppn valid; the target leaf is absent
+                // (checked above under the same lock scope in
+                // map_user_region); phys frames are freshly zeroed.
+                unsafe {
+                    map_user_region(
+                        user_root_ppn,
+                        va,
+                        ((base_pfn + i) as u64) << PAGE_SHIFT,
+                        PAGE_SIZE as u64,
+                        flags,
+                    );
+                }
+            }
+            let _ = skipped;
+        }
 
         // R7-C5: the rounded-up block allocated 2^order pages but the
         // mapping only covers chunk_pages — the unmapped excess has no
