@@ -176,8 +176,14 @@ int main(void)
     setenv("TMPDIR", "/tmp", 1);
     setenv("LTP_IPC_PATH", "/tmp/ltp-ipc", 1);
     setenv("HOME", "/", 1);
+    /* runltp/ltp-pan start each test with CWD = the LTP bin dir: the new
+     * API's resource-copy search path ($LTP_DATAROOT, $LTPROOT/testcases/
+     * bin, then the STARTING cwd) only finds *_child binaries from there
+     * (execve02/05, execveat01/02, creat07... otherwise TBROK "Failed to
+     * copy resource"). */
+    setenv("LTPROOT", "/test/linux-ltp", 1);
 
-    chdir("/tmp");
+    chdir(LTP_BIN);
 
     FILE *f = fopen(CHUNK_FILE, "r");
     if (!f) {
