@@ -3432,7 +3432,7 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
         }
     }
     let version = hdr[0];
-    let _pid = hdr[1] as i32;
+    let pid = hdr[1] as i32;
 
     // Determine data size from version
     let data_count: usize;
@@ -3471,11 +3471,18 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
     let new_permitted = Cap::from_halves(data[1], data[4]);
     let new_inheritable = Cap::from_halves(data[2], data[5]);
 
-    // capset can only operate on the current process
+    // capset can only operate on the current process. Linux returns EPERM
+    // when the header pid names any other task (kernel/capability.c:
+    // "if (pid && pid != task_pid_vnr(current)) return -EPERM"). LTP
+    // capset04 forks a child and expects capset(child_pid, ...) = EPERM.
     let current = match crate::sched::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
     };
+    if pid != 0 && pid != unsafe { (*current).pid() } as i32 && pid != unsafe { (*current).tgid() } as i32
+    {
+        return -(errno::EPERM as i64);
+    }
 
     // Permission checks (Linux capset semantics):
     // 1. new permitted must be a subset of old permitted

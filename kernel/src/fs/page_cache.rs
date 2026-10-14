@@ -123,6 +123,27 @@ impl PageCache {
         Some(phys_to_virt_ptr(phys) as *const u8)
     }
 
+    /// Same as `get` but returns the PHYSICAL address — for mapping the
+    /// cached frame directly into a user page table (MAP_SHARED faults).
+    /// The returned pin is owned by that PTE mapping for its lifetime.
+    pub fn get_phys(&self, fs_id: u64, ino: u64, page_index: u64) -> Option<u64> {
+        let key = cache_key(fs_id, ino);
+        let cache = self.inodes.lock();
+        let inode_cache = cache.get(&key)?;
+        let page = inode_cache.pages.get(&page_index)?;
+        if page.invalidated {
+            return None;
+        }
+        page.ref_count.fetch_add(1, Ordering::AcqRel);
+        let page_desc = pfn_to_page_mut(page.pfn);
+        if !page_desc.is_null() {
+            unsafe {
+                (*page_desc).set_flag(PageFlag::Referenced);
+            }
+        }
+        Some(pfn_to_phys(page.pfn) as u64)
+    }
+
     /// Insert a newly-read page into the cache.
     /// If the page already exists, just increments ref_count.
     pub fn insert(&self, fs_id: u64, ino: u64, page_index: u64, _block_nr: u64, data: &[u8]) {
@@ -695,4 +716,64 @@ pub fn get_page_cache() -> &'static PageCache {
 /// Get the total number of cached pages (for /proc/meminfo).
 pub fn page_cache_total_pages() -> u32 {
     PAGE_CACHE.total_pages.load(Ordering::Relaxed)
+}
+
+/// Resolve a MAP_SHARED file-mapping fault to the page-cache frame for
+/// (inode, file_offset/PAGE), populating the cache from the file on miss.
+///
+/// Returns the pinned physical address that the caller maps into the user
+/// page table. Aliasing the cache frame (instead of a private copy) is
+/// what makes the mapping genuinely shared: every mapper of the file —
+/// across fork AND across a fresh mmap after exec — faults onto the same
+/// physical page and observes the others' stores (LTP's IPC results file;
+/// the execl01..execveat02 family used to TBROK "Test haven't reported
+/// results" when each mapper got a private copy).
+///
+/// The `get_phys` pin is owned by the user PTE mapping for its lifetime;
+/// there is deliberately no put() at unmap time, so a shared-mapped page
+/// stays unevictable until its inode cache is dropped. Bounded in practice
+/// by the number of simultaneously shared-mapped files (LTP: one 4KB page
+/// per test). Known deviation from Linux, documented here: write(2) on the
+/// file invalidates the inode cache, after which the mapped frame and new
+/// disk reads can diverge — Linux keeps them coherent by writing through
+/// the page cache; ext4 here writes disk-direct. Files used as shared
+/// mappings (the POSIX shm-over-mmap pattern) are written via the mapping
+/// itself, which stays coherent.
+pub fn shared_file_fault_page(file: &crate::fs::file::File, file_offset: u64) -> Option<u64> {
+    // SAFETY: inode is written once at open time and read-only afterwards.
+    let inode = unsafe { &*file.inode.get() }.as_ref()?;
+    let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
+    let cache = get_page_cache();
+    let page_index = file_offset / PAGE_SIZE as u64;
+
+    if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
+        return Some(phys);
+    }
+
+    // Miss: read the page from the file into a bounce frame, insert it
+    // into the cache, then take the pinning lookup path.
+    let bounce_phys = alloc_page(GfpFlags::GFP_KERNEL);
+    if bounce_phys == 0 {
+        return None;
+    }
+    // SAFETY: bounce_phys is a freshly allocated page frame owned here.
+    let bounce = unsafe {
+        core::ptr::write_bytes(phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8, 0,
+                               PAGE_SIZE);
+        phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8
+    };
+    // SAFETY: read_at validates its own file references; bounce is a full
+    // page of writable kernel memory.
+    let got = unsafe { file.read_at(file_offset, bounce, PAGE_SIZE) };
+    if got < 0 {
+        free_page(bounce_phys);
+        return None;
+    }
+    // SAFETY: bounce holds PAGE_SIZE readable bytes (zero-filled tail).
+    unsafe {
+        cache.insert(fs_id, ino, page_index, 0,
+                     core::slice::from_raw_parts(bounce, PAGE_SIZE));
+    }
+    free_page(bounce_phys);
+    cache.get_phys(fs_id, ino, page_index)
 }

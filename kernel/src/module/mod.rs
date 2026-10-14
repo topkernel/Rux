@@ -371,9 +371,12 @@ pub fn sys_init_module_impl(umod: usize, len: usize) -> i64 {
         return -(errno::Errno::BadAddress.as_i32() as i64);
     }
 
+    // load_module_blob returns already-negated i32 errnos (as_neg_i32):
+    // negate again and a failure would surface as a POSITIVE return
+    // value, i.e. success (delete_module02 saw +2 for ENOENT).
     match load_module_blob(&blob) {
         Ok(_) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -419,9 +422,12 @@ pub fn sys_finit_module_impl(fd: usize, _param_flags: u64) -> i64 {
         return -(errno::Errno::InvalidArgument.as_i32() as i64);
     }
 
+    // load_module_blob returns already-negated i32 errnos (as_neg_i32):
+    // negate again and a failure would surface as a POSITIVE return
+    // value, i.e. success (delete_module02 saw +2 for ENOENT).
     match load_module_blob(&blob) {
         Ok(_) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }
 
@@ -456,21 +462,25 @@ pub fn sys_delete_module_impl(name_user: usize, _flags: u64) -> i64 {
         }
         name_buf[i] = one[0];
     }
+    // Linux never validates the name here: strncpy_from_user truncates to
+    // MODULE_NAME_LEN-1 chars and the table lookup fails on its own. An
+    // empty name therefore reports ENOENT (lookup miss), and a 56+ char
+    // name is truncated, not rejected with EINVAL (LTP delete_module02).
+    name_buf[MODULE_NAME_LEN] = 0;
     if name_buf[0] == 0 {
-        return -(errno::Errno::InvalidArgument.as_i32() as i64); // empty name
-    }
-    // Reject a non-terminated over-long name.
-    if name_buf[MODULE_NAME_LEN] != 0 {
-        return -(errno::Errno::InvalidArgument.as_i32() as i64);
+        return -(errno::Errno::NoSuchFileOrDirectory.as_i32() as i64); // empty name -> lookup miss
     }
 
     let name = match core::str::from_utf8(&name_buf[..MODULE_NAME_LEN]) {
         Ok(s) => s.trim_end_matches('\0'),
-        Err(_) => return -(errno::Errno::InvalidArgument.as_i32() as i64),
+        Err(_) => return -(errno::Errno::NoSuchFileOrDirectory.as_i32() as i64),
     };
 
+    // delete_module_by_name returns already-negated i32 errnos — do not
+    // negate twice (double negation turned ENOENT into +2 = fake success,
+    // LTP delete_module02 cases 1/4).
     match delete_module_by_name(name) {
         Ok(()) => 0,
-        Err(e) => -(e as i64),
+        Err(e) => e as i64,
     }
 }

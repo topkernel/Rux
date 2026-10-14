@@ -1080,25 +1080,35 @@ pub fn pipe_file_poll(file: &File, events: u16) -> u16 {
     if let Some(pipe_ptr) = unsafe { *file.private_data.get() } {
         let pipe = unsafe { &*(pipe_ptr as *const Pipe) };
 
-        if events & POLLIN != 0 {
+        // Linux pipe_poll() branches on filp->f_mode: read-side readiness
+        // (POLLIN/POLLRDNORM, POLLHUP when the writers are gone) is only
+        // reported to fds opened for reading, write-side readiness
+        // (POLLOUT/POLLWRNORM, POLLERR when the readers are gone) only to
+        // fds opened for writing. Polling the WRITE end for POLLIN used to
+        // report the buffer's data as readable there — LTP epoll_ctl01
+        // registers the write end for EPOLLIN and expects silence.
+        let accmode = file.flags().bits() & FileFlags::O_ACCMODE;
+        let can_read = accmode == FileFlags::O_RDONLY || accmode == FileFlags::O_RDWR;
+        let can_write = accmode == FileFlags::O_WRONLY || accmode == FileFlags::O_RDWR;
+
+        if can_read && events & POLLIN != 0 {
             if pipe.buffer.lock().available_read() > 0 {
                 ready |= POLLIN | POLLRDNORM;
             }
         }
-        if events & POLLOUT != 0 {
+        if can_write && events & POLLOUT != 0 {
             if pipe.buffer.lock().available_write() > 0 {
                 ready |= POLLOUT | POLLWRNORM;
             }
         }
 
         // POLLHUP/POLLERR are reported regardless of the requested events
-        // (Linux sets them unconditionally in pipe_poll) — review 5.2 low:
-        // they used to be masked behind POLLIN/POLLOUT requests, hiding
-        // EOF/reader-gone from callers that only polled the other direction.
-        if pipe.is_write_closed() {
+        // (Linux sets them unconditionally in pipe_poll), but per side:
+        // HUP only to readers, ERR only to writers.
+        if can_read && pipe.is_write_closed() {
             ready |= POLLHUP;
         }
-        if pipe.is_read_closed() {
+        if can_write && pipe.is_read_closed() {
             ready |= POLLERR;
         }
     }

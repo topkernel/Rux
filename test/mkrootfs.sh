@@ -61,6 +61,26 @@ alias ll='ls -l --color=auto'
 alias help='toybox --help'
 MRSHRC
 
+# User/group database. LTP tests resolve "nobody" (and a few "bin"/"daemon")
+# via getpwnam/getgrnam; without these entries dozens of syscall tests
+# TBROK in setup before exercising the kernel at all (observed in the
+# 2026-10 chunked scans: access01, chmod03/05/06/07, chown03, acct01...).
+cat <<'PASSWD' > "$STAGING/etc/passwd"
+root:x:0:0:root:/root:/bin/sh
+bin:x:1:1:bin:/bin:/sbin/nologin
+daemon:x:2:2:daemon:/sbin:/sbin/nologin
+nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin
+PASSWD
+cat <<'GROUP' > "$STAGING/etc/group"
+root:x:0:
+bin:x:1:
+daemon:x:2:
+tty:x:5:
+disk:x:6:
+nogroup:x:65534:
+nobody:x:65534:
+GROUP
+
 # Copy GUI applications to /app/ directory
 for app in desktop calculator clock vshell; do
     eval "binary=\$$(echo $app | tr '[:lower:]' '[:upper:]')_BINARY"
@@ -249,6 +269,26 @@ if [ -d "$LINUX_LTP_DIR/testcases" ]; then
     chmod -R +x "$STAGING/test/linux-ltp/testcases/bin/"* 2>/dev/null || true
     TEST_COUNT=$(find "$STAGING/test/linux-ltp/testcases/bin" -type f 2>/dev/null | wc -l)
     echo "  Installed $TEST_COUNT test binaries"
+fi
+
+# Build + install the LTP chunk-sweep runner (init=/test/ltpscan; musl
+# static with the same march/soft-fp pinning as the LTP suite itself —
+# a glibc static build SIGILLs on RVV memset under the pinned QEMU CPU).
+LTPSCAN_SRC="$PROJECT_ROOT/test/ltpscan/ltpscan.c"
+if [ -f "$LTPSCAN_SRC" ] && [ -d "$MUSL_LIB_DIR/../include" ]; then
+    MUSL_SYSROOT="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
+    echo "Installing ltpscan to /test/ltpscan..."
+    if riscv64-linux-gnu-gcc -static -O2 -Wall \
+         -march=rv64gc_zicsr -nostdinc -U_FORTIFY_SOURCE \
+         -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include \
+         -isystem "$MUSL_SYSROOT/include" \
+         -o "$STAGING/test/ltpscan" "$LTPSCAN_SRC" \
+         -L"$MUSL_SYSROOT/lib" -L"$PROJECT_ROOT/userspace/soft-fp" -lsoftfp-pin; then
+        chmod +x "$STAGING/test/ltpscan"
+    else
+        echo "Warning: ltpscan failed to compile (skipped)"
+        rm -f "$STAGING/test/ltpscan"
+    fi
 fi
 
 # Install mrsh as /bin/sh (POSIX-compliant shell)
