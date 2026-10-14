@@ -54,10 +54,24 @@ pub fn set_gpu_device(device: VirtioGpuDevice) {
 /// Flush framebuffer to display device
 /// VirtIO-GPU requires explicit flush to display updated content
 pub fn flush_framebuffer() -> bool {
-    if let Some(ref device) = *GPU_DEVICE.lock() {
-        device.flush();
-        true
-    } else {
-        false
-    }
+    // Snapshot the device pointer under the lock and RELEASE before the
+    // flush. device.flush() submits virtio commands and polls for the
+    // device response, which under TCG/BQL contention can take hundreds
+    // of ms; holding GPU_DEVICE across that stall made every concurrent
+    // flusher (kfbflush every 30ms, each FBIO_FLUSH ioctl) spin on this
+    // lock for a whole device transaction — observed as
+    // "DEADLOCK: spinlock stuck cpu=1 lock=GPU_DEVICE" in soak-r1
+    // (smp4 MTTCG + I/O churn, t=948s).
+    // SAFETY: GPU_DEVICE is a static set once by set_gpu_device() during
+    // boot and never cleared or replaced afterwards, so the pointed-to
+    // VirtioGpuDevice outlives this function; flush() takes &self only.
+    let device: *const VirtioGpuDevice = {
+        let guard = GPU_DEVICE.lock();
+        match guard.as_ref() {
+            Some(d) => d as *const VirtioGpuDevice,
+            None => return false,
+        }
+    };
+    unsafe { (*device).flush() };
+    true
 }

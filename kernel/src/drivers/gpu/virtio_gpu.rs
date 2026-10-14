@@ -706,18 +706,45 @@ impl VirtioGpuDevice {
             queue.notify();
             fence(Ordering::SeqCst);
 
-            // Wait for response (simple polling). The bound must be generous:
-            // under a host display backend (SDL/GTK) QEMU realizes the
-            // window before answering GET_DISPLAY_INFO, which can take
-            // seconds under load — the old 100k-iteration cap expired first
-            // and framebuffer init failed ("no /dev/fb0", garbled screen).
-            // The fast path returns as soon as used.idx advances, so the
-            // larger bound only costs time on a genuinely dead device.
-            for _ in 0..100_000_000 {
+            // Wait for response (simple polling), under two bounds:
+            //
+            // (a) WALL-CLOCK: 10 s of jiffies (checked every ~1M
+            //     iterations). At runtime the polling CPU has irqs
+            //     enabled, so its timer tick keeps jiffies advancing even
+            //     while spinning. 10 s keeps a 5x margin over the
+            //     documented worst case (host display-backend window
+            //     realization answering GET_DISPLAY_INFO can take seconds
+            //     under load) while bounding the flush latency other
+            //     CPUs can tolerate. A time bound is REQUIRED, not an
+            //     iteration count: under TCG MTTCG with BQL contention
+            //     every polled iteration (SeqCst fence + used-ring read)
+            //     stretches, so iteration caps do not bound wall time —
+            //     soak-r1 (smp4 + I/O churn) measured a >500 ms lock
+            //     hold (spinlock DEADLOCK warning) from exactly this
+            //     loop's iteration budget.
+            // (b) ITERATIONS: 100M — the fallback during early boot,
+            //     when the probe runs before the scheduler/timer start
+            //     and jiffies are frozen; same bound as before the
+            //     wall-clock deadline existed.
+            // The fast path returns as soon as used.idx advances, so
+            // these bounds only cost time on a genuinely dead device.
+            let jiffy_deadline = crate::drivers::timer::get_jiffies()
+                + 10 * crate::config::KERNEL_HZ as u64;
+            let mut spins: u32 = 0;
+            loop {
                 fence(Ordering::SeqCst);
                 let used = &*queue.used;
                 if used.idx as usize >= idx + 1 {
                     completed = true;
+                    break;
+                }
+                spins = spins.wrapping_add(1);
+                if spins >= 100_000_000 {
+                    break;
+                }
+                if spins & 0xF_FFFF == 0
+                    && crate::drivers::timer::get_jiffies() >= jiffy_deadline
+                {
                     break;
                 }
             }
