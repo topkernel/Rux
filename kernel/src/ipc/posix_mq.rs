@@ -189,7 +189,9 @@ fn mq_alloc(mq: PosixMq) -> MqAlloc {
     MqAlloc::Full
 }
 
-/// Parse name from userspace pointer. Must start with '/'.
+/// Parse name from userspace pointer. The name is a single path component;
+/// a leading '/' (present when the libc wrapper did not strip it) is
+/// accepted and dropped.
 fn mq_parse_name(name_ptr: *const u8) -> Result<alloc::vec::Vec<u8>, i32> {
     if name_ptr.is_null() || !access_ok(name_ptr as usize, 256) {
         return Err(-errno::EFAULT);
@@ -213,13 +215,22 @@ fn mq_parse_name(name_ptr: *const u8) -> Result<alloc::vec::Vec<u8>, i32> {
     if uncopied > 0 && name.len() == copied {
         return Err(-errno::EFAULT);
     }
-    if name.is_empty() || name[0] != b'/' {
+    if name.is_empty() {
+        return Err(-errno::EINVAL);
+    }
+    // LTP-mq: both musl and glibc strip the leading '/' before calling the
+    // syscall (musl unconditionally, glibc after validating name[0] == '/'),
+    // so the kernel-side convention is a slash-less name relative to the
+    // mqueue root. Accept the '/'-prefixed form too, but reject embedded
+    // slashes (POSIX: the name is a single path component).
+    let name: &[u8] = if name[0] == b'/' { &name[1..] } else { &name[..] };
+    if name.is_empty() || name.contains(&b'/') {
         return Err(-errno::EINVAL);
     }
     if name.len() > 255 {
         return Err(-errno::ENAMETOOLONG);
     }
-    Ok(name)
+    Ok(name.to_vec())
 }
 
 // ============================================================================
