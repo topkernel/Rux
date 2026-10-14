@@ -2539,6 +2539,22 @@ pub fn sys_fchmod(args: SyscallArgs) -> i64 {
                         && cred.euid != inode_uid {
                         return -(errno::EPERM as i64);
                     }
+                    // notify_change S_ISGID rule (same as vfs_chmod): an
+                    // unprivileged caller that is not in the file's group
+                    // loses S_ISGID on chmod — setgid dirs must not survive
+                    // a downgrade by a non-member (LTP fchmod05: nobody
+                    // fchmod's a free_gid-owned directory to 043777 and
+                    // must land on 041777).
+                    let inode_gid = inode.gid.load(core::sync::atomic::Ordering::Relaxed);
+                    let mode = if mode & 0o2000 != 0
+                        && !crate::security::has_capability(&cred, crate::security::CAP_FSETID)
+                        && cred.egid != inode_gid
+                        && !cred.groups.contains(&inode_gid)
+                    {
+                        mode & !0o2000
+                    } else {
+                        mode
+                    };
                     // Use op_setattr to update mode
                     let result = inode.op_setattr(0x0001, mode as u64, 0);
                     if result == 0 { 0 } else { -(result as i64) }

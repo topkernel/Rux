@@ -2300,18 +2300,22 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
         return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
     }
 
-    // Linux: check that fd was opened for writing (FMODE_WRITE) —
-    // ftruncate(2) documents EBADF for a read-only fd (LTP ftruncate03).
+    // Linux do_ftruncate: a VALID fd that is not open for writing is
+    // EINVAL (man 2 ftruncate: "fd is not open for writing"); EBADF is
+    // only for fds that do not exist (LTP ftruncate03: read_fd EINVAL,
+    // bad_fd EBADF).
     let file_flags = file.flags();
     if file_flags.is_readonly() {
-        return Err(errno::Errno::BadFileNumber.as_neg_i32());
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
     // Get inode from file
     // SAFETY: file.inode is an UnsafeCell<Option<Arc<Inode>>>; accessing under current task's fd table lock
     let inode_opt = unsafe { &*file.inode.get() };
+    // Sockets and other inode-less files: the fd is valid but the target
+    // is not a regular file — EINVAL, not EBADF (LTP ftruncate03 sock_fd).
     let inode = inode_opt.as_ref()
-        .ok_or(errno::Errno::BadFileNumber.as_neg_i32())?;
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?;
 
     if inode.mode.is_directory() {
         return Err(errno::Errno::IsADirectory.as_neg_i32());

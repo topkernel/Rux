@@ -171,6 +171,12 @@ fn create_and_start_init_process(
 
         (*task_ptr).set_parent(core::ptr::null_mut());
 
+        // PID 1 is its own session and process-group leader (Linux init:
+        // sid == pgid == 1). The boot task starts with pgid/sid zeroed,
+        // which made getpgid(1) report 0 (LTP getpgid01).
+        (*task_ptr).set_sid(1);
+        (*task_ptr).set_pgid(1);
+
         // cgroup v2 (U1b): track PID 1 in the root cgroup so its (and its
         // children's) membership and memory usage are visible from
         // /sys/fs/cgroup from the first moment; systemd later moves itself

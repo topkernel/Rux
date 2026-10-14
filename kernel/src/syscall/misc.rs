@@ -3316,7 +3316,14 @@ pub fn sys_timerfd_gettime(args: SyscallArgs) -> i64 {
 pub fn sys_getrandom(args: SyscallArgs) -> i64 {
     let buf_ptr = args[0] as *mut u8;
     let buflen = args[1] as usize;
-    let _flags = args[2] as u32;
+    let flags = args[2] as u32;
+
+    // Flags validation (Linux): GRND_RANDOM 0x1, GRND_NONBLOCK 0x2,
+    // GRND_INSECURE 0x4 — anything else is EINVAL (LTP getrandom05).
+    const GRND_VALID: u32 = 0x1 | 0x2 | 0x4;
+    if flags & !GRND_VALID != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     if buf_ptr.is_null() {
         return -(errno::EFAULT as i64);

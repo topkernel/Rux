@@ -1298,11 +1298,31 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     let addr_ptr = args[1] as *mut u8;
     let addrlen_ptr = args[2] as *mut u32;
 
+    // Linux sockfd_lookup: a nonexistent fd is EBADF; a valid non-socket
+    // fd is ENOTSOCK (LTP getsockname01/getpeername01 first cases probe
+    // fd=400 and /dev/null).
+    // SAFETY: read-only fd table lookup.
+    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
+        return -(errno::EBADF as i64);
+    }
     if addr_ptr.is_null() || addrlen_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
     if !crate::arch::uaccess::access_ok(addrlen_ptr as usize, 4) {
         return -(errno::EFAULT as i64);
+    }
+    // Read the caller's length ONCE, before any per-family dispatch: a
+    // faulting read (unaligned/unmapped len pointer) is EFAULT, and a
+    // value above MAX_SOCK_ADDR (128) is EINVAL for every family (Linux
+    // move_addr_to_user; LTP's (socklen_t)-1 cases — the AF_UNIX branch
+    // used to skip these checks entirely).
+    // SAFETY: addrlen_ptr validated with access_ok(4) above.
+    let addrlen_early = match unsafe { crate::arch::uaccess::get_user::<u32>(addrlen_ptr) } {
+        Some(v) => v as usize,
+        None => return -(errno::EFAULT as i64),
+    };
+    if addrlen_early > 128 {
+        return -(errno::EINVAL as i64);
     }
 
     // W3: non-socket fd → ENOTSOCK (matching getpeername). The old
@@ -1313,6 +1333,9 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     // the inet addrlen<16 check because a sockaddr_un can legitimately be
     // shorter than a sockaddr_in.
     if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
+        if addrlen_early < 2 {
+            return -(errno::EINVAL as i64);
+        }
         if !crate::arch::uaccess::access_ok(
             addr_ptr as usize,
             crate::net::unix::SOCKADDR_UN_LEN,
@@ -1329,10 +1352,12 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
 
     // Inet path: a sockaddr_in needs the full 16 bytes.
     // SAFETY: addrlen_ptr validated with access_ok(4); get_user is the
-    // exception-table copy path (SUM=0 safe).
-    let addrlen = unsafe {
-        crate::arch::uaccess::get_user::<u32>(addrlen_ptr).unwrap_or(0)
-    } as usize;
+    // exception-table copy path (SUM=0 safe). A faulting read (unaligned
+    // or unmapped len pointer) is EFAULT, never a silent 0 (LTP
+    // getsockname01/getpeername01 "(socklen_t *)1" cases). Linux
+    // move_addr_to_user also rejects lengths above MAX_SOCK_ADDR (128)
+    // with EINVAL (the (socklen_t)-1 cases).
+    let addrlen = addrlen_early;
     if addrlen < 16 {
         return -(errno::EINVAL as i64);
     }
@@ -1428,17 +1453,40 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
     let addr_ptr = args[1] as *mut u8;
     let addrlen_ptr = args[2] as *mut u32;
 
+    // Linux sockfd_lookup: a nonexistent fd is EBADF; a valid non-socket
+    // fd is ENOTSOCK (LTP getsockname01/getpeername01 first cases probe
+    // fd=400 and /dev/null).
+    // SAFETY: read-only fd table lookup.
+    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
+        return -(errno::EBADF as i64);
+    }
     if addr_ptr.is_null() || addrlen_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
     if !crate::arch::uaccess::access_ok(addrlen_ptr as usize, 4) {
         return -(errno::EFAULT as i64);
     }
+    // Read the caller's length ONCE, before any per-family dispatch: a
+    // faulting read (unaligned/unmapped len pointer) is EFAULT, and a
+    // value above MAX_SOCK_ADDR (128) is EINVAL for every family (Linux
+    // move_addr_to_user; LTP's (socklen_t)-1 cases — the AF_UNIX branch
+    // used to skip these checks entirely).
+    // SAFETY: addrlen_ptr validated with access_ok(4) above.
+    let addrlen_early = match unsafe { crate::arch::uaccess::get_user::<u32>(addrlen_ptr) } {
+        Some(v) => v as usize,
+        None => return -(errno::EFAULT as i64),
+    };
+    if addrlen_early > 128 {
+        return -(errno::EINVAL as i64);
+    }
 
     // P0-1: AF_UNIX — the peer's bound path (or the connected DGRAM name).
     // Dispatched before the inet addrlen<16 check: a sockaddr_un can be
     // shorter than a sockaddr_in.
     if let Some(usock) = crate::net::unix::unix_socket_from_fd(fd) {
+        if addrlen_early < 2 {
+            return -(errno::EINVAL as i64);
+        }
         if *usock.state.lock() != crate::net::unix::UnixState::Connected {
             return -(errno::ENOTCONN as i64);
         }
@@ -1463,10 +1511,12 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
 
     // Inet path: a sockaddr_in needs the full 16 bytes.
     // SAFETY: addrlen_ptr validated with access_ok(4); get_user is the
-    // exception-table copy path (SUM=0 safe).
-    let addrlen = unsafe {
-        crate::arch::uaccess::get_user::<u32>(addrlen_ptr).unwrap_or(0)
-    } as usize;
+    // exception-table copy path (SUM=0 safe). A faulting read (unaligned
+    // or unmapped len pointer) is EFAULT, never a silent 0 (LTP
+    // getsockname01/getpeername01 "(socklen_t *)1" cases). Linux
+    // move_addr_to_user also rejects lengths above MAX_SOCK_ADDR (128)
+    // with EINVAL (the (socklen_t)-1 cases).
+    let addrlen = addrlen_early;
     if addrlen < 16 {
         return -(errno::EINVAL as i64);
     }
@@ -2081,6 +2131,12 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
     const IP_TOS: i32 = 1;
     const IP_TTL: i32 = 2;
 
+    // Linux sockfd_lookup: a nonexistent fd is EBADF, a valid non-socket
+    // fd is ENOTSOCK (LTP getsockopt01 probes fd=400 then /dev/null).
+    // SAFETY: read-only fd table lookup.
+    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
+        return -(errno::EBADF as i64);
+    }
     if optval.is_null() || optlen_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
@@ -2088,13 +2144,17 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     // SAFETY: optlen_ptr validated with access_ok; get_user is the
-    // exception-table copy path (SUM=0 safe).
-    let optlen = unsafe {
-        crate::arch::uaccess::get_user::<u32>(optlen_ptr).unwrap_or(0)
-    } as usize;
-    if optlen == 0 {
+    // exception-table copy path (SUM=0 safe). Linux do_getsockopt rejects
+    // optlen == 0 AND (as a signed compare) any huge value such as
+    // (socklen_t)-1 with EINVAL (LTP getsockopt01's "invalid optlen").
+    let optlen = match unsafe { crate::arch::uaccess::get_user::<u32>(optlen_ptr) } {
+        Some(v) => v,
+        None => return -(errno::EFAULT as i64),
+    };
+    if optlen == 0 || (optlen as i32) < 0 || optlen > 128 {
         return -(errno::EINVAL as i64);
     }
+    let optlen = optlen as usize;
     if !crate::arch::uaccess::access_ok(optval as usize, optlen) {
         return -(errno::EFAULT as i64);
     }
@@ -2428,8 +2488,12 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                     return -(errno::ENOPROTOOPT as i64);
                 }
             },
+            // Linux sock_common_getsockopt/do_ip_getsockopt: an unknown
+            // PROTOCOL LEVEL is EOPNOTSUPP; an unknown optname inside a
+            // known level is ENOPROTOOPT (LTP getsockopt01: invalid level
+            // 263 -> EOPNOTSUPP, IP/TCP bad optnames -> ENOPROTOOPT).
             _ => {
-                return -(errno::ENOPROTOOPT as i64);
+                return -(errno::EOPNOTSUPP as i64);
             }
         }
     }
