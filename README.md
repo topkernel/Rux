@@ -23,10 +23,10 @@
 
 | | |
 |---|---|
-| ![GNOME desktop](docs/images/gnome-desktop-2026-10-14.png) | ![Ubuntu desktop](docs/images/ubuntu-desktop-2026-09-29.png) |
-| *GNOME Shell overview on Rux — Activities, clock, workspace thumbnails and dash, rendered by gnome-shell/mutter over Xorg-fbdev with software GL* | *udesk desktop (dock, top panel, windows) — `make ubuntu-run`* |
-| ![Ubuntu login](docs/images/ubuntu-login-2026-09-29.png) | ![Terminal](docs/images/ubuntu-terminal-2026-09-29.png) |
-| *udesk login screen (native framebuffer session)* | *Terminal running a real `/bin/dash` shell — real commands, real output* |
+| ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Ubuntu GNOME desktop](docs/images/ubuntu-gnome-desktop-2026-10-15.png) |
+| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *Ubuntu GNOME desktop on Rux (riscv64) — the full udesk session with dock, panel, and apps* |
+| ![OH services](docs/images/oh-servicestart-2026-10-15.png) | ![OH boot](docs/images/oh-boot-2026-10-15.png) |
+| *OpenHarmony x86_64_virt — 74 system services (samgr, foundation, render_service, bootanimation…) start and stay up (Phase 1 gate)* | *OpenHarmony boot: the kernel drives virtio-gpu at 720×1280 on QEMU q35 (display HDI in progress)* |
 
 What is running in these screenshots, all on the Rux kernel:
 
@@ -89,6 +89,36 @@ Automated pixel-level verification (23 checks per boot: login → wrong password
 
 ```bash
 python3 test/ubuntu-gui/verify.py --runs 2 --smp 4
+```
+
+---
+
+## 📱 Rux Runs OpenHarmony
+
+**The OpenHarmony x86_64_virt emulator boots on the Rux kernel to a full
+system service bring-up: 74 services (ueventd, samgr, appspawn,
+foundation, render_service, bootanimation, hilogd, storage_daemon, ...) start
+and stay up — verified stable for 300 seconds with zero panics.**
+
+The kernel-side fixes that made this work:
+
+- **virtio 64-bit BAR mapping**: QEMU places virtio PCI BARs above 4GiB (up
+  to 768GiB); extended the kernel's device-alias window to cover the full
+  64-bit PCI space
+- **musl dynamic loader**: OH's ld.so uses `mmap(MAP_32BIT)` to load every
+  shared library — the kernel now implements this x86-64 Linux UAPI flag
+- **ext4 metadata_csum**: the OH system/vendor images carry the
+  `metadata_csum` feature; a new checksum verification module
+  (`kernel/src/fs/ext4/csum.rs`) validates and mounts them
+- **switch_root**: `mount(src, dst, NULL, MS_MOVE, NULL)` and the root
+  switch-over with child mount rehoming
+- **devfs with devtmpfs semantics**: `O_CREAT` + `ftruncate` + `mmap` on
+  `/dev/__parameters__` (the OH parameter service workspace)
+
+```bash
+# Boot the OH emulator on Rux:
+./test/run-oh.sh ~/oh-images console     # serial console
+./test/run-oh.sh ~/oh-images gui        # virtio-gpu at 720×1280
 ```
 
 ---
