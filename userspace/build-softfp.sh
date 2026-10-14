@@ -48,3 +48,61 @@ if riscv64-linux-gnu-readelf -A "$OUT_A" | grep -qE "zbb1p0|zba1p0|zbs1p0|zcb1p0
 fi
 
 echo "libsoftfp-pin.a built ($(ls -la "$OUT_A" | awk '{print $5}') bytes)"
+
+# ---------------------------------------------------------------------------
+# Pin-clean libgcc.a shadow (gcc-pin/libgcc.a)
+#
+# LTP links with `$(CC) $(LDFLAGS) $^ $(LDLIBS)` (rules.mk), i.e. every user
+# library sits BEFORE the objects; at that point nothing is undefined yet, so
+# an overlay archive listed in LDFLAGS is skipped and the gcc driver's
+# trailing -lgcc resolves __letf2/__getf2/__multf3/__trunctfdf2 (referenced by
+# musl's libc.a fmodl.lo) from Ubuntu's libgcc.a, whose members carry
+# zbs/zicond encodings the pinned QEMU CPU model cannot execute (SIGILL).
+#
+# Position cannot win this, so we win by SEARCH PATH: this script copies the
+# host libgcc.a and swaps the quad-float members for the pin-clean objects
+# built above. Links that pass `-B<soft-fp>/gcc-pin/` find this copy before
+# the system one, so every -lgcc resolution is pin-clean regardless of order.
+# Members that still contain bitmanip after the swap abort the build (gate
+# below), so a future gcc upgrade that adds new zicond members cannot sneak
+# through silently.
+GCC_PIN_DIR="${SRC}/gcc-pin"
+SYSTEM_LIBGCC=$(ls /usr/lib/gcc-cross/riscv64-linux-gnu/*/libgcc.a 2>/dev/null | sort -V | tail -1)
+if [ -z "$SYSTEM_LIBGCC" ]; then
+    echo "Warning: system riscv64 libgcc.a not found; gcc-pin shadow not built" >&2
+    exit 0
+fi
+mkdir -p "$GCC_PIN_DIR"
+cp "$SYSTEM_LIBGCC" "${GCC_PIN_DIR}/libgcc.a"
+
+# Swap every quad-float member the overlay provides (archive member names
+# match the .c basenames: letf2.o, getf2.o, multf3.o, trunctfdf2.o, ...).
+SWAP_OBJS=()
+for c in "$SRC"/*.c; do
+    obj="${c%.c}.o"
+    if riscv64-linux-gnu-ar t "$SYSTEM_LIBGCC" | grep -qx "${obj##*/}"; then
+        SWAP_OBJS+=("$obj")
+    fi
+done
+if [ ${#SWAP_OBJS[@]} -gt 0 ]; then
+    riscv64-linux-gnu-ar r "${GCC_PIN_DIR}/libgcc.a" "${SWAP_OBJS[@]}"
+fi
+
+# Gate: every member we swapped must itself be pin-clean (proves the swap
+# objects honor -march; catches a compiler that ignores the pin).
+for obj in "${SWAP_OBJS[@]}"; do
+    if riscv64-linux-gnu-objdump -d "$obj" 2>/dev/null | \
+        grep -qE "czero\.(eqz|nez)|\bbseti?\b|\bandn\b|\brolw?\b|\brorw?\b|\bclz\b"; then
+        echo "Error: swap object $obj contains bitmanip encodings" >&2
+        exit 1
+    fi
+done
+
+# Report (non-fatal) members that still carry offender encodings. They only
+# ship when a link actually references their symbols; _Float16 conversions
+# (fixhfdi) and ifunc feature probes (feature_bits) are unreferenced by LTP.
+riscv64-linux-gnu-objdump -d "${GCC_PIN_DIR}/libgcc.a" 2>/dev/null | \
+    grep -E "czero\.(eqz|nez)|\bbseti?\b" > /dev/null && \
+    echo "Warning: gcc-pin shadow still has bitmanip sites in uns members (fixhfdi/feature_bits); unused by LTP links" >&2
+
+echo "gcc-pin/libgcc.a shadow built at ${GCC_PIN_DIR} (${#SWAP_OBJS[@]} members swapped)"
