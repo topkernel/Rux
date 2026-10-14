@@ -2972,6 +2972,14 @@ pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     crate::dfx::softlockup::touch(cpu_id);
 
+    // R84 (R74 producer-#2 hunt): the R83 idle-loop audit never ran
+    // under the dbus storm (all harts busy) — validate headers from the
+    // tick itself: current task every tick, full pid-hash walk every 4
+    // jiffies, heap fingerprint scan every 64 jiffies (all CAS-gated
+    // inside; try-locked walks so IRQ context is safe).
+    #[cfg(feature = "riscv64")]
+    crate::dfx::r83hunt::sched_tick_audit();
+
     // Poll UART for pending data — MUST be before current check.
     if crate::console::uart_has_data() {
         crate::console::read_waitq().wake_up_one();
