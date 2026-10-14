@@ -3108,11 +3108,11 @@ pub fn sys_removexattrat(args: SyscallArgs) -> i64 {
 /// sys_chroot - Change root directory (NR 51)
 pub fn sys_chroot(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[0] as *const u8;
-    // CAP_SYS_CHROOT required to chroot
-    if !crate::security::capable(crate::security::CAP_SYS_CHROOT) {
-        return -(errno::EPERM as i64);
-    }
 
+    // Linux resolves the path BEFORE the capability check (fs/open.c:
+    // user_path_at, then d_can_lookup, then ns_capable(CAP_SYS_CHROOT)).
+    // A non-searchable directory component therefore reports EACCES, not
+    // EPERM — LTP chroot04 chroots as nobody into a 0644 directory.
     let full_path = match resolve_user_path(-100, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
@@ -3125,6 +3125,11 @@ pub fn sys_chroot(args: SyscallArgs) -> i64 {
     }
     if stat.st_mode & 0o170000 != 0o040000 {
         return -(errno::ENOTDIR as i64);
+    }
+
+    // CAP_SYS_CHROOT required to chroot
+    if !crate::security::capable(crate::security::CAP_SYS_CHROOT) {
+        return -(errno::EPERM as i64);
     }
 
     // P1 chroot: store the (normalized, real-namespace) root in fs_struct.

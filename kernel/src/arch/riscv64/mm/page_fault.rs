@@ -466,10 +466,59 @@ pub fn handle_mm_fault(
         }
     }
 
-    // Allocate new page
-    let phys_addr = match alloc_user_phys_page() {
-        Some(addr) => PhysAddr::new(addr),
-        None => return MmFaultResult::OutOfMemory,
+    // MAP_SHARED file mapping: alias the PAGE-CACHE frame for this file
+    // offset instead of a private copy, so every mapper of the file —
+    // across fork and across a fresh mmap after exec — observes the
+    // others' stores. Linux filemap semantics: VM_SHARED faults map the
+    // page-cache page directly. Private mappings keep the copy path
+    // below. (LTP execl01..execveat02: the child re-mmaps the IPC
+    // results file after exec; with private copies the parent never saw
+    // the child's TPASS bits and TBROK'd "Test haven't reported
+    // results".) COW-exemption on fork already keys off
+    // VmaFlags::SHARED regardless of VmaType, so aliased frames inherit
+    // as-is; the pin taken by get_phys keeps the frame unevictable for
+    // the mapping's lifetime (see shared_file_fault_page).
+    let shared_alias_phys: Option<u64> = if vma_type == VmaType::FileBacked
+        && vma_flags.is_shared()
+    {
+        let file = addr_space
+            .get_vma_file(
+                addr_space
+                    .vma_read()
+                    .find(page_virt_addr)
+                    .map(|v| v.start().as_usize())
+                    .unwrap_or(0),
+            )
+            .or_else(|| {
+                if vma_file_fd >= 0 {
+                    unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+                } else {
+                    None
+                }
+            });
+        let vma_start = addr_space
+            .vma_read()
+            .find(page_virt_addr)
+            .map(|v| v.start().as_usize());
+        match (file, vma_start) {
+            (Some(f), Some(vs)) => {
+                let file_offset = vma_offset + (page_virt_addr.as_usize() - vs);
+                crate::fs::page_cache::shared_file_fault_page(&f, file_offset as u64)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // Allocate new page (skipped when aliasing a shared cache frame)
+    let phys_addr = if let Some(p) = shared_alias_phys {
+        PhysAddr::new(p)
+    } else {
+        match alloc_user_phys_page() {
+            Some(addr) => PhysAddr::new(addr),
+            None => return MmFaultResult::OutOfMemory,
+        }
     };
 
     // Convert physical address to virtual address for kernel access
@@ -478,6 +527,9 @@ pub fn handle_mm_fault(
     // Initialize page content based on type
     // SAFETY: page_ptr is from phys_to_virt() on a freshly allocated physical page.
     // The page is PAGE_SIZE bytes and exclusively owned by this fault handler.
+    // (MAP_SHARED aliased cache frames skip this entirely — their content
+    // is the shared page-cache page and must not be reinitialized.)
+    if shared_alias_phys.is_none() {
     unsafe {
         match vma_type {
             VmaType::Anonymous => {
@@ -584,6 +636,7 @@ pub fn handle_mm_fault(
             }
         }
     }
+    } // shared_alias_phys.is_none()
 
     // Build page table entry flags
     let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
@@ -628,7 +681,11 @@ pub fn handle_mm_fault(
         drop(_pte_guard);
         // Lost the race: free our exclusively-owned fresh page and let the
         // caller retry — the next entry sees the mapping present.
-        crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+        // (A MAP_SHARED cache alias is NOT exclusively owned — its pin
+        // belongs to the page cache; freeing the frame would corrupt it.)
+        if shared_alias_phys.is_none() {
+            crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+        }
         // R8-4: Handled, not AlreadyMapped — the trap handler maps
         // AlreadyMapped to SIGSEGV for user faults, killing the race loser
         // instead of re-executing against the winner's mapping.
@@ -660,6 +717,23 @@ pub fn handle_mm_fault(
             // SAFETY: page is from pfn_to_page_mut and checked for null.
             // The page was just allocated and mapped, so we have exclusive access.
             unsafe {
+                // MAP_SHARED page-cache alias: the frame is owned by the
+                // page cache (and possibly other mappers) — take one page
+                // reference for THIS PTE mapping so the teardown walkers'
+                // put_page() stays balanced, and skip the private-fill
+                // text-stamp machinery (stamps assume an exclusive
+                // file-fill page; a second mapper would trip FILL-DOUBLE
+                // forensics, and the stamp adjudication must never decide
+                // the fate of a cache-owned frame).
+                if shared_alias_phys.is_some() {
+                    (*page).get_page();
+                    (*page).inc_mapcount();
+                    crate::mm::rmap::page_record_mapping(
+                        unsafe { &*page },
+                        addr_space as *const _ as usize,
+                        fault_addr.bits() as usize,
+                    );
+                } else {
                 match vma_type {
                     VmaType::Anonymous => {
                         (*page).set_flag(PageFlag::Anonymous);
@@ -738,6 +812,7 @@ pub fn handle_mm_fault(
                         }
                     }
                 }
+                } // shared_alias bookkeeping else-branch
             }
         }
     }
