@@ -217,6 +217,14 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
                 if let Some(zone) = node.zone_mut(ZoneType::ZoneNormal) {
                     if zone.is_initialized() {
                         if let Some(pfn) = zone.alloc_pages(0) {
+                            // SCRIBBLE HUNT: zone starts above the image; a
+                            // low PFN here means the zone was mis-seeded.
+                            if (pfn << 12) < 0x1E0_0000 {
+                                crate::pr_err!(
+                                    "PTALLOC-LOW-HIT ppn={:#x} — below zone floor!",
+                                    pfn
+                                );
+                            }
                             let page = crate::mm::page_desc::pfn_to_page_mut(pfn);
                             if !page.is_null() {
                                 unsafe {
@@ -947,6 +955,36 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                             stale_tables[stale_count] = (0, vpn4, vpn3 * 512 + vpn2, ppn1);
                         }
                         stale_count += 1;
+                        // SCRIBBLE HUNT (x86 text-scribbler): dump the first
+                        // leaves of the offending table plus the parent PMD
+                        // slot bits — identifies whether the frame is a live
+                        // kernel-image page (scribble engine) or a benign
+                        // boot-era table, and which VA range it maps.
+                        static STALE_DUMPS: AtomicUsize = AtomicUsize::new(0);
+                        if STALE_DUMPS.fetch_add(1, Ordering::Relaxed) < 4 {
+                            let t = get_page_table_virt(table1_phys);
+                            let va_base = (vpn4 as u64) << 39 | (vpn3 as u64) << 30
+                                | (vpn2 as u64) << 21;
+                            let pmd_slot = (*get_page_table_virt(
+                                pte2.ppn() << PAGE_SHIFT)).get(vpn2).bits();
+                            let mut shown = 0;
+                            for k in 0..512usize {
+                                let e = (*t).get(k);
+                                if e.is_valid() && shown < 4 {
+                                    crate::pr_err!(
+                                        "  STALE-DUMP pt ppn={:#x} leaf[{}] = {:#x} (va {:#x} -> phys {:#x})",
+                                        ppn1, k, e.bits(),
+                                        va_base | (k as u64) << 12,
+                                        e.ppn() << PAGE_SHIFT
+                                    );
+                                    shown += 1;
+                                }
+                            }
+                            crate::pr_err!(
+                                "  STALE-DUMP parent PMD slot={:#x} pt_phys={:#x}",
+                                pmd_slot, table1_phys
+                            );
+                        }
                     }
                 }
                 free_page_table_checked(table1_phys, "l0");

@@ -644,6 +644,15 @@ pub fn memblock_phys_alloc() -> Option<usize> {
     unsafe {
         // Find a free page in available memory
         let phys = MEMBLOCK.find_in_range(PAGE_SIZE, 0, usize::MAX)?;
+        // SCRIBBLE HUNT: the kernel image occupies the low ~12MB; a page
+        // handed out from there becomes a live page table over .text
+        // (the x86 text-scribbler). Catch it red-handed.
+        if phys < 0x1E0_0000 {
+            crate::pr_err!(
+                "MEMBLOCK-LOW-HIT phys={:#x} — kernel-image page handed out!",
+                phys
+            );
+        }
         // Reserve it
         MEMBLOCK.reserve(phys, PAGE_SIZE).ok()?;
         Some(phys)

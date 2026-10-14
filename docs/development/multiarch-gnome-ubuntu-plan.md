@@ -35,10 +35,23 @@
 ## 2. x86_64 GNOME 收尾清单（按序）
 
 1. **[已解] Xorg xkbcomp 链**（2026-10-14）：根因是镜像缺 /bin/sh——apt 依赖闭包不含 Essential 集（dash/bash 未下载），Xorg 的 System("/bin/sh -c ...xkbcomp...") exec 失败 127。修复：PKGS 显式加 dash bash（+ 镜像内 glib-compile-schemas 预编译、machine-id、XDG_SESSION_TYPE=x11）。
-2. **[当前卡点] x86 text-scribbler**：gnome-shell 存活做 IO 时内核 #UD（运行时指令字节被改写，盘上 ELF 合法）。riscv64 侧同族根因是 R75（>16MB 堆分配下分配不足涂写 48MB）、R76（memfd 大 ftruncate）、R83（trap.S 用户 sp 涂抹 ti_user_sp）、R7x（调度器 orphan 生产者）——这些修复多在通用代码已继承，但 x86 仍有变体。伴随诊断：PTLEDGER DOUBLE-FREE REFUSED（页表帧重复释放被拒）、FUT-STALE-TREE（外来/未记账页表帧）。下一步：
-   a. 用 riscv64 的 scribble tripwire 机制（dfx/scribble 已在 x86 crash_report 上报路径）对 text 段设防篡改巡检，抓生产者 PID/上下文
-   b. 审计 x86 后端独有路径：PML4 高半区共享（create_user_address_space 的 leaf-only 克隆）、PT_LEDGER stamp/free 配对（EARLY-ROOT-FREE 诊断已出现：root=0x7fa06 owner pid=306 ALIVE freed in pid=307 context——**跨任务上下文释放活跃根页表**，先查这个）
-   c. EARLY-ROOT-FREE 是强线索：exit/exec 路径在错误的 mm 上释放了页表根
+2. **[当前卡点] x86 text-scribbler — 已完成最小复现与根因压缩（2026-10-15 取证轮）**：
+
+   **复现器**：`test/gnome-x86/forkloop.c`（host gcc -static，200×fork+exec /bin/true + 100×posix_spawn）→ work/rootfs-x86/sbin/forkloop，`init=/sbin/forkloop`。结果：功能 0 失败、零 panic，但**每次 exec 的 teardown 都报** `PTLEDGER DOUBLE-FREE ppn=0x300 REFUSED` + `FUT-STALE-TREE lvl=0 pml4=0 lower=6 ppn=0x300`——与 GNOME 场景同签名（通用缺陷，非 GNOME 特有；GNOME 只是把写入频率推过了涂写阈值）。
+
+   **取证链（STALE-DUMP 增强，已入树）**：
+   - ppn 0x300 = phys 0x300000 = **内核 .text 起始页**（.text vaddr 0xffffffff80200000，VMA-LMA: phys = vaddr-base+0x100000）
+   - 该"页表"的 leaf 内容 = `0x10ec8348e5894855` = **x86-64 函数序言机器码**（push rbp; mov rbp,rsp; sub rsp,0x10）——.text 原文
+   - **parent PMD 槽值 = 同一段代码字节**——即 PID1 树 PMD[0] 表的 vpn2=6 槽被写入了 .text 内容，而非合法 PTE
+   - 用户 VA 0xc00000(12MB)=PID1 静态 ELF 的 .data/.bss 区（demand-fill 热点）
+   - 分配器陷阱（memblock<30MB、zone<floor）**零触发**：该帧从未经任何分配器发出
+
+   **结论**：PID1 树低半区 PMD[0] 表帧与 .text 物理页发生别名（写 PMD 槽=涂写 .text 首页）。嫌疑收敛到两个函数的交叉：
+   - `copy_kernel_mappings`（mm_ops.rs）低半区 leaf-only 克隆
+   - `map_page_noflush`（mmu_init.rs）的 **2MB-leaf demotion 分支**（E8-MM）：对 PID1 树 PMD[0][6] 的身份 2MB leaf 首次 demand-fill 时展开为 512×4K——demotion 后的 PT 分配/链接与其后 fork 的 copy_page_table_cow 对该 PT 的再处理之间，存在把 .text 物理地址写入 PMD 槽的路径（pte2.ppn() 对被涂写槽位的解析会从代码字节产生任意 ppn，`get_page_table_virt(pte2.ppn()<<12)` 随即把"PT 写入"定向到任意物理页——自传播涂写引擎，与 riscv64 zeroed-text 同构）
+   - 注意 `pte2.is_valid() && pte2.is_leaf()` 对垃圾槽值的判定天然不可靠——demotion 分支需要在读 pte2 前校验 ppn 的物理合法域
+
+   **下一步（修复轮）**：① 在 map_page_noflush/copy_page_table_cow 的每级 pte 读取后加 ppn 物理域校验（< ram_top 且页对齐），非法即报错跳过而非继续展开；② 给 PID1 树 PMD[0][6] demotion 的 PT 帧打标验证是否被二次 demotion/copy 错误重写 PMD 槽；③ 修好后 GNOME x86 大概率直接点亮（会话链其余部分已全部验证）。
 2. **SMP bring-up**：MADT 解析 + LAPIC init + INIT-SIPI-SIPI（x86_64/smp.rs 已有部分）——GNOME CPU-storm 修复（poll 事件唤醒等）是通用代码，SMP 上线即可继承
 3. **q35 PCI hole**：3GB+ 内存下 BAR 落在 0xc0000000 未映射（x86 mm territory，run-x86-ub.sh 注释）
 4. **2100s 门禁**（riscv64 的 fire-r74fix 同款：smp4、全链、零 KERNPANIC）
