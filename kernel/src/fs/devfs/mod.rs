@@ -37,6 +37,10 @@ pub enum DevEntryType {
     CharDevice,
     /// Block device (not implemented)
     BlockDevice,
+    /// Regular file (devtmpfs semantics: /dev is a tmpfs, userspace
+    /// creates real files in it — OH's parameter service keeps its
+    /// shared workspace under /dev/__parameters__).
+    RegularFile,
 }
 
 /// devfs directory entry
@@ -58,6 +62,8 @@ pub struct DevfsEntry {
     /// devfs_setattr). Atomic for the same reason as `mode`.
     pub uid: AtomicU32,
     pub gid: AtomicU32,
+    /// File contents (regular files only — devtmpfs file storage)
+    pub data: Spinlock<alloc::vec::Vec<u8>>,
 }
 
 impl DevfsEntry {
@@ -71,6 +77,21 @@ impl DevfsEntry {
             mode: AtomicU32::new(0o755),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
+            data: Spinlock::new(alloc::vec::Vec::new()),
+        }
+    }
+
+    /// Create regular file (devtmpfs file storage)
+    pub fn new_file(name: &str, mode: u32) -> Self {
+        Self {
+            name: String::from(name),
+            entry_type: DevEntryType::RegularFile,
+            children: Spinlock::new(BTreeMap::new()),
+            devno: DevNo::default(),
+            mode: AtomicU32::new(mode & 0o777),
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            data: Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -84,6 +105,7 @@ impl DevfsEntry {
             mode: AtomicU32::new(0o666),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
+            data: Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -97,6 +119,7 @@ impl DevfsEntry {
             mode: AtomicU32::new(mode & 0o777),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
+            data: Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -112,6 +135,7 @@ impl DevfsEntry {
             mode: AtomicU32::new(mode & 0o777),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
+            data: Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -128,6 +152,11 @@ impl DevfsEntry {
     /// Is block device
     pub fn is_block_device(&self) -> bool {
         self.entry_type == DevEntryType::BlockDevice
+    }
+
+    /// Is regular file (devtmpfs file storage)
+    pub fn is_regular_file(&self) -> bool {
+        self.entry_type == DevEntryType::RegularFile
     }
 }
 
@@ -1043,6 +1072,8 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
 
     let mode = if child.is_dir() {
         InodeMode::new(InodeMode::S_IFDIR | child.mode.load(Ordering::Acquire))
+    } else if child.is_regular_file() {
+        InodeMode::new(InodeMode::S_IFREG | child.mode.load(Ordering::Acquire))
     } else if child.is_char_device() {
         InodeMode::new(InodeMode::S_IFCHR | child.mode.load(Ordering::Acquire))
     } else if child.is_block_device() {
@@ -1064,6 +1095,9 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
     // Clone the Arc and convert to raw pointer to keep the DevfsEntry alive
     // independently of the BTreeMap entry. The refcount is incremented by
     // clone() and preserved by into_raw() (which doesn't decrement).
+    if child.is_regular_file() {
+        inode.set_size(child.data.lock().len() as u64);
+    }
     let child_arc = Arc::clone(&child);
     inode.private_data = Some(Arc::into_raw(child_arc) as *mut u8);
     Ok(alloc::sync::Arc::new(inode))
@@ -1087,8 +1121,13 @@ unsafe fn devfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     // DevNo::to_user_dev; the old kernel-internal encoding made every
     // userspace stat report major 0).
     stat.st_rdev = entry.devno.to_user_dev();
-    stat.st_size = 0;
-    stat.st_blocks = 0;
+    let fsize = if entry.is_regular_file() {
+        entry.data.lock().len()
+    } else {
+        0
+    };
+    stat.st_size = fsize as i64;
+    stat.st_blocks = ((fsize as i64) + 511) / 512;
     stat.st_blksize = 4096;
     // File type from the (immutable) entry kind, permission bits from the
     // entry — the authoritative store, so a chmod is visible in stat even
@@ -1198,6 +1237,9 @@ unsafe fn devfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::
         ops
     } else if inode.mode.is_directory() {
         Some(&crate::fs::file::DIR_FILE_OPS)
+    } else if inode.mode.is_regular_file() {
+        // devtmpfs regular files (OH /dev/__parameters__ workspace).
+        Some(&DEVFS_REG_FILE_OPS)
     } else {
         // Block device (or unknown): no block-driver registry exists —
         // returning None makes the VFS open gate fail with ENXIO ("no
@@ -1226,6 +1268,8 @@ unsafe fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inod
             file_type::DT_CHR
         } else if child.is_block_device() {
             file_type::DT_BLK
+        } else if child.is_regular_file() {
+            file_type::DT_REG
         } else {
             file_type::DT_UNKNOWN
         };
@@ -1318,6 +1362,142 @@ unsafe fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<I
     inode.private_data = Some(Arc::into_raw(new_dir) as *mut u8);
     Ok(Arc::new(inode))
 }
+
+/// create on devfs (devtmpfs semantics): userspace may create REGULAR
+/// FILES under /dev — OH's parameter service builds its shared workspace
+/// at /dev/__parameters__ (param_watcher/workspaces are plain files the
+/// service ftruncates and mmaps). Device nodes still need mknod.
+/// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
+unsafe fn devfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
+    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let entry = &*(entry_ptr as *const DevfsEntry);
+    if !entry.is_dir() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+    let name = core::str::from_utf8(name)
+        .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
+
+    let mut children = entry.children.lock_irqsave();
+    if children.contains_key(name) {
+        return Err(errno::Errno::FileExists.as_neg_i32());
+    }
+    let file_entry = Arc::new(DevfsEntry::new_file(name, mode.bits()));
+    children.insert(String::from(name), file_entry.clone());
+    drop(children);
+
+    let ino = devfs_ino_hash(name);
+    let mut inode = Inode::new(
+        ino,
+        InodeMode::new(InodeMode::S_IFREG | file_entry.mode.load(Ordering::Acquire)),
+    );
+    inode.fs_id = crate::fs::inode::FS_ID_DEVFS;
+    inode.ops = Some(&DEVFS_INODE_OPS);
+    inode.private_data = Some(Arc::into_raw(file_entry) as *mut u8);
+    Ok(Arc::new(inode))
+}
+
+/// Regular-file ops on devfs (devtmpfs file storage).
+fn devfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
+    // SAFETY: VFS callback contract — inode/private_data are valid.
+    unsafe {
+        let inode = match (&*file.inode.get()).as_ref() {
+            Some(i) => i,
+            None => return -9,
+        };
+        let entry = match inode.private_data {
+            Some(p) => &*(p as *const DevfsEntry),
+            None => return -9,
+        };
+        let data = entry.data.lock();
+        let off = file.get_pos() as usize;
+        let avail = data.len().saturating_sub(off);
+        let n = buf.len().min(avail);
+        buf[..n].copy_from_slice(&data[off..off + n]);
+        if n > 0 {
+            file.set_pos((off + n) as u64);
+        }
+        n as isize
+    }
+}
+
+fn devfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
+    // SAFETY: VFS callback contract — inode/private_data are valid.
+    unsafe {
+        let inode = match (&*file.inode.get()).as_ref() {
+            Some(i) => i,
+            None => return -9,
+        };
+        let entry = match inode.private_data {
+            Some(p) => &*(p as *const DevfsEntry),
+            None => return -9,
+        };
+        let off = file.get_pos() as usize;
+        let mut data = entry.data.lock();
+        let need = off.saturating_add(buf.len());
+        if data.len() < need {
+            data.resize(need, 0);
+        }
+        data[off..off + buf.len()].copy_from_slice(buf);
+        file.set_pos(need as u64);
+        // Keep the generic Inode.size coherent (mmap EOF checks read it).
+        inode.set_size(need as u64);
+        buf.len() as isize
+    }
+}
+
+fn devfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
+    // SAFETY: VFS callback contract — inode/private_data are valid.
+    let size = unsafe {
+        match (&*file.inode.get()).as_ref().and_then(|i| i.private_data) {
+            Some(p) => (*(p as *const DevfsEntry)).data.lock().len() as isize,
+            None => return -9,
+        }
+    };
+    let cur = file.get_pos() as isize;
+    let new = match whence {
+        0 => offset,
+        1 => cur + offset,
+        2 => size + offset,
+        _ => return -22,
+    };
+    if new < 0 {
+        return -22;
+    }
+    file.set_pos(new as u64);
+    new
+}
+
+/// read_at for devfs regular files: positional, no shared-position swing
+/// (R71 — the mmap demand-fault path reads through this).
+fn devfs_file_read_at(file: &crate::fs::File, offset: u64, buf: &mut [u8]) -> isize {
+    // SAFETY: VFS callback contract — inode/private_data are valid.
+    unsafe {
+        let inode = match (&*file.inode.get()).as_ref() {
+            Some(i) => i,
+            None => return -9,
+        };
+        let entry = match inode.private_data {
+            Some(p) => &*(p as *const DevfsEntry),
+            None => return -9,
+        };
+        let data = entry.data.lock();
+        let off = offset as usize;
+        let avail = data.len().saturating_sub(off);
+        let n = buf.len().min(avail);
+        buf[..n].copy_from_slice(&data[off..off + n]);
+        n as isize
+    }
+}
+
+/// File ops for devfs regular files (devtmpfs).
+pub static DEVFS_REG_FILE_OPS: FileOps = FileOps {
+    read: Some(devfs_file_read),
+    write: Some(devfs_file_write),
+    lseek: Some(devfs_file_lseek),
+    close: None,
+    poll: None,
+    read_at: Some(devfs_file_read_at),
+};
 
 /// unlink on devfs (userspace): remove a device node (rm /dev/vda before
 /// mdev/udev recreates it, mdev remove events, ...).
@@ -1441,9 +1621,22 @@ unsafe fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             inode.gid.store(arg2 as u32, Ordering::Release);
             0
         }
+        setattr_attr::ATTR_SIZE => {
+            // Regular files (devtmpfs): ftruncate resizes the stored
+            // contents (OH's param service sizes its workspace files with
+            // ftruncate before mmap). Device nodes keep size 0 — accept.
+            if let Some(ptr) = inode.private_data {
+                let entry = &*(ptr as *const DevfsEntry);
+                if entry.is_regular_file() {
+                    entry.data.lock().resize(arg1 as usize, 0);
+                    inode.set_size(arg1);
+                }
+            }
+            0
+        }
         // Device nodes have no size; timestamp updates are accepted no-ops
         // (Linux devtmpfs honors utimensat on device nodes the same way).
-        setattr_attr::ATTR_SIZE | setattr_attr::ATTR_ATIME | setattr_attr::ATTR_MTIME => 0,
+        setattr_attr::ATTR_ATIME | setattr_attr::ATTR_MTIME => 0,
         _ => -95, // EOPNOTSUPP (same fallback as tmpfs_setattr)
     }
 }
@@ -1451,7 +1644,7 @@ unsafe fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 /// DevFS inode operations table
 pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(devfs_lookup),
-    create: None,
+    create: Some(devfs_create),
     link: None,
     unlink: Some(devfs_unlink),
     symlink: None,

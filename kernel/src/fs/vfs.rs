@@ -427,10 +427,98 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     Ok(())
 }
 
+/// Move a mount: mount(2) with MS_MOVE re-attaches the filesystem
+/// mounted at `from` over `to` (Linux move_mount/MS_MOVE — OH's
+/// switch_root moves /dev,/proc,/sys,/run into the new root's tree and
+/// finally moves /usr onto /, replacing the initramfs root).
+///
+/// `to == "/"` overlays the VFS root the same way `vfs_mount("/")`
+/// does (root inode replacement), and additionally drops the old
+/// root's cached children so ramdisk names cannot shadow the moved-in
+/// filesystem's root (lookups resolve through the new root inode).
+pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
+    if from == "/" {
+        return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+    }
+
+    // Source: the MOUNTPOINT dentry (not the mounted root) — the walk
+    // follows mounts on the way but takes the final component without
+    // following, so `from` names the covered dentry that carries the
+    // VfsMountInternal.
+    let src_child = {
+        let vfs_root = VFS_STATE.lock().root_dentry.clone()
+            .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+        let comps: Vec<&str> = from.split('/').filter(|s| !s.is_empty()).collect();
+        let mut current = vfs_root;
+        for (i, component) in comps.iter().enumerate() {
+            if i + 1 < comps.len() {
+                current = follow_mount(current);
+            }
+            current = current
+                .lookup_child(component)
+                .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+        }
+        current
+    };
+    let mnt = src_child
+        .get_mount()
+        .ok_or(errno::Errno::InvalidArgument.as_neg_i32())?
+        .clone();
+
+    // Detach from the source mountpoint.
+    src_child.clear_mount();
+
+    if to == "/" {
+        // Root overlay: root inode := moved mount's root inode; the moved
+        // mount's cached children (the /proc, /dev, ... mounts the
+        // switcher attached under it) are rehomed onto the VFS root so
+        // they stay reachable; then the OLD root's stale ramdisk children
+        // are gone with the swap (fresh names resolve through the new
+        // root inode's directory ops). Mirrors vfs_mount("/")'s inode
+        // overlay plus the MS_MOVE child carry-over.
+        let mut state = VFS_STATE.lock();
+        state.mounts.retain(|m| !Arc::ptr_eq(m, &mnt));
+        if let Some(root) = state.root_dentry.clone() {
+            if let Some(inode) = mnt.root.get_inode() {
+                root.set_inode(inode);
+            }
+            root.clear_children();
+            mnt.root.rehome_children_into(&root);
+        }
+        return Ok(());
+    }
+
+    // Regular target: find-or-create the mountpoint dentry (same walk
+    // discipline as vfs_mount — follow mounts on intermediate nodes).
+    let comps: Vec<&str> = to.split('/').filter(|s| !s.is_empty()).collect();
+    let vfs_root = VFS_STATE.lock().root_dentry.clone()
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    let mut current = vfs_root;
+    current = follow_mount(current);
+    for (i, component) in comps.iter().enumerate() {
+        let is_last = i == comps.len() - 1;
+        let name = String::from(*component);
+        let child = match current.lookup_child(&name) {
+            Some(existing) => existing,
+            None => {
+                let d = Arc::new(Dentry::new(name.clone()));
+                d.set_parent(current.clone());
+                current.add_child(name.clone(), d.clone());
+                d
+            }
+        };
+        if is_last {
+            child.set_mount(mnt.clone());
+        } else {
+            current = follow_mount(child);
+        }
+    }
+    Ok(())
+}
+
 /// Filesystem type identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FsType {
-    /// RootFS (memory-backed)
+pub enum FsType {    /// RootFS (memory-backed)
     RootFS,
     /// ext4 filesystem
     Ext4,

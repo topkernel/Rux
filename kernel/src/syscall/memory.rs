@@ -299,7 +299,12 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
 
     // Reject unknown mapping flags (Linux do_mmap rejects unmapped bits).
     // Honored set: type bits plus the asm-generic flags we recognize.
-    let known_map_flags: u32 = map::MAP_TYPE_MASK
+    // MAP_32BIT (x86_64) is accepted as a placement hint — OH's musl
+    // ld.so mmaps each library's ELF header probe with
+    // MAP_PRIVATE|MAP_32BIT, and rejecting bit 0x40 with EINVAL made
+    // every dependency load report "not found".
+    #[allow(unused_mut)] // riscv64's map module has no MAP_32BIT
+    let mut known_map_flags: u32 = map::MAP_TYPE_MASK
         | map::MAP_FIXED
         | map::MAP_ANONYMOUS
         | map::MAP_STACK
@@ -314,6 +319,10 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
         | 0x1000   // MAP_EXECUTABLE
         | 0x10000  // MAP_NONBLOCK
         | 0x80000; // MAP_SYNC
+    #[cfg(feature = "x86_64")]
+    {
+        known_map_flags |= map::MAP_32BIT;
+    }
     if map_flags & !known_map_flags != 0 {
         // With MAP_SHARED_VALIDATE an unknown flag is EOPNOTSUPP; plain
         // SHARED/PRIVATE reject it with EINVAL (LTP mmap20 passes a

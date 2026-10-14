@@ -196,7 +196,7 @@ pub fn do_mount(
         if let Some(idx) = minor {
             let disk = crate::drivers::loop_dev::loop_disk(idx as usize)
                 .ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
-            let root = crate::fs::ext4::mount_loop_instance(disk)?;
+            let root = crate::fs::ext4::mount_loop_instance(disk, mnt_flags.is_readonly())?;
             crate::fs::vfs::vfs_mount(target, root, mnt_flags);
             register_mount(
                 source,
@@ -234,7 +234,8 @@ pub fn do_mount(
                     // First ext4 becomes THE root instance (full mount
                     // path, journal replay — the OH init mounting
                     // /dev/block/vdb before any other ext4).
-                    crate::fs::ext4::mount_ext4(disk).map_err(|e| e as i32)?;
+                    crate::fs::ext4::mount_ext4_flags(disk, mnt_flags.is_readonly())
+                        .map_err(|e| e as i32)?;
                     crate::fs::vfs::vfs_mount(
                         target,
                         crate::fs::ext4::create_root_inode(),
@@ -244,8 +245,11 @@ pub fn do_mount(
                     // Additional disks: separate instance (mount_loop_
                     // instance discipline — no journal replay, like a
                     // fresh scratch mount; the OH images are clean).
-                    let root = crate::fs::ext4::mount_loop_instance(disk)
-                        .map_err(|e| e as i32)?;
+                    let root = crate::fs::ext4::mount_loop_instance(
+                        disk,
+                        mnt_flags.is_readonly(),
+                    )
+                    .map_err(|e| e as i32)?;
                     crate::fs::vfs::vfs_mount(target, root, mnt_flags);
                 }
                 register_mount(

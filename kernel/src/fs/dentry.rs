@@ -15,6 +15,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::fs::inode::Inode;
@@ -202,6 +203,34 @@ impl Dentry {
     /// Remove a child dentry by name.
     pub fn remove_child(&self, name: &str) {
         self.children.lock().remove(name);
+    }
+
+    /// Drop every cached child (mount(2) MS_MOVE onto "/": the old root's
+    /// cached ramdisk names must not shadow the moved-in filesystem's
+    /// root — lookups fall back to the new root inode's directory ops).
+    pub fn clear_children(&self) {
+        self.children.lock().clear();
+    }
+
+    /// Move every cached child of `self` into `into` (re-parenting them).
+    /// mount(2) MS_MOVE onto "/": the mounts the userspace switcher
+    /// attached UNDER the moved root (/proc, /dev, ... — children of the
+    /// moved mount's root dentry) must survive the root dentry swap, or
+    /// the new root loses its /proc and /dev entirely.
+    pub fn rehome_children_into(&self, into: &Arc<Dentry>) {
+        let moving: Vec<(String, Arc<Dentry>)> = self.children.lock().iter().map(|(k, v)| {
+            (k.clone(), v.clone())
+        }).collect();
+        for (name, child) in moving {
+            child.set_parent(into.clone());
+            into.add_child(name, child);
+        }
+        self.children.lock().clear();
+    }
+
+    /// Detach the mount descriptor (mount(2) MS_MOVE source side).
+    pub fn clear_mount(&self) {
+        *self.vfsmount.lock() = None;
     }
 
     /// Set the mount descriptor (marks this dentry as a mount point).

@@ -308,6 +308,14 @@ impl MmStruct {
                 return Err(MapError::Invalid);
             }
             start
+        } else if map_flags & map::MAP_32BIT != 0 {
+            // Linux x86_64 arch_get_unmapped_area: MAP_32BIT forces the
+            // mapping into the FIRST 2GB, bottom-up from 1GB (observed
+            // Linux placement: a MAP_32BIT mmap on the host lands just
+            // above 0x40000000). The caller's hint is subordinate to the
+            // constraint. OH's musl ld.so issues MAP_PRIVATE|MAP_32BIT for
+            // every library header probe.
+            self.find_free_area_32bit(aligned_size)?
         } else if addr.as_usize() == 0 {
             self.find_free_area(aligned_size)?
         } else {
@@ -411,9 +419,47 @@ impl MmStruct {
     }
 
     /// Find free virtual address area
+    /// MAP_32BIT placement (Linux x86_64): bottom-up gap search inside
+    /// the first 2GB, low limit 1GB — static ELF segments (0x400000+),
+    /// the brk region below BRK_DEFAULT, and vDSO-less early mappings all
+    /// live below; the gap walk skips whatever exists. ENOMEM when the
+    /// 2GB window has no room.
+    pub fn find_free_area_32bit(&self, size: usize) -> Result<PageVirtAddr, MapError> {
+        const MAP32_LOW: usize = 0x4000_0000; // 1GB
+        const MAP32_HIGH: usize = 0x8000_0000; // 2GB
+
+        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+        if aligned_size == 0 || MAP32_HIGH - MAP32_LOW < aligned_size {
+            return Err(MapError::Invalid);
+        }
+
+        let vma_mgr = self.vma_read();
+        let mut search_start = MAP32_LOW;
+        for vma in vma_mgr.iter() {
+            let vma_start = vma.start().as_usize();
+            if vma_start > search_start
+                && vma_start - search_start >= aligned_size
+            {
+                return Ok(PageVirtAddr::new(search_start));
+            }
+            let vma_end = vma.end().as_usize();
+            if vma_end > search_start {
+                search_start = (vma_end + PAGE_SIZE_USIZE - 1)
+                    & !(PAGE_SIZE_USIZE - 1);
+            }
+            if search_start.saturating_add(aligned_size) > MAP32_HIGH {
+                break;
+            }
+        }
+
+        if search_start.saturating_add(aligned_size) <= MAP32_HIGH {
+            return Ok(PageVirtAddr::new(search_start));
+        }
+        Err(MapError::OutOfMemory)
+    }
+
     pub fn find_free_area(&self, size: usize) -> Result<PageVirtAddr, MapError> {
         use user_addr::{MMAP_START, MMAP_END, USER_END};
-
         let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
         if aligned_size == 0 {
             return Err(MapError::Invalid);

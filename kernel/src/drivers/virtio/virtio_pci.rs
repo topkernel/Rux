@@ -12,6 +12,15 @@ use crate::drivers::virtio::offset;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::vec::Vec;
 
+/// One-shot latch for the out-of-window BAR warning in `bar_va` (x86_64):
+/// four capability BARs per function would otherwise spam the log.
+#[cfg(feature = "x86_64")]
+fn device_alias_oob_warned() -> bool {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    !WARNED.swap(true, Ordering::AcqRel)
+}
+
 /// VirtIO PCI Capability types
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,7 +413,22 @@ impl VirtIOPCI {
             // their firmware-assigned physical addresses — all runtime
             // MMIO (common cfg, notify, ISR reads from interrupt context)
             // goes through the kernel-half device alias.
-            crate::arch::mm::memory_layout::device_alias(bar)
+            let va = crate::arch::mm::memory_layout::device_alias(bar);
+            if va == bar
+                && bar >= 0x1_0000_0000
+                && !device_alias_oob_warned()
+            {
+                // Out-of-window above-4G BAR: the identity fallback only
+                // translates under the BOOT root CR3. The first access
+                // from interrupt context under a USER CR3 (intx_dispatch
+                // ISR read) would KERNPANIC — say so now, at the source.
+                crate::pr_err!(
+                    "virtio-pci: BAR {:#x} outside every device-alias window; \
+                     MMIO will fault under user CR3 — enlarge the window",
+                    bar
+                );
+            }
+            va
         }
 
         let common_bar_obj = assigned_bars.get(&common_bar)
@@ -1871,9 +1895,11 @@ pub fn intx_blk_service() {
 mod intx {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    /// Registered virtio-pci functions per shared PIC line. 8 covers the
-    /// q35 device set with headroom.
-    const MAX_DEVICES: usize = 8;
+    /// Registered virtio-pci functions per shared PIC line. 16 covers the
+    /// full OH emulator set (6 virtio-blk + 2 net + keyboard + tablet +
+    /// gpu + headroom) — a function that fails to register asserts the
+    /// shared line with nobody acking its ISR (level-triggered storm).
+    const MAX_DEVICES: usize = 16;
 
     /// (ISR capability address, service fn) pairs. The address doubles as
     /// the occupancy marker (0 = free slot).

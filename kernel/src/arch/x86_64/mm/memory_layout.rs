@@ -83,22 +83,25 @@ pub const DEVICE_ALIAS_PHYS_BASE: usize = 0xb000_0000;
 pub const DEVICE_ALIAS_SIZE: usize = 0x5000_0000;
 
 /// Second alias window: the ABOVE-4G PCI window. With several PCI devices
-/// (OH boot: 6 virtio-blk + net + keyboard + tablet) QEMU q35 places the
-/// 64-bit prefetchable BARs into the high PCI window (observed base
-/// 0xc00000000 = 48GB). One full PML4 slot (512GB) of PA
-/// [0x1_0000_0000, 0x81_0000_0000) mirrored with 1GB leaves — exactly one
-/// extra PDP table of page-table cost.
+/// (OH boot: 6 virtio-blk + net x2 + keyboard + tablet) QEMU q35 places
+/// the 64-bit BARs into the high PCI hole (observed base 0xc000000000 =
+/// 768GB — QEMU moves this with device count/RAM, a previous boot placed
+/// them below 512GB, which is why the window must be generous). Eight
+/// PML4 slots of PA [0x1_0000_0000, 0x101_0000_0000) mirrored with 1GB
+/// leaves — eight PDP tables of page-table cost.
 pub const DEVICE_ALIAS64_BASE: usize = 0xffff_8a00_0000_0000;
 /// Physical base the 64-bit alias window mirrors (4GB).
 pub const DEVICE_ALIAS64_PHYS_BASE: usize = 0x1_0000_0000;
-/// Window size: 512GB (one PML4 slot).
-pub const DEVICE_ALIAS64_SIZE: usize = 0x80_0000_0000;
+/// Window size: 4TB (eight PML4 slots, [4GB, 4TB+4GB)).
+pub const DEVICE_ALIAS64_SIZE: usize = 0x100_0000_0000;
 
 /// Translate a device physical address into its kernel-half alias VA.
 /// Covers the two fixed windows (low [0xb0000000, 4GB), high
-/// [4GB, 4GB+512GB)); anything else falls back to the identity address
-/// (valid under the boot root where ioremap_device_window mapped it — an
-/// out-of-window access faults loudly instead of aliasing a wrong PA).
+/// [4GB, 4TB+4GB)); anything else falls back to the identity address
+/// (valid under the boot root where ioremap_device_window mapped it, but
+/// NOT under a user CR3 — the caller warns, so an out-of-window BAR is
+/// visible in the boot log instead of a KERNPANIC on its first
+/// interrupt-context access).
 #[inline]
 pub const fn device_alias(pa: u64) -> u64 {
     if pa >= DEVICE_ALIAS_PHYS_BASE as u64 && pa < 0x1_0000_0000 {
@@ -191,6 +194,9 @@ pub mod map {
     pub const MAP_TYPE_MASK: u32 = 0x0f;
     pub const MAP_FIXED: u32 = 0x10;
     pub const MAP_ANONYMOUS: u32 = 0x20;
+    /// x86_64-only: place the mapping inside the first 2GB (see
+    /// AddressSpace::mmap's 32-bit area search).
+    pub const MAP_32BIT: u32 = 0x40;
     pub const MAP_STACK: u32 = 0x20000;
     pub const MAP_FIXED_NOREPLACE: u32 = 0x100000;
     pub const MAP_HUGETLB: u32 = 0x40000;

@@ -89,6 +89,10 @@ pub mod map {
     pub const MAP_POPULATE: u32 = 0x8000;
     /// No core dump
     pub const MAP_NODUMP: u32 = 0x10000;
+    /// x86_64-only: place the mapping inside the first 2GB (placement
+    /// hint honored by the bottom-up 32-bit area search; riscv64 has no
+    /// such flag in the Linux UAPI and keeps rejecting bit 0x40).
+    pub const MAP_32BIT: u32 = 0x40;
 }
 
 /// Allocate fresh physical memory and map it into a user page table.
