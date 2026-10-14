@@ -511,10 +511,19 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         /// Store the child's TID at `child_tid` in the CHILD's address
         /// space (Linux CLONE_CHILD_SETTID semantics). The child just got
         /// a COW copy of the parent's mm, so a parent-side copy_to_user
-        /// would hit the PARENT's mapping. If the target leaf is still
-        /// COW-shared, break the COW first (private copy for the child,
-        /// bookkeeping charged to the child's mm), then write through the
-        /// child's PTE via the linear map.
+        /// would hit the PARENT's mapping.
+        ///
+        /// Architecture-independent: the leaf walk and any COW break go
+        /// through the arch backend (`PageTableWalker` + `handle_cow_fault`).
+        /// The previous implementation hand-rolled the SV39 3-level walk,
+        /// which read the wrong table levels under the x86_64 4-level
+        /// layout and failed every glibc fork() with EFAULT
+        /// (clone(CLONE_CHILD_SETTID|CLONE_CHILD_CLEARTID|SIGCHLD, 0) —
+        /// the "udesk st=32767" respawn loop on Ubuntu amd64).
+        ///
+        /// Accounting nuance: `handle_cow_fault` books the private copy
+        /// against sched::current() (the parent), one page of RSS drift;
+        /// accepted for now (TODO: charge the child's mm).
         ///
         /// # Safety
         /// `child_root` must be the root ppn of the new child's page
@@ -523,108 +532,40 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             child_root: u64,
             child_tid: *mut i32,
             tid: i32,
-            child_task: *mut Task,
+            _child_task: *mut Task,
         ) -> bool {
-            use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr, PAGE_SIZE};
-            use crate::arch::mm::mmu_init::get_page_table_virt;
-            use crate::arch::mm::pagetable::PageTableEntry;
-            use crate::arch::mm::cow_flags;
-            use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+            use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
+            use crate::arch::mm::mm_ops::PageTableWalker;
+            use crate::arch::mm::memory_layout::VirtAddr as ArchVirtAddr;
 
             let va = child_tid as u64;
-            let vpn2 = ((va >> 30) & 0x1ff) as usize;
-            let vpn1 = ((va >> 21) & 0x1ff) as usize;
-            let vpn0 = ((va >> 12) & 0x1ff) as usize;
-            let root = get_page_table_virt(child_root << 12);
-            let pte2 = (*root).get(vpn2);
-            if !pte2.is_valid() {
-                return false;
-            }
-            let t1 = get_page_table_virt(pte2.ppn() << 12);
-            let pte1 = (*t1).get(vpn1);
-            if !pte1.is_valid() {
-                return false;
-            }
-            let t0 = get_page_table_virt(pte1.ppn() << 12);
-            let mut pte0 = (*t0).get(vpn0);
-            if !pte0.is_valid() {
-                return false;
+
+            // Break COW (if the leaf is still RO+COW) through the arch's
+            // own walker. Retry is fine: a sibling already resolved it.
+            match crate::arch::mm::mm_ops::handle_cow_fault(
+                child_root,
+                ArchVirtAddr::new(va),
+            ) {
+                crate::arch::mm::mm_ops::CowFaultResult::Resolved
+                | crate::arch::mm::mm_ops::CowFaultResult::Retry => {}
+                crate::arch::mm::mm_ops::CowFaultResult::OutOfMemory => return false,
             }
 
-            // Break COW if the leaf is write-protected and COW-marked
-            // (same mechanics as handle_cow_fault, but the copy is charged
-            // to the CHILD's mm — that function books against
-            // sched::current(), which here is the parent).
-            if pte0.bits() & PageTableEntry::W == 0
-                && pte0.bits() & cow_flags::COW != 0
-            {
-                let old_ppn = pte0.ppn();
-                let old_page = pfn_to_page_mut(old_ppn as usize);
-                let new_phys = match crate::arch::mm::mm_ops::alloc_user_phys_page() {
-                    Some(p) => p,
-                    None => return false,
-                };
-                let new_ppn = (new_phys >> 12) as u64;
-                let old_virt = phys_to_virt(PhysAddr((old_ppn << 12) as u64));
-                let new_virt = phys_to_virt(PhysAddr(new_phys));
-                core::ptr::copy_nonoverlapping(
-                    old_virt.bits() as *const u8,
-                    new_virt.bits() as *mut u8,
-                    PAGE_SIZE as usize,
-                );
-                // W requires R (SV39 reserved encoding otherwise).
-                let flags = pte0.bits()
-                    & (PageTableEntry::V
-                        | PageTableEntry::R
-                        | PageTableEntry::X
-                        | PageTableEntry::U
-                        | PageTableEntry::G
-                        | PageTableEntry::A
-                        | PageTableEntry::D)
-                    | PageTableEntry::W
-                    | PageTableEntry::R;
-                (*t0).set(vpn0, PageTableEntry::from_bits((new_ppn << 10) | flags));
-                // Release the child's share of the old page.
-                if !old_page.is_null() {
-                    (*old_page).put_page();
-                    (*old_page).dec_mapcount();
+            // Re-walk and write through the linear map.
+            match PageTableWalker::walk(child_root, va) {
+                Some((ppn, _bits)) => {
+                    let base = phys_to_virt(PhysAddr((ppn << 12) as u64));
+                    core::ptr::write_volatile(
+                        (base.as_usize() + (va & 0xfff) as usize) as *mut i32,
+                        tid,
+                    );
+                    // The child has never run, so no TLB can hold a stale
+                    // entry; fence for ordering only.
+                    crate::arch::cpu::dsb();
+                    true
                 }
-                let new_page = pfn_to_page_mut(new_ppn as usize);
-                if !new_page.is_null() {
-                    (*new_page).set_flag(PageFlag::Anonymous);
-                    // SwapBacked + LRU membership: keep the copy reclaimable
-                    // via swap-out (vmscan scans LRU_INACTIVE_ANON only).
-                    (*new_page).set_flag(PageFlag::SwapBacked);
-                    (*new_page).set_index(va as usize / (PAGE_SIZE as usize));
-                    (*new_page).inc_mapcount();
-                }
-                // Charge the copy to the CHILD's mm (not current()).
-                if let Some(mm) = (*child_task).address_space() {
-                    if !new_page.is_null() {
-                        crate::mm::rmap::page_record_mapping(
-                            &*new_page,
-                            mm as *const _ as usize,
-                            va as usize,
-                        );
-                        crate::mm::lru::page_add_anon_lru(&*new_page);
-                    }
-                    mm.add_rss(1);
-                }
-                pte0 = (*t0).get(vpn0);
+                None => false,
             }
-
-            if pte0.bits() & PageTableEntry::W == 0 {
-                return false;
-            }
-            let base = phys_to_virt(PhysAddr((pte0.ppn() << 12) as u64));
-            core::ptr::write_volatile(
-                (base.as_usize() + (va & 0xfff) as usize) as *mut i32,
-                tid,
-            );
-            // The child has never run, so no TLB can hold a stale entry;
-            // fence for ordering only.
-            crate::arch::cpu::dsb();
-            true
         }
 
         // === CLONE_CHILD_CLEARTID: Clear TID when child exits ===
