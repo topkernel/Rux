@@ -94,6 +94,18 @@ grep -q '^messagebus:' "$ROOT/etc/group" 2>/dev/null || \
 python3 -c "import uuid; print(uuid.uuid4().hex)" > "$ROOT/etc/machine-id"
 mkdir -p "$ROOT/var/lib/dbus"
 cp "$ROOT/etc/machine-id" "$ROOT/var/lib/dbus/machine-id"
+
+# /var/run -> /run: Ubuntu ships this symlink, but the deb extraction
+# leaves /var/run as a plain directory. dbus-daemon binds
+# /run/dbus/system_bus_socket (system.conf) while GLib's Gio.DBus.system
+# defaults to the historical /var/run/dbus/system_bus_socket — without
+# the symlink every system-bus client gets ENOENT; gnome-shell's
+# ui/status/power.js throws out of main.js during panel construction and
+# the shell exits(1) right before its first full frame.
+if [ ! -L "$ROOT/var/run" ]; then
+    rmdir "$ROOT/var/run" 2>/dev/null || rm -rf "$ROOT/var/run"
+    ln -s /run "$ROOT/var/run"
+fi
 # compiled GSettings schemas (dpkg -x skips glib-compile-schemas)
 if command -v glib-compile-schemas >/dev/null; then
     glib-compile-schemas "$ROOT/usr/share/glib-2.0/schemas/" \
