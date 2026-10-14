@@ -27,6 +27,9 @@ core::arch::global_asm!(
     task_ti_user_sp = const crate::process::task::task_offsets::TI_USER_SP,
     task_ti_cpu = const crate::process::task::task_offsets::TI_CPU,
     task_ti_a0 = const crate::process::task::task_offsets::TI_A0,
+    // R85 ksp gates: stack-top repair reads the task's own stack record.
+    task_kstack_bottom = const crate::process::task::task_offsets::TASK_KERNEL_STACK_BOTTOM,
+    kernel_stack_size = const crate::config::KERNEL_STACK_SIZE,
 );
 
 /// Get pt_regs for current task

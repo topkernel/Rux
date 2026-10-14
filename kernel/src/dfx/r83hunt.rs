@@ -128,6 +128,8 @@ fn report(tag: &[u8], task: *mut Task, bad: &Fields) {
     pmsg(tag);
     pmsg(b" jiffies=");
     pdec(crate::drivers::timer::get_jiffies());
+    pmsg(b" time=0x");
+    phex(crate::drivers::timer::read_time());
     pmsg(b" by=cpu:");
     pdec(crate::arch::cpu_id() as u64);
     pmsg(b"/pid:");
@@ -370,6 +372,195 @@ pub fn waitwatch_report(task: *mut Task, old: &WatchSnap, new: &WatchSnap) {
     for i in 0..8 {
         putchar(b' ');
         unsafe { phex(rq64(task, 0x40 + i * 8)); }
+    }
+    putchar(b'\n');
+}
+
+// ==================== R84: producer-#2 hunt ====================
+//
+// The trap.S smear engine (producer #1) is fixed, but a SECOND writer
+// still lands {lo32 = µs-scale growing, hi32 = 0x1999_9995 = (2^32-46)/10}
+// qwords precisely on ti_kernel_sp of parked tasks. The idle-loop audit
+// (R83) only runs when a CPU idles — under the dbus-activation storm all
+// four harts stay busy, so the write window was never sampled. This
+// widening runs from scheduler_tick() (timer IRQ, every CPU):
+//
+// - every tick: validate THIS CPU's current task header (bit63-clear
+//   ti_kernel_sp is impossible for every legal writer — trap exit stores
+//   kernel-half sp values only);
+// - every 4 jiffies (system-wide CAS): walk the pid hash and validate
+//   every hashed task — catches sleeping victims wherever they park
+//   (ext4 biglock, futex, poll, ...), independent of idleness;
+// - every 64 jiffies: scan a 2 MiB slice of the kernel heap for the
+//   producer's fingerprint (any qword whose hi32 == 0x1999_9995) and
+//   report every hit with its neighborhood — the SOURCE object that
+//   stores/computes the {µs, 0x19999995} pair gets named without
+//   catching the store in flight, and frozen earlier-victim pages show
+//   where the value already lives.
+//
+// Every report carries jiffies AND the raw `time` CSR so the victim
+// value's clock scale can be calibrated first-hand.
+
+/// Fingerprint high half of the producer's qword.
+const R84_MAGIC_HI: u32 = 0x1999_9995;
+
+/// Called from scheduler_tick() on every CPU (IRQ context).
+pub fn sched_tick_audit() {
+    // (1) Current task's own header, every tick. Cheap: 3 volatile reads.
+    if let Some(cur) = crate::sched::current() {
+        let t = cur as *mut Task;
+        let ksp = unsafe { rq64(t, offs::TI_KERNEL_SP) };
+        if ksp != 0 && (ksp as i64) >= 0 {
+            let mut bad = NO_FIELDS;
+            bad[0] = (b"ti_kernel_sp(user-half)", ksp);
+            report(b"tick-self", t, &bad);
+        }
+    }
+    // (2) Full pid-hash walk every 4 jiffies, one CPU at a time (CAS).
+    {
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let now = crate::drivers::timer::get_jiffies();
+        let last = LAST.load(Ordering::Acquire);
+        if now.wrapping_sub(last) >= 4 {
+            if LAST
+                .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+                    let pid = unsafe { (*task).pid() };
+                    if pid == 0 || pid == TASK_POISON {
+                        return;
+                    }
+                    let bad = unsafe { bad_fields(task) };
+                    if !bad[0].0.is_empty() {
+                        report(b"tick-hash", task, &bad);
+                    }
+                });
+            }
+        }
+    }
+    // (3) Heap fingerprint scan every 64 jiffies: 2 MiB per pass.
+    {
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        static NEXT_OFF: AtomicU64 = AtomicU64::new(0);
+        let now = crate::drivers::timer::get_jiffies();
+        let last = LAST.load(Ordering::Acquire);
+        if now.wrapping_sub(last) >= 64 {
+            if LAST
+                .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                magic_scan(&NEXT_OFF);
+            }
+        }
+    }
+}
+
+/// Scan one 2 MiB slice of the kernel heap for the producer's
+/// fingerprint. The slice start cycles through the whole heap so the
+/// full 128 MiB is covered roughly every 40 s.
+fn magic_scan(next_off: &AtomicU64) {
+    const SLICE: u64 = 2 * 1024 * 1024;
+    let base_phys = crate::arch::mm::memory_layout::HEAP_START;
+    let heap_len = crate::config::KERNEL_HEAP_SIZE as u64;
+    let mut off = next_off.load(Ordering::Relaxed);
+    if off >= heap_len {
+        off = 0;
+    }
+    next_off.store(off + SLICE, Ordering::Relaxed);
+    let start = crate::arch::mm::memory_layout::phys_to_virt(
+        crate::arch::mm::memory_layout::PhysAddr(base_phys + off),
+    )
+    .0 as usize;
+    let end = start + SLICE.min(heap_len - off) as usize;
+    // SAFETY: diagnostic reads of the linear-mapped kernel heap.
+    unsafe {
+        let mut p = start;
+        while p < end {
+            let v = core::ptr::read_volatile(p as *const u64);
+            if (v >> 32) as u32 == R84_MAGIC_HI {
+                magic_report(p as u64, v);
+            }
+            p += 8;
+        }
+    }
+}
+
+/// Report one fingerprint hit: the qword plus its neighborhood (4 qwords
+/// before, 8 after) so the owning object's shape is visible. Dedup per
+/// 4 KiB page, capped globally at 16 prints.
+fn magic_report(addr: u64, v: u64) {
+    if REPORTS.load(Ordering::Relaxed) >= 16 {
+        return;
+    }
+    let page = addr & !0xFFF;
+    if !may_report(page) {
+        return;
+    }
+    REPORTS.fetch_add(1, Ordering::Relaxed);
+    pmsg(b"\nR84-MAGIC jiffies=");
+    pdec(crate::drivers::timer::get_jiffies());
+    pmsg(b" time=0x");
+    phex(crate::drivers::timer::read_time());
+    pmsg(b" at=0x");
+    phex(addr);
+    pmsg(b" v=0x");
+    phex(v);
+    pmsg(b"\n");
+    let base = (addr as usize).saturating_sub(0x10) & !0xF;
+    for row in 0..3 {
+        pmsg(b"R84-AROUND @0x");
+        phex((base + row * 0x20) as u64);
+        pmsg(b":");
+        for col in 0..4 {
+            let p = base + row * 0x20 + col * 8;
+            // SAFETY: diagnostic read of the kernel heap neighborhood.
+            unsafe { phex(core::ptr::read_volatile(p as *const u64)); }
+            putchar(b' ');
+        }
+        putchar(b'\n');
+    }
+}
+
+// ==================== R84b: ksp store/reload site traps ====================
+//
+// The producer-#2 qword (hi32 = 0x1999_9995) is TRANSIENT at ti_kernel_sp —
+// present for the R74 read, gone (legal sp+PT_SIZE) by the header dump
+// microseconds later. So the garbage is WRITTEN by one of the four asm
+// sites that touch ti_kernel_sp on the trap return paths, with a wild sp
+// in the register at the store, or reloaded into sp from a garbage ksp.
+// This hook is called from trap.S at each site when the value fails the
+// kernel-half test; `sepc` names the interrupted code — the context whose
+// sp was wild.
+
+/// site: 1 = .Lreturn_user store, 2 = .Lcheck_resched_kernel store,
+///       3 = .Lreturn_user post-schedule reload, 4 = same, kernel path,
+///       5 = .Lfrom_user entry ksp load.
+#[no_mangle]
+pub extern "C" fn r84_ksp_trap(site: u64, val: u64, tp: u64, sepc: u64) {
+    use core::sync::atomic::AtomicU64 as A64;
+    static SEEN: [A64; 6] = [const { A64::new(0) }; 6];
+    let s = (site as usize) % 6;
+    if SEEN[s].swap(1, Ordering::AcqRel) != 0 {
+        return; // one report per site (raw print, no locks)
+    }
+    pmsg(b"\nR84-KSPTRAP site=");
+    pdec(site);
+    pmsg(b" val=0x");
+    phex(val);
+    pmsg(b" tp=0x");
+    phex(tp);
+    pmsg(b" sepc=0x");
+    phex(sepc);
+    pmsg(b" jiffies=");
+    pdec(crate::drivers::timer::get_jiffies());
+    pmsg(b" time=0x");
+    phex(crate::drivers::timer::read_time());
+    if tp >= 0x8000_0000_0000_0000 {
+        // SAFETY: diagnostic pid read of the (validated kernel-half) task.
+        let pid = unsafe { rq32(tp as *mut Task, offs::TASK_PID) };
+        pmsg(b" pid=");
+        pdec(pid as u64);
     }
     putchar(b'\n');
 }

@@ -1,0 +1,81 @@
+=== DFX TASK DUMP (periodic) ===
+cpu slots: 450 0 418 409
+grq: nr_running=29 cfs=29 rt=0 dl=0 cpu[pid/idle]: 450/b 0/i 418/b 409/b
+task @0xffffffff80493970 pid=0 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=589585212800 policy=IDLE comm=
+task @0xffffffff80492e10 pid=0 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=589620370600 policy=IDLE comm=
+task @0xffffffff804922b0 pid=0 state=RUNNING ti_cpu=1 on_cpu=0 claim=-1 pk=0 preempt=256 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=589612163900 policy=IDLE comm=
+task @0xffffffff80491750 pid=0 state=RUNNING ti_cpu=0 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=589609782200 policy=IDLE comm=
+task @0xffffffff80494ca0 pid=1 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365632630900 policy=CFS comm=runit
+task @0xffffffd600f29000 pid=300 state=INTERRUPTIBLE(sleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=10595900 policy=CFS comm=kswapd
+task @0xffffffd600f2f000 pid=301 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000001 vruntime=6847000 policy=CFS comm=ksoftirqd/0
+task @0xffffffd600f33000 pid=302 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000002 vruntime=837200 policy=CFS comm=ksoftirqd/1
+task @0xffffffd600f37000 pid=303 state=INTERRUPTIBLE(sleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000004 vruntime=121500 policy=CFS comm=ksoftirqd/2
+task @0xffffffd600f3b000 pid=304 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000008 vruntime=957500 policy=CFS comm=ksoftirqd/3
+task @0xffffffd600f3f000 pid=305 state=INTERRUPTIBLE(sleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=334325673100 policy=CFS comm=khungtaskd
+task @0xffffffd6010ee000 pid=306 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899369900 policy=CFS comm=kfbflush
+task @0xffffffd6011b0000 pid=311 state=RUNNING ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365900204200 policy=CFS comm=Xorg
+task @0xffffffd602a8e000 pid=321 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=85730704200 policy=CFS comm=sh
+task @0xffffffd602eac000 pid=329 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=364830926500 policy=CFS comm=dbus-daemon
+task @0xffffffd603038000 pid=331 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=359025847800 policy=CFS comm=dbus-daemon
+task @0xffffffd602cb4000 pid=332 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899840100 policy=CFS comm=gnome-session-b
+task @0xffffffd601ed1000 pid=336 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899781700 policy=CFS comm=gmain
+task @0xffffffd601e3f000 pid=337 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899784800 policy=CFS comm=gdbus
+task @0xffffffd601844000 pid=342 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899683300 policy=CFS comm=dconf worker
+task @0xffffffd601ef3000 pid=348 state=INTERRUPTIBLE(sleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=63928865900 policy=CFS comm=InputThread
+task @0xffffffd603797000 pid=359 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365900322300 policy=CFS comm=gnome-keyring-d
+task @0xffffffd603fb5000 pid=360 state=ZOMBIE ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=? on_rq=0 affinity=0x00000000ffffffff vruntime=80216479200 policy=CFS comm=gnome-keyring-d
+task @0xffffffd603953000 pid=361 state=ZOMBIE ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=80084863200 policy=CFS comm=gnome-keyring-d
+task @0xffffffd60409a000 pid=363 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899684300 policy=CFS comm=gmain
+task @0xffffffd604090000 pid=365 state=RUNNING ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365900032700 policy=CFS comm=gdbus
+task @0xffffffd604169000 pid=368 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=79799565000 policy=CFS comm=timer
+task @0xffffffd603edb000 pid=369 state=UNINTERRUPTIBLE(dsleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365862632200 policy=CFS comm=gnome-shell
+task @0xffffffd602805000 pid=372 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899664100 policy=CFS comm=gmain
+task @0xffffffd6021e0000 pid=374 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899756000 policy=CFS comm=gdbus
+task @0xffffffd604404000 pid=375 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899908200 policy=CFS comm=dconf worker
+task @0xffffffd6029d7000 pid=377 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=148515328900 policy=CFS comm=JS Helper
+task @0xffffffd604dc7000 pid=378 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=148516272500 policy=CFS comm=JS Helper
+task @0xffffffd604f11000 pid=379 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=148518307100 policy=CFS comm=JS Helper
+task @0xffffffd604e0c000 pid=380 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=148515547000 policy=CFS comm=JS Helper
+task @0xffffffd601f86000 pid=383 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899630900 policy=CFS comm=dconf-service
+task @0xffffffd604ea6000 pid=384 state=UNINTERRUPTIBLE(dsleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365761282000 policy=CFS comm=gnome-session-f
+task @0xffffffd6035dc000 pid=385 state=UNINTERRUPTIBLE(dsleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365767347800 policy=CFS comm=gsd-wwan
+task @0xffffffd601aa1000 pid=388 state=UNINTERRUPTIBLE(dsleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365894450300 policy=CFS comm=gsd-sharing
+task @0xffffffd6052c7000 pid=389 state=UNINTERRUPTIBLE(dsleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365834608300 policy=CFS comm=gsd-usb-protect
+task @0xffffffd6053f5000 pid=390 state=UNINTERRUPTIBLE(dsleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365824245900 policy=CFS comm=gsd-color
+task @0xffffffd6053e9000 pid=392 state=UNINTERRUPTIBLE(dsleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365809355500 policy=CFS comm=gsd-keyboard
+task @0xffffffd6054e6000 pid=393 state=UNINTERRUPTIBLE(dsleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365881685500 policy=CFS comm=gsd-print-notif
+task @0xffffffd604080000 pid=394 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899680100 policy=CFS comm=gsd-rfkill
+task @0xffffffd605142000 pid=397 state=UNINTERRUPTIBLE(dsleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365903625400 policy=CFS comm=gsd-smartcard
+task @0xffffffd602a1a000 pid=398 state=UNINTERRUPTIBLE(dsleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365733688000 policy=CFS comm=gsd-wacom
+task @0xffffffd6057df000 pid=399 state=UNINTERRUPTIBLE(dsleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365764076400 policy=CFS comm=gsd-datetime
+task @0xffffffd601a5b000 pid=400 state=UNINTERRUPTIBLE(dsleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365764659100 policy=CFS comm=gsd-media-keys
+task @0xffffffd6057de000 pid=402 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899649300 policy=CFS comm=gsd-screensaver
+task @0xffffffd6051c8000 pid=405 state=UNINTERRUPTIBLE(dsleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365766331300 policy=CFS comm=gsd-sound
+task @0xffffffd6051ca000 pid=406 state=UNINTERRUPTIBLE(dsleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365831425100 policy=CFS comm=gsd-a11y-settin
+task @0xffffffd60545c000 pid=407 state=UNINTERRUPTIBLE(dsleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365885950000 policy=CFS comm=gsd-xsettings
+task @0xffffffd6039ed000 pid=409 state=RUNNING ti_cpu=3 on_cpu=1 claim=3 pk=1 preempt=1 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365906527500 policy=CFS comm=gsd-housekeepin
+task @0xffffffd60536f000 pid=412 state=UNINTERRUPTIBLE(dsleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365856179600 policy=CFS comm=gsd-power
+task @0xffffffd605a7b000 pid=415 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899644900 policy=CFS comm=gmain
+task @0xffffffd605d65000 pid=416 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899753100 policy=CFS comm=gdbus
+task @0xffffffd605fe4000 pid=418 state=RUNNING ti_cpu=2 on_cpu=1 claim=2 pk=1 preempt=1 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=366080877200 policy=CFS comm=evolution-alarm
+task @0xffffffd605fe2000 pid=420 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=357870946000 policy=CFS comm=sh
+task @0xffffffd60645e000 pid=424 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899712800 policy=CFS comm=gmain
+task @0xffffffd6062ca000 pid=425 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365900191300 policy=CFS comm=gmain
+task @0xffffffd6011fc000 pid=427 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899634900 policy=CFS comm=gmain
+task @0xffffffd60643e000 pid=428 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899819800 policy=CFS comm=gmain
+task @0xffffffd606432000 pid=431 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899676100 policy=CFS comm=gmain
+task @0xffffffd6066e3000 pid=432 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899741200 policy=CFS comm=gmain
+task @0xffffffd6059a6000 pid=433 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899739900 policy=CFS comm=gdbus
+task @0xffffffd602802000 pid=439 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=? on_rq=1 affinity=0x00000000ffffffff vruntime=365899742300 policy=CFS comm=gdbus
+task @0xffffffd6021cf000 pid=440 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899978000 policy=CFS comm=gdbus
+task @0xffffffd604ceb000 pid=441 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899822200 policy=CFS comm=gdbus
+task @0xffffffd602007000 pid=442 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=358641562000 policy=CFS comm=pool-gnome-sess
+task @0xffffffd6068bf000 pid=443 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899779900 policy=CFS comm=gdbus
+task @0xffffffd606918000 pid=444 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899804200 policy=CFS comm=gdbus
+task @0xffffffd6057c7000 pid=445 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=1 on_rq=1 affinity=0x00000000ffffffff vruntime=365899670300 policy=CFS comm=gmain
+task @0xffffffd60698e000 pid=447 state=UNINTERRUPTIBLE(dsleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365737525300 policy=CFS comm=grep
+task @0xffffffd6069f7000 pid=448 state=INTERRUPTIBLE(sleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=358727329900 policy=CFS comm=pool-gsd-smartc
+task @0xffffffd606581000 pid=449 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=364804461500 policy=CFS comm=dbus-daemon
+task @0xffffffd606b0c000 pid=450 state=RUNNING ti_cpu=0 on_cpu=1 claim=0 pk=1 preempt=1 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=366151087400 policy=CFS comm=dbus-daemon-lau
+task @0xffffffd601e7c000 pid=451 state=UNINTERRUPTIBLE(dsleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=365906162200 policy=CFS comm=xterm
+=== 77 tasks ===

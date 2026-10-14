@@ -1,0 +1,38 @@
+t	line	completion
+3.5	/bin/mkdir /run/user	
+4.6	/bin/mkdir /run/user	[st=0]
+4.6	/bin/mkdir /run/user/0	
+4.6	/bin/mkdir /run/user/0	[st=0]
+4.6	/bin/mkdir /run/dbus	
+4.6	/bin/mkdir /run/dbus	[st=0]
+4.6	/bin/mkdir /tmp/.X11-unix	
+4.6	/bin/mkdir /tmp/.X11-unix	[st=256]
+4.6	BG /usr/bin/Xorg -config /root/xorg-fbdev.conf -logfile /root/Xorg.0.log :0	
+4.6	BG /usr/bin/Xorg -config /root/xorg-fbdev.conf -logfile /root/Xorg.0.log :0	[bg pid=311]
+4.6	SLEEP 120	
+4.6	SLEEP 120	[sleep 120]
+125.3	/bin/echo FIRE-P1-X0-SOCKET-TEST	
+125.3	/bin/echo FIRE-P1-X0-SOCKET-TEST	[st=0]
+125.3	/bin/ls -la /tmp/.X11-unix	
+125.3	/bin/ls -la /tmp/.X11-unix	[st=0]
+125.3	/bin/test -S /tmp/.X11-unix/X0	
+125.3	/bin/test -S /tmp/.X11-unix/X0	[st=0]
+125.3	/bin/echo FIRE-P1-DONE	
+126.4	/bin/echo FIRE-P1-DONE	[st=0]
+126.4	BG /root/start-gnome.sh	
+126.4	BG /root/start-gnome.sh	[bg pid=321]
+126.4	SLEEP 180	
+126.4	SLEEP 180	[sleep 180]
+305.7	/bin/echo FIRE-P2-GNOME-STATUS	
+309.0	/bin/echo FIRE-P2-GNOME-STATUS	[st=0]
+309.0	/bin/cat /root/dbus-session.log	
+312.1	/bin/cat /root/dbus-session.log	[st=0]
+312.1	/bin/cat /root/dbus-system.log	
+314.2	/bin/cat /root/dbus-system.log	[st=0]
+314.2	/usr/bin/tail -n 40 /root/gnome-session.log	
+316.2	/usr/bin/tail -n 40 /root/gnome-session.log	[st=0]
+316.2	/bin/cat /root/start-gnome.log	
+318.4	/bin/cat /root/start-gnome.log	[st=256]
+318.4	/bin/echo FIRE-P2-DONE	
+343.5	/bin/echo FIRE-P2-DONE	[st=0]
+343.5	/usr/bin/xterm -geometry +0+0 -title X-OK	
