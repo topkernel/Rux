@@ -727,14 +727,12 @@ pub static FUT_REPEAT_REPORTS: core::sync::atomic::AtomicUsize =
 
 #[inline]
 fn is_framebuffer_frame(phys: u64) -> bool {
-    // Device frames (virtio-gpu framebuffer) are NOT RAM pages: tearing
-    // them down through put_page/free_pages corrupts the page_desc
-    // accounting (mapcount/refcount of an unrelated descriptor) — the
-    // recycled-frame family's amplifier.
-    if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
-        return phys >= info.addr && phys < info.addr + info.size as u64;
-    }
-    false
+    // Device/kernel-owned frames (virtio-gpu framebuffer; DRM GEM buffers
+    // living in the memblock-reserved kernel heap) are NOT this mm's RAM
+    // pages: tearing them down through put_page/free_pages corrupts the
+    // page_desc accounting (mapcount/refcount of an unrelated descriptor)
+    // — the recycled-frame family's amplifier.
+    crate::mm::page_alloc::is_kernel_owned_frame(phys)
 }
 
 // FORENSIC: PTE-install ledger — every user PTE installation records

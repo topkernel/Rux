@@ -74,6 +74,13 @@ pub(crate) const FD_DIR_INO_OFF: u64 = 200;
 pub(crate) const FD_LINK_INO_OFF: u64 = 300;
 pub(crate) const NS_DIR_INO_OFF: u64 = 400;
 pub(crate) const NS_LINK_INO_OFF: u64 = 410;
+pub(crate) const ATTR_DIR_INO_OFF: u64 = 420;
+/// pid * 10000 + ATTR_FILE_INO_OFF + idx — the "attr/<name>" files, idx
+/// indexes ATTR_FILE_NAMES.
+pub(crate) const ATTR_FILE_INO_OFF: u64 = 430;
+/// SELinux attr file names inside /proc/[pid]/attr, index-aligned with
+/// the ino offsets and the PidFileKind variants.
+pub(crate) const ATTR_FILE_NAMES: [&[u8]; 3] = [b"current", b"exec", b"prev"];
 
 /// Kind of file inside a /proc/[pid] directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +107,17 @@ pub enum PidFileKind {
     /// (cgroup_core01..03, clone303, madvise06, memcg_*) opens
     /// /proc/self/mounts to find the cgroup2 mount point.
     Mounts,
+    /// /proc/[pid]/attr/current — SELinux current context. OH's init
+    /// writes the service's context here (setcon) and libselinux reads
+    /// it (getcon); labels are stored per-pid, no policy engine.
+    AttrCurrent,
+    /// /proc/[pid]/attr/exec — SELinux exec context. OH's init writes
+    /// every display service's "u:r:<name>:s0" here via setexeccon()
+    /// before exec; the write failing ENOENT aborted the child
+    /// (INIT_EEXEC_CONTENT, exit 21) before it ever ran.
+    AttrExec,
+    /// /proc/[pid]/attr/prev — previous context (read-only bookkeeping).
+    AttrPrev,
 }
 
 /// ProcFS node type
@@ -302,6 +320,9 @@ impl ProcFSNode {
                 PidFileKind::Comm => pid::generate_comm(pid),
                 PidFileKind::Cgroup => pid::generate_cgroup(pid),
                 PidFileKind::Mounts => mounts::generate(),
+                PidFileKind::AttrCurrent => selinux_attr_label(pid, 0),
+                PidFileKind::AttrExec => selinux_attr_label(pid, 1),
+                PidFileKind::AttrPrev => selinux_attr_label(pid, 2),
                 // Symlinks handled by get_link_target()
                 PidFileKind::Exe | PidFileKind::Cwd => Vec::new(),
             };
@@ -464,6 +485,12 @@ impl ProcFSSuperBlock {
 
         // /proc/self - symlink to current process directory
         self.create_dynamic_symlink("self", self_proc::get_self_link);
+
+        // /proc/thread-self — libselinux's openattr() resolves
+        // /proc/thread-self/attr/<name> first (falling back to
+        // /proc/self/task/<tid>/attr/...). Attr storage here is
+        // per-process, so the link points at the current pid dir.
+        self.create_dynamic_symlink("thread-self", self_proc::get_self_link);
 
         // P1: /proc/sys minimal tree (fs/procfs/sysctl.rs for the storage).
         self.init_sys_tree();
@@ -1074,6 +1101,11 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                 if name == b"ns" {
                     return Ok(pid_val * 10000 + NS_DIR_INO_OFF);
                 }
+                // /proc/[pid]/attr — SELinux label files (see
+                // PROCFS_ATTR_DIR_OPS below).
+                if name == b"attr" {
+                    return Ok(pid_val * 10000 + ATTR_DIR_INO_OFF);
+                }
                 // /proc/[pid]/fd/<N> — per-descriptor symlinks.
                 if name.len() <= 3
                     && !name.is_empty()
@@ -1316,6 +1348,16 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
                     inode.private_data = Some(pid_val as usize as *mut u8);
                     return Ok(Arc::new(inode));
                 }
+                // /proc/[pid]/attr directory: the three SELinux label
+                // files (current/exec/prev) — a plain label store, no
+                // policy engine. OH init's setexeccon writes here.
+                if name == b"attr" && ino == pid_val * 10000 + ATTR_DIR_INO_OFF {
+                    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+                    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+                    inode.ops = Some(&PROCFS_ATTR_DIR_OPS);
+                    inode.private_data = Some(pid_val as usize as *mut u8);
+                    return Ok(Arc::new(inode));
+                }
                 // /proc/[pid]/fd/<N> symlink: readlink resolves through
                 // pid::generate_fd_link (decoded from the ino).
                 if ino >= pid_val * 10000 + FD_LINK_INO_OFF
@@ -1456,6 +1498,32 @@ fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         None => return -22,
     };
     let node = unsafe { &*(node_ptr as *const ProcFSNode) };
+
+    // /proc/[pid]/attr/{current,exec}: store the SELinux label. OH's
+    // init writes every display service's context here (setexeccon /
+    // setcon); there is no policy engine — the write must merely
+    // succeed and read back.
+    if matches!(
+        node.pid_file_kind,
+        Some(PidFileKind::AttrCurrent)
+            | Some(PidFileKind::AttrExec)
+            | Some(PidFileKind::AttrPrev)
+    ) {
+        let pid = match node.pid {
+            Some(p) => p,
+            None => return -22,
+        };
+        let idx = match node.pid_file_kind {
+            Some(PidFileKind::AttrCurrent) => 0,
+            Some(PidFileKind::AttrExec) => 1,
+            _ => 2,
+        };
+        return if selinux_attr_set(pid, idx, buf.to_vec()) {
+            buf.len() as isize
+        } else {
+            -3 // ESRCH: target task gone
+        };
+    }
 
     // /proc/[pid]/oom_score_adj: store the adjustment on the task (Linux
     // semantics: decimal i32 in [-1000, 1000]; out-of-range/undecodable is
@@ -1829,6 +1897,174 @@ static PROCFS_NS_DIR_OPS: INodeOps = INodeOps {
     getattr: Some(procfs_ns_dir_getattr),
     setattr: None,
     iget: Some(procfs_ns_dir_iget),
+    destroy_inode: None,
+};
+
+// ============================================================================
+// /proc/[pid]/attr — minimal SELinux attr files (label store, no policy
+// engine). OH's init writes each service's context via setexeccon()
+// (attr/exec) and setcon() (attr/current); libselinux's openattr()
+// resolves /proc/thread-self/attr/<name> first.
+// ============================================================================
+
+/// Per-pid stored labels: (current, exec, prev).
+static SELINUX_ATTRS: Spinlock<alloc::collections::BTreeMap<u64, [Vec<u8>; 3]>> =
+    Spinlock::new(alloc::collections::BTreeMap::new());
+
+/// Default label reported before any write: OH's init context.
+const SELINUX_DEFAULT_LABEL: &[u8] = b"u:r:init:s0\n";
+
+/// Read one attr label (idx 0=current 1=exec 2=prev).
+fn selinux_attr_label(pid: u64, idx: usize) -> Vec<u8> {
+    let map = SELINUX_ATTRS.lock_irqsave();
+    match map.get(&pid) {
+        Some(l) => l[idx].clone(),
+        None => SELINUX_DEFAULT_LABEL.to_vec(),
+    }
+}
+
+/// Store one attr label. Returns false when the task is gone (ESRCH to
+/// the writer — matches Linux writing a dead task's attrs). Prunes dead
+/// pids opportunistically so long-running systems don't accumulate.
+fn selinux_attr_set(pid: u64, idx: usize, mut label: Vec<u8>) -> bool {
+    use crate::process::{current_pid, find_task_by_pid};
+
+    if current_pid() as u64 != pid && find_task_by_pid(pid as u32).is_none() {
+        return false;
+    }
+    // Labels are NUL-terminated on write in Linux; store with a newline
+    // so readers (getcon) see a clean string either way.
+    while label.last() == Some(&b'\n') || label.last() == Some(&0) {
+        label.pop();
+    }
+    if label.len() > 127 {
+        return false; // XATTR_SIZE_MAX-ish bound
+    }
+    label.push(b'\n');
+    let mut map = SELINUX_ATTRS.lock_irqsave();
+    if map.len() > 1024 {
+        // Opportunistic prune of dead pids.
+        let dead: Vec<u64> = map
+            .keys()
+            .filter(|&&p| current_pid() as u64 != p && find_task_by_pid(p as u32).is_none())
+            .cloned()
+            .collect();
+        for p in dead {
+            map.remove(&p);
+        }
+    }
+    map.entry(pid).or_insert([Vec::new(), Vec::new(), Vec::new()])[idx] = label;
+    true
+}
+
+/// attr-file index for a name (0=current 1=exec 2=prev).
+fn attr_file_index(name: &[u8]) -> Option<usize> {
+    ATTR_FILE_NAMES.iter().position(|n| *n == name)
+}
+
+/// Lookup inside the attr directory: name -> synthetic ino.
+/// SAFETY: VFS callback contract; private_data stores the PID.
+unsafe fn procfs_attr_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+    let pid_val = match dir.private_data {
+        Some(p) => p as usize as u64,
+        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
+    };
+    match attr_file_index(name) {
+        Some(idx) => Ok(pid_val * 10000 + ATTR_FILE_INO_OFF + idx as u64),
+        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+    }
+}
+
+/// Instantiate an attr file inode: a regular 0666 file whose ProcFSNode
+/// carries (pid, PidFileKind::Attr*). Reads regenerate from the store,
+/// writes go through procfs_file_write's pid_file_kind dispatch.
+/// SAFETY: VFS callback contract.
+unsafe fn procfs_attr_dir_iget(
+    _parent: &Inode,
+    name: &[u8],
+    ino: Ino,
+) -> Result<Arc<Inode>, i32> {
+    let kind = match name {
+        b"current" => PidFileKind::AttrCurrent,
+        b"exec" => PidFileKind::AttrExec,
+        b"prev" => PidFileKind::AttrPrev,
+        _ => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+    };
+    // pid is recoverable from the ino: pid*10000 + ATTR_FILE_INO_OFF + idx
+    let idx = attr_file_index(name).ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())? as u64;
+    let pid_val = (ino - ATTR_FILE_INO_OFF - idx) / 10000;
+
+    let proc_node = Arc::new(ProcFSNode {
+        name: name.to_vec(),
+        node_type: ProcFSType::RegularFile,
+        content_generator: None,
+        static_content: None,
+        link_generator: None,
+        link_target: None,
+        children: Spinlock::new(Vec::new()),
+        ref_count: AtomicU64::new(1),
+        ino,
+        cached_size: AtomicU64::new(0),
+        pid: Some(pid_val),
+        pid_file_kind: Some(kind),
+        sysctl_write: None,
+    });
+    let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
+
+    // Linux attr files are 0666 (mode 0666 in proc_attr_operations).
+    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o666));
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+    inode.ops = Some(&PROCFS_INODE_OPS);
+    inode.private_data = Some(raw_ptr);
+    Ok(Arc::new(inode))
+}
+
+/// Readdir of the attr directory: ".", ".." and the three label files.
+/// SAFETY: VFS callback contract; private_data stores the PID.
+unsafe fn procfs_attr_dir_readdir(
+    inode: &Inode,
+) -> Option<alloc::vec::Vec<crate::fs::inode::VfsDirEntry>> {
+    use crate::fs::inode::file_type;
+    let pid_val = inode.private_data? as usize as u64;
+    let mut entries = alloc::vec::Vec::new();
+    entries.push(crate::fs::inode::VfsDirEntry {
+        ino: inode.ino,
+        name: alloc::vec![b'.'],
+        file_type: file_type::DT_DIR,
+    });
+    entries.push(crate::fs::inode::VfsDirEntry {
+        ino: 1,
+        name: alloc::vec![b'.', b'.'],
+        file_type: file_type::DT_DIR,
+    });
+    for (i, name) in ATTR_FILE_NAMES.iter().enumerate() {
+        entries.push(crate::fs::inode::VfsDirEntry {
+            ino: pid_val * 10000 + ATTR_FILE_INO_OFF + i as u64,
+            name: name.to_vec(),
+            file_type: file_type::DT_REG,
+        });
+    }
+    Some(entries)
+}
+
+static PROCFS_ATTR_DIR_OPS: INodeOps = INodeOps {
+    lookup: Some(procfs_attr_dir_lookup),
+    create: None,
+    link: None,
+    unlink: None,
+    symlink: None,
+    mkdir: None,
+    rmdir: None,
+    mknod: None,
+    rename: None,
+    readlink: None,
+    get_file_ops: None,
+    readdir: Some(procfs_attr_dir_readdir),
+    open: None,
+    permission: None,
+    getattr: Some(procfs_ns_dir_getattr),
+    setattr: None,
+    iget: Some(procfs_attr_dir_iget),
     destroy_inode: None,
 };
 

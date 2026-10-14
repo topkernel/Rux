@@ -357,6 +357,23 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
     addr
 }
 
+/// True when `phys` is a frame the kernel owns outright — the virtio-gpu
+/// framebuffer or any memblock-reserved region (kernel image, heap, slab,
+/// vmemmap). User PTEs may legitimately POINT at such frames (fb0 and DRM
+/// GEM device mappings alias kernel-heap buffers), but those frames are
+/// never this mm's to rmap/put_page: running the release path on them
+/// corrupts the page_desc accounting of heap metadata, and free_pages
+/// refuses them anyway (boot-reserved guard). Teardown paths (munmap,
+/// exit page-table walk) must skip them and only clear the PTE.
+pub fn is_kernel_owned_frame(phys: u64) -> bool {
+    if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
+        if phys >= info.addr && phys < info.addr + info.size as u64 {
+            return true;
+        }
+    }
+    crate::mm::memblock::memblock().is_reserved(phys as usize)
+}
+
 /// Free contiguous physical pages
 ///
 /// # Arguments

@@ -708,6 +708,68 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         }
                     }
 
+                    // DRM GEM mmap (OH display HDI): prime fds map their
+                    // GEM object at offset 0 (the gralloc's mmap of the
+                    // exported dma-buf), and /dev/dri nodes map a dumb
+                    // buffer at the fake offset DRM_IOCTL_MODE_MAP_DUMB
+                    // returned. Same device-mapping discipline as fb0:
+                    // physical pages installed up front, Device VMA.
+                    if fd >= 0 {
+                        // SAFETY: fd validated above; get_file_fd returns a
+                        // valid Arc<File> or None.
+                        let drm_file = unsafe { crate::fs::file::get_file_fd(fd as usize) };
+                        if let Some(file) = drm_file {
+                            if crate::drivers::drm::is_drm_file(&file)
+                                || crate::drivers::drm::is_prime_file(&file)
+                            {
+                                let Some((phys, len)) =
+                                    crate::drivers::drm::gem_mmap_resolve(&file, offset, actual_length)
+                                else {
+                                    return mmap_error::EINVAL;
+                                };
+                                let hint = if addr == 0 { None } else { Some(addr) };
+                                let placement = match hint {
+                                    Some(a) => a,
+                                    None => match address_space.find_free_area(actual_length) {
+                                        Ok(v) => v.as_usize(),
+                                        Err(_) => return mmap_error::ENOMEM,
+                                    },
+                                };
+                                let root = address_space.root_ppn();
+                                // SAFETY: root is the task's page-table
+                                // root; phys..+len is the GEM object's
+                                // linear-mapped backing store.
+                                unsafe {
+                                    crate::arch::mm::mm_ops::MM_CTX.store(
+                                        2,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    crate::arch::mm::mm_ops::map_user_region(
+                                        root,
+                                        placement as u64,
+                                        phys,
+                                        len as u64,
+                                        crate::arch::mm::PageTableEntry::V
+                                            | crate::arch::mm::PageTableEntry::R
+                                            | crate::arch::mm::PageTableEntry::W
+                                            | crate::arch::mm::PageTableEntry::U
+                                            | crate::arch::mm::PageTableEntry::A
+                                            | crate::arch::mm::PageTableEntry::D,
+                                    );
+                                }
+                                let vma_end = placement + actual_length;
+                                let mut dv = crate::mm::vma::Vma::new(
+                                    VirtAddr::new(placement),
+                                    VirtAddr::new(vma_end),
+                                    vma_flags,
+                                );
+                                dv.set_type(crate::mm::vma::VmaType::Device);
+                                let _ = address_space.vma_write().add(dv);
+                                return placement as i64;
+                            }
+                        }
+                    }
+
                     // ashmem mmap (/dev/ashmem, OH port plan §6 item 2):
                     // map the area's private page pool. MAP_SHARED
                     // mappings alias the pool pages across fork; MAP_PRIVATE

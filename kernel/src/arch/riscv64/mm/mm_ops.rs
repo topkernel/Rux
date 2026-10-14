@@ -673,15 +673,15 @@ impl MmStruct {
                     addr += PAGE_SIZE_USIZE;
                     continue;
                 }
-                // Device frames (virtio-gpu framebuffer) are not RAM pages —
-                // never put_page/free them (accounting corruption otherwise).
+                // Device frames (virtio-gpu framebuffer, DRM GEM buffers in
+                // the kernel heap) are not this mm's RAM pages — never
+                // rmap/put_page/free them (accounting corruption
+                // otherwise); just drop the PTE.
                 {
                     let phys = (ppn_val as u64) << 12;
-                    if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
-                        if phys >= info.addr && phys < info.addr + info.size as u64 {
-                            unsafe { self.clear_pte(addr as u64); }
-                            continue;
-                        }
+                    if crate::mm::page_alloc::is_kernel_owned_frame(phys) {
+                        unsafe { self.clear_pte(addr as u64); }
+                        continue;
                     }
                 }
                 // Remove reverse mapping before clearing PTE, then drop this

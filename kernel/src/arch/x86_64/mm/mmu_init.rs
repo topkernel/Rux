@@ -867,6 +867,11 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 if !phys_valid(phys_addr as usize) {
                     continue;
                 }
+                // Device/kernel-owned frames (fb, DRM GEM in the reserved
+                // heap): not this mm's — skip release entirely.
+                if crate::mm::page_alloc::is_kernel_owned_frame(phys_addr) {
+                    continue;
+                }
                 let pfn = phys_to_pfn(phys_addr as usize);
                 let page = pfn_to_page(pfn);
                 if !page.is_null() {
@@ -906,6 +911,11 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     }
                     let phys_addr = pte2.ppn() << PAGE_SHIFT;
                     if !phys_valid(phys_addr as usize) {
+                        continue;
+                    }
+                    // Device/kernel-owned frames (fb, DRM GEM in the
+                    // reserved heap): not this mm's — skip release.
+                    if crate::mm::page_alloc::is_kernel_owned_frame(phys_addr) {
                         continue;
                     }
                     let pfn = phys_to_pfn(phys_addr as usize);
@@ -958,6 +968,14 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     let page = pfn_to_page(pfn);
 
                     if page.is_null() || !phys_valid(phys_addr as usize) {
+                        continue;
+                    }
+
+                    // Device/kernel-owned frames (fb, DRM GEM in the
+                    // reserved heap): not this mm's — skip release
+                    // (rmap/put_page on heap frames corrupts page_desc
+                    // accounting; free_pages refuses them anyway).
+                    if crate::mm::page_alloc::is_kernel_owned_frame(phys_addr) {
                         continue;
                     }
 

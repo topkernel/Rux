@@ -119,6 +119,7 @@ NETTEST_SRC="$PROJECT_ROOT/test/nettest.c"
 if [ -f "$NETTEST_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
     echo "Installing nettest to /test/nettest..."
     if riscv64-linux-gnu-gcc -nostdlib -nostartfiles -static -O2 -fno-builtin \
+         -march=rv64imafdc \
          -o "$STAGING/test/nettest" "$NETTEST_SRC"; then
         chmod +x "$STAGING/test/nettest"
     else
@@ -127,6 +128,21 @@ if [ -f "$NETTEST_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
     fi
 else
     echo "Warning: riscv64-linux-gnu-gcc not found, skipping nettest"
+fi
+
+# DRM render-node gralloc probe (same freestanding recipe): the exact
+# OpenHarmony hi_gbm ioctl sequence against /dev/dri/renderD128.
+DRMPROBE_SRC="$PROJECT_ROOT/test/drm_gralloc_probe.c"
+if [ -f "$DRMPROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing drm_gralloc_probe to /test/drm_gralloc_probe..."
+    if riscv64-linux-gnu-gcc -nostdlib -nostartfiles -static -O2 -fno-builtin \
+         -march=rv64imafdc \
+         -o "$STAGING/test/drm_gralloc_probe" "$DRMPROBE_SRC"; then
+        chmod +x "$STAGING/test/drm_gralloc_probe"
+    else
+        echo "Warning: drm_gralloc_probe failed to compile (skipping)"
+        rm -f "$STAGING/test/drm_gralloc_probe"
+    fi
 fi
 
 # Build + install the slirp virtio-net E2E test (same freestanding recipe

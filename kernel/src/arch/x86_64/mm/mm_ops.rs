@@ -684,6 +684,18 @@ impl MmStruct {
                     addr += PAGE_SIZE_USIZE;
                     continue;
                 }
+                // Device frames (virtio-gpu framebuffer, DRM GEM buffers in
+                // the kernel heap) are not this mm's RAM pages — never
+                // rmap/put_page/free them (accounting corruption
+                // otherwise); just drop the PTE. Mirror of the riscv64
+                // twin.
+                {
+                    let phys = (ppn_val as u64) << 12;
+                    if crate::mm::page_alloc::is_kernel_owned_frame(phys) {
+                        unsafe { self.clear_pte(addr as u64); }
+                        continue;
+                    }
+                }
                 // Remove reverse mapping before clearing PTE, then drop this
                 // mapping's reference; the last reference frees the page.
                 use crate::mm::page_desc::pfn_to_page_mut;

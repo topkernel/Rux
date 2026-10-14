@@ -777,6 +777,16 @@ pub fn rust_main_tail() -> ! {
                 }
             }
 
+            // DRM nodes for the OpenHarmony display HDI: the buffer
+            // allocator (allocator_host's gralloc) opens renderD128 and
+            // needs dumb/GEM/prime; card0 is the composer's KMS node
+            // (KMS ioctls are feature/oh-display territory). No GPU
+            // dependency — the console-mode OH boot has no virtio-gpu.
+            match drivers::drm::init_drm() {
+                Ok(()) => print_status("driver", "/dev/dri/renderD128 registered", true),
+                Err(()) => print_status("driver", "/dev/dri registration failed", false),
+            }
+
             // Build dentry tree for devfs
             if let Some(root_entry) = fs::devfs::get_root_entry() {
                 fs::vfs::vfs_mount("/dev", fs::devfs::create_root_inode(&root_entry),

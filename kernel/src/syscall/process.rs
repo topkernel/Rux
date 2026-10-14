@@ -140,10 +140,64 @@ fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
 
 /// Read file content from filesystem (ext4 or rootfs)
 fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
-    if crate::fs::ext4::is_mounted() {
+    let direct = if crate::fs::ext4::is_mounted() {
         crate::fs::ext4::read_file_from_mounted(path)
     } else {
         crate::fs::read_file_from_rootfs(path)
+    };
+    match direct {
+        Some(d) => Some(d),
+        // The direct readers only see the ROOT ext4 (or boot ramfs).
+        // Binaries on another mount — /vendor, /data, ... — resolve only
+        // through the VFS mount table. The OH display services exec
+        // /vendor/bin/hdf_devhost; without this fallback every one of
+        // them died with execv ENOENT although the file existed and the
+        // pre-flight path_lookup above had already found it.
+        None => read_exec_file_via_vfs(path),
+    }
+}
+
+/// Read a whole file through the VFS (mount-aware): open by path, read to
+/// EOF, close. The transient fd lives only for the duration of the read.
+fn read_exec_file_via_vfs(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    use alloc::vec::Vec;
+
+    const O_RDONLY: u32 = 0;
+    let fd = crate::fs::vfs::file_open(path, O_RDONLY, 0).ok()?;
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut ok = true;
+    loop {
+        // SAFETY: chunk is a valid 8192-byte buffer for the duration of
+        // the call; the fd was just installed in this task's table.
+        let n = unsafe {
+            match crate::fs::file::get_file_fd(fd) {
+                Some(file) => file.read(chunk.as_mut_ptr(), chunk.len()),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        };
+        if n < 0 {
+            ok = false;
+            break;
+        }
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&chunk[..n as usize]);
+        if out.len() > 512 * 1024 * 1024 {
+            ok = false; // sanity cap
+            break;
+        }
+    }
+    // SAFETY: fd was installed by file_open above in this task.
+    let _ = unsafe { crate::fs::file::close_file_fd(fd) };
+    if ok && !out.is_empty() {
+        Some(out)
+    } else {
+        None
     }
 }
 
@@ -2133,6 +2187,42 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             // SAFETY: current is a valid task pointer; cred_mut() returns
             // a mutable reference to the task's credential structure.
             unsafe { (*current).cred_mut().keepcaps = arg2 != 0; }
+            0
+        }
+        27 => {
+            // PR_GET_SECUREBITS: current SECBIT_* mask.
+            // SAFETY: current is a valid task pointer.
+            unsafe { (*current).cred().securebits as i64 }
+        }
+        28 => {
+            // PR_SET_SECUREBITS: arg2 = SECBIT_* mask (8 defined bits).
+            // OH's init programs SECBIT_NO_SETUID_FIXUP(+_LOCKED) and
+            // SECBIT_KEEP_CAPS(+_LOCKED) on its display services before
+            // exec; EINVAL there made init abort the child (INIT_EKEEPCAP,
+            // exit 13) and allocator_host/composer_host/render_service/
+            // bootanimation never started. SECBIT_KEEP_CAPS mirrors the
+            // PR_SET_KEEPCAPS flag so the setuid cap-retention path sees
+            // one consistent bit.
+            if arg2 > 0xff {
+                return -(errno::EINVAL as i64);
+            }
+            // SAFETY: current is a valid task pointer; cred_mut returns
+            // the task's own credential structure.
+            unsafe {
+                let cred = (*current).cred_mut();
+                // Locked bits never clear once set (issecure() rule);
+                // honor it by OR-ing the locked-alive bits back.
+                let old = cred.securebits;
+                let mut new_bits = arg2 as u32;
+                for (bit, lock) in [(0u32, 1u32), (2, 3), (4, 5), (6, 7)] {
+                    if old & (1 << lock) != 0 {
+                        new_bits |= 1 << bit; // locked-set bits stay set
+                        new_bits |= 1 << lock;
+                    }
+                }
+                cred.securebits = new_bits;
+                cred.keepcaps = new_bits & crate::process::task::SECBIT_KEEP_CAPS != 0;
+            }
             0
         }
         23 => {
