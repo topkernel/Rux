@@ -116,9 +116,14 @@ fn reg_read(reg_xapic: u32, msr_x2apic: u32) -> u32 {
         // SAFETY: x2APIC MSR read; READY gates first use.
         unsafe { rdmsr(msr_x2apic) as u32 }
     } else {
-        let va = crate::arch::mm::memory_layout::LAPIC_BASE as usize + reg_xapic as usize;
-        // SAFETY: MMIO read of the local APIC window (identity-mapped at
-        // setup_device_mappings time).
+        // Linux fixmap discipline: the LAPIC window is accessed through the
+        // kernel-half device alias (shared into every mm), never through a
+        // low identity VA — trap-context EOIs run under user CR3s too.
+        let va = crate::arch::mm::memory_layout::device_alias(
+            crate::arch::mm::memory_layout::LAPIC_BASE as u64,
+        ) as usize + reg_xapic as usize;
+        // SAFETY: MMIO read of the local APIC window (kernel-half alias,
+        // mapped once at setup_device_mappings time).
         unsafe { core::ptr::read_volatile(va as *const u32) }
     }
 }
@@ -130,8 +135,10 @@ fn reg_write(reg_xapic: u32, msr_x2apic: u32, value: u32) {
         // SAFETY: x2APIC MSR write; READY gates first use.
         unsafe { wrmsr(msr_x2apic, value as u64) };
     } else {
-        let va = crate::arch::mm::memory_layout::LAPIC_BASE as usize + reg_xapic as usize;
-        // SAFETY: MMIO write to the local APIC window.
+        let va = crate::arch::mm::memory_layout::device_alias(
+            crate::arch::mm::memory_layout::LAPIC_BASE as u64,
+        ) as usize + reg_xapic as usize;
+        // SAFETY: MMIO write to the local APIC window (kernel-half alias).
         unsafe { core::ptr::write_volatile(va as *mut u32, value) };
     }
 }

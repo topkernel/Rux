@@ -297,12 +297,18 @@ pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
 }
 
 unsafe fn free_page_table_checked(phys_addr: u64, site: &str) {
+    free_page_table_checked_rooted(phys_addr, site, 0)
+}
+
+/// `root_ppn` feeds the sharing-pair forensics ring (which tree freed the
+/// frame). Callers inside free_user_page_tables pass the tree root.
+unsafe fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_ppn: u64) {
     if get_alloc_stage() == AllocStage::Late {
         stamp_kernel_tree_boot();
         if !PT_LEDGER.take_returns(phys_addr >> PAGE_SHIFT) {
             return; // boot-shared table: never free, never reuse
         }
-        if !PT_LEDGER.take(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid(), site) {
+        if !PT_LEDGER.take(phys_addr >> PAGE_SHIFT, crate::sched::get_current_pid(), site, root_ppn) {
             return; // double/foreign free: refuse, keep the frame leaked
                     // rather than wired into two live trees
         }
@@ -496,7 +502,7 @@ impl PtLedger {
     /// must then REFUSE to return the frame to the zone. A table frame
     /// entering the free list twice is what wires one physical page into
     /// two live page-table trees (the shared-pgd corruption family).
-    fn take(&self, ppn: u64, pid: u32, site: &str) -> bool {
+    fn take(&self, ppn: u64, pid: u32, site: &str, root_ppn: u64) -> bool {
         use core::sync::atomic::Ordering::Relaxed;
         if self.set_live_bit(ppn, false) {
             // FORENSIC: ring of successful table frees — at a stale-tree
@@ -507,6 +513,7 @@ impl PtLedger {
                 PT_FREE_RING[idx].ppn.store(ppn, Relaxed);
                 PT_FREE_RING[idx].pid.store(pid, Relaxed);
                 PT_FREE_RING[idx].site.store(site.as_bytes()[0] as u64, Relaxed);
+                PT_FREE_RING[idx].root.store(root_ppn, Relaxed);
             }
             // EARLY-TEARDOWN WITNESS: a registered fork-mm root is being
             // freed. If the freeing context is NOT the registered owner and
@@ -533,8 +540,9 @@ impl PtLedger {
         }
         if self.reported.fetch_add(1, Relaxed) < 8 {
             crate::pr_err!(
-                "PTLEDGER: DOUBLE-FREE ppn={:#x} at {} by pid={} REFUSED (prev-free pid={}, boot={})",
-                ppn, site, pid, pt_free_ring_prev_free_pid(ppn), self.is_boot(ppn)
+                "PTLEDGER: DOUBLE-FREE ppn={:#x} at {} by pid={} REFUSED (prev-free pid={} root={:#x}, boot={})",
+                ppn, site, pid, pt_free_ring_prev_free_pid(ppn),
+                pt_free_ring_prev_free_root(ppn), self.is_boot(ppn)
             );
             // FORENSIC: the frame's live descriptor state distinguishes
             // "freed earlier, still on freelist" (OnFreelist, refcount 0)
@@ -581,6 +589,8 @@ pub struct PtFreeEntry {
     pub ppn: AtomicU64,
     pub pid: AtomicU32,
     pub site: AtomicU64,
+    /// Root of the tree the frame was freed from (sharing-pair forensics)
+    pub root: AtomicU64,
 }
 impl PtFreeEntry {
     const fn new() -> Self {
@@ -588,6 +598,7 @@ impl PtFreeEntry {
             ppn: AtomicU64::new(0),
             pid: AtomicU32::new(0),
             site: AtomicU64::new(0),
+            root: AtomicU64::new(0),
         }
     }
 }
@@ -685,6 +696,19 @@ fn pt_free_ring_prev_free_pid(ppn: u64) -> u32 {
         let idx = (cur + PT_FREE_RING.len() - 1 - k) % PT_FREE_RING.len();
         if PT_FREE_RING[idx].ppn.load(Relaxed) == ppn {
             return PT_FREE_RING[idx].pid.load(Relaxed) as u32;
+        }
+    }
+    0
+}
+
+/// Root of the tree that last successfully freed this frame (0 = unknown).
+fn pt_free_ring_prev_free_root(ppn: u64) -> u64 {
+    use core::sync::atomic::Ordering::Relaxed;
+    let cur = PT_FREE_CURSOR.load(Relaxed);
+    for k in 0..PT_FREE_RING.len() {
+        let idx = (cur + PT_FREE_RING.len() - 1 - k) % PT_FREE_RING.len();
+        if PT_FREE_RING[idx].ppn.load(Relaxed) == ppn {
+            return PT_FREE_RING[idx].root.load(Relaxed);
         }
     }
     0
@@ -962,32 +986,28 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                         // boot-era table, and which VA range it maps.
                         static STALE_DUMPS: AtomicUsize = AtomicUsize::new(0);
                         if STALE_DUMPS.fetch_add(1, Ordering::Relaxed) < 4 {
-                            let t = get_page_table_virt(table1_phys);
                             let va_base = (vpn4 as u64) << 39 | (vpn3 as u64) << 30
                                 | (vpn2 as u64) << 21;
-                            let pmd_slot = (*get_page_table_virt(
-                                pte2.ppn() << PAGE_SHIFT)).get(vpn2).bits();
-                            let mut shown = 0;
-                            for k in 0..512usize {
-                                let e = (*t).get(k);
-                                if e.is_valid() && shown < 4 {
-                                    crate::pr_err!(
-                                        "  STALE-DUMP pt ppn={:#x} leaf[{}] = {:#x} (va {:#x} -> phys {:#x})",
-                                        ppn1, k, e.bits(),
-                                        va_base | (k as u64) << 12,
-                                        e.ppn() << PAGE_SHIFT
-                                    );
-                                    shown += 1;
+                            crate::pr_err!(
+                                "  STALE-DUMP pmd_slot raw={:#x} valid={} leaf={} user={} ppn={:#x} pt_phys={:#x} va_base={:#x}",
+                                pte2.bits(), pte2.is_valid(), pte2.is_leaf(),
+                                pte2.is_user(), pte2.ppn(), table1_phys, va_base
+                            );
+                            for nk in [vpn2.wrapping_sub(1), vpn2 + 1] {
+                                if nk < 512 {
+                                    let ne = (*table2).get(nk);
+                                    if ne.is_valid() {
+                                        crate::pr_err!(
+                                            "  STALE-DUMP pmd[{}] raw={:#x} leaf={} ppn={:#x}",
+                                            nk, ne.bits(), ne.is_leaf(), ne.ppn()
+                                        );
+                                    }
                                 }
                             }
-                            crate::pr_err!(
-                                "  STALE-DUMP parent PMD slot={:#x} pt_phys={:#x}",
-                                pmd_slot, table1_phys
-                            );
                         }
                     }
                 }
-                free_page_table_checked(table1_phys, "l0");
+                free_page_table_checked_rooted(table1_phys, "l0", root_ppn);
             }
             // FORENSIC: census the PMD table before freeing it.
             if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn2) {
@@ -999,7 +1019,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     stale_count += 1;
                 }
             }
-            free_page_table_checked(table2_phys, "l1");
+            free_page_table_checked_rooted(table2_phys, "l1", root_ppn);
         }
         // FORENSIC: census the PUD table before freeing it.
         if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn3) {
@@ -1011,7 +1031,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 stale_count += 1;
             }
         }
-        free_page_table_checked(table3_phys, "l2");
+        free_page_table_checked_rooted(table3_phys, "l2", root_ppn);
     }
 
     if stale_count > 0 {
@@ -1092,7 +1112,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
     }
 
     // Free root table (PML4)
-    free_page_table_checked(root_phys, "root");
+    free_page_table_checked_rooted(root_phys, "root", root_ppn);
 }
 
 // ==================== Page Mapping Functions ====================
@@ -1125,9 +1145,20 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 /// bad link is reported and the walk refuses to continue (the mapping
 /// fails loudly instead of writing a "page table" over kernel memory).
 #[inline]
-fn valid_table_link_ppn(ppn: u64) -> bool {
+fn valid_table_link_ppn(ppn: u64, root_ppn: u64) -> bool {
     let ram_top = (crate::mm::page_desc::MAX_PFN as u64) << 12;
-    (ppn << 12) < ram_top
+    let phys = ppn << 12;
+    if phys >= ram_top {
+        return false;
+    }
+    // USER-tree links must also stay above the kernel-image reserve: their
+    // tables come from the zone (floor ~1GB), never from the Early BSS
+    // pool or the image itself. A user-tree link below 0x1E00000 is a
+    // scribbled slot parsing as a pointer — following it would read/write
+    // the kernel image (the x86 scribble engine: PMD[6]=0x300065 steering
+    // writes into .text). The KERNEL root's own tables legitimately live
+    // in the image (BSS pool) and are exempt.
+    root_ppn == unsafe { root_page_table_ppn() } || phys >= 0x1E0_0000
 }
 
 unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
@@ -1174,9 +1205,9 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     };
 
     // PUD -> PMD
-    if !valid_table_link_ppn(ppn3) {
+    if !valid_table_link_ppn(ppn3, root_ppn) {
         crate::pr_err!(
-            "SCRIBBLE-GUARD map_page: PUD link ppn={:#x} out of RAM at va {:#x} — refusing",
+            "SCRIBBLE-GUARD map_page: PUD link ppn={:#x} bad at va {:#x} — refusing",
             ppn3, virt_addr
         );
         return;
@@ -1235,7 +1266,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     };
 
     // PMD -> PT
-    if !valid_table_link_ppn(ppn2) {
+    if !valid_table_link_ppn(ppn2, root_ppn) {
         crate::pr_err!(
             "SCRIBBLE-GUARD map_page: PMD link ppn={:#x} out of RAM at va {:#x} — refusing",
             ppn2, virt_addr
@@ -1292,7 +1323,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     };
 
     // PT -> physical page
-    if !valid_table_link_ppn(ppn1) {
+    if !valid_table_link_ppn(ppn1, root_ppn) {
         crate::pr_err!(
             "SCRIBBLE-GUARD map_page: PT link ppn={:#x} out of RAM at va {:#x} — refusing",
             ppn1, virt_addr
@@ -1305,6 +1336,15 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     let ppn: u64 = phys_addr >> PAGE_SHIFT;
     let pte_bits: u64 = (ppn << PAGE_SHIFT) | flags;
 
+    // SCRIBBLE HUNT: a leaf whose physical frame lies inside the kernel
+    // image (below the 30MB reserve) is corruption — the zone starts at
+    // ~1GB and post-boot memblock never dips below the reserve.
+    if phys_addr < 0x1E0_0000 && root_ppn != root_page_table_ppn() {
+        crate::pr_err!(
+            "LEAF-LOW-HIT map_page va={:#x} -> phys={:#x} flags={:#x} root={:#x}",
+            virt_addr, phys_addr, flags, root_ppn
+        );
+    }
     table1_ref.set(vpn1, PageTableEntry::from_bits(pte_bits));
     pte_install_log(root_ppn, virt_addr, ppn);
 }
@@ -1712,6 +1752,9 @@ pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
 /// walk allocates fresh PMD tables — no demotion of bootstrap leaves is
 /// needed; the ECAM window goes in as 2MB IO leaves (128 entries).
 pub fn setup_device_mappings() {
+    use crate::arch::mm::memory_layout::{
+        DEVICE_ALIAS_BASE, DEVICE_ALIAS_PHYS_BASE, DEVICE_ALIAS_SIZE,
+    };
     unsafe {
         // Uncached device memory: PWT|PCD (the IO alias in pagetable.rs).
         let device_flags = PageTableEntry::P | PageTableEntry::RW
@@ -1724,12 +1767,24 @@ pub fn setup_device_mappings() {
         // BARs here (observed at 0xfe000000). One full PD of 2MB leaves.
         map_kernel_region_huge(0xc000_0000, 0x4000_0000, device_flags);
 
-
-
         // IOAPIC + LAPIC: single 4K pages each (already covered by the hole
         // megapages above; re-mapping the 4K pages keeps their exactness).
         map_kernel_region(IOAPIC_BASE, IOAPIC_BASE, 0x1000, device_flags);
         map_kernel_region(LAPIC_BASE, LAPIC_BASE, 0x1000, device_flags);
+
+        // KERNEL-HALF alias of the whole device region (Linux fixmap-style):
+        // one contiguous window [DEVICE_ALIAS_BASE, +1.25GB) mirroring phys
+        // [0xb0000000, 0x100000000). The kernel half is shared into every
+        // mm's PML4, so trap-context MMIO works under any user CR3 — the
+        // replacement for the E8-MM low-identity clone (that clone let
+        // fork/teardown walks demote and free device-window page tables:
+        // the x86 scribbler family).
+        map_kernel_region(
+            DEVICE_ALIAS_BASE as u64,
+            DEVICE_ALIAS_PHYS_BASE as u64,
+            DEVICE_ALIAS_SIZE as u64,
+            device_flags,
+        );
     }
 }
 

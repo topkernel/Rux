@@ -66,6 +66,29 @@ pub const VMEMMAP_SIZE: usize = 4 * 1024 * 1024 * 1024;            // 4GB
 pub const VMEMMAP_END: usize = VMALLOC_END;
 pub const VMEMMAP_START: usize = VMEMMAP_END - VMEMMAP_SIZE;
 
+// ==================== Device MMIO alias (kernel half) ====================
+// Linux-style ioremap substitute: the q35 device windows (ECAM, 32-bit PCI
+// hole incl. virtio BARs, LAPIC/IOAPIC) are mapped ONCE in the kernel half
+// of the static root at a fixed offset. Because the kernel half of every
+// PML4 is shared into every mm (copy_kernel_mappings links PML4[256..512]),
+// these VAs translate under ANY CR3 — trap-context MMIO (LAPIC EOI, virtio
+// ISR/notify reads from interrupt handlers) goes through them, exactly like
+// Linux's fixmap. The identity (low-VA) mappings stay boot-only; user trees
+// never see the device windows, so no fork/teardown path can demote or free
+// them (the E8-MM scribble class is structurally removed).
+pub const DEVICE_ALIAS_BASE: usize = 0xffff_8900_0000_0000;
+/// Physical base the alias window mirrors (ECAM base).
+pub const DEVICE_ALIAS_PHYS_BASE: usize = 0xb000_0000;
+/// Window size: 0xb0000000..0x100000000 = 1.25GB.
+pub const DEVICE_ALIAS_SIZE: usize = 0x5000_0000;
+
+/// Translate a device physical address in [0xb0000000, 0x100000000) to its
+/// kernel-half alias VA. Panics outside the window (programming error).
+#[inline]
+pub const fn device_alias(pa: u64) -> u64 {
+    DEVICE_ALIAS_BASE as u64 + (pa - DEVICE_ALIAS_PHYS_BASE as u64)
+}
+
 // ==================== Physical layout ====================
 
 /// x86 RAM starts at physical 0

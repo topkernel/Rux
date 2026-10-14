@@ -1041,88 +1041,16 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
 
     (*user_table).zero();
 
-    // ---- Low half (identity/device/ioremap) subtrees: PML4[0..256] ----
-    // The kernel touches low VAs from trap context under a USER CR3 (IRQ
-    // EOI, virtio ISR acks at above-4G ioremap'd BARs). Every present
-    // low-half PML4 entry's PUD subtree is cloned leaf-only — the original
-    // code cloned ONLY PML4[0], so a PCI BAR ioremap'd into PML4[96]+
-    // faulted the first INTx under a user root.
-    for pml4_idx in 0..256usize {
-    let pte0 = (*kernel_table).get(pml4_idx);
-    if pte0.is_valid() && !pte0.is_leaf() {
-        let kernel_pud = get_page_table_virt(pte0.ppn() << PAGE_SHIFT) as *const PageTable;
-
-        if let Some(new_pud_phys) = alloc_page_table() {
-            let new_pud = get_page_table_virt(new_pud_phys) as *mut PageTable;
-            (*new_pud).zero();
-
-            for vpn3 in 0..512usize {
-                let pte3 = (*kernel_pud).get(vpn3);
-                if !pte3.is_valid() {
-                    continue;
-                }
-
-                if pte3.is_leaf() {
-                    // 1GB leaf (U=0) — safe to copy directly
-                    (*new_pud).set(vpn3, pte3);
-                    continue;
-                }
-
-                // Non-leaf: clone the PMD table, copying only entries that
-                // are safe (leaves, or links whose PT we clone leaf-only).
-                let kernel_pmd = get_page_table_virt(pte3.ppn() << PAGE_SHIFT) as *const PageTable;
-
-                if let Some(new_pmd_phys) = alloc_page_table() {
-                    let new_pmd = get_page_table_virt(new_pmd_phys) as *mut PageTable;
-                    (*new_pmd).zero();
-
-                    for vpn2 in 0..512usize {
-                        let pte2 = (*kernel_pmd).get(vpn2);
-                        if !pte2.is_valid() {
-                            continue;
-                        }
-
-                        if pte2.is_leaf() {
-                            // 2MB leaf (identity/device MMIO) — copy directly
-                            (*new_pmd).set(vpn2, pte2);
-                            continue;
-                        }
-
-                        // Non-leaf PMD entry: points to a kernel PT table.
-                        // Must NOT share the kernel PT directly because
-                        // free_user_page_tables() would free it on process
-                        // exit. Clone a new PT and copy only non-user leaf
-                        // entries (user entries belong to another process —
-                        // there are none in the kernel identity subtree, but
-                        // the check is cheap defense).
-                        let kernel_pt = get_page_table_virt(pte2.ppn() << PAGE_SHIFT) as *const PageTable;
-
-                        if let Some(new_pt_phys) = alloc_page_table() {
-                            let new_pt = get_page_table_virt(new_pt_phys) as *mut PageTable;
-                            (*new_pt).zero();
-
-                            for vpn1 in 0..512usize {
-                                let pte1 = (*kernel_pt).get(vpn1);
-                                if pte1.is_valid() && !pte1.is_user() {
-                                    (*new_pt).set(vpn1, pte1);
-                                }
-                            }
-
-                            let new_pt_ppn = new_pt_phys >> PAGE_SHIFT;
-                            (*new_pmd).set(vpn2, PageTableEntry::new_table(new_pt_ppn));
-                        }
-                    }
-
-                    let new_pmd_ppn = new_pmd_phys >> PAGE_SHIFT;
-                    (*new_pud).set(vpn3, PageTableEntry::new_table(new_pmd_ppn));
-                }
-            }
-
-            let new_pud_ppn = new_pud_phys >> PAGE_SHIFT;
-            (*user_table).set(pml4_idx, PageTableEntry::new_table(new_pud_ppn));
-        }
-    } // end if pte0.is_valid()
-    } // end low-half PML4 loop
+    // ---- Low half (PML4[0..256]): EMPTY — pure user mappings ----
+    // The E8-MM low-identity clone used to live here (device windows
+    // copied leaf-only into every mm so trap-context MMIO worked under
+    // user CR3s). That put supervisor mappings inside the user half,
+    // where fork copies, demand fills and teardown walked them as user
+    // tables — the x86 text-scribbler family (a demoted identity window
+    // freed one incarnation, reused as file data, then parsed as page
+    // tables by the next walk). Trap-context MMIO now goes through the
+    // KERNEL-HALF device alias (setup_device_mappings), which the shared
+    // kernel-half links below already provide under every CR3.
 
     // ---- Kernel-space PML4 entries (256..512): shared links ----
     for i in KERNEL_PGD_START..PTRS_PER_PGD as usize {

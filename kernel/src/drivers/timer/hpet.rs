@@ -137,27 +137,40 @@ pub fn init() -> bool {
     if base == 0 || base & 0xFFF != 0 {
         return false;
     }
-    // Bases inside the pre-mapped uncached device windows (q35 PCI MMIO
-    // hole covers the fixed 0xFED00000) need no new mapping; anything
-    // else gets one 4K uncached page, the same flags
-    // setup_device_mappings uses.
-    if !crate::arch::x86_64::mm::mmu_init::kernel_device_window_pte(base as u64).is_some() {
-        let flags = crate::arch::mm::pagetable::PageTableEntry::P
-            | crate::arch::mm::pagetable::PageTableEntry::RW
-            | crate::arch::mm::pagetable::PageTableEntry::ACCESSED
-            | crate::arch::mm::pagetable::PageTableEntry::DIRTY
-            | crate::arch::mm::pagetable::PageTableEntry::IO;
-        // SAFETY: identity-mapping one uncached device page for the
-        // HPET register block (reserved firmware region, never RAM).
-        unsafe {
-            crate::arch::mm::mmu_init::map_kernel_region(
-                base as u64,
-                base as u64,
-                0x1000,
-                flags,
-            );
+    // Runtime counter reads happen from timer-interrupt context under
+    // USER CR3s — route them through the kernel-half device alias (Linux
+    // fixmap discipline), never through a low identity VA. The alias
+    // window [0xb0000000, 4GB) covers q35's fixed HPET base; an ACPI
+    // table outside it gets one explicit alias page.
+    let alias_va = {
+        use crate::arch::mm::memory_layout::{
+            device_alias, DEVICE_ALIAS_PHYS_BASE,
+        };
+        let in_window = (base as u64) >= DEVICE_ALIAS_PHYS_BASE as u64
+            && (base as u64) < 0x1_0000_0000;
+        if !in_window {
+            let flags = crate::arch::mm::pagetable::PageTableEntry::P
+                | crate::arch::mm::pagetable::PageTableEntry::RW
+                | crate::arch::mm::pagetable::PageTableEntry::ACCESSED
+                | crate::arch::mm::pagetable::PageTableEntry::DIRTY
+                | crate::arch::mm::pagetable::PageTableEntry::IO;
+            // SAFETY: mapping one uncached alias page for the HPET block
+            // in the kernel half (reserved firmware region, never RAM).
+            unsafe {
+                let va = 0xffff_8a00_0000_0000u64 + (base as u64 & 0xF_FFFF_F000);
+                crate::arch::mm::mmu_init::map_kernel_region(
+                    va,
+                    base as u64 & !0xFFFu64,
+                    0x1000,
+                    flags,
+                );
+                va
+            }
+        } else {
+            device_alias(base as u64)
         }
-    }
+    };
+    let base = alias_va as usize;
 
     // Validate the block: vendor ID nonzero, 64-bit counter capability,
     // period within the HPET spec bound (<= 100 ns) and an integer

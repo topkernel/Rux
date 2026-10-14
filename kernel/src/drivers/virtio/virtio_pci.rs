@@ -400,7 +400,11 @@ impl VirtIOPCI {
         }
         #[cfg(feature = "x86_64")]
         fn bar_va(bar: u64) -> u64 {
-            bar
+            // Linux ioremap discipline: BARs are never dereferenced at
+            // their firmware-assigned physical addresses — all runtime
+            // MMIO (common cfg, notify, ISR reads from interrupt context)
+            // goes through the kernel-half device alias.
+            crate::arch::mm::memory_layout::device_alias(bar)
         }
 
         let common_bar_obj = assigned_bars.get(&common_bar)
