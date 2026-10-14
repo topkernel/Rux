@@ -289,14 +289,27 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
     let cmd = args[1] as i32;
     let buf = args[2];
 
-    let idx = match SHM_IDS.find(shmid) {
-        Some(i) => i,
-        None => return -(errno::EINVAL as i64),
-    };
+    // Index-addressed / id-ignoring commands: IPC_INFO(3), SHM_STAT(13) and
+    // SHM_INFO(14) treat the first argument as a raw slot index or ignore
+    // it — they must bypass the id lookup (the old unconditional gate made
+    // shmctl(0, IPC_INFO) fail EINVAL before dispatch, LTP shmctl03).
+    match cmd {
+        IPC_INFO | 13 | 14 => {}
+        _ => {
+            let _ = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+        }
+    }
 
     match cmd {
         IPC_RMID => {
             // Owner check (review IPC P2): uid OR cuid path, or CAP_SYS_ADMIN.
+            let idx = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
             {
                 let slots = SHM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
@@ -387,11 +400,13 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
                 return -(errno::EFAULT as i64);
             }
-            let idx2 = match SHM_IDS.find_with_perms(shmid, 0o2) {
-                Ok(i) => i,
-                Err(e) => return e as i64,
+            let idx2 = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
             };
-            // Owner check (review IPC P2): euid == uid || cuid, or CAP_SYS_ADMIN.
+            // Owner check (review IPC P2): euid == uid || cuid, or
+            // CAP_SYS_ADMIN. No mode-bit check for IPC_SET — a non-owner
+            // gets EPERM, never EACCES (LTP shmctl02 by nobody).
             {
                 let slots = SHM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx2] {
@@ -561,21 +576,65 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             // shm_rss (offset 16), shm_swp (offset 24) — no swap support, 0
             // swap_attempts (offset 32), swap_successes (offset 40) — 0
             // shm_tot is already written; remaining fields stay 0
-            // Return: index of highest used entry + 1
-            let mut max_idx: usize = 0;
-            {
-                let slots = SHM_IDS.slots.lock();
-                for (i, entry) in slots.iter().enumerate().rev() {
-                    if entry.is_some() {
-                        max_idx = i + 1;
-                        break;
-                    }
-                }
-            }
-            max_idx as i64
+            // Return: highest used slot index (Linux ipc_get_maxidx),
+            // -1 when empty — LTP shmctl01 scans 0..=max_idx with SHM_STAT.
+            shm_max_idx() as i64
         }
         _ => -(errno::EINVAL as i64),
     }
+}
+
+/// /proc/sysvipc/shm contents — one line per segment (Linux ipc/util.c
+/// formatting). LTP's GET_USED_SEGMENTS() (shmget03) counts lines.
+pub fn proc_show() -> alloc::vec::Vec<u8> {
+    use alloc::fmt::Write;
+    let mut out = alloc::string::String::new();
+    let _ = writeln!(
+        out,
+        "       key      shmid perms       size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime       rss       swap"
+    );
+    let slots = SHM_IDS.slots.lock();
+    for (i, slot) in slots.iter().enumerate() {
+        if let Some(ref entry) = slot {
+            if entry.deleted {
+                continue;
+            }
+            let seg = &entry.inner;
+            let id = ipc_build_id(i, seg.perm.seq);
+            let _ = writeln!(
+                out,
+                "{:10} {:10} {:6o} {:10} {:6} {:6} {:6} {:6} {:6} {:6} {:6} {:11} {:11} {:11} {:9} {:9}",
+                seg.perm.key,
+                id,
+                seg.perm.mode & 0o7777,
+                seg.segsz,
+                seg.cpid.load(Ordering::Relaxed),
+                seg.lpid.load(Ordering::Relaxed),
+                seg.nattch.load(Ordering::Relaxed),
+                seg.perm.uid,
+                seg.perm.gid,
+                seg.perm.cuid,
+                seg.perm.cgid,
+                seg.shm_atime.load(Ordering::Relaxed),
+                seg.shm_dtime.load(Ordering::Relaxed),
+                seg.shm_ctime.load(Ordering::Relaxed),
+                0,
+                0,
+            );
+        }
+    }
+    out.into_bytes()
+}
+
+/// Highest allocated shm slot index, or -1 when empty (ipc_get_maxidx).
+fn shm_max_idx() -> i32 {
+    let slots = SHM_IDS.slots.lock();
+    for i in (0..IPC_IDS_MAX).rev() {
+        if slots[i].is_some() {
+            return i as i32;
+        }
+    }
+    -1
 }
 
 /// sys_shmat — Attach shared memory segment (NR 196)

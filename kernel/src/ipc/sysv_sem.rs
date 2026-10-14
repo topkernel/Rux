@@ -200,13 +200,24 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
     let cmd = args[2] as i32;
     let arg = args[3];
 
-    let idx = match SEM_IDS.find(semid) {
-        Some(i) => i,
-        None => return -(errno::EINVAL as i64),
-    };
+    // Index-addressed / id-ignoring commands (IPC_INFO, SEM_STAT,
+    // SEM_STAT_ANY, SEM_INFO) bypass the id→slot lookup — see msgctl.
+    match cmd {
+        3 | 18 | 19 | 20 => {}
+        _ => {
+            let _ = match SEM_IDS.find(semid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+        }
+    }
 
     match cmd {
         IPC_RMID => {
+            let idx = match SEM_IDS.find(semid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
             // Owner check (review IPC P2): Linux allows RMID when euid
             // matches uid OR cuid, or with CAP_SYS_ADMIN (the old code
             // missed the uid path and checked the wrong capability).
@@ -283,9 +294,9 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>()) {
                 return -(errno::EFAULT as i64);
             }
-            let idx2 = match SEM_IDS.find_with_perms(semid, 0o2) {
-                Ok(i) => i,
-                Err(e) => return e as i64,
+            let idx2 = match SEM_IDS.find(semid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
             };
             // Owner check (review IPC P2: IPC_SET 无属主检查——任何有写权限者可夺
             // 所有权): euid must be uid or cuid, or CAP_SYS_ADMIN.
@@ -539,20 +550,124 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                     core::mem::size_of::<SemInfoUapi>(),
                 );
             }
-            // Return: index of highest used entry
-            let mut max_idx: usize = 0;
-            {
-                let slots = SEM_IDS.slots.lock();
-                for (i, entry) in slots.iter().enumerate().rev() {
-                    if entry.is_some() {
-                        max_idx = i + 1;
-                        break;
-                    }
-                }
-            }
-            max_idx as i64
+            // Return: highest used slot index (ipc_get_maxidx), -1 when
+            // empty — LTP feeds it into SEM_STAT as a raw index.
+            sem_max_idx() as i64
         }
         18 => {
+            // SEM_STAT — IPC_STAT addressed by raw kernel index; returns the
+            // real semid on success (Linux uapi: SEM_STAT=18, SEM_INFO=19,
+            // SEM_STAT_ANY=20 — the old arm at 18 was mislabeled SEM_INFO).
+            let raw_idx = semid as usize;
+            let buf_ptr = arg as *mut SemidDsUapi;
+            if buf_ptr.is_null()
+                || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>())
+            {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= IPC_IDS_MAX {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = SemidDsUapi {
+                sem_perm: IpcPermUapi::default(),
+                sem_otime: 0,
+                #[cfg(feature = "x86_64")]
+                sem_otime_high: 0,
+                sem_ctime: 0,
+                #[cfg(feature = "x86_64")]
+                sem_ctime_high: 0,
+                sem_nsems: 0,
+                __unused3: 0,
+                __unused4: 0,
+            };
+            let result_id: i32;
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // SEM_STAT requires S_IRUGO like IPC_STAT (R32 NEW-4).
+                    if !ipc_check_permissions(entry.inner.get_perm(), 0o4) {
+                        return -(errno::EACCES as i64);
+                    }
+                    ds.sem_perm = entry.inner.perm.to_uapi();
+                    ds.sem_otime = entry.inner.sem_otime.load(Ordering::Relaxed);
+                    ds.sem_ctime = entry.inner.sem_ctime.load(Ordering::Relaxed);
+                    ds.sem_nsems = entry.inner.nsems() as u64;
+                    result_id = ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated above;
+            // ds is a stack-local repr(C) struct of exactly that size.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const SemidDsUapi as *const u8,
+                    core::mem::size_of::<SemidDsUapi>(),
+                );
+            }
+            result_id as i64
+        }
+        20 => {
+            // SEM_STAT_ANY — SEM_STAT without the permission check
+            // (introduced for checkpoint/restore; root-only by capability of
+            // the caller in Linux via CAP_SYS_ADMIN, approximated here).
+            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+                return -(errno::EPERM as i64);
+            }
+            let raw_idx = semid as usize;
+            let buf_ptr = arg as *mut SemidDsUapi;
+            if buf_ptr.is_null()
+                || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>())
+            {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= IPC_IDS_MAX {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = SemidDsUapi {
+                sem_perm: IpcPermUapi::default(),
+                sem_otime: 0,
+                #[cfg(feature = "x86_64")]
+                sem_otime_high: 0,
+                sem_ctime: 0,
+                #[cfg(feature = "x86_64")]
+                sem_ctime_high: 0,
+                sem_nsems: 0,
+                __unused3: 0,
+                __unused4: 0,
+            };
+            let result_id: i32;
+            {
+                let slots = SEM_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
+                    }
+                    ds.sem_perm = entry.inner.perm.to_uapi();
+                    ds.sem_otime = entry.inner.sem_otime.load(Ordering::Relaxed);
+                    ds.sem_ctime = entry.inner.sem_ctime.load(Ordering::Relaxed);
+                    ds.sem_nsems = entry.inner.nsems() as u64;
+                    result_id = ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated above;
+            // ds is a stack-local repr(C) struct of exactly that size.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const SemidDsUapi as *const u8,
+                    core::mem::size_of::<SemidDsUapi>(),
+                );
+            }
+            result_id as i64
+        }
+        19 => {
             // SEM_INFO — like IPC_INFO but returns current usage
             let buf_ptr = arg as *mut SemInfoUapi;
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemInfoUapi>()) {
@@ -589,21 +704,58 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                     core::mem::size_of::<SemInfoUapi>(),
                 );
             }
-            // Return: index of highest used entry + 1
-            let mut max_idx: usize = 0;
-            {
-                let slots = SEM_IDS.slots.lock();
-                for (i, entry) in slots.iter().enumerate().rev() {
-                    if entry.is_some() {
-                        max_idx = i + 1;
-                        break;
-                    }
-                }
-            }
-            max_idx as i64
+            // Return: highest used slot index, -1 when empty (see IPC_INFO).
+            sem_max_idx() as i64
         }
         _ => return -(errno::EINVAL as i64),
     }
+}
+
+/// /proc/sysvipc/sem contents — one line per semaphore set (Linux ipc/util.c
+/// formatting). LTP's GET_USED_ARRAYS() counts lines.
+pub fn proc_show() -> alloc::vec::Vec<u8> {
+    use alloc::fmt::Write;
+    let mut out = alloc::string::String::new();
+    let _ = writeln!(
+        out,
+        "       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime"
+    );
+    let slots = SEM_IDS.slots.lock();
+    for (i, slot) in slots.iter().enumerate() {
+        if let Some(ref entry) = slot {
+            if entry.deleted {
+                continue;
+            }
+            let set = &entry.inner;
+            let id = ipc_build_id(i, set.perm.seq);
+            let _ = writeln!(
+                out,
+                "{:10} {:10} {:6o} {:8} {:6} {:6} {:6} {:6} {:11} {:11}",
+                set.perm.key,
+                id,
+                set.perm.mode & 0o7777,
+                set.nsems(),
+                set.perm.uid,
+                set.perm.gid,
+                set.perm.cuid,
+                set.perm.cgid,
+                set.sem_otime.load(Ordering::Relaxed),
+                set.sem_ctime.load(Ordering::Relaxed),
+            );
+        }
+    }
+    out.into_bytes()
+}
+
+/// Highest allocated sem slot index, or -1 when empty (ipc_get_maxidx).
+fn sem_max_idx() -> i32 {
+    let slots = SEM_IDS.slots.lock();
+    for i in (0..IPC_IDS_MAX).rev() {
+        if slots[i].is_some() {
+            return i as i32;
+        }
+    }
+    -1
 }
 
 /// sys_semtimedop — Semaphore operations with timeout (NR 192)
