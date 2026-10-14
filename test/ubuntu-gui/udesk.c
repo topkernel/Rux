@@ -97,9 +97,16 @@ static const uint8_t F8[95][8] = {
 
 // ------------------------------------------------------------------- fb glue
 static uint32_t *fb; static int W, H, fbfd;
-// measured mapping on Rux virtio-gpu: screen R<-V[15:8], G<-V[23:16], B<-V[31:24]
+// Standard X TrueColor packing: the kernel's virtio-gpu 2D resource is
+// format 2 (B8G8R8X8: memory B,G,R,X), so R<<16|G<<8|B displays as-is —
+// the same bytes Xorg fbdev, Mesa swrast, and Linux DRM_FORMAT_XRGB8888
+// produce. (The old kernel scanned out format 3 A8R8G8B8 — R<-V[15:8],
+// G<-V[23:16], B<-V[31:24] — and rgb() rotated channels to compensate.
+// After the kernel moved to format 2 the rotation displayed every pixel
+// as (G,R,0): aubergine became green, white became yellow, blue died at
+// the alpha byte.)
 static uint32_t rgb(uint32_t hex) {
-    return ((hex >> 16 & 0xff) << 8) | ((hex >> 8 & 0xff) << 16) | ((hex & 0xff) << 24);
+    return hex;
 }
 static uint32_t lerp(uint32_t a, uint32_t b, int t, int n) { // hex-color lerp
     int ar = a >> 16 & 0xff, ag = a >> 8 & 0xff, ab = a & 0xff;
