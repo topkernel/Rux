@@ -75,3 +75,21 @@ pub fn flush_framebuffer() -> bool {
     unsafe { (*device).flush() };
     true
 }
+
+/// Run `f` with the global VirtIO-GPU device (None when no GPU was
+/// probed). Same lock discipline as flush_framebuffer: the device
+/// pointer is snapshotted and the lock released BEFORE `f` runs — virtio
+/// transactions inside `f` can take milliseconds under TCG and must not
+/// hold GPU_DEVICE.
+// SAFETY: GPU_DEVICE is set once during boot and never cleared; the
+// pointed-to VirtioGpuDevice outlives the call (see flush_framebuffer).
+pub fn with_gpu_device<R>(f: impl FnOnce(&VirtioGpuDevice) -> R) -> Option<R> {
+    let device: *const VirtioGpuDevice = {
+        let guard = GPU_DEVICE.lock();
+        match guard.as_ref() {
+            Some(d) => d as *const VirtioGpuDevice,
+            None => return None,
+        }
+    };
+    Some(f(unsafe { &*device }))
+}

@@ -725,6 +725,23 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
     }
 
+    // DRM ioctls (/dev/dri/card0 + renderD128, OH display HDI): dispatch
+    // on the File's ops identity (evdev/fbdev pattern). Prime fds
+    // (drmPrimeHandleToFD exports) carry their own ops table — only
+    // DMA_BUF_IOCTL_SYNC reaches them.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if crate::drivers::drm::is_drm_file(&file) {
+                return crate::drivers::drm::drm_ioctl(request, arg);
+            }
+            if crate::drivers::drm::is_prime_file(&file) {
+                if let Some(ret) = crate::drivers::drm::prime_file_ioctl(&file, request, arg) {
+                    return ret;
+                }
+            }
+        }
+    }
+
     // Binder IPC ioctls (BINDER_WRITE_READ etc. on /dev/binder): dispatch
     // on the File's ops identity (evdev/loop pattern). The driver handles
     // its own version/size checks.

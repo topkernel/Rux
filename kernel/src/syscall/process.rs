@@ -2160,6 +2160,95 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             }
             0
         }
+        27 => {
+            // PR_GET_SECUREBITS: current SECBIT_* mask.
+            // SAFETY: current is a valid task pointer.
+            unsafe { (*current).cred().securebits as i64 }
+        }
+        28 => {
+            // PR_SET_SECUREBITS: arg2 = SECBIT_* mask (8 defined bits).
+            // OH's init programs SECBIT_NO_SETUID_FIXUP(+_LOCKED) and
+            // SECBIT_KEEP_CAPS(+_LOCKED) on its display services before
+            // exec; EINVAL there made init abort the child
+            // (INIT_EKEEPCAP) and composer_host/render_service/
+            // bootanimation never started. SECBIT_KEEP_CAPS mirrors the
+            // PR_SET_KEEPCAPS flag so the setuid cap-retention path sees
+            // one consistent bit.
+            if arg2 > 0xff {
+                return -(errno::EINVAL as i64);
+            }
+            // SAFETY: current is a valid task pointer; cred_mut returns
+            // the task's own credential structure.
+            unsafe {
+                let cred = (*current).cred_mut();
+                // Locked bits never clear once set (issecure() rule);
+                // honor it by OR-ing the locked-alive bits back.
+                let old = cred.securebits;
+                let mut new_bits = arg2 as u32;
+                for (bit, lock) in [(0u32, 1u32), (2, 3), (4, 5), (6, 7)] {
+                    if old & (1 << lock) != 0 {
+                        new_bits |= 1 << bit; // locked-set bits stay set
+                        new_bits |= 1 << lock;
+                    }
+                }
+                cred.securebits = new_bits;
+                cred.keepcaps = new_bits & crate::process::task::SECBIT_KEEP_CAPS != 0;
+            }
+            0
+        }
+        47 => {
+            // PR_CAP_AMBIENT: arg2 selects the sub-operation
+            // (1 IS_SET / 2 RAISE / 3 LOWER / 4 CLEAR_ALL), arg3 is the
+            // capability. OH's init raises ambient caps on its services
+            // (SetAmbientCapability) — EINVAL aborted the service child
+            // with INIT_ECAP before exec.
+            const PR_CAP_AMBIENT_IS_SET: u64 = 1;
+            const PR_CAP_AMBIENT_RAISE: u64 = 2;
+            const PR_CAP_AMBIENT_LOWER: u64 = 3;
+            const PR_CAP_AMBIENT_CLEAR_ALL: u64 = 4;
+            let cap = arg3 as u32;
+            match arg2 {
+                PR_CAP_AMBIENT_IS_SET => {
+                    if cap > crate::security::capability::CAP_LAST_CAP {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred().cap_ambient.has(cap) as i64 }
+                }
+                PR_CAP_AMBIENT_RAISE => {
+                    if cap > crate::security::capability::CAP_LAST_CAP {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // Linux requires the cap in BOTH the permitted and
+                    // inheritable sets; init's service children run with
+                    // full root sets before dropping.
+                    // SAFETY: current is a valid task pointer.
+                    unsafe {
+                        let cred = (*current).cred();
+                        if !cred.cap_permitted.has(cap) || !cred.cap_inheritable.has(cap) {
+                            return -(errno::EPERM as i64);
+                        }
+                    }
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred_mut().cap_ambient.set(cap); }
+                    0
+                }
+                PR_CAP_AMBIENT_LOWER => {
+                    if cap > crate::security::capability::CAP_LAST_CAP {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred_mut().cap_ambient.clear(cap); }
+                    0
+                }
+                PR_CAP_AMBIENT_CLEAR_ALL => {
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred_mut().cap_ambient = crate::security::capability::Cap::EMPTY; }
+                    0
+                }
+                _ => -(errno::EINVAL as i64),
+            }
+        }
         _ => -(errno::EINVAL as i64),
     }
 }

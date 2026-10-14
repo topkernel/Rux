@@ -775,6 +775,13 @@ pub fn rust_main_tail() -> ! {
                     Ok(()) => print_status("driver", "/dev/fb0 registered", true),
                     Err(()) => print_status("driver", "/dev/fb0 registration failed", false),
                 }
+                // DRM/KMS nodes for the OpenHarmony display HDI (composer
+                // opens card0, the gbm gralloc opens renderD128). Needs
+                // the virtio-gpu device for the page-flip path.
+                match drivers::drm::init_drm() {
+                    Ok(()) => print_status("driver", "/dev/dri/card0 + renderD128 registered", true),
+                    Err(()) => print_status("driver", "/dev/dri registration failed", false),
+                }
             }
 
             // Build dentry tree for devfs

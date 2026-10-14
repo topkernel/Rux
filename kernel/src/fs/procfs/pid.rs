@@ -868,3 +868,58 @@ pub fn generate_oom_score_adj(pid: u64) -> Vec<u8> {
     let adj = unsafe { (*task).oom_score_adj() };
     format!("{}\n", adj).into_bytes()
 }
+
+// ============================================================================
+// /proc/[pid]/attr/* — SELinux label files (OH Phase 2)
+// ============================================================================
+
+/// Per-process SELinux labels written through /proc/[pid]/attr/exec and
+/// /proc/[pid]/attr/current. Rux has no SELinux enforcement, but OH's
+/// init *writes* the service context through libselinux's setexeccon()
+/// (open+write+close on /proc/self/attr/exec) before exec'ing every
+/// service — ENOENT there made init abort the child with
+/// INIT_EEXEC_CONTENT, so composer_host/render_service/bootanimation
+/// never started. The stored strings are just kept readable back.
+use alloc::collections::BTreeMap;
+use crate::sync::spinlock::Spinlock;
+
+/// (exec label, current label) per pid.
+static ATTR_LABELS: Spinlock<BTreeMap<u32, (Option<alloc::vec::Vec<u8>>, Option<alloc::vec::Vec<u8>>)>> =
+    Spinlock::new(BTreeMap::new());
+
+/// Trim NUL/newline separators libselinux appends.
+fn trim_label(buf: &[u8]) -> alloc::vec::Vec<u8> {
+    let end = buf
+        .iter()
+        .position(|&b| b == 0 || b == b'\n')
+        .unwrap_or(buf.len());
+    buf[..end].to_vec()
+}
+
+/// Read one label file: exec/current (fscreate mirrors exec's store).
+/// Empty content is valid (Linux: unset → empty read).
+pub fn attr_label_get(pid: u64, exec: bool) -> Vec<u8> {
+    let map = ATTR_LABELS.lock_irqsave();
+    match map.get(&(pid as u32)) {
+        Some((e, c)) => {
+            if exec {
+                e.clone().unwrap_or_default()
+            } else {
+                c.clone().unwrap_or_default()
+            }
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Write one label file (procfs_file_write path).
+pub fn attr_label_set(pid: u64, exec: bool, buf: &[u8]) {
+    let label = trim_label(buf);
+    let mut map = ATTR_LABELS.lock_irqsave();
+    let entry = map.entry(pid as u32).or_insert((None, None));
+    if exec {
+        entry.0 = Some(label);
+    } else {
+        entry.1 = Some(label);
+    }
+}

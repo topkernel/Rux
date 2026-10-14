@@ -378,7 +378,17 @@ pub struct Cred {
     /// from 0 (libcap-ng's capng_change_id() sets this before dropping to
     /// the daemon user, then clears it).
     pub keepcaps: bool,
+    /// PR_SET_SECUREBITS bitmask (SECBIT_*): tracked for prctl parity;
+    /// SECBIT_KEEP_CAPS mirrors `keepcaps`. OH's init sets
+    /// SECBIT_NO_SETUID_FIXUP(+_LOCKED) and SECBIT_KEEP_CAPS(+_LOCKED)
+    /// on every display service (composer_host, render_service,
+    /// bootanimation) before exec — EINVAL there aborted the service
+    /// with INIT_EKEEPCAP before it ever ran.
+    pub securebits: u32,
 }
+
+/// SECBIT_KEEP_CAPS (bit 4) in the prctl securebits encoding.
+pub const SECBIT_KEEP_CAPS: u32 = 1 << 4;
 
 impl Cred {
     /// Create credential for init (PID 0) / kernel threads.
@@ -396,6 +406,7 @@ impl Cred {
             cap_bounding:    crate::security::capability::Cap::FULL,
             cap_ambient:     crate::security::capability::Cap::EMPTY,
             keepcaps: false,
+            securebits: 0,
         }
     }
 
@@ -413,6 +424,7 @@ impl Cred {
             cap_bounding:    crate::security::capability::Cap::FULL,
             cap_ambient:     crate::security::capability::Cap::EMPTY,
             keepcaps: false,
+            securebits: 0,
         }
     }
 
