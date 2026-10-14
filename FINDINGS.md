@@ -27,3 +27,35 @@ byte-rotated; fixed by 44c7c06f (fbdev bitfields match format 3).
 5. Full run history: runs/bigalloc{1..9}, driver runs/bigalloc-hunt.py,
    image runs/gp3i.img (X + both dbus + gnome-shell, auto-clears X locks).
 Sched-branch evidence: /home/william/rux-agents/gnome-sched2/FINDINGS.md.
+
+# HANDOVER (2026-10-14, pausing for OH debug on another machine)
+
+Pushed state: main @ be8817dc = full GNOME integration (poll event-wake,
+D-Bus reply-loss pair, R75 buddy, R76 page-backed FileBuffer, fbdev
+ioctls, R82 EFAULT ordering, R83 trap.S user_sp fix, R84 diagnostics,
+R85 ti_kernel_sp anchor gating). Verified on this tree: GNOME Shell
+overview paints (bigalloc11, smp4, t=1082s, held to 1500s, zero
+panics); full-chain 2100s smp4 zero KERNPANIC/PREEMPT-UNDERFLOW with
+session alive; make run smoke-boots.
+
+PENDING (resume list, in priority order):
+1. make test REGRESSION: stock main 41d7aad1 = 1087/1087 green; merged
+   tree = test-kernel boot wedge (VW-WEDGE disk=0 used=6 irqs=0) or
+   SIGILL after ext4 init. Bisect was started (git bisect between
+   41d7aad1..HEAD) and aborted at step 1 — redo it. NOTE: GUI/fire6
+   boots work fine on the same kernel content; suspect test-config
+   THREAD/layout sensitivity. Repro: make test (rootfs at test/rootfs.img).
+2. R85 full-gate verification pending (only build+smoke done): run
+   fire6 2100s smp4 + bigalloc-hunt paint check on this kernel.
+3. Producer-#2 (last ksp scribbler) still open: signature hi32 const
+   0x19999995 (= (2^32-46)/10), lo32 0x400-aligned monotonic us.
+   Traps in tree: R83 idle header audit, R83b ext4-wait self-watch
+   (widen to non-ext4 ksp changes), freed-page 0xC3 paint, R84 tick
+   audit + heap fingerprint + ksp tripwire.
+4. Full-chain M5-paint: the GNOME overview paint is proven on the
+   minimal session; the full fire6 chain reaches xterm-level lit only
+   (components all alive) — closing producer-#2 likely unlocks it.
+Artifacts: runs under rux-agents/gnome-int/runs (bigalloc*, drivers),
+gnome-img/fire-* (gate runs). Worktrees with extra state: gnome-int
+(integration), gnome-sched2 (sched branch), gnome-dbus2, gnome-paint,
+gnome-cpu (FINDINGS + rigs).
