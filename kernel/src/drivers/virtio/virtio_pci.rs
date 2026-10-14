@@ -368,6 +368,18 @@ impl VirtIOPCI {
                     crate::println!("virtio-pci: BAR{} unassigned by firmware", bar_idx);
                     return Err("Firmware left PCI BAR unassigned");
                 }
+                // 64-bit BARs land ABOVE 4GB in QEMU's PCI window (the
+                // 32-bit hole fills up with many devices). The kernel's
+                // device map only covers ECAM + the low hole — ioremap the
+                // BAR's own range here (2MB-rounded, identity, uncached)
+                // and record it for the E8-MM device-window restore list.
+                if bar_obj.base_addr >= 0x1_0000_0000 {
+                    let lo = bar_obj.base_addr & !0x1F_FFFF;
+                    let hi = (bar_obj.base_addr + bar_obj.size as u64 + 0x1F_FFFF) & !0x1F_FFFF;
+                    unsafe {
+                        crate::arch::mm::mmu_init::ioremap_device_window(lo, hi - lo);
+                    }
+                }
                 assigned_bars.insert(bar_idx, bar_obj);
             }
         }

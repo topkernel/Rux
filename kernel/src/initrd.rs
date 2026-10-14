@@ -589,6 +589,11 @@ const MAX_LINK_MEMO: usize = 8192;
 pub fn unpack_newc(data: &[u8], sb: &RootFSSuperBlock) -> Result<CpioStats, &'static str> {
     let mut stats = CpioStats::default();
     let mut link_memo: Vec<(u32, alloc::string::String)> = Vec::new();
+    // cpio newc stores the DATA with the LAST entry of a hardlink group;
+    // the earlier same-ino entries have filesize=0 and appear BEFORE any
+    // data-carrying entry exists to link against. Defer them and resolve
+    // after the walk (the old code created empty files for them).
+    let mut deferred_links: Vec<(u32, alloc::string::String)> = Vec::new();
     let mut pos = 0usize;
 
     loop {
@@ -657,15 +662,12 @@ pub fn unpack_newc(data: &[u8], sb: &RootFSSuperBlock) -> Result<CpioStats, &'st
                 set_node_meta(sb, &path, mode, mtime);
             }
             S_IFREG => {
-                // Hard link: a later entry with the same ino and no data
-                // links to the first occurrence.
+                // Hard link: same-ino entries with no data link to the
+                // data-carrying entry — which may come LATER in the
+                // archive. Defer every 0-size nlink>1 entry.
                 if filesize == 0 && nlink > 1 {
-                    if let Some((_, first)) = link_memo.iter().find(|(i, _)| *i == ino) {
-                        if sb.link(first, &path).is_ok() {
-                            stats.hardlinks += 1;
-                        }
-                        continue;
-                    }
+                    deferred_links.push((ino, path.clone()));
+                    continue;
                 }
                 let file_data = data[data_off..data_off + filesize].to_vec();
                 if create_file(sb, &path, file_data).is_ok() {
@@ -695,6 +697,26 @@ pub fn unpack_newc(data: &[u8], sb: &RootFSSuperBlock) -> Result<CpioStats, &'st
                 stats.skipped_special += 1;
             }
         }
+    }
+
+    // Resolve deferred hardlinks: every deffered (ino, path) links to the
+    // memo entry with data for the same ino. Entries whose data-carrying
+    // sibling never appeared (malformed archive) are dropped with a count.
+    let mut unresolved = 0usize;
+    for (ino, path) in deferred_links.iter() {
+        if let Some((_, first)) = link_memo.iter().find(|(i, _)| i == ino) {
+            if sb.link(first, path).is_ok() {
+                stats.hardlinks += 1;
+            }
+        } else {
+            unresolved += 1;
+        }
+    }
+    if unresolved > 0 {
+        crate::println!(
+            "initrd: {} hardlink names had no data-carrying sibling",
+            unresolved
+        );
     }
 
     // Guarantee the standard mountpoints exist even when the archive did

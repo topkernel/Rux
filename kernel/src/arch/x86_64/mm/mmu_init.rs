@@ -1556,7 +1556,53 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
 /// Returns the raw PTE bits of the device translation for a page inside a
 /// window (identity phys, P|RW|A|D|PWT|PCD — the same flags
 /// setup_device_mappings installs), or None for ordinary user VAs.
+/// Runtime ioremap'd device windows (above-4G PCI BARs), recorded so
+/// `kernel_device_window_pte` restores them when a user mapping is torn
+/// down over one. Fixed capacity; overflow refuses the ioremap.
+const EXTRA_WINDOW_SLOTS: usize = 16;
+
+struct ExtraWindows {
+    base: [core::sync::atomic::AtomicU64; EXTRA_WINDOW_SLOTS],
+    size: [core::sync::atomic::AtomicU64; EXTRA_WINDOW_SLOTS],
+}
+
+static EXTRA_WINDOWS: ExtraWindows = ExtraWindows {
+    base: [const { core::sync::atomic::AtomicU64::new(0) }; EXTRA_WINDOW_SLOTS],
+    size: [const { core::sync::atomic::AtomicU64::new(0) }; EXTRA_WINDOW_SLOTS],
+};
+
+/// Map an extra device window (identity, uncached, 2MB-granular) and
+/// record it. Safe to call repeatedly for the same range.
+pub fn ioremap_device_window(base: u64, size: u64) -> bool {
+    use core::sync::atomic::Ordering;
+    if size == 0 {
+        return true;
+    }
+    // already recorded?
+    for i in 0..EXTRA_WINDOW_SLOTS {
+        let (rb, rs) = (EXTRA_WINDOWS.base[i].load(Ordering::Acquire), EXTRA_WINDOWS.size[i].load(Ordering::Acquire));
+        if rb != 0 && base >= rb && base + size <= rb + rs {
+            return true;
+        }
+    }
+    for i in 0..EXTRA_WINDOW_SLOTS {
+        if EXTRA_WINDOWS.base[i].load(Ordering::Acquire) == 0 {
+            unsafe {
+                let device_flags = PageTableEntry::P | PageTableEntry::RW
+                    | PageTableEntry::ACCESSED | PageTableEntry::DIRTY
+                    | PageTableEntry::IO;
+                map_kernel_region_huge(base, size, device_flags);
+            }
+            EXTRA_WINDOWS.base[i].store(base, Ordering::Release);
+            EXTRA_WINDOWS.size[i].store(size, Ordering::Release);
+            return true;
+        }
+    }
+    false
+}
+
 pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
+    use core::sync::atomic::Ordering;
     const WINDOWS: &[(u64, u64)] = &[
         (PCIE_ECAM_BASE, PCIE_ECAM_SIZE),  // q35 MMCONFIG, 256MB
         (0xc000_0000, 0x4000_0000),           // q35 32-bit PCI MMIO hole,
@@ -1566,15 +1612,25 @@ pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
         (LAPIC_BASE, 0x1000),
     ];
     let page = va & !0xFFF;
-    for &(base, size) in WINDOWS {
-        if page >= base && page + 0x1000 <= base + size {
-            let device_flags = PageTableEntry::P
-                | PageTableEntry::RW
-                | PageTableEntry::ACCESSED
-                | PageTableEntry::DIRTY
-                | PageTableEntry::IO;
-            return Some((page & PageTableEntry::PHYS_MASK_PUBLIC) | device_flags);
+    let mut hit = WINDOWS.iter().any(|&(base, size)| {
+        page >= base && page + 0x1000 <= base + size
+    });
+    if !hit {
+        for i in 0..EXTRA_WINDOW_SLOTS {
+            let (rb, rs) = (EXTRA_WINDOWS.base[i].load(Ordering::Acquire), EXTRA_WINDOWS.size[i].load(Ordering::Acquire));
+            if rb != 0 && page >= rb && page + 0x1000 <= rb + rs {
+                hit = true;
+                break;
+            }
         }
+    }
+    if hit {
+        let device_flags = PageTableEntry::P
+            | PageTableEntry::RW
+            | PageTableEntry::ACCESSED
+            | PageTableEntry::DIRTY
+            | PageTableEntry::IO;
+        return Some((page & PageTableEntry::PHYS_MASK_PUBLIC) | device_flags);
     }
     None
 }
@@ -1596,6 +1652,8 @@ pub fn setup_device_mappings() {
         // 32-bit PCI MMIO hole 0xc0000000..4GB: the firmware assigns virtio
         // BARs here (observed at 0xfe000000). One full PD of 2MB leaves.
         map_kernel_region_huge(0xc000_0000, 0x4000_0000, device_flags);
+
+
 
         // IOAPIC + LAPIC: single 4K pages each (already covered by the hole
         // megapages above; re-mapping the 4K pages keeps their exactness).

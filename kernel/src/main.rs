@@ -1135,6 +1135,27 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
+        // x86_64 twin: QEMU's linuxboot ROM fills the boot_params zero page
+        // at 0x10000 — ramdisk_image @ +0x218, ramdisk_size @ +0x21C.
+        #[cfg(feature = "x86_64")]
+        {
+            // SAFETY: the zero page is plain RAM written by the ROM before
+            // the kernel entry; volatile reads, no writes.
+            let bp = 0x10000usize as *const u8;
+            let image = unsafe {
+                u32::from(core::ptr::read_volatile(bp.add(0x218) as *const u32)) as usize
+            };
+            let size = unsafe {
+                u32::from(core::ptr::read_volatile(bp.add(0x21C) as *const u32)) as usize
+            };
+            if image != 0 && size != 0 {
+                let end = image + size;
+                if mm::memblock_reserve(image, size).is_ok() {
+                    initrd::set_region(image, end);
+                }
+            }
+        }
+
         // Reserve memory regions (kernel, heap, slab)
         let heap_start = KERNEL_HEAP_PHYS;
         let heap_size = crate::config::KERNEL_HEAP_SIZE;

@@ -43,7 +43,7 @@ DISKS="$(qemu_drive 0 "$IMGDIR/updater.img")$(qemu_drive 1 "$IMGDIR/system.img")
 
 # The reference cmdline, verbatim tokens the userspace init parses
 # (kernel only relays /proc/cmdline; it must not filter ohos.*).
-APPEND="root=/dev/ram0 init=init console=ttyS0 rw"
+APPEND="root=/dev/ram0 init=${INIT:-init} console=ttyS0 rw"
 APPEND="$APPEND ohos.boot.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1"
 APPEND="$APPEND ohos.boot.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1"
 APPEND="$APPEND hardware=virt default_boot_device=a"

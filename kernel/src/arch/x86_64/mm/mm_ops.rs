@@ -1041,8 +1041,14 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
 
     (*user_table).zero();
 
-    // ---- Low identity subtree: PML4[0] ----
-    let pte0 = (*kernel_table).get(0);
+    // ---- Low half (identity/device/ioremap) subtrees: PML4[0..256] ----
+    // The kernel touches low VAs from trap context under a USER CR3 (IRQ
+    // EOI, virtio ISR acks at above-4G ioremap'd BARs). Every present
+    // low-half PML4 entry's PUD subtree is cloned leaf-only — the original
+    // code cloned ONLY PML4[0], so a PCI BAR ioremap'd into PML4[96]+
+    // faulted the first INTx under a user root.
+    for pml4_idx in 0..256usize {
+    let pte0 = (*kernel_table).get(pml4_idx);
     if pte0.is_valid() && !pte0.is_leaf() {
         let kernel_pud = get_page_table_virt(pte0.ppn() << PAGE_SHIFT) as *const PageTable;
 
@@ -1113,9 +1119,10 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
             }
 
             let new_pud_ppn = new_pud_phys >> PAGE_SHIFT;
-            (*user_table).set(0, PageTableEntry::new_table(new_pud_ppn));
+            (*user_table).set(pml4_idx, PageTableEntry::new_table(new_pud_ppn));
         }
-    }
+    } // end if pte0.is_valid()
+    } // end low-half PML4 loop
 
     // ---- Kernel-space PML4 entries (256..512): shared links ----
     for i in KERNEL_PGD_START..PTRS_PER_PGD as usize {
