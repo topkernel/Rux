@@ -172,8 +172,7 @@ pub fn write_pipe_max_size(input: &[u8]) -> i32 {
 /// /proc/sys/fs/lease-break-time — seconds to wait after signalling a
 /// lease holder before breaking the lease by force (Linux default 45;
 /// read+written by LTP fcntl33).
-pub fn generate_lease_break_time() -> Vec<u8> {
-    alloc::format!(
+pub fn generate_lease_break_time() -> Vec<u8> {    alloc::format!(
         "{}\n",
         crate::fs::locks::LEASE_BREAK_TIME.load(Ordering::Relaxed)
     )
@@ -338,4 +337,69 @@ pub fn write_core_pattern(input: &[u8]) -> i32 {
     pat.buf[..s.len()].copy_from_slice(s);
     pat.len = s.len();
     0
+}
+
+// ============================================================================
+// /proc/sys/fs/inotify — read by LTP inotify05/06/12 and glib's GFileMonitor
+// ============================================================================
+
+/// /proc/sys/fs/inotify/max_queued_events — per-instance event-queue cap.
+/// Live: the inotify enqueue path consults it (rw; LTP inotify05 reads it
+/// and relies on the IN_Q_OVERFLOW-last semantics when it is exceeded).
+pub fn generate_inotify_max_queued_events() -> Vec<u8> {
+    alloc::format!("{}\n", crate::fs::inotify::max_queued_events()).into_bytes()
+}
+
+pub fn write_inotify_max_queued_events(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            // Linux accepts >= 0 (0 means "overflow on the first event");
+            // cap at a sane bound to keep the queue a VecDeque of events.
+            if v > (1 << 20) {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            crate::fs::inotify::MAX_QUEUED_EVENTS_SYSCTL
+                .store(v as usize, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/fs/inotify/max_user_instances — per-user instance cap
+/// (Linux default 128). Stored only: no per-user accounting exists yet;
+/// inotify06 raises the limit before its churn loop.
+pub static INOTIFY_MAX_USER_INSTANCES: AtomicU64 = AtomicU64::new(128);
+
+pub fn generate_inotify_max_user_instances() -> Vec<u8> {
+    alloc::format!("{}\n", INOTIFY_MAX_USER_INSTANCES.load(Ordering::Relaxed)).into_bytes()
+}
+
+pub fn write_inotify_max_user_instances(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            INOTIFY_MAX_USER_INSTANCES.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/fs/inotify/max_user_watches — per-user watch cap (Linux
+/// default 1048576). Stored only for now (no per-user accounting);
+/// raising it is what userland (inotify06, desktop file managers) does.
+pub static INOTIFY_MAX_USER_WATCHES: AtomicU64 = AtomicU64::new(1048576);
+
+pub fn generate_inotify_max_user_watches() -> Vec<u8> {
+    alloc::format!("{}\n", INOTIFY_MAX_USER_WATCHES.load(Ordering::Relaxed)).into_bytes()
+}
+
+pub fn write_inotify_max_user_watches(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            INOTIFY_MAX_USER_WATCHES.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
 }
