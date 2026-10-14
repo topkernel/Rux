@@ -1230,10 +1230,6 @@ pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 pub static PTE_MODIFY_LOCK: crate::sync::spinlock::Spinlock<()> =
     crate::sync::spinlock::Spinlock::new(());
 
-/// map_page caller-context marker (corruption hunt, advisory; twin of the
-/// x86_64 MM_CTX): set right before the unchecked map helpers run so a
-/// PTE-overwrite tripwire can name the site. See arch/x86_64/mm/mm_ops.rs.
-pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 pub unsafe fn map_user_region(
     user_root_ppn: u64,
