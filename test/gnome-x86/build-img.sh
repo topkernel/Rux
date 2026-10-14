@@ -109,6 +109,16 @@ gcc -static -O2 -Wall -o "$ROOT/sbin/runit" "$WT/test/gnome-x86/runit.c"
 
 # Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only)
 mkdir -p "$ROOT/etc/X11"
+# Minimal GNOME session definition: the stock "gnome" session lists a
+# dozen gsd components as RequiredComponents and gnome-session aborts
+# when they are missing — this image installs no gsd, so pin the shell
+# as the only requirement.
+mkdir -p "$ROOT/usr/share/gnome-session/sessions"
+cat > "$ROOT/usr/share/gnome-session/sessions/rux.session" <<'EOS'
+[GNOME Session]
+Name=Rux
+RequiredComponents=org.gnome.Shell;
+EOS
 cat > "$ROOT/etc/X11/xorg-fbdev.conf" <<'EOX'
 Section "Device"
     Identifier "RuxFbdev"
