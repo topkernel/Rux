@@ -378,6 +378,33 @@ pub struct Cred {
     /// from 0 (libcap-ng's capng_change_id() sets this before dropping to
     /// the daemon user, then clears it).
     pub keepcaps: bool,
+    /// Securebits mask (uapi/linux/securebits.h, prctl(2) PR_SET/GET_
+    /// SECUREBITS). Bits 0/2/4/6 are the flags, bits 1/3/5/7 their
+    /// immutability locks. PR_SET_KEEPCAPS is the historical front end
+    /// for SECBIT_KEEP_CAPS.
+    pub securebits: u32,
+}
+
+/// Securebits flag bits (uapi/linux/securebits.h).
+pub mod securebits {
+    pub const SECBIT_NOROOT: u32 = 1 << 0;
+    pub const SECBIT_NOROOT_LOCKED: u32 = 1 << 1;
+    pub const SECBIT_NO_SETUID_FIXUP: u32 = 1 << 2;
+    pub const SECBIT_NO_SETUID_FIXUP_LOCKED: u32 = 1 << 3;
+    pub const SECBIT_KEEP_CAPS: u32 = 1 << 4;
+    pub const SECBIT_KEEP_CAPS_LOCKED: u32 = 1 << 5;
+    pub const SECBIT_NO_CAP_AMBIENT_RAISE: u32 = 1 << 6;
+    pub const SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED: u32 = 1 << 7;
+    /// The four flag bits that are implemented.
+    pub const IMPLEMENTED: u32 = SECBIT_NOROOT
+        | SECBIT_NO_SETUID_FIXUP
+        | SECBIT_KEEP_CAPS
+        | SECBIT_NO_CAP_AMBIENT_RAISE;
+    /// The four lock bits.
+    pub const ALL_LOCKS: u32 = SECBIT_NOROOT_LOCKED
+        | SECBIT_NO_SETUID_FIXUP_LOCKED
+        | SECBIT_KEEP_CAPS_LOCKED
+        | SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED;
 }
 
 impl Cred {
@@ -396,6 +423,7 @@ impl Cred {
             cap_bounding:    crate::security::capability::Cap::FULL,
             cap_ambient:     crate::security::capability::Cap::EMPTY,
             keepcaps: false,
+            securebits: 0,
         }
     }
 
@@ -413,6 +441,7 @@ impl Cred {
             cap_bounding:    crate::security::capability::Cap::FULL,
             cap_ambient:     crate::security::capability::Cap::EMPTY,
             keepcaps: false,
+            securebits: 0,
         }
     }
 
@@ -422,6 +451,17 @@ impl Cred {
             return true;
         }
         self.groups.iter().any(|&g| g == gid)
+    }
+
+    /// Does a uid transition away from euid 0 keep the capability sets?
+    /// True when PR_SET_KEEPCAPS was set or SECBIT_KEEP_CAPS /
+    /// SECBIT_NO_SETUID_FIXUP is active (both mean "skip the capability
+    /// fixup on setuid" — kernel commoncap.c cap_emulate_setxuid).
+    pub fn keeps_caps_on_setuid(&self) -> bool {
+        self.keepcaps
+            || (self.securebits
+                & (securebits::SECBIT_KEEP_CAPS | securebits::SECBIT_NO_SETUID_FIXUP))
+                != 0
     }
 }
 

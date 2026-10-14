@@ -1240,7 +1240,7 @@ pub fn sys_setuid(args: SyscallArgs) -> i64 {
             // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id).
             // RETURNING to euid 0 (ruid or suid still 0) restores them from
             // the bounding set — see sys_setresuid for the full rationale.
-            if cred.euid != 0 && !cred.keepcaps {
+            if cred.euid != 0 && !cred.keeps_caps_on_setuid() {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             } else if cred.euid == 0 && (cred.uid == 0 || cred.suid == 0) {
@@ -1336,7 +1336,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
             // the bounding set (LTP creat08: root → setreuid(-1,nobody) →
             // setreuid(-1,0) must regain CAP_FSETID to keep S_ISGID on
             // files created in a setgid directory).
-            if cred.euid != 0 && !cred.keepcaps {
+            if cred.euid != 0 && !cred.keeps_caps_on_setuid() {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             } else if cred.euid == 0 && (new_ruid == 0 || cred.suid == 0) {
@@ -1471,7 +1471,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> i64 {
             //   that setresuid()s to another user and back keeps EMPTY
             //   capability sets and loses CAP_SETUID forever (LTP
             //   setresuid01: setresuid(main,-1,-1) after the round trip).
-            if cred.euid != 0 && !cred.keepcaps {
+            if cred.euid != 0 && !cred.keeps_caps_on_setuid() {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             } else if cred.euid == 0
@@ -2126,14 +2126,78 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
         8 => {
             // PR_SET_KEEPCAPS: arg2 must be 0 or 1. Setting the flag keeps
             // the capability sets across a uid transition away from 0
-            // (used by libcap-ng capng_change_id before setuid).
+            // (used by libcap-ng capng_change_id before setuid). Linux
+            // implements this as setting/clearing SECBIT_KEEP_CAPS, so a
+            // set SECBIT_KEEP_CAPS_LOCKED makes the change fail EPERM.
             if arg2 > 1 {
                 return -(errno::EINVAL as i64);
             }
+            // SAFETY: current is a valid task pointer; cred() is a shared
+            // reference to the task's credential structure.
+            if unsafe { (*current).cred().securebits }
+                & crate::process::task::securebits::SECBIT_KEEP_CAPS_LOCKED
+                != 0
+            {
+                return -(errno::EPERM as i64);
+            }
             // SAFETY: current is a valid task pointer; cred_mut() returns
             // a mutable reference to the task's credential structure.
-            unsafe { (*current).cred_mut().keepcaps = arg2 != 0; }
+            unsafe {
+                let cred = (*current).cred_mut();
+                cred.keepcaps = arg2 != 0;
+                if arg2 != 0 {
+                    cred.securebits |=
+                        crate::process::task::securebits::SECBIT_KEEP_CAPS;
+                } else {
+                    cred.securebits &=
+                        !crate::process::task::securebits::SECBIT_KEEP_CAPS;
+                }
+            }
             0
+        }
+        28 => {
+            // PR_SET_SECUREBITS: set the process securebits mask
+            // (uapi/linux/securebits.h). Rules (kernel/sys.c):
+            // - bits outside IMPLEMENTED|ALL_LOCKS are EINVAL,
+            // - a lock bit that is currently set cannot be cleared, and an
+            //   implemented bit whose lock is set cannot change (EPERM).
+            // OH's init calls this (SECBIT_NO_SETUID_FIXUP|..._LOCKED) in
+            // every service child before setuid; a failure makes the child
+            // abort before exec, so no service would ever start.
+            let new_bits = arg2 as u32;
+            use crate::process::task::securebits as sb;
+            if new_bits & !(sb::IMPLEMENTED | sb::ALL_LOCKS) != 0 {
+                return -(errno::EINVAL as i64);
+            }
+            // SAFETY: current is a valid task pointer; cred() is a shared
+            // reference to the task's credential structure.
+            let old_bits = unsafe { (*current).cred().securebits };
+            // A set lock bit can never be cleared.
+            if old_bits & sb::ALL_LOCKS & !new_bits != 0 {
+                return -(errno::EPERM as i64);
+            }
+            // A locked implemented bit can never change (each lock sits
+            // one above its flag, so old_bits >> 1 maps flag -> lock).
+            if (old_bits ^ new_bits) & sb::IMPLEMENTED & (old_bits >> 1) != 0 {
+                return -(errno::EPERM as i64);
+            }
+            // SAFETY: current is a valid task pointer; cred_mut() returns
+            // a mutable reference to the task's credential structure.
+            unsafe {
+                let cred = (*current).cred_mut();
+                cred.securebits = new_bits;
+                // Keep the legacy keepcaps view in sync (the setuid
+                // capability-drop sites read it through
+                // keeps_caps_on_setuid(), which also consults securebits).
+                cred.keepcaps = new_bits & sb::SECBIT_KEEP_CAPS != 0;
+            }
+            0
+        }
+        29 => {
+            // PR_GET_SECUREBITS: return the securebits mask.
+            // SAFETY: current is a valid task pointer; cred() is a shared
+            // reference to the task's credential structure.
+            unsafe { (*current).cred().securebits as i64 }
         }
         23 => {
             // PR_CAPBSET_READ: is capability arg2 in the bounding set?
