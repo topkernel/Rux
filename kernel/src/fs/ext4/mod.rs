@@ -1834,7 +1834,19 @@ unsafe fn ext4_getattr(inode: &Inode, stat: &mut Stat) -> i32 {
     stat.st_nlink = ext4_inode.links_count as u32;
     stat.st_uid = ext4_inode.uid as u32;
     stat.st_gid = ext4_inode.gid as u32;
-    stat.st_rdev = 0;
+    // Device nodes: rdev is encoded in the on-disk i_block[0]
+    // (ext4_iget: new_decode_dev(le32_to_cpu(raw_inode->i_block[0]))).
+    stat.st_rdev = if ext4_inode.mode & 0o170000 == 0o020000
+        || ext4_inode.mode & 0o170000 == 0o060000
+    {
+        let enc = ext4_inode.block[0];
+        // Linux new_decode_dev() then MKDEV(): inverse of new_encode_dev
+        let minor = (enc & 0xff) | ((enc >> 12) & 0xfff00);
+        let major = (enc >> 8) & 0xfff;
+        ((minor & 0xff) | (major << 8) | ((minor & !0xffu32) << 12)) as u64
+    } else {
+        0
+    };
     stat.st_blksize = 4096;
     stat.st_blocks = ext4_inode.blocks as i64;
     stat.st_atime = ext4_inode.atime as i64;
@@ -2505,7 +2517,7 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     symlink: Some(ext4_symlink_wrapper),
     mkdir: Some(ext4_mkdir_wrapper),
     rmdir: Some(ext4_rmdir_wrapper),
-    mknod: None,        // TODO: implement
+    mknod: Some(ext4_mknod_wrapper),
     rename: Some(ext4_rename_wrapper),
     readlink: Some(ext4_readlink),
     get_file_ops: Some(ext4_get_file_ops),
@@ -2607,6 +2619,23 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
     let fs = get_ext4_fs_from_inode(dir)?;
     let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
+
+    // Update parent directory's cached Ext4Inode
+    refresh_parent_dir_cache(dir, fs);
+
+    let disk_inode = inode::read_inode(fs, new_ino)?;
+    let ext4_inode = inode::Ext4Inode::from_disk(&disk_inode, new_ino);
+    let vfs_inode = create_vfs_inode_in(fs as *const Ext4FileSystem as *mut Ext4FileSystem, new_ino, &ext4_inode);
+    crate::fs::inode::icache_add(vfs_inode.clone());
+    Ok(vfs_inode)
+}
+
+/// Wrapper for ext4_mknod to match VFS signature (device/FIFO nodes).
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
+unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64) -> Result<alloc::sync::Arc<Inode>, i32> {
+    let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
+    let fs = get_ext4_fs_from_inode(dir)?;
+    let new_ino = namei::ext4_mknod(fs, dir.ino as u32, name, mode.bits() as u16, dev)?;
 
     // Update parent directory's cached Ext4Inode
     refresh_parent_dir_cache(dir, fs);

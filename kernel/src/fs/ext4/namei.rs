@@ -1050,6 +1050,77 @@ fn ext4_create_inner(
 }
 
 // ============================================================================
+// mknod implementation (device nodes / FIFOs on ext4)
+// ============================================================================
+
+/// Linux new_encode_dev() (include/linux/kdev_t.h): the on-disk encoding
+/// ext4 uses for i_rdev in i_block[0] of character/block device inodes.
+fn new_encode_dev(dev: u64) -> u32 {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+    ((minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12)) as u32
+}
+
+/// Create a special inode (FIFO / char / block device) — LTP fgetxattr02
+/// and the mknod family mknod(2) device nodes on the ext4 rootfs; the old
+/// EPERM fallback (device mknod outside /dev) TBROK'd their setups.
+pub fn ext4_mknod(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    mode: u16,
+    dev: u64,
+) -> Result<u32, i32> {
+    if fs.journal.is_some() {
+        let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
+        unsafe { set_current_handle(&mut handle); }
+        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
+        let result = ext4_mknod_inner(fs, dir_ino, name, mode, dev);
+        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
+        unsafe { clear_current_handle(); }
+        super::journal::ext4_journal_stop(&mut handle)?;
+        return result;
+    }
+    ext4_mknod_inner(fs, dir_ino, name, mode, dev)
+}
+
+fn ext4_mknod_inner(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    mode: u16,
+    dev: u64,
+) -> Result<u32, i32> {
+    if name.is_empty() {
+        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+    if name.len() > 255 {
+        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+    }
+
+    let file_mode = mode;
+    let (new_ino, mut new_inode) = ext4_new_inode(fs, dir_ino, file_mode, name)?;
+
+    // Device nodes: rdev lives in i_block[0] (ext4_iget's
+    // new_decode_dev(le32_to_cpu(raw_inode->i_block[0]))).
+    if file_mode & 0o170000 == 0o020000 || file_mode & 0o170000 == 0o060000 {
+        new_inode.i_block[0] = new_encode_dev(dev);
+    }
+
+    // Write new inode
+    super::inode::write_inode_disk(fs, new_ino, &new_inode)?;
+
+    // Add directory entry with the device file type
+    let ft = file_type_from_mode(file_mode);
+    ext4_add_entry(fs, dir_ino, name, new_ino, ft)?;
+
+    touch_parent_dir(fs, dir_ino);
+
+    Ok(new_ino)
+}
+
+// ============================================================================
 // symlink implementation
 // ============================================================================
 
