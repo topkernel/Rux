@@ -48,6 +48,40 @@ int main(void) {
     unlink("/tmp/.X0-lock");
     unlink("/tmp/.X11-unix/X0");
 
+    // ---- bring-up diagnostics: localize the xkbcomp failure ----
+    // (a) direct exec, no pipe involved
+    {
+        pid_t p = fork();
+        if (p == 0) {
+            int dn = open("/dev/null", O_RDONLY);
+            if (dn >= 0) { dup2(dn, STDIN_FILENO); close(dn); }
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+            execl("/usr/bin/xkbcomp", "xkbcomp", "--version", (char *)NULL);
+            _exit(127);
+        }
+        int st; waitpid(p, &st, 0);
+        printf("[diag] xkbcomp --version direct: st=%#x\n", st);
+    }
+    // (b) shell pipeline (dash): exercises pipe + fork + dup2 + exec + read
+    {
+        pid_t p = fork();
+        if (p == 0) {
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); close(con); }
+            int dn = open("/dev/null", O_RDONLY);
+            if (dn >= 0) { dup2(dn, STDIN_FILENO); close(dn); }
+            execl("/bin/sh", "sh", "-c",
+                  "echo 'xkb_keymap { xkb_keycodes { < > = 1; }; };' | "
+                  "/usr/bin/xkbcomp -xkm - -o /tmp/diag.xkm; "
+                  "echo pipe_rc=$?; ls -la /tmp/diag.xkm 2>&1",
+                  (char *)NULL);
+            _exit(127);
+        }
+        int st; waitpid(p, &st, 0);
+        printf("[diag] shell pipeline: st=%#x\n", st);
+    }
+
     printf("[runit] starting dbus\n");
     mkdir("/run/dbus", 0755);
     spawn("dbus-daemon", (char *[]){ "dbus-daemon", "--system", "--fork",
@@ -80,6 +114,7 @@ int main(void) {
 
     printf("[runit] starting gnome-shell (minimal gs path)\n");
     setenv("DISPLAY", ":0", 1);
+    setenv("XDG_SESSION_TYPE", "x11", 1);
     char addr[512];
     read_first_line("/tmp/dbus-session.addr", addr, sizeof addr);
     // dbus-daemon --print-address prints "unix:abstract=..." (no pid= form
@@ -102,12 +137,27 @@ int main(void) {
 
     // PID 1 never exits: a headless serial backend presents EOF, which
     // would make a console shell exit and power the machine down. Park
-    // forever reaping children.
+    // forever reaping children; when gnome-shell dies, dump its log to
+    // the console for bring-up forensics.
     signal(SIGCHLD, SIG_DFL);
     for (;;) {
         int st;
         pid_t p = wait(&st);
-        if (p > 0) printf("[runit] child %d exited st=%d\n", (int)p, st);
+        if (p > 0) {
+            printf("[runit] child %d exited st=%d\n", (int)p, st);
+            if (p == gpid || p == xpid) {
+                printf("== dump /tmp/gnome-shell.log ==\n");
+                fflush(stdout);
+                pid_t d = fork();
+                if (d == 0) {
+                    int con = open("/dev/console", O_WRONLY);
+                    if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+                    execl("/bin/cat", "cat", "/tmp/gnome-shell.log", (char *)NULL);
+                    _exit(127);
+                }
+                waitpid(d, &st, 0);
+            }
+        }
         else sleep(2);
     }
     return 0;

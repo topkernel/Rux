@@ -17,7 +17,7 @@
 | 会话 | ✅ | **`[udesk] login screen up`**（fork 修复后零 EFAULT/零 respawn，console+GUI 通道） |
 | fork（glibc） | ✅ 已修复 | commit `5c32dad7`：write_child_settid 手写 SV39 三级 walk 在 x86 四级页表下全错 → 改走 arch 抽象（PageTableWalker + handle_cow_fault） |
 | GNOME 镜像 | ✅ 已建成 | `work/gnome-x86.img`（3G，725 deb：Xorg-fbdev + dbus×2 + gnome-session/shell，`test/gnome-x86/build-img.sh` 免特权方案：apt download + dpkg-deb -x + mkfs -d） |
-| GNOME 会话链 | 🔶 至 GLX | 会话跑通到 **Xorg fbdev 探测 1280x800 + shadow fb + GLX DRISWRAST（软件 GL）初始化**；卡点：Xorg→xkbcomp 子进程 keymap 编译失败（`Keyboard initialization failed`）→ Xorg Fatal 退出（riscv64 当年同样深挖过 xkbcomp 链：input_mutex futex + System() 调用） |
+| GNOME 会话链 | 🔶 shell 存活，卡内核 scribbler | 全链已通：/bin/sh 补齐（apt 闭包不含 Essential 的 dash/bash——Xorg System() 即 xkbcomp 链）、Xorg 完整就绪（GLX/IGLX swrast）、mutter 以 X11 合成器运行、gnome-shell 存活并做 ext4 IO（dbus-launch 成功自起 session bus）。**当前唯一卡点：内核态 #UD at `signal::SigContext::zeroed+0xd7`——ELF 中该处为合法指令 `movq $0x0,0x88(%rdi)`，运行时被改写 → x86 版 text-scribbler**（riscv64 zeroed-text/R74 涂抹引擎同族；伴随 PTLEDGER DOUBLE-FREE REFUSED + FUT-STALE-TREE 诊断） |
 
 已知限制（x86_64）：
 - SMP 未上线（`single CPU (no APIC/MADT secondary)`），GNOME 门禁需补 APIC/IO-APIC/MADT 解析 + SMP 启动
@@ -34,11 +34,11 @@
 
 ## 2. x86_64 GNOME 收尾清单（按序）
 
-1. **[当前卡点] Xorg xkbcomp 链**：Xorg fork+pipe+exec `/usr/bin/xkbcomp`（动态链接 PIE），keymap 编译失败。排查顺序：
-   a. guest 内直接跑 `xkbcomp -xkm - -` 验证二进制本身可运行（PIE/interp 加载 vs dbus-daemon 成功案例对比——dbus 是 ET_EXEC）
-   b. Xorg 调用链：`xkb/... XkbDDXCompileKeymapByNames` → `System()` = pipe+fork+dup2+exec+read；x86 的该链若有 bug（pipe 读到 0/errno、wait 状态、SIGCHLD），对照 riscv64 修复（input_mutex futex 楔死族、EXITNOTIFY 配对）
-   c. 临时旁路：`Option "AutoAddDevices" "off"` + 预生成 xkm（xkbcomp 在 host 预编译放进 /var/lib/xkb），跳过运行时编译先点亮 paint 链
-2. gnome-shell 启动前置：Xorg 存活 + session bus 地址注入（runit 已注入 /tmp/dbus-session.addr）
+1. **[已解] Xorg xkbcomp 链**（2026-10-14）：根因是镜像缺 /bin/sh——apt 依赖闭包不含 Essential 集（dash/bash 未下载），Xorg 的 System("/bin/sh -c ...xkbcomp...") exec 失败 127。修复：PKGS 显式加 dash bash（+ 镜像内 glib-compile-schemas 预编译、machine-id、XDG_SESSION_TYPE=x11）。
+2. **[当前卡点] x86 text-scribbler**：gnome-shell 存活做 IO 时内核 #UD（运行时指令字节被改写，盘上 ELF 合法）。riscv64 侧同族根因是 R75（>16MB 堆分配下分配不足涂写 48MB）、R76（memfd 大 ftruncate）、R83（trap.S 用户 sp 涂抹 ti_user_sp）、R7x（调度器 orphan 生产者）——这些修复多在通用代码已继承，但 x86 仍有变体。伴随诊断：PTLEDGER DOUBLE-FREE REFUSED（页表帧重复释放被拒）、FUT-STALE-TREE（外来/未记账页表帧）。下一步：
+   a. 用 riscv64 的 scribble tripwire 机制（dfx/scribble 已在 x86 crash_report 上报路径）对 text 段设防篡改巡检，抓生产者 PID/上下文
+   b. 审计 x86 后端独有路径：PML4 高半区共享（create_user_address_space 的 leaf-only 克隆）、PT_LEDGER stamp/free 配对（EARLY-ROOT-FREE 诊断已出现：root=0x7fa06 owner pid=306 ALIVE freed in pid=307 context——**跨任务上下文释放活跃根页表**，先查这个）
+   c. EARLY-ROOT-FREE 是强线索：exit/exec 路径在错误的 mm 上释放了页表根
 2. **SMP bring-up**：MADT 解析 + LAPIC init + INIT-SIPI-SIPI（x86_64/smp.rs 已有部分）——GNOME CPU-storm 修复（poll 事件唤醒等）是通用代码，SMP 上线即可继承
 3. **q35 PCI hole**：3GB+ 内存下 BAR 落在 0xc0000000 未映射（x86 mm territory，run-x86-ub.sh 注释）
 4. **2100s 门禁**（riscv64 的 fire-r74fix 同款：smp4、全链、零 KERNPANIC）

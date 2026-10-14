@@ -43,7 +43,7 @@ cat > "$APT_SRC" <<'EOS'
 deb [trusted=yes] http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
 deb [trusted=yes] http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
 EOS
-PKGS="xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-shell fonts-dejavu-core util-linux coreutils"
+PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-shell fonts-dejavu-core util-linux coreutils"
 
 # Resolve the full recursive dependency closure (no recommends), download
 # every .deb, and extract into the rootfs. dpkg-deb -x needs no privileges;
@@ -88,7 +88,17 @@ echo rux-gnome > "$ROOT/etc/hostname"
 grep -q '^messagebus:' "$ROOT/etc/passwd" 2>/dev/null || \
     echo 'messagebus:x:102:105::/nonexistent:/usr/sbin/nologin' >> "$ROOT/etc/passwd"
 grep -q '^messagebus:' "$ROOT/etc/group" 2>/dev/null || \
-    echo 'messagebus:x:105:' >> "$ROOT/etc/group" 
+    echo 'messagebus:x:105:' >> "$ROOT/etc/group"
+
+# machine-id: gnome-shell/dbus refuse to spawn a session bus without it
+python3 -c "import uuid; print(uuid.uuid4().hex)" > "$ROOT/etc/machine-id"
+mkdir -p "$ROOT/var/lib/dbus"
+cp "$ROOT/etc/machine-id" "$ROOT/var/lib/dbus/machine-id"
+# compiled GSettings schemas (dpkg -x skips glib-compile-schemas)
+if command -v glib-compile-schemas >/dev/null; then
+    glib-compile-schemas "$ROOT/usr/share/glib-2.0/schemas/" \
+        --targetdir="$ROOT/usr/share/glib-2.0/schemas/" || true
+fi 
 
 # ---------------------------------------------------------------------------
 # /sbin/runit — the session bootstrap (same shape as the riscv64 gp3i image:
