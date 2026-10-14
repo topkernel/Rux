@@ -53,13 +53,24 @@ pub fn sys_gettimeofday(args: SyscallArgs) -> i64 {
     let tv_ptr = args[0] as *mut TimeVal;
     let _tz_ptr = args[1] as *mut u8;  // timezone is deprecated
 
-    if tv_ptr.is_null() {
+    if tv_ptr.is_null() && _tz_ptr.is_null() {
         return 0;  // NULL is allowed, just return success
     }
 
     // Check if tv_ptr is in valid user space
-    if !crate::arch::uaccess::access_ok(tv_ptr as usize, core::mem::size_of::<TimeVal>()) {
+    if !tv_ptr.is_null()
+        && !crate::arch::uaccess::access_ok(tv_ptr as usize, core::mem::size_of::<TimeVal>())
+    {
         return -(errno::EFAULT as i64);
+    }
+    // The timezone struct is obsolete but its POINTER is still validated
+    // (struct timezone, 8 bytes) — gettimeofday(bad_tv, bad_tz) is EFAULT
+    // for either argument (LTP gettimeofday01 passes (void*)-1 for each).
+    if !_tz_ptr.is_null() && !crate::arch::uaccess::access_ok(_tz_ptr as usize, 8) {
+        return -(errno::EFAULT as i64);
+    }
+    if tv_ptr.is_null() {
+        return 0;
     }
 
     // Get time from RISC-V timer + wall-clock epoch offset (ns-precise:
@@ -1722,23 +1733,33 @@ pub fn sys_get_robust_list(args: SyscallArgs) -> i64 {
     let len_ptr = args[2] as *mut u32;
 
     if pid != 0 && pid as u32 != crate::process::current_pid() {
+        // Linux sys_get_robust_list: a nonexistent pid is ESRCH; an
+        // existing other task requires PTRACE_MODE_ATTACH (LTP
+        // get_robust_list01 probes both).
+        if crate::process::find_task_by_pid(pid as u32).is_none() {
+            return -(errno::ESRCH as i64);
+        }
         return -(errno::EPERM as i64);
     }
 
-    if !head_ptr.is_null() {
-        if !crate::arch::uaccess::access_ok(head_ptr as usize, 8) {
-            return -(errno::EFAULT as i64);
-        }
-        // SAFETY: head_ptr validated with access_ok(8); put_user is the
-        // exception-table copy path.
-        unsafe { let _ = crate::arch::uaccess::put_user(head_ptr, 0u64); }
+    // Linux sys_get_robust_list stores to BOTH pointers unconditionally
+    // (put_user(sizeof(*head), len_ptr) runs even when head_ptr is NULL):
+    // a NULL or unwritable argument is EFAULT, not skipped (LTP
+    // get_robust_list01 cases 1/2 pass NULL for one of the two).
+    if len_ptr.is_null() || head_ptr.is_null() {
+        return -(errno::EFAULT as i64);
     }
-    if !len_ptr.is_null() {
-        if !crate::arch::uaccess::access_ok(len_ptr as usize, 4) {
-            return -(errno::EFAULT as i64);
-        }
-        // SAFETY: len_ptr validated with access_ok(4); writes sizeof(struct robust_list_head).
-        unsafe { let _ = crate::arch::uaccess::put_user(len_ptr, 24u32); } // sizeof(struct robust_list_head) on 64-bit
+    if !crate::arch::uaccess::access_ok(len_ptr as usize, 8)
+        || !crate::arch::uaccess::access_ok(head_ptr as usize, 8)
+    {
+        return -(errno::EFAULT as i64);
+    }
+    // SAFETY: both pointers validated with access_ok(8); put_user is the
+    // exception-table copy path.
+    unsafe {
+        // size_t len: 8 bytes on 64-bit (sizeof(struct robust_list_head))
+        let _ = crate::arch::uaccess::put_user(len_ptr as *mut u64, 24u64);
+        let _ = crate::arch::uaccess::put_user(head_ptr, 0u64);
     }
     0
 }

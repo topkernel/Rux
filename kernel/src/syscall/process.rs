@@ -3838,6 +3838,11 @@ pub fn sys_getrusage(args: SyscallArgs) -> i64 {
     const RUSAGE_SELF: i32 = 0;
     const RUSAGE_CHILDREN: i32 = -1;
     const RUSAGE_THREAD: i32 = 1;
+    // Linux getrusage: any `who` outside {-1, 0, 1} is EINVAL before the
+    // pointer checks (LTP getrusage02 probes -2).
+    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
+        return -(errno::EINVAL as i64);
+    }
 
     // struct rusage layout (bytes):
     //   0  ru_utime.tv_sec     8  ru_utime.tv_usec
