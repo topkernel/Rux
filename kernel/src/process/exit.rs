@@ -705,8 +705,13 @@ pub fn do_exit(exit_code: i32) -> ! {
         //   holding the last reference FREES the page tables while this
         //   task may still be spinning in wait_for_thread_group_death on
         //   another CPU — running on a freed root is the ARCH-H4 fault.
+        // is_last must be decided BEFORE any Arc clone: reading the count
+        // through address_space_arc() counts the temporary too, so a
+        // forked child — sole owner of its copied mm — read 2, looked
+        // non-last, and skipped the shm detach below (one nattch leak per
+        // forked child inheriting a shm VMA; LTP shmat01).
+        let is_last = (*current).address_space_strong_count() == Some(1);
         if let Some(as_arc) = (*current).address_space_arc() {
-            let is_last = alloc::sync::Arc::strong_count(&as_arc) == 1;
             if is_last {
                 // Iterate VMAs to detach shared memory segments (decrement nattch)
                 let vma_mgr = as_arc.vma_read();

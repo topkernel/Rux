@@ -2898,6 +2898,18 @@ impl Task {
         self.address_space.clone()
     }
 
+    /// Strong-reference count of this task's address space, WITHOUT adding
+    /// a reference. `address_space_arc()` clones the Arc, so a count taken
+    /// through it is inflated by the temporary — a forked child (sole
+    /// owner of its copied mm) reads 2 and looks non-last, which used to
+    /// skip the exit-time shm detach and leak one nattch per forked
+    /// child inheriting a shm VMA (LTP shmat01).
+    pub fn address_space_strong_count(&self) -> Option<usize> {
+        self.address_space
+            .as_ref()
+            .map(|a| alloc::sync::Arc::strong_count(a))
+    }
+
     /// Get active address space (for kernel threads, this is borrowed address space)
     pub fn active_mm(&self) -> Option<&AddressSpace> {
         if let Some(ref aspace) = self.address_space {
