@@ -1565,7 +1565,7 @@ pub fn ext4_fallocate_on(
                     fs, &mut ext4_inode, needed_blocks, current_blocks, &allocator, goal_group,
                 )
             } else {
-                file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks)
+                file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks, current_blocks)
             };
             if let Err(e) = alloc_res {
                 // The allocators mark blocks used in the on-disk bitmap as
@@ -1813,7 +1813,7 @@ fn append_dir_block(
 
     // First allocate the block in the inode's extent tree/indirect blocks
     // This will give us the physical block number
-    file::allocate_blocks_for_file(fs, &mut parent_inode, new_block_index + 1)?;
+    file::allocate_blocks_for_file(fs, &mut parent_inode, new_block_index + 1, new_block_index)?;
 
     // Now get the actual block number that was allocated
     let new_block = parent_inode.get_data_block(fs, new_block_index)?;

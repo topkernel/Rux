@@ -607,9 +607,21 @@ pub fn ext4_file_write(
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
     let sectors_per_block = (fs.block_size / 512) as u64;
 
-    // If new blocks are needed, allocate them
+    // If new blocks are needed, allocate them — but ONLY from the first
+    // block this write touches. Pre-allocating [current_blocks,
+    // needed_blocks) for a sparse write (lseek past EOF + small write,
+    // Linux's O_LARGEFILE test writes 7 bytes at 4 GiB) materialized every
+    // hole block: on a disk smaller than the target offset that exhausts
+    // every free block zeroing data the writer never asked for, burns
+    // minutes of synchronous I/O under TCG (the r9 sweep's openat02 30s
+    // timeout + livelock), and leaves the filesystem full for every
+    // later test (294 TBROK ENOSPC mkdtemp failures). Holes in the skipped
+    // range stay holes; the per-block loop below allocates a missing
+    // block on first touch, and reads of holes zero-fill.
     if needed_blocks > current_blocks {
-        allocate_blocks_for_file(fs, inode, needed_blocks)?;
+        let first_touched = offset / block_size;
+        allocate_blocks_for_file(fs, inode, needed_blocks,
+                                 core::cmp::max(current_blocks, first_touched))?;
     }
 
     // Write data
@@ -774,23 +786,25 @@ pub fn allocate_blocks_for_file(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &mut crate::fs::ext4::inode::Ext4Inode,
     needed_blocks: u64,
+    from_block: u64,
 ) -> Result<(), i32> {
     let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
     let block_size = fs.block_size as u64;
     let current_blocks = (inode.get_size() + block_size - 1) / block_size;
+    let start_block = core::cmp::max(from_block, current_blocks).min(needed_blocks);
     let sectors_per_block = (fs.block_size / 512) as u64;
     let goal_group = (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
 
     // Check if file uses extents
     if inode.has_extent() {
-        return allocate_blocks_with_extents(fs, inode, needed_blocks, current_blocks, &allocator, goal_group);
+        return allocate_blocks_with_extents(fs, inode, needed_blocks, start_block, &allocator, goal_group);
     }
 
     // Allocate new blocks (indirect block mode). Run-based like the
     // extents path: one bitmap pass per contiguous run instead of one per
     // block — a 300MB fallocate (LTP tst_acquire_device) is 76800 bitmap
     // read/write/desc/superblock round trips otherwise.
-    let mut i = current_blocks;
+    let mut i = start_block;
     while i < needed_blocks {
         let want = core::cmp::min(needed_blocks - i, 0x7FFF) as u32;
         let (run_start, run_len) = match allocator.alloc_block_run(goal_group, want) {
