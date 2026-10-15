@@ -207,20 +207,27 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
                     core::sync::atomic::AtomicUsize::new(0);
                 print_it = ENO_DEV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
             } else {
-                // ld.so directory probes (".so" suffix) never enter the
-                // dedup list — they would fill the budget before the
-                // interesting runtime failures (hilogd/samgr) appear.
+                // ".so" misses get their own budget: the ld.so probe
+                // storm would otherwise starve the runtime-failure
+                // budget, but a lib missing from EVERY directory is the
+                // dlopen-failure signal (bootanimation retry loops).
+                // The BASE name dedupes the ~30 directory probes per
+                // missing lib to one line.
                 let is_lib_probe = full_path.ends_with(".so")
                     || full_path.ends_with(".z.so")
                     || full_path.ends_with(".so.1");
-                if !is_lib_probe {
-                    let mut seen = ENO_SEEN.lock_irqsave();
-                    let list = seen.get_or_insert_with(alloc::vec::Vec::new);
-                    if list.len() < 96 {
-                        if !list.iter().any(|p| p.as_str() == full_path.as_str()) {
-                            list.push(alloc::string::String::from(full_path.as_str()));
-                            print_it = true;
-                        }
+                let mut seen = ENO_SEEN.lock_irqsave();
+                let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+                let cap = if is_lib_probe { 140 } else { 96 };
+                if list.len() < cap {
+                    let key = if is_lib_probe {
+                        alloc::string::String::from(full_path.rsplit('/').next().unwrap_or(""))
+                    } else {
+                        full_path.clone()
+                    };
+                    if !list.iter().any(|p| p.as_str() == key) {
+                        list.push(key);
+                        print_it = true;
                     }
                 }
             }
