@@ -431,6 +431,37 @@ pub fn sys_fstat(args: SyscallArgs) -> i64 {
 /// - args[1]: pathname - file path
 /// - args[2]: statbuf - stat structure buffer
 /// - args[3]: flags - flags (AT_SYMLINK_NOFOLLOW, etc.)
+
+/// Parse a "/proc/[self|<pid>]/fd/<n>" magic-link path (OH bring-up:
+/// musl's fchmodat(AT_SYMLINK_NOFOLLOW) fallback stats and chmods
+/// exactly this path — see the sys_fstatat/sys_fchmodat shortcuts).
+/// Returns (pid, fd) when the path matches and the fd is open in that
+/// pid's table.
+fn proc_fd_magic(path: &str) -> Option<(u32, u32)> {
+    let rest = path.strip_prefix("/proc/")?;
+    let (pid_s, fd_s) = rest.split_once("/fd/")?;
+    if fd_s.is_empty() || !fd_s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let pid: u32 = if pid_s == "self" {
+        unsafe { crate::process::current_pid() }
+    } else if !pid_s.is_empty() && pid_s.bytes().all(|b| b.is_ascii_digit()) {
+        pid_s.parse().ok()?
+    } else {
+        return None;
+    };
+    let fd: u32 = fd_s.parse().ok()?;
+    let open = crate::process::find_task_by_pid(pid)
+        .or_else(|| {
+            use crate::process::{current_pid, current_task};
+            if current_pid() == pid { current_task() } else { None }
+        })
+        .and_then(|t| t.try_fdtable())
+        .map(|ft| ft.get_file(fd as usize).is_some())
+        .unwrap_or(false);
+    if open { Some((pid, fd)) } else { None }
+}
+
 pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     use crate::fs::{Stat, stat_file_by_path};
 
@@ -444,6 +475,38 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     }
     if !crate::arch::uaccess::access_ok(statbuf as usize, crate::fs::user_stat_size()) {
         return -(errno::EFAULT as i64);
+    }
+
+    // Magic-link shortcut: stat("/proc/[self|<pid>]/fd/<n>") stats the
+    // file the fd refers to (Linux open traversal of the procfs fd link).
+    // musl's fchmodat(NO-FOLLOW) fallback stats this path after its
+    // O_PATH open; walking the synthetic symlink re-resolves a target
+    // string that socket fds cannot express. (Non-chrooted tasks only,
+    // like the other global /proc shortcuts.)
+    if !crate::fs::vfs::chrooted() {
+        let mut probe = [0u8; 64];
+        if !pathname_ptr.is_null()
+            && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe.as_mut_ptr(), pathname_ptr, probe.len())
+            } == 0
+        {
+            let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                if let Some((_, fd)) = proc_fd_magic(p) {
+                    let mut stat = Stat::new();
+                    match crate::fs::file_stat(fd as usize, &mut stat) {
+                        Ok(()) => {
+                            let r = crate::fs::copy_stat_to_user(
+                                statbuf as *mut u8, &stat);
+                            return if r != 0 { -(errno::EFAULT as i64) } else { 0 };
+                        }
+                        Err(e) => return e as i64,
+                    }
+                }
+            }
+        }
     }
 
     // Validate flags: AT_SYMLINK_NOFOLLOW (0x100), AT_EMPTY_PATH (0x1000)
@@ -1983,6 +2046,28 @@ pub fn sys_fchmodat(args: SyscallArgs) -> i64 {
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let mode = args[2] as u32;
+
+    // Magic-link shortcut (see sys_fstatat): chmod("/proc/*/fd/<n>")
+    // chmods the file the fd refers to.
+    if !crate::fs::vfs::chrooted() {
+        let mut probe = [0u8; 64];
+        if !pathname_ptr.is_null()
+            && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe.as_mut_ptr(), pathname_ptr, probe.len())
+            } == 0
+        {
+            let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                if let Some((_, fd)) = proc_fd_magic(p) {
+                    return sys_fchmod([
+                        fd as u64, mode as u64, 0, 0, 0, 0,
+                    ]);
+                }
+            }
+        }
+    }
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
