@@ -69,6 +69,22 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
+    // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
+    // loop is only visible when the loaded-each-round libs are shown).
+    if full_path.ends_with(".so") {
+        static SO_TRACE_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = SO_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 600 {
+            crate::pr_info!(
+                "so-open[{}] '{}' (pid {})",
+                n,
+                full_path,
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    }
+
     // Shortcut: /proc/[pid]/fd with O_DIRECTORY. P1 chroot: the string
     // shortcuts below address the GLOBAL /proc namespace — under a chroot
     // without a mounted /proc inside the jail they must NOT leak (they
