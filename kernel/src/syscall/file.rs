@@ -80,12 +80,12 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         // bootanimation ~pid 450+ on this image). The counter only
         // advances for late pids — an unconditional fetch_add let the
         // early storm consume the whole budget again.
-        let n = if pid >= 400 {
+        let n = if pid >= 418 {
             SO_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
         } else {
             SO_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
         };
-        if n < 400 && pid >= 400 {
+        if n < 400 && pid >= 418 {
             crate::pr_info!(
                 "so-open[{}] '{}' (pid {})",
                 n,
