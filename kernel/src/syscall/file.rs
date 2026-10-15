@@ -218,7 +218,7 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
                     || full_path.ends_with(".so.1");
                 let mut seen = ENO_SEEN.lock_irqsave();
                 let list = seen.get_or_insert_with(alloc::vec::Vec::new);
-                let cap = if is_lib_probe { 140 } else { 96 };
+                let cap = if is_lib_probe { 420 } else { 96 };
                 if list.len() < cap {
                     let key = if is_lib_probe {
                         alloc::string::String::from(full_path.rsplit('/').next().unwrap_or(""))
