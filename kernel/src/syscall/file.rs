@@ -472,7 +472,23 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
-        Err(e) => return e as i64,
+        Err(e) => {
+            // OH bring-up: init's service-socket chmod path dies with
+            // ENOTDIR — name the failing call.
+            if e as i32 == -20 {
+                let mut pb = [0u8; 96];
+                let shown = crate::arch::uaccess::strncpy_from_user(
+                    pathname_ptr, pb.len(), &mut pb)
+                    .map(|s| core::str::from_utf8(s).unwrap_or("?"))
+                    .unwrap_or("?");
+                crate::pr_info!(
+                    "fstatat ENOTDIR: dirfd={} path='{}' flags={:#x} pid={}",
+                    dirfd, shown, flags,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+            return e as i64;
+        }
     };
 
     // AT_SYMLINK_NOFOLLOW: don't follow symlinks (for lstat)
