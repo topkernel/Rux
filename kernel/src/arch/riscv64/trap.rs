@@ -826,6 +826,19 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
             "SIGILL-FORENSIC epc-16..+24: {:016x} {:016x} {:016x} {:016x} {:016x}",
             w2[0], w2[1], w2[2], w2[3], w2[4]
         );
+        // SIGILL-FORENSIC full page dump (r9 corruption hunt): 64 rows of
+        // 8 u64s — the whole 4 KiB faulting page, so the exact corruption
+        // shape (splice points, shifted runs) is recoverable host-side.
+        for row in 0..64usize {
+            let mut w8 = [0u64; 8];
+            for (i, w) in w8.iter_mut().enumerate() {
+                *w = core::ptr::read_volatile(p64.add(row * 8 + i));
+            }
+            crate::pr_info!(
+                "FDP{:03x}: {:016x} {:016x} {:016x} {:016x} {:016x} {:016x} {:016x} {:016x}",
+                row, w8[0], w8[1], w8[2], w8[3], w8[4], w8[5], w8[6], w8[7]
+            );
+        }
     }
 }
 
