@@ -79,8 +79,15 @@ pub mod features {
     /// Incompatible features this implementation UNDERSTANDS. Any other
     /// incompat bit means on-disk structures we would misparse — refuse
     /// the mount (Linux does the same for unknown incompat features).
+    /// ENCRYPT is a fs CAPABILITY flag: its presence only means the fs
+    /// supports per-file encryption — unencrypted files (all of them in
+    /// the OH images) read and write identically. Linux mounts such a
+    /// filesystem without complaint; refusing it with ENODEV blocked the
+    /// stock OH userdata partition entirely (mount[11] -19, /data dead,
+    /// the whole OH service mkdir storm failing with err=2/5).
     pub const KNOWN_INCOMPAT: u32 = incompat::FILETYPE | incompat::RECOVER
-        | incompat::EXTENTS | incompat::B64BIT | incompat::FLEX_BG;
+        | incompat::EXTENTS | incompat::B64BIT | incompat::FLEX_BG
+        | incompat::ENCRYPT;
 
     /// Read-only-compat features that are safe for our (write-through,
     /// no-checksum) metadata paths. Everything else — notably BIGALLOC
@@ -95,7 +102,7 @@ pub mod features {
     pub const REJECTED_INCOMPAT: u32 = incompat::COMPRESSION | incompat::JOURNAL_DEV
         | incompat::META_BG | incompat::MMP | incompat::EA_INODE
         | incompat::DIRDATA | incompat::CSUM_SEED | incompat::LARGEDIR
-        | incompat::INLINE_DATA | incompat::ENCRYPT;
+        | incompat::INLINE_DATA;
 
     /// Per-directory flag: directory is htree-indexed (EXT4_INDEX_FL).
     /// Our directory code is linear-scan; READING an indexed directory

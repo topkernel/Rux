@@ -31,6 +31,15 @@ qemu_drive() { # idx file
     printf ' -drive file=%s,if=none,id=ohd%d,format=raw,file.locking=off -device virtio-blk-pci,drive=ohd%d' "$file" "$idx" "$idx"
 }
 
+# userdata: prefer the fresh rw-able image. The stock userdata.img is
+# mkfs'd with metadata_csum + encrypt: Rux ext4 rejects `encrypt`
+# (ENODEV) and metadata_csum forces read-only — either way OH's /data
+# mkdir storm fails (err=2/5) and hilogd/faultloggerd/boot dirs never
+# come up. userdata-rw.img is a blank ext4 (no csum/encrypt/journal);
+# OH populates /data itself on first boot.
+USERDATA="$IMGDIR/userdata-rw.img"
+[ -f "$USERDATA" ] || USERDATA="$IMGDIR/userdata.img"
+
 APPEND="ip=dhcp loglevel=7 console=ttyS0,115200"
 APPEND="$APPEND init=init root=/dev/ram0 rw"
 APPEND="$APPEND ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio"
@@ -40,7 +49,7 @@ APPEND="$APPEND ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrie
 # EXTRA_APPEND (env): appended verbatim (dfx= flags etc).
 APPEND="$APPEND ${EXTRA_APPEND:-}"
 
-DISKS="$(qemu_drive 0 "$IMGDIR/updater.img")$(qemu_drive 1 "$IMGDIR/system.img")$(qemu_drive 2 "$IMGDIR/vendor.img")$(qemu_drive 3 "$IMGDIR/sys_prod.img")$(qemu_drive 4 "$IMGDIR/chip_prod.img")$(qemu_drive 5 "$IMGDIR/userdata.img")"
+DISKS="$(qemu_drive 0 "$IMGDIR/updater.img")$(qemu_drive 1 "$IMGDIR/system.img")$(qemu_drive 2 "$IMGDIR/vendor.img")$(qemu_drive 3 "$IMGDIR/sys_prod.img")$(qemu_drive 4 "$IMGDIR/chip_prod.img")$(qemu_drive 5 "$USERDATA")"
 
 # RAMDISK: prefer the patched copy (adds /etc/ld-musl-x86_64.path, the
 # default-library-path file this image only ships for aarch64 — without
