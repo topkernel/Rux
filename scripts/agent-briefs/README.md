@@ -12,6 +12,11 @@ hand-copying prompts. Current set:
   firmware-BAR handling
 - `s005-coredump.md` — fix BUG-S005 (repeated core-dumping children corrupt
   the parent shell); unlocks the LTP full baseline
+- `oh-display.md` — OH Phase 2 display bring-up: DRM/KMS card0 page-flip
+  chain until the composer renders UI (worktree oh-display)
+- `ltp-max-pass.md` — LTP 1,869-test pass-rate maximization; absorbs the
+  ltp-fix-a slab-allocator line and works the failure families
+  (worktree ltp-fix-b)
 
 To launch on a new machine:
   git worktree add -b feature/<name> /path/to/worktrees/<name> feature/x86-64
