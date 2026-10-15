@@ -599,21 +599,25 @@ impl ProcFSSuperBlock {
             sysctl::generate_msgmnb,
             self.alloc_ino(),
         )));
-        // SysV shm limits — read by LTP shmget03 (shmmni) and shmctl03
-        // (cross-checked against shmctl IPC_INFO values).
-        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+        // SysV shm limits — live and writable: shmget consults shmmax/
+        // shmmni/shmall (LTP shmget02/03), shmctl03 cross-checks IPC_INFO
+        // against the files.
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"shmmax".to_vec(),
             sysctl::generate_shmmax,
+            sysctl::write_shmmax,
             self.alloc_ino(),
         )));
-        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"shmmni".to_vec(),
             sysctl::generate_shmmni,
+            sysctl::write_shmmni,
             self.alloc_ino(),
         )));
-        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"shmall".to_vec(),
             sysctl::generate_shmall,
+            sysctl::write_shmall,
             self.alloc_ino(),
         )));
 

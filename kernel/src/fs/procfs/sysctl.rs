@@ -323,20 +323,55 @@ pub fn generate_threads_max() -> Vec<u8> {
     alloc::format!("31418\n").into_bytes()
 }
 
-/// /proc/sys/kernel/shmmax — max segment size. Mirrors the constant the
-/// shmctl(IPC_INFO) path reports (LTP shmctl03 asserts equality).
+/// /proc/sys/kernel/shmmax — max segment size. Live: the shmget size
+/// check and shmctl(IPC_INFO) both consult it (writable; LTP shmget02
+/// lowers it to 8192, shmctl03 asserts IPC_INFO equality).
 pub fn generate_shmmax() -> Vec<u8> {
-    alloc::format!("{}\n", 256 * 4096u64).into_bytes()
+    alloc::format!("{}\n", crate::ipc::sysv_shm::shm_ctlmax()).into_bytes()
 }
 
-/// /proc/sys/kernel/shmmni — max segments system-wide.
+pub fn write_shmmax(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            crate::ipc::sysv_shm::SHM_CTLMAX.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/kernel/shmmni — max segments system-wide (LTP shmget03 reads
+/// it and creates exactly that many segments).
 pub fn generate_shmmni() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::util::IPC_IDS_MAX).into_bytes()
+    alloc::format!("{}\n", crate::ipc::sysv_shm::shm_ctlni()).into_bytes()
 }
 
-/// /proc/sys/kernel/shmall — total shm pages.
+pub fn write_shmmni(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            // The fixed slot table caps the real limit at IPC_IDS_MAX;
+            // clamp so the file never promises more than the kernel has.
+            let capped = v.min(crate::ipc::util::IPC_IDS_MAX as u64);
+            crate::ipc::sysv_shm::SHM_CTLNI.store(capped, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/kernel/shmall — total shm page budget (ENOSPC past it).
 pub fn generate_shmall() -> Vec<u8> {
-    alloc::format!("{}\n", 256 * 256u64).into_bytes()
+    alloc::format!("{}\n", crate::ipc::sysv_shm::shm_ctlall()).into_bytes()
+}
+
+pub fn write_shmall(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            crate::ipc::sysv_shm::SHM_CTLALL.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
 }
 
 /// /proc/sys/fs/mqueue/queues_max — writable POSIX mq count limit.
