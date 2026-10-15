@@ -3615,15 +3615,148 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
 }
 
 /// sys_preadv2 - Read from fd into vectors v2 (NR 286)
+/// RWF_* flag bits accepted by preadv2/pwritev2 (include/linux/rw_hint.h
+/// layout). Unknown bits are EINVAL (Linux vfs_readv/vfs_writev).
+mod rwf {
+    pub const HIPRI: u32 = 0x01;
+    pub const DSYNC: u32 = 0x02;
+    pub const SYNC: u32 = 0x04;
+    pub const NOWAIT: u32 = 0x08;
+    pub const APPEND: u32 = 0x10;
+    pub const VALID: u32 = HIPRI | DSYNC | SYNC | NOWAIT | APPEND;
+}
+
+/// Validate RWF_* flags shared by preadv2/pwritev2. Unsupported or unknown
+/// flag bits -> EOPNOTSUPP (Linux kiocb_set_rw_flags; LTP preadv202/
+/// pwritev202 "flag is invalid" cases pass flags=-1 and expect EOPNOTSUPP).
+fn rwf_check(flags: u32) -> Result<(), i64> {
+    const RWF_VALID: u32 = rwf::VALID;
+    if flags & (!RWF_VALID) != 0 || flags & rwf::HIPRI != 0 {
+        return Err(-(errno::EOPNOTSUPP as i64));
+    }
+    Ok(())
+}
+
+/// Combine the split (pos_l, pos_h) register pair of preadv2/pwritev2 into
+/// the 64-bit offset — Linux pos_from_hilo() semantics: (high << 32) | low.
+/// LO_HI_LONG(-1) arrives as (u64::MAX, 0xFFFFFFFF) and reassembles to -1.
+#[inline]
+fn pos_from_hilo(pos_l: u64, pos_h: u64) -> u64 {
+    ((pos_h & 0xFFFF_FFFF) << 32) | pos_l
+}
+
+/// sys_preadv2 - preadv with per-call flags (NR 286)
+///
+/// Native asm-generic ABI (6 args): (fd, iov, iovcnt, pos_l, pos_h, flags).
+/// The rootfs's musl has no preadv2 wrapper, so LTP's lapi fallback issues
+/// exactly this form (LO_HI_LONG split). Semantics over plain preadv
+/// (LTP preadv201/202/203):
+/// - unknown/unsupported RWF bits and RWF_HIPRI -> EOPNOTSUPP (rwf_check)
+/// - pos == -1: operate at the CURRENT fd position and advance it —
+///   the readv-equivalent mode. Explicit offsets never touch the position.
 pub fn sys_preadv2(args: SyscallArgs) -> i64 {
-    // Same as preadv, ignoring flags
-    crate::syscall::io::sys_preadv(args)
+    let flags = args[5] as u32;
+    if let Err(e) = rwf_check(flags) {
+        return e;
+    }
+    let pos = pos_from_hilo(args[3], args[4]);
+    if pos != u64::MAX {
+        let mut a = args;
+        a[3] = pos;
+        return crate::syscall::io::sys_preadv(a);
+    }
+    // Current-position mode: snapshot the pos, delegate each iov to the
+    // explicit-offset path, then advance the fd position by the total.
+    let fd = args[0] as usize;
+    // SAFETY: read-only fd-table lookup; File methods used are &self.
+    let start = unsafe {
+        match crate::fs::get_file_fd(fd) {
+            Some(f) => f.get_pos(),
+            None => return -(errno::EBADF as i64),
+        }
+    };
+    let mut a = args;
+    a[3] = start;
+    let result = crate::syscall::io::sys_preadv(a);
+    if result > 0 {
+        unsafe {
+            if let Some(f) = crate::fs::get_file_fd(fd) {
+                f.set_pos(start + result as u64);
+            }
+        }
+    }
+    result
 }
 
 /// sys_pwritev2 - Write vectors to fd v2 (NR 287)
+///
+/// Native asm-generic ABI (6 args): (fd, iov, iovcnt, pos_l, pos_h, flags)
+/// — the rootfs's musl lacks pwritev2, so LTP's lapi fallback issues the
+/// LO_HI_LONG split form. Semantics over plain pwritev (LTP pwritev201/202):
+/// - unknown/unsupported RWF bits and RWF_HIPRI -> EOPNOTSUPP (rwf_check)
+/// - RWF_APPEND: write at the CURRENT END of file regardless of the passed
+///   offset (POSIX O_APPEND semantics forced per-call)
+/// - pos == -1: writev-equivalent — operate at (and advance) the current
+///   fd position. Explicit offsets never touch the position.
 pub fn sys_pwritev2(args: SyscallArgs) -> i64 {
-    // Same as pwritev, ignoring flags
-    crate::syscall::io::sys_pwritev(args)
+    let flags = args[5] as u32;
+    if let Err(e) = rwf_check(flags) {
+        return e;
+    }
+    let fd = args[0] as usize;
+    let pos = pos_from_hilo(args[3], args[4]);
+
+    // RWF_APPEND: the current file size IS the offset (the passed one is
+    // ignored). Only meaningful for inode-backed files; on inode-less
+    // unseekables (pipe/socket) the flag is inert and the -1/writev path
+    // below applies (Linux only honors APPEND in the regular-file write
+    // iterator).
+    if flags & rwf::APPEND != 0 {
+        // SAFETY: read-only fd-table lookup; inode.size read is atomic.
+        let end = unsafe {
+            match crate::fs::get_file_fd(fd) {
+                Some(f) => {
+                    let inode = &*f.inode.get();
+                    match inode.as_ref() {
+                        Some(i) => Some(i.get_size()),
+                        None => None,
+                    }
+                }
+                None => return -(errno::EBADF as i64),
+            }
+        };
+        if let Some(end) = end {
+            let mut a = args;
+            a[3] = end;
+            return crate::syscall::io::sys_pwritev(a);
+        }
+    }
+
+    if pos != u64::MAX {
+        let mut a = args;
+        a[3] = pos;
+        return crate::syscall::io::sys_pwritev(a);
+    }
+    // Current-position mode (writev-equivalent): snapshot pos, delegate,
+    // advance.
+    // SAFETY: read-only fd-table lookup; File methods used are &self.
+    let start = unsafe {
+        match crate::fs::get_file_fd(fd) {
+            Some(f) => f.get_pos(),
+            None => return -(errno::EBADF as i64),
+        }
+    };
+    let mut a = args;
+    a[3] = start;
+    let result = crate::syscall::io::sys_pwritev(a);
+    if result > 0 {
+        unsafe {
+            if let Some(f) = crate::fs::get_file_fd(fd) {
+                f.set_pos(start + result as u64);
+            }
+        }
+    }
+    result
 }
 
 // ============================================================================

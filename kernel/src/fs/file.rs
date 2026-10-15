@@ -324,6 +324,15 @@ impl File {
     /// Returns -ESPIPE for non-seekable objects (pipes/sockets — Linux
     /// pread on them fails with ESPIPE).
     pub unsafe fn read_at(&self, offset: u64, buf: *mut u8, count: usize) -> isize {
+        // Unseekable objects first (pipes/sockets/fifos: no lseek op, no
+        // inode): explicit-position reads fail ESPIPE BEFORE the f_mode
+        // check — Linux rw_verify_area's FMODE_STREAM rejection (LTP
+        // preadv202 expects ESPIPE on a pipe read end, and pread on an
+        // O_WRONLY pipe write end is also ESPIPE, not EBADF).
+        let inode_opt = &*self.inode.get();
+        if !self.positional_capable() {
+            return -29; // ESPIPE
+        }
         // f_mode enforcement, same as read().
         if self.flags().is_writeonly() {
             return -9; // EBADF
@@ -342,11 +351,6 @@ impl File {
                 return n;
             }
         }
-        let inode_opt = &*self.inode.get();
-        let inode = match inode_opt.as_ref() {
-            Some(i) => i,
-            None => return -9,
-        };
 
         // Disk-backed files (ext4) serve reads through their file ops;
         // inode.read_data only holds the in-memory FileBuffer of mem
@@ -367,30 +371,52 @@ impl File {
 
         let slice = core::slice::from_raw_parts_mut(buf, count);
         // Only seekable (inode-backed) files support offset reads.
-        if inode.ops.is_none() {
-            return -29; // ESPIPE
+        match inode_opt.as_ref() {
+            Some(inode) if inode.ops.is_some() => {
+                let n = inode.read_data(offset as usize, slice);
+                if n > 0 {
+                    // inotify IN_ACCESS on the pread(2) path (P0-4).
+                    crate::fs::inotify::notify_file(
+                        self,
+                        crate::fs::inotify::inotify_events::IN_ACCESS,
+                    );
+                }
+                n as isize
+            }
+            _ => -29, // ESPIPE
         }
-        let n = inode.read_data(offset as usize, slice);
-        if n > 0 {
-            // inotify IN_ACCESS on the pread(2) path (P0-4).
-            crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_ACCESS);
+    }
+
+    /// Can this file serve explicit-position (pread/pwrite) IO? Native
+    /// read_at op, an lseek op (position-swing fallback), or an inode with
+    /// data ops all qualify; pipes/sockets/fifos do not (ESPIPE).
+    fn positional_capable(&self) -> bool {
+        if let Some(ops) = unsafe { *self.ops.get() } {
+            if ops.read_at.is_some() || ops.lseek.is_some() {
+                return true;
+            }
         }
-        n as isize
+        if let Some(inode) = unsafe { &*self.inode.get() }.as_ref() {
+            return inode.ops.is_some();
+        }
+        false
     }
 
     /// Position-invariant write at an explicit offset (pwrite(2) backing).
     ///
     /// O_APPEND is ignored by pwrite per POSIX (the explicit offset wins).
     pub unsafe fn write_at(&self, offset: u64, buf: *const u8, count: usize) -> isize {
-        // f_mode enforcement, same as read().
+        // Unseekable first, before the f_mode check: pwrite on a pipe
+        // (even its O_RDONLY read end) fails ESPIPE, not EBADF — Linux
+        // rw_verify_area's FMODE_STREAM rejection (LTP pwritev202).
+        let inode_opt = &*self.inode.get();
+        if !self.positional_capable() {
+            return -29; // ESPIPE
+        }
+        // f_mode enforcement, same as write().
         if self.flags().is_readonly() {
             return -9; // EBADF
         }
-        let inode_opt = &*self.inode.get();
-        let inode = match inode_opt.as_ref() {
-            Some(i) => i,
-            None => return -9,
-        };
 
         // Disk-backed files (ext4) must write through their file ops;
         // inode.write_data targets the in-memory FileBuffer and would
@@ -406,19 +432,24 @@ impl File {
         }
 
         let slice = core::slice::from_raw_parts(buf, count);
-        if inode.ops.is_none() {
-            return -29; // ESPIPE
+        match inode_opt.as_ref() {
+            Some(inode) if inode.ops.is_some() => {
+                // Serialize concurrent explicit-offset writers like
+                // reg_file_write does (O_APPEND/pos race class, review 5.2).
+                let _write_guard = self.io_lock.guard();
+                let n = inode.write_data(offset as usize, slice);
+                if n > 0 {
+                    // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
+                    // sqlite's journal/WAL writes all go through pwrite.
+                    crate::fs::inotify::notify_file(
+                        self,
+                        crate::fs::inotify::inotify_events::IN_MODIFY,
+                    );
+                }
+                n as isize
+            }
+            _ => -29, // ESPIPE
         }
-        // Serialize concurrent explicit-offset writers like reg_file_write
-        // does (O_APPEND/pos race class, review 5.2).
-        let _write_guard = self.io_lock.guard();
-        let n = inode.write_data(offset as usize, slice);
-        if n > 0 {
-            // inotify IN_MODIFY on the pwrite(2) path (P0-4) — sqlite's
-            // journal/WAL writes all go through pwrite.
-            crate::fs::inotify::notify_file(self, crate::fs::inotify::inotify_events::IN_MODIFY);
-        }
-        n as isize
     }
 
     /// Close file
