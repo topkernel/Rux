@@ -192,16 +192,33 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // OH bring-up: throttled ENOENT trace — the display HDF hosts retry
     // missing files in tight loops and their hilog never reaches the
     // console; the failing path list is the only visibility into what
-    // userspace still lacks.
+    // userspace still lacks. ld.so directory probes would burn the
+    // budget, so: /dev/ paths always print (device nodes are the
+    // bring-up signal), every other DISTINCT path prints once (the
+    // linker search list dedupes to one line per missing library).
     if let Err(e) = &result {
         if *e == -(errno::ENOENT as i32) {
-            static ENO_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            let n = ENO_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if n < 48 || n % 8192 == 0 {
+            static ENO_SEEN: crate::sync::spinlock::Spinlock<
+                Option<alloc::vec::Vec<alloc::string::String>>,
+            > = crate::sync::spinlock::Spinlock::new(None);
+            let mut print_it = false;
+            if full_path.starts_with("/dev/") {
+                static ENO_DEV_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                print_it = ENO_DEV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
+            } else {
+                let mut seen = ENO_SEEN.lock_irqsave();
+                let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+                if list.len() < 96 {
+                    if !list.iter().any(|p| p.as_str() == full_path.as_str()) {
+                        list.push(alloc::string::String::from(full_path.as_str()));
+                        print_it = true;
+                    }
+                }
+            }
+            if print_it {
                 crate::pr_info!(
-                    "open ENOENT #{}: '{}' (pid {})",
-                    n,
+                    "open ENOENT: '{}' (pid {})",
                     full_path,
                     unsafe { crate::process::current_pid() }
                 );
@@ -777,35 +794,61 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
 
     // Generic path: look up the symlink itself (NOFOLLOW) and read its
     // target through the filesystem's readlink op.
-    match crate::fs::vfs::path_lookup(&full_path, crate::fs::vfs::LOOKUP_NOFOLLOW) {
-        Ok(vpath) => {
-            let inode = match vpath.inode {
-                Some(i) => i,
-                None => return -(errno::ENOENT as i64),
-            };
-            if !inode.mode.is_symlink() {
-                return -(errno::EINVAL as i64);
-            }
-            let mut target_buf = [0u8; PATH_MAX];
-            let n = inode.op_readlink(&mut target_buf);
-            if n < 0 {
-                return n as i64;
-            }
-            let n = n as usize;
-            if n > target_buf.len() {
-                return -(errno::ENAMETOOLONG as i64);
-            }
-            let copy_len = n.min(bufsize);
-            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
-            unsafe {
-                if crate::arch::uaccess::copy_to_user(buf, target_buf.as_ptr(), copy_len) != 0 {
-                    return -(errno::EFAULT as i64);
-                }
-            }
-            // Linux truncates to bufsiz and returns the truncated length
-            copy_len as i64
+    let rl_result: Result<i64, i64> = (|| {
+        let vpath = crate::fs::vfs::path_lookup(&full_path, crate::fs::vfs::LOOKUP_NOFOLLOW)
+            .map_err(|e| e as i64)?;
+        let inode = vpath.inode.ok_or(-(errno::ENOENT as i64))?;
+        if !inode.mode.is_symlink() {
+            return Err(-(errno::EINVAL as i64));
         }
-        Err(e) => e as i64,
+        let mut target_buf = [0u8; PATH_MAX];
+        let n = inode.op_readlink(&mut target_buf);
+        if n < 0 {
+            return Err(n as i64);
+        }
+        let n = n as usize;
+        if n > target_buf.len() {
+            return Err(-(errno::ENAMETOOLONG as i64));
+        }
+        let copy_len = n.min(bufsize);
+        // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
+        unsafe {
+            if crate::arch::uaccess::copy_to_user(buf, target_buf.as_ptr(), copy_len) != 0 {
+                return Err(-(errno::EFAULT as i64));
+            }
+        }
+        // Linux truncates to bufsiz and returns the truncated length
+        Ok(copy_len as i64)
+    })();
+    // OH bring-up: throttled readlink-failure trace (HDF devhost probes
+    // its module directory through readlink; hilog never reaches the
+    // console). Distinct paths only, like the ENOENT open trace.
+    if let Err(e) = &rl_result {
+        static RL_SEEN: crate::sync::spinlock::Spinlock<
+            Option<alloc::vec::Vec<alloc::string::String>>,
+        > = crate::sync::spinlock::Spinlock::new(None);
+        let mut print_it = false;
+        {
+            let mut seen = RL_SEEN.lock_irqsave();
+            let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+            if list.len() < 48 && !list.iter().any(|p| p.as_str() == full_path.as_str()) {
+                list.push(alloc::string::String::from(full_path.as_str()));
+                print_it = true;
+            }
+        }
+        if print_it {
+            crate::pr_info!(
+                "readlink fail({}) '{}': not-a-symlink={} (pid {})",
+                e,
+                full_path,
+                *e == -(errno::EINVAL as i64),
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    }
+    match rl_result {
+        Ok(v) => v,
+        Err(e) => e,
     }
 }
 

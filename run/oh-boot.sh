@@ -37,14 +37,21 @@ APPEND="$APPEND ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio
 APPEND="$APPEND ohos.boot.sn=01234567890"
 APPEND="$APPEND ohos.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1@wait,required"
 APPEND="$APPEND ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required"
+# EXTRA_APPEND (env): appended verbatim (dfx= flags etc).
+APPEND="$APPEND ${EXTRA_APPEND:-}"
 
 DISKS="$(qemu_drive 0 "$IMGDIR/updater.img")$(qemu_drive 1 "$IMGDIR/system.img")$(qemu_drive 2 "$IMGDIR/vendor.img")$(qemu_drive 3 "$IMGDIR/sys_prod.img")$(qemu_drive 4 "$IMGDIR/chip_prod.img")$(qemu_drive 5 "$IMGDIR/userdata.img")"
+
+# GDB=1 adds the gdbstub (-s, port 1234) for post-crash or breakpoint work.
+GDBARGS=""
+[ "${GDB:-0}" = "1" ] && GDBARGS="-s"
 
 # shellcheck disable=SC2086
 exec qemu-system-x86_64 \
     -M q35 -accel tcg,thread=multi -cpu max -m 4G -smp 2 -snapshot \
+    $GDBARGS \
     -display none \
-    -device virtio-gpu-pci,xres=720,yres=1280 \
+    -device virtio-gpu-pci,id=gpu0,xres=720,yres=1280 \
     -serial file:"$SERIAL" \
     -monitor unix:"$MON",server=on,wait=off \
     -kernel "$KERNEL" -initrd "$IMGDIR/ramdisk.img" \
