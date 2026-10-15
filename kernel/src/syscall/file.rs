@@ -1354,6 +1354,33 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         None
     };
 
+    // OH bring-up: throttled mount trace — the param service mounts
+    // tmpfs at /dev/__parameters__; a failed mount there stalls every
+    // later param get (samgr/devhost startup).
+    {
+        static MNT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = MNT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 24 {
+            let ret = match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
+                Ok(()) => 0,
+                Err(e) => e,
+            };
+            if ret != 0 || n < 12 {
+                crate::pr_info!(
+                    "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
+                    n,
+                    source,
+                    target,
+                    fs_type_str,
+                    args[3],
+                    ret
+                );
+            }
+            return ret as i64;
+        }
+    }
+
     match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
         Ok(()) => 0,
         Err(e) => e as i64,

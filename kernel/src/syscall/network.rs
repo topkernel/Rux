@@ -990,7 +990,35 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
             Some((sock, nonblock)) => {
                 match crate::net::unix::unix_connect(&sock, &uaddr, nonblock) {
                     Ok(()) => 0,
-                    Err(e) => e as i64,
+                    Err(e) => {
+                        // OH bring-up: throttled unix-connect-failure trace
+                        // — param/hilog clients retry forever against a
+                        // missing node and hilog never reaches console.
+                        static UCONN_SEEN: crate::sync::spinlock::Spinlock<
+                            Option<alloc::vec::Vec<alloc::string::String>>,
+                        > = crate::sync::spinlock::Spinlock::new(None);
+                        let mut print_it = false;
+                        {
+                            let mut seen = UCONN_SEEN.lock_irqsave();
+                            let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+                            if list.len() < 32
+                                && !list.iter().any(|p| p.as_str() == uaddr.key.as_str())
+                            {
+                                list.push(alloc::string::String::from(uaddr.key.as_str()));
+                                print_it = true;
+                            }
+                        }
+                        if print_it {
+                            crate::pr_info!(
+                                "unix connect fail({}) '{}':{} (pid {})",
+                                e,
+                                uaddr.key,
+                                uaddr.key.len(),
+                                unsafe { crate::process::current_pid() }
+                            );
+                        }
+                        e as i64
+                    }
                 }
             }
             None => -(errno::ENOTSOCK as i64),
