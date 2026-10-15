@@ -75,7 +75,11 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         static SO_TRACE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         let n = SO_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 600 {
+        let pid = unsafe { crate::process::current_pid() };
+        // Late-boot services only: the early-service dlopen storm burned
+        // a flat budget before the interesting phase (composer ~pid 420+,
+        // bootanimation ~pid 450+ on this image).
+        if n < 400 && pid >= 400 {
             crate::pr_info!(
                 "so-open[{}] '{}' (pid {})",
                 n,
