@@ -299,13 +299,25 @@ fn load_and_setup_elf(
 
     // Same argv/envp the old inline stack builder provided.
     let argv: Vec<String> = alloc::vec![String::from(init_path)];
-    let envp: Vec<String> = alloc::vec![
+    let mut envp: Vec<String> = alloc::vec![
         String::from("PATH=/bin:/usr/bin:/sbin:/usr/sbin"),
         String::from("HOME=/root"),
         String::from("TERM=linux"),
         String::from("PS1=\x1b[1;32mroot\x1b[0m:\x1b[1;34m${PWD}\x1b[0m# "),
         String::from("ENV=/etc/mrshrc"),
     ];
+    // OH bring-up (x86_64_virt image): init's environment is inherited
+    // by every OH service (SetServiceEnv only ADDS cfg setenvs on top).
+    // The display composer's vendor backend (libdisplay_composer_vendor)
+    // needs libdrm.so, which this image ships only under
+    // /sys_prod/robot/out/lib (the robot/ROS payload's lib tree) — not
+    // in any ld-musl default directory. Handing init an LD_LIBRARY_PATH
+    // that includes it lets the composer devhost resolve libdrm.so.
+    if cmdline::get_param("ohos.boot.hardware").is_some() {
+        envp.push(String::from(
+            "LD_LIBRARY_PATH=/sys_prod/robot/out/lib:/system/lib64:/vendor/lib64",
+        ));
+    }
 
     // do_execve_elf switches this hart's satp to the new (init) address
     // space; capture the kernel root so boot continues on the kernel page
