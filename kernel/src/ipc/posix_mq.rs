@@ -447,12 +447,27 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
         return Err(-errno::EINVAL);
     }
-    let timeout_jiffies = (ts_sec as u64)
-        .saturating_mul(crate::drivers::timer::HZ as u64)
-        .saturating_add(
-            (ts_nsec as u64) * crate::drivers::timer::HZ as u64 / 1_000_000_000,
-        );
-    Ok(Some(crate::drivers::timer::get_jiffies() + timeout_jiffies))
+    // POSIX: the mq_timedsend/mq_timedreceive timeout is an ABSOLUTE
+    // CLOCK_REALTIME deadline, not a relative sleep. The old relative
+    // reading (jiffies + ts) turned the caller's epoch-based absolute
+    // time (~1.7e9 s) into a deadline thousands of years away — the
+    // blocked sender/receiver never woke and mq_timedsend01/recv01 hung
+    // past every watchdog. Convert against the same realtime base
+    // clock_gettime serves: deadline = now_monotonic + (abs - now_real).
+    let (rt_sec, rt_nsec) = crate::syscall::time::realtime_secs_nanos();
+    let delta_ns = (ts_sec as i128) * 1_000_000_000i128 + ts_nsec as i128
+        - ((rt_sec as i128) * 1_000_000_000i128 + rt_nsec as i128);
+    if delta_ns <= 0 {
+        // Absolute time already reached: expire on the first recheck.
+        return Ok(Some(crate::drivers::timer::get_jiffies()));
+    }
+    // Round the wait up to the next jiffy so a sub-jiffy delta still fires.
+    let hz = crate::drivers::timer::HZ as i128;
+    let delta_jiffies = (delta_ns * hz + 1_000_000_000 - 1) / 1_000_000_000;
+    let deadline = crate::drivers::timer::get_jiffies().saturating_add(
+        delta_jiffies.clamp(0, (i64::MAX / 2) as i128) as u64,
+    );
+    Ok(Some(deadline))
 }
 
 /// sys_mq_timedsend — Send a message to a message queue (NR 182)
@@ -905,8 +920,14 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
 /// sys_mq_getsetattr — Get/set message queue attributes (NR 185)
 pub fn sys_mq_getsetattr(args: [u64; 6]) -> i64 {
     let mqdes = args[0] as i32;
-    let attr_ptr = args[1] as *mut MqAttr;
-    let newattr_ptr = args[2] as *const MqAttr;
+    // Argument order is mq_getsetattr(mqdes, NEWattr, OLDattr): the setter
+    // pointer comes FIRST. The previous args[1]/args[2] swap turned every
+    // mq_getattr(fd, &a) into "set flags from &a, copy out nothing" —
+    // callers saw zeroed attributes (mq_curmsgs=0 with a full queue), and
+    // LTP's mq_timedsend01/mq_timedreceive01 cleanup_queue drained nothing,
+    // so the next case's pre-fill blocked forever on the full queue.
+    let newattr_ptr = args[1] as *const MqAttr;
+    let attr_ptr = args[2] as *mut MqAttr;
 
     // Get the MQ from the fd
     let mq = match get_mq_fd(mqdes as usize) {

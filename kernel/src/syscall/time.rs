@@ -28,7 +28,10 @@ fn monotonic_time() -> (u64, u64) {
 
 /// Current CLOCK_REALTIME (monotonic + wall epoch offset) as (secs, nanos).
 /// FIX8: shared by the adjtimex GET path (tx.time) and ADJ_SETOFFSET.
-fn realtime_secs_nanos() -> (i64, u64) {
+/// Also shared with the POSIX-mq absolute-timeout conversion
+/// (kernel/src/ipc/posix_mq.rs), which must interpret the caller's
+/// timespec against the same realtime base clock_gettime serves.
+pub(crate) fn realtime_secs_nanos() -> (i64, u64) {
     let (s, ns) = monotonic_time();
     let total_ns = (s as u128 * 1_000_000_000u128 + ns as u128)
         + wall_epoch_offset_ns() as u128;
