@@ -475,17 +475,27 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         Err(e) => {
             // OH bring-up: init's service-socket chmod path dies with
             // ENOTDIR — name the failing call.
-            if e as i32 == -20 {
-                let mut pb = [0u8; 96];
-                let shown = crate::arch::uaccess::strncpy_from_user(
-                    pathname_ptr, pb.len(), &mut pb)
-                    .map(|s| core::str::from_utf8(s).unwrap_or("?"))
-                    .unwrap_or("?");
-                crate::pr_info!(
-                    "fstatat ENOTDIR: dirfd={} path='{}' flags={:#x} pid={}",
-                    dirfd, shown, flags,
-                    unsafe { crate::process::current_pid() }
-                );
+            {
+                static FSTATAT_ERR_TRACE_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let pid = unsafe { crate::process::current_pid() };
+                let n = if pid >= 300 {
+                    FSTATAT_ERR_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                } else {
+                    FSTATAT_ERR_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
+                };
+                if n < 40 && pid >= 300 {
+                    let mut pb = [0u8; 96];
+                    let shown = crate::arch::uaccess::strncpy_from_user(
+                        pathname_ptr, pb.len(), &mut pb)
+                        .map(|s| core::str::from_utf8(s).unwrap_or("?"))
+                        .unwrap_or("?");
+                    crate::pr_info!(
+                        "fstatat err: dirfd={} path='{}' flags={:#x} ret={} pid={}",
+                        dirfd, shown, flags, e,
+                        pid
+                    );
+                }
             }
             return e as i64;
         }
