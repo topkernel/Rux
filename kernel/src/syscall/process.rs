@@ -140,6 +140,36 @@ fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
 
 /// Read file content from filesystem (ext4 or rootfs)
 fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    // VFS-first (OH Phase 2): the raw-ext4 shortcut below resolves
+    // against the ROOT ext4 superblock only — executables on other
+    // mounts (/vendor/bin/hdf_devhost for every display *_host service)
+    // came back ENOENT even though the exec pre-flight path_lookup
+    // succeeded. Open through the VFS (any mount) and read in chunks.
+    if let Ok(fd) = crate::fs::vfs::file_open(path, 0 /* O_RDONLY */, 0) {
+        let file = unsafe { crate::fs::file::get_file_fd(fd) };
+        if let Some(file) = file {
+            let mut data = alloc::vec::Vec::new();
+            let mut chunk = [0u8; 16384];
+            loop {
+                let n = unsafe { file.read(chunk.as_mut_ptr(), chunk.len()) };
+                if n <= 0 {
+                    break;
+                }
+                data.extend_from_slice(&chunk[..n as usize]);
+                if (n as usize) < chunk.len() {
+                    break;
+                }
+            }
+            // SAFETY: fd came from file_open on the current task's table.
+            let _ = unsafe { crate::fs::file::close_file_fd(fd) };
+            if !data.is_empty() {
+                return Some(data);
+            }
+        } else {
+            // SAFETY: fd came from file_open on the current task's table.
+            let _ = unsafe { crate::fs::file::close_file_fd(fd) };
+        }
+    }
     if crate::fs::ext4::is_mounted() {
         crate::fs::ext4::read_file_from_mounted(path)
     } else {
@@ -2249,7 +2279,22 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                 _ => -(errno::EINVAL as i64),
             }
         }
-        _ => -(errno::EINVAL as i64),
+        _ => {
+            // Bring-up visibility: which unimplemented options callers
+            // actually exercise (throttled — hdf_devhost retries some in
+            // a loop).
+            static UNK_PRCTL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = UNK_PRCTL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 32 {
+                crate::pr_warn!(
+                    "prctl: unimplemented option {} arg2={:#x} (pid {})",
+                    option,
+                    arg2,
+                    crate::process::current_pid()
+                );
+            }
+            -(errno::EINVAL as i64)
+        }
     }
 }
 

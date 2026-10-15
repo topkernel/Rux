@@ -959,8 +959,8 @@ fn get_resources(arg: usize) -> i64 {
 fn get_crtc(arg: usize) -> i64 {
     let Some(mut b) = copy_in::<112>(arg, 112) else { return -14 };
     let mode = current_mode();
-    wru32(&mut b, 8, OBJ_CRTC); // crtc_id
-    wru32(&mut b, 12, 0); // fb_id
+    wru32(&mut b, 12, OBJ_CRTC); // crtc_id
+    wru32(&mut b, 16, 0); // fb_id
     wru32(&mut b, 28, 0); // gamma_size
     wru32(&mut b, 32, 1); // mode_valid
     // SAFETY: mode is a plain struct; the destination range is inside b.
@@ -1012,8 +1012,8 @@ fn get_connector(arg: usize) -> i64 {
     let Some(mut b) = copy_in::<80>(arg, 80) else { return -14 };
     let enc_ptr = rdu64(&b, 0) as usize;
     let modes_ptr = rdu64(&b, 8) as usize;
-    let n_enc = rdu32(&b, 20);
-    let n_modes = rdu32(&b, 12);
+    let n_enc = rdu32(&b, 40);
+    let n_modes = rdu32(&b, 32);
 
     let encoders: [u32; 1] = [OBJ_ENCODER];
     let mode = current_mode();
@@ -1048,18 +1048,18 @@ fn get_connector(arg: usize) -> i64 {
         }
     }
 
-    wru32(&mut b, 12, 1); // count_modes
-    wru32(&mut b, 16, 0); // count_props
-    wru32(&mut b, 20, 1); // count_encoders
-    wru32(&mut b, 24, OBJ_ENCODER); // encoder_id
-    wru32(&mut b, 28, OBJ_CONNECTOR); // connector_id
-    wru32(&mut b, 32, DRM_MODE_CONNECTOR_DSI);
-    wru32(&mut b, 36, 1); // connector_type_id
-    wru32(&mut b, 40, DRM_MODE_CONNECTED);
-    wru32(&mut b, 44, 72); // mm_width
-    wru32(&mut b, 48, 128); // mm_height
-    wru32(&mut b, 52, 0); // subpixel
-    wru32(&mut b, 56, 0); // pad
+    wru32(&mut b, 32, 1); // count_modes
+    wru32(&mut b, 36, 0); // count_props
+    wru32(&mut b, 40, 1); // count_encoders
+    wru32(&mut b, 44, OBJ_ENCODER); // encoder_id
+    wru32(&mut b, 48, OBJ_CONNECTOR); // connector_id
+    wru32(&mut b, 52, DRM_MODE_CONNECTOR_DSI);
+    wru32(&mut b, 56, 1); // connector_type_id
+    wru32(&mut b, 60, DRM_MODE_CONNECTED);
+    wru32(&mut b, 64, 72); // mm_width
+    wru32(&mut b, 68, 128); // mm_height
+    wru32(&mut b, 72, 0); // subpixel
+    wru32(&mut b, 76, 0); // pad
     if !copy_out(arg, &b, 80) {
         return -14;
     }
@@ -1158,6 +1158,17 @@ fn obj_get_properties(arg: usize) -> i64 {
     let Some(props) = props_for_obj(obj_id) else { return -22 };
     let total = props.len();
     let n = count.min(total);
+    static OGP_TRACE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if OGP_TRACE.fetch_add(1, Ordering::Relaxed) < 4 {
+        crate::pr_info!(
+            "drm: obj_getprops obj={} count={} n={} first_id={} props_ptr={:#x}",
+            obj_id,
+            count,
+            n,
+            props.first().map(|p| p.prop_id).unwrap_or(0),
+            props_ptr
+        );
+    }
     if n > 0 && props_ptr != 0 && values_ptr != 0 {
         if !crate::arch::uaccess::access_ok(props_ptr, n * 4)
             || !crate::arch::uaccess::access_ok(values_ptr, n * 8)
@@ -1182,10 +1193,14 @@ fn obj_get_properties(arg: usize) -> i64 {
             }
         }
     }
-    let mut out = [0u8; N];
-    wru32(&mut out, 16, total as u32);
-    wru32(&mut out, 20, obj_id);
-    if !copy_out(arg, &out, N) {
+    // Update ONLY count_props (and echo obj_id) in the caller's struct —
+    // libdrm's two-phase protocol re-issues the ioctl with the same
+    // struct; overwriting the pointer fields with zeros (a fresh reply
+    // buffer did exactly that) made the second call pass NULL arrays.
+    let mut b = b;
+    wru32(&mut b, 16, total as u32);
+    wru32(&mut b, 20, obj_id);
+    if !copy_out(arg, &b, N) {
         return -14;
     }
     0
