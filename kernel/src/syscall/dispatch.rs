@@ -654,7 +654,10 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // OH bring-up: name the call behind any ENOTDIR — the hilogd
     // service-socket chmod fails with errno 20 and no in-handler trace
     // sees it, so decode it here (pathname arg for the *at family).
-    if result == -20 && crate::process::current_pid() >= 300 {
+    if (result == -20 || (result == -2
+            && [53i64, 79, 257, 48, 90].contains(&syscall_no)))
+        && crate::process::current_pid() >= 300
+    {
         static ENOTDIR_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if ENOTDIR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
