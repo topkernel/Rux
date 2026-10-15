@@ -69,6 +69,28 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
+    // OH bring-up: trace O_PATH opens (musl's fchmodat fallback opens
+    // the target O_PATH then fstatat(fd,"",AT_EMPTY_PATH)s it).
+    {
+        const O_PATH_X: u32 = 0x200000;
+        if (flags & O_PATH_X) != 0 {
+            static OPATH_TRACE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let pid = unsafe { crate::process::current_pid() };
+            let n = if pid >= 300 {
+                OPATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            } else {
+                OPATH_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
+            };
+            if n < 20 && pid >= 300 {
+                crate::pr_info!(
+                    "o-path open: '{}' flags={:#x} pid={}",
+                    full_path, flags, pid
+                );
+            }
+        }
+    }
+
     // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
     // loop is only visible when the loaded-each-round libs are shown).
     if full_path.ends_with(".so") {
@@ -464,7 +486,20 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         match crate::fs::file_stat(dirfd as usize, &mut stat) {
             Ok(()) => {}
             // Already-negative errno (see sys_fstat): don't re-negate.
-            Err(e) => return e as i64,
+            Err(e) => {
+                static FSTAT_EP_ERR_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if FSTAT_EP_ERR_N.fetch_add(
+                    1, core::sync::atomic::Ordering::Relaxed) < 20
+                {
+                    crate::pr_info!(
+                        "fstatat empty-path err: dirfd={} flags={:#x} ret={} pid={}",
+                        dirfd, flags, e,
+                        unsafe { crate::process::current_pid() }
+                    );
+                }
+                return e as i64;
+            }
         }
         let result = crate::fs::copy_stat_to_user(statbuf as *mut u8, &stat);
         return if result != 0 { -(errno::EFAULT as i64) } else { 0 };
