@@ -295,6 +295,47 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         return 0;
     }
 
+    // OH bring-up: dump late-boot services' stderr text (capped). The
+    // musl loader's "Error loading shared library X" / "Error relocating"
+    // diagnostics go to fd 2, which init redirects away from the UART
+    // console — without this the exact loader failure (and exit 127) is
+    // invisible on serial. Gate pid >= 418 (late services: hdf_devhost
+    // ~418, render_service ~443, bootanimation later).
+    if fd == 2 {
+        const STDERR_DUMP_N: usize = 200;
+        static STDERR_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let pid = unsafe { crate::process::current_pid() };
+        // Only late pids consume the budget (an unconditional fetch_add
+        // would let the early-boot stderr storm eat it first).
+        let n = if pid >= 418 {
+            STDERR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        } else {
+            STDERR_N.load(core::sync::atomic::Ordering::Relaxed)
+        };
+        if n < STDERR_DUMP_N && pid >= 418 {
+            let len = core::cmp::min(count, 160);
+            let mut kb = [0u8; 160];
+            // SAFETY: buf/count validated by access_ok above; kb is a
+            // local 160-byte buffer and len <= 160.
+            let uncopied = unsafe {
+                crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
+            };
+            if uncopied == 0 {
+                let text = kb[..len]
+                    .iter()
+                    .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
+                    .collect::<alloc::vec::Vec<u8>>();
+                crate::pr_info!(
+                    "stderr[{}] pid {}: {}",
+                    n,
+                    pid,
+                    core::str::from_utf8(&text).unwrap_or("<non-utf8>")
+                );
+            }
+        }
+    }
+
     // SAFETY: get_file_fd returns valid File or None; user pointers validated above.
     unsafe {
         match get_file_fd(fd) {

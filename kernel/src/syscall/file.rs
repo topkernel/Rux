@@ -72,26 +72,30 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
     // loop is only visible when the loaded-each-round libs are shown).
     if full_path.ends_with(".so") {
-        static SO_TRACE_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        let pid = unsafe { crate::process::current_pid() };
-        // Late-boot services only: the early-service dlopen storm burned
-        // a flat budget before the interesting phase (composer ~pid 420+,
-        // bootanimation ~pid 450+ on this image). The counter only
-        // advances for late pids — an unconditional fetch_add let the
-        // early storm consume the whole budget again.
-        let n = if pid >= 418 {
-            SO_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-        } else {
-            SO_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
-        };
-        if n < 400 && pid >= 418 {
-            crate::pr_info!(
-                "so-open[{}] '{}' (pid {})",
-                n,
-                full_path,
-                unsafe { crate::process::current_pid() }
-            );
+        // Per-pid budget: a flat counter let hdf_devhost (~pid 418,
+        // every lib searched across ~15 dirs) consume the whole budget
+        // before render_service (~443) opened its first library. 8
+        // pid-slots x 64 lines each, indexed by pid % 8 (collisions
+        // just share a budget). Late-boot services only (pid >= 418).
+        static SO_SLOT_PID: [core::sync::atomic::AtomicU32; 8] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+        static SO_SLOT_N: [core::sync::atomic::AtomicU32; 8] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+        let pid = unsafe { crate::process::current_pid() } as u32;
+        let slot = (pid % 8) as usize;
+        let slot_pid = SO_SLOT_PID[slot].load(core::sync::atomic::Ordering::Relaxed);
+        if slot_pid != pid && pid >= 418 {
+            // Claim the slot for this pid (last writer wins on races —
+            // this is a diagnostic, approximate is fine).
+            SO_SLOT_PID[slot].store(pid, core::sync::atomic::Ordering::Relaxed);
+            SO_SLOT_N[slot].store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        let claimed = SO_SLOT_PID[slot].load(core::sync::atomic::Ordering::Relaxed);
+        if claimed == pid && pid >= 418 {
+            let n = SO_SLOT_N[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 64 {
+                crate::pr_info!("so-open[{}.{}] '{}' (pid {})", slot, n, full_path, pid);
+            }
         }
     }
 
