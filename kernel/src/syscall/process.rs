@@ -2279,6 +2279,18 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                 _ => -(errno::EINVAL as i64),
             }
         }
+        // PR_SET_VMA (Linux with CONFIG_ANON_VMA_NAME): name an anonymous
+        // VMA — (option, addr, size, PR_SET_VMA_ANON_NAME, name). OH's
+        // userspace names thread stacks/arenas at creation and treats
+        // EINVAL as a failure it retries (bootanimation's thread-creation
+        // loop). Accept and ignore the name (we don't track VMA names).
+        0x5356_4d41 => {
+            const PR_SET_VMA_ANON_NAME: u64 = 0;
+            if arg4 != PR_SET_VMA_ANON_NAME {
+                return -(errno::EINVAL as i64);
+            }
+            0
+        }
         _ => {
             // Bring-up visibility: which unimplemented options callers
             // actually exercise (throttled — hdf_devhost retries some in
