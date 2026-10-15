@@ -1669,11 +1669,24 @@ pub fn unix_setsockopt(
     // faultloggerd) with "Service error 97 ... failed to create service
     // socket". Rux has no LSM: accept and drop the label.
     const SO_SECURITYCONTEXT: i32 = 33;
+    const SO_PASSCRED: i32 = 16;
     if level != SOL_SOCKET {
         return -97; // ENOPROTOOPT for unknown levels
     }
     match optname {
         SO_SECURITYCONTEXT => 0,
+        // SO_PASSCRED (init's second mandatory service-socket option,
+        // init_service_socket.c:81): store the flag — the recvmsg side
+        // attaches creds cmsgs when it is set (shared SocketOptions
+        // field, same as the netlink path).
+        SO_PASSCRED => {
+            let v = match read_i32() {
+                Some(v) => v,
+                None => return -22,
+            };
+            sock.options.lock().passcred = v != 0;
+            0
+        }
         SO_RCVTIMEO | SO_SNDTIMEO => {
             let us = match read_timeval_us() {
                 Some(us) => us,
