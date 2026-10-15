@@ -216,18 +216,53 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
                 let is_lib_probe = full_path.ends_with(".so")
                     || full_path.ends_with(".z.so")
                     || full_path.ends_with(".so.1");
-                let mut seen = ENO_SEEN.lock_irqsave();
-                let list = seen.get_or_insert_with(alloc::vec::Vec::new);
-                let cap = if is_lib_probe { 420 } else { 96 };
-                if list.len() < cap {
-                    let key = if is_lib_probe {
-                        alloc::string::String::from(full_path.rsplit('/').next().unwrap_or(""))
-                    } else {
-                        full_path.clone()
-                    };
-                    if !list.iter().any(|p| p.as_str() == key) {
-                        list.push(key);
-                        print_it = true;
+                if is_lib_probe {
+                    // Basename counter map: print at 1, then every 64
+                    // misses — a dlopen RETRY LOOP shows as "still
+                    // missing" milestones.
+                    static SO_COUNTS: crate::sync::spinlock::Spinlock<
+                        Option<alloc::vec::Vec<(alloc::string::String, u32)>>,
+                    > = crate::sync::spinlock::Spinlock::new(None);
+                    let base = alloc::string::String::from(
+                        full_path.rsplit('/').next().unwrap_or(""),
+                    );
+                    let mut counts = SO_COUNTS.lock_irqsave();
+                    let list = counts.get_or_insert_with(alloc::vec::Vec::new);
+                    if list.len() < 420 {
+                        match list.iter_mut().find(|(n, _)| *n == base) {
+                            Some((_, c)) => {
+                                *c += 1;
+                                if *c % 64 == 0 {
+                                    crate::pr_info!(
+                                        "open ENOENT: still missing '{}' x{} (pid {})",
+                                        base,
+                                        c,
+                                        unsafe { crate::process::current_pid() }
+                                    );
+                                }
+                            }
+                            None => {
+                                crate::pr_info!(
+                                    "open ENOENT: '{}' (pid {})",
+                                    base,
+                                    unsafe { crate::process::current_pid() }
+                                );
+                                list.push((base, 1));
+                            }
+                        }
+                    }
+                } else {
+                    let mut seen = ENO_SEEN.lock_irqsave();
+                    let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+                    if list.len() < 96 {
+                        if !list.iter().any(|p| p.as_str() == full_path.as_str()) {
+                            list.push(alloc::string::String::from(full_path.as_str()));
+                            crate::pr_info!(
+                                "open ENOENT: '{}' (pid {})",
+                                full_path,
+                                unsafe { crate::process::current_pid() }
+                            );
+                        }
                     }
                 }
             }
