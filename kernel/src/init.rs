@@ -314,8 +314,14 @@ fn load_and_setup_elf(
     // in any ld-musl default directory. Handing init an LD_LIBRARY_PATH
     // that includes it lets the composer devhost resolve libdrm.so.
     if cmdline::get_param("ohos.boot.hardware").is_some() {
+        // The image ships only /etc/ld-musl-aarch64.path, so the x86_64
+        // ld-musl never reads a search-path file and falls back to bare
+        // /lib:/usr/local/lib:/usr/lib — every OH directory (and the
+        // robot payload's libdrm.so) would be unsearchable. Replicate
+        // the standard OH ld-musl path here (from the image's aarch64
+        // file) plus the robot lib tree.
         envp.push(String::from(
-            "LD_LIBRARY_PATH=/sys_prod/robot/out/lib:/system/lib64:/vendor/lib64",
+            "LD_LIBRARY_PATH=/sys_prod/robot/out/lib:/system/lib64:/vendor/lib64:/vendor/lib64/chipsetsdk:/vendor/lib64/chipset-sdk:/vendor/lib64/passthrough:/vendor/lib64/passthrough/indirect:/system/lib64/chipset-pub-sdk:/system/lib64/chipset-sdk:/system/lib64/platformsdk:/system/lib64/module:/system/lib64/module/data:/system/lib64/module/multimedia:/system/lib64/module/security:/lib64/platformsdk:/lib64/chipset-pub-sdk:/lib64/chipsetsdk:/lib64/chipset-sdk:/lib64/chipset-sdk-sp:/lib64/llndk:/sys_prod/lib64:/chip_prod/lib64:/chip_prod/lib64/passthrough:/system/lib:/system/lib/ndk:/lib:/usr/local/lib:/usr/lib",
         ));
     }
 
