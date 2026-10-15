@@ -34,6 +34,14 @@ use crate::process::task::Task;
 
 pub const SCRIBBLE_SLOTS: usize = 512;
 
+/// Direct-map heap window that holds heap-allocated Task structs and
+/// kernel stacks (x86_64: phys 0x40000000 + VA_PA_OFFSET, sized by
+/// KERNEL_HEAP_SIZE — 512MB with the OH profile; the old hardcoded
+/// 128MB ceiling silently skipped every task past 0x48000000).
+#[cfg(feature = "x86_64")]
+pub(crate) const HEAP_WINDOW: core::ops::Range<usize> =
+    0xffff_8880_4000_0000..(0xffff_8880_4000_0000 + crate::config::KERNEL_HEAP_SIZE);
+
 const OFF_THREAD: usize = core::mem::offset_of!(Task, thread);
 const OFF_FS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, fs_base);
 const OFF_GS: usize = OFF_THREAD + core::mem::offset_of!(crate::arch::thread::ThreadStruct, gs_base);
@@ -378,7 +386,7 @@ pub fn task_plausible(task: *mut Task) -> bool {
     }
     let a = task as usize;
     let in_kimg = (0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&a);
-    let in_heap = (0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&a);
+    let in_heap = HEAP_WINDOW.contains(&a);
     if !in_kimg && !in_heap {
         return false;
     }
@@ -396,7 +404,7 @@ pub fn task_plausible(task: *mut Task) -> bool {
         if top == 0 || top & 0xF != 0 {
             return false;
         }
-        if !(0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&top)
+        if !HEAP_WINDOW.contains(&top)
             && !(0xffff_ffff_8000_0000..0xffff_ffff_8100_0000).contains(&top)
         {
             return false;
@@ -517,7 +525,7 @@ pub fn switch_window_heal(prev: u64) {
     // state, not a heal witness. Heap tasks only. (Note the direction:
     // kernel-image addresses 0xffffffff8... are numerically ABOVE the
     // direct-map heap prefix 0xffff8880...)
-    if !(0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&prev) {
+    if !HEAP_WINDOW.contains(&(prev as usize)) {
         return;
     }
     static SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -913,7 +921,7 @@ pub fn verify() {
         // never build a user entry frame at their stack tops (their top
         // region holds boot/idle residue like rip=0/cs=8 — the s1 run's
         // false-positive storm).
-        if (0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&(task as usize))
+        if HEAP_WINDOW.contains(&(task as usize))
             && s.armed.load(Ordering::Acquire) != 0
             && unsafe { (*task).has_address_space() }
             // Latch: report each victim once (the kill comes at resume;
@@ -970,7 +978,7 @@ pub fn verify() {
         // one-shot: a corrupted header re-trips every scan and would
         // flood the serial interleave (the s1 lesson).
         #[cfg(feature = "x86_64")]
-        if (0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&(task as usize))
+        if HEAP_WINDOW.contains(&(task as usize))
             && unsafe {
                 let hts = (*task).hung_task_since.load(Ordering::Acquire);
                 let a0 = core::ptr::read_volatile(

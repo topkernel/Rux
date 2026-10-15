@@ -403,13 +403,21 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
         // Option's niche encodes None as 0.
         unsafe { (*task).get_kernel_stack().map_or(0, |p| p as u64) }
     };
-    // Kernel stacks live in the 128MB heap region of the direct map
+    // Kernel stacks live in the kernel heap region of the direct map
     // (VIRTUAL 0xffff8880_40000000 — the physical 0x40000000 base plus
-    // the linear-map prefix). Byte-flipped stack pointers can still land
-    // inside — this catches the coarse corruption classes (null, small
-    // ints, user pointers, text/data addresses, prefix-byte flips).
+    // the linear-map prefix), sized by KERNEL_HEAP_SIZE (512MB for the
+    // OH service storm — see Kernel.toml). The bound MUST track the
+    // configured size: with the old hardcoded 128MB ceiling every stack
+    // allocated past 0x48000000 failed this check, update_rsp0 kept the
+    // PREVIOUS task's TSS.rsp0, and every later user-mode trap entry on
+    // that CPU pushed its frame through the wrong (live) stack — the
+    // poisoned-switch-frame KERNPANIC family and the phantom-run wedges
+    // (composer_host) both trace to this. Byte-flipped stack pointers
+    // can still land inside — this catches the coarse corruption classes
+    // (null, small ints, user pointers, text/data addresses, prefix-byte
+    // flips).
     const HEAP_LO: u64 = 0xffff_8880_4000_0000;
-    const HEAP_HI: u64 = 0xffff_8880_4800_0000;
+    const HEAP_HI: u64 = HEAP_LO + crate::config::KERNEL_HEAP_SIZE as u64;
     if top != 0 && (top < HEAP_LO || top >= HEAP_HI || top & 0xF != 0) {
         use crate::console::putchar_no_lock as putchar;
         const MSG: &[u8] = b"\nR64-BAD-RSP0 task=0x";
