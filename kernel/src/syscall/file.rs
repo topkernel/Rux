@@ -207,12 +207,20 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
                     core::sync::atomic::AtomicUsize::new(0);
                 print_it = ENO_DEV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
             } else {
-                let mut seen = ENO_SEEN.lock_irqsave();
-                let list = seen.get_or_insert_with(alloc::vec::Vec::new);
-                if list.len() < 96 {
-                    if !list.iter().any(|p| p.as_str() == full_path.as_str()) {
-                        list.push(alloc::string::String::from(full_path.as_str()));
-                        print_it = true;
+                // ld.so directory probes (".so" suffix) never enter the
+                // dedup list — they would fill the budget before the
+                // interesting runtime failures (hilogd/samgr) appear.
+                let is_lib_probe = full_path.ends_with(".so")
+                    || full_path.ends_with(".z.so")
+                    || full_path.ends_with(".so.1");
+                if !is_lib_probe {
+                    let mut seen = ENO_SEEN.lock_irqsave();
+                    let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+                    if list.len() < 96 {
+                        if !list.iter().any(|p| p.as_str() == full_path.as_str()) {
+                            list.push(alloc::string::String::from(full_path.as_str()));
+                            print_it = true;
+                        }
                     }
                 }
             }
