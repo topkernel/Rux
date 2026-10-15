@@ -299,16 +299,16 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // (hilog traffic goes to the hilog socket fd — every OH service's
     // diagnostics are invisible on serial without this).
     if count <= 256 && fd != 1 && fd != 2 {
-        const WTRACE_N_MAX: usize = 1200;
+        const WTRACE_N_MAX: usize = 4000;
         static WTRACE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         let pid = unsafe { crate::process::current_pid() };
-        let n = if pid >= 300 {
+        let n = if pid >= 313 {
             WTRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
         } else {
             WTRACE_N.load(core::sync::atomic::Ordering::Relaxed)
         };
-        if n < WTRACE_N_MAX && pid >= 300 {
+        if n < WTRACE_N_MAX && pid >= 313 {
             let len = core::cmp::min(count, 200);
             let mut kb = [0u8; 200];
             // SAFETY: buf/count validated by access_ok above.
@@ -321,8 +321,13 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                     .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
                     .collect::<alloc::vec::Vec<u8>>();
                 if let Ok(t) = core::str::from_utf8(&text) {
-                    // Skip pure-noise payloads (binary counters).
-                    if t.chars().take(24).any(|c| c.is_ascii_alphabetic()) {
+                    // Skip binary hilog frames: require a mostly-printable
+                    // head (text logs start with '<N>[pid=..]' or words).
+                    let head: usize = t.as_bytes().iter()
+                        .take(32)
+                        .filter(|&&b| b.is_ascii_graphic() || b == b' ')
+                        .count();
+                    if head >= 24 {
                         crate::pr_info!("w[{}] fd{} pid {}: {}", n, fd, pid, t);
                     }
                 }
