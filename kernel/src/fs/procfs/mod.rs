@@ -84,11 +84,24 @@ pub(crate) const ATTR_FILE_INO_OFF: u64 = 510;
 pub(crate) fn attr_file_kind_of(ino: u64) -> Option<(u64, u8)> {
     let pid_val = ino / 10000;
     let rem = ino % 10000;
-    if pid::is_valid_pid(pid_val) && rem >= ATTR_FILE_INO_OFF && rem < ATTR_FILE_INO_OFF + 3 {
+    if pid::is_valid_pid(pid_val) && rem >= ATTR_FILE_INO_OFF && rem < ATTR_FILE_INO_OFF + 6 {
         Some((pid_val, (rem - ATTR_FILE_INO_OFF) as u8))
     } else {
         None
     }
+}
+
+/// /proc/[pid]/task subdirectory (thread IDs). The per-tid directories
+/// alias the tid's own PID directory (same ino = tid), so
+/// /proc/self/task/<tid>/attr/<file> resolves through the regular
+/// /proc/[pid] machinery — libselinux addresses attr files through the
+/// task path, not /proc/<pid>.
+pub(crate) const TASK_DIR_INO_OFF: u64 = 620;
+
+/// Is this ino the /proc/[pid]/task subdirectory?
+pub(crate) fn is_task_dir(ino: u64) -> bool {
+    let pid_val = ino / 10000;
+    pid::is_valid_pid(pid_val) && ino % 10000 == TASK_DIR_INO_OFF
 }
 
 /// Is this ino the /proc/[pid]/attr subdirectory?
@@ -130,6 +143,15 @@ pub enum PidFileKind {
     AttrCurrent,
     /// /proc/[pid]/attr/fscreate — file-create label (writable).
     AttrFscreate,
+    /// /proc/[pid]/attr/sockcreate — socket-create label (writable).
+    /// libselinux's setsockcreatecon() writes here before OH init binds
+    /// a service socket; ENOENT aborted every service child that owns a
+    /// socket (hilogd, samgr-adjacent helpers) before exec.
+    AttrSockcreate,
+    /// /proc/[pid]/attr/prev — previous label (read-only, empty).
+    AttrPrev,
+    /// /proc/[pid]/attr/keycreate — keyring-create label (writable).
+    AttrKeycreate,
 }
 
 /// ProcFS node type
@@ -334,7 +356,10 @@ impl ProcFSNode {
                 PidFileKind::Mounts => mounts::generate(),
                 PidFileKind::AttrExec => pid::attr_label_get(pid, true),
                 PidFileKind::AttrCurrent => pid::attr_label_get(pid, false),
-                PidFileKind::AttrFscreate => pid::attr_label_get(pid, true),
+                PidFileKind::AttrFscreate => pid::attr_get(pid, pid::ATTR_FSCREATE),
+                PidFileKind::AttrSockcreate => pid::attr_get(pid, pid::ATTR_SOCKCREATE),
+                PidFileKind::AttrPrev => pid::attr_get(pid, pid::ATTR_PREV),
+                PidFileKind::AttrKeycreate => pid::attr_get(pid, pid::ATTR_KEYCREATE),
                 // Symlinks handled by get_link_target()
                 PidFileKind::Exe | PidFileKind::Cwd => Vec::new(),
             };
@@ -892,8 +917,12 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
         };
         if let Some(pid) = pid::parse_pid(first.as_bytes()) {
             return match components[3] {
-                "exec" | "fscreate" => Some(pid::attr_label_get(pid, true)),
+                "exec" => Some(pid::attr_label_get(pid, true)),
+                "fscreate" => Some(pid::attr_get(pid, pid::ATTR_FSCREATE)),
                 "current" => Some(pid::attr_label_get(pid, false)),
+                "sockcreate" => Some(pid::attr_get(pid, pid::ATTR_SOCKCREATE)),
+                "prev" => Some(pid::attr_get(pid, pid::ATTR_PREV)),
+                "keycreate" => Some(pid::attr_get(pid, pid::ATTR_KEYCREATE)),
                 _ => None,
             };
         }
@@ -1067,6 +1096,11 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                 if name == b"attr" {
                     return Ok(pid_val * 10000 + ATTR_DIR_INO_OFF);
                 }
+                // /proc/[pid]/task — per-thread directory (attr files are
+                // addressed through /proc/self/task/<tid>/attr/...).
+                if name == b"task" {
+                    return Ok(pid_val * 10000 + TASK_DIR_INO_OFF);
+                }
                 // /proc/[pid]/fd/<N> — per-descriptor symlinks.
                 if name.len() <= 3
                     && !name.is_empty()
@@ -1095,9 +1129,23 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
             b"exec" => 0u64,
             b"current" => 1,
             b"fscreate" => 2,
+            b"sockcreate" => 3,
+            b"prev" => 4,
+            b"keycreate" => 5,
             _ => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
         };
         return Ok(pid_val * 10000 + ATTR_FILE_INO_OFF + off);
+    }
+
+    // /proc/[pid]/task directory: a numeric entry is a thread ID; alias
+    // the tid's own PID directory (threads live in the same pid space).
+    if dir.private_data.is_none() && is_task_dir(dir.ino) {
+        if let Some(tid) = pid::parse_pid(name) {
+            if pid::is_valid_pid(tid) {
+                return Ok(tid);
+            }
+        }
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
     let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
@@ -1201,7 +1249,13 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         let node = &*(node_ptr as *const ProcFSNode);
         if matches!(
             node.pid_file_kind,
-            Some(PidFileKind::AttrExec | PidFileKind::AttrCurrent | PidFileKind::AttrFscreate)
+            Some(
+            PidFileKind::AttrExec
+                | PidFileKind::AttrCurrent
+                | PidFileKind::AttrFscreate
+                | PidFileKind::AttrSockcreate
+                | PidFileKind::AttrKeycreate,
+        )
         ) {
             if let Some(pid) = node.pid {
                 let target = if crate::process::current_pid() as u64 == pid {
@@ -1216,6 +1270,26 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
                 }
             }
         }
+    }
+
+    // /proc/[pid]/task directory: plain synthetic directory.
+    if inode.private_data.is_none() && is_task_dir(inode.ino) {
+        stat.st_ino = inode.ino;
+        stat.st_mode = InodeMode::S_IFDIR | 0o555;
+        stat.st_size = 0;
+        stat.st_nlink = 2;
+        stat.st_uid = 0;
+        stat.st_gid = 0;
+        stat.st_rdev = 0;
+        stat.st_blksize = 4096;
+        stat.st_blocks = 0;
+        stat.st_atime = 0;
+        stat.st_atime_nsec = 0;
+        stat.st_mtime = 0;
+        stat.st_mtime_nsec = 0;
+        stat.st_ctime = 0;
+        stat.st_ctime_nsec = 0;
+        return 0;
     }
 
     // /proc/[pid]/attr directory: plain synthetic directory.
@@ -1253,7 +1327,13 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         || node.pid_file_kind == Some(PidFileKind::OomScoreAdj)
         || matches!(
             node.pid_file_kind,
-            Some(PidFileKind::AttrExec | PidFileKind::AttrCurrent | PidFileKind::AttrFscreate)
+            Some(
+            PidFileKind::AttrExec
+                | PidFileKind::AttrCurrent
+                | PidFileKind::AttrFscreate
+                | PidFileKind::AttrSockcreate
+                | PidFileKind::AttrKeycreate,
+        )
         )
     {
         // P1 /proc/sys writable sysctl, /proc/[pid]/oom_score_adj and the
@@ -1434,6 +1514,17 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         return Ok(Arc::new(inode));
     }
 
+    // The /proc/[pid]/task directory: a plain synthetic directory.
+    if parent.private_data.is_none() && pid::is_valid_pid(parent.ino)
+        && name == b"task"
+    {
+        let ino = parent.ino * 10000 + TASK_DIR_INO_OFF;
+        let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+        inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+        inode.ops = Some(&PROCFS_INODE_OPS);
+        return Ok(Arc::new(inode));
+    }
+
     // Parent is the /proc/[pid]/attr directory: build the label file.
     if parent.private_data.is_none() && is_attr_dir(parent.ino) {
         let Some((_, which)) = attr_file_kind_of(ino) else {
@@ -1442,7 +1533,10 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         let kind = match which {
             0 => PidFileKind::AttrExec,
             1 => PidFileKind::AttrCurrent,
-            _ => PidFileKind::AttrFscreate,
+            2 => PidFileKind::AttrFscreate,
+            3 => PidFileKind::AttrSockcreate,
+            4 => PidFileKind::AttrPrev,
+            _ => PidFileKind::AttrKeycreate,
         };
         let proc_node = Arc::new(ProcFSNode {
             name: name.to_vec(),
@@ -1614,11 +1708,24 @@ fn procfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     // context with a trailing NUL; accept the whole buffer.
     if matches!(
         node.pid_file_kind,
-        Some(PidFileKind::AttrExec | PidFileKind::AttrCurrent | PidFileKind::AttrFscreate)
+        Some(
+            PidFileKind::AttrExec
+                | PidFileKind::AttrCurrent
+                | PidFileKind::AttrFscreate
+                | PidFileKind::AttrSockcreate
+                | PidFileKind::AttrKeycreate,
+        )
     ) {
         let pid = node.pid.unwrap_or(0);
-        let is_exec = !matches!(node.pid_file_kind, Some(PidFileKind::AttrCurrent));
-        pid::attr_label_set(pid, is_exec, buf);
+        let kind = match node.pid_file_kind {
+            Some(PidFileKind::AttrExec) => pid::ATTR_EXEC,
+            Some(PidFileKind::AttrCurrent) => pid::ATTR_CURRENT,
+            Some(PidFileKind::AttrFscreate) => pid::ATTR_FSCREATE,
+            Some(PidFileKind::AttrSockcreate) => pid::ATTR_SOCKCREATE,
+            Some(PidFileKind::AttrKeycreate) => pid::ATTR_KEYCREATE,
+            _ => pid::ATTR_EXEC,
+        };
+        pid::attr_set(pid, kind, buf);
         return buf.len() as isize;
     }
 
@@ -1799,12 +1906,37 @@ unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
         return Some(generate_pid_dir_entries(pid));
     }
 
+    // /proc/[pid]/task directory: the thread IDs of the group. Minimal
+    // listing — the leader's tid (task-dir consumers address
+    // /proc/self/task/<tid>/attr/... by name; nothing enumerates it on
+    // the OH boot path).
+    if inode.private_data.is_none() && is_task_dir(inode.ino) {
+        use crate::fs::inode::file_type;
+        let pid_val = inode.ino / 10000;
+        let name = alloc::format!("{}", pid_val).into_bytes();
+        return Some(alloc::vec![crate::fs::inode::VfsDirEntry {
+            ino: pid_val,
+            name,
+            file_type: file_type::DT_DIR,
+        }]);
+    }
+
     // /proc/[pid]/attr directory: three label files.
     if inode.private_data.is_none() && is_attr_dir(inode.ino) {
         use crate::fs::inode::file_type;
         let pid_val = inode.ino / 10000;
         let mut entries = alloc::vec::Vec::new();
-        for (i, name) in [b"exec" as &[u8], b"current", b"fscreate"].iter().enumerate() {
+        for (i, name) in [
+            b"exec" as &[u8],
+            b"current",
+            b"fscreate",
+            b"sockcreate",
+            b"prev",
+            b"keycreate",
+        ]
+        .iter()
+        .enumerate()
+        {
             entries.push(crate::fs::inode::VfsDirEntry {
                 ino: pid_val * 10000 + ATTR_FILE_INO_OFF + i as u64,
                 name: name.to_vec(),

@@ -883,8 +883,17 @@ pub fn generate_oom_score_adj(pid: u64) -> Vec<u8> {
 use alloc::collections::BTreeMap;
 use crate::sync::spinlock::Spinlock;
 
-/// (exec label, current label) per pid.
-static ATTR_LABELS: Spinlock<BTreeMap<u32, (Option<alloc::vec::Vec<u8>>, Option<alloc::vec::Vec<u8>>)>> =
+/// Attr kind indices (match ATTR_FILE_INO_OFF layout in mod.rs).
+pub const ATTR_EXEC: usize = 0;
+pub const ATTR_CURRENT: usize = 1;
+pub const ATTR_FSCREATE: usize = 2;
+pub const ATTR_SOCKCREATE: usize = 3;
+pub const ATTR_PREV: usize = 4;
+pub const ATTR_KEYCREATE: usize = 5;
+
+/// Labels per pid: exec/current/fscreate/sockcreate/keycreate slots
+/// (prev is synthesized as empty — see attr_get).
+static ATTR_LABELS: Spinlock<BTreeMap<u32, [Option<alloc::vec::Vec<u8>>; 6]>> =
     Spinlock::new(BTreeMap::new());
 
 /// Trim NUL/newline separators libselinux appends.
@@ -896,30 +905,36 @@ fn trim_label(buf: &[u8]) -> alloc::vec::Vec<u8> {
     buf[..end].to_vec()
 }
 
-/// Read one label file: exec/current (fscreate mirrors exec's store).
-/// Empty content is valid (Linux: unset → empty read).
-pub fn attr_label_get(pid: u64, exec: bool) -> Vec<u8> {
+/// Read one label slot. Empty content is valid (Linux: unset → empty
+/// read — this exact case is what libselinux probes for).
+pub fn attr_get(pid: u64, kind: usize) -> Vec<u8> {
+    if kind == ATTR_PREV {
+        return Vec::new();
+    }
     let map = ATTR_LABELS.lock_irqsave();
     match map.get(&(pid as u32)) {
-        Some((e, c)) => {
-            if exec {
-                e.clone().unwrap_or_default()
-            } else {
-                c.clone().unwrap_or_default()
-            }
-        }
+        Some(slots) => slots.get(kind).cloned().flatten().unwrap_or_default(),
         None => Vec::new(),
     }
 }
 
-/// Write one label file (procfs_file_write path).
-pub fn attr_label_set(pid: u64, exec: bool, buf: &[u8]) {
+/// Write one label slot (procfs_file_write path).
+pub fn attr_set(pid: u64, kind: usize, buf: &[u8]) {
+    if kind >= 6 {
+        return;
+    }
     let label = trim_label(buf);
     let mut map = ATTR_LABELS.lock_irqsave();
-    let entry = map.entry(pid as u32).or_insert((None, None));
-    if exec {
-        entry.0 = Some(label);
-    } else {
-        entry.1 = Some(label);
-    }
+    let entry = map.entry(pid as u32).or_insert([None, None, None, None, None, None]);
+    entry[kind] = Some(label);
+}
+
+/// Legacy bool-flavored accessor (exec vs current) for existing callers.
+pub fn attr_label_get(pid: u64, exec: bool) -> Vec<u8> {
+    attr_get(pid, if exec { ATTR_EXEC } else { ATTR_CURRENT })
+}
+
+/// Write one label file (procfs_file_write path).
+pub fn attr_label_set(pid: u64, exec: bool, buf: &[u8]) {
+    attr_set(pid, if exec { ATTR_EXEC } else { ATTR_CURRENT }, buf);
 }
