@@ -307,6 +307,19 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         static STDERR_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         let pid = unsafe { crate::process::current_pid() };
+        // Dedupe: a fixed ring of recent (pid, first-8-bytes) keys — the
+        // hilog-adapter and selinux-restorecon loops reprint the same
+        // line forever and would eat the whole budget on the first
+        // service (observed: ueventd's restorecon spam took 34 slots,
+        // the HiLogAdapter retry loop 130+).
+        static DEDUPE: [(core::sync::atomic::AtomicU32, [core::sync::atomic::AtomicU32; 2]);
+            32] =
+            [const {
+                (
+                    core::sync::atomic::AtomicU32::new(0),
+                    [core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0)],
+                )
+            }; 32];
         // Only late pids consume the budget (an unconditional fetch_add
         // would let the early-boot stderr storm eat it first).
         let n = if pid >= 300 {
@@ -327,12 +340,42 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                     .iter()
                     .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
                     .collect::<alloc::vec::Vec<u8>>();
-                crate::pr_info!(
-                    "stderr[{}] pid {}: {}",
-                    n,
-                    pid,
-                    core::str::from_utf8(&text).unwrap_or("<non-utf8>")
-                );
+                // Dedupe key: pid + first 8 bytes of the text.
+                let key1 = pid;
+                let key2 = u32::from_le_bytes([
+                    kb[0], kb[1], kb[2], kb[3],
+                ]);
+                let key3 = u32::from_le_bytes([
+                    kb[4], kb[5], kb[6.min(len)], kb[7.min(len)],
+                ]);
+                let mut dup = false;
+                for slot in DEDUPE.iter() {
+                    if slot.0.load(core::sync::atomic::Ordering::Relaxed) == key1
+                        && slot.1[0].load(core::sync::atomic::Ordering::Relaxed) == key2
+                        && slot.1[1].load(core::sync::atomic::Ordering::Relaxed) == key3
+                    {
+                        dup = true;
+                        break;
+                    }
+                }
+                if !dup {
+                    let di = n % DEDUPE.len();
+                    DEDUPE[di].0.store(key1, core::sync::atomic::Ordering::Relaxed);
+                    DEDUPE[di].1[0].store(key2, core::sync::atomic::Ordering::Relaxed);
+                    DEDUPE[di].1[1].store(key3, core::sync::atomic::Ordering::Relaxed);
+                    crate::pr_info!(
+                        "stderr[{}] pid {}: {}",
+                        n,
+                        pid,
+                        core::str::from_utf8(&text).unwrap_or("<non-utf8>")
+                    );
+                } else {
+                    // Refund the budget slot: dup lines don't consume it.
+                    STDERR_N.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                // Copy failed: refund the slot too.
+                STDERR_N.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
             }
         }
     }
