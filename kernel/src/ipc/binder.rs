@@ -423,7 +423,13 @@ struct BinderAlloc {
 
 impl BinderAlloc {
     fn block_need(data_size: usize, offsets_size: usize, extra_size: usize) -> usize {
-        align8(data_size) + align8(offsets_size) + align8(extra_size)
+        // Linux binder_alloc_new_buf allocates for EVERY transaction,
+        // including all-zero payloads (the block carries data_size=0
+        // metadata; empty parcels are legal — OH's samgrClient
+        // registration path sends one). The old `0 -> reject` rule
+        // failed every such transaction with BR_FAILED_REPLY, so no
+        // service could ever register with samgr.
+        (align8(data_size) + align8(offsets_size) + align8(extra_size)).max(8)
     }
 
     /// binder_alloc_new_buf: sync first-fit from the low end, async from
@@ -436,9 +442,6 @@ impl BinderAlloc {
         is_async: bool,
     ) -> Option<usize> {
         let need = Self::block_need(data_size, offsets_size, extra_size);
-        if need == 0 {
-            return None;
-        }
         if is_async && self.free_async_space < need {
             return None;
         }
