@@ -1574,6 +1574,75 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
             kp_put_hex(regs.rsp);
             crate::console::putchar_no_lock(b'\n');
+            // OH bring-up forensics: dump 16 kernel-stack words at rsp
+            // and walk the frame-pointer chain, raw. When control flow
+            // jumps through a garbage pointer (executed stack garbage,
+            // use-after-free vtable...) this is the only record of what
+            // the stack held at the jump. Words print one per line
+            // ("kp-stk"), frames as "kp-frame".
+            for i in 0..16usize {
+                let addr = regs.rsp as usize + i * 8;
+                // SAFETY: best-effort read of our own kernel stack; a
+                // word past the mapping faults into this same handler's
+                // halt loop (no recovery attempted).
+                let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
+                for &b in b"kp-stk " {
+                    crate::console::putchar_no_lock(b);
+                }
+                kp_put_hex(addr as u64);
+                crate::console::putchar_no_lock(b':');
+                crate::console::putchar_no_lock(b' ');
+                kp_put_hex(v);
+                crate::console::putchar_no_lock(b'\n');
+            }
+            // Frame-pointer walk: [rbp] = next rbp, [rbp+8] = return
+            // address. Stops at the stack top or the first bogus frame.
+            let stack_top = (regs.rsp | 0x3fff) + 1;
+            let mut rbp = regs.rbp;
+            for _ in 0..10 {
+                if rbp & 7 != 0 || rbp + 16 >= stack_top || rbp < regs.rsp {
+                    break;
+                }
+                // SAFETY: bounds-checked reads of the current kernel stack.
+                let (next, ret) = unsafe {
+                    (
+                        core::ptr::read_volatile(rbp as *const u64),
+                        core::ptr::read_volatile((rbp + 8) as *const u64),
+                    )
+                };
+                for &b in b"kp-frame " {
+                    crate::console::putchar_no_lock(b);
+                }
+                kp_put_hex(ret);
+                crate::console::putchar_no_lock(b'\n');
+                if next <= rbp || next >= stack_top {
+                    break;
+                }
+                rbp = next;
+            }
+            // Forensic ring tail: the last 12 completed syscalls before
+            // the crash (pid/nr/a0/ret), oldest first. Identifies the
+            // in-flight syscall for interrupt-time crashes.
+            {
+                use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
+                let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+                let len = SYSCALL_RING.len();
+                for k in (0..12usize).rev() {
+                    let idx = (cur + len - 1 - k) % len;
+                    let e = &SYSCALL_RING[idx];
+                    for &b in b"kp-sys " {
+                        crate::console::putchar_no_lock(b);
+                    }
+                    kp_put_hex(e.pid.load(core::sync::atomic::Ordering::Relaxed) as u64);
+                    crate::console::putchar_no_lock(b' ');
+                    kp_put_hex(e.nr.load(core::sync::atomic::Ordering::Relaxed) as u64);
+                    crate::console::putchar_no_lock(b' ');
+                    kp_put_hex(e.a0.load(core::sync::atomic::Ordering::Relaxed));
+                    crate::console::putchar_no_lock(b' ');
+                    kp_put_hex(e.ret.load(core::sync::atomic::Ordering::Relaxed));
+                    crate::console::putchar_no_lock(b'\n');
+                }
+            }
             // SAFETY: hlt halts until the next interrupt; safe in a halt loop.
             loop {
                 unsafe { core::arch::asm!("hlt") };

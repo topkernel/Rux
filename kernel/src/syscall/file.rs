@@ -189,6 +189,26 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         crate::fs::file_open(&full_path, flags, mode)
     };
 
+    // OH bring-up: throttled ENOENT trace — the display HDF hosts retry
+    // missing files in tight loops and their hilog never reaches the
+    // console; the failing path list is the only visibility into what
+    // userspace still lacks.
+    if let Err(e) = &result {
+        if *e == -(errno::ENOENT as i32) {
+            static ENO_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = ENO_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 48 || n % 8192 == 0 {
+                crate::pr_info!(
+                    "open ENOENT #{}: '{}' (pid {})",
+                    n,
+                    full_path,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+        }
+    }
+
     match result {
         Ok(fd) => {
             if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
