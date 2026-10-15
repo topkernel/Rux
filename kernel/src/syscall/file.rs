@@ -2282,12 +2282,41 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
     // OpenHow is #[repr(C)] with 3 u64 fields = 24 bytes, so read is valid.
     let how: OpenHow = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const OpenHow) };
 
-    // Validate flags: reject O_CREAT/O_EXCL/O_TRUNC for now (simplification)
-    // Actually, just pass through — sys_openat handles these
-    // Validate resolve flags: only accept known bits
+    // Flag and mode validation (Linux build_open_flags, openat2-only
+    // strictness): unknown O_ bits are EINVAL, and a mode with bits
+    // outside 07777 alongside O_CREAT is EINVAL (LTP openat203).
+    {
+        const O_VALID_FLAGS: u64 = 0o3 /*access mode*/
+            | 0o100 /*O_CREAT*/ | 0o200 /*O_EXCL*/ | 0o400 /*O_NOCTTY*/
+            | 0o1000 /*O_TRUNC*/ | 0o2000 /*O_APPEND*/ | 0o4000 /*O_NONBLOCK*/
+            | 0o10000 /*O_DSYNC*/ | 0o20000 /*FASYNC*/ | 0o40000 /*O_DIRECT*/
+            | 0o100000 /*O_LARGEFILE*/ | 0o200000 /*O_DIRECTORY*/
+            | 0o400000 /*O_NOFOLLOW*/ | 0o1000000 /*O_NOATIME*/
+            | 0o2000000 /*O_CLOEXEC*/ | 0o4000000 /*__O_SYNC*/
+            | 0o10000000 /*O_PATH*/ | 0o20000000 /*__O_TMPFILE*/;
+        if how.flags & !O_VALID_FLAGS != 0 {
+            return -(errno::EINVAL as i64);
+        }
+        if (how.flags & 0o100 /*O_CREAT*/) != 0 && (how.mode & !0o7777) != 0 {
+            return -(errno::EINVAL as i64);
+        }
+        // mode must be zero unless O_CREAT/O_TMPFILE is set (open_how
+        // contract; LTP openat203 invalid-flags passes O_RDONLY with
+        // S_IWUSR).
+        if (how.flags & (0o100 /*O_CREAT*/ | 0o20000000 /*__O_TMPFILE*/)) == 0
+            && how.mode != 0
+        {
+            return -(errno::EINVAL as i64);
+        }
+    }
+
+    // Validate resolve flags: only accept known bits (openat2.h values:
+    // Validate resolve flags: only accept known bits (openat2.h values:
+    // NO_MAGICLINKS is 0x02, NO_SYMLINKS is 0x04 — these two were swapped
+    // here before, so each LTP case enforcing one silently got the other).
     const RESOLVE_NO_XDEV: u64 = 0x01;
-    const RESOLVE_NO_SYMLINKS: u64 = 0x02;
-    const RESOLVE_NO_MAGICLINKS: u64 = 0x04;
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x04;
     const RESOLVE_BENEATH: u64 = 0x08;
     const RESOLVE_IN_ROOT: u64 = 0x10;
     const RESOLVE_CACHED: u64 = 0x20;
@@ -2298,15 +2327,175 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // TODO: Implement RESOLVE_* semantics (currently just delegate to openat)
-    let openat_args = [
-        dirfd as u64,
-        pathname_ptr as u64,
-        how.flags,
-        how.mode,
-        0, 0,
-    ];
-    sys_openat(openat_args)
+    // RESOLVE_* semantics. Without any resolve bit openat2 is openat with
+    // explicit args — delegate unchanged. With resolve bits the path is
+    // normalized lexically against the dirfd (or cwd) and each restriction
+    // enforced before the open; the CLEANED path is then opened directly
+    // (IN_ROOT rewrites absolute paths under the dirfd — impossible to
+    // express through a dirfd-relative delegation).
+    if how.resolve & !RESOLVE_CACHED == 0 {
+        let openat_args = [
+            dirfd as u64,
+            pathname_ptr as u64,
+            how.flags,
+            how.mode,
+            0, 0,
+        ];
+        return sys_openat(openat_args);
+    }
+
+    // Copy the pathname (NUL-terminated, capped like PATH_MAX).
+    if pathname_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -(errno::EFAULT as i64);
+    }
+    let mut raw = [0u8; 4096];
+    // SAFETY: pathname_ptr access_ok-checked; read a bounded window and
+    // stop at the first NUL below.
+    unsafe {
+        crate::arch::uaccess::copy_from_user(raw.as_mut_ptr(), pathname_ptr, 4096);
+    }
+    let nul = raw.iter().position(|&b| b == 0).unwrap_or(4096);
+    let user_path = match core::str::from_utf8(&raw[..nul]) {
+        Ok(p) => p,
+        Err(_) => return -(errno::EINVAL as i64),
+    };
+
+    // Resolve the base: dirfd's path (AT_FDCWD → cwd).
+    let base: alloc::string::String = if dirfd == -100 {
+        match crate::sched::current() {
+            Some(t) => unsafe {
+                let cwd = (*t).get_cwd();
+                alloc::string::String::from_utf8_lossy(&cwd).into_owned()
+            },
+            None => return -(errno::ESRCH as i64),
+        }
+    } else {
+        match unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+            Some(f) => f.path(),
+            None => return -(errno::EBADF as i64),
+        }
+    };
+
+    let is_absolute = user_path.starts_with('/');
+    if (how.resolve & RESOLVE_BENEATH) != 0 && is_absolute {
+        return -(errno::EXDEV as i64);
+    }
+
+    // Lexical normalization. An ABSOLUTE path walks from the filesystem
+    // root (the base is only the anchor for relative paths and for
+    // IN_ROOT rewrites) — prepending the dirfd/cwd base to absolute
+    // inputs broke every /proc-based resolve case. depth counts
+    // components pushed past the anchor; ".." at depth 0 escapes
+    // (BENEATH → EXDEV, IN_ROOT → clamp at the anchor).
+    let mut comps: alloc::vec::Vec<&str> = if is_absolute {
+        // RESOLVE_IN_ROOT rewrites absolute paths UNDER the dirfd; every
+        // other resolve mode walks absolute paths from the real root.
+        if (how.resolve & RESOLVE_IN_ROOT) != 0 {
+            base.split('/').filter(|s| !s.is_empty()).collect()
+        } else {
+            alloc::vec::Vec::new()
+        }
+    } else {
+        base.split('/').filter(|s| !s.is_empty()).collect()
+    };
+    let base_depth = comps.len();
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for c in user_path.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                if depth == 0 {
+                    escaped = true;
+                } else {
+                    depth -= 1;
+                    comps.pop();
+                }
+            }
+            _ => {
+                depth += 1;
+                comps.push(c);
+            }
+        }
+    }
+    if escaped {
+        if (how.resolve & RESOLVE_BENEATH) != 0 {
+            return -(errno::EXDEV as i64);
+        }
+        // IN_ROOT: clamped — comps stay at base_depth (nothing popped).
+    }
+
+    let cleaned: alloc::string::String = {
+        let mut s = alloc::string::String::new();
+        for c in &comps {
+            s.push('/');
+            s.push_str(c);
+        }
+        if s.is_empty() { s.push('/'); }
+        s
+    };
+
+    // RESOLVE_NO_SYMLINKS / NO_MAGICLINKS: every component of the cleaned
+    // path must not be a symlink (magiclinks checks only under /proc —
+    // procfs magic links like /proc/self/exe). Prefixes are built from the
+    // comps themselves: for relative paths the base components are already
+    // in comps, for absolute paths comps walk from the root.
+    let no_symlinks = (how.resolve & RESOLVE_NO_SYMLINKS) != 0;
+    let no_magiclinks = (how.resolve & RESOLVE_NO_MAGICLINKS) != 0;
+    if no_symlinks || no_magiclinks {
+        let mut prefix = alloc::string::String::new();
+        for c in comps.iter() {
+            prefix.push('/');
+            prefix.push_str(c);
+            // Our procfs models /proc/self as a directory (Linux presents
+            // it as a magic symlink) — under RESOLVE_NO_MAGICLINKS it must
+            // behave like one (LTP openat202).
+            if no_magiclinks && prefix == "/proc/self" {
+                return -(errno::ELOOP as i64);
+            }
+            let check = no_symlinks
+                || (no_magiclinks && prefix.starts_with("/proc"));
+            if check {
+                let mut st = crate::fs::Stat::default();
+                if crate::fs::vfs::stat_file_by_path_with_flags(
+                    &prefix, &mut st, crate::fs::vfs::LOOKUP_NOFOLLOW,
+                ).is_ok() && (st.st_mode & 0o170000) == 0o120000 {
+                    return -(errno::ELOOP as i64);
+                }
+            }
+        }
+    }
+
+    // RESOLVE_NO_XDEV: the resolved path must stay on the dirfd's
+    // filesystem (st_dev comparison — LTP openat202 crosses from a
+    // tmpdir on the root fs into procfs).
+    if (how.resolve & RESOLVE_NO_XDEV) != 0 {
+        let mut st_base = crate::fs::Stat::default();
+        let mut st_final = crate::fs::Stat::default();
+        let base_ok = crate::fs::vfs::stat_file_by_path(&base, &mut st_base).is_ok();
+        let final_ok = crate::fs::vfs::stat_file_by_path(&cleaned, &mut st_final).is_ok();
+        if base_ok && final_ok && st_base.st_dev != st_final.st_dev {
+            return -(errno::EXDEV as i64);
+        }
+    }
+
+    // Open (and, with O_CREAT, create) under the CLEANED path — resolve
+    // semantics must apply to creation too: LTP openat202 passes
+    // O_RDONLY|O_CREAT with every resolve flag, and IN_ROOT's
+    // "/tmp/<tmpdir>/proc/version" must ENOENT (no intermediate "proc"),
+    // not silently create/resolve the caller's original absolute path.
+    match crate::fs::vfs::file_open(&cleaned, how.flags as u32, how.mode as u32) {
+        Ok(fd) => {
+            if (how.flags as u32 & 0o2000000 /*O_CLOEXEC*/) != 0 {
+                crate::fs::set_cloexec_fd(fd, true);
+            }
+            fd as i64
+        }
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_mknodat - create a filesystem node

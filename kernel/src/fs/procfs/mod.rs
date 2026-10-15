@@ -1153,6 +1153,13 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
 /// ProcFS getattr operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+    // Distinct st_dev for procfs (Linux s_dev of procfs instances): the
+    // root ext4 reports its own fs_id and procfs used to leave st_dev at
+    // 0 — with both filesystems effectively sharing a device id,
+    // RESOLVE_NO_XDEV (openat2 st_dev comparison) and any statfs/dev
+    // based cross-mount logic could never distinguish them (LTP
+    // openat202's resolve-no-xdev case).
+    stat.st_dev = 0x9e90; // "proc" instance id, chosen non-zero and stable
     // PID directory: private_data is None, inode.ino stores the PID
     if inode.private_data.is_none() && pid::is_valid_pid(inode.ino) {
         let pid = inode.ino;
