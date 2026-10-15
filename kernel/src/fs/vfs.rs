@@ -4117,7 +4117,7 @@ pub fn vfs_utimensat_ex(
 /// Synthetic INodeOps for procfs directory shortcuts (e.g. /proc/[pid]/fd/).
 /// pub(crate): procfs reuses it for the /proc/[pid]/fd lookup-layer inode.
 pub(crate) static PROCFS_DIR_OPS: INodeOps = INodeOps {
-    lookup: None,
+    lookup: Some(crate::fs::procfs::procfs_fd_dir_lookup),
     create: None,
     link: None,
     unlink: None,
@@ -4133,7 +4133,7 @@ pub(crate) static PROCFS_DIR_OPS: INodeOps = INodeOps {
     permission: None,
     getattr: None,
     setattr: None,
-    iget: None,
+    iget: Some(crate::fs::procfs::procfs_fd_dir_iget),
     destroy_inode: None,
 };
 

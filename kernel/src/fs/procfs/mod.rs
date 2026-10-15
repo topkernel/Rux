@@ -2085,6 +2085,50 @@ unsafe fn procfs_ns_dir_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i3
 }
 
 /// Synthetic INodeOps for the /proc/[pid]/ns directory (U1c).
+/// Lookup inside /proc/[pid]/fd: a numeric name resolves to the fd's
+/// magic-link ino (pid * 10000 + FD_LINK_INO_OFF + fd). musl's
+/// fchmodat(AT_SYMLINK_NOFOLLOW) fallback stats "/proc/self/fd/<n>" by
+/// PATH — with lookup: None the walk failed ENOTDIR and every
+/// socket-owning OH service child died at its socket chmod.
+/// SAFETY: VFS callback contract; private_data stores the PID.
+pub unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+    let pid_val = match dir.private_data {
+        Some(p) => p as usize as u64,
+        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
+    };
+    if name.is_empty() || name.len() > 3 || !name.iter().all(|b| b.is_ascii_digit()) {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+    let fd: u64 = name.iter().fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
+    // Closed (or out-of-range) fds are ENOENT, like Linux.
+    let open = crate::process::find_task_by_pid(pid_val as u32)
+        .or_else(|| {
+            use crate::process::{current_pid, current_task};
+            if current_pid() as u64 == pid_val { current_task() } else { None }
+        })
+        .and_then(|t| t.try_fdtable())
+        .map(|ft| ft.get_file(fd as usize).is_some())
+        .unwrap_or(false);
+    if !open {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+    Ok(pid_val * 10000 + FD_LINK_INO_OFF + fd)
+}
+
+/// Instantiate the fd magic-link inode (symlink; readlink handled by
+/// procfs_readlink's FD_LINK branch).
+/// SAFETY: VFS callback contract.
+pub unsafe fn procfs_fd_dir_iget(
+    _parent: &Inode,
+    _name: &[u8],
+    ino: Ino,
+) -> Result<Arc<Inode>, i32> {
+    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+    inode.ops = Some(&PROCFS_INODE_OPS);
+    Ok(Arc::new(inode))
+}
+
 static PROCFS_NS_DIR_OPS: INodeOps = INodeOps {
     lookup: Some(procfs_ns_dir_lookup),
     create: None,
