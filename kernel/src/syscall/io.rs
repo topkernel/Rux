@@ -295,6 +295,41 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         return 0;
     }
 
+    // OH bring-up: dump late-boot services' short writes to OTHER fds
+    // (hilog traffic goes to the hilog socket fd — every OH service's
+    // diagnostics are invisible on serial without this).
+    if count <= 256 && fd != 1 && fd != 2 {
+        const WTRACE_N_MAX: usize = 1200;
+        static WTRACE_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let pid = unsafe { crate::process::current_pid() };
+        let n = if pid >= 300 {
+            WTRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        } else {
+            WTRACE_N.load(core::sync::atomic::Ordering::Relaxed)
+        };
+        if n < WTRACE_N_MAX && pid >= 300 {
+            let len = core::cmp::min(count, 200);
+            let mut kb = [0u8; 200];
+            // SAFETY: buf/count validated by access_ok above.
+            let uncopied = unsafe {
+                crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
+            };
+            if uncopied == 0 {
+                let text = kb[..len]
+                    .iter()
+                    .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
+                    .collect::<alloc::vec::Vec<u8>>();
+                if let Ok(t) = core::str::from_utf8(&text) {
+                    // Skip pure-noise payloads (binary counters).
+                    if t.chars().take(24).any(|c| c.is_ascii_alphabetic()) {
+                        crate::pr_info!("w[{}] fd{} pid {}: {}", n, fd, pid, t);
+                    }
+                }
+            }
+        }
+    }
+
     // OH bring-up: dump late-boot services' stderr text (capped). The
     // musl loader's "Error loading shared library X" / "Error relocating"
     // diagnostics go to fd 2, which init redirects away from the UART
