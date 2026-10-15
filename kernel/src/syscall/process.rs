@@ -2285,8 +2285,10 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
         // EINVAL as a failure it retries (bootanimation's thread-creation
         // loop). Accept and ignore the name (we don't track VMA names).
         0x5356_4d41 => {
+            // prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, size, name):
+            // the SUB-OPERATION is arg2 (addr in arg3, size in arg4).
             const PR_SET_VMA_ANON_NAME: u64 = 0;
-            if arg4 != PR_SET_VMA_ANON_NAME {
+            if arg2 != PR_SET_VMA_ANON_NAME {
                 return -(errno::EINVAL as i64);
             }
             0
