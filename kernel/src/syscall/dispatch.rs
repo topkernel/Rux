@@ -651,6 +651,28 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
         .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
 
+    // OH bring-up: name the call behind any ENOTDIR — the hilogd
+    // service-socket chmod fails with errno 20 and no in-handler trace
+    // sees it, so decode it here (pathname arg for the *at family).
+    if result == -20 && crate::process::current_pid() >= 300 {
+        static ENOTDIR_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if ENOTDIR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            let mut pb = [0u8; 96];
+            let path = if [257i64, 48, 79, 263, 264, 53, 54].contains(&syscall_no) && args[1] != 0 {
+                crate::arch::uaccess::strncpy_from_user(
+                    args[1] as *const u8, pb.len(), &mut pb)
+                    .map(|s| core::str::from_utf8(s).unwrap_or("?"))
+                    .unwrap_or("<efault>")
+            } else { "-" };
+            crate::pr_info!(
+                "ENOTDIR: nr={} a0={:#x} path='{}' a2={:#x} pid={}",
+                syscall_no, args[0], path, args[2],
+                crate::process::current_pid()
+            );
+        }
+    }
+
     crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
         crate::process::current_pid(), syscall_no, result,
         if result < 0 { "error" } else { "ok" });
