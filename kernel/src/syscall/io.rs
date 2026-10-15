@@ -299,8 +299,9 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // musl loader's "Error loading shared library X" / "Error relocating"
     // diagnostics go to fd 2, which init redirects away from the UART
     // console — without this the exact loader failure (and exit 127) is
-    // invisible on serial. Gate pid >= 418 (late services: hdf_devhost
-    // ~418, render_service ~443, bootanimation later).
+    // invisible on serial. Gate pid >= 300 (hdf_devmgr ~320, devhosts
+    // ~404+, render_service ~443, bootanimation later); init/ueventd
+    // stderr before that is kmsg-visible anyway.
     if fd == 2 {
         const STDERR_DUMP_N: usize = 200;
         static STDERR_N: core::sync::atomic::AtomicUsize =
@@ -308,12 +309,12 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         let pid = unsafe { crate::process::current_pid() };
         // Only late pids consume the budget (an unconditional fetch_add
         // would let the early-boot stderr storm eat it first).
-        let n = if pid >= 418 {
+        let n = if pid >= 300 {
             STDERR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
         } else {
             STDERR_N.load(core::sync::atomic::Ordering::Relaxed)
         };
-        if n < STDERR_DUMP_N && pid >= 418 {
+        if n < STDERR_DUMP_N && pid >= 300 {
             let len = core::cmp::min(count, 160);
             let mut kb = [0u8; 160];
             // SAFETY: buf/count validated by access_ok above; kb is a

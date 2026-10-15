@@ -706,7 +706,15 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Does not return
 pub fn sys_exit(args: SyscallArgs) -> i64 {
-    let status = args[0] as i32;
+    // Linux ABI (kernel/exit.c): the user code is masked to 8 bits and
+    // pre-shifted into wait-status layout at the syscall boundary —
+    // sys_exit stores `(error_code & 0xff) << 8`. Storing the raw value
+    // made `exit(-1)` indistinguishable from death-by-SIGHUP everywhere
+    // downstream (Rux encodes signal deaths as negative exit codes), so
+    // every OH service exiting with -1 was misreported as a
+    // kernel-origin SIGHUP kill (SIGDEATH sig=1, si_pid=0) and init's
+    // wait4 saw WIFSIGNALED where Linux reports WIFEXITED/255.
+    let status = (((args[0] as u32) & 0xFF) << 8) as i32;
     crate::process::exit::do_exit(status);
     0 // unreachable
 }
@@ -718,7 +726,8 @@ pub fn sys_exit(args: SyscallArgs) -> i64 {
 /// `exit` / return-from-main all come through here — without it a
 /// multi-threaded process kept running after "exit".
 pub fn sys_exit_group(args: SyscallArgs) -> i64 {
-    let status = args[0] as i32;
+    // Same Linux pre-shift as sys_exit (see the comment there).
+    let status = (((args[0] as u32) & 0xFF) << 8) as i32;
     crate::process::exit::do_exit_group(status);
     0 // unreachable
 }

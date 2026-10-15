@@ -199,6 +199,11 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
 
     // SIGKILL and SIGSTOP cannot be caught or ignored
     if signum == Signal::SIGKILL as i32 || signum == Signal::SIGSTOP as i32 {
+        crate::pr_info!(
+            "rt_sigaction EINVAL: signum={} is SIGKILL/SIGSTOP, pid={}",
+            signum,
+            unsafe { crate::process::current_pid() }
+        );
         return -(errno::EINVAL as i64);
     }
 
@@ -213,6 +218,11 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
     unsafe {
         let signal_struct = (*current).signal.as_mut();
         if signal_struct.is_none() {
+            crate::pr_info!(
+                "rt_sigaction EINVAL: no signal_struct, signum={} pid={}",
+                signum,
+                unsafe { crate::process::current_pid() }
+            );
             return -(errno::EINVAL as i64);
         }
         let sig_struct = signal_struct.unwrap();
@@ -288,7 +298,14 @@ let new_action = SigAction {
             };
             match sig_struct.set_action(signum, new_action) {
                 Ok(_) => 0,  // Success
-                Err(_) => -(errno::EINVAL as i64),
+                Err(_) => {
+                    crate::pr_info!(
+                        "rt_sigaction EINVAL: set_action rejected signum={} pid={}",
+                        signum,
+                        unsafe { crate::process::current_pid() }
+                    );
+                    -(errno::EINVAL as i64)
+                }
             }
         } else {
             0  // Success (just query)
