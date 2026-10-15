@@ -93,6 +93,9 @@ struct SemEntry {
     ncnt: AtomicUsize,
     /// Number of processes waiting for value to become zero (sem_op == 0).
     zcnt: AtomicUsize,
+    /// PID of the last process that operated on THIS semaphore (semop or
+    /// SETALL) — semctl(GETPID) returns it (LTP semctl07).
+    pid: AtomicU32,
 }
 
 /// Semaphore set (the IPC object).
@@ -129,6 +132,7 @@ impl SemArray {
                 value: AtomicI32::new(0),
                 ncnt: AtomicUsize::new(0),
                 zcnt: AtomicUsize::new(0),
+                pid: AtomicU32::new(0),
             });
         }
         Self {
@@ -395,6 +399,10 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 let prev;
                 if let Some(ref mut sems) = *entry.inner.sems.lock() {
                     prev = sems[snum].value.swap(val, Ordering::Relaxed);
+                    // SETVAL records the caller as the last operator of
+                    // this semaphore (semctl GETPID; Linux do_semctl SETVAL
+                    // sets sem->pid).
+                    sems[snum].pid.store(get_current_pid(), Ordering::Relaxed);
                 } else {
                     return -(errno::EINVAL as i64);
                 }
@@ -434,7 +442,12 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                         let val = sems[i].value.load(Ordering::Relaxed);
                         // SAFETY: array_ptr was access_ok-validated for nsems*2 bytes above;
                         // put_user is the exception-table copy path (SUM=0 safe).
-                        let _ = unsafe { put_user(array_ptr.add(i), val as u16) };
+                        if !unsafe { put_user(array_ptr.add(i), val as u16) } {
+                            // Unwritable user page (PROT_NONE bad_addr):
+                            // Linux fails the whole semctl with EFAULT
+                            // (LTP semctl03 raw-syscall variant).
+                            return -(errno::EFAULT as i64);
+                        }
                     }
                 }
             }
@@ -460,11 +473,20 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                     for i in 0..nsems {
                         // SAFETY: array_ptr was access_ok-validated for nsems*2 bytes above;
                         // get_user is the exception-table copy path (SUM=0 safe).
-                        let val = unsafe { get_user(array_ptr.add(i)).unwrap_or(0) } as i32;
-                        if val < 0 || val > SEMVMX {
-                            return -(errno::ERANGE as i64);
+                        match unsafe { get_user(array_ptr.add(i)) } {
+                            Some(v) => {
+                                let val = v as i32;
+                                if val < 0 || val > SEMVMX {
+                                    return -(errno::ERANGE as i64);
+                                }
+                                sems[i].value.store(val, Ordering::Relaxed);
+                                // SETALL records the caller as the last operator
+                                // of every semaphore (semctl GETPID).
+                                sems[i].pid.store(get_current_pid(), Ordering::Relaxed);
+                            }
+                            // Unreadable user page: EFAULT (LTP semctl03).
+                            None => return -(errno::EFAULT as i64),
                         }
-                        sems[i].value.store(val, Ordering::Relaxed);
                     }
                 }
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
@@ -477,13 +499,24 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
         }
         GETPID => {
             // R32 (NEW-4): Linux requires S_IRUGO for GETPID — was missing.
+            if semnum < 0 {
+                return -(errno::EINVAL as i64);
+            }
             let idx2 = match SEM_IDS.find_with_perms(semid, 0o4) {
                 Ok(i) => i,
                 Err(e) => return e as i64,
             };
             let slots = SEM_IDS.slots.lock();
             if let Some(ref entry) = slots[idx2] {
-                return entry.inner.sem_padid.load(Ordering::Relaxed) as i64;
+                let snum = semnum as usize;
+                if snum >= entry.inner.nsems() {
+                    return -(errno::EINVAL as i64);
+                }
+                // PID of the last process that operated on THIS semaphore
+                // (Linux returns sems[semnum].pid; semctl07).
+                if let Some(ref sems) = *entry.inner.sems.lock() {
+                    return sems[snum].pid.load(Ordering::Relaxed) as i64;
+                }
             }
             return -(errno::EINVAL as i64);
         }
@@ -1136,8 +1169,12 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
         // Third pass: apply all atomically
         // Save original values for rollback if SEM_UNDO adjustment exceeds SEMAEM.
         let orig_vals: alloc::vec::Vec<i32> = sops.iter().map(|s| sems[s.sem_num as usize].value.load(Ordering::Relaxed)).collect();
+        let caller_pid = get_current_pid();
         for (i, &new_val) in new_vals.iter().enumerate() {
             sems[sops[i].sem_num as usize].value.store(new_val, Ordering::Relaxed);
+            // Each operated semaphore records the caller as its last
+            // operator (semctl GETPID; Linux perform_atomic_semop).
+            sems[sops[i].sem_num as usize].pid.store(caller_pid, Ordering::Relaxed);
         }
 
         // Record SEM_UNDO adjustments for current process
