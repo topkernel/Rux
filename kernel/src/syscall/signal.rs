@@ -175,11 +175,25 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
 
     // Validate sigsetsize
     if sigsetsize != 8 {
+        // OH bring-up: devhost services die right after an rt_sigaction
+        // EINVAL — name the rejected call so the offending signum is
+        // visible on the console.
+        crate::pr_info!(
+            "rt_sigaction EINVAL: signum={} sigsetsize={} pid={}",
+            signum,
+            sigsetsize,
+            unsafe { crate::process::current_pid() }
+        );
         return -(errno::EINVAL as i64);
     }
 
     // Validate signal number
     if signum < 1 || signum > 64 {
+        crate::pr_info!(
+            "rt_sigaction EINVAL: signum={} pid={}",
+            signum,
+            unsafe { crate::process::current_pid() }
+        );
         return -(errno::EINVAL as i64);
     }
 

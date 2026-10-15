@@ -1059,6 +1059,18 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
         // child could observe the orphaning).
         let pdeath = (*child).pdeath_signal;
         if pdeath != 0 {
+            // OH bring-up forensics: the *_host services all die of a
+            // kernel-origin SIGHUP; this print names pdeathsig as the
+            // source (or rules it out) directly on the console.
+            static PDEATH_TRACE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PDEATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+                crate::pr_info!(
+                    "pdeath: pid {} tgid {} gets sig {} (parent pid {} tgid {} dying)",
+                    (*child).pid(), (*child).tgid(), pdeath,
+                    (*dying).pid(), (*dying).tgid()
+                );
+            }
             let _ = crate::signal::send_signal((*child).pid(), pdeath as i32);
         }
 

@@ -2071,6 +2071,7 @@ unsafe fn send_signal_locked_info(
     if sig == Signal::SIGKILL as i32
         || sig == Signal::SIGTERM as i32
         || sig == Signal::SIGSEGV as i32
+        || sig == Signal::SIGHUP as i32
     {
         static KILLTRACE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -2091,6 +2092,7 @@ unsafe fn send_signal_locked_info(
                 let watched = t_str.starts_with("gnome-session") || t_str.starts_with("ls");
                 let group_teardown = same_group && sig == Signal::SIGKILL as i32;
                 let interesting = sig == Signal::SIGTERM as i32
+                    || sig == Signal::SIGHUP as i32
                     || (sig == Signal::SIGKILL as i32 && !same_group)
                     || watched;
                 if interesting
