@@ -230,12 +230,28 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
             // (0xffffffff80200000..0xffffffff80690000), so no victim frame
             // ever matched and every report showed only the scanner's own
             // backtrace.
+            // The text-range symbols differ per arch link script:
+            // x86_64 defines __stext/__etext, riscv64 _stext/_etext.
+            #[cfg(feature = "x86_64")]
             extern "C" {
                 static __stext: u8;
                 static __etext: u8;
             }
-            let lo = core::ptr::addr_of!(__stext) as u64;
-            let hi = core::ptr::addr_of!(__etext) as u64;
+            #[cfg(not(feature = "x86_64"))]
+            extern "C" {
+                static _stext: u8;
+                static _etext: u8;
+            }
+            #[cfg(feature = "x86_64")]
+            let (lo, hi) = (
+                core::ptr::addr_of!(__stext) as u64,
+                core::ptr::addr_of!(__etext) as u64,
+            );
+            #[cfg(not(feature = "x86_64"))]
+            let (lo, hi) = (
+                core::ptr::addr_of!(_stext) as u64,
+                core::ptr::addr_of!(_etext) as u64,
+            );
             for k in 0..80 {
                 // SAFETY: diagnostic read within the task's own kernel
                 // stack pages (the Task exists and pins them).

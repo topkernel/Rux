@@ -655,14 +655,14 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // service-socket chmod fails with errno 20 and no in-handler trace
     // sees it, so decode it here (pathname arg for the *at family).
     if (result == -20 || (result == -2
-            && [53i64, 79, 90].contains(&syscall_no)))
+            && [53i64, 79, 90].contains(&(syscall_no as i64))))
         && crate::process::current_pid() >= 300
     {
         static ENOTDIR_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if ENOTDIR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
             let mut pb = [0u8; 96];
-            let path = if [257i64, 48, 79, 263, 264, 53, 54].contains(&syscall_no) && args[1] != 0 {
+            let path = if [257i64, 48, 79, 263, 264, 53, 54].contains(&(syscall_no as i64)) && args[1] != 0 {
                 crate::arch::uaccess::strncpy_from_user(
                     args[1] as *const u8, pb.len(), &mut pb)
                     .map(|s| core::str::from_utf8(s).unwrap_or("?"))
