@@ -907,14 +907,36 @@ fn trim_label(buf: &[u8]) -> alloc::vec::Vec<u8> {
 
 /// Read one label slot. Empty content is valid (Linux: unset → empty
 /// read — this exact case is what libselinux probes for).
+///
+/// `ATTR_CURRENT` falls back to `ATTR_EXEC` when the user has not
+/// written `current` directly. Linux's `selinux_bprm_set_creds()` does
+/// this implicitly at exec time (copies the stored exec label into the
+/// new task's current label); Rux has no LSM hook to do that, so the
+/// read path has to remember instead. OH's first-stage init calls
+/// setexeccon() then exec()'s them — without this fallback every
+/// service child reads empty from /proc/self/attr/current,
+/// libselinux's getcon() returns "" and the SA gate's `callingSid`
+/// comes back empty, so `Unknown class samgr_class` + `deny_unknown`
+/// still fail closed (the SAMGR side cannot recover a SID it never
+/// sees). Explicit writes to current (Some(empty) after a clear) win
+/// over the fallback — only the unset slot triggers it.
 pub fn attr_get(pid: u64, kind: usize) -> Vec<u8> {
     if kind == ATTR_PREV {
         return Vec::new();
     }
     let map = ATTR_LABELS.lock_irqsave();
-    match map.get(&(pid as u32)) {
-        Some(slots) => slots.get(kind).cloned().flatten().unwrap_or_default(),
-        None => Vec::new(),
+    let slots = match map.get(&(pid as u32)) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let primary = slots.get(kind).cloned().flatten();
+    if kind == ATTR_CURRENT {
+        match primary {
+            Some(v) => v, // explicit current write (incl. empty) wins
+            None => slots.get(ATTR_EXEC).cloned().flatten().unwrap_or_default(),
+        }
+    } else {
+        primary.unwrap_or_default()
     }
 }
 
