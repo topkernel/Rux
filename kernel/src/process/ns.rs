@@ -72,7 +72,14 @@ impl UtsNamespace {
         Self {
             inum,
             hostname: Spinlock::new([0u8; UTS_LEN]),
-            domainname: Spinlock::new([0u8; UTS_LEN]),
+            // Linux init_uts_ns default domainname is "(none)" — an
+            // empty default makes setdomainname-restore fail EINVAL
+            // (LTP setdomainname02's cleanup path warns).
+            domainname: Spinlock::new({
+                let mut d = [0u8; UTS_LEN];
+                d[..6].copy_from_slice(b"(none)");
+                d
+            }),
         }
     }
 

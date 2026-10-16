@@ -590,6 +590,10 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
 
     match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec) {
         Ok(()) => {
+            // The image changed: the parent may no longer setpgid us
+            // (Linux sys_setpgid EACCES after exec; LTP setpgid03).
+            // SAFETY: current is the running task.
+            unsafe { (*current).mark_execed(); }
             if xt_on {
                 crate::pr_info!(
                     "EXECTRACE: OK pid={} path={} dt_jiffies={}",
@@ -1325,9 +1329,15 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
             cred.uid = new_ruid;
             cred.euid = new_euid;
             cred.fsuid = new_euid;
-            // Linux sys_setreuid: the saved uid follows the new euid when
-            // EITHER argument is specified (not just when ruid is set).
-            if ruid != -1 || euid != -1 {
+            // Linux __sys_setreuid: the saved uid follows the new euid
+            // only when ruid was set, OR when euid was set to a value
+            // DIFFERENT from the old real uid ("suid = euid" if
+            // ruid != -1 || (euid != -1 && euid != old->uid)). The old
+            // "either argument" rule updated suid on setreuid(-1, root)
+            // from uid 0 — LTP setreuid02 expects the saved uid to stay
+            // nobody there, and setregid03's setregid(-1, secondary)
+            // wrongly EPERM'd because sgid had followed the wrong egid.
+            if ruid != -1 || (euid != -1 && new_euid != old_ruid) {
                 cred.suid = new_euid;
             }
             // Leaving euid 0 drops all capabilities (Linux commit_creds)
@@ -1390,9 +1400,10 @@ pub fn sys_setregid(args: SyscallArgs) -> i64 {
             cred.gid = new_rgid;
             cred.egid = new_egid;
             cred.fsgid = new_egid;
-            // Linux sys_setregid: the saved gid follows the new egid when
-            // EITHER argument is specified (mirror of setreuid).
-            if rgid != -1 || egid != -1 {
+            // Linux __sys_setregid mirror of setreuid: the saved gid
+            // follows the new egid only when rgid was set, OR when egid
+            // was set to a value DIFFERENT from the old real gid.
+            if rgid != -1 || (egid != -1 && new_egid != old_rgid) {
                 cred.sgid = new_egid;
             }
         }
@@ -1720,12 +1731,19 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
     // so a partial read leaves zero group ids rather than garbage.
     let mut groups = alloc::vec::Vec::new();
     groups.resize(size as usize, 0u32);
+    // SAFETY: copy_from_user is the exception-table copy path; a partial
+    // fault (guarded buffers, bad pointers) MUST surface as EFAULT — the
+    // return value was previously dropped and the syscall silently
+    // installed zero-filled groups (LTP setgroups03's EFAULT case).
     unsafe {
-        crate::arch::uaccess::copy_from_user(
+        if crate::arch::uaccess::copy_from_user(
             groups.as_mut_ptr() as *mut u8,
             list_ptr as *const u8,
             size as usize * 4,
-        );
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     // Store in task credentials
@@ -1753,6 +1771,11 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
     // SAFETY: current is a valid task pointer from sched::current().
     let current_pid = unsafe { (*current).pid() };
 
+    // A negative pgid is EINVAL (LTP setpgid02: setpgid(pid, -1)).
+    if pgid < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     // Resolve target pid
     let target_pid = if target_pid == 0 {
         current_pid as i32
@@ -1767,13 +1790,28 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
         pgid
     };
 
+    // The target process group must exist: a pgid names a process-group
+    // LEADER (a live pid). Joining a nonexistent group is EPERM (LTP
+    // setpgid02's pid_max case).
+    if pgid != target_pid
+        && unsafe { crate::sched::find_task_by_pid(pgid as u32) }.is_null()
+    {
+        return -(errno::EPERM as i64);
+    }
+
     // Cannot set pgid for processes in different sessions
     if target_pid as u32 == current_pid {
         // Setting own pgid
         // SAFETY: current is a valid task pointer from sched::current().
         unsafe {
-            if (*current).sid() != pgid as u32 {
-                // pgid must be in same session (simplified: just check it's valid)
+            // Joining a process group whose LEADER lives in another
+            // session is EPERM (LTP setpgid03: parent joins the
+            // setsid()'d child's group).
+            if pgid as u32 != current_pid {
+                let leader = crate::sched::find_task_by_pid(pgid as u32);
+                if leader.is_null() || (*leader).sid() != (*current).sid() {
+                    return -(errno::EPERM as i64);
+                }
             }
             (*current).set_pgid(pgid as u32);
         }
@@ -1793,6 +1831,12 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
             // Target must be in same session
             if (*target).sid() != (*current).sid() {
                 return -(errno::EPERM as i64);
+            }
+            // Once the child has exec'd, the parent may no longer move it
+            // between groups (Linux sys_setpgid EACCES; LTP setpgid03's
+            // exec'd-child case).
+            if (*target).has_execed() {
+                return -(errno::EACCES as i64);
             }
             (*target).set_pgid(pgid as u32);
         }
@@ -2628,11 +2672,37 @@ pub fn sys_setfsuid(args: SyscallArgs) -> i64 {
         // return references to the task's credential structure.
         unsafe {
             let old_fsuid = (*task).cred().fsuid;
-            let cred = (*task).cred_mut();
-            if crate::security::capable(crate::security::CAP_SETUID) {
-                cred.fsuid = fsuid;
-            } else if fsuid == cred.uid || fsuid == cred.euid || fsuid == cred.suid {
-                cred.fsuid = fsuid;
+            // (uid_t)-1 leaves fsuid unchanged (verified on Linux 7.0:
+            // setfsuid((uid_t)-1) twice as root returns 0 both times —
+            // LTP setfsuid02; the old code let -1 become the new fsuid).
+            let mut changed_to = None;
+            if fsuid != u32::MAX {
+                let cred = (*task).cred_mut();
+                if crate::security::capable(crate::security::CAP_SETUID) {
+                    cred.fsuid = fsuid;
+                    changed_to = Some(fsuid);
+                } else if fsuid == cred.uid || fsuid == cred.euid || fsuid == cred.suid {
+                    cred.fsuid = fsuid;
+                    changed_to = Some(fsuid);
+                }
+            }
+            // Linux commit_creds CAP_FS_MASK rule: leaving fsuid 0 drops
+            // the filesystem capabilities (CHOWN, DAC_OVERRIDE,
+            // DAC_READ_SEARCH, FOWNER, FSETID — bits 0..4) from the
+            // EFFECTIVE set; returning to fsuid 0 restores them from the
+            // permitted set. Without this, setfsuid(nobody) still opened
+            // root files O_RDWR through CAP_DAC_OVERRIDE (LTP setfsuid04).
+            if let Some(new_fsuid) = changed_to {
+                const CAP_FS_MASK: u64 = 0x1f;
+                let cred = (*task).cred_mut();
+                if old_fsuid == 0 && new_fsuid != 0 {
+                    let eff = cred.cap_effective.bits() & !CAP_FS_MASK;
+                    cred.cap_effective = crate::security::capability::Cap::new(eff);
+                } else if old_fsuid != 0 && new_fsuid == 0 {
+                    let eff = cred.cap_effective.bits()
+                        | (cred.cap_permitted.bits() & CAP_FS_MASK);
+                    cred.cap_effective = crate::security::capability::Cap::new(eff);
+                }
             }
             old_fsuid as i64
         }
@@ -2652,11 +2722,16 @@ pub fn sys_setfsgid(args: SyscallArgs) -> i64 {
         // return references to the task's credential structure.
         unsafe {
             let old_fsgid = (*task).cred().fsgid;
-            let cred = (*task).cred_mut();
-            if crate::security::capable(crate::security::CAP_SETGID) {
-                cred.fsgid = fsgid;
-            } else if fsgid == cred.gid || fsgid == cred.egid || fsgid == cred.sgid {
-                cred.fsgid = fsgid;
+            // (gid_t)-1 leaves fsgid unchanged (LTP setfsgid01: the old
+            // code stored 0xFFFFFFFF and the next call's return, read as
+            // a signed syscall result, surfaced as -1).
+            if fsgid != u32::MAX {
+                let cred = (*task).cred_mut();
+                if crate::security::capable(crate::security::CAP_SETGID) {
+                    cred.fsgid = fsgid;
+                } else if fsgid == cred.gid || fsgid == cred.egid || fsgid == cred.sgid {
+                    cred.fsgid = fsgid;
+                }
             }
             old_fsgid as i64
         }
@@ -3925,8 +4000,14 @@ pub fn sys_sethostname(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    if name_ptr.is_null() || len == 0 || len > 64 {
+    if len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
+    }
+    if name_ptr.is_null() {
+        // Linux fails the strncpy_from_user on NULL with EFAULT (LTP
+        // setdomainname02 / sethostname02 "name == NULL" cases) — not
+        // EINVAL.
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);
@@ -3958,8 +4039,14 @@ pub fn sys_setdomainname(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    if name_ptr.is_null() || len == 0 || len > 64 {
+    if len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
+    }
+    if name_ptr.is_null() {
+        // Linux fails the strncpy_from_user on NULL with EFAULT (LTP
+        // setdomainname02 / sethostname02 "name == NULL" cases) — not
+        // EINVAL.
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);

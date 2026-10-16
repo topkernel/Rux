@@ -753,6 +753,10 @@ pub struct Task {
 
     /// Session ID
     sid: u32,
+    /// Set at the first successful execve: once a process has exec'd, its
+    /// parent may no longer move it between process groups (Linux
+    /// sys_setpgid EACCES; LTP setpgid03).
+    execed: core::sync::atomic::AtomicBool,
 
     /// Children list
     ///
@@ -1141,6 +1145,7 @@ impl Task {
             dumpable: 1, // SUID_DUMP_USER (Linux default)
             pgid: pid,
             sid: pid,
+            execed: core::sync::atomic::AtomicBool::new(false),
             children: ListHead::new(),
             sibling: ListHead::new(),
             parent_children_head: ptr::null_mut(),
@@ -3747,6 +3752,18 @@ impl Task {
     #[inline]
     pub fn set_sid(&mut self, sid: u32) {
         self.sid = sid;
+    }
+
+    /// Has this task exec'd at least once? (setpgid EACCES rule)
+    #[inline]
+    pub fn has_execed(&self) -> bool {
+        self.execed.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Mark this task as having exec'd (first successful execve).
+    #[inline]
+    pub fn mark_execed(&self) {
+        self.execed.store(true, core::sync::atomic::Ordering::Release);
     }
 
     // ==================== Process Tree Management ====================
