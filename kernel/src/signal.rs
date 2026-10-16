@@ -439,6 +439,13 @@ pub struct SignalStruct {
     pub mask: AtomicU64,
     /// Whether this process is a child subreaper (init-style reaper)
     pub is_child_subreaper: core::sync::atomic::AtomicBool,
+    /// exit_group in progress: every member of the group must die with
+    /// THIS status (Linux signal_group_exit). Without it, the SIGKILL
+    /// that exit_group uses to stop siblings makes the group LEADER die
+    /// as "killed by signal 9" — a clean exit(0) from a non-leader
+    /// thread then reported TBROK "Test killed!" (LTP mq_notify03).
+    pub group_exiting: core::sync::atomic::AtomicBool,
+    pub group_exit_code: core::sync::atomic::AtomicI32,
 }
 
 impl SignalStruct {
@@ -457,6 +464,8 @@ impl SignalStruct {
             action: RwSpinlock::new(actions),
             mask: AtomicU64::new(0),
             is_child_subreaper: core::sync::atomic::AtomicBool::new(false),
+            group_exiting: core::sync::atomic::AtomicBool::new(false),
+            group_exit_code: core::sync::atomic::AtomicI32::new(0),
         }
     }
 
@@ -564,6 +573,8 @@ impl Clone for SignalStruct {
             is_child_subreaper: core::sync::atomic::AtomicBool::new(
                 self.is_child_subreaper.load(Ordering::Acquire),
             ),
+            group_exiting: core::sync::atomic::AtomicBool::new(false),
+            group_exit_code: core::sync::atomic::AtomicI32::new(0),
         }
     }
 }
@@ -663,6 +674,8 @@ pub mod si_code {
     pub const SI_QUEUE: i32 = -1;
     /// Signal sent by POSIX timer expiry
     pub const SI_TIMER: i32 = -2;
+    /// Signal sent by POSIX message queue notification (mq_notify)
+    pub const SI_MESGQ: i32 = -4;
     /// Child process exited
     pub const CLD_EXITED: i32 = 1;
     /// Child process killed
@@ -1922,7 +1935,24 @@ fn handle_default_signal(sig: i32) {
             // This releases mm, fdtable, kernel stack, removes from run
             // queue, etc. Store negative signal number (do_wait encodes
             // as waitpid status).
-            crate::process::exit::do_exit_group(-(sig as i32));
+            //
+            // EXCEPT when the group is already exiting cleanly: the
+            // SIGKILL came from exit_group's sibling stop — the member
+            // must report the group's exit STATUS, not its own signal
+            // death (Linux do_group_exit reads signal_group_exit).
+            let group_code = crate::sched::current()
+                .and_then(|c| (*c).signal_arc())
+                .and_then(|ss| {
+                if ss.group_exiting.load(core::sync::atomic::Ordering::Acquire) {
+                    Some(ss.group_exit_code.load(core::sync::atomic::Ordering::Acquire))
+                } else {
+                    None
+                }
+            });
+            match group_code {
+                Some(code) => crate::process::exit::do_exit_group(code),
+                None => crate::process::exit::do_exit_group(-(sig as i32)),
+            }
         }
         _ => {
             // Unknown signal, default ignore
@@ -2251,6 +2281,18 @@ pub fn send_signal_info(pid: u32, sig: i32, si_code: i32) -> Result<(), i32> {
     };
     let info = SigInfo::new(sig, si_code, my_pid, my_uid);
     send_signal_with_info(pid, info)
+}
+
+impl SigInfo {
+    /// Attach an rt-payload (si_value) to this SigInfo.
+    ///
+    /// The _rt/_mesgq sifields layout is si_pid@16, si_uid@20, then the
+    /// 8-byte sigval union at offset 24 — the first 8 bytes of `_rest`.
+    /// Consumed by SA_SIGINFO handlers (mq_notify SIGEV_* delivery).
+    pub fn with_sigval(mut self, sival: u64) -> Self {
+        self._rest[0..8].copy_from_slice(&sival.to_ne_bytes());
+        self
+    }
 }
 
 /// Send a signal carrying a fully-formed kernel SigInfo.

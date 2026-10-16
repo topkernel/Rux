@@ -525,6 +525,15 @@ impl NetlinkSocket {
         self.recv_queue.lock().push_back(msg);
         self.wait_queue.wake_up_all();
     }
+
+    /// Kernel-originated unicast message (one recvmsg delivers it whole).
+    ///
+    /// Used by POSIX mqueue SIGEV_THREAD notification: Linux pushes a
+    /// 32-byte message onto the helper's netlink socket
+    /// (do_mq_notify -> netlink_unicast).
+    pub fn push_kernel_message(&self, msg: Vec<u8>) {
+        self.push_response(msg);
+    }
 }
 
 /// One blocking wait round (same discipline as unix.rs / socket.rs).

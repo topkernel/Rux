@@ -906,6 +906,20 @@ pub fn do_exit_group(exit_code: i32) -> ! {
         Some(c) => c as *mut Task,
         None => do_exit(exit_code),
     };
+    // Publish the group exit status BEFORE stopping the siblings: the
+    // SIGKILL below makes each member's fatal-signal path re-enter
+    // do_exit_group with THIS code, so the whole group — the leader
+    // included — reports the clean status instead of "killed by
+    // signal 9" (Linux signal_group_exit; LTP mq_notify03 exit(0)
+    // from the mq callback thread).
+    // SAFETY: current is the running task (matched above), non-null.
+    let signal_arc = unsafe { (*current).signal_arc() };
+    if let Some(ss) = signal_arc {
+        ss.group_exit_code
+            .store(exit_code, core::sync::atomic::Ordering::Release);
+        ss.group_exiting
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
     kill_other_threads(current);
     do_exit(exit_code)
 }
