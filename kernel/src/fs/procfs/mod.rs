@@ -923,23 +923,11 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
         }
     }
 
-    // Match /proc/[pid]/fd/N (fd symlink target)
-    if components.len() == 4 && components[0] == "proc" && components[2] == "fd" {
-        let first = if components[1] == "self" {
-            alloc::format!("{}", current_pid())
-        } else {
-            alloc::string::String::from(components[1])
-        };
-
-        if let Some(pid) = pid::parse_pid(first.as_bytes()) {
-            if let Ok(fd) = components[3].parse::<u32>() {
-                let target = pid::generate_fd_link(pid, fd);
-                if !target.is_empty() {
-                    return Some(target);
-                }
-            }
-        }
-    }
+    // NOTE: /proc/[pid]/fd/N is intentionally NOT matched here. Serving the
+    // link target string as file CONTENT made open("/proc/self/fd/N") hand
+    // back a memory file containing the path text; fd links must resolve
+    // through the generic VFS walk (PROCFS_DIR_OPS.lookup -> FD_LINK inode
+    // -> follow_symlink magic redirect to the target dentry).
 
     // Legacy 2-component paths (e.g. from internal procfs code)
     if components.len() == 2 {
@@ -1072,6 +1060,44 @@ pub fn mount_procfs() -> Result<(), i32> {
 // ============================================================================
 // ProcFS Inode Operations
 // ============================================================================
+
+/// Lookup operation for the synthetic /proc/[pid]/fd directory.
+///
+/// PROCFS_DIR_OPS.lookup: private_data carries the pid; only entries that
+/// are live descriptors of that task exist. Without this, path_lookup
+/// died with ENOTDIR (ops.lookup == None) on the walk INTO fd/<N> — so
+/// every path-based operation through a /proc/self/fd magic link
+/// (fchmodat/linkat/stat: LTP open13 musl fallback, open14 linkat)
+/// failed before it ever reached the link.
+// SAFETY: VFS callback contract; private_data stores a valid PID value.
+pub(crate) unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+    let pid = dir.private_data
+        .ok_or(errno::Errno::NotADirectory.as_neg_i32())? as usize as u64;
+    if name.is_empty() || name.len() > 6 || !name.iter().all(|b| b.is_ascii_digit()) {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+    let mut fd: u64 = 0;
+    for &b in name {
+        fd = fd * 10 + (b - b'0') as u64;
+    }
+    if fd as usize >= crate::fs::file::MAX_FDS
+        || pid::get_fd_file(pid, fd as u32).is_none()
+    {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+    Ok(pid * 10000 + FD_LINK_INO_OFF + fd)
+}
+
+/// Iget operation for the synthetic /proc/[pid]/fd directory: builds the
+/// FD_LINK symlink inode (same shape as the FD_LINK arm of procfs_iget —
+/// private_data None, (pid, fd) encoded in the ino).
+// SAFETY: VFS callback contract; builds a fresh inode.
+pub(crate) unsafe fn procfs_fd_dir_iget(_parent: &Inode, _name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
+    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
+    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+    inode.ops = Some(&PROCFS_INODE_OPS);
+    Ok(Arc::new(inode))
+}
 
 /// ProcFS inode lookup operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block

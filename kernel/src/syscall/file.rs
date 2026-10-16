@@ -183,6 +183,27 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         }
     }
 
+    // O_TMPFILE (__O_TMPFILE | O_DIRECTORY): an unnamed writable inode
+    // inside the directory (LTP open14/openat03). Must run before the
+    // O_DIRECTORY dispatch — O_TMPFILE carries the O_DIRECTORY bit and
+    // must not open the directory itself.
+    const __O_TMPFILE: u32 = 0o20000000;
+    const O_PATH_BIT: u32 = 0o10000000;
+    if flags & __O_TMPFILE != 0 {
+        if flags & O_DIRECTORY == 0 || flags & O_PATH_BIT != 0 {
+            // Linux build_open_flags: O_TMPFILE without O_DIRECTORY (the
+            // macro always includes it) or with O_PATH is EINVAL.
+            return -(errno::EINVAL as i64);
+        }
+        return match crate::fs::vfs::file_open_tmpfile(&full_path, flags, mode) {
+            Ok(fd) => {
+                if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
+                fd as i64
+            }
+            Err(e) => e as i64,
+        };
+    }
+
     let result = if (flags & O_DIRECTORY) != 0 {
         crate::fs::vfs::file_opendir(&full_path, flags)
     } else {

@@ -962,7 +962,53 @@ fn follow_symlink(
         return Ok(dentry);
     }
 
-
+    // /proc/[pid]/fd/N magic link: resolution goes straight to the target
+    // descriptor's dentry, never through the target path STRING — the
+    // printed path is stale for unlinked files (O_TMPFILE linkat, LTP
+    // open14/openat03) and unwalkable for pipes/sockets. This mirrors
+    // Linux proc magic-link semantics (nd_jump_link).
+    if inode.fs_id == crate::fs::inode::FS_ID_PROCFS && inode.private_data.is_none() {
+        let pid_val = inode.ino / 10000;
+        let rem = inode.ino % 10000;
+        if crate::fs::procfs::pid::is_valid_pid(pid_val)
+            && rem >= crate::fs::procfs::FD_LINK_INO_OFF
+            && rem < crate::fs::procfs::FD_LINK_INO_OFF + 1024
+        {
+            if let Some(file) = crate::fs::procfs::pid::get_fd_file(
+                pid_val,
+                (rem - crate::fs::procfs::FD_LINK_INO_OFF) as u32,
+            ) {
+                // SAFETY: dentry written once at open; read-only access.
+                let target = unsafe { &*file.dentry.get() }.clone();
+                if let Some(d) = target {
+                    // Unlinked-while-open (O_TMPFILE, or any fd surviving
+                    // an unlink): vfs_unlink strips the dentry's inode to
+                    // keep readdir honest, but the DESCRIPTOR still pins
+                    // the inode — exactly like Linux's unhashed-but-live
+                    // dentry. A magic-link walk referencing this fd
+                    // re-attaches the live inode so linkat/chmod/stat
+                    // through /proc/[pid]/fd/N work on the real file.
+                    if d.get_inode().is_none() {
+                        // SAFETY: inode written once at open; read-only.
+                        let live = unsafe { &*file.inode.get() }.clone();
+                        if let Some(inode_arc) = live {
+                            d.set_inode(inode_arc);
+                            d.clear_negative();
+                        }
+                    }
+                    *depth += 1;
+                    if *depth > crate::config::MAX_SYMLINKS {
+                        return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32());
+                    }
+                    return Ok(follow_mount(d));
+                }
+            }
+            // No dentry (pipe/socket/anon inode) or task gone: fall
+            // through to the string-based walk below, which reports
+            // ENOENT for the unwalkable target — same observable errno
+            // as Linux for these.
+        }
+    }
 
     *depth += 1;
     // Linux MAXSYMLINKS = 40 (review 5.1: was 8, rejecting deep-but-legal
@@ -2495,6 +2541,70 @@ fn inherit_setgid_dir_gid(parent_inode: &Arc<Inode>, new_inode: &Arc<Inode>) {
 /// - O_CREAT: create file if it does not exist
 /// - O_EXCL: used with O_CREAT, returns error if file already exists
 /// - O_TRUNC: truncate file to empty
+/// Open an unnamed temporary file inside `dirpath` (O_TMPFILE semantics).
+///
+/// Linux creates a fresh inode in the directory with NO directory entry;
+/// the descriptor is the only handle until the file is materialized via
+/// linkat("/proc/self/fd/N"). Implemented on top of the ordinary create
+/// path: create a uniquely-named file, open it, then immediately unlink
+/// the name — the descriptor's dentry keeps the inode reachable (POSIX
+/// unlink-while-open) and the /proc/[pid]/fd/N magic link resolves to
+/// that dentry (see follow_symlink), so linkat re-links it exactly as on
+/// Linux (LTP open14 / openat03).
+pub fn file_open_tmpfile(dirpath: &str, flags: u32, mode: u32) -> Result<usize, i32> {
+    static TMPFILE_SEQ: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+
+    let dir = path_lookup(dirpath, 0)?;
+    let dir_inode = dir.inode
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    if !dir_inode.mode.is_directory() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+    // Creating the inode needs write+search on the directory (Linux
+    // O_TMPFILE -> MAY_WRITE|MAY_EXEC on the parent).
+    if !crate::fs::permission::inode_permission(
+        &dir_inode,
+        crate::fs::permission::MAY_WRITE | crate::fs::permission::MAY_EXEC,
+    ) {
+        return Err(errno::Errno::PermissionDenied.as_neg_i32());
+    }
+
+    // Strip the directory-shaped bits; add create-exclusive so the name
+    // can never collide. Access mode (O_RDWR/O_WRONLY) passes through.
+    let open_flags = (flags & !(FileFlags::O_DIRECTORY as u32
+        | 0o20000000 /*__O_TMPFILE*/
+        | FileFlags::O_TRUNC as u32))
+        | FileFlags::O_CREAT as u32
+        | FileFlags::O_EXCL as u32;
+
+    let seq = TMPFILE_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let unique = alloc::format!(
+        ".rux-tmpfile-{}-{}",
+        crate::process::current_pid(),
+        seq
+    );
+    let full = if dirpath.ends_with('/') {
+        alloc::format!("{}{}", dirpath, unique)
+    } else {
+        alloc::format!("{}/{}", dirpath, unique)
+    };
+
+    let fd = file_open(&full, open_flags, mode)?;
+
+    // Remove the name right away: the directory must report empty (the
+    // descriptor holds the inode alive). A failed unlink leaks a name —
+    // close the descriptor and surface the error instead.
+    if let Err(e) = vfs_unlink(&full) {
+        // SAFETY: fd was just installed in the current task's table.
+        unsafe {
+            let _ = crate::fs::close_file_fd(fd);
+        }
+        return Err(e);
+    }
+    Ok(fd)
+}
+
 pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
     // SAFETY: file descriptor operations use well-defined VFS callbacks and Arc-based refcounting
     unsafe {
@@ -4127,7 +4237,7 @@ pub fn vfs_utimensat_ex(
 /// Synthetic INodeOps for procfs directory shortcuts (e.g. /proc/[pid]/fd/).
 /// pub(crate): procfs reuses it for the /proc/[pid]/fd lookup-layer inode.
 pub(crate) static PROCFS_DIR_OPS: INodeOps = INodeOps {
-    lookup: None,
+    lookup: Some(crate::fs::procfs::procfs_fd_dir_lookup),
     create: None,
     link: None,
     unlink: None,
@@ -4143,7 +4253,7 @@ pub(crate) static PROCFS_DIR_OPS: INodeOps = INodeOps {
     permission: None,
     getattr: None,
     setattr: None,
-    iget: None,
+    iget: Some(crate::fs::procfs::procfs_fd_dir_iget),
     destroy_inode: None,
 };
 
