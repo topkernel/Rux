@@ -2215,8 +2215,17 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
 /// - args[1]: tid - thread ID (exact thread)
 /// - args[2]: sig - signal number
 pub fn sys_tgkill(args: SyscallArgs) -> i64 {
-    let tgid = args[0] as u32;
-    let tid = args[1] as u32;
+    // Linux do_tgkill() rejects tgid <= 0 || tid <= 0 with EINVAL
+    // BEFORE looking up any task. The naked `as u32` cast below would
+    // otherwise turn -1 into u32::MAX and produce ESRCH for what should
+    // be a clear EINVAL. LTP tgkill03 / tgkill02 both rely on this.
+    let tgid_raw = args[0] as i32;
+    let tid_raw = args[1] as i32;
+    if tgid_raw <= 0 || tid_raw <= 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let tgid = tgid_raw as u32;
+    let tid = tid_raw as u32;
     let sig = args[2] as i32;
 
     if sig < 0 || sig > 64 {
