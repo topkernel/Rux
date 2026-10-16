@@ -733,7 +733,7 @@ impl CfsRunQueue {
         if let Some((&key, &task)) = self.tasks_timeline.iter().next() {
             // b50 #GP guard — see pick_next_cpu. A non-canonical slot
             // pointer must never reach the deref below.
-            if !crate::sched::sched::kernel_ptr_canonical(task as *const u8) {
+            if !crate::sched::sched::kernel_ptr_in_physmap(task as *const u8) {
                 self.tasks_timeline.remove(&key);
                 self.nr_running.fetch_sub(1, Ordering::AcqRel);
                 crate::sched::sched::report_poisoned_rq_entry(usize::MAX, task as usize);
@@ -820,7 +820,7 @@ impl CfsRunQueue {
             // unrecoverable either way; keeping the kernel (and this
             // CPU's pick) alive matters more. load_weight is left
             // stale: reading it would deref the same garbage.
-            if !crate::sched::sched::kernel_ptr_canonical(task as *const u8) {
+            if !crate::sched::sched::kernel_ptr_in_physmap(task as *const u8) {
                 self.tasks_timeline.remove(&key);
                 self.nr_running.fetch_sub(1, Ordering::AcqRel);
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);

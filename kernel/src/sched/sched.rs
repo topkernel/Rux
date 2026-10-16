@@ -430,7 +430,28 @@ unsafe fn grq_init() {
         }
         return;
     }
+    // RT-HEADS FIX (oh-display b61-b66 root cause): the 100 RT priority
+    // list heads are SELF-REFERENTIAL ListHeads. GlobalRunQueue::new()
+    // builds rt_rq as a stack temporary and calls RtRunQueue::init() ON
+    // THE TEMPORARY, so every head's next/prev hold the temporary's
+    // address; the move into the GRQ static copies those VALUES, leaving
+    // all 100 heads pointing into a dead early-boot stack frame
+    // (~0x10a1xx-0x10a7xx on the BSP boot stack). Every RT list was then
+    // threaded through a phantom node in boot-stack memory: the first
+    // add_tail at a priority scribbled the stale slot to reach the real
+    // node, and the lists stayed functional only while that stack region
+    // retained the scribble. The first sufficiently deep BSP excursion
+    // overwrote it and every subsequent walk dereferenced boot-stack
+    // garbage (POISONED rq entry reports, KERNPANICs in the pick path at
+    // T+15-19min, byte-identical every boot). Nothing is enqueued yet
+    // (GRQ_READY gates all enqueue paths), so re-self-linking the heads
+    // at their final address here is safe and complete.
     GRQ = core::mem::MaybeUninit::new(GlobalRunQueue::new());
+    // SAFETY: written immediately above on the sole initialization path;
+    // re-initializing the embedded ListHead array is plain memory writes.
+    unsafe {
+        GRQ.assume_init_mut().rt_rq.init();
+    }
 }
 
 /// Get a shared reference to GRQ.
@@ -1209,6 +1230,61 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+        // FREED-WHILE-LINKED UNLINK (oh-display b61-b66 family): a Task
+        // page returned to the heap while still linked on a class queue
+        // gets recycled (new Tasks, BTreeMap nodes, kernel stacks), and
+        // every later walk of that queue dereferences the recycled page —
+        // the "POISONED rq entry" / pick-path KERNPANIC family at
+        // T+15-19min. The old check only REPORTED and only under
+        // dfx=scribble; unlink for real, unconditionally, while the page
+        // is still valid so del()/BTreeMap-removal write to the real
+        // neighbors. RT uses force_unlink (does not trust the possibly
+        // stale on_rq flag); CFS/DL dequeue scan by pointer and are
+        // flag-independent already. grq.nr_running is paired per actual
+        // removal.
+        {
+            let mut guard = grq().lock_irqsave();
+            let mut unlinked = 0usize;
+            // SAFETY: task_ptr is non-null and still a valid Task (poison
+            // and dealloc happen below); the GRQ lock is held.
+            unsafe {
+                if guard.rt_rq.force_unlink(task_ptr) {
+                    unlinked += 1;
+                }
+                if guard.cfs_rq.is_linked(task_ptr)
+                    && guard.cfs_rq.dequeue(task_ptr)
+                {
+                    unlinked += 1;
+                }
+                if guard.dl_rq.is_linked(task_ptr)
+                    && guard.dl_rq.dequeue(task_ptr)
+                {
+                    unlinked += 1;
+                }
+            }
+            for _ in 0..unlinked {
+                guard.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+            }
+            if unlinked > 0 {
+                use crate::console::putchar_no_lock as putchar;
+                const MSG: &[u8] = b"\nFREED-WHILE-LINKED-UNLINKED task=0x";
+                for &b in MSG {
+                    putchar(b);
+                }
+                let mut v = task_ptr as usize;
+                for _ in 0..16 {
+                    let n = (v >> 60) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                putchar(b'0' + unlinked as u8);
+                putchar(b'\n');
+            }
+        }
         // Scribble hunter (dfx=scribble): stop tracking before the page
         // is dropped/deallocated (it may be recycled immediately).
         #[cfg(feature = "x86_64")]
@@ -1738,25 +1814,42 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     // 2. Deadline — pick earliest-deadline task that can run on this CPU
     if !grq.dl_rq.is_empty() {
         if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id, prev) {
-            mark_picked_on_cpu(task, task == prev);
-            // R32-DL1: reset the CBS execution clock at pick (mirror of the
-            // CFS R20-6 fix). exec_start otherwise still holds the
-            // timestamp of the task's PREVIOUS switch-out (or 0 before its
-            // first run), so the first scheduler_tick/__schedule charge
-            // after a wake billed the entire sleep duration (or the whole
-            // uptime) into the runtime budget and throttled the task
-            // instantly.
-            (*task).dl_entity().exec_start.store(
-                crate::sched::fair::sched_clock(),
-                core::sync::atomic::Ordering::Release,
-            );
-            // R7-B5: pick removes the task from the queue — pair the count.
-            grq.nr_running.fetch_update(
-                core::sync::atomic::Ordering::SeqCst,
-                core::sync::atomic::Ordering::SeqCst,
-                |v| v.checked_sub(1),
-            );
-            return task;
+            // PID-0 GATE (b64-b66 fatal chain): PIDs below RESERVED_PIDS
+            // are never allocated, so a class-queue entry reading pid 0
+            // is an idle task or freed/recycled memory — never a
+            // legitimately runnable task. The pick already removed it
+            // from the queue; pair the count and fall through to the
+            // next class instead of context-switching onto a garbage
+            // context (observed: PICK-LIVE-FORCED pid=0 → resume at a
+            // stale boot-stack sp → fatal).
+            if (*task).pid() == 0 {
+                report_poisoned_rq_entry(cpu_id, task as usize);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+            } else {
+                mark_picked_on_cpu(task, task == prev);
+                // R32-DL1: reset the CBS execution clock at pick (mirror of the
+                // CFS R20-6 fix). exec_start otherwise still holds the
+                // timestamp of the task's PREVIOUS switch-out (or 0 before its
+                // first run), so the first scheduler_tick/__schedule charge
+                // after a wake billed the entire sleep duration (or the whole
+                // uptime) into the runtime budget and throttled the task
+                // instantly.
+                (*task).dl_entity().exec_start.store(
+                    crate::sched::fair::sched_clock(),
+                    core::sync::atomic::Ordering::Release,
+                );
+                // R7-B5: pick removes the task from the queue — pair the count.
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+                return task;
+            }
         }
     }
 
@@ -1764,43 +1857,68 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     //    Skipped entirely while the RT bandwidth is throttled (batch 8).
     if !grq.rt_rq.is_empty() && !RT_THROTTLED.load(core::sync::atomic::Ordering::Acquire) {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id, prev) {
-            mark_picked_on_cpu(task, task == prev);
-            grq.nr_running.fetch_update(
-                core::sync::atomic::Ordering::SeqCst,
-                core::sync::atomic::Ordering::SeqCst,
-                |v| v.checked_sub(1),
-            );
-            return task;
+            // PID-0 GATE — see the Deadline block above.
+            if (*task).pid() == 0 {
+                report_poisoned_rq_entry(cpu_id, task as usize);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+            } else {
+                mark_picked_on_cpu(task, task == prev);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+                return task;
+            }
         }
     }
 
     // 4. CFS — pick min-vruntime task that can run on this CPU
     if !grq.cfs_rq.is_empty() {
         if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id, prev) {
-            mark_picked_on_cpu(task, task == prev);
-            grq.nr_running.fetch_update(
-                core::sync::atomic::Ordering::SeqCst,
-                core::sync::atomic::Ordering::SeqCst,
-                |v| v.checked_sub(1),
-            );
-            grq.cfs_rq.set_curr(task);
-            // R20-6: reset the execution clock at pick. Nothing else resets
-            // exec_start, so after a sleep it still holds the timestamp of
-            // the task's PREVIOUS run — the first update_curr/direct charge
-            // after wakeup billed the entire sleep duration into vruntime.
-            let se = (*task).sched_entity();
-            se.set_exec_start(crate::sched::fair::sched_clock());
-            // Batch 8: start a fresh activation window — scheduler_tick
-            // judges preemption on sum_exec_runtime - prev_sum_exec_runtime
-            // (current run length) vs the slice (Linux check_preempt_tick).
-            se.prev_sum_exec_runtime.store(
-                se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire),
-                core::sync::atomic::Ordering::Release,
-            );
-            let slice_ns = grq.cfs_rq.sched_slice(se);
-            let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
-            (*task).set_time_slice(slice_ms.max(1) as u32);
-            return task;
+            // PID-0 GATE — see the Deadline block above. This is the exact
+            // site of the b64-b66 fatal: the CFS walk returned a
+            // freed-then-recycled entry whose pid word read 0 with a claim
+            // word reading 0 (= cpu 0), mark_picked_on_cpu published it
+            // LIVE ("PICK-LIVE-FORCED pid=0") and the switch resumed a
+            // stale boot-stack context (rsp=0x10a870).
+            if (*task).pid() == 0 {
+                report_poisoned_rq_entry(cpu_id, task as usize);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+            } else {
+                mark_picked_on_cpu(task, task == prev);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+                grq.cfs_rq.set_curr(task);
+                // R20-6: reset the execution clock at pick. Nothing else resets
+                // exec_start, so after a sleep it still holds the timestamp of
+                // the task's PREVIOUS run — the first update_curr/direct charge
+                // after wakeup billed the entire sleep duration into vruntime.
+                let se = (*task).sched_entity();
+                se.set_exec_start(crate::sched::fair::sched_clock());
+                // Batch 8: start a fresh activation window — scheduler_tick
+                // judges preemption on sum_exec_runtime - prev_sum_exec_runtime
+                // (current run length) vs the slice (Linux check_preempt_tick).
+                se.prev_sum_exec_runtime.store(
+                    se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire),
+                    core::sync::atomic::Ordering::Release,
+                );
+                let slice_ns = grq.cfs_rq.sched_slice(se);
+                let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
+                (*task).set_time_slice(slice_ms.max(1) as u32);
+                return task;
+            }
         }
     }
 

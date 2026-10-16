@@ -256,6 +256,74 @@ impl RtRunQueue {
         }
     }
 
+    /// Unlink `task` from its priority list WITHOUT trusting the entity's
+    /// on_rq flag. free_task_slot's freed-while-linked defense (oh-display
+    /// b61-b66): a task whose page is about to return to the heap may
+    /// carry a STALE on_rq=false while its rt_run_list node is still
+    /// linked (one-sided unlink shapes) — plain dequeue() would refuse on
+    /// the flag and leave the dangling node behind, poisoning every later
+    /// walk of that list once the page is reused. is_linked() gates the
+    /// call, so a task that is provably unlinked costs one pointer read.
+    ///
+    /// Counters/bitmap are reconciled exactly like dequeue(). Called with
+    /// the GRQ lock held, from the task-free path only (the task memory is
+    /// still valid — del() writes land in the list's real neighbors).
+    pub fn force_unlink(&mut self, task: *mut Task) -> bool {
+        if task.is_null() || !self.is_linked(task) {
+            return false;
+        }
+        // SAFETY: is_linked() proved the node is linked into one of
+        // self.queue's lists; the caller (free_task_slot) holds the GRQ
+        // lock and the Task memory is not yet freed/poisoned.
+        unsafe {
+            let t = &mut *task;
+            let raw = t.rt_priority() as usize;
+            // Remove from list regardless of the (possibly stale) on_rq
+            // flag — the linkage check above is the authority.
+            t.rt_run_list.del();
+
+            if raw < MAX_RT_PRIO {
+                // Same bitmap inversion as enqueue/dequeue.
+                let prio = MAX_RT_PRIO - 1 - raw;
+                if self.queue[prio].is_empty() {
+                    let word_idx = prio / 64;
+                    let bit_idx = prio % 64;
+                    self.bitmap[word_idx].fetch_and(!(1u64 << bit_idx), Ordering::AcqRel);
+                }
+            } else {
+                // Priority out of range: the node was linked through some
+                // corruption; sweep every empty-list bit so the bitmap
+                // cannot keep naming a prio whose list is now empty.
+                for prio in 0..MAX_RT_PRIO {
+                    if self.queue[prio].is_empty() {
+                        let word_idx = prio / 64;
+                        let bit_idx = prio % 64;
+                        self.bitmap[word_idx].fetch_and(!(1u64 << bit_idx), Ordering::AcqRel);
+                    }
+                }
+            }
+
+            // Counters: rt_nr_running/rr_nr_running may already be
+            // consistent (a normally-linked task) or drifted; clamp at 0
+            // so a double-decrement cannot underflow.
+            if self.rt_nr_running.load(Ordering::Acquire) > 0 {
+                self.rt_nr_running.fetch_sub(1, Ordering::AcqRel);
+            }
+            if t.policy() == SchedPolicy::Rr && self.rr_nr_running.load(Ordering::Acquire) > 0 {
+                self.rr_nr_running.fetch_sub(1, Ordering::AcqRel);
+            }
+
+            if self.is_empty() {
+                self.highest_prio.store(MAX_RT_PRIO as u32, Ordering::Release);
+            } else if let Some(new_highest) = self.find_highest_prio() {
+                self.highest_prio.store(new_highest, Ordering::Release);
+            }
+
+            t.rt_entity().set_on_rq(false);
+        }
+        true
+    }
+
     /// Pick the next task to run
     pub fn pick_next(&mut self) -> Option<*mut Task> {
         let prio = self.find_highest_prio()?;
