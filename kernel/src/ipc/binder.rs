@@ -156,9 +156,15 @@ pub const BR_DEAD_BINDER: u32 = ior(b'r' as u32, 11, SZ_U64);
 pub const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = ior(b'r' as u32, 14, SZ_U64);
 pub const BR_FAILED_REPLY: u32 = io(b'r' as u32, 17);
 /// struct binder_transaction_data_secctx (upstream): the transaction data
-/// followed by a pointer to a sender-info record in the buffer's extra
-/// area. OH's libbinder reads the sender identity from it.
-pub const BR_TRANSACTION_SECCTX: u32 = ior(b'r' as u32, 42, 72);
+/// followed by a pointer to the sender's NUL-terminated security-context
+/// string in the buffer's extra area. NOTE the ioctl number: nr=2 with a
+/// 72-byte size (0x80487202) — the SAME nr as BR_TRANSACTION (_IOR('r',2,
+/// struct binder_transaction_data), 64 bytes); the size field is what
+/// distinguishes them. OH libbinder switch-matches the exact value
+/// (sys_binder.h BR_TRANSACTION_SEC_CTX); an earlier 0x8048722A (nr=42)
+/// staging was rejected with HandleCommands error:404 and samgr silently
+/// dropped every SECCTX delivery (b45/b59 wedges).
+pub const BR_TRANSACTION_SECCTX: u32 = ior(b'r' as u32, 2, 72);
 
 /// struct binder_transaction_data (LP64)
 #[repr(C)]
