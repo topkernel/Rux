@@ -514,6 +514,28 @@ pub fn handle_mm_fault(
                             if !page.is_null() {
                                 // SAFETY: page descriptor of a live frame.
                                 unsafe {
+                                    // One reference PER MAPPING (Linux
+                                    // shmem discipline): the entry's
+                                    // SharedFilePages holds its own
+                                    // reference from allocation, and every
+                                    // mapping must take another so this
+                                    // mm's munmap/teardown put_page cannot
+                                    // free the frame while the file's
+                                    // backing still lists it. Without this,
+                                    // the WRITER's munmap (OH's param
+                                    // loader unmaps after writing the
+                                    // selinux contexts) dropped the last
+                                    // reference, the frame went back to the
+                                    // allocator, and the NEXT devfs shared
+                                    // grow (param_sec_dac's 2MB) took and
+                                    // zeroed it mid-read: every paraContext
+                                    // string read back empty, all
+                                    // selinux-label workspaces opened
+                                    // '/dev/__parameters__/' (EISDIR) and
+                                    // every labeled param SET was forbidden
+                                    // (boots b81/s1: 33x "Forbid to add
+                                    // selinux workspace").
+                                    (*page).get_page();
                                     (*page).set_flag(PageFlag::Anonymous);
                                     (*page).inc_mapcount();
                                     crate::mm::rmap::page_record_mapping(

@@ -215,6 +215,30 @@ impl DevfsEntry {
     }
 }
 
+/// The shared backing's frames carry ONE reference owned by the entry
+/// itself (from shared_grow_locked's allocation) plus one per live
+/// mapping (the fault path's get_page, fork's COW-exempt walk). When the
+/// last Arc<DevfsEntry> dies (unlink + last inode release) drop the
+/// entry's own references so the frames return to the allocator exactly
+/// once — never while a mapping still holds one (Linux shmem truncate/
+/// evict semantics).
+impl Drop for DevfsEntry {
+    fn drop(&mut self) {
+        let sp = self.shared_pages.lock_irqsave().take();
+        let Some(sp) = sp else { return };
+        for pfn in sp.pfns {
+            // SAFETY: pfn names a frame this entry's backing owned a
+            // reference to; put_page drops exactly that reference.
+            unsafe {
+                let page = crate::mm::page_desc::pfn_to_page_mut(pfn);
+                if !page.is_null() && (*page).put_page() == 0 {
+                    crate::mm::page_alloc::free_pages(pfn << 12, 0);
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // devfs filesystem
 // ============================================================================
