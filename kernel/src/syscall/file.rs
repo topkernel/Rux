@@ -268,26 +268,40 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
                 let is_lib_probe = full_path.ends_with(".so")
                     || full_path.ends_with(".z.so")
                     || full_path.ends_with(".so.1");
-                if is_lib_probe {
-                    // Basename counter map: print at 1, then every 64
-                    // misses — a dlopen RETRY LOOP shows as "still
-                    // missing" milestones.
+if is_lib_probe {
+                    // Per-(basename,parent_dir) counter map: keeps the
+                    // dlopen directory probe storm deduplicated while
+                    // still surfacing WHERE the loader looked. The
+                    // (lib,dir) tuple is the unit — "still missing
+                    // libEGL.so in /system/lib64" is one line,
+                    // "/vendor/lib64" is another. Without the dir axis
+                    // the loader can hit /system/lib64 and miss, hit
+                    // /vendor/lib64 and miss, and we only see one
+                    // "still missing libEGL.so" that tells us nothing.
                     static SO_COUNTS: crate::sync::spinlock::Spinlock<
-                        Option<alloc::vec::Vec<(alloc::string::String, u32)>>,
+                        Option<alloc::vec::Vec<((alloc::string::String, alloc::string::String), u32)>>,
                     > = crate::sync::spinlock::Spinlock::new(None);
                     let base = alloc::string::String::from(
                         full_path.rsplit('/').next().unwrap_or(""),
                     );
+                    let parent = alloc::string::String::from(
+                        match full_path.rsplit_once('/') {
+                            Some((d, _)) if !d.is_empty() => d,
+                            _ => "/",
+                        },
+                    );
                     let mut counts = SO_COUNTS.lock_irqsave();
                     let list = counts.get_or_insert_with(alloc::vec::Vec::new);
                     if list.len() < 420 {
-                        match list.iter_mut().find(|(n, _)| *n == base) {
+                        let key = (base.clone(), parent.clone());
+                        match list.iter_mut().find(|(k, _)| *k == key) {
                             Some((_, c)) => {
                                 *c += 1;
                                 if *c % 64 == 0 {
                                     crate::pr_info!(
-                                        "open ENOENT: still missing '{}' x{} (pid {})",
+                                        "open ENOENT: still missing '{}' in '{}' x{} (pid {})",
                                         base,
+                                        parent,
                                         c,
                                         unsafe { crate::process::current_pid() }
                                     );
@@ -295,11 +309,12 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
                             }
                             None => {
                                 crate::pr_info!(
-                                    "open ENOENT: '{}' (pid {})",
+                                    "open ENOENT: '{}' in '{}' (pid {})",
                                     base,
+                                    parent,
                                     unsafe { crate::process::current_pid() }
                                 );
-                                list.push((base, 1));
+                                list.push((key, 1));
                             }
                         }
                     }
