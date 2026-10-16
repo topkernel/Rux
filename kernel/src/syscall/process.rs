@@ -2251,7 +2251,11 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
     // suicide etc.) reports si_pid=0 and the sender is unattributable.
     crate::signal::send_signal_from_user_tkill(tid, sig)
         .map(|_| 0)
-        .unwrap_or(-(errno::EINVAL as i64))
+        // send_signal_* returns the negated errno in Err (e.g. -EAGAIN
+        // when RLIMIT_SIGPENDING is hit on an RT signal). Surface that
+        // to userspace instead of clobbering every failure into EINVAL
+        // — LTP tgkill02 expects EAGAIN (errno 11), not EINVAL (22).
+        .unwrap_or_else(|e| e as i64)
 }
 
 /// sys_rt_sigqueueinfo - send signal with data to a PROCESS
@@ -2335,7 +2339,10 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
 
     crate::signal::send_signal_with_info(tgid, info)
         .map(|_| 0)
-        .unwrap_or(-(errno::EINVAL as i64))
+        // Propagate the actual errno from send_signal_with_info (e.g.
+        // EAGAIN on RLIMIT_SIGPENDING exhaustion). Previous behavior
+        // masked every send failure into EINVAL.
+        .unwrap_or_else(|e| e as i64)
 }
 
 /// sys_rt_tgsigqueueinfo - send signal with data to a precise THREAD
@@ -2410,7 +2417,8 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
 
     crate::signal::send_signal_with_info(tid, info)
         .map(|_| 0)
-        .unwrap_or(-(errno::EINVAL as i64))
+        // Propagate the actual errno (EAGAIN on RLIMIT_SIGPENDING, etc.).
+        .unwrap_or_else(|e| e as i64)
 }
 
 /// sys_rt_sigtimedwait - synchronously wait for signals
