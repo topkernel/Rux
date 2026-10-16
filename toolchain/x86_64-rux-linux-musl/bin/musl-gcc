@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "${REALGCC:-gcc}" "$@" -specs "/home/william/rux-agents/oh-services/toolchain/x86_64-rux-linux-musl/lib/musl-gcc.specs"
