@@ -373,6 +373,10 @@ pub fn vfs_mount(
                 flags: Spinlock::new(mnt_flags),
             });
             child.set_mount(mnt_desc.clone());
+            // Reverse edge: the mounted root remembers its mountpoint so
+            // build_path() can climb out of the mount (Weak — the strong
+            // cycle runs mountpoint → mount → root).
+            mounted_root.set_mountpoint_back(child.clone());
             state.mounts.push(mnt_desc);
         } else {
             // Intermediate component — create if not exists
@@ -423,7 +427,8 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
         let mut state = VFS_STATE.lock();
         state.mounts.retain(|m| !Arc::ptr_eq(m, &mnt));
     }
-    *child.vfsmount.lock() = None;
+    // Also drops the mounted root's mountpoint back-pointer.
+    child.clear_mount();
     Ok(())
 }
 
@@ -509,6 +514,10 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
         };
         if is_last {
             child.set_mount(mnt.clone());
+            // Mount moved: refresh the root's mountpoint back-pointer to
+            // the new attach point (clear_mount on the source dropped the
+            // old one).
+            mnt.root.set_mountpoint_back(child.clone());
         } else {
             current = follow_mount(child);
         }
