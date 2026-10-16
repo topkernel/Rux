@@ -461,6 +461,23 @@ pub fn kernel_ptr_canonical(p: *const u8) -> bool {
     hi == 0 || hi == 0x1FFFF
 }
 
+/// Stricter variant for runqueue-walk safety: the pointer must lie in the
+/// kernel PHYSMAP (direct map), where every Task allocation lives. Plain
+/// canonical also accepts kernel-NEGATIVE addresses (0xfffffffffffffeXX —
+/// poison like -1/-0x158 left in a freed task's list links), which then
+/// fault inside the pick path when fields are dereferenced through them
+/// (b61/b62 KERNPANICs in RtRunQueue::pick_next_cpu: the cgroup chain
+/// walk and ownership_pickable faulting on garbage derived from
+/// freed-then-reused queue entries).
+pub fn kernel_ptr_in_physmap(p: *const u8) -> bool {
+    let a = p as usize as u64;
+    if a % 8 != 0 {
+        return false;
+    }
+    // 0xffff8880_00000000 ..< 0xffff9000_00000000 (64 GB of direct map).
+    (0xffff_8880_0000_0000..0xffff_9000_0000_0000).contains(&a)
+}
+
 /// Rate-limited one-line report for a poisoned runqueue entry (see
 /// kernel_ptr_canonical). Called with the GRQ lock held — the R34
 /// no-lock console discipline applies.
