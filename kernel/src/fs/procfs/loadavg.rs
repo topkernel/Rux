@@ -120,8 +120,14 @@ pub fn generate() -> Vec<u8> {
 
     let (pids, count, _truncated) = pid_hash::pid_hash_collect_all();
 
+    // Linux nr_threads semantics: idle tasks (pid 0) are NOT counted —
+    // Linux never allocates a pid for them. Rux hash-inserts MAX_CPUS
+    // idle Tasks with pid 0; without the filter the total ran high by
+    // the pre-created idle count on every read.
+    let real = (0..count).filter(|&i| pids[i] != 0).count();
+
     let running = LAST_RUNNING.load(Ordering::Relaxed) as u64;
-    let total = if count > 0 { count as u64 } else { 1 };
+    let total = if real > 0 { real as u64 } else { 1 };
 
     let last_pid = if count > 0 {
         *pids.iter().max().unwrap_or(&1) as u64
