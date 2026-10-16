@@ -254,15 +254,6 @@ impl DlRunQueue {
                 None => break,
             };
 
-            // b50 #GP guard — see the fair-class twin. A scribbled slot
-            // pointer must never reach the deref below.
-            if !crate::sched::sched::kernel_ptr_canonical(task as *const u8) {
-                self.tasks.remove(&key);
-                self.dl_nr_running.fetch_sub(1, Ordering::AcqRel);
-                crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
-                continue;
-            }
-
             // SAFETY: `task` was obtained from self.tasks which only stores
             // valid, live Task pointers inserted by enqueue().
             // R8-1b: skip tasks whose context is not yet saved, except

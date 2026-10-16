@@ -325,31 +325,11 @@ impl RtRunQueue {
                 let mut pos = self.queue[prio].next;
 
                 while pos != head {
-                    // b50 #GP guard: a scribbled link yields a
-                    // non-canonical ListHead; derefing it (next-loads or
-                    // the container_of below) is a kernel #GP. The node
-                    // cannot be unlinked safely either, so stop walking
-                    // this priority for this pick and report — the
-                    // entries past the break stay linked and skip-picked,
-                    // which keeps the kernel alive instead of fatal.
-                    // b61/b62 hardening: canonical alone also accepts
-                    // kernel-NEGATIVE poison (0xfffffffffffffeXX read from
-                    // a freed task's links) — require the PHYSMAP range,
-                    // where Task allocations actually live, for both the
-                    // link and the derived task pointer.
-                    if !crate::sched::sched::kernel_ptr_in_physmap(pos as *const u8) {
-                        crate::sched::sched::report_poisoned_rq_entry(cpu_id, pos as usize);
-                        break;
-                    }
                     // SAFETY: pos is an embedded ListHead in an enqueued Task; offset_of gives the correct back-pointer.
                     let task = unsafe {
                         let offset = core::mem::offset_of!(Task, rt_run_list);
                         (pos as *mut u8).sub(offset) as *mut Task
                     };
-                    if !crate::sched::sched::kernel_ptr_in_physmap(task as *const u8) {
-                        crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
-                        break;
-                    }
 
                     // SAFETY: task derived from queue above; cpu_allowed is a simple field read.
                     // R8-1b: skip tasks whose context is not yet saved (a
