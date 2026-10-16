@@ -13,7 +13,7 @@ pub const KERNEL_NAME: &str = "Rux";
 pub const KERNEL_VERSION: &str = "0.1.0";
 
 /// Target platform
-pub const TARGET_PLATFORM: &str = "x86_64";
+pub const TARGET_PLATFORM: &str = "riscv64";
 
 // ============================================================
 // Memory Configuration
