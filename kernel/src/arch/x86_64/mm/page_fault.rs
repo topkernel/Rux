@@ -432,6 +432,86 @@ pub fn handle_mm_fault(
                     );
                     return MmFaultResult::BusError;
                 }
+
+                // Coherent SHARED devfs mapping (OH param workspaces, see
+                // fs/devfs SharedFilePages): instead of a per-process
+                // private page filled from read_at, map the FILE'S shared
+                // physical page so plain memcpy stores from any mapper
+                // are instantly visible to every other mapper — Linux
+                // tmpfs MAP_SHARED semantics, which the OH parameter
+                // service's write protocol (memcpy, no msync) requires.
+                if vma_flags.contains(crate::mm::vma::VmaFlags::SHARED) {
+                    if let Some(shared_phys) = addr_space
+                        .get_vma_file(vma_start)
+                        .and_then(|f| {
+                            let ops = f.get_ops()?;
+                            if !core::ptr::eq(
+                                ops as *const _,
+                                &crate::fs::devfs::DEVFS_REG_FILE_OPS as *const _,
+                            ) {
+                                return None;
+                            }
+                            // Page-granular offset within the file.
+                            crate::fs::devfs::shared_fault_file_page(
+                                f.as_ref(),
+                                (file_offset / (PAGE_SIZE as usize))
+                                    * (PAGE_SIZE as usize),
+                            )
+                        })
+                    {
+                        let sp_phys = PhysAddr::new(shared_phys);
+                        let mut sp_flags = PageTableEntry::P
+                            | PageTableEntry::A
+                            | PageTableEntry::D
+                            | PageTableEntry::NX
+                            | PageTableEntry::U;
+                        if vma_flags.is_writable() {
+                            sp_flags |= PageTableEntry::W;
+                        }
+                        if vma_flags.is_executable() {
+                            sp_flags &= !PageTableEntry::NX;
+                        }
+                        let _sp_guard =
+                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                        if unsafe {
+                            PageTableWalker::walk(root_ppn, fault_addr.bits() as u64)
+                        }
+                        .map_or(false, |(_ppn, bits)| {
+                            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+                        })
+                        {
+                            return MmFaultResult::Handled;
+                        }
+                        // SAFETY: root_ppn valid; fault_addr page-aligned;
+                        // sp_phys is the shared file page; flags built above.
+                        unsafe {
+                            map_page(root_ppn, fault_addr, sp_phys, sp_flags);
+                            crate::arch::cpu::invlpg(fault_addr.bits());
+                        }
+                        // Refcount/mapcount bookkeeping for the shared
+                        // frame (multi-mapper: fork's COW walk exempts
+                        // SHARED VMAs and bumps the refcount itself).
+                        {
+                            use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+                            let page =
+                                pfn_to_page_mut((shared_phys >> PAGE_SHIFT) as usize);
+                            if !page.is_null() {
+                                // SAFETY: page descriptor of a live frame.
+                                unsafe {
+                                    (*page).set_flag(PageFlag::Anonymous);
+                                    (*page).inc_mapcount();
+                                    crate::mm::rmap::page_record_mapping(
+                                        &*page,
+                                        addr_space as *const _ as usize,
+                                        fault_addr.bits() as usize,
+                                    );
+                                }
+                            }
+                        }
+                        addr_space.add_rss(1);
+                        return MmFaultResult::Handled;
+                    }
+                }
             }
         }
     }
