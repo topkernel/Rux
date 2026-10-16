@@ -1059,6 +1059,18 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
         // child could observe the orphaning).
         let pdeath = (*child).pdeath_signal;
         if pdeath != 0 {
+            // OH bring-up forensics: the *_host services all die of a
+            // kernel-origin SIGHUP; this print names pdeathsig as the
+            // source (or rules it out) directly on the console.
+            static PDEATH_TRACE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PDEATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+                crate::pr_info!(
+                    "pdeath: pid {} tgid {} gets sig {} (parent pid {} tgid {} dying)",
+                    (*child).pid(), (*child).tgid(), pdeath,
+                    (*dying).pid(), (*dying).tgid()
+                );
+            }
             let _ = crate::signal::send_signal((*child).pid(), pdeath as i32);
         }
 
@@ -1259,11 +1271,14 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 let raw_exit = child.exit_code();
 
                 // Encode exit status per waitpid ABI:
-                // - Normal exit: status = (exit_code & 0xFF) << 8  (WIFEXITED, WEXITSTATUS)
+                // - Normal exit: exit_code IS the wait status already —
+                //   sys_exit/sys_exit_group store `(code & 0xff) << 8`
+                //   (Linux pre-shifts at the syscall boundary), so the
+                //   value is passed through with no second shift.
                 // - Killed by signal: status = |signal_number|      (WIFSIGNALED, WTERMSIG)
                 //   plus WCOREDUMP (0x80) when a core file was written.
                 let status: i32 = if raw_exit >= 0 {
-                    (((raw_exit as u32) & 0xFF) << 8) as i32
+                    (raw_exit as u32 & 0xFFFF) as i32
                 } else {
                     let mut s = (-(raw_exit as i32) as u32 & 0x7F) as i32;
                     if child.core_dumped() {
@@ -1519,7 +1534,8 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
             let raw_exit = child.exit_code();
 
             let status: i32 = if raw_exit >= 0 {
-                (((raw_exit as u32) & 0xFF) << 8) as i32
+                // Pre-shifted at sys_exit (Linux ABI) — pass through.
+                (raw_exit as u32 & 0xFFFF) as i32
             } else {
                 let mut s = (-(raw_exit as i32) as u32 & 0x7F) as i32;
                 if child.core_dumped() {
@@ -1683,7 +1699,10 @@ pub fn do_waitid(
                     let raw_exit = child.exit_code();
                     let mut was_killed = false;
                     if raw_exit >= 0 {
-                        result_code = raw_exit as i32;
+                        // si_status is the raw 0-255 exit code (Linux
+                        // WEXITSTATUS semantics); sys_exit pre-shifted it
+                        // into bits 8-15, shift back down here.
+                        result_code = ((raw_exit as u32) >> 8) as i32;
                     } else {
                         result_code = (-raw_exit) as i32;
                         was_killed = true;

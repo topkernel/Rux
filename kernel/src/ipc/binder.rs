@@ -113,6 +113,14 @@ pub const BINDER_SET_MAX_THREADS: u32 = iow(b'b' as u32, 5, SZ_U32);
 pub const BINDER_SET_CONTEXT_MGR: u32 = iow(b'b' as u32, 7, SZ_U32);
 pub const BINDER_THREAD_EXIT: u32 = iow(b'b' as u32, 8, SZ_U32);
 pub const BINDER_VERSION: u32 = ioc(3, b'b' as u32, 9, SZ_VERSION);
+/// _IOW('b', 13, struct flat_binder_object) — 24 bytes on LP64. OH samgr
+/// tries this FIRST; rejecting it sent samgr into a retry loop (803 dead
+/// handle-0 transactions in one boot) before falling back to the plain
+/// ioctl.
+pub const BINDER_SET_CONTEXT_MGR_EXT: u32 = iow(b'b' as u32, 13, 24);
+/// _IOWR('b', 30, struct binder_feature_set) — OpenHarmony addition; the
+/// IPC library probes it right after BINDER_VERSION on every open.
+pub const BINDER_FEATURE_SET: u32 = ioc(3, b'b' as u32, 30, SZ_U64);
 
 pub const BC_TRANSACTION: u32 = iow(b'c' as u32, 0, SZ_TR);
 pub const BC_REPLY: u32 = iow(b'c' as u32, 1, SZ_TR);
@@ -148,9 +156,15 @@ pub const BR_DEAD_BINDER: u32 = ior(b'r' as u32, 11, SZ_U64);
 pub const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = ior(b'r' as u32, 14, SZ_U64);
 pub const BR_FAILED_REPLY: u32 = io(b'r' as u32, 17);
 /// struct binder_transaction_data_secctx (upstream): the transaction data
-/// followed by a pointer to a sender-info record in the buffer's extra
-/// area. OH's libbinder reads the sender identity from it.
-pub const BR_TRANSACTION_SECCTX: u32 = ior(b'r' as u32, 42, 72);
+/// followed by a pointer to the sender's NUL-terminated security-context
+/// string in the buffer's extra area. NOTE the ioctl number: nr=2 with a
+/// 72-byte size (0x80487202) — the SAME nr as BR_TRANSACTION (_IOR('r',2,
+/// struct binder_transaction_data), 64 bytes); the size field is what
+/// distinguishes them. OH libbinder switch-matches the exact value
+/// (sys_binder.h BR_TRANSACTION_SEC_CTX); an earlier 0x8048722A (nr=42)
+/// staging was rejected with HandleCommands error:404 and samgr silently
+/// dropped every SECCTX delivery (b45/b59 wedges).
+pub const BR_TRANSACTION_SECCTX: u32 = ior(b'r' as u32, 2, 72);
 
 /// struct binder_transaction_data (LP64)
 #[repr(C)]
@@ -225,17 +239,20 @@ struct BinderFdArrayObject {
 }
 const _: () = assert!(core::mem::size_of::<BinderFdArrayObject>() == 32);
 
-/// Sender-info record copied into the transaction's sg area when the
-/// target node opted into FLAT_BINDER_FLAG_TXN_SECURITY_CTX (OH's
-/// GetCallerPid/GetCallerUid/GetCallerTokenID source).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct BinderSenderInfo {
-    pid: i32,
-    uid: u32,
-    tokenid: u64,
-}
-const _: () = assert!(core::mem::size_of::<BinderSenderInfo>() == 16);
+/// Security-context string copied into the transaction's sg area when the
+/// target node opted into FLAT_BINDER_FLAG_TXN_SECURITY_CTX — OH libbinder
+/// reads it as the caller's SELinux sid (IPCSkeleton::GetCallingSid).
+/// All Rux tasks share this synthesized permissive domain.
+const SECCTX_SID: &str = "u:r:init:s0";
+const _: () = {
+    let bytes = SECCTX_SID.as_bytes();
+    let mut i = 0;
+    assert!(bytes.len() > 0);
+    while i < bytes.len() {
+        assert!(bytes[i] != 0, "SECCTX_SID must have no interior NULs");
+        i += 1;
+    }
+};
 
 /// Minimum in-buffer size of each object type (binder_validate_object;
 /// on LP64 the fd object carries an 8-byte union like flat_binder_object).
@@ -423,7 +440,13 @@ struct BinderAlloc {
 
 impl BinderAlloc {
     fn block_need(data_size: usize, offsets_size: usize, extra_size: usize) -> usize {
-        align8(data_size) + align8(offsets_size) + align8(extra_size)
+        // Linux binder_alloc_new_buf allocates for EVERY transaction,
+        // including all-zero payloads (the block carries data_size=0
+        // metadata; empty parcels are legal — OH's samgrClient
+        // registration path sends one). The old `0 -> reject` rule
+        // failed every such transaction with BR_FAILED_REPLY, so no
+        // service could ever register with samgr.
+        (align8(data_size) + align8(offsets_size) + align8(extra_size)).max(8)
     }
 
     /// binder_alloc_new_buf: sync first-fit from the low end, async from
@@ -436,9 +459,6 @@ impl BinderAlloc {
         is_async: bool,
     ) -> Option<usize> {
         let need = Self::block_need(data_size, offsets_size, extra_size);
-        if need == 0 {
-            return None;
-        }
         if is_async && self.free_async_space < need {
             return None;
         }
@@ -591,8 +611,8 @@ struct BinderTxn {
     data_size: usize,
     offsets_size: usize,
     buffer_off: usize,
-    /// Target-user address of the BinderSenderInfo record in the sg area
-    /// (0: the target node did not request a security context).
+    /// Target-user address of the NUL-terminated secctx string in the sg
+    /// area (0: the target node did not request a security context).
     security_ctx: u64,
 }
 
@@ -633,6 +653,12 @@ struct BinderThread {
     /// wake the exact thread; proc work wakes one selected waiter.
     wait: WaitQueueHead,
     st: core::cell::UnsafeCell<ThreadState>,
+    /// Jiffies when this thread entered the blocking binder read wait (0
+    /// while not waiting) — read atomically by the khungtaskd binder-stall
+    /// scan without taking WORLD.
+    read_wait_since: core::sync::atomic::AtomicU64,
+    /// One stall report per wait episode (avoids per-scan spam).
+    stall_reported: core::sync::atomic::AtomicBool,
 }
 
 impl BinderThread {
@@ -640,6 +666,8 @@ impl BinderThread {
         Self {
             tid,
             wait: WaitQueueHead::new(),
+            read_wait_since: core::sync::atomic::AtomicU64::new(0),
+            stall_reported: core::sync::atomic::AtomicBool::new(false),
             st: core::cell::UnsafeCell::new(ThreadState {
                 looper: 0,
                 todo: VecDeque::new(),
@@ -743,6 +771,90 @@ struct World {
 
 static WORLD: Spinlock<Option<World>> = Spinlock::new(None);
 static NEXT_PROC_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Waiters parked while the context manager for their device context is
+/// not yet installed (see wait_for_context_manager). set_context_mgr
+/// wakes everyone on success.
+static MANAGER_WAIT: crate::process::wait::WaitQueueHead =
+    crate::process::wait::WaitQueueHead::new();
+
+/// Bounded block for handle-0 transactions issued before the context
+/// manager exists (OH boot bring-up).
+///
+/// Every early-boot OH client (storage_daemon, hdf_devmgr, appspawn
+/// helpers, ...) reaches for the samgr proxy with a BOUNDED retry budget
+/// (hdf_devmgr: 16 tries). On this image samgr must fault in ~100 shared
+/// libraries before its BINDER_SET_CONTEXT_MGR(_EXT) lands, and under
+/// TCG that window outlasted those budgets: hdf_devmgr exited 255
+/// ("failed to start service manager"), SA 5100 never registered and
+/// every devhost then waited on it forever (boot b46, lines 3046-8623 —
+/// the manager arrived ~400 serial lines AFTER the last retry). Instead
+/// of failing BR_DEAD_REPLY instantly, park the transaction for up to
+/// MANAGER_WAIT_MAX_MS total so the client budget stretches across the
+/// gap. Linux answers BR_DEAD_REPLY immediately — this is a deliberate,
+/// contained divergence for bring-up; nothing on OH probes for manager
+/// absence on purpose.
+fn wait_for_context_manager(ctx: BinderCtx) {
+    const MANAGER_WAIT_MAX_MS: u64 = 8000;
+    const SLICE_MS: u64 = 250;
+    const SLICE_JIFFIES: u64 = (SLICE_MS * crate::config::KERNEL_HZ as u64) / 1000;
+    let hz = crate::config::KERNEL_HZ as u64;
+
+    let mut waited_ms = 0u64;
+    loop {
+        {
+            let w = world_lock();
+            let installed = w
+                .as_ref()
+                .map(|world| world.mgr_node[ctx as usize].is_some())
+                .unwrap_or(true);
+            if installed {
+                return;
+            }
+        }
+        if waited_ms >= MANAGER_WAIT_MAX_MS {
+            return;
+        }
+        if crate::signal::signal_pending() {
+            return;
+        }
+        // Park on MANAGER_WAIT with a timer backstop so a missing
+        // set_context_mgr wake cannot strand the caller for the full
+        // budget (khungtaskd discipline).
+        let current = match crate::sched::current() {
+            Some(t) => t as *mut crate::process::task::Task,
+            None => return,
+        };
+        // SAFETY: current is this task's own pointer.
+        let my_pid = unsafe { (*current).pid() };
+        let target = crate::drivers::timer::get_jiffies() + SLICE_JIFFIES.max(1);
+        let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
+        MANAGER_WAIT.prepare_to_wait(current, false, true);
+        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+            MANAGER_WAIT.finish_wait(current);
+            if timer_id != 0 {
+                crate::timer::del_timer(timer_id);
+            }
+            // SAFETY: a racing wake may have enqueued us while we are
+            // still executing — take ourselves back off (NEW-C2).
+            unsafe {
+                (*current).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
+                crate::sched::dequeue_task(&*current);
+            }
+        } else {
+            crate::arch::cpu::restore_irq(true);
+            crate::sched::schedule();
+            MANAGER_WAIT.finish_wait(current);
+            if timer_id != 0 && crate::timer::timer_pending(timer_id) {
+                crate::timer::del_timer(timer_id);
+            }
+        }
+        waited_ms += SLICE_MS;
+        let _ = hz;
+    }
+}
 
 // SAFETY: binder state is shared across CPUs strictly under the WORLD
 // spinlock; the wait queues are internally synchronized; the kvirt raw
@@ -1242,6 +1354,111 @@ pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Op
     Some(binder_ioctl(file, request, arg))
 }
 
+/// Binder stall scan, called from khungtaskd (process context) alongside
+/// the D-state scan. A thread parked in the blocking binder read for
+/// longer than the threshold is almost always an IPC chain stall —
+/// typically a service that never answered a synchronous transaction.
+/// S-state tasks are invisible to the D-state detector, so report these
+/// here: pid/tid, wait duration, and — when the thread is waiting for a
+/// REPLY — the pid of the process that owes it (txn_stack top's owner).
+/// One report per wait episode.
+pub fn stall_report() {
+    const STALL_SECS: u64 = 120;
+    let now = crate::drivers::timer::get_jiffies();
+    let hz = crate::config::KERNEL_HZ as u64;
+    if hz == 0 {
+        return;
+    }
+    let w = world_lock();
+    // SAFETY: read-only traversal under WORLD (pm() casts are only used
+    // to reach each live proc's thread list).
+    unsafe {
+        let world = match w.as_ref() {
+            Some(world) => world,
+            None => return,
+        };
+        for p in &world.procs {
+            let proc = pm(world, p);
+            for t in &proc.im().threads {
+                let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
+                if since == 0 || now.saturating_sub(since) < STALL_SECS * hz {
+                    continue;
+                }
+                if t.stall_reported.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                    continue;
+                }
+                let secs = (now.saturating_sub(since) / hz).max(1);
+                let th = t.st();
+                let pending = th.txn_stack.len();
+                let owed_by = th.txn_stack.last().map(|txn| txn.to_proc.pid);
+                match (pending, owed_by) {
+                    (0, _) => crate::pr_warn!(
+                        "binder-stall: pid {} tid {} waiting {}s for work (no pending txn)",
+                        proc.pid, t.tid, secs
+                    ),
+                    (n, Some(owner)) => crate::pr_warn!(
+                        "binder-stall: pid {} tid {} waiting {}s for reply from pid {} ({} txn(s) stacked)",
+                        proc.pid, t.tid, secs, owner, n
+                    ),
+                    (n, None) => crate::pr_warn!(
+                        "binder-stall: pid {} tid {} waiting {}s for reply ({} txn(s) stacked)",
+                        proc.pid, t.tid, secs, n
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// BINDER_SET_CONTEXT_MGR / _EXT body (binder_ioctl_set_ctx_mgr). The EXT
+/// variant passes the flat_binder_object's ptr/cookie/flags; the plain one
+/// passes zeros. Linux creates the node with local refs held and has_*_ref
+/// already true, so no INCREFS/ACQUIRE handshake fires for it.
+fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) -> i64 {
+    let mut w = world_lock();
+    let world = w.as_mut().unwrap();
+    if world.mgr_node[proc.ctx as usize].is_some() {
+        crate::pr_err!(
+            "binder: BINDER_SET_CONTEXT_MGR already set (ctx {})",
+            proc.ctx as u8
+        );
+        return -(EBUSY as i64);
+    }
+    // Keep FLAT_BINDER_FLAG_TXN_SECURITY_CTX (0x1000) live on the manager
+    // node: OH samgr registers with it and REQUIRES BR_TRANSACTION_SEC_CTX
+    // deliveries — libbinder's BinderInvoker::Transaction() derives
+    // callerSid_ (IPCSkeleton::GetCallingSid()) from the secctx record as a
+    // C string, and a plain BR_TRANSACTION leaves it "" (boots b52-b58:
+    // every GetServiceCheck failed with an empty callingSid because an
+    // earlier wedge workaround masked the flag). The b45 wedge itself was
+    // the garbage binary secctx record plus the broken selinuxfs status
+    // mmap, both fixed alongside this.
+    let node = Arc::new(BinderNode::new(world.next_id, ptr, cookie, proc.id, flags));
+    world.next_id += 1;
+    // SAFETY: under WORLD.
+    unsafe {
+        let ns = node.st();
+        ns.local_strong_refs = 1;
+        ns.local_weak_refs = 1;
+        ns.has_strong_ref = true;
+        ns.has_weak_ref = true;
+        pm(world, proc).im().nodes.push(node.clone());
+    }
+    world.mgr_node[proc.ctx as usize] = Some(node);
+    drop(w);
+    // Release any handle-0 transactions parked waiting for the manager
+    // (wait_for_context_manager).
+    MANAGER_WAIT.wake_up_all();
+    crate::pr_info!(
+        "binder: proc {} (pid {}) is the context manager (ctx {}, flags {:#x})",
+        proc.id,
+        proc.pid,
+        proc.ctx as u8,
+        flags
+    );
+    0
+}
+
 fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
     // SAFETY: fd-backed lifetime; see proc_ref.
     let Some(proc) = (unsafe { proc_ref(file) }) else {
@@ -1286,32 +1503,39 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 None => -(EINVAL as i64),
             }
         }
-        BINDER_SET_CONTEXT_MGR => {
-            let mut w = world_lock();
-            let world = w.as_mut().unwrap();
-            if world.mgr_node[proc.ctx as usize].is_some() {
-                crate::pr_err!("binder: BINDER_SET_CONTEXT_MGR already set (ctx {})", proc.ctx as u8);
-                return -(EBUSY as i64);
+        BINDER_SET_CONTEXT_MGR => set_context_mgr(&proc, 0, 0, 0),
+        BINDER_SET_CONTEXT_MGR_EXT => {
+            // flat_binder_object (LP64): type@0 u32, flags@4 u32,
+            // binder@8 u64, cookie@16 u64. Linux only consumes
+            // fp->binder (node ptr), fp->cookie and fp->flags here.
+            if arg == 0 || !crate::arch::uaccess::access_ok(arg, 24) {
+                return -(EFAULT as i64);
             }
-            // Linux creates the node with local refs held and has_*_ref
-            // already true, so no INCREFS/ACQUIRE handshake fires for it.
-            // The mgr node's flags are 0 (binder_new_node with fp==NULL):
-            // it does not accept BINDER_TYPE_FD objects, exactly like the
-            // un-extended BINDER_SET_CONTEXT_MGR ioctl.
-            let node = Arc::new(BinderNode::new(world.next_id, 0, 0, proc.id, 0));
-            world.next_id += 1;
-            // SAFETY: under WORLD.
-            unsafe {
-                let ns = node.st();
-                ns.local_strong_refs = 1;
-                ns.local_weak_refs = 1;
-                ns.has_strong_ref = true;
-                ns.has_weak_ref = true;
-                pm(world, &proc).im().nodes.push(node.clone());
+            let ftype = unsafe { crate::arch::uaccess::get_user(arg as *const u32) };
+            let flags = unsafe { crate::arch::uaccess::get_user((arg + 4) as *const u32) };
+            let ptr = unsafe { crate::arch::uaccess::get_user((arg + 8) as *const u64) };
+            let cookie = unsafe { crate::arch::uaccess::get_user((arg + 16) as *const u64) };
+            match (ftype, flags, ptr, cookie) {
+                (Some(_), Some(flags), Some(ptr), Some(cookie)) => {
+                    set_context_mgr(&proc, ptr, cookie, flags)
+                }
+                _ => -(EFAULT as i64),
             }
-            world.mgr_node[proc.ctx as usize] = Some(node);
-            drop(w);
-            crate::pr_info!("binder: proc {} (pid {}) is the context manager (ctx {})", proc.id, proc.pid, proc.ctx as u8);
+        }
+        BINDER_FEATURE_SET => {
+            // OpenHarmony binder feature negotiation: report the enhanced
+            // features this driver supports. We implement none of them
+            // (access-token, real-pid tagging), so the answer is 0 —
+            // libipc then runs its baseline protocol, which is plain
+            // upstream binder. Answering the ioctl at all (instead of
+            // EINVAL) keeps every open from logging a probe failure.
+            if arg == 0 || !crate::arch::uaccess::access_ok(arg, 8) {
+                return -(EFAULT as i64);
+            }
+            // SAFETY: arg validated non-null, 8-byte writable.
+            if !unsafe { crate::arch::uaccess::put_user(arg as *mut u64, 0u64) } {
+                return -(EFAULT as i64);
+            }
             0
         }
         BINDER_THREAD_EXIT => {
@@ -1598,6 +1822,63 @@ fn binder_thread_write(
                             .refs
                             .iter()
                             .position(|r| r.desc == desc);
+                        // Linux binder_thread_write special case: an
+                        // INCREMENT on handle 0 (the context-manager
+                        // proxy every BpBinder(0) takes on creation)
+                        // resolves to the context-manager node via
+                        // binder_inc_ref_for_node, creating the ref if
+                        // this proc does not have one yet. Without it,
+                        // every OH process's first samgr proxy ref was
+                        // dropped on the floor.
+                        let ridx = match (ridx, increment && desc == 0) {
+                            (Some(i), _) => Some(i),
+                            (None, true) => {
+                                let mgr = world.mgr_node[proc.ctx as usize].clone();
+                                match mgr {
+                                    Some(mgr) if mgr.proc_id != proc.id => {
+                                        let p = pm(world, proc);
+                                        if let Some(i) = p
+                                            .im()
+                                            .refs
+                                            .iter()
+                                            .position(|r| Arc::ptr_eq(&r.node, &mgr))
+                                        {
+                                            Some(i)
+                                        } else {
+                                            // Create with zero counts (the
+                                            // normal increment path below
+                                            // brings them to 1/0 or 0/1),
+                                            // pinning the node like
+                                            // get_or_create_ref does.
+                                            let d = p.im().next_desc;
+                                            p.im().next_desc += 1;
+                                            mgr.st().internal_strong_refs += 1;
+                                            p.im().refs.push(BinderRef {
+                                                desc: d,
+                                                node: mgr.clone(),
+                                                strong: 0,
+                                                weak: 0,
+                                                death: None,
+                                            });
+                                            let i = p.im().refs.len() - 1;
+                                            if let Some(owner) = world
+                                                .procs
+                                                .iter()
+                                                .find(|o| o.id == mgr.proc_id)
+                                            {
+                                                owner.im().todo.push_back(Work::Node(mgr.clone()));
+                                                if wake_owner.is_none() {
+                                                    wake_owner = Some(owner.clone());
+                                                }
+                                            }
+                                            Some(i)
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            (None, false) => None,
+                        };
                         let Some(ridx) = ridx else {
                             drop(w);
                             crate::pr_info!("binder: pid {} ref command on invalid handle {}", proc.pid, desc);
@@ -1907,6 +2188,13 @@ fn binder_transaction(
     let data_size = tr.data_size as usize;
     let offsets_size = tr.offsets_size as usize;
 
+    // Bring-up crutch for the samgr-install race — see
+    // wait_for_context_manager: stretch bounded client retry budgets
+    // across the manager's late install instead of failing instantly.
+    if !reply && tr.target_handle == 0 {
+        wait_for_context_manager(proc.ctx);
+    }
+
     // ---- resolve target + allocate the target buffer ------------------
     let mut target_node: Option<Arc<BinderNode>> = None;
     let mut target_thread_key: Option<(Arc<BinderProc>, u32)> = None;
@@ -2018,7 +2306,7 @@ fn binder_transaction(
                 if let Some(node) = &target_node {
                     allows_fd = node.flags & FLAT_BINDER_FLAG_ACCEPTS_FDS != 0;
                     if node.flags & FLAT_BINDER_FLAG_TXN_SECURITY_CTX != 0 {
-                        secctx_space = align8(core::mem::size_of::<BinderSenderInfo>());
+                        secctx_space = align8(SECCTX_SID.len() + 1);
                     }
                 }
             }
@@ -2098,24 +2386,31 @@ fn binder_transaction(
         }
     }
 
-    // ---- sender-info record (BR_TRANSACTION_SECCTX payload) ------------
-    // Written at the start of the sg area, ahead of any BINDER_TYPE_PTR
-    // payloads (upstream prepends the security context there).
+    // ---- secctx record (BR_TRANSACTION_SECCTX payload) ------------------
+    // A NUL-terminated security-context STRING at the start of the sg area,
+    // ahead of any BINDER_TYPE_PTR payloads (upstream puts the context
+    // there). OH libbinder's BinderInvoker::Transaction() casts the secctx
+    // pointer to `const char*` for callerSid_ (IPCSkeleton::GetCallingSid)
+    // — a binary struct here reads as garbage bytes up to an accidental
+    // NUL (pid low byte), so it must be a string. Every Rux task is
+    // unlabeled; "u:r:init:s0" is the permissive synthesized domain. With
+    // the class/ tree absent, string_to_security_class fails and
+    // deny_unknown=0 turns every such check into an allow anyway — the
+    // string only needs to be well-formed and non-empty.
     let extra_base = align8(data_size) + align8(offsets_size);
     let mut sg_used = 0usize;
     let mut security_ctx: u64 = 0;
     if secctx_space > 0 {
-        let (sender_pid, sender_euid) = match crate::sched::current() {
-            Some(t) => ((*t).pid() as i32, (*t).cred().euid),
-            None => (0, 0),
-        };
-        let info = BinderSenderInfo { pid: sender_pid, uid: sender_euid, tokenid: 0 };
-        // SAFETY: the sg area is sized for secctx_space.
+        let bytes = SECCTX_SID.as_bytes();
+        // SAFETY: the sg area is sized for secctx_space (>= len+1, NUL
+        // included; SECCTX_SID has no interior NULs).
         unsafe {
-            core::ptr::write_volatile(
-                kvirt.add(block_off + extra_base) as *mut BinderSenderInfo,
-                info,
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                kvirt.add(block_off + extra_base),
+                bytes.len(),
             );
+            core::ptr::write_volatile(kvirt.add(block_off + extra_base + bytes.len()), 0u8);
         }
         security_ctx = user_base + block_off as u64 + extra_base as u64;
         sg_used += secctx_space;
@@ -2748,11 +3043,16 @@ fn binder_thread_read(
                     thread.st().waiting_for_proc_work = true;
                 }
             }
+            thread
+                .read_wait_since
+                .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
+            thread.stall_reported.store(false, core::sync::atomic::Ordering::Release);
             let r = crate::wait_event_interruptible!(&thread.wait, {
                 let w = world_lock();
                 // SAFETY: under WORLD.
                 unsafe { thread_has_work(w.as_ref().unwrap(), proc, thread) }
             });
+            thread.read_wait_since.store(0, core::sync::atomic::Ordering::Release);
             {
                 let _w = world_lock();
                 // SAFETY: under WORLD.
@@ -2914,6 +3214,18 @@ fn binder_thread_read(
                             ));
                             if sec {
                                 stage_u64!(t.security_ctx);
+                                // First few deliveries logged: proves the
+                                // SECCTX path is live and shows the sid the
+                                // receiver will parse (SA-gate forensics).
+                                static SECCTX_DELIVERED: core::sync::atomic::AtomicU32 =
+                                    core::sync::atomic::AtomicU32::new(0);
+                                use core::sync::atomic::Ordering::Relaxed;
+                                if SECCTX_DELIVERED.fetch_add(1, Relaxed) < 5 {
+                                    crate::pr_info!(
+                                        "binder: BR_TRANSACTION_SECCTX -> pid {} sid '{}' code {}",
+                                        proc.pid, SECCTX_SID, td.code
+                                    );
+                                }
                             }
                             // The receiving side now owns the buffer.
                             if let Some(a) = t.to_proc.im().alloc.as_mut() {

@@ -196,7 +196,16 @@ pub fn do_mount(
         if let Some(idx) = minor {
             let disk = crate::drivers::loop_dev::loop_disk(idx as usize)
                 .ok_or(errno::Errno::NoSuchDevice.as_neg_i32())?;
-            let root = crate::fs::ext4::mount_loop_instance(disk, mnt_flags.is_readonly())?;
+            let (root, effective_ro) =
+                crate::fs::ext4::mount_loop_instance(disk, mnt_flags.is_readonly())?;
+            // Bring-up policy: the ext4 layer downgraded an rw request
+            // (metadata_csum) — mirror it in the VFS mount flags so all
+            // write paths fail EROFS at the VFS, not inside ext4.
+            let mnt_flags = if effective_ro && !mnt_flags.is_readonly() {
+                MntFlags::new(mnt_flags.bits() | MntFlags::MNT_READONLY)
+            } else {
+                mnt_flags
+            };
             crate::fs::vfs::vfs_mount(target, root, mnt_flags);
             register_mount(
                 source,
@@ -245,11 +254,16 @@ pub fn do_mount(
                     // Additional disks: separate instance (mount_loop_
                     // instance discipline — no journal replay, like a
                     // fresh scratch mount; the OH images are clean).
-                    let root = crate::fs::ext4::mount_loop_instance(
+                    let (root, effective_ro) = crate::fs::ext4::mount_loop_instance(
                         disk,
                         mnt_flags.is_readonly(),
                     )
                     .map_err(|e| e as i32)?;
+                    let mnt_flags = if effective_ro && !mnt_flags.is_readonly() {
+                        MntFlags::new(mnt_flags.bits() | MntFlags::MNT_READONLY)
+                    } else {
+                        mnt_flags
+                    };
                     crate::fs::vfs::vfs_mount(target, root, mnt_flags);
                 }
                 register_mount(

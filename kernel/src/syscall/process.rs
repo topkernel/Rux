@@ -140,6 +140,36 @@ fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
 
 /// Read file content from filesystem (ext4 or rootfs)
 fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    // VFS-first (OH Phase 2): the raw-ext4 shortcut below resolves
+    // against the ROOT ext4 superblock only — executables on other
+    // mounts (/vendor/bin/hdf_devhost for every display *_host service)
+    // came back ENOENT even though the exec pre-flight path_lookup
+    // succeeded. Open through the VFS (any mount) and read in chunks.
+    if let Ok(fd) = crate::fs::vfs::file_open(path, 0 /* O_RDONLY */, 0) {
+        let file = unsafe { crate::fs::file::get_file_fd(fd) };
+        if let Some(file) = file {
+            let mut data = alloc::vec::Vec::new();
+            let mut chunk = [0u8; 16384];
+            loop {
+                let n = unsafe { file.read(chunk.as_mut_ptr(), chunk.len()) };
+                if n <= 0 {
+                    break;
+                }
+                data.extend_from_slice(&chunk[..n as usize]);
+                if (n as usize) < chunk.len() {
+                    break;
+                }
+            }
+            // SAFETY: fd came from file_open on the current task's table.
+            let _ = unsafe { crate::fs::file::close_file_fd(fd) };
+            if !data.is_empty() {
+                return Some(data);
+            }
+        } else {
+            // SAFETY: fd came from file_open on the current task's table.
+            let _ = unsafe { crate::fs::file::close_file_fd(fd) };
+        }
+    }
     if crate::fs::ext4::is_mounted() {
         crate::fs::ext4::read_file_from_mounted(path)
     } else {
@@ -676,7 +706,15 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Does not return
 pub fn sys_exit(args: SyscallArgs) -> i64 {
-    let status = args[0] as i32;
+    // Linux ABI (kernel/exit.c): the user code is masked to 8 bits and
+    // pre-shifted into wait-status layout at the syscall boundary —
+    // sys_exit stores `(error_code & 0xff) << 8`. Storing the raw value
+    // made `exit(-1)` indistinguishable from death-by-SIGHUP everywhere
+    // downstream (Rux encodes signal deaths as negative exit codes), so
+    // every OH service exiting with -1 was misreported as a
+    // kernel-origin SIGHUP kill (SIGDEATH sig=1, si_pid=0) and init's
+    // wait4 saw WIFSIGNALED where Linux reports WIFEXITED/255.
+    let status = (((args[0] as u32) & 0xFF) << 8) as i32;
     crate::process::exit::do_exit(status);
     0 // unreachable
 }
@@ -688,7 +726,8 @@ pub fn sys_exit(args: SyscallArgs) -> i64 {
 /// `exit` / return-from-main all come through here — without it a
 /// multi-threaded process kept running after "exit".
 pub fn sys_exit_group(args: SyscallArgs) -> i64 {
-    let status = args[0] as i32;
+    // Same Linux pre-shift as sys_exit (see the comment there).
+    let status = (((args[0] as u32) & 0xFF) << 8) as i32;
     crate::process::exit::do_exit_group(status);
     0 // unreachable
 }
@@ -2160,7 +2199,125 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             }
             0
         }
-        _ => -(errno::EINVAL as i64),
+        27 => {
+            // PR_GET_SECUREBITS: current SECBIT_* mask.
+            // SAFETY: current is a valid task pointer.
+            unsafe { (*current).cred().securebits as i64 }
+        }
+        28 => {
+            // PR_SET_SECUREBITS: arg2 = SECBIT_* mask (8 defined bits).
+            // OH's init programs SECBIT_NO_SETUID_FIXUP(+_LOCKED) and
+            // SECBIT_KEEP_CAPS(+_LOCKED) on its display services before
+            // exec; EINVAL there made init abort the child
+            // (INIT_EKEEPCAP) and composer_host/render_service/
+            // bootanimation never started. SECBIT_KEEP_CAPS mirrors the
+            // PR_SET_KEEPCAPS flag so the setuid cap-retention path sees
+            // one consistent bit.
+            if arg2 > 0xff {
+                return -(errno::EINVAL as i64);
+            }
+            // SAFETY: current is a valid task pointer; cred_mut returns
+            // the task's own credential structure.
+            unsafe {
+                let cred = (*current).cred_mut();
+                // Locked bits never clear once set (issecure() rule);
+                // honor it by OR-ing the locked-alive bits back.
+                let old = cred.securebits;
+                let mut new_bits = arg2 as u32;
+                for (bit, lock) in [(0u32, 1u32), (2, 3), (4, 5), (6, 7)] {
+                    if old & (1 << lock) != 0 {
+                        new_bits |= 1 << bit; // locked-set bits stay set
+                        new_bits |= 1 << lock;
+                    }
+                }
+                cred.securebits = new_bits;
+                cred.keepcaps = new_bits & crate::process::task::SECBIT_KEEP_CAPS != 0;
+            }
+            0
+        }
+        47 => {
+            // PR_CAP_AMBIENT: arg2 selects the sub-operation
+            // (1 IS_SET / 2 RAISE / 3 LOWER / 4 CLEAR_ALL), arg3 is the
+            // capability. OH's init raises ambient caps on its services
+            // (SetAmbientCapability) — EINVAL aborted the service child
+            // with INIT_ECAP before exec.
+            const PR_CAP_AMBIENT_IS_SET: u64 = 1;
+            const PR_CAP_AMBIENT_RAISE: u64 = 2;
+            const PR_CAP_AMBIENT_LOWER: u64 = 3;
+            const PR_CAP_AMBIENT_CLEAR_ALL: u64 = 4;
+            let cap = arg3 as u32;
+            match arg2 {
+                PR_CAP_AMBIENT_IS_SET => {
+                    if cap > crate::security::capability::CAP_LAST_CAP {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred().cap_ambient.has(cap) as i64 }
+                }
+                PR_CAP_AMBIENT_RAISE => {
+                    if cap > crate::security::capability::CAP_LAST_CAP {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // Linux requires the cap in BOTH the permitted and
+                    // inheritable sets; init's service children run with
+                    // full root sets before dropping.
+                    // SAFETY: current is a valid task pointer.
+                    unsafe {
+                        let cred = (*current).cred();
+                        if !cred.cap_permitted.has(cap) || !cred.cap_inheritable.has(cap) {
+                            return -(errno::EPERM as i64);
+                        }
+                    }
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred_mut().cap_ambient.set(cap); }
+                    0
+                }
+                PR_CAP_AMBIENT_LOWER => {
+                    if cap > crate::security::capability::CAP_LAST_CAP {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred_mut().cap_ambient.clear(cap); }
+                    0
+                }
+                PR_CAP_AMBIENT_CLEAR_ALL => {
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred_mut().cap_ambient = crate::security::capability::Cap::EMPTY; }
+                    0
+                }
+                _ => -(errno::EINVAL as i64),
+            }
+        }
+        // PR_SET_VMA (Linux with CONFIG_ANON_VMA_NAME): name an anonymous
+        // VMA — (option, addr, size, PR_SET_VMA_ANON_NAME, name). OH's
+        // userspace names thread stacks/arenas at creation and treats
+        // EINVAL as a failure it retries (bootanimation's thread-creation
+        // loop). Accept and ignore the name (we don't track VMA names).
+        0x5356_4d41 => {
+            // prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, size, name):
+            // the SUB-OPERATION is arg2 (addr in arg3, size in arg4).
+            const PR_SET_VMA_ANON_NAME: u64 = 0;
+            if arg2 != PR_SET_VMA_ANON_NAME {
+                return -(errno::EINVAL as i64);
+            }
+            0
+        }
+        _ => {
+            // Bring-up visibility: which unimplemented options callers
+            // actually exercise (throttled — hdf_devhost retries some in
+            // a loop).
+            static UNK_PRCTL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = UNK_PRCTL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 32 {
+                crate::pr_warn!(
+                    "prctl: unimplemented option {} arg2={:#x} (pid {})",
+                    option,
+                    arg2,
+                    crate::process::current_pid()
+                );
+            }
+            -(errno::EINVAL as i64)
+        }
     }
 }
 

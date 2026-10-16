@@ -868,3 +868,95 @@ pub fn generate_oom_score_adj(pid: u64) -> Vec<u8> {
     let adj = unsafe { (*task).oom_score_adj() };
     format!("{}\n", adj).into_bytes()
 }
+
+// ============================================================================
+// /proc/[pid]/attr/* — SELinux label files (OH Phase 2)
+// ============================================================================
+
+/// Per-process SELinux labels written through /proc/[pid]/attr/exec and
+/// /proc/[pid]/attr/current. Rux has no SELinux enforcement, but OH's
+/// init *writes* the service context through libselinux's setexeccon()
+/// (open+write+close on /proc/self/attr/exec) before exec'ing every
+/// service — ENOENT there made init abort the child with
+/// INIT_EEXEC_CONTENT, so composer_host/render_service/bootanimation
+/// never started. The stored strings are just kept readable back.
+use alloc::collections::BTreeMap;
+use crate::sync::spinlock::Spinlock;
+
+/// Attr kind indices (match ATTR_FILE_INO_OFF layout in mod.rs).
+pub const ATTR_EXEC: usize = 0;
+pub const ATTR_CURRENT: usize = 1;
+pub const ATTR_FSCREATE: usize = 2;
+pub const ATTR_SOCKCREATE: usize = 3;
+pub const ATTR_PREV: usize = 4;
+pub const ATTR_KEYCREATE: usize = 5;
+
+/// Labels per pid: exec/current/fscreate/sockcreate/keycreate slots
+/// (prev is synthesized as empty — see attr_get).
+static ATTR_LABELS: Spinlock<BTreeMap<u32, [Option<alloc::vec::Vec<u8>>; 6]>> =
+    Spinlock::new(BTreeMap::new());
+
+/// Trim NUL/newline separators libselinux appends.
+fn trim_label(buf: &[u8]) -> alloc::vec::Vec<u8> {
+    let end = buf
+        .iter()
+        .position(|&b| b == 0 || b == b'\n')
+        .unwrap_or(buf.len());
+    buf[..end].to_vec()
+}
+
+/// Read one label slot. Empty content is valid (Linux: unset → empty
+/// read — this exact case is what libselinux probes for).
+///
+/// `ATTR_CURRENT` falls back to `ATTR_EXEC` when the user has not
+/// written `current` directly. Linux's `selinux_bprm_set_creds()` does
+/// this implicitly at exec time (copies the stored exec label into the
+/// new task's current label); Rux has no LSM hook to do that, so the
+/// read path has to remember instead. OH's first-stage init calls
+/// setexeccon() then exec()'s them — without this fallback every
+/// service child reads empty from /proc/self/attr/current,
+/// libselinux's getcon() returns "" and the SA gate's `callingSid`
+/// comes back empty, so `Unknown class samgr_class` + `deny_unknown`
+/// still fail closed (the SAMGR side cannot recover a SID it never
+/// sees). Explicit writes to current (Some(empty) after a clear) win
+/// over the fallback — only the unset slot triggers it.
+pub fn attr_get(pid: u64, kind: usize) -> Vec<u8> {
+    if kind == ATTR_PREV {
+        return Vec::new();
+    }
+    let map = ATTR_LABELS.lock_irqsave();
+    let slots = match map.get(&(pid as u32)) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let primary = slots.get(kind).cloned().flatten();
+    if kind == ATTR_CURRENT {
+        match primary {
+            Some(v) => v, // explicit current write (incl. empty) wins
+            None => slots.get(ATTR_EXEC).cloned().flatten().unwrap_or_default(),
+        }
+    } else {
+        primary.unwrap_or_default()
+    }
+}
+
+/// Write one label slot (procfs_file_write path).
+pub fn attr_set(pid: u64, kind: usize, buf: &[u8]) {
+    if kind >= 6 {
+        return;
+    }
+    let label = trim_label(buf);
+    let mut map = ATTR_LABELS.lock_irqsave();
+    let entry = map.entry(pid as u32).or_insert([None, None, None, None, None, None]);
+    entry[kind] = Some(label);
+}
+
+/// Legacy bool-flavored accessor (exec vs current) for existing callers.
+pub fn attr_label_get(pid: u64, exec: bool) -> Vec<u8> {
+    attr_get(pid, if exec { ATTR_EXEC } else { ATTR_CURRENT })
+}
+
+/// Write one label file (procfs_file_write path).
+pub fn attr_label_set(pid: u64, exec: bool, buf: &[u8]) {
+    attr_set(pid, if exec { ATTR_EXEC } else { ATTR_CURRENT }, buf);
+}

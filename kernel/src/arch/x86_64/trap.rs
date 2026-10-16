@@ -906,13 +906,26 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 
         let regs_ref = &mut *regs;
 
-        crate::pr_debug!(
-            "trap: vector={:#x}, rip={:#x}, rsp={:#x}, mode={}",
-            vector,
-            regs_ref.rip,
-            regs_ref.rsp,
-            if regs_ref.user_mode() { "user" } else { "kernel" }
-        );
+        // OH bring-up: kernel-mode IPI/timer entries (0xE0-0xE5) are
+        // routine events — printing every one flooded the emulated UART
+        // (85% of a 400MB serial log) and slowed the whole boot enough
+        // to cost samgr the hdf_devmgr race. The remaining per-trap
+        // line (syscall entries are the overwhelming majority) is
+        // likewise UART-flooding: it now needs dfx=steptrace.
+        let routine_ipi = !regs_ref.user_mode()
+            && (0xE0..=0xE5).contains(&vector);
+        if !routine_ipi
+            && crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::Steptrace)
+        {
+            crate::pr_debug!(
+                "trap: vector={:#x}, rip={:#x}, rsp={:#x}, mode={}",
+                vector,
+                regs_ref.rip,
+                regs_ref.rsp,
+                if regs_ref.user_mode() { "user" } else { "kernel" }
+            );
+        }
 
         if vector == SYSCALL_VECTOR {
             handle_syscall(regs_ref);
@@ -1069,7 +1082,18 @@ fn handle_external_interrupt(vector: u64) {
             let f: fn() = unsafe { core::mem::transmute(h) };
             f();
         } else {
-            crate::pr_debug!("trap: unhandled IRQ line {} (vector {:#x})", line, vector);
+            // Once per line per boot: on the OH q35 boot, spurious PIC
+            // lines (2 via vectors 0x2a/0x2b) fire continuously; the
+            // per-IRQ print line was a measurable share of the serial log.
+            static LINES_SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let seen = LINES_SEEN.fetch_or(1u32 << line, core::sync::atomic::Ordering::Relaxed);
+            if seen & (1u32 << line) == 0 {
+                crate::pr_debug!(
+                    "trap: unhandled IRQ line {} (vector {:#x}) [once per line]",
+                    line,
+                    vector
+                );
+            }
         }
         pic_send_eoi(line);
         // PIC lines arrive through LINT0 (virtual wire) when the local
@@ -1144,9 +1168,11 @@ fn handle_general_protection(regs: &mut PtRegs) {
     if regs.user_mode() {
         // Handler-first routing (same as the page-fault Segfault path):
         // debuggers/crash catchers must see the SIGSEGV; the default
-        // disposition kills here.
+        // disposition kills here. A fault inside the (blocked) SIGSEGV
+        // handler itself is forced to the default action — unblocking
+        // alone would re-enter the handler and loop forever.
         let pid = crate::process::current_pid();
-        if sigsegv_has_handler() {
+        if sigsegv_has_handler() && !sigsegv_blocked_current() {
             let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
             // Synchronous fault: deliver despite a blocked mask
             // (Linux force_sig parity — see force_unblock_current).
@@ -1319,6 +1345,21 @@ fn sigsegv_has_handler() -> bool {
         .unwrap_or(false)
 }
 
+/// True when the CURRENT task blocks SIGSEGV (bit 10) — the thread is
+/// inside a SIGSEGV handler (delivery blocks the signal unless
+/// SA_NODEFER) or blocked it via sigprocmask. Linux force_sig_info
+/// semantics: a FORCED signal that is blocked is reset to SIG_DFL and
+/// unblocked — i.e. a synchronous fault on a blocked SIGSEGV kills the
+/// task. Merely pending it and iretq-ing back to the faulting rip
+/// refaults forever: OH's DFX_SignalHandler itself faults reading past
+/// its thread-stack top, and the redelivery loop starved the whole
+/// machine (96k+ identical faults in one boot).
+fn sigsegv_blocked_current() -> bool {
+    crate::sched::current()
+        .map(|t| (*t).sigmask & (1u64 << 10) != 0)
+        .unwrap_or(false)
+}
+
 fn sigbus_has_handler() -> bool {
     crate::sched::current()
         .and_then(|t| (*t).signal.as_ref().map(|s| s.get_action(7)))
@@ -1439,13 +1480,15 @@ fn handle_page_fault(regs: &mut PtRegs) {
         );
     }
 
-    crate::pr_debug!(
-        "trap: page fault addr={:#x}, rip={:#x}, ec={:#x}, mode={}",
-        fault_addr,
-        regs.rip,
-        error_code,
-        if regs.kernel_mode() { "kernel" } else { "user" }
-    );
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+        crate::pr_debug!(
+            "trap: page fault addr={:#x}, rip={:#x}, ec={:#x}, mode={}",
+            fault_addr,
+            regs.rip,
+            error_code,
+            if regs.kernel_mode() { "kernel" } else { "user" }
+        );
+    }
 
     let result = do_page_fault(regs, access);
 
@@ -1466,9 +1509,12 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // Linux semantics: route user-mode faults through signal
                 // delivery (force_sig_fault) — an installed SIGSEGV
                 // handler must run (LTP mmap05); default kills here.
+                // A blocked SIGSEGV (fault inside its own handler) is
+                // forced to the default action instead of pended — see
+                // sigsegv_blocked_current.
                 user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
-                if sigsegv_has_handler() {
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
@@ -1490,13 +1536,15 @@ fn handle_page_fault(regs: &mut PtRegs) {
             crate::pr_err!("pagefault: Permission denied at {:#x}, rip={:#x}, pid={}",
                 fault_addr, regs.rip, crate::sched::get_current_pid());
             if regs.user_mode() {
-                // Handler-first routing like Segfault (PROT_NONE access).
+                // Handler-first routing like Segfault (PROT_NONE access);
+                // likewise force-default a blocked SIGSEGV.
                 user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
-                if sigsegv_has_handler() {
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
+                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
@@ -1574,6 +1622,75 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
             kp_put_hex(regs.rsp);
             crate::console::putchar_no_lock(b'\n');
+            // OH bring-up forensics: dump 16 kernel-stack words at rsp
+            // and walk the frame-pointer chain, raw. When control flow
+            // jumps through a garbage pointer (executed stack garbage,
+            // use-after-free vtable...) this is the only record of what
+            // the stack held at the jump. Words print one per line
+            // ("kp-stk"), frames as "kp-frame".
+            for i in 0..16usize {
+                let addr = regs.rsp as usize + i * 8;
+                // SAFETY: best-effort read of our own kernel stack; a
+                // word past the mapping faults into this same handler's
+                // halt loop (no recovery attempted).
+                let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
+                for &b in b"kp-stk " {
+                    crate::console::putchar_no_lock(b);
+                }
+                kp_put_hex(addr as u64);
+                crate::console::putchar_no_lock(b':');
+                crate::console::putchar_no_lock(b' ');
+                kp_put_hex(v);
+                crate::console::putchar_no_lock(b'\n');
+            }
+            // Frame-pointer walk: [rbp] = next rbp, [rbp+8] = return
+            // address. Stops at the stack top or the first bogus frame.
+            let stack_top = (regs.rsp | 0x3fff) + 1;
+            let mut rbp = regs.rbp;
+            for _ in 0..10 {
+                if rbp & 7 != 0 || rbp + 16 >= stack_top || rbp < regs.rsp {
+                    break;
+                }
+                // SAFETY: bounds-checked reads of the current kernel stack.
+                let (next, ret) = unsafe {
+                    (
+                        core::ptr::read_volatile(rbp as *const u64),
+                        core::ptr::read_volatile((rbp + 8) as *const u64),
+                    )
+                };
+                for &b in b"kp-frame " {
+                    crate::console::putchar_no_lock(b);
+                }
+                kp_put_hex(ret);
+                crate::console::putchar_no_lock(b'\n');
+                if next <= rbp || next >= stack_top {
+                    break;
+                }
+                rbp = next;
+            }
+            // Forensic ring tail: the last 12 completed syscalls before
+            // the crash (pid/nr/a0/ret), oldest first. Identifies the
+            // in-flight syscall for interrupt-time crashes.
+            {
+                use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
+                let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+                let len = SYSCALL_RING.len();
+                for k in (0..12usize).rev() {
+                    let idx = (cur + len - 1 - k) % len;
+                    let e = &SYSCALL_RING[idx];
+                    for &b in b"kp-sys " {
+                        crate::console::putchar_no_lock(b);
+                    }
+                    kp_put_hex(e.pid.load(core::sync::atomic::Ordering::Relaxed) as u64);
+                    crate::console::putchar_no_lock(b' ');
+                    kp_put_hex(e.nr.load(core::sync::atomic::Ordering::Relaxed) as u64);
+                    crate::console::putchar_no_lock(b' ');
+                    kp_put_hex(e.a0.load(core::sync::atomic::Ordering::Relaxed));
+                    crate::console::putchar_no_lock(b' ');
+                    kp_put_hex(e.ret.load(core::sync::atomic::Ordering::Relaxed));
+                    crate::console::putchar_no_lock(b'\n');
+                }
+            }
             // SAFETY: hlt halts until the next interrupt; safe in a halt loop.
             loop {
                 unsafe { core::arch::asm!("hlt") };

@@ -251,6 +251,20 @@ impl CgroupNode {
     pub fn for_each_ancestor<F: FnMut(&CgroupNode)>(&self, mut f: F) {
         let mut cur = self;
         loop {
+            // b61/b63 containment: this walk runs from BOTH scheduler pick
+            // paths (RT list walk and the fair-class twin) on task-derived
+            // node pointers; a freed-then-reused task's cgroup_ptr is
+            // garbage and the first field deref was a fatal kernel fault
+            // twice (badaddr 0x1200003404 / #GP in atomic_load). Nodes are
+            // never freed once created, so a live node ALWAYS sits in the
+            // kernel physmap, qword-aligned — anything else means the
+            // entry came from corrupted task memory: stop the walk (the
+            // caller treats "no ancestor throttled" as schedulable)
+            // instead of dying.
+            if !crate::sched::sched::kernel_ptr_in_physmap(cur as *const CgroupNode as *const u8) {
+                crate::sched::sched::report_poisoned_rq_entry(0, cur as *const CgroupNode as usize);
+                return;
+            }
             f(cur);
             match cur.parent.as_ref() {
                 Some(p) => {

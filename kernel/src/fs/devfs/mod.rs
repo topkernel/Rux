@@ -1200,6 +1200,22 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if entry.devno.major == crate::fs::pty::PTY_SLAVE_MAJOR {
         return crate::fs::pty::slave_open(file, entry.devno.minor);
     }
+    // DRM node open trace (OH bring-up): the composer's first move is
+    // open("/dev/dri/card0"), the gralloc's is open("/dev/dri/renderD128")
+    // — neither produces hilog output, so this is the only on-serial
+    // visibility into their startup.
+    if entry.devno == crate::drivers::drm::DEV_DRM_CARD0
+        || entry.devno == crate::drivers::drm::DEV_DRM_RENDER
+    {
+        static DRM_OPENS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let n = DRM_OPENS.fetch_add(1, Ordering::Relaxed);
+        crate::pr_info!(
+            "drm: open {} (#{}) by pid {}",
+            entry.name,
+            n + 1,
+            crate::process::current_pid()
+        );
+    }
     // evdev nodes: stash the DevNo in file.private_data — evdev's
     // read/poll dispatch on it (the hook the comments promised but no
     // one ever wired: reads returned EBADF before reaching the queue).

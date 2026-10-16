@@ -295,6 +295,143 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         return 0;
     }
 
+    // OH bring-up: dump late-boot services' short writes to OTHER fds
+    // (hilog traffic goes to the hilog socket fd — every OH service's
+    // diagnostics are invisible on serial without this). Per-PID budget:
+    // one early service retrying "GetSystemAbilityManager failed" burned
+    // the whole global 4000 budget in ~3999 lines (boot b43) and the
+    // graphics services' output stayed invisible.
+    if count <= 256 && fd != 1 && fd != 2 {
+        const WTRACE_PID_MAX: usize = 48;
+        const WTRACE_SLOTS: usize = 256;
+        static WTRACE_USED: [core::sync::atomic::AtomicU8; WTRACE_SLOTS] =
+            [const { core::sync::atomic::AtomicU8::new(0) }; WTRACE_SLOTS];
+        static WTRACE_TAG: [core::sync::atomic::AtomicU32; WTRACE_SLOTS] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; WTRACE_SLOTS];
+        let pid = unsafe { crate::process::current_pid() };
+        if pid >= 313 {
+            let slot = (pid as usize) % WTRACE_SLOTS;
+            let tag = WTRACE_TAG[slot].load(core::sync::atomic::Ordering::Relaxed);
+            let used = if tag == pid {
+                WTRACE_USED[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            } else {
+                WTRACE_TAG[slot].store(pid, core::sync::atomic::Ordering::Relaxed);
+                WTRACE_USED[slot].store(0, core::sync::atomic::Ordering::Relaxed);
+                0
+            };
+            if used < WTRACE_PID_MAX as u8 {
+                let len = core::cmp::min(count, 200);
+                let mut kb = [0u8; 200];
+                // SAFETY: buf/count validated by access_ok above.
+                let uncopied = unsafe {
+                    crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
+                };
+                if uncopied == 0 {
+                    let text = kb[..len]
+                        .iter()
+                        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
+                        .collect::<alloc::vec::Vec<u8>>();
+                    if let Ok(t) = core::str::from_utf8(&text) {
+                        // Skip binary hilog frames: require a mostly-printable
+                        // head (text logs start with '<N>[pid=..]' or words).
+                        let head: usize = t.as_bytes().iter()
+                            .take(32)
+                            .filter(|&&b| b.is_ascii_graphic() || b == b' ')
+                            .count();
+                        if head >= 24 {
+                            crate::pr_info!("w pid {}: {}", pid, t);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // OH bring-up: dump late-boot services' stderr text (capped). The
+    // musl loader's "Error loading shared library X" / "Error relocating"
+    // diagnostics go to fd 2, which init redirects away from the UART
+    // console — without this the exact loader failure (and exit 127) is
+    // invisible on serial. Gate pid >= 300 (hdf_devmgr ~320, devhosts
+    // ~404+, render_service ~443, bootanimation later); init/ueventd
+    // stderr before that is kmsg-visible anyway.
+    if fd == 2 {
+        const STDERR_DUMP_N: usize = 200;
+        static STDERR_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let pid = unsafe { crate::process::current_pid() };
+        // Dedupe: a fixed ring of recent (pid, first-8-bytes) keys — the
+        // hilog-adapter and selinux-restorecon loops reprint the same
+        // line forever and would eat the whole budget on the first
+        // service (observed: ueventd's restorecon spam took 34 slots,
+        // the HiLogAdapter retry loop 130+).
+        static DEDUPE: [(core::sync::atomic::AtomicU32, [core::sync::atomic::AtomicU32; 2]);
+            32] =
+            [const {
+                (
+                    core::sync::atomic::AtomicU32::new(0),
+                    [core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0)],
+                )
+            }; 32];
+        // Only late pids consume the budget (an unconditional fetch_add
+        // would let the early-boot stderr storm eat it first).
+        let n = if pid >= 300 {
+            STDERR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        } else {
+            STDERR_N.load(core::sync::atomic::Ordering::Relaxed)
+        };
+        if n < STDERR_DUMP_N && pid >= 300 {
+            let len = core::cmp::min(count, 160);
+            let mut kb = [0u8; 160];
+            // SAFETY: buf/count validated by access_ok above; kb is a
+            // local 160-byte buffer and len <= 160.
+            let uncopied = unsafe {
+                crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
+            };
+            if uncopied == 0 {
+                let text = kb[..len]
+                    .iter()
+                    .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
+                    .collect::<alloc::vec::Vec<u8>>();
+                // Dedupe key: pid + first 8 bytes of the text.
+                let key1 = pid;
+                let key2 = u32::from_le_bytes([
+                    kb[0], kb[1], kb[2], kb[3],
+                ]);
+                let key3 = u32::from_le_bytes([
+                    kb[4], kb[5], kb[6.min(len)], kb[7.min(len)],
+                ]);
+                let mut dup = false;
+                for slot in DEDUPE.iter() {
+                    if slot.0.load(core::sync::atomic::Ordering::Relaxed) == key1
+                        && slot.1[0].load(core::sync::atomic::Ordering::Relaxed) == key2
+                        && slot.1[1].load(core::sync::atomic::Ordering::Relaxed) == key3
+                    {
+                        dup = true;
+                        break;
+                    }
+                }
+                if !dup {
+                    let di = n % DEDUPE.len();
+                    DEDUPE[di].0.store(key1, core::sync::atomic::Ordering::Relaxed);
+                    DEDUPE[di].1[0].store(key2, core::sync::atomic::Ordering::Relaxed);
+                    DEDUPE[di].1[1].store(key3, core::sync::atomic::Ordering::Relaxed);
+                    crate::pr_info!(
+                        "stderr[{}] pid {}: {}",
+                        n,
+                        pid,
+                        core::str::from_utf8(&text).unwrap_or("<non-utf8>")
+                    );
+                } else {
+                    // Refund the budget slot: dup lines don't consume it.
+                    STDERR_N.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                // Copy failed: refund the slot too.
+                STDERR_N.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
     // SAFETY: get_file_fd returns valid File or None; user pointers validated above.
     unsafe {
         match get_file_fd(fd) {
@@ -721,6 +858,23 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
             if crate::drivers::gpu::fbdev::is_fb_file(&file) {
                 return crate::drivers::gpu::fbdev_ioctl(request, arg) as i64;
+            }
+        }
+    }
+
+    // DRM ioctls (/dev/dri/card0 + renderD128, OH display HDI): dispatch
+    // on the File's ops identity (evdev/fbdev pattern). Prime fds
+    // (drmPrimeHandleToFD exports) carry their own ops table — only
+    // DMA_BUF_IOCTL_SYNC reaches them.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if crate::drivers::drm::is_drm_file(&file) {
+                return crate::drivers::drm::drm_ioctl(request, arg);
+            }
+            if crate::drivers::drm::is_prime_file(&file) {
+                if let Some(ret) = crate::drivers::drm::prime_file_ioctl(&file, request, arg) {
+                    return ret;
+                }
             }
         }
     }

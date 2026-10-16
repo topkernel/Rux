@@ -911,6 +911,19 @@ fn sigsegv_has_handler() -> bool {
         .unwrap_or(false)
 }
 
+/// True when the CURRENT task blocks SIGSEGV (bit 10) — the thread is
+/// inside a SIGSEGV handler (delivery blocks the signal unless
+/// SA_NODEFER) or blocked it via sigprocmask. Linux force_sig_info
+/// semantics: a FORCED signal that is blocked is reset to SIG_DFL — a
+/// synchronous fault on a blocked SIGSEGV kills the task. Unblocking
+/// alone re-enters the handler and faults forever (see the x86_64 twin:
+/// OH's DFX_SignalHandler faulting inside itself starved the machine).
+fn sigsegv_blocked_current() -> bool {
+    crate::sched::current()
+        .map(|t| (*t).sigmask & (1u64 << 10) != 0)
+        .unwrap_or(false)
+}
+
 fn sigbus_has_handler() -> bool {
     crate::sched::current()
         .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(7)) })
@@ -978,12 +991,14 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // Linux semantics: route user-mode faults through normal
                 // signal delivery (force_sig_fault) — an installed
                 // SIGSEGV handler (debuggers, crash catchers, LTP mmap05)
-                // must run. With a handler: pend the signal and RETURN;
-                // do_signal delivers it on the way back to userspace.
-                // Without one: the default action kills here (and avoids
-                // a fault-retry loop when the disposition is SIG_IGN).
+                // must run. With a handler (and SIGSEGV not blocked —
+                // i.e. not already inside that handler): pend the signal
+                // and RETURN; do_signal delivers it on the way back to
+                // userspace. Without one — or with the fault happening
+                // inside the handler itself — the default action kills
+                // here (and avoids a fault-retry loop).
                 let pid = crate::process::current_pid();
-                if sigsegv_has_handler() {
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                     // Synchronous fault: deliver despite a blocked mask
                     // (Linux force_sig parity — see force_unblock_current).
@@ -1000,14 +1015,16 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             if regs.user_mode() {
                 // Same handler-first routing as Segfault: a PROT_NONE
                 // access with an installed SIGSEGV handler must run it
-                // (LTP mmap05); default disposition kills directly.
+                // (LTP mmap05); a fault inside the (blocked) handler
+                // itself, or the default disposition, kills directly.
                 let pid = crate::process::current_pid();
-                if sigsegv_has_handler() {
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                     // Synchronous fault: deliver despite a blocked mask.
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
+                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }
         }

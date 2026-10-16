@@ -69,6 +69,58 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
+    // OH bring-up: trace O_PATH opens (musl's fchmodat fallback opens
+    // the target O_PATH then fstatat(fd,"",AT_EMPTY_PATH)s it).
+    {
+        const O_PATH_X: u32 = 0x200000;
+        if (flags & O_PATH_X) != 0 {
+            static OPATH_TRACE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let pid = unsafe { crate::process::current_pid() };
+            let n = if pid >= 300 {
+                OPATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            } else {
+                OPATH_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
+            };
+            if n < 20 && pid >= 300 {
+                crate::pr_info!(
+                    "o-path open: '{}' flags={:#x} pid={}",
+                    full_path, flags, pid
+                );
+            }
+        }
+    }
+
+    // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
+    // loop is only visible when the loaded-each-round libs are shown).
+    if full_path.ends_with(".so") {
+        // Per-pid budget: a flat counter let hdf_devhost (~pid 418,
+        // every lib searched across ~15 dirs) consume the whole budget
+        // before render_service (~443) opened its first library. 8
+        // pid-slots x 64 lines each, indexed by pid % 8 (collisions
+        // just share a budget). Late-boot services only (pid >= 418).
+        static SO_SLOT_PID: [core::sync::atomic::AtomicU32; 8] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+        static SO_SLOT_N: [core::sync::atomic::AtomicU32; 8] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+        let pid = unsafe { crate::process::current_pid() } as u32;
+        let slot = (pid % 8) as usize;
+        let slot_pid = SO_SLOT_PID[slot].load(core::sync::atomic::Ordering::Relaxed);
+        if slot_pid != pid && pid >= 418 {
+            // Claim the slot for this pid (last writer wins on races —
+            // this is a diagnostic, approximate is fine).
+            SO_SLOT_PID[slot].store(pid, core::sync::atomic::Ordering::Relaxed);
+            SO_SLOT_N[slot].store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        let claimed = SO_SLOT_PID[slot].load(core::sync::atomic::Ordering::Relaxed);
+        if claimed == pid && pid >= 418 {
+            let n = SO_SLOT_N[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 64 {
+                crate::pr_info!("so-open[{}.{}] '{}' (pid {})", slot, n, full_path, pid);
+            }
+        }
+    }
+
     // Shortcut: /proc/[pid]/fd with O_DIRECTORY. P1 chroot: the string
     // shortcuts below address the GLOBAL /proc namespace — under a chroot
     // without a mounted /proc inside the jail they must NOT leak (they
@@ -189,6 +241,108 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         crate::fs::file_open(&full_path, flags, mode)
     };
 
+    // OH bring-up: throttled ENOENT trace — the display HDF hosts retry
+    // missing files in tight loops and their hilog never reaches the
+    // console; the failing path list is the only visibility into what
+    // userspace still lacks. ld.so directory probes would burn the
+    // budget, so: /dev/ paths always print (device nodes are the
+    // bring-up signal), every other DISTINCT path prints once (the
+    // linker search list dedupes to one line per missing library).
+    if let Err(e) = &result {
+        if *e == -(errno::ENOENT as i32) {
+            static ENO_SEEN: crate::sync::spinlock::Spinlock<
+                Option<alloc::vec::Vec<alloc::string::String>>,
+            > = crate::sync::spinlock::Spinlock::new(None);
+            let mut print_it = false;
+            if full_path.starts_with("/dev/") {
+                static ENO_DEV_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                print_it = ENO_DEV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
+            } else {
+                // ".so" misses get their own budget: the ld.so probe
+                // storm would otherwise starve the runtime-failure
+                // budget, but a lib missing from EVERY directory is the
+                // dlopen-failure signal (bootanimation retry loops).
+                // The BASE name dedupes the ~30 directory probes per
+                // missing lib to one line.
+                let is_lib_probe = full_path.ends_with(".so")
+                    || full_path.ends_with(".z.so")
+                    || full_path.ends_with(".so.1");
+if is_lib_probe {
+                    // Per-(basename,parent_dir) counter map: keeps the
+                    // dlopen directory probe storm deduplicated while
+                    // still surfacing WHERE the loader looked. The
+                    // (lib,dir) tuple is the unit — "still missing
+                    // libEGL.so in /system/lib64" is one line,
+                    // "/vendor/lib64" is another. Without the dir axis
+                    // the loader can hit /system/lib64 and miss, hit
+                    // /vendor/lib64 and miss, and we only see one
+                    // "still missing libEGL.so" that tells us nothing.
+                    static SO_COUNTS: crate::sync::spinlock::Spinlock<
+                        Option<alloc::vec::Vec<((alloc::string::String, alloc::string::String), u32)>>,
+                    > = crate::sync::spinlock::Spinlock::new(None);
+                    let base = alloc::string::String::from(
+                        full_path.rsplit('/').next().unwrap_or(""),
+                    );
+                    let parent = alloc::string::String::from(
+                        match full_path.rsplit_once('/') {
+                            Some((d, _)) if !d.is_empty() => d,
+                            _ => "/",
+                        },
+                    );
+                    let mut counts = SO_COUNTS.lock_irqsave();
+                    let list = counts.get_or_insert_with(alloc::vec::Vec::new);
+                    if list.len() < 420 {
+                        let key = (base.clone(), parent.clone());
+                        match list.iter_mut().find(|(k, _)| *k == key) {
+                            Some((_, c)) => {
+                                *c += 1;
+                                if *c % 64 == 0 {
+                                    crate::pr_info!(
+                                        "open ENOENT: still missing '{}' in '{}' x{} (pid {})",
+                                        base,
+                                        parent,
+                                        c,
+                                        unsafe { crate::process::current_pid() }
+                                    );
+                                }
+                            }
+                            None => {
+                                crate::pr_info!(
+                                    "open ENOENT: '{}' in '{}' (pid {})",
+                                    base,
+                                    parent,
+                                    unsafe { crate::process::current_pid() }
+                                );
+                                list.push((key, 1));
+                            }
+                        }
+                    }
+                } else {
+                    let mut seen = ENO_SEEN.lock_irqsave();
+                    let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+                    if list.len() < 96 {
+                        if !list.iter().any(|p| p.as_str() == full_path.as_str()) {
+                            list.push(alloc::string::String::from(full_path.as_str()));
+                            crate::pr_info!(
+                                "open ENOENT: '{}' (pid {})",
+                                full_path,
+                                unsafe { crate::process::current_pid() }
+                            );
+                        }
+                    }
+                }
+            }
+            if print_it {
+                crate::pr_info!(
+                    "open ENOENT: '{}' (pid {})",
+                    full_path,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+        }
+    }
+
     match result {
         Ok(fd) => {
             if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
@@ -292,6 +446,37 @@ pub fn sys_fstat(args: SyscallArgs) -> i64 {
 /// - args[1]: pathname - file path
 /// - args[2]: statbuf - stat structure buffer
 /// - args[3]: flags - flags (AT_SYMLINK_NOFOLLOW, etc.)
+
+/// Parse a "/proc/[self|<pid>]/fd/<n>" magic-link path (OH bring-up:
+/// musl's fchmodat(AT_SYMLINK_NOFOLLOW) fallback stats and chmods
+/// exactly this path — see the sys_fstatat/sys_fchmodat shortcuts).
+/// Returns (pid, fd) when the path matches and the fd is open in that
+/// pid's table.
+fn proc_fd_magic(path: &str) -> Option<(u32, u32)> {
+    let rest = path.strip_prefix("/proc/")?;
+    let (pid_s, fd_s) = rest.split_once("/fd/")?;
+    if fd_s.is_empty() || !fd_s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let pid: u32 = if pid_s == "self" {
+        unsafe { crate::process::current_pid() }
+    } else if !pid_s.is_empty() && pid_s.bytes().all(|b| b.is_ascii_digit()) {
+        pid_s.parse().ok()?
+    } else {
+        return None;
+    };
+    let fd: u32 = fd_s.parse().ok()?;
+    let open = crate::process::find_task_by_pid(pid)
+        .or_else(|| {
+            use crate::process::{current_pid, current_task};
+            if current_pid() == pid { current_task() } else { None }
+        })
+        .and_then(|t| t.try_fdtable())
+        .map(|ft| ft.get_file(fd as usize).is_some())
+        .unwrap_or(false);
+    if open { Some((pid, fd)) } else { None }
+}
+
 pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     use crate::fs::{Stat, stat_file_by_path};
 
@@ -305,6 +490,38 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     }
     if !crate::arch::uaccess::access_ok(statbuf as usize, crate::fs::user_stat_size()) {
         return -(errno::EFAULT as i64);
+    }
+
+    // Magic-link shortcut: stat("/proc/[self|<pid>]/fd/<n>") stats the
+    // file the fd refers to (Linux open traversal of the procfs fd link).
+    // musl's fchmodat(NO-FOLLOW) fallback stats this path after its
+    // O_PATH open; walking the synthetic symlink re-resolves a target
+    // string that socket fds cannot express. (Non-chrooted tasks only,
+    // like the other global /proc shortcuts.)
+    if !crate::fs::vfs::chrooted() {
+        let mut probe = [0u8; 64];
+        if !pathname_ptr.is_null()
+            && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe.as_mut_ptr(), pathname_ptr, probe.len())
+            } == 0
+        {
+            let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                if let Some((_, fd)) = proc_fd_magic(p) {
+                    let mut stat = Stat::new();
+                    match crate::fs::file_stat(fd as usize, &mut stat) {
+                        Ok(()) => {
+                            let r = crate::fs::copy_stat_to_user(
+                                statbuf as *mut u8, &stat);
+                            return if r != 0 { -(errno::EFAULT as i64) } else { 0 };
+                        }
+                        Err(e) => return e as i64,
+                    }
+                }
+            }
+        }
     }
 
     // Validate flags: AT_SYMLINK_NOFOLLOW (0x100), AT_EMPTY_PATH (0x1000)
@@ -347,7 +564,20 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         match crate::fs::file_stat(dirfd as usize, &mut stat) {
             Ok(()) => {}
             // Already-negative errno (see sys_fstat): don't re-negate.
-            Err(e) => return e as i64,
+            Err(e) => {
+                static FSTAT_EP_ERR_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if FSTAT_EP_ERR_N.fetch_add(
+                    1, core::sync::atomic::Ordering::Relaxed) < 20
+                {
+                    crate::pr_info!(
+                        "fstatat empty-path err: dirfd={} flags={:#x} ret={} pid={}",
+                        dirfd, flags, e,
+                        unsafe { crate::process::current_pid() }
+                    );
+                }
+                return e as i64;
+            }
         }
         let result = crate::fs::copy_stat_to_user(statbuf as *mut u8, &stat);
         return if result != 0 { -(errno::EFAULT as i64) } else { 0 };
@@ -355,7 +585,33 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
-        Err(e) => return e as i64,
+        Err(e) => {
+            // OH bring-up: init's service-socket chmod path dies with
+            // ENOTDIR — name the failing call.
+            {
+                static FSTATAT_ERR_TRACE_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let pid = unsafe { crate::process::current_pid() };
+                let n = if pid >= 300 {
+                    FSTATAT_ERR_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                } else {
+                    FSTATAT_ERR_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
+                };
+                if n < 40 && pid >= 300 {
+                    let mut pb = [0u8; 96];
+                    let shown = crate::arch::uaccess::strncpy_from_user(
+                        pathname_ptr, pb.len(), &mut pb)
+                        .map(|s| core::str::from_utf8(s).unwrap_or("?"))
+                        .unwrap_or("?");
+                    crate::pr_info!(
+                        "fstatat err: dirfd={} path='{}' flags={:#x} ret={} pid={}",
+                        dirfd, shown, flags, e,
+                        pid
+                    );
+                }
+            }
+            return e as i64;
+        }
     };
 
     // AT_SYMLINK_NOFOLLOW: don't follow symlinks (for lstat)
@@ -757,35 +1013,61 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
 
     // Generic path: look up the symlink itself (NOFOLLOW) and read its
     // target through the filesystem's readlink op.
-    match crate::fs::vfs::path_lookup(&full_path, crate::fs::vfs::LOOKUP_NOFOLLOW) {
-        Ok(vpath) => {
-            let inode = match vpath.inode {
-                Some(i) => i,
-                None => return -(errno::ENOENT as i64),
-            };
-            if !inode.mode.is_symlink() {
-                return -(errno::EINVAL as i64);
-            }
-            let mut target_buf = [0u8; PATH_MAX];
-            let n = inode.op_readlink(&mut target_buf);
-            if n < 0 {
-                return n as i64;
-            }
-            let n = n as usize;
-            if n > target_buf.len() {
-                return -(errno::ENAMETOOLONG as i64);
-            }
-            let copy_len = n.min(bufsize);
-            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
-            unsafe {
-                if crate::arch::uaccess::copy_to_user(buf, target_buf.as_ptr(), copy_len) != 0 {
-                    return -(errno::EFAULT as i64);
-                }
-            }
-            // Linux truncates to bufsiz and returns the truncated length
-            copy_len as i64
+    let rl_result: Result<i64, i64> = (|| {
+        let vpath = crate::fs::vfs::path_lookup(&full_path, crate::fs::vfs::LOOKUP_NOFOLLOW)
+            .map_err(|e| e as i64)?;
+        let inode = vpath.inode.ok_or(-(errno::ENOENT as i64))?;
+        if !inode.mode.is_symlink() {
+            return Err(-(errno::EINVAL as i64));
         }
-        Err(e) => e as i64,
+        let mut target_buf = [0u8; PATH_MAX];
+        let n = inode.op_readlink(&mut target_buf);
+        if n < 0 {
+            return Err(n as i64);
+        }
+        let n = n as usize;
+        if n > target_buf.len() {
+            return Err(-(errno::ENAMETOOLONG as i64));
+        }
+        let copy_len = n.min(bufsize);
+        // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
+        unsafe {
+            if crate::arch::uaccess::copy_to_user(buf, target_buf.as_ptr(), copy_len) != 0 {
+                return Err(-(errno::EFAULT as i64));
+            }
+        }
+        // Linux truncates to bufsiz and returns the truncated length
+        Ok(copy_len as i64)
+    })();
+    // OH bring-up: throttled readlink-failure trace (HDF devhost probes
+    // its module directory through readlink; hilog never reaches the
+    // console). Distinct paths only, like the ENOENT open trace.
+    if let Err(e) = &rl_result {
+        static RL_SEEN: crate::sync::spinlock::Spinlock<
+            Option<alloc::vec::Vec<alloc::string::String>>,
+        > = crate::sync::spinlock::Spinlock::new(None);
+        let mut print_it = false;
+        {
+            let mut seen = RL_SEEN.lock_irqsave();
+            let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+            if list.len() < 48 && !list.iter().any(|p| p.as_str() == full_path.as_str()) {
+                list.push(alloc::string::String::from(full_path.as_str()));
+                print_it = true;
+            }
+        }
+        if print_it {
+            crate::pr_info!(
+                "readlink fail({}) '{}': not-a-symlink={} (pid {})",
+                e,
+                full_path,
+                *e == -(errno::EINVAL as i64),
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    }
+    match rl_result {
+        Ok(v) => v,
+        Err(e) => e,
     }
 }
 
@@ -1273,6 +1555,33 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         None
     };
 
+    // OH bring-up: throttled mount trace — the param service mounts
+    // tmpfs at /dev/__parameters__; a failed mount there stalls every
+    // later param get (samgr/devhost startup).
+    {
+        static MNT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = MNT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 24 {
+            let ret = match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
+                Ok(()) => 0,
+                Err(e) => e,
+            };
+            if ret != 0 || n < 12 {
+                crate::pr_info!(
+                    "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
+                    n,
+                    source,
+                    target,
+                    fs_type_str,
+                    args[3],
+                    ret
+                );
+            }
+            return ret as i64;
+        }
+    }
+
     match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
         Ok(()) => 0,
         Err(e) => e as i64,
@@ -1735,6 +2044,28 @@ pub fn sys_fchmodat(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[1] as *const u8;
     let mode = args[2] as u32;
 
+    // Magic-link shortcut (see sys_fstatat): chmod("/proc/*/fd/<n>")
+    // chmods the file the fd refers to.
+    if !crate::fs::vfs::chrooted() {
+        let mut probe = [0u8; 64];
+        if !pathname_ptr.is_null()
+            && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe.as_mut_ptr(), pathname_ptr, probe.len())
+            } == 0
+        {
+            let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                if let Some((_, fd)) = proc_fd_magic(p) {
+                    return sys_fchmod([
+                        fd as u64, mode as u64, 0, 0, 0, 0,
+                    ]);
+                }
+            }
+        }
+    }
+
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
@@ -1928,6 +2259,22 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         fill_rootfs_statfs(buf);
         buf.f_type = crate::fs::tmpfs::TMPFS_MAGIC as u32 as u64;
         buf.f_fsid = [crate::fs::tmpfs::TMPFS_MAGIC, 0];
+        return;
+    }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::selinuxfs::SELINUXFS_INODE_OPS as *const _))
+    {
+        // selinuxfs: f_type MUST be SELINUX_MAGIC (0xf97cff8c) —
+        // libselinux's verify_selinuxmnt() gates selinux_mnt (and thus
+        // every security_check_context) on exactly this magic and a
+        // non-read-only statvfs. OH samgr's SA-permission gate depends
+        // on it (boot b50's "SA:5100 selinux denied" loop).
+        const SELINUX_MAGIC: u64 = 0xf97c_ff8c;
+        fill_rootfs_statfs(buf);
+        buf.f_type = SELINUX_MAGIC;
+        buf.f_fsid = [SELINUX_MAGIC as u32, 0];
+        buf.f_flags = 0; // rw — verify_selinuxmnt rejects ST_RDONLY
         return;
     }
     fill_rootfs_statfs(buf);

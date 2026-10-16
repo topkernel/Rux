@@ -94,9 +94,15 @@ pub enum DfxSwitch {
     /// Scheduler lifecycle forensic prints (EXITNOTIFY delivery log +
     /// R56 orphan-harvest diagnostics). See the module doc for details.
     SchedTrace,
+    /// Per-syscall return line + per-trap vector line. Used during the
+    /// SIGHUP / fake-crash hunts; left on, every syscall printed two
+    /// lines (trap entry + return) — a single OH boot wrote a 2.7GB
+    /// serial log and the UART traffic slowed the system enough to cost
+    /// samgr the hdf_devmgr race. OFF unless asked for.
+    Steptrace,
 }
 
-const SWITCH_COUNT: usize = 14;
+const SWITCH_COUNT: usize = 15;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -117,6 +123,7 @@ impl DfxSwitch {
             DfxSwitch::ClaimInject => 11,
             DfxSwitch::Strace1 => 12,
             DfxSwitch::SchedTrace => 13,
+            DfxSwitch::Steptrace => 14,
         }
     }
 
@@ -136,6 +143,7 @@ impl DfxSwitch {
             "claiminject" => Some(DfxSwitch::ClaimInject),
             "strace1" => Some(DfxSwitch::Strace1),
             "schedtrace" => Some(DfxSwitch::SchedTrace),
+            "steptrace" => Some(DfxSwitch::Steptrace),
             _ => None,
         }
     }

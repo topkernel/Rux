@@ -638,8 +638,12 @@ impl SigInfo {
     ///   (no core bit — the distinction rides on si_code; e.g. toybox
     ///   timeout computes 128+WTERMSIG from si_status).
     pub fn child_exit(pid: u32, uid: u32, raw_exit: i32, core_dumped: bool) -> Self {
+        // si_status semantics (waitid SIGCHLD): the raw 0-255 exit code
+        // for CLD_EXITED (not the shifted wait status — sys_exit already
+        // pre-shifted the code into bits 8-15, so shift back down), or
+        // the signal number for CLD_KILLED/CLD_DUMPED.
         let (code, status) = if raw_exit >= 0 {
-            (si_code::CLD_EXITED, ((raw_exit as u32) & 0xFF) << 8)
+            (si_code::CLD_EXITED, ((raw_exit as u32) >> 8) & 0xFF)
         } else {
             let sig = (-(raw_exit as i64)) as u32 & 0x7F;
             let c = if core_dumped { si_code::CLD_DUMPED } else { si_code::CLD_KILLED };
@@ -2071,6 +2075,7 @@ unsafe fn send_signal_locked_info(
     if sig == Signal::SIGKILL as i32
         || sig == Signal::SIGTERM as i32
         || sig == Signal::SIGSEGV as i32
+        || sig == Signal::SIGHUP as i32
     {
         static KILLTRACE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -2091,6 +2096,7 @@ unsafe fn send_signal_locked_info(
                 let watched = t_str.starts_with("gnome-session") || t_str.starts_with("ls");
                 let group_teardown = same_group && sig == Signal::SIGKILL as i32;
                 let interesting = sig == Signal::SIGTERM as i32
+                    || sig == Signal::SIGHUP as i32
                     || (sig == Signal::SIGKILL as i32 && !same_group)
                     || watched;
                 if interesting

@@ -79,8 +79,15 @@ pub mod features {
     /// Incompatible features this implementation UNDERSTANDS. Any other
     /// incompat bit means on-disk structures we would misparse — refuse
     /// the mount (Linux does the same for unknown incompat features).
+    /// ENCRYPT is a fs CAPABILITY flag: its presence only means the fs
+    /// supports per-file encryption — unencrypted files (all of them in
+    /// the OH images) read and write identically. Linux mounts such a
+    /// filesystem without complaint; refusing it with ENODEV blocked the
+    /// stock OH userdata partition entirely (mount[11] -19, /data dead,
+    /// the whole OH service mkdir storm failing with err=2/5).
     pub const KNOWN_INCOMPAT: u32 = incompat::FILETYPE | incompat::RECOVER
-        | incompat::EXTENTS | incompat::B64BIT | incompat::FLEX_BG;
+        | incompat::EXTENTS | incompat::B64BIT | incompat::FLEX_BG
+        | incompat::ENCRYPT;
 
     /// Read-only-compat features that are safe for our (write-through,
     /// no-checksum) metadata paths. Everything else — notably BIGALLOC
@@ -95,7 +102,7 @@ pub mod features {
     pub const REJECTED_INCOMPAT: u32 = incompat::COMPRESSION | incompat::JOURNAL_DEV
         | incompat::META_BG | incompat::MMP | incompat::EA_INODE
         | incompat::DIRDATA | incompat::CSUM_SEED | incompat::LARGEDIR
-        | incompat::INLINE_DATA | incompat::ENCRYPT;
+        | incompat::INLINE_DATA;
 
     /// Per-directory flag: directory is htree-indexed (EXT4_INDEX_FL).
     /// Our directory code is linear-scan; READING an indexed directory
@@ -273,10 +280,18 @@ impl Ext4FileSystem {
                 // read-path verification (csum.rs — OH Phase 1: the OH
                 // system/vendor images are mkfs'd with metadata_csum);
                 // bigalloc stays rejected outright.
+                //
+                // OH bring-up policy (sys_prod/userdata): those images
+                // are also metadata_csum and OH's fstab mounts them rw.
+                // Refusing with ENODEV stalled the second-stage boot
+                // (sys_prod carries libdrm.so for the display composer
+                // backend). Downgrade the mount to read-only with a
+                // loud warning instead — readers work, writers get EROFS.
                 if ro_compat & features::ro_compat::METADATA_CSUM != 0 && !self.read_only {
-                    crate::pr_err!("ext4: metadata_csum rw mount not supported — refusing mount");
-                    bio::brelse(sb_bh);
-                    return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
+                    crate::pr_warn!(
+                        "ext4: metadata_csum rw mount downgraded to read-only (OH bring-up policy)"
+                    );
+                    self.read_only = true;
                 }
                 if ro_compat & features::ro_compat::BIGALLOC != 0 {
                     crate::pr_err!("ext4: bigalloc not supported — refusing mount");
@@ -2929,7 +2944,7 @@ pub fn create_vfs_inode_in(
 pub fn mount_loop_instance(
     disk: *const blkdev::GenDisk,
     read_only: bool,
-) -> Result<alloc::sync::Arc<Inode>, i32> {
+) -> Result<(alloc::sync::Arc<Inode>, bool), i32> {
     if disk.is_null() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -2945,7 +2960,7 @@ pub fn mount_loop_instance(
     // SAFETY: fs_ptr is a leaked, valid instance pointer.
     let fs_ref = unsafe { &*fs_ptr };
     match fs_ref.read_inode(2) {
-        Ok(ext4_inode) => Ok(create_vfs_inode_in(fs_ptr, 2, &ext4_inode)),
+        Ok(ext4_inode) => Ok((create_vfs_inode_in(fs_ptr, 2, &ext4_inode), fs_ref.read_only)),
         Err(_) => {
             // Not a filesystem root (bad magic / inode 2): fail the mount
             // and reclaim the instance.
