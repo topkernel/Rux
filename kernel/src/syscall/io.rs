@@ -297,38 +297,50 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
 
     // OH bring-up: dump late-boot services' short writes to OTHER fds
     // (hilog traffic goes to the hilog socket fd — every OH service's
-    // diagnostics are invisible on serial without this).
+    // diagnostics are invisible on serial without this). Per-PID budget:
+    // one early service retrying "GetSystemAbilityManager failed" burned
+    // the whole global 4000 budget in ~3999 lines (boot b43) and the
+    // graphics services' output stayed invisible.
     if count <= 256 && fd != 1 && fd != 2 {
-        const WTRACE_N_MAX: usize = 4000;
-        static WTRACE_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
+        const WTRACE_PID_MAX: usize = 48;
+        const WTRACE_SLOTS: usize = 256;
+        static WTRACE_USED: [core::sync::atomic::AtomicU8; WTRACE_SLOTS] =
+            [const { core::sync::atomic::AtomicU8::new(0) }; WTRACE_SLOTS];
+        static WTRACE_TAG: [core::sync::atomic::AtomicU32; WTRACE_SLOTS] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; WTRACE_SLOTS];
         let pid = unsafe { crate::process::current_pid() };
-        let n = if pid >= 313 {
-            WTRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-        } else {
-            WTRACE_N.load(core::sync::atomic::Ordering::Relaxed)
-        };
-        if n < WTRACE_N_MAX && pid >= 313 {
-            let len = core::cmp::min(count, 200);
-            let mut kb = [0u8; 200];
-            // SAFETY: buf/count validated by access_ok above.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
+        if pid >= 313 {
+            let slot = (pid as usize) % WTRACE_SLOTS;
+            let tag = WTRACE_TAG[slot].load(core::sync::atomic::Ordering::Relaxed);
+            let used = if tag == pid {
+                WTRACE_USED[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            } else {
+                WTRACE_TAG[slot].store(pid, core::sync::atomic::Ordering::Relaxed);
+                WTRACE_USED[slot].store(0, core::sync::atomic::Ordering::Relaxed);
+                0
             };
-            if uncopied == 0 {
-                let text = kb[..len]
-                    .iter()
-                    .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
-                    .collect::<alloc::vec::Vec<u8>>();
-                if let Ok(t) = core::str::from_utf8(&text) {
-                    // Skip binary hilog frames: require a mostly-printable
-                    // head (text logs start with '<N>[pid=..]' or words).
-                    let head: usize = t.as_bytes().iter()
-                        .take(32)
-                        .filter(|&&b| b.is_ascii_graphic() || b == b' ')
-                        .count();
-                    if head >= 24 {
-                        crate::pr_info!("w[{}] fd{} pid {}: {}", n, fd, pid, t);
+            if used < WTRACE_PID_MAX as u8 {
+                let len = core::cmp::min(count, 200);
+                let mut kb = [0u8; 200];
+                // SAFETY: buf/count validated by access_ok above.
+                let uncopied = unsafe {
+                    crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
+                };
+                if uncopied == 0 {
+                    let text = kb[..len]
+                        .iter()
+                        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
+                        .collect::<alloc::vec::Vec<u8>>();
+                    if let Ok(t) = core::str::from_utf8(&text) {
+                        // Skip binary hilog frames: require a mostly-printable
+                        // head (text logs start with '<N>[pid=..]' or words).
+                        let head: usize = t.as_bytes().iter()
+                            .take(32)
+                            .filter(|&&b| b.is_ascii_graphic() || b == b' ')
+                            .count();
+                        if head >= 24 {
+                            crate::pr_info!("w pid {}: {}", pid, t);
+                        }
                     }
                 }
             }
