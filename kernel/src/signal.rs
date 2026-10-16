@@ -343,6 +343,16 @@ impl SigPending {
         queue.iter().find(|i| i.si_signo == sig).copied()
     }
 
+    /// Queued real-time signal count (Linux's per-sigqueue-alloc
+    /// sigpending accounting, approximated per task). Consulted by the
+    /// send path against RLIMIT_SIGPENDING before queueing an RT signal
+    /// with a user-class si_code (LTP tgkill02: rlimit 0 + blocked
+    /// SIGRTMIN must yield EAGAIN).
+    pub fn rt_queued_count(&self) -> usize {
+        let queue = self.queue.inner.lock();
+        queue.iter().filter(|i| i.si_signo >= SIGRTMIN).count()
+    }
+
     /// Remove signal (from bitmap and queue)
     pub fn remove(&self, sig: i32) {
         if sig < 1 || sig > 64 {
@@ -2226,7 +2236,20 @@ unsafe fn send_signal_locked_info(
 
     // Add signal to pending set BEFORE checking mask.
     // Masked signals stay pending and will be delivered when unmasked.
+    //
+    // Linux __send_signal(): real-time signals with a user-class si_code
+    // (SI_TKILL/SI_QUEUE/... — si_code < 0) allocate a sigqueue that is
+    // charged against RLIMIT_SIGPENDING; when the limit is exhausted the
+    // send fails EAGAIN (kill()-originated SI_USER is exempt — kill is
+    // not allowed to fail EAGAIN). Standard signals coalesce in the
+    // bitmap and never take this path.
     if let Some(info) = si {
+        if info.si_signo >= SIGRTMIN && info.si_code < 0 {
+            let limit = task.rlimits.lock()[crate::process::task::rlimit_res::SIGPENDING].0;
+            if limit != u64::MAX && task.pending.rt_queued_count() as u64 >= limit {
+                return Err(crate::errno::Errno::TryAgain.as_neg_i32());
+            }
+        }
         task.pending.add_info(info);
     } else {
         task.pending.add(sig);
