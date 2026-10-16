@@ -100,7 +100,15 @@ fn build_child_inode(idx: usize) -> Arc<Inode> {
     let mode_bits = match node {
         Node::Dir => InodeMode::S_IFDIR | 0o555,
         Node::SinkMode(m) => InodeMode::S_IFREG | *m,
-        Node::Const(_) | Node::Sink => InodeMode::S_IFREG | 0o600,
+        // Const nodes must be WORLD-READABLE: file_open enforces DAC
+        // (inode_permission, Linux may_open), and samgr's libselinux runs
+        // as uid 5555 — a 0600 root-owned `enforce`/`deny_unknown`/
+        // `status` open fails EACCES, which makes security_getenforce()
+        // abort avc_open() and security_deny_unknown() return -1
+        // (checkAccess.c reads -1 as "deny" → every SA gate fails; b60).
+        // `load` stays root-writable (first-stage init writes the policy).
+        Node::Const(_) => InodeMode::S_IFREG | 0o444,
+        Node::Sink => InodeMode::S_IFREG | 0o644,
     };
     let mut inode = Inode::new(child_ino(idx), InodeMode::new(mode_bits));
     inode.ops = Some(&SELINUXFS_INODE_OPS);
