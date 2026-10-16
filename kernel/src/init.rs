@@ -324,8 +324,21 @@ fn load_and_setup_elf(
         // librender_service.z.so, live ONLY in /system/lib64/ndk —
         // without it render_service and bootanimation exit 127 at
         // loader stage) plus the robot lib tree.
+        //
+        // ORDERING (eglCreateImageKHR hunt): the robot tree must come
+        // AFTER every OH directory. /sys_prod/robot/out/lib carries a
+        // Mesa 25.2.2 stack whose libEGL.so exports only eglCreateImage
+        // (the KHR-suffixed entry points were dropped); when it sat
+        // first, musl resolved librender_service_base.z.so's
+        // DT_NEEDED libEGL.so to Mesa's build and the process died with
+        // "Error relocating ... eglCreateImageKHR: symbol not found" —
+        // both render_service and bootanimation. OH's own
+        // /system/lib64/platformsdk/libEGL.so exports all 22 egl*
+        // symbols rsb imports, so OH dirs must win every SONAME clash;
+        // the robot tree stays on the list (last) for names only it
+        // has (libdrm.so, libgallium-25.2.2.so, ...).
         envp.push(String::from(
-            "LD_LIBRARY_PATH=/sys_prod/robot/out/lib:/system/lib64:/vendor/lib64:/vendor/lib64/chipsetsdk:/vendor/lib64/chipset-sdk:/vendor/lib64/passthrough:/vendor/lib64/passthrough/indirect:/system/lib64/chipset-pub-sdk:/system/lib64/chipset-sdk:/system/lib64/platformsdk:/system/lib64/module:/system/lib64/module/data:/system/lib64/module/multimedia:/system/lib64/module/security:/system/lib64/llndk:/system/lib64/chipset-sdk-sp:/vendor/lib64/hw:/vendor/lib64/chipset-sdk-sp:/lib64/platformsdk:/lib64/chipset-pub-sdk:/lib64/chipsetsdk:/lib64/llndk:/lib64/chipset-sdk:/lib64/chipset-sdk-sp:/sys_prod/lib64:/system/lib:/system/lib/ndk:/lib:/usr/local/lib:/usr/lib:/vendor/modem/modem_vendor/lib64:/chip_prod/lib64:/chip_prod/lib64/passthrough:/chip_prod/lib64/passthrough/indirect:/system/lib64/ndk",
+            "LD_LIBRARY_PATH=/system/lib64:/vendor/lib64:/vendor/lib64/chipsetsdk:/vendor/lib64/chipset-sdk:/vendor/lib64/passthrough:/vendor/lib64/passthrough/indirect:/system/lib64/chipset-pub-sdk:/system/lib64/chipset-sdk:/system/lib64/platformsdk:/system/lib64/module:/system/lib64/module/data:/system/lib64/module/multimedia:/system/lib64/module/security:/system/lib64/llndk:/system/lib64/chipset-sdk-sp:/vendor/lib64/hw:/vendor/lib64/chipset-sdk-sp:/lib64/platformsdk:/lib64/chipset-pub-sdk:/lib64/chipsetsdk:/lib64/llndk:/lib64/chipset-sdk:/lib64/chipset-sdk-sp:/sys_prod/lib64:/sys_prod/robot/out/lib:/system/lib:/system/lib/ndk:/lib:/usr/local/lib:/usr/lib:/vendor/modem/modem_vendor/lib64:/chip_prod/lib64:/chip_prod/lib64/passthrough:/chip_prod/lib64/passthrough/indirect:/system/lib64/ndk",
         ));
     }
 

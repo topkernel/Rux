@@ -676,7 +676,13 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         }
     }
 
-    crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
-        crate::process::current_pid(), syscall_no, result,
-        if result < 0 { "error" } else { "ok" });
+    // STEPTRACE (dfx=steptrace): one line per syscall return. Left
+    // ungated this flooded the emulated UART (2.7GB per OH boot) and the
+    // printing alone slowed services enough to lose races — see the
+    // switch catalog note in dfx/switches.rs.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+        crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
+            crate::process::current_pid(), syscall_no, result,
+            if result < 0 { "error" } else { "ok" });
+    }
 }

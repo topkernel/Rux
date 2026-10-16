@@ -909,10 +909,15 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         // OH bring-up: kernel-mode IPI/timer entries (0xE0-0xE5) are
         // routine events — printing every one flooded the emulated UART
         // (85% of a 400MB serial log) and slowed the whole boot enough
-        // to cost samgr the hdf_devmgr race.
+        // to cost samgr the hdf_devmgr race. The remaining per-trap
+        // line (syscall entries are the overwhelming majority) is
+        // likewise UART-flooding: it now needs dfx=steptrace.
         let routine_ipi = !regs_ref.user_mode()
             && (0xE0..=0xE5).contains(&vector);
-        if !routine_ipi {
+        if !routine_ipi
+            && crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::Steptrace)
+        {
             crate::pr_debug!(
                 "trap: vector={:#x}, rip={:#x}, rsp={:#x}, mode={}",
                 vector,

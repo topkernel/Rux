@@ -84,9 +84,15 @@ pub enum DfxSwitch {
     /// "library not found" can be attributed to the failing step instead
     /// of guessed at.
     Strace1,
+    /// Per-syscall return line + per-trap vector line. Used during the
+    /// SIGHUP / fake-crash hunts; left on, every syscall printed two
+    /// lines (trap entry + return) — a single OH boot wrote a 2.7GB
+    /// serial log and the UART traffic slowed the system enough to cost
+    /// samgr the hdf_devmgr race. OFF unless asked for.
+    Steptrace,
 }
 
-const SWITCH_COUNT: usize = 13;
+const SWITCH_COUNT: usize = 14;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -106,6 +112,7 @@ impl DfxSwitch {
             DfxSwitch::EpollTrace => 10,
             DfxSwitch::ClaimInject => 11,
             DfxSwitch::Strace1 => 12,
+            DfxSwitch::Steptrace => 13,
         }
     }
 
@@ -124,6 +131,7 @@ impl DfxSwitch {
             "epolltrace" => Some(DfxSwitch::EpollTrace),
             "claiminject" => Some(DfxSwitch::ClaimInject),
             "strace1" => Some(DfxSwitch::Strace1),
+            "steptrace" => Some(DfxSwitch::Steptrace),
             _ => None,
         }
     }
