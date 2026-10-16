@@ -1297,11 +1297,7 @@ pub fn stall_report() {
                 let secs = (now.saturating_sub(since) / hz).max(1);
                 let th = t.st();
                 let pending = th.txn_stack.len();
-                let owed_by = th
-                    .txn_stack
-                    .last()
-                    .and_then(|txn| txn.to_proc.clone())
-                    .map(|p| p.pid);
+                let owed_by = th.txn_stack.last().map(|txn| txn.to_proc.pid);
                 match (pending, owed_by) {
                     (0, _) => crate::pr_warn!(
                         "binder-stall: pid {} tid {} waiting {}s for work (no pending txn)",
