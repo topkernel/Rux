@@ -1335,6 +1335,14 @@ fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) ->
         );
         return -(EBUSY as i64);
     }
+    // Honor only the flag bits the driver actually implements. In
+    // particular FLAT_BINDER_FLAG_TXN_SECURITY_CTX is masked off for the
+    // manager node: OH samgr registers with it (0x1000), which routes
+    // EVERY handle-0 transaction through the BR_TRANSACTION_SECCTX
+    // staging path — with it live, samgr went silent right after install
+    // in boot b45 and never served a transaction. Plain BR_TRANSACTION
+    // (protocol-8 baseline) is what b43 and earlier ran with.
+    let flags = flags & (FLAT_BINDER_FLAG_ACCEPTS_FDS | 0xff);
     let node = Arc::new(BinderNode::new(world.next_id, ptr, cookie, proc.id, flags));
     world.next_id += 1;
     // SAFETY: under WORLD.
