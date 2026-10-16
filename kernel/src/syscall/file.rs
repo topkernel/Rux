@@ -642,6 +642,11 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     let buf = args[2] as *mut u8;
     let bufsize = args[3] as usize;
 
+    // Linux: bufsiz == 0 is EINVAL unconditionally (a zero-length buffer
+    // can never receive a link target; LTP readlink03's SYM_FILE2 case).
+    if bufsize == 0 {
+        return -(errno::EINVAL as i64);
+    }
     if buf.is_null() {
         return -(errno::EFAULT as i64);
     }
