@@ -1604,6 +1604,21 @@ pub fn shared_fault_file_page(file: &crate::fs::File, file_off: usize) -> Option
     let sp = guard.as_ref()?;
     let idx = file_off / (crate::mm::page::PAGE_SIZE as usize);
     let pfn = *sp.pfns.get(idx)?;
+    // b83 hunt: the selinux-trie walker reads the WRONG file's bytes at
+    // its mapping base — name which file each shared fault serves.
+    static SF_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    let n = SF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n < 40 {
+        crate::pr_info!(
+            "sharedfault[{}] path {} off {:#x} -> pfn {:#x} (pid {})",
+            n,
+            file.path(),
+            file_off,
+            pfn,
+            unsafe { crate::process::current_pid() }
+        );
+    }
     Some((pfn << 12) as u64)
 }
 

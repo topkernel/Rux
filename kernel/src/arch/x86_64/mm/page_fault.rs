@@ -507,13 +507,31 @@ pub fn handle_mm_fault(
                         // Refcount/mapcount bookkeeping for the shared
                         // frame (multi-mapper: fork's COW walk exempts
                         // SHARED VMAs and bumps the refcount itself).
+                        // CRITICAL (b84): each MAPPING must hold its own
+                        // page REFERENCE — unmap_pages put_page()s every
+                        // mapped PTE and frees at refcount 0. Without the
+                        // get_page here, the FIRST unmap freed the frame
+                        // back to the buddy while the file's shared
+                        // backing still listed it — the buddy re-handed
+                        // the same PFNs to the NEXT allocation (observed:
+                        // param_sec_dac off 0x1000/0x2000 receiving
+                        // param_selinux's frames 0x7f608/0x7f609), and
+                        // the two files' contents cross-wired through the
+                        // aliased pages — the same double-handout engine
+                        // behind this family's "wrong file content"
+                        // livelocks (and plausibly the historical
+                        // random-global scribbles: user stores landing in
+                        // re-handed kernel pages).
                         {
                             use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
                             let page =
                                 pfn_to_page_mut((shared_phys >> PAGE_SHIFT) as usize);
                             if !page.is_null() {
-                                // SAFETY: page descriptor of a live frame.
+                                // SAFETY: page descriptor of a live frame;
+                                // the backing holds the base reference, so
+                                // get_page cannot race a 0→1 resurrection.
                                 unsafe {
+                                    (*page).get_page();
                                     (*page).set_flag(PageFlag::Anonymous);
                                     (*page).inc_mapcount();
                                     crate::mm::rmap::page_record_mapping(
