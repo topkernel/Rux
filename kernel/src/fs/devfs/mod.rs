@@ -1916,6 +1916,16 @@ unsafe fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             if let Some(ptr) = inode.private_data {
                 let entry = &*(ptr as *const DevfsEntry);
                 if entry.is_regular_file() {
+                    // b72/b73 SIGBUS hunt: name every size change on the
+                    // param workspace files (a size-0 window between
+                    // open(O_TRUNC) and ftruncate SIGBUSes every mapper).
+                    crate::pr_info!(
+                        "devfs TRUNC '{}' {} -> {} (pid {})",
+                        entry.name,
+                        inode.get_size(),
+                        arg1,
+                        unsafe { crate::process::current_pid() }
+                    );
                     // Shared backing active: keep it canonical. Grow
                     // extends the page array (zero-filled); shrink just
                     // drops the logical size (read_at/fault bounds use the

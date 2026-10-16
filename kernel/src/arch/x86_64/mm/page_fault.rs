@@ -421,14 +421,19 @@ pub fn handle_mm_fault(
                     .unwrap_or(vma_file_size) as usize;
                 if file_offset >= effective_size {
                     crate::pr_err!(
-                        "pagefault: SIGBUS forensics: addr {:#x} vma_start {:#x} vma_off {:#x} file_off {:#x} eff_size {:#x} mmap_snap_size {:#x} fd {}",
+                        "pagefault: SIGBUS forensics: addr {:#x} vma_start {:#x} vma_off {:#x} file_off {:#x} eff_size {:#x} mmap_snap_size {:#x} fd {} pid {} path {}",
                         page_virt_addr.as_usize(),
                         vma_start,
                         vma_offset,
                         file_offset,
                         effective_size,
                         vma_file_size as usize,
-                        vma_file_fd
+                        vma_file_fd,
+                        unsafe { crate::process::current_pid() },
+                        addr_space
+                            .get_vma_file(vma_start)
+                            .map(|f| f.path())
+                            .unwrap_or_default(),
                     );
                     return MmFaultResult::BusError;
                 }
