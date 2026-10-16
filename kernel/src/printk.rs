@@ -651,8 +651,14 @@ fn format_record_header(buf: &mut [u8; MAX_HEADER_LEN], level: u8, pid: u32, cpu
 
 /// Read records sequentially from where the last read left off.
 fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
-    if maxlen == 0 || bufp.is_null() {
+    // Linux do_syslog: NULL buffer is EINVAL, but a zero length is a
+    // successful empty read (LTP syslog11 calls read/read_all with
+    // len=0 and expects >= 0).
+    if bufp.is_null() {
         return -(crate::syscall::errno::EINVAL as i64);
+    }
+    if maxlen == 0 {
+        return 0;
     }
     if !crate::arch::uaccess::access_ok(bufp as usize, maxlen) {
         return -(crate::syscall::errno::EFAULT as i64);
@@ -725,8 +731,13 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
 
 /// Read all records from the ring buffer, oldest first.
 fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
-    if maxlen == 0 || bufp.is_null() {
+    // Same as the sequential read: NULL buffer is EINVAL, zero length
+    // is a successful empty read.
+    if bufp.is_null() {
         return -(crate::syscall::errno::EINVAL as i64);
+    }
+    if maxlen == 0 {
+        return 0;
     }
     if !crate::arch::uaccess::access_ok(bufp as usize, maxlen) {
         return -(crate::syscall::errno::EFAULT as i64);

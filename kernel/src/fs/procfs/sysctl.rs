@@ -323,6 +323,32 @@ pub fn generate_threads_max() -> Vec<u8> {
     alloc::format!("31418\n").into_bytes()
 }
 
+/// /proc/sys/kernel/printk — four loglevels as on Linux:
+/// `<console_loglevel> <default_message_loglevel> <minimum_console_loglevel>
+/// <default_console_loglevel>`. The first number is live: syslog(2)
+/// actions 6/7/8 store into the same CONSOLE_LOGLEVEL this reads, so LTP
+/// syslog11 can observe level changes through the file.
+pub fn generate_printk() -> Vec<u8> {
+    let cur = crate::printk::get_console_loglevel();
+    alloc::format!("{} 4 1 7\n", cur).into_bytes()
+}
+
+/// Write side: the first integer sets the console loglevel (Linux
+/// printk_sysctl bounds 1..=15; single-number writes are what sysctl(8)
+/// and LTP's save/restore emit).
+pub fn write_printk(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            if !(1..=15).contains(&v) {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            crate::printk::set_console_loglevel(v as u8);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
 /// /proc/sys/kernel/shmmax — max segment size. Live: the shmget size
 /// check and shmctl(IPC_INFO) both consult it (writable; LTP shmget02
 /// lowers it to 8192, shmctl03 asserts IPC_INFO equality).

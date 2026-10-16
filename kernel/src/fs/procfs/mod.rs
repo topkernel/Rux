@@ -573,6 +573,15 @@ impl ProcFSSuperBlock {
             sysctl::generate_cap_last_cap,
             self.alloc_ino(),
         )));
+        // Console loglevels "<cur> <default> <min> <boot>" — the first
+        // number is the live console_loglevel (LTP syslog11 reads it
+        // around syslog(2) level actions; tst_sys_conf saves/restores it).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"printk".to_vec(),
+            sysctl::generate_printk,
+            sysctl::write_printk,
+            self.alloc_ino(),
+        )));
         // Core dump file name pattern (consumed by process::coredump).
         kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"core_pattern".to_vec(),
