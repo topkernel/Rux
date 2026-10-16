@@ -419,19 +419,26 @@ const DRM_IOCTL_SET_CLIENT_CAP: u32 = ioc(1, 0x0d, 16);
 const DRM_IOCTL_SET_MASTER: u32 = ioc(0, 0x1e, 0);
 const DRM_IOCTL_DROP_MASTER: u32 = ioc(0, 0x1f, 0);
 const DRM_IOCTL_AUTH_MAGIC: u32 = ioc(1, 0x11, 4);
-const DRM_IOCTL_GEM_CLOSE: u32 = ioc(1, 0x09, 8);
+const DRM_IOCTL_GEM_CLOSE: u32 = ioc(1, 0x09, 4);
 const DRM_IOCTL_PRIME_HANDLE_TO_FD: u32 = ioc(3, 0x2d, 16);
 const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = ioc(3, 0x2e, 16);
 const DRM_IOCTL_WAIT_VBLANK: u32 = ioc(3, 0x3a, 24);
 const DRM_IOCTL_MODE_GETRESOURCES: u32 = ioc(3, 0xa0, 64);
-const DRM_IOCTL_MODE_GETCRTC: u32 = ioc(3, 0xa1, 112);
-const DRM_IOCTL_MODE_SETCRTC: u32 = ioc(3, 0xa2, 112);
-const DRM_IOCTL_MODE_GETENCODER: u32 = ioc(3, 0xa6, 24);
+// Sizes verified against the IMAGE's libdrm.so (constants embedded in
+// drmModeGetCrtc/Encoder: 0xc06864a1 = 104, 0xc01464a6 = 20) and the
+// host kernel uapi headers: struct drm_mode_crtc is 104 bytes
+// (modeinfo is 68), drm_mode_get_encoder is 20, GEM_CLOSE carries a
+// single u32. The wrong sizes (112/24/8) changed the encoded request
+// number, so every real-libdrm call landed in the ENOTTY arm and the
+// composer saw "can not get crtc/encoder".
+const DRM_IOCTL_MODE_GETCRTC: u32 = ioc(3, 0xa1, 104);
+const DRM_IOCTL_MODE_SETCRTC: u32 = ioc(3, 0xa2, 104);
+const DRM_IOCTL_MODE_GETENCODER: u32 = ioc(3, 0xa6, 20);
 const DRM_IOCTL_MODE_GETCONNECTOR: u32 = ioc(3, 0xa7, 80);
 const DRM_IOCTL_MODE_GETPROPERTY: u32 = ioc(3, 0xaa, 64);
 const DRM_IOCTL_MODE_SETPROPERTY: u32 = ioc(3, 0xab, 16);
 const DRM_IOCTL_MODE_GETPROPBLOB: u32 = ioc(3, 0xac, 16);
-const DRM_IOCTL_MODE_ADDFB: u32 = ioc(3, 0xae, 24);
+const DRM_IOCTL_MODE_ADDFB: u32 = ioc(3, 0xae, 28);
 const DRM_IOCTL_MODE_RMFB: u32 = ioc(3, 0xaf, 4);
 const DRM_IOCTL_MODE_PAGE_FLIP: u32 = ioc(3, 0xb0, 24);
 const DRM_IOCTL_MODE_CREATE_DUMB: u32 = ioc(3, 0xb2, 32);
@@ -538,9 +545,16 @@ static NEXT_VIRTIO_RES: AtomicU32 = AtomicU32::new(2); // 1 = fbdev fb
 /// DRM fourcc -> virtio-gpu 2D format. Both describe the same memory
 /// byte order; see the format table in virtio_cmd.rs.
 fn virtio_format_for(fourcc: u32) -> Option<u32> {
+    // Mirrors Linux virtio_gpu_translate_format (the fourcc char order
+    // is MSB-first in the little-endian pixel word, the virtio enum
+    // name likewise describes the pixel word MSB-first):
+    //   XRGB8888 (X[31:24] R[23:16] G[15:8] B[7:0]) -> B8G8R8X8
+    //   XBGR8888 (X[31:24] B[23:16] G[15:8] R[7:0]) -> R8G8B8X8
+    // and the A-variants accordingly; the reversed-reading fourccs
+    // (BGRX/BGRA) map to the mirrored constants.
     match fourcc {
         0x3432_5258 => Some(crate::drivers::gpu::virtio_cmd::format::B8G8R8X8_UNORM), // XRGB8888
-        0x3432_5241 => Some(crate::drivers::gpu::virtio_cmd::format::B8G8R8X8_UNORM), // ARGB8888
+        0x3432_5241 => Some(crate::drivers::gpu::virtio_cmd::format::B8G8R8A8_UNORM), // ARGB8888
         0x3432_4258 => Some(crate::drivers::gpu::virtio_cmd::format::R8G8B8X8_UNORM), // XBGR8888
         0x3432_4241 => Some(crate::drivers::gpu::virtio_cmd::format::R8G8B8A8_UNORM), // ABGR8888
         0x3432_5842 => Some(crate::drivers::gpu::virtio_cmd::format::X8R8G8B8_UNORM), // BGRX8888
@@ -763,9 +777,16 @@ fn drm_ioctl_inner(request: u32, arg: usize) -> i64 {
         DRM_IOCTL_SET_CLIENT_CAP => drm_set_client_cap(arg),
         DRM_IOCTL_SET_MASTER | DRM_IOCTL_DROP_MASTER => 0, // single-client system
         DRM_IOCTL_AUTH_MAGIC => {
-            // drmIsMaster() probes with AUTH_MAGIC(0): master fds get
-            // EINVAL (invalid magic) in Linux, non-master get EACCES.
-            -22 // EINVAL
+            // The IMAGE's libdrm (vendor libdisplay_composer_vendor's
+            // chipset-sdk libdrm.so, drmIsMaster @0xd690) is OH-patched:
+            // it probes with a single AUTH_MAGIC ioctl carrying magic 0
+            // and reports master ONLY when the ioctl SUCCEEDS
+            // (errno EINTR/EAGAIN retry, everything else -> not master).
+            // Upstream libdrm instead expects EINVAL-as-master; answering
+            // EINVAL here made DrmDevice::Init() fail at its
+            // "is not master" check and the composer never enumerated
+            // displays. Single-client DRM: accept every auth.
+            0
         }
         DRM_IOCTL_GEM_CLOSE => gem_close(rdu32_or(arg)),
         DRM_IOCTL_PRIME_HANDLE_TO_FD => prime_handle_to_fd(arg),
@@ -957,7 +978,7 @@ fn get_resources(arg: usize) -> i64 {
 
 /// GETCRTC: report the fixed mode, no fb bound initially.
 fn get_crtc(arg: usize) -> i64 {
-    let Some(mut b) = copy_in::<112>(arg, 112) else { return -14 };
+    let Some(mut b) = copy_in::<104>(arg, 104) else { return -14 };
     let mode = current_mode();
     wru32(&mut b, 12, OBJ_CRTC); // crtc_id
     wru32(&mut b, 16, 0); // fb_id
@@ -971,7 +992,7 @@ fn get_crtc(arg: usize) -> i64 {
             core::mem::size_of::<DrmModeInfo>(),
         );
     }
-    if !copy_out(arg, &b, 112) {
+    if !copy_out(arg, &b, 104) {
         return -14;
     }
     0
@@ -979,7 +1000,7 @@ fn get_crtc(arg: usize) -> i64 {
 
 /// SETCRTC: legacy modeset — accept the fixed mode, reject others.
 fn set_crtc(arg: usize) -> i64 {
-    let Some(b) = copy_in::<112>(arg, 112) else { return -14 };
+    let Some(b) = copy_in::<104>(arg, 104) else { return -14 };
     let mode_valid = rdu32(&b, 32);
     if mode_valid == 0 {
         return 0; // dpms-off style disable: accept
@@ -994,13 +1015,13 @@ fn set_crtc(arg: usize) -> i64 {
 }
 
 fn get_encoder(arg: usize) -> i64 {
-    let Some(mut b) = copy_in::<24>(arg, 24) else { return -14 };
+    let Some(mut b) = copy_in::<20>(arg, 20) else { return -14 };
     wru32(&mut b, 0, OBJ_ENCODER);
     wru32(&mut b, 4, DRM_MODE_ENCODER_DSI);
     wru32(&mut b, 8, 0); // crtc_id (attached later by atomic commit)
     wru32(&mut b, 12, 1); // possible_crtcs: CRTC index 0
     wru32(&mut b, 16, 1); // possible_clones
-    if !copy_out(arg, &b, 24) {
+    if !copy_out(arg, &b, 20) {
         return -14;
     }
     0
@@ -1091,11 +1112,16 @@ fn get_plane_resources(arg: usize) -> i64 {
 }
 
 /// Formats advertised on the primary plane (32-bit RGB fourccs).
-const PLANE_FORMATS: [u32; 4] = [
+/// XBGR8888 must be listed: the gralloc's FB-path allocation converts
+/// PIXEL_FMT_BGRX_8888 to DRM_FORMAT_XBGR8888 (DrmAllocator::Allocate
+/// forces that format for HBM_USE_MEM_FB buffers), and the composer
+/// hands those buffers to ADDFB2 on the primary plane.
+const PLANE_FORMATS: [u32; 5] = [
     0x3432_5241, // ARGB8888
     0x3432_5258, // XRGB8888
     0x3432_4241, // ABGR8888 (RGBA_8888)
     0x3432_4742, // BGRA8888
+    0x3432_4258, // XBGR8888 (BGRX_8888, gralloc FB buffers)
 ];
 
 fn get_plane(arg: usize) -> i64 {
@@ -1546,18 +1572,23 @@ pub fn prime_file_ioctl(_file: &crate::fs::file::File, request: u32, _arg: usize
 // --- framebuffers ------------------------------------------------------------
 
 fn addfb(arg: usize) -> i64 {
-    let Some(b) = copy_in::<24>(arg, 24) else { return -14 };
+    // struct drm_mode_fb_cmd is 28 bytes: fb_id(0) width(4) height(8)
+    // pitch(12) bpp(16) depth(20) handle(24). The old code copied 24
+    // bytes and read handle at offset 24 — an out-of-bounds slice index
+    // that would panic the kernel; the wrong ioctl size (24 vs 28) also
+    // made the request number mismatch libdrm's, so ADDFB answered
+    // ENOTTY instead.
+    let Some(b) = copy_in::<28>(arg, 28) else { return -14 };
     let width = rdu32(&b, 4);
     let height = rdu32(&b, 8);
     let pitch = rdu32(&b, 12);
     let bpp = rdu32(&b, 16);
-    // struct drm_mode_fb_cmd: fb_id, width, height, pitch, bpp, depth, handle
     let handle = rdu32(&b, 24);
     let fourcc = match bpp {
         32 => 0x3432_5241, // ARGB8888
         _ => return -22,
     };
-    add_fb_common(arg, 24, handle, width, height, pitch, fourcc)
+    add_fb_common(arg, 28, handle, width, height, pitch, fourcc)
 }
 
 fn addfb2(arg: usize) -> i64 {
