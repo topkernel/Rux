@@ -25,6 +25,10 @@ SECTIONS
 
 	_text = .;
 	_stext = .;
+	/* x86_64-parity aliases: dfx code (hung_task's kernel-text filter)
+	 * references __stext/__etext — without these every riscv64 link
+	 * fails with 'undefined symbol: __stext'. */
+	__stext = .;
 
 	.text : AT(KERNEL_PHYS) ALIGN(4096)
 	{
@@ -33,6 +37,7 @@ SECTIONS
 	}
 
 	_etext = .;
+	__etext = .;
 
 	. = ALIGN(4096);
 	.rodata : AT(ADDR(.rodata) - VA_OFFSET) { *(.rodata .rodata.*) }
