@@ -414,6 +414,17 @@ pub fn handle_mm_fault(
                 let effective_size = addr_space
                     .get_vma_file(vma_start)
                     .and_then(|f| {
+                        // Entry-authoritative size for devfs regular
+                        // files: the pinned vm_file's Inode.size is a
+                        // snapshot from ITS open; ftruncate through the
+                        // creating fd updated the entry, not this
+                        // snapshot — a stale 0 SIGBUSed pid 1's param
+                        // workspace mapping at file_off 0 (b74).
+                        if let Some(live) =
+                            crate::fs::devfs::devfs_reg_current_size(f.as_ref())
+                        {
+                            return Some(live);
+                        }
                         // SAFETY: inode cell written at open time; read-only.
                         let inode_opt = unsafe { &*f.inode.get() };
                         inode_opt.as_ref().map(|i| i.get_size())

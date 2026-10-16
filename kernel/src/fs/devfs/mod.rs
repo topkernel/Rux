@@ -64,6 +64,17 @@ pub struct DevfsEntry {
     pub gid: AtomicU32,
     /// File contents (regular files only — devtmpfs file storage)
     pub data: Spinlock<alloc::vec::Vec<u8>>,
+    /// Authoritative file size in bytes (regular files). devfs_iget
+    /// builds a FRESH Inode per lookup and Inode.size is a plain field,
+    /// so a size change through one fd's inode (ftruncate/write) was
+    /// invisible to every OTHER open's inode — a mapper's inode kept its
+    /// lookup-time snapshot and the mmap EOF gate SIGBUSed mapped pages
+    /// of a file that had long since been ftruncated bigger (b74: pid 1
+    /// SIGBUS at file_off 0, eff_size 0, while the TRUNC trace showed
+    /// 0 -> 10MB minutes earlier — the OH param workspaces mmap across
+    /// separate opens). Mode/uid/gid already live on the entry for the
+    /// same reason; size joins them.
+    pub size: core::sync::atomic::AtomicU64,
     /// Shared page backing for MAP_SHARED mmaps of this regular file
     /// (see SharedFilePages). None until the first shared mapping
     /// fault; regular files only.
@@ -112,6 +123,7 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
             shared_pages: Spinlock::new(None),
         }
     }
@@ -127,6 +139,7 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
             shared_pages: Spinlock::new(None),
         }
     }
@@ -142,6 +155,7 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
             shared_pages: Spinlock::new(None),
         }
     }
@@ -157,6 +171,7 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
             shared_pages: Spinlock::new(None),
         }
     }
@@ -174,6 +189,7 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
             shared_pages: Spinlock::new(None),
         }
     }
@@ -1135,7 +1151,13 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
     // independently of the BTreeMap entry. The refcount is incremented by
     // clone() and preserved by into_raw() (which doesn't decrement).
     if child.is_regular_file() {
-        inode.set_size(child.data.lock().len() as u64);
+        // Seed from the ENTRY-AUTHORITATIVE size (not data.len() at this
+        // instant — the same value, but the discipline is one store):
+        // every lookup builds a fresh Inode whose size field is a
+        // snapshot; later size changes through another fd's inode update
+        // entry.size, which devfs_reg_current_size serves to cross-open
+        // readers (the mmap EOF gate).
+        inode.set_size(child.size.load(Ordering::Acquire));
     }
     let child_arc = Arc::clone(&child);
     inode.private_data = Some(Arc::into_raw(child_arc) as *mut u8);
@@ -1527,6 +1549,27 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
     backed
 }
 
+/// Entry-authoritative CURRENT size of a devfs regular file, for
+/// cross-open readers (the mmap EOF gate in the page-fault path): the
+/// pinned vm_file's Inode.size is a snapshot from ITS open, and
+/// ftruncate/write through other fds update entry.size, not that
+/// snapshot — reading the entry gives Linux-tmpfs behavior (b74: pid 1
+/// SIGBUSed at file_off 0 because its mapper inode still said 0 after
+/// the workspace had been ftruncated to 10MB through the creating fd).
+/// None for non-devfs-regular files.
+pub fn devfs_reg_current_size(file: &crate::fs::File) -> Option<u64> {
+    // SAFETY: caller passes a valid File; only stable fields are read.
+    unsafe {
+        let inode = (*file.inode.get()).as_ref()?;
+        let ptr = inode.private_data?;
+        let entry = &*(ptr as *const DevfsEntry);
+        if !entry.is_regular_file() {
+            return None;
+        }
+        Some(entry.size.load(Ordering::Acquire))
+    }
+}
+
 /// Shared-fault hook: the physical address of the page holding
 /// `file_off` for a MAP_SHARED mapping of this devfs regular file,
 /// activating/growing the shared backing on demand. None → the caller
@@ -1545,6 +1588,11 @@ pub fn shared_fault_file_page(file: &crate::fs::File, file_off: usize) -> Option
     let inode_size = unsafe {
         (*file.inode.get()).as_ref().map(|i| i.get_size() as usize).unwrap_or(0)
     };
+    // Entry-authoritative size: the mapper's inode snapshot may predate
+    // the ftruncate that sized the workspace (see devfs_reg_current_size).
+    let inode_size = inode_size.max(
+        devfs_reg_current_size(file).map(|s| s as usize).unwrap_or(0),
+    );
     // The mmap-time EOF gate ran on the CURRENT inode size; the shared
     // backing must cover at least that, plus this fault's page.
     let need = core::cmp::max(inode_size, file_off + 1);
@@ -1652,6 +1700,7 @@ fn shared_write_off(
     }
     if done > 0 && (off + done) as u64 > inode.get_size() {
         inode.set_size((off + done) as u64);
+        entry.size.store((off + done) as u64, Ordering::Release);
     }
     done
 }
@@ -1715,7 +1764,9 @@ fn devfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         }
         data[off..off + buf.len()].copy_from_slice(buf);
         file.set_pos(need as u64);
-        // Keep the generic Inode.size coherent (mmap EOF checks read it).
+        // Keep the generic Inode.size coherent (mmap EOF checks read it)
+        // and the entry-authoritative size in sync (cross-open readers).
+        entry.size.store(need as u64, Ordering::Release);
         inode.set_size(need as u64);
         buf.len() as isize
     }
@@ -1941,6 +1992,10 @@ unsafe fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     if entry.shared_pages.lock_irqsave().is_none() {
                         entry.data.lock().resize(arg1 as usize, 0);
                     }
+                    // Entry-authoritative size (cross-open readers — the
+                    // mmap EOF gate reads this through
+                    // devfs_reg_current_size).
+                    entry.size.store(arg1, Ordering::Release);
                     inode.set_size(arg1);
                 }
             }
