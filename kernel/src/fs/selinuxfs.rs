@@ -48,9 +48,18 @@ const NODES: &[(&str, Node)] = &[
     // because selinux_mnt was NULL — statfs did not report the
     // SELINUX_MAGIC f_type). Accept and discard, like `load`.
     ("context", Node::SinkMode(0o666)),
+    // `deny_unknown` — b51: with the context node fixed, samgr's
+    // selinux_check_access() reached string_to_security_class
+    // ("samgr_class"), which fails (no class/ discovery tree), and the
+    // fallback asks security_deny_unknown(); ENOENT there returns -1,
+    // which checkAccess.c treats as "deny" → the SA gate stayed shut.
+    // "0" = allow unknown classes/permissions (permissive answer).
+    ("deny_unknown", Node::Const(b"0\n")),
     ("disable", Node::Const(b"0\n")),
     ("enforce", Node::Const(b"0\n")),
     ("load", Node::Sink),
+    // `mls` — is_selinux_mls_enabled(); "0" for a non-MLS policy.
+    ("mls", Node::Const(b"0\n")),
     // `policy` — first-stage init chmods it to 0444 right after
     // mounting (a warning-only path, but a present node keeps it quiet).
     ("policy", Node::SinkMode(0o644)),
