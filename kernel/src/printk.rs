@@ -351,7 +351,14 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
 pub fn sys_syslog(args: [u64; 6]) -> i64 {
     let action = args[0] as i32;
     let bufp = args[1] as *mut u8;
-    let len = args[2] as usize;
+    // syslog: a negative `len` is EINVAL (LTP syslog12). Without the
+    // signed check, args[2] cast to usize wraps negative to a huge
+    // positive and access_ok(bufp, huge) returns false → EFAULT.
+    let len_signed = args[2] as i64;
+    if len_signed < 0 {
+        return -(crate::syscall::errno::EINVAL as i64);
+    }
+    let len = len_signed as usize;
 
     // Permission check (Linux check_syslog_permissions): everything except
     // the size queries (3/10 with dmesg_restrict=0 semantics) requires
