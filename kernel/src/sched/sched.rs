@@ -1487,6 +1487,45 @@ unsafe fn __schedule() {
     crate::sync::rcu::rcu_note_context_switch();
 
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    // PER_CPU scribble heal (b81 GDB capture): the wild-write engine that
+    // hit hpet::BASE (b77) also zeroes/corrupts PER_CPU slots — cpu1 ran
+    // with current=nil and idle=<random heap task>, so every "nothing
+    // runnable" pick context-switched into an arbitrary task's stale
+    // context (the b66 resume-family symptom, now from a different
+    // producer) and the machine crawled on one vCPU. The idle tasks are
+    // STATIC (IDLE_TASK_STORAGES, written once by init) and current is
+    // mirrored in the arch tp register: both slots are therefore
+    // RE-DERIVABLE, and two compares per schedule are cheap. Heal
+    // unconditionally; report the first hit per CPU.
+    if cpu_id < MAX_CPUS {
+        let static_idle = {
+            // SAFETY: IDLE_TASK_STORAGES was fully initialized by
+            // sched::init before any CPU schedules; read-only access.
+            unsafe {
+                IDLE_TASK_STORAGES[cpu_id].as_mut_ptr()
+            }
+        };
+        let pcpu = cpu_state_mut(cpu_id);
+        if pcpu.idle != static_idle {
+            static PCDATA_HIT: [core::sync::atomic::AtomicBool; MAX_CPUS] =
+                [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
+            if !PCDATA_HIT[cpu_id].swap(true, core::sync::atomic::Ordering::AcqRel) {
+                r56_print_pid(
+                    b"PERCPU-SCRIBBLE-HEALED cpu=",
+                    cpu_id as u32,
+                    b" idle_slot=",
+                );
+                r56_print_pid(b"", pcpu.idle as usize as u32, b"\n");
+            }
+            pcpu.idle = static_idle;
+        }
+        if pcpu.current.is_null() {
+            let tp0 = crate::arch::cpu::get_thread_id() as *mut Task;
+            if !tp0.is_null() {
+                pcpu.current = tp0;
+            }
+        }
+    }
     let mut prev = this_cpu().current;
 
     // R65 hunt (garbage-prev guard): the slot-resolved prev is dereferenced
