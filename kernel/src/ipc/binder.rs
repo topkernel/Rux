@@ -763,6 +763,90 @@ struct World {
 static WORLD: Spinlock<Option<World>> = Spinlock::new(None);
 static NEXT_PROC_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
+/// Waiters parked while the context manager for their device context is
+/// not yet installed (see wait_for_context_manager). set_context_mgr
+/// wakes everyone on success.
+static MANAGER_WAIT: crate::process::wait::WaitQueueHead =
+    crate::process::wait::WaitQueueHead::new();
+
+/// Bounded block for handle-0 transactions issued before the context
+/// manager exists (OH boot bring-up).
+///
+/// Every early-boot OH client (storage_daemon, hdf_devmgr, appspawn
+/// helpers, ...) reaches for the samgr proxy with a BOUNDED retry budget
+/// (hdf_devmgr: 16 tries). On this image samgr must fault in ~100 shared
+/// libraries before its BINDER_SET_CONTEXT_MGR(_EXT) lands, and under
+/// TCG that window outlasted those budgets: hdf_devmgr exited 255
+/// ("failed to start service manager"), SA 5100 never registered and
+/// every devhost then waited on it forever (boot b46, lines 3046-8623 —
+/// the manager arrived ~400 serial lines AFTER the last retry). Instead
+/// of failing BR_DEAD_REPLY instantly, park the transaction for up to
+/// MANAGER_WAIT_MAX_MS total so the client budget stretches across the
+/// gap. Linux answers BR_DEAD_REPLY immediately — this is a deliberate,
+/// contained divergence for bring-up; nothing on OH probes for manager
+/// absence on purpose.
+fn wait_for_context_manager(ctx: BinderCtx) {
+    const MANAGER_WAIT_MAX_MS: u64 = 8000;
+    const SLICE_MS: u64 = 250;
+    const SLICE_JIFFIES: u64 = (SLICE_MS * crate::config::KERNEL_HZ as u64) / 1000;
+    let hz = crate::config::KERNEL_HZ as u64;
+
+    let mut waited_ms = 0u64;
+    loop {
+        {
+            let w = world_lock();
+            let installed = w
+                .as_ref()
+                .map(|world| world.mgr_node[ctx as usize].is_some())
+                .unwrap_or(true);
+            if installed {
+                return;
+            }
+        }
+        if waited_ms >= MANAGER_WAIT_MAX_MS {
+            return;
+        }
+        if crate::signal::signal_pending() {
+            return;
+        }
+        // Park on MANAGER_WAIT with a timer backstop so a missing
+        // set_context_mgr wake cannot strand the caller for the full
+        // budget (khungtaskd discipline).
+        let current = match crate::sched::current() {
+            Some(t) => t as *mut crate::process::task::Task,
+            None => return,
+        };
+        // SAFETY: current is this task's own pointer.
+        let my_pid = unsafe { (*current).pid() };
+        let target = crate::drivers::timer::get_jiffies() + SLICE_JIFFIES.max(1);
+        let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
+        MANAGER_WAIT.prepare_to_wait(current, false, true);
+        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+            MANAGER_WAIT.finish_wait(current);
+            if timer_id != 0 {
+                crate::timer::del_timer(timer_id);
+            }
+            // SAFETY: a racing wake may have enqueued us while we are
+            // still executing — take ourselves back off (NEW-C2).
+            unsafe {
+                (*current).set_state(crate::process::task::TaskState::new(
+                    crate::process::task::TaskState::RUNNING,
+                ));
+                crate::sched::dequeue_task(&*current);
+            }
+        } else {
+            crate::arch::cpu::restore_irq(true);
+            crate::sched::schedule();
+            MANAGER_WAIT.finish_wait(current);
+            if timer_id != 0 && crate::timer::timer_pending(timer_id) {
+                crate::timer::del_timer(timer_id);
+            }
+        }
+        waited_ms += SLICE_MS;
+        let _ = hz;
+    }
+}
+
 // SAFETY: binder state is shared across CPUs strictly under the WORLD
 // spinlock; the wait queues are internally synchronized; the kvirt raw
 // pointer is only dereferenced under WORLD while the mmap is alive.
@@ -1352,6 +1436,9 @@ fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) ->
     }
     world.mgr_node[proc.ctx as usize] = Some(node);
     drop(w);
+    // Release any handle-0 transactions parked waiting for the manager
+    // (wait_for_context_manager).
+    MANAGER_WAIT.wake_up_all();
     crate::pr_info!(
         "binder: proc {} (pid {}) is the context manager (ctx {}, flags {:#x})",
         proc.id,
@@ -2090,6 +2177,13 @@ fn binder_transaction(
     let oneway = tr.flags & TF_ONE_WAY != 0;
     let data_size = tr.data_size as usize;
     let offsets_size = tr.offsets_size as usize;
+
+    // Bring-up crutch for the samgr-install race — see
+    // wait_for_context_manager: stretch bounded client retry budgets
+    // across the manager's late install instead of failing instantly.
+    if !reply && tr.target_handle == 0 {
+        wait_for_context_manager(proc.ctx);
+    }
 
     // ---- resolve target + allocate the target buffer ------------------
     let mut target_node: Option<Arc<BinderNode>> = None;
