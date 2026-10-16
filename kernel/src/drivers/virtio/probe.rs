@@ -389,14 +389,12 @@ pub fn init_pci_block_devices() -> usize {
                     };
 
                     // Create VirtQueue
+                    // (serial-clean: the raw "slot N queue0 notify/isr/
+                    // common" pr_info that used to live here was a
+                    // bring-up aid — every value is re-derivable from the
+                    // PCI capability layout — and it polluted the
+                    // structured boot table on every boot.)
                     let dummy_isr_addr = virtio_dev.common_cfg_bar;
-                    crate::pr_info!(
-                        "virtio-blk: slot {} queue0 notify {:#x} isr {:#x} common {:#x}",
-                        device_count,
-                        virtio_dev.get_notify_addr(0),
-                        dummy_isr_addr,
-                        virtio_dev.common_cfg_bar
-                    );
                     match crate::drivers::virtio::queue::VirtQueue::new(queue_max,
                         0,  // queue_index
                         virtio_dev.get_notify_addr(0),
@@ -462,9 +460,19 @@ pub fn init_pci_block_devices() -> usize {
                                     // U4: remember the function for rescan diffing.
                                     CLAIMED_BLK_ECAM.lock().push(ecam_addr);
 
-                                    crate::pr_info!(
-                                        "virtio-blk: {} (slot {}) at {:#x}, {} sectors",
-                                        name, slot, ecam_addr, capacity
+                                    // Structured per-disk registration line
+                                    // (serial-clean: replaced the raw
+                                    // "virtio-blk: vda (slot 0) at 0x…"
+                                    // pr_info — the ECAM address is stable
+                                    // QEMU config, the name and capacity are
+                                    // the facts a boot log needs).
+                                    crate::print_status(
+                                        "driver",
+                                        &alloc::format!(
+                                            "{} virtio-blk {} sectors",
+                                            name, capacity
+                                        ),
+                                        true,
                                     );
                                     device_count += 1;
                                 }

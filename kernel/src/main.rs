@@ -851,10 +851,10 @@ pub fn rust_main_tail() -> ! {
         {
             // OH Phase 1: init::init() walks the Linux-ordered candidate
             // chain (rdinit= → initrd /init → init= → /sbin/init …) and
-            // reports each attempt on the console.
+            // prints the structured init lines itself (serial-clean: the
+            // "ELF loaded"/"enqueued" pair moved next to the candidate
+            // outcome so the chosen path can be folded into the line).
             init::init();
-            print_status("init", "ELF loaded to user space", true);
-            print_status("init", "init task (PID 1) enqueued", true);
 
             // Print shell welcome message after boot
             unsafe {
@@ -1258,18 +1258,23 @@ fn mount_root_filesystem() {
     // vda resolves to the first PCI disk, or the MMIO boot disk when no
     // PCI virtio-blk was found; vdb..vdz resolve to the PCI slots.
     if let Some(disk) = drivers::virtio::get_pci_gen_disk_by_name(&dev_name) {
-        crate::pr_info!(
-            "root: {} -> PCI virtio-blk disk ({} sectors)",
-            root,
-            disk.get_capacity()
+        // [done]: the selection record; the capacity is on the per-disk
+        // "driver:" line and the mount verdict follows as its own
+        // "ext4 mounted /" line (serial-clean: was a raw pr_info).
+        print_status_ex(
+            "fs",
+            &format!("root {} -> {}", root, dev_name),
+            None,
         );
         mount_ext4_root_from(disk as *const drivers::blkdev::GenDisk);
         return;
     }
 
-    crate::pr_info!(
-        "root: cmdline root={} not mountable by name; trying boot disk",
-        root
+    // Unparsable root= (PARTUUID=, unknown name): first-ext4 fallback.
+    print_status_ex(
+        "fs",
+        &format!("root {} -> boot-disk fallback", root),
+        None,
     );
     mount_boot_disk_ext4();
 }
