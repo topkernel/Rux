@@ -398,6 +398,12 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             Some(file) => {
                 let accmode = file.flags().bits()
                     & crate::fs::file::FileFlags::O_ACCMODE;
+                // O_PATH descriptors cannot back a mapping — Linux rejects
+                // them before the access-mode rules (LTP open13: mmap on
+                // an O_PATH fd must fail).
+                if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+                    return mmap_error::EBADF;
+                }
                 let readable = accmode != crate::fs::file::FileFlags::O_WRONLY;
                 let writable = accmode == crate::fs::file::FileFlags::O_RDWR
                     || accmode == crate::fs::file::FileFlags::O_WRONLY;

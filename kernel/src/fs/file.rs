@@ -265,6 +265,10 @@ impl File {
         if self.flags().is_writeonly() {
             return -9;  // EBADF
         }
+        // O_PATH descriptors permit no I/O at all (LTP open13).
+        if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+            return -9; // EBADF
+        }
         if let Some(ops) = *self.ops.get() {
             if let Some(read_fn) = ops.read {
                 let slice = core::slice::from_raw_parts_mut(buf, count);
@@ -285,6 +289,10 @@ impl File {
         // f_mode enforcement: write on an O_RDONLY fd is EBADF (Linux)
         if self.flags().is_readonly() {
             return -9;  // EBADF
+        }
+        // O_PATH descriptors permit no I/O at all (LTP open13).
+        if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+            return -9; // EBADF
         }
         if let Some(ops) = *self.ops.get() {
             if let Some(write_fn) = ops.write {
@@ -335,6 +343,9 @@ impl File {
         }
         // f_mode enforcement, same as read().
         if self.flags().is_writeonly() {
+            return -9; // EBADF
+        }
+        if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
             return -9; // EBADF
         }
         // Native positional op: no shared-position access at all.
@@ -415,6 +426,9 @@ impl File {
         }
         // f_mode enforcement, same as write().
         if self.flags().is_readonly() {
+            return -9; // EBADF
+        }
+        if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
             return -9; // EBADF
         }
 

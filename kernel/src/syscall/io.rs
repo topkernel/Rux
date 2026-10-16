@@ -112,6 +112,13 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                 if mode == crate::fs::file::FileFlags::O_WRONLY {
                     return -errno::EBADF as i64;
                 }
+                // O_PATH descriptors permit no I/O — the fast paths below
+                // bypass File::read's gates (LTP open13).
+                if file.flags.load(core::sync::atomic::Ordering::Relaxed)
+                    & crate::fs::file::FileFlags::O_PATH != 0
+                {
+                    return -errno::EBADF as i64;
+                }
                 // Pipe fast path: transfer directly user↔ring. The generic
                 // staging below costs an alloc + 2 copies per op; on pipes
                 // that was ~half the per-syscall time under TCG.
@@ -305,6 +312,12 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
                     & crate::fs::file::FileFlags::O_ACCMODE;
                 if mode == crate::fs::file::FileFlags::O_RDONLY {
+                    return -errno::EBADF as i64;
+                }
+                // O_PATH descriptors permit no I/O (LTP open13).
+                if file.flags.load(core::sync::atomic::Ordering::Relaxed)
+                    & crate::fs::file::FileFlags::O_PATH != 0
+                {
                     return -errno::EBADF as i64;
                 }
                 // Check if this is the original console (UART) stdout/stderr
@@ -709,6 +722,16 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // fd=1025 with SIOCATMARK and expects EBADF, not ENOTTY).
     if fd < 0 || unsafe { crate::fs::file::get_file_fd(fd as usize) }.is_none() {
         return -errno::EBADF as i64;
+    }
+
+    // O_PATH descriptors permit no ioctls either (Linux empty-fops; LTP
+    // open13: ioctl(FIGETBSZ) on an O_PATH fd is EBADF).
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+                return -errno::EBADF as i64;
+            }
+        }
     }
 
     // Framebuffer ioctls dispatch on the FILE's ops identity (R22-2

@@ -1753,6 +1753,11 @@ pub fn sys_fchmodat(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[1] as *const u8;
     let mode = args[2] as u32;
 
+    // Note: Linux fchmodat (53) ignores flags entirely — AT_EMPTY_PATH
+    // and flag validation live in fchmodat2 (452) only. Verified on
+    // Linux 7.0: fchmodat(path, mode, 999) succeeds on a real path and
+    // an empty pathname yields ENOENT regardless of AT_EMPTY_PATH.
+
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
@@ -2710,6 +2715,11 @@ pub fn sys_fchmod(args: SyscallArgs) -> i64 {
     // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
+            // O_PATH descriptors permit no I/O nor metadata changes (Linux
+            // chmod_common rejects non-readable/writable fds; LTP open13).
+            if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+                return -(errno::EBADF as i64);
+            }
             // EROFS: fd-based chmod on a read-only mount (LTP fchmod06).
             if crate::fs::vfs::file_on_readonly_mount(&file) {
                 return -(errno::EROFS as i64);
@@ -2911,6 +2921,11 @@ fn xattr_inode_by_fd(fd: u64) -> Result<alloc::sync::Arc<crate::fs::inode::Inode
     // SAFETY: fd comes from the syscall args; get_file_fd validates it.
     let file = unsafe { crate::fs::get_file_fd(fd as usize) }
         .ok_or(-(errno::EBADF as i32))?;
+    // O_PATH descriptors permit no xattr operations either — Linux rejects
+    // them with EBADF before touching the inode (LTP open13).
+    if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+        return Err(-(errno::EBADF as i32));
+    }
     // SAFETY: inode written once at open; read-only access.
     unsafe { (*file.inode.get()).clone() }
         .ok_or(-(errno::EBADF as i32))
@@ -3410,6 +3425,11 @@ pub fn sys_fchown(args: SyscallArgs) -> i64 {
     // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
+            // O_PATH descriptors permit no metadata changes either (LTP
+            // open13: fchown on an O_PATH fd is EBADF).
+            if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+                return -(errno::EBADF as i64);
+            }
             // SAFETY: inode.get() points to an Option<Arc<Inode>> initialized during file open.
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
