@@ -2900,7 +2900,13 @@ pub fn enable_device_interrupt(base_addr: u64) {
     let slot = ((base_addr - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_SIZE) as u32;
     let irq = (slot + 1) as u32;  // IRQ 1-8 correspond to slot 0-7
 
-    crate::pr_info!("virtio-blk: Registering IRQ {} for device at 0x{:x} (slot {})", irq, base_addr, slot);
+    // Structured line (serial-clean): the raw "virtio-blk: Registering
+    // IRQ…" pr_info polluted the boot table on virtio-mmio boots.
+    crate::print_status(
+        "driver",
+        &alloc::format!("virtio-blk MMIO vda IRQ {}", irq),
+        true,
+    );
 
     // Register handler via IRQ framework (unmasks automatically)
     crate::interrupt::request_irq(

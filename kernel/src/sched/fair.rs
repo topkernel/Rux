@@ -965,7 +965,13 @@ impl CfsRunQueue {
         // legs. Rate-limited to one report per 100 jiffies system-wide so
         // the hot idle-loop callers cannot flood the console. SBI direct
         // write discipline (R34): we hold the GRQ lock here.
-        if result.is_none() && skip_count > 0 {
+        // serial-clean: gated behind dfx=schedtrace — the pick-skip
+        // transient (a task mid switch-out) is common enough on ordinary
+        // boots that the report leaked into default serial logs.
+        if result.is_none()
+            && skip_count > 0
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+        {
             use crate::console::putchar_no_lock as putchar;
             fn pd(mut v: u64) {
                 use crate::console::putchar_no_lock as putchar;

@@ -61,18 +61,39 @@ pub fn init_task_storage_addr() -> usize {
 pub fn init() {
     let rootfs_first = crate::initrd::loaded();
     for init_path in init_candidates() {
-        println!("init: trying {}", init_path);
         let program_data = load_init_program(&init_path, rootfs_first);
         if let Some(data) = program_data {
             if create_and_start_init_process(&data, &init_path, rootfs_first).is_some() {
+                // Success: the two structured init lines (serial-clean:
+                // used to live in main.rs after init() returned, with a
+                // raw "init: trying <path>" printed above them; the
+                // chosen path is now folded into the load line).
+                crate::print_status(
+                    "init",
+                    &alloc::format!("ELF {} loaded", init_path),
+                    true,
+                );
+                crate::print_status("init", "init task (PID 1) enqueued", true);
                 return;
             }
-            println!("init: Failed to create init process for {}", init_path);
+            crate::print_status(
+                "init",
+                &alloc::format!("{} start failed", init_path),
+                false,
+            );
         } else {
-            println!("init: {} not found on any filesystem", init_path);
+            // Neutral [done]: the candidate list intentionally tries
+            // several paths (Linux kernel_init semantics); a miss is
+            // normal, not a boot failure (serial-clean: was a raw
+            // println).
+            crate::print_status_ex(
+                "init",
+                &alloc::format!("{} not found", init_path),
+                None,
+            );
         }
     }
-    println!("init: no init program could be loaded — halting");
+    crate::print_status("init", "no init program loadable", false);
     halt();
 }
 
@@ -205,6 +226,13 @@ fn create_and_start_init_process(
 
         // Load ELF program into memory and set up user context
         if let Err(e) = load_and_setup_elf(task_ptr, program_data, init_path, rootfs_first) {
+            crate::print_status(
+                "init",
+                &alloc::format!("{} ELF load failed", init_path),
+                false,
+            );
+            // Error detail (broken-boot diagnostic; not part of the
+            // normal boot table).
             println!("init: ELF load failed err={:?} path={} len={} first8={:02x}{:02x}{:02x}{:02x}",
                 e, init_path, program_data.len(),
                 program_data.get(0).copied().unwrap_or(0),
