@@ -122,6 +122,11 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         // Scan all tasks
         check_tasks();
+
+        // Binder stall scan: threads parked in a blocking binder read are
+        // S-state (invisible above); they mark an IPC chain that stopped
+        // answering — the common OH bring-up stall shape.
+        crate::ipc::binder::stall_report();
     }
 
     RUNNING.store(false, Ordering::Release);

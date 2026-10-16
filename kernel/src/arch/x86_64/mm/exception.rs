@@ -135,11 +135,17 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
     let cr2 = crate::arch::cpu::read_cr2();
     let fault_addr = VirtAddr::new(cr2);
 
-    crate::pr_debug!(
-        "do_page_fault: addr={:#x}, rip={:#x}, type={:#x}, mode={}",
-        fault_addr.bits(), regs.rip, access_type,
-        if regs.kernel_mode() { "kernel" } else { "user" }
-    );
+    // Per-fault line gated behind dfx=steptrace: a full OH boot takes
+    // millions of user faults (demand paging every .so page); left on,
+    // these three lines per fault dominated the serial log and slowed
+    // TCG enough to change service-start races.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+        crate::pr_debug!(
+            "do_page_fault: addr={:#x}, rip={:#x}, type={:#x}, mode={}",
+            fault_addr.bits(), regs.rip, access_type,
+            if regs.kernel_mode() { "kernel" } else { "user" }
+        );
+    }
 
     // X3 fix: do NOT fixup uaccess-window kernel faults here. The early
     // check below intercepted EVERY kernel #PF inside copy_to/from_user

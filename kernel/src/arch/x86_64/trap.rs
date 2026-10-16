@@ -1082,7 +1082,18 @@ fn handle_external_interrupt(vector: u64) {
             let f: fn() = unsafe { core::mem::transmute(h) };
             f();
         } else {
-            crate::pr_debug!("trap: unhandled IRQ line {} (vector {:#x})", line, vector);
+            // Once per line per boot: on the OH q35 boot, spurious PIC
+            // lines (2 via vectors 0x2a/0x2b) fire continuously; the
+            // per-IRQ print line was a measurable share of the serial log.
+            static LINES_SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let seen = LINES_SEEN.fetch_or(1u32 << line, core::sync::atomic::Ordering::Relaxed);
+            if seen & (1u32 << line) == 0 {
+                crate::pr_debug!(
+                    "trap: unhandled IRQ line {} (vector {:#x}) [once per line]",
+                    line,
+                    vector
+                );
+            }
         }
         pic_send_eoi(line);
         // PIC lines arrive through LINT0 (virtual wire) when the local
@@ -1469,13 +1480,15 @@ fn handle_page_fault(regs: &mut PtRegs) {
         );
     }
 
-    crate::pr_debug!(
-        "trap: page fault addr={:#x}, rip={:#x}, ec={:#x}, mode={}",
-        fault_addr,
-        regs.rip,
-        error_code,
-        if regs.kernel_mode() { "kernel" } else { "user" }
-    );
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+        crate::pr_debug!(
+            "trap: page fault addr={:#x}, rip={:#x}, ec={:#x}, mode={}",
+            fault_addr,
+            regs.rip,
+            error_code,
+            if regs.kernel_mode() { "kernel" } else { "user" }
+        );
+    }
 
     let result = do_page_fault(regs, access);
 

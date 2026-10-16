@@ -393,7 +393,9 @@ pub fn handle_mm_fault(
         return MmFaultResult::PermissionDenied;
     }
 
-    crate::pr_debug!("pagefault: map new page at {:#x}, type={:?}", fault_addr.bits(), vma_type);
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+        crate::pr_debug!("pagefault: map new page at {:#x}, type={:?}", fault_addr.bits(), vma_type);
+    }
 
     // Release read lock
     drop(vma_mgr);

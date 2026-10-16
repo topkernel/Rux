@@ -113,6 +113,14 @@ pub const BINDER_SET_MAX_THREADS: u32 = iow(b'b' as u32, 5, SZ_U32);
 pub const BINDER_SET_CONTEXT_MGR: u32 = iow(b'b' as u32, 7, SZ_U32);
 pub const BINDER_THREAD_EXIT: u32 = iow(b'b' as u32, 8, SZ_U32);
 pub const BINDER_VERSION: u32 = ioc(3, b'b' as u32, 9, SZ_VERSION);
+/// _IOW('b', 13, struct flat_binder_object) — 24 bytes on LP64. OH samgr
+/// tries this FIRST; rejecting it sent samgr into a retry loop (803 dead
+/// handle-0 transactions in one boot) before falling back to the plain
+/// ioctl.
+pub const BINDER_SET_CONTEXT_MGR_EXT: u32 = iow(b'b' as u32, 13, 24);
+/// _IOWR('b', 30, struct binder_feature_set) — OpenHarmony addition; the
+/// IPC library probes it right after BINDER_VERSION on every open.
+pub const BINDER_FEATURE_SET: u32 = ioc(3, b'b' as u32, 30, SZ_U64);
 
 pub const BC_TRANSACTION: u32 = iow(b'c' as u32, 0, SZ_TR);
 pub const BC_REPLY: u32 = iow(b'c' as u32, 1, SZ_TR);
@@ -636,6 +644,12 @@ struct BinderThread {
     /// wake the exact thread; proc work wakes one selected waiter.
     wait: WaitQueueHead,
     st: core::cell::UnsafeCell<ThreadState>,
+    /// Jiffies when this thread entered the blocking binder read wait (0
+    /// while not waiting) — read atomically by the khungtaskd binder-stall
+    /// scan without taking WORLD.
+    read_wait_since: core::sync::atomic::AtomicU64,
+    /// One stall report per wait episode (avoids per-scan spam).
+    stall_reported: core::sync::atomic::AtomicBool,
 }
 
 impl BinderThread {
@@ -643,6 +657,8 @@ impl BinderThread {
         Self {
             tid,
             wait: WaitQueueHead::new(),
+            read_wait_since: core::sync::atomic::AtomicU64::new(0),
+            stall_reported: core::sync::atomic::AtomicBool::new(false),
             st: core::cell::UnsafeCell::new(ThreadState {
                 looper: 0,
                 todo: VecDeque::new(),
@@ -1245,6 +1261,103 @@ pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Op
     Some(binder_ioctl(file, request, arg))
 }
 
+/// Binder stall scan, called from khungtaskd (process context) alongside
+/// the D-state scan. A thread parked in the blocking binder read for
+/// longer than the threshold is almost always an IPC chain stall —
+/// typically a service that never answered a synchronous transaction.
+/// S-state tasks are invisible to the D-state detector, so report these
+/// here: pid/tid, wait duration, and — when the thread is waiting for a
+/// REPLY — the pid of the process that owes it (txn_stack top's owner).
+/// One report per wait episode.
+pub fn stall_report() {
+    const STALL_SECS: u64 = 120;
+    let now = crate::drivers::timer::get_jiffies();
+    let hz = crate::config::KERNEL_HZ as u64;
+    if hz == 0 {
+        return;
+    }
+    let w = world_lock();
+    // SAFETY: read-only traversal under WORLD (pm() casts are only used
+    // to reach each live proc's thread list).
+    unsafe {
+        let world = match w.as_ref() {
+            Some(world) => world,
+            None => return,
+        };
+        for p in &world.procs {
+            let proc = pm(world, p);
+            for t in &proc.im().threads {
+                let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
+                if since == 0 || now.saturating_sub(since) < STALL_SECS * hz {
+                    continue;
+                }
+                if t.stall_reported.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                    continue;
+                }
+                let secs = (now.saturating_sub(since) / hz).max(1);
+                let th = t.st();
+                let pending = th.txn_stack.len();
+                let owed_by = th
+                    .txn_stack
+                    .last()
+                    .and_then(|txn| txn.to_proc.clone())
+                    .map(|p| p.pid);
+                match (pending, owed_by) {
+                    (0, _) => crate::pr_warn!(
+                        "binder-stall: pid {} tid {} waiting {}s for work (no pending txn)",
+                        proc.pid, t.tid, secs
+                    ),
+                    (n, Some(owner)) => crate::pr_warn!(
+                        "binder-stall: pid {} tid {} waiting {}s for reply from pid {} ({} txn(s) stacked)",
+                        proc.pid, t.tid, secs, owner, n
+                    ),
+                    (n, None) => crate::pr_warn!(
+                        "binder-stall: pid {} tid {} waiting {}s for reply ({} txn(s) stacked)",
+                        proc.pid, t.tid, secs, n
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// BINDER_SET_CONTEXT_MGR / _EXT body (binder_ioctl_set_ctx_mgr). The EXT
+/// variant passes the flat_binder_object's ptr/cookie/flags; the plain one
+/// passes zeros. Linux creates the node with local refs held and has_*_ref
+/// already true, so no INCREFS/ACQUIRE handshake fires for it.
+fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) -> i64 {
+    let mut w = world_lock();
+    let world = w.as_mut().unwrap();
+    if world.mgr_node[proc.ctx as usize].is_some() {
+        crate::pr_err!(
+            "binder: BINDER_SET_CONTEXT_MGR already set (ctx {})",
+            proc.ctx as u8
+        );
+        return -(EBUSY as i64);
+    }
+    let node = Arc::new(BinderNode::new(world.next_id, ptr, cookie, proc.id, flags));
+    world.next_id += 1;
+    // SAFETY: under WORLD.
+    unsafe {
+        let ns = node.st();
+        ns.local_strong_refs = 1;
+        ns.local_weak_refs = 1;
+        ns.has_strong_ref = true;
+        ns.has_weak_ref = true;
+        pm(world, proc).im().nodes.push(node.clone());
+    }
+    world.mgr_node[proc.ctx as usize] = Some(node);
+    drop(w);
+    crate::pr_info!(
+        "binder: proc {} (pid {}) is the context manager (ctx {}, flags {:#x})",
+        proc.id,
+        proc.pid,
+        proc.ctx as u8,
+        flags
+    );
+    0
+}
+
 fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
     // SAFETY: fd-backed lifetime; see proc_ref.
     let Some(proc) = (unsafe { proc_ref(file) }) else {
@@ -1289,32 +1402,39 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 None => -(EINVAL as i64),
             }
         }
-        BINDER_SET_CONTEXT_MGR => {
-            let mut w = world_lock();
-            let world = w.as_mut().unwrap();
-            if world.mgr_node[proc.ctx as usize].is_some() {
-                crate::pr_err!("binder: BINDER_SET_CONTEXT_MGR already set (ctx {})", proc.ctx as u8);
-                return -(EBUSY as i64);
+        BINDER_SET_CONTEXT_MGR => set_context_mgr(&proc, 0, 0, 0),
+        BINDER_SET_CONTEXT_MGR_EXT => {
+            // flat_binder_object (LP64): type@0 u32, flags@4 u32,
+            // binder@8 u64, cookie@16 u64. Linux only consumes
+            // fp->binder (node ptr), fp->cookie and fp->flags here.
+            if arg == 0 || !crate::arch::uaccess::access_ok(arg, 24) {
+                return -(EFAULT as i64);
             }
-            // Linux creates the node with local refs held and has_*_ref
-            // already true, so no INCREFS/ACQUIRE handshake fires for it.
-            // The mgr node's flags are 0 (binder_new_node with fp==NULL):
-            // it does not accept BINDER_TYPE_FD objects, exactly like the
-            // un-extended BINDER_SET_CONTEXT_MGR ioctl.
-            let node = Arc::new(BinderNode::new(world.next_id, 0, 0, proc.id, 0));
-            world.next_id += 1;
-            // SAFETY: under WORLD.
-            unsafe {
-                let ns = node.st();
-                ns.local_strong_refs = 1;
-                ns.local_weak_refs = 1;
-                ns.has_strong_ref = true;
-                ns.has_weak_ref = true;
-                pm(world, &proc).im().nodes.push(node.clone());
+            let ftype = unsafe { crate::arch::uaccess::get_user(arg as *const u32) };
+            let flags = unsafe { crate::arch::uaccess::get_user((arg + 4) as *const u32) };
+            let ptr = unsafe { crate::arch::uaccess::get_user((arg + 8) as *const u64) };
+            let cookie = unsafe { crate::arch::uaccess::get_user((arg + 16) as *const u64) };
+            match (ftype, flags, ptr, cookie) {
+                (Some(_), Some(flags), Some(ptr), Some(cookie)) => {
+                    set_context_mgr(&proc, ptr, cookie, flags)
+                }
+                _ => -(EFAULT as i64),
             }
-            world.mgr_node[proc.ctx as usize] = Some(node);
-            drop(w);
-            crate::pr_info!("binder: proc {} (pid {}) is the context manager (ctx {})", proc.id, proc.pid, proc.ctx as u8);
+        }
+        BINDER_FEATURE_SET => {
+            // OpenHarmony binder feature negotiation: report the enhanced
+            // features this driver supports. We implement none of them
+            // (access-token, real-pid tagging), so the answer is 0 —
+            // libipc then runs its baseline protocol, which is plain
+            // upstream binder. Answering the ioctl at all (instead of
+            // EINVAL) keeps every open from logging a probe failure.
+            if arg == 0 || !crate::arch::uaccess::access_ok(arg, 8) {
+                return -(EFAULT as i64);
+            }
+            // SAFETY: arg validated non-null, 8-byte writable.
+            if !unsafe { crate::arch::uaccess::put_user(arg as *mut u64, 0u64) } {
+                return -(EFAULT as i64);
+            }
             0
         }
         BINDER_THREAD_EXIT => {
@@ -1601,6 +1721,63 @@ fn binder_thread_write(
                             .refs
                             .iter()
                             .position(|r| r.desc == desc);
+                        // Linux binder_thread_write special case: an
+                        // INCREMENT on handle 0 (the context-manager
+                        // proxy every BpBinder(0) takes on creation)
+                        // resolves to the context-manager node via
+                        // binder_inc_ref_for_node, creating the ref if
+                        // this proc does not have one yet. Without it,
+                        // every OH process's first samgr proxy ref was
+                        // dropped on the floor.
+                        let ridx = match (ridx, increment && desc == 0) {
+                            (Some(i), _) => Some(i),
+                            (None, true) => {
+                                let mgr = world.mgr_node[proc.ctx as usize].clone();
+                                match mgr {
+                                    Some(mgr) if mgr.proc_id != proc.id => {
+                                        let p = pm(world, proc);
+                                        if let Some(i) = p
+                                            .im()
+                                            .refs
+                                            .iter()
+                                            .position(|r| Arc::ptr_eq(&r.node, &mgr))
+                                        {
+                                            Some(i)
+                                        } else {
+                                            // Create with zero counts (the
+                                            // normal increment path below
+                                            // brings them to 1/0 or 0/1),
+                                            // pinning the node like
+                                            // get_or_create_ref does.
+                                            let d = p.im().next_desc;
+                                            p.im().next_desc += 1;
+                                            mgr.st().internal_strong_refs += 1;
+                                            p.im().refs.push(BinderRef {
+                                                desc: d,
+                                                node: mgr.clone(),
+                                                strong: 0,
+                                                weak: 0,
+                                                death: None,
+                                            });
+                                            let i = p.im().refs.len() - 1;
+                                            if let Some(owner) = world
+                                                .procs
+                                                .iter()
+                                                .find(|o| o.id == mgr.proc_id)
+                                            {
+                                                owner.im().todo.push_back(Work::Node(mgr.clone()));
+                                                if wake_owner.is_none() {
+                                                    wake_owner = Some(owner.clone());
+                                                }
+                                            }
+                                            Some(i)
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            (None, false) => None,
+                        };
                         let Some(ridx) = ridx else {
                             drop(w);
                             crate::pr_info!("binder: pid {} ref command on invalid handle {}", proc.pid, desc);
@@ -2751,11 +2928,16 @@ fn binder_thread_read(
                     thread.st().waiting_for_proc_work = true;
                 }
             }
+            thread
+                .read_wait_since
+                .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
+            thread.stall_reported.store(false, core::sync::atomic::Ordering::Release);
             let r = crate::wait_event_interruptible!(&thread.wait, {
                 let w = world_lock();
                 // SAFETY: under WORLD.
                 unsafe { thread_has_work(w.as_ref().unwrap(), proc, thread) }
             });
+            thread.read_wait_since.store(0, core::sync::atomic::Ordering::Release);
             {
                 let _w = world_lock();
                 // SAFETY: under WORLD.
