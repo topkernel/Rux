@@ -233,17 +233,20 @@ struct BinderFdArrayObject {
 }
 const _: () = assert!(core::mem::size_of::<BinderFdArrayObject>() == 32);
 
-/// Sender-info record copied into the transaction's sg area when the
-/// target node opted into FLAT_BINDER_FLAG_TXN_SECURITY_CTX (OH's
-/// GetCallerPid/GetCallerUid/GetCallerTokenID source).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct BinderSenderInfo {
-    pid: i32,
-    uid: u32,
-    tokenid: u64,
-}
-const _: () = assert!(core::mem::size_of::<BinderSenderInfo>() == 16);
+/// Security-context string copied into the transaction's sg area when the
+/// target node opted into FLAT_BINDER_FLAG_TXN_SECURITY_CTX — OH libbinder
+/// reads it as the caller's SELinux sid (IPCSkeleton::GetCallingSid).
+/// All Rux tasks share this synthesized permissive domain.
+const SECCTX_SID: &str = "u:r:init:s0";
+const _: () = {
+    let bytes = SECCTX_SID.as_bytes();
+    let mut i = 0;
+    assert!(bytes.len() > 0);
+    while i < bytes.len() {
+        assert!(bytes[i] != 0, "SECCTX_SID must have no interior NULs");
+        i += 1;
+    }
+};
 
 /// Minimum in-buffer size of each object type (binder_validate_object;
 /// on LP64 the fd object carries an 8-byte union like flat_binder_object).
@@ -602,8 +605,8 @@ struct BinderTxn {
     data_size: usize,
     offsets_size: usize,
     buffer_off: usize,
-    /// Target-user address of the BinderSenderInfo record in the sg area
-    /// (0: the target node did not request a security context).
+    /// Target-user address of the NUL-terminated secctx string in the sg
+    /// area (0: the target node did not request a security context).
     security_ctx: u64,
 }
 
@@ -1415,14 +1418,15 @@ fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) ->
         );
         return -(EBUSY as i64);
     }
-    // Honor only the flag bits the driver actually implements. In
-    // particular FLAT_BINDER_FLAG_TXN_SECURITY_CTX is masked off for the
-    // manager node: OH samgr registers with it (0x1000), which routes
-    // EVERY handle-0 transaction through the BR_TRANSACTION_SECCTX
-    // staging path — with it live, samgr went silent right after install
-    // in boot b45 and never served a transaction. Plain BR_TRANSACTION
-    // (protocol-8 baseline) is what b43 and earlier ran with.
-    let flags = flags & (FLAT_BINDER_FLAG_ACCEPTS_FDS | 0xff);
+    // Keep FLAT_BINDER_FLAG_TXN_SECURITY_CTX (0x1000) live on the manager
+    // node: OH samgr registers with it and REQUIRES BR_TRANSACTION_SEC_CTX
+    // deliveries — libbinder's BinderInvoker::Transaction() derives
+    // callerSid_ (IPCSkeleton::GetCallingSid()) from the secctx record as a
+    // C string, and a plain BR_TRANSACTION leaves it "" (boots b52-b58:
+    // every GetServiceCheck failed with an empty callingSid because an
+    // earlier wedge workaround masked the flag). The b45 wedge itself was
+    // the garbage binary secctx record plus the broken selinuxfs status
+    // mmap, both fixed alongside this.
     let node = Arc::new(BinderNode::new(world.next_id, ptr, cookie, proc.id, flags));
     world.next_id += 1;
     // SAFETY: under WORLD.
@@ -2296,7 +2300,7 @@ fn binder_transaction(
                 if let Some(node) = &target_node {
                     allows_fd = node.flags & FLAT_BINDER_FLAG_ACCEPTS_FDS != 0;
                     if node.flags & FLAT_BINDER_FLAG_TXN_SECURITY_CTX != 0 {
-                        secctx_space = align8(core::mem::size_of::<BinderSenderInfo>());
+                        secctx_space = align8(SECCTX_SID.len() + 1);
                     }
                 }
             }
@@ -2376,24 +2380,31 @@ fn binder_transaction(
         }
     }
 
-    // ---- sender-info record (BR_TRANSACTION_SECCTX payload) ------------
-    // Written at the start of the sg area, ahead of any BINDER_TYPE_PTR
-    // payloads (upstream prepends the security context there).
+    // ---- secctx record (BR_TRANSACTION_SECCTX payload) ------------------
+    // A NUL-terminated security-context STRING at the start of the sg area,
+    // ahead of any BINDER_TYPE_PTR payloads (upstream puts the context
+    // there). OH libbinder's BinderInvoker::Transaction() casts the secctx
+    // pointer to `const char*` for callerSid_ (IPCSkeleton::GetCallingSid)
+    // — a binary struct here reads as garbage bytes up to an accidental
+    // NUL (pid low byte), so it must be a string. Every Rux task is
+    // unlabeled; "u:r:init:s0" is the permissive synthesized domain. With
+    // the class/ tree absent, string_to_security_class fails and
+    // deny_unknown=0 turns every such check into an allow anyway — the
+    // string only needs to be well-formed and non-empty.
     let extra_base = align8(data_size) + align8(offsets_size);
     let mut sg_used = 0usize;
     let mut security_ctx: u64 = 0;
     if secctx_space > 0 {
-        let (sender_pid, sender_euid) = match crate::sched::current() {
-            Some(t) => ((*t).pid() as i32, (*t).cred().euid),
-            None => (0, 0),
-        };
-        let info = BinderSenderInfo { pid: sender_pid, uid: sender_euid, tokenid: 0 };
-        // SAFETY: the sg area is sized for secctx_space.
+        let bytes = SECCTX_SID.as_bytes();
+        // SAFETY: the sg area is sized for secctx_space (>= len+1, NUL
+        // included; SECCTX_SID has no interior NULs).
         unsafe {
-            core::ptr::write_volatile(
-                kvirt.add(block_off + extra_base) as *mut BinderSenderInfo,
-                info,
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                kvirt.add(block_off + extra_base),
+                bytes.len(),
             );
+            core::ptr::write_volatile(kvirt.add(block_off + extra_base + bytes.len()), 0u8);
         }
         security_ctx = user_base + block_off as u64 + extra_base as u64;
         sg_used += secctx_space;
@@ -3197,6 +3208,18 @@ fn binder_thread_read(
                             ));
                             if sec {
                                 stage_u64!(t.security_ctx);
+                                // First few deliveries logged: proves the
+                                // SECCTX path is live and shows the sid the
+                                // receiver will parse (SA-gate forensics).
+                                static SECCTX_DELIVERED: core::sync::atomic::AtomicU32 =
+                                    core::sync::atomic::AtomicU32::new(0);
+                                use core::sync::atomic::Ordering::Relaxed;
+                                if SECCTX_DELIVERED.fetch_add(1, Relaxed) < 5 {
+                                    crate::pr_info!(
+                                        "binder: BR_TRANSACTION_SECCTX -> pid {} sid '{}' code {}",
+                                        proc.pid, SECCTX_SID, td.code
+                                    );
+                                }
                             }
                             // The receiving side now owns the buffer.
                             if let Some(a) = t.to_proc.im().alloc.as_mut() {

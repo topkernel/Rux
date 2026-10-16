@@ -25,6 +25,19 @@ use crate::fs::FileOps;
 
 const ROOT_INO: u64 = 1;
 
+/// selinux_status_t (libselinux sestatus.c): the page mmap'd read-only by
+/// `selinux_status_open()`. avc_open() → avc_init_internal() calls it with
+/// fallback=0, so a failed mmap fails the whole avc_open and leaves
+/// selinux_enabled=1 with avc_running=0 — a half-open AVC that makes every
+/// samgr SA gate fail from a different direction. Static page: sequence
+/// stays 0 (read_sequence always consistent), enforcing=0 (permissive),
+/// deny_unknown=0 (allow unknown classes/perms — same answer as the node).
+const STATUS_PAGE: [u8; 20] = {
+    let mut p = [0u8; 20];
+    p[0] = 1; // version = SELINUX_KERNEL_STATUS_VERSION
+    p
+};
+
 enum Node {
     Const(&'static [u8]),
     /// Write sink (`load`): writes accepted and discarded, reads EOF.
@@ -64,7 +77,11 @@ const NODES: &[(&str, Node)] = &[
     // mounting (a warning-only path, but a present node keeps it quiet).
     ("policy", Node::SinkMode(0o644)),
     ("policyvers", Node::Const(b"31\n")),
-    ("status", Node::Dir),
+    // `status` — MUST be a regular file carrying the selinux_status_t
+    // page: libselinux's selinux_status_open() mmaps it PROT_READ
+    // MAP_SHARED; an empty directory node makes the mmap fail and takes
+    // down avc_open() (see STATUS_PAGE above).
+    ("status", Node::Const(&STATUS_PAGE)),
 ];
 
 /// Child ino = 100 + index into NODES (stable within a boot).
@@ -87,18 +104,56 @@ fn build_child_inode(idx: usize) -> Arc<Inode> {
     };
     let mut inode = Inode::new(child_ino(idx), InodeMode::new(mode_bits));
     inode.ops = Some(&SELINUXFS_INODE_OPS);
+    // Report the true byte size: file-backed mmap() faults SIGBUS at or
+    // past inode size, so `status` must claim 20 bytes for libselinux's
+    // selinux_status_open() mmap to be serviceable.
+    if let Node::Const(d) = node {
+        inode.set_size(d.len() as u64);
+    }
     // private_data = index into NODES (as a small integer tag) — the read
     // path resolves the constant from it; no allocation to free.
     inode.private_data = Some(idx as *mut u8);
     Arc::new(inode)
 }
 
+/// First-touch-per-node trace mask: one bit per NODES entry, so a boot
+/// log shows WHICH selinuxfs nodes each component reaches (and by which
+/// pid) without spamming a line per poll. `context`/`access`/`status`
+/// touches are the diagnostic for "does libselinux consult the kernel
+/// selinuxfs at all" (samgr SA-gate forensics, boots b50+).
+static NODE_TOUCHED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 unsafe fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
     if dir.ino != ROOT_INO {
+        // Class discovery probes (`class/<name>/index`) land here — log
+        // the first few: they show which security classes libselinux
+        // fails to discover (string_to_security_class → discover_class).
+        static CLASS_PROBES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        use core::sync::atomic::Ordering::Relaxed;
+        if CLASS_PROBES.fetch_add(1, Relaxed) < 20 {
+            if let Ok(s) = core::str::from_utf8(name) {
+                crate::pr_info!(
+                    "selinuxfs: class lookup '{}' by pid {} -> ENOTDIR",
+                    s,
+                    crate::process::current_pid()
+                );
+            }
+        }
         return Err(-20); // ENOTDIR: child dirs are empty
     }
     match node_index(name) {
-        Some(idx) => Ok(child_ino(idx)),
+        Some(idx) => {
+            use core::sync::atomic::Ordering::Relaxed;
+            let mask = 1u64 << idx;
+            if NODE_TOUCHED.fetch_or(mask, Relaxed) & mask == 0 {
+                crate::pr_info!(
+                    "selinuxfs: first lookup '{}' by pid {}",
+                    NODES[idx].0,
+                    crate::process::current_pid()
+                );
+            }
+            Ok(child_ino(idx))
+        }
         None => Err(-2), // ENOENT
     }
 }
