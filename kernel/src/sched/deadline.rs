@@ -256,7 +256,7 @@ impl DlRunQueue {
 
             // b50 #GP guard — see the fair-class twin. A scribbled slot
             // pointer must never reach the deref below.
-            if !crate::sched::sched::kernel_ptr_in_physmap(task as *const u8) {
+            if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
                 self.tasks.remove(&key);
                 self.dl_nr_running.fetch_sub(1, Ordering::AcqRel);
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);

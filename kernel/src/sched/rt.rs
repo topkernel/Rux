@@ -402,10 +402,18 @@ impl RtRunQueue {
                     // which keeps the kernel alive instead of fatal.
                     // b61/b62 hardening: canonical alone also accepts
                     // kernel-NEGATIVE poison (0xfffffffffffffeXX read from
-                    // a freed task's links) — require the PHYSMAP range,
-                    // where Task allocations actually live, for both the
-                    // link and the derived task pointer.
-                    if !crate::sched::sched::kernel_ptr_in_physmap(pos as *const u8) {
+                    // a freed task's links) — require the PHYSMAP range
+                    // for the link, where Task allocations actually live.
+                    // b69 fix: the DERIVED task screen must also accept
+                    // the static Task storages (boot init task, idle
+                    // tasks) — a physmap-only check dropped PID 1 from
+                    // the CFS timeline at its first pick and wedged the
+                    // machine in WFI with nr_running==0. The pos node
+                    // itself stays physmap-or-static too (it is the
+                    // rt_run_list INSIDE the same Task allocation).
+                    if pos as usize % 8 != 0
+                        || !crate::sched::sched::kernel_task_ptr_range_ok(pos as *const u8)
+                    {
                         crate::sched::sched::report_poisoned_rq_entry(cpu_id, pos as usize);
                         break;
                     }
@@ -414,7 +422,7 @@ impl RtRunQueue {
                         let offset = core::mem::offset_of!(Task, rt_run_list);
                         (pos as *mut u8).sub(offset) as *mut Task
                     };
-                    if !crate::sched::sched::kernel_ptr_in_physmap(task as *const u8) {
+                    if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
                         crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
                         break;
                     }

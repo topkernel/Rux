@@ -499,6 +499,36 @@ pub fn kernel_ptr_in_physmap(p: *const u8) -> bool {
     (0xffff_8880_0000_0000..0xffff_9000_0000_0000).contains(&a)
 }
 
+/// Range-only Task-pointer screen for runqueue walks: the kernel linear
+/// map (where every heap-allocated Task lives) PLUS the static Task
+/// storages that legally sit outside it — the boot init task
+/// (init::INIT_TASK_STORAGE, the ONE non-heap Task — b69: a physmap-only
+/// screen dropped PID 1 from the CFS timeline at its first pick and
+/// wedged both CPUs in WFI with nr_running==0) and the per-CPU idle
+/// tasks (IDLE_TASK_STORAGES). Pure address arithmetic, no dereference —
+/// safe to call on not-yet-validated memory. CgroupNode walks must NOT
+/// use this (nodes are heap-only; keep kernel_ptr_in_physmap there).
+pub fn kernel_task_ptr_range_ok(p: *const u8) -> bool {
+    if kernel_ptr_in_physmap(p) {
+        return true;
+    }
+    let a = p as usize;
+    if a % 8 != 0 {
+        return false;
+    }
+    let init_lo = crate::init::init_task_storage_addr();
+    if a >= init_lo && a < init_lo + core::mem::size_of::<crate::process::task::Task>() {
+        return true;
+    }
+    // SAFETY: only the static's address is read, never its (possibly
+    // uninitialized) contents.
+    let idle_lo = unsafe {
+        core::ptr::addr_of!(IDLE_TASK_STORAGES) as usize
+    };
+    let idle_span = core::mem::size_of::<crate::process::task::Task>() * MAX_CPUS;
+    a >= idle_lo && a < idle_lo + idle_span
+}
+
 /// Rate-limited one-line report for a poisoned runqueue entry (see
 /// kernel_ptr_canonical). Called with the GRQ lock held — the R34
 /// no-lock console discipline applies.
