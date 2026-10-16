@@ -930,30 +930,14 @@ pub fn attr_get(pid: u64, kind: usize) -> Vec<u8> {
         None => return Vec::new(),
     };
     let primary = slots.get(kind).cloned().flatten();
-    let result = if kind == ATTR_CURRENT {
+    if kind == ATTR_CURRENT {
         match primary {
             Some(v) => v, // explicit current write (incl. empty) wins
             None => slots.get(ATTR_EXEC).cloned().flatten().unwrap_or_default(),
         }
     } else {
         primary.unwrap_or_default()
-    };
-    // OH bring-up: confirm the ATTR_CURRENT→ATTR_EXEC fallback fires.
-    // Drop once SA gate is open. The label bytes are diagnostic only —
-    // libselinux's `getcon()` reads through here so an empty result
-    // means the SA gate's `callingSid` is empty too.
-    if kind == ATTR_CURRENT {
-        let mut preview = [0u8; 64];
-        let n = core::cmp::min(result.len(), 64);
-        preview[..n].copy_from_slice(&result[..n]);
-        crate::pr_info!(
-            "attr_get: pid={} kind=CURRENT bytes={} preview={:?}",
-            pid,
-            result.len(),
-            alloc::string::String::from_utf8_lossy(&preview[..n]).as_bytes(),
-        );
     }
-    result
 }
 
 /// Write one label slot (procfs_file_write path).
