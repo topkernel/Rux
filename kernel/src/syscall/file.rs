@@ -2264,6 +2264,22 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         buf.f_fsid = [crate::fs::tmpfs::TMPFS_MAGIC, 0];
         return;
     }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::selinuxfs::SELINUXFS_INODE_OPS as *const _))
+    {
+        // selinuxfs: f_type MUST be SELINUX_MAGIC (0xf97cff8c) —
+        // libselinux's verify_selinuxmnt() gates selinux_mnt (and thus
+        // every security_check_context) on exactly this magic and a
+        // non-read-only statvfs. OH samgr's SA-permission gate depends
+        // on it (boot b50's "SA:5100 selinux denied" loop).
+        const SELINUX_MAGIC: u64 = 0xf97c_ff8c;
+        fill_rootfs_statfs(buf);
+        buf.f_type = SELINUX_MAGIC;
+        buf.f_fsid = [SELINUX_MAGIC as u32, 0];
+        buf.f_flags = 0; // rw — verify_selinuxmnt rejects ST_RDONLY
+        return;
+    }
     fill_rootfs_statfs(buf);
 }
 

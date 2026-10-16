@@ -29,6 +29,10 @@ enum Node {
     Const(&'static [u8]),
     /// Write sink (`load`): writes accepted and discarded, reads EOF.
     Sink,
+    /// Write sink with a custom mode — `context` is opened O_RDWR by
+    /// every libselinux `security_check_context` caller (samgr's SA
+    /// permission gate runs as non-root), so it must be world-rw.
+    SinkMode(u32),
     /// Present-but-empty directory.
     Dir,
 }
@@ -37,9 +41,19 @@ const NODES: &[(&str, Node)] = &[
     ("booleans", Node::Dir),
     ("checkreqprot", Node::Const(b"0\n")),
     ("class", Node::Dir),
+    // `context` — THE node samgr's SA-permission gate needs:
+    // CheckPerm() calls security_check_context(callerSid), which opens
+    // /sys/fs/selinux/context O_RDWR and writes the context string; the
+    // write succeeding IS the check (b50: every GetServiceCheck failed
+    // because selinux_mnt was NULL — statfs did not report the
+    // SELINUX_MAGIC f_type). Accept and discard, like `load`.
+    ("context", Node::SinkMode(0o666)),
     ("disable", Node::Const(b"0\n")),
     ("enforce", Node::Const(b"0\n")),
     ("load", Node::Sink),
+    // `policy` — first-stage init chmods it to 0444 right after
+    // mounting (a warning-only path, but a present node keeps it quiet).
+    ("policy", Node::SinkMode(0o644)),
     ("policyvers", Node::Const(b"31\n")),
     ("status", Node::Dir),
 ];
@@ -57,12 +71,12 @@ fn node_index(name: &[u8]) -> Option<usize> {
 fn build_child_inode(idx: usize) -> Arc<Inode> {
     let (name, node) = &NODES[idx];
     let _ = name;
-    let mut inode = match node {
-        Node::Dir => Inode::new(child_ino(idx), InodeMode::new(InodeMode::S_IFDIR | 0o555)),
-        Node::Const(_) | Node::Sink => {
-            Inode::new(child_ino(idx), InodeMode::new(InodeMode::S_IFREG | 0o600))
-        }
+    let mode_bits = match node {
+        Node::Dir => InodeMode::S_IFDIR | 0o555,
+        Node::SinkMode(m) => InodeMode::S_IFREG | *m,
+        Node::Const(_) | Node::Sink => InodeMode::S_IFREG | 0o600,
     };
+    let mut inode = Inode::new(child_ino(idx), InodeMode::new(mode_bits));
     inode.ops = Some(&SELINUXFS_INODE_OPS);
     // private_data = index into NODES (as a small integer tag) — the read
     // path resolves the constant from it; no allocation to free.
@@ -119,7 +133,20 @@ unsafe fn selinuxfs_get_file_ops(inode: &Inode) -> Option<&'static FileOps> {
     }
 }
 
-static SELINUXFS_INODE_OPS: INodeOps = INodeOps {
+/// No-op setattr: init chmods `policy` to 0444 right after mounting.
+/// The default (no setattr op) answers EROFS, which init logs as a
+/// boot-graph warning; a silent success keeps the graph clean. Mode
+/// bits on synthetic nodes are cosmetic — nothing enforces them.
+unsafe fn selinuxfs_setattr(_inode: &Inode, _attr: u32, _arg1: u64, _arg2: u64) -> i32 {
+    0
+}
+
+/// pub(crate) for the statfs dispatch: statfs("/sys/fs/selinux") must
+/// report f_type = SELINUX_MAGIC (0xf97cff8c) or libselinux's
+/// verify_selinuxmnt() refuses to set selinux_mnt and every
+/// security_check_context() fails with ENOENT (boot b50's SA-denial
+/// loop: "GetServiceCheck callingSid:,SA:5100,ret:fail").
+pub(crate) static SELINUXFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(selinuxfs_lookup),
     iget: Some(selinuxfs_iget),
     create: None,
@@ -136,7 +163,7 @@ static SELINUXFS_INODE_OPS: INodeOps = INodeOps {
     open: None,
     permission: None,
     getattr: None,
-    setattr: None,
+    setattr: Some(selinuxfs_setattr),
     destroy_inode: None,
 };
 

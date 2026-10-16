@@ -1011,7 +1011,19 @@ fn build_tree() -> Arc<KObject> {
     }
 
     // ---------------- /sys/fs, /sys/firmware, /sys/hypervisor ----------
-    mk_dir(&root, "fs", KType::Fs);
+    // /sys/fs needs the standard mountpoint skeleton (selinux, bpf,
+    // cgroup, pstore). On Linux with SELinux built in the kernel itself
+    // creates and mounts /sys/fs/selinux at boot (init_selinux_fs), so
+    // OH first-stage init's mount("selinuxfs", "/sys/fs/selinux") never
+    // sees ENOENT; without the dir our mount answer is ENOENT and the
+    // whole selinuxfs path (samgr's SA-permission gate) stays dead.
+    // Same story for init.virt.cfg's bpf/cgroup/pstore mounts (they
+    // warn-only, but quiet is better).
+    let sys_fs = mk_dir(&root, "fs", KType::Fs);
+    mk_dir(&sys_fs, "selinux", KType::Fs);
+    mk_dir(&sys_fs, "bpf", KType::Fs);
+    mk_dir(&sys_fs, "cgroup", KType::Fs);
+    mk_dir(&sys_fs, "pstore", KType::Fs);
     mk_dir(&root, "firmware", KType::Firmware);
     mk_dir(&root, "hypervisor", KType::Hypervisor);
 

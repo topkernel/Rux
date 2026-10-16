@@ -442,6 +442,80 @@ fn grq() -> &'static GlobalRunQueue {
     unsafe { GRQ.assume_init_ref() }
 }
 
+/// b50 #GP guard (x86-scribble family): 48-bit canonical-address check
+/// for pointers pulled out of runqueue structures. Both supported
+/// arches (x86_64, riscv64 sv48) use 48-bit canonical addresses — bits
+/// 63:47 must all replicate bit 47 — and every kernel pointer the
+/// scheduler stores (heap Task structs, embedded ListHeads) is qword
+/// aligned. A wild kernel store landing on a timeline/list slot turns
+/// the stored pointer into garbage whose first deref raises #GP(0)
+/// (boot b50: rip inside ownership_pickable's opening qword load,
+/// rdi non-canonical, kernel fatal at ~20 min uptime). Testing the
+/// shape before the deref converts that into a dropped/skipped entry.
+pub fn kernel_ptr_canonical(p: *const u8) -> bool {
+    let a = p as usize as u64;
+    if a % 8 != 0 {
+        return false;
+    }
+    let hi = a >> 47;
+    hi == 0 || hi == 0x1FFFF
+}
+
+/// Rate-limited one-line report for a poisoned runqueue entry (see
+/// kernel_ptr_canonical). Called with the GRQ lock held — the R34
+/// no-lock console discipline applies.
+pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(core::sync::atomic::Ordering::Acquire);
+    if now.wrapping_sub(last) < 100 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn ph(mut v: u64) {
+        let mut buf = [0u8; 16];
+        let mut n = 0;
+        while v > 0 && n < 16 {
+            let d = (v & 0xF) as u8;
+            buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            v >>= 4;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    for &b in b"sched: POISONED rq entry raw=0x" {
+        putchar(b);
+    }
+    ph(raw as u64);
+    for &b in b" on cpu " {
+        putchar(b);
+    }
+    let mut c = cpu;
+    let mut cb = [0u8; 8];
+    let mut n = 0;
+    if c == 0 {
+        cb[0] = b'0';
+        n = 1;
+    }
+    while c > 0 {
+        cb[n] = b'0' + (c % 10) as u8;
+        c /= 10;
+        n += 1;
+    }
+    for i in (0..n).rev() {
+        putchar(cb[i]);
+    }
+    putchar(b'\n');
+}
+
 /// Scribble hunter (dfx=scribble): trylock the GRQ for the diagnostic
 /// consistency scan. None when uninitialized or currently held.
 pub fn try_grq_lock() -> Option<GrqGuard<'static>> {

@@ -731,6 +731,14 @@ impl CfsRunQueue {
     pub fn pick_next(&mut self) -> Option<*mut crate::process::Task> {
         // Get task with smallest vruntime
         if let Some((&key, &task)) = self.tasks_timeline.iter().next() {
+            // b50 #GP guard — see pick_next_cpu. A non-canonical slot
+            // pointer must never reach the deref below.
+            if !crate::sched::sched::kernel_ptr_canonical(task as *const u8) {
+                self.tasks_timeline.remove(&key);
+                self.nr_running.fetch_sub(1, Ordering::AcqRel);
+                crate::sched::sched::report_poisoned_rq_entry(usize::MAX, task as usize);
+                return None;
+            }
             // Remove from queue using key (don't call dequeue, as vruntime may have changed)
             self.tasks_timeline.remove(&key);
 
@@ -804,6 +812,20 @@ impl CfsRunQueue {
                 Some(&t) => t,
                 None => break,
             };
+
+            // b50 #GP guard: a scribbled timeline slot yields a
+            // non-canonical *mut Task; the ownership probe below would
+            // #GP the kernel on its first qword load (boot b50, ~20 min
+            // in). Drop the poisoned entry — the task it named is
+            // unrecoverable either way; keeping the kernel (and this
+            // CPU's pick) alive matters more. load_weight is left
+            // stale: reading it would deref the same garbage.
+            if !crate::sched::sched::kernel_ptr_canonical(task as *const u8) {
+                self.tasks_timeline.remove(&key);
+                self.nr_running.fetch_sub(1, Ordering::AcqRel);
+                crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
+                continue;
+            }
 
             // SAFETY: task is from the BTreeMap, a valid pointer stored during enqueue.
             // R8-1b: skip tasks still marked on-CPU (context not saved —
