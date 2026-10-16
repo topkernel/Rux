@@ -628,8 +628,11 @@ fn process_deferred_exit_pid(packed: i64) {
     let (parent_pid, child_pid) = unpack_notify(packed);
     // EXITNOTIFY (dbus-activation hunt): activation stalls were traced to
     // the parent never learning its spawned child exited. Log each
-    // delivered exit notification (parent, child, signal rc).
-    {
+    // delivered exit notification (parent, child, signal rc). One line
+    // per child exit — a bare `ls` in the shell fires one — so the trace
+    // is available only behind dfx=schedtrace (serial-clean: it used to
+    // pollute every boot log).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
         static EN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if EN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
@@ -4162,16 +4165,21 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // printed hundreds of anonymous harvest lines while
                         // the actual blocker (a LIVE-mark phantom) was
                         // refused elsewhere and never named.
-                        r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
-                        // R80 (diag, producer hunt): the v2 storm showed
-                        // pids 306/336/338 cycling orphan -> heal -> orphan
-                        // every ~200ms through THIS plain-insert path (no
-                        // R49/R80 print — their marks were already clean).
-                        // Print the victim's parked context, rate-limited:
-                        // the saved thread.sp's caller frames name the exact
-                        // syscall/wait site the context was stranded in, and
-                        // repeated identical frames = one producer.
-                        harvest_print_parked(t, pid);
+                        // serial-clean: gated behind dfx=schedtrace.
+                        if crate::dfx::switches::enabled(
+                            crate::dfx::switches::DfxSwitch::SchedTrace,
+                        ) {
+                            r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                            // R80 (diag, producer hunt): the v2 storm showed
+                            // pids 306/336/338 cycling orphan -> heal -> orphan
+                            // every ~200ms through THIS plain-insert path (no
+                            // R49/R80 print — their marks were already clean).
+                            // Print the victim's parked context, rate-limited:
+                            // the saved thread.sp's caller frames name the exact
+                            // syscall/wait site the context was stranded in, and
+                            // repeated identical frames = one producer.
+                            harvest_print_parked(t, pid);
+                        }
                     }
                 }
                 Some(c) => {
@@ -4184,7 +4192,11 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // Lying idle-marked slot — R56c inside
                         // wake_up_enqueue heals the slot and admits the
                         // re-link.
-                        if wake_up_enqueue(t) {
+                        if wake_up_enqueue(t)
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::SchedTrace,
+                            )
+                        {
                             r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
                         }
                     } else if (*t).preempt_count() == 0
