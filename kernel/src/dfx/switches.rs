@@ -100,9 +100,15 @@ pub enum DfxSwitch {
     /// serial log and the UART traffic slowed the system enough to cost
     /// samgr the hdf_devmgr race. OFF unless asked for.
     Steptrace,
+    /// Per-short-write printable capture (OH bring-up): binary hilog /
+    /// binder frames still leak past the printable-head filter and spam
+    /// the console; default OFF, enable with dfx=writetrace. Mirrors
+    /// main's d0fb238c+b18f683f (my branch adds fd + a hex prefix for
+    /// offline frame decoding).
+    WriteTrace,
 }
 
-const SWITCH_COUNT: usize = 15;
+const SWITCH_COUNT: usize = 16;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -124,6 +130,7 @@ impl DfxSwitch {
             DfxSwitch::Strace1 => 12,
             DfxSwitch::SchedTrace => 13,
             DfxSwitch::Steptrace => 14,
+            DfxSwitch::WriteTrace => 15,
         }
     }
 
@@ -144,6 +151,7 @@ impl DfxSwitch {
             "strace1" => Some(DfxSwitch::Strace1),
             "schedtrace" => Some(DfxSwitch::SchedTrace),
             "steptrace" => Some(DfxSwitch::Steptrace),
+            "writetrace" => Some(DfxSwitch::WriteTrace),
             _ => None,
         }
     }

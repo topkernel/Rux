@@ -320,13 +320,25 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 0
             };
             if used < WTRACE_PID_MAX as u8 {
-                let len = core::cmp::min(count, 200);
-                let mut kb = [0u8; 200];
+                // 480 bytes: enough to zlib-inflate a hilog frame offline
+                // (HiLogAdapter compresses each socket message; 200 cut the
+                // stream mid-dictionary and the frames read as pure noise).
+                let len = core::cmp::min(count, 480);
+                let mut kb = [0u8; 480];
                 // SAFETY: buf/count validated by access_ok above.
                 let uncopied = unsafe {
                     crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
                 };
                 if uncopied == 0 {
+                    // Hex prefix (exact bytes, first 192) for offline
+                    // zlib decoding of compressed hilog frames, plus a
+                    // printable render of the whole sample for reading.
+                    let mut hexout = alloc::string::String::with_capacity(192 * 2);
+                    for &b in kb.iter().take(192) {
+                        const HEX: &[u8; 16] = b"0123456789abcdef";
+                        hexout.push(HEX[(b >> 4) as usize] as char);
+                        hexout.push(HEX[(b & 0xf) as usize] as char);
+                    }
                     let text = kb[..len]
                         .iter()
                         .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
@@ -338,8 +350,12 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                             .take(32)
                             .filter(|&&b| b.is_ascii_graphic() || b == b' ')
                             .count();
-                        if head >= 24 {
-                            crate::pr_info!("w pid {}: {}", pid, t);
+                        if head >= 24
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::WriteTrace,
+                            )
+                        {
+                            crate::pr_info!("w pid {} fd {} hx {}: {}", pid, fd, hexout, t);
                         }
                     }
                 }
