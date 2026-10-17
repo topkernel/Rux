@@ -617,13 +617,18 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         }
     };
 
-    // Validate phys_size against MAX_PAGES
-    // This ensures zone allocations stay within vmemmap bounds
+    // Validate phys_size against the descriptor ceiling (fake-OOM fix:
+    // the old limit here was the Kernel.toml NOMINAL size, so >2GiB
+    // machines silently lost every page above the line — see the
+    // MAX_PAGES comment in page_desc.rs). The runtime descriptor count is
+    // published by init_vmemmap from the same discovered memory map, so
+    // vmemmap bounds stay consistent with the zone span.
     let max_pages = super::page_desc::MAX_PAGES;
     let max_phys_size = max_pages * PAGE_SIZE;
     let effective_phys_size = phys_size.min(max_phys_size);
     if effective_phys_size != phys_size {
-        crate::println!("page_alloc: phys_size {}MB exceeds MAX_PAGES limit {}MB, truncating",
+        crate::pr_err!(
+            "page_alloc: phys_size {}MB exceeds MAX_PAGES limit {}MB, truncating",
             phys_size / (1024 * 1024), max_phys_size / (1024 * 1024));
     }
 

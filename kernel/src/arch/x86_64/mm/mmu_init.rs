@@ -1146,7 +1146,10 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 /// fails loudly instead of writing a "page table" over kernel memory).
 #[inline]
 fn valid_table_link_ppn(ppn: u64, root_ppn: u64) -> bool {
-    let ram_top = (crate::mm::page_desc::MAX_PFN as u64) << 12;
+    // Runtime RAM top (discovered memory map — fake-OOM fix: the old
+    // compile-time MAX_PFN rejected every table link above the Kernel.toml
+    // nominal 2 GiB, breaking user page tables on larger machines).
+    let ram_top = (crate::mm::page_desc::max_pfn() as u64) << 12;
     let phys = ppn << 12;
     if phys >= ram_top {
         return false;

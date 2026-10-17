@@ -110,8 +110,9 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     let max_pages = super::page_desc::MAX_PAGES;
     let effective_nr_pages = nr_pages.min(max_pages);
     if effective_nr_pages != nr_pages {
-        crate::println!("vmemmap: nr_pages {} exceeds MAX_PAGES {}, truncating",
-            nr_pages, max_pages);
+        crate::pr_err!(
+            "vmemmap: nr_pages {} exceeds MAX_PAGES {} ({} GiB ceiling) — truncating; raise MAX_PAGES",
+            nr_pages, max_pages, max_pages * PAGE_SIZE / (1024 * 1024 * 1024));
     }
 
     // Calculate how many vmemmap pages we need
@@ -192,6 +193,12 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
             vmemmap_pages,
         };
     }
+
+    // Publish the runtime descriptor count (fake-OOM fix): every later
+    // bounds check (pfn_to_page, phys_valid, forensic scans) uses this
+    // instead of the Kernel.toml nominal size, so machines with more RAM
+    // than the config value manage all of it.
+    super::page_desc::set_nr_descs(effective_nr_pages);
 
     Ok(())
 }
