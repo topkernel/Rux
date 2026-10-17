@@ -1662,6 +1662,21 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
                     rdi,
                     rsi
                 );
+                // If the holder is parked in futex_wait, correlate its
+                // waiter entry: woken=true-but-still-asleep indicts the
+                // wake→run path; woken=false indicts the key match (key_mm
+                // vs the task's own current identity) or the releaser.
+                if let Some((uaddr, key_mm, woken)) =
+                    crate::sync::futex::waiter_of(task)
+                {
+                    crate::pr_warn!(
+                        "binder-stall:    futex waiter uaddr={:#x} key_mm={:#x} own_mm={:#x} woken={}",
+                        uaddr,
+                        key_mm,
+                        crate::sync::futex::task_futex_mm_id(task),
+                        woken
+                    );
+                }
             }
         }
         None => crate::pr_warn!(

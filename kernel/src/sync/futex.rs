@@ -201,6 +201,46 @@ static HASH_HEADS: [Spinlock<Option<usize>>; HASH_SIZE] = {
     [INIT; HASH_SIZE]
 };
 
+/// Diagnostic (b133/b134 stall hunt): find the live futex-waiter entry of
+/// `task`, if any. Returns (uaddr, key.mm, woken). The binder stall report
+/// calls this for txn-holder threads parked in futex_wait: a `woken=true`
+/// waiter that never resumed indicts the wake→run path, while `woken=false`
+/// after minutes indicts the key match (compare key.mm with the task's own
+/// current identity) or the userspace releaser.
+pub fn waiter_of(task: *mut Task) -> Option<(usize, usize, bool)> {
+    for b in HASH_HEADS.iter() {
+        let h = b.lock_irqsave();
+        let mut idx = *h;
+        while let Some(i) = idx {
+            // SAFETY: slot indices come from chain links under the bucket
+            // lock; slots are freed only under both locks, so the entry we
+            // copy out stays live for the duration of the read.
+            let (entry, next) = {
+                let slot = WAITER_POOL[i].lock_irqsave();
+                match *slot {
+                    Some(ref w) => (
+                        Some((w.key.uaddr, w.key.mm, w.woken, core::ptr::eq(w.task, task))),
+                        w.next,
+                    ),
+                    None => (None, None),
+                }
+            };
+            match entry {
+                Some((uaddr, mm, woken, true)) => {
+                    drop(h);
+                    return Some((uaddr, mm, woken));
+                }
+                Some(_) => {
+                    idx = next;
+                }
+                None => break,
+            }
+        }
+        drop(h);
+    }
+    None
+}
+
 /// Allocate a waiter slot
 fn alloc_waiter() -> Option<usize> {
     for i in 0..WAITER_POOL_SIZE {
