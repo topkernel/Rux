@@ -112,6 +112,10 @@ pub enum DfxSwitch {
     /// unless explicitly requested; never enable in production or LTP
     /// runs.
     OncpuInject,
+    /// Per-short-write printable capture (OH bring-up): binary hilog /
+    /// binder frames still leak past the printable-head filter and spam
+    /// the console; default OFF, enable with dfx=writetrace.
+    WriteTrace,
 }
 
 const SWITCH_COUNT: usize = 16;
