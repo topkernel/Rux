@@ -315,9 +315,17 @@ pub fn handle_mm_fault(
     // Check if page is already mapped
     // SAFETY: root_ppn is the address space's valid root page table PPN.
     // PageTableWalker::walk only reads page table entries.
+    // R-WRITESTORM-2 (x86_64 twin): a V|U leaf with NO R/W/X bits is a
+    // PROT_NONE marker from mprotect(prot==0) (Sv39 keeps V set). Counting
+    // it as "already mapped" sent the fault into the permission check,
+    // which sees no R/W/X and kills the task without consulting the
+    // covering VMA. Markers now fall through to the VMA layer, which
+    // re-presents the leaf when the VMA grants the access.
     let already_mapped = unsafe {
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).map_or(false, |(_ppn, bits)| {
-            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+            !(pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+              && (bits & (PageTableEntry::R | PageTableEntry::W | PageTableEntry::X)) == 0
+              && (bits & PageTableEntry::V) != 0)
         })
     };
 
@@ -433,6 +441,57 @@ pub fn handle_mm_fault(
     }
     if is_read && !vma_flags.is_readable() {
         return MmFaultResult::PermissionDenied;
+    }
+
+    // R-WRITESTORM-2 (x86_64 twin): if the leaf is a PROT_NONE marker
+    // (V|U, no R/W/X, PPN preserved) and the covering VMA grants this
+    // access, RE-PRESENT the leaf with the VMA's permissions — preserving
+    // the PPN and the COW software bit (W deferred to the COW fault,
+    // INV-COW-1). Linux parity: a fault under a VMA that grants the access
+    // must succeed regardless of the region's mprotect history; the stale
+    // marker is advisory PTE state, not a protection decision.
+    {
+        let page_base = VirtAddr::new(fault_addr.bits() & !0xFFF);
+        if let Some(raw) = read_pte_raw(root_ppn, page_base) {
+            if is_protnone_marker(raw) {
+                let mut flags = PageTableEntry::V | PageTableEntry::U
+                    | PageTableEntry::A | PageTableEntry::D;
+                if vma_flags.is_readable() {
+                    flags |= PageTableEntry::R;
+                }
+                if vma_flags.is_writable() {
+                    flags |= PageTableEntry::W | PageTableEntry::R; // W requires R
+                }
+                if vma_flags.is_executable() {
+                    flags |= PageTableEntry::X;
+                }
+                let cow_bit = raw & (1 << 8); // COW software bit
+                if cow_bit != 0 {
+                    flags |= cow_bit;
+                    flags &= !PageTableEntry::W;
+                }
+                let _pte_guard =
+                    crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                if let Some(now) = read_pte_raw(root_ppn, page_base) {
+                    if is_protnone_marker(now) {
+                        let new_pte = (now & !0x3FF) | flags;
+                        write_pte_raw(root_ppn, page_base, new_pte);
+                        // SAFETY: sfence.vma for this address; kernel ctx.
+                        unsafe {
+                            let va = page_base.bits();
+                            core::arch::asm!(
+                                "fence",
+                                "sfence.vma {0}, zero",
+                                "fence",
+                                in(reg) va,
+                                options(nostack, preserves_flags)
+                            );
+                        }
+                        return MmFaultResult::Handled;
+                    }
+                }
+            }
+        }
     }
 
     crate::pr_debug!("pagefault: map new page at {:#x}, type={:?}", fault_addr.bits(), vma_type);
@@ -875,6 +934,39 @@ pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
 /// Walks the three-level page table and returns the raw bits of the
 /// leaf PTE, even if V=0 (e.g. a swap entry).  Returns None if the
 /// page table walk cannot reach the leaf level.
+/// R-WRITESTORM-2: is this leaf a PROT_NONE marker (V|U set, no R/W/X,
+/// PPN preserved) as written by sys_mprotect for prot==0? The covering
+/// VMA owns the protection decision; the fault layer re-presents the
+/// leaf when the VMA grants the access.
+pub(crate) fn is_protnone_marker(raw: u64) -> bool {
+    (raw & PageTableEntry::V) != 0
+        && (raw & PageTableEntry::U) != 0
+        && (raw & (PageTableEntry::R | PageTableEntry::W | PageTableEntry::X)) == 0
+        && (raw >> 10) != 0 // has a PPN
+}
+
+/// R-WRITESTORM-2: write one 4K leaf PTE (raw bits), same 3-level walk as
+/// read_pte_raw. Caller must hold PTE_MODIFY_LOCK and have resolved the
+/// leaf via read_pte_raw first (upper levels exist).
+pub(crate) fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
+    use super::PAGE_SHIFT;
+    let vpn2 = ((vaddr.bits() >> 30) & 0x1FF) as usize;
+    let vpn1 = ((vaddr.bits() >> 21) & 0x1FF) as usize;
+    let vpn0 = ((vaddr.bits() >> 12) & 0x1FF) as usize;
+    // SAFETY: same walk as read_pte_raw; the leaf exists (the caller just
+    // read it), so intermediate tables are present. Only the leaf changes.
+    unsafe {
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte2 = (*root_table).get(vpn2);
+        if !pte2.is_valid() { return; }
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() || pte1.is_leaf() { return; }
+        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+        (*table0).set(vpn0, PageTableEntry::from_bits(bits));
+    }
+}
+
 pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
     use super::PAGE_SHIFT;
 

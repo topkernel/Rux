@@ -952,6 +952,22 @@ impl MmStruct {
 
     /// Copy address space using Copy-on-Write mechanism
     pub fn fork(&self) -> Result<MmStruct, MapError> {
+        // R-WRITESTORM-3 (fork/VMA atomicity): hold ONE vma_read guard
+        // across the cow_exempt scan, the COW page-table copy, AND the
+        // VMA snapshot. The old shape took and dropped vma_read twice
+        // with the PTE copy between the two acquisitions — a same-mm
+        // mprotect (which holds vma_write across BOTH its PTE rewrite
+        // and its VMA surgery) could interleave exactly there: the child
+        // then received the OLD PTEs (a PROT_NONE marker) with the NEW
+        // (upgraded) VMA flags. A later touch of that page tripped the
+        // marker as "already mapped + no perms" and killed the child
+        // with SIGSEGV/EACCES (the OH service Permission-denied family).
+        // Every mm mutator takes vma_write, so one read guard gives fork
+        // a consistent PTE+VMA view; faults (vma_read) still proceed
+        // concurrently, and their installs serialize on the PTE lock
+        // taken below.
+        let parent_vma_guard = self.vma_read();
+
         // COW-exempt VMA regions (MAP_SHARED / device mappings). fork's COW
         // walk historically write-protected EVERY user-writable PTE — in the
         // PARENT too. A MAP_SHARED mapping then COW-faulted on the first
@@ -960,17 +976,14 @@ impl MmStruct {
         // (the fbterm framebuffer-freeze root cause on riscv64). Shared and
         // device VMAs must be inherited as-is: bump the refcount, keep the
         // write permission.
-        let cow_exempt: Vec<(u64, u64)> = {
-            let vma_mgr = self.vma_read();
-            vma_mgr
-                .iter()
-                .filter(|vma| {
-                    vma.flags().contains(crate::mm::vma::VmaFlags::SHARED)
-                        || vma.vma_type() == crate::mm::vma::VmaType::Device
-                })
-                .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
-                .collect()
-        };
+        let cow_exempt: Vec<(u64, u64)> = parent_vma_guard
+            .iter()
+            .filter(|vma| {
+                vma.flags().contains(crate::mm::vma::VmaFlags::SHARED)
+                    || vma.vma_type() == crate::mm::vma::VmaType::Device
+            })
+            .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
+            .collect();
 
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
@@ -990,15 +1003,18 @@ impl MmStruct {
         ) };
 
         {
-            // Snapshot VMA data under parent read-lock, then drop it before
-            // acquiring child write-lock to avoid nested read-then-write deadlock.
-            let vma_snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)> = {
-                let vma_mgr = self.vma_read();
-                vma_mgr.iter().map(|vma| {
+            // Snapshot VMA data under the SAME parent read-guard held
+            // since before the PTE copy (R-WRITESTORM-3) — no same-mm
+            // mutator can interleave between the two views. The child
+            // write-lock below is a DIFFERENT lock (the child's manager),
+            // so no read-then-write deadlock.
+            let vma_snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)> =
+                parent_vma_guard.iter().map(|vma| {
                     (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset())
-                }).collect()
-            };
-            // Parent read-lock is now dropped.
+                }).collect();
+            // Parent read-lock released here (R-WRITESTORM-3): everything
+            // after this point only touches the CHILD's manager.
+            drop(parent_vma_guard);
 
             if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();

@@ -286,9 +286,17 @@ pub fn handle_mm_fault(
     // Check if page is already mapped
     // SAFETY: root_ppn is the address space's valid root page table PPN.
     // PageTableWalker::walk only reads page table entries.
+    // R-WRITESTORM-2: a PRESENT USER leaf counts as mapped. A PROT_NONE
+    // marker (P=0, U=1, PPN preserved) does NOT — counting it sent the
+    // fault into the already-mapped permission check, which reads P=0 as
+    // "no leaf" (check_pte_permissions -> None) and killed the task with
+    // PermissionDenied without ever consulting the covering VMA (the oh
+    // service-kill family). Markers now fall through to the VMA layer,
+    // which re-presents the leaf when the VMA grants the access.
     let already_mapped = unsafe {
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).map_or(false, |(_ppn, bits)| {
-            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+            (bits & PageTableEntry::P) != 0
+                && (bits & PageTableEntry::U) != 0
         })
     };
 
@@ -391,6 +399,65 @@ pub fn handle_mm_fault(
     }
     if is_read && !vma_flags.is_readable() {
         return MmFaultResult::PermissionDenied;
+    }
+
+    // R-WRITESTORM-2 (OH Permission-denied family): a P=0, U=1, non-swap
+    // leaf is a PROT_NONE marker left by mprotect(PROT_NONE) — the PPN is
+    // deliberately preserved so a re-protect restores the same page. The
+    // entry walk below no longer counts markers as "already mapped", so
+    // the fault reaches this VMA layer. If the covering VMA now GRANTS
+    // the access (the region was re-protected from PROT_NONE, or a fork
+    // raced an mprotect upgrade and left the child's VMA/PTE disagreeing
+    // — fork copies PTEs and snapshots VMAs in two separately-locked
+    // phases), the marker must be RE-PRESENTED with the VMA's
+    // permissions instead of (a) short-circuiting to SIGSEGV (the oh
+    // b113-b121 service kills: `pagefault: Permission denied at
+    // rip=ld.so+0x89ac6`, covering VMA flags=0x10 right after GWP-Asan
+    // mprotect'ed the slot readable) or (b) zero-filling over the
+    // quarantined page (silent data loss). Linux parity: a fault under a
+    // VMA that grants the access must succeed regardless of the region's
+    // mprotect history; the stale marker is advisory PTE state, not a
+    // protection decision.
+    {
+        let page_base = VirtAddr::new(fault_addr.bits() & !(PAGE_SIZE as u64 - 1));
+        if let Some(raw) = read_pte_raw(root_ppn, page_base) {
+            if is_protnone_marker(raw) {
+                let mut flags = PageTableEntry::P
+                    | PageTableEntry::U
+                    | PageTableEntry::A
+                    | PageTableEntry::D
+                    | PageTableEntry::NX;
+                if vma_flags.is_writable() {
+                    flags |= PageTableEntry::W;
+                }
+                if vma_flags.is_executable() {
+                    flags &= !PageTableEntry::NX;
+                }
+                let cow_bit =
+                    raw & super::mm_ops::cow_flags::COW;
+                if cow_bit != 0 {
+                    flags |= cow_bit;
+                    flags &= !PageTableEntry::W;
+                }
+                let _pte_guard =
+                    crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                // Re-read under the lock: a racing mprotect / COW fault /
+                // swap-in may have replaced the leaf since the lock-free
+                // read above; only rewrite a still-marker leaf.
+                if let Some(now) = read_pte_raw(root_ppn, page_base) {
+                    if is_protnone_marker(now) {
+                        let new_bits =
+                            (now & PageTableEntry::PHYS_MASK_PUBLIC) | flags;
+                        write_pte_raw(root_ppn, page_base, new_bits);
+                        // SAFETY: invlpg on a user VA from kernel context.
+                        unsafe { crate::arch::cpu::invlpg(page_base.bits()); }
+                        return MmFaultResult::Handled;
+                    }
+                    // Leaf changed under us: fall through; the demand
+                    // paths below (or the retry) act on the new state.
+                }
+            }
+        }
     }
 
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
@@ -777,6 +844,47 @@ pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
 /// Walks the four-level page table and returns the raw bits of the leaf
 /// PTE, even if P=0 (e.g. a swap entry). Returns None if the walk cannot
 /// reach the leaf level.
+/// R-WRITESTORM-2: is this leaf a PROT_NONE marker (P=0, U=1, non-swap,
+/// non-migration, with a preserved PPN) as written by mprotect_pte_range
+/// for prot==0? Such a leaf is NOT a mapping decision — the covering VMA
+/// owns protection; the fault layer re-presents it when the VMA grants
+/// the access.
+pub(crate) fn is_protnone_marker(raw: u64) -> bool {
+    (raw & PageTableEntry::P) == 0
+        && (raw & PageTableEntry::U) != 0
+        && !crate::mm::swap::is_swap_entry(raw)
+        && !crate::mm::swap::is_migration_entry(raw)
+        && (raw & PageTableEntry::PHYS_MASK_PUBLIC) != 0
+}
+
+/// R-WRITESTORM-2: write one 4K leaf PTE (raw bits), following the same
+/// 4-level walk as read_pte_raw. Caller must hold PTE_MODIFY_LOCK and
+/// only call it for addresses whose walk read_pte_raw already resolved
+/// (the upper levels exist).
+pub(crate) fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
+    let a = VirtAddr::new(vaddr.bits());
+    let vpn4 = a.pgd_index() as usize;
+    let vpn3 = a.pud_index() as usize;
+    let vpn2 = a.pmd_index() as usize;
+    let vpn1 = a.pte_index() as usize;
+    // SAFETY: same walk as read_pte_raw; the leaf exists (caller read it
+    // via read_pte_raw on the same root/addr), so the intermediate
+    // tables are present. Only the leaf is replaced.
+    unsafe {
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte4 = (*root_table).get(vpn4);
+        if !pte4.is_valid() { return; }
+        let table3 = get_page_table_virt(pte4.ppn() << PAGE_SHIFT);
+        let pte3 = (*table3).get(vpn3);
+        if !pte3.is_valid() || pte3.is_leaf() { return; }
+        let table2 = get_page_table_virt(pte3.ppn() << PAGE_SHIFT);
+        let pte2 = (*table2).get(vpn2);
+        if !pte2.is_valid() || pte2.is_leaf() { return; }
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        (*table1).set(vpn1, super::pagetable::PageTableEntry::from_bits(bits));
+    }
+}
+
 pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
     let a = VirtAddr::new(vaddr.bits());
     let vpn4 = a.pgd_index() as usize;
