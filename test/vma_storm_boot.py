@@ -31,6 +31,10 @@ WT = os.path.dirname(HERE)
 QEMU = "/usr/bin/qemu-system-riscv64"
 CC = "riscv64-linux-gnu-gcc"
 MKFS = "/usr/sbin/mkfs.ext4"
+# Prebuilt musl sysroot (toolchain/README recipe). Static glibc SIGILLs on
+# RVV memset under the pinned QEMU CPU; musl also matches the OH target's
+# libc (mallocng) for behavioral parity.
+MUSL = "/home/william/workspace/Rux/toolchain/riscv64-rux-linux-musl"
 DEFAULT_KERNEL = os.path.join(
     WT, "target/riscv64gc-unknown-none-elf/debug/rux")
 # Newer ISA bits: the cross-gcc's static glibc emits zbb/zba/zbs/zicond/
@@ -45,8 +49,14 @@ def build_image(img, secs, stack_threads):
         shutil.rmtree(staging)
     os.makedirs(os.path.join(staging, "test"))
     probe = os.path.join(WT, "work", "vma_storm")
-    subprocess.run([CC, "-static", "-O2", "-Wall", "-pthread",
-                    "-o", probe, os.path.join(HERE, "vma_storm.c")],
+    subprocess.run([CC, "-static", "-O2", "-Wall",
+                    "-march=rv64gc_zicsr", "-nostdinc", "-nostartfiles", "-U_FORTIFY_SOURCE",
+                    "-isystem", "/usr/lib/gcc-cross/riscv64-linux-gnu/15/include",
+                    "-isystem", os.path.join(MUSL, "include"),
+                    "-o", probe, os.path.join(HERE, "vma_storm.c"),
+                    os.path.join(MUSL, "lib", "crt1.o"),
+                    os.path.join(MUSL, "lib", "libc.a"),
+                    "-lgcc"],
                    check=True)
     shutil.copyfile(probe, os.path.join(staging, "test", "vma_storm"))
     os.chmod(os.path.join(staging, "test", "vma_storm"), 0o755)

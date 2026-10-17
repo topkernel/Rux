@@ -1089,6 +1089,28 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // Get current process
     match crate::sched::current() {
         Some(current_task) => {
+            let addr_space = match current_task.address_space() {
+                Some(a) => a,
+                None => return -12_i64, // ENOMEM
+            };
+
+            // ATOMIC mprotect (Linux holds mmap_lock across the whole
+            // syscall): ONE vma_write guard spans the coverage check, the
+            // shared-file EACCES decision, the PTE rewrite (PTE_MODIFY_LOCK
+            // nested inside — no code path takes a VMA lock inside a PTE
+            // section, so the nesting is one-way) and the VMA split
+            // surgery. The old shape checked coverage and EACCES under
+            // vma_read, rewrote PTEs under the PTE lock, then re-derived
+            // the overlapping set for surgery under vma_write — three
+            // separately-locked phases. A concurrent mmap/munmap between
+            // the phases left PTEs and VMAs disagreeing (e.g. the whole
+            // range's PTEs rewritten RW while the VMA surgery then found
+            // nothing to split), and the mid-surgery EACCES bail returned
+            // AFTER PTEs and earlier VMAs had already been mutated. All
+            // decisions now precede all mutations, and no same-mm thread
+            // can interleave between them.
+            let mut vma_mgr = addr_space.vma_write();
+
             // Linux mprotect: the ENTIRE [addr, addr+length) range must be
             // covered by VMAs — any gap fails the whole call with ENOMEM
             // (mprotect_fixup walks until the vma list stops covering the
@@ -1096,12 +1118,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // returned success for a range that was never mapped (LTP
             // mprotect01).
             {
-                let addr_space = match current_task.address_space() {
-                    Some(a) => a,
-                    None => return -12_i64, // ENOMEM
-                };
-                let mut spans: alloc::vec::Vec<(usize, usize)> = addr_space
-                    .vma_read()
+                let mut spans: alloc::vec::Vec<(usize, usize)> = vma_mgr
                     .iter()
                     .map(|v| (v.start().as_usize(), v.end().as_usize()))
                     .collect();
@@ -1128,8 +1145,12 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                 // writing fails with EACCES before any PTE is touched
                 // (LTP mprotect01 case 3: mmap /dev/zero O_RDONLY
                 // PROT_READ MAP_SHARED, then mprotect PROT_WRITE).
+                // A missing vm_file pin is NOT grounds for EACCES here
+                // (only a pinned, provably read-only file is) — the old
+                // in-surgery copy of this check treated a missing pin as
+                // read-only and bailed mid-mutation.
                 if prot & 0x2 != 0 {
-                    for vma in addr_space.vma_read().iter() {
+                    for vma in vma_mgr.iter() {
                         let vs = vma.start().as_usize();
                         let ve = vma.end().as_usize();
                         if vs >= addr + length || ve <= addr {
@@ -1148,11 +1169,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             }
 
             // Get page table root
-            let root_ppn = if let Some(addr_space) = current_task.address_space() {
-                addr_space.root_ppn()
-            } else {
-                return -12_i64;  // ENOMEM
-            };
+            let root_ppn = addr_space.root_ppn();
 
             // Calculate new PTE flags (riscv64 Sv39 encoding; the x86_64
             // path builds its flags inside mprotect_pte_range).
@@ -1280,10 +1297,15 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // between DSO segments (dl-load.c), which stripped READ from
             // the entire executable segment and killed every dynamically
             // linked binary with SIGSEGV on its first library read.
-            if let Some(addr_space) = current_task.address_space() {
+            //
+            // The EACCES-on-readonly-shared-file decision moved to the
+            // pre-checks above: this loop used to carry its own copy that
+            // ALSO fired when the vm_file pin was missing, returning
+            // EACCES after the range's PTEs had already been rewritten
+            // and earlier VMAs in the loop had already been split.
+            {
                 let range_start = addr;
                 let range_end = addr + length;
-                let mut vma_mgr = addr_space.vma_write();
 
                 // Snapshot overlapping VMAs (start addresses).
                 let mut starts: alloc::vec::Vec<crate::mm::page::VirtAddr> = alloc::vec::Vec::new();
@@ -1323,32 +1345,6 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                     let old_fd = vma.file_fd();
                     let old_fsz = vma.file_size();
                     let old_off = vma.offset();
-
-                    // Escalating a SHARED FILE mapping to writable
-                    // requires the backing file to be open for writing
-                    // (Linux mprotect_fixup → vma_wants_writectory):
-                    // mprotect(PROT_WRITE) on a read-only-fd MAP_SHARED
-                    // mapping fails with EACCES (LTP mprotect01). Private
-                    // (COW) mappings are exempt — writes stay private.
-                    // (pinned_file was fetched before this loop; taking
-                    // no further VMA locks here.)
-                    if prot & 0x2 != 0
-                        && full_flags.contains(crate::mm::vma::VmaFlags::SHARED)
-                        && old_type == crate::mm::vma::VmaType::FileBacked
-                    {
-                        let writable = pinned_file
-                            .as_ref()
-                            .map(|f| {
-                                let m = f.flags().bits()
-                                    & crate::fs::file::FileFlags::O_ACCMODE;
-                                m == crate::fs::file::FileFlags::O_RDWR
-                                    || m == crate::fs::file::FileFlags::O_WRONLY
-                            })
-                            .unwrap_or(false);
-                        if !writable {
-                            return -13_i64; // EACCES
-                        }
-                    }
 
                     // Head piece [v_start, range_start): keep original flags.
                     let head = if v_start < range_start {
