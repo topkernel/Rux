@@ -1217,6 +1217,18 @@ pub fn binder_mmap_handler(
     let task = crate::sched::current().ok_or(-12)?;
     let addr_space = task.address_space().ok_or(-12)?;
 
+    // Double-mmap check FIRST, before any allocation or VMA surgery: a
+    // second binder mmap on the same proc must only cost the EBUSY.
+    {
+        let w = world_lock();
+        // SAFETY: under WORLD.
+        unsafe {
+            if pm(w.as_ref().unwrap(), &proc).im().alloc.is_some() {
+                return Err(-16); // EBUSY: already mapped
+            }
+        }
+    }
+
     let npages = length.div_ceil(PAGE_SIZE);
     let order = npages.next_power_of_two().trailing_zeros() as usize;
     let phys = alloc_pages(GfpFlags::GFP_KERNEL, order);
@@ -1228,39 +1240,98 @@ pub fn binder_mmap_handler(
     let kvirt = crate::arch::mm::phys_to_virt(PhysAddr::new(phys as u64)).bits() as *mut u8;
     unsafe { core::ptr::write_bytes(kvirt, 0, size) };
 
-    {
-        let w = world_lock();
-        // SAFETY: under WORLD.
-        unsafe {
-            if pm(w.as_ref().unwrap(), &proc).im().alloc.is_some() {
-                free_pages(phys, order);
-                return Err(-16); // EBUSY: already mapped
-            }
-        }
-    }
+    let mut vma_flags = VmaFlags::new();
+    vma_flags.insert(VmaFlags::READ);
+    vma_flags.insert(VmaFlags::WRITE);
+    vma_flags.insert(VmaFlags::SHARED);
 
-    let vaddr = if addr == 0 {
-        match addr_space.find_free_area(size) {
-            Ok(v) => v.as_usize(),
-            Err(_) => {
-                free_pages(phys, order);
-                return Err(-12);
-            }
-        }
-    } else {
-        addr & !(PAGE_SIZE - 1)
-    };
-    {
+    // ATOMIC pick + reserve (b91 heap-corruption fix): the old shape ran
+    // find_free_area on a READ lock, then spent the 4 MiB memset + eager
+    // PTE-install window BEFORE taking vma_write to add the VMA. A second
+    // thread of the same mm (mallocng group mmap, pthread stack) was
+    // handed the same "free" address in that window; whichever side lost
+    // either (a) had its demand-installed PTEs overwritten by this loop's
+    // eager map_page — orphaning live heap frames and pointing the VMA at
+    // binder frames — or (b) failed the VmaManager::add here with Overlap
+    // AFTER its PTEs were installed, then FREE_PAGES'd the block while
+    // still mapped: the buddy re-handed those frames and every later
+    // store through the surviving VMA corrupted the new owner in place
+    // (the b86-b91 zeroed-buffer / mallocng-meta family). Mirrors the
+    // sys_mmap pick-and-insert fix (mm_ops.rs mmap).
+    let vaddr = {
+        let mut vmas = addr_space.vma_write();
         let user_end = crate::arch::mm::user_addr::USER_END;
-        let Some(end) = vaddr.checked_add(size) else {
-            free_pages(phys, order);
-            return Err(-22);
+        let mut base = if addr == 0 {
+            None
+        } else {
+            let b = addr & !(PAGE_SIZE - 1);
+            let Some(end) = b.checked_add(size) else {
+                free_pages(phys, order);
+                return Err(-22);
+            };
+            if end > user_end {
+                free_pages(phys, order);
+                return Err(-22);
+            }
+            // Hint honored only when the whole range is VMA-free.
+            let probe = Vma::new(
+                crate::mm::page::VirtAddr::new(b),
+                crate::mm::page::VirtAddr::new(b + size),
+                vma_flags,
+            );
+            if vmas.iter().any(|v| v.overlaps(&probe)) {
+                None
+            } else {
+                Some(b)
+            }
         };
-        if end > user_end {
-            free_pages(phys, order);
-            return Err(-22);
+        if base.is_none() {
+            // Bottom-up free-area scan from MMAP_START under the WRITE
+            // lock (same placement rule as MmStruct::find_free_area).
+            use crate::arch::mm::user_addr as ua;
+            let mut search_start = ua::MMAP_START;
+            let search_end = ua::MMAP_END.min(user_end.saturating_sub(size));
+            let mut hit: Option<usize> = None;
+            for v in vmas.iter() {
+                let vs = v.start().as_usize();
+                if vs > search_start && vs - search_start >= size {
+                    hit = Some(search_start);
+                    break;
+                }
+                if v.end().as_usize() > search_start {
+                    search_start = v.end().as_usize();
+                }
+                if search_start > search_end {
+                    break;
+                }
+            }
+            let b = match hit {
+                Some(b) => b,
+                None => {
+                    if search_start <= search_end && search_end - search_start >= size {
+                        search_start
+                    } else {
+                        drop(vmas);
+                        free_pages(phys, order);
+                        return Err(-12);
+                    }
+                }
+            };
+            base = Some(b);
         }
-    }
+        let b = base.unwrap();
+        let vma = Vma::new(
+            crate::mm::page::VirtAddr::new(b),
+            crate::mm::page::VirtAddr::new(b + size),
+            vma_flags,
+        );
+        if let Err(_overlap) = vmas.add(vma) {
+            drop(vmas);
+            free_pages(phys, order);
+            return Err(-12);
+        }
+        b
+    };
 
     let root = addr_space.root_ppn();
     let mut pte_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
@@ -1270,35 +1341,57 @@ pub fn binder_mmap_handler(
     if prot & 0x2 != 0 {
         pte_flags |= PageTableEntry::R | PageTableEntry::W;
     }
-    // SAFETY: root is the task's page-table root; phys..phys+size is our
-    // fresh contiguous allocation.
-    unsafe {
+    // Eager install under PTE_MODIFY_LOCK (the NEW2 class: an unlocked
+    // leaf-PTE writer racing fork's COW walk or a COW fault diverges
+    // refcounts and leaves dangling child PTEs). The VMA is already
+    // reserved, so a demand fault on this range in the reserve→map window
+    // is only possible from a same-mm thread touching a brand-new address
+    // it cannot know; if one did win a page anyway, its anon zero page is
+    // exclusive inside OUR VMA — zap it and install the binder frame so
+    // the kvirt/PTE pairing (binder's coherence contract) holds.
+    {
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
         for i in 0..(size / PAGE_SIZE) {
             let va = vaddr + i * PAGE_SIZE;
             let pa = phys + i * PAGE_SIZE;
-            map_page(root, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
+            // SAFETY: root is the task's live page-table root; the walk is
+            // read-only and lock-protected.
+            if let Some((old_ppn, _bits)) =
+                unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va as u64) }
+            {
+                // Demand-fault winner: free its exclusive anon page, then
+                // replace below. put_page→0 frees; refcount is 1 (fresh
+                // zero page inside our private VMA window).
+                let page = crate::mm::pfn_to_page_mut(old_ppn as usize);
+                if !page.is_null() {
+                // SAFETY: descriptor of the mapped frame under PTE lock.
+                unsafe {
+                    (*page).rmap_alt_remove(
+                        addr_space as *const _ as usize,
+                        va / PAGE_SIZE,
+                    );
+                        (*page).dec_mapcount();
+                        if (*page).put_page() == 0 {
+                            crate::mm::page_alloc::free_pages((old_ppn as usize) << 12, 0);
+                        }
+                    }
+                }
+                addr_space.sub_rss(1);
+            }
+            // SAFETY: root is the task's page-table root; phys..phys+size is our
+            // fresh contiguous allocation, mapped page-aligned under the PTE lock.
+            unsafe {
+                map_page(root, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
+            }
             // Mapping reference (io_uring discipline): munmap drops one,
             // binder_close drops the owner one, the last drop frees.
             let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(pa));
             if !page.is_null() {
-                (*page).get_page();
+                // SAFETY: descriptor of our freshly allocated frame.
+                unsafe { (*page).get_page(); }
             }
         }
         crate::arch::mm::asid::flush_tlb_all();
-    }
-
-    let mut vma_flags = VmaFlags::new();
-    vma_flags.insert(VmaFlags::READ);
-    vma_flags.insert(VmaFlags::WRITE);
-    vma_flags.insert(VmaFlags::SHARED);
-    let vma = Vma::new(
-        crate::mm::page::VirtAddr::new(vaddr),
-        crate::mm::page::VirtAddr::new(vaddr + size),
-        vma_flags,
-    );
-    if addr_space.vma_write().add(vma).is_err() {
-        free_pages(phys, order);
-        return Err(-12);
     }
 
     let mut alloc = BinderAlloc {
@@ -1843,8 +1936,8 @@ fn bc_corruption_snapshot(
     // binder region points at a different failure mode (kernel-side block
     // corruption) than one on the malloc heap.
     {
-        let w = world_lock();
-        // SAFETY: WORLD held for the alloc inspection.
+        // WORLD held for the alloc inspection (guard lives to scope end).
+        let _w = world_lock();
         unsafe {
             if let Some(alloc) = proc.im().alloc.as_ref() {
                 let lo = alloc.user_base;
