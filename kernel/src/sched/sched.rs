@@ -695,6 +695,81 @@ pub fn task_is_mid_switch_out(task: *mut Task) -> bool {
     })
 }
 
+/// R85 (tail-phase PICK-SKIP wedge): does any CPU still OWN `task`?
+///
+/// Called from the class pick screens (fair.rs decision legs) with the GRQ
+/// held, where it is the AUTHORITATIVE ownership adjudication. A task is
+/// live-owned iff some CPU's current slot names it, or some CPU is
+/// switching it out right now:
+///
+/// - A running task's slot names it from its pick until its next
+///   __schedule, and a completed pick publishes the ownership marks AND
+///   the slot inside one continuous GRQ hold — a marked pick can never be
+///   observed slotless under the lock.
+/// - A mid-switch-out task is named by SWITCHING_OUT[cpu], published under
+///   the GRQ BEFORE the lock is dropped and cleared only AFTER
+///   __switch_to's release store has landed (same CPU, program order).
+///
+/// A task that still shows ownership marks ({on_cpu=1, claim=X} or a
+/// foreign claim) but is named by NO slot and NO in-flight switch is not
+/// executing anywhere, no picker is resuming it, and no code path will
+/// ever release its marks — the tail-phase PICK-SKIP wedge shape (pid 1
+/// linked, {oncpu=1, claim=1, pk=1}, every CPU's pick skipping it with
+/// why=1 forever while the box idles). The advisory pick_state word alone
+/// cannot make this call: LIVE legitimately persists after switch-outs
+/// and a scribble can leave it set forever (the R80 lesson) — the slots
+/// and SWITCHING_OUT are scheduler-truth, written only under the GRQ.
+pub fn pick_owner_live(task: *mut Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    (0..MAX_CPUS).any(|c| {
+        cpu_state(c).current == task
+            || SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64
+    })
+}
+
+/// R85 (diag): bitmask of CPUs whose current slot names `task` — for the
+/// PICK-SKIP-ALL report block, so a capture names whether a refusal was
+/// backed by a live owner or a stale mark nobody will release.
+pub fn owner_slot_mask(task: *mut Task) -> u32 {
+    if task.is_null() {
+        return 0;
+    }
+    let mut m = 0u32;
+    for c in 0..MAX_CPUS {
+        if cpu_state(c).current == task {
+            m |= 1 << c;
+        }
+    }
+    m
+}
+
+/// R85 (diag): bitmask of CPUs whose in-flight switch-out is `task`.
+pub fn switching_out_mask(task: *mut Task) -> u32 {
+    if task.is_null() {
+        return 0;
+    }
+    let mut m = 0u32;
+    for c in 0..MAX_CPUS {
+        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64 {
+            m |= 1 << c;
+        }
+    }
+    m
+}
+
+/// R85: pick-side time confirmation for a stale-ownership adjudication.
+/// Wraps the harvester's orphan watch (same table, same 60-jiffy re-record
+/// discipline): a mid-switch-out transient or a briefly descheduled
+/// picker re-records and never matures; a shape that persists for
+/// `threshold` jiffies is by definition stale. The owner-based
+/// pick_owner_live check already excludes every legitimate owner, so this
+/// is defense in depth against an out-of-tree divergence window.
+pub fn stale_mark_confirm(task: *mut Task, pid: u32, threshold: u64) -> bool {
+    orphan_watch_confirm(task, pid, crate::drivers::timer::get_jiffies(), threshold)
+}
+
 /// Per-CPU reschedule flags
 static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
@@ -1633,8 +1708,35 @@ unsafe fn __schedule() {
             found
         };
         if home != usize::MAX {
-            // Resync the poisoned identity: tp executes HERE, on cpu_id.
-            (*tp).set_ti_cpu(cpu_id as i32);
+            // Resync the poisoned identity: tp executes HERE. R85: stamp
+            // the HOME slot's index, NOT cpu_id — cpu_id was derived from
+            // the very ti_cpu we are healing (clamped to 0 when stale), so
+            // stamping it back entrenches the divergence and books this
+            // hart's schedules on another CPU's PER_CPU slot forever (two
+            // harts fighting over slot 0: the tail-phase heal-storm shape).
+            // The slot that names tp is the last pick's booking — the
+            // physical hart tp executes on. When ti_cpu was already right,
+            // home == cpu_id and this is a no-op.
+            if home != cpu_id {
+                // Rate-limited (a divergence fight can pass here hot).
+                static LAST_RESYNC: core::sync::atomic::AtomicU64 =
+                    core::sync::atomic::AtomicU64::new(0);
+                let now = crate::drivers::timer::get_jiffies();
+                let last = LAST_RESYNC.load(core::sync::atomic::Ordering::Acquire);
+                if now.wrapping_sub(last) >= 2
+                    && LAST_RESYNC
+                        .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+                        .is_ok()
+                {
+                    r56_print_pid(
+                        b"R55-RESYNC-STALE tcpu_was=",
+                        (*tp).ti_cpu() as u32,
+                        b" home=",
+                    );
+                    r56_print_pid(b"", home as u32, b"\n");
+                }
+            }
+            (*tp).set_ti_cpu(home as i32);
             prev = tp;
         } else if (tp as usize) >= 0x80000000
             && (*tp).pid() == 0
@@ -1663,16 +1765,27 @@ unsafe fn __schedule() {
                 crate::console::putchar_no_lock(b);
             }
         }
-        // home == MAX otherwise: tp has no slot at all (exited?) — leave
-        // prev as the slot's task; the exit path owns that case.
+        // home == MAX otherwise: tp has no slot at all.
         //
-        // R74 tripwire: a REAL, running tp-task with no slot is the
-        // orphan producer (it keeps executing while __schedule books the
-        // switch on the slot's task; its on_cpu mark outlives every
-        // protocol clear and the wake-side heals then refuse or
-        // double-run it). The exit path's genuine case (tp == the dying
-        // task mid-do_exit) has PF_EXITING set. Anything else gets named
-        // here, rate-limited.
+        // R85 (tail-phase PICK-SKIP wedge, the producer): a REAL, running
+        // tp-task with no slot must be BOOKED as prev — the code below
+        // would otherwise book the slot's task, switching out the WRONG
+        // context while the physically-executing task keeps its on_cpu
+        // mark, gets requeued by no one, and is skipped by every future
+        // pick (the pid-1 tail wedge: linked ∧ {on_cpu=1, claim=X,
+        // pk=1} forever, box idle). Linux parity: the current task is
+        // what the hardware executes — its enqueue/dequeue bookkeeping
+        // belongs to IT, and the slot is only a mirror that can lie (the
+        // clamped-cpu_id divergence books PER_CPU[0] from a foreign
+        // hart; heals and steals rewrite slots under us). Booking tp
+        // makes the switch save/release the RIGHT context even when the
+        // slot identity is poisoned; the misbooked slot heals through
+        // the existing R56c/R56d/R85 machinery. The exit path's genuine
+        // case (tp == the dying task mid-do_exit) has PF_EXITING set
+        // and keeps the old behavior.
+        //
+        // R74 tripwire: name the shape (it is the orphan producer)
+        // rate-limited.
         if home == usize::MAX && (tp as usize) >= 0x8000_0000_0000_0000 {
             use crate::process::task::task_flags::TaskFlags;
             let exiting = unsafe {
@@ -1709,6 +1822,15 @@ unsafe fn __schedule() {
                 // R83: byte-level header dump of the victim — the scribble
                 // shape (extent + alignment) names the writer's store.
                 crate::dfx::r83hunt::dump_victim(b"R74", tp);
+                // R85: book the physical truth — unconditional within this
+                // block (tp != prev by the enclosing guard, tp is running,
+                // canonical, and not exiting). The slot's task may be
+                // legitimately running on ANOTHER hart; booking it here as
+                // prev is exactly the double-book that strands tp. The
+                // preempt-count guard below still refuses mid-critical-
+                // section switches for tp.
+                (*tp).set_ti_cpu(cpu_id as i32);
+                prev = tp;
             }
         }
     }
@@ -2981,6 +3103,19 @@ pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> Option<bool
 pub fn dfx_claim_inject() -> usize {
     match try_grq_lock() {
         Some(mut g) => g.cfs_rq.claim_inject_scan(),
+        None => 0,
+    }
+}
+
+/// dfx=oncpuinject adjudication hook (R85 tail-wedge hunt): stamp the
+/// lost-release ownership shape {on_cpu=true, claim=7, pk=LIVE} onto
+/// every linked CFS task currently showing the pickable state
+/// {on_cpu=false, claim=-1}. Called from the timer softirq every 50
+/// jiffies. Returns the number of tasks poisoned (the caller prints it);
+/// a busy GRQ simply skips that round.
+pub fn dfx_oncpu_inject() -> usize {
+    match try_grq_lock() {
+        Some(mut g) => g.cfs_rq.oncpu_inject_scan(),
         None => 0,
     }
 }

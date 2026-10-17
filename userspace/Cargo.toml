@@ -26,7 +26,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Rux Developers"]
+authors = ["Fei Wang"]
 
 # Optimization config: reduce binary size
 [workspace.metadata.cargo-compilation]

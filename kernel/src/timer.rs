@@ -381,6 +381,22 @@ pub fn timer_softirq_handler(_nr: usize) {
         }
     }
 
+    // dfx=oncpuinject (R85 tail-wedge adjudication): every 50 jiffies,
+    // stamp the lost-release ownership shape {on_cpu=1, claim=7, LIVE}
+    // onto the linked pickable set. Unpatched kernels strand the poisoned
+    // tasks exactly like the pid-1 tail wedge (every pick skips them
+    // why=1 forever); kernels with the R85 pick-side ownership
+    // adjudication must sweep the poison (STALE-ONCPU-RESET) and keep
+    // scheduling.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OncpuInject)
+        && current % 50 == 0
+    {
+        let n = crate::sched::sched::dfx_oncpu_inject();
+        if n > 0 {
+            crate::pr_err!("ONCPU-INJECT poisoned={}", n);
+        }
+    }
+
     // Collect expired timers under locks; deliver AFTER releasing them
     // (R12-3 — see the moved delivery block below).
     // R34: capacity reserved OUTSIDE the lock; the budget counter below

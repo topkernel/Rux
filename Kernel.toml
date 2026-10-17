@@ -9,7 +9,7 @@ name = "Rux"
 # Version number
 version = "0.1.0"
 # Developer info
-authors = ["Rux Developers"]
+authors = ["Fei Wang"]
 
 [platform]
 # Target platform: "aarch64", "x86_64", "riscv64"

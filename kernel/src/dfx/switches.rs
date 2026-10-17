@@ -100,20 +100,32 @@ pub enum DfxSwitch {
     /// serial log and the UART traffic slowed the system enough to cost
     /// samgr the hdf_devmgr race. OFF unless asked for.
     Steptrace,
+    /// R85 (tail-phase PICK-SKIP wedge adjudication): every 50 jiffies,
+    /// stamp the FULL lost-release ownership shape {on_cpu=true,
+    /// claim=7(nonexistent), pk=LIVE} onto every LINKED CFS task that
+    /// shows the pickable {on_cpu=false, claim=-1}. This is the exact
+    /// terminal microstate of the pid-1 tail wedge (linked, marked,
+    /// owned by no slot and no in-flight switch). An unpatched kernel
+    /// strands the task forever (every pick skips it why=1); a kernel
+    /// with the R85 pick-side ownership adjudication sweeps the poison
+    /// within ~50 jiffies (STALE-ONCPU-RESET) and keeps scheduling. OFF
+    /// unless explicitly requested; never enable in production or LTP
+    /// runs.
+    OncpuInject,
     /// Per-short-write printable capture (OH bring-up): binary hilog /
     /// binder frames still leak past the printable-head filter and spam
     /// the console; default OFF, enable with dfx=writetrace. Mirrors
-    /// main's d0fb238c+b18f683f (my branch adds fd + a hex prefix for
+    /// main's d0fb238c+b18f683f (this branch adds fd + a hex prefix for
     /// offline frame decoding).
     WriteTrace,
-    /// Per-transaction binder trace (HDF devmgr↔devhost handshake hunt):
+    /// Per-transaction binder trace (HDF devmgr<->devhost handshake hunt):
     /// one "btx:" line per resolved BC_TRANSACTION/BC_REPLY (from pid,
     /// target pid, handle, code, oneway/twoway, data sizes). Default
-    /// OFF — a full OH boot resolves tens of thousands of transactions.
+    /// OFF - a full OH boot resolves tens of thousands of transactions.
     BinderTrace,
 }
 
-const SWITCH_COUNT: usize = 17;
+const SWITCH_COUNT: usize = 18;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -135,8 +147,9 @@ impl DfxSwitch {
             DfxSwitch::Strace1 => 12,
             DfxSwitch::SchedTrace => 13,
             DfxSwitch::Steptrace => 14,
-            DfxSwitch::WriteTrace => 15,
-            DfxSwitch::BinderTrace => 16,
+            DfxSwitch::OncpuInject => 15,
+            DfxSwitch::WriteTrace => 16,
+            DfxSwitch::BinderTrace => 17,
         }
     }
 
@@ -158,6 +171,7 @@ impl DfxSwitch {
             "schedtrace" => Some(DfxSwitch::SchedTrace),
             "steptrace" => Some(DfxSwitch::Steptrace),
             "writetrace" => Some(DfxSwitch::WriteTrace),
+            "oncpuinject" => Some(DfxSwitch::OncpuInject),
             "bindertrace" => Some(DfxSwitch::BinderTrace),
             _ => None,
         }
