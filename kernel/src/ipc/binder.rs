@@ -103,6 +103,11 @@ const BINDER_CURRENT_PROTOCOL_VERSION: i32 = 8;
 const SZ_BWR: u32 = 48;
 const SZ_TR: u32 = 64;
 const SZ_PTR_COOKIE: u32 = 16;
+/// OH's uapi binder.h packs struct binder_handle_cookie (u32 handle +
+/// u64 cookie) with `} __packed;` — 12 bytes, not the aligned 16 of
+/// binder_ptr_cookie. The BC command words for death notifications
+/// therefore encode size 12.
+const SZ_HANDLE_COOKIE: u32 = 12;
 const SZ_U32: u32 = 4;
 const SZ_U64: u32 = 8;
 const SZ_VERSION: u32 = 4;
@@ -141,8 +146,13 @@ pub const BC_ACQUIRE_DONE: u32 = iow(b'c' as u32, 9, SZ_PTR_COOKIE);
 pub const BC_REGISTER_LOOPER: u32 = io(b'c' as u32, 11);
 pub const BC_ENTER_LOOPER: u32 = io(b'c' as u32, 12);
 pub const BC_EXIT_LOOPER: u32 = io(b'c' as u32, 13);
-pub const BC_REQUEST_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 14, SZ_PTR_COOKIE);
-pub const BC_CLEAR_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 15, SZ_PTR_COOKIE);
+/// OH packs binder_handle_cookie (__packed, 12 bytes) so the command word
+/// is _IOW('c', 14, 12) = 0x400c630e. With the aligned 16-byte size the
+/// word mismatches and the write loop reports "unknown BC command
+/// 0x400c630e, stopping" (b117-b119: pid 326 froze right after samgr
+/// accepted SA 5100, wedging the whole SA registration storm).
+pub const BC_REQUEST_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 14, SZ_HANDLE_COOKIE);
+pub const BC_CLEAR_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 15, SZ_HANDLE_COOKIE);
 pub const BC_DEAD_BINDER_DONE: u32 = iow(b'c' as u32, 16, SZ_U64);
 pub const BC_TRANSACTION_SG: u32 = iow(b'c' as u32, 17, SZ_TR_SG);
 pub const BC_REPLY_SG: u32 = iow(b'c' as u32, 18, SZ_TR_SG);
@@ -159,8 +169,12 @@ pub const BR_RELEASE: u32 = ior(b'r' as u32, 9, SZ_PTR_COOKIE);
 pub const BR_DECREFS: u32 = ior(b'r' as u32, 10, SZ_PTR_COOKIE);
 pub const BR_NOOP: u32 = io(b'r' as u32, 12);
 pub const BR_SPAWN_LOOPER: u32 = io(b'r' as u32, 13);
-pub const BR_DEAD_BINDER: u32 = ior(b'r' as u32, 11, SZ_U64);
-pub const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = ior(b'r' as u32, 14, SZ_U64);
+/// OH uapi: BR_DEAD_BINDER = _IOR('r', 15, binder_uintptr_t) and
+/// BR_CLEAR_DEATH_NOTIFICATION_DONE = _IOR('r', 16, binder_uintptr_t).
+/// nr 11 is BR_ATTEMPT_ACQUIRE in the same header — libipc switch-matches
+/// the exact word, so the old nr 11/14 encodings would be misparsed.
+pub const BR_DEAD_BINDER: u32 = ior(b'r' as u32, 15, SZ_U64);
+pub const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = ior(b'r' as u32, 16, SZ_U64);
 pub const BR_FAILED_REPLY: u32 = io(b'r' as u32, 17);
 /// struct binder_transaction_data_secctx (upstream): the transaction data
 /// followed by a pointer to the sender's NUL-terminated security-context

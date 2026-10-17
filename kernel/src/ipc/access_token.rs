@@ -76,17 +76,15 @@ fn empty() -> Registry {
 /// binder driver's BINDER_GET_ACCESS_TOKEN / BINDER_GET_SENDER_INFO to
 /// report senders to samgr.
 ///
-/// STOPGAP (b113-b115): nothing on this image ever calls
+/// STOPGAP (b113-b116): nothing on this image ever calls
 /// ACCESS_TOKENID_SET_TOKENID — init's SetAccessToken path is compiled
 /// out (the "failed to set access token" warning never fired on any
 /// boot, even when the device was absent pre-ab45291d) and the services
-/// don't set their own. samgr's CanRequest() only checks the token's
-/// TYPE BITS are TOKEN_NATIVE, so for processes with no registered
-/// token we synthesize a stable per-pid native token instead of
-/// reporting 0 (which reads as TOKEN_INVALID and got every
-/// AddSystemAbility denied — the HDF display-chain blocker). If the
-/// image's userspace ever starts setting real tokens, registered
-/// values take precedence.
+/// don't set their own, so for processes with no registered token we
+/// synthesize a stable per-pid NATIVE token instead of reporting 0
+/// (which reads as TOKEN_INVALID and got every AddSystemAbility denied
+/// — the HDF display-chain blocker). If the image's userspace ever
+/// starts setting real tokens, registered values take precedence.
 pub fn token_of(pid: u32) -> (u64, u64) {
     let g = REGISTRY.lock_irqsave();
     let registered = g.as_ref().and_then(|r| r.by_pid.get(&pid)).copied();
@@ -94,10 +92,17 @@ pub fn token_of(pid: u32) -> (u64, u64) {
     match registered {
         Some(t) => (t.token, t.ftoken),
         None => {
-            // access_tokenid_inner: version (bits 28-30) = 1,
-            // type (bits 26-27) = 1 (TOKEN_NATIVE), uniqueid (bits
-            // 0-19) = pid. Stable per pid.
-            let synthetic: u64 = (1u64 << 28) | (1u64 << 26) | (pid as u64 & 0xF_FFFF);
+            // Layout verified against THIS image (b116): samgr requires
+            // AccessTokenKit::GetTokenTypeFlag(token) == 1 (TOKEN_NATIVE)
+            // before AddSystemAbility; libaccesstoken_sdk.z.so decodes it
+            // as (token >> 27) & 3 (objdump @0x1a4df: shr 0x1b; and 3).
+            // Real native tokens from the image's nativetoken.json are
+            // all 0x28xxxxxx: type bits 27-28 = 0b01 (NATIVE), bit 29
+            // set, version bits 24-26 = 0, uniqueid (bits 0-19) = pid.
+            // The previous 0x14xxxxxx guess put bit 28 inside the type
+            // field -> read as 2 (TOKEN_SHELL) -> PERMISSION DENIED
+            // ("CanRequest callingTkid:..., tokenType:2" on every boot).
+            let synthetic: u64 = 0x2800_0000 | (pid as u64 & 0xF_FFFF);
             (synthetic, 0)
         }
     }
