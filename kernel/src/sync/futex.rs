@@ -201,6 +201,46 @@ static HASH_HEADS: [Spinlock<Option<usize>>; HASH_SIZE] = {
     [INIT; HASH_SIZE]
 };
 
+/// Diagnostic (b133/b134 stall hunt): find the live futex-waiter entry of
+/// `task`, if any. Returns (uaddr, key.mm, woken). The binder stall report
+/// calls this for txn-holder threads parked in futex_wait: a `woken=true`
+/// waiter that never resumed indicts the wake→run path, while `woken=false`
+/// after minutes indicts the key match (compare key.mm with the task's own
+/// current identity) or the userspace releaser.
+pub fn waiter_of(task: *mut Task) -> Option<(usize, usize, bool)> {
+    for b in HASH_HEADS.iter() {
+        let h = b.lock_irqsave();
+        let mut idx = *h;
+        while let Some(i) = idx {
+            // SAFETY: slot indices come from chain links under the bucket
+            // lock; slots are freed only under both locks, so the entry we
+            // copy out stays live for the duration of the read.
+            let (entry, next) = {
+                let slot = WAITER_POOL[i].lock_irqsave();
+                match *slot {
+                    Some(ref w) => (
+                        Some((w.key.uaddr, w.key.mm, w.woken, core::ptr::eq(w.task, task))),
+                        w.next,
+                    ),
+                    None => (None, None),
+                }
+            };
+            match entry {
+                Some((uaddr, mm, woken, true)) => {
+                    drop(h);
+                    return Some((uaddr, mm, woken));
+                }
+                Some(_) => {
+                    idx = next;
+                }
+                None => break,
+            }
+        }
+        drop(h);
+    }
+    None
+}
+
 /// Allocate a waiter slot
 fn alloc_waiter() -> Option<usize> {
     for i in 0..WAITER_POOL_SIZE {
@@ -439,6 +479,80 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
 
     #[cfg(feature = "dfx-futex-trace")]
     ftx_trace(b"WAKE-OUT", uaddr, ret as u64, woken_n as u64);
+
+    // b133 hunt (dfx=syscalltrace): OH's samgr/SA threads park forever in
+    // PRIVATE futex_wait inside musl's ld.so malloc locks — 120s+ binder
+    // stalls queue the whole display chain behind them. Wake/wait protocol
+    // is documented-solid, so the prime suspect is a KEY MISMATCH: a
+    // waiter linked under a different (uaddr, mm) than this waker
+    // computes. When a wake wanted more waiters than it found, scan every
+    // bucket for same-uaddr entries whose key does NOT match, and report
+    // both identities. Gated + rate-limited: the scan walks all buckets,
+    // and uncontended FUTEX_WAKEs (every pthread_mutex_unlock) must not
+    // pay for it.
+    if ret < nr_wake as i64
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+    {
+        static MISS_REPORTS: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let mut waker_pid = 0u32;
+        if let Some(t) = crate::sched::current() {
+            // SAFETY: sched::current() yields the current task for the
+            // duration of this syscall.
+            waker_pid = unsafe { (*t).pid() };
+        }
+        for (bi, b) in HASH_HEADS.iter().enumerate() {
+            let mut h = b.lock_irqsave();
+            let mut idx = *h;
+            while let Some(i) = idx {
+                // SAFETY: the slot index came from a chain link under the
+                // bucket lock; slots are freed only under both locks.
+                let (task, next, mismatch) = {
+                    let slot = WAITER_POOL[i].lock_irqsave();
+                    match *slot {
+                        Some(ref w) => {
+                            let mismatch = w.key.uaddr == uaddr
+                                && (!w.key.matches(&key) || (w.bitset & bitset) == 0);
+                            (w.task, w.next, mismatch)
+                        }
+                        None => (core::ptr::null_mut(), None, false),
+                    }
+                };
+                if mismatch {
+                    let n = MISS_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 32 {
+                        let mut wcomm = [0u8; 16];
+                        if !task.is_null() {
+                            // SAFETY: the task is linked in the bucket; it
+                            // cannot be freed while we hold the lock.
+                            let c = unsafe { (*task).comm() };
+                            wcomm.copy_from_slice(c);
+                        }
+                        let name = core::str::from_utf8(
+                            &wcomm[..wcomm.iter().position(|&c| c == 0).unwrap_or(16)],
+                        )
+                        .unwrap_or("?");
+                        let wmm = {
+                            // SAFETY: diagnostic identity read.
+                            task_futex_mm_id(task)
+                        };
+                        crate::pr_warn!(
+                            "futex-wake-miss: uaddr={:#x} waker pid {} key(mm={:#x},shared={}) found waiter pid-key mm={:#x} bucket {} waiter-comm {}",
+                            uaddr,
+                            waker_pid,
+                            mm,
+                            flags & FLAGS_SHARED != 0,
+                            wmm,
+                            bi,
+                            name
+                        );
+                    }
+                }
+                idx = next;
+            }
+            drop(h);
+        }
+    }
 
     ret
 }

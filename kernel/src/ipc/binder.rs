@@ -1619,21 +1619,78 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
     let lstr = looper(th.looper);
     let loop_str = core::str::from_utf8(&lstr).unwrap_or("-=-");
     match th.txn_stack.last() {
-        Some(txn) => crate::pr_warn!(
-            "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack={} top=txn{} code {} oneway={} from pid {} tid {} to_tid {}",
-            proc.pid,
-            t.tid,
-            loop_str,
-            th.waiting_for_proc_work,
-            th.todo.len(),
-            th.txn_stack.len(),
-            txn.id,
-            txn.code,
-            txn.flags & TF_ONE_WAY != 0,
-            txn.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
-            txn.from_tid.unwrap_or(0),
-            txn.to_tid().unwrap_or(0),
-        ),
+        Some(txn) => {
+            crate::pr_warn!(
+                "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack={} top=txn{} code {} oneway={} from pid {} tid {} to_tid {}",
+                proc.pid,
+                t.tid,
+                loop_str,
+                th.waiting_for_proc_work,
+                th.todo.len(),
+                th.txn_stack.len(),
+                txn.id,
+                txn.code,
+                txn.flags & TF_ONE_WAY != 0,
+                txn.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                txn.from_tid.unwrap_or(0),
+                txn.to_tid().unwrap_or(0),
+            );
+            // Holder-task forensics (b128-b135: a samgr thread parks
+            // 120s+ INSIDE a txn and every display-chain client queues
+            // behind it). The binder view can't say where the thread
+            // actually is, so read its Task: scheduling state plus the
+            // user entry frame at kernel_stack_top - PT_REGS_SIZE (both
+            // arches place the user entry frame at that fixed offset —
+            // see the pt_regs module docs).
+            let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
+            if !task.is_null() {
+                let tk = unsafe { &*task };
+                let top = tk.kernel_stack_top();
+                #[cfg(feature = "x86_64")]
+                let (rip, sys, a0, a1) = {
+                    let regs = (top.wrapping_sub(
+                        crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                    )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                    // SAFETY: diagnostic read of this task's own entry
+                    // frame; the kernel stack stays mapped while the Task
+                    // lives, and the frame slot is written on every entry.
+                    unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
+                };
+                #[cfg(feature = "riscv64")]
+                let (rip, sys, a0, a1) = {
+                    let regs = (top.wrapping_sub(
+                        crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                    )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                    // SAFETY: same contract as the x86_64 twin above.
+                    unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1) }
+                };
+                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
+                crate::pr_warn!(
+                    "binder-stall:    holder task state={:#x} rip={:#x} sys={:#x} a0={:#x} a1={:#x}",
+                    tk.state().bits(),
+                    rip,
+                    sys,
+                    a0,
+                    a1
+                );
+                // If the holder is parked in futex_wait, correlate its
+                // waiter entry: woken=true-but-still-asleep indicts the
+                // wake→run path; woken=false indicts the key match (key_mm
+                // vs the task's own current identity) or the releaser.
+                if let Some((uaddr, key_mm, woken)) =
+                    crate::sync::futex::waiter_of(task)
+                {
+                    crate::pr_warn!(
+                        "binder-stall:    futex waiter uaddr={:#x} key_mm={:#x} own_mm={:#x} woken={}",
+                        uaddr,
+                        key_mm,
+                        crate::sync::futex::task_futex_mm_id(task),
+                        woken
+                    );
+                }
+            }
+        }
         None => crate::pr_warn!(
             "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack=0",
             proc.pid,
@@ -1882,7 +1939,16 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             // The calling thread's transaction stack top is the txn being
             // serviced (Linux thread->transaction_stack, OH reads the same).
             let (sender_pid, token, ftoken) = {
-                crate::pr_info!("btx: GET_SENDER_INFO caller tid {}", current_tid());
+                // dfx=syscalltrace: the GET_SENDER_INFO round-trip trace.
+                // Ungated it prints twice per call — samgr-side polls make
+                // this the highest-rate binder ioctl of an OH boot, and
+                // hilogd.rd_kmsg then eats a vCPU copying it to /data.
+                let trace = crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::SyscallTrace,
+                );
+                if trace {
+                    crate::pr_info!("btx: GET_SENDER_INFO caller tid {}", current_tid());
+                }
                 let tid = current_tid();
                 let mut out = (0u32, 0u64, 0u64);
                 let w = world_lock();
@@ -1904,7 +1970,9 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 }
                 drop(w);
                 let (t, f) = crate::ipc::access_token::token_of(out.0);
-                crate::pr_info!("btx: GET_SENDER_INFO sender pid {} token {:#x} ftoken {:#x}", out.0, t, f);
+                if trace {
+                    crate::pr_info!("btx: GET_SENDER_INFO sender pid {} token {:#x} ftoken {:#x}", out.0, t, f);
+                }
                 (out.0, t, f)
             };
             let mut rec = [0u64; 5];

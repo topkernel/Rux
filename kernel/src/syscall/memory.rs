@@ -960,26 +960,33 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // at 0x7ff000b86000 is carved by fixed RW
                             // mmaps — b93 showed the crash VMA starts
                             // exactly at the reserve base).
-                            if prot_flags == 0
-                                && map_flags & map::MAP_ANONYMOUS != 0
-                                && actual_length >= 0x10_0000
-                            {
-                                crate::pr_info!(
-                                    "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
-                                    crate::process::current_pid(),
-                                    mapped_addr.as_usize(),
-                                    actual_length
-                                );
-                            }
-                            if map_flags & map::MAP_FIXED != 0 {
-                                crate::pr_info!(
-                                    "FIXED-MAP pid {} addr {:#x} len {:#x} prot {:#x} fd {}",
-                                    crate::process::current_pid(),
-                                    mapped_addr.as_usize(),
-                                    actual_length,
-                                    prot_flags,
-                                    fd
-                                );
+                            // dfx=syscalltrace only (see file.rs so-open
+                            // note: ungated trace volume feeds
+                            // hilogd.rd_kmsg, which eats a whole vCPU).
+                            if crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::SyscallTrace,
+                            ) {
+                                if prot_flags == 0
+                                    && map_flags & map::MAP_ANONYMOUS != 0
+                                    && actual_length >= 0x10_0000
+                                {
+                                    crate::pr_info!(
+                                        "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
+                                        crate::process::current_pid(),
+                                        mapped_addr.as_usize(),
+                                        actual_length
+                                    );
+                                }
+                                if map_flags & map::MAP_FIXED != 0 {
+                                    crate::pr_info!(
+                                        "FIXED-MAP pid {} addr {:#x} len {:#x} prot {:#x} fd {}",
+                                        crate::process::current_pid(),
+                                        mapped_addr.as_usize(),
+                                        actual_length,
+                                        prot_flags,
+                                        fd
+                                    );
+                                }
                             }
                             mapped_addr.as_usize() as i64
                         },
@@ -1842,18 +1849,22 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
 /// (MPROTECT/FIXED-MAP/BIGMUNMAP were all ruled out). Every mremap now
 /// logs its identity and arguments on entry and its result on exit —
 /// one boot ties any mystery VMA surgery to its caller.
+/// dfx=syscalltrace only: ungated this is two lines per mremap, and
+/// hilogd.rd_kmsg eats a vCPU copying them (b128/b129).
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
-    let pid = crate::process::current_pid();
-    let comm_bytes = crate::sched::current()
-        .map(|t| unsafe { (*t).comm() }.to_vec())
-        .unwrap_or_default();
-    let comm = core::str::from_utf8(&comm_bytes).unwrap_or("?");
-    crate::pr_info!(
-        "MREMAP-ENTER pid={} comm={} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x}",
-        pid, comm, args[0], args[1], args[2], args[3], args[4]
-    );
     let ret = sys_mremap_inner(args);
-    crate::pr_info!("MREMAP-EXIT pid={} -> {:#x}", pid, ret);
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+        let pid = crate::process::current_pid();
+        let comm_bytes = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() }.to_vec())
+            .unwrap_or_default();
+        let comm = core::str::from_utf8(&comm_bytes).unwrap_or("?");
+        crate::pr_info!(
+            "MREMAP-ENTER pid={} comm={} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x}",
+            pid, comm, args[0], args[1], args[2], args[3], args[4]
+        );
+        crate::pr_info!("MREMAP-EXIT pid={} -> {:#x}", pid, ret);
+    }
     ret
 }
 

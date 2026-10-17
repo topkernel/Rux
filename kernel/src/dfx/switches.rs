@@ -127,9 +127,28 @@ pub enum DfxSwitch {
     /// target pid, handle, code, oneway/twoway, data sizes). Default
     /// OFF - a full OH boot resolves tens of thousands of transactions.
     BinderTrace,
+    /// OH bring-up syscall trace family (b128/b129 hunts): the per-dlopen
+    /// `so-open[...]` trace, per-mmap `FIXED-MAP`/`PROTNONE-MAP`, the
+    /// mremap ENTER/EXIT pair and the binder `GET_SENDER_INFO` round-trip
+    /// prints. All were unconditional pr_info during the dlopen-retry and
+    /// VMA-surgery hunts; at OH scale they emit ~57k lines per boot, and
+    /// OH's hilogd.rd_kmsg thread copies every one of them from /dev/kmsg
+    /// into /data log files — at KVM speed that single thread eats a
+    /// whole vCPU and starves samgr's in-flight transactions (b128/b129:
+    /// 130s+ binder stalls, the whole display chain queued behind samgr).
+    /// Same failure shape as Steptrace's 2.7GB serial log. OFF unless
+    /// asked for with dfx=syscalltrace.
+    SyscallTrace,
+    /// Futex wake-miss probe (b133 hunt): when a FUTEX_WAKE wants more
+    /// waiters than it finds, scan every bucket for same-uaddr waiters
+    /// under a non-matching key and report both mm identities — the
+    /// lost-wake signature when a PRIVATE-futex waiter and its waker
+    /// disagree on the address-space identity. Rate-limited to 32 lines;
+    /// the scan walks all buckets so it stays behind this switch.
+    FutexTrace,
 }
 
-const SWITCH_COUNT: usize = 19;
+const SWITCH_COUNT: usize = 21;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -159,6 +178,8 @@ impl DfxSwitch {
             DfxSwitch::OncpuInject => 16,
             DfxSwitch::Ledger => 17,
             DfxSwitch::BinderTrace => 18,
+            DfxSwitch::SyscallTrace => 19,
+            DfxSwitch::FutexTrace => 20,
         }
     }
 
@@ -183,6 +204,8 @@ impl DfxSwitch {
             "oncpuinject" => Some(DfxSwitch::OncpuInject),
             "ledger" => Some(DfxSwitch::Ledger),
             "bindertrace" => Some(DfxSwitch::BinderTrace),
+            "syscalltrace" => Some(DfxSwitch::SyscallTrace),
+            "futextrace" => Some(DfxSwitch::FutexTrace),
             _ => None,
         }
     }
