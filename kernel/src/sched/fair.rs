@@ -609,44 +609,26 @@ impl CfsRunQueue {
         self.tasks_timeline.iter().any(|(_, &ptr)| ptr == task)
     }
 
-    /// GNOME-wedge report for the stale-claim heal inside pick_next_cpu:
-    /// one line per incident, at most one per 2s system-wide (the picking
-    /// CPUs can pass here hot while the heal unwedges a queue). SBI direct
-    /// write discipline (R34): callers hold the GRQ lock.
-    fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32) {
-        Self::stale_heal_report(b"STALE-CLAIM-RESET", cpu_id, pid, was, u32::MAX);
-    }
-
-    /// R85 (tail-phase PICK-SKIP wedge): always-on, rate-limited report
-    /// for the pick-side stale on_cpu heal — the released FULL qword is
-    /// the store __switch_to would have made; the print names the victim,
-    /// the pre-heal claim, and the advisory pick-state so a capture can
-    /// tell a lost release (pk=LIVE, claim=real-cpu) from a scribble.
-    /// Same R34 discipline and 2s system-wide budget as the claim twin.
-    fn stale_oncpu_healed(cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
-        // SAFETY: diagnostic reads of stable Task fields; the task is
-        // linked on this queue (pinned by the GRQ lock the caller holds).
-        let pid = unsafe { (*task).pid() };
-        Self::stale_heal_report(b"STALE-ONCPU-RESET", cpu_id, pid, claim, pk);
-    }
-
-    /// Shared rate-limited heal reporter (R34: GRQ-held callers, direct
-    /// console writes only).
-    fn stale_heal_report(tag: &[u8], cpu_id: usize, pid: u32, was: i32, pk: u32) {
-        use crate::console::putchar_no_lock as putchar;
+    /// Shared heal-report rate gate: at most one heal line per 2 jiffies
+    /// system-wide (the picking CPUs can pass a healing candidate hot while
+    /// a queue unwedges). R34 discipline: callers hold the GRQ lock.
+    fn heal_report_budget_ok() -> bool {
         static LAST_REPORT: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
         let now = crate::drivers::timer::get_jiffies();
         let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
         if now.wrapping_sub(last) < 2 {
-            return;
+            return false;
         }
-        if LAST_REPORT
+        LAST_REPORT
             .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
+            .is_ok()
+    }
+
+    /// One heal line prefix: TAG by_cpu=N pid=P from_claim=C[ pk=K] (no
+    /// trailing newline — callers append their context tail first).
+    fn stale_heal_line(tag: &[u8], cpu_id: usize, pid: u32, was: i32, pk: u32) {
+        use crate::console::putchar_no_lock as putchar;
         for &b in tag {
             putchar(b);
         }
@@ -654,44 +636,12 @@ impl CfsRunQueue {
         for &b in MB {
             putchar(b);
         }
-        let mut v = cpu_id as u64;
-        if v == 0 {
-            putchar(b'0');
-        }
-        while v > 0 {
-            let mut buf = [0u8; 20];
-            let mut n = 0;
-            while v > 0 {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
-        }
+        Self::put_dec(cpu_id as u64);
         const M2: &[u8] = b" pid=";
         for &b in M2 {
             putchar(b);
         }
-        let mut v = pid as u64;
-        if v == 0 {
-            putchar(b'0');
-        }
-        while v > 0 {
-            let mut buf = [0u8; 20];
-            let mut n = 0;
-            while v > 0 {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
-        }
+        Self::put_dec(pid as u64);
         const M3: &[u8] = b" from_claim=";
         for &b in M3 {
             putchar(b);
@@ -699,47 +649,102 @@ impl CfsRunQueue {
         if (was as i64) < 0 {
             putchar(b'-');
         }
-        let mut v = (was as i64).unsigned_abs();
-        if v == 0 {
-            putchar(b'0');
-        }
-        while v > 0 {
-            let mut buf = [0u8; 20];
-            let mut n = 0;
-            while v > 0 {
-                buf[n] = b'0' + (v % 10) as u8;
-                v /= 10;
-                n += 1;
-            }
-            while n > 0 {
-                n -= 1;
-                putchar(buf[n]);
-            }
-        }
+        Self::put_dec((was as i64).unsigned_abs());
         if pk != u32::MAX {
             const M4: &[u8] = b" pk=";
             for &b in M4 {
                 putchar(b);
             }
-            let mut v = pk as u64;
-            if v == 0 {
-                putchar(b'0');
-            }
-            while v > 0 {
-                let mut buf = [0u8; 20];
-                let mut n = 0;
-                while v > 0 {
-                    buf[n] = b'0' + (v % 10) as u8;
-                    v /= 10;
-                    n += 1;
-                }
-                while n > 0 {
-                    n -= 1;
-                    putchar(buf[n]);
-                }
-            }
+            Self::put_dec(pk as u64);
         }
-        putchar(b'\n');
+    }
+
+    /// GNOME-wedge report for the stale-claim heal inside pick_next_cpu
+    /// (R34: GRQ-held callers, direct console writes only).
+    fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32) {
+        if !Self::heal_report_budget_ok() {
+            return;
+        }
+        Self::stale_heal_line(b"STALE-CLAIM-RESET", cpu_id, pid, was, u32::MAX);
+        crate::console::putchar_no_lock(b'\n');
+    }
+
+    /// R85 (tail-phase PICK-SKIP wedge): always-on, rate-limited report
+    /// for the pick-side stale on_cpu heal — the released FULL qword is
+    /// the store __switch_to would have made; the print names the victim
+    /// (pid, state word, ti_cpu), the pre-heal claim, the advisory
+    /// pick-state and the owner masks, so a capture can tell a lost
+    /// release (slot=0 swout=0) from a lying-slot double-run fight
+    /// (marks flipping between two cpus' claims). Same R34 discipline
+    /// and 2s system-wide budget as the claim twin.
+    fn stale_oncpu_healed(cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
+        if !Self::heal_report_budget_ok() {
+            return;
+        }
+        // SAFETY: diagnostic reads of stable Task fields; the task is
+        // linked on this queue (pinned by the GRQ lock the caller holds).
+        unsafe {
+            let pid = (*task).pid();
+            let st = (*task).state().bits();
+            let tcpu = (*task).ti_cpu() as i64;
+            let slot = crate::sched::sched::owner_slot_mask(task);
+            let swout = crate::sched::sched::switching_out_mask(task);
+            Self::stale_heal_line(b"STALE-ONCPU-RESET", cpu_id, pid, claim, pk);
+            // Context tail: st= state word, tcpu= ti_cpu, slot=/swout=
+            // owner masks at heal time (both must be 0 — that is the
+            // adjudication's precondition; a nonzero mask here names a
+            // racing owner).
+            use crate::console::putchar_no_lock as putchar;
+            const M: &[u8] = b" st=0x";
+            for &b in M {
+                putchar(b);
+            }
+            let mut v = st as u64;
+            for sh in (0..8u32).rev() {
+                let nb = ((v >> (sh * 4)) & 0xF) as u8;
+                putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+            }
+            const M2: &[u8] = b" tcpu=";
+            for &b in M2 {
+                putchar(b);
+            }
+            if tcpu < 0 {
+                putchar(b'-');
+            }
+            Self::put_dec(tcpu.unsigned_abs());
+            const M3: &[u8] = b" slot=";
+            for &b in M3 {
+                putchar(b);
+            }
+            Self::put_dec(slot as u64);
+            const M4: &[u8] = b" swout=";
+            for &b in M4 {
+                putchar(b);
+            }
+            Self::put_dec(swout as u64);
+            putchar(b'\n');
+        }
+    }
+
+    /// Decimal printer for the heal reports (R34: direct console writes).
+    fn put_dec(v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        let mut v = v;
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
     }
 
     /// dfx=claiminject adjudication scan (GNOME-wedge hunt): poison every
