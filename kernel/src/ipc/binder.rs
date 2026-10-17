@@ -878,13 +878,31 @@ fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World
     g
 }
 
-/// &mut BinderProc for an Arc found in the world, without borrowing the
-/// World — legal because every caller holds WORLD (the access contract).
+/// &mut BinderProc for an Arc, without borrowing the World. The Arc keeps
+/// the object alive (callers hold clones) and every mutation is
+/// serialized by WORLD — that is the access contract, NOT membership in
+/// world.procs. b88 kernel-panicked on the old expect("proc not in
+/// world") because binder_close removes the proc from the world BEFORE
+/// draining its pending work, and finish_work then hit the expect: a
+/// dying service must take its in-flight transactions down quietly, not
+/// kill the kernel. Membership loss is now a bounded warning; the cast
+/// itself only needs the Arc.
 /// SAFETY: caller must hold WORLD.
 #[allow(clippy::mut_from_ref)]
 unsafe fn pm<'a>(_world: &World, p: &Arc<BinderProc>) -> &'a mut BinderProc {
-    let found = _world.procs.iter().find(|x| Arc::ptr_eq(x, p)).expect("proc not in world");
-    &mut *(Arc::as_ptr(found) as *mut BinderProc)
+    let ptr = Arc::as_ptr(p);
+    if !_world.procs.iter().any(|x| core::ptr::eq(Arc::as_ptr(x), ptr)) {
+        static DEAD_PM_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if DEAD_PM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_warn!(
+                "binder: access to dead proc {} (pid {}) — draining or replying to a closed service",
+                p.id,
+                p.pid
+            );
+        }
+    }
+    &mut *(ptr as *mut BinderProc)
 }
 
 fn proc_alive(world: &World, p: &Arc<BinderProc>) -> bool {
@@ -898,7 +916,12 @@ fn wake_thread(t: &BinderThread) {
 /// binder_select_thread_ilocked + wake: pick one thread of the proc that
 /// is blocked waiting for proc work (Linux keeps them on
 /// proc->waiting_threads) and wake just that one — no thundering herd
-/// across a 16-thread samgr pool.
+/// across a 16-thread samgr pool. The predicate must match
+/// binder_available_for_proc_work_ilocked exactly (empty txn stack, empty
+/// own todo, ENTERED/REGISTERED looper): b85 forensics showed wakes being
+/// eaten by a parked reader without looper flags, which re-checked
+/// thread_has_work, found itself ineligible and went back to sleep — the
+/// queued txn then sat on the proc todo while eligible workers slept on.
 fn wake_proc_one(p: &Arc<BinderProc>) {
     let w = world_lock();
     // SAFETY: read-only scan under WORLD.
@@ -909,7 +932,10 @@ fn wake_proc_one(p: &Arc<BinderProc>) {
             .iter()
             .find(|t| {
                 let th = t.st();
-                th.waiting_for_proc_work && th.todo.is_empty() && th.txn_stack.is_empty()
+                th.waiting_for_proc_work
+                    && th.todo.is_empty()
+                    && th.txn_stack.is_empty()
+                    && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
             })
             .cloned()
     };
@@ -1354,6 +1380,54 @@ pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Op
     Some(binder_ioctl(file, request, arg))
 }
 
+/// One-line summary of a thread for the stall dump (b85 follow-up: the
+/// wedge state was invisible — "1 txn(s) stacked" said nothing about
+/// what the txn was or why nobody took the proc todo).
+/// SAFETY: caller holds WORLD.
+unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
+    let th = t.st();
+    let looper = |l: u32| {
+        let mut s = [b'-'; 3];
+        if l & LOOPER_REGISTERED != 0 {
+            s[0] = b'R';
+        }
+        if l & LOOPER_ENTERED != 0 {
+            s[1] = b'E';
+        }
+        if l & LOOPER_EXITED != 0 {
+            s[2] = b'X';
+        }
+        s
+    };
+    let lstr = looper(th.looper);
+    let loop_str = core::str::from_utf8(&lstr).unwrap_or("-=-");
+    match th.txn_stack.last() {
+        Some(txn) => crate::pr_warn!(
+            "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack={} top=txn{} code {} oneway={} from pid {} tid {} to_tid {}",
+            proc.pid,
+            t.tid,
+            loop_str,
+            th.waiting_for_proc_work,
+            th.todo.len(),
+            th.txn_stack.len(),
+            txn.id,
+            txn.code,
+            txn.flags & TF_ONE_WAY != 0,
+            txn.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+            txn.from_tid.unwrap_or(0),
+            txn.to_tid().unwrap_or(0),
+        ),
+        None => crate::pr_warn!(
+            "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack=0",
+            proc.pid,
+            t.tid,
+            loop_str,
+            th.waiting_for_proc_work,
+            th.todo.len(),
+        ),
+    }
+}
+
 /// Binder stall scan, called from khungtaskd (process context) alongside
 /// the D-state scan. A thread parked in the blocking binder read for
 /// longer than the threshold is almost always an IPC chain stall —
@@ -1361,7 +1435,9 @@ pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Op
 /// S-state tasks are invisible to the D-state detector, so report these
 /// here: pid/tid, wait duration, and — when the thread is waiting for a
 /// REPLY — the pid of the process that owes it (txn_stack top's owner).
-/// One report per wait episode.
+/// One report per wait episode. The first owing process gets a full
+/// per-thread dump (proc todo depth, looper/wait/stack state of every
+/// worker) so the next wedge names the exact thread that ate the wake.
 pub fn stall_report() {
     const STALL_SECS: u64 = 120;
     let now = crate::drivers::timer::get_jiffies();
@@ -1369,41 +1445,77 @@ pub fn stall_report() {
     if hz == 0 {
         return;
     }
-    let w = world_lock();
-    // SAFETY: read-only traversal under WORLD (pm() casts are only used
-    // to reach each live proc's thread list).
-    unsafe {
-        let world = match w.as_ref() {
-            Some(world) => world,
-            None => return,
-        };
-        for p in &world.procs {
-            let proc = pm(world, p);
-            for t in &proc.im().threads {
-                let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
-                if since == 0 || now.saturating_sub(since) < STALL_SECS * hz {
-                    continue;
+    let mut dump_owner: Option<Arc<BinderProc>> = None;
+    {
+        let w = world_lock();
+        // SAFETY: read-only traversal under WORLD (pm() casts are only used
+        // to reach each live proc's thread list).
+        unsafe {
+            let world = match w.as_ref() {
+                Some(world) => world,
+                None => return,
+            };
+            for p in &world.procs {
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
+                    if since == 0 || now.saturating_sub(since) < STALL_SECS * hz {
+                        continue;
+                    }
+                    if t.stall_reported.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                        continue;
+                    }
+                    let secs = (now.saturating_sub(since) / hz).max(1);
+                    let th = t.st();
+                    let pending = th.txn_stack.len();
+                    let owed_by = th.txn_stack.last().map(|txn| txn.to_proc.clone());
+                    let top_txn = th.txn_stack.last().cloned();
+                    match (pending, &owed_by) {
+                        (0, _) => crate::pr_warn!(
+                            "binder-stall: pid {} tid {} waiting {}s for work (no pending txn)",
+                            proc.pid, t.tid, secs
+                        ),
+                        (n, Some(owner)) => {
+                            crate::pr_warn!(
+                                "binder-stall: pid {} tid {} waiting {}s for reply from pid {} ({} txn(s) stacked)",
+                                proc.pid, t.tid, secs, owner.pid, n
+                            );
+                            if let Some(txn) = top_txn {
+                                crate::pr_warn!(
+                                    "binder-stall:   top txn{} code {} oneway={} from pid {} tid {} to_tid {}",
+                                    txn.id,
+                                    txn.code,
+                                    txn.flags & TF_ONE_WAY != 0,
+                                    txn.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                    txn.from_tid.unwrap_or(0),
+                                    txn.to_tid().unwrap_or(0)
+                                );
+                            }
+                            if dump_owner.is_none() {
+                                dump_owner = Some(owner.clone());
+                            }
+                        }
+                        (n, None) => crate::pr_warn!(
+                            "binder-stall: pid {} tid {} waiting {}s for reply ({} txn(s) stacked)",
+                            proc.pid, t.tid, secs, n
+                        ),
+                    }
                 }
-                if t.stall_reported.swap(true, core::sync::atomic::Ordering::AcqRel) {
-                    continue;
-                }
-                let secs = (now.saturating_sub(since) / hz).max(1);
-                let th = t.st();
-                let pending = th.txn_stack.len();
-                let owed_by = th.txn_stack.last().map(|txn| txn.to_proc.pid);
-                match (pending, owed_by) {
-                    (0, _) => crate::pr_warn!(
-                        "binder-stall: pid {} tid {} waiting {}s for work (no pending txn)",
-                        proc.pid, t.tid, secs
-                    ),
-                    (n, Some(owner)) => crate::pr_warn!(
-                        "binder-stall: pid {} tid {} waiting {}s for reply from pid {} ({} txn(s) stacked)",
-                        proc.pid, t.tid, secs, owner, n
-                    ),
-                    (n, None) => crate::pr_warn!(
-                        "binder-stall: pid {} tid {} waiting {}s for reply ({} txn(s) stacked)",
-                        proc.pid, t.tid, secs, n
-                    ),
+            }
+            // Full dump of the first owing proc: proc todo depth + every
+            // thread's looper/wait/stack/todo state.
+            if let Some(owner) = &dump_owner {
+                if let Some(op) = world.procs.iter().find(|p| Arc::ptr_eq(p, owner)) {
+                    let opm = pm(world, op);
+                    crate::pr_warn!(
+                        "binder-stall: owing pid {} proc todo depth {} threads {}",
+                        op.pid,
+                        opm.im().todo.len(),
+                        opm.im().threads.len()
+                    );
+                    for t in &opm.im().threads {
+                        stall_thread_line(op, t);
+                    }
                 }
             }
         }
@@ -2162,7 +2274,14 @@ fn binder_thread_write(
                 }
             }
             _ => {
-                crate::pr_info!("binder: unknown BC command {:#x}, stopping", cmd);
+                // b85 forensics: the last binder event before the samgr
+                // wedge was this print WITHOUT a pid — name the issuer.
+                crate::pr_info!(
+                    "binder: pid {} tid {} unknown BC command {:#x}, stopping",
+                    proc.pid,
+                    thread.tid,
+                    cmd
+                );
                 ptr -= 4; // not consumed
                 break;
             }
@@ -2290,10 +2409,15 @@ fn binder_transaction(
                 }
             }
             let tp = target_proc.as_ref().unwrap();
-            if !reply && Arc::ptr_eq(tp, proc) {
-                *err_cmd = BR_FAILED_REPLY;
-                return;
-            }
+            // NOTE: no same-proc rejection here. Linux 5.10 (the OH
+            // baseline) has no "self transaction" check — only master
+            // gained one — so a transaction to a node owned by the
+            // caller's own process queues on the (own) proc todo and is
+            // served by a sibling worker (b85: samgr worker 357's calls
+            // into samgr-hosted services died here with BR_FAILED_REPLY,
+            // wedging the whole SA storm). Handle 0 from the manager's
+            // own process stays an error above, exactly like 5.10's
+            // "got transaction to context manager from process owning it".
             if tp.im().alloc.is_none() {
                 *err_cmd = BR_FAILED_REPLY;
                 return;
@@ -2596,6 +2720,8 @@ fn binder_transaction(
     });
 
     let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    // Threads to wake directly (thread-targeted delivery).
+    let mut wake_ths: Vec<Arc<BinderThread>> = Vec::new();
     // BC_REPLY whose originating thread vanished: fail after WORLD is
     // released (release_block/close_installed_fds must not run under it).
     let mut reply_target_gone = false;
@@ -2687,13 +2813,44 @@ fn binder_transaction(
                 }
                 wakes.push(proc.clone());
             } else {
-                // Sync: deferred TRANSACTION_COMPLETE (no process_todo) +
+                // Sync: TRANSACTION_COMPLETE on the sender's todo (visible
+                // to its next read via thread_has_work's todo check) +
                 // push on the sender's txn stack + queue on the target.
                 let th = thread.st();
                 th.todo.push_back(Work::TransactionComplete);
+                th.process_todo = true;
+                // Linux 5.10 from-walk, BEFORE the new txn is stacked:
+                // while this thread is handling a sync txn T whose
+                // originator thread C lives in the target proc, a nested
+                // sync call into that same proc is delivered to C's OWN
+                // thread todo — C is parked in read waiting for T's reply
+                // and takes thread work despite its txn stack — instead of
+                // competing for the proc todo. This is also what makes
+                // same-process transactions deadlock-free (nested samgr
+                // calls unwind LIFO through the blocked originator).
+                let mut t_thread: Option<Arc<BinderThread>> = None;
+                for st in th.txn_stack.iter().rev() {
+                    if let (Some(fp), Some(ftid)) = (&st.from_proc, st.from_tid) {
+                        if Arc::ptr_eq(fp, &target) {
+                            if let Some(t) =
+                                pm(world, &target).im().threads.iter().find(|t| t.tid == ftid).cloned()
+                            {
+                                t_thread = Some(t);
+                            }
+                            break;
+                        }
+                    }
+                }
                 th.txn_stack.push(txn.clone());
-                pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
-                wakes.push(target.clone());
+                if let Some(tt) = t_thread {
+                    let tth = tt.st();
+                    tth.todo.push_back(Work::Transaction(txn.clone()));
+                    tth.process_todo = true;
+                    wake_ths.push(tt);
+                } else {
+                    pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                    wakes.push(target.clone());
+                }
             }
         }
     }
@@ -2701,6 +2858,9 @@ fn binder_transaction(
         release_block(&target, block_off);
         close_installed_fds(&installed_fds);
         return;
+    }
+    for t in wake_ths {
+        wake_thread(&t);
     }
     for p in wakes {
         wake_proc_one(&p);
@@ -2990,10 +3150,16 @@ unsafe fn get_or_create_ref(
 /// SAFETY: caller holds WORLD.
 unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<BinderThread>) -> bool {
     let th = thread.st();
+    // Own todo non-empty = binder_has_thread_work (Linux): covers work
+    // pushed without an explicit wake, e.g. the deferred sync-send
+    // TRANSACTION_COMPLETE that must reach the sender before it sleeps
+    // awaiting the reply.
+    if th.process_todo || !th.todo.is_empty() {
+        return true;
+    }
     let avail_for_proc = th.txn_stack.is_empty()
-        && th.todo.is_empty()
         && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
-    th.process_todo || (avail_for_proc && !pm(world, proc).im().todo.is_empty())
+    avail_for_proc && !pm(world, proc).im().todo.is_empty()
 }
 
 fn binder_thread_read(
@@ -3040,7 +3206,15 @@ fn binder_thread_read(
                 let _w = world_lock();
                 // SAFETY: under WORLD.
                 unsafe {
-                    thread.st().waiting_for_proc_work = true;
+                    // waiting_threads membership: only a thread that can
+                    // actually take proc work registers for wakeups
+                    // (binder_available_for_proc_work_ilocked). A reader
+                    // without looper flags or with a stacked txn must not
+                    // — it would eat wake_proc_one's single pick.
+                    let th = thread.st();
+                    th.waiting_for_proc_work = th.todo.is_empty()
+                        && th.txn_stack.is_empty()
+                        && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
                 }
             }
             thread
@@ -3245,10 +3419,10 @@ fn binder_thread_read(
                 // and more threads are allowed and none are ready.
                 if !got_transaction {
                     let pim = pm(world, proc).im();
-                    let ready = pim
-                        .threads
-                        .iter()
-                        .any(|t| t.st().waiting_for_proc_work && t.st().todo.is_empty() && t.st().txn_stack.is_empty());
+                    // waiting_for_proc_work now implies the full
+                    // availability predicate (todo/txn_stack empty +
+                    // looper flags), i.e. waiting_threads membership.
+                    let ready = pim.threads.iter().any(|t| t.st().waiting_for_proc_work);
                     if pim.requested_threads == 0
                         && !ready
                         && pim.max_threads > 0

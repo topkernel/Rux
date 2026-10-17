@@ -1162,8 +1162,11 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
 
 /// Handle #GP: user mode → SIGSEGV (Linux semantics), kernel → bug.
 fn handle_general_protection(regs: &mut PtRegs) {
-    crate::pr_debug!("trap: #GP at rip={:#x}, mode={}",
-        regs.rip, if regs.user_mode() { "user" } else { "kernel" });
+    // OH bring-up: name the faulting task — b85's repeating user #GP at
+    // ld.so+0xba256 could not be attributed to any pid.
+    crate::pr_info!("trap: #GP at rip={:#x}, mode={}, pid {}",
+        regs.rip, if regs.user_mode() { "user" } else { "kernel" },
+        crate::process::current_pid());
 
     if regs.user_mode() {
         // Handler-first routing (same as the page-fault Segfault path):

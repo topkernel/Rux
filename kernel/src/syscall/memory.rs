@@ -89,7 +89,16 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 return new_brk as i64;
             }
 
-            // Expand heap: need to map new memory pages
+            // Expand heap: VMA surgery only — pages appear via the demand
+            // fault path (which re-checks the leaf under
+            // PTE_MODIFY_LOCK before mapping). The OLD eager
+            // alloc_and_map_user_memory here mapped a fresh zero page per
+            // address and DESTROYED any already-live leaf it landed on:
+            // render_service's musl heap churn (poll loops freeing and
+            // re-expanding the top chunk) hit it twice at 0x1f000/0x20000
+            // (PTE-OVERWRITE-LIVE data_DESTROYED, then a NULL-adjacent
+            // write fault at 0x8 killed the process — boots b86/b87).
+            // Linux sys_brk never maps: it only adjusts the brk VMA.
             if new_brk > current_brk {
                 // Upper bound: the brk must stay inside the user address
                 // space. Without this check a brk above USER_END would map
@@ -112,80 +121,31 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     return current_brk as i64;
                 }
 
-                // Calculate page range to map. Only FULL NEW pages may be
-                // mapped: the page containing current_brk was already
-                // mapped by the previous growth (or by exec for the bss
-                // tail). Mapping from the page FLOOR of a mid-page brk
-                // replaced that live page's PTE with a fresh zero page —
-                // glibc keeps its static TLS/TCB block in the first brk
-                // page, so the next sbrk round silently wiped pd->list and
-                // every fork() crashed in __libc_fork dereferencing NULL.
-                let brk_page_floor = current_brk & !(PAGE_SIZE as u64 - 1);
-                let brk_page_ceil = brk_page_floor + PAGE_SIZE as u64;
-                let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+                let page = PAGE_SIZE as u64;
+                // The heap VMA covers whole pages; the page containing
+                // current_brk belongs to the previous growth (or to exec's
+                // bss tail) — start at its ceiling so the new VMA is
+                // ADJACENT to the existing one (VmaManager::add merges
+                // compatible neighbors) instead of overlapping it.
+                let vma_start = (current_brk + page - 1) & !(page - 1);
+                let new_page_end = (new_brk + page - 1) & !(page - 1);
 
-                // Get root page table of address space
-                let root_ppn = if let Some(addr_space) = current_task.address_space() {
-                    addr_space.root_ppn()
-                } else {
-                    return current_brk as i64;
-                };
-
-                // Mid-page brk: the partial page must already be mapped;
-                // verify via page-table walk so an unexpected hole still
-                // gets mapped instead of silently skipped.
-                let map_start = if current_brk == brk_page_floor {
-                    current_brk
-                } else {
-                    // SAFETY: root_ppn is the current task's page-table
-                    // root; walk is a read-only page-table inspection.
-                    let partial_mapped = unsafe {
-                        crate::arch::mm::mm_ops::PageTableWalker::walk(
-                            root_ppn,
-                            brk_page_floor as u64,
-                        )
-                    }
-                    .is_some();
-                    if partial_mapped { brk_page_ceil } else { brk_page_floor }
-                };
-
-                // If need to map new pages
-                if new_page_end > map_start {
-                    // Map new heap pages
-                    let size = new_page_end - map_start;
-
-                    // Permissions: User + Read + Write + Valid + Accessed + Dirty
-                    let pte_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
-                        | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
-
-                    // SAFETY: root_ppn is a valid page table root; alloc_and_map_user_memory
-                    // handles page allocation and mapping within user address space.
-                    unsafe {
-                        let result = alloc_and_map_user_memory(root_ppn, map_start, size, pte_flags);
-                        if result.is_none() {
-                            return current_brk as i64;
-                        }
-                    }
-
-                    // Register the heap growth as an anonymous VMA. Mapping
-                    // PTEs without a VMA left every access past the initial
-                    // brk page as NOVMA — glibc malloc's first sbrk region
-                    // (TCB, arenas, function pointers) faulted on touch
-                    // (observed: dash jumping through a heap pointer at
-                    // 0x1c29c with tp already in the brk heap).
-                    if let Some(addr_space) = current_task.address_space() {
+                if let Some(addr_space) = current_task.address_space() {
+                    if new_page_end > vma_start {
                         use crate::mm::vma::{Vma, VmaFlags, VmaType};
                         let heap_vma = Vma::new(
-                            crate::mm::page::VirtAddr::new(map_start as usize),
+                            crate::mm::page::VirtAddr::new(vma_start as usize),
                             crate::mm::page::VirtAddr::new(new_page_end as usize),
                             VmaFlags::from_bits(
                                 VmaFlags::READ | VmaFlags::WRITE | VmaFlags::PRIVATE,
                             ),
                         );
-                        // Vma::new starts with no type — set it explicitly.
                         let mut heap_vma = heap_vma;
                         heap_vma.set_type(VmaType::Anonymous);
-                        let _ = addr_space.vma_write().add(heap_vma);
+                        if addr_space.vma_write().add(heap_vma).is_err() {
+                            // Keep the old brk on failure (Linux parity).
+                            return current_brk as i64;
+                        }
                     }
                 }
 
