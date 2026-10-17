@@ -2569,6 +2569,17 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
     // the re-check and the enqueue are one atomic step.
     unsafe {
         let st = (*task).state();
+        // PID-0 tasks (per-CPU idles, the boot init's idle) are RUNNING by
+        // design and are owned by their own cpu's idle loop — no wake path
+        // ever legitimately targets one. The idle task of an OFFLINE cpu
+        // presents exactly the R46 phantom shape (RUNNING, unlinked, owned
+        // by no current slot) forever, so the heal below would re-link it
+        // onto the CFS timeline (unit-test capture:
+        // "R46-RUNNING-PHANTOM healed pid=0x0 ... cpu=3" on a 2-cpu boot)
+        // only for the pick-side PID-0 gates to drop it again. Refuse.
+        if (*task).pid() == 0 {
+            return false;
+        }
         if !(st.is_sleeping() || st.contains(TaskState::STOPPED)) {
             // RUNNING (woken elsewhere / never slept), ZOMBIE, or DEAD —
             // the wake is stale or redundant; drop it. (Freed-page poison
