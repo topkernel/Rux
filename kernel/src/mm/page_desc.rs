@@ -535,6 +535,8 @@ impl Page {
                 // Would underflow — refuse to decrement
                 // Note: intentionally no log here to avoid printk during page table
                 // teardown, which can deadlock on mm/ring buffer/ext4 locks.
+                crate::dfx::driftwatch::PUT_UNDERFLOW
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return -1;
             }
             match self._refcount.compare_exchange_weak(
@@ -547,6 +549,19 @@ impl Page {
                 Err(_) => continue, // CAS failed, retry
             }
         }
+    }
+
+    /// `put_page()` with drift attribution: a transition to 0 is the exact
+    /// moment a frame becomes orphan-able — count it per call site
+    /// (dfx::driftwatch) so the MEMLEDGER census can attribute drift to the
+    /// release path that dropped it. Same return contract as `put_page`.
+    #[inline]
+    pub fn put_page_site(&self, site: usize) -> i32 {
+        let r = self.put_page();
+        if r == 0 {
+            crate::dfx::driftwatch::note_zero_put(site);
+        }
+        r
     }
 
     /// Try to increment reference count (only if refcount > 0)
@@ -925,6 +940,83 @@ pub fn pfn_valid(pfn: usize) -> bool {
 #[inline]
 pub fn phys_valid(phys: usize) -> bool {
     phys >= PHYS_MEMORY_BASE && phys < PHYS_MEMORY_BASE + nr_descs() * PAGE_SIZE
+}
+
+/// Present (usable RAM) pages this boot — the SUM of the discovered
+/// regions, holes excluded. Distinct from nr_descs(), which sizes the
+/// linear PFN span (max region end) including non-RAM holes. MemTotal and
+/// friends must use this (fake-OOM family: span-counted totals overstated
+/// RAM by the MMIO-hole size on split-map machines).
+static PRESENT_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish the present-page count (called once from boot after the
+/// memory map is parsed).
+pub fn set_present_pages(n: usize) {
+    PRESENT_PAGES.store(n, Ordering::Release);
+}
+
+/// Present (usable RAM) pages: nr_descs() if the boot never published a
+/// count (contiguous-map fallback), else the sum of usable regions.
+#[inline]
+pub fn present_pages() -> usize {
+    match PRESENT_PAGES.load(Ordering::Acquire) {
+        0 => nr_descs(),
+        n => n,
+    }
+}
+
+/// Mark every PFN in the descriptor span that is NOT covered by a usable
+/// RAM region as Reserved (fake-OOM family, the phantom-drift mechanism):
+/// descriptors are indexed linearly over the whole PFN span, so the
+/// descriptors backing MMIO holes / firmware gaps would otherwise sit at
+/// power-on zero — refcount 0, no flags — and the MEMLEDGER census would
+/// count them as free pages (b126: 524,804 phantom "free" pages inside
+/// the 3G..4G hole alone), while the free-path tripwires would not stop
+/// a forged free of them.
+///
+/// A page is RAM only if FULLY contained in one region (partial edge
+/// pages of unaligned regions count as non-RAM, like Linux marking
+/// partial e820 pages reserved).
+pub fn mark_non_ram_pages(regions: &[crate::cmdline::MemoryRegion]) {
+    use crate::mm::PAGE_SIZE;
+    let start_pfn = MIN_PFN;
+    let end_pfn = MIN_PFN + nr_descs();
+
+    // Regions sorted by base (e820/FDT maps come sorted; sort again —
+    // n <= 64, insertion sort is fine).
+    let mut sorted: alloc::vec::Vec<(usize, usize)> =
+        regions.iter().map(|r| (r.base, r.base + r.size)).collect();
+    sorted.sort_unstable();
+
+    let is_ram = |pfn: usize| -> bool {
+        let pa = pfn * PAGE_SIZE;
+        let pe = pa + PAGE_SIZE;
+        sorted
+            .iter()
+            .any(|&(b, e)| pa >= b && pe <= e)
+    };
+
+    let mut marked = 0usize;
+    for pfn in start_pfn..end_pfn {
+        if is_ram(pfn) {
+            continue;
+        }
+        let page = pfn_to_page(pfn);
+        if !page.is_null() {
+            // SAFETY: boot-time single-threaded init; descriptor in span.
+            unsafe {
+                (*page).init_reserved();
+            }
+            marked += 1;
+        }
+    }
+    if marked > 0 {
+        crate::println!(
+            "page_desc: marked {} non-RAM hole pages Reserved ({} MB)",
+            marked,
+            marked * PAGE_SIZE / (1024 * 1024)
+        );
+    }
 }
 
 /// Whether page array is initialized

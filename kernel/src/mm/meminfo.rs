@@ -145,11 +145,13 @@ impl<'a> core::fmt::Display for MemoryInfoFormatter<'a> {
 pub fn get_basic_memory_info() -> MemoryInfo {
     let mut info = MemoryInfo::default();
 
-    // Runtime total: the discovered memory map (nr_descs), not the
-    // Kernel.toml nominal size — MemTotal must not lie on machines whose
-    // RAM differs from the config value (fake-OOM family: the 4G box
-    // reported 2G while claiming to manage all of it).
-    let total = super::page_desc::nr_descs() * PAGE_SIZE;
+    // Runtime total: the discovered USABLE RAM (present pages), not the
+    // Kernel.toml nominal size and not the PFN-span descriptor count —
+    // MemTotal must not lie on machines whose RAM differs from the config
+    // value (fake-OOM family: the 4G box reported 2G while claiming to
+    // manage all of it) nor on split maps where the span includes MMIO
+    // holes (span-counted totals overstated RAM by the hole size).
+    let total = super::page_desc::present_pages() * PAGE_SIZE;
     if let Some(node) = first_online_node() {
         let free_pages = node.free_pages();
         info.mem_free = free_pages * PAGE_SIZE;

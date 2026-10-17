@@ -368,7 +368,9 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
 /// - `addr`: Physical address of the first page
 /// - `order`: Order of the allocation
 pub fn free_pages(addr: usize, order: usize) {
+    use crate::dfx::driftwatch as dw;
     if addr == 0 {
+        dw::FREE_NULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return;
     }
 
@@ -385,6 +387,8 @@ pub fn free_pages(addr: usize, order: usize) {
         if !pd.is_null() && unsafe { (*pd).is_mapped() } {
             static MAPPED_FREES: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
+            dw::FREE_REFUSED_MAPPED
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if MAPPED_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
                 crate::pr_err!(
                     "free_pages: REFUSED frame {:#x} order {} still MAPPED (mapcount {}) pid {} — leaking instead of aliasing",
@@ -415,6 +419,7 @@ pub fn free_pages(addr: usize, order: usize) {
     // VMAs are far outside it) while accepting every page the zone can
     // hand out — the two sets must agree by construction.
     if !super::page_desc::phys_valid(addr) {
+        dw::FREE_DROPPED_WILD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         // Caller diagnostic is x86-only (frame-pointer walk via att_syntax
         // asm); the riscv64 build has no equivalent and just drops it.
         #[cfg(feature = "x86_64")]
@@ -441,6 +446,8 @@ pub fn free_pages(addr: usize, order: usize) {
     // user mapping (observed: corrupted task children lists, do_wait
     // panics). Refuse loudly and keep the frame leaked instead.
     if crate::mm::memblock::memblock().is_reserved(addr) {
+        dw::FREE_REFUSED_RESERVED
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         crate::pr_err!(
             "free_pages: REFUSED boot-reserved frame {:#x} order {} — not returned to zone",
             addr, order
@@ -506,12 +513,18 @@ pub fn free_pages(addr: usize, order: usize) {
                         TEXT_OWN_FREES.load(core::sync::atomic::Ordering::Relaxed)
                     );
                     crate::dfx::backtrace::dump_stack();
+                    dw::FREE_REFUSED_TEXT
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
                 #[cfg(not(feature = "riscv64"))]
-                crate::pr_err!(
-                    "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} — free REFUSED (leaked)",
-                    pfn, order, owner_pid, owner_va, dying
-                );
+                {
+                    crate::pr_err!(
+                        "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} — free REFUSED (leaked)",
+                        pfn, order, owner_pid, owner_va, dying
+                    );
+                    dw::FREE_REFUSED_TEXT
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
                 return;
             } else {
                 // Switch off: keep historical behavior, just drop the stamp.
@@ -545,6 +558,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     let end_pfn = zone.end_pfn();
                     if pfn >= start_pfn && pfn < end_pfn {
                         zone.free_pages(pfn, order);
+                        dw::FREE_OK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         return;
                     }
                 }
@@ -554,6 +568,7 @@ pub fn free_pages(addr: usize, order: usize) {
 
     // Page doesn't belong to any zone - this shouldn't happen in normal operation
     // Pages allocated via memblock during early boot are not tracked and don't need freeing
+    dw::FREE_NO_ZONE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Free a single page
@@ -616,9 +631,14 @@ pub fn page_to_virt(page: &Page) -> usize {
 ///
 /// # Arguments
 /// - `phys_start`: Physical memory start address
-/// - `phys_size`: Total physical memory size in bytes
-/// - `kernel_end`: End of kernel memory (where allocation can start)
-pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) {
+/// - `phys_size`: SIZE OF THE PFN SPAN (max region end − phys_start),
+///   including MMIO holes — matching the descriptor/vmemmap sizing. The
+///   zone spans the whole discovered map; only memblock-FREE pages are
+///   seeded, so holes and static regions contribute no free pages.
+/// - `kernel_end`: legacy, unused (the zone no longer starts after the
+///   heap/slab window — that clamp is what left ~980 MB below
+///   KERNEL_HEAP_PHYS permanently unmanaged on x86_64).
+pub fn init_zone_system(phys_start: usize, phys_size: usize, _kernel_end: usize) {
     // Initialize node data structure
     // SAFETY: Called once during early boot before any page allocation.
     unsafe {
@@ -654,9 +674,17 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
     let total_pages = effective_phys_size / PAGE_SIZE;
     node.init(start_pfn, total_pages, total_pages);
 
-    // Create ZONE_NORMAL for all allocatable memory
-    // On RISC-V, we don't need DMA zones, but we'll use ZONE_NORMAL
-    let alloc_start_pfn = (kernel_end / PAGE_SIZE).max(start_pfn);
+    // ZONE_NORMAL spans the WHOLE discovered PFN space (fake-OOM family):
+    // the old span started at `kernel_end` (heap+slab end), so on x86_64
+    // every memblock-free page below it — ~980 MB between the kernel
+    // image and the heap at 0x40000000 — was never seeded and stayed
+    // permanently unallocatable while the OOM killer fired (census:
+    // 237,521 of 524,140 descriptors rc==0, unlinked, unmanaged on one
+    // 2G boot). Linux parity: the zone spans present memory; reserved
+    // ranges and non-RAM holes inside the span are simply never seeded,
+    // and the memblock_is_reserved / PageFlag::Reserved guards on the
+    // free path refuse anything forged against them.
+    let alloc_start_pfn = start_pfn;
     let alloc_end_pfn = start_pfn + total_pages;
     let alloc_start = alloc_start_pfn * PAGE_SIZE;
     let alloc_end = alloc_end_pfn * PAGE_SIZE;
@@ -711,6 +739,12 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         }
     });
 
+    // Managed pages = what the buddy actually owns (span minus reserved
+    // ranges and non-RAM holes), like Linux zone->managed_pages vs
+    // spanned_pages. The old span-equals-managed accounting overstated
+    // availability and sized watermarks off phantom pages.
+    zone.set_managed_pages(total_added);
+
     // Add zone to node
     node.add_zone(ZoneType::ZoneNormal, zone);
 
@@ -720,6 +754,17 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         let refs: [&Zone; 1] = [zone_ref];
         super::zone::setup_per_zone_wmarks(&refs, total_managed);
     }
+
+    // One-line boot banner: span vs seeded vs holes, so any future
+    // structural loss is visible immediately.
+    let span_pages = alloc_end_pfn - alloc_start_pfn;
+    crate::println!(
+        "page_alloc: zone Normal span={} pages ({} MB), seeded={} ({} MB), unmanaged-in-span={} ({} MB)",
+        span_pages, span_pages * PAGE_SIZE / (1024 * 1024),
+        total_added, total_added * PAGE_SIZE / (1024 * 1024),
+        span_pages.saturating_sub(total_added),
+        span_pages.saturating_sub(total_added) * PAGE_SIZE / (1024 * 1024)
+    );
 }
 
 // ==================== Page Allocation APIs ====================

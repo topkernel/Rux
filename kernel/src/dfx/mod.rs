@@ -40,6 +40,9 @@ pub mod memwatch;
 /// Full physical-accounting ledger (fake-OOM family): census + counters
 /// reconciliation, triggered at the OOM moment and via the UART magic.
 pub mod ledger;
+/// Zero-put / free-refusal attribution counters (freelist-drift family):
+/// which release site orphaned the census's refcount-0 pages.
+pub mod driftwatch;
 #[cfg(feature = "x86_64")]
 pub mod scribble;
 /// R83 (R74 producer hunt): live task-header audit + victim dumps.

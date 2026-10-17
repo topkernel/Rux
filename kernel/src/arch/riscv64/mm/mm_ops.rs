@@ -1954,7 +1954,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultR
     // mapping reference.  Without dec_mapcount the count leaks across
     // COW cycles and eventually corrupts page reclaim / rmap decisions.
     if !old_page.is_null() {
-        let after = (*old_page).put_page();
+        let after = (*old_page).put_page_site(crate::dfx::driftwatch::S_COW_RV);
         (*old_page).dec_mapcount();
         // Stamp lifecycle (gnome-sigill): the faulting process no longer
         // maps the OLD frame — if it owned the text stamp, drop it, or

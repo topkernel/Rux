@@ -73,6 +73,8 @@ def build_image(img, args):
     shutil.copyfile(probe, os.path.join(staging, "test", "oomchurn"))
     os.chmod(os.path.join(staging, "test", "oomchurn"), 0o755)
     os.symlink("/test/oomchurn", os.path.join(staging, "test", "init"))
+    # write-storm modes need a directory to churn files in
+    os.makedirs(os.path.join(staging, "storm"), exist_ok=True)
     if args.mode == "anon":
         argline = "%s %d" % (args.mode, args.mb)
     elif args.mode == "fork":
@@ -81,6 +83,10 @@ def build_image(img, args):
         argline = "%s %d %d" % (args.mode, args.mb, args.rounds)
     elif args.mode == "exec":
         argline = "%s %d %d" % (args.mode, args.fork_n, args.mb)
+    elif args.mode == "wrstorm":
+        argline = "%s %d %d /storm/wrfile" % (args.mode, args.mb, args.rounds)
+    elif args.mode == "mix":
+        argline = "%s %d %d" % (args.mode, args.rounds, args.mb)
     else:
         argline = "%s %d" % (args.mode, args.mb)
     with open(os.path.join(staging, "test", "args"), "w") as f:
@@ -101,7 +107,8 @@ def main():
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--secs", type=int, default=600)
     ap.add_argument("--mode", default="anon",
-                    choices=["anon", "fork", "churn", "exec", "mapfile"])
+                    choices=["anon", "fork", "churn", "exec", "mapfile",
+                             "wrstorm", "mix"])
     ap.add_argument("--mb", type=int, default=1200)
     ap.add_argument("--fork-n", type=int, default=8)
     ap.add_argument("--rounds", type=int, default=4)
@@ -115,6 +122,8 @@ def main():
                          "(e.g. 'LEDGER!' with dfx=ledger)")
     ap.add_argument("--magic-at", type=float, default=25.0,
                     help="seconds before writing --magic")
+    ap.add_argument("--magic-every", type=float, default=0.0,
+                    help="repeat --magic every N seconds (drift trace)")
     args = ap.parse_args()
 
     img = os.path.join(WT, "work", "oomchurn.img")
@@ -144,6 +153,8 @@ def main():
     touched_max = 0
     magic_done = args.magic is None
     magic_at = time.time() + args.magic_at
+    drift_trace = []
+    memfree_trace = []
     try:
         while time.time() < deadline:
             if not magic_done and time.time() >= magic_at:
@@ -154,7 +165,10 @@ def main():
                     print("[magic] sent %r" % args.magic)
                 except OSError as e:
                     print("[magic] failed: %s" % e)
-                magic_done = True
+                if args.magic_every > 0:
+                    magic_at = time.time() + args.magic_every
+                else:
+                    magic_done = True
             r, _, _ = select.select([proc.stdout], [], [], 5.0)
             if not r:
                 if proc.poll() is not None:
@@ -171,6 +185,13 @@ def main():
             m = re.findall(r"anon: (\d+) MB touched", text)
             if m:
                 touched_max = max(touched_max, int(m[-1]))
+            for dm in re.findall(r"free_census=(\d+) vs zone_free_cnt=(\d+) "
+                                 r"drift=(-?\d+)", text):
+                drift_trace.append((int(dm[0]), int(dm[1]), int(dm[2])))
+                print("[drift] census=%d zone=%d drift=%d"
+                      % drift_trace[-1])
+            for mm_ in re.findall(r"MemFree:\s+(\d+) kB", text):
+                memfree_trace.append(int(mm_))
             for pat in FAIL_PATTERNS:
                 if pat.search(text) and verdict is None:
                     verdict = ("FAKE-OOM", pat.pattern)
@@ -196,6 +217,14 @@ def main():
         logf.close()
         if not args.keep_img:
             pass  # keep image for iteration speed
+
+    if memfree_trace:
+        print("[memfree] first=%d kB last=%d kB min=%d kB"
+              % (memfree_trace[0], memfree_trace[-1], min(memfree_trace)))
+    if drift_trace:
+        print("[drift-trace] %d sample(s): %s"
+              % (len(drift_trace),
+                 " -> ".join("d=%d" % d[2] for d in drift_trace)))
 
     print("\n[verdict] %s (log: %s)" % (verdict or ("UNKNOWN", "timeout"),
                                         log_path))

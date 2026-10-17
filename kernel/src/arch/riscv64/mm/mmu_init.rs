@@ -878,7 +878,7 @@ pub(crate) unsafe fn release_user_leaf(
     if (*page).is_mapped() {
         crate::mm::rmap::page_remove_rmap(&*page);
     }
-    let new_ref = (*page).put_page();
+    let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_RV);
     let dying = crate::process::current_pid() as u32;
     if stamp.is_some() {
         crate::mm::page_desc::text_stamp_note(pfn, dying, 'T', new_ref);
