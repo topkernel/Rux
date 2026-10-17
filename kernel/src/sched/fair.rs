@@ -650,6 +650,10 @@ impl CfsRunQueue {
         for &b in tag {
             putchar(b);
         }
+        const MB: &[u8] = b" by_cpu=";
+        for &b in MB {
+            putchar(b);
+        }
         let mut v = cpu_id as u64;
         if v == 0 {
             putchar(b'0');
@@ -667,7 +671,10 @@ impl CfsRunQueue {
                 putchar(buf[n]);
             }
         }
-        putchar(b' ');
+        const M2: &[u8] = b" pid=";
+        for &b in M2 {
+            putchar(b);
+        }
         let mut v = pid as u64;
         if v == 0 {
             putchar(b'0');
