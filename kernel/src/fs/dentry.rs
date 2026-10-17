@@ -157,12 +157,43 @@ impl Dentry {
 
     /// Build full path from root by walking parent chain
     pub fn build_path(&self) -> alloc::string::String {
+        // The global climb can never fail (it terminates at the global
+        // root); the Option only exists for the rooted variant below.
+        self.build_path_rooted(None)
+            .unwrap_or_else(|| alloc::string::String::from("/"))
+    }
+
+    /// Build the path of `self` the way Linux prepend_path() does: the
+    /// climb stops at `stop` — the dentry treated as the process root —
+    /// instead of the global root, so the result is ROOT-RELATIVE (after
+    /// chroot("/usr") the "/usr/bin" dentry reports "/bin").
+    ///
+    /// Returns None when the climb reaches the global root without passing
+    /// through `stop` — the path is not reachable under that root. getcwd
+    /// translates this to ENOENT (Linux behavior for a cwd outside the
+    /// process root); display-only callers may fall back to the global
+    /// path.
+    ///
+    /// `stop = None` is the plain global path: same walk, same
+    /// mount-boundary crossing as build_path() (a mount root climbs from
+    /// its mountpoint so entries inside a mount carry the mountpoint
+    /// prefix — chdir("/proc") must store cwd="/proc", not "/").
+    pub fn build_path_rooted(
+        &self,
+        stop: Option<&Arc<Dentry>>,
+    ) -> Option<alloc::string::String> {
         let mut components: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
         let name = self.get_name();
         // Limit depth to prevent infinite loops on corrupted dentry trees.
         // 256 (review 5.1: build_path>64 截断 — deep trees silently got
         // truncated paths, breaking /proc/self/fd links and getcwd).
         let max_depth = 256;
+        // `self` IS the process root: the rooted path is "/".
+        if let Some(s) = stop {
+            if core::ptr::eq(self, s.as_ref()) {
+                return Some(alloc::string::String::from("/"));
+            }
+        }
         // A mounted filesystem's root dentry has NO parent pointer; the
         // climb starts at (or continues into) the MOUNTPOINT dentry in the
         // parent filesystem instead, so paths of entries inside a mount
@@ -178,6 +209,13 @@ impl Dentry {
         while let Some(d) = current {
             if components.len() >= max_depth {
                 break;
+            }
+            // Arrived at the process root: stop here — everything collected
+            // so far is the path BELOW the root.
+            if let Some(s) = stop {
+                if core::ptr::eq(d.as_ref(), s.as_ref()) {
+                    break;
+                }
             }
             let parent = d.parent.lock().clone();
             match parent {
@@ -198,7 +236,15 @@ impl Dentry {
                     // mountpoint's own name is pushed on the next iteration.
                     match d.mountpoint_dentry() {
                         Some(mp) => current = Some(mp),
-                        None => break,
+                        // The global (or a detached) filesystem root: with a
+                        // stop requested we never met the process root, so
+                        // `self` is NOT under it (Linux: unreachable).
+                        None => {
+                            if stop.is_some() {
+                                return None;
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -218,7 +264,7 @@ impl Dentry {
             }
             path.push_str(&name);
         }
-        path
+        Some(path)
     }
 
     /// Look up a child dentry by name. Returns None if not found.

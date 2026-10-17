@@ -697,9 +697,16 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 (*task_ptr).set_fs(Some(parent_fs));
             }
         } else {
-            // Copy filesystem info (child gets its own FsStruct with same cwd)
-            let parent_cwd = (*current_ptr).get_cwd();
-            (*task_ptr).set_cwd(&parent_cwd);
+            // Copy filesystem info: the child gets its own FsStruct with
+            // the same cwd AND root — including the cwd/root DENTRIES
+            // (fork duplicates fs_struct wholesale in Linux; the old
+            // string-only cwd copy let a forked child of a chrooted task
+            // escape the jail and lose the mount-aware cwd).
+            if let (Some(parent_fs), Some(child_fs)) =
+                ((*current_ptr).fs_arc(), (*task_ptr).fs_arc())
+            {
+                child_fs.copy_fs_from(&parent_fs);
+            }
         }
 
         // === CLONE_THREAD: join the parent's thread group ===
