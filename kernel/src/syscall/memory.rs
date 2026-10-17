@@ -949,6 +949,23 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 unsafe { crate::arch::mm::asid::flush_tlb_all(); }
                             }
 
+                            // b91-b92 forensics: attribute big anonymous
+                            // PROT_NONE mappings (musl pthread stacks are
+                            // PROT_NONE + mprotect RW; a stack that STAYS
+                            // wholly PROT_NONE after its thread runs is a
+                            // lost/reverted mprotect — the hilogd crash
+                            // family writes into exactly such a VMA).
+                            if prot_flags == 0
+                                && map_flags & map::MAP_ANONYMOUS != 0
+                                && actual_length >= 0x10_0000
+                            {
+                                crate::pr_info!(
+                                    "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
+                                    crate::process::current_pid(),
+                                    mapped_addr.as_usize(),
+                                    actual_length
+                                );
+                            }
                             mapped_addr.as_usize() as i64
                         },
                         Err(e) => {
@@ -995,6 +1012,18 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
+
+    // b91-b92 forensics: big munmaps are pthread-stack teardowns (musl
+    // __unmapself) or mallocng group frees — the counterparts of
+    // PROTNONE-MAP/MPROTECT-RW above.
+    if length >= 0x8_0000 {
+        crate::pr_info!(
+            "BIGMUNMAP pid {} addr {:#x} len {:#x}",
+            crate::process::current_pid(),
+            addr,
+            length
+        );
+    }
 
     // Validate arguments
     if length == 0 {
@@ -1060,6 +1089,19 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
     let prot = args[2] as u32;
+
+    // b91-b92 forensics: big PROT_WRITE mprotects are the pthread-stack
+    // upgrade (musl maps PROT_NONE, then mprotects RW before clone). If a
+    // stack VMA that faulted was never upgraded, this log sequence shows
+    // which upgrade went missing (or landed on the wrong range).
+    if prot & 0x2 != 0 && length >= 0x8_0000 {
+        crate::pr_info!(
+            "MPROTECT-RW pid {} addr {:#x} len {:#x}",
+            crate::process::current_pid(),
+            addr,
+            length
+        );
+    }
 
     // Validate arguments
     if length == 0 {
