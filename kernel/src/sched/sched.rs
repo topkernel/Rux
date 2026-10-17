@@ -821,7 +821,9 @@ fn process_deferred_exit_pid(packed: i64) {
     // EXITNOTIFY (dbus-activation hunt): activation stalls were traced to
     // the parent never learning its spawned child exited. Log each
     // delivered exit notification (parent, child, signal rc).
-    {
+    // serial-clean: default off — available only behind dfx=schedtrace
+    // (it fired on every child exit and polluted every boot log).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
         static EN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if EN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
@@ -4498,7 +4500,11 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                     // Slot moved on (the classic R56 shape) or the mark was
                     // never set (R46 family): wake_up_enqueue's GRQ-locked
                     // phantom path verifies linkage/ownership and heals.
-                    if wake_up_enqueue(t) {
+                    if wake_up_enqueue(t)
+                        && crate::dfx::switches::enabled(
+                            crate::dfx::switches::DfxSwitch::SchedTrace,
+                        )
+                    {
                         // R80 (diag): name the healed pid — the v1-r1 wedge
                         // printed hundreds of anonymous harvest lines while
                         // the actual blocker (a LIVE-mark phantom) was
@@ -4526,7 +4532,11 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // wake_up_enqueue heals the slot and admits the
                         // re-link.
                         if wake_up_enqueue(t) {
-                            r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                            if crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::SchedTrace,
+                            ) {
+                                r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                            }
                         }
                     } else if (*t).preempt_count() == 0
                         && orphan_watch_confirm(t, pid, now, 3)
