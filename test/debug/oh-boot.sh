@@ -15,7 +15,7 @@
 #   [kernel] bzImage path (default: target/.../bzImage)
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 IMGDIR="$ROOT/run/oh-img"
 TAG="${1:?usage: oh-boot.sh <tag> [kernel]}"
 KERNEL="${2:-$ROOT/target/x86_64-unknown-none/debug/bzImage}"

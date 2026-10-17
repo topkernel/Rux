@@ -582,6 +582,20 @@ pub fn do_exit(exit_code: i32) -> ! {
         // ===== Core dump (P1) =====
         // A negative exit code encodes death by signal; the core-dumping
         // signals get a core file written BEFORE any resource is torn
+        // ===== Binder pool reaping =====
+        // Threads killed by a signal never reach BINDER_THREAD_EXIT;
+        // without this their pool entries live forever, the spawner's
+        // threads.len() gate counts corpses and never replenishes, and
+        // the process's clients stall (b92: samgr proc todo depth 13,
+        // hdf_devhost waiters parked 162s). Cleanly-exiting IPC threads
+        // also route through the same reaper via the ioctl.
+        crate::ipc::binder::binder_task_died(
+            current_pid,
+            (*current).tgid(),
+            (*current).ns_pid_local(),
+        );
+
+        // ===== Core dump (P1) =====
         // down. Runs in the dying task's context (its cwd/fdtable/mm are
         // still intact). This is the single funnel for both the signal
         // default-action path (handle_default_signal -> do_exit_group)

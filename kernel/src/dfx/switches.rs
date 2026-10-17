@@ -114,15 +114,22 @@ pub enum DfxSwitch {
     OncpuInject,
     /// Per-short-write printable capture (OH bring-up): binary hilog /
     /// binder frames still leak past the printable-head filter and spam
-    /// the console; default OFF, enable with dfx=writetrace.
+    /// the console; default OFF, enable with dfx=writetrace. Mirrors
+    /// main's d0fb238c+b18f683f (this branch adds fd + a hex prefix for
+    /// offline frame decoding).
     WriteTrace,
     /// Full physical-accounting ledger (fake-OOM family): arms the UART
     /// magic "LEDGER!" for an on-demand census + reconciliation dump and
     /// includes the OOM-moment ledger automatically. See dfx/ledger.rs.
     Ledger,
+    /// Per-transaction binder trace (HDF devmgr<->devhost handshake hunt):
+    /// one "btx:" line per resolved BC_TRANSACTION/BC_REPLY (from pid,
+    /// target pid, handle, code, oneway/twoway, data sizes). Default
+    /// OFF - a full OH boot resolves tens of thousands of transactions.
+    BinderTrace,
 }
 
-const SWITCH_COUNT: usize = 18;
+const SWITCH_COUNT: usize = 19;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -151,6 +158,7 @@ impl DfxSwitch {
             DfxSwitch::WriteTrace => 15,
             DfxSwitch::OncpuInject => 16,
             DfxSwitch::Ledger => 17,
+            DfxSwitch::BinderTrace => 18,
         }
     }
 
@@ -174,6 +182,7 @@ impl DfxSwitch {
             "writetrace" => Some(DfxSwitch::WriteTrace),
             "oncpuinject" => Some(DfxSwitch::OncpuInject),
             "ledger" => Some(DfxSwitch::Ledger),
+            "bindertrace" => Some(DfxSwitch::BinderTrace),
             _ => None,
         }
     }

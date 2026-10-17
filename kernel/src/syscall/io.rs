@@ -302,7 +302,12 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // the whole global 4000 budget in ~3999 lines (boot b43) and the
     // graphics services' output stayed invisible.
     if count <= 256 && fd != 1 && fd != 2 {
-        const WTRACE_PID_MAX: usize = 48;
+        // 512/pid: samgr's runtime HILOGE lines (the SAMStub
+        // "PERMISSION DENIED"/"interfaceToken failed" family) arrive after
+        // its ~20 init-time frames; the old 48/pid budget cut exactly
+        // there and the AddSystemAbility(5100) failure reason stayed
+        // invisible (dfx=writetrace boots only).
+        const WTRACE_PID_MAX: usize = 512;
         const WTRACE_SLOTS: usize = 256;
         static WTRACE_USED: [core::sync::atomic::AtomicU8; WTRACE_SLOTS] =
             [const { core::sync::atomic::AtomicU8::new(0) }; WTRACE_SLOTS];
@@ -320,13 +325,25 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 0
             };
             if used < WTRACE_PID_MAX as u8 {
-                let len = core::cmp::min(count, 200);
-                let mut kb = [0u8; 200];
+                // 480 bytes: enough to zlib-inflate a hilog frame offline
+                // (HiLogAdapter compresses each socket message; 200 cut the
+                // stream mid-dictionary and the frames read as pure noise).
+                let len = core::cmp::min(count, 480);
+                let mut kb = [0u8; 480];
                 // SAFETY: buf/count validated by access_ok above.
                 let uncopied = unsafe {
                     crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
                 };
                 if uncopied == 0 {
+                    // Hex prefix (exact bytes, first 192) for offline
+                    // zlib decoding of compressed hilog frames, plus a
+                    // printable render of the whole sample for reading.
+                    let mut hexout = alloc::string::String::with_capacity(192 * 2);
+                    for &b in kb.iter().take(192) {
+                        const HEX: &[u8; 16] = b"0123456789abcdef";
+                        hexout.push(HEX[(b >> 4) as usize] as char);
+                        hexout.push(HEX[(b & 0xf) as usize] as char);
+                    }
                     let text = kb[..len]
                         .iter()
                         .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
@@ -343,7 +360,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                                 crate::dfx::switches::DfxSwitch::WriteTrace,
                             )
                         {
-                            crate::pr_info!("w pid {}: {}", pid, t);
+                            crate::pr_info!("w pid {} fd {} hx {}: {}", pid, fd, hexout, t);
                         }
                     }
                 }
@@ -890,6 +907,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     if fd >= 0 {
         if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
             if let Some(ret) = crate::ipc::binder::binder_file_ioctl(&file, request, arg) {
+                return ret;
+            }
+            // /dev/access_token_id ioctls (OH token registry): dispatch on
+            // the File's ops identity, same pattern as binder.
+            if let Some(ret) = crate::ipc::access_token::access_token_file_ioctl(&file, request, arg) {
                 return ret;
             }
         }

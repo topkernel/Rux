@@ -103,6 +103,11 @@ const BINDER_CURRENT_PROTOCOL_VERSION: i32 = 8;
 const SZ_BWR: u32 = 48;
 const SZ_TR: u32 = 64;
 const SZ_PTR_COOKIE: u32 = 16;
+/// OH's uapi binder.h packs struct binder_handle_cookie (u32 handle +
+/// u64 cookie) with `} __packed;` — 12 bytes, not the aligned 16 of
+/// binder_ptr_cookie. The BC command words for death notifications
+/// therefore encode size 12.
+const SZ_HANDLE_COOKIE: u32 = 12;
 const SZ_U32: u32 = 4;
 const SZ_U64: u32 = 8;
 const SZ_VERSION: u32 = 4;
@@ -121,6 +126,13 @@ pub const BINDER_SET_CONTEXT_MGR_EXT: u32 = iow(b'b' as u32, 13, 24);
 /// _IOWR('b', 30, struct binder_feature_set) — OpenHarmony addition; the
 /// IPC library probes it right after BINDER_VERSION on every open.
 pub const BINDER_FEATURE_SET: u32 = ioc(3, b'b' as u32, 30, SZ_U64);
+pub const BINDER_GET_ACCESS_TOKEN: u32 = ioc(3, b'b' as u32, 31, 32);
+pub const BINDER_GET_SENDER_INFO: u32 = ioc(3, b'b' as u32, 32, 40);
+
+/// OH binder enhancement features we support (sys_binder.h masks):
+/// bit0 ACCESS_TOKEN (BINDER_GET_ACCESS_TOKEN), bit2 SENDER_INFO
+/// (BINDER_GET_SENDER_INFO — also carries the real sender pid).
+pub const BINDER_SUPPORTED_FEATURES: u64 = (1 << 0) | (1 << 2);
 
 pub const BC_TRANSACTION: u32 = iow(b'c' as u32, 0, SZ_TR);
 pub const BC_REPLY: u32 = iow(b'c' as u32, 1, SZ_TR);
@@ -134,8 +146,13 @@ pub const BC_ACQUIRE_DONE: u32 = iow(b'c' as u32, 9, SZ_PTR_COOKIE);
 pub const BC_REGISTER_LOOPER: u32 = io(b'c' as u32, 11);
 pub const BC_ENTER_LOOPER: u32 = io(b'c' as u32, 12);
 pub const BC_EXIT_LOOPER: u32 = io(b'c' as u32, 13);
-pub const BC_REQUEST_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 14, SZ_PTR_COOKIE);
-pub const BC_CLEAR_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 15, SZ_PTR_COOKIE);
+/// OH packs binder_handle_cookie (__packed, 12 bytes) so the command word
+/// is _IOW('c', 14, 12) = 0x400c630e. With the aligned 16-byte size the
+/// word mismatches and the write loop reports "unknown BC command
+/// 0x400c630e, stopping" (b117-b119: pid 326 froze right after samgr
+/// accepted SA 5100, wedging the whole SA registration storm).
+pub const BC_REQUEST_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 14, SZ_HANDLE_COOKIE);
+pub const BC_CLEAR_DEATH_NOTIFICATION: u32 = iow(b'c' as u32, 15, SZ_HANDLE_COOKIE);
 pub const BC_DEAD_BINDER_DONE: u32 = iow(b'c' as u32, 16, SZ_U64);
 pub const BC_TRANSACTION_SG: u32 = iow(b'c' as u32, 17, SZ_TR_SG);
 pub const BC_REPLY_SG: u32 = iow(b'c' as u32, 18, SZ_TR_SG);
@@ -152,8 +169,12 @@ pub const BR_RELEASE: u32 = ior(b'r' as u32, 9, SZ_PTR_COOKIE);
 pub const BR_DECREFS: u32 = ior(b'r' as u32, 10, SZ_PTR_COOKIE);
 pub const BR_NOOP: u32 = io(b'r' as u32, 12);
 pub const BR_SPAWN_LOOPER: u32 = io(b'r' as u32, 13);
-pub const BR_DEAD_BINDER: u32 = ior(b'r' as u32, 11, SZ_U64);
-pub const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = ior(b'r' as u32, 14, SZ_U64);
+/// OH uapi: BR_DEAD_BINDER = _IOR('r', 15, binder_uintptr_t) and
+/// BR_CLEAR_DEATH_NOTIFICATION_DONE = _IOR('r', 16, binder_uintptr_t).
+/// nr 11 is BR_ATTEMPT_ACQUIRE in the same header — libipc switch-matches
+/// the exact word, so the old nr 11/14 encodings would be misparsed.
+pub const BR_DEAD_BINDER: u32 = ior(b'r' as u32, 15, SZ_U64);
+pub const BR_CLEAR_DEATH_NOTIFICATION_DONE: u32 = ior(b'r' as u32, 16, SZ_U64);
 pub const BR_FAILED_REPLY: u32 = io(b'r' as u32, 17);
 /// struct binder_transaction_data_secctx (upstream): the transaction data
 /// followed by a pointer to the sender's NUL-terminated security-context
@@ -1187,6 +1208,109 @@ unsafe fn unpin_txn_node(world: &World, t: &BinderTxn) {
     }
 }
 
+/// Abort a pool thread's in-flight state and remove it from the pool.
+///
+/// Shared by BINDER_THREAD_EXIT (musl's clean IPC-thread shutdown) and
+/// the task-exit hook `binder_task_died` (threads killed by a signal
+/// never reach the ioctl — the b86-b93 heap-corruption victims).
+/// Every transaction the thread was PROCESSING gets its sender a
+/// BR_DEAD_REPLY (Linux binder_thread_release semantics — the reply
+/// will never come); queued work is finished (buffers freed, node pins
+/// dropped). Returns the procs whose readers must be re-checked for
+/// wake-up AFTER WORLD is released.
+///
+/// SAFETY: caller must hold WORLD.
+unsafe fn binder_reap_thread(
+    world: &World,
+    proc: &Arc<BinderProc>,
+    tid: u32,
+) -> Vec<Arc<BinderProc>> {
+    let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    let Some(t) = proc.im().threads.iter().find(|t| t.tid == tid).cloned() else {
+        return wakes;
+    };
+    let th = t.st();
+    let mut self_wake = false;
+    for x in th.txn_stack.drain(..) {
+        // Sender wake-up for the never-coming reply.
+        if let Some(fp) = &x.from_proc {
+            let same = Arc::ptr_eq(fp, proc);
+            let mut delivered = false;
+            if let Some(ftid) = x.from_tid {
+                let pool = if same {
+                    proc.im().threads.clone()
+                } else {
+                    pm(world, fp).im().threads.clone()
+                };
+                if let Some(ft) = pool.into_iter().find(|ct| ct.tid == ftid) {
+                    let fth = ft.st();
+                    fth.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+                    fth.process_todo = true;
+                    delivered = true;
+                }
+            }
+            if !delivered {
+                if same {
+                    proc.im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+                } else {
+                    pm(world, fp).im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+                }
+            }
+            if same {
+                self_wake = true;
+            } else {
+                wakes.push(fp.clone());
+            }
+        }
+        // Free the delivered buffer + drop the node pin: an abandoned
+        // sync txn held its pin forever when the processing thread died
+        // (b92 samgr: pinned nodes never reached the 0-refs transition).
+        finish_work(world, proc, Work::Transaction(x));
+    }
+    for wk in th.todo.drain(..) {
+        finish_work(world, proc, wk);
+    }
+    proc.im().threads.retain(|ct| ct.tid != tid);
+    if self_wake {
+        wakes.push(proc.clone());
+    }
+    wakes
+}
+
+/// Task-exit hook (called from do_exit): a thread that dies without
+/// reaching BINDER_THREAD_EXIT must leave its process's binder pool.
+/// A corpse pool entry blocks the BR_SPAWN_LOOPER replenishment gate
+/// (`threads.len() < max_threads` counts it as a live worker), the pool
+/// starves, proc todo grows without a processor, and every client of
+/// the process stalls (b92: samgr todo depth 13 with 16 registered
+/// threads — all dead — and hdf_devhost waiters parked 162s).
+pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
+    let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    {
+        let mut w = world_lock();
+        let Some(world) = w.as_mut() else { return };
+        // SAFETY: under WORLD.
+        unsafe {
+            // Membership: OH opens /dev/binder on the group leader
+            // (proc.pid == tgid); a non-leader opener is matched by its
+            // own pid so its personal pool entry is still reaped.
+            let proc = world
+                .procs
+                .iter()
+                .find(|p| p.pid == dying_tgid || p.pid == dying_pid)
+                .cloned();
+            let Some(proc) = proc else { return };
+            if proc.im().is_dead {
+                return;
+            }
+            wakes = binder_reap_thread(world, &proc, dying_tid);
+        }
+    }
+    for p in wakes {
+        wake_proc_one(&p);
+    }
+}
+
 /// mmap handler (sys_mmap dispatch for BINDER_OPS files).
 pub fn binder_mmap_handler(
     file: &crate::fs::File,
@@ -1217,6 +1341,18 @@ pub fn binder_mmap_handler(
     let task = crate::sched::current().ok_or(-12)?;
     let addr_space = task.address_space().ok_or(-12)?;
 
+    // Double-mmap check FIRST, before any allocation or VMA surgery: a
+    // second binder mmap on the same proc must only cost the EBUSY.
+    {
+        let w = world_lock();
+        // SAFETY: under WORLD.
+        unsafe {
+            if pm(w.as_ref().unwrap(), &proc).im().alloc.is_some() {
+                return Err(-16); // EBUSY: already mapped
+            }
+        }
+    }
+
     let npages = length.div_ceil(PAGE_SIZE);
     let order = npages.next_power_of_two().trailing_zeros() as usize;
     let phys = alloc_pages(GfpFlags::GFP_KERNEL, order);
@@ -1228,39 +1364,98 @@ pub fn binder_mmap_handler(
     let kvirt = crate::arch::mm::phys_to_virt(PhysAddr::new(phys as u64)).bits() as *mut u8;
     unsafe { core::ptr::write_bytes(kvirt, 0, size) };
 
-    {
-        let w = world_lock();
-        // SAFETY: under WORLD.
-        unsafe {
-            if pm(w.as_ref().unwrap(), &proc).im().alloc.is_some() {
-                free_pages(phys, order);
-                return Err(-16); // EBUSY: already mapped
-            }
-        }
-    }
+    let mut vma_flags = VmaFlags::new();
+    vma_flags.insert(VmaFlags::READ);
+    vma_flags.insert(VmaFlags::WRITE);
+    vma_flags.insert(VmaFlags::SHARED);
 
-    let vaddr = if addr == 0 {
-        match addr_space.find_free_area(size) {
-            Ok(v) => v.as_usize(),
-            Err(_) => {
-                free_pages(phys, order);
-                return Err(-12);
-            }
-        }
-    } else {
-        addr & !(PAGE_SIZE - 1)
-    };
-    {
+    // ATOMIC pick + reserve (b91 heap-corruption fix): the old shape ran
+    // find_free_area on a READ lock, then spent the 4 MiB memset + eager
+    // PTE-install window BEFORE taking vma_write to add the VMA. A second
+    // thread of the same mm (mallocng group mmap, pthread stack) was
+    // handed the same "free" address in that window; whichever side lost
+    // either (a) had its demand-installed PTEs overwritten by this loop's
+    // eager map_page — orphaning live heap frames and pointing the VMA at
+    // binder frames — or (b) failed the VmaManager::add here with Overlap
+    // AFTER its PTEs were installed, then FREE_PAGES'd the block while
+    // still mapped: the buddy re-handed those frames and every later
+    // store through the surviving VMA corrupted the new owner in place
+    // (the b86-b91 zeroed-buffer / mallocng-meta family). Mirrors the
+    // sys_mmap pick-and-insert fix (mm_ops.rs mmap).
+    let vaddr = {
+        let mut vmas = addr_space.vma_write();
         let user_end = crate::arch::mm::user_addr::USER_END;
-        let Some(end) = vaddr.checked_add(size) else {
-            free_pages(phys, order);
-            return Err(-22);
+        let mut base = if addr == 0 {
+            None
+        } else {
+            let b = addr & !(PAGE_SIZE - 1);
+            let Some(end) = b.checked_add(size) else {
+                free_pages(phys, order);
+                return Err(-22);
+            };
+            if end > user_end {
+                free_pages(phys, order);
+                return Err(-22);
+            }
+            // Hint honored only when the whole range is VMA-free.
+            let probe = Vma::new(
+                crate::mm::page::VirtAddr::new(b),
+                crate::mm::page::VirtAddr::new(b + size),
+                vma_flags,
+            );
+            if vmas.iter().any(|v| v.overlaps(&probe)) {
+                None
+            } else {
+                Some(b)
+            }
         };
-        if end > user_end {
-            free_pages(phys, order);
-            return Err(-22);
+        if base.is_none() {
+            // Bottom-up free-area scan from MMAP_START under the WRITE
+            // lock (same placement rule as MmStruct::find_free_area).
+            use crate::arch::mm::user_addr as ua;
+            let mut search_start = ua::MMAP_START;
+            let search_end = ua::MMAP_END.min(user_end.saturating_sub(size));
+            let mut hit: Option<usize> = None;
+            for v in vmas.iter() {
+                let vs = v.start().as_usize();
+                if vs > search_start && vs - search_start >= size {
+                    hit = Some(search_start);
+                    break;
+                }
+                if v.end().as_usize() > search_start {
+                    search_start = v.end().as_usize();
+                }
+                if search_start > search_end {
+                    break;
+                }
+            }
+            let b = match hit {
+                Some(b) => b,
+                None => {
+                    if search_start <= search_end && search_end - search_start >= size {
+                        search_start
+                    } else {
+                        drop(vmas);
+                        free_pages(phys, order);
+                        return Err(-12);
+                    }
+                }
+            };
+            base = Some(b);
         }
-    }
+        let b = base.unwrap();
+        let vma = Vma::new(
+            crate::mm::page::VirtAddr::new(b),
+            crate::mm::page::VirtAddr::new(b + size),
+            vma_flags,
+        );
+        if let Err(_overlap) = vmas.add(vma) {
+            drop(vmas);
+            free_pages(phys, order);
+            return Err(-12);
+        }
+        b
+    };
 
     let root = addr_space.root_ppn();
     let mut pte_flags = PageTableEntry::V | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
@@ -1270,35 +1465,57 @@ pub fn binder_mmap_handler(
     if prot & 0x2 != 0 {
         pte_flags |= PageTableEntry::R | PageTableEntry::W;
     }
-    // SAFETY: root is the task's page-table root; phys..phys+size is our
-    // fresh contiguous allocation.
-    unsafe {
+    // Eager install under PTE_MODIFY_LOCK (the NEW2 class: an unlocked
+    // leaf-PTE writer racing fork's COW walk or a COW fault diverges
+    // refcounts and leaves dangling child PTEs). The VMA is already
+    // reserved, so a demand fault on this range in the reserve→map window
+    // is only possible from a same-mm thread touching a brand-new address
+    // it cannot know; if one did win a page anyway, its anon zero page is
+    // exclusive inside OUR VMA — zap it and install the binder frame so
+    // the kvirt/PTE pairing (binder's coherence contract) holds.
+    {
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
         for i in 0..(size / PAGE_SIZE) {
             let va = vaddr + i * PAGE_SIZE;
             let pa = phys + i * PAGE_SIZE;
-            map_page(root, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
+            // SAFETY: root is the task's live page-table root; the walk is
+            // read-only and lock-protected.
+            if let Some((old_ppn, _bits)) =
+                unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va as u64) }
+            {
+                // Demand-fault winner: free its exclusive anon page, then
+                // replace below. put_page→0 frees; refcount is 1 (fresh
+                // zero page inside our private VMA window).
+                let page = crate::mm::pfn_to_page_mut(old_ppn as usize);
+                if !page.is_null() {
+                // SAFETY: descriptor of the mapped frame under PTE lock.
+                unsafe {
+                    (*page).rmap_alt_remove(
+                        addr_space as *const _ as usize,
+                        va / PAGE_SIZE,
+                    );
+                        (*page).dec_mapcount();
+                        if (*page).put_page() == 0 {
+                            crate::mm::page_alloc::free_pages((old_ppn as usize) << 12, 0);
+                        }
+                    }
+                }
+                addr_space.sub_rss(1);
+            }
+            // SAFETY: root is the task's page-table root; phys..phys+size is our
+            // fresh contiguous allocation, mapped page-aligned under the PTE lock.
+            unsafe {
+                map_page(root, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
+            }
             // Mapping reference (io_uring discipline): munmap drops one,
             // binder_close drops the owner one, the last drop frees.
             let page = crate::mm::pfn_to_page_mut(crate::mm::phys_to_pfn(pa));
             if !page.is_null() {
-                (*page).get_page();
+                // SAFETY: descriptor of our freshly allocated frame.
+                unsafe { (*page).get_page(); }
             }
         }
         crate::arch::mm::asid::flush_tlb_all();
-    }
-
-    let mut vma_flags = VmaFlags::new();
-    vma_flags.insert(VmaFlags::READ);
-    vma_flags.insert(VmaFlags::WRITE);
-    vma_flags.insert(VmaFlags::SHARED);
-    let vma = Vma::new(
-        crate::mm::page::VirtAddr::new(vaddr),
-        crate::mm::page::VirtAddr::new(vaddr + size),
-        vma_flags,
-    );
-    if addr_space.vma_write().add(vma).is_err() {
-        free_pages(phys, order);
-        return Err(-12);
     }
 
     let mut alloc = BinderAlloc {
@@ -1636,16 +1853,75 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
         }
         BINDER_FEATURE_SET => {
             // OpenHarmony binder feature negotiation: report the enhanced
-            // features this driver supports. We implement none of them
-            // (access-token, real-pid tagging), so the answer is 0 —
-            // libipc then runs its baseline protocol, which is plain
-            // upstream binder. Answering the ioctl at all (instead of
-            // EINVAL) keeps every open from logging a probe failure.
+            // features this driver supports. With the access-token registry
+            // (ipc::access_token) we now implement the token transport the
+            // samgr security chain needs — without it samgr's CanRequest()
+            // saw a uid-as-token, denied every AddSystemAbility, and the
+            // whole HDF host chain (composer included) starved.
             if arg == 0 || !crate::arch::uaccess::access_ok(arg, 8) {
                 return -(EFAULT as i64);
             }
             // SAFETY: arg validated non-null, 8-byte writable.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut u64, 0u64) } {
+            if !unsafe {
+                crate::arch::uaccess::put_user(arg as *mut u64, BINDER_SUPPORTED_FEATURES)
+            } {
+                return -(EFAULT as i64);
+            }
+            0
+        }
+        BINDER_GET_ACCESS_TOKEN | BINDER_GET_SENDER_INFO => {
+            // OH extension: the server asks for the SENDER of the
+            // transaction it is currently servicing. struct access_token
+            // {u64 sender_tokenid; u64 first_tokenid; u64 reserved[2]},
+            // struct binder_sender_info = access_token + u64 sender_pid_nr.
+            let with_pid = request == BINDER_GET_SENDER_INFO;
+            let len = if with_pid { 40 } else { 32 };
+            if arg == 0 || !crate::arch::uaccess::access_ok(arg, len) {
+                return -(EFAULT as i64);
+            }
+            // The calling thread's transaction stack top is the txn being
+            // serviced (Linux thread->transaction_stack, OH reads the same).
+            let (sender_pid, token, ftoken) = {
+                crate::pr_info!("btx: GET_SENDER_INFO caller tid {}", current_tid());
+                let tid = current_tid();
+                let mut out = (0u32, 0u64, 0u64);
+                let w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe {
+                    let world = w.as_ref().unwrap();
+                    if let Some(th) = world
+                        .procs
+                        .iter()
+                        .find(|q| Arc::ptr_eq(q, &proc))
+                        .and_then(|q| q.im().threads.iter().find(|t| t.tid == tid))
+                    {
+                        if let Some(txn) = th.st().txn_stack.last() {
+                            if let Some(fp) = &txn.from_proc {
+                                out = (fp.pid, 0, 0);
+                            }
+                        }
+                    }
+                }
+                drop(w);
+                let (t, f) = crate::ipc::access_token::token_of(out.0);
+                crate::pr_info!("btx: GET_SENDER_INFO sender pid {} token {:#x} ftoken {:#x}", out.0, t, f);
+                (out.0, t, f)
+            };
+            let mut rec = [0u64; 5];
+            rec[0] = token;
+            rec[1] = ftoken;
+            if with_pid {
+                rec[4] = sender_pid as u64;
+            }
+            // SAFETY: arg validated, len bytes.
+            if unsafe {
+                crate::arch::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    rec.as_ptr() as *const u8,
+                    len,
+                )
+            } != 0
+            {
                 return -(EFAULT as i64);
             }
             0
@@ -1655,15 +1931,12 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             // SAFETY: under WORLD.
             unsafe {
                 let world = w.as_mut().unwrap();
-                let t = pm(world, &proc).im().threads.iter().find(|t| t.tid == tid).cloned();
-                if let Some(t) = t {
-                    let th = t.st();
-                    for wk in th.todo.drain(..) {
-                        finish_work(world, &proc, wk);
-                    }
-                    th.txn_stack.clear();
+                let wakes = binder_reap_thread(world, &proc, tid);
+                // Wake outside WORLD (lock discipline; see binder_close).
+                drop(w);
+                for p in wakes {
+                    wake_proc_one(&p);
                 }
-                pm(world, &proc).im().threads.retain(|t| t.tid != tid);
             }
             0
         }
@@ -1784,6 +2057,194 @@ fn get_user_at<T: Copy>(base: u64, off: usize) -> Option<T> {
     unsafe { crate::arch::uaccess::get_user(addr as *const T) }
 }
 
+/// BC-FORENSICS: snapshot the state of the userspace page backing a bad
+/// binder write command — the "unknown BC command 0x0" family from the
+/// b86-b90 heap-corruption hunt. A zero command word means copy_from_user
+/// read zeros where userspace believes it wrote binder commands; the
+/// page-table bits, page-descriptor counts and raw page contents below
+/// distinguish the corruption modes:
+///   - PTE present, page contents zeroed  -> data scribbled in place
+///     (or the page was re-handed after a bogus free — free-while-mapped
+///     tripwire never fired, so in-place is the leading theory),
+///   - PTE present onto a DIFFERENT frame  -> PTE overwrite/aliasing,
+///   - PTE absent / swap-marker            -> mapping torn down live,
+///   - VMA missing                         -> "vanishing VMA" family (b89).
+/// Error-path only (never on the hot path).
+fn bc_corruption_snapshot(
+    proc: &Arc<BinderProc>,
+    thread: &Arc<BinderThread>,
+    buffer: u64,
+    size: usize,
+    bad_off: usize,
+    cmd: u32,
+) {
+    use crate::mm::page::{VirtAddr, PAGE_SIZE};
+
+    let bad_va = buffer.wrapping_add(bad_off as u64);
+    crate::pr_err!(
+        "BC-FORENSICS: pid {} tid {} cmd {:#x} buffer={:#x} size={} bad_off={}",
+        proc.pid,
+        thread.tid,
+        cmd,
+        buffer,
+        size,
+        bad_off
+    );
+
+    // Userspace view of the buffer: head words + words around the bad
+    // offset (0xDEAD_BEEF marks "unmapped/unreadable", not "zero").
+    let mut head = [0u32; 8];
+    for i in 0..8usize {
+        head[i] = get_user_at::<u32>(buffer, i * 4).unwrap_or(0xDEAD_BEEF);
+    }
+    crate::pr_err!("BC-FORENSICS: buffer[0..32] ={:08x?}", head);
+    if bad_off > 0 {
+        let mut around = [0u32; 8];
+        let base = bad_off.saturating_sub(16) & !3;
+        for i in 0..8usize {
+            let off = base + i * 4;
+            if off < size {
+                around[i] = get_user_at::<u32>(buffer, off).unwrap_or(0xDEAD_BEEF);
+            } else {
+                around[i] = 0xCAFE_0000;
+            }
+        }
+        crate::pr_err!("BC-FORENSICS: buffer[{}..] ={:08x?}", base, around);
+    }
+
+    // Binder-zone membership: a write buffer inside the proc's own mmap'd
+    // binder region points at a different failure mode (kernel-side block
+    // corruption) than one on the malloc heap.
+    {
+        // WORLD held for the alloc inspection (guard lives to scope end).
+        let _w = world_lock();
+        unsafe {
+            if let Some(alloc) = proc.im().alloc.as_ref() {
+                let lo = alloc.user_base;
+                let hi = alloc.user_base + (alloc.npages * PAGE_SIZE) as u64;
+                crate::pr_err!(
+                    "BC-FORENSICS: binder mmap zone {:#x}-{:#x} bad_va_in_zone={}",
+                    lo,
+                    hi,
+                    bad_va >= lo && bad_va < hi
+                );
+            }
+        }
+    }
+
+    let Some(task) = crate::sched::current() else { return };
+    let Some(aspace) = task.address_space() else { return };
+    let root = aspace.root_ppn();
+    let page_va = bad_va & !((PAGE_SIZE - 1) as u64);
+
+    // Covering VMA (find() is on the page-safe address bad_va).
+    {
+        let vmas = aspace.vma_read();
+        match vmas.find(VirtAddr::new(bad_va as usize)) {
+            Some(v) => crate::pr_err!(
+                "BC-FORENSICS: vma {:#x}-{:#x} flags={:#x} type={:?}",
+                v.start().as_usize(),
+                v.end().as_usize(),
+                v.flags().bits(),
+                v.vma_type()
+            ),
+            None => crate::pr_err!("BC-FORENSICS: NO VMA covers {:#x}", bad_va),
+        }
+    }
+
+    // Raw leaf PTE first: catches P=0 swap/migration markers that the
+    // walker below reports as simply "absent". x86_64-only (the OH target
+    // arch); riscv64 keeps the walker read.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Some(raw) =
+            crate::arch::mm::page_fault::read_pte_raw(root, crate::arch::mm::VirtAddr::new(bad_va))
+        {
+            crate::pr_err!("BC-FORENSICS: raw leaf pte = {:#x}", raw);
+        }
+    }
+
+    // SAFETY: read-only diagnostic walk of the current task's live user
+    // page tables.
+    let walked = unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, page_va) };
+    match walked {
+        Some((ppn, bits)) => {
+            #[cfg(target_arch = "x86_64")]
+            crate::pr_err!(
+                "BC-FORENSICS: pte(page) ppn={:#x} bits={:#x} P={} W={} U={} NX={} A={} D={}",
+                ppn,
+                bits,
+                bits & 0x1 != 0,
+                bits & 0x2 != 0,
+                bits & 0x4 != 0,
+                bits & 0x8000_0000_0000_0000 != 0,
+                bits & 0x20 != 0,
+                bits & 0x40 != 0
+            );
+            #[cfg(target_arch = "riscv64")]
+            crate::pr_err!(
+                "BC-FORENSICS: pte(page) ppn={:#x} bits={:#x} V={} R={} W={} X={}",
+                ppn,
+                bits,
+                bits & 0x1 != 0,
+                bits & 0x2 != 0,
+                bits & 0x4 != 0,
+                bits & 0x8 != 0
+            );
+
+            let page = crate::mm::pfn_to_page_mut(ppn as usize);
+            if !page.is_null() {
+                // SAFETY: read-only descriptor access for a live frame.
+                let p = unsafe { &*page };
+                crate::pr_err!(
+                    "BC-FORENSICS: page desc refcount={} mapcount={} Cow={} Anon={} SwapBacked={} OnFreelist={} Reserved={} Migrating={}",
+                    p.refcount(),
+                    p.mapcount(),
+                    p.test_flag(crate::mm::page_desc::PageFlag::Cow),
+                    p.test_flag(crate::mm::page_desc::PageFlag::Anonymous),
+                    p.test_flag(crate::mm::page_desc::PageFlag::SwapBacked),
+                    p.test_flag(crate::mm::page_desc::PageFlag::OnFreelist),
+                    p.test_flag(crate::mm::page_desc::PageFlag::Reserved),
+                    p.test_flag(crate::mm::page_desc::PageFlag::Migrating),
+                );
+                let mut mappings = alloc::string::String::new();
+                // SAFETY: same read-only descriptor.
+                unsafe {
+                    (*page).rmap_alt_for_each(|mm, vpn| {
+                        use core::fmt::Write;
+                        let _ = write!(mappings, " (mm:{:#x},vpn:{:#x})", mm, vpn);
+                    });
+                }
+                if !mappings.is_empty() {
+                    crate::pr_err!("BC-FORENSICS: page alt mappings:{}", mappings);
+                }
+            } else {
+                crate::pr_err!("BC-FORENSICS: page desc NULL for ppn {:#x}", ppn);
+            }
+
+            // Raw page contents through the direct map: is the WHOLE page
+            // zero, or only the binder words? (frame may be any user page;
+            // the linear map covers all RAM on both targets)
+            if crate::mm::pfn_valid(ppn as usize) {
+                let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(ppn << 12));
+                let base = kv.bits() as usize as *const u64;
+                // SAFETY: base points at the physical page behind the PTE
+                // just walked, inside the kernel direct map; 16 u64 words
+                // are within the page.
+                let words = unsafe { core::slice::from_raw_parts(base, 16) };
+                crate::pr_err!("BC-FORENSICS: page[{:#x}] first 128B ={:016x?}", ppn << 12, words);
+            }
+        }
+        None => {
+            crate::pr_err!(
+                "BC-FORENSICS: page {:#x} NOT MAPPED in pid {}'s tables (PTE absent)",
+                page_va,
+                proc.pid
+            );
+        }
+    }
+}
+
 fn binder_thread_write(
     proc: &Arc<BinderProc>,
     thread: &Arc<BinderThread>,
@@ -1823,6 +2284,46 @@ fn binder_thread_write(
                     0
                 };
                 ptr += if sg { 72 } else { 64 };
+                // dfx=bindertrace: payload head for small parcels — the
+                // interface token ("ohos.system...." / hdf names) is ASCII
+                // at the head and names the target interface; replies carry
+                // the result int. Read BEFORE the world lock (uaccess).
+                if crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::BinderTrace,
+                ) && tr.data_size > 0
+                    && tr.data_size <= 160
+                {
+                    // Full parcel for small transactions: the
+                    // FLAT_BINDER_OBJECT past the interface token is the
+                    // prime suspect in the AddSystemAbility(5100)
+                    // ERR_TRANSACTION_FAILED loop (driver must translate
+                    // BINDER_TYPE_BINDER -> HANDLE for the target).
+                    let n = tr.data_size as usize;
+                    let mut pb = [0u8; 160];
+                    if unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            pb.as_mut_ptr(),
+                            tr.data_buffer as *const u8,
+                            n,
+                        )
+                    } == 0
+                    {
+                        const HEX: &[u8; 16] = b"0123456789abcdef";
+                        let mut hx = alloc::string::String::with_capacity(n * 2);
+                        for &by in pb[..n].iter() {
+                            hx.push(HEX[(by >> 4) as usize] as char);
+                            hx.push(HEX[(by & 0xf) as usize] as char);
+                        }
+                        crate::pr_info!(
+                            "btxp: pid {} {} code {} ds {} p {}",
+                            proc.pid,
+                            if reply { "R" } else { "T" },
+                            tr.code,
+                            tr.data_size,
+                            hx
+                        );
+                    }
+                }
                 let mut err_cmd: u32 = 0;
                 binder_transaction(proc, thread, &mut tr, reply, sg_size, &mut err_cmd);
                 if err_cmd != 0 {
@@ -2282,6 +2783,12 @@ fn binder_thread_write(
                     thread.tid,
                     cmd
                 );
+                // b86-b90 heap-corruption hunt: a zero command word is the
+                // "zeroed write buffer" signature — snapshot the page
+                // state before the userspace side dies (error path only).
+                if cmd == 0 {
+                    bc_corruption_snapshot(proc, thread, buffer, size, ptr - 4, cmd);
+                }
                 ptr -= 4; // not consumed
                 break;
             }
@@ -2437,6 +2944,25 @@ fn binder_transaction(
 
             txn_id = world.next_id;
             world.next_id += 1;
+
+            // dfx=bindertrace: one line per resolved transaction — the
+            // HDF devmgr↔devhost handshake debugging needed the actual
+            // conversation (who calls whom, which codes, oneway or not),
+            // not just the failures.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
+                crate::pr_info!(
+                    "btx: #{} pid {}{} -> pid {} h{} code {} {} ds {} os {}",
+                    txn_id,
+                    proc.pid,
+                    if reply { " R" } else { "" },
+                    target_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                    tr.target_handle,
+                    tr.code,
+                    if oneway { "oneway" } else { "twoway" },
+                    data_size,
+                    offsets_size
+                );
+            }
 
             let is_async = !reply && oneway;
             let _ = is_async;

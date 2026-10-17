@@ -85,6 +85,12 @@ struct binder_ptr_cookie {
     binder_uintptr_t cookie;
 };
 
+/* OH uapi: struct binder_handle_cookie is __packed -> 12 bytes */
+struct __attribute__((packed)) binder_handle_cookie {
+    uint32_t handle;
+    binder_uintptr_t cookie;
+};
+
 struct flat_binder_object {
     uint32_t type;
     uint32_t flags;
@@ -169,8 +175,8 @@ enum {
     BC_REGISTER_LOOPER = _IO('c', 11),
     BC_ENTER_LOOPER = _IO('c', 12),
     BC_EXIT_LOOPER = _IO('c', 13),
-    BC_REQUEST_DEATH_NOTIFICATION = _IOW('c', 14, struct binder_ptr_cookie),
-    BC_CLEAR_DEATH_NOTIFICATION = _IOW('c', 15, struct binder_ptr_cookie),
+    BC_REQUEST_DEATH_NOTIFICATION = _IOW('c', 14, struct binder_handle_cookie),
+    BC_CLEAR_DEATH_NOTIFICATION = _IOW('c', 15, struct binder_handle_cookie),
     BC_DEAD_BINDER_DONE = _IOW('c', 16, binder_uintptr_t),
 };
 
@@ -185,12 +191,12 @@ enum {
     BR_ACQUIRE = _IOR('r', 8, struct binder_ptr_cookie),
     BR_RELEASE = _IOR('r', 9, struct binder_ptr_cookie),
     BR_DECREFS = _IOR('r', 10, struct binder_ptr_cookie),
-    BR_DEAD_BINDER = _IOR('r', 11, binder_uintptr_t),
-    BR_CLEAR_DEATH_NOTIFICATION_DONE = _IOR('r', 14, binder_uintptr_t),
+    BR_DEAD_BINDER = _IOR('r', 15, binder_uintptr_t),
+    BR_CLEAR_DEATH_NOTIFICATION_DONE = _IOR('r', 16, binder_uintptr_t),
     BR_NOOP = _IO('r', 12),
     BR_SPAWN_LOOPER = _IO('r', 13),
     BR_FAILED_REPLY = _IO('r', 17),
-    BR_TRANSACTION_SECCTX = _IOR('r', 42, struct binder_transaction_data_secctx),
+    BR_TRANSACTION_SECCTX = _IOR('r', 2, struct binder_transaction_data_secctx),
 };
 
 /* ---- configuration ---- */

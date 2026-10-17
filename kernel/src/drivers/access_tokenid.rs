@@ -111,8 +111,17 @@ unsafe fn tokenid_ioctl(request: u32, arg: usize) -> i64 {
 
     match request {
         ACCESS_TOKENID_GET_TOKENID => {
+            // Prefer the shared ipc registry (what BINDER_GET_SENDER_INFO
+            // reports); fall back to the per-task field for coherence
+            // with older boots.
+            let (reg, _) = crate::ipc::access_token::token_of(task.tgid() as u32);
+            let v = if reg != 0 {
+                reg
+            } else {
+                task.access_token()
+            };
             // SAFETY: arg validated for 8 writable bytes.
-            if !put_user(arg as *mut u64, task.access_token()) {
+            if !put_user(arg as *mut u64, v) {
                 return -EFAULT;
             }
             0
@@ -122,6 +131,10 @@ unsafe fn tokenid_ioctl(request: u32, arg: usize) -> i64 {
                 return -EPERM;
             }
             task.set_access_token(value);
+            // Mirror into the shared registry — the devfs node now
+            // resolves to the registry device, but keep both stores
+            // coherent for any path still holding these ops.
+            crate::ipc::access_token::mirror_set(task.tgid() as u32, false, value);
             0
         }
         ACCESS_TOKENID_GET_FTOKENID => {
@@ -136,6 +149,7 @@ unsafe fn tokenid_ioctl(request: u32, arg: usize) -> i64 {
                 return -EPERM;
             }
             task.set_access_ftoken(value);
+            crate::ipc::access_token::mirror_set(task.tgid() as u32, true, value);
             0
         }
         _ => -ENOTTY,
