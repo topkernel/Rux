@@ -909,6 +909,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if let Some(ret) = crate::ipc::binder::binder_file_ioctl(&file, request, arg) {
                 return ret;
             }
+            // /dev/access_token_id ioctls (OH token registry): dispatch on
+            // the File's ops identity, same pattern as binder.
+            if let Some(ret) = crate::ipc::access_token::access_token_file_ioctl(&file, request, arg) {
+                return ret;
+            }
         }
     }
 

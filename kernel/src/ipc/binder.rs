@@ -121,6 +121,13 @@ pub const BINDER_SET_CONTEXT_MGR_EXT: u32 = iow(b'b' as u32, 13, 24);
 /// _IOWR('b', 30, struct binder_feature_set) — OpenHarmony addition; the
 /// IPC library probes it right after BINDER_VERSION on every open.
 pub const BINDER_FEATURE_SET: u32 = ioc(3, b'b' as u32, 30, SZ_U64);
+pub const BINDER_GET_ACCESS_TOKEN: u32 = ioc(3, b'b' as u32, 31, 32);
+pub const BINDER_GET_SENDER_INFO: u32 = ioc(3, b'b' as u32, 32, 40);
+
+/// OH binder enhancement features we support (sys_binder.h masks):
+/// bit0 ACCESS_TOKEN (BINDER_GET_ACCESS_TOKEN), bit2 SENDER_INFO
+/// (BINDER_GET_SENDER_INFO — also carries the real sender pid).
+pub const BINDER_SUPPORTED_FEATURES: u64 = (1 << 0) | (1 << 2);
 
 pub const BC_TRANSACTION: u32 = iow(b'c' as u32, 0, SZ_TR);
 pub const BC_REPLY: u32 = iow(b'c' as u32, 1, SZ_TR);
@@ -1832,16 +1839,73 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
         }
         BINDER_FEATURE_SET => {
             // OpenHarmony binder feature negotiation: report the enhanced
-            // features this driver supports. We implement none of them
-            // (access-token, real-pid tagging), so the answer is 0 —
-            // libipc then runs its baseline protocol, which is plain
-            // upstream binder. Answering the ioctl at all (instead of
-            // EINVAL) keeps every open from logging a probe failure.
+            // features this driver supports. With the access-token registry
+            // (ipc::access_token) we now implement the token transport the
+            // samgr security chain needs — without it samgr's CanRequest()
+            // saw a uid-as-token, denied every AddSystemAbility, and the
+            // whole HDF host chain (composer included) starved.
             if arg == 0 || !crate::arch::uaccess::access_ok(arg, 8) {
                 return -(EFAULT as i64);
             }
             // SAFETY: arg validated non-null, 8-byte writable.
-            if !unsafe { crate::arch::uaccess::put_user(arg as *mut u64, 0u64) } {
+            if !unsafe {
+                crate::arch::uaccess::put_user(arg as *mut u64, BINDER_SUPPORTED_FEATURES)
+            } {
+                return -(EFAULT as i64);
+            }
+            0
+        }
+        BINDER_GET_ACCESS_TOKEN | BINDER_GET_SENDER_INFO => {
+            // OH extension: the server asks for the SENDER of the
+            // transaction it is currently servicing. struct access_token
+            // {u64 sender_tokenid; u64 first_tokenid; u64 reserved[2]},
+            // struct binder_sender_info = access_token + u64 sender_pid_nr.
+            let with_pid = request == BINDER_GET_SENDER_INFO;
+            let len = if with_pid { 40 } else { 32 };
+            if arg == 0 || !crate::arch::uaccess::access_ok(arg, len) {
+                return -(EFAULT as i64);
+            }
+            // The calling thread's transaction stack top is the txn being
+            // serviced (Linux thread->transaction_stack, OH reads the same).
+            let (sender_pid, token, ftoken) = {
+                let tid = current_tid();
+                let mut out = (0u32, 0u64, 0u64);
+                let w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe {
+                    let world = w.as_ref().unwrap();
+                    if let Some(th) = world
+                        .procs
+                        .iter()
+                        .find(|q| Arc::ptr_eq(q, &proc))
+                        .and_then(|q| q.im().threads.iter().find(|t| t.tid == tid))
+                    {
+                        if let Some(txn) = th.st().txn_stack.last() {
+                            if let Some(fp) = &txn.from_proc {
+                                out = (fp.pid, 0, 0);
+                            }
+                        }
+                    }
+                }
+                drop(w);
+                let (t, f) = crate::ipc::access_token::token_of(out.0);
+                (out.0, t, f)
+            };
+            let mut rec = [0u64; 5];
+            rec[0] = token;
+            rec[1] = ftoken;
+            if with_pid {
+                rec[4] = sender_pid as u64;
+            }
+            // SAFETY: arg validated, len bytes.
+            if unsafe {
+                crate::arch::uaccess::copy_to_user(
+                    arg as *mut u8,
+                    rec.as_ptr() as *const u8,
+                    len,
+                )
+            } != 0
+            {
                 return -(EFAULT as i64);
             }
             0

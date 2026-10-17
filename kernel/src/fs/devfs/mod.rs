@@ -575,6 +575,24 @@ fn devtmpfs_populate() {
         );
     }
 
+    // /dev/access_token_id (OH access-token registry): init's service
+    // children store their native token id here (SET_TOKENID between fork
+    // and exec) and libbinder reads it back on every binder open; the
+    // binder driver consults it for BINDER_GET_SENDER_INFO. Mode 0666:
+    // the SET path permission-checks uid internally (root/3020).
+    let _ = registry::register_char_device(
+        crate::ipc::access_token::DEV_ACCESS_TOKEN,
+        &crate::ipc::access_token::ACCESS_TOKEN_OPS,
+    );
+    children.insert(
+        String::from("access_token_id"),
+        Arc::new(DevfsEntry::new_char_device_with_mode(
+            "access_token_id",
+            crate::ipc::access_token::DEV_ACCESS_TOKEN,
+            0o020000 | 0o666,
+        )),
+    );
+
     for (name, devno, mode) in char_nodes.iter() {
         children.insert(
             String::from(*name),
