@@ -482,6 +482,34 @@ pub fn kernel_ptr_canonical(p: *const u8) -> bool {
     hi == 0 || hi == 0x1FFFF
 }
 
+/// Kernel text window [lo, hi) taken from the arch linker script (x86_64:
+/// __stext/__etext; riscv64: _stext/_etext). Forensic stack-word filters
+/// must use this instead of hardcoded VAs: the old window
+/// [0xffffffff80000000, 0xffffffff80200000) sat below the actual x86_64
+/// text and covered only the first 2 MiB of the (up to 12 MiB) riscv64
+/// image, so no real return address ever matched.
+pub fn kernel_text_window() -> (u64, u64) {
+    #[cfg(feature = "x86_64")]
+    extern "C" {
+        static __stext: u8;
+        static __etext: u8;
+    }
+    #[cfg(not(feature = "x86_64"))]
+    extern "C" {
+        static _stext: u8;
+        static _etext: u8;
+    }
+    #[cfg(feature = "x86_64")]
+    let lo = core::ptr::addr_of!(__stext) as u64;
+    #[cfg(feature = "x86_64")]
+    let hi = core::ptr::addr_of!(__etext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let lo = core::ptr::addr_of!(_stext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let hi = core::ptr::addr_of!(_etext) as u64;
+    (lo, hi)
+}
+
 /// Stricter variant for runqueue-walk safety: the pointer must lie in the
 /// kernel PHYSMAP (direct map), where every Task allocation lives. Plain
 /// canonical also accepts kernel-NEGATIVE addresses (0xfffffffffffffeXX —
@@ -495,8 +523,30 @@ pub fn kernel_ptr_in_physmap(p: *const u8) -> bool {
     if a % 8 != 0 {
         return false;
     }
-    // 0xffff8880_00000000 ..< 0xffff9000_00000000 (64 GB of direct map).
-    (0xffff_8880_0000_0000..0xffff_9000_0000_0000).contains(&a)
+    #[cfg(feature = "x86_64")]
+    {
+        // 0xffff8880_00000000 ..< 0xffff9000_0000_0000 (64 GB of direct map).
+        (0xffff_8880_0000_0000..0xffff_9000_0000_0000).contains(&a)
+    }
+    // RUX-RISCV-POISON (sched-riscv): the physmap screen was hardcoded to
+    // the x86_64 direct-map window. On riscv64 (Sv39) every kernel heap
+    // pointer lives in the linear map at 0xffffffd6_00000000..+128GB
+    // (arch/riscv64/mm/memory_layout.rs: PAGE_OFFSET/KERN_VIRT_SIZE), so
+    // the screen rejected EVERY legitimately allocated Task and CgroupNode:
+    // the CFS pick dropped each one at its first pick ("POISONED rq entry
+    // raw=0xffffffd6xxxxxxxx", rate-limited print hiding a systematic
+    // drop), and any fork()ed child was silently lost at its first
+    // schedule — the riscv64 wedge-at-first-ls repro. Only the static
+    // storages (init task, per-CPU idles) survived via the extra legs of
+    // kernel_task_ptr_range_ok, which is why the boot reached the shell
+    // (PID 1 is the static init task) and then froze forever on the first
+    // fork. Gate on the arch's actual linear-map window.
+    #[cfg(not(feature = "x86_64"))]
+    {
+        let po = crate::arch::mm::PAGE_OFFSET as u64;
+        let end = po + crate::arch::mm::KERN_VIRT_SIZE as u64;
+        (po..end).contains(&a)
+    }
 }
 
 /// Range-only Task-pointer screen for runqueue walks: the kernel linear
@@ -2816,10 +2866,11 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                         let base = thsp as *const u64;
                         let mut shown = 0;
                         for k in 0..64 {
-                            // SAFETY: diagnostic read of the task's own
-                            // kernel-stack pages (the Task pins them).
-                            let w = core::ptr::read_volatile(base.add(k));
-                            if w >= 0xffffffff80000000 && w < 0xffffffff80200000 && (w & 1) == 0 {
+                        // SAFETY: diagnostic read of the task's own
+                        // kernel-stack pages (the Task pins them).
+                        let w = core::ptr::read_volatile(base.add(k));
+                        let (lo, hi) = kernel_text_window();
+                        if w >= lo && w < hi && (w & 1) == 0 {
                                 putchar(b' ');
                                 phex(w);
                                 shown += 1;
@@ -3994,7 +4045,8 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
                 // SAFETY: diagnostic volatile read of the pinned task's own
                 // kernel-stack pages.
                 let w = core::ptr::read_volatile(base.add(k));
-                if w >= 0xffffffff80000000 && w < 0xffffffff80200000 && (w & 1) == 0 {
+                let (lo, hi) = kernel_text_window();
+                if w >= lo && w < hi && (w & 1) == 0 {
                     putchar(b' ');
                     phex(w);
                     shown += 1;
