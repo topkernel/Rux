@@ -731,14 +731,6 @@ impl CfsRunQueue {
     pub fn pick_next(&mut self) -> Option<*mut crate::process::Task> {
         // Get task with smallest vruntime
         if let Some((&key, &task)) = self.tasks_timeline.iter().next() {
-            // b50 #GP guard — see pick_next_cpu. A non-canonical slot
-            // pointer must never reach the deref below.
-            if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                self.tasks_timeline.remove(&key);
-                self.nr_running.fetch_sub(1, Ordering::AcqRel);
-                crate::sched::sched::report_poisoned_rq_entry(usize::MAX, task as usize);
-                return None;
-            }
             // Remove from queue using key (don't call dequeue, as vruntime may have changed)
             self.tasks_timeline.remove(&key);
 
@@ -812,20 +804,6 @@ impl CfsRunQueue {
                 Some(&t) => t,
                 None => break,
             };
-
-            // b50 #GP guard: a scribbled timeline slot yields a
-            // non-canonical *mut Task; the ownership probe below would
-            // #GP the kernel on its first qword load (boot b50, ~20 min
-            // in). Drop the poisoned entry — the task it named is
-            // unrecoverable either way; keeping the kernel (and this
-            // CPU's pick) alive matters more. load_weight is left
-            // stale: reading it would deref the same garbage.
-            if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                self.tasks_timeline.remove(&key);
-                self.nr_running.fetch_sub(1, Ordering::AcqRel);
-                crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
-                continue;
-            }
 
             // SAFETY: task is from the BTreeMap, a valid pointer stored during enqueue.
             // R8-1b: skip tasks still marked on-CPU (context not saved —
@@ -987,7 +965,13 @@ impl CfsRunQueue {
         // legs. Rate-limited to one report per 100 jiffies system-wide so
         // the hot idle-loop callers cannot flood the console. SBI direct
         // write discipline (R34): we hold the GRQ lock here.
-        if result.is_none() && skip_count > 0 {
+        // serial-clean: gated behind dfx=schedtrace — the pick-skip
+        // transient (a task mid switch-out) is common enough on ordinary
+        // boots that the report leaked into default serial logs.
+        if result.is_none()
+            && skip_count > 0
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+        {
             use crate::console::putchar_no_lock as putchar;
             fn pd(mut v: u64) {
                 use crate::console::putchar_no_lock as putchar;
