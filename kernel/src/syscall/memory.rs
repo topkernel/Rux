@@ -1687,6 +1687,31 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
             let old_phys = old_ppn << PAGE_SHIFT;
             let old_kvaddr = phys_to_virt(PhysAddr::new(old_phys)).bits() as *const u8;
 
+            // DESTINATION-PRESENT GUARD (b93 heap-corruption attribution,
+            // forensics rank 1): the destination range was created by
+            // mmap in this same syscall and its PTEs should all be holes.
+            // If a leaf is nevertheless PRESENT here, blind-mapping a
+            // fresh frame over it is the PTE-OVERWRITE-LIVE aliasing
+            // instant: the live frame's mapping loses its data (or its
+            // owner reads this copy's bytes), and the old frame leaks.
+            // Never overwrite a live leaf from this path — skip the page
+            // and log loudly (this "cannot happen" short of an upstream
+            // bug, so visibility beats guessing).
+            if crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, new_virt).is_some() {
+                static DST_HIT_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if DST_HIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                    crate::pr_err!(
+                        "MREMAP-DST-LIVE pid={} va={:#x} src={:#x} — refusing overwrite",
+                        crate::process::current_pid(),
+                        new_virt,
+                        old_virt
+                    );
+                }
+                offset += PAGE_SIZE as usize;
+                continue;
+            }
+
             // Eagerly allocate + map the destination page (see comment above)
             let new_phys = alloc_page(GfpFlags::GFP_KERNEL);
             if new_phys == 0 {
@@ -1746,7 +1771,29 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
 ///
 /// # Description
 /// mremap expands or shrinks existing memory mapping
+///
+/// b93 heap-corruption attribution: mremap was the only VMA-mutating
+/// syscall with no serial trace, so the split of hilogd's 2GB PROT_NONE
+/// reserve at +0x1fd000 could not be pinned on any logged operation
+/// (MPROTECT/FIXED-MAP/BIGMUNMAP were all ruled out). Every mremap now
+/// logs its identity and arguments on entry and its result on exit —
+/// one boot ties any mystery VMA surgery to its caller.
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
+    let pid = crate::process::current_pid();
+    let comm_bytes = crate::sched::current()
+        .map(|t| unsafe { (*t).comm() }.to_vec())
+        .unwrap_or_default();
+    let comm = core::str::from_utf8(&comm_bytes).unwrap_or("?");
+    crate::pr_info!(
+        "MREMAP-ENTER pid={} comm={} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x}",
+        pid, comm, args[0], args[1], args[2], args[3], args[4]
+    );
+    let ret = sys_mremap_inner(args);
+    crate::pr_info!("MREMAP-EXIT pid={} -> {:#x}", pid, ret);
+    ret
+}
+
+fn sys_mremap_inner(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
