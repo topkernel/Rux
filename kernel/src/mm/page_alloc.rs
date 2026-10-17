@@ -368,7 +368,9 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
 /// - `addr`: Physical address of the first page
 /// - `order`: Order of the allocation
 pub fn free_pages(addr: usize, order: usize) {
+    use crate::dfx::driftwatch as dw;
     if addr == 0 {
+        dw::FREE_NULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return;
     }
 
@@ -385,6 +387,8 @@ pub fn free_pages(addr: usize, order: usize) {
         if !pd.is_null() && unsafe { (*pd).is_mapped() } {
             static MAPPED_FREES: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
+            dw::FREE_REFUSED_MAPPED
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if MAPPED_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
                 crate::pr_err!(
                     "free_pages: REFUSED frame {:#x} order {} still MAPPED (mapcount {}) pid {} — leaking instead of aliasing",
@@ -415,6 +419,7 @@ pub fn free_pages(addr: usize, order: usize) {
     // VMAs are far outside it) while accepting every page the zone can
     // hand out — the two sets must agree by construction.
     if !super::page_desc::phys_valid(addr) {
+        dw::FREE_DROPPED_WILD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         // Caller diagnostic is x86-only (frame-pointer walk via att_syntax
         // asm); the riscv64 build has no equivalent and just drops it.
         #[cfg(feature = "x86_64")]
@@ -441,6 +446,8 @@ pub fn free_pages(addr: usize, order: usize) {
     // user mapping (observed: corrupted task children lists, do_wait
     // panics). Refuse loudly and keep the frame leaked instead.
     if crate::mm::memblock::memblock().is_reserved(addr) {
+        dw::FREE_REFUSED_RESERVED
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         crate::pr_err!(
             "free_pages: REFUSED boot-reserved frame {:#x} order {} — not returned to zone",
             addr, order
@@ -506,12 +513,18 @@ pub fn free_pages(addr: usize, order: usize) {
                         TEXT_OWN_FREES.load(core::sync::atomic::Ordering::Relaxed)
                     );
                     crate::dfx::backtrace::dump_stack();
+                    dw::FREE_REFUSED_TEXT
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
                 #[cfg(not(feature = "riscv64"))]
-                crate::pr_err!(
-                    "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} — free REFUSED (leaked)",
-                    pfn, order, owner_pid, owner_va, dying
-                );
+                {
+                    crate::pr_err!(
+                        "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} — free REFUSED (leaked)",
+                        pfn, order, owner_pid, owner_va, dying
+                    );
+                    dw::FREE_REFUSED_TEXT
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
                 return;
             } else {
                 // Switch off: keep historical behavior, just drop the stamp.
@@ -545,6 +558,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     let end_pfn = zone.end_pfn();
                     if pfn >= start_pfn && pfn < end_pfn {
                         zone.free_pages(pfn, order);
+                        dw::FREE_OK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         return;
                     }
                 }
@@ -554,6 +568,7 @@ pub fn free_pages(addr: usize, order: usize) {
 
     // Page doesn't belong to any zone - this shouldn't happen in normal operation
     // Pages allocated via memblock during early boot are not tracked and don't need freeing
+    dw::FREE_NO_ZONE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Free a single page

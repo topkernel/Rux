@@ -886,7 +886,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                     if (*page).is_mapped() {
                         crate::mm::rmap::page_remove_rmap(&*page);
                     }
-                    let new_ref = (*page).put_page();
+                    let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L3);
                     if new_ref == 0 {
                         crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         free_pages(phys_addr as usize, 0);
@@ -927,7 +927,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                         if (*page).is_mapped() {
                             crate::mm::rmap::page_remove_rmap(&*page);
                         }
-                        let new_ref = (*page).put_page();
+                        let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L2);
                         if new_ref == 0 {
                             crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             free_pages(phys_addr as usize, 0);
@@ -978,7 +978,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                         crate::mm::rmap::page_remove_rmap(&*page);
                     }
 
-                    let new_ref = (*page).put_page();
+                    let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L1);
                     if new_ref == 0 {
                         crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         free_pages(phys_addr as usize, 0);

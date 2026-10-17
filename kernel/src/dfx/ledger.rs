@@ -318,6 +318,9 @@ pub fn dump(site: &str) {
         zone_managed,
         nr_descs() as u64 - c.reserved
     );
+    // Zero-put / free-refusal attribution (freelist-drift family): which
+    // release path's refcount-0 transitions did NOT pair with a zone free.
+    super::driftwatch::report();
     crate::println!("==== MEMLEDGER end ====");
 
     BUSY.store(false, Ordering::Release);

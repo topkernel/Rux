@@ -535,6 +535,8 @@ impl Page {
                 // Would underflow — refuse to decrement
                 // Note: intentionally no log here to avoid printk during page table
                 // teardown, which can deadlock on mm/ring buffer/ext4 locks.
+                crate::dfx::driftwatch::PUT_UNDERFLOW
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return -1;
             }
             match self._refcount.compare_exchange_weak(
@@ -547,6 +549,19 @@ impl Page {
                 Err(_) => continue, // CAS failed, retry
             }
         }
+    }
+
+    /// `put_page()` with drift attribution: a transition to 0 is the exact
+    /// moment a frame becomes orphan-able — count it per call site
+    /// (dfx::driftwatch) so the MEMLEDGER census can attribute drift to the
+    /// release path that dropped it. Same return contract as `put_page`.
+    #[inline]
+    pub fn put_page_site(&self, site: usize) -> i32 {
+        let r = self.put_page();
+        if r == 0 {
+            crate::dfx::driftwatch::note_zero_put(site);
+        }
+        r
     }
 
     /// Try to increment reference count (only if refcount > 0)
