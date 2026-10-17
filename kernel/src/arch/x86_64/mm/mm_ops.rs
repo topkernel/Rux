@@ -782,7 +782,8 @@ impl MmStruct {
                         crate::mm::rmap::page_remove_rmap(unsafe { &*page });
                     }
                     // SAFETY: page descriptor for a page mapped by this address space.
-                    let new_ref = unsafe { (*page).put_page() };
+                    let new_ref =
+                        unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
                     if new_ref == 0 {
                         crate::mm::page_alloc::free_pages(
                             (ppn_val as usize) << PAGE_SHIFT, 0,
@@ -1944,7 +1945,7 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultR
     // across COW cycles and eventually corrupts page reclaim / rmap
     // decisions.
     if !old_page.is_null() {
-        (*old_page).put_page();
+        (*old_page).put_page_site(crate::dfx::driftwatch::S_COW_X86);
         (*old_page).dec_mapcount();
     }
 

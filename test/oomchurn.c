@@ -14,6 +14,15 @@
  *   fork <n> <MB>      n rounds of fork; child touches MB then exits.
  *   churn <MB> <rounds>  alloc/touch/release loop (leak detector).
  *   mapfile <MB>       mmap + read a file to fill page cache.
+ *   wrstorm <MB> <rounds> [path]  write+read+fsync churn through the page
+ *                      cache (OH /data first-boot storm shape): per round
+ *                      create a fresh file, write MB in 64K chunks, fsync,
+ *                      re-read MB (page-cache fill), close, unlink. Prints
+ *                      MemFree per round so a monotonic drop across rounds
+ *                      is the leak signature.
+ *   mix <rounds> <MB>  fork churn where each child writes MB to a fresh
+ *                      file, reads it back, and exits — fork COW + write
+ *                      storm + full lifecycle teardown in one loop.
  *
  * Build: riscv64-linux-gnu-gcc -static -O2 -o oomchurn oomchurn.c
  * Any Linux-ABI static binary runs on the minimal rootfs (musl userland
@@ -205,6 +214,113 @@ static int mode_mapfile(long mb)
     return 0;
 }
 
+/* One write-storm round: fresh file, write mb MB in 64K chunks, fsync,
+ * re-read it back (page-cache fill + invalidate churn), close, unlink. */
+static int wrstorm_round(long mb, int round, const char *path)
+{
+    char pathbuf[128];
+    char buf[64 * 1024];
+    snprintf(pathbuf, sizeof(pathbuf), "%s.%d", path, round);
+    int fd = open(pathbuf, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        printf("wrstorm: round %d open(%s) failed errno=%d (%s)\n", round,
+               pathbuf, errno, strerror(errno));
+        return 1;
+    }
+    long want = mb * 1024 * 1024;
+    long wrote = 0;
+    unsigned seed = (unsigned)round * 2654435761u;
+    while (wrote < want) {
+        size_t chunk = sizeof(buf);
+        if (want - wrote < (long)chunk)
+            chunk = (size_t)(want - wrote);
+        for (size_t i = 0; i < chunk; i += PAGE)
+            buf[i] = (unsigned char)(seed + i);
+        ssize_t n = write(fd, buf, chunk);
+        if (n <= 0) {
+            printf("wrstorm: round %d write failed at %ld errno=%d (%s)\n",
+                   round, wrote, errno, strerror(errno));
+            close(fd);
+            unlink(pathbuf);
+            return 1;
+        }
+        wrote += n;
+    }
+    if (fsync(fd) != 0)
+        printf("wrstorm: round %d fsync errno=%d (continuing)\n", round,
+               errno);
+    close(fd);
+
+    /* Read the file back through the page cache. */
+    fd = open(pathbuf, O_RDONLY);
+    if (fd < 0) {
+        printf("wrstorm: round %d reopen failed errno=%d\n", round, errno);
+        return 1;
+    }
+    long got = 0;
+    while (got < want) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        got += n;
+    }
+    close(fd);
+    unlink(pathbuf);
+    return 0;
+}
+
+static int mode_wrstorm(long mb, int rounds, const char *path)
+{
+    print_memfree();
+    for (int r = 0; r < rounds; r++) {
+        int rc = wrstorm_round(mb, r, path);
+        if (rc != 0) {
+            printf("OOMCHURN-WRSTORM-FAIL round=%d\n", r + 1);
+            return rc;
+        }
+        printf("wrstorm: round %d/%d done (%ldMB w+r)\n", r + 1, rounds, mb);
+        print_memfree();
+    }
+    printf("OOMCHURN-WRSTORM-PASS\n");
+    return 0;
+}
+
+static int mode_mix(int rounds, long mb)
+{
+    const char *base = "/storm/mixfile";
+    print_memfree();
+    for (int r = 0; r < rounds; r++) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            printf("mix: round %d fork failed errno=%d (%s)\n", r, errno,
+                   strerror(errno));
+            printf("OOMCHURN-MIX-FAIL round=%d errno=%d\n", r + 1, errno);
+            return 1;
+        }
+        if (pid == 0) {
+            /* child: small anon COW touch + write storm + exit */
+            void *p = mmap(NULL, mb * 1024 * 1024 / 8, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p != MAP_FAILED) {
+                touch_anon_mb(mb / 8, p);
+                munmap(p, mb * 1024 * 1024 / 8);
+            }
+            int rc = wrstorm_round(mb, 1000 + r, base);
+            _exit(rc);
+        }
+        int st = 0;
+        waitpid(pid, &st, 0);
+        printf("mix: round %d/%d child st=%d\n", r + 1, rounds, st);
+        print_memfree();
+        if (st != 0) {
+            printf("OOMCHURN-MIX-FAIL round=%d status=%d\n", r + 1, st);
+            return 2;
+        }
+    }
+    printf("OOMCHURN-MIX-PASS\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setbufs();
@@ -258,6 +374,12 @@ int main(int argc, char **argv)
         return mode_churn(atol(argv[2]), atoi(argv[3]));
     if (strcmp(argv[1], "mapfile") == 0)
         return mode_mapfile(atol(argv[2]));
+    if (strcmp(argv[1], "wrstorm") == 0) {
+        const char *path = argc > 4 ? argv[4] : "/storm/wrfile";
+        return mode_wrstorm(atol(argv[2]), atoi(argv[3]), path);
+    }
+    if (strcmp(argv[1], "mix") == 0)
+        return mode_mix(atoi(argv[2]), atol(argv[3]));
     if (strcmp(argv[1], "exekid") == 0)
         return mode_anon(atol(argv[2]));
     if (strcmp(argv[1], "exec") == 0)

@@ -304,7 +304,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     super::lru::page_remove_lru(p);
 
                     // Drop reference; free if last holder
-                    let refcount = p.put_page();
+                    let refcount = p.put_page_site(crate::dfx::driftwatch::S_VMSCAN_SWAP);
                     // R14-1 (F10): free ONLY when WE took it to zero.
                     if refcount == 0 {
                         free_page(phys);
@@ -347,7 +347,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     super::lru::page_remove_lru(p);
 
                     // Drop reference; free if last holder
-                    let refcount = p.put_page();
+                    let refcount = p.put_page_site(crate::dfx::driftwatch::S_VMSCAN_SWAP);
                     if refcount == 0 {
                         free_page(phys);
                         reclaimed += 1;
