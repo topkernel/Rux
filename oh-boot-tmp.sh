@@ -31,13 +31,19 @@ qemu_drive() { # idx file
     printf ' -drive file=%s,if=none,id=ohd%d,format=raw,file.locking=off -device virtio-blk-pci,drive=ohd%d' "$file" "$idx" "$idx"
 }
 
-# userdata: prefer the fresh rw-able image. The stock userdata.img is
+# userdata: prefer the seeded rw-able image. The stock userdata.img is
 # mkfs'd with metadata_csum + encrypt: Rux ext4 rejects `encrypt`
 # (ENODEV) and metadata_csum forces read-only — either way OH's /data
 # mkdir storm fails (err=2/5) and hilogd/faultloggerd/boot dirs never
 # come up. userdata-rw.img is a blank ext4 (no csum/encrypt/journal);
-# OH populates /data itself on first boot.
-USERDATA="$IMGDIR/userdata-rw.img"
+# OH populates /data itself on first boot. userdata-tok.img = the same
+# blank image PRE-SEEDED with /service/el0/access_token/nativetoken.json
+# from the stock image: without it init's load_access_token_id reads an
+# empty file, every native token id is 0, hdf_devmgr's accessToken poll
+# never succeeds and the whole HDF host chain (composer included)
+# stalls forever (boots b98-b106).
+USERDATA="$IMGDIR/userdata-tok.img"
+[ -f "$USERDATA" ] || USERDATA="$IMGDIR/userdata-rw.img"
 [ -f "$USERDATA" ] || USERDATA="$IMGDIR/userdata.img"
 
 APPEND="ip=dhcp loglevel=${LOGLEVEL:-7} console=ttyS0,115200"
