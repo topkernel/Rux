@@ -2891,10 +2891,14 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
         let _ = put_u64(info_ptr.add(8) as *mut u64, 0);
         let _ = put_u64(info_ptr.add(16) as *mut u64, 0);
         let _ = put_u64(info_ptr.add(24) as *mut u64, 0);
-        // totalram (bytes)
-        let _ = put_u64(info_ptr.add(32) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64);
+        // totalram (bytes): the discovered memory map (runtime descriptor
+        // count), not the Kernel.toml nominal size — sysinfo(2) callers
+        // (installers, OOM-aware daemons) size their behavior off these
+        // fields; freeram used to be a hard-coded "half of nominal".
+        let mem = crate::mm::meminfo::get_basic_memory_info();
+        let _ = put_u64(info_ptr.add(32) as *mut u64, mem.mem_total as u64);
         // freeram
-        let _ = put_u64(info_ptr.add(40) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64 / 2);
+        let _ = put_u64(info_ptr.add(40) as *mut u64, mem.mem_free as u64);
         // sharedram, bufferram
         let _ = put_u64(info_ptr.add(48) as *mut u64, 0);
         let _ = put_u64(info_ptr.add(56) as *mut u64, 0);

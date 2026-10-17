@@ -684,6 +684,19 @@ impl PtLedger {
     pub fn is_live_table(ppn: u64) -> bool {
         PT_LEDGER.live_bit(ppn)
     }
+
+    /// Accounting ledger: number of frames currently carrying a live
+    /// page-table stamp (exact bitmap popcount, bounded by the runtime
+    /// descriptor count). This is the authoritative PageTables figure.
+    pub fn live_count() -> usize {
+        let bits = crate::mm::page_desc::nr_descs().min(MAX_PAGES);
+        let mut n = 0usize;
+        for i in 0..bits.div_ceil(64) {
+            n += PT_LEDGER.live[i].load(core::sync::atomic::Ordering::Relaxed)
+                .count_ones() as usize;
+        }
+        n
+    }
 }
 
 /// FORENSIC: newest PT_FREE_RING entry naming `ppn` — the pid context of its
@@ -1146,7 +1159,10 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
 /// fails loudly instead of writing a "page table" over kernel memory).
 #[inline]
 fn valid_table_link_ppn(ppn: u64, root_ppn: u64) -> bool {
-    let ram_top = (crate::mm::page_desc::MAX_PFN as u64) << 12;
+    // Runtime RAM top (discovered memory map — fake-OOM fix: the old
+    // compile-time MAX_PFN rejected every table link above the Kernel.toml
+    // nominal 2 GiB, breaking user page tables on larger machines).
+    let ram_top = (crate::mm::page_desc::max_pfn() as u64) << 12;
     let phys = ppn << 12;
     if phys >= ram_top {
         return false;

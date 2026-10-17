@@ -135,6 +135,11 @@ static UART_IRQ_ARMED: core::sync::atomic::AtomicBool =
 /// Rolling match position for the DFX "DUMP!" magic (RX IRQ context only).
 static mut DUMP_MAGIC_POS: usize = 0;
 
+/// Rolling-match position for the "LEDGER!" accounting-census magic
+/// (dfx=ledger). The RX handler only latches dfx::ledger::PENDING — the
+/// census itself runs from the timer softirq (see ledger.rs).
+static mut LEDGER_MAGIC_POS: usize = 0;
+
 /// Rolling match position for the serial Ctrl-Alt-Del sequence (RX IRQ
 /// context only). The xterm/modifier encoding of Ctrl+Alt+Delete is
 /// CSI 3;7~ (ESC [ 3 ; 7 ~): tilcode 3 = Delete, modifier 7 = 1 + Ctrl(4)
@@ -440,6 +445,25 @@ fn uart_rx_debug_magic(c: u8) {
                 crate::drivers::virtio::vw_report("dump");
                 crate::dfx::taskdump::dump_all_tasks("uart-magic");
                 crate::ipc::binder::binder_dfx_dump();
+            }
+        }
+
+        // Accounting-ledger magic trigger (dfx=ledger): latch only — the
+        // census is printk-heavy and runs from the timer softirq.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ledger) {
+            const LMAGIC: &[u8; 7] = b"LEDGER!";
+            LEDGER_MAGIC_POS = if LEDGER_MAGIC_POS < LMAGIC.len()
+                && c == LMAGIC[LEDGER_MAGIC_POS]
+            {
+                LEDGER_MAGIC_POS + 1
+            } else if c == LMAGIC[0] {
+                1
+            } else {
+                0
+            };
+            if LEDGER_MAGIC_POS == LMAGIC.len() {
+                LEDGER_MAGIC_POS = 0;
+                crate::dfx::ledger::PENDING.store(true, core::sync::atomic::Ordering::Release);
             }
         }
 

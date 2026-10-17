@@ -188,6 +188,11 @@ pub fn oom_forensic_dump(site: &str) {
         return;
     }
 
+    // Full accounting ledger first (dfx/ledger.rs): where every managed
+    // page went at this moment — the census + counter reconciliation that
+    // attributes the "out of memory" to a category (or to drift).
+    super::super::dfx::ledger::dump(&alloc::format!("oom: {}", site));
+
     crate::println!("==== OOM-FORENSIC #{} @ {} ====", DUMPS.load(Ordering::Relaxed), site);
     crate::println!("OOM-FORENSIC: in_direct_reclaim={}", IN_DIRECT_RECLAIM.load(Ordering::Relaxed));
 
@@ -394,10 +399,22 @@ pub fn free_pages(addr: usize, order: usize) {
         }
     }
 
-    // Sentinel: a kernel VMA (or any address >= 4GB "phys") entering the zone
-    // poisons the freelist — the next alloc returns it as a wild phys.
-    // (x86_64 diagnostic from the feature branch; kept as a cheap guard.)
-    if addr >= 0x1_0000_0000 {
+    // Sentinel: a kernel VMA (or any address outside the managed physical
+    // range) entering the zone poisons the freelist — the next alloc
+    // returns it as a wild phys. (x86_64 diagnostic from the feature
+    // branch; kept as a cheap guard.)
+    //
+    // Fake-OOM fix: the bound used to be a hard-coded 4 GiB ceiling, but
+    // qemu virt maps guest DRAM starting at 0x8000_0000, so on -m 4G HALF
+    // the RAM (0x1_0000_0000..0x1_8000_0000) is above it — every free of
+    // an above-4G page was dropped and the frame leaked (oomchurn anon
+    // 2600 MB on 4G: exactly 524288 WILD lines = 2 GiB leaked on one
+    // munmap; rerunning the workload then fails with a page allocator
+    // "out of memory" while most of the RAM is only leaked, not used).
+    // The managed-range check rejects genuinely wild addresses (kernel
+    // VMAs are far outside it) while accepting every page the zone can
+    // hand out — the two sets must agree by construction.
+    if !super::page_desc::phys_valid(addr) {
         // Caller diagnostic is x86-only (frame-pointer walk via att_syntax
         // asm); the riscv64 build has no equivalent and just drops it.
         #[cfg(feature = "x86_64")]
@@ -617,13 +634,18 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         }
     };
 
-    // Validate phys_size against MAX_PAGES
-    // This ensures zone allocations stay within vmemmap bounds
+    // Validate phys_size against the descriptor ceiling (fake-OOM fix:
+    // the old limit here was the Kernel.toml NOMINAL size, so >2GiB
+    // machines silently lost every page above the line — see the
+    // MAX_PAGES comment in page_desc.rs). The runtime descriptor count is
+    // published by init_vmemmap from the same discovered memory map, so
+    // vmemmap bounds stay consistent with the zone span.
     let max_pages = super::page_desc::MAX_PAGES;
     let max_phys_size = max_pages * PAGE_SIZE;
     let effective_phys_size = phys_size.min(max_phys_size);
     if effective_phys_size != phys_size {
-        crate::println!("page_alloc: phys_size {}MB exceeds MAX_PAGES limit {}MB, truncating",
+        crate::pr_err!(
+            "page_alloc: phys_size {}MB exceeds MAX_PAGES limit {}MB, truncating",
             phys_size / (1024 * 1024), max_phys_size / (1024 * 1024));
     }
 

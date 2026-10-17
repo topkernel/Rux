@@ -454,7 +454,13 @@ pub fn rust_main_tail() -> ! {
             // Initialize zone allocator
             let kernel_end = slab_start + slab_size;
             mm::init_zone_system(MEMORY_PHYS_BASE, total_phys_memory, kernel_end);
-            print_status("mm", "zone allocator initialized", true);
+            // Managed-RAM banner (fake-OOM family): the zone span actually
+            // handed to the buddy, so a truncation (config-vs-machine size
+            // mismatch) is visible on the serial log at boot.
+            let managed = mm::page_desc::nr_descs() * mm::PAGE_SIZE;
+            print_status("mm", &alloc::format!(
+                "zone allocator initialized ({} descriptors, {} MB managed)",
+                mm::page_desc::nr_descs(), managed / (1024 * 1024)), true);
 
             // Switch to late stage (use buddy allocator for page tables)
             arch::mm::pt_ops_set_late();

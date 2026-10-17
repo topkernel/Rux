@@ -37,6 +37,9 @@ pub mod sbi_debug;
 pub mod switches;
 pub mod taskdump;
 pub mod memwatch;
+/// Full physical-accounting ledger (fake-OOM family): census + counters
+/// reconciliation, triggered at the OOM moment and via the UART magic.
+pub mod ledger;
 #[cfg(feature = "x86_64")]
 pub mod scribble;
 /// R83 (R74 producer hunt): live task-header audit + victim dumps.

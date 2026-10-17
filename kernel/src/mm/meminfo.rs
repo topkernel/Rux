@@ -18,7 +18,6 @@ use super::buddy_allocator::buddy_stats;
 use super::slab::slab_stats;
 use super::page_desc::page_desc_stats;
 use super::PAGE_SIZE;
-use crate::config::PHYS_MEMORY_SIZE;
 
 /// Memory statistics info (similar to /proc/meminfo)
 #[derive(Debug, Clone, Copy)]
@@ -146,16 +145,21 @@ impl<'a> core::fmt::Display for MemoryInfoFormatter<'a> {
 pub fn get_basic_memory_info() -> MemoryInfo {
     let mut info = MemoryInfo::default();
 
+    // Runtime total: the discovered memory map (nr_descs), not the
+    // Kernel.toml nominal size — MemTotal must not lie on machines whose
+    // RAM differs from the config value (fake-OOM family: the 4G box
+    // reported 2G while claiming to manage all of it).
+    let total = super::page_desc::nr_descs() * PAGE_SIZE;
     if let Some(node) = first_online_node() {
         let free_pages = node.free_pages();
         info.mem_free = free_pages * PAGE_SIZE;
         info.mem_available = free_pages * PAGE_SIZE;
-        info.mem_total = PHYS_MEMORY_SIZE;
+        info.mem_total = total;
         info.mem_used = info.mem_total.saturating_sub(info.mem_free);
     } else {
-        info.mem_total = PHYS_MEMORY_SIZE;
+        info.mem_total = total;
         info.mem_free = 0;
-        info.mem_used = PHYS_MEMORY_SIZE;
+        info.mem_used = info.mem_total;
         info.mem_available = 0;
     }
 

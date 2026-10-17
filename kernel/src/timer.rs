@@ -604,6 +604,12 @@ pub fn timer_softirq_handler(_nr: usize) {
     {
         LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
         crate::dfx::taskdump::dump_all_tasks("periodic");    }
+
+    // dfx=ledger: run a pending on-demand accounting census latched by the
+    // "LEDGER!" UART magic. The RX IRQ itself only sets the flag (printk
+    // from IRQ context is the classic self-wedge); this softirq already
+    // hosts the periodic dumps, so printk discipline is the same.
+    crate::dfx::ledger::run_pending();
 }
 
 /// Jiffies of the last periodic DFX snapshot (dfx=periodic).
