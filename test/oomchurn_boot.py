@@ -110,6 +110,11 @@ def main():
     ap.add_argument("--keep-img", action="store_true")
     ap.add_argument("--log", default=None)
     ap.add_argument("--accel", default="tcg")
+    ap.add_argument("--magic", default=None,
+                    help="raw bytes written to guest serial stdin after boot "
+                         "(e.g. 'LEDGER!' with dfx=ledger)")
+    ap.add_argument("--magic-at", type=float, default=25.0,
+                    help="seconds before writing --magic")
     args = ap.parse_args()
 
     img = os.path.join(WT, "work", "oomchurn.img")
@@ -132,12 +137,24 @@ def main():
         WT, "work", "oomchurn-%s.log" % int(time.time()))
     logf = open(log_path, "wb")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+                            stderr=subprocess.STDOUT,
+                            stdin=subprocess.PIPE if args.magic else subprocess.DEVNULL)
     deadline = time.time() + args.secs
     verdict = None
     touched_max = 0
+    magic_done = args.magic is None
+    magic_at = time.time() + args.magic_at
     try:
         while time.time() < deadline:
+            if not magic_done and time.time() >= magic_at:
+                # -serial mon:stdio: QEMU's stdin IS the guest serial RX.
+                try:
+                    proc.stdin.write(args.magic.encode())
+                    proc.stdin.flush()
+                    print("[magic] sent %r" % args.magic)
+                except OSError as e:
+                    print("[magic] failed: %s" % e)
+                magic_done = True
             r, _, _ = select.select([proc.stdout], [], [], 5.0)
             if not r:
                 if proc.poll() is not None:

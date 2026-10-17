@@ -116,9 +116,13 @@ pub enum DfxSwitch {
     /// binder frames still leak past the printable-head filter and spam
     /// the console; default OFF, enable with dfx=writetrace.
     WriteTrace,
+    /// Full physical-accounting ledger (fake-OOM family): arms the UART
+    /// magic "LEDGER!" for an on-demand census + reconciliation dump and
+    /// includes the OOM-moment ledger automatically. See dfx/ledger.rs.
+    Ledger,
 }
 
-const SWITCH_COUNT: usize = 16;
+const SWITCH_COUNT: usize = 18;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -140,8 +144,13 @@ impl DfxSwitch {
             DfxSwitch::Strace1 => 12,
             DfxSwitch::SchedTrace => 13,
             DfxSwitch::Steptrace => 14,
+            // 15 used to be shared by WriteTrace AND OncpuInject (both
+            // mapped to 15) — `dfx=writetrace` silently armed the
+            // adjudication injector (and vice versa). Split while adding
+            // the Ledger switch: each switch now owns its bit.
             DfxSwitch::WriteTrace => 15,
-            DfxSwitch::OncpuInject => 15,
+            DfxSwitch::OncpuInject => 16,
+            DfxSwitch::Ledger => 17,
         }
     }
 
@@ -164,6 +173,7 @@ impl DfxSwitch {
             "steptrace" => Some(DfxSwitch::Steptrace),
             "writetrace" => Some(DfxSwitch::WriteTrace),
             "oncpuinject" => Some(DfxSwitch::OncpuInject),
+            "ledger" => Some(DfxSwitch::Ledger),
             _ => None,
         }
     }
