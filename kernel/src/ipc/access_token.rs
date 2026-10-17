@@ -110,6 +110,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
     use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user};
 
     let pid = unsafe { crate::process::current_pid() };
+    crate::pr_info!("atid: pid {} ioctl {:#x}", pid, request);
 
     match request {
         ACCESS_TOKENID_GET_TOKENID | ACCESS_TOKENID_GET_FTOKENID => {
@@ -278,4 +279,5 @@ pub static ACCESS_TOKEN_OPS: FileOps = FileOps {
 /// Register the char device (called from devfs init, next to binder).
 pub fn register() {
     let _ = registry::register_char_device(DEV_ACCESS_TOKEN, &ACCESS_TOKEN_OPS);
+    crate::pr_info!("atid: /dev/access_token_id registered");
 }
