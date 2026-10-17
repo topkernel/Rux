@@ -39,11 +39,17 @@ done
 rm -f "$OUT_A"
 riscv64-linux-gnu-ar rcs "$OUT_A" "${OBJS[@]}"
 
-# Gate: the overlay itself must stay pin-clean. Any z*b/zcb attribute here
-# means the compiler stopped honoring -march and the whole scheme is void.
-if riscv64-linux-gnu-readelf -A "$OUT_A" | grep -qE "zbb1p0|zba1p0|zbs1p0|zcb1p0|zicond1p0"; then
-    echo "Error: libsoftfp-pin.a carries bitmanip/compressed-bitmanip attributes:" >&2
-    riscv64-linux-gnu-readelf -A "$OUT_A" | grep -oE "zbb1p0|zba1p0|zbs1p0|zcb1p0|zicond1p0" | sort -u >&2
+# Gate: the overlay itself must stay pin-clean. Any attribute beyond the
+# pinned march means the compiler stopped honoring -march (or the host gcc
+# default marched on again — gcc-15.2 defaults to rv64...v_zcb_zfa_zicbo*)
+# and the whole scheme is void. The pattern covers every extension that
+# encodes instructions illegal on the project's stock QEMU cpu
+# (-cpu rv64,zbb=true,zba=true,zbs=true); see the matching gate in
+# mrsh/build-mrsh.sh.
+BAD_ATTRS='zbb1p0|zba1p0|zbs1p0|zcb1p0|zicond1p0|zcmop1p0|zimop1p0|zfa1p0|zawrs1p0|zicbo[mp]1p0|zicboz1p0|_v1p0|zve(32|64)[fdx]?1p0|zvbb1p0|zvkb1p0|zvl[0-9]+b1p0'
+if riscv64-linux-gnu-readelf -A "$OUT_A" | grep -qE "$BAD_ATTRS"; then
+    echo "Error: libsoftfp-pin.a carries attributes beyond the pinned march:" >&2
+    riscv64-linux-gnu-readelf -A "$OUT_A" | grep -oE "$BAD_ATTRS" | sort -u >&2
     exit 1
 fi
 

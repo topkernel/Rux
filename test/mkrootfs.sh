@@ -139,8 +139,27 @@ if [ -f "$SLIRP_TEST_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; th
          -o "$STAGING/test/slirp_test" "$SLIRP_TEST_SRC"; then
         chmod +x "$STAGING/test/slirp_test"
     else
-        echo "Warning: slirp_test failed to compile (skipping)"
+        echo "Warning: slirp_test failed to compile (skipped)"
         rm -f "$STAGING/test/slirp_test"
+    fi
+fi
+
+# Build + install the chroot/getcwd semantics probe (same freestanding
+# recipe; checks root-relative getcwd, ENOENT for a cwd outside the jail,
+# in-root absolute opens, and the cwd self-heal across MS_MOVE — the
+# busybox/OH switch_root idiom).
+CHROOTCWD_SRC="$PROJECT_ROOT/test/chrootcwd.c"
+if [ -f "$CHROOTCWD_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing chrootcwd to /test/chrootcwd..."
+    # -march pinned WITHOUT vector: this gcc defaults to an rv64+V march
+    # and -O2 auto-vectorizes the buffer-clear loops into vsetivli — the
+    # QEMU boot CPU has no V extension and the probe SIGILLs.
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -nostdlib -nostartfiles -static -O2 -fno-builtin \
+         -o "$STAGING/test/chrootcwd" "$CHROOTCWD_SRC"; then
+        chmod +x "$STAGING/test/chrootcwd"
+    else
+        echo "Warning: chrootcwd failed to compile (skipped)"
+        rm -f "$STAGING/test/chrootcwd"
     fi
 fi
 

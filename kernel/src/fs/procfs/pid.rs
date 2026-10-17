@@ -680,7 +680,10 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
                         let dentry_opt = unsafe { &*file.dentry.get() };
                         match dentry_opt {
                             Some(dentry) => {
-                                let path = dentry.build_path();
+                                // /proc/<pid>/maps paths are d_path()-style:
+                                // relative to the READING task's root.
+                                let path =
+                                    crate::fs::vfs::dentry_user_path(dentry);
                                 let ino = dentry.get_inode()
                                     .map(|inode| inode.ino)
                                     .unwrap_or(0);
@@ -756,7 +759,10 @@ pub fn list_fds(pid: u64) -> Vec<(u32, alloc::string::String)> {
 fn get_fd_path(file: &alloc::sync::Arc<crate::fs::File>) -> alloc::string::String {
     let dentry_opt = unsafe { &*file.dentry.get() };
     match dentry_opt {
-        Some(dentry) => dentry.build_path(),
+        // /proc/<pid>/fd/N links are d_path()-style: relative to the
+        // READING task's root (Linux readlink on these uses the reader's
+        // fs->root), so a chrooted reader sees jail-relative names.
+        Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
         None => {
             // No dentry (pipe, socket, epoll, etc.)
             // Try to get inode number for display

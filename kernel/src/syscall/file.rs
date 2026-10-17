@@ -1250,29 +1250,13 @@ pub fn sys_chdir(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    // Verify path exists and is a directory (no fd allocated)
-    let abs_path = if pathname.starts_with('/') {
-        pathname.as_bytes().to_vec()
-    } else {
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            let mut abs = cwd.to_vec();
-            if !cwd.ends_with(&[b'/']) {
-                abs.push(b'/');
-            }
-            abs.extend_from_slice(pathname.as_bytes());
-            abs
-        } else {
-            return -(errno::ENOENT as i64);
-        }
-    };
-
-    let path_str = match core::str::from_utf8(&abs_path) {
-        Ok(s) => s,
-        Err(_) => return -(errno::EINVAL as i64),
-    };
-
-    match crate::fs::vfs::path_lookup(path_str, 0) {
+    // Resolve the RAW user path through path_lookup: it joins relative
+    // paths against the cwd and prefixes the task root onto absolute
+    // paths, in the caller's namespace. The old manual cwd join here
+    // produced a GLOBAL absolute path which path_lookup then
+    // root-prefixed a SECOND time — every relative chdir() under
+    // chroot() failed with ENOENT.
+    match crate::fs::vfs::path_lookup(pathname, 0) {
         Ok(vpath) => {
             if let Some(ref inode) = vpath.inode {
                 if !inode.mode.is_directory() {
@@ -1297,18 +1281,22 @@ pub fn sys_chdir(args: SyscallArgs) -> i64 {
             // symlink reports the RESOLVED location, never the symlink
             // name (LTP symlink01 chdir01 compares getcwd against the
             // object directory). Storing the literal argument string made
-            // getcwd echo the unresolved symlink path.
+            // getcwd echo the unresolved symlink path. The dentry is
+            // recorded alongside the string: it is the truth that keeps
+            // the cwd correct across later mount moves (MS_MOVE) and lets
+            // getcwd compute root-relative paths under chroot.
             let physical = vpath
                 .dentry
                 .as_ref()
                 .map(|d| d.build_path())
-                .unwrap_or_else(|| {
-                    core::str::from_utf8(&abs_path)
-                        .map(|s| alloc::string::String::from(s))
-                        .unwrap_or_else(|_| alloc::string::String::from("/"))
-                });
+                .unwrap_or_else(|| alloc::string::String::from(pathname));
+            let cwd_dentry = vpath.dentry.clone();
             if let Some(current) = crate::sched::current() {
-                unsafe { (*current).set_cwd(physical.as_bytes()); }
+                // SAFETY: current is the running task's Task pointer from
+                // sched::current(); fs_arc() only clones the Arc out of it.
+                if let Some(fs) = unsafe { (*current).fs_arc() } {
+                    fs.set_cwd_with_dentry(physical.as_bytes(), cwd_dentry);
+                }
             }
             0
         }
@@ -1355,35 +1343,23 @@ pub fn sys_fchdir(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    // Walk dentry chain up to root, collect names
-    let mut components = alloc::vec::Vec::new();
-    let mut current = dentry.clone();
-    loop {
-        let name = current.get_name();
-        if name == "/" {
-            break;
-        }
-        components.push(name);
-        let parent_opt = current.parent.lock().clone();
-        match parent_opt {
-            Some(p) => current = p,
-            None => break,
-        }
-    }
-
-    // Build absolute path: / + reversed components
-    let mut path = alloc::vec::Vec::new();
-    path.push(b'/');
-    for (i, comp) in components.iter().rev().enumerate() {
-        if i > 0 {
-            path.push(b'/');
-        }
-        path.extend_from_slice(comp.as_bytes());
-    }
+    // The physical (mount-crossing) path of the target directory, exactly
+    // what sys_chdir stores. The old manual parent walk could not cross
+    // mount boundaries (a mounted fs root has no parent pointer), so
+    // fchdir to a /proc or /dev fd stored cwd="/" (or dropped the
+    // mountpoint prefix) — same defect chdir had before build_path()
+    // became mount-aware. The dentry is recorded alongside the string
+    // (same rationale as sys_chdir — survives later mount moves, feeds
+    // root-relative getcwd).
+    let physical = dentry.build_path();
+    let cwd_dentry = dentry.clone();
 
     if let Some(task) = crate::sched::current() {
-        // SAFETY: task is the running task's Task pointer from sched::current().
-        unsafe { (*task).set_cwd(&path); }
+        // SAFETY: task is the running task's Task pointer from
+        // sched::current(); fs_arc() only clones the Arc out of it.
+        if let Some(fs) = unsafe { (*task).fs_arc() } {
+            fs.set_cwd_with_dentry(physical.as_bytes(), Some(cwd_dentry));
+        }
     }
 
     0
@@ -1402,23 +1378,56 @@ pub fn sys_getcwd(args: SyscallArgs) -> i64 {
     }
 
     if let Some(current) = crate::sched::current() {
-        // SAFETY: current is the running task's Task pointer from sched::current().
-        let cwd = unsafe { (*current).get_cwd() };
+        // SAFETY: current is the running task's Task pointer from
+        // sched::current(); fs_arc() only clones the Arc out of it.
+        let fs = unsafe { (*current).fs_arc() };
 
-        // Linux walks the cwd dentry UP TO the process ROOT; after chroot()
-        // WITHOUT chdir() the cwd lies outside the root and that walk never
-        // terminates at the root — getcwd fails with ENOENT (the
+        // Linux prepend_path() walks the cwd dentry UP TO the process ROOT
+        // (fs->root), so getcwd reports a path RELATIVE TO THE JAIL: after
+        // chroot("/usr") + chdir("/usr/bin"), getcwd() is "/bin", not
+        // "/usr/bin". When the walk reaches the global root without
+        // meeting the process root (chroot() without chdir() — the cwd
+        // stays outside the jail, historic Linux behavior), getcwd fails
+        // with ENOENT ("(unreachable)" in modern kernels; the
         // CVE-2018-1000001 shape; LTP realpath01 chroots into an empty dir
         // and expects realpath(".") == NULL/ENOENT because getcwd does).
-        // Path-string approximation: the stored global cwd must run under
-        // the task's (global-namespace) root.
-        {
-            // SAFETY: same task pointer as above.
-            let root = unsafe { (*current).get_root() };
-            if root.as_ref() != b"/".as_slice() && !cwd.starts_with(&root[..]) {
-                return -(errno::ENOENT as i64);
+        let cwd: alloc::vec::Vec<u8> = match fs.as_ref() {
+            Some(fs) if fs.cwd_dentry().is_some() => {
+                let cwd_d = fs.cwd_dentry().unwrap();
+                let root = fs.get_root();
+                if root.as_slice() == b"/" {
+                    // Not chrooted: the mount-crossing global path —
+                    // `cd /proc; pwd` must report "/proc".
+                    cwd_d.build_path().into_bytes()
+                } else if let Some(root_d) = fs.root_dentry() {
+                    match cwd_d.build_path_rooted(Some(&root_d)) {
+                        Some(p) => p.into_bytes(),
+                        // cwd outside the jail: Linux getcwd fails ENOENT.
+                        None => return -(errno::ENOENT as i64),
+                    }
+                } else {
+                    // Chrooted without a root dentry (legacy root set by a
+                    // string-only path): approximate with the string prefix.
+                    let cwd = fs.get_cwd();
+                    if !cwd.starts_with(&root[..]) {
+                        return -(errno::ENOENT as i64);
+                    }
+                    cwd
+                }
             }
-        }
+            _ => {
+                // No cwd dentry recorded (early boot / string-only state):
+                // old string-prefix approximation, unchanged.
+                // SAFETY: same task pointer as above.
+                let cwd = unsafe { (*current).get_cwd() };
+                // SAFETY: same task pointer as above.
+                let root = unsafe { (*current).get_root() };
+                if root.as_ref() != b"/".as_slice() && !cwd.starts_with(&root[..]) {
+                    return -(errno::ENOENT as i64);
+                }
+                cwd.into()
+            }
+        };
 
         let cwd_len = cwd.len();
 
@@ -2055,21 +2064,17 @@ pub fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::s
     let full_path: alloc::string::String = if pathname_str.starts_with('/') {
         alloc::string::String::from(pathname_str)
     } else if dirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            // SAFETY: current is the running task's Task pointer from sched::current().
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') { path.push('/'); }
-                path.push_str(pathname_str);
-                path
-            } else {
-                alloc::string::String::from(pathname_str)
-            }
-        } else {
-            alloc::string::String::from(pathname_str)
-        }
+        // Join against the cwd AS THE USER SEES IT (root-relative, the
+        // getcwd(3) string). The result feeds path_lookup-style callers
+        // that PREFIX the task root onto absolute paths; joining the
+        // GLOBAL cwd here made them prefix it twice, so every relative
+        // *at()/chroot() path under chroot() failed with ENOENT.
+        let cwd_str = crate::fs::vfs::get_cwd_user();
+        let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
+        path.push_str(&cwd_str);
+        if !path.ends_with('/') { path.push('/'); }
+        path.push_str(pathname_str);
+        path
     } else {
         // Relative path resolved against the directory referenced by dirfd.
         // The fd must exist and be a directory (Linux: EBADF / ENOTDIR).
@@ -2086,7 +2091,21 @@ pub fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::s
         if !is_dir {
             return Err((-errno::ENOTDIR as i64) as u64);
         }
-        let base = file.path();
+        // Same namespace discipline as the AT_FDCWD branch: the base is
+        // the dirfd's path RELATIVE TO THE TASK ROOT (d_path style — what
+        // /proc/<pid>/fd shows), so downstream root-prefixing applies
+        // exactly once. A dirfd outside the jail has no in-jail spelling
+        // and keeps its global path (string roots cannot express Linux's
+        // dentry-based dirfd escape).
+        let base = {
+            // SAFETY: file comes from the fd table; dentry written once at
+            // open time and never mutated afterwards; read-only access.
+            let dentry_opt = unsafe { (*file.dentry.get()).clone() };
+            match dentry_opt {
+                Some(d) => crate::fs::vfs::dentry_user_path(&d),
+                None => file.path(),
+            }
+        };
         let mut path = alloc::string::String::with_capacity(base.len() + pathname_str.len() + 1);
         path.push_str(&base);
         if !path.ends_with('/') { path.push('/'); }
@@ -3591,16 +3610,34 @@ pub fn sys_chroot(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    // P1 chroot: store the (normalized, real-namespace) root in fs_struct.
-    // path_lookup interprets every subsequent absolute path against this
-    // prefix and clamps ".." at it (see vfs::normalize_with_root), so the
-    // jail is enforced for lookups, opens, creates and unlinks alike.
-    // Known boundary (matches historic Linux, not pivot_root): the cwd is
-    // NOT moved — relative paths from a cwd outside the jail still resolve
-    // there, and getcwd() reports real-namespace paths.
-    let normalized = crate::fs::path::path_normalize(&full_path);
+    // P1 chroot: store the jail root in fs_struct — the dentry of the
+    // resolved directory plus its real-namespace path string.
+    // path_lookup interprets every subsequent absolute path against the
+    // string prefix and clamps ".." at it (see vfs::normalize_with_root),
+    // so the jail is enforced for lookups, opens, creates and unlinks
+    // alike. The dentry is what Linux's fs->root is: getcwd computes
+    // root-relative paths from the cwd dentry up to it, and a cwd outside
+    // the jail fails getcwd with ENOENT ("(unreachable)" in modern
+    // kernels).
+    //
+    // The path string is the CANONICAL build_path() of the resolved
+    // dentry, not path_normalize(full_path): the user path may contain
+    // symlinks the FOLLOW lookup already resolved, and — critically for
+    // switch_root-style flows — cwd-relative arguments like "." must
+    // capture where the cwd dentry IS NOW, as a string that stays valid
+    // for the prefix machinery (the cwd string itself is rebuilt from the
+    // cwd dentry, so it cannot be stale here).
+    let root_dentry = vpath.dentry.clone();
+    let normalized = match root_dentry.as_ref() {
+        Some(d) => d.build_path(),
+        None => crate::fs::path::path_normalize(&full_path),
+    };
     if let Some(current) = crate::sched::current() {
-        current.set_root(normalized.as_bytes());
+        // SAFETY: current is the running task's Task pointer from
+        // sched::current(); fs_arc() only clones the Arc out of it.
+        if let Some(fs) = unsafe { (*current).fs_arc() } {
+            fs.set_root_with_dentry(normalized.as_bytes(), root_dentry);
+        }
     }
     0
 }
