@@ -66,6 +66,16 @@ def main():
     # A device node: must be skipped by the unpacker (rootfs has no
     # device nodes) — boot log reports it as "special skipped".
     out += entry("dev/console", 0o020600, 0, b"", 106)
+    # heapwatch probe (static glibc + pthreads) when prebuilt next to the
+    # source — boots as init=/heapwatch for the heap-corruption hunt
+    # (see docs/development/heap-corruption-timeline.md).
+    hw = os.path.join(HERE, "..", "heapwatch", "heapwatch")
+    if os.path.isfile(hw):
+        hw_data = open(hw, "rb").read()
+        out += entry("heapwatch", 0o100755, len(hw_data), hw_data, 107)
+        hw_note = f" heapwatch={len(hw_data)}B"
+    else:
+        hw_note = ""
     out += entry("TRAILER!!!", 0, 0, b"", 0)
 
     cpio = out
@@ -77,7 +87,7 @@ def main():
         f.write(blob)
     print(
         f"initrd: {out_path} cpio={len(cpio)}B gzip={len(blob)}B "
-        f"init={len(init_data)}B hello={len(hello_data)}B"
+        f"init={len(init_data)}B hello={len(hello_data)}B{hw_note}"
     )
 
 

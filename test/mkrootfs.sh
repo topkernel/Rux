@@ -178,6 +178,23 @@ if [ -f "$REBOOT_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; 
     fi
 fi
 
+# Build + install the heap-corruption damage detector (static glibc +
+# pthreads; watches binder-like/stack-like/malloc regions with per-page
+# checksums + write probes, dumps /proc/self/maps on the first mismatch —
+# repro aid for the OH heap corruption, see
+# docs/development/heap-corruption-timeline.md).
+HEAPWATCH_SRC="$PROJECT_ROOT/test/heapwatch/heapwatch.c"
+if [ -f "$HEAPWATCH_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing heapwatch to /test/heapwatch..."
+    if riscv64-linux-gnu-gcc -static -pthread -O2 -Wall \
+         -o "$STAGING/test/heapwatch" "$HEAPWATCH_SRC"; then
+        chmod +x "$STAGING/test/heapwatch"
+    else
+        echo "Warning: heapwatch failed to compile (skipped)"
+        rm -f "$STAGING/test/heapwatch"
+    fi
+fi
+
 # Build + install the E8 reparent-safety storm (static glibc + pthreads;
 # orphan-zombie chains, thread-group sibling reapers and deep top-first
 # chain teardown — the workload family behind the GNOME final8

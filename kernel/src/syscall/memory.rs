@@ -640,13 +640,27 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             if actual_length > fb_len {
                                 return mmap_error::EINVAL;
                             }
-                            let hint = if addr == 0 { None } else { Some(addr) };
-                            let placement = match hint {
-                                Some(a) => a,
-                                None => match address_space.find_free_area(actual_length) {
-                                    Ok(v) => v.as_usize(),
-                                    Err(_) => return mmap_error::ENOMEM,
-                                },
+                            // ATOMIC RESERVE first (b91 corruption fix): the
+                            // old shape picked on a READ lock (or used the
+                            // hint verbatim), eagerly map_page'd the device
+                            // frames, and only then added the VMA with `let
+                            // _` — a same-mm mapper winning the range in the
+                            // window lost its frames to the PTE overwrite,
+                            // and an add failure left device PTEs installed
+                            // under a foreign VMA. MmStruct::mmap picks +
+                            // inserts under ONE vma_write (and runs the
+                            // MAP_FIXED replace surgery + unmap_pages), so
+                            // the range below is exclusively ours.
+                            let placement = match address_space.mmap(
+                                VirtAddr::new(addr),
+                                actual_length,
+                                vma_flags,
+                                crate::mm::vma::VmaType::Device,
+                                perm,
+                                map_flags & map::MAP_FIXED,
+                            ) {
+                                Ok(v) => v.as_usize(),
+                                Err(_) => return mmap_error::ENOMEM,
                             };
                             let root = address_space.root_ppn();
                             // SAFETY: root is the task's page-table root;
@@ -674,14 +688,6 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // Kick the auto-flush presenter awake: this
                             // mapper may be a flush-less renderer (Xorg).
                             crate::drivers::gpu::fbdev::mark_fb_user_mapped();
-                            let vma_end = placement + actual_length;
-                            let mut dv = crate::mm::vma::Vma::new(
-                                VirtAddr::new(placement),
-                                VirtAddr::new(vma_end),
-                                vma_flags,
-                            );
-                            dv.set_type(crate::mm::vma::VmaType::Device);
-                            let _ = address_space.vma_write().add(dv);
                             return placement as i64;
                         }
                     }
@@ -703,13 +709,21 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 else {
                                     return mmap_error::EINVAL;
                                 };
-                                let hint = if addr == 0 { None } else { Some(addr) };
-                                let placement = match hint {
-                                    Some(a) => a,
-                                    None => match address_space.find_free_area(actual_length) {
-                                        Ok(v) => v.as_usize(),
-                                        Err(_) => return mmap_error::ENOMEM,
-                                    },
+                                // ATOMIC RESERVE first (b91 corruption fix —
+                                // see the fb0 twin above): pick + insert via
+                                // MmStruct::mmap under ONE vma_write, with
+                                // MAP_FIXED replace surgery when requested;
+                                // only then install the GEM pages eagerly.
+                                let placement = match address_space.mmap(
+                                    VirtAddr::new(addr),
+                                    actual_length,
+                                    vma_flags,
+                                    crate::mm::vma::VmaType::Device,
+                                    perm,
+                                    map_flags & map::MAP_FIXED,
+                                ) {
+                                    Ok(v) => v.as_usize(),
+                                    Err(_) => return mmap_error::ENOMEM,
                                 };
                                 let root = address_space.root_ppn();
                                 // SAFETY: root is the task's page-table
@@ -733,14 +747,6 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                             | crate::arch::mm::PageTableEntry::D,
                                     );
                                 }
-                                let vma_end = placement + actual_length;
-                                let mut dv = crate::mm::vma::Vma::new(
-                                    VirtAddr::new(placement),
-                                    VirtAddr::new(vma_end),
-                                    vma_flags,
-                                );
-                                dv.set_type(crate::mm::vma::VmaType::Device);
-                                let _ = address_space.vma_write().add(dv);
                                 return placement as i64;
                             }
                         }
@@ -943,6 +949,38 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 unsafe { crate::arch::mm::asid::flush_tlb_all(); }
                             }
 
+                            // b91-b92 forensics: attribute big anonymous
+                            // PROT_NONE mappings (musl pthread stacks are
+                            // PROT_NONE + mprotect RW; a stack that STAYS
+                            // wholly PROT_NONE after its thread runs is a
+                            // lost/reverted mprotect — the hilogd crash
+                            // family writes into exactly such a VMA).
+                            // Also every MAP_FIXED mapping (the reserve-
+                            // carve pattern: hilogd's 2GB PROT_NONE arena
+                            // at 0x7ff000b86000 is carved by fixed RW
+                            // mmaps — b93 showed the crash VMA starts
+                            // exactly at the reserve base).
+                            if prot_flags == 0
+                                && map_flags & map::MAP_ANONYMOUS != 0
+                                && actual_length >= 0x10_0000
+                            {
+                                crate::pr_info!(
+                                    "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
+                                    crate::process::current_pid(),
+                                    mapped_addr.as_usize(),
+                                    actual_length
+                                );
+                            }
+                            if map_flags & map::MAP_FIXED != 0 {
+                                crate::pr_info!(
+                                    "FIXED-MAP pid {} addr {:#x} len {:#x} prot {:#x} fd {}",
+                                    crate::process::current_pid(),
+                                    mapped_addr.as_usize(),
+                                    actual_length,
+                                    prot_flags,
+                                    fd
+                                );
+                            }
                             mapped_addr.as_usize() as i64
                         },
                         Err(e) => {
@@ -989,6 +1027,18 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
+
+    // b91-b92 forensics: big munmaps are pthread-stack teardowns (musl
+    // __unmapself) or mallocng group frees — the counterparts of
+    // PROTNONE-MAP/MPROTECT-RW above.
+    if length >= 0x8_0000 {
+        crate::pr_info!(
+            "BIGMUNMAP pid {} addr {:#x} len {:#x}",
+            crate::process::current_pid(),
+            addr,
+            length
+        );
+    }
 
     // Validate arguments
     if length == 0 {
@@ -1054,6 +1104,20 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
     let prot = args[2] as u32;
+
+    // b91-b92 forensics: PROT_WRITE mprotects cover the pthread-stack
+    // upgrade (musl maps PROT_NONE, then mprotects RW before clone) AND
+    // the reserve-carve pattern (b93: hilogd's 2GB PROT_NONE arena carved
+    // by RW mprotects — the crash memset targets the reserve base). Log
+    // ALL of them: RELRO downgrades are PROT_READ and stay quiet.
+    if prot & 0x2 != 0 {
+        crate::pr_info!(
+            "MPROTECT-RW pid {} addr {:#x} len {:#x}",
+            crate::process::current_pid(),
+            addr,
+            length
+        );
+    }
 
     // Validate arguments
     if length == 0 {

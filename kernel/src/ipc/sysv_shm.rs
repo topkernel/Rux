@@ -763,6 +763,41 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
         pte_flags |= crate::arch::mm::PageTableEntry::W;
     }
 
+    // ATOMIC RESERVE (b91 corruption fix): the old shape mapped every
+    // segment page first and added the VMA LAST — a same-mm mmap landing
+    // in the (read-lock-picked, long unmapped) window made add_vma fail,
+    // and the rollback munmapped the COLLIDING mapping after this loop's
+    // map_user_page had already overwritten its demand PTEs. Reserving
+    // the VMA before any PTE work makes the range exclusively ours; the
+    // map loop below can then only ever install into our own VMA, and
+    // the hole rollback munmaps exactly our own range.
+    let mut vma_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::SHARED);
+    if !shm_readonly {
+        vma_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::SHARED);
+    }
+
+    let mut vma = Vma::new(
+        VirtAddr::new(attach_addr),
+        VirtAddr::new(attach_addr + size_aligned),
+        vma_flags,
+    );
+    vma.set_type(VmaType::SharedMemory);
+    vma.set_file_fd(shmid);
+    vma.set_file_size(segsz);
+
+    if addr_space.add_vma(vma).is_err() {
+        // Concurrent mapper won the range (auto-pick race or fixed-address
+        // request raced): undo the reservation and fail — never unmap the
+        // winner's range.
+        {
+            let slots = SHM_IDS.slots.lock();
+            if let Some(ref entry) = slots[idx] {
+                entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        return -(errno::ENOMEM as i64);
+    }
+
     // Map each page — OUTSIDE the SHM_IDS lock.
     for (i, &phys) in phys_pages.iter().enumerate() {
         if phys == 0 {
@@ -805,36 +840,6 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             drop(_pte_guard);
         }
     }
-
-    // Create VMA entry for this attachment
-    let mut vma_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::SHARED);
-    if !shm_readonly {
-        vma_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::SHARED);
-    }
-
-    let mut vma = Vma::new(
-        VirtAddr::new(attach_addr),
-        VirtAddr::new(attach_addr + size_aligned),
-        vma_flags,
-    );
-    vma.set_type(VmaType::SharedMemory);
-    vma.set_file_fd(shmid);
-    vma.set_file_size(segsz);
-
-    if addr_space.add_vma(vma).is_err() {
-        let _ = addr_space.munmap(VirtAddr::new(attach_addr), size_aligned);
-        // Undo the early nattch reservation
-        {
-            let slots = SHM_IDS.slots.lock();
-            if let Some(ref entry) = slots[idx] {
-                entry.inner.nattch.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-        return -(errno::ENOMEM as i64);
-    }
-
-    // Update segment metadata (nattch was already incremented atomically
-    // with the mapping above)
 
     // Flush TLB after modifying page table entries for the mapping.
     crate::arch::mm::flush_tlb_all();
