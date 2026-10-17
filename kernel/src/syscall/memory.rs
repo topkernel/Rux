@@ -955,6 +955,11 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // wholly PROT_NONE after its thread runs is a
                             // lost/reverted mprotect — the hilogd crash
                             // family writes into exactly such a VMA).
+                            // Also every MAP_FIXED mapping (the reserve-
+                            // carve pattern: hilogd's 2GB PROT_NONE arena
+                            // at 0x7ff000b86000 is carved by fixed RW
+                            // mmaps — b93 showed the crash VMA starts
+                            // exactly at the reserve base).
                             if prot_flags == 0
                                 && map_flags & map::MAP_ANONYMOUS != 0
                                 && actual_length >= 0x10_0000
@@ -964,6 +969,16 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     crate::process::current_pid(),
                                     mapped_addr.as_usize(),
                                     actual_length
+                                );
+                            }
+                            if map_flags & map::MAP_FIXED != 0 {
+                                crate::pr_info!(
+                                    "FIXED-MAP pid {} addr {:#x} len {:#x} prot {:#x} fd {}",
+                                    crate::process::current_pid(),
+                                    mapped_addr.as_usize(),
+                                    actual_length,
+                                    prot_flags,
+                                    fd
                                 );
                             }
                             mapped_addr.as_usize() as i64
@@ -1090,11 +1105,12 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     let length = args[1] as usize;
     let prot = args[2] as u32;
 
-    // b91-b92 forensics: big PROT_WRITE mprotects are the pthread-stack
-    // upgrade (musl maps PROT_NONE, then mprotects RW before clone). If a
-    // stack VMA that faulted was never upgraded, this log sequence shows
-    // which upgrade went missing (or landed on the wrong range).
-    if prot & 0x2 != 0 && length >= 0x8_0000 {
+    // b91-b92 forensics: PROT_WRITE mprotects cover the pthread-stack
+    // upgrade (musl maps PROT_NONE, then mprotects RW before clone) AND
+    // the reserve-carve pattern (b93: hilogd's 2GB PROT_NONE arena carved
+    // by RW mprotects — the crash memset targets the reserve base). Log
+    // ALL of them: RELRO downgrades are PROT_READ and stay quiet.
+    if prot & 0x2 != 0 {
         crate::pr_info!(
             "MPROTECT-RW pid {} addr {:#x} len {:#x}",
             crate::process::current_pid(),
