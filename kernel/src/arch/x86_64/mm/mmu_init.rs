@@ -1838,6 +1838,159 @@ pub fn kernel_device_window_pte(va: u64) -> Option<u64> {
     None
 }
 
+// ==================== Per-BAR kernel-half ioremap (K1-BAR) ====================
+//
+// Under KVM the q35 host bridge assigns virtio-modern 64-bit BARs far
+// above the fixed DEVICE_ALIAS64 window (observed 0xe0000008000 = 14TiB
+// with the full OH device set; TCG on the same machine stays under 1TB —
+// the placement is firmware/accelerator policy, not a contract we can
+// pre-map for). Linux's answer is ioremap-per-BAR into vmalloc space; our
+// equivalent is a bump arena in the kernel half plus this registry. Each
+// discovered out-of-window BAR is mapped into the STATIC root's kernel
+// half at probe time; because copy_kernel_mappings shares PML4[256..512]
+// by reference and PCI probe runs before the first user mm exists, every
+// CR3 in the system translates these VAs — trap-context MMIO (virtio
+// notify writes, ISR reads from interrupt handlers) works under any user
+// CR3, which the old identity ioremap (low half, boot root only) never
+// provided.
+//
+// Boot-time contract: entries are never torn down. No PCI hot-unplug path
+// exists in this kernel, and the old EXTRA_WINDOWS identity windows had
+// the same boot-permanent lifetime. If one is ever added, it must first
+// deal with existing user roots that carry the arena PML4 links.
+
+/// Registry capacity: one slot per distinct above-window BAR. The full OH
+/// set (6 blk + net + keyboard + tablet + gpu ≈ 10 functions, 1-2 modern
+/// BARs each) stays under 20; overflow refuses the ioremap loudly.
+const DYN_BAR_SLOTS: usize = 32;
+
+struct DynBarMap {
+    pa_base: [AtomicU64; DYN_BAR_SLOTS],
+    pa_end: [AtomicU64; DYN_BAR_SLOTS],
+    va_base: [AtomicU64; DYN_BAR_SLOTS],
+}
+
+impl DynBarMap {
+    const fn new() -> Self {
+        Self {
+            pa_base: [const { AtomicU64::new(0) }; DYN_BAR_SLOTS],
+            pa_end: [const { AtomicU64::new(0) }; DYN_BAR_SLOTS],
+            va_base: [const { AtomicU64::new(0) }; DYN_BAR_SLOTS],
+        }
+    }
+}
+
+static DYN_BARS: DynBarMap = DynBarMap::new();
+
+/// Bump cursor into IOREMAP_ARENA. Chunks are 2MB-aligned so most BAR
+/// mappings get 2MB PMD leaves for their interior.
+static DYN_BAR_CURSOR: AtomicU64 = AtomicU64::new(
+    crate::arch::mm::memory_layout::IOREMAP_ARENA_BASE as u64,
+);
+
+/// Set by create_user_address_space: once any user mm exists, a NEW PML4
+/// entry installed here is invisible to the mms forked before it (they
+/// copied the kernel-half links at creation). PCI probe must therefore
+/// finish before the first exec — a late ioremap is still mapped for the
+/// boot root but is reported loudly instead of failing silently later.
+static USER_MMS_EXIST: AtomicBool = AtomicBool::new(false);
+
+pub fn mark_user_mms_exist() {
+    USER_MMS_EXIST.store(true, Ordering::Release);
+}
+
+/// Resolve a PA through the per-BAR registry: Some(kernel-half VA) for a
+/// PA inside any registered BAR window, None otherwise. Range-aware so
+/// interior offsets (the virtio notify capability sits at BAR+0x7000 in
+/// the KVM layout) resolve against the BAR's own mapping.
+pub fn device_alias_dyn(pa: u64) -> Option<u64> {
+    for i in 0..DYN_BAR_SLOTS {
+        let base = DYN_BARS.pa_base[i].load(Ordering::Acquire);
+        if base == 0 {
+            // Slots fill in order and are never cleared.
+            break;
+        }
+        let end = DYN_BARS.pa_end[i].load(Ordering::Acquire);
+        if pa >= base && pa < end {
+            let va = DYN_BARS.va_base[i].load(Ordering::Acquire);
+            return Some(va + (pa - base));
+        }
+    }
+    None
+}
+
+/// Map one device BAR (or any device PA range) into the kernel-half
+/// ioremap arena and register it for `device_alias`.
+///
+/// Returns the kernel-half VA base on success — either an existing
+/// covering mapping (fixed window or earlier registration) or a fresh
+/// one. Returns None when the registry or the arena is exhausted, or the
+/// mapping could not be installed.
+///
+/// Safe to call repeatedly for the same range (idempotent). Call from
+/// single-threaded boot context (PCI probe); installs PML4 entries in the
+/// static kernel root.
+pub fn ioremap_bar_kernel(pa: u64, size: u64) -> Option<u64> {
+    use crate::arch::mm::memory_layout::{
+        device_alias_fixed, IOREMAP_ARENA_BASE, IOREMAP_ARENA_END,
+    };
+    if size == 0 {
+        return None;
+    }
+    // Already inside a fixed alias window: nothing to do (and never burn
+    // arena space for it).
+    if let Some(va) = device_alias_fixed(pa) {
+        return Some(va);
+    }
+    if USER_MMS_EXIST.load(Ordering::Acquire) {
+        // Not fatal for the boot root, but every existing user CR3 will
+        // page-fault on this BAR — the callers' warning covers the
+        // consequence; this names the cause.
+        crate::pr_err!(
+            "ioremap_bar_kernel: pa={:#x} mapped AFTER user mms exist — \
+             existing user CR3s will not see this arena link",
+            pa
+        );
+    }
+    // Already registered (re-probe of the same function, two capabilities
+    // sharing one BAR)?
+    if let Some(va) = device_alias_dyn(pa) {
+        return Some(va);
+    }
+    // Fresh chunk: 2MB-aligned size, bumped atomically.
+    let chunk = (size + 0x1f_ffff) & !0x1f_ffff;
+    let va = DYN_BAR_CURSOR.fetch_add(chunk, Ordering::AcqRel);
+    if va < IOREMAP_ARENA_BASE as u64 || va + chunk > IOREMAP_ARENA_END as u64 {
+        crate::pr_err!(
+            "ioremap_bar_kernel: arena exhausted (pa={:#x} size={:#x}) — \
+             enlarge IOREMAP_ARENA_SIZE",
+            pa, size
+        );
+        return None;
+    }
+    unsafe {
+        let device_flags = PageTableEntry::P | PageTableEntry::RW
+            | PageTableEntry::ACCESSED | PageTableEntry::DIRTY
+            | PageTableEntry::IO;
+        map_kernel_region(va, pa, size, device_flags);
+    }
+    // Record after the mapping is installed (Release/Acquire pairing).
+    for i in 0..DYN_BAR_SLOTS {
+        if DYN_BARS.pa_base[i].load(Ordering::Acquire) == 0 {
+            DYN_BARS.va_base[i].store(va, Ordering::Release);
+            DYN_BARS.pa_end[i].store(pa + size, Ordering::Release);
+            DYN_BARS.pa_base[i].store(pa, Ordering::Release);
+            return Some(va);
+        }
+    }
+    crate::pr_err!(
+        "ioremap_bar_kernel: registry full ({} slots) — pa={:#x} left on the \
+         identity fallback; user-CR3 MMIO on it will KERNPANIC",
+        DYN_BAR_SLOTS, pa
+    );
+    None
+}
+
 /// Device/ECAM mappings (q35: MMCONFIG @ 0xb0000000, IOAPIC, LAPIC).
 ///
 /// These VAs sit ABOVE the bootstrap identity map's 2GB coverage, so the

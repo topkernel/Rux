@@ -1164,6 +1164,13 @@ pub fn create_user_address_space() -> Option<u64> {
     // is refused — one leaked frame per exec'd mm).
     super::mmu_init::PT_LEDGER.stamp_root(root_page >> PAGE_SHIFT);
 
+    // K1-BAR: from this point on, new kernel-half PML4 entries installed
+    // in the static root (per-BAR ioremap arena) are invisible to mm
+    // trees forked earlier — they copied the kernel-half links at their
+    // own creation. PCI probe must finish before the first user mm;
+    // ioremap_bar_kernel reports a violation loudly.
+    super::mmu_init::mark_user_mms_exist();
+
     // SAFETY: root_page is a freshly allocated physical page; get_page_table_virt returns a
     // valid kernel-virtual pointer to it. copy_kernel_mappings expects a valid root PPN for
     // a page-sized allocation that we exclusively own.

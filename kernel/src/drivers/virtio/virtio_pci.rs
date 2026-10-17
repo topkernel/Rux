@@ -378,15 +378,43 @@ impl VirtIOPCI {
                     return Err("Firmware left PCI BAR unassigned");
                 }
                 // 64-bit BARs land ABOVE 4GB in QEMU's PCI window (the
-                // 32-bit hole fills up with many devices). The kernel's
-                // device map only covers ECAM + the low hole — ioremap the
-                // BAR's own range here (2MB-rounded, identity, uncached)
-                // and record it for the E8-MM device-window restore list.
-                if bar_obj.base_addr >= 0x1_0000_0000 {
-                    let lo = bar_obj.base_addr & !0x1F_FFFF;
-                    let hi = (bar_obj.base_addr + bar_obj.size as u64 + 0x1F_FFFF) & !0x1F_FFFF;
-                    unsafe {
-                        crate::arch::mm::mmu_init::ioremap_device_window(lo, hi - lo);
+                // 32-bit hole fills up with many devices). Under KVM the
+                // q35 host bridge places them FAR beyond the fixed
+                // DEVICE_ALIAS64 window (observed 0xe0000008000 = 14TiB
+                // with the full OH device set; TCG on the same machine
+                // stayed under 1TB), so the old identity ioremap —
+                // boot-root low half only, invisible under every user
+                // CR3 — KERNPANICed the first notify MMIO from a user
+                // task. ioremap the BAR's full probed size into the
+                // kernel-half arena instead (K1-BAR): the mapping lands
+                // in the static root before the first user mm exists,
+                // and device_alias resolves it under any CR3.
+                if bar_obj.base_addr >= 0x1_0000_0000
+                    && crate::arch::mm::memory_layout::device_alias_fixed(bar_obj.base_addr)
+                        .is_none()
+                {
+                    // read_bar does not populate .size; bar_size was probed
+                    // above in this loop. A zero probe (BAR unimplemented?)
+                    // still gets a 2MB chunk — cheap and always sufficient
+                    // for virtio modern capabilities living in this BAR.
+                    let map_size = if bar_size > 0 { bar_size } else { 0x20_0000 };
+                    match crate::arch::mm::mmu_init::ioremap_bar_kernel(
+                        bar_obj.base_addr,
+                        map_size,
+                    ) {
+                        Some(va) => {
+                            crate::println!(
+                                "virtio-pci: BAR {:#x}+{:#x} -> ioremap arena {:#x}",
+                                bar_obj.base_addr, map_size, va
+                            );
+                        }
+                        None => {
+                            crate::pr_err!(
+                                "virtio-pci: BAR {:#x} above-4G ioremap FAILED \
+                                 (registry/arena exhausted)",
+                                bar_obj.base_addr
+                            );
+                        }
                     }
                 }
                 assigned_bars.insert(bar_idx, bar_obj);
