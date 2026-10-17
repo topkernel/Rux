@@ -335,24 +335,27 @@ Non-mechanisms (ruled out by evidence):
   (heap-forensics worktree) regenerate all tables from the logs.
 - Disassembly: `objdump -d --start-address=... /run/ohmnt/...` on the
   private loop-mounted copy of system.img (unmounted after use).
-- **Guest probe `test/heapwatch/`** (builds static for both arches):
-  - `heapwatch.c` — mmaps a 1M binder-like region + 2M stack-like
-    region + 256K malloc block, fills recognizable patterns, and loops:
-    fresh-thread spawn with malloc/free churn (FFRT-worker mimic),
-    per-page XOR checksums (catches S1 content replacement without
-    needing the process to crash), same-value rewrites of every page
-    boundary (catches S2 permission strip and S3 VMA loss via SIGSEGV),
-    and fork+exit churn every 64 rounds (processdump mimic; the
-    post-fork window is re-checked immediately).
+  - **Guest probe `test/heapwatch/`** (builds static for both arches):
+    - `heapwatch.c` — mmaps a 1M binder-like region + 2M stack-like
+      region + 256K malloc block, fills recognizable patterns, and loops:
+      fresh-thread spawn with malloc/free churn (FFRT-worker mimic),
+      per-page XOR checksums (catches S1 content replacement without
+      needing the process to crash), same-value rewrites of every page
+      boundary (catches S2 permission strip and S3 VMA loss via SIGSEGV),
+      fork+exit churn every 64 rounds (processdump mimic), and —
+      matching the ctx=4 attribution — an `mremap(MREMAP_MAYMOVE)` move
+      of a dirtied 3M block every 16 rounds with post-move data
+      verification (`HEAPWATCH-MREMAP` + maps dump if the move loses
+      data).
   - On damage or fault it prints the fault address / page / old and new
     checksums and a full `/proc/self/maps` snapshot, then exits 42/43.
   - `mkinitrd-hw.py` packs an initrd with just the probe;
     `run-boot.sh [seconds] [riscv64|x86_64]` boots it with
     `init=/heapwatch` (q35 single QEMU, timeout-killed).
-  - Verified 150s on the x86_64 kernel: HEAPWATCH-START + 20k rounds
-    of beats, no false positives. A damage hit serializes as
-    `HEAPWATCH-DAMAGE ... (S1 ...)` / `HEAPWATCH-FAULT ... (S2/S3 ...)`
-    plus the maps dump — grep for `HEAPWATCH-` after a run.
-  - To reproduce the real thing it likely needs mremap traffic: extend
-    `fresh_worker` with a periodic `mremap(MREMAP_MAYMOVE)` of a
-    2-4MB mmap block (the audit agent's first experiment).
+  - Verified on the x86_64 kernel (2G q35): 20k rounds plain + 7k
+    rounds with mremap churn, no false positives; the probe's regions
+    land in the same VA neighborhood as the OH victims
+    (0x7feffffff000-0x7ff0002ff010). A damage hit serializes as
+    `HEAPWATCH-DAMAGE ... (S1 ...)`, `HEAPWATCH-FAULT ... (S2/S3 ...)`
+    or `HEAPWATCH-MREMAP ...` plus the maps dump — grep
+    `HEAPWATCH-` after a run.
