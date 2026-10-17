@@ -367,6 +367,33 @@ pub fn free_pages(addr: usize, order: usize) {
         return;
     }
 
+    // REUSE-WHILE-MAPPED tripwire (b88 samgr heap corruption hunt): a
+    // frame whose descriptor still says "mapped" must never re-enter the
+    // zone — the surviving PTE would alias the next allocation and the
+    // two owners scribble over each other (observed as mallocng meta
+    // corruption and a zeroed binder write buffer in samgr, with NO
+    // PTE-OVERWRITE at map time because the old leaf simply stayed).
+    // Refuse the free (bounded leak) and name the frame; the mapping
+    // keeps working, so the boot survives to reveal more.
+    {
+        let pd = crate::mm::page_desc::pfn_to_page(phys_to_pfn(addr));
+        if !pd.is_null() && unsafe { (*pd).is_mapped() } {
+            static MAPPED_FREES: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if MAPPED_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                crate::pr_err!(
+                    "free_pages: REFUSED frame {:#x} order {} still MAPPED (mapcount {}) pid {} — leaking instead of aliasing",
+                    addr,
+                    order,
+                    unsafe { (*pd).mapcount() },
+                    crate::process::current_pid()
+                );
+                crate::dfx::backtrace::dump_stack();
+            }
+            return;
+        }
+    }
+
     // Sentinel: a kernel VMA (or any address >= 4GB "phys") entering the zone
     // poisons the freelist — the next alloc returns it as a wild phys.
     // (x86_64 diagnostic from the feature branch; kept as a cheap guard.)
