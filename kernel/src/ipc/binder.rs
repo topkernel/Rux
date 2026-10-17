@@ -2211,10 +2211,10 @@ fn binder_thread_write(
                 if crate::dfx::switches::enabled(
                     crate::dfx::switches::DfxSwitch::BinderTrace,
                 ) && tr.data_size > 0
-                    && tr.data_size <= 160
+                    && tr.data_size <= 192
                 {
-                    let n = (tr.data_size as usize).min(24);
-                    let mut pb = [0u8; 24];
+                    let n = (tr.data_size as usize).min(64);
+                    let mut pb = [0u8; 64];
                     if unsafe {
                         crate::arch::uaccess::copy_from_user(
                             pb.as_mut_ptr(),
