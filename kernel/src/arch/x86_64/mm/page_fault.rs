@@ -414,6 +414,17 @@ pub fn handle_mm_fault(
                 let effective_size = addr_space
                     .get_vma_file(vma_start)
                     .and_then(|f| {
+                        // Entry-authoritative size for devfs regular
+                        // files: the pinned vm_file's Inode.size is a
+                        // snapshot from ITS open; ftruncate through the
+                        // creating fd updated the entry, not this
+                        // snapshot — a stale 0 SIGBUSed pid 1's param
+                        // workspace mapping at file_off 0 (b74).
+                        if let Some(live) =
+                            crate::fs::devfs::devfs_reg_current_size(f.as_ref())
+                        {
+                            return Some(live);
+                        }
                         // SAFETY: inode cell written at open time; read-only.
                         let inode_opt = unsafe { &*f.inode.get() };
                         inode_opt.as_ref().map(|i| i.get_size())
@@ -421,16 +432,119 @@ pub fn handle_mm_fault(
                     .unwrap_or(vma_file_size) as usize;
                 if file_offset >= effective_size {
                     crate::pr_err!(
-                        "pagefault: SIGBUS forensics: addr {:#x} vma_start {:#x} vma_off {:#x} file_off {:#x} eff_size {:#x} mmap_snap_size {:#x} fd {}",
+                        "pagefault: SIGBUS forensics: addr {:#x} vma_start {:#x} vma_off {:#x} file_off {:#x} eff_size {:#x} mmap_snap_size {:#x} fd {} pid {} path {}",
                         page_virt_addr.as_usize(),
                         vma_start,
                         vma_offset,
                         file_offset,
                         effective_size,
                         vma_file_size as usize,
-                        vma_file_fd
+                        vma_file_fd,
+                        unsafe { crate::process::current_pid() },
+                        addr_space
+                            .get_vma_file(vma_start)
+                            .map(|f| f.path())
+                            .unwrap_or_default(),
                     );
                     return MmFaultResult::BusError;
+                }
+
+                // Coherent SHARED devfs mapping (OH param workspaces, see
+                // fs/devfs SharedFilePages): instead of a per-process
+                // private page filled from read_at, map the FILE'S shared
+                // physical page so plain memcpy stores from any mapper
+                // are instantly visible to every other mapper — Linux
+                // tmpfs MAP_SHARED semantics, which the OH parameter
+                // service's write protocol (memcpy, no msync) requires.
+                if vma_flags.contains(crate::mm::vma::VmaFlags::SHARED) {
+                    if let Some(shared_phys) = addr_space
+                        .get_vma_file(vma_start)
+                        .and_then(|f| {
+                            let ops = f.get_ops()?;
+                            if !core::ptr::eq(
+                                ops as *const _,
+                                &crate::fs::devfs::DEVFS_REG_FILE_OPS as *const _,
+                            ) {
+                                return None;
+                            }
+                            // Page-granular offset within the file.
+                            crate::fs::devfs::shared_fault_file_page(
+                                f.as_ref(),
+                                (file_offset / (PAGE_SIZE as usize))
+                                    * (PAGE_SIZE as usize),
+                            )
+                        })
+                    {
+                        let sp_phys = PhysAddr::new(shared_phys);
+                        let mut sp_flags = PageTableEntry::P
+                            | PageTableEntry::A
+                            | PageTableEntry::D
+                            | PageTableEntry::NX
+                            | PageTableEntry::U;
+                        if vma_flags.is_writable() {
+                            sp_flags |= PageTableEntry::W;
+                        }
+                        if vma_flags.is_executable() {
+                            sp_flags &= !PageTableEntry::NX;
+                        }
+                        let _sp_guard =
+                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                        if unsafe {
+                            PageTableWalker::walk(root_ppn, fault_addr.bits() as u64)
+                        }
+                        .map_or(false, |(_ppn, bits)| {
+                            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+                        })
+                        {
+                            return MmFaultResult::Handled;
+                        }
+                        // SAFETY: root_ppn valid; fault_addr page-aligned;
+                        // sp_phys is the shared file page; flags built above.
+                        unsafe {
+                            map_page(root_ppn, fault_addr, sp_phys, sp_flags);
+                            crate::arch::cpu::invlpg(fault_addr.bits());
+                        }
+                        // Refcount/mapcount bookkeeping for the shared
+                        // frame (multi-mapper: fork's COW walk exempts
+                        // SHARED VMAs and bumps the refcount itself).
+                        // CRITICAL (b84): each MAPPING must hold its own
+                        // page REFERENCE — unmap_pages put_page()s every
+                        // mapped PTE and frees at refcount 0. Without the
+                        // get_page here, the FIRST unmap freed the frame
+                        // back to the buddy while the file's shared
+                        // backing still listed it — the buddy re-handed
+                        // the same PFNs to the NEXT allocation (observed:
+                        // param_sec_dac off 0x1000/0x2000 receiving
+                        // param_selinux's frames 0x7f608/0x7f609), and
+                        // the two files' contents cross-wired through the
+                        // aliased pages — the same double-handout engine
+                        // behind this family's "wrong file content"
+                        // livelocks (and plausibly the historical
+                        // random-global scribbles: user stores landing in
+                        // re-handed kernel pages).
+                        {
+                            use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+                            let page =
+                                pfn_to_page_mut((shared_phys >> PAGE_SHIFT) as usize);
+                            if !page.is_null() {
+                                // SAFETY: page descriptor of a live frame;
+                                // the backing holds the base reference, so
+                                // get_page cannot race a 0→1 resurrection.
+                                unsafe {
+                                    (*page).get_page();
+                                    (*page).set_flag(PageFlag::Anonymous);
+                                    (*page).inc_mapcount();
+                                    crate::mm::rmap::page_record_mapping(
+                                        &*page,
+                                        addr_space as *const _ as usize,
+                                        fault_addr.bits() as usize,
+                                    );
+                                }
+                            }
+                        }
+                        addr_space.add_rss(1);
+                        return MmFaultResult::Handled;
+                    }
                 }
             }
         }

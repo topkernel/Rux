@@ -256,6 +256,74 @@ impl RtRunQueue {
         }
     }
 
+    /// Unlink `task` from its priority list WITHOUT trusting the entity's
+    /// on_rq flag. free_task_slot's freed-while-linked defense (oh-display
+    /// b61-b66): a task whose page is about to return to the heap may
+    /// carry a STALE on_rq=false while its rt_run_list node is still
+    /// linked (one-sided unlink shapes) — plain dequeue() would refuse on
+    /// the flag and leave the dangling node behind, poisoning every later
+    /// walk of that list once the page is reused. is_linked() gates the
+    /// call, so a task that is provably unlinked costs one pointer read.
+    ///
+    /// Counters/bitmap are reconciled exactly like dequeue(). Called with
+    /// the GRQ lock held, from the task-free path only (the task memory is
+    /// still valid — del() writes land in the list's real neighbors).
+    pub fn force_unlink(&mut self, task: *mut Task) -> bool {
+        if task.is_null() || !self.is_linked(task) {
+            return false;
+        }
+        // SAFETY: is_linked() proved the node is linked into one of
+        // self.queue's lists; the caller (free_task_slot) holds the GRQ
+        // lock and the Task memory is not yet freed/poisoned.
+        unsafe {
+            let t = &mut *task;
+            let raw = t.rt_priority() as usize;
+            // Remove from list regardless of the (possibly stale) on_rq
+            // flag — the linkage check above is the authority.
+            t.rt_run_list.del();
+
+            if raw < MAX_RT_PRIO {
+                // Same bitmap inversion as enqueue/dequeue.
+                let prio = MAX_RT_PRIO - 1 - raw;
+                if self.queue[prio].is_empty() {
+                    let word_idx = prio / 64;
+                    let bit_idx = prio % 64;
+                    self.bitmap[word_idx].fetch_and(!(1u64 << bit_idx), Ordering::AcqRel);
+                }
+            } else {
+                // Priority out of range: the node was linked through some
+                // corruption; sweep every empty-list bit so the bitmap
+                // cannot keep naming a prio whose list is now empty.
+                for prio in 0..MAX_RT_PRIO {
+                    if self.queue[prio].is_empty() {
+                        let word_idx = prio / 64;
+                        let bit_idx = prio % 64;
+                        self.bitmap[word_idx].fetch_and(!(1u64 << bit_idx), Ordering::AcqRel);
+                    }
+                }
+            }
+
+            // Counters: rt_nr_running/rr_nr_running may already be
+            // consistent (a normally-linked task) or drifted; clamp at 0
+            // so a double-decrement cannot underflow.
+            if self.rt_nr_running.load(Ordering::Acquire) > 0 {
+                self.rt_nr_running.fetch_sub(1, Ordering::AcqRel);
+            }
+            if t.policy() == SchedPolicy::Rr && self.rr_nr_running.load(Ordering::Acquire) > 0 {
+                self.rr_nr_running.fetch_sub(1, Ordering::AcqRel);
+            }
+
+            if self.is_empty() {
+                self.highest_prio.store(MAX_RT_PRIO as u32, Ordering::Release);
+            } else if let Some(new_highest) = self.find_highest_prio() {
+                self.highest_prio.store(new_highest, Ordering::Release);
+            }
+
+            t.rt_entity().set_on_rq(false);
+        }
+        true
+    }
+
     /// Pick the next task to run
     pub fn pick_next(&mut self) -> Option<*mut Task> {
         let prio = self.find_highest_prio()?;
@@ -325,11 +393,39 @@ impl RtRunQueue {
                 let mut pos = self.queue[prio].next;
 
                 while pos != head {
+                    // b50 #GP guard: a scribbled link yields a
+                    // non-canonical ListHead; derefing it (next-loads or
+                    // the container_of below) is a kernel #GP. The node
+                    // cannot be unlinked safely either, so stop walking
+                    // this priority for this pick and report — the
+                    // entries past the break stay linked and skip-picked,
+                    // which keeps the kernel alive instead of fatal.
+                    // b61/b62 hardening: canonical alone also accepts
+                    // kernel-NEGATIVE poison (0xfffffffffffffeXX read from
+                    // a freed task's links) — require the PHYSMAP range
+                    // for the link, where Task allocations actually live.
+                    // b69 fix: the DERIVED task screen must also accept
+                    // the static Task storages (boot init task, idle
+                    // tasks) — a physmap-only check dropped PID 1 from
+                    // the CFS timeline at its first pick and wedged the
+                    // machine in WFI with nr_running==0. The pos node
+                    // itself stays physmap-or-static too (it is the
+                    // rt_run_list INSIDE the same Task allocation).
+                    if pos as usize % 8 != 0
+                        || !crate::sched::sched::kernel_task_ptr_range_ok(pos as *const u8)
+                    {
+                        crate::sched::sched::report_poisoned_rq_entry(cpu_id, pos as usize);
+                        break;
+                    }
                     // SAFETY: pos is an embedded ListHead in an enqueued Task; offset_of gives the correct back-pointer.
                     let task = unsafe {
                         let offset = core::mem::offset_of!(Task, rt_run_list);
                         (pos as *mut u8).sub(offset) as *mut Task
                     };
+                    if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
+                        crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
+                        break;
+                    }
 
                     // SAFETY: task derived from queue above; cpu_allowed is a simple field read.
                     // R8-1b: skip tasks whose context is not yet saved (a

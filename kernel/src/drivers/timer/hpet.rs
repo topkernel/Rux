@@ -54,6 +54,15 @@ const CFG_ENABLE: u32 = 1;
 
 /// MMIO base (identity-mapped VA) once initialized; 0 = not present.
 static BASE: AtomicU64 = AtomicU64::new(0);
+/// The value BASE held at successful init. The HPET is a FIXED MMIO
+/// block — this value can never legitimately change after init. b77
+/// capture: a wild kernel write changed BASE 0xffff8900fed00000 →
+/// 0xffff89004ed00000 mid-boot (one byte of the physical address); every
+/// subsequent clock read dereferenced an unmapped physmap address and
+/// the whole boot graph froze (all tasks crawling, serial silent). Any
+/// deviation from the locked value is a scribble: read_counter heals it
+/// back and reports once.
+static BASE_LOCKED: AtomicU64 = AtomicU64::new(0);
 /// HPET ticks per nominal-domain tick (CLOCK_FREQ units). QEMU: 100 MHz
 /// HPET / 10 MHz nominal = 10. 0 until `init` validated the period.
 static DIV: AtomicU64 = AtomicU64::new(0);
@@ -94,8 +103,25 @@ unsafe fn w32(base: usize, off: usize, v: u32) {
 /// after ~5.8 kyr, so u64 arithmetic needs no wrap handling.
 #[inline]
 pub fn read_counter() -> u64 {
-    let base = BASE.load(Ordering::Acquire) as usize;
+    let mut base = BASE.load(Ordering::Acquire) as usize;
     debug_assert!(base != 0);
+    // Scribble guard (see BASE_LOCKED): a fixed MMIO base that changed
+    // after init is a wild write — heal, report once, keep reading the
+    // real block instead of unmapped memory.
+    let good = BASE_LOCKED.load(Ordering::Acquire) as usize;
+    if good != 0 && base != good {
+        BASE.store(good as u64, Ordering::Release);
+        static REPORTED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !REPORTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+            crate::pr_err!(
+                "hpet: BASE scribbled {:#x} -> healed {:#x}",
+                base,
+                good
+            );
+        }
+        base = good;
+    }
     loop {
         // SAFETY: BASE != 0 implies an initialized, mapped HPET.
         let hi1 = unsafe { r32(base, HPET_CNTR_HI) } as u64;
@@ -230,6 +256,7 @@ pub fn init() -> bool {
     DIV.store(div, Ordering::Release);
     BOOT_OFFSET.store(continuity, Ordering::Release);
     BASE.store(base as u64, Ordering::Release);
+    BASE_LOCKED.store(base as u64, Ordering::Release);
     true
 }
 

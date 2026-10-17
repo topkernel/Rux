@@ -489,6 +489,24 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                 if file.get_ops().is_none() {
                     return mmap_error::ENODEV;
                 }
+                // A DIRECTORY fd has dir file ops, but Linux mmap refuses
+                // it with ENODEV (directories have no ->mmap). Accepting
+                // it created a FileBacked VMA over the (size-0) directory
+                // inode whose first touch SIGBUSed "past EOF" — b74/b75:
+                // pid 1 mapped the /dev/__parameters__ directory this way,
+                // the SIGBUS spawned a hung processdump, and its SIGALRM
+                // exit left the whole boot graph frozen. Userspace handles
+                // a clean ENODEV; it cannot handle the delayed SIGBUS.
+                let is_dir = unsafe {
+                    let inode_opt = &*file.inode.get();
+                    inode_opt
+                        .as_ref()
+                        .map(|i| i.mode.is_directory())
+                        .unwrap_or(false)
+                };
+                if is_dir {
+                    return mmap_error::ENODEV;
+                }
             }
             None => return mmap_error::EBADF,
         }

@@ -241,6 +241,36 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         crate::fs::file_open(&full_path, flags, mode)
     };
 
+    // OH param-workspace hunt (b70): /dev/__parameters__/{param_sec_dac,
+    // param_selinux} end up missing — init's GetSharedMem create-open
+    // (O_CREAT|O_RDWR|O_TRUNC + ftruncate + mmap MAP_SHARED) fails
+    // silently (ENOENT-only tracing misses non-ENOENT errnos), every
+    // later param label lookup is refused, bootevent.* sets are
+    // forbidden and init's boot graph never starts the UI stack. Print
+    // EVERY open under that directory with its result, plus the
+    // create-open's flags, so the failing errno is named directly.
+    if full_path.starts_with("/dev/__parameters__") {
+        static PARAMWS_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = PARAMWS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 48 {
+            let rc = match &result {
+                Ok(fd) => *fd as i64,
+                Err(e) => *e as i64,
+            };
+            let creating = (flags & O_CREAT) != 0;
+            crate::pr_info!(
+                "paramws open[{}] '{}' flags {:#x} creat={} -> {} (pid {})",
+                n,
+                full_path,
+                flags,
+                creating,
+                rc,
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    }
+
     // OH bring-up: throttled ENOENT trace — the display HDF hosts retry
     // missing files in tight loops and their hilog never reaches the
     // console; the failing path list is the only visibility into what
@@ -729,6 +759,22 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
+
+    // OH param-workspace hunt (b70) — see the open tracer in sys_open.
+    if full_path.starts_with("/dev/__parameters") {
+        let rc = match crate::fs::vfs::file_mkdir(&full_path, mode) {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        };
+        crate::pr_info!(
+            "paramws mkdir '{}' mode {:#o} -> {} (pid {})",
+            full_path,
+            mode,
+            rc,
+            unsafe { crate::process::current_pid() }
+        );
+        return rc;
+    }
 
     match crate::fs::vfs::file_mkdir(&full_path, mode) {
         Ok(()) => 0,
