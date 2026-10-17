@@ -614,6 +614,25 @@ impl CfsRunQueue {
     /// CPUs can pass here hot while the heal unwedges a queue). SBI direct
     /// write discipline (R34): callers hold the GRQ lock.
     fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32) {
+        Self::stale_heal_report(b"STALE-CLAIM-RESET", cpu_id, pid, was, u32::MAX);
+    }
+
+    /// R85 (tail-phase PICK-SKIP wedge): always-on, rate-limited report
+    /// for the pick-side stale on_cpu heal — the released FULL qword is
+    /// the store __switch_to would have made; the print names the victim,
+    /// the pre-heal claim, and the advisory pick-state so a capture can
+    /// tell a lost release (pk=LIVE, claim=real-cpu) from a scribble.
+    /// Same R34 discipline and 2s system-wide budget as the claim twin.
+    fn stale_oncpu_healed(cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
+        // SAFETY: diagnostic reads of stable Task fields; the task is
+        // linked on this queue (pinned by the GRQ lock the caller holds).
+        let pid = unsafe { (*task).pid() };
+        Self::stale_heal_report(b"STALE-ONCPU-RESET", cpu_id, pid, claim, pk);
+    }
+
+    /// Shared rate-limited heal reporter (R34: GRQ-held callers, direct
+    /// console writes only).
+    fn stale_heal_report(tag: &[u8], cpu_id: usize, pid: u32, was: i32, pk: u32) {
         use crate::console::putchar_no_lock as putchar;
         static LAST_REPORT: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
@@ -628,8 +647,7 @@ impl CfsRunQueue {
         {
             return;
         }
-        const MSG: &[u8] = b"STALE-CLAIM-RESET by_cpu=";
-        for &b in MSG {
+        for &b in tag {
             putchar(b);
         }
         let mut v = cpu_id as u64;
@@ -649,10 +667,7 @@ impl CfsRunQueue {
                 putchar(buf[n]);
             }
         }
-        const M2: &[u8] = b" pid=";
-        for &b in M2 {
-            putchar(b);
-        }
+        putchar(b' ');
         let mut v = pid as u64;
         if v == 0 {
             putchar(b'0');
@@ -692,6 +707,29 @@ impl CfsRunQueue {
             while n > 0 {
                 n -= 1;
                 putchar(buf[n]);
+            }
+        }
+        if pk != u32::MAX {
+            const M4: &[u8] = b" pk=";
+            for &b in M4 {
+                putchar(b);
+            }
+            let mut v = pk as u64;
+            if v == 0 {
+                putchar(b'0');
+            }
+            while v > 0 {
+                let mut buf = [0u8; 20];
+                let mut n = 0;
+                while v > 0 {
+                    buf[n] = b'0' + (v % 10) as u8;
+                    v /= 10;
+                    n += 1;
+                }
+                while n > 0 {
+                    n -= 1;
+                    putchar(buf[n]);
+                }
             }
         }
         putchar(b'\n');
@@ -893,41 +931,72 @@ impl CfsRunQueue {
                     true
                 } else {
                     let claim = (*task).running_on_cpu.load(Ordering::Acquire);
+                    // R85 (tail-phase PICK-SKIP wedge): adjudicate every
+                    // refusal against SCHEDULER TRUTH instead of the
+                    // advisory bits. pick_owner_live (sched.rs) scans the
+                    // per-CPU current slots and the SWITCHING_OUT marks
+                    // under this same GRQ hold: a genuinely owned task is
+                    // named by its CPU's slot (running / picked — the mark
+                    // and slot publishes share one GRQ hold) or by a
+                    // SWITCHING_OUT entry (mid switch-out, release store
+                    // still pending). A marked task named by NEITHER
+                    // executes nowhere and no path will ever release its
+                    // marks: every pick would skip it with why=1/why=2
+                    // forever (the pid-1 tail wedge: linked,
+                    // {oncpu=1, claim=1, pk=1}, box idle).
+                    let owner_live =
+                        crate::sched::sched::pick_owner_live(task);
                     if !(*task).on_cpu()
                         && claim != -1
                         && claim as usize != cpu_id
                     {
-                        // R74 (double-run gate): a LIVE pick-state with a
-                        // live claiming hart means that CPU published this
-                        // ownership at pick time and has not released it —
-                        // the task may be mid-switch-in on the claimer
-                        // (the r74a capture: claim=0 while CPU0 was inside
-                        // its pick → reset → CPU3 picked → double-run
-                        // KERNPANIC). Only reset the claim when the
-                        // claiming hart is verifiably not servicing
-                        // interrupts (frozen >= 5s, the R57 discipline:
-                        // starved != dead) or the claim is out of range
-                        // (scribble garbage — reset as before). A genuinely
-                        // stuck claim on a live hart retries on later
-                        // picks; it does not strand the task while the
-                        // claimer still runs.
-                        let claiming = claim as usize;
-                        let claim_live = claiming < crate::config::MAX_CPUS
-                            && (*task).pick_state()
-                                == crate::process::task::PICK_LIVE
-                            && crate::dfx::softlockup::cpu_irq_frozen_ms(
-                                claiming)
-                                < 5000;
-                        if !claim_live {
+                        // R74 (double-run gate, superseded): the old gate
+                        // trusted pick_state==LIVE plus hart liveness
+                        // (irq-frozen < 5s) — but LIVE legitimately
+                        // persists after a switch-out and says nothing
+                        // about whether the CLAIMER still owns the task.
+                        // The r74a capture (reset while CPU0 was inside
+                        // its pick → double-run) is now excluded
+                        // STRUCTURALLY: a pick's mark→slot publish window
+                        // is one continuous GRQ hold, so this scan can
+                        // never interleave it; the r74a shape reads
+                        // slot(claimer)==task → owner_live → refused. A
+                        // {on_cpu=false, foreign claim} candidate owned by
+                        // no slot and no in-flight switch is a byte-clear
+                        // residue or scribble garbage — reset it.
+                        if !owner_live {
                             (*task).running_on_cpu.store(-1, Ordering::Release);
                             Self::stale_claim_healed(cpu_id, (*task).pid(), claim);
                             skip_reason = 5;
                         } else {
                             skip_reason = 2;
                         }
-                        !claim_live
+                        !owner_live
                     } else {
-                        skip_reason = 1;
+                        // why=1 leg: on_cpu set (or the claim names THIS
+                        // picker's cpu). This is the legitimate mid
+                        // switch-out / fast-repick transient — UNLESS no
+                        // owner backs it (slotless, no SWITCHING_OUT): the
+                        // release store was lost and the marks are stale
+                        // forever. Time-confirm through the orphan watch
+                        // (50 jiffies) so a picker that briefly appears
+                        // slotless under an out-of-tree divergence window
+                        // is re-recorded, then release the FULL qword —
+                        // the exact store __switch_to would have made.
+                        if !owner_live
+                            && crate::sched::sched::stale_mark_confirm(
+                                task,
+                                (*task).pid(),
+                                50,
+                            )
+                        {
+                            let was_pk = (*task).pick_state();
+                            (*task).release_pick_ownership();
+                            Self::stale_oncpu_healed(cpu_id, task, claim, was_pk);
+                            skip_reason = 5;
+                        } else {
+                            skip_reason = 1;
+                        }
                         false
                     }
                 };
@@ -1062,6 +1131,26 @@ impl CfsRunQueue {
                         // that refused the candidate.
                         ps(b" pk=");
                         pd((*task).pick_state() as u64);
+                        // R85 (tail-phase wedge hunt): the ownership
+                        // ADJUDICATION fields — st= the state word (the
+                        // harvester only heals RUNNING orphans; a wedged
+                        // waiter shows SLEEPING here), slot= the CPUs whose
+                        // current slot names the task, swout= the CPUs
+                        // whose in-flight switch-out names it. why=1 with
+                        // slot=0 swout=0 persisting across reports is the
+                        // un-owned stale mark the R85 pick-side heal
+                        // releases (STALE-ONCPU-RESET).
+                        ps(b" st=0x");
+                        let st = (*task).state().bits();
+                        let mut v = st as u64;
+                        for sh in (0..8u32).rev() {
+                            let nb = ((v >> (sh * 4)) & 0xF) as u8;
+                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                        }
+                        ps(b" slot=");
+                        pd(crate::sched::sched::owner_slot_mask(task) as u64);
+                        ps(b" swout=");
+                        pd(crate::sched::sched::switching_out_mask(task) as u64);
                         ps(b" aff=0x");
                         let mut v = (*task).cpus_allowed() as u64;
                         for sh in (0..8u32).rev() {

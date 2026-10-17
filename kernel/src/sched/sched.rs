@@ -695,6 +695,81 @@ pub fn task_is_mid_switch_out(task: *mut Task) -> bool {
     })
 }
 
+/// R85 (tail-phase PICK-SKIP wedge): does any CPU still OWN `task`?
+///
+/// Called from the class pick screens (fair.rs decision legs) with the GRQ
+/// held, where it is the AUTHORITATIVE ownership adjudication. A task is
+/// live-owned iff some CPU's current slot names it, or some CPU is
+/// switching it out right now:
+///
+/// - A running task's slot names it from its pick until its next
+///   __schedule, and a completed pick publishes the ownership marks AND
+///   the slot inside one continuous GRQ hold — a marked pick can never be
+///   observed slotless under the lock.
+/// - A mid-switch-out task is named by SWITCHING_OUT[cpu], published under
+///   the GRQ BEFORE the lock is dropped and cleared only AFTER
+///   __switch_to's release store has landed (same CPU, program order).
+///
+/// A task that still shows ownership marks ({on_cpu=1, claim=X} or a
+/// foreign claim) but is named by NO slot and NO in-flight switch is not
+/// executing anywhere, no picker is resuming it, and no code path will
+/// ever release its marks — the tail-phase PICK-SKIP wedge shape (pid 1
+/// linked, {oncpu=1, claim=1, pk=1}, every CPU's pick skipping it with
+/// why=1 forever while the box idles). The advisory pick_state word alone
+/// cannot make this call: LIVE legitimately persists after switch-outs
+/// and a scribble can leave it set forever (the R80 lesson) — the slots
+/// and SWITCHING_OUT are scheduler-truth, written only under the GRQ.
+pub fn pick_owner_live(task: *mut Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    (0..MAX_CPUS).any(|c| {
+        cpu_state(c).current == task
+            || SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64
+    })
+}
+
+/// R85 (diag): bitmask of CPUs whose current slot names `task` — for the
+/// PICK-SKIP-ALL report block, so a capture names whether a refusal was
+/// backed by a live owner or a stale mark nobody will release.
+pub fn owner_slot_mask(task: *mut Task) -> u32 {
+    if task.is_null() {
+        return 0;
+    }
+    let mut m = 0u32;
+    for c in 0..MAX_CPUS {
+        if cpu_state(c).current == task {
+            m |= 1 << c;
+        }
+    }
+    m
+}
+
+/// R85 (diag): bitmask of CPUs whose in-flight switch-out is `task`.
+pub fn switching_out_mask(task: *mut Task) -> u32 {
+    if task.is_null() {
+        return 0;
+    }
+    let mut m = 0u32;
+    for c in 0..MAX_CPUS {
+        if SWITCHING_OUT[c].load(core::sync::atomic::Ordering::Acquire) == task as u64 {
+            m |= 1 << c;
+        }
+    }
+    m
+}
+
+/// R85: pick-side time confirmation for a stale-ownership adjudication.
+/// Wraps the harvester's orphan watch (same table, same 60-jiffy re-record
+/// discipline): a mid-switch-out transient or a briefly descheduled
+/// picker re-records and never matures; a shape that persists for
+/// `threshold` jiffies is by definition stale. The owner-based
+/// pick_owner_live check already excludes every legitimate owner, so this
+/// is defense in depth against an out-of-tree divergence window.
+pub fn stale_mark_confirm(task: *mut Task, pid: u32, threshold: u64) -> bool {
+    orphan_watch_confirm(task, pid, crate::drivers::timer::get_jiffies(), threshold)
+}
+
 /// Per-CPU reschedule flags
 static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
