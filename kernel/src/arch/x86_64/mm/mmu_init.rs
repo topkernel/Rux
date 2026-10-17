@@ -1394,6 +1394,12 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
                     ctx,
                     if equal { "COPIED" } else { "DESTROYED" }
                 );
+                // Attribution: MM_CTX can be stale (it is never reset),
+                // so the printed ctx only says what ran RECENTLY, not
+                // which path is mapping now. The frame walk names the
+                // actual caller — b86 lost render_service to a 2-page
+                // heap overwrite at 0x1f000 whose ctx label was useless.
+                crate::dfx::backtrace::dump_stack();
             }
         }
     }
