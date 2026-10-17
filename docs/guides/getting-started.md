@@ -235,8 +235,7 @@ isa             : rv64imafdc
 mmu             : sv39
 ...
 
-/app/desktop
-# Launch desktop environment (requires GUI mode: make gui)
+(desktop demo removed — run GNOME via `make ubuntu-run` instead)
 ```
 
 **Note**: most commands (`ls`, `cat`, `ps`, ...) are symlinks to `/bin/toybox`; the shell itself provides POSIX built-ins (`cd`, `exit`, ...).

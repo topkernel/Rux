@@ -79,7 +79,6 @@ run_kernel() {
 run_kernel_gui() {
     local INIT="${1:-$DEFAULT_INIT}"
     echo "Starting QEMU (4 cores, 2GB memory, GUI mode, init=$INIT)..."
-    echo "Tip: Run /app/desktop in terminal shell to start desktop"
     qemu-system-riscv64 \
         -M virt \
         -accel tcg,thread=single \
