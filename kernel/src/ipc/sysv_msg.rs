@@ -125,6 +125,83 @@ fn get_current_pid() -> u32 {
 
 static MSG_IDS: IpcIds<MsgQueue> = IpcIds::new();
 
+/// Runtime MSGMNI — number of message queues allowed system-wide. Writable
+/// through /proc/sys/kernel/msgmni (LTP msgget03 lowers it to a small value
+/// and expects the very next msgget to fail with ENOSPC). Capped by the
+/// slot-array size IPC_IDS_MAX.
+static MSGMNI: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(256);
+
+/// Read the runtime MSGMNI limit (procfs sysctl + IPC_INFO/MSG_INFO).
+pub fn msgmni() -> i32 {
+    MSGMNI.load(Ordering::Relaxed)
+}
+
+/// Set the runtime MSGMNI limit (procfs sysctl write). Returns false when the
+/// requested value is out of range.
+pub fn set_msgmni(v: i32) -> bool {
+    if v < 1 || v > IPC_IDS_MAX as i32 {
+        return false;
+    }
+    MSGMNI.store(v, Ordering::Relaxed);
+    true
+}
+
+/// /proc/sysvipc/msg contents — one line per queue, Linux ipc/util.c
+/// formatting. LTP's GET_USED_QUEUES() (msgget03, msgstress01) counts lines
+/// to learn how many queues exist.
+pub fn proc_show() -> alloc::vec::Vec<u8> {
+    use alloc::fmt::Write;
+    let mut out = alloc::string::String::new();
+    let _ = writeln!(
+        out,
+        "       key      msqid perms      uid      gid  cuid   cgid  stime  rtime  ctime       cbytes       qnum qbytes lspid lrpid"
+    );
+    let slots = MSG_IDS.slots.lock();
+    for (i, slot) in slots.iter().enumerate() {
+        if let Some(ref entry) = slot {
+            if entry.deleted {
+                continue;
+            }
+            let q = &entry.inner;
+            let id = ipc_build_id(i, q.perm.seq);
+            let _ = writeln!(
+                out,
+                "{:10} {:10} {:6o} {:8} {:8} {:6} {:6} {:6} {:6} {:6} {:12} {:12} {:6} {:6} {:6}",
+                q.perm.key,
+                id,
+                q.perm.mode & 0o7777,
+                q.perm.uid,
+                q.perm.gid,
+                q.perm.cuid,
+                q.perm.cgid,
+                q.msg_stime.load(Ordering::Relaxed),
+                q.msg_rtime.load(Ordering::Relaxed),
+                q.msg_ctime.load(Ordering::Relaxed),
+                q.cbytes.load(Ordering::Relaxed),
+                q.qnum.load(Ordering::Relaxed),
+                q.qbytes.load(Ordering::Relaxed),
+                q.msg_lspid.load(Ordering::Relaxed),
+                q.msg_lrpid.load(Ordering::Relaxed),
+            );
+        }
+    }
+    out.into_bytes()
+}
+
+/// Highest allocated slot index, or -1 when the table is empty — Linux's
+/// ipc_get_maxidx(). Returned by IPC_INFO/MSG_INFO; LTP passes the value
+/// straight into MSG_STAT (raw index), so the +1 the old code added made
+/// every subsequent MSG_STAT hit an empty slot (EINVAL).
+fn msg_max_idx() -> i32 {
+    let slots = MSG_IDS.slots.lock();
+    for i in (0..IPC_IDS_MAX).rev() {
+        if slots[i].is_some() {
+            return i as i32;
+        }
+    }
+    -1
+}
+
 // ============================================================================
 // Syscall Implementations
 // ============================================================================
@@ -134,6 +211,14 @@ pub fn sys_msgget(args: [u64; 6]) -> i64 {
     let key = args[0] as i32;
     let msgflg = args[1] as i32;
 
+    // ENOSPC at the runtime MSGMNI (Linux msgget checks ids->in_use >=
+    // ns->msg_ctlmni before allocating; an existing key still resolves).
+    if MSG_IDS.count() >= msgmni() as usize {
+        let existing = if key != 0 { MSG_IDS.find_by_key(key) } else { None };
+        if existing.is_none() {
+            return -(errno::ENOSPC as i64);
+        }
+    }
     match MSG_IDS.alloc(MsgQueue::new(key, (msgflg & 0o777) as u16), key, msgflg) {
         Ok((id, _)) => id as i64,
         Err(e) => e as i64,
@@ -146,14 +231,29 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
     let cmd = args[1] as i32;
     let buf = args[2];
 
-    let idx = match MSG_IDS.find(msqid) {
-        Some(i) => i,
-        None => return -(errno::EINVAL as i64),
-    };
+    // MSG_INFO-style commands interpret the first argument as a raw kernel
+    // slot index (MSG_STAT) or ignore it entirely (IPC_INFO/MSG_INFO), so
+    // they must NOT go through the id→slot lookup. The old unconditional
+    // find() gate rejected msgctl(0, IPC_INFO) with EINVAL before the cmd
+    // match ever ran (LTP msgctl12, shmctl03's msg twin).
+    match cmd {
+        IPC_INFO | 11 | 12 | 13 => {}
+        _ => {
+            let _ = match MSG_IDS.find(msqid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+        }
+    }
 
     match cmd {
         IPC_RMID => {
             // Owner check (review IPC P2): uid OR cuid path, or CAP_SYS_ADMIN.
+            // Linux does no mode-bit check for RMID (no EACCES path exists).
+            let idx = match MSG_IDS.find(msqid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
@@ -238,11 +338,13 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<MsqidDsUapi>()) {
                 return -(errno::EFAULT as i64);
             }
-            let idx2 = match MSG_IDS.find_with_perms(msqid, 0o2) {
-                Ok(i) => i,
-                Err(e) => return e as i64,
+            let idx2 = match MSG_IDS.find(msqid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
             };
-            // Owner check (review IPC P2): euid == uid || cuid, or CAP_SYS_ADMIN.
+            // Owner check (review IPC P2): euid == uid || cuid, or
+            // CAP_SYS_ADMIN. Linux runs NO mode-bit check for IPC_SET, so a
+            // non-owner with full rw mode still gets EPERM, never EACCES.
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx2] {
@@ -319,7 +421,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                 msgmap: 0,
                 msgmax: 8192,
                 msgmnb: 16384,
-                msgmni: 256,
+                msgmni: msgmni(),
                 msgssz: 16,
                 msgtql: 65536,
                 msgseg: 0xffff,
@@ -332,18 +434,9 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                     core::mem::size_of::<MsgInfoUapi>(),
                 );
             }
-            // Return: index of highest used entry
-            let mut max_idx: usize = 0;
-            {
-                let slots = MSG_IDS.slots.lock();
-                for (i, entry) in slots.iter().enumerate().rev() {
-                    if entry.is_some() {
-                        max_idx = i + 1;
-                        break;
-                    }
-                }
-            }
-            max_idx as i64
+            // Return: highest used slot index (Linux ipc_get_maxidx);
+            // -1 when empty. LTP feeds this value straight into MSG_STAT.
+            msg_max_idx() as i64
         }
         12 => {
             // MSG_INFO — like IPC_INFO but returns current usage
@@ -368,7 +461,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                 msgmap: total_msgs as i32,
                 msgmax: 8192,
                 msgmnb: 16384,
-                msgmni: 256,
+                msgmni: msgmni(),
                 msgssz: 16,
                 msgtql: 65536,
                 msgseg: 0xffff,
@@ -381,18 +474,133 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                     core::mem::size_of::<MsgInfoUapi>(),
                 );
             }
-            // Return: index of highest used entry + 1
-            let mut max_idx: usize = 0;
+            // Return: highest used slot index, -1 when empty (see IPC_INFO).
+            msg_max_idx() as i64
+        }
+        13 => {
+            // MSG_STAT_ANY — MSG_STAT without the permission check (uapi:
+            // MSG_STAT=11, MSG_INFO=12, MSG_STAT_ANY=13; the old arm at 13
+            // implemented MSG_STAT and the real MSG_STAT(11) fell through
+            // to EINVAL — LTP msgctl12 via libc msgctl(MSG_STAT=11)).
+            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+                return -(errno::EPERM as i64);
+            }
+            let raw_idx = msqid as usize;
+            let buf_ptr = buf as *mut MsqidDsUapi;
+            if buf_ptr.is_null()
+                || !access_ok(buf_ptr as usize, core::mem::size_of::<MsqidDsUapi>())
+            {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= IPC_IDS_MAX {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = MsqidDsUapi {
+                msg_perm: IpcPermUapi::default(),
+                msg_stime: 0,
+                msg_rtime: 0,
+                msg_ctime: 0,
+                __msg_cbytes: 0,
+                msg_qnum: 0,
+                msg_qbytes: 0,
+                msg_lspid: 0,
+                msg_lrpid: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            let result_id: i32;
             {
                 let slots = MSG_IDS.slots.lock();
-                for (i, entry) in slots.iter().enumerate().rev() {
-                    if entry.is_some() {
-                        max_idx = i + 1;
-                        break;
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
                     }
+                    // MSG_STAT_ANY skips the permission check entirely.
+                    ds.msg_perm = entry.inner.perm.to_uapi();
+                    ds.msg_stime = entry.inner.msg_stime.load(Ordering::Relaxed);
+                    ds.msg_rtime = entry.inner.msg_rtime.load(Ordering::Relaxed);
+                    ds.msg_ctime = entry.inner.msg_ctime.load(Ordering::Relaxed);
+                    ds.__msg_cbytes = entry.inner.cbytes.load(Ordering::Relaxed) as u64;
+                    ds.msg_qnum = entry.inner.qnum.load(Ordering::Relaxed) as u64;
+                    ds.msg_qbytes = entry.inner.qbytes.load(Ordering::Relaxed) as u64;
+                    ds.msg_lspid = entry.inner.msg_lspid.load(Ordering::Relaxed);
+                    ds.msg_lrpid = entry.inner.msg_lrpid.load(Ordering::Relaxed);
+                    result_id = ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
                 }
             }
-            max_idx as i64
+            // SAFETY: buf_ptr was null-checked and access_ok-validated above;
+            // ds is a stack-local repr(C) struct of exactly that size.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const MsqidDsUapi as *const u8,
+                    core::mem::size_of::<MsqidDsUapi>(),
+                );
+            }
+            result_id as i64
+        }
+        11 => {
+            // MSG_STAT — IPC_STAT addressed by raw kernel slot index (no
+            // seq); on success returns the real msqid. S_IRUGO applies.
+            let raw_idx = msqid as usize;
+            let buf_ptr = buf as *mut MsqidDsUapi;
+            if buf_ptr.is_null()
+                || !access_ok(buf_ptr as usize, core::mem::size_of::<MsqidDsUapi>())
+            {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= IPC_IDS_MAX {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = MsqidDsUapi {
+                msg_perm: IpcPermUapi::default(),
+                msg_stime: 0,
+                msg_rtime: 0,
+                msg_ctime: 0,
+                __msg_cbytes: 0,
+                msg_qnum: 0,
+                msg_qbytes: 0,
+                msg_lspid: 0,
+                msg_lrpid: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            let result_id: i32;
+            {
+                let slots = MSG_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
+                    }
+                    if !ipc_check_permissions(entry.inner.get_perm(), 0o4) {
+                        return -(errno::EACCES as i64);
+                    }
+                    ds.msg_perm = entry.inner.perm.to_uapi();
+                    ds.msg_stime = entry.inner.msg_stime.load(Ordering::Relaxed);
+                    ds.msg_rtime = entry.inner.msg_rtime.load(Ordering::Relaxed);
+                    ds.msg_ctime = entry.inner.msg_ctime.load(Ordering::Relaxed);
+                    ds.__msg_cbytes = entry.inner.cbytes.load(Ordering::Relaxed) as u64;
+                    ds.msg_qnum = entry.inner.qnum.load(Ordering::Relaxed) as u64;
+                    ds.msg_qbytes = entry.inner.qbytes.load(Ordering::Relaxed) as u64;
+                    ds.msg_lspid = entry.inner.msg_lspid.load(Ordering::Relaxed);
+                    ds.msg_lrpid = entry.inner.msg_lrpid.load(Ordering::Relaxed);
+                    result_id = ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated above;
+            // ds is a stack-local repr(C) struct of exactly that size.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const MsqidDsUapi as *const u8,
+                    core::mem::size_of::<MsqidDsUapi>(),
+                );
+            }
+            result_id as i64
         }
         _ => -(errno::EINVAL as i64),
     }

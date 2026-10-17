@@ -529,6 +529,9 @@ impl ProcFSSuperBlock {
         // P1: /proc/sys minimal tree (fs/procfs/sysctl.rs for the storage).
         self.init_sys_tree();
 
+        // /proc/sysvipc — live SysV IPC object listings (LTP line counts).
+        self.init_sysvipc_tree();
+
         // P1: /proc/net — network subsystem introspection (ss/netstat
         // compatible formats).
         self.init_net_tree();
@@ -602,6 +605,11 @@ impl ProcFSSuperBlock {
             sysctl::write_hostname,
             self.alloc_ino(),
         )));
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"threads-max".to_vec(),
+            sysctl::generate_threads_max,
+            self.alloc_ino(),
+        )));
         kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"pid_max".to_vec(),
             sysctl::generate_pid_max,
@@ -636,9 +644,10 @@ impl ProcFSSuperBlock {
         // SysV IPC message-queue limits (read by LTP msgstress01 and
         // ipcs(1); msgmni = queue-count limit, msgmax = largest message,
         // msgmnb = default queue bytes).
-        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"msgmni".to_vec(),
             sysctl::generate_msgmni,
+            sysctl::write_msgmni,
             self.alloc_ino(),
         )));
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
@@ -649,6 +658,23 @@ impl ProcFSSuperBlock {
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"msgmnb".to_vec(),
             sysctl::generate_msgmnb,
+            self.alloc_ino(),
+        )));
+        // SysV shm limits — read by LTP shmget03 (shmmni) and shmctl03
+        // (cross-checked against shmctl IPC_INFO values).
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"shmmax".to_vec(),
+            sysctl::generate_shmmax,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"shmmni".to_vec(),
+            sysctl::generate_shmmni,
+            self.alloc_ino(),
+        )));
+        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"shmall".to_vec(),
+            sysctl::generate_shmall,
             self.alloc_ino(),
         )));
 
@@ -693,6 +719,48 @@ impl ProcFSSuperBlock {
             b"lease-break-time".to_vec(),
             sysctl::generate_lease_break_time,
             sysctl::write_lease_break_time,
+            self.alloc_ino(),
+        )));
+        // POSIX mq limits — LTP mq_open01 reads+writes queues_max.
+        let mqdir = Arc::new(ProcFSNode::new_dir(b"mqueue".to_vec(), self.alloc_ino()));
+        fsdir.add_child(mqdir.clone());
+        mqdir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"queues_max".to_vec(),
+            sysctl::generate_mq_queues_max,
+            sysctl::write_mq_queues_max,
+            self.alloc_ino(),
+        )));
+        mqdir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"msg_max".to_vec(),
+            sysctl::generate_mq_msg_max,
+            self.alloc_ino(),
+        )));
+        mqdir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"msgsize_max".to_vec(),
+            sysctl::generate_mq_msgsize_max,
+            self.alloc_ino(),
+        )));
+    }
+
+    /// /proc/sysvipc/{msg,sem,shm} — live SysV IPC object listings.
+    /// LTP counts lines (GET_USED_QUEUES/SEGMENTS/ARRAYS) and ipcs(1)
+    /// parses the columns.
+    fn init_sysvipc_tree(&self) {
+        let dir = Arc::new(ProcFSNode::new_dir(b"sysvipc".to_vec(), self.alloc_ino()));
+        self.root_node.add_child(dir.clone());
+        dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"msg".to_vec(),
+            crate::ipc::sysv_msg::proc_show,
+            self.alloc_ino(),
+        )));
+        dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"sem".to_vec(),
+            crate::ipc::sysv_sem::proc_show,
+            self.alloc_ino(),
+        )));
+        dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+            b"shm".to_vec(),
+            crate::ipc::sysv_shm::proc_show,
             self.alloc_ino(),
         )));
     }
@@ -1966,11 +2034,23 @@ unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
         });
     }
 
-    // For procfs root (ino == 1), also list all active PID directories
+    // For procfs root (ino == 1), also list all active PID directories.
     if inode.ino == 1 {
         use crate::process::pid_hash;
         let (pids, count, _truncated) = pid_hash::pid_hash_collect_all();
         for i in 0..count {
+            // Linux-exact /proc root listing: pid 0 (the per-CPU idle
+            // tasks / swapper) NEVER appears — Linux keeps idle tasks out
+            // of the PID allocator, so no dirent is generated for them.
+            // Rux pre-creates MAX_CPUS idle Tasks and hash-inserts them
+            // all with pid 0 (sched::init), which used to surface one
+            // "0" entry per pre-created idle task here — four on every
+            // boot, regardless of the online CPU count. /proc/0 LOOKUP
+            // already refused them (pid::is_valid_pid); readdir now
+            // matches that.
+            if pids[i] == 0 {
+                continue;
+            }
             entries.push(crate::fs::inode::VfsDirEntry {
                 ino: pids[i] as u64,
                 name: alloc::format!("{}", pids[i]).into_bytes(),

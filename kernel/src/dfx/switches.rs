@@ -23,6 +23,13 @@
 //!   task snapshot after it).
 //! - `taskdump` — manual task-state snapshots via the DFX sysrq hook
 //!   (same dump code path, different trigger).
+//! - `schedtrace` — scheduler lifecycle forensic prints: the deferred
+//!   exit-notify delivery log (EXITNOTIFY lines, one per child exit —
+//!   a bare `ls` in the shell fires one) and the R56 orphan-harvest
+//!   diagnostics (R56-ORPHAN-HARVESTED / ORPHAN-CTX parked-context
+//!   dumps from the idle-loop harvester). All are hunt aids for the
+//!   dbus-activation and reparent-safety investigations; they pollute
+//!   the structured boot table, so they are OFF unless requested.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -84,6 +91,9 @@ pub enum DfxSwitch {
     /// "library not found" can be attributed to the failing step instead
     /// of guessed at.
     Strace1,
+    /// Scheduler lifecycle forensic prints (EXITNOTIFY delivery log +
+    /// R56 orphan-harvest diagnostics). See the module doc for details.
+    SchedTrace,
     /// Per-syscall return line + per-trap vector line. Used during the
     /// SIGHUP / fake-crash hunts; left on, every syscall printed two
     /// lines (trap entry + return) — a single OH boot wrote a 2.7GB
@@ -92,7 +102,7 @@ pub enum DfxSwitch {
     Steptrace,
 }
 
-const SWITCH_COUNT: usize = 14;
+const SWITCH_COUNT: usize = 15;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -112,7 +122,8 @@ impl DfxSwitch {
             DfxSwitch::EpollTrace => 10,
             DfxSwitch::ClaimInject => 11,
             DfxSwitch::Strace1 => 12,
-            DfxSwitch::Steptrace => 13,
+            DfxSwitch::SchedTrace => 13,
+            DfxSwitch::Steptrace => 14,
         }
     }
 
@@ -131,6 +142,7 @@ impl DfxSwitch {
             "epolltrace" => Some(DfxSwitch::EpollTrace),
             "claiminject" => Some(DfxSwitch::ClaimInject),
             "strace1" => Some(DfxSwitch::Strace1),
+            "schedtrace" => Some(DfxSwitch::SchedTrace),
             "steptrace" => Some(DfxSwitch::Steptrace),
             _ => None,
         }

@@ -109,3 +109,6 @@ userspace/soft-fp/libsoftfp-pin.a
 runs/*/fire.img
 runs/*/qemu.sock
 runs/*/qemu.pid
+# pin-clean libgcc shadow (system libgcc.a copy; rebuilt by build-softfp.sh)
+userspace/soft-fp/gcc-pin/
+runs/

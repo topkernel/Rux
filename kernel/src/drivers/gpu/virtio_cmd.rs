@@ -35,14 +35,18 @@ pub mod cmd {
     pub const RESP_ERR_INVALID_PARAMETER: u32 = 0x1205;
 }
 
-/// Format constants
+/// Format constants — virtio-gpu 1.2 spec enum virtio_gpu_formats.
+/// The 3/4 vs 67/68 columns were previously SWAPPED (R8G8B8X8 sent as 4
+/// = X8R8G8B8 to the device), which QEMU happily accepted while
+/// scrambling the DRM XBGR8888 scanout channels (measured via
+/// drm_probe + screendump: red channel read the X byte).
 pub mod format {
     pub const B8G8R8A8_UNORM: u32 = 1;
     pub const B8G8R8X8_UNORM: u32 = 2;
-    pub const R8G8B8A8_UNORM: u32 = 3;
-    pub const R8G8B8X8_UNORM: u32 = 4;
-    pub const X8R8G8B8_UNORM: u32 = 67;
-    pub const X8B8G8R8_UNORM: u32 = 68;
-    pub const A8R8G8B8_UNORM: u32 = 69;
-    pub const A8B8G8R8_UNORM: u32 = 71;
+    pub const A8R8G8B8_UNORM: u32 = 3;
+    pub const X8R8G8B8_UNORM: u32 = 4;
+    pub const R8G8B8A8_UNORM: u32 = 67;
+    pub const R8G8B8X8_UNORM: u32 = 68;
+    pub const A8B8G8R8_UNORM: u32 = 121;
+    pub const X8B8G8R8_UNORM: u32 = 122;
 }

@@ -298,7 +298,72 @@ pub fn write_pipe_user_pages_hard(input: &[u8]) -> i32 {
 /// /proc/sys/kernel/msgmni — System V message queue count limit. Matches
 /// the IPC_IDS_MAX slots the ipc table offers.
 pub fn generate_msgmni() -> Vec<u8> {
+    alloc::format!("{}\n", crate::ipc::sysv_msg::msgmni()).into_bytes()
+}
+
+/// /proc/sys/kernel/msgmni write — LTP msgget03 lowers MSGMNI and expects
+/// the next msgget to fail ENOSPC.
+pub fn write_msgmni(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            if v > i32::MAX as u64 || !crate::ipc::sysv_msg::set_msgmni(v as i32) {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/kernel/threads-max — max threads system-wide (read by LTP
+/// tst_pid / msgstress01).
+pub fn generate_threads_max() -> Vec<u8> {
+    // Linux default for a 2GB machine (mempages / (8 * THREAD_SIZE/PAGE));
+    // tst_max_child_pids() scales fork workloads off this.
+    alloc::format!("31418\n").into_bytes()
+}
+
+/// /proc/sys/kernel/shmmax — max segment size. Mirrors the constant the
+/// shmctl(IPC_INFO) path reports (LTP shmctl03 asserts equality).
+pub fn generate_shmmax() -> Vec<u8> {
+    alloc::format!("{}\n", 256 * 4096u64).into_bytes()
+}
+
+/// /proc/sys/kernel/shmmni — max segments system-wide.
+pub fn generate_shmmni() -> Vec<u8> {
     alloc::format!("{}\n", crate::ipc::util::IPC_IDS_MAX).into_bytes()
+}
+
+/// /proc/sys/kernel/shmall — total shm pages.
+pub fn generate_shmall() -> Vec<u8> {
+    alloc::format!("{}\n", 256 * 256u64).into_bytes()
+}
+
+/// /proc/sys/fs/mqueue/queues_max — writable POSIX mq count limit.
+pub fn generate_mq_queues_max() -> Vec<u8> {
+    alloc::format!("{}\n", crate::ipc::posix_mq::queues_max()).into_bytes()
+}
+
+pub fn write_mq_queues_max(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            if v > i32::MAX as u64 || !crate::ipc::posix_mq::set_queues_max(v as i32) {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/fs/mqueue/msg_max — max messages per queue (read-only here).
+pub fn generate_mq_msg_max() -> Vec<u8> {
+    alloc::format!("10\n").into_bytes()
+}
+
+/// /proc/sys/fs/mqueue/msgsize_max — max message size (read-only here).
+pub fn generate_mq_msgsize_max() -> Vec<u8> {
+    alloc::format!("8192\n").into_bytes()
 }
 
 /// /proc/sys/kernel/msgmax — largest single message (bytes).

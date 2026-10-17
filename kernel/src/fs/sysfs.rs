@@ -766,12 +766,122 @@ pub fn unregister_block_disk(name: &str, major: u32, minor: u32) -> u64 {
     uevent_send_full(&devpath, "remove", "block", &extra)
 }
 
-/// Register an input event node under /sys/class/input/<name> (+ the
-/// /sys/dev/char/<maj:min> mapping) and broadcast the "add" uevent.
+/// Registration data for one evdev event node and its input_dev parent —
+/// the two-kobject layout every Linux input device has:
 ///
-/// DEVNAME is "input/<name>" — the node path relative to /dev — exactly
-/// what udev/mdev need to create /dev/input/event<N>.
-pub fn register_input_event(name: &str, major: u32, minor: u32) -> u64 {
+/// ```text
+/// /sys/class/input/inputN                (input_dev: uevent carries
+///                                         PRODUCT/NAME/PROP/EV/KEY/...)
+/// /sys/class/input/inputN/eventM         (char node: uevent carries
+///                                         MAJOR/MINOR/DEVNAME)
+/// /sys/class/input/eventM       -> link  ../../devices/virtual/input/inputN/eventM
+/// /sys/dev/char/<maj:min>      -> link  ../../devices/virtual/input/inputN/eventM
+/// ```
+///
+/// The canonical DEVPATH spelling is `/devices/virtual/input/inputN/...`
+/// (Linux parity); it resolves through the `/sys/devices/virtual ->
+/// ../../class` compat link onto the real kobject dirs. Both spellings
+/// must work because consumers mix them: OH's libudev shim resolves
+/// `/sys/dev/char/<maj:min>` readlink and then stats
+/// `<resolved>/uevent`, while udevd/mdev walk `/sys/class/input`.
+///
+/// The capability bitmap strings MUST come from the same bitmaps the
+/// driver serves through EVIOCGBIT — libinput computes ID_INPUT_KEYBOARD
+/// / ID_INPUT_MOUSE / ID_INPUT_TOUCHSCREEN tags from these uevent lines
+/// (via OH's libudev shim) and cross-checks them against the ioctl caps.
+#[derive(Debug, Clone)]
+pub struct InputEventReg {
+    /// input_dev kobject name ("input0")
+    pub input_name: String,
+    /// event node name ("event0")
+    pub event_name: String,
+    pub major: u32,
+    pub minor: u32,
+    /// input device name ("VirtIO Keyboard") — NAME= env + name attr
+    pub dev_name: String,
+    pub bustype: u32,
+    pub vendor: u32,
+    pub product: u32,
+    pub version: u32,
+    /// EV= bitmap string (Linux input_print_bitmap format: space-separated
+    /// lowercase-hex 64-bit words, most-significant first)
+    pub ev: String,
+    /// KEY= bitmap string, empty → line omitted (type not supported)
+    pub key: String,
+    /// REL= bitmap string, empty → omitted
+    pub rel: String,
+    /// ABS= bitmap string, empty → omitted
+    pub abs: String,
+}
+
+impl InputEventReg {
+    /// The Linux `input_dev_uevent()` environment block for the input_dev
+    /// kobject (PRODUCT/NAME/PROP/EV/KEY/REL/ABS in kernel emit order).
+    fn dev_env(&self) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = Vec::new();
+        env.push((
+            String::from("PRODUCT"),
+            format!("{:x}/{:x}/{:x}/{:x}", self.bustype, self.vendor, self.product, self.version),
+        ));
+        // Linux quotes NAME in the uevent environment (NAME="%s").
+        env.push((String::from("NAME"), format!("\"{}\"", self.dev_name)));
+        env.push((String::from("PROP"), String::from("0")));
+        env.push((String::from("EV"), self.ev.clone()));
+        if !self.key.is_empty() {
+            env.push((String::from("KEY"), self.key.clone()));
+        }
+        if !self.rel.is_empty() {
+            env.push((String::from("REL"), self.rel.clone()));
+        }
+        if !self.abs.is_empty() {
+            env.push((String::from("ABS"), self.abs.clone()));
+        }
+        env
+    }
+}
+
+/// A uevent attribute whose environment is a fixed key=value set (the
+/// input_dev kobject: PRODUCT/NAME/PROP/EV/...). Same read/write contract
+/// as `add_uevent_attr` — read returns the env block, write of
+/// add/remove/change re-broadcasts it on the netlink socket.
+fn add_env_uevent_attr(dev: &Arc<KObject>, devpath: &str, env: Vec<(String, String)>) {
+    let env_show = env.clone();
+    let devpath = String::from(devpath);
+    attr_rw(
+        dev,
+        "uevent",
+        move || {
+            let mut out = String::new();
+            for (k, v) in env_show.iter() {
+                out.push_str(k);
+                out.push('=');
+                out.push_str(v);
+                out.push('\n');
+            }
+            out.into_bytes()
+        },
+        move |buf| {
+            let action = match parse_uevent_action(buf) {
+                Some(a) => a,
+                None => return errno::Errno::InvalidArgument.as_neg_i32(),
+            };
+            let extra: Vec<(&str, &str)> =
+                env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            uevent_send_full(&devpath, action, "input", &extra);
+            0
+        },
+    );
+}
+
+/// Register an input_dev + event node pair (see `InputEventReg`) and
+/// broadcast both "add" uevents — the input_dev registration event (with
+/// PRODUCT/NAME/EV/KEY/... like Linux `input_register_device()`) followed
+/// by the event node event (MAJOR/MINOR/DEVNAME like Linux `device_add()`
+/// on the evdev cdev).
+///
+/// Returns the uevent SEQNUM of the event-node "add" (0 when sysfs is not
+/// up or the pair is already registered).
+pub fn register_input_event(reg: &InputEventReg) -> u64 {
     if sysfs_root().is_none() {
         return 0;
     }
@@ -782,58 +892,121 @@ pub fn register_input_event(name: &str, major: u32, minor: u32) -> u64 {
             None => return 0,
         },
     };
-    if class_input.find_child(name.as_bytes()).is_some() {
+    if class_input.find_child(reg.event_name.as_bytes()).is_some() {
         return 0; // already registered
     }
 
-    let dev = mk_dir(&class_input, name, KType::Input);
-    *dev.devno.lock() = Some((major, minor));
-    *dev.devname.lock() = Some(format!("input/{}", name));
+    // ---- input_dev kobject (/sys/class/input/inputN) ----
+    let input_dev = mk_dir(&class_input, &reg.input_name, KType::Input);
 
-    attr_ro(&dev, "dev", move || format!("{}:{}\n", major, minor).into_bytes());
-    add_uevent_attr(&dev);
+    let dev_name = reg.dev_name.clone();
+    attr_ro(&input_dev, "name", move || {
+        let mut v = dev_name.as_bytes().to_vec();
+        v.push(b'\n');
+        v
+    });
 
-    // /sys/dev/char/<maj:min> → ../../../class/input/<name>
+    // id/{bustype,vendor,product,version} — %04x like Linux input_dev attrs.
+    let id = mk_dir(&input_dev, "id", KType::Generic);
+    for (nm, val) in [
+        ("bustype", reg.bustype),
+        ("vendor", reg.vendor),
+        ("product", reg.product),
+        ("version", reg.version),
+    ] {
+        let v = val;
+        attr_ro(&id, nm, move || format!("{:04x}\n", v).into_bytes());
+    }
+
+    // capabilities/{ev,key,rel,abs} — same bitmap strings as the uevent env.
+    let caps = mk_dir(&input_dev, "capabilities", KType::Generic);
+    for (nm, s) in [
+        ("ev", &reg.ev),
+        ("key", &reg.key),
+        ("rel", &reg.rel),
+        ("abs", &reg.abs),
+    ] {
+        let val = s.clone();
+        attr_ro(&caps, nm, move || {
+            if val.is_empty() {
+                Vec::new()
+            } else {
+                let mut v = val.as_bytes().to_vec();
+                v.push(b'\n');
+                v
+            }
+        });
+    }
+
+    // subsystem link: resolves to /sys/class/input (basename "input", the
+    // value GetSubsystem()-style consumers take after the last '/').
+    mk_link(&input_dev, "subsystem", "../../../class/input");
+
+    let devpath_dev = format!("/devices/virtual/input/{}", reg.input_name);
+    let dev_env = reg.dev_env();
+    add_env_uevent_attr(&input_dev, &devpath_dev, dev_env.clone());
+
+    // ---- event node kobject (/sys/class/input/inputN/eventM) ----
+    let evnode = mk_dir(&input_dev, &reg.event_name, KType::Input);
+    *evnode.devno.lock() = Some((reg.major, reg.minor));
+    *evnode.devname.lock() = Some(format!("input/{}", reg.event_name));
+
+    let ev_major = reg.major;
+    let ev_minor = reg.minor;
+    attr_ro(&evnode, "dev", move || format!("{}:{}\n", ev_major, ev_minor).into_bytes());
+    add_uevent_attr(&evnode);
+    mk_link(&evnode, "subsystem", "../../../../class/input");
+
+    // ---- links: /sys/class/input/eventM and /sys/dev/char/<maj:min> ----
+    let target = format!("../../devices/virtual/input/{}/{}", reg.input_name, reg.event_name);
+    mk_link(&class_input, &reg.event_name, &target);
     if let Some(dev_char) = lookup_path("dev/char") {
         mk_link(
             &dev_char,
-            &format!("{}:{}", major, minor),
-            &format!("../../../class/input/{}", name),
+            &format!("{}:{}", reg.major, reg.minor),
+            &format!("../../devices/virtual/input/{}/{}", reg.input_name, reg.event_name),
         );
     }
 
-    let devpath = dev.path();
-    let devname = format!("input/{}", name);
-    let maj = format!("{}", major);
-    let min = format!("{}", minor);
+    // ---- "add" uevents: input_dev first, event node second ----
+    let extra_env: Vec<(&str, &str)> =
+        dev_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    uevent_send_full(&devpath_dev, "add", "input", &extra_env);
+
+    let devpath_ev = format!("{}/{}", devpath_dev, reg.event_name);
+    let maj = format!("{}", reg.major);
+    let min = format!("{}", reg.minor);
+    let devname = format!("input/{}", reg.event_name);
     let extra: [(&str, &str); 3] = [
         ("MAJOR", maj.as_str()),
         ("MINOR", min.as_str()),
         ("DEVNAME", devname.as_str()),
     ];
-    uevent_send_full(&devpath, "add", "input", &extra)
+    uevent_send_full(&devpath_ev, "add", "input", &extra)
 }
 
-/// Unregister an input event node (drop tree entries, broadcast "remove").
-/// (No evdev removal path exists yet — kept for device_del bring-up.)
+/// Unregister an input event node pair (drop tree entries, broadcast
+/// "remove"). (No evdev removal path exists yet — kept for device_del
+/// bring-up.)
 #[allow(dead_code)]
-pub fn unregister_input_event(name: &str, major: u32, minor: u32) -> u64 {
+pub fn unregister_input_event(reg: &InputEventReg) -> u64 {
     if let Some(class_input) = lookup_path("class/input") {
-        class_input.remove_child(name);
+        class_input.remove_child(&reg.event_name);
+        class_input.remove_child(&reg.input_name);
     }
     if let Some(dev_char) = lookup_path("dev/char") {
-        dev_char.remove_child(&format!("{}:{}", major, minor));
+        dev_char.remove_child(&format!("{}:{}", reg.major, reg.minor));
     }
-    let devpath = format!("/class/input/{}", name);
-    let devname = format!("input/{}", name);
-    let maj = format!("{}", major);
-    let min = format!("{}", minor);
+    let devpath_ev = format!("/devices/virtual/input/{}/{}", reg.input_name, reg.event_name);
+    let devname = format!("input/{}", reg.event_name);
+    let maj = format!("{}", reg.major);
+    let min = format!("{}", reg.minor);
     let extra: [(&str, &str); 3] = [
         ("MAJOR", maj.as_str()),
         ("MINOR", min.as_str()),
         ("DEVNAME", devname.as_str()),
     ];
-    uevent_send_full(&devpath, "remove", "input", &extra)
+    uevent_send_full(&devpath_ev, "remove", "input", &extra)
 }
 
 /// Build a /sys/class/tty device directory.
@@ -900,7 +1073,7 @@ fn build_tree() -> Arc<KObject> {
     // from PCI rescan hotplug). virtio-blk conventionally uses major 254.
     let _block = mk_dir(&class, "block", KType::Block);
 
-    // /sys/class/input — skeleton; event0/event1 register via
+    // /sys/class/input — skeleton; the inputN/eventN pairs register via
     // register_input_event() when evdev initializes.
     let _input = mk_dir(&class, "input", KType::Input);
 

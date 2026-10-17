@@ -176,60 +176,10 @@ fn get_current_pid() -> u32 {
     crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0)
 }
 
-// ============================================================================
-// Address allocation helper
-// ============================================================================
-
-/// Find a free virtual address range in the current process's address space.
-///
-/// Wedge fix (LTP shmt03/shmt08): two bugs livelocked this loop — one CPU
-/// spinning in shmat forever (unkillable by the test runner: whole-chunk
-/// WEDGE, photographed by the QEMU monitor at exactly this function):
-///
-/// 1. The conflict handler set `addr = vma.end()` — an address HIGHER
-///    than the candidate — so the next `addr -= size` reproduced the same
-///    candidate against the same VMA. Continue the DOWNWARD search:
-///    place the next candidate at the blocking VMA's start.
-/// 2. The conflict test used `vma.start() <= addr + size`, counting a
-///    candidate that ends EXACTLY at a VMA's start as a conflict. When
-///    `vma.start() - size` is page-aligned, the loop re-derived the same
-///    adjacent candidate forever. Back-to-back mappings are legal: use
-///    STRICT overlap (`vma.start() < addr + size`).
-///
-/// Termination: each conflict now yields candidate
-/// align_down(vma.start() - size) whose end is <= vma.start() — either
-/// conflict-free (return) or strictly lower than the previous candidate.
-fn find_free_shm_addr(size: usize) -> Option<VirtAddr> {
-    let current = crate::sched::current()?;
-    let addr_space = current.address_space()?;
-
-    let mmap_base = addr_space.mmap_base();
-    let vma_mgr = addr_space.vma_read();
-
-    // Search downward from mmap_base
-    let mut addr = mmap_base;
-    let min_addr: usize = 0x1000000; // 16MB minimum user address
-
-    while addr > min_addr && addr > size {
-        addr -= size;
-        addr &= !PAGE_MASK;
-
-        // Check for conflicts (strict overlap — see comment above)
-        let mut conflict = false;
-        for vma in vma_mgr.iter() {
-            if vma.start().as_usize() < addr + size && vma.end().as_usize() > addr {
-                // Restart the search just below this VMA.
-                addr = vma.start().as_usize();
-                conflict = true;
-                break;
-            }
-        }
-        if !conflict {
-            return Some(VirtAddr::new(addr));
-        }
-    }
-    None
-}
+// (Kernel-chosen shmat placement now goes through AddressSpace::
+// find_free_area — the mmap syscall's gap scan. The old private downward
+// scan from mm->mmap_base placed attachments in the VMA-less brk heap
+// region, overwriting the caller's live heap; see sys_shmat.)
 
 // ============================================================================
 // Syscall Implementations
@@ -289,14 +239,27 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
     let cmd = args[1] as i32;
     let buf = args[2];
 
-    let idx = match SHM_IDS.find(shmid) {
-        Some(i) => i,
-        None => return -(errno::EINVAL as i64),
-    };
+    // Index-addressed / id-ignoring commands: IPC_INFO(3), SHM_STAT(13) and
+    // SHM_INFO(14) treat the first argument as a raw slot index or ignore
+    // it — they must bypass the id lookup (the old unconditional gate made
+    // shmctl(0, IPC_INFO) fail EINVAL before dispatch, LTP shmctl03).
+    match cmd {
+        IPC_INFO | 13 | 14 => {}
+        _ => {
+            let _ = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+        }
+    }
 
     match cmd {
         IPC_RMID => {
             // Owner check (review IPC P2): uid OR cuid path, or CAP_SYS_ADMIN.
+            let idx = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
             {
                 let slots = SHM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx] {
@@ -387,11 +350,13 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
                 return -(errno::EFAULT as i64);
             }
-            let idx2 = match SHM_IDS.find_with_perms(shmid, 0o2) {
-                Ok(i) => i,
-                Err(e) => return e as i64,
+            let idx2 = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
             };
-            // Owner check (review IPC P2): euid == uid || cuid, or CAP_SYS_ADMIN.
+            // Owner check (review IPC P2): euid == uid || cuid, or
+            // CAP_SYS_ADMIN. No mode-bit check for IPC_SET — a non-owner
+            // gets EPERM, never EACCES (LTP shmctl02 by nobody).
             {
                 let slots = SHM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx2] {
@@ -561,21 +526,65 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             // shm_rss (offset 16), shm_swp (offset 24) — no swap support, 0
             // swap_attempts (offset 32), swap_successes (offset 40) — 0
             // shm_tot is already written; remaining fields stay 0
-            // Return: index of highest used entry + 1
-            let mut max_idx: usize = 0;
-            {
-                let slots = SHM_IDS.slots.lock();
-                for (i, entry) in slots.iter().enumerate().rev() {
-                    if entry.is_some() {
-                        max_idx = i + 1;
-                        break;
-                    }
-                }
-            }
-            max_idx as i64
+            // Return: highest used slot index (Linux ipc_get_maxidx),
+            // -1 when empty — LTP shmctl01 scans 0..=max_idx with SHM_STAT.
+            shm_max_idx() as i64
         }
         _ => -(errno::EINVAL as i64),
     }
+}
+
+/// /proc/sysvipc/shm contents — one line per segment (Linux ipc/util.c
+/// formatting). LTP's GET_USED_SEGMENTS() (shmget03) counts lines.
+pub fn proc_show() -> alloc::vec::Vec<u8> {
+    use alloc::fmt::Write;
+    let mut out = alloc::string::String::new();
+    let _ = writeln!(
+        out,
+        "       key      shmid perms       size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime       rss       swap"
+    );
+    let slots = SHM_IDS.slots.lock();
+    for (i, slot) in slots.iter().enumerate() {
+        if let Some(ref entry) = slot {
+            if entry.deleted {
+                continue;
+            }
+            let seg = &entry.inner;
+            let id = ipc_build_id(i, seg.perm.seq);
+            let _ = writeln!(
+                out,
+                "{:10} {:10} {:6o} {:10} {:6} {:6} {:6} {:6} {:6} {:6} {:6} {:11} {:11} {:11} {:9} {:9}",
+                seg.perm.key,
+                id,
+                seg.perm.mode & 0o7777,
+                seg.segsz,
+                seg.cpid.load(Ordering::Relaxed),
+                seg.lpid.load(Ordering::Relaxed),
+                seg.nattch.load(Ordering::Relaxed),
+                seg.perm.uid,
+                seg.perm.gid,
+                seg.perm.cuid,
+                seg.perm.cgid,
+                seg.shm_atime.load(Ordering::Relaxed),
+                seg.shm_dtime.load(Ordering::Relaxed),
+                seg.shm_ctime.load(Ordering::Relaxed),
+                0,
+                0,
+            );
+        }
+    }
+    out.into_bytes()
+}
+
+/// Highest allocated shm slot index, or -1 when empty (ipc_get_maxidx).
+fn shm_max_idx() -> i32 {
+    let slots = SHM_IDS.slots.lock();
+    for i in (0..IPC_IDS_MAX).rev() {
+        if slots[i].is_some() {
+            return i as i32;
+        }
+    }
+    -1
 }
 
 /// sys_shmat — Attach shared memory segment (NR 196)
@@ -608,6 +617,29 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     let size_aligned = ((segsz as usize) + PAGE_SIZE - 1) & !PAGE_MASK;
 
     // Determine attach address
+    // SHMTRAC (corruption hunt): shmat overwrote live ELF data pages in
+    // gnome-shell (PTE-OVERWRITE-LIVE ctx=1) — log every attach's inputs
+    // and chosen address to pin the bad placement source.
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    let addr_space = match current.address_space() {
+        Some(as_) => as_,
+        None => return -(errno::ENOMEM as i64),
+    };
+    static SHMTRAC_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    if SHMTRAC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+        crate::pr_info!(
+            "SHMTRAC: pid={} shmid={} shmaddr={:#x} shmflg={:#o} size={:#x}",
+            crate::process::current_pid(),
+            shmid,
+            shmaddr,
+            shmflg,
+            size_aligned
+        );
+    }
     let attach_addr = if shmaddr != 0 {
         if shmaddr & PAGE_MASK != 0 {
             if (shmflg & 0o20000) != 0 { // SHM_RND
@@ -619,19 +651,20 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             shmaddr
         }
     } else {
-        match find_free_shm_addr(size_aligned) {
-            Some(a) => a.as_usize(),
-            None => return -(errno::ENOMEM as i64),
+        // Linux do_shmat: the kernel-chosen address comes from
+        // get_unmapped_area — the SAME placement the mmap syscall uses
+        // (a gap scan inside the mmap region). The old private downward
+        // scan from mm->mmap_base walked the LOW half, where the only
+        // "VMA-free" hole is the brk heap: brk maps pages WITHOUT adding
+        // a VMA, so the heap is invisible to every VMA-based placement
+        // scan and shmat landed ON the caller's live heap ( gdk's
+        // 0x4000 MIT-SHM segments mapped over gnome-shell's brk heap at
+        // 0x501000+ — the [pango] FcInit abort; PTE-OVERWRITE-LIVE
+        // ctx=1, data_DESTROYED).
+        match addr_space.find_free_area(size_aligned) {
+            Ok(a) => a.as_usize(),
+            Err(_) => return -(errno::ENOMEM as i64),
         }
-    };
-
-    let current = match crate::sched::current() {
-        Some(t) => t,
-        None => return -(errno::ESRCH as i64),
-    };
-    let addr_space = match current.address_space() {
-        Some(as_) => as_,
-        None => return -(errno::ENOMEM as i64),
     };
 
     let root_ppn = addr_space.root_ppn();

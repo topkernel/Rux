@@ -731,6 +731,24 @@ fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Soc
     Some((socket, nonblock))
 }
 
+/// Resolve a socket fd with Linux errno semantics: EBADF when the fd is not
+/// open at all, ENOTSOCK when it is open but not a socket. `socket_file_of`
+/// conflates the two into ENOTSOCK (LTP sendmmsg02/recvmmsg01 pass fd=-1
+/// and expect EBADF).
+fn socket_file_of_checked(fd: i32) -> Result<(alloc::sync::Arc<crate::net::socket::Socket>, bool), i64> {
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(t) => t,
+        None => return Err(-(errno::EBADF as i64)),
+    };
+    if fdtable.get_file(fd as usize).is_none() {
+        return Err(-(errno::EBADF as i64));
+    }
+    match socket_file_of(fd as usize) {
+        Some(s) => Ok(s),
+        None => Err(-(errno::ENOTSOCK as i64)),
+    }
+}
+
 /// Common accept engine (sys_accept / sys_accept4).
 ///
 /// W3: blocking semantics — with no pending connection, a BLOCKING socket
@@ -3370,9 +3388,9 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
         return total_sent as i64;
     }
 
-    let (socket, file_nonblock) = match socket_file_of(fd as usize) {
-        Some(s) => s,
-        None => return -(errno::ENOTSOCK as i64),
+    let (socket, file_nonblock) = match socket_file_of_checked(fd) {
+        Ok(s) => s,
+        Err(e) => return e,
     };
     let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
     let deadline = socket.sndtimeo_deadline();
@@ -3578,9 +3596,9 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
         return total_recv as i64;
     }
 
-    let (socket, file_nonblock) = match socket_file_of(fd as usize) {
-        Some(s) => s,
-        None => return -(errno::ENOTSOCK as i64),
+    let (socket, file_nonblock) = match socket_file_of_checked(fd) {
+        Ok(s) => s,
+        Err(e) => return e,
     };
     let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
 

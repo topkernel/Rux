@@ -1153,6 +1153,28 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // Get current process
     match crate::sched::current() {
         Some(current_task) => {
+            let addr_space = match current_task.address_space() {
+                Some(a) => a,
+                None => return -12_i64, // ENOMEM
+            };
+
+            // ATOMIC mprotect (Linux holds mmap_lock across the whole
+            // syscall): ONE vma_write guard spans the coverage check, the
+            // shared-file EACCES decision, the PTE rewrite (PTE_MODIFY_LOCK
+            // nested inside — no code path takes a VMA lock inside a PTE
+            // section, so the nesting is one-way) and the VMA split
+            // surgery. The old shape checked coverage and EACCES under
+            // vma_read, rewrote PTEs under the PTE lock, then re-derived
+            // the overlapping set for surgery under vma_write — three
+            // separately-locked phases. A concurrent mmap/munmap between
+            // the phases left PTEs and VMAs disagreeing (e.g. the whole
+            // range's PTEs rewritten RW while the VMA surgery then found
+            // nothing to split), and the mid-surgery EACCES bail returned
+            // AFTER PTEs and earlier VMAs had already been mutated. All
+            // decisions now precede all mutations, and no same-mm thread
+            // can interleave between them.
+            let mut vma_mgr = addr_space.vma_write();
+
             // Linux mprotect: the ENTIRE [addr, addr+length) range must be
             // covered by VMAs — any gap fails the whole call with ENOMEM
             // (mprotect_fixup walks until the vma list stops covering the
@@ -1160,12 +1182,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // returned success for a range that was never mapped (LTP
             // mprotect01).
             {
-                let addr_space = match current_task.address_space() {
-                    Some(a) => a,
-                    None => return -12_i64, // ENOMEM
-                };
-                let mut spans: alloc::vec::Vec<(usize, usize)> = addr_space
-                    .vma_read()
+                let mut spans: alloc::vec::Vec<(usize, usize)> = vma_mgr
                     .iter()
                     .map(|v| (v.start().as_usize(), v.end().as_usize()))
                     .collect();
@@ -1192,8 +1209,12 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                 // writing fails with EACCES before any PTE is touched
                 // (LTP mprotect01 case 3: mmap /dev/zero O_RDONLY
                 // PROT_READ MAP_SHARED, then mprotect PROT_WRITE).
+                // A missing vm_file pin is NOT grounds for EACCES here
+                // (only a pinned, provably read-only file is) — the old
+                // in-surgery copy of this check treated a missing pin as
+                // read-only and bailed mid-mutation.
                 if prot & 0x2 != 0 {
-                    for vma in addr_space.vma_read().iter() {
+                    for vma in vma_mgr.iter() {
                         let vs = vma.start().as_usize();
                         let ve = vma.end().as_usize();
                         if vs >= addr + length || ve <= addr {
@@ -1212,11 +1233,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             }
 
             // Get page table root
-            let root_ppn = if let Some(addr_space) = current_task.address_space() {
-                addr_space.root_ppn()
-            } else {
-                return -12_i64;  // ENOMEM
-            };
+            let root_ppn = addr_space.root_ppn();
 
             // Calculate new PTE flags (riscv64 Sv39 encoding; the x86_64
             // path builds its flags inside mprotect_pte_range).
@@ -1344,10 +1361,15 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // between DSO segments (dl-load.c), which stripped READ from
             // the entire executable segment and killed every dynamically
             // linked binary with SIGSEGV on its first library read.
-            if let Some(addr_space) = current_task.address_space() {
+            //
+            // The EACCES-on-readonly-shared-file decision moved to the
+            // pre-checks above: this loop used to carry its own copy that
+            // ALSO fired when the vm_file pin was missing, returning
+            // EACCES after the range's PTEs had already been rewritten
+            // and earlier VMAs in the loop had already been split.
+            {
                 let range_start = addr;
                 let range_end = addr + length;
-                let mut vma_mgr = addr_space.vma_write();
 
                 // Snapshot overlapping VMAs (start addresses).
                 let mut starts: alloc::vec::Vec<crate::mm::page::VirtAddr> = alloc::vec::Vec::new();
@@ -1387,32 +1409,6 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                     let old_fd = vma.file_fd();
                     let old_fsz = vma.file_size();
                     let old_off = vma.offset();
-
-                    // Escalating a SHARED FILE mapping to writable
-                    // requires the backing file to be open for writing
-                    // (Linux mprotect_fixup → vma_wants_writectory):
-                    // mprotect(PROT_WRITE) on a read-only-fd MAP_SHARED
-                    // mapping fails with EACCES (LTP mprotect01). Private
-                    // (COW) mappings are exempt — writes stay private.
-                    // (pinned_file was fetched before this loop; taking
-                    // no further VMA locks here.)
-                    if prot & 0x2 != 0
-                        && full_flags.contains(crate::mm::vma::VmaFlags::SHARED)
-                        && old_type == crate::mm::vma::VmaType::FileBacked
-                    {
-                        let writable = pinned_file
-                            .as_ref()
-                            .map(|f| {
-                                let m = f.flags().bits()
-                                    & crate::fs::file::FileFlags::O_ACCMODE;
-                                m == crate::fs::file::FileFlags::O_RDWR
-                                    || m == crate::fs::file::FileFlags::O_WRONLY
-                            })
-                            .unwrap_or(false);
-                        if !writable {
-                            return -13_i64; // EACCES
-                        }
-                    }
 
                     // Head piece [v_start, range_start): keep original flags.
                     let head = if v_start < range_start {
@@ -1755,6 +1751,31 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
             let old_phys = old_ppn << PAGE_SHIFT;
             let old_kvaddr = phys_to_virt(PhysAddr::new(old_phys)).bits() as *const u8;
 
+            // DESTINATION-PRESENT GUARD (b93 heap-corruption attribution,
+            // forensics rank 1): the destination range was created by
+            // mmap in this same syscall and its PTEs should all be holes.
+            // If a leaf is nevertheless PRESENT here, blind-mapping a
+            // fresh frame over it is the PTE-OVERWRITE-LIVE aliasing
+            // instant: the live frame's mapping loses its data (or its
+            // owner reads this copy's bytes), and the old frame leaks.
+            // Never overwrite a live leaf from this path — skip the page
+            // and log loudly (this "cannot happen" short of an upstream
+            // bug, so visibility beats guessing).
+            if crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, new_virt).is_some() {
+                static DST_HIT_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if DST_HIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                    crate::pr_err!(
+                        "MREMAP-DST-LIVE pid={} va={:#x} src={:#x} — refusing overwrite",
+                        crate::process::current_pid(),
+                        new_virt,
+                        old_virt
+                    );
+                }
+                offset += PAGE_SIZE as usize;
+                continue;
+            }
+
             // Eagerly allocate + map the destination page (see comment above)
             let new_phys = alloc_page(GfpFlags::GFP_KERNEL);
             if new_phys == 0 {
@@ -1814,7 +1835,29 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
 ///
 /// # Description
 /// mremap expands or shrinks existing memory mapping
+///
+/// b93 heap-corruption attribution: mremap was the only VMA-mutating
+/// syscall with no serial trace, so the split of hilogd's 2GB PROT_NONE
+/// reserve at +0x1fd000 could not be pinned on any logged operation
+/// (MPROTECT/FIXED-MAP/BIGMUNMAP were all ruled out). Every mremap now
+/// logs its identity and arguments on entry and its result on exit —
+/// one boot ties any mystery VMA surgery to its caller.
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
+    let pid = crate::process::current_pid();
+    let comm_bytes = crate::sched::current()
+        .map(|t| unsafe { (*t).comm() }.to_vec())
+        .unwrap_or_default();
+    let comm = core::str::from_utf8(&comm_bytes).unwrap_or("?");
+    crate::pr_info!(
+        "MREMAP-ENTER pid={} comm={} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x}",
+        pid, comm, args[0], args[1], args[2], args[3], args[4]
+    );
+    let ret = sys_mremap_inner(args);
+    crate::pr_info!("MREMAP-EXIT pid={} -> {:#x}", pid, ret);
+    ret
+}
+
+fn sys_mremap_inner(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;

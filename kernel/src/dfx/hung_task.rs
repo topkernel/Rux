@@ -225,17 +225,30 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
             // the parked chain live at HIGHER addresses (stacks grow down);
             // the words below sp are the context-switch machinery, which is
             // byte-identical for every parked task and names nothing.
-            // Window = [__stext, __etext): the old hardcoded cap
+            // Window = [text start, text end): the old hardcoded cap
             // 0xffffffff80200000 sat entirely BELOW the x86_64 kernel text
             // (0xffffffff80200000..0xffffffff80690000), so no victim frame
             // ever matched and every report showed only the scanner's own
-            // backtrace.
+            // backtrace. The two arch linker scripts spell the bounds
+            // differently (x86_64: __stext/__etext, riscv64: _stext/_etext).
+            #[cfg(feature = "x86_64")]
             extern "C" {
                 static __stext: u8;
                 static __etext: u8;
             }
+            #[cfg(not(feature = "x86_64"))]
+            extern "C" {
+                static _stext: u8;
+                static _etext: u8;
+            }
+            #[cfg(feature = "x86_64")]
             let lo = core::ptr::addr_of!(__stext) as u64;
+            #[cfg(feature = "x86_64")]
             let hi = core::ptr::addr_of!(__etext) as u64;
+            #[cfg(not(feature = "x86_64"))]
+            let lo = core::ptr::addr_of!(_stext) as u64;
+            #[cfg(not(feature = "x86_64"))]
+            let hi = core::ptr::addr_of!(_etext) as u64;
             for k in 0..80 {
                 // SAFETY: diagnostic read within the task's own kernel
                 // stack pages (the Task exists and pins them).
