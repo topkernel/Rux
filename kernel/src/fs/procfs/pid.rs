@@ -83,12 +83,30 @@ fn task_state_str(task: &crate::process::Task) -> &'static str {
     else { "sleeping" }
 }
 
-/// The task's comm: basename of the exe path, truncated to 15 characters
-/// (Linux TASK_COMM_LEN - 1). Used for /proc/[pid]/comm, the "Name:" line
-/// of /proc/[pid]/status and field 2 of /proc/[pid]/stat — systemd's PID 1
-/// check compares /proc/1/comm against "systemd". Kernel threads (no exe)
-/// report their kthread name like Linux.
+/// The task's comm: Linux reads task->comm — set at exec (binary
+/// basename), copied at fork, overwritten by prctl(PR_SET_NAME). Thread
+/// names (OH's OS_IPC_* workers) live in the same field; deriving comm
+/// from the exe path hid every thread's name. Falls back to the exe
+/// basename / kthread name when Task.comm is empty (early tasks).
+/// Truncated to 15 characters (Linux TASK_COMM_LEN - 1). Used for
+/// /proc/[pid]/comm, the "Name:" line of /proc/[pid]/status and field 2
+/// of /proc/[pid]/stat — systemd's PID 1 check compares /proc/1/comm
+/// against "systemd". Kernel threads (no exe) report their kthread name
+/// like Linux.
 fn task_comm(task: &crate::process::Task) -> alloc::borrow::Cow<'_, str> {
+    let comm = task.comm();
+    let nul = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+    if nul > 0 {
+        // Truncate to 15 bytes (TASK_COMM_LEN - 1) without splitting a
+        // multi-byte UTF-8 sequence: shrink until the prefix is valid.
+        let mut len = nul.min(15);
+        while len > 0 {
+            if let Ok(s) = core::str::from_utf8(&comm[..len]) {
+                return alloc::borrow::Cow::Borrowed(s);
+            }
+            len -= 1;
+        }
+    }
     let path = task.get_exe_path();
     if path.is_empty() {
         if let Some(name) = crate::process::kthread::kthread_name(task.pid()) {

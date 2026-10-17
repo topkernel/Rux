@@ -1520,6 +1520,23 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
                     // private_data None + is_attr_dir(ino) drives lookups.
                     return Ok(Arc::new(inode));
                 }
+                // /proc/[pid]/task directory: per-thread subdirectory.
+                // MUST be served here: this first iget branch returns for
+                // EVERY pid-dir child name, so a "task" case further down
+                // the function is dead code — /proc/<pid>/task then never
+                // materialized and every open answered ENOENT. That killed
+                // hdf_devmgr (spawns an OS_IPC thread, opens
+                // /proc/self/task/<tid>/comm, exits 1) and with it the
+                // whole HDF host chain — composer included.
+                if name == b"task" && ino == pid_val * 10000 + TASK_DIR_INO_OFF {
+                    let mut inode =
+                        Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+                    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+                    inode.ops = Some(&PROCFS_INODE_OPS);
+                    // private_data None + is_task_dir(ino) drives lookups
+                    // and readdir below.
+                    return Ok(Arc::new(inode));
+                }
                 // /proc/[pid]/ns directory (U1c): synthetic directory whose
                 // children are the six namespace magic links; lookups and
                 // readdir run through PROCFS_NS_DIR_OPS.
@@ -1582,15 +1599,23 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         return Ok(Arc::new(inode));
     }
 
-    // The /proc/[pid]/task directory: a plain synthetic directory.
-    if parent.private_data.is_none() && pid::is_valid_pid(parent.ino)
-        && name == b"task"
-    {
-        let ino = parent.ino * 10000 + TASK_DIR_INO_OFF;
-        let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
-        inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
-        inode.ops = Some(&PROCFS_INODE_OPS);
-        return Ok(Arc::new(inode));
+    // Parent is the /proc/[pid]/task directory: a numeric name is a
+    // thread ID — alias the tid's own PID directory (threads share the
+    // pid space), so /proc/<tgid>/task/<tid>/{comm,status,attr/...}
+    // resolve through the regular pid-dir machinery in the first branch
+    // of this function. Without this branch the generic
+    // `private_data.ok_or(ENOTDIR)` below ate every task-dir child.
+    if parent.private_data.is_none() && is_task_dir(parent.ino) {
+        if let Some(tid) = pid::parse_pid(name) {
+            if pid::is_valid_pid(tid) {
+                let mode = InodeMode::new(InodeMode::S_IFDIR | 0o555);
+                let mut inode = Inode::new(tid, mode);
+                inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+                inode.ops = Some(&PROCFS_INODE_OPS);
+                return Ok(Arc::new(inode));
+            }
+        }
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
 
     // Parent is the /proc/[pid]/attr directory: build the label file.
@@ -1974,19 +1999,30 @@ unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
         return Some(generate_pid_dir_entries(pid));
     }
 
-    // /proc/[pid]/task directory: the thread IDs of the group. Minimal
-    // listing — the leader's tid (task-dir consumers address
-    // /proc/self/task/<tid>/attr/... by name; nothing enumerates it on
-    // the OH boot path).
+    // /proc/[pid]/task directory: every live thread of the group (Linux
+    // lists all tids including the leader). Collect raw tids under the
+    // pid-hash bucket locks, format names after the walk — no
+    // allocation while holding the bucket spinlocks.
     if inode.private_data.is_none() && is_task_dir(inode.ino) {
         use crate::fs::inode::file_type;
-        let pid_val = inode.ino / 10000;
-        let name = alloc::format!("{}", pid_val).into_bytes();
-        return Some(alloc::vec![crate::fs::inode::VfsDirEntry {
-            ino: pid_val,
-            name,
-            file_type: file_type::DT_DIR,
-        }]);
+        let pid_val = (inode.ino / 10000) as u32;
+        let mut tids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+            let t = &*t;
+            if t.tgid() == pid_val {
+                tids.push(t.pid() as u64);
+            }
+        });
+        tids.sort_unstable();
+        let entries = tids
+            .into_iter()
+            .map(|tid| crate::fs::inode::VfsDirEntry {
+                ino: tid,
+                name: alloc::format!("{}", tid).into_bytes(),
+                file_type: file_type::DT_DIR,
+            })
+            .collect();
+        return Some(entries);
     }
 
     // /proc/[pid]/attr directory: three label files.
