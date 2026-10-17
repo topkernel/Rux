@@ -91,12 +91,20 @@ pub fn effective_static_regions(
         .saturating_sub(MIN_USER_ZONE);
     let mut heap_size = config_size.min(headroom);
     // ...but keep at least MIN_HEAP when the machine is that tight (the
-    // user zone shrinks below MIN_USER_ZONE instead of the heap).
+    // user zone shrinks below MIN_USER_ZONE instead of the heap), and on
+    // machines where the config does not fit at all, leave the heap at
+    // most half the RAM (a 464MB-of-512MB heap left a 30MB user zone —
+    // the machine booted but 16MB of anonymous mmap OOM'd; the heap
+    // hosts every Task/file object, so half the machine is already a
+    // generous entitlement for it).
     let max_fit = phys_end
         .saturating_sub(heap_start)
         .saturating_sub(slab_size);
+    let small_machine_cap = phys_size / 2;
     if heap_size < MIN_HEAP {
         heap_size = MIN_HEAP.min(max_fit);
+    } else if config_size > headroom {
+        heap_size = heap_size.min(small_machine_cap);
     }
     // Align DOWN so buddy seeding covers whole power-of-two blocks
     // without the last block poking past the window.
