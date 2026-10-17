@@ -23,9 +23,10 @@ pub fn test_config() {
     test_assert_eq!(MAX_TASKS, 256, "MAX_TASKS == 256");
 
     // Test 4: Memory sizes
-    // Kernel heap grew 32MB -> 128MB for distro-scale userspace; kernel
-    // stacks doubled again (64KB -> 128KB) after the r19 stack fix.
-    test_assert_eq!(KERNEL_HEAP_SIZE, 134217728, "KERNEL_HEAP_SIZE == 128MB");
+    // Kernel heap grew 32MB -> 128MB -> 512MB (distro-scale userspace,
+    // then the OH/GNOME service set); kernel stacks doubled again
+    // (64KB -> 128KB) after the r19 stack fix.
+    test_assert_eq!(KERNEL_HEAP_SIZE, 536870912, "KERNEL_HEAP_SIZE == 512MB");
     test_assert_eq!(PHYS_MEMORY_SIZE, 2147483648, "PHYS_MEMORY_SIZE == 2GB");
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
     test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB");
