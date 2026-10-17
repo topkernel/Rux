@@ -118,18 +118,25 @@ pub const KERNEL_ENTRY: u64 = 0x80200000;
 /// later outgrew 10MB — its boot-stack top page faulted at
 /// 0xffffffff80a00000 during the first trap (see boot.S PMD[5]).
 ///
-/// The heap does NOT move with this window: the image+stack physically
-/// ends at 0x80A01000 (unit-test build), ~2MB below the heap base, and
-/// KERNEL_RESERVE_SIZE (12MB from the RAM base) still covers the real
-/// image with slack. Moving the heap one PMD past the window
-/// (0x80E00000) was tried and breaks the vmemmap backing search
-/// (deterministic pfault at vmemmap+0x1800000 in Page::init_free) — the
-/// early-boot allocator is sensitive to the 2MB free gap such a move
-/// opens between the kernel reservation and the heap.
+/// The heap now starts at the window end (0x80E00000, HEAP_START below)
+/// with the RAM-base reservation extended to meet it. The earlier note
+/// that "moving the heap one PMD past the window breaks the vmemmap
+/// backing search" described a move that left [0x80C00000,0x80E00000)
+/// FREE between the unchanged 12MB reservation and the moved heap — the
+/// vmemmap backing search grabbed the gap and Page::init_free then walked
+/// descriptors over live heap pages. With reservation-end == heap-start
+/// (no gap anywhere between image, heap and slab) the topology is
+/// monotone and the search behaves exactly as it did below 0x80C00000.
 pub const KERNEL_SIZE: u64 = 0xC00000;
 
 /// Heap start address (after kernel)
-pub const HEAP_START: u64 = 0x80C00000;
+/// RUX-RISCV-LAYOUT: must stay at/above the boot.S image-window end
+/// (entry 0x80200000 + KERNEL_SIZE 12MB = 0x80E00000) and must match
+/// KERNEL_RESERVE_SIZE/KERNEL_HEAP_PHYS in main.rs and buddy_allocator.rs.
+/// When it sat at 0x80C00000 (2MB inside the window) the grown kernel
+/// image overlapped the first heap pages — see main.rs
+/// RUX-RISCV-LAYOUT for the corruption family that produced.
+pub const HEAP_START: u64 = 0x80E00000;
 
 /// Slab start address (after heap)
 /// Note: Actual address depends on KERNEL_HEAP_SIZE config

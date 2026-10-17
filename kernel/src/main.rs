@@ -256,6 +256,41 @@ fn format_hex(v: u64) -> &'static str {
 /// kernel stack via boot_stack_continuation; riscv64 calls it directly
 /// (its whole boot fits the .boot stack).
 pub fn rust_main_tail() -> ! {
+    // RUX-RISCV-LAYOUT guard (see the KERNEL_RESERVE_SIZE comment): halt
+    // loudly if the kernel image (text+data+bss incl. the boot stack) has
+    // again grown past the heap's physical base. Without this the overlap
+    // is silent: kernel statics and the first heap pages scribble each
+    // other and the failure surfaces far away as random queue/dentry/
+    // BTreeMap corruption.
+    #[cfg(feature = "riscv64")]
+    {
+        extern "C" {
+            static _end: u8;
+        }
+        // SAFETY: only the symbol's address is read.
+        let image_end_va = unsafe { core::ptr::addr_of!(_end) as usize };
+        let image_end_phys = image_end_va - 0xffff_ffff_8000_0000 + 0x8020_0000;
+        if image_end_phys > KERNEL_HEAP_PHYS {
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"\nFATAL: kernel image end 0x";
+                for &b in MSG { putchar(b); }
+                let mut v = image_end_phys as u64;
+                let mut buf = [0u8; 16];
+                let mut n = 0;
+                while v > 0 && n < 16 {
+                    let d = (v & 0xF) as u8;
+                    buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+                    v >>= 4; n += 1;
+                }
+                for i in (0..n).rev() { putchar(buf[i]); }
+                const MSG2: &[u8] = b" overlaps heap base - enlarge KERNEL_RESERVE_SIZE/KERNEL_HEAP_PHYS\n";
+                for &b in MSG2 { putchar(b); }
+            }
+            loop { crate::arch::cpu::wfi(); }
+        }
+    }
+
     // Initialize Slab allocator (use virtual address in linear mapping region)
     let slab_phys = KERNEL_HEAP_PHYS + crate::config::KERNEL_HEAP_SIZE;
     let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
@@ -955,12 +990,31 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 
 /// Kernel reservation at the RAM base (OpenSBI + kernel on riscv64; low
 /// memory + kernel on x86_64) and the heap's physical base.
+///
+/// RUX-RISCV-LAYOUT (sched-riscv): the reservation and the heap base were
+/// 12MB/0x80C00000 while boot.S's early page tables map a 6-PMD (12MB)
+/// image window ending at phys 0x80E00000 — the heap sat 2MB INSIDE the
+/// image window. The kernel image (.bss incl. the boot stack) grew past
+/// 0x80C00000 (normal build +0x1e120, unit-test build +0x5d090), so kernel
+/// statics and the boot-stack physically shared pages with the FIRST
+/// 123-362KB of heap allocations: every early heap object (root dentry,
+/// BTreeMap nodes, the first slab entries) was scribbled by static writes
+/// and vice versa. That single overlap produced the whole riscv64
+/// corruption family: "POISONED rq entry" fed by garbage queue entries,
+/// dentry-mount spinlock deadlocks (lock word stomped by a static), the
+/// sysfs-init BTreeMap panic ("range end index 204 out of range for slice
+/// of length 11" — a leaf whose len word was overwritten), and the
+/// unit-test boot panics. Move the heap base to the image-window end and
+/// extend the reservation to meet it — no free gap opens between the
+/// kernel reservation and the heap (the earlier failed 0x80E00000 attempt
+/// left [0x80C00000,0x80E00000) free, the vmemmap backing search grabbed
+/// it, and Page::init_free walked descriptors over live heap pages).
 #[cfg(feature = "riscv64")]
-const KERNEL_RESERVE_SIZE: usize = 0xC0_0000; // 12MB
+const KERNEL_RESERVE_SIZE: usize = 0xE0_0000; // 14MB
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x80C0_0000;
+const KERNEL_HEAP_PHYS: usize = 0x80E0_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 

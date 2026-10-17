@@ -430,7 +430,28 @@ unsafe fn grq_init() {
         }
         return;
     }
+    // RT-HEADS FIX (oh-display b61-b66 root cause): the 100 RT priority
+    // list heads are SELF-REFERENTIAL ListHeads. GlobalRunQueue::new()
+    // builds rt_rq as a stack temporary and calls RtRunQueue::init() ON
+    // THE TEMPORARY, so every head's next/prev hold the temporary's
+    // address; the move into the GRQ static copies those VALUES, leaving
+    // all 100 heads pointing into a dead early-boot stack frame
+    // (~0x10a1xx-0x10a7xx on the BSP boot stack). Every RT list was then
+    // threaded through a phantom node in boot-stack memory: the first
+    // add_tail at a priority scribbled the stale slot to reach the real
+    // node, and the lists stayed functional only while that stack region
+    // retained the scribble. The first sufficiently deep BSP excursion
+    // overwrote it and every subsequent walk dereferenced boot-stack
+    // garbage (POISONED rq entry reports, KERNPANICs in the pick path at
+    // T+15-19min, byte-identical every boot). Nothing is enqueued yet
+    // (GRQ_READY gates all enqueue paths), so re-self-linking the heads
+    // at their final address here is safe and complete.
     GRQ = core::mem::MaybeUninit::new(GlobalRunQueue::new());
+    // SAFETY: written immediately above on the sole initialization path;
+    // re-initializing the embedded ListHead array is plain memory writes.
+    unsafe {
+        GRQ.assume_init_mut().rt_rq.init();
+    }
 }
 
 /// Get a shared reference to GRQ.
@@ -440,6 +461,177 @@ fn grq() -> &'static GlobalRunQueue {
     }
     // SAFETY: GRQ_READY is checked above; if true, GRQ was fully initialized by grq_init().
     unsafe { GRQ.assume_init_ref() }
+}
+
+/// b50 #GP guard (x86-scribble family): 48-bit canonical-address check
+/// for pointers pulled out of runqueue structures. Both supported
+/// arches (x86_64, riscv64 sv48) use 48-bit canonical addresses — bits
+/// 63:47 must all replicate bit 47 — and every kernel pointer the
+/// scheduler stores (heap Task structs, embedded ListHeads) is qword
+/// aligned. A wild kernel store landing on a timeline/list slot turns
+/// the stored pointer into garbage whose first deref raises #GP(0)
+/// (boot b50: rip inside ownership_pickable's opening qword load,
+/// rdi non-canonical, kernel fatal at ~20 min uptime). Testing the
+/// shape before the deref converts that into a dropped/skipped entry.
+pub fn kernel_ptr_canonical(p: *const u8) -> bool {
+    let a = p as usize as u64;
+    if a % 8 != 0 {
+        return false;
+    }
+    let hi = a >> 47;
+    hi == 0 || hi == 0x1FFFF
+}
+
+/// Kernel text window [lo, hi) taken from the arch linker script (x86_64:
+/// __stext/__etext; riscv64: _stext/_etext). Forensic stack-word filters
+/// must use this instead of hardcoded VAs: the old window
+/// [0xffffffff80000000, 0xffffffff80200000) sat below the actual x86_64
+/// text and covered only the first 2 MiB of the (up to 12 MiB) riscv64
+/// image, so no real return address ever matched.
+pub fn kernel_text_window() -> (u64, u64) {
+    #[cfg(feature = "x86_64")]
+    extern "C" {
+        static __stext: u8;
+        static __etext: u8;
+    }
+    #[cfg(not(feature = "x86_64"))]
+    extern "C" {
+        static _stext: u8;
+        static _etext: u8;
+    }
+    #[cfg(feature = "x86_64")]
+    let lo = core::ptr::addr_of!(__stext) as u64;
+    #[cfg(feature = "x86_64")]
+    let hi = core::ptr::addr_of!(__etext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let lo = core::ptr::addr_of!(_stext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let hi = core::ptr::addr_of!(_etext) as u64;
+    (lo, hi)
+}
+
+/// Stricter variant for runqueue-walk safety: the pointer must lie in the
+/// kernel PHYSMAP (direct map), where every Task allocation lives. Plain
+/// canonical also accepts kernel-NEGATIVE addresses (0xfffffffffffffeXX —
+/// poison like -1/-0x158 left in a freed task's list links), which then
+/// fault inside the pick path when fields are dereferenced through them
+/// (b61/b62 KERNPANICs in RtRunQueue::pick_next_cpu: the cgroup chain
+/// walk and ownership_pickable faulting on garbage derived from
+/// freed-then-reused queue entries).
+pub fn kernel_ptr_in_physmap(p: *const u8) -> bool {
+    let a = p as usize as u64;
+    if a % 8 != 0 {
+        return false;
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        // 0xffff8880_00000000 ..< 0xffff9000_0000_0000 (64 GB of direct map).
+        (0xffff_8880_0000_0000..0xffff_9000_0000_0000).contains(&a)
+    }
+    // RUX-RISCV-POISON (sched-riscv): the physmap screen was hardcoded to
+    // the x86_64 direct-map window. On riscv64 (Sv39) every kernel heap
+    // pointer lives in the linear map at 0xffffffd6_00000000..+128GB
+    // (arch/riscv64/mm/memory_layout.rs: PAGE_OFFSET/KERN_VIRT_SIZE), so
+    // the screen rejected EVERY legitimately allocated Task and CgroupNode:
+    // the CFS pick dropped each one at its first pick ("POISONED rq entry
+    // raw=0xffffffd6xxxxxxxx", rate-limited print hiding a systematic
+    // drop), and any fork()ed child was silently lost at its first
+    // schedule — the riscv64 wedge-at-first-ls repro. Only the static
+    // storages (init task, per-CPU idles) survived via the extra legs of
+    // kernel_task_ptr_range_ok, which is why the boot reached the shell
+    // (PID 1 is the static init task) and then froze forever on the first
+    // fork. Gate on the arch's actual linear-map window.
+    #[cfg(not(feature = "x86_64"))]
+    {
+        let po = crate::arch::mm::PAGE_OFFSET as u64;
+        let end = po + crate::arch::mm::KERN_VIRT_SIZE as u64;
+        (po..end).contains(&a)
+    }
+}
+
+/// Range-only Task-pointer screen for runqueue walks: the kernel linear
+/// map (where every heap-allocated Task lives) PLUS the static Task
+/// storages that legally sit outside it — the boot init task
+/// (init::INIT_TASK_STORAGE, the ONE non-heap Task — b69: a physmap-only
+/// screen dropped PID 1 from the CFS timeline at its first pick and
+/// wedged both CPUs in WFI with nr_running==0) and the per-CPU idle
+/// tasks (IDLE_TASK_STORAGES). Pure address arithmetic, no dereference —
+/// safe to call on not-yet-validated memory. CgroupNode walks must NOT
+/// use this (nodes are heap-only; keep kernel_ptr_in_physmap there).
+pub fn kernel_task_ptr_range_ok(p: *const u8) -> bool {
+    if kernel_ptr_in_physmap(p) {
+        return true;
+    }
+    let a = p as usize;
+    if a % 8 != 0 {
+        return false;
+    }
+    let init_lo = crate::init::init_task_storage_addr();
+    if a >= init_lo && a < init_lo + core::mem::size_of::<crate::process::task::Task>() {
+        return true;
+    }
+    // SAFETY: only the static's address is read, never its (possibly
+    // uninitialized) contents.
+    let idle_lo = unsafe {
+        core::ptr::addr_of!(IDLE_TASK_STORAGES) as usize
+    };
+    let idle_span = core::mem::size_of::<crate::process::task::Task>() * MAX_CPUS;
+    a >= idle_lo && a < idle_lo + idle_span
+}
+
+/// Rate-limited one-line report for a poisoned runqueue entry (see
+/// kernel_ptr_canonical). Called with the GRQ lock held — the R34
+/// no-lock console discipline applies.
+pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(core::sync::atomic::Ordering::Acquire);
+    if now.wrapping_sub(last) < 100 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn ph(mut v: u64) {
+        let mut buf = [0u8; 16];
+        let mut n = 0;
+        while v > 0 && n < 16 {
+            let d = (v & 0xF) as u8;
+            buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            v >>= 4;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    for &b in b"sched: POISONED rq entry raw=0x" {
+        putchar(b);
+    }
+    ph(raw as u64);
+    for &b in b" on cpu " {
+        putchar(b);
+    }
+    let mut c = cpu;
+    let mut cb = [0u8; 8];
+    let mut n = 0;
+    if c == 0 {
+        cb[0] = b'0';
+        n = 1;
+    }
+    while c > 0 {
+        cb[n] = b'0' + (c % 10) as u8;
+        c /= 10;
+        n += 1;
+    }
+    for i in (0..n).rev() {
+        putchar(cb[i]);
+    }
+    putchar(b'\n');
 }
 
 /// Scribble hunter (dfx=scribble): trylock the GRQ for the diagnostic
@@ -628,11 +820,8 @@ fn process_deferred_exit_pid(packed: i64) {
     let (parent_pid, child_pid) = unpack_notify(packed);
     // EXITNOTIFY (dbus-activation hunt): activation stalls were traced to
     // the parent never learning its spawned child exited. Log each
-    // delivered exit notification (parent, child, signal rc). One line
-    // per child exit — a bare `ls` in the shell fires one — so the trace
-    // is available only behind dfx=schedtrace (serial-clean: it used to
-    // pollute every boot log).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+    // delivered exit notification (parent, child, signal rc).
+    {
         static EN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if EN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
@@ -1121,6 +1310,61 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+        // FREED-WHILE-LINKED UNLINK (oh-display b61-b66 family): a Task
+        // page returned to the heap while still linked on a class queue
+        // gets recycled (new Tasks, BTreeMap nodes, kernel stacks), and
+        // every later walk of that queue dereferences the recycled page —
+        // the "POISONED rq entry" / pick-path KERNPANIC family at
+        // T+15-19min. The old check only REPORTED and only under
+        // dfx=scribble; unlink for real, unconditionally, while the page
+        // is still valid so del()/BTreeMap-removal write to the real
+        // neighbors. RT uses force_unlink (does not trust the possibly
+        // stale on_rq flag); CFS/DL dequeue scan by pointer and are
+        // flag-independent already. grq.nr_running is paired per actual
+        // removal.
+        {
+            let mut guard = grq().lock_irqsave();
+            let mut unlinked = 0usize;
+            // SAFETY: task_ptr is non-null and still a valid Task (poison
+            // and dealloc happen below); the GRQ lock is held.
+            unsafe {
+                if guard.rt_rq.force_unlink(task_ptr) {
+                    unlinked += 1;
+                }
+                if guard.cfs_rq.is_linked(task_ptr)
+                    && guard.cfs_rq.dequeue(task_ptr)
+                {
+                    unlinked += 1;
+                }
+                if guard.dl_rq.is_linked(task_ptr)
+                    && guard.dl_rq.dequeue(task_ptr)
+                {
+                    unlinked += 1;
+                }
+            }
+            for _ in 0..unlinked {
+                guard.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+            }
+            if unlinked > 0 {
+                use crate::console::putchar_no_lock as putchar;
+                const MSG: &[u8] = b"\nFREED-WHILE-LINKED-UNLINKED task=0x";
+                for &b in MSG {
+                    putchar(b);
+                }
+                let mut v = task_ptr as usize;
+                for _ in 0..16 {
+                    let n = (v >> 60) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                putchar(b'0' + unlinked as u8);
+                putchar(b'\n');
+            }
+        }
         // Scribble hunter (dfx=scribble): stop tracking before the page
         // is dropped/deallocated (it may be recycled immediately).
         #[cfg(feature = "x86_64")]
@@ -1293,6 +1537,45 @@ unsafe fn __schedule() {
     crate::sync::rcu::rcu_note_context_switch();
 
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+    // PER_CPU scribble heal (b81 GDB capture): the wild-write engine that
+    // hit hpet::BASE (b77) also zeroes/corrupts PER_CPU slots — cpu1 ran
+    // with current=nil and idle=<random heap task>, so every "nothing
+    // runnable" pick context-switched into an arbitrary task's stale
+    // context (the b66 resume-family symptom, now from a different
+    // producer) and the machine crawled on one vCPU. The idle tasks are
+    // STATIC (IDLE_TASK_STORAGES, written once by init) and current is
+    // mirrored in the arch tp register: both slots are therefore
+    // RE-DERIVABLE, and two compares per schedule are cheap. Heal
+    // unconditionally; report the first hit per CPU.
+    if cpu_id < MAX_CPUS {
+        let static_idle = {
+            // SAFETY: IDLE_TASK_STORAGES was fully initialized by
+            // sched::init before any CPU schedules; read-only access.
+            unsafe {
+                IDLE_TASK_STORAGES[cpu_id].as_mut_ptr()
+            }
+        };
+        let pcpu = cpu_state_mut(cpu_id);
+        if pcpu.idle != static_idle {
+            static PCDATA_HIT: [core::sync::atomic::AtomicBool; MAX_CPUS] =
+                [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
+            if !PCDATA_HIT[cpu_id].swap(true, core::sync::atomic::Ordering::AcqRel) {
+                r56_print_pid(
+                    b"PERCPU-SCRIBBLE-HEALED cpu=",
+                    cpu_id as u32,
+                    b" idle_slot=",
+                );
+                r56_print_pid(b"", pcpu.idle as usize as u32, b"\n");
+            }
+            pcpu.idle = static_idle;
+        }
+        if pcpu.current.is_null() {
+            let tp0 = crate::arch::cpu::get_thread_id() as *mut Task;
+            if !tp0.is_null() {
+                pcpu.current = tp0;
+            }
+        }
+    }
     let mut prev = this_cpu().current;
 
     // R65 hunt (garbage-prev guard): the slot-resolved prev is dereferenced
@@ -1650,25 +1933,42 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     // 2. Deadline — pick earliest-deadline task that can run on this CPU
     if !grq.dl_rq.is_empty() {
         if let Some(task) = grq.dl_rq.pick_next_cpu(cpu_id, prev) {
-            mark_picked_on_cpu(task, task == prev);
-            // R32-DL1: reset the CBS execution clock at pick (mirror of the
-            // CFS R20-6 fix). exec_start otherwise still holds the
-            // timestamp of the task's PREVIOUS switch-out (or 0 before its
-            // first run), so the first scheduler_tick/__schedule charge
-            // after a wake billed the entire sleep duration (or the whole
-            // uptime) into the runtime budget and throttled the task
-            // instantly.
-            (*task).dl_entity().exec_start.store(
-                crate::sched::fair::sched_clock(),
-                core::sync::atomic::Ordering::Release,
-            );
-            // R7-B5: pick removes the task from the queue — pair the count.
-            grq.nr_running.fetch_update(
-                core::sync::atomic::Ordering::SeqCst,
-                core::sync::atomic::Ordering::SeqCst,
-                |v| v.checked_sub(1),
-            );
-            return task;
+            // PID-0 GATE (b64-b66 fatal chain): PIDs below RESERVED_PIDS
+            // are never allocated, so a class-queue entry reading pid 0
+            // is an idle task or freed/recycled memory — never a
+            // legitimately runnable task. The pick already removed it
+            // from the queue; pair the count and fall through to the
+            // next class instead of context-switching onto a garbage
+            // context (observed: PICK-LIVE-FORCED pid=0 → resume at a
+            // stale boot-stack sp → fatal).
+            if (*task).pid() == 0 {
+                report_poisoned_rq_entry(cpu_id, task as usize);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+            } else {
+                mark_picked_on_cpu(task, task == prev);
+                // R32-DL1: reset the CBS execution clock at pick (mirror of the
+                // CFS R20-6 fix). exec_start otherwise still holds the
+                // timestamp of the task's PREVIOUS switch-out (or 0 before its
+                // first run), so the first scheduler_tick/__schedule charge
+                // after a wake billed the entire sleep duration (or the whole
+                // uptime) into the runtime budget and throttled the task
+                // instantly.
+                (*task).dl_entity().exec_start.store(
+                    crate::sched::fair::sched_clock(),
+                    core::sync::atomic::Ordering::Release,
+                );
+                // R7-B5: pick removes the task from the queue — pair the count.
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+                return task;
+            }
         }
     }
 
@@ -1676,43 +1976,68 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     //    Skipped entirely while the RT bandwidth is throttled (batch 8).
     if !grq.rt_rq.is_empty() && !RT_THROTTLED.load(core::sync::atomic::Ordering::Acquire) {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id, prev) {
-            mark_picked_on_cpu(task, task == prev);
-            grq.nr_running.fetch_update(
-                core::sync::atomic::Ordering::SeqCst,
-                core::sync::atomic::Ordering::SeqCst,
-                |v| v.checked_sub(1),
-            );
-            return task;
+            // PID-0 GATE — see the Deadline block above.
+            if (*task).pid() == 0 {
+                report_poisoned_rq_entry(cpu_id, task as usize);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+            } else {
+                mark_picked_on_cpu(task, task == prev);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+                return task;
+            }
         }
     }
 
     // 4. CFS — pick min-vruntime task that can run on this CPU
     if !grq.cfs_rq.is_empty() {
         if let Some(task) = grq.cfs_rq.pick_next_cpu(cpu_id, prev) {
-            mark_picked_on_cpu(task, task == prev);
-            grq.nr_running.fetch_update(
-                core::sync::atomic::Ordering::SeqCst,
-                core::sync::atomic::Ordering::SeqCst,
-                |v| v.checked_sub(1),
-            );
-            grq.cfs_rq.set_curr(task);
-            // R20-6: reset the execution clock at pick. Nothing else resets
-            // exec_start, so after a sleep it still holds the timestamp of
-            // the task's PREVIOUS run — the first update_curr/direct charge
-            // after wakeup billed the entire sleep duration into vruntime.
-            let se = (*task).sched_entity();
-            se.set_exec_start(crate::sched::fair::sched_clock());
-            // Batch 8: start a fresh activation window — scheduler_tick
-            // judges preemption on sum_exec_runtime - prev_sum_exec_runtime
-            // (current run length) vs the slice (Linux check_preempt_tick).
-            se.prev_sum_exec_runtime.store(
-                se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire),
-                core::sync::atomic::Ordering::Release,
-            );
-            let slice_ns = grq.cfs_rq.sched_slice(se);
-            let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
-            (*task).set_time_slice(slice_ms.max(1) as u32);
-            return task;
+            // PID-0 GATE — see the Deadline block above. This is the exact
+            // site of the b64-b66 fatal: the CFS walk returned a
+            // freed-then-recycled entry whose pid word read 0 with a claim
+            // word reading 0 (= cpu 0), mark_picked_on_cpu published it
+            // LIVE ("PICK-LIVE-FORCED pid=0") and the switch resumed a
+            // stale boot-stack context (rsp=0x10a870).
+            if (*task).pid() == 0 {
+                report_poisoned_rq_entry(cpu_id, task as usize);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+            } else {
+                mark_picked_on_cpu(task, task == prev);
+                grq.nr_running.fetch_update(
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                    |v| v.checked_sub(1),
+                );
+                grq.cfs_rq.set_curr(task);
+                // R20-6: reset the execution clock at pick. Nothing else resets
+                // exec_start, so after a sleep it still holds the timestamp of
+                // the task's PREVIOUS run — the first update_curr/direct charge
+                // after wakeup billed the entire sleep duration into vruntime.
+                let se = (*task).sched_entity();
+                se.set_exec_start(crate::sched::fair::sched_clock());
+                // Batch 8: start a fresh activation window — scheduler_tick
+                // judges preemption on sum_exec_runtime - prev_sum_exec_runtime
+                // (current run length) vs the slice (Linux check_preempt_tick).
+                se.prev_sum_exec_runtime.store(
+                    se.sum_exec_runtime.load(core::sync::atomic::Ordering::Acquire),
+                    core::sync::atomic::Ordering::Release,
+                );
+                let slice_ns = grq.cfs_rq.sched_slice(se);
+                let slice_ms = crate::sched::fair::sched_slice_to_ms(slice_ns);
+                (*task).set_time_slice(slice_ms.max(1) as u32);
+                return task;
+            }
         }
     }
 
@@ -2244,6 +2569,17 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
     // the re-check and the enqueue are one atomic step.
     unsafe {
         let st = (*task).state();
+        // PID-0 tasks (per-CPU idles, the boot init's idle) are RUNNING by
+        // design and are owned by their own cpu's idle loop — no wake path
+        // ever legitimately targets one. The idle task of an OFFLINE cpu
+        // presents exactly the R46 phantom shape (RUNNING, unlinked, owned
+        // by no current slot) forever, so the heal below would re-link it
+        // onto the CFS timeline (unit-test capture:
+        // "R46-RUNNING-PHANTOM healed pid=0x0 ... cpu=3" on a 2-cpu boot)
+        // only for the pick-side PID-0 gates to drop it again. Refuse.
+        if (*task).pid() == 0 {
+            return false;
+        }
         if !(st.is_sleeping() || st.contains(TaskState::STOPPED)) {
             // RUNNING (woken elsewhere / never slept), ZOMBIE, or DEAD —
             // the wake is stale or redundant; drop it. (Freed-page poison
@@ -2541,10 +2877,11 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                         let base = thsp as *const u64;
                         let mut shown = 0;
                         for k in 0..64 {
-                            // SAFETY: diagnostic read of the task's own
-                            // kernel-stack pages (the Task pins them).
-                            let w = core::ptr::read_volatile(base.add(k));
-                            if w >= 0xffffffff80000000 && w < 0xffffffff80200000 && (w & 1) == 0 {
+                        // SAFETY: diagnostic read of the task's own
+                        // kernel-stack pages (the Task pins them).
+                        let w = core::ptr::read_volatile(base.add(k));
+                        let (lo, hi) = kernel_text_window();
+                        if w >= lo && w < hi && (w & 1) == 0 {
                                 putchar(b' ');
                                 phex(w);
                                 shown += 1;
@@ -3719,7 +4056,8 @@ fn harvest_print_parked(task: *mut Task, pid: u32) {
                 // SAFETY: diagnostic volatile read of the pinned task's own
                 // kernel-stack pages.
                 let w = core::ptr::read_volatile(base.add(k));
-                if w >= 0xffffffff80000000 && w < 0xffffffff80200000 && (w & 1) == 0 {
+                let (lo, hi) = kernel_text_window();
+                if w >= lo && w < hi && (w & 1) == 0 {
                     putchar(b' ');
                     phex(w);
                     shown += 1;
@@ -4165,21 +4503,16 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // printed hundreds of anonymous harvest lines while
                         // the actual blocker (a LIVE-mark phantom) was
                         // refused elsewhere and never named.
-                        // serial-clean: gated behind dfx=schedtrace.
-                        if crate::dfx::switches::enabled(
-                            crate::dfx::switches::DfxSwitch::SchedTrace,
-                        ) {
-                            r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
-                            // R80 (diag, producer hunt): the v2 storm showed
-                            // pids 306/336/338 cycling orphan -> heal -> orphan
-                            // every ~200ms through THIS plain-insert path (no
-                            // R49/R80 print — their marks were already clean).
-                            // Print the victim's parked context, rate-limited:
-                            // the saved thread.sp's caller frames name the exact
-                            // syscall/wait site the context was stranded in, and
-                            // repeated identical frames = one producer.
-                            harvest_print_parked(t, pid);
-                        }
+                        r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
+                        // R80 (diag, producer hunt): the v2 storm showed
+                        // pids 306/336/338 cycling orphan -> heal -> orphan
+                        // every ~200ms through THIS plain-insert path (no
+                        // R49/R80 print — their marks were already clean).
+                        // Print the victim's parked context, rate-limited:
+                        // the saved thread.sp's caller frames name the exact
+                        // syscall/wait site the context was stranded in, and
+                        // repeated identical frames = one producer.
+                        harvest_print_parked(t, pid);
                     }
                 }
                 Some(c) => {
@@ -4192,11 +4525,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // Lying idle-marked slot — R56c inside
                         // wake_up_enqueue heals the slot and admits the
                         // re-link.
-                        if wake_up_enqueue(t)
-                            && crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::SchedTrace,
-                            )
-                        {
+                        if wake_up_enqueue(t) {
                             r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
                         }
                     } else if (*t).preempt_count() == 0
