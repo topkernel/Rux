@@ -1016,7 +1016,10 @@ impl CfsRunQueue {
                 core::sync::atomic::AtomicU64::new(0);
             let now = crate::drivers::timer::get_jiffies();
             let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
-            if now.wrapping_sub(last) >= 100
+            // serial-clean: this canary fires on benign mid-switch-out
+            // transients too — print only behind dfx=schedtrace.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+                && now.wrapping_sub(last) >= 100
                 && LAST_REPORT
                     .compare_exchange(
                         last,

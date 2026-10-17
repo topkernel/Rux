@@ -177,33 +177,41 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
     if sigsetsize != 8 {
         // OH bring-up: devhost services die right after an rt_sigaction
         // EINVAL — name the rejected call so the offending signum is
-        // visible on the console.
-        crate::pr_info!(
-            "rt_sigaction EINVAL: signum={} sigsetsize={} pid={}",
-            signum,
-            sigsetsize,
-            unsafe { crate::process::current_pid() }
-        );
+        // visible on the console. Gated behind dfx=schedtrace: musl's
+        // spawn path probes rt_sigaction(SIGKILL/SIGSTOP) on every child,
+        // so ungated this printed thousands of lines per soak.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+            crate::pr_info!(
+                "rt_sigaction EINVAL: signum={} sigsetsize={} pid={}",
+                signum,
+                sigsetsize,
+                unsafe { crate::process::current_pid() }
+            );
+        }
         return -(errno::EINVAL as i64);
     }
 
     // Validate signal number
     if signum < 1 || signum > 64 {
-        crate::pr_info!(
-            "rt_sigaction EINVAL: signum={} pid={}",
-            signum,
-            unsafe { crate::process::current_pid() }
-        );
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+            crate::pr_info!(
+                "rt_sigaction EINVAL: signum={} pid={}",
+                signum,
+                unsafe { crate::process::current_pid() }
+            );
+        }
         return -(errno::EINVAL as i64);
     }
 
     // SIGKILL and SIGSTOP cannot be caught or ignored
     if signum == Signal::SIGKILL as i32 || signum == Signal::SIGSTOP as i32 {
-        crate::pr_info!(
-            "rt_sigaction EINVAL: signum={} is SIGKILL/SIGSTOP, pid={}",
-            signum,
-            unsafe { crate::process::current_pid() }
-        );
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+            crate::pr_info!(
+                "rt_sigaction EINVAL: signum={} is SIGKILL/SIGSTOP, pid={}",
+                signum,
+                unsafe { crate::process::current_pid() }
+            );
+        }
         return -(errno::EINVAL as i64);
     }
 
