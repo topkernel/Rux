@@ -3,8 +3,9 @@
 import os, subprocess, sys, time, select
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KERNEL = os.environ.get("RUX_KERNEL", os.path.join(HERE, "target/riscv64gc-unknown-none-elf/debug/rux"))
-ROOTFS = os.environ.get("RUX_ROOTFS", os.path.join(HERE, "test/rootfs.img"))
+ROOT = os.path.dirname(HERE)
+KERNEL = os.environ.get("RUX_KERNEL", os.path.join(ROOT, "target/riscv64gc-unknown-none-elf/debug/rux"))
+ROOTFS = os.environ.get("RUX_ROOTFS", os.path.join(HERE, "rootfs.img"))
 SECS = int(sys.argv[1]) if len(sys.argv) > 1 else 420
 LOG = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "unittest.log")
 

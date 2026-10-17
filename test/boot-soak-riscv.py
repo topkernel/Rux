@@ -13,8 +13,9 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KERNEL = os.path.join(HERE, "target/riscv64gc-unknown-none-elf/debug/rux")
-ROOTFS = os.path.join(HERE, "test/rootfs.img")
+ROOT = os.path.dirname(HERE)
+KERNEL = os.path.join(ROOT, "target/riscv64gc-unknown-none-elf/debug/rux")
+ROOTFS = os.environ.get("RUX_ROOTFS", os.path.join(HERE, "rootfs.img"))
 
 
 def main():
@@ -23,6 +24,7 @@ def main():
     ap.add_argument("--seconds", type=int, default=120)
     ap.add_argument("--kernel", default=KERNEL)
     ap.add_argument("--dfx", default="")
+    ap.add_argument("--cpuext", default="", help="extra -cpu extension bits, e.g. ,zcmop=true")
     ap.add_argument("--log", default=None)
     args = ap.parse_args()
 
@@ -32,8 +34,8 @@ def main():
     cmd = [
         "qemu-system-riscv64",
         "-M", "virt",
-        "-accel", "tcg,thread=single",
-        "-cpu", "rv64,zbb=true,zba=true,zbs=true",
+        "-accel", os.environ.get("RUX_TCG", "tcg,thread=single"),
+        "-cpu", "rv64,zbb=true,zba=true,zbs=true" + args.cpuext,
         "-m", "1G",
         "-smp", str(args.smp),
         "-nographic",
@@ -110,6 +112,8 @@ def main():
                 feed("pwd")
                 feed("ls > /dev/null")
                 feed("i=0; while [ $i -lt 300 ]; do ls /proc >/dev/null; i=$((i+1)); done; echo LOOP-DONE")
+                feed("i=0; while [ $i -lt 3000 ]; do /bin/true; i=$((i+1)); done; echo CHURN-DONE")
+                feed("j=0; while [ $j -lt 8000 ]; do j=$((j+1)); done; echo ARITH-DONE")
                 commands_sent = True
                 last_cmd_time = now
             # idle detection: shell wedged = no output for 20s while loop
