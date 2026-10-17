@@ -1635,32 +1635,44 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
                 txn.from_tid.unwrap_or(0),
                 txn.to_tid().unwrap_or(0),
             );
-            // Holder-task forensics (b128-b132: a samgr thread parks
+            // Holder-task forensics (b128-b135: a samgr thread parks
             // 120s+ INSIDE a txn and every display-chain client queues
             // behind it). The binder view can't say where the thread
             // actually is, so read its Task: scheduling state plus the
-            // user entry frame at kernel_stack_top - PT_REGS_SIZE —
-            // rip (where userspace was), orig_rax (the syscall it made,
-            // -1 when it trapped rather than syscalled) and rdi (arg0).
+            // user entry frame at kernel_stack_top - PT_REGS_SIZE (both
+            // arches place the user entry frame at that fixed offset —
+            // see the pt_regs module docs).
             let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
             if !task.is_null() {
                 let tk = unsafe { &*task };
                 let top = tk.kernel_stack_top();
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                // SAFETY: diagnostic read of this task's own entry
-                // frame; the kernel stack stays mapped while the Task
-                // lives, and the frame slot is written on every entry.
-                let (rip, orig_rax, rdi, rsi) =
-                    unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) };
+                #[cfg(feature = "x86_64")]
+                let (rip, sys, a0, a1) = {
+                    let regs = (top.wrapping_sub(
+                        crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                    )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                    // SAFETY: diagnostic read of this task's own entry
+                    // frame; the kernel stack stays mapped while the Task
+                    // lives, and the frame slot is written on every entry.
+                    unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
+                };
+                #[cfg(feature = "riscv64")]
+                let (rip, sys, a0, a1) = {
+                    let regs = (top.wrapping_sub(
+                        crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                    )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                    // SAFETY: same contract as the x86_64 twin above.
+                    unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1) }
+                };
+                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
                 crate::pr_warn!(
-                    "binder-stall:    holder task state={:#x} rip={:#x} orig_rax={:#x} rdi={:#x} rsi={:#x}",
+                    "binder-stall:    holder task state={:#x} rip={:#x} sys={:#x} a0={:#x} a1={:#x}",
                     tk.state().bits(),
                     rip,
-                    orig_rax,
-                    rdi,
-                    rsi
+                    sys,
+                    a0,
+                    a1
                 );
                 // If the holder is parked in futex_wait, correlate its
                 // waiter entry: woken=true-but-still-asleep indicts the
