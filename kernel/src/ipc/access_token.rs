@@ -119,6 +119,23 @@ fn set_token(pid: u32, set_ftoken: bool, v: u64) {
     }
 }
 
+/// Mirror a SET_TOKENID/SET_FTOKENID from the legacy
+/// drivers/access_tokenid ioctl path into the shared registry so both
+/// entry points stay coherent (single store; the devfs node points at
+/// this registry, but anything still holding the old ops must not
+/// diverge from what BINDER_GET_SENDER_INFO reports).
+pub fn mirror_set(pid: u32, set_ftoken: bool, v: u64) {
+    set_token(pid, set_ftoken, v);
+}
+
+/// The REGISTERED token of a process (None when nothing ever called
+/// SET_TOKENID for it) — fork inheritance copies only real tokens so
+/// the synthetic per-pid fallback stays per-pid.
+pub fn registered_token_of(pid: u32) -> Option<(u64, u64)> {
+    let g = REGISTRY.lock_irqsave();
+    g.as_ref().and_then(|r| r.by_pid.get(&pid)).map(|t| (t.token, t.ftoken))
+}
+
 fn ebadf() -> i64 {
     crate::errno::Errno::BadAddress.as_neg_i32() as i64
 }

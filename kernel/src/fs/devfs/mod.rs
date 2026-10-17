@@ -523,11 +523,15 @@ fn devtmpfs_populate() {
         ("urandom", crate::fs::dev_t::DEV_URANDOM, 0o666),
         ("kmsg", crate::fs::dev_t::DEV_KMSG, 0o600),
         ("ashmem", crate::drivers::ashmem::DEV_ASHMEM, 0o666),
-        (
-            "access_token_id",
-            crate::drivers::access_tokenid::DEV_ACCESS_TOKENID,
-            0o666,
-        ),
+        // NOTE: no "access_token_id" here — the node is registered below
+        // with the ipc access-token registry (single store). This batch
+        // inserts AFTER that registration, so a duplicate entry here
+        // shadowed the registry with the old drivers/access_tokenid
+        // per-task skeleton: init's SET_TOKENID writes landed in a store
+        // BINDER_GET_SENDER_INFO never reads (senders decoded as
+        // TOKEN_SHELL, samgr denied every AddSystemAbility — b98-b120;
+        // see docs/development/oh-linux-vs-rux-boot.md on
+        // feature/oh-linux-ref).
     ];
     // Loop family: /dev/loop-control (misc) + /dev/loop0..7 (BLOCK
     // majors) — LTP tst_acquire_device and losetup need both (the loop

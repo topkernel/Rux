@@ -789,8 +789,20 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // OpenHarmony access-token inheritance (upstream accesstokenid
         // patch: child inherits the normal token, ftoken is cleared).
+        // Both stores: the per-task field (legacy accessor) and the ipc
+        // registry keyed by tgid (what BINDER_GET_SENDER_INFO reads) —
+        // a forked child (e.g. devmgr -> devhost) must keep the
+        // parent's registered token or permission checks in samgr/ATM
+        // would see it fall back to the synthetic native id.
         (*task_ptr).set_access_token((*current_ptr).access_token());
         (*task_ptr).set_access_ftoken(0);
+        {
+            if let Some((ptok, _)) = crate::ipc::access_token::registered_token_of((*current_ptr).tgid() as u32) {
+                if ptok != 0 {
+                    crate::ipc::access_token::mirror_set((*task_ptr).tgid() as u32, false, ptok);
+                }
+            }
+        }
 
         // === U1c namespaces: default share the parent's namespace objects
         // (Arc clone); CLONE_NEW* bits give the child fresh ones. Fails the
