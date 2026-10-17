@@ -631,9 +631,14 @@ pub fn page_to_virt(page: &Page) -> usize {
 ///
 /// # Arguments
 /// - `phys_start`: Physical memory start address
-/// - `phys_size`: Total physical memory size in bytes
-/// - `kernel_end`: End of kernel memory (where allocation can start)
-pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) {
+/// - `phys_size`: SIZE OF THE PFN SPAN (max region end − phys_start),
+///   including MMIO holes — matching the descriptor/vmemmap sizing. The
+///   zone spans the whole discovered map; only memblock-FREE pages are
+///   seeded, so holes and static regions contribute no free pages.
+/// - `kernel_end`: legacy, unused (the zone no longer starts after the
+///   heap/slab window — that clamp is what left ~980 MB below
+///   KERNEL_HEAP_PHYS permanently unmanaged on x86_64).
+pub fn init_zone_system(phys_start: usize, phys_size: usize, _kernel_end: usize) {
     // Initialize node data structure
     // SAFETY: Called once during early boot before any page allocation.
     unsafe {
@@ -669,9 +674,17 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
     let total_pages = effective_phys_size / PAGE_SIZE;
     node.init(start_pfn, total_pages, total_pages);
 
-    // Create ZONE_NORMAL for all allocatable memory
-    // On RISC-V, we don't need DMA zones, but we'll use ZONE_NORMAL
-    let alloc_start_pfn = (kernel_end / PAGE_SIZE).max(start_pfn);
+    // ZONE_NORMAL spans the WHOLE discovered PFN space (fake-OOM family):
+    // the old span started at `kernel_end` (heap+slab end), so on x86_64
+    // every memblock-free page below it — ~980 MB between the kernel
+    // image and the heap at 0x40000000 — was never seeded and stayed
+    // permanently unallocatable while the OOM killer fired (census:
+    // 237,521 of 524,140 descriptors rc==0, unlinked, unmanaged on one
+    // 2G boot). Linux parity: the zone spans present memory; reserved
+    // ranges and non-RAM holes inside the span are simply never seeded,
+    // and the memblock_is_reserved / PageFlag::Reserved guards on the
+    // free path refuse anything forged against them.
+    let alloc_start_pfn = start_pfn;
     let alloc_end_pfn = start_pfn + total_pages;
     let alloc_start = alloc_start_pfn * PAGE_SIZE;
     let alloc_end = alloc_end_pfn * PAGE_SIZE;
@@ -726,6 +739,12 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         }
     });
 
+    // Managed pages = what the buddy actually owns (span minus reserved
+    // ranges and non-RAM holes), like Linux zone->managed_pages vs
+    // spanned_pages. The old span-equals-managed accounting overstated
+    // availability and sized watermarks off phantom pages.
+    zone.set_managed_pages(total_added);
+
     // Add zone to node
     node.add_zone(ZoneType::ZoneNormal, zone);
 
@@ -735,6 +754,17 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         let refs: [&Zone; 1] = [zone_ref];
         super::zone::setup_per_zone_wmarks(&refs, total_managed);
     }
+
+    // One-line boot banner: span vs seeded vs holes, so any future
+    // structural loss is visible immediately.
+    let span_pages = alloc_end_pfn - alloc_start_pfn;
+    crate::println!(
+        "page_alloc: zone Normal span={} pages ({} MB), seeded={} ({} MB), unmanaged-in-span={} ({} MB)",
+        span_pages, span_pages * PAGE_SIZE / (1024 * 1024),
+        total_added, total_added * PAGE_SIZE / (1024 * 1024),
+        span_pages.saturating_sub(total_added),
+        span_pages.saturating_sub(total_added) * PAGE_SIZE / (1024 * 1024)
+    );
 }
 
 // ==================== Page Allocation APIs ====================

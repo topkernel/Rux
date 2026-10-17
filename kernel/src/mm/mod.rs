@@ -193,6 +193,7 @@ pub const USER_VIRT_BASE: usize = 0x0000_0000_1000_0000;
 pub const USER_VIRT_TOP: usize = 0x0000_0000_7fff_ffff;
 
 pub use allocator::init_heap;
+pub use buddy_allocator::init_heap_sized;
 pub use page_desc::{init_mem_map, pfn_to_page, pfn_to_page_mut, page_to_pfn, pfn_valid, phys_valid};
 pub use slab::{kmalloc, kfree, kzalloc, init_slab, slab_stats, slab_region, is_slab_initialized};
 pub use meminfo::{

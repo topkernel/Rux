@@ -166,28 +166,58 @@ impl BuddyAllocator {
     /// Uses hardcoded addresses for early boot compatibility.
     /// The actual layout is tracked in mm::layout module for other components.
     pub fn init(&self) {
+        self.init_sized(HEAP_SIZE);
+    }
+
+    /// Initialize the allocator with a heap window CLAMPED to the
+    /// discovered memory map (the -m 512M panic family: `HEAP_SIZE` is the
+    /// config NOMINAL size; on machines with less RAM the window must
+    /// shrink or the buddy hands out addresses past the last DRAM page).
+    ///
+    /// Unlike the old single-block seeding (`heap_size_to_order` rounds UP
+    /// to a power of two, poking the last block past the window), the
+    /// window is seeded with the largest whole blocks that fit — the same
+    /// discipline as zone init. `size` is capped at `HEAP_SIZE` (the
+    /// metadata array bound).
+    pub fn init_sized(&self, size: usize) {
         if self.initialized.load(Ordering::Acquire) != 0 {
             return;
         }
 
         if self.initialized.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            let size = size.min(HEAP_SIZE);
             // Set magic number
             self.magic.store(0xDEADBEEF, Ordering::Release);
             self.heap_start.store(HEAP_START, Ordering::Release);
-            self.heap_end.store(HEAP_START + HEAP_SIZE, Ordering::Release);
+            self.heap_end.store(HEAP_START + size, Ordering::Release);
 
             // Initialize all free lists to empty
             for i in 0..=MAX_ORDER {
                 self.free_lists[i].store(EMPTY_LIST, Ordering::Release);
             }
 
-            // Calculate maximum order
-            let max_order = self.heap_size_to_order(HEAP_SIZE);
+            if size == 0 {
+                return; // no heap window on this machine — allocations fail
+            }
 
-            // Add entire heap as a single large block to corresponding order's free list
-            // Page index 0 corresponds to HEAP_START
-            self.init_block(0, max_order, false);
-            self.add_to_free_list(0, max_order);
+            // Seed: repeatedly add the largest order that is index-aligned
+            // and fits in the remaining pages. Page 0 == HEAP_START.
+            let mut remaining = size / PAGE_SIZE;
+            let mut idx = 0usize;
+            while remaining > 0 {
+                let mut order = 0usize;
+                for o in (0..=MAX_ORDER).rev() {
+                    let block = 1usize << o;
+                    if idx % block == 0 && remaining >= block {
+                        order = o;
+                        break;
+                    }
+                }
+                self.init_block(idx, order, false);
+                self.add_to_free_list(idx, order);
+                idx += 1usize << order;
+                remaining -= 1usize << order;
+            }
         }
     }
 
@@ -672,6 +702,13 @@ pub use GLOBAL_ALLOCATOR as HEAP_ALLOCATOR;
 
 pub fn init_heap() {
     GLOBAL_ALLOCATOR.init();
+}
+
+/// init_heap with a RAM-clamped window size (see BuddyAllocator::init_sized;
+/// the -m 512M panic family). The early boot block computes the effective
+/// size from the discovered memory map.
+pub fn init_heap_sized(size: usize) {
+    GLOBAL_ALLOCATOR.init_sized(size);
 }
 
 /// Buddy allocator statistics

@@ -291,10 +291,17 @@ pub fn rust_main_tail() -> ! {
         }
     }
 
-    // Initialize Slab allocator (use virtual address in linear mapping region)
-    let slab_phys = KERNEL_HEAP_PHYS + crate::config::KERNEL_HEAP_SIZE;
-    let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
-    mm::init_slab(slab_start, 4 * 1024 * 1024);  // 4MB for slab
+    // Initialize Slab allocator (use virtual address in linear mapping region).
+    // RAM-clamped static regions (see the early boot block): slab follows the
+    // EFFECTIVE heap end and is skipped entirely when the machine had no room.
+    let heap_size_eff = HEAP_SIZE_EFF.load(core::sync::atomic::Ordering::Acquire);
+    let slab_phys = KERNEL_HEAP_PHYS + heap_size_eff;
+    let slab_end_eff = HEAP_SLAB_END_EFF.load(core::sync::atomic::Ordering::Acquire);
+    let slab_size_eff = slab_end_eff.saturating_sub(slab_phys);
+    if slab_size_eff > 0 {
+        let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
+        mm::init_slab(slab_start, slab_size_eff);
+    }
 
     // ========== Heap initialized, format! can be used below ==========
 
@@ -418,9 +425,32 @@ pub fn rust_main_tail() -> ! {
             print_status("mm", &format!("linear mapping {} MB",
                 total_phys_memory / (1024 * 1024)), true);
 
-            // Initialize vmemmap mapping
+            // PFN-space sizing (fake-OOM family, the "phantom drift"
+            // mechanism): descriptors/vmemmap/zone are indexed LINEARLY
+            // from MEMORY_PHYS_BASE, so the descriptor count must cover
+            // the HIGHEST PFN of the discovered map — not the SUM of
+            // region sizes. On q35 -m 4G the e820 map is 2 GiB below 4G
+            // plus 2 GiB above 4G: sizing by the sum (4095 MB) left every
+            // above-4G page outside the descriptor array (2 GiB of RAM
+            // invisible: unallocatable, and freed above-4G pages dropped
+            // as "WILD"), while the 3 GiB..4 GiB MMIO hole got phantom
+            // rc==0 descriptors that the MEMLEDGER census counted as
+            // free-page drift (b126: drift=744314 with zero runtime
+            // leaks — the entire number was phantom hole descriptors plus
+            // structurally unmanaged low memory).
+            let max_phys_end: usize = memory_regions
+                .iter()
+                .map(|r| r.base + r.size)
+                .max()
+                .unwrap_or(0);
             let start_pfn = MEMORY_PHYS_BASE / mm::PAGE_SIZE;
-            let nr_pages = total_phys_memory / mm::PAGE_SIZE;
+            let nr_pages = (max_phys_end / mm::PAGE_SIZE).saturating_sub(start_pfn);
+            let span_size = max_phys_end.saturating_sub(MEMORY_PHYS_BASE);
+            // Usable RAM (sum, holes excluded) — the honest MemTotal.
+            mm::page_desc::set_present_pages(total_phys_memory / mm::PAGE_SIZE);
+
+            // Initialize vmemmap mapping
+            // (nr_pages now covers the full PFN span including holes)
 
             if mm::vmemmap::init_vmemmap(start_pfn, nr_pages).is_ok() {
                 print_status("mm", "vmemmap mapping initialized", true);
@@ -428,10 +458,9 @@ pub fn rust_main_tail() -> ! {
                 print_status("mm", "vmemmap mapping failed", false);
             }
 
-            // Initialize kernel memory layout
-            let heap_size = crate::config::KERNEL_HEAP_SIZE;
-            let slab_start = KERNEL_HEAP_PHYS + heap_size;
-            let slab_size = 4 * 1024 * 1024;
+            // Initialize kernel memory layout (heap/slab inside are
+            // RAM-clamped by effective_static_regions — the unused locals
+            // here were the pre-clamp values and are gone)
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
                 MEMORY_PHYS_BASE,
                 total_phys_memory, // phys SIZE (was phys_base+size — review 4.20)
@@ -449,11 +478,19 @@ pub fn rust_main_tail() -> ! {
 
             // Initialize page descriptors
             mm::page::init_page_descriptors(start_pfn, nr_pages);
-            print_status("mm", &format!("{} page descriptors", nr_pages), true);
+            // Mark NON-RAM PFNs (MMIO holes, firmware gaps) Reserved so no
+            // descriptor in the span can be mistaken for a free page (the
+            // phantom-drift mechanism above).
+            mm::page_desc::mark_non_ram_pages(&memory_regions);
+            print_status("mm", &format!("{} page descriptors (span {} MB, present {} MB)",
+                nr_pages, span_size / (1024 * 1024), total_phys_memory / (1024 * 1024)), true);
 
-            // Initialize zone allocator
-            let kernel_end = slab_start + slab_size;
-            mm::init_zone_system(MEMORY_PHYS_BASE, total_phys_memory, kernel_end);
+            // Initialize zone allocator over the FULL discovered PFN span
+            // (holes stay unseeded + Reserved; the above-4G regions become
+            // allocatable; memory below the heap/slab statics is seeded
+            // too — the old kernel_end-clamped span left ~980 MB
+            // unmanaged on x86_64).
+            mm::init_zone_system(MEMORY_PHYS_BASE, span_size, 0);
             // Managed-RAM banner (fake-OOM family): the zone span actually
             // handed to the buddy, so a truncation (config-vs-machine size
             // mismatch) is visible on the serial log at boot.
@@ -1019,6 +1056,15 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 const KERNEL_RESERVE_SIZE: usize = 0xE0_0000; // 14MB
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
+/// Effective (RAM-clamped) static-region sizes computed by the early
+/// boot block from the discovered memory map (layout.rs
+/// effective_static_regions). HEAP_SIZE_EFF feeds the heap buddy's
+/// window; HEAP_SLAB_END_EFF feeds the zone's start.
+static HEAP_SIZE_EFF: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(crate::config::KERNEL_HEAP_SIZE);
+static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(feature = "riscv64")]
 const KERNEL_HEAP_PHYS: usize = 0x80E0_0000;
 #[cfg(feature = "x86_64")]
@@ -1223,18 +1269,45 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
-        // Reserve memory regions (kernel, heap, slab)
-        let heap_start = KERNEL_HEAP_PHYS;
-        let heap_size = crate::config::KERNEL_HEAP_SIZE;
-        let slab_start = heap_start + heap_size;
-        let slab_size = 4 * 1024 * 1024;
+        // Reserve memory regions (kernel, heap, slab). Static regions are
+        // clamped to the discovered memory map (-m 512M panic family: the
+        // config heap window extended past RAM, reserved nonexistent DRAM
+        // in memblock, and underflowed layout init). Same helper as
+        // layout::init_from_memblock — the two must not drift apart.
+        let phys_end = memory_regions
+            .iter()
+            .map(|r| r.base + r.size)
+            .max()
+            .unwrap_or(0);
+        let eff = mm::layout::effective_static_regions(
+            MEMORY_PHYS_BASE,
+            phys_end.saturating_sub(MEMORY_PHYS_BASE),
+            KERNEL_HEAP_PHYS,
+        );
+        let heap_start = eff.heap_start;
+        let heap_size = eff.heap_size;
+        let slab_start = eff.slab_start;
+        let slab_size = eff.slab_size;
 
         #[cfg(feature = "riscv64")]
         mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
         #[cfg(feature = "x86_64")]
         mm::memblock_reserve(0, KERNEL_RESERVE_SIZE).ok(); // low memory + kernel
-        mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
-        mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
+        if heap_size > 0 {
+            mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
+        }
+        if slab_size > 0 {
+            mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
+        }
+        crate::println!(
+            "boot: static regions phys_end={:#x} heap={:#x}+{:#x} slab={:#x}+{:#x}",
+            phys_end, heap_start, heap_size, slab_start, slab_size
+        );
+        HEAP_SIZE_EFF.store(heap_size, core::sync::atomic::Ordering::Release);
+        HEAP_SLAB_END_EFF.store(
+            heap_start + heap_size + slab_size,
+            core::sync::atomic::Ordering::Release,
+        );
 
         // Stay in Early stage for setup_linear_mapping (static BSS arrays always accessible)
         // Don't switch to Fixmap yet — Fixmap stage uses identity mapping which
@@ -1251,8 +1324,9 @@ pub extern "C" fn rust_main() -> ! {
     }
 
     // Now linear mapping is available, phys_to_virt() works for all physical memory
-    // Initialize heap allocator
-    mm::init_heap();
+    // Initialize heap allocator (window clamped to discovered RAM — the
+    // buddy must never cover DRAM past the memory map).
+    mm::init_heap_sized(HEAP_SIZE_EFF.load(core::sync::atomic::Ordering::Acquire));
 
     // x86_64: leave the .boot stack (limited by the LMA window, ~1MB) for a
     // 4MB heap-backed kernel stack. The whole init chain — including exec's

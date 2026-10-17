@@ -32,6 +32,87 @@ pub const KERNEL_ENTRY: usize = 0x80200000;
 /// Default slab size (4MB)
 pub const DEFAULT_SLAB_SIZE: usize = 4 * 1024 * 1024;
 
+/// Effective static-region sizing for machines smaller than the config
+/// assumes (the -m 512M boot panic family).
+///
+/// `KERNEL_HEAP_PHYS` (+ `KERNEL_HEAP_SIZE`) and the slab window that
+/// follows it are COMPILE-TIME addresses: on a machine whose discovered
+/// RAM ends before `heap_start + heap_size` the old code (a) reserved a
+/// heap range extending past RAM in memblock, (b) underflowed in
+/// `init_from_memblock` (`phys_base + phys_size - slab_start - slab_size`
+/// panics "attempt to subtract with overflow" at boot), and (c) let the
+/// heap buddy cover nonexistent DRAM — its single MAX_ORDER seed block
+/// made allocations past the RAM end fault (KERNPANIC on first touch).
+///
+/// This helper is the ONE place the static regions are clamped to the
+/// discovered memory map:
+///  - the heap NEVER extends past `phys_end`, and always leaves room for
+///    the slab plus a minimum user zone (`MIN_USER_ZONE`), shrinking the
+///    heap (config size is a CAP, not an entitlement);
+///  - the slab follows the (possibly shrunk) heap end, clamped to RAM;
+///  - when RAM is too small even for that, regions come back empty
+///    rather than wrapped — boot fails with a clear "no memory" instead
+///    of an arithmetic panic.
+///
+/// Machines with RAM ≥ KERNEL_HEAP_PHYS-base + KERNEL_HEAP_SIZE +
+/// slab + MIN_USER_ZONE get EXACTLY the historical layout (the clamp is
+/// a no-op) — 2G/4G boots are unchanged.
+pub struct EffectiveStaticRegions {
+    pub heap_start: usize,
+    pub heap_size: usize,
+    pub slab_start: usize,
+    pub slab_size: usize,
+}
+
+pub fn effective_static_regions(
+    phys_base: usize,
+    phys_size: usize,
+    heap_start: usize,
+) -> EffectiveStaticRegions {
+    /// Smallest user zone we are willing to hand the buddy when the heap
+    /// must shrink to fit (16 MiB — enough for the minimal rootfs shell).
+    const MIN_USER_ZONE: usize = 16 * 1024 * 1024;
+    /// Heap shrink granularity (keeps the window a power-of-two multiple
+    /// so the buddy can seed it with whole blocks).
+    const HEAP_ALIGN: usize = 16 * 1024 * 1024;
+    /// Never hand the kernel heap less than this, even if it means a tiny
+    /// user zone (the heap hosts every Task/file object; below this the
+    /// kernel cannot boot at all).
+    const MIN_HEAP: usize = 32 * 1024 * 1024;
+
+    let phys_end = phys_base.saturating_add(phys_size);
+    let config_size = crate::config::KERNEL_HEAP_SIZE;
+    let slab_size = DEFAULT_SLAB_SIZE;
+
+    // Heap: cap at RAM end minus slab minus the minimum user zone...
+    let headroom = phys_end
+        .saturating_sub(heap_start)
+        .saturating_sub(slab_size)
+        .saturating_sub(MIN_USER_ZONE);
+    let mut heap_size = config_size.min(headroom);
+    // ...but keep at least MIN_HEAP when the machine is that tight (the
+    // user zone shrinks below MIN_USER_ZONE instead of the heap).
+    let max_fit = phys_end
+        .saturating_sub(heap_start)
+        .saturating_sub(slab_size);
+    if heap_size < MIN_HEAP {
+        heap_size = MIN_HEAP.min(max_fit);
+    }
+    // Align DOWN so buddy seeding covers whole power-of-two blocks
+    // without the last block poking past the window.
+    heap_size = heap_size / HEAP_ALIGN * HEAP_ALIGN;
+
+    let heap_end = heap_start.saturating_add(heap_size);
+    let slab_fit = phys_end.saturating_sub(heap_end);
+    let slab_size = if slab_fit >= slab_size { slab_size } else { 0 };
+    EffectiveStaticRegions {
+        heap_start,
+        heap_size,
+        slab_start: heap_end,
+        slab_size,
+    }
+}
+
 /// Kernel memory layout
 ///
 /// This structure holds all the dynamically computed memory regions.
@@ -95,16 +176,15 @@ impl KernelMemoryLayout {
         // Calculate heap region (after kernel)
         let _kernel_size = kernel_end - kernel_start;
         let heap_start = (kernel_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        // Single source of truth: the kernel heap buddy
-        // (buddy_allocator.rs) is sized from crate::config::KERNEL_HEAP_SIZE;
-        // deriving the layout from the same constant keeps memblock
-        // reservations, the buddy's window and this layout from drifting
-        // apart (assert_memblock_consistency enforces it at boot).
-        let heap_size = crate::config::KERNEL_HEAP_SIZE;
+        // Static regions clamped to the DISCOVERED memory map (the -m 512M
+        // panic family — see effective_static_regions). The kernel_end
+        // argument is KERNEL_HEAP_PHYS: the heap window base.
+        let eff = effective_static_regions(phys_base, phys_size, heap_start);
+        let heap_size = eff.heap_size;
 
         // Calculate slab region (after heap)
-        let slab_start = heap_start + heap_size;
-        let slab_size = DEFAULT_SLAB_SIZE;
+        let slab_start = eff.slab_start;
+        let slab_size = eff.slab_size;
 
         // Calculate user physical memory region.
         //
@@ -118,14 +198,18 @@ impl KernelMemoryLayout {
         // heap+slab is user-physical, 25% stays reserved for kernel
         // structures (page tables, page descriptors, slab growth). No
         // 64MB truncation. Boot order is unchanged (layout init runs at the
-        // same main.rs point as before).
-        let remaining_after_slab = phys_base + phys_size - slab_start - slab_size;
+        // same main.rs point as before). Saturating: on machines smaller
+        // than the static regions the remainder is simply zero (the
+        // effective_* clamps already shrank them to fit).
+        let remaining_after_slab = (phys_base + phys_size)
+            .saturating_sub(slab_start)
+            .saturating_sub(slab_size);
         let user_phys_size = remaining_after_slab * 3 / 4;
         let user_phys_start = slab_start + slab_size;
 
         // Frame allocator starts after user physical region
         let frame_alloc_start = user_phys_start + user_phys_size;
-        let frame_alloc_size = phys_base + phys_size - frame_alloc_start;
+        let frame_alloc_size = (phys_base + phys_size).saturating_sub(frame_alloc_start);
 
         Self {
             phys_base,

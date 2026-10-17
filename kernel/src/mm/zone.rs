@@ -294,6 +294,13 @@ impl Zone {
         self.free_pages.load(Ordering::Acquire)
     }
 
+    /// Set managed pages (boot-time only): the count of pages actually
+    /// handed to the buddy (span minus reserved/hole pages), mirroring
+    /// Linux zone->managed_pages vs spanned_pages.
+    pub fn set_managed_pages(&self, n: usize) {
+        self.managed_pages.store(n, Ordering::Release);
+    }
+
     /// Get watermark value for the given level (WMARK_MIN/LOW/HIGH).
     pub fn watermark(&self, wmark: usize) -> usize {
         self._watermark[wmark].load(Ordering::Relaxed)
