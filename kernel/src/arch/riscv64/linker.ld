@@ -25,6 +25,8 @@ SECTIONS
 
 	_text = .;
 	_stext = .;
+	/* x86_64-style alias consumed by dfx::hung_task's kernel-text window */
+	__stext = .;
 
 	.text : AT(KERNEL_PHYS) ALIGN(4096)
 	{
@@ -33,6 +35,7 @@ SECTIONS
 	}
 
 	_etext = .;
+	__etext = .;
 
 	. = ALIGN(4096);
 	.rodata : AT(ADDR(.rodata) - VA_OFFSET) { *(.rodata .rodata.*) }

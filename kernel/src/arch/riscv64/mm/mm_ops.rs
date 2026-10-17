@@ -359,20 +359,36 @@ impl MmStruct {
             // _dl_map_object_from_fd): every page outside the final
             // segment lost its VMA and faulted with SIGSEGV (Ubuntu
             // dash/libc load).
+            //
+            // ATOMICITY (mm-audit, OH stack-VMA-vanishing): the whole
+            // surgery — snapshot, remove, piece re-add, PTE zap of the
+            // fixed range, and the new VMA's install — runs under ONE
+            // vma_write guard. The old shape released the guard between
+            // the removal phase and the piece re-adds (each piece under
+            // its own guard, add failures silently swallowed), so a
+            // concurrent same-mm mmap that picked the just-opened gap
+            // made a piece's re-add fail with Overlap and the piece was
+            // silently DROPPED: a live mapping (e.g. a thread's stack)
+            // kept its pages but lost its VMA — later faults there report
+            // "no VMA" while the pages stay resident (the b89
+            // fresh-thread hole), and any mapping landing in the hole
+            // collides with the zombie range. unmap_pages takes no VMA
+            // lock (PTE lock only, nested one-way), so holding the guard
+            // across it is safe.
             let fixed_end = PageVirtAddr::new(start.as_usize() + aligned_size);
             let test_vma = Vma::new(start, fixed_end, flags);
+
+            let mut vma_mgr = self.vma_write();
 
             // Snapshot full-attribute VMAs that overlap the fixed range,
             // along with their pinned backing files (the pin is keyed by
             // VMA start; split pieces must re-pin or lose the file when
             // the mapping fd is closed).
-            let overlapping: Vec<(Vma, Option<alloc::sync::Arc<crate::fs::file::File>>)> = {
-                let vma_mgr = self.vma_read();
-                vma_mgr.iter()
-                    .filter(|v| v.overlaps(&test_vma))
-                    .map(|v| (v.clone(), self.get_vma_file(v.start().as_usize())))
-                    .collect()
-            };
+            let overlapping: Vec<(Vma, Option<alloc::sync::Arc<crate::fs::file::File>>)> = vma_mgr
+                .iter()
+                .filter(|v| v.overlaps(&test_vma))
+                .map(|v| (v.clone(), self.get_vma_file(v.start().as_usize())))
+                .collect();
 
             // Compute the preserved head/tail pieces.
             let mut kept: Vec<(Vma, Option<alloc::sync::Arc<crate::fs::file::File>>)> = Vec::new();
@@ -397,24 +413,16 @@ impl MmStruct {
                 }
             }
 
-            // Remove the overlapped VMAs, then re-add the preserved pieces.
-            {
-                let mut vma_mgr = self.vma_write();
-                let overlap_starts: Vec<PageVirtAddr> = vma_mgr
-                    .iter()
-                    .filter(|v| v.overlaps(&test_vma))
-                    .map(|v| v.start())
-                    .collect();
-                for vma_start in overlap_starts {
-                    let _ = vma_mgr.remove(vma_start);
-                    self.unpin_vma_file(vma_start.as_usize());
-                }
-                drop(vma_mgr);
-                for (piece, file) in kept {
-                    let _ = self.vma_write().add(piece.clone());
-                    if let Some(f) = file {
-                        self.pin_vma_file(piece.start().as_usize(), f);
-                    }
+            // Remove the overlapped VMAs, then re-add the preserved
+            // pieces — under the SAME guard (see ATOMICITY above).
+            for (vma, _) in overlapping.iter() {
+                let _ = vma_mgr.remove(vma.start());
+                self.unpin_vma_file(vma.start().as_usize());
+            }
+            for (piece, file) in kept {
+                let _ = vma_mgr.add(piece.clone());
+                if let Some(f) = file {
+                    self.pin_vma_file(piece.start().as_usize(), f);
                 }
             }
 
@@ -423,11 +431,23 @@ impl MmStruct {
             // the previous inline copy raced fork's table walk (round 6
             // HIGH: MAP_FIXED PTE teardown bypassed the lock).
             self.unmap_pages(start, aligned_size)?;
+
+            // Install the replacement VMA under the SAME guard (map_vma
+            // would re-acquire vma_write — recursion — so inline its
+            // body: add + stats).
+            let end = PageVirtAddr::new(start.as_usize() + aligned_size);
+            let mut vma = Vma::new(start, end, flags);
+            vma.set_type(vma_type);
+            vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
+            drop(vma_mgr);
+            self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
+            self.update_highest_vm_end(end.as_usize());
+            vma_installed = true;
         }
 
         if !vma_installed {
-            // Fixed placement: the VMA is added only after the overlap
-            // surgery above has cleared the target range.
+            // Unreachable today (every non-fixed path installs inline);
+            // kept as a safety net for future placement paths.
             let end = PageVirtAddr::new(start.as_usize() + aligned_size);
             let mut vma = Vma::new(start, end, flags);
             vma.set_type(vma_type);
@@ -513,13 +533,26 @@ impl MmStruct {
 
         let end_addr = addr.as_usize() + aligned_size;
 
-        // VMA surgery: collect under read lock, then mutate under write lock.
-        // VmaManager::add internally takes vma_write, so we must NOT hold
-        // the write lock when calling it (write-lock recursion = deadlock).
-        // R8-7: collect AND apply under ONE vma_write guard — two critical
-        // sections let a same-mm mmap/MAP_FIXED install into the gap
-        // (VMA over unmapped PTEs, or stale keys removing a re-created
+        // VMA surgery: collect AND apply under ONE vma_write guard — two
+        // critical sections let a same-mm mmap/MAP_FIXED install into the
+        // gap (VMA over unmapped PTEs, or stale keys removing a re-created
         // VMA). add/remove are plain methods; no recursion.
+        //
+        // mm-audit: the guard now also spans the PTE zap below. Releasing
+        // it between surgery and unmap_pages exposed the range as "free"
+        // while its PTEs were still live — a racing mmap could land in
+        // the hole and its demand-fault installs then interleaved with
+        // the zap's walk (the kernel-side engine behind silently zeroed
+        // or half-torn fresh mappings). unmap_pages takes no VMA lock
+        // (PTE lock only, nested one-way), so the extended hold is safe.
+        //
+        // Pin-table discipline (vm_file semantics): a split FILE VMA's
+        // tail starts at a new address, so the pin keyed at the original
+        // start no longer resolves for it — re-pin the tail at its own
+        // start and drop the original key. Without this, demand faults on
+        // the tail fell back to fd-number resolution and produced ZERO
+        // pages once the mapping fd was closed (Linux vm_file follows the
+        // VMA, not the address).
         {
             let mut vma_mgr = self.vma_write();
             let mut rm = Vec::new();
@@ -530,6 +563,7 @@ impl MmStruct {
                 if ve <= addr.as_usize() || vs >= end_addr {
                     continue;
                 }
+                let pinned = self.get_vma_file(vs);
                 rm.push(vma.start());
                 if vs < addr.as_usize() {
                     let mut head = Vma::new(
@@ -541,7 +575,7 @@ impl MmStruct {
                     head.set_file_fd(vma.file_fd());
                     head.set_file_size(vma.file_size());
                     head.set_offset(vma.offset());
-                    add.push(head);
+                    add.push((head, pinned.clone()));
                 }
                 if ve > end_addr {
                     let mut tail = Vma::new(
@@ -553,18 +587,22 @@ impl MmStruct {
                     tail.set_file_fd(vma.file_fd());
                     tail.set_file_size(vma.file_size());
                     tail.set_offset(vma.offset() + (end_addr - vs));
-                    add.push(tail);
+                    add.push((tail, pinned.clone()));
                 }
             }
             for start in &rm {
                 let _ = vma_mgr.remove(*start);
+                self.unpin_vma_file(start.as_usize());
             }
-            for vma in &add {
+            for (vma, file) in &add {
                 let _ = vma_mgr.add(vma.clone());
+                if let Some(f) = file {
+                    self.pin_vma_file(vma.start().as_usize(), f.clone());
+                }
             }
-        }
 
-        self.unmap_pages(addr, aligned_size)?;
+            self.unmap_pages(addr, aligned_size)?;
+        }
 
         Ok(())
     }
