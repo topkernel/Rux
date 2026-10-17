@@ -1784,6 +1784,194 @@ fn get_user_at<T: Copy>(base: u64, off: usize) -> Option<T> {
     unsafe { crate::arch::uaccess::get_user(addr as *const T) }
 }
 
+/// BC-FORENSICS: snapshot the state of the userspace page backing a bad
+/// binder write command — the "unknown BC command 0x0" family from the
+/// b86-b90 heap-corruption hunt. A zero command word means copy_from_user
+/// read zeros where userspace believes it wrote binder commands; the
+/// page-table bits, page-descriptor counts and raw page contents below
+/// distinguish the corruption modes:
+///   - PTE present, page contents zeroed  -> data scribbled in place
+///     (or the page was re-handed after a bogus free — free-while-mapped
+///     tripwire never fired, so in-place is the leading theory),
+///   - PTE present onto a DIFFERENT frame  -> PTE overwrite/aliasing,
+///   - PTE absent / swap-marker            -> mapping torn down live,
+///   - VMA missing                         -> "vanishing VMA" family (b89).
+/// Error-path only (never on the hot path).
+fn bc_corruption_snapshot(
+    proc: &Arc<BinderProc>,
+    thread: &Arc<BinderThread>,
+    buffer: u64,
+    size: usize,
+    bad_off: usize,
+    cmd: u32,
+) {
+    use crate::mm::page::{VirtAddr, PAGE_SIZE};
+
+    let bad_va = buffer.wrapping_add(bad_off as u64);
+    crate::pr_err!(
+        "BC-FORENSICS: pid {} tid {} cmd {:#x} buffer={:#x} size={} bad_off={}",
+        proc.pid,
+        thread.tid,
+        cmd,
+        buffer,
+        size,
+        bad_off
+    );
+
+    // Userspace view of the buffer: head words + words around the bad
+    // offset (0xDEAD_BEEF marks "unmapped/unreadable", not "zero").
+    let mut head = [0u32; 8];
+    for i in 0..8usize {
+        head[i] = get_user_at::<u32>(buffer, i * 4).unwrap_or(0xDEAD_BEEF);
+    }
+    crate::pr_err!("BC-FORENSICS: buffer[0..32] ={:08x?}", head);
+    if bad_off > 0 {
+        let mut around = [0u32; 8];
+        let base = bad_off.saturating_sub(16) & !3;
+        for i in 0..8usize {
+            let off = base + i * 4;
+            if off < size {
+                around[i] = get_user_at::<u32>(buffer, off).unwrap_or(0xDEAD_BEEF);
+            } else {
+                around[i] = 0xCAFE_0000;
+            }
+        }
+        crate::pr_err!("BC-FORENSICS: buffer[{}..] ={:08x?}", base, around);
+    }
+
+    // Binder-zone membership: a write buffer inside the proc's own mmap'd
+    // binder region points at a different failure mode (kernel-side block
+    // corruption) than one on the malloc heap.
+    {
+        let w = world_lock();
+        // SAFETY: WORLD held for the alloc inspection.
+        unsafe {
+            if let Some(alloc) = proc.im().alloc.as_ref() {
+                let lo = alloc.user_base;
+                let hi = alloc.user_base + (alloc.npages * PAGE_SIZE) as u64;
+                crate::pr_err!(
+                    "BC-FORENSICS: binder mmap zone {:#x}-{:#x} bad_va_in_zone={}",
+                    lo,
+                    hi,
+                    bad_va >= lo && bad_va < hi
+                );
+            }
+        }
+    }
+
+    let Some(task) = crate::sched::current() else { return };
+    let Some(aspace) = task.address_space() else { return };
+    let root = aspace.root_ppn();
+    let page_va = bad_va & !((PAGE_SIZE - 1) as u64);
+
+    // Covering VMA (find() is on the page-safe address bad_va).
+    {
+        let vmas = aspace.vma_read();
+        match vmas.find(VirtAddr::new(bad_va as usize)) {
+            Some(v) => crate::pr_err!(
+                "BC-FORENSICS: vma {:#x}-{:#x} flags={:#x} type={:?}",
+                v.start().as_usize(),
+                v.end().as_usize(),
+                v.flags().bits(),
+                v.vma_type()
+            ),
+            None => crate::pr_err!("BC-FORENSICS: NO VMA covers {:#x}", bad_va),
+        }
+    }
+
+    // Raw leaf PTE first: catches P=0 swap/migration markers that the
+    // walker below reports as simply "absent". x86_64-only (the OH target
+    // arch); riscv64 keeps the walker read.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Some(raw) =
+            crate::arch::mm::page_fault::read_pte_raw(root, crate::arch::mm::VirtAddr::new(bad_va))
+        {
+            crate::pr_err!("BC-FORENSICS: raw leaf pte = {:#x}", raw);
+        }
+    }
+
+    // SAFETY: read-only diagnostic walk of the current task's live user
+    // page tables.
+    let walked = unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, page_va) };
+    match walked {
+        Some((ppn, bits)) => {
+            #[cfg(target_arch = "x86_64")]
+            crate::pr_err!(
+                "BC-FORENSICS: pte(page) ppn={:#x} bits={:#x} P={} W={} U={} NX={} A={} D={}",
+                ppn,
+                bits,
+                bits & 0x1 != 0,
+                bits & 0x2 != 0,
+                bits & 0x4 != 0,
+                bits & 0x8000_0000_0000_0000 != 0,
+                bits & 0x20 != 0,
+                bits & 0x40 != 0
+            );
+            #[cfg(target_arch = "riscv64")]
+            crate::pr_err!(
+                "BC-FORENSICS: pte(page) ppn={:#x} bits={:#x} V={} R={} W={} X={}",
+                ppn,
+                bits,
+                bits & 0x1 != 0,
+                bits & 0x2 != 0,
+                bits & 0x4 != 0,
+                bits & 0x8 != 0
+            );
+
+            let page = crate::mm::pfn_to_page_mut(ppn as usize);
+            if !page.is_null() {
+                // SAFETY: read-only descriptor access for a live frame.
+                let p = unsafe { &*page };
+                crate::pr_err!(
+                    "BC-FORENSICS: page desc refcount={} mapcount={} Cow={} Anon={} SwapBacked={} OnFreelist={} Reserved={} Migrating={}",
+                    p.refcount(),
+                    p.mapcount(),
+                    p.test_flag(crate::mm::page_desc::PageFlag::Cow),
+                    p.test_flag(crate::mm::page_desc::PageFlag::Anonymous),
+                    p.test_flag(crate::mm::page_desc::PageFlag::SwapBacked),
+                    p.test_flag(crate::mm::page_desc::PageFlag::OnFreelist),
+                    p.test_flag(crate::mm::page_desc::PageFlag::Reserved),
+                    p.test_flag(crate::mm::page_desc::PageFlag::Migrating),
+                );
+                let mut mappings = alloc::string::String::new();
+                // SAFETY: same read-only descriptor.
+                unsafe {
+                    (*page).rmap_alt_for_each(|mm, vpn| {
+                        use core::fmt::Write;
+                        let _ = write!(mappings, " (mm:{:#x},vpn:{:#x})", mm, vpn);
+                    });
+                }
+                if !mappings.is_empty() {
+                    crate::pr_err!("BC-FORENSICS: page alt mappings:{}", mappings);
+                }
+            } else {
+                crate::pr_err!("BC-FORENSICS: page desc NULL for ppn {:#x}", ppn);
+            }
+
+            // Raw page contents through the direct map: is the WHOLE page
+            // zero, or only the binder words? (frame may be any user page;
+            // the linear map covers all RAM on both targets)
+            if crate::mm::pfn_valid(ppn as usize) {
+                let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(ppn << 12));
+                let base = kv.bits() as usize as *const u64;
+                // SAFETY: base points at the physical page behind the PTE
+                // just walked, inside the kernel direct map; 16 u64 words
+                // are within the page.
+                let words = unsafe { core::slice::from_raw_parts(base, 16) };
+                crate::pr_err!("BC-FORENSICS: page[{:#x}] first 128B ={:016x?}", ppn << 12, words);
+            }
+        }
+        None => {
+            crate::pr_err!(
+                "BC-FORENSICS: page {:#x} NOT MAPPED in pid {}'s tables (PTE absent)",
+                page_va,
+                proc.pid
+            );
+        }
+    }
+}
+
 fn binder_thread_write(
     proc: &Arc<BinderProc>,
     thread: &Arc<BinderThread>,
@@ -2282,6 +2470,12 @@ fn binder_thread_write(
                     thread.tid,
                     cmd
                 );
+                // b86-b90 heap-corruption hunt: a zero command word is the
+                // "zeroed write buffer" signature — snapshot the page
+                // state before the userspace side dies (error path only).
+                if cmd == 0 {
+                    bc_corruption_snapshot(proc, thread, buffer, size, ptr - 4, cmd);
+                }
                 ptr -= 4; // not consumed
                 break;
             }
