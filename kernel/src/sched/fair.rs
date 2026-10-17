@@ -760,6 +760,35 @@ impl CfsRunQueue {
         n
     }
 
+    /// dfx=oncpuinject adjudication scan (R85 tail-wedge hunt): stamp the
+    /// FULL lost-release shape — {on_cpu=true, claim=7, pk=LIVE} via
+    /// publish_pick_ownership — onto every linked task currently showing
+    /// the pickable {on_cpu=false, claim=-1}. CPU 7 exists on no board we
+    /// boot, so no slot can ever back the claim: the state is exactly the
+    /// terminal microstate of the pid-1 tail wedge (linked, marked, owned
+    /// by neither a slot nor an in-flight switch). An unpatched kernel
+    /// strands every poisoned task forever (picks skip it why=1); with the
+    /// R85 pick-side ownership adjudication the poison is swept within
+    /// ~50 jiffies (STALE-ONCPU-RESET). Caller holds the GRQ lock.
+    pub fn oncpu_inject_scan(&mut self) -> usize {
+        let mut n = 0;
+        for (_, &task) in self.tasks_timeline.iter() {
+            // SAFETY: diagnostic publish on a task pinned in the timeline
+            // by the caller's GRQ lock. Only tasks with a fully released
+            // qword are stamped, so no legitimate in-flight ownership is
+            // overwritten (running/picked tasks are not linked).
+            unsafe {
+                if !(*task).on_cpu()
+                    && (*task).running_on_cpu.load(Ordering::Acquire) == -1
+                {
+                    (*task).publish_pick_ownership(7, true);
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// Pick next task to run
     ///
     /// Select task with smallest vruntime

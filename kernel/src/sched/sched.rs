@@ -3060,6 +3060,19 @@ pub fn dfx_claim_inject() -> usize {
     }
 }
 
+/// dfx=oncpuinject adjudication hook (R85 tail-wedge hunt): stamp the
+/// lost-release ownership shape {on_cpu=true, claim=7, pk=LIVE} onto
+/// every linked CFS task currently showing the pickable state
+/// {on_cpu=false, claim=-1}. Called from the timer softirq every 50
+/// jiffies. Returns the number of tasks poisoned (the caller prints it);
+/// a busy GRQ simply skips that round.
+pub fn dfx_oncpu_inject() -> usize {
+    match try_grq_lock() {
+        Some(mut g) => g.cfs_rq.oncpu_inject_scan(),
+        None => 0,
+    }
+}
+
 
 /// DFX diagnostic (4-thread hang hunt): grq.nr_running (the global runnable
 /// counter the idle fast path trusts) versus the per-class queue depths it is

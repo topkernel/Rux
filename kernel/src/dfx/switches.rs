@@ -100,9 +100,21 @@ pub enum DfxSwitch {
     /// serial log and the UART traffic slowed the system enough to cost
     /// samgr the hdf_devmgr race. OFF unless asked for.
     Steptrace,
+    /// R85 (tail-phase PICK-SKIP wedge adjudication): every 50 jiffies,
+    /// stamp the FULL lost-release ownership shape {on_cpu=true,
+    /// claim=7(nonexistent), pk=LIVE} onto every LINKED CFS task that
+    /// shows the pickable {on_cpu=false, claim=-1}. This is the exact
+    /// terminal microstate of the pid-1 tail wedge (linked, marked,
+    /// owned by no slot and no in-flight switch). An unpatched kernel
+    /// strands the task forever (every pick skips it why=1); a kernel
+    /// with the R85 pick-side ownership adjudication sweeps the poison
+    /// within ~50 jiffies (STALE-ONCPU-RESET) and keeps scheduling. OFF
+    /// unless explicitly requested; never enable in production or LTP
+    /// runs.
+    OncpuInject,
 }
 
-const SWITCH_COUNT: usize = 15;
+const SWITCH_COUNT: usize = 16;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -124,6 +136,7 @@ impl DfxSwitch {
             DfxSwitch::Strace1 => 12,
             DfxSwitch::SchedTrace => 13,
             DfxSwitch::Steptrace => 14,
+            DfxSwitch::OncpuInject => 15,
         }
     }
 
@@ -144,6 +157,7 @@ impl DfxSwitch {
             "strace1" => Some(DfxSwitch::Strace1),
             "schedtrace" => Some(DfxSwitch::SchedTrace),
             "steptrace" => Some(DfxSwitch::Steptrace),
+            "oncpuinject" => Some(DfxSwitch::OncpuInject),
             _ => None,
         }
     }
