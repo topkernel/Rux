@@ -167,11 +167,23 @@ make -j$(nproc) mrsh
 
 # Verify build result
 if [ -f "$MRSH_DIR/mrsh" ]; then
-    # BUG-S005 gate: the final binary must not carry Zcb-capable members.
-    # A zcb1p0 attribute means some path still reached the unpinned libgcc
-    # and the shell will SIGILL on the project's QEMU CPU model.
-    if riscv64-linux-gnu-readelf -A "$MRSH_DIR/mrsh" | grep -qE "zcb1p0|zicond1p0"; then
-        echo "Error: mrsh still carries zcb/zicond attributes (unpinned libgcc member linked)" >&2
+    # BUG-S005 gate: the final binary must not carry ISA extensions the
+    # stock QEMU CPU model cannot execute. The pinned march is
+    # -march=rv64gc_zicsr, but Ubuntu's cross toolchains keep ratcheting
+    # their DEFAULT march up (gcc-15.2 on this host defaults to
+    # rv64...v_zcb_zcmop_zimop_zicond_zfa_zicbo*...), so any object or
+    # archive member that slips past a -march pin re-introduces
+    # SIGILL-on-stock-flags encodings (observed: c.zext.w inside
+    # __floatsitf killed PID 1 at 0x3d99a). Gate on every extension that
+    # encodes instructions illegal under `-cpu rv64,zbb=true,zba=true,zbs=true`:
+    # zcb/zcmop/zimop (compressed bitmanip/mops), zicond (czero.*), zfa
+    # (fli), vector (V/zve*/zvl*/zvbb/zvkb), cache-mgmt (zicbom/zicbop/
+    # zicboz) and zawrs. Stock-legal extras (zbb/zba/zbs/zicsr/zca/zcd/
+    # zaamo/zalrsc/zmmul) stay out of the pattern on purpose.
+    BAD_ATTRS='zcb1p0|zcmop1p0|zimop1p0|zicond1p0|zfa1p0|zawrs1p0|zicbo[mp]1p0|zicboz1p0|_v1p0|zve(32|64)[fdx]?1p0|zvbb1p0|zvkb1p0|zvl[0-9]+b1p0'
+    if riscv64-linux-gnu-readelf -A "$MRSH_DIR/mrsh" | grep -qE "$BAD_ATTRS"; then
+        echo "Error: mrsh carries ISA attributes beyond the pinned march (SIGILL risk on the stock QEMU cpu):" >&2
+        riscv64-linux-gnu-readelf -A "$MRSH_DIR/mrsh" | grep -oE "$BAD_ATTRS" | sort -u >&2
         exit 1
     fi
     echo ""

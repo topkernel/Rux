@@ -16,6 +16,10 @@
 # Environment:
 #   KERNEL  — path to the Rux bzImage (default: target/.../bzImage)
 #   EXTRA_APPEND — appended verbatim to the kernel cmdline
+#   MONITOR — QEMU monitor spec (default: none). Set e.g.
+#             MONITOR=unix:/tmp/oh-mon.sock,server,nowait to drive
+#             screendumps for the headless geometry check while console
+#             mode runs.
 set -euo pipefail
 
 IMGDIR="${1:?usage: run-oh.sh <oh-images-dir> [console|gui|debug]}"
@@ -55,10 +59,25 @@ APPEND="$APPEND ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrie
 APPEND="$APPEND ${EXTRA_APPEND:-}"
 
 QEMU="${QEMU:-qemu-system-x86_64}"
+# Display geometry: the phone image targets a 720x1280 panel. QEMU seeds
+# the virtio-gpu display-info pmode[0] (and the synthetic EDID) from
+# xres/yres, and the kernel sizes its boot framebuffer from that pmode —
+# so the geometry only applies when the device is attached. It is added
+# in console/debug mode too (with -display none): without any display
+# device q35 falls back to its built-in VGA and screendumps come out at
+# the 720x400 text-mode default, never 720x1280.
+#
+# -vga none: q35 otherwise plants a default std-VGA alongside the
+# virtio-gpu (even when a user display device is given — verified on
+# QEMU 10.2). That VGA owns console 0, so a bare `screendump` captures
+# its 720x400 text surface instead of the guest's scanout. With the VGA
+# gone and the gpu named, `screendump oh.ppm ohgpu` captures the
+# virtio-gpu console: P6 720 1280 once the kernel sets the scanout.
+OH_GPU="-device virtio-gpu-pci,id=ohgpu,xres=720,yres=1280"
 case "$MODE" in
-    console) DISP="-display none" ;;
-    gui)     DISP="-display gtk -device virtio-gpu-pci,xres=720,yres=1280" ;;
-    debug)   DISP="-display none -s -S" ;;
+    console) DISP="-display none $OH_GPU -vga none" ;;
+    gui)     DISP="-display gtk $OH_GPU -vga none" ;;
+    debug)   DISP="-display none -s -S $OH_GPU -vga none" ;;
     *) echo "unknown mode: $MODE" >&2; exit 1 ;;
 esac
 
@@ -69,7 +88,7 @@ esac
 # shellcheck disable=SC2086
 exec "$QEMU" \
     -M q35 -accel tcg,thread=multi -cpu max -m 4G -smp 2 -snapshot \
-    $DISP -serial mon:stdio -monitor none \
+    $DISP -serial mon:stdio -monitor "${MONITOR:-none}" \
     -kernel "$KERNEL" -initrd "$IMGDIR/ramdisk.img" \
     -append "$APPEND" \
     $DISKS \
