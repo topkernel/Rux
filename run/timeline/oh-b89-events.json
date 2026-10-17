@@ -1,0 +1,1211 @@
+[
+ {
+  "t": 330,
+  "type": "exec",
+  "raw": "exec: pid=1 path=/bin/init",
+  "pid": "1",
+  "path": "/bin/init"
+ },
+ {
+  "t": 1176,
+  "type": "fork",
+  "raw": "fork: parent=1, child=305, flags=0x11",
+  "parent": "1",
+  "child": "305",
+  "flags": "0x11"
+ },
+ {
+  "t": 1202,
+  "type": "fork",
+  "raw": "fork: parent=1, child=306, flags=0x11",
+  "parent": "1",
+  "child": "306",
+  "flags": "0x11"
+ },
+ {
+  "t": 1238,
+  "type": "exec",
+  "raw": "exec: pid=305 path=/system/bin/ueventd",
+  "pid": "305",
+  "path": "/system/bin/ueventd"
+ },
+ {
+  "t": 1239,
+  "type": "exec",
+  "raw": "exec: pid=306 path=/system/bin/watchdog_service",
+  "pid": "306",
+  "path": "/system/bin/watchdog_service"
+ },
+ {
+  "t": 1354,
+  "type": "fork",
+  "raw": "fork: parent=1, child=307, flags=0x11",
+  "parent": "1",
+  "child": "307",
+  "flags": "0x11"
+ },
+ {
+  "t": 1364,
+  "type": "exec",
+  "raw": "exec: pid=307 path=/system/bin/resize2fs",
+  "pid": "307",
+  "path": "/system/bin/resize2fs"
+ },
+ {
+  "t": 1392,
+  "type": "exit",
+  "raw": "exit: pid=307, tgid=307, exit_code=256, ppid=1 (leader)",
+  "pid": "307",
+  "tgid": "307",
+  "code": "256",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 1397,
+  "type": "fork",
+  "raw": "fork: parent=1, child=308, flags=0x11",
+  "parent": "1",
+  "child": "308",
+  "flags": "0x11"
+ },
+ {
+  "t": 1407,
+  "type": "exec",
+  "raw": "exec: pid=308 path=/system/bin/e2fsck",
+  "pid": "308",
+  "path": "/system/bin/e2fsck"
+ },
+ {
+  "t": 1428,
+  "type": "exit",
+  "raw": "exit: pid=308, tgid=308, exit_code=2048, ppid=1 (leader)",
+  "pid": "308",
+  "tgid": "308",
+  "code": "2048",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 1458,
+  "type": "fork",
+  "raw": "fork: parent=1, child=309, flags=0x11",
+  "parent": "1",
+  "child": "309",
+  "flags": "0x11"
+ },
+ {
+  "t": 1509,
+  "type": "exec",
+  "raw": "exec: pid=309 path=/system/bin/check_module_update_init",
+  "pid": "309",
+  "path": "/system/bin/check_module_update_init"
+ },
+ {
+  "t": 1579,
+  "type": "fork",
+  "raw": "fork: parent=309, child=310, flags=0x7d0f00",
+  "parent": "309",
+  "child": "310",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 1581,
+  "type": "exit",
+  "raw": "exit: pid=310, tgid=309, exit_code=0, ppid=1 (thread)",
+  "pid": "310",
+  "tgid": "309",
+  "code": "0",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 1584,
+  "type": "exit",
+  "raw": "exit: pid=309, tgid=309, exit_code=0, ppid=1 (leader)",
+  "pid": "309",
+  "tgid": "309",
+  "code": "0",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 2550,
+  "type": "fork",
+  "raw": "fork: parent=1, child=311, flags=0x11",
+  "parent": "1",
+  "child": "311",
+  "flags": "0x11"
+ },
+ {
+  "t": 2608,
+  "type": "fork",
+  "raw": "fork: parent=1, child=312, flags=0x11",
+  "parent": "1",
+  "child": "312",
+  "flags": "0x11"
+ },
+ {
+  "t": 2626,
+  "type": "exec",
+  "raw": "exec: pid=311 path=/system/bin/sa_main",
+  "pid": "311",
+  "path": "/system/bin/sa_main"
+ },
+ {
+  "t": 2722,
+  "type": "exec",
+  "raw": "exec: pid=312 path=/system/bin/faultloggerd",
+  "pid": "312",
+  "path": "/system/bin/faultloggerd"
+ },
+ {
+  "t": 2760,
+  "type": "fork",
+  "raw": "fork: parent=312, child=313, flags=0x7d0f00",
+  "parent": "312",
+  "child": "313",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 2815,
+  "type": "stall",
+  "raw": "EXT4-BIGLOCK-STALL waiter=311 holder=1 depth=1 held=0j"
+ },
+ {
+  "t": 2832,
+  "type": "fork",
+  "raw": "fork: parent=1, child=314, flags=0x11",
+  "parent": "1",
+  "child": "314",
+  "flags": "0x11"
+ },
+ {
+  "t": 2906,
+  "type": "fork",
+  "raw": "fork: parent=1, child=315, flags=0x11",
+  "parent": "1",
+  "child": "315",
+  "flags": "0x11"
+ },
+ {
+  "t": 2964,
+  "type": "exec",
+  "raw": "exec: pid=315 path=/system/bin/key_enable",
+  "pid": "315",
+  "path": "/system/bin/key_enable"
+ },
+ {
+  "t": 2966,
+  "type": "exec",
+  "raw": "exec: pid=314 path=/system/bin/hilogd",
+  "pid": "314",
+  "path": "/system/bin/hilogd"
+ },
+ {
+  "t": 2974,
+  "type": "fork",
+  "raw": "fork: parent=314, child=316, flags=0x7d0f00",
+  "parent": "314",
+  "child": "316",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 3035,
+  "type": "fork",
+  "raw": "fork: parent=314, child=317, flags=0x7d0f00",
+  "parent": "314",
+  "child": "317",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 3039,
+  "type": "fork",
+  "raw": "fork: parent=314, child=318, flags=0x7d0f00",
+  "parent": "314",
+  "child": "318",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 3050,
+  "type": "fork",
+  "raw": "fork: parent=314, child=319, flags=0x7d0f00",
+  "parent": "314",
+  "child": "319",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 3052,
+  "type": "usegv",
+  "raw": "USEGV-FOR: pid=319 rip=0x3fbf089ac6 cr2=0x7ff000b97000 rsp=0x7ff083e1c720 rbp=0x7ff083e1c7a0",
+  "pid": "319",
+  "rip": "0x3fbf089ac6",
+  "cr2": "0x7ff000b97000",
+  "rsp": "0x7ff083e1c720",
+  "rbp": "0x7ff083e1c7a0"
+ },
+ {
+  "t": 3063,
+  "type": "fork",
+  "raw": "fork: parent=319, child=320, flags=0x11",
+  "parent": "319",
+  "child": "320",
+  "flags": "0x11"
+ },
+ {
+  "t": 3082,
+  "type": "fork",
+  "raw": "fork: parent=320, child=321, flags=0x11",
+  "parent": "320",
+  "child": "321",
+  "flags": "0x11"
+ },
+ {
+  "t": 3097,
+  "type": "exec",
+  "raw": "exec: pid=321 path=/system/bin/processdump",
+  "pid": "321",
+  "path": "/system/bin/processdump"
+ },
+ {
+  "t": 3107,
+  "type": "usegv",
+  "raw": "USEGV-FOR: pid=314 rip=0x3fbf089ac6 cr2=0x7ff000b97000 rsp=0x7fffffffc900 rbp=0x7fffffffc980",
+  "pid": "314",
+  "rip": "0x3fbf089ac6",
+  "cr2": "0x7ff000b97000",
+  "rsp": "0x7fffffffc900",
+  "rbp": "0x7fffffffc980"
+ },
+ {
+  "t": 3183,
+  "type": "bopen",
+  "raw": "binder: pid 311 opened the device (proc 1)",
+  "pid": "311",
+  "proc": "1"
+ },
+ {
+  "t": 3186,
+  "type": "bmap",
+  "raw": "binder: proc 1 mapped 0x100000 bytes at 0x7ff081a47000",
+  "proc": "1",
+  "size": "0x100000",
+  "vaddr": "0x7ff081a47000"
+ },
+ {
+  "t": 3190,
+  "type": "fork",
+  "raw": "fork: parent=311, child=322, flags=0x7d0f00",
+  "parent": "311",
+  "child": "322",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 3202,
+  "type": "fork",
+  "raw": "fork: parent=311, child=323, flags=0x7d0f00",
+  "parent": "311",
+  "child": "323",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 3265,
+  "type": "fork",
+  "raw": "fork: parent=1, child=324, flags=0x11",
+  "parent": "1",
+  "child": "324",
+  "flags": "0x11"
+ },
+ {
+  "t": 3290,
+  "type": "exec",
+  "raw": "exec: pid=324 path=/system/bin/sa_main",
+  "pid": "324",
+  "path": "/system/bin/sa_main"
+ },
+ {
+  "t": 3311,
+  "type": "fork",
+  "raw": "fork: parent=1, child=325, flags=0x11",
+  "parent": "1",
+  "child": "325",
+  "flags": "0x11"
+ },
+ {
+  "t": 3333,
+  "type": "exec",
+  "raw": "exec: pid=325 path=/system/bin/storage_daemon",
+  "pid": "325",
+  "path": "/system/bin/storage_daemon"
+ },
+ {
+  "t": 3355,
+  "type": "fork",
+  "raw": "fork: parent=1, child=326, flags=0x11",
+  "parent": "1",
+  "child": "326",
+  "flags": "0x11"
+ },
+ {
+  "t": 3390,
+  "type": "exec",
+  "raw": "exec: pid=326 path=/system/bin/samgr",
+  "pid": "326",
+  "path": "/system/bin/samgr"
+ },
+ {
+  "t": 3413,
+  "type": "fork",
+  "raw": "fork: parent=1, child=327, flags=0x11",
+  "parent": "1",
+  "child": "327",
+  "flags": "0x11"
+ },
+ {
+  "t": 3440,
+  "type": "exec",
+  "raw": "exec: pid=327 path=/system/bin/sa_main",
+  "pid": "327",
+  "path": "/system/bin/sa_main"
+ },
+ {
+  "t": 3475,
+  "type": "fork",
+  "raw": "fork: parent=1, child=328, flags=0x11",
+  "parent": "1",
+  "child": "328",
+  "flags": "0x11"
+ },
+ {
+  "t": 3585,
+  "type": "fork",
+  "raw": "fork: parent=1, child=329, flags=0x11",
+  "parent": "1",
+  "child": "329",
+  "flags": "0x11"
+ },
+ {
+  "t": 3628,
+  "type": "exec",
+  "raw": "exec: pid=329 path=/system/bin/hdf_devmgr",
+  "pid": "329",
+  "path": "/system/bin/hdf_devmgr"
+ },
+ {
+  "t": 3701,
+  "type": "exit",
+  "raw": "exit: pid=306, tgid=306, exit_code=256, ppid=1 (leader)",
+  "pid": "306",
+  "tgid": "306",
+  "code": "256",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 3718,
+  "type": "exit",
+  "raw": "exit: pid=328, tgid=328, exit_code=65280, ppid=1 (leader)",
+  "pid": "328",
+  "tgid": "328",
+  "code": "65280",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 3742,
+  "type": "fork",
+  "raw": "fork: parent=1, child=330, flags=0x11",
+  "parent": "1",
+  "child": "330",
+  "flags": "0x11"
+ },
+ {
+  "t": 3802,
+  "type": "exec",
+  "raw": "exec: pid=330 path=/system/bin/appspawn",
+  "pid": "330",
+  "path": "/system/bin/appspawn"
+ },
+ {
+  "t": 3934,
+  "type": "exec",
+  "raw": "exec: pid=330 path=/system/bin/appspawn",
+  "pid": "330",
+  "path": "/system/bin/appspawn"
+ },
+ {
+  "t": 3939,
+  "type": "exit",
+  "raw": "exit: pid=320, tgid=320, exit_code=-9, ppid=319 (leader)",
+  "pid": "320",
+  "tgid": "320",
+  "code": "-9",
+  "ppid": "319",
+  "role": "leader"
+ },
+ {
+  "t": 3940,
+  "type": "death",
+  "raw": "SIGDEATH: pid=320 tgid=320 comm=Ok(\"hilogd.cmd\") sig=9 ppid=319 si_pid=319 si_code=0x0",
+  "pid": "320",
+  "tgid": "320",
+  "comm": "hilogd.cmd",
+  "sig": "9"
+ },
+ {
+  "t": 3956,
+  "type": "usegv",
+  "raw": "USEGV-FOR: pid=319 rip=0x3fbf089ac6 cr2=0x7ff000b97000 rsp=0x7ff083e1c720 rbp=0x7ff083e1c7a0",
+  "pid": "319",
+  "rip": "0x3fbf089ac6",
+  "cr2": "0x7ff000b97000",
+  "rsp": "0x7ff083e1c720",
+  "rbp": "0x7ff083e1c7a0"
+ },
+ {
+  "t": 3968,
+  "type": "usegv",
+  "raw": "USEGV-FOR: pid=314 rip=0x3fbf089ac6 cr2=0x7ff000b97000 rsp=0x7fffffffc900 rbp=0x7fffffffc980",
+  "pid": "314",
+  "rip": "0x3fbf089ac6",
+  "cr2": "0x7ff000b97000",
+  "rsp": "0x7fffffffc900",
+  "rbp": "0x7fffffffc980"
+ },
+ {
+  "t": 3978,
+  "type": "usegv",
+  "raw": "USEGV-FOR: pid=319 rip=0x3fbf089ac6 cr2=0x7ff000b97000 rsp=0x7ff083e1c720 rbp=0x7ff083e1c7a0",
+  "pid": "319",
+  "rip": "0x3fbf089ac6",
+  "cr2": "0x7ff000b97000",
+  "rsp": "0x7ff083e1c720",
+  "rbp": "0x7ff083e1c7a0"
+ },
+ {
+  "t": 3983,
+  "type": "exit",
+  "raw": "exit: pid=314, tgid=314, exit_code=-11, ppid=1 (leader)",
+  "pid": "314",
+  "tgid": "314",
+  "code": "-11",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 3985,
+  "type": "exit",
+  "raw": "exit: pid=319, tgid=314, exit_code=-11, ppid=1 (thread)",
+  "pid": "319",
+  "tgid": "314",
+  "code": "-11",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 3986,
+  "type": "death",
+  "raw": "SIGDEATH: pid=314 tgid=314 comm=Ok(\"hilogd\") sig=11 ppid=1 si_pid=0 si_code=0x0",
+  "pid": "314",
+  "tgid": "314",
+  "comm": "hilogd",
+  "sig": "11"
+ },
+ {
+  "t": 3987,
+  "type": "death",
+  "raw": "SIGDEATH: pid=319 tgid=314 comm=Ok(\"hilogd.cmd\") sig=11 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "319",
+  "tgid": "314",
+  "comm": "hilogd.cmd",
+  "sig": "11"
+ },
+ {
+  "t": 3988,
+  "type": "exit",
+  "raw": "exit: pid=317, tgid=314, exit_code=-9, ppid=1 (thread)",
+  "pid": "317",
+  "tgid": "314",
+  "code": "-9",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 3989,
+  "type": "death",
+  "raw": "SIGDEATH: pid=317 tgid=314 comm=Ok(\"OS_FFRT_2_0\") sig=9 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "317",
+  "tgid": "314",
+  "comm": "OS_FFRT_2_0",
+  "sig": "9"
+ },
+ {
+  "t": 3990,
+  "type": "exit",
+  "raw": "exit: pid=316, tgid=314, exit_code=-9, ppid=1 (thread)",
+  "pid": "316",
+  "tgid": "314",
+  "code": "-9",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 3991,
+  "type": "death",
+  "raw": "SIGDEATH: pid=316 tgid=314 comm=Ok(\"hilogd.server\") sig=9 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "316",
+  "tgid": "314",
+  "comm": "hilogd.server",
+  "sig": "9"
+ },
+ {
+  "t": 3992,
+  "type": "exit",
+  "raw": "exit: pid=318, tgid=314, exit_code=-9, ppid=1 (thread)",
+  "pid": "318",
+  "tgid": "314",
+  "code": "-9",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 3993,
+  "type": "death",
+  "raw": "SIGDEATH: pid=318 tgid=314 comm=Ok(\"hilogd.rd_kmsg\") sig=9 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "318",
+  "tgid": "314",
+  "comm": "hilogd.rd_kmsg",
+  "sig": "9"
+ },
+ {
+  "t": 4036,
+  "type": "bopen",
+  "raw": "binder: pid 329 opened the device (proc 2)",
+  "pid": "329",
+  "proc": "2"
+ },
+ {
+  "t": 4039,
+  "type": "bmap",
+  "raw": "binder: proc 2 mapped 0x100000 bytes at 0x7ff081847000",
+  "proc": "2",
+  "size": "0x100000",
+  "vaddr": "0x7ff081847000"
+ },
+ {
+  "t": 4048,
+  "type": "fork",
+  "raw": "fork: parent=329, child=331, flags=0x7d0f00",
+  "parent": "329",
+  "child": "331",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4186,
+  "type": "bopen",
+  "raw": "binder: pid 327 opened the device (proc 3)",
+  "pid": "327",
+  "proc": "3"
+ },
+ {
+  "t": 4187,
+  "type": "bopen",
+  "raw": "binder: pid 324 opened the device (proc 4)",
+  "pid": "324",
+  "proc": "4"
+ },
+ {
+  "t": 4188,
+  "type": "bmap",
+  "raw": "binder: proc 3 mapped 0x100000 bytes at 0x7ff081a47000",
+  "proc": "3",
+  "size": "0x100000",
+  "vaddr": "0x7ff081a47000"
+ },
+ {
+  "t": 4189,
+  "type": "bmap",
+  "raw": "binder: proc 4 mapped 0x100000 bytes at 0x7ff081a47000",
+  "proc": "4",
+  "size": "0x100000",
+  "vaddr": "0x7ff081a47000"
+ },
+ {
+  "t": 4193,
+  "type": "fork",
+  "raw": "fork: parent=327, child=332, flags=0x7d0f00",
+  "parent": "327",
+  "child": "332",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4199,
+  "type": "fork",
+  "raw": "fork: parent=324, child=333, flags=0x7d0f00",
+  "parent": "324",
+  "child": "333",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4208,
+  "type": "fork",
+  "raw": "fork: parent=327, child=334, flags=0x7d0f00",
+  "parent": "327",
+  "child": "334",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4209,
+  "type": "fork",
+  "raw": "fork: parent=324, child=335, flags=0x7d0f00",
+  "parent": "324",
+  "child": "335",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4245,
+  "type": "fork",
+  "raw": "fork: parent=1, child=336, flags=0x11",
+  "parent": "1",
+  "child": "336",
+  "flags": "0x11"
+ },
+ {
+  "t": 4254,
+  "type": "bopen",
+  "raw": "binder: pid 315 opened the device (proc 5)",
+  "pid": "315",
+  "proc": "5"
+ },
+ {
+  "t": 4255,
+  "type": "exec",
+  "raw": "exec: pid=336 path=/system/bin/sdc",
+  "pid": "336",
+  "path": "/system/bin/sdc"
+ },
+ {
+  "t": 4258,
+  "type": "bmap",
+  "raw": "binder: proc 5 mapped 0x100000 bytes at 0x7ff0823c7000",
+  "proc": "5",
+  "size": "0x100000",
+  "vaddr": "0x7ff0823c7000"
+ },
+ {
+  "t": 4268,
+  "type": "fork",
+  "raw": "fork: parent=315, child=337, flags=0x7d0f00",
+  "parent": "315",
+  "child": "337",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4290,
+  "type": "bopen",
+  "raw": "binder: pid 325 opened the device (proc 6)",
+  "pid": "325",
+  "proc": "6"
+ },
+ {
+  "t": 4293,
+  "type": "bmap",
+  "raw": "binder: proc 6 mapped 0x100000 bytes at 0x7ff082033000",
+  "proc": "6",
+  "size": "0x100000",
+  "vaddr": "0x7ff082033000"
+ },
+ {
+  "t": 4300,
+  "type": "fork",
+  "raw": "fork: parent=325, child=338, flags=0x7d0f00",
+  "parent": "325",
+  "child": "338",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4336,
+  "type": "bopen",
+  "raw": "binder: pid 336 opened the device (proc 7)",
+  "pid": "336",
+  "proc": "7"
+ },
+ {
+  "t": 4339,
+  "type": "bmap",
+  "raw": "binder: proc 7 mapped 0x100000 bytes at 0x7ff081dc7000",
+  "proc": "7",
+  "size": "0x100000",
+  "vaddr": "0x7ff081dc7000"
+ },
+ {
+  "t": 4346,
+  "type": "fork",
+  "raw": "fork: parent=336, child=339, flags=0x7d0f00",
+  "parent": "336",
+  "child": "339",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4379,
+  "type": "exit",
+  "raw": "exit: pid=315, tgid=315, exit_code=25856, ppid=1 (leader)",
+  "pid": "315",
+  "tgid": "315",
+  "code": "25856",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 4380,
+  "type": "exit",
+  "raw": "exit: pid=337, tgid=315, exit_code=-9, ppid=1 (thread)",
+  "pid": "337",
+  "tgid": "315",
+  "code": "-9",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 4381,
+  "type": "death",
+  "raw": "SIGDEATH: pid=337 tgid=315 comm=Ok(\"OS_IPC_0_337\") sig=9 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "337",
+  "tgid": "315",
+  "comm": "OS_IPC_0_337",
+  "sig": "9"
+ },
+ {
+  "t": 4407,
+  "type": "bopen",
+  "raw": "binder: pid 326 opened the device (proc 8)",
+  "pid": "326",
+  "proc": "8"
+ },
+ {
+  "t": 4410,
+  "type": "bmap",
+  "raw": "binder: proc 8 mapped 0x100000 bytes at 0x7ff0821bf000",
+  "proc": "8",
+  "size": "0x100000",
+  "vaddr": "0x7ff0821bf000"
+ },
+ {
+  "t": 4417,
+  "type": "fork",
+  "raw": "fork: parent=326, child=340, flags=0x7d0f00",
+  "parent": "326",
+  "child": "340",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4778,
+  "type": "fork",
+  "raw": "fork: parent=326, child=341, flags=0x7d0f00",
+  "parent": "326",
+  "child": "341",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4791,
+  "type": "fork",
+  "raw": "fork: parent=341, child=342, flags=0x7d0f00",
+  "parent": "341",
+  "child": "342",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4816,
+  "type": "fork",
+  "raw": "fork: parent=341, child=343, flags=0x7d0f00",
+  "parent": "341",
+  "child": "343",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4857,
+  "type": "fork",
+  "raw": "fork: parent=341, child=344, flags=0x7d0f00",
+  "parent": "341",
+  "child": "344",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4893,
+  "type": "fork",
+  "raw": "fork: parent=341, child=345, flags=0x7d0f00",
+  "parent": "341",
+  "child": "345",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 4909,
+  "type": "gp",
+  "raw": "trap: #GP at rip=0x3fbf0ba256, mode=user, pid 345",
+  "rip": "0x3fbf0ba256",
+  "mode": "user",
+  "pid": "345"
+ },
+ {
+  "t": 4916,
+  "type": "segv",
+  "raw": "pagefault: Segfault at 0x7ff00052e000, rip=0x3fbf08ad30, rsp=0x7ff00052db88, pid=345, mode=user",
+  "cr2": "0x7ff00052e000",
+  "rip": "0x3fbf08ad30",
+  "rsp": "0x7ff00052db88",
+  "pid": "345",
+  "mode": "user"
+ },
+ {
+  "t": 4917,
+  "type": "usegv",
+  "raw": "USEGV-FOR: pid=345 rip=0x3fbf08ad30 cr2=0x7ff00052e000 rsp=0x7ff00052db88 rbp=0xb",
+  "pid": "345",
+  "rip": "0x3fbf08ad30",
+  "cr2": "0x7ff00052e000",
+  "rsp": "0x7ff00052db88",
+  "rbp": "0xb"
+ },
+ {
+  "t": 4923,
+  "type": "exit",
+  "raw": "exit: pid=345, tgid=326, exit_code=-11, ppid=1 (thread)",
+  "pid": "345",
+  "tgid": "326",
+  "code": "-11",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 4924,
+  "type": "death",
+  "raw": "SIGDEATH: pid=345 tgid=326 comm=Ok(\"OS_FFRT_2_0\") sig=11 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "345",
+  "tgid": "326",
+  "comm": "OS_FFRT_2_0",
+  "sig": "11"
+ },
+ {
+  "t": 4928,
+  "type": "gp",
+  "raw": "trap: #GP at rip=0x3fbf0bb17d, mode=user, pid 326",
+  "rip": "0x3fbf0bb17d",
+  "mode": "user",
+  "pid": "326"
+ },
+ {
+  "t": 4929,
+  "type": "stall",
+  "raw": "EXT4-BIGLOCK-STALL waiter=330 holder=321 depth=1 held=0j"
+ },
+ {
+  "t": 4937,
+  "type": "exit",
+  "raw": "exit: pid=321, tgid=321, exit_code=-14, ppid=1 (leader)",
+  "pid": "321",
+  "tgid": "321",
+  "code": "-14",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 4938,
+  "type": "death",
+  "raw": "SIGDEATH: pid=321 tgid=321 comm=Ok(\"processdump\") sig=14 ppid=1 si_pid=0 si_code=0x0",
+  "pid": "321",
+  "tgid": "321",
+  "comm": "processdump",
+  "sig": "14"
+ },
+ {
+  "t": 5105,
+  "type": "stall",
+  "raw": "EXT4-BIGLOCK-STALL waiter=330 holder=336 depth=1 held=0j"
+ },
+ {
+  "t": 6835,
+  "type": "bopen",
+  "raw": "binder: pid 330 opened the device (proc 9)",
+  "pid": "330",
+  "proc": "9"
+ },
+ {
+  "t": 6836,
+  "type": "bmap",
+  "raw": "binder: proc 9 mapped 0x100000 bytes at 0x7ff099f35000",
+  "proc": "9",
+  "size": "0x100000",
+  "vaddr": "0x7ff099f35000"
+ },
+ {
+  "t": 6837,
+  "type": "fork",
+  "raw": "fork: parent=330, child=346, flags=0x7d0f00",
+  "parent": "330",
+  "child": "346",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 6844,
+  "type": "fork",
+  "raw": "fork: parent=330, child=347, flags=0x7d0f00",
+  "parent": "330",
+  "child": "347",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 6845,
+  "type": "stall",
+  "raw": "EXT4-BIGLOCK-STALL waiter=347 holder=330 depth=1 held=0j"
+ },
+ {
+  "t": 7039,
+  "type": "fork",
+  "raw": "fork: parent=330, child=348, flags=0x7d0f00",
+  "parent": "330",
+  "child": "348",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 7040,
+  "type": "fork",
+  "raw": "fork: parent=330, child=349, flags=0x7d0f00",
+  "parent": "330",
+  "child": "349",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 7045,
+  "type": "fork",
+  "raw": "fork: parent=330, child=350, flags=0x7d0f00",
+  "parent": "330",
+  "child": "350",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 7046,
+  "type": "fork",
+  "raw": "fork: parent=330, child=351, flags=0x7d0f00",
+  "parent": "330",
+  "child": "351",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 8895,
+  "type": "exit",
+  "raw": "exit: pid=348, tgid=330, exit_code=0, ppid=1 (thread)",
+  "pid": "348",
+  "tgid": "330",
+  "code": "0",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 8896,
+  "type": "exit",
+  "raw": "exit: pid=350, tgid=330, exit_code=0, ppid=1 (thread)",
+  "pid": "350",
+  "tgid": "330",
+  "code": "0",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 8897,
+  "type": "exit",
+  "raw": "exit: pid=349, tgid=330, exit_code=0, ppid=1 (thread)",
+  "pid": "349",
+  "tgid": "330",
+  "code": "0",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 8898,
+  "type": "exit",
+  "raw": "exit: pid=351, tgid=330, exit_code=0, ppid=1 (thread)",
+  "pid": "351",
+  "tgid": "330",
+  "code": "0",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 9097,
+  "type": "exit",
+  "raw": "exit: pid=323, tgid=311, exit_code=0, ppid=1 (thread)",
+  "pid": "323",
+  "tgid": "311",
+  "code": "0",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 9104,
+  "type": "exit",
+  "raw": "exit: pid=311, tgid=311, exit_code=0, ppid=1 (leader)",
+  "pid": "311",
+  "tgid": "311",
+  "code": "0",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 9105,
+  "type": "exit",
+  "raw": "exit: pid=322, tgid=311, exit_code=-9, ppid=1 (thread)",
+  "pid": "322",
+  "tgid": "311",
+  "code": "-9",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 9106,
+  "type": "death",
+  "raw": "SIGDEATH: pid=322 tgid=311 comm=Ok(\"OS_IPC_0_322\") sig=9 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "322",
+  "tgid": "311",
+  "comm": "OS_IPC_0_322",
+  "sig": "9"
+ },
+ {
+  "t": 9124,
+  "type": "exit",
+  "raw": "exit: pid=335, tgid=324, exit_code=0, ppid=1 (thread)",
+  "pid": "335",
+  "tgid": "324",
+  "code": "0",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 9125,
+  "type": "exit",
+  "raw": "exit: pid=334, tgid=327, exit_code=0, ppid=1 (thread)",
+  "pid": "334",
+  "tgid": "327",
+  "code": "0",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 9126,
+  "type": "stall",
+  "raw": "EXT4-BIGLOCK-STALL waiter=327 holder=324 depth=1 held=0j"
+ },
+ {
+  "t": 9134,
+  "type": "exit",
+  "raw": "exit: pid=324, tgid=324, exit_code=0, ppid=1 (leader)",
+  "pid": "324",
+  "tgid": "324",
+  "code": "0",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 9135,
+  "type": "exit",
+  "raw": "exit: pid=333, tgid=324, exit_code=-9, ppid=1 (thread)",
+  "pid": "333",
+  "tgid": "324",
+  "code": "-9",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 9136,
+  "type": "death",
+  "raw": "SIGDEATH: pid=333 tgid=324 comm=Ok(\"OS_IPC_0_333\") sig=9 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "333",
+  "tgid": "324",
+  "comm": "OS_IPC_0_333",
+  "sig": "9"
+ },
+ {
+  "t": 9139,
+  "type": "exit",
+  "raw": "exit: pid=327, tgid=327, exit_code=0, ppid=1 (leader)",
+  "pid": "327",
+  "tgid": "327",
+  "code": "0",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 9140,
+  "type": "exit",
+  "raw": "exit: pid=332, tgid=327, exit_code=-9, ppid=1 (thread)",
+  "pid": "332",
+  "tgid": "327",
+  "code": "-9",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 9141,
+  "type": "death",
+  "raw": "SIGDEATH: pid=332 tgid=327 comm=Ok(\"OS_IPC_0_332\") sig=9 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "332",
+  "tgid": "327",
+  "comm": "OS_IPC_0_332",
+  "sig": "9"
+ },
+ {
+  "t": 10176,
+  "type": "fork",
+  "raw": "fork: parent=329, child=352, flags=0x7d0f00",
+  "parent": "329",
+  "child": "352",
+  "flags": "0x7d0f00"
+ },
+ {
+  "t": 10179,
+  "type": "exit",
+  "raw": "exit: pid=329, tgid=329, exit_code=65280, ppid=1 (leader)",
+  "pid": "329",
+  "tgid": "329",
+  "code": "65280",
+  "ppid": "1",
+  "role": "leader"
+ },
+ {
+  "t": 10180,
+  "type": "exit",
+  "raw": "exit: pid=352, tgid=329, exit_code=-9, ppid=1 (thread)",
+  "pid": "352",
+  "tgid": "329",
+  "code": "-9",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 10181,
+  "type": "death",
+  "raw": "SIGDEATH: pid=352 tgid=329 comm=Ok(\"hdf_devmgr\") sig=9 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "352",
+  "tgid": "329",
+  "comm": "hdf_devmgr",
+  "sig": "9"
+ },
+ {
+  "t": 10182,
+  "type": "exit",
+  "raw": "exit: pid=331, tgid=329, exit_code=-9, ppid=1 (thread)",
+  "pid": "331",
+  "tgid": "329",
+  "code": "-9",
+  "ppid": "1",
+  "role": "thread"
+ },
+ {
+  "t": 10183,
+  "type": "death",
+  "raw": "SIGDEATH: pid=331 tgid=329 comm=Ok(\"OS_IPC_0_331\") sig=9 ppid=1 (thread) si_pid=0 si_code=0x0",
+  "pid": "331",
+  "tgid": "329",
+  "comm": "OS_IPC_0_331",
+  "sig": "9"
+ }
+]
