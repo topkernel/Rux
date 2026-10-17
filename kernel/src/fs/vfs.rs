@@ -643,6 +643,74 @@ pub fn chrooted() -> bool {
     get_process_root() != "/"
 }
 
+/// The current task's cwd AS THE USER SEES IT: relative to the task root
+/// (the getcwd(3) string, e.g. "/bin" under chroot("/usr")). Callers that
+/// feed the result into path_lookup-style resolution — which PREFIXES the
+/// task root onto absolute paths — must join relative user paths against
+/// THIS string, not the global cwd: joining the global cwd produced
+/// absolute paths that the prefixer then double-prefixed (every relative
+/// chdir()/openat(AT_FDCWD) under chroot() failed with ENOENT).
+///
+/// Falls back to the global cwd when the cwd is not representable under
+/// the root (cwd outside the jail — string roots cannot express that; the
+/// lookup then clamps at the jail root, which is the same place ".."
+/// stops).
+pub fn get_cwd_user() -> String {
+    if let Some(current) = crate::sched::current() {
+        // SAFETY: current is the running task's Task pointer from
+        // sched::current(); fs_arc() only clones the Arc out of it.
+        if let Some(fs) = unsafe { (*current).fs_arc() } {
+            let root = get_process_root();
+            if root == "/" {
+                return get_cwd();
+            }
+            if let Some(cwd_d) = fs.cwd_dentry() {
+                if let Some(root_d) = fs.root_dentry() {
+                    if let Some(p) = cwd_d.build_path_rooted(Some(&root_d)) {
+                        return p;
+                    }
+                }
+                // cwd outside the jail: use the global cwd; the ".."
+                // clamp keeps the lookup inside the jail.
+                return cwd_d.build_path();
+            }
+            // Legacy string-only state: strip the root prefix.
+            let cwd = get_cwd();
+            let trimmed = root.trim_end_matches('/');
+            if cwd == trimmed {
+                return String::from("/");
+            }
+            if let Some(rel) = cwd.strip_prefix(&format!("{}/", trimmed)) {
+                return format!("/{}", rel);
+            }
+            return cwd;
+        }
+    }
+    get_cwd()
+}
+
+/// User-visible path of a dentry — Linux d_path() semantics: the string is
+/// computed relative to the ROOT OF THE READING TASK, not the global root.
+/// This is what /proc/<pid>/fd/N readlink and /proc/<pid>/maps show: a
+/// chrooted reader sees jail-relative names ("/bin/init"), an unchrooted
+/// reader sees the global path (same string, since the jail prefix is
+/// absent). Falls back to the global path when the dentry is not under the
+/// reader's root (display-only; Linux prints "(unreachable)" there).
+pub fn dentry_user_path(dentry: &alloc::sync::Arc<crate::fs::dentry::Dentry>) -> String {
+    if let Some(current) = crate::sched::current() {
+        // SAFETY: current is the running task's Task pointer from
+        // sched::current(); fs_arc() only clones the Arc out of it.
+        if let Some(fs) = unsafe { (*current).fs_arc() } {
+            if let Some(root_d) = fs.root_dentry() {
+                return dentry
+                    .build_path_rooted(Some(&root_d))
+                    .unwrap_or_else(|| dentry.build_path());
+            }
+        }
+    }
+    dentry.build_path()
+}
+
 /// Interpret `path` in the current task's namespace: absolute paths get the
 /// chroot prefix prepended; relative paths stay cwd-joined (cwd is stored
 /// as a real path, so the result is always a real-namespace path).
