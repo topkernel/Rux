@@ -93,7 +93,11 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
 
     // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
     // loop is only visible when the loaded-each-round libs are shown).
-    if full_path.ends_with(".so") {
+    // dfx=syscalltrace only: ungated, hilogd.rd_kmsg copies the whole
+    // trace from /dev/kmsg and eats a vCPU at KVM speed (b128/b129).
+    if full_path.ends_with(".so")
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+    {
         // Per-pid budget: a flat counter let hdf_devhost (~pid 418,
         // every lib searched across ~15 dirs) consume the whole budget
         // before render_service (~443) opened its first library. 8
