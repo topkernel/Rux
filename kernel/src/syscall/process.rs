@@ -3795,13 +3795,27 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     };
 
     // (a) jail: fs root prefix → new_root (chroot-style, ".." clamped).
-    current.set_root(new_root.as_bytes());
+    // Record the jail-root DENTRY too (same as chroot): getcwd derives
+    // root-relative paths from it, and the string self-heals from it if
+    // mounts move. Best-effort — a failed lookup keeps string-only root.
+    let root_dentry = match crate::fs::vfs::path_lookup(
+        &new_root,
+        crate::fs::vfs::LOOKUP_FOLLOW,
+    ) {
+        Ok(vpath) => vpath.dentry.clone(),
+        Err(_) => None,
+    };
+    if let Some(fs) = current.fs_arc() {
+        fs.set_root_with_dentry(new_root.as_bytes(), root_dentry);
+    }
     // (d) cwd: move into the new root when the old cwd fell outside it.
     let cwd = current.get_cwd();
     let cwd_str = core::str::from_utf8(&cwd).unwrap_or("/");
     let cwd_norm = crate::fs::path::path_normalize(cwd_str);
     let inside = cwd_norm == "/" || cwd_norm.starts_with(&new_root);
     if !inside {
+        // String-only reset (clears any cwd dentry — the string is the
+        // truth again for this legacy-compat branch).
         current.set_cwd(b"/");
     }
 
