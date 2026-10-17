@@ -28,6 +28,7 @@
  *       -o heapwatch heapwatch.c
  * Run as init=/heapwatch or from the shell; prints to stdout.
  */
+#define _GNU_SOURCE 1
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -42,12 +43,56 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifndef MREMAP_MAYMOVE
+#define MREMAP_MAYMOVE 1
+#endif
+
+static void dump_maps(void);
+
 #define PAGE         4096UL
 #define BINDER_SIZE  (1UL << 20)   /* matches the 1M binder mmap of victims */
 #define STACK_SIZE   (2UL << 20)
 #define HEAP_SIZE    (256UL << 10)
 #define HEARTBEAT    2000
 #define FORK_EVERY   64            /* rounds between fork+exit churns */
+#define MREMAP_EVERY 16            /* rounds between mremap moves */
+
+/*
+ * mremap churn: the b86/b87 PTE-OVERWRITE-LIVE prints carry ctx=4
+ * (mremap copy), so the suspected trigger is mremap traffic landing on
+ * busy VMAs.  Allocate a 3M block, dirty it, move it with MAYMOVE,
+ * verify the data survived the move, drop it.
+ */
+static void mremap_churn(int round)
+{
+    size_t sz = 3UL << 20;
+    uint8_t *a = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (a == MAP_FAILED)
+        return;
+    for (size_t off = 0; off < sz; off += PAGE) {
+        uint64_t *w = (uint64_t *)(a + off);
+        w[0] = 0x4d52454d41502043ULL ^ (off / PAGE);   /* "CMAP REM" */
+        w[1] = (uint64_t)round;
+    }
+    void *b = mremap(a, sz, sz, MREMAP_MAYMOVE);
+    if (b == MAP_FAILED) {
+        munmap(a, sz);
+        return;
+    }
+    for (size_t off = 0; off < sz; off += PAGE) {
+        uint64_t *w = (uint64_t *)((uint8_t *)b + off);
+        if (w[0] != (0x4d52454d41502043ULL ^ (off / PAGE))) {
+            printf("HEAPWATCH-MREMAP round=%d moved=%p page=%zu "
+                   "first-qword=%016llx (mremap lost data!)\n",
+                   round, b, off / PAGE,
+                   (unsigned long long)w[0]);
+            dump_maps();
+            _exit(43);
+        }
+    }
+    munmap(b, sz);
+}
 
 struct region {
     const char *name;
@@ -227,6 +272,11 @@ int main(void)
             if (pid > 0)
                 waitpid(pid, NULL, 0);
             check_regions(round);   /* post-fork COW-burst window */
+        }
+
+        if (round % MREMAP_EVERY == MREMAP_EVERY - 1) {
+            mremap_churn(round);
+            check_regions(round);   /* post-mremap window */
         }
 
         if (round % HEARTBEAT == 0) {
