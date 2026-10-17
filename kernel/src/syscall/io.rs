@@ -302,7 +302,12 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // the whole global 4000 budget in ~3999 lines (boot b43) and the
     // graphics services' output stayed invisible.
     if count <= 256 && fd != 1 && fd != 2 {
-        const WTRACE_PID_MAX: usize = 48;
+        // 512/pid: samgr's runtime HILOGE lines (the SAMStub
+        // "PERMISSION DENIED"/"interfaceToken failed" family) arrive after
+        // its ~20 init-time frames; the old 48/pid budget cut exactly
+        // there and the AddSystemAbility(5100) failure reason stayed
+        // invisible (dfx=writetrace boots only).
+        const WTRACE_PID_MAX: usize = 512;
         const WTRACE_SLOTS: usize = 256;
         static WTRACE_USED: [core::sync::atomic::AtomicU8; WTRACE_SLOTS] =
             [const { core::sync::atomic::AtomicU8::new(0) }; WTRACE_SLOTS];
