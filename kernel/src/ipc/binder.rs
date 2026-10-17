@@ -878,13 +878,31 @@ fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World
     g
 }
 
-/// &mut BinderProc for an Arc found in the world, without borrowing the
-/// World — legal because every caller holds WORLD (the access contract).
+/// &mut BinderProc for an Arc, without borrowing the World. The Arc keeps
+/// the object alive (callers hold clones) and every mutation is
+/// serialized by WORLD — that is the access contract, NOT membership in
+/// world.procs. b88 kernel-panicked on the old expect("proc not in
+/// world") because binder_close removes the proc from the world BEFORE
+/// draining its pending work, and finish_work then hit the expect: a
+/// dying service must take its in-flight transactions down quietly, not
+/// kill the kernel. Membership loss is now a bounded warning; the cast
+/// itself only needs the Arc.
 /// SAFETY: caller must hold WORLD.
 #[allow(clippy::mut_from_ref)]
 unsafe fn pm<'a>(_world: &World, p: &Arc<BinderProc>) -> &'a mut BinderProc {
-    let found = _world.procs.iter().find(|x| Arc::ptr_eq(x, p)).expect("proc not in world");
-    &mut *(Arc::as_ptr(found) as *mut BinderProc)
+    let ptr = Arc::as_ptr(p);
+    if !_world.procs.iter().any(|x| core::ptr::eq(Arc::as_ptr(x), ptr)) {
+        static DEAD_PM_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if DEAD_PM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_warn!(
+                "binder: access to dead proc {} (pid {}) — draining or replying to a closed service",
+                p.id,
+                p.pid
+            );
+        }
+    }
+    &mut *(ptr as *mut BinderProc)
 }
 
 fn proc_alive(world: &World, p: &Arc<BinderProc>) -> bool {
