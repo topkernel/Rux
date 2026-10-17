@@ -148,10 +148,28 @@ impl PageCache {
     /// If the page already exists, just increments ref_count.
     pub fn insert(&self, fs_id: u64, ino: u64, page_index: u64, _block_nr: u64, data: &[u8]) {
         let key = cache_key(fs_id, ino);
+
+        // R-WRITESTORM-1: allocate the frame BEFORE taking the inodes
+        // lock. alloc_page(GFP_KERNEL) can enter synchronous direct
+        // reclaim (page_alloc.rs slowpath), which reaches
+        // vmscan::try_to_free_pages -> PageCache::shrink -> inodes.lock()
+        // — allocating under the lock self-deadlocks the CPU on its own
+        // spinlock. Under the OH /data write storm (memory pressure makes
+        // the zone slowpath routine) that wedged BOTH CPUs spinning on
+        // PAGE_CACHE while the ext4 big-lock holder sat inside insert()
+        // (oh b120/b121 deadlock watchdog: lock=...page_cache::PAGE_CACHE,
+        // preceded by EXT4-BIGLOCK-STALL).
+        let phys_addr = alloc_page(GfpFlags::GFP_KERNEL);
+        if phys_addr == 0 {
+            return;
+        }
+
         let mut cache = self.inodes.lock();
 
         // Evict if needed (with progress check to prevent infinite loop
-        // when all cached pages have ref_count > 0).
+        // when all cached pages have ref_count > 0). The frame is already
+        // in hand, so exceeding the soft cap by one page here is harmless
+        // — the next insert evicts.
         while self.total_pages.load(Ordering::Relaxed) as usize >= MAX_CACHED_PAGES {
             let before = self.total_pages.load(Ordering::Relaxed);
             Self::evict_one(&mut cache, &self.total_pages);
@@ -167,9 +185,11 @@ impl PageCache {
 
         // If already cached and fresh, nothing to do. (R7-C2: this used to
         // bump ref_count with no matching put — a permanent pin leak that
-        // defeated eviction and pinned stale data forever.)
+        // defeated eviction and pinned stale data forever.) The frame we
+        // pre-allocated is unused on both early-return paths — return it.
         if let Some(page) = inode_cache.pages.get(&page_index) {
             if !page.invalidated {
+                free_page(phys_addr);
                 return;
             }
             // R8-3: invalidated-but-still-pinned — the final put() owns the
@@ -177,12 +197,7 @@ impl PageCache {
             // ref_count, handing the pinned reader a freed physical page
             // (exactly what invalidate_inode promises not to do). Skip
             // caching this read; the old entry dies via its refcount.
-            return;
-        }
-
-        // Allocate a physical page frame from zone allocator
-        let phys_addr = alloc_page(GfpFlags::GFP_KERNEL);
-        if phys_addr == 0 {
+            free_page(phys_addr);
             return;
         }
 
