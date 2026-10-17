@@ -148,6 +148,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
                 return eperm();
             }
             set_token(pid, request == ACCESS_TOKENID_SET_FTOKENID, v);
+            crate::pr_info!("atid: pid {} set token {:#x} (f={})", pid, v, request == ACCESS_TOKENID_SET_FTOKENID);
             0
         }
         ACCESS_TOKENID_ADD_PERMISSIONS => {

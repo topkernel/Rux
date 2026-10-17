@@ -1868,6 +1868,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             // The calling thread's transaction stack top is the txn being
             // serviced (Linux thread->transaction_stack, OH reads the same).
             let (sender_pid, token, ftoken) = {
+                crate::pr_info!("btx: GET_SENDER_INFO caller tid {}", current_tid());
                 let tid = current_tid();
                 let mut out = (0u32, 0u64, 0u64);
                 let w = world_lock();
@@ -1889,6 +1890,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 }
                 drop(w);
                 let (t, f) = crate::ipc::access_token::token_of(out.0);
+                crate::pr_info!("btx: GET_SENDER_INFO sender pid {} token {:#x} ftoken {:#x}", out.0, t, f);
                 (out.0, t, f)
             };
             let mut rec = [0u64; 5];
