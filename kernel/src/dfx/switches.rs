@@ -136,6 +136,7 @@ impl DfxSwitch {
             DfxSwitch::Strace1 => 12,
             DfxSwitch::SchedTrace => 13,
             DfxSwitch::Steptrace => 14,
+            DfxSwitch::WriteTrace => 15,
             DfxSwitch::OncpuInject => 15,
         }
     }
@@ -157,6 +158,7 @@ impl DfxSwitch {
             "strace1" => Some(DfxSwitch::Strace1),
             "schedtrace" => Some(DfxSwitch::SchedTrace),
             "steptrace" => Some(DfxSwitch::Steptrace),
+            "writetrace" => Some(DfxSwitch::WriteTrace),
             "oncpuinject" => Some(DfxSwitch::OncpuInject),
             _ => None,
         }

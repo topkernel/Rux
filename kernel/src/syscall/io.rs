@@ -338,7 +338,11 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                             .take(32)
                             .filter(|&&b| b.is_ascii_graphic() || b == b' ')
                             .count();
-                        if head >= 24 {
+                        if head >= 24
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::WriteTrace,
+                            )
+                        {
                             crate::pr_info!("w pid {}: {}", pid, t);
                         }
                     }
