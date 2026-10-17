@@ -458,12 +458,16 @@ pub fn rust_main_tail() -> ! {
                 print_status("mm", "vmemmap mapping failed", false);
             }
 
-            // Initialize kernel memory layout (heap/slab inside are
-            // RAM-clamped by effective_static_regions — the unused locals
-            // here were the pre-clamp values and are gone)
+            // Initialize kernel memory layout. phys_size is the PFN SPAN
+            // (max region end − base), NOT the sum of usable regions: the
+            // zone/descriptors/vmemmap are span-based now, and layout's
+            // phys_end feeds create_user_address_space's allocation
+            // validation — a sum-based bound (holes excluded) rejected
+            // the top-of-RAM pages the zone hands out first and every
+            // exec died with ENOMEM (the r4/r5 bisect).
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
                 MEMORY_PHYS_BASE,
-                total_phys_memory, // phys SIZE (was phys_base+size — review 4.20)
+                span_size,
                 KERNEL_PHYS_LOAD_ADDR,
                 KERNEL_HEAP_PHYS,
             );
