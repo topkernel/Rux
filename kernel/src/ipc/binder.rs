@@ -2211,10 +2211,15 @@ fn binder_thread_write(
                 if crate::dfx::switches::enabled(
                     crate::dfx::switches::DfxSwitch::BinderTrace,
                 ) && tr.data_size > 0
-                    && tr.data_size <= 192
+                    && tr.data_size <= 160
                 {
-                    let n = (tr.data_size as usize).min(64);
-                    let mut pb = [0u8; 64];
+                    // Full parcel for small transactions: the
+                    // FLAT_BINDER_OBJECT past the interface token is the
+                    // prime suspect in the AddSystemAbility(5100)
+                    // ERR_TRANSACTION_FAILED loop (driver must translate
+                    // BINDER_TYPE_BINDER -> HANDLE for the target).
+                    let n = tr.data_size as usize;
+                    let mut pb = [0u8; 160];
                     if unsafe {
                         crate::arch::uaccess::copy_from_user(
                             pb.as_mut_ptr(),
