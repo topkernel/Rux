@@ -985,6 +985,17 @@ impl CfsRunQueue {
                     // marks: every pick would skip it with why=1/why=2
                     // forever (the pid-1 tail wedge: linked,
                     // {oncpu=1, claim=1, pk=1}, box idle).
+                    //
+                    // Organic captures (fork-storm soak, smp2, no
+                    // injectors): pid 1 re-entered these shapes every few
+                    // seconds for minutes — {oncpu=1, claim=-1, pk=1,
+                    // st=RUNNING, slot=0, swout=0, tcpu=crossed} (a
+                    // byte-granular on_cpu flip or a lost release; ti_cpu
+                    // naming the OTHER cpu) and {oncpu=0, claim=foreign}
+                    // (why=2). On dd5537f1 each occurrence was a
+                    // potential permanent strand; with this adjudication
+                    // each is swept in <=50 jiffies and the soak completes
+                    // all phases.
                     let owner_live =
                         crate::sched::sched::pick_owner_live(task);
                     if !(*task).on_cpu()
