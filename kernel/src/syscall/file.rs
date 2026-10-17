@@ -1355,17 +1355,35 @@ pub fn sys_fchdir(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    // The physical (mount-crossing) path of the target directory, exactly
-    // what sys_chdir stores. The old manual parent walk could not cross
-    // mount boundaries (a mounted fs root has no parent pointer), so
-    // fchdir to a /proc or /dev fd stored cwd="/" (or dropped the
-    // mountpoint prefix) — same defect chdir had before build_path()
-    // became mount-aware.
-    let physical = dentry.build_path();
+    // Walk dentry chain up to root, collect names
+    let mut components = alloc::vec::Vec::new();
+    let mut current = dentry.clone();
+    loop {
+        let name = current.get_name();
+        if name == "/" {
+            break;
+        }
+        components.push(name);
+        let parent_opt = current.parent.lock().clone();
+        match parent_opt {
+            Some(p) => current = p,
+            None => break,
+        }
+    }
+
+    // Build absolute path: / + reversed components
+    let mut path = alloc::vec::Vec::new();
+    path.push(b'/');
+    for (i, comp) in components.iter().rev().enumerate() {
+        if i > 0 {
+            path.push(b'/');
+        }
+        path.extend_from_slice(comp.as_bytes());
+    }
 
     if let Some(task) = crate::sched::current() {
         // SAFETY: task is the running task's Task pointer from sched::current().
-        unsafe { (*task).set_cwd(physical.as_bytes()); }
+        unsafe { (*task).set_cwd(&path); }
     }
 
     0
