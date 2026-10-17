@@ -1619,21 +1619,51 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
     let lstr = looper(th.looper);
     let loop_str = core::str::from_utf8(&lstr).unwrap_or("-=-");
     match th.txn_stack.last() {
-        Some(txn) => crate::pr_warn!(
-            "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack={} top=txn{} code {} oneway={} from pid {} tid {} to_tid {}",
-            proc.pid,
-            t.tid,
-            loop_str,
-            th.waiting_for_proc_work,
-            th.todo.len(),
-            th.txn_stack.len(),
-            txn.id,
-            txn.code,
-            txn.flags & TF_ONE_WAY != 0,
-            txn.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
-            txn.from_tid.unwrap_or(0),
-            txn.to_tid().unwrap_or(0),
-        ),
+        Some(txn) => {
+            crate::pr_warn!(
+                "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack={} top=txn{} code {} oneway={} from pid {} tid {} to_tid {}",
+                proc.pid,
+                t.tid,
+                loop_str,
+                th.waiting_for_proc_work,
+                th.todo.len(),
+                th.txn_stack.len(),
+                txn.id,
+                txn.code,
+                txn.flags & TF_ONE_WAY != 0,
+                txn.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                txn.from_tid.unwrap_or(0),
+                txn.to_tid().unwrap_or(0),
+            );
+            // Holder-task forensics (b128-b132: a samgr thread parks
+            // 120s+ INSIDE a txn and every display-chain client queues
+            // behind it). The binder view can't say where the thread
+            // actually is, so read its Task: scheduling state plus the
+            // user entry frame at kernel_stack_top - PT_REGS_SIZE —
+            // rip (where userspace was), orig_rax (the syscall it made,
+            // -1 when it trapped rather than syscalled) and rdi (arg0).
+            let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
+            if !task.is_null() {
+                let tk = unsafe { &*task };
+                let top = tk.kernel_stack_top();
+                let regs = (top.wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                // SAFETY: diagnostic read of this task's own entry
+                // frame; the kernel stack stays mapped while the Task
+                // lives, and the frame slot is written on every entry.
+                let (rip, orig_rax, rdi, rsi) =
+                    unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) };
+                crate::pr_warn!(
+                    "binder-stall:    holder task state={:#x} rip={:#x} orig_rax={:#x} rdi={:#x} rsi={:#x}",
+                    tk.state().bits(),
+                    rip,
+                    orig_rax,
+                    rdi,
+                    rsi
+                );
+            }
+        }
         None => crate::pr_warn!(
             "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack=0",
             proc.pid,

@@ -139,9 +139,16 @@ pub enum DfxSwitch {
     /// Same failure shape as Steptrace's 2.7GB serial log. OFF unless
     /// asked for with dfx=syscalltrace.
     SyscallTrace,
+    /// Futex wake-miss probe (b133 hunt): when a FUTEX_WAKE wants more
+    /// waiters than it finds, scan every bucket for same-uaddr waiters
+    /// under a non-matching key and report both mm identities — the
+    /// lost-wake signature when a PRIVATE-futex waiter and its waker
+    /// disagree on the address-space identity. Rate-limited to 32 lines;
+    /// the scan walks all buckets so it stays behind this switch.
+    FutexTrace,
 }
 
-const SWITCH_COUNT: usize = 20;
+const SWITCH_COUNT: usize = 21;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -172,6 +179,7 @@ impl DfxSwitch {
             DfxSwitch::Ledger => 17,
             DfxSwitch::BinderTrace => 18,
             DfxSwitch::SyscallTrace => 19,
+            DfxSwitch::FutexTrace => 20,
         }
     }
 
@@ -197,6 +205,7 @@ impl DfxSwitch {
             "ledger" => Some(DfxSwitch::Ledger),
             "bindertrace" => Some(DfxSwitch::BinderTrace),
             "syscalltrace" => Some(DfxSwitch::SyscallTrace),
+            "futextrace" => Some(DfxSwitch::FutexTrace),
             _ => None,
         }
     }
