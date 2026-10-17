@@ -2204,6 +2204,41 @@ fn binder_thread_write(
                     0
                 };
                 ptr += if sg { 72 } else { 64 };
+                // dfx=bindertrace: payload head for small parcels — the
+                // interface token ("ohos.system...." / hdf names) is ASCII
+                // at the head and names the target interface; replies carry
+                // the result int. Read BEFORE the world lock (uaccess).
+                if crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::BinderTrace,
+                ) && tr.data_size > 0
+                    && tr.data_size <= 160
+                {
+                    let n = (tr.data_size as usize).min(24);
+                    let mut pb = [0u8; 24];
+                    if unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            pb.as_mut_ptr(),
+                            tr.data_buffer as *const u8,
+                            n,
+                        )
+                    } == 0
+                    {
+                        const HEX: &[u8; 16] = b"0123456789abcdef";
+                        let mut hx = alloc::string::String::with_capacity(n * 2);
+                        for &by in pb[..n].iter() {
+                            hx.push(HEX[(by >> 4) as usize] as char);
+                            hx.push(HEX[(by & 0xf) as usize] as char);
+                        }
+                        crate::pr_info!(
+                            "btxp: pid {} {} code {} ds {} p {}",
+                            proc.pid,
+                            if reply { "R" } else { "T" },
+                            tr.code,
+                            tr.data_size,
+                            hx
+                        );
+                    }
+                }
                 let mut err_cmd: u32 = 0;
                 binder_transaction(proc, thread, &mut tr, reply, sg_size, &mut err_cmd);
                 if err_cmd != 0 {
