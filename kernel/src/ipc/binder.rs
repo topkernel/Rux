@@ -1187,6 +1187,109 @@ unsafe fn unpin_txn_node(world: &World, t: &BinderTxn) {
     }
 }
 
+/// Abort a pool thread's in-flight state and remove it from the pool.
+///
+/// Shared by BINDER_THREAD_EXIT (musl's clean IPC-thread shutdown) and
+/// the task-exit hook `binder_task_died` (threads killed by a signal
+/// never reach the ioctl — the b86-b93 heap-corruption victims).
+/// Every transaction the thread was PROCESSING gets its sender a
+/// BR_DEAD_REPLY (Linux binder_thread_release semantics — the reply
+/// will never come); queued work is finished (buffers freed, node pins
+/// dropped). Returns the procs whose readers must be re-checked for
+/// wake-up AFTER WORLD is released.
+///
+/// SAFETY: caller must hold WORLD.
+unsafe fn binder_reap_thread(
+    world: &World,
+    proc: &Arc<BinderProc>,
+    tid: u32,
+) -> Vec<Arc<BinderProc>> {
+    let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    let Some(t) = proc.im().threads.iter().find(|t| t.tid == tid).cloned() else {
+        return wakes;
+    };
+    let th = t.st();
+    let mut self_wake = false;
+    for x in th.txn_stack.drain(..) {
+        // Sender wake-up for the never-coming reply.
+        if let Some(fp) = &x.from_proc {
+            let same = Arc::ptr_eq(fp, proc);
+            let mut delivered = false;
+            if let Some(ftid) = x.from_tid {
+                let pool = if same {
+                    proc.im().threads.clone()
+                } else {
+                    pm(world, fp).im().threads.clone()
+                };
+                if let Some(ft) = pool.into_iter().find(|ct| ct.tid == ftid) {
+                    let fth = ft.st();
+                    fth.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+                    fth.process_todo = true;
+                    delivered = true;
+                }
+            }
+            if !delivered {
+                if same {
+                    proc.im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+                } else {
+                    pm(world, fp).im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+                }
+            }
+            if same {
+                self_wake = true;
+            } else {
+                wakes.push(fp.clone());
+            }
+        }
+        // Free the delivered buffer + drop the node pin: an abandoned
+        // sync txn held its pin forever when the processing thread died
+        // (b92 samgr: pinned nodes never reached the 0-refs transition).
+        finish_work(world, proc, Work::Transaction(x));
+    }
+    for wk in th.todo.drain(..) {
+        finish_work(world, proc, wk);
+    }
+    proc.im().threads.retain(|ct| ct.tid != tid);
+    if self_wake {
+        wakes.push(proc.clone());
+    }
+    wakes
+}
+
+/// Task-exit hook (called from do_exit): a thread that dies without
+/// reaching BINDER_THREAD_EXIT must leave its process's binder pool.
+/// A corpse pool entry blocks the BR_SPAWN_LOOPER replenishment gate
+/// (`threads.len() < max_threads` counts it as a live worker), the pool
+/// starves, proc todo grows without a processor, and every client of
+/// the process stalls (b92: samgr todo depth 13 with 16 registered
+/// threads — all dead — and hdf_devhost waiters parked 162s).
+pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
+    let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    {
+        let mut w = world_lock();
+        let Some(world) = w.as_mut() else { return };
+        // SAFETY: under WORLD.
+        unsafe {
+            // Membership: OH opens /dev/binder on the group leader
+            // (proc.pid == tgid); a non-leader opener is matched by its
+            // own pid so its personal pool entry is still reaped.
+            let proc = world
+                .procs
+                .iter()
+                .find(|p| p.pid == dying_tgid || p.pid == dying_pid)
+                .cloned();
+            let Some(proc) = proc else { return };
+            if proc.im().is_dead {
+                return;
+            }
+            wakes = binder_reap_thread(world, &proc, dying_tid);
+        }
+    }
+    for p in wakes {
+        wake_proc_one(&p);
+    }
+}
+
 /// mmap handler (sys_mmap dispatch for BINDER_OPS files).
 pub fn binder_mmap_handler(
     file: &crate::fs::File,
@@ -1748,15 +1851,12 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             // SAFETY: under WORLD.
             unsafe {
                 let world = w.as_mut().unwrap();
-                let t = pm(world, &proc).im().threads.iter().find(|t| t.tid == tid).cloned();
-                if let Some(t) = t {
-                    let th = t.st();
-                    for wk in th.todo.drain(..) {
-                        finish_work(world, &proc, wk);
-                    }
-                    th.txn_stack.clear();
+                let wakes = binder_reap_thread(world, &proc, tid);
+                // Wake outside WORLD (lock discipline; see binder_close).
+                drop(w);
+                for p in wakes {
+                    wake_proc_one(&p);
                 }
-                pm(world, &proc).im().threads.retain(|t| t.tid != tid);
             }
             0
         }
