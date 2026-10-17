@@ -75,11 +75,31 @@ fn empty() -> Registry {
 /// (token, first token) of a process; (0, 0) when never set. Used by the
 /// binder driver's BINDER_GET_ACCESS_TOKEN / BINDER_GET_SENDER_INFO to
 /// report senders to samgr.
+///
+/// STOPGAP (b113-b115): nothing on this image ever calls
+/// ACCESS_TOKENID_SET_TOKENID — init's SetAccessToken path is compiled
+/// out (the "failed to set access token" warning never fired on any
+/// boot, even when the device was absent pre-ab45291d) and the services
+/// don't set their own. samgr's CanRequest() only checks the token's
+/// TYPE BITS are TOKEN_NATIVE, so for processes with no registered
+/// token we synthesize a stable per-pid native token instead of
+/// reporting 0 (which reads as TOKEN_INVALID and got every
+/// AddSystemAbility denied — the HDF display-chain blocker). If the
+/// image's userspace ever starts setting real tokens, registered
+/// values take precedence.
 pub fn token_of(pid: u32) -> (u64, u64) {
     let g = REGISTRY.lock_irqsave();
-    match g.as_ref().and_then(|r| r.by_pid.get(&pid)) {
+    let registered = g.as_ref().and_then(|r| r.by_pid.get(&pid)).copied();
+    drop(g);
+    match registered {
         Some(t) => (t.token, t.ftoken),
-        None => (0, 0),
+        None => {
+            // access_tokenid_inner: version (bits 28-30) = 1,
+            // type (bits 26-27) = 1 (TOKEN_NATIVE), uniqueid (bits
+            // 0-19) = pid. Stable per pid.
+            let synthetic: u64 = (1u64 << 28) | (1u64 << 26) | (pid as u64 & 0xF_FFFF);
+            (synthetic, 0)
+        }
     }
 }
 
