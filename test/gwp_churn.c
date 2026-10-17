@@ -99,10 +99,16 @@ static void mprot(void *addr, size_t len, int prot, const char *tag)
 static volatile int pause_churn;       /* forker requests quiescence */
 static volatile int active_workers;     /* workers inside a transition */
 
-static void worker(void *unused)
+static void worker(void *wid_ptr)
 {
-    (void)unused;
-    unsigned seed = (unsigned)(syscall(SYS_gettid) & 0xffff) | 1;
+    int wid = *(volatile int *)wid_ptr;
+    unsigned seed = (unsigned)(wid * 7919 + 1) | 1;
+    /* DISJOINT slot partition per worker: rand collisions between
+     * workers made one worker's R->NONE cycle race another's RW->store
+     * on the SAME slot (a userspace false positive, not a kernel bug —
+     * observed run 2: pid 306 stalled mid-cycle while pid 304 completed
+     * a full RW->R->NONE cycle on the same address). */
+    unsigned slots_per = NSLOTS / NWORKERS;
     while (!stop_flag) {
         /* quiescence point: honor the forker's pause before the next
          * slot transition, so a fork child can never race a slot that
@@ -124,7 +130,7 @@ static void worker(void *unused)
             break;
         }
 
-        unsigned long slot = rand_r(&seed) % NSLOTS;
+        unsigned long slot = (rand_r(&seed) % slots_per) * NWORKERS + (unsigned long)wid;
         char *p = region + slot * PAGE;
 
         /* NONE -> RW: publish AFTER mprotect success */
@@ -226,10 +232,13 @@ int main(int argc, char **argv)
         fail("mmap-region", 0, 0);
     printf("gwp_churn: region=%p secs=%d\n", region, secs);
 
+    static int wids[NWORKERS];
     pthread_t th[NWORKERS + 1];
-    for (int i = 0; i < NWORKERS; i++)
-        if (pthread_create(&th[i], NULL, (void *(*)(void *))worker, NULL) != 0)
+    for (int i = 0; i < NWORKERS; i++) {
+        wids[i] = i;
+        if (pthread_create(&th[i], NULL, (void *(*)(void *))worker, &wids[i]) != 0)
             fail("pthread-worker", i, 0);
+    }
     if (pthread_create(&th[NWORKERS], NULL, (void *(*)(void *))forker, NULL) != 0)
         fail("pthread-forker", 0, 0);
 
