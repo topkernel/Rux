@@ -108,6 +108,26 @@ Every "second fault" during crash handling is `memcpy` touching the
 damaged region (e.g. DFX_SignalHandler copying the ucontext/TCB). It is
 a *witness*, not an independent bug.
 
+### 1.5 Who mprotects these regions (userspace is mprotect-heavy)
+
+OH musl calls `mprotect` from exactly two subsystems (all 8 call sites
+disassembled):
+- **GWP-ASan init** (`0x89e27`, `0x8a107`): reserves the pool with
+  `mmap(PROT_NONE)` then `mprotect(metadata, PROT_READ)` — the metadata
+  table is *deliberately* read-only (`flags == 0x11`), and pool slot
+  pages are mprotected RW one by one as sampling activates them.
+- **mallocng** (`0xbaaca`): OH's patched allocator enables pages of a
+  reserved area with `mprotect(page, 0x1000, RW)` as meta areas grow.
+
+Consequence for the flags evidence: the victims' flags=0x10 GWP-table
+VMAs are **READ stripped from a region mprotect made PROT_READ**, i.e.
+damage on a region whose flags are only ever touched by `mprotect`
+(and the kernel's VMA split/merge machinery underneath it). The pool
+reservation and the metadata sit adjacent in one address range, so
+per-slot mprotect churn splits/merges VMAs next to the metadata VMA
+constantly. render_service's `vma(0x8)=0x0-0x4000 flags=0x11` shows the
+*intended* post-mprotect state for comparison.
+
 ## 2. Timeline (all five boots)
 
 Machine-readable: `run/timeline/correlate3.out`. "age" = serial lines
@@ -226,56 +246,53 @@ mapping removed) post-creation.
 
 ## 4. Ranked mechanisms (for the audit agent)
 
-Ranked by explanatory power over ALL observed signatures.
+Ranked by explanatory power over ALL observed signatures. Kernel code
+references are at b3586f69 (this branch's base).
 
-1. **fork/clone path damages the parent's (or shared) VMA state — flag
-   stripping and/or PTE replacement.**
-   Evidence for:
-   - Every boot's first corruption follows a fork/COW cascade (processdump
-     fork `flags=0x11` after the first #GP; new-thread clone + COW burst
-     right before the flags=0x10 fault).
-   - VMA flags end as `PRIVATE(0x10)` exactly — a constructed value, not a
-     bit-flip (0x13 -> 0x10 removes two bits; 0x11 -> 0x10 removes READ).
-   - PTE-OVERWRITE-LIVE shows fresh frames mapped over live VAs
-     (data_DESTROYED) — consistent with a fork/mmap path calling
-     map-in-place where it should have skipped or demanded COW first.
-   - The free-while-mapped tripwire (commit 48ebea6e) never fired, so the
-     old frames were NOT freed before the overwrite — points at a path
-     that maps pages over existing PTEs without freeing, e.g. COW-break
-     installing a new frame without checking, or fork's early PTE clear.
-   Evidence against: the flags=0x10 VMA damage survived *across* the
-   processdump fork and respawn in the same process (crashloop repeats
-   with identical cr2), so the damage is persistent, not transient.
-   Audit targets: every place that writes `VmaFlags` in fork/clone/mmap
-   (look for PRIVATE-only constructions or `remove(READ|WRITE)`), and
-   every `map_page`-style call in `arch/x86_64/mm/` that can run with a
-   non-empty PTE (the PTE-OVERWRITE-LIVE backtrace sites:
-   `mmu_init.rs:1388`, callers in `mm_ops.rs` ~1174/1276,
-   `syscall/memory.rs:99`, `mm/page_alloc.rs:375`).
-2. **VMA merge/split bug producing wrong flags or dropped pages.**
-   Evidence for:
-   - flags=0x10 VMAs appear with sane geometry (page-aligned, plausible
-     sizes) — merge could have taken flags from a PRIVATE-only neighbor.
-   - A VMA at 0x0-0x4000 flags=0x11 exists in render_service (and
-     0x0-0x11000 in hilogd b88) — bogus low VMA geometry that a bad
-     split/merge can fabricate.
-   - The b89 stack top page loss is exactly "VMA end moved down by one
-     page", a classic bad-split/bad-merge artifact; a COW sweep cannot
-     do that.
-   Evidence against: none direct; needs code reading of merge/fixup
-   (`mm/vma.rs`, split/merge paths) for a PRIVATE-only producer.
-3. **mprotect/mm sweep write-protecting or clearing PTEs of live VMAs.**
-   Would explain zeroed/foreign frames if the sweep re-maps; explains
-   flags=0x10 if the sweep rewrites VMA flags. For: PTE-OVERWRITE-LIVE
-   fires during normal service life (render_service mid-binder), not
-   near fork. Against: the strongest flag-stripping correlations are
-   fork-adjacent, not mprotect-adjacent (no mprotect prints seen nearby).
-4. **VMA-tree race between concurrent mm users (mmap vs fork vs
-   munmap)** — the intermittency across boots (b88 gets the samgr mass
-   kill, b89 the stack vanish, b86/b87 render_service) fits a race:
-   same code, different interleaving, different victim VMA.
-   For: 5 boots, 5 different "flavor" combinations of one damage class.
-   Against: purely a modifier of 1/2 rather than an independent cause.
+1. **mremap destination handling maps fresh pages over live PTEs
+   (kernel/src/syscall/memory.rs `copy_old_to_new_pages`, ~1671).**
+   The b86/b87 PTE-OVERWRITE-LIVE lines carry `ctx=4` — the MM_CTX
+   marker documented in `arch/x86_64/mm/mm_ops.rs:1173` as
+   "4 mremap copy". `copy_old_to_new_pages` walks the source, does
+   `alloc_page` + unconditional `map_page` at the destination, THEN
+   copies — so any destination leaf still PRESENT gets overwritten
+   (fresh frame + mover's data over whatever lived there). The
+   `data_DESTROYED` verdict is the pre-copy compare; the third-party
+   owner loses data either way. This path's comment (~line 1825)
+   documents a *prior* "silent cross-chunk heap corruption" fix in the
+   same function family — it is historically bug-dense. This explains
+   S1 (foreign-content mallocng meta → non-canonical decoded pointer →
+   #GP at 0xba256; zero/NULL meta → cr2=0x8 at 0xbb0c4) and, if the
+   destination range covers binder mmap pages, the zeroed BC buffer
+   (b88: mover copies zero source pages, or fresh zero pages when the
+   source walk finds nothing).
+   Audit: does MREMAP_FIXED/MAYMOVE unmap the destination's PTEs
+   (not just VMAs) before `copy_old_to_new_pages`? What happens when
+   destination range overlaps a VMA with present PTEs?
+2. **mprotect/VMA split-merge bug stripping access bits (S2).**
+   The GWP metadata VMA is deliberately PROT_READ (mprotect-set); the
+   victims show flags=0x10 (READ removed). `sys_mprotect`'s VMA
+   rewrite (memory.rs ~1283-1400) splits head/covered/tail and rebuilds
+   flags as `(old & !0x7) | perm_bits` — a PROT_NONE pass over any
+   part of the range yields exactly 0x10 on anon-private pieces.
+   Candidates: range/rounding errors splitting one page too many;
+   the EACCES early-return at memory.rs:1349 that bails AFTER PTEs
+   were already rewritten and some VMAs already re-split (partial
+   state, no rollback); or a merge of the covered piece with a
+   PROT_NONE pool neighbor. The b89 stack-top VMA loss (S3) is the
+   same family — "VMA end moved/shrunk by a page".
+3. **fork/clone COW-sweep interplay.**
+   The first corruption of every boot sits inside a fork/COW cascade
+   (processdump fork after the first crash; new-thread clone + COW
+   burst before the flags=0x10 fault). But b88 shows old threads dying
+   59k lines after their birth, and pid 318's get_meta read *succeeded*
+   (garbage content, page readable) before any fork — so fork is a
+   *correlate* (crash handlers fork), not necessarily the cause.
+4. **VMA-tree race between concurrent mm users.**
+   The per-boot flavor variation (b88 samgr mass-kill, b89 stack
+   vanish, b86/b87 render_service) fits a race: same code, different
+   interleaving, different victim VMA. Modifier of 1/2 rather than an
+   independent cause.
 
 Non-mechanisms (ruled out by evidence):
 - Page-reuse-after-free of freed frames (tripwire never fired; the
@@ -286,18 +303,31 @@ Non-mechanisms (ruled out by evidence):
 - Zeroed-page allocation as the sole cause: get_meta sees non-canonical
   garbage (foreign data), not zeros; zeros only explain the BC buffer
   and the NULL-prev meta.
+- GWP-ASan userspace logic flipping its own table to no-access: the
+  table is mprotect(PROT_READ) at init and never re-protected by the
+  disassembled code; flags=0x10 has no userspace producer.
 
 ## 5. Open questions / next steps for this workstream
 
-- Symbolize the PTE-OVERWRITE-LIVE backtrace if a KERNPANIC/taskdump with
-  kernel stack words accompanies it (none in b86-b90; consider asking the
-  fix agent to enable the backtrace variant for one repro boot).
-- Determine which syscall path created the flags=0x10 state: needs a
-  detector that snapshots VMA flags at mmap/fork boundaries (audit
-  agent's territory; this workstream supplies the repro probe below).
-- Guest probe (test/, riscv64 minimal rootfs): thread-stack + binder-map
-  checksum loop to catch the damage sub-second and print
-  /proc/self/maps before dying. [to be landed]
+- The PTE-OVERWRITE-LIVE prints in b86/b87 carry no kernel backtrace:
+  the `dump_stack()` call at `mmu_init.rs:1402` post-dates those logs
+  (its comment cites b86 as motivation). One fresh OH repro boot on a
+  current kernel would capture the mremap-overflow caller chain
+  directly — cheapest decisive evidence for the fix agent.
+- Which userspace caller issues the mremap that hit render_service's
+  0x1f000-0x21000 (and the samgr-adjacent ones)? Candidates to check
+  in the OH image: anything using `mremap(MREMAP_FIXED)` (ashmem
+  resize, HiTrace buffers, DFX unwinder).
+- The low-VA geometry (anon VMAs at 0x0-0x4000, 0x0-0x11000, COW fault
+  at 0x41d78) — what maps user memory that low? If Rux's
+  mmap-base/brk selection can return ~0x0, several "bogus VMA"
+  observations may follow from that alone.
+- Environment note: kernel b3586f69 does NOT compile for riscv64
+  (`kernel/src/syscall/dispatch.rs:658/665`: `[..i64].contains(&u64)` —
+  the i64 normalization at dispatch.rs:220-227 is
+  `#[cfg(feature = "x86_64")]`-gated). Fix is a 2-cast change in
+  kernel/ (audit/integration agent's ownership); until then the probe
+  below runs on the x86_64 kernel.
 
 ## 6. Repro/verification aids
 
@@ -305,3 +335,24 @@ Non-mechanisms (ruled out by evidence):
   (heap-forensics worktree) regenerate all tables from the logs.
 - Disassembly: `objdump -d --start-address=... /run/ohmnt/...` on the
   private loop-mounted copy of system.img (unmounted after use).
+- **Guest probe `test/heapwatch/`** (builds static for both arches):
+  - `heapwatch.c` — mmaps a 1M binder-like region + 2M stack-like
+    region + 256K malloc block, fills recognizable patterns, and loops:
+    fresh-thread spawn with malloc/free churn (FFRT-worker mimic),
+    per-page XOR checksums (catches S1 content replacement without
+    needing the process to crash), same-value rewrites of every page
+    boundary (catches S2 permission strip and S3 VMA loss via SIGSEGV),
+    and fork+exit churn every 64 rounds (processdump mimic; the
+    post-fork window is re-checked immediately).
+  - On damage or fault it prints the fault address / page / old and new
+    checksums and a full `/proc/self/maps` snapshot, then exits 42/43.
+  - `mkinitrd-hw.py` packs an initrd with just the probe;
+    `run-boot.sh [seconds] [riscv64|x86_64]` boots it with
+    `init=/heapwatch` (q35 single QEMU, timeout-killed).
+  - Verified 150s on the x86_64 kernel: HEAPWATCH-START + 20k rounds
+    of beats, no false positives. A damage hit serializes as
+    `HEAPWATCH-DAMAGE ... (S1 ...)` / `HEAPWATCH-FAULT ... (S2/S3 ...)`
+    plus the maps dump — grep for `HEAPWATCH-` after a run.
+  - To reproduce the real thing it likely needs mremap traffic: extend
+    `fresh_worker` with a periodic `mremap(MREMAP_MAYMOVE)` of a
+    2-4MB mmap block (the audit agent's first experiment).
