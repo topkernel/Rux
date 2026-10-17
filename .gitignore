@@ -109,3 +109,5 @@ userspace/soft-fp/libsoftfp-pin.a
 runs/*/fire.img
 runs/*/qemu.sock
 runs/*/qemu.pid
+test/heapwatch/initrd-hw*.cpio*
+test/heapwatch/heapwatch
