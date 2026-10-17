@@ -86,32 +86,66 @@ pub const DEVICE_ALIAS_SIZE: usize = 0x5000_0000;
 /// (OH boot: 6 virtio-blk + net x2 + keyboard + tablet) QEMU q35 places
 /// the 64-bit BARs into the high PCI hole (observed base 0xc000000000 =
 /// 768GB — QEMU moves this with device count/RAM, a previous boot placed
-/// them below 512GB, which is why the window must be generous). Eight
-/// PML4 slots of PA [0x1_0000_0000, 0x101_0000_0000) mirrored with 1GB
-/// leaves — eight PDP tables of page-table cost.
+/// them below 512GB, which is why the window must be generous). Two PML4
+/// slots of PA [0x1_0000_0000, 0x101_0000_0000) mirrored with 1GB leaves
+/// — two PDP tables of page-table cost.
 pub const DEVICE_ALIAS64_BASE: usize = 0xffff_8a00_0000_0000;
 /// Physical base the 64-bit alias window mirrors (4GB).
 pub const DEVICE_ALIAS64_PHYS_BASE: usize = 0x1_0000_0000;
-/// Window size: 4TB (eight PML4 slots, [4GB, 4TB+4GB)).
+/// Window size: 1TB (two PML4 slots, [4GB, 4GB+1TB)).
 pub const DEVICE_ALIAS64_SIZE: usize = 0x100_0000_0000;
+
+/// Dynamic per-BAR ioremap arena (kernel half, K1-BAR). Under KVM the q35
+/// host bridge assigns virtio 64-bit BARs at arbitrary above-4G addresses —
+/// observed at 0xe0000008000 (14TiB) with the full OH device set, far
+/// beyond any fixed window worth pre-mapping (TCG on the same machine
+/// stayed under 1TB; the placement is firmware/accelerator policy, not a
+/// contract). `mmu_init::ioremap_bar_kernel` bump-allocates a chunk here
+/// per out-of-window BAR, maps it into the static root's kernel half, and
+/// records it; `device_alias` resolves it through that registry — Linux
+/// ioremap parity, minus the allocator. Sits directly above DEVICE_ALIAS64
+/// so all device-alias VA real estate stays contiguous below the vmalloc
+/// region; bounded, and a full arena refuses the ioremap loudly instead of
+/// silently aliasing into vmalloc.
+pub const IOREMAP_ARENA_BASE: usize = DEVICE_ALIAS64_BASE + DEVICE_ALIAS64_SIZE;
+/// Arena size: 4TB of bump space (8 PML4 slots, VA only — pages are
+/// allocated per BAR on demand).
+pub const IOREMAP_ARENA_SIZE: usize = 0x400_0000_0000;
+pub const IOREMAP_ARENA_END: usize = IOREMAP_ARENA_BASE + IOREMAP_ARENA_SIZE;
 
 /// Translate a device physical address into its kernel-half alias VA.
 /// Covers the two fixed windows (low [0xb0000000, 4GB), high
-/// [4GB, 4TB+4GB)); anything else falls back to the identity address
-/// (valid under the boot root where ioremap_device_window mapped it, but
-/// NOT under a user CR3 — the caller warns, so an out-of-window BAR is
-/// visible in the boot log instead of a KERNPANIC on its first
-/// interrupt-context access).
+/// [4GB, 4GB+1TB)), then any per-BAR ioremap registered by
+/// `mmu_init::ioremap_bar_kernel` (K1-BAR: above-window 64-bit BARs);
+/// anything else falls back to the identity address (valid under the boot
+/// root where ioremap_device_window mapped it, but NOT under a user CR3 —
+/// the caller warns, so an out-of-window BAR is visible in the boot log
+/// instead of a KERNPANIC on its first interrupt-context access).
 #[inline]
-pub const fn device_alias(pa: u64) -> u64 {
+pub fn device_alias(pa: u64) -> u64 {
+    if let Some(va) = device_alias_fixed(pa) {
+        return va;
+    }
+    if let Some(va) = crate::arch::mm::mmu_init::device_alias_dyn(pa) {
+        return va;
+    }
+    pa
+}
+
+/// Arithmetic-only fixed-window alias (no registry): the two statically
+/// mapped windows. Shared by `device_alias` and by
+/// `mmu_init::ioremap_bar_kernel`'s already-covered check so a BAR inside
+/// a fixed window never burns arena space.
+#[inline]
+pub const fn device_alias_fixed(pa: u64) -> Option<u64> {
     if pa >= DEVICE_ALIAS_PHYS_BASE as u64 && pa < 0x1_0000_0000 {
-        DEVICE_ALIAS_BASE as u64 + (pa - DEVICE_ALIAS_PHYS_BASE as u64)
+        Some(DEVICE_ALIAS_BASE as u64 + (pa - DEVICE_ALIAS_PHYS_BASE as u64))
     } else if pa >= DEVICE_ALIAS64_PHYS_BASE as u64
         && pa < DEVICE_ALIAS64_PHYS_BASE as u64 + DEVICE_ALIAS64_SIZE as u64
     {
-        DEVICE_ALIAS64_BASE as u64 + (pa - DEVICE_ALIAS64_PHYS_BASE as u64)
+        Some(DEVICE_ALIAS64_BASE as u64 + (pa - DEVICE_ALIAS64_PHYS_BASE as u64))
     } else {
-        pa
+        None
     }
 }
 
