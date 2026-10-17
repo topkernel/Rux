@@ -106,9 +106,14 @@ pub enum DfxSwitch {
     /// main's d0fb238c+b18f683f (my branch adds fd + a hex prefix for
     /// offline frame decoding).
     WriteTrace,
+    /// Per-transaction binder trace (HDF devmgr↔devhost handshake hunt):
+    /// one "btx:" line per resolved BC_TRANSACTION/BC_REPLY (from pid,
+    /// target pid, handle, code, oneway/twoway, data sizes). Default
+    /// OFF — a full OH boot resolves tens of thousands of transactions.
+    BinderTrace,
 }
 
-const SWITCH_COUNT: usize = 16;
+const SWITCH_COUNT: usize = 17;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -131,6 +136,7 @@ impl DfxSwitch {
             DfxSwitch::SchedTrace => 13,
             DfxSwitch::Steptrace => 14,
             DfxSwitch::WriteTrace => 15,
+            DfxSwitch::BinderTrace => 16,
         }
     }
 
@@ -152,6 +158,7 @@ impl DfxSwitch {
             "schedtrace" => Some(DfxSwitch::SchedTrace),
             "steptrace" => Some(DfxSwitch::Steptrace),
             "writetrace" => Some(DfxSwitch::WriteTrace),
+            "bindertrace" => Some(DfxSwitch::BinderTrace),
             _ => None,
         }
     }

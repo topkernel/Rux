@@ -2825,6 +2825,25 @@ fn binder_transaction(
             txn_id = world.next_id;
             world.next_id += 1;
 
+            // dfx=bindertrace: one line per resolved transaction — the
+            // HDF devmgr↔devhost handshake debugging needed the actual
+            // conversation (who calls whom, which codes, oneway or not),
+            // not just the failures.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
+                crate::pr_info!(
+                    "btx: #{} pid {}{} -> pid {} h{} code {} {} ds {} os {}",
+                    txn_id,
+                    proc.pid,
+                    if reply { " R" } else { "" },
+                    target_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                    tr.target_handle,
+                    tr.code,
+                    if oneway { "oneway" } else { "twoway" },
+                    data_size,
+                    offsets_size
+                );
+            }
+
             let is_async = !reply && oneway;
             let _ = is_async;
 
