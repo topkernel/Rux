@@ -43,7 +43,8 @@ def main():
     ap.add_argument("--secs", type=int, default=1500)
     ap.add_argument("--smp", type=int, default=2)
     ap.add_argument("--mem", default="2G")
-    ap.add_argument("--accel", default="kvm,thread=multi")
+    ap.add_argument("--accel", default="kvm",
+                    help="kvm | tcg,thread=multi | tcg,thread=single")
     ap.add_argument("--kernel", default=DEFAULT_KERNEL)
     ap.add_argument("--extra-append", default="dfx=ledger")
     ap.add_argument("--magic-every", type=float, default=120.0)
