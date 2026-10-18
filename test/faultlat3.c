@@ -165,13 +165,18 @@ int main(void) {
      * ~= 1.3s per loader when cached; thrash shows up as tens of seconds. */
     read_meminfo("after");
     putsu_("FAULTLAT3 all loaders done in ", wall); puts_("ms\n");
-    /* Verdict from wall time: 6 loaders x 4096 pages at the raw-path
-     * ~54us/page is ~1.3s of pure fault work per loader, and the writers
-     * interleave — FAST is anything under 15s; the OH-family thrash is
-     * tens of seconds to minutes. Per-loader avg/max lines above carry
-     * the precise per-page numbers. */
-    if (wall > 15000) puts_("FAULTLAT3 RESULT: SLOW wall_ms=");
-    else puts_("FAULTLAT3 RESULT: FAST wall_ms=");
+    /* Verdict from wall time, scaled to the file size: SLOW when wall
+     * implies > 2 ms/page across the loader set (raw-path avg is
+     * ~0.05-0.5 ms/page; the thrash family is 10+ ms/page), with a 15 s
+     * floor for small files. Per-loader avg/max lines above carry the
+     * precise per-page numbers. */
+    {
+        unsigned long npages = (unsigned long)LOAD_MB * 256;
+        unsigned long slow_ms = 2 * npages;
+        if (slow_ms < 15000) slow_ms = 15000;
+        if (wall > slow_ms) puts_("FAULTLAT3 RESULT: SLOW wall_ms=");
+        else puts_("FAULTLAT3 RESULT: FAST wall_ms=");
+    }
     putu_(wall); puts_(" sink=");
     putu_(sink & 0xffff); puts_("\n");
     return 0;

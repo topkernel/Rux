@@ -42,7 +42,7 @@ def build_probe(out):
     return True
 
 
-def build_image(img):
+def build_image(img, load_mb=16):
     staging = os.path.join(WORK, "faultlat3_root")
     if os.path.exists(staging):
         shutil.rmtree(staging)
@@ -55,10 +55,10 @@ def build_image(img):
     for i in range(6):
         big = os.path.join(staging, "test/l%d.bin" % i)
         with open(big, "wb") as f:
-            for _ in range(16):
+            for _ in range(load_mb):
                 f.write(blk)
     r = subprocess.run([MKFS, "-q", "-F", "-O", "^metadata_csum",
-                        "-d", staging, img, "%dM" % (SIZE_MB + 80)],
+                        "-d", staging, img, "%dM" % (SIZE_MB + 6 * load_mb + 16)],
                        capture_output=True, text=True)
     if r.returncode != 0:
         print("[img] mkfs failed: %s" % r.stderr)
@@ -75,6 +75,10 @@ def main():
     ap.add_argument("--kernel", default=os.path.join(
         WT, "target/x86_64-unknown-none/debug/bzImage"))
     ap.add_argument("--tag", default=None, help="suffix for serial log")
+    ap.add_argument("--load-mb", type=int, default=16,
+                    help="MiB per loader file (6 loaders); use 128 on a 1G "
+                         "guest to force the page cache past its cap "
+                         "(the at-cap eviction regime the OH boot lives in)")
     args = ap.parse_args()
 
     os.makedirs(WORK, exist_ok=True)
@@ -84,7 +88,7 @@ def main():
     if not build_probe(os.path.join(WORK, "faultlat3")):
         return 2
     img = os.path.join(WORK, "faultlat3.img")
-    if not build_image(img):
+    if not build_image(img, args.load_mb):
         return 2
 
     tag = args.tag or "run"
