@@ -97,7 +97,7 @@ unsafe fn w32(base: usize, off: usize, v: u32) {
 /// discipline compares the HIGH halves around the low-half read: at
 /// 100 MHz the low 32 bits advance between any two MMIO reads (so
 /// comparing low halves would loop forever), while the high half
-/// changes once every 2^32 / 1e8 s ~= 429 s.
+/// changes once every 2^32 / 1e8 s ~= 42.9 s.
 ///
 /// The counter is 64-bit on QEMU (COUNT_SIZE_CAP) and at 100 MHz wraps
 /// after ~5.8 kyr, so u64 arithmetic needs no wrap handling.

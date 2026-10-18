@@ -605,6 +605,13 @@ pub fn timer_softirq_handler(_nr: usize) {
         LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
         crate::dfx::taskdump::dump_all_tasks("periodic");    }
 
+    // dfx=monowatch: ~1 Hz timebase jump tripwire (backward motion or
+    // multi-second spikes, clocksource named) — same printk discipline
+    // as the periodic dump above.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MonoWatch) {
+        crate::dfx::monowatch::tick(current);
+    }
+
     // dfx=ledger: run a pending on-demand accounting census latched by the
     // "LEDGER!" UART magic. The RX IRQ itself only sets the flag (printk
     // from IRQ context is the classic self-wedge); this softirq already

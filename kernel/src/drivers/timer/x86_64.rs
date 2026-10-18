@@ -124,6 +124,12 @@ pub fn read_time() -> u64 {
     }
 }
 
+/// True when the calibrated TSC is the active timekeeper (no HPET).
+/// Exposed for diagnostics (dfx monowatch names the clocksource).
+pub fn tsc_active() -> bool {
+    TSC_ACTIVE.load(Ordering::Acquire) != 0
+}
+
 /// Called by the intc/APIC driver after calibration: promote the TSC to
 /// timekeeper.  `tsc_freq == 0` (failed calibration) keeps the PIT phase.
 /// No-op when the HPET clocksource is active — the TSC then stays a

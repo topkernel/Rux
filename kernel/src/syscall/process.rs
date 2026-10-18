@@ -2452,13 +2452,48 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
 }
 
 /// sys_rt_tgsigqueueinfo - send signal with data to a precise THREAD
-/// (Linux asm-generic NR 240: 3 parameters — tgid, tid, uinfo)
+/// (Linux asm-generic NR 240: 4 parameters — tgid, tid, sig, uinfo).
+///
+/// HILOGD fix: this previously parsed THREE arguments (tgid, tid,
+/// uinfo=args[2]) — args[2] is the SIGNAL number, so uinfo became a
+/// garbage pointer the size of the signo (e.g. 0x23), failed
+/// access_ok, and every caller got EFAULT. hilogd's DFX stack-dump
+/// path (rt_tgsigqueueinfo(self-tgid, self-tid, SIGDUMP, &si on its
+/// own stack) — b154/sweep1: `EFAULTTRAC: nr=240 a0=<tgid> a1=<tid>`
+/// immediately before the hilogd.server SIGSEGV at 0x18) depends on
+/// this syscall succeeding; with EFAULT the whole hilog pipeline was
+/// dead from boot. Linux reads sig=args[2], uinfo=args[3]
+/// (kernel/signal.c sys_rt_tgsigqueueinfo).
 pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
     let tgid = args[0] as u32;
     let tid = args[1] as u32;
-    let uinfo = args[2] as *const u8;
+    let sig = args[2] as i32;
+    let uinfo = args[3] as *const u8;
 
-    // Resolve the exact thread first.
+    // Linux order (kernel/signal.c): copy siginfo from user FIRST
+    // (EFAULT), then valid_signal (EINVAL), then the thread lookup
+    // (ESRCH), then the si_code forge check (EPERM), then permission,
+    // and sig==0 validates only — no delivery.
+    if uinfo.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::uaccess::access_ok(uinfo as usize, 128) {
+        return -(errno::EFAULT as i64);
+    }
+    // si_signo (offset 0), si_code (offset 8), si_value.sival_ptr
+    // (offset 24) — the fields we deliver; Linux copies the full
+    // 128-byte struct and overwrites si_signo with `sig`.
+    let mut buf = [0u8; 32];
+    if unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), uinfo, 32) } != 0 {
+        return -(errno::EFAULT as i64);
+    }
+    let si_code = i32::from_le_bytes(buf[8..12].try_into().unwrap());
+
+    if sig < 0 || sig > 64 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Resolve the exact thread.
     // SAFETY: find_task_by_pid returns valid pointer when non-null.
     let target = unsafe { crate::sched::find_task_by_pid(tid) };
     if target.is_null() {
@@ -2469,50 +2504,20 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
     if target_task.tgid() != tgid {
         return -(errno::ESRCH as i64);
     }
-    if !crate::security::can_send_signal(target_task.cred()) {
+
+    // Linux (do_rt_tgsigqueueinfo): si_code >= 0 or SI_TKILL (-6) means
+    // the caller tries to forge a kernel signal source — EPERM.
+    if si_code >= 0 || si_code == -6 {
         return -(errno::EPERM as i64);
     }
-
-    if uinfo.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-    if !crate::arch::uaccess::access_ok(uinfo as usize, 128) {
-        return -(errno::EFAULT as i64);
-    }
-
-    // Read si_signo (offset 0) and si_code (offset 8).
-    let mut hdr = [0u8; 12];
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(hdr.as_mut_ptr(), uinfo, 12)
-    } != 0
-    {
-        return -(errno::EFAULT as i64);
-    }
-    let sig = i32::from_le_bytes(hdr[0..4].try_into().unwrap());
-    if sig < 0 || sig > 64 {
-        return -(errno::EINVAL as i64);
+    if !crate::security::can_send_signal(target_task.cred()) {
+        return -(errno::EPERM as i64);
     }
     if sig == 0 {
         return 0;
     }
-    let si_code = i32::from_le_bytes(hdr[8..12].try_into().unwrap());
-    if si_code >= 0 {
-        return -(errno::EPERM as i64);
-    }
 
-    // Preserve the user payload (si_value @24) for SA_SIGINFO receivers,
-    // mirroring rt_sigqueueinfo above.
-    let mut payload = [0u8; 8];
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(
-            payload.as_mut_ptr(),
-            uinfo.add(24),
-            8,
-        )
-    } != 0
-    {
-        return -(errno::EFAULT as i64);
-    }
+    let payload: [u8; 8] = buf[24..32].try_into().unwrap();
     let mut info = crate::signal::SigInfo::new(
         sig,
         si_code,

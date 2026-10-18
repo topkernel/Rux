@@ -146,9 +146,16 @@ pub enum DfxSwitch {
     /// disagree on the address-space identity. Rate-limited to 32 lines;
     /// the scan walks all buckets so it stays behind this switch.
     FutexTrace,
+    /// CLOCK_MONOTONIC jump tripwire (timer-lane hunt): ~1 Hz samples of
+    /// the shared timebase from the timer softirq; reports backward
+    /// motion or multi-second spikes with the active clocksource named
+    /// (see dfx/monowatch.rs). Near-zero cost; meant to ride along on
+    /// every hunt boot so clock jumps are caught live instead of
+    /// inferred from impossible probe totals afterwards.
+    MonoWatch,
 }
 
-const SWITCH_COUNT: usize = 21;
+const SWITCH_COUNT: usize = 22;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -180,6 +187,7 @@ impl DfxSwitch {
             DfxSwitch::BinderTrace => 18,
             DfxSwitch::SyscallTrace => 19,
             DfxSwitch::FutexTrace => 20,
+            DfxSwitch::MonoWatch => 21,
         }
     }
 
@@ -206,6 +214,7 @@ impl DfxSwitch {
             "bindertrace" => Some(DfxSwitch::BinderTrace),
             "syscalltrace" => Some(DfxSwitch::SyscallTrace),
             "futextrace" => Some(DfxSwitch::FutexTrace),
+            "monowatch" => Some(DfxSwitch::MonoWatch),
             _ => None,
         }
     }
