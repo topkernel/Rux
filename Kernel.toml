@@ -21,7 +21,17 @@ enable_riscv64 = true
 
 [memory]
 # Kernel heap size (MB) - must be power of 2 (16, 32, 64...)
-kernel_heap_size = 512
+# 1024 for the OpenHarmony lane: a full OH boot (79 services, ~500
+# tasks, per-process page tables, pipe/socket buffers) sat the 512 MiB
+# window at ~513/524 MiB, the clone heap-reserve gate (<8 MiB free)
+# tripped, and every pthread_create came back EAGAIN — foundation (and
+# every FFRT-using service) aborted on the first std::thread spawn
+# failure and the boot looped on the critical-service reboot. On Linux
+# none of this is kernel-heap backed (slab is page-backed and
+# reclaimable); the window here is a static carveout, so it must be
+# sized for the real working set. Whether usage also LEAKS past this
+# is Agent C's memwatch hunt — this only buys the launcher a chance.
+kernel_heap_size = 1024
 # Physical memory size (MB)
 physical_memory = 2048
 # Page size
