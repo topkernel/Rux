@@ -2295,6 +2295,29 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 /// discipline that R7-A2 predated: register on the queue BEFORE
 /// re-checking the state, EXCLUSIVE/FIFO, wake-one on release, and undo
 /// a spurious concurrent enqueue on the fast path.
+///
+/// R84 (b139 fairness): wake-one alone is NOT a handoff. The woken
+/// waiter must first be scheduled, and in that window any FRESH
+/// fast-path caller (`!st.locked` → take) barged past it. Under KVM's
+/// I/O concurrency every .so page fault re-enters ext4 through the page
+/// cache, so the bargers never stopped: oh-b139 parked bootanimation /
+/// sa_main / render_service for 10+ s (47 EXT4-BIGLOCK-STALL prints,
+/// holder cycling at held=0j) while 10+ services sat UNINTERRUPTIBLE —
+/// pure fairness starvation (nr_running=6 with idle CPU headroom), not
+/// a deadlock. TCG boots flowed only because lower concurrency means
+/// less barging. Fixed with Linux-mutex-HANDOFF semantics:
+///  - `waiters` counts parked tasks plus unspent wake tokens;
+///  - fresh SLEEPABLE callers are gated (`try_acquire_or_recurse_fair`):
+///    a free lock is taken only when `waiters == 0`, so they queue;
+///  - the woken waiter spends its token as ownership
+///    (`try_acquire_wake_token`): unconditional take of the free lock,
+///    count dropped in the same critical section;
+///  - non-sleeping spinners (no task ctx / preempt_count != 0) stay
+///    UNGATED — they cannot queue, so the queue can never serve them;
+///  - a waiter parked longer than ANTI_STARVE_JIFFIES may take a
+///    free lock at the registration re-check even with other waiters
+///    queued: bounded-latency self-heal so the gate itself can never
+///    strand a free lock behind a stuck count.
 pub static EXT4_BIG_LOCK: Ext4BigLock = Ext4BigLock::new();
 
 /// Task-recursive big lock.
@@ -2339,9 +2362,28 @@ struct Ext4BigState {
     /// parks every later ext4 user in D-state forever: the full3/inst-full1
     /// wedge shape).
     acquired_at: u64,
+    /// R84 (b139 fairness): tasks parked on `wait` PLUS tasks holding an
+    /// unspent release() wake token. A task enters the count when it
+    /// first registers on the queue and leaves it in the same critical
+    /// section in which it takes the lock (token spend or sole-waiter
+    /// take). While nonzero, the fair fast path refuses fresh sleepable
+    /// acquirers — see try_acquire_or_recurse_fair.
+    waiters: u32,
 }
 
 impl Ext4BigLock {
+    /// R84 (b139 fairness): a waiter older than this may take a FREE
+    /// lock at the registration re-check even with other waiters
+    /// queued — the self-heal that bounds any residual gate pathology
+    /// (stale count, token-holder races beyond the analysis) at a few
+    /// seconds of extra wait instead of an unbounded wedge.
+    const ANTI_STARVE_JIFFIES: u64 = crate::config::KERNEL_HZ as u64 * 5;
+
+    /// R84: stall tripwire threshold on the WAITER's own queue age
+    /// (first registration to now). Normal parking lasts milliseconds;
+    /// 3 s queued means the handoff is not reaching this waiter.
+    const STALL_WAITER_JIFFIES: u64 = crate::config::KERNEL_HZ as u64 * 3;
+
     const fn new() -> Self {
         Self {
             state: crate::sync::spinlock::Spinlock::new(Ext4BigState {
@@ -2349,13 +2391,24 @@ impl Ext4BigLock {
                 owner: 0,
                 depth: 0,
                 acquired_at: 0,
+                waiters: 0,
             }),
             wait: crate::process::wait::WaitQueueHead::new(),
         }
     }
 
-    /// Try to take the lock / recurse into it. Returns the guard on
-    /// success. Caller must NOT hold the state spinlock.
+    /// Try to take the lock / recurse into it, UNGATED: a free lock goes
+    /// to whoever asks. Caller must NOT hold the state spinlock.
+    ///
+    /// R84 (b139 fairness): this is no longer the general acquire. It
+    /// survives for exactly the callers the queue cannot serve:
+    ///  - the non-sleeping spinner in lock_fair (no task context or
+    ///    preempt_count != 0 — it cannot register on the waitqueue, so
+    ///    gating it would livelock it behind a queue that never drains
+    ///    under load; its section is preempt/IRQ-constrained and short);
+    ///  - any path that must never be rejected for recursion reasons.
+    /// Fresh sleepable callers use try_acquire_or_recurse_fair; the
+    /// woken waiter uses try_acquire_wake_token.
     fn try_acquire_or_recurse(&'static self, pid: u32) -> Option<Ext4BigGuard> {
         let mut st = self.state.lock();
         if !st.locked {
@@ -2372,15 +2425,72 @@ impl Ext4BigLock {
         }
     }
 
+    /// R84 (b139 fairness): the acquire for fresh sleepable callers.
+    /// Identical to try_acquire_or_recurse except a FREE lock is only
+    /// taken when no waiter is parked and no wake token is outstanding
+    /// (`waiters == 0`) — everyone else must queue. This is what stops
+    /// the barging: before it, any task on another CPU could take the
+    /// just-released lock during the scheduling window of the waiter
+    /// that release() had woken, and under KVM's .so-page-fault churn
+    /// the bargers never stopped (47 STALL prints, waiters aged 10+ s
+    /// while holders cycled at held=0j).
+    fn try_acquire_or_recurse_fair(&'static self, pid: u32) -> Option<Ext4BigGuard> {
+        let mut st = self.state.lock();
+        if !st.locked && st.waiters == 0 {
+            st.locked = true;
+            st.owner = pid;
+            st.depth = 1;
+            st.acquired_at = crate::drivers::timer::get_jiffies();
+            Some(Ext4BigGuard { lock: self })
+        } else if st.owner == pid {
+            st.depth += 1;
+            Some(Ext4BigGuard { lock: self })
+        } else {
+            None
+        }
+    }
+
+    /// R84 (b139 fairness): spend the release() handoff token. The woken
+    /// waiter takes a FREE lock unconditionally and leaves the waiter
+    /// count in the same critical section — the count keeps covering the
+    /// token holder for the whole wake-to-take window, which is what
+    /// holds fresh callers at the gate until ownership has actually
+    /// changed hands (Linux mutex HANDOFF, in miniature). A held lock or
+    /// a lost race against another token holder returns None: the caller
+    /// re-parks and keeps its count. Recursion is honored without
+    /// touching the count (a counted task cannot be the owner — it has
+    /// not taken the lock yet — so that branch is unreachable defensive
+    /// code; the anti-starvation override heals any hypothetical stale
+    /// count it would leave behind).
+    fn try_acquire_wake_token(&'static self, pid: u32) -> Option<Ext4BigGuard> {
+        let mut st = self.state.lock();
+        if st.owner == pid {
+            st.depth += 1;
+            Some(Ext4BigGuard { lock: self })
+        } else if !st.locked {
+            if st.waiters > 0 {
+                st.waiters -= 1;
+            }
+            st.locked = true;
+            st.owner = pid;
+            st.depth = 1;
+            st.acquired_at = crate::drivers::timer::get_jiffies();
+            Some(Ext4BigGuard { lock: self })
+        } else {
+            None
+        }
+    }
+
     /// Acquire (sleep on contention, recursive per task).
     pub fn lock_fair(&'static self) -> Ext4BigGuard {
         let pid = crate::process::current_pid();
 
         // Adaptive: a short spin first covers the common case of a holder
         // that is on-CPU and about to release (boot-time short sections
-        // never touch the waitqueue at all).
+        // never touch the waitqueue at all). R84: gated so the spin
+        // cannot barge past parked waiters either.
         for _ in 0..4 {
-            if let Some(g) = self.try_acquire_or_recurse(pid) {
+            if let Some(g) = self.try_acquire_or_recurse_fair(pid) {
                 return g;
             }
             for _ in 0..64 {
@@ -2420,8 +2530,33 @@ impl Ext4BigLock {
         };
         let mut wait_snap_set = false;
 
+        // R84 (b139 fairness) waiter bookkeeping:
+        //  counted      <=> st.waiters already includes us (we are on the
+        //                   queue or hold an unspent wake token); the count
+        //                   is entered once at first registration and left
+        //                   in the same critical section as a take.
+        //  woken_retry  <=> schedule() just returned: the release() that
+        //                   woke us spent its one handoff token on us.
+        //  first_park   <=> jiffies of our FIRST registration; re-parks
+        //                   keep it so the anti-starvation override below
+        //                   measures true queue age.
+        let mut counted = false;
+        let mut woken_retry = false;
+        let mut first_park = 0u64;
+
         loop {
-            if let Some(g) = self.try_acquire_or_recurse(pid) {
+            if woken_retry {
+                // Handoff: the free lock is ours if it is still free.
+                // Losing it means another token holder won the race or a
+                // spurious wake — fall through and re-park like any
+                // contender (our count stays).
+                if let Some(g) = self.try_acquire_wake_token(pid) {
+                    counted = false;
+                    return g;
+                }
+                woken_retry = false;
+            }
+            if let Some(g) = self.try_acquire_or_recurse_fair(pid) {
                 return g;
             }
             // R83b (R74 producer hunt): every capture so far had the victim
@@ -2451,8 +2586,53 @@ impl Ext4BigLock {
             // attempt finds us queued and hands its wake token to us.
             // EXCLUSIVE + tail insert => FIFO, one wake per release.
             self.wait.prepare_to_wait(cur, true, false);
-            match self.try_acquire_or_recurse(pid) {
-                Some(g) => {
+            // R7-B6b re-check, fairness-aware (R84): count ourselves under
+            // the state lock — once; re-parks keep the count — then take
+            // the free lock ONLY when no OTHER waiter/token exists
+            // (`waiters == 1`: us). That covers the release that raced
+            // our registration (its wake found an empty queue — nobody
+            // else can ever hand the lock out, so we must). With older
+            // waiters queued the pending handoff belongs to them and we
+            // sleep like everyone else. The anti-starvation override
+            // (parked > ANTI_STARVE_JIFFIES and the lock is free) is the
+            // self-heal that guarantees the gate can never strand a free
+            // lock behind a stuck count: it converts any residual
+            // pathology into bounded latency instead of a wedge, and in
+            // normal operation it never fires because tokens already
+            // flow FIFO.
+            {
+                let now = crate::drivers::timer::get_jiffies();
+                let mut st = self.state.lock();
+                if !counted {
+                    st.waiters += 1;
+                    counted = true;
+                    first_park = now;
+                }
+                let take = if st.owner == pid {
+                    // Unreachable while parked (a counted waiter has not
+                    // taken the lock, so it cannot own it), kept so
+                    // recursion is honored on every path.
+                    st.waiters -= 1;
+                    counted = false;
+                    st.depth += 1;
+                    true
+                } else if !st.locked
+                    && (st.waiters == 1
+                        || now.wrapping_sub(first_park)
+                            > Self::ANTI_STARVE_JIFFIES)
+                {
+                    st.waiters -= 1;
+                    counted = false;
+                    st.locked = true;
+                    st.owner = pid;
+                    st.depth = 1;
+                    st.acquired_at = now;
+                    true
+                } else {
+                    false
+                };
+                drop(st);
+                if take {
                     self.wait.finish_wait(cur);
                     // A concurrent release()'s wake_up_one may have seen
                     // us queued+sleeping and enqueued us between the
@@ -2460,55 +2640,66 @@ impl Ext4BigLock {
                     // per-class on_rq guards make this a no-op when we
                     // were not actually enqueued). Mirrors Semaphore::down.
                     crate::sched::dequeue_task(&*cur);
-                    return g;
+                    return Ext4BigGuard { lock: self };
                 }
-                None => {}
             }
             // Sleep until release() wakes us (UNINTERRUPTIBLE: ext4 ops
             // are not signal-interruptible and the guard must be carried
             // back out of the critical section).
             //
-            // R77 (wedge hunt tripwire): a waiter parked here for many
-            // seconds means the holder leaked the lock (killed
-            // synchronously inside the critical section — RAII never runs
-            // through do_exit). Name the holder, its depth, and how long
-            // it has held, rate-limited to one line per 10 s.
+            // R77 (wedge hunt tripwire): a holder that never releases
+            // (killed synchronously inside the critical section — RAII
+            // never runs through do_exit) shows up as held growing. R84
+            // (b139 fairness): a WAITER parked/retrying for many seconds
+            // while holders cycle (held ~0) is the starvation shape the
+            // fairness gate exists to kill. Normal parking lasts
+            // milliseconds, so the tripwire only prints when EITHER the
+            // waiter has been queued 3+ s (fairness starvation) or the
+            // holder has held 10+ s (leak) — rate-limited to one line
+            // per 10 s either way.
             {
-                static LAST_WAIT_REPORT: core::sync::atomic::AtomicU64 =
-                    core::sync::atomic::AtomicU64::new(0);
                 let now = crate::drivers::timer::get_jiffies();
-                let last = LAST_WAIT_REPORT.load(core::sync::atomic::Ordering::Relaxed);
-                let (owner, depth, held) = {
+                let (owner, depth, held, nwaiters) = {
                     let st = self.state.lock();
-                    (st.owner, st.depth, now.saturating_sub(st.acquired_at))
+                    (st.owner, st.depth, now.saturating_sub(st.acquired_at), st.waiters)
                 };
-                if locked_owner_alive_wait(&owner)
-                    && now.wrapping_sub(last) >= crate::config::KERNEL_HZ as u64 * 10
-                    && LAST_WAIT_REPORT
-                        .compare_exchange(
-                            last,
-                            now,
-                            core::sync::atomic::Ordering::Relaxed,
-                            core::sync::atomic::Ordering::Relaxed,
-                        )
-                        .is_ok()
+                let waited = now.wrapping_sub(first_park);
+                if (waited >= Self::STALL_WAITER_JIFFIES
+                    || held >= crate::config::KERNEL_HZ as u64 * 10)
+                    && locked_owner_alive_wait(&owner)
                 {
-                    let cur_pid = crate::process::current_pid();
-                    crate::pr_err!(
-                        "EXT4-BIGLOCK-STALL waiter={} holder={} depth={} held={}j",
-                        cur_pid,
-                        owner,
-                        depth,
-                        held
-                    );
+                    static LAST_WAIT_REPORT: core::sync::atomic::AtomicU64 =
+                        core::sync::atomic::AtomicU64::new(0);
+                    let last = LAST_WAIT_REPORT.load(core::sync::atomic::Ordering::Relaxed);
+                    if now.wrapping_sub(last) >= crate::config::KERNEL_HZ as u64 * 10
+                        && LAST_WAIT_REPORT
+                            .compare_exchange(
+                                last,
+                                now,
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            )
+                            .is_ok()
+                    {
+                        let cur_pid = crate::process::current_pid();
+                        crate::pr_err!(
+                            "EXT4-BIGLOCK-STALL waiter={} holder={} depth={} held={}j waiters={} waited={}j",
+                            cur_pid,
+                            owner,
+                            depth,
+                            held,
+                            nwaiters,
+                            waited
+                        );
+                    }
                 }
             }
             crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
             self.wait.finish_wait(cur);
-            // Woken: loop and retry the acquire (another task may have
-            // barged past us — the release that woke us is not a
-            // reservation, just a retry token).
+            // Woken: the release() that issued this wake spent its handoff
+            // token on us — spend it at the top of the loop.
+            woken_retry = true;
         }
     }
 
@@ -2523,10 +2714,16 @@ impl Ext4BigLock {
                 }
             }
         }
-        // Hand the lock to one waiter. Done outside the state spinlock:
-        // the waker takes the waitqueue lock, the waiter's finish_wait
-        // takes it too — never both at once. Waking an empty queue is a
-        // no-op, so this is safe even without waiter accounting.
+        // Hand the lock to one waiter. R84 (b139 fairness): this wake is
+        // a HANDOFF token, not a retry hint — the woken waiter takes the
+        // free lock unconditionally in lock_fair, and
+        // try_acquire_or_recurse_fair keeps fresh callers queued behind
+        // it until the token is spent. Still done outside the state
+        // spinlock: the waker takes the waitqueue lock, the waiter's
+        // finish_wait takes it too — never both at once. Waking an empty
+        // queue is a no-op (an outstanding token holder takes the free
+        // lock on its own), so this is safe even without waiter
+        // accounting.
         self.wait.wake_up_one();
     }
 

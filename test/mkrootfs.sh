@@ -225,6 +225,37 @@ fi
 # "Permission denied at __cfi_slowpath" SIGSEGV family that kills samgr).
 MUSL_SDK="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
 
+# Build + install the EXT4_BIG_LOCK fairness probe (the b139 starvation
+# shape — many tenants driving page-cache MISS reads through ext4 at SMP2
+# while a 10 Hz canary reader asserts bounded latency; gate for the R84
+# handoff/fairness fix). musl recipe, NOT static glibc: the current host
+# glibc.a ships riscv vector stringops that SIGILL on the no-V boot CPU
+# regardless of -march (verified: orphan_storm, rebuilt by the stock
+# recipe, traps at insn16=0x7057).
+BIGFAIR_SRC="$PROJECT_ROOT/test/biglock_fair.c"
+MUSL_SDK_RISCV="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
+if [ ! -d "$MUSL_SDK_RISCV/lib" ]; then
+    # Fall back to the shared main-repo SDK if this worktree has not
+    # built one (make sdk).
+    MUSL_SDK_RISCV="/home/william/workspace/Rux/toolchain/riscv64-rux-linux-musl"
+fi
+if [ -f "$BIGFAIR_SRC" ] && [ -d "$MUSL_SDK_RISCV/lib" ]; then
+    echo "Installing biglock_fair to /test/biglock_fair..."
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -static -O2 -pthread -Wall \
+         -nostdinc -isystem "$MUSL_SDK_RISCV/include" -nostdlib \
+         -o "$STAGING/test/biglock_fair" "$BIGFAIR_SRC" \
+         "$MUSL_SDK_RISCV/lib/crt1.o" "$MUSL_SDK_RISCV/lib/crti.o" "$MUSL_SDK_RISCV/lib/crtn.o" \
+         -L"$MUSL_SDK_RISCV/lib" -lc \
+         $(riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -print-libgcc-file-name); then
+        chmod +x "$STAGING/test/biglock_fair"
+    else
+        echo "Warning: biglock_fair failed to compile (skipped)"
+        rm -f "$STAGING/test/biglock_fair"
+    fi
+else
+    echo "Warning: biglock_fair source or musl SDK missing (skipped)"
+fi
+
 # Build + install the GWP-Asan mprotect/fault churn probe (same musl
 # SDK recipe as cfi_shadow — static glibc SIGILLs on the no-V boot CPU).
 GWP_CHURN_SRC="$PROJECT_ROOT/test/gwp_churn.c"
