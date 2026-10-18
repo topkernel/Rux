@@ -1197,6 +1197,13 @@ pub fn unix_send(
                 // u17 lesson: "dri" matches "driver", "Render" matches
                 // the audio RenderRouters flood, "display" matches
                 // everything — keep the set tight and case-distinct.
+                // Tag allowlist first (decoded tags are exact, no
+                // substring risk): RS/bootanimation/composer cohort.
+                const TAGS: [&str; 12] = [
+                    "OHOS::RS", "BootAnimation", "Composer", "ComposerAgent",
+                    "ComposerManager", "2DGraphics", "FrameCollector",
+                    "FramePainter", "EGL", "OpenGLWrapper", "DISP", "MESA",
+                ];
                 const KEYS: [&str; 23] = [
                     "EGL", "egl", "DRI", "dri2", "Mesa", "mesa", "gbm", "GBM", "virtio",
                     "llvmpipe", "gallium", "swrast", "softpipe", "GL_", "GLES", "Composer",
@@ -1208,7 +1215,12 @@ pub fn unix_send(
                 // window (screen create → llvmpipe init → verdict);
                 // skipping them keeps the budget for the verdict lines.
                 let flood = s.contains("procname = gl");
-                if !flood && KEYS.iter().any(|key| s.contains(key)) {
+                // Decoded line is "<tag>: <content>" — prefix-match the
+                // tag so "OHOS::RS" (which contains ':') still works.
+                let interesting = TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || KEYS.iter().any(|key| s.contains(key));
+                if !flood && interesting {
                     static HILOG_TAPS: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

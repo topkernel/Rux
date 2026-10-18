@@ -338,7 +338,13 @@ fn plane_name_prop() -> PropDesc {
 // ============================================================================
 
 /// The single display mode exposed on the connector. Struct layout is
-/// uapi struct drm_mode_modeinfo (72 bytes).
+/// uapi struct drm_mode_modeinfo (68 bytes: the horizontal/vertical
+/// fields are __u16 — the old "72" here overran libdrm's exactly-sized
+/// modeinfo array by 4 bytes, corrupting the caller's heap: the OH
+/// composer devhost took a user-mode #GP in ld.so right after its second
+/// GETCONNECTOR and died (r9, "RegHotPlugCallback_ failed 29189" =
+/// IPC ServiceDied — every later screen/hotplug registration lost its
+/// service).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DrmModeInfo {
@@ -1142,14 +1148,15 @@ fn get_connector(arg: usize) -> i64 {
     }
     if n_modes > 0 && modes_ptr != 0 {
         let n = (n_modes as usize).min(1);
-        if !crate::arch::uaccess::access_ok(modes_ptr, n * 72) {
+        const MODEINFO_SZ: usize = core::mem::size_of::<DrmModeInfo>();
+        if !crate::arch::uaccess::access_ok(modes_ptr, n * MODEINFO_SZ) {
             return -14;
         }
         if unsafe {
             crate::arch::uaccess::copy_to_user(
                 modes_ptr as *mut u8,
                 &mode as *const DrmModeInfo as *const u8,
-                n * 72,
+                n * MODEINFO_SZ,
             )
         } != 0
         {
