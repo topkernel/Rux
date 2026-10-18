@@ -930,7 +930,7 @@ impl Drop for MmStruct {
         // Free page tables when the last reference is dropped
         // Only free for user address spaces (not kernel)
         //
-        // Per-VMA teardown note (review 4.2, "Drop 不遍历 VMA"): the actual
+        // Per-VMA teardown note (review 4.2, "Drop does not walk the VMA tree"): the actual
         // page teardown walks the PAGE TABLES (free_user_page_tables visits
         // every leaf PTE, does page_remove_rmap + put_page and frees the
         // page-table pages). Driving VmaManager::unmap_pages per VMA here
@@ -939,6 +939,66 @@ impl Drop for MmStruct {
         // are already drained by that PTE walk.
         if self.space_type == PageTableType::User {
             crate::dfx::memwatch::MM_DROPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+            // ===== SysV shm detach (exactly once, Linux exit_mmap parity) =====
+            // nattch must drop exactly once per mm, at the point its address
+            // space goes away — NOT per task exit (CLONE_VM siblings share
+            // one Arc) and not twice. do_exit's old pre-drop
+            // `Arc::strong_count == 1` check was racy: a concurrently
+            // cloned walker reference (ptrace/OOM/rmap) could make the
+            // check read >1 at exit and 1 by drop time (nattch leak), or
+            // two sibling exits could both observe 1 (double detach). The
+            // Drop impl runs exactly once by construction. Runs before the
+            // VMA tree is released with the struct.
+            {
+                let vma_mgr = self.vma_read();
+                for vma in vma_mgr.iter() {
+                    if vma.vma_type() == crate::mm::vma::VmaType::SharedMemory {
+                        let shmid = vma.file_fd();
+                        if shmid >= 0 {
+                            crate::ipc::sysv_shm::shm_detach_vma(shmid);
+                        }
+                    }
+                }
+            }
+
+            // ===== Grace-period wait: hold off the free under raw borrowers =====
+            // procfs generate_maps/smaps/status take `task.address_space()` —
+            // an UNACCOUNTED &MmStruct borrow of a foreign task. A CPU
+            // mid-syscall never reports an RCU quiescent state (quiescence
+            // needs a context switch, idle entry, or user return), so one
+            // grace period after the LAST task slot went None guarantees
+            // every such in-flight borrow has finished before we free the
+            // page tables and (with the struct) the VMA btree. This is the
+            // same idea as Linux freeing mm_struct via call_rcu in mmdrop.
+            // Skipped when we cannot schedule (spinlock held / IRQs off /
+            // softirq — e.g. an OOM-scan Arc dropped under a pid-hash
+            // bucket lock): those callers are restructured to drop outside
+            // their locks, this is the belt-and-braces guard.
+            if crate::interrupt::preempt::preempt_count() == 0
+                && crate::arch::cpu::get_interrupts_state()
+            {
+                crate::sync::rcu::synchronize_rcu();
+            }
+
+            // Teardown-context witness (FUT-STALE family): a teardown in a
+            // context that is not the (still-alive) owner names a
+            // deferred/wrong-context drop — the shape the PTLEDGER
+            // DOUBLE-FREE ring then attributes. Cheap, bounded print.
+            {
+                let owner = self.owner_pid();
+                let cur = crate::sched::get_current_pid() as i32;
+                if owner > 0 && owner != cur && crate::process::find_task_by_pid(owner as u32).is_some() {
+                    static DEFER_REPORTS: AtomicUsize = AtomicUsize::new(0);
+                    if DEFER_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                        crate::pr_warn!(
+                            "MM-DROP-CTX: mm root={:#x} owner pid={} still alive, dropped in pid={} context",
+                            self.pgd, owner, cur
+                        );
+                    }
+                }
+            }
+
             unsafe {
                 crate::arch::mm::free_user_page_tables(self.pgd);
             }

@@ -710,29 +710,23 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::sched::cgroup::cgroup_exit(current);
 
         // ===== exit_mm: drop THIS task's mm reference =====
-        // Shared-mm teardown rules:
-        // - shm detach: only the LAST reference holder (threads must not
-        //   each decrement nattch).
+        // Linux exit_mm discipline:
+        // - shm detach (nattch) runs inside MmStruct::drop now — exactly
+        //   once per mm, when the LAST Arc reference goes away. The old
+        //   pre-drop `Arc::strong_count == 1` check here was racy against
+        //   walker-held clones (ptrace/OOM/rmap) and against concurrent
+        //   sibling exits (double detach / missed detach).
         // - satp switch to the kernel root page table: EVERY dying task on
         //   a user page table, last or not. After clear_child_tid/robust
         //   list nothing touches user memory, and a dying group member
         //   holding the last reference FREES the page tables while this
         //   task may still be spinning in wait_for_thread_group_death on
         //   another CPU — running on a freed root is the ARCH-H4 fault.
-        if let Some(as_arc) = (*current).address_space_arc() {
-            let is_last = alloc::sync::Arc::strong_count(&as_arc) == 1;
-            if is_last {
-                // Iterate VMAs to detach shared memory segments (decrement nattch)
-                let vma_mgr = as_arc.vma_read();
-                for vma in vma_mgr.iter() {
-                    if vma.vma_type() == crate::mm::vma::VmaType::SharedMemory {
-                        let shmid = vma.file_fd();
-                        if shmid >= 0 {
-                            crate::ipc::sysv_shm::shm_detach_vma(shmid);
-                        }
-                    }
-                }
-            }
+        // - set_address_space(None) swaps the slot under the mm-slot lock
+        //   and drops our Arc after it; if it is the last reference the
+        //   teardown (grace wait + PT free + VMA release) runs in THIS
+        //   context, after the satp switch.
+        if (*current).address_space_arc().is_some() {
             let kernel_ppn = crate::arch::mm::mmu_init::root_page_table_ppn();
             let current_ppn = crate::arch::mm::read_satp() as u64 & 0xF_FFFF_FFFF_FFFF;
             if current_ppn != kernel_ppn {
