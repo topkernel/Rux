@@ -9,7 +9,7 @@
 //! for userspace `dmesg` to read/manage kernel logs.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 extern crate alloc;
 
@@ -196,17 +196,21 @@ impl<'a> fmt::Write for BufferWriter<'a> {
 ///    synchronously to the console UART (review批次8: the console path was
 ///    missing entirely — kernel messages were invisible outside panics)
 pub fn printk(level: u8, args: fmt::Arguments) {
+    // Perf: filter BEFORE formatting (same rationale as printk_ln below —
+    // discarded messages must not pay the fmt pass).
+    if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+        return;
+    }
+
     // Re-entrancy guard: if already in printk, discard
     let _guard = match PrintkGuard::try_new() {
         Some(g) => g,
         None => return,
     };
 
-    // Check console log level — controls ring buffer writes.
-    // Messages above this level are discarded entirely.
-    if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
-        return;
-    }
+    // Console TX stall notice (rate-limited): must run OUTSIDE the guard,
+    // or the notice itself would be dropped as re-entrant.
+    crate::console::report_tx_stall_recovery();
 
     // Format into a stack-allocated buffer
     let mut buf = [0u8; RECORD_TEXT_SIZE];
@@ -227,10 +231,85 @@ pub fn printk(level: u8, args: fmt::Arguments) {
 /// Whole-record console atomicity flag: with several harts printing
 /// concurrently, per-byte lock-free emission interleaved records
 /// mid-line (garbled boot log). Holders only push bytes to the UART
-/// (bounded work, no other locks taken), and same-CPU re-entry is
-/// already excluded by the per-CPU IN_PRINTK guard — so spinning here
-/// cannot deadlock.
+/// (no other locks taken), and same-CPU re-entry is already excluded by
+/// the per-CPU IN_PRINTK guard.
+///
+/// # Bounded acquisition (printk-wedge, OH b140)
+///
+/// The acquire spin below used to be UNBOUNDED, and the UART byte push
+/// itself could stall forever in the x86_64 THRE poll — so a CPU in
+/// interrupt context (IF=0) could spin here for eternity while the
+/// holder sat wedged in the UART: exactly the b140 wedge (CPU0 inside
+/// emit_to_console with IF=0, CPU1 mid-line under the emit lock; serial
+/// frozen; 1-in-5 KVM boots). Invariants now:
+///
+/// - Acquisition is BOUNDED by wall time; the budget depends on context:
+///   interrupt context (hardirq/NMI/softirq) gives up almost immediately
+///   — spinning with IF=0 must never outlive a slow holder — and task
+///   context waits generously (the holder only pushes ≤256 bytes through
+///   a *bounded* putc, but may be preempted mid-line or sit behind one
+///   bounded UART-stall episode).
+/// - On timeout the console emission is SKIPPED. The record is already
+///   in the ring buffer (dmesg/syslog still have it); losing one console
+///   line under pathological contention beats wedging the box. Linux
+///   defers console output under contention for the same reason.
 static CONSOLE_EMIT_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Console emissions skipped because CONSOLE_EMIT_LOCK could not be
+/// acquired within the context budget (diagnostic counter; those records
+/// remain in the ring buffer).
+static CONSOLE_EMIT_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Acquire budget in interrupt context (hardirq/NMI/softirq): 100µs of
+/// read_time() units. Interrupt context must not spin long — the holder
+/// may itself be an interrupt-context emitter on another CPU or a
+/// preempted task whose progress this CPU cannot help.
+const EMIT_WAIT_IRQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 10_000;
+
+/// Acquire budget in task context: 2s. Generous on purpose: a healthy
+/// holder finishes a 256-byte line in ~20ms of emulated-baud time, and a
+/// stalled one costs at most one bounded putc episode; the slack covers
+/// scheduling latency under host contention so healthy consoles never
+/// drop lines.
+const EMIT_WAIT_TASK: u64 = crate::config::TIMER_CLOCK_FREQ_HZ * 2;
+
+/// Bounded TTAS acquire of CONSOLE_EMIT_LOCK. Returns false when the
+/// budget expires (caller skips console output — the record is already
+/// in the ring buffer).
+fn acquire_emit_lock() -> bool {
+    let irq_ctx = crate::interrupt::preempt::in_interrupt();
+    let budget = if irq_ctx { EMIT_WAIT_IRQ } else { EMIT_WAIT_TASK };
+    let start = crate::arch::cpu::read_time();
+    loop {
+        if CONSOLE_EMIT_LOCK
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+        // Check the deadline on EVERY outer iteration: under pure CAS
+        // contention (lock bouncing free/held between rivals) the inner
+        // TTAS load below sees "free" immediately and never re-checks the
+        // clock — without this check the spin would not be bounded.
+        if crate::arch::cpu::read_time().saturating_sub(start) >= budget {
+            return false;
+        }
+        // TTAS: park on a relaxed load until the holder releases instead
+        // of re-issuing an atomic RMW every iteration (same rationale as
+        // RawSpinlock::lock).
+        let mut parked: u32 = 0;
+        while CONSOLE_EMIT_LOCK.load(Ordering::Relaxed) {
+            parked += 1;
+            if parked >= 512 {
+                parked = 0;
+                if crate::arch::cpu::read_time().saturating_sub(start) >= budget {
+                    return false;
+                }
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
 
 /// Console (UART) emission path for printk records.
 ///
@@ -238,11 +317,9 @@ static CONSOLE_EMIT_LOCK: AtomicBool = AtomicBool::new(false);
 /// spinlock: printk can run with arbitrary locks held or in IRQ context.
 /// Re-entrancy is already excluded by the IN_PRINTK guard in the callers.
 fn emit_to_console(text: &[u8]) {
-    while CONSOLE_EMIT_LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
+    if !acquire_emit_lock() {
+        CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
+        return; // record is in the ring buffer; console line skipped
     }
     for &b in text {
         if b == b'\n' {
@@ -250,6 +327,41 @@ fn emit_to_console(text: &[u8]) {
         }
         crate::console::putchar_no_lock(b);
     }
+    CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
+}
+
+/// Bounded best-effort acquire of the console emit lock for diagnostic
+/// writers that bypass printk (dfx `ConsoleWriter`: softlockup reports,
+/// stack dumps). Keeps their output from interleaving mid-line with an
+/// in-flight printk record (b140's "…len BUG: soft lockup" garble).
+///
+/// Crash/diagnostic output must never block on a possibly-wedged holder,
+/// so the budget is small: 100µs in interrupt context, 10ms otherwise.
+/// Returns false on timeout; the caller falls back to lockless output.
+pub fn try_console_emit_lock() -> bool {
+    let irq_ctx = crate::interrupt::preempt::in_interrupt();
+    let budget = if irq_ctx {
+        EMIT_WAIT_IRQ
+    } else {
+        crate::config::TIMER_CLOCK_FREQ_HZ / 100 // 10ms
+    };
+    let start = crate::arch::cpu::read_time();
+    loop {
+        if CONSOLE_EMIT_LOCK
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+        if crate::arch::cpu::read_time().saturating_sub(start) >= budget {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Release CONSOLE_EMIT_LOCK acquired via `try_console_emit_lock`.
+pub fn console_emit_unlock() {
     CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
 }
 
@@ -278,6 +390,10 @@ pub fn printk_ln(level: u8, args: fmt::Arguments) {
 
 /// Write raw bytes to the kernel log (used by printk_ln to avoid double formatting).
 fn printk_bytes(level: u8, text: &[u8]) {
+    // Console TX stall notice (rate-limited): must run OUTSIDE the guard,
+    // or the notice itself would be dropped as re-entrant.
+    crate::console::report_tx_stall_recovery();
+
     // Re-entrancy guard: if already in printk, discard
     let _guard = match PrintkGuard::try_new() {
         Some(g) => g,

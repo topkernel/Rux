@@ -144,6 +144,24 @@ if [ -f "$SLIRP_TEST_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; th
     fi
 fi
 
+# Build + install the printk wedge flood probe (freestanding raw-syscall
+# recipe, same as nettest: static glibc objects carry rv64+V vector code
+# the boot CPU cannot execute; drives the MREMAP-CFI kernel printk flood
+# and direct console-write pressure; see test/printk_flood.c).
+PRINTK_FLOOD_SRC="$PROJECT_ROOT/test/printk_flood.c"
+if [ -f "$PRINTK_FLOOD_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing printk_flood to /test/printk_flood..."
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -nostdlib -nostartfiles -static -O2 -fno-builtin \
+         -o "$STAGING/test/printk_flood" "$PRINTK_FLOOD_SRC"; then
+        chmod +x "$STAGING/test/printk_flood"
+    else
+        echo "Warning: printk_flood failed to compile (skipped)"
+        rm -f "$STAGING/test/printk_flood"
+    fi
+else
+    echo "Warning: riscv64-linux-gnu-gcc not found, skipping printk_flood"
+fi
+
 # Build + install the chroot/getcwd semantics probe (same freestanding
 # recipe; checks root-relative getcwd, ENOENT for a cwd outside the jail,
 # in-root absolute opens, and the cwd self-heal across MS_MOVE — the

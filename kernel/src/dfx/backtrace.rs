@@ -23,11 +23,29 @@ use crate::console::putchar_no_lock;
 ///
 /// Uses `putchar_no_lock` directly. Safe to use in panic/OOPS contexts
 /// where normal printk infrastructure may be unavailable or recursive.
-pub struct ConsoleWriter;
+pub struct ConsoleWriter {
+    /// Whether this writer holds the printk console emit lock (bounded
+    /// best-effort acquire in `new()`): keeps diagnostic reports from
+    /// interleaving mid-line with an in-flight printk record on another
+    /// CPU (OH b140: "…len BUG: soft lockup" garble). On timeout —
+    /// e.g. a wedged holder, or this CPU's own interrupted task holds
+    /// the lock — output proceeds locklessly exactly as before.
+    emit_locked: bool,
+}
 
 impl ConsoleWriter {
-    pub const fn new() -> Self {
-        ConsoleWriter
+    pub fn new() -> Self {
+        ConsoleWriter {
+            emit_locked: crate::printk::try_console_emit_lock(),
+        }
+    }
+}
+
+impl Drop for ConsoleWriter {
+    fn drop(&mut self) {
+        if self.emit_locked {
+            crate::printk::console_emit_unlock();
+        }
     }
 }
 
