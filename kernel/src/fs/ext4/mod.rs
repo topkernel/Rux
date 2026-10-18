@@ -2369,6 +2369,18 @@ struct Ext4BigState {
     /// take). While nonzero, the fair fast path refuses fresh sleepable
     /// acquirers — see try_acquire_or_recurse_fair.
     waiters: u32,
+    /// R85 (b148 silent crawl): orphaned-handoff epoch. release() hands
+    /// the lock to ONE waiter via wake_up_one; when the queue is empty
+    /// at that moment (every counted waiter is mid-loop between
+    /// finish_wait and its next prepare_to_wait — the failed-token-spend
+    /// re-register path) the wake is dropped and the lock sits FREE
+    /// behind a nonzero `waiters` with nobody left to wake it. Each such
+    /// drop bumps this epoch: a waiter whose registration snapshot of
+    /// the epoch predates the bump may take the free lock at its
+    /// re-check, so an orphaned handoff is recovered by the FIRST
+    /// mid-loop waiter to re-register instead of stranding everyone
+    /// until an incidental foreign wake.
+    handoff_epoch: u64,
 }
 
 impl Ext4BigLock {
@@ -2392,6 +2404,7 @@ impl Ext4BigLock {
                 depth: 0,
                 acquired_at: 0,
                 waiters: 0,
+                handoff_epoch: 0,
             }),
             wait: crate::process::wait::WaitQueueHead::new(),
         }
@@ -2540,9 +2553,21 @@ impl Ext4BigLock {
         //  first_park   <=> jiffies of our FIRST registration; re-parks
         //                   keep it so the anti-starvation override below
         //                   measures true queue age.
+        //  timer_id     <=> R85: anti-starve deadline wake armed for the
+        //                   CURRENT park (0 = none). A parked waiter has
+        //                   no waker of its own when a handoff is dropped
+        //                   (empty-queue release) or its token is lost —
+        //                   without this timer the ANTI_STARVE override
+        //                   below can never fire, because it is only
+        //                   evaluated on a loop iteration and iterating
+        //                   requires a wake. That was the b148 shape: a
+        //                   free lock, dozens of UNINTERRUPTIBLE waiters,
+        //                   zero STALL prints, progress only on incidental
+        //                   foreign wakes.
         let mut counted = false;
         let mut woken_retry = false;
         let mut first_park = 0u64;
+        let mut timer_id = 0u64;
 
         loop {
             if woken_retry {
@@ -2586,6 +2611,15 @@ impl Ext4BigLock {
             // attempt finds us queued and hands its wake token to us.
             // EXCLUSIVE + tail insert => FIFO, one wake per release.
             self.wait.prepare_to_wait(cur, true, false);
+            // R85: snapshot the orphaned-handoff epoch BEFORE the
+            // registration critical section below — a release() that
+            // dropped its wake (empty queue) between this read and the
+            // re-check shows up as an epoch change, letting us take the
+            // free lock it stranded instead of parking past it.
+            let my_epoch = {
+                let st = self.state.lock();
+                st.handoff_epoch
+            };
             // R7-B6b re-check, fairness-aware (R84): count ourselves under
             // the state lock — once; re-parks keep the count — then take
             // the free lock ONLY when no OTHER waiter/token exists
@@ -2599,7 +2633,9 @@ impl Ext4BigLock {
             // lock behind a stuck count: it converts any residual
             // pathology into bounded latency instead of a wedge, and in
             // normal operation it never fires because tokens already
-            // flow FIFO.
+            // flow FIFO. R85 adds the epoch term: a handoff that was
+            // DROPPED (empty-queue release bumped the epoch after we
+            // registered) belongs to nobody — take the free lock now.
             {
                 let now = crate::drivers::timer::get_jiffies();
                 let mut st = self.state.lock();
@@ -2618,6 +2654,7 @@ impl Ext4BigLock {
                     true
                 } else if !st.locked
                     && (st.waiters == 1
+                        || st.handoff_epoch != my_epoch
                         || now.wrapping_sub(first_park)
                             > Self::ANTI_STARVE_JIFFIES)
                 {
@@ -2637,9 +2674,12 @@ impl Ext4BigLock {
                     // A concurrent release()'s wake_up_one may have seen
                     // us queued+sleeping and enqueued us between the
                     // registration and the acquire — undo it (the
-                    // per-class on_rq guards make this a no-op when we
+                    // per-class on_rq guards make it a no-op when we
                     // were not actually enqueued). Mirrors Semaphore::down.
                     crate::sched::dequeue_task(&*cur);
+                    if timer_id != 0 && crate::timer::timer_pending(timer_id) {
+                        crate::timer::del_timer(timer_id);
+                    }
                     return Ext4BigGuard { lock: self };
                 }
             }
@@ -2657,16 +2697,30 @@ impl Ext4BigLock {
             // waiter has been queued 3+ s (fairness starvation) or the
             // holder has held 10+ s (leak) — rate-limited to one line
             // per 10 s either way.
+            //
+            // R85 (b148): the old tripwire only reported a LIVE owner —
+            // the stranded-LOCK-FREE shape (owner=0, waiters stuck,
+            // dropped handoff) printed NOTHING while the whole OH cohort
+            // crawled, which is exactly how b148 looked (zero STALL
+            // prints, 120 s+ D-state waiters, free lock). Report that
+            // shape too, same rate limit.
             {
                 let now = crate::drivers::timer::get_jiffies();
-                let (owner, depth, held, nwaiters) = {
+                let (owner, depth, held, nwaiters, locked) = {
                     let st = self.state.lock();
-                    (st.owner, st.depth, now.saturating_sub(st.acquired_at), st.waiters)
+                    (
+                        st.owner,
+                        st.depth,
+                        now.saturating_sub(st.acquired_at),
+                        st.waiters,
+                        st.locked,
+                    )
                 };
                 let waited = now.wrapping_sub(first_park);
+                let stranded_free = !locked && nwaiters > 0 && waited >= Self::STALL_WAITER_JIFFIES;
                 if (waited >= Self::STALL_WAITER_JIFFIES
                     || held >= crate::config::KERNEL_HZ as u64 * 10)
-                    && locked_owner_alive_wait(&owner)
+                    && (stranded_free || locked_owner_alive_wait(&owner))
                 {
                     static LAST_WAIT_REPORT: core::sync::atomic::AtomicU64 =
                         core::sync::atomic::AtomicU64::new(0);
@@ -2682,23 +2736,57 @@ impl Ext4BigLock {
                             .is_ok()
                     {
                         let cur_pid = crate::process::current_pid();
-                        crate::pr_err!(
-                            "EXT4-BIGLOCK-STALL waiter={} holder={} depth={} held={}j waiters={} waited={}j",
-                            cur_pid,
-                            owner,
-                            depth,
-                            held,
-                            nwaiters,
-                            waited
-                        );
+                        if stranded_free {
+                            crate::pr_err!(
+                                "EXT4-BIGLOCK-STALL-FREE waiter={} owner=none waiters={} waited={}j (dropped handoff / stuck count)",
+                                cur_pid,
+                                nwaiters,
+                                waited
+                            );
+                        } else {
+                            crate::pr_err!(
+                                "EXT4-BIGLOCK-STALL waiter={} holder={} depth={} held={}j waiters={} waited={}j",
+                                cur_pid,
+                                owner,
+                                depth,
+                                held,
+                                nwaiters,
+                                waited
+                            );
+                        }
                     }
                 }
             }
+            // R85: arm the anti-starve self-wake. schedule() below blocks
+            // until SOMETHING wakes us; when the handoff was dropped (the
+            // empty-queue release) or our token is stolen, that someone
+            // does not exist — without this timer the override above can
+            // never evaluate and a stranded waiter sleeps indefinitely
+            // (re-armed on every re-park so a held lock is polled at
+            // ANTI_STARVE granularity, not hot-looped). Timer-table full
+            // (id 0) degrades to the old wake-dependent behavior.
+            if timer_id != 0 {
+                crate::timer::del_timer(timer_id);
+                timer_id = 0;
+            }
+            timer_id = crate::timer::add_timer_wakeup(
+                crate::drivers::timer::get_jiffies() + Self::ANTI_STARVE_JIFFIES,
+                pid,
+            );
             crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
+            if timer_id != 0 {
+                if crate::timer::timer_pending(timer_id) {
+                    crate::timer::del_timer(timer_id);
+                }
+                timer_id = 0;
+            }
             self.wait.finish_wait(cur);
             // Woken: the release() that issued this wake spent its handoff
-            // token on us — spend it at the top of the loop.
+            // token on us — spend it at the top of the loop. (R85: a timer
+            // or foreign wake ALSO lands here with no token; the token
+            // spend fails or succeeds on lock state alone, so a spurious
+            // retry is harmless.)
             woken_retry = true;
         }
     }
@@ -2724,7 +2812,22 @@ impl Ext4BigLock {
         // queue is a no-op (an outstanding token holder takes the free
         // lock on its own), so this is safe even without waiter
         // accounting.
-        self.wait.wake_up_one();
+        let woke = self.wait.wake_up_one();
+        if woke == 0 {
+            // R85 (b148 silent crawl): the handoff was DROPPED — the
+            // queue was empty, so every counted waiter is mid-loop
+            // between finish_wait and its next prepare_to_wait and the
+            // just-freed lock has no taker: the fresh-caller gate
+            // (waiters > 0) bars everyone else. Bump the orphaned-handoff
+            // epoch so the first mid-loop waiter to re-register takes the
+            // free lock at its re-check instead of parking past it. (No
+            // counted waiters at all: the bump is inert — nobody's
+            // registration snapshot can predate it.)
+            let mut st = self.state.lock();
+            if !st.locked && st.waiters > 0 {
+                st.handoff_epoch += 1;
+            }
+        }
     }
 
     /// R73 exit-path release: force-drop the lock when its owner dies.
@@ -2762,7 +2865,14 @@ impl Ext4BigLock {
             }
         };
         if was_held {
-            self.wait.wake_up_one();
+            let woke = self.wait.wake_up_one();
+            if woke == 0 {
+                // R85: same dropped-handoff recovery as release().
+                let mut st = self.state.lock();
+                if !st.locked && st.waiters > 0 {
+                    st.handoff_epoch += 1;
+                }
+            }
         }
     }
 
