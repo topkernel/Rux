@@ -10,7 +10,7 @@
 
 use core::fmt;
 use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
 #[cfg(feature = "riscv64")]
@@ -42,6 +42,72 @@ const FCR_TRIGGER_8: u8 = 0x80; // Trigger at 8 bytes (half of 16-byte FIFO)
 // LSR bits
 const LSR_DR: u8 = 0x01; // Data Ready
 const LSR_THRE: u8 = 0x20; // THR Empty
+
+// ============================================================================
+// Console TX stall tracking (printk-wedge, OH b140 family)
+// ============================================================================
+
+/// The x86_64 `putc` used to poll LSR.THRE forever. A stalled emulated
+/// UART (host under memory pressure, chardev flush stall, KVM exit storm)
+/// then froze the emitting CPU *while it held the printk console emit
+/// lock* — every other CPU printked into that lock and spun, and the box
+/// wedged (OH decisive round b140: 1-in-5 boots, CPU0 inside
+/// emit_to_console with IF=0, CPU1 mid-line at "len "). `putc` now bounds
+/// the THRE wait, drops the byte, and latches this flag so every
+/// subsequent byte costs a single probe until THRE returns. Losing a byte
+/// beats wedging the box — Linux 8250 drivers bound their TX waits the
+/// same way.
+static TX_STALLED: AtomicBool = AtomicBool::new(false);
+
+/// Bytes dropped due to TX stalls (diagnostic; reported on recovery).
+static TX_DROPPED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Recovery was observed; a notice should be printed from a context where
+/// printk is not re-entrancy-guarded (see `report_tx_stall_recovery`).
+static TX_RECOVERY_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// `read_time()` stamp of the last recovery notice, for rate limiting.
+static TX_LAST_NOTICE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Upper bound on LSR.THRE polls per byte before dropping it. A healthy
+/// 115200 UART asserts THRE within one character time (~87µs ≈ tens of
+/// `inb` polls under KVM); this budget is orders of magnitude above that
+/// so a merely slow console never drops bytes, while a genuinely stalled
+/// one costs at most one bounded wait per stall episode (the latch above
+/// makes every following byte a single probe).
+#[cfg(feature = "x86_64")]
+const UART_TX_POLL_BUDGET: u32 = 1_000_000;
+
+/// Print a rate-limited notice (once per second) about how many bytes the
+/// console TX stall dropped. Called from the printk entry paths BEFORE
+/// the per-CPU re-entrancy guard is taken: a notice issued from inside
+/// the guarded emit path would be silently dropped by that same guard.
+/// On non-x86_64 targets the stall latch is never set, so this is an
+/// inexpensive no-op (one relaxed-ish atomic swap).
+pub fn report_tx_stall_recovery() {
+    if !TX_RECOVERY_PENDING.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let now = crate::arch::cpu::read_time();
+    let last = TX_LAST_NOTICE.load(Ordering::Acquire);
+    // One notice per second of wall time.
+    if last != 0 && now.saturating_sub(last) < crate::config::TIMER_CLOCK_FREQ_HZ {
+        // Too soon: re-arm so the next printk retries after the window.
+        TX_RECOVERY_PENDING.store(true, Ordering::Release);
+        return;
+    }
+    let dropped = TX_DROPPED.swap(0, Ordering::AcqRel);
+    if dropped == 0 {
+        return;
+    }
+    TX_LAST_NOTICE.store(now, Ordering::Release);
+    crate::printk::printk_ln(
+        crate::printk::loglevel::KERN_WARNING,
+        format_args!("console: UART TX stalled, dropped {} bytes", dropped),
+    );
+}
 
 /// UART IRQ number on QEMU virt
 const UART_IRQ: u32 = 10;
@@ -210,9 +276,33 @@ impl Uart {
 
         #[cfg(feature = "x86_64")]
         {
+            // Fast path while a stall is latched: one probe; if THRE is
+            // back, unlatch and fall through to the normal write; if not,
+            // drop the byte immediately (bounded cost per stall episode).
+            if TX_STALLED.load(Ordering::Acquire) {
+                if read_reg(COM1_BASE, UART_LSR) & LSR_THRE != 0 {
+                    TX_STALLED.store(false, Ordering::Release);
+                    TX_RECOVERY_PENDING.store(true, Ordering::Release);
+                } else {
+                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
             // Poll LSR bit 5 (THR Empty) before writing THR — the 8250
             // drops characters written while the shift register is busy.
+            // BOUNDED (printk-wedge / OH b140): this poll was unbounded, so
+            // a stalled UART froze the CPU with the printk emit lock held
+            // and wedged the whole machine. Give up after
+            // UART_TX_POLL_BUDGET tries, drop the byte, and latch the
+            // stall so subsequent bytes cost one probe each.
+            let mut tries: u32 = 0;
             while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
+                tries = tries.saturating_add(1);
+                if tries >= UART_TX_POLL_BUDGET {
+                    TX_STALLED.store(true, Ordering::Release);
+                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
                 core::hint::spin_loop();
             }
             // SAFETY: COM1 THR is the standard 8250 data port.
