@@ -708,6 +708,7 @@ fn wru64(b: &mut [u8], off: usize, v: u64) {
 /// Handle a DRM ioctl on a /dev/dri node.
 pub fn drm_ioctl(request: u32, arg: usize) -> i64 {
     let ret = drm_ioctl_inner(request, arg);
+    trace_seq(request, ret);
     trace_ioctl(request, ret);
     ret
 }
@@ -718,7 +719,43 @@ pub fn drm_ioctl(request: u32, arg: usize) -> i64 {
 // never reaches the console on this image).
 // ============================================================================
 
-static TRACE_FIRST_DONE: AtomicU32 = AtomicU32::new(0);
+// ============================================================================
+// Full-sequence trace: the Mesa/EGL/composer handshake is a few dozen
+// ioctls at most; per-category counters cannot show WHERE it stops. Log
+// the first 128 ioctls on any /dev/dri node verbatim (pid + request +
+// ret), then keep logging up to 16 DISTINCT request numbers never seen
+// before (Mesa probes several driver-private ioctls mid-sequence).
+// ============================================================================
+
+static SEQ_N: AtomicU32 = AtomicU32::new(0);
+static SEQ_SEEN_REQS: [AtomicU32; 16] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+];
+static SEQ_SEEN_N: AtomicU32 = AtomicU32::new(0);
+
+fn trace_seq(request: u32, ret: i64) {
+    let pid = crate::process::current_pid();
+    let n = SEQ_N.fetch_add(1, Ordering::Relaxed);
+    if n < 128 {
+        crate::pr_warn!("drm[{}] ioctl#{n} {:#x} -> {}", pid, request, ret);
+        return;
+    }
+    // Past the window: only first sightings of a NEW request number —
+    // an unseen probe is the next thing to implement.
+    for slot in SEQ_SEEN_REQS.iter() {
+        if slot.load(Ordering::Relaxed) == request {
+            return;
+        }
+    }
+    let idx = SEQ_SEEN_N.fetch_add(1, Ordering::Relaxed) as usize;
+    if idx < SEQ_SEEN_REQS.len() {
+        SEQ_SEEN_REQS[idx].store(request, Ordering::Relaxed);
+        crate::pr_warn!("drm[{}] new-req {:#x} -> {} (after #{} ioctls)", pid, request, ret, n);
+    }
+}
 static TRACE_COUNTS: [AtomicU32; 8] = [
     AtomicU32::new(0),
     AtomicU32::new(0),
@@ -845,27 +882,16 @@ fn drm_ioctl_inner(request: u32, arg: usize) -> i64 {
 fn virtgpu_getparam(arg: usize) -> i64 {
     let Some(mut b) = copy_in::<16>(arg, 16) else { return -14 };
     let param = rdu64(&b, 0);
-    // VIRTGPU_PARAM_* (include/uapi/drm/virtgpu_drm.h). All zero: no 3D,
-    // no host-visible heaps, no cross-device, no context-init, no capsets.
-    const VIRTGPU_PARAM_3D_FEATURES: u64 = 1;
-    const VIRTGPU_PARAM_CAPSET_MAX_FIXUPS: u64 = 2;
-    const VIRTGPU_PARAM_RESOURCE_BASE_BUSY: u64 = 3;
-    const VIRTGPU_PARAM_HOST_VISIBLE: u64 = 4;
-    const VIRTGPU_PARAM_CROSS_DEVICE: u64 = 5;
-    const VIRTGPU_PARAM_CONTEXT_INIT: u64 = 6;
-    const VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS: u64 = 8;
-    let supported = matches!(
-        param,
-        VIRTGPU_PARAM_3D_FEATURES
-            | VIRTGPU_PARAM_CAPSET_MAX_FIXUPS
-            | VIRTGPU_PARAM_RESOURCE_BASE_BUSY
-            | VIRTGPU_PARAM_HOST_VISIBLE
-            | VIRTGPU_PARAM_CROSS_DEVICE
-            | VIRTGPU_PARAM_CONTEXT_INIT
-            | VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS
-    );
-    if !supported {
-        return -22; // EINVAL
+    // VIRTGPU_PARAM_* (include/uapi/drm/virtgpu_drm.h). Linux's
+    // virtio_gpu_getparam answers every param in the enum with 0 on a
+    // 2D-only device (no virgl/crossven): 1 3D_FEATURES, 2 CAPSET_MIN_,
+    // 3 RESOURCE_BASE_BUSY, 4 HOST_VISIBLE, 5 CROSS_DEVICE, 6 CONTEXT_
+    // INIT, 7 SUPPORTED_CAPSET_IDS (mask 0), 8 CAPSET_MAX_FIXUPS, 9
+    // BLOB_MEM, 10 HOST_VISIBLE_DEBUG, 11 CONTEXT_GROWABLE, 12 CAPSET_
+    // MASK. u13 trace: Mesa probes 1..6 then 7; the old list lacked 7
+    // and answered EINVAL where Linux says "param known, value 0".
+    if !(1..=12).contains(&param) {
+        return -22; // EINVAL: unknown param number
     }
     wru64(&mut b, 8, 0);
     if !copy_out(arg, &b, 16) {
