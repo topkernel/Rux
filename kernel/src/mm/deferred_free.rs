@@ -72,7 +72,15 @@ pub fn register_deferred_size(size: usize) {
     if size == 0 {
         return;
     }
-    let _ = DEFER_SIZE.compare_exchange(0, size, Ordering::AcqRel, Ordering::Acquire);
+    if DEFER_SIZE
+        .compare_exchange(0, size, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        crate::pr_err!(
+            "DEFERFREE: registered size class {} (MmStruct ArcInner block)",
+            size
+        );
+    }
 }
 
 #[inline]
@@ -111,6 +119,14 @@ pub fn try_defer(ptr: *mut u8, layout: &Layout) -> bool {
     let earliest = EARLIEST_DEADLINE.load(Ordering::Relaxed);
     if deadline < earliest {
         EARLIEST_DEADLINE.store(deadline, Ordering::Relaxed);
+    }
+    // One-time engagement witness: proves the size class matched a real
+    // free (the first iteration of this guard registered the WRONG size
+    // — bare size_of::<MmStruct> instead of the ArcInner block — and
+    // silently deferred nothing).
+    static ENGAGED: AtomicUsize = AtomicUsize::new(0);
+    if ENGAGED.fetch_add(1, Ordering::Relaxed) == 0 {
+        crate::pr_err!("DEFERFREE: engaged (first MmStruct free held back {}ms)", DEFER_MS);
     }
     true
 }
@@ -155,7 +171,7 @@ pub fn drain(now: u64) -> usize {
         let (ptr, size, align) = batch[i];
         if let Ok(layout) = Layout::from_size_align(size, align) {
             unsafe {
-                crate::mm::buddy_allocator::dealloc_direct(ptr as *mut u8, layout);
+                crate::mm::buddy_allocator::dealloc_untracked_pub(ptr as *mut u8, layout);
             }
         }
     }

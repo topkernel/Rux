@@ -525,6 +525,11 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // so walking from s0 yields [ra-into-__rust_alloc, callers...].
         let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
 
+        // Opportunistic reclamation of time-deferred frees (see
+        // mm/deferred_free.rs): one relaxed load on the fast path; the
+        // same allocation churn that fills the pool drains it.
+        crate::mm::deferred_free::drain_if_due();
+
         // Check magic number and initialization state
         if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
             || self.initialized.load(Ordering::Acquire) == 0
@@ -621,6 +626,33 @@ unsafe impl GlobalAlloc for BuddyAllocator {
             return;
         }
 
+        // Teardown-race guard (mm/deferred_free.rs): frees of the
+        // registered size class (the MmStruct ArcInner block) are held
+        // back briefly so unaccounted &MmStruct borrowers (procfs
+        // generators) preempted mid-syscall resume against coherent
+        // post-teardown memory instead of heap-reused garbage (the
+        // #GP-in-btree-navigate family). NOTE: this impl is the live
+        // #[global_allocator] (GLOBAL_ALLOCATOR: BuddyAllocator) — the
+        // interception must live HERE, not in CombinedAllocator.
+        if crate::mm::deferred_free::try_defer(ptr, &layout) {
+            return;
+        }
+
+        self.dealloc_untracked(ptr, layout);
+    }
+}
+
+/// Free through the live global allocator, bypassing the deferred-free
+/// interception (drainer entry point, mm/deferred_free.rs).
+pub unsafe fn dealloc_untracked_pub(ptr: *mut u8, layout: Layout) {
+    GLOBAL_ALLOCATOR.dealloc_untracked(ptr, layout);
+}
+
+impl BuddyAllocator {
+    /// The real buddy free path, unintercepted — the deferred-free
+    /// drainer (mm/deferred_free.rs) calls this so a held-back entry can
+    /// never be re-deferred.
+    unsafe fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {
         // R17-B withdrawn from the refuse path: the bitmap index aliases
         // for pages outside the heap's 8192-page window (stacks, page
         // tables), refusing legitimate frees and bleeding the machine to
