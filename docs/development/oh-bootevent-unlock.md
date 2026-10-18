@@ -200,3 +200,64 @@ it is healthy. Next steps for OH pixels: (1) bisect the base-kernel
 SA-load regression (b155's build vs 26e61516), (2) rerun the decisive
 boot on a base that completes OpenSo — the faultlat fix should then turn
 the OpenSo seconds into sub-second times.
+
+## basewedge addendum (2026-10-18, feature/basewedge): bisect closed — no base regression; seeded.img re-tested clean on merged main
+
+Verdict of the base-kernel bisect this worktree was opened for: **there
+is no base regression to bisect.** The section above ("SA-load chain is
+dead on the BASE kernel") does not reproduce. Measured with
+md5-verified images (run/oh-boot.sh: KVM q35 SMP2 4G, loglevel 7, six
+disks, virtio-gpu 720x1280, no dfx overrides; logs
+run/oh-{C1,C1seed,Wseed}-serial.log):
+
+| boot | kernel | userdata | outcome |
+|---|---|---|---|
+| C1 (600 s) | dd9b5b9b pristine main | tok bb4be52e | 79 services, 78 OpenSo, SA:3002 **22.8 s**; bootevents SET: bootanimation.started/.finished, composer_host/renderservice/wms, bms bundles ready; alive at window end (samgr+bootanimation vruntime still advancing) |
+| C1seed (900 s) | dd9b5b9b pristine main | seeded 17c656 | **no wedge**: 80 services, 81 OpenSo, SA:3002 **16.2 s**, same SET chain plus appfwk.ready; foundation SAs (6200/6105/403) init-finished ~35 s; foundation never dies |
+| Wseed (600 s) | 26e61516 pre-merge base | seeded 17c656 | no wedge either — slow-flow family: 78 services, 46 OpenSo in the window, per-SA times 39–305 s (SA:3301 236 s, SA:3008 306 s), SA:3002 not reached before the window closed (= the b153 802 s stall, not a wedge); composer_host.ready set |
+
+The b1–b6/bctl shape (55 services, ZERO OpenSo, foundation ZOMBIE at
+~13.7k lines) reproduced with **none** of these cells — including the
+exact kernel+image pair bctl claimed (26e61516 + seeded-family image,
+which it reached with 55 services/0 OpenSo at 20.7k lines versus
+Wseed's 78/46). Those boots ran faultlat-worktree builds with a local
+`userdata-mine.img` (since deleted), so the 0-OpenSo wedge belonged to
+the mid-branch build family and/or that image copy — not to main's
+base, and not to `userdata-seeded.img` itself.
+
+Faultlat fix validated in the OH boot path: SA:3002 .so load 802.2 s
+(b153) / 729 s (b155 soak) → 16–23 s on dd9b5b9b, on either image. In
+the one seeded-vs-tok pair measured, seeded was the faster boot of the
+two (16.2 s vs 22.8 s) — its pre-populated /data tree cuts first-boot
+churn; single sample, not a claim.
+
+What the two images actually differ by (debugfs -c, read-only):
+
+- **tok**: near-blank ext4; only seeded content is
+  `/service/el0/access_token` (0775 1000:1000) — the nativetoken
+  preseed; live first boot creates everything else.
+- **seeded**: snapshot of a partially-booted /data — root 0771 1000:1000
+  (tok root 0755 0:0), full `service/el0..el5` and `app/el1..el5`
+  trees root:root 0711, plus `samgr/ system/ local/ log/ misc/
+  updater/ …`. First boot scans/rewrites that whole stale tree — far
+  more page-cache pressure than the blank image, which is exactly the
+  load the mid-branch page-cache defects turned into a hard wedge.
+
+**Guidance (replaces the quarantine):** keep tok as the reference
+userdata for comparability with b-series numbers; seeded.img is NOT
+poisoned on dd9b5b9b and later — usable as a heavier (and in one
+sample, faster) variant. Do not use it to judge pre-merge kernels: it
+amplifies their page-cache stall (Wseed per-SA minutes vs b153's
+single 802 s stall on tok).
+
+Unchanged frontier + one new observation for the next lane:
+`bootevent.boot.completed` stays unset on both images (watcher
+registered, never set). And in C1 only, foundation (pid 792) is
+SIGKILLed (SIGDEATH sig=9, ppid=1) at ~57k lines — AFTER
+wms.ready/bootanimation.finished — with appspawn kickdog spinning
+"App enable -1" thereafter; a post-completion userspace/watchdog
+question, not a kernel wedge. C1seed shows no foundation death.
+
+Kernels: run/kernels/{A-c6b7c79a,C-dd9b5b9b,W-26e61516}-bzImage (A
+unbooted — the bracket was mooted once C flowed). No kernel changes
+required; this branch carries only the boot script and this doc.

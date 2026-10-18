@@ -1,10 +1,14 @@
 #!/bin/bash
-# oh-boot.sh — fs-writestorm agent's private OH boot (mirrors
-# oh-display/oh-boot-tmp.sh; kernel/images are this worktree's own).
-# Read-only images via symlinks + -snapshot; userdata is a private copy.
+# oh-boot.sh — basewedge agent's private OH bisect boot (mirrors
+# faultlat's oh-boot.sh; kernel/images are this worktree's own).
+# Read-only images via symlinks + -snapshot.
+#
+# USERDATA is ALWAYS the tok image (userdata-tok.img, md5 bb4be52e...) —
+# the seeded image (17c656...) hard-wedges every boot independently and
+# is used only for the one confirmation boot (USERDATA=... override).
 #
 # Usage: oh-boot.sh <tag> [kernel]
-# Env: SMP=2 ACCEL="tcg,thread=multi"|kvm SECS=<boot seconds> EXTRA_APPEND=...
+# Env: SMP=2 ACCEL=kvm SECS=<boot seconds> EXTRA_APPEND=... USERDATA=...
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,7 +27,12 @@ qemu_drive() { # idx file
     printf ' -drive file=%s,if=none,id=ohd%d,format=raw,file.locking=off,snapshot=on -device virtio-blk-pci,drive=ohd%d' "$file" "$idx" "$idx"
 }
 
-USERDATA="$ROOT/work/userdata-mine.img"
+USERDATA="${USERDATA:-$IMGDIR/userdata-tok.img}"
+
+# loglevel 7 on purpose (NOT 4): every verdict line — ServiceStart
+# counts, SAMGR "OpenSo Nms" completions, taskdump task states — rides
+# the /dev/kmsg pr_info passthrough, which console_loglevel filters.
+# b155 and every faultlat reference boot used 7; comparability wins.
 
 APPEND="ip=dhcp loglevel=7 console=ttyS0,115200"
 APPEND="$APPEND init=init root=/dev/ram0 rw"
@@ -39,8 +48,8 @@ RAMDISK="$IMGDIR/ramdisk-x64.img"
 [ -f "$RAMDISK" ] || RAMDISK="$IMGDIR/ramdisk.img"
 
 SMPN="${SMP:-2}"
-ACCEL_ARGS="${ACCEL:-tcg,thread=multi}"
-SECS="${SECS:-240}"
+ACCEL_ARGS="${ACCEL:-kvm}"
+SECS="${SECS:-600}"
 
 # shellcheck disable=SC2086
 timeout --signal=TERM --kill-after=10 "${SECS}s" qemu-system-x86_64 \
