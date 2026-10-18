@@ -962,13 +962,29 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // exactly at the reserve base).
                             // dfx=syscalltrace only (see file.rs so-open
                             // note: ungated trace volume feeds
-                            // hilogd.rd_kmsg, which eats a whole vCPU).
+                            // hilogd.rd_kmsg, which eats a whole vCPU) —
+                            // EXCEPT the >=1GB reserves: those are musl's
+                            // CFI/GWP-Asan shadow reservations, a handful
+                            // per boot, and the CFI hunt needs them
+                            // visible by default.
+                            let big_reserve = prot_flags == 0
+                                && map_flags & map::MAP_ANONYMOUS != 0
+                                && actual_length >= 0x4000_0000;
+                            if big_reserve {
+                                crate::pr_info!(
+                                    "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
+                                    crate::process::current_pid(),
+                                    mapped_addr.as_usize(),
+                                    actual_length
+                                );
+                            }
                             if crate::dfx::switches::enabled(
                                 crate::dfx::switches::DfxSwitch::SyscallTrace,
                             ) {
                                 if prot_flags == 0
                                     && map_flags & map::MAP_ANONYMOUS != 0
                                     && actual_length >= 0x10_0000
+                                    && !big_reserve
                                 {
                                     crate::pr_info!(
                                         "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
@@ -1103,6 +1119,39 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 /// # Description
 /// mprotect is used to change protection attributes of existing memory mapping
 pub fn sys_mprotect(args: [u64; 6]) -> i64 {
+    let ret = sys_mprotect_inner(args);
+    // CFI-shadow hunt (perm-denied lane): OH musl's cross-DSO CFI fill
+    // mprotects PROT_READ slices out of a 2GB PROT_NONE reserve and then
+    // mremap(MREMAP_FIXED)s a filled scratch over them; a failed fill
+    // leaves the slice PROT_NONE and every later indirect call into that
+    // DSO SIGSEGVs inside __cfi_slowpath. Failures are rare and always
+    // interesting: log every one ungated. PROT_READ downgrades (RELRO,
+    // the shadow's tmp before mremap) are entry/exit traced only under
+    // dfx=syscalltrace (two lines per call, same gating as MREMAP).
+    if ret != 0 {
+        crate::pr_info!(
+            "MPROTECT-FAIL pid {} addr {:#x} len {:#x} prot {:#x} -> {}",
+            crate::process::current_pid(),
+            args[0],
+            args[1],
+            args[2],
+            ret
+        );
+    } else if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+        && (args[2] as u32) & 0x6 == 0
+    {
+        crate::pr_info!(
+            "MPROTECT-R pid {} addr {:#x} len {:#x} prot {:#x}",
+            crate::process::current_pid(),
+            args[0],
+            args[1],
+            args[2]
+        );
+    }
+    ret
+}
+
+fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     #[cfg(target_arch = "riscv64")]
     use crate::arch::mm::{PageTableEntry, PAGE_SIZE, PAGE_SHIFT, PageTable, VirtAddr};
     #[cfg(target_arch = "x86_64")]
@@ -1164,6 +1213,41 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                 Some(a) => a,
                 None => return -12_i64, // ENOMEM
             };
+
+            // CFI-shadow forensics (perm-denied lane): OH musl reserves
+            // 2GB PROT_NONE and fills per-DSO slices with
+            // mprotect(PROT_READ) + mremap(MREMAP_FIXED). A failed fill
+            // leaves the slice PROT_NONE and every indirect call into
+            // that DSO SIGSEGVs in __cfi_slowpath. Full syscalltrace is
+            // too heavy for a boot (console wedge, see cfi2), so the
+            // shadow-shaped subset is always traced: a PROT_READ
+            // mprotect whose range intersects a >=1MB anonymous
+            // PROT_NONE VMA (RELRO downgrades are file-backed, pthread
+            // stack upgrades are PROT_WRITE — neither matches). NOTE
+            // the >=1GB threshold from cfi3 hid the main-exe/ldso
+            // slices: they sit inside the sub-1GB PROT_NONE head left
+            // after the high-DSO slices are carved out.
+            if prot == 0x1 {
+                let vma_mgr = addr_space.vma_read();
+                let end = addr.saturating_add(length);
+                let hits_big_protnone = vma_mgr.iter().any(|v| {
+                    let f = v.flags().bits();
+                    v.end().as_usize() > addr
+                        && v.start().as_usize() < end
+                        && f & 0x7 == 0
+                        && v.vma_type() == crate::mm::vma::VmaType::Anonymous
+                        && v.end().as_usize() - v.start().as_usize() >= 0x10_0000
+                });
+                if hits_big_protnone {
+                    crate::pr_info!(
+                        "MPROTECT-CFI pid {} addr {:#x} len {:#x} prot {:#x}",
+                        crate::process::current_pid(),
+                        addr,
+                        length,
+                        prot
+                    );
+                }
+            }
 
             // ATOMIC mprotect (Linux holds mmap_lock across the whole
             // syscall): ONE vma_write guard spans the coverage check, the
@@ -1863,6 +1947,16 @@ unsafe fn copy_old_to_new_pages(
 /// hilogd.rd_kmsg eats a vCPU copying them (b128/b129).
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
     let ret = sys_mremap_inner(args);
+    // Failure returns are rare and always interesting (CFI-shadow hunt):
+    // log ungated, success only under dfx=syscalltrace.
+    if ret < 0 {
+        crate::pr_info!(
+            "MREMAP-FAIL pid {} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x} -> {}",
+            crate::process::current_pid(),
+            args[0], args[1], args[2], args[3], args[4],
+            ret
+        );
+    }
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
         let pid = crate::process::current_pid();
         let comm_bytes = crate::sched::current()
@@ -1936,6 +2030,22 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         Some(aspace) => aspace,
         None => return mmap_error::ENOMEM,
     };
+
+    // CFI-shadow forensics: musl's shadow fill is
+    // mremap(tmp, len, len, MREMAP_MAYMOVE|MREMAP_FIXED, slice). By
+    // mremap time the slice VMA is PROT_READ (the fill mprotects it
+    // first), so a VMA-shape filter can't catch the move — and MREMAP_FIXED
+    // is rare outside CFI/JIT moves anyway: always trace it.
+    if (flags & MREMAP_FIXED) != 0 {
+        crate::pr_info!(
+            "MREMAP-CFI pid {} old {:#x} len {:#x} -> new {:#x} ({})",
+            crate::process::current_pid(),
+            old_addr,
+            old_size_aligned,
+            new_addr_arg,
+            new_size_aligned
+        );
+    }
 
     // 1. Find VMA covering old_addr
     let vma_info = {
