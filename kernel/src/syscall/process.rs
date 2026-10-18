@@ -2452,11 +2452,19 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
 }
 
 /// sys_rt_tgsigqueueinfo - send signal with data to a precise THREAD
-/// (Linux asm-generic NR 240: 3 parameters — tgid, tid, uinfo)
+/// (Linux asm-generic NR 240: FOUR parameters — tgid, tid, sig, uinfo).
+///
+/// The 3-arg decode here (uinfo = args[2]) made every call pass the signal
+/// NUMBER as the siginfo pointer: rt_tgsigqueueinfo(316, 318, SIGX, ptr)
+/// -> access_ok(SIGX, 128) fails -> EFAULT on every legitimate call.
+/// hilogd's server thread dies on that EFAULT (NULL-deref in its error
+/// path, SIGDEATH sig=11 in every OH boot since b138) — the whole hilog
+/// visibility problem traces back to this one decode.
 pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
     let tgid = args[0] as u32;
     let tid = args[1] as u32;
-    let uinfo = args[2] as *const u8;
+    let sig = args[2] as i32;
+    let uinfo = args[3] as *const u8;
 
     // Resolve the exact thread first.
     // SAFETY: find_task_by_pid returns valid pointer when non-null.
@@ -2473,6 +2481,12 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
+    if sig < 0 || sig > 64 {
+        return -(errno::EINVAL as i64);
+    }
+    if sig == 0 {
+        return 0;
+    }
     if uinfo.is_null() {
         return -(errno::EFAULT as i64);
     }
@@ -2480,20 +2494,14 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // Read si_signo (offset 0) and si_code (offset 8).
+    // Read si_code (offset 8). User-sent siginfo must carry a NEGATIVE
+    // si_code (Linux copy_siginfo_from_user: si_code >= 0 -> EPERM).
     let mut hdr = [0u8; 12];
     if unsafe {
         crate::arch::uaccess::copy_from_user(hdr.as_mut_ptr(), uinfo, 12)
     } != 0
     {
         return -(errno::EFAULT as i64);
-    }
-    let sig = i32::from_le_bytes(hdr[0..4].try_into().unwrap());
-    if sig < 0 || sig > 64 {
-        return -(errno::EINVAL as i64);
-    }
-    if sig == 0 {
-        return 0;
     }
     let si_code = i32::from_le_bytes(hdr[8..12].try_into().unwrap());
     if si_code >= 0 {
