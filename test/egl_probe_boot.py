@@ -89,6 +89,13 @@ def build_image(img):
             os.symlink(b, os.path.join(dst, a))
         except FileExistsError:
             pass
+    # Mesa's OH platform dlopens driver libs by the IMAGE path
+    # /vendor/lib64/chipsetsdk/<name>.so (MESA-LOADER error proved it);
+    # alias that whole directory onto /lib where the libs live.
+    os.makedirs(os.path.join(staging, "vendor", "lib64"), exist_ok=True)
+    vlink = os.path.join(staging, "vendor", "lib64", "chipsetsdk")
+    if not os.path.lexists(vlink):
+        os.symlink("../../lib", vlink)
     r = subprocess.run([MKFS, "-q", "-F", "-O", "^metadata_csum,^has_journal",
                         "-d", staging, img, "512M"],
                        capture_output=True, text=True)

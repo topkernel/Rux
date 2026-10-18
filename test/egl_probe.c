@@ -31,48 +31,52 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
-/* ---- hilog catcher: libhilog (inside libEGL/Mesa) connects to the
- * abstract socket "hilogd.server" and pushes formatted messages. Be
- * that server and mirror every message to serial — this is the only
- * place the OH-patched Mesa error text exists. */
+/* ---- hilog catcher: libhilog (inside libEGL/Mesa) sends its formatted
+ * messages to the unix socket /dev/unix/socket/hilogInput (kernel log
+ * showed the failed connect attempt to exactly that path). Be that
+ * socket and mirror every datagram to serial — this is the only place
+ * the OH-patched Mesa error text exists. */
+static void dump_bytes(const char *tag, const char *buf, ssize_t n)
+{
+    printf("--- %s (%zd bytes) ---\n", tag, n);
+    for (ssize_t i = 0; i < n; i++) {
+        unsigned char ch = (unsigned char)buf[i];
+        putchar((ch >= 0x20 && ch < 0x7f) || ch == '\n' ? ch : '.');
+    }
+    putchar('\n');
+    fflush(stdout);
+}
+
 static void *hilog_catcher(void *arg)
 {
     (void)arg;
-    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    /* devfs mkdir from userspace (kernel creates dri/graphics this way
+     * internally; the syscall path must work for ueventd too) */
+    mkdir("/dev/unix", 0755);
+    mkdir("/dev/unix/socket", 0755);
+    int s = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (s < 0) { printf("info hilog: no socket (%s)\n", strerror(errno)); return NULL; }
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof sa);
     sa.sun_family = AF_UNIX;
-    sa.sun_path[0] = '\0';
-    strcpy(sa.sun_path + 1, "hilogd.server");
+    strcpy(sa.sun_path, "/dev/unix/socket/hilogInput");
+    unlink(sa.sun_path);
     if (bind(s, (struct sockaddr *)&sa, sizeof sa) != 0) {
-        printf("info hilog: bind failed (%s)\n", strerror(errno));
+        printf("info hilog: bind %s failed (%s)\n", sa.sun_path, strerror(errno));
         close(s);
         return NULL;
     }
-    if (listen(s, 4) != 0) { close(s); return NULL; }
-    printf("info hilog: catcher listening (hilogd.server)\n");
+    printf("info hilog: catcher bound %s (dgram)\n", sa.sun_path);
+    char buf[2048];
     for (;;) {
-        int c = accept(s, NULL, NULL);
-        if (c < 0) continue;
-        char buf[2048];
-        ssize_t n;
-        while ((n = read(c, buf, sizeof buf - 1)) > 0) {
-            buf[n] = 0;
-            /* the message carries non-printable hilog headers; print the
-             * whole thing, filtering to graphic chars per line */
-            printf("--- hilog msg (%zd bytes) ---\n", n);
-            for (ssize_t i = 0; i < n; i++) {
-                unsigned char ch = (unsigned char)buf[i];
-                putchar((ch >= 0x20 && ch < 0x7f) || ch == '\n' ? ch : '.');
-            }
-            putchar('\n');
-            fflush(stdout);
-        }
-        close(c);
+        ssize_t n = recv(s, buf, sizeof buf - 1, 0);
+        if (n <= 0) continue;
+        buf[n] = 0;
+        dump_bytes("hilog msg", buf, n);
     }
     return NULL;
 }
