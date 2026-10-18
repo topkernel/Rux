@@ -1292,7 +1292,7 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     {
         static DRM_OPENS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         let n = DRM_OPENS.fetch_add(1, Ordering::Relaxed);
-        crate::pr_info!(
+        crate::pr_warn!(
             "drm: open {} (#{}) by pid {}",
             entry.name,
             n + 1,
