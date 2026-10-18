@@ -39,9 +39,9 @@ use core::alloc::Layout;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Pool capacity — bounded memory exposure (entries are 32 bytes each).
-const POOL_CAP: usize = 4096;
+const POOL_CAP: usize = 16384;
 /// How long a matched free is held back (ms of jiffies).
-const DEFER_MS: u64 = 250;
+const DEFER_MS: u64 = 1500;
 
 #[derive(Clone, Copy)]
 struct Entry {

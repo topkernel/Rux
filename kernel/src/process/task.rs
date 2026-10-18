@@ -1456,6 +1456,18 @@ impl Task {
         // family) instead of heap-reuse garbage pointers (the walker #GP
         // family).
         crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
+        // The walker path's other unpinned Arc borrows — fdtable
+        // (generate_maps resolves file paths per VMA) and the shared
+        // signal struct (generate_status reads ign/cgt masks) — get the
+        // same 250ms hold: sizes are the ArcInner block (2 refcount
+        // words) + the struct. Registered from here (types are pub,
+        // constructors live in fs//signal — outside the mm lane).
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::file::FdTable>(),
+        );
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::signal::SignalStruct>(),
+        );
         // Note: thread field already initialized above with ra=cpu_idle_loop;
         // do NOT reinitialize here or the entry point will be zeroed.
         ptr::write(
@@ -1937,6 +1949,18 @@ impl Task {
         // family) instead of heap-reuse garbage pointers (the walker #GP
         // family).
         crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
+        // The walker path's other unpinned Arc borrows — fdtable
+        // (generate_maps resolves file paths per VMA) and the shared
+        // signal struct (generate_status reads ign/cgt masks) — get the
+        // same 250ms hold: sizes are the ArcInner block (2 refcount
+        // words) + the struct. Registered from here (types are pub,
+        // constructors live in fs//signal — outside the mm lane).
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::file::FdTable>(),
+        );
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::signal::SignalStruct>(),
+        );
         ptr::write(
             (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
             crate::arch::thread::ThreadStruct::new(),

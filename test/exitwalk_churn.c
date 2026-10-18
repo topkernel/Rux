@@ -48,6 +48,18 @@
 #ifndef PROBE_SECS
 #define PROBE_SECS 30
 #endif
+/* Churn pacing: microseconds slept between spawn iterations. 0 = the
+ * pathological KVM rate (~5k forks/s aggregate, well beyond OH's
+ * launcher era ~1-10/s); 20000 = ~100/s aggregate (10x heavier than
+ * OH) for acceptance-mode runs. */
+#ifndef CHURN_DELAY_US
+#define CHURN_DELAY_US 0
+#endif
+/* smaps cadence: every Nth pid (1 = every pid — the pathological
+ * long-borrow hammer; 50 = OH-realistic occasional heavy scan). */
+#ifndef SMAPS_EVERY
+#define SMAPS_EVERY 7
+#endif
 
 #define NSPAWNERS 2
 #define NWALKERS  2
@@ -218,6 +230,9 @@ static void spawner_main(int id)
         /* vary the churn rate so exits interleave walkers */
         if ((seed & 7) == 0)
             usleep(1000);
+#if CHURN_DELAY_US > 0
+        usleep(CHURN_DELAY_US);
+#endif
     }
     _exit(0);
 }
@@ -286,7 +301,7 @@ static void walker_main(int id)
                 (void)read_whole(path);
                 sh->reads++;
             }
-            if (round % 7 == 0) {
+            if (round % SMAPS_EVERY == 0) {
                 /* smaps: per-page PT walk — the expensive hammer */
                 snprintf(path, sizeof(path), "/proc/%ld/smaps", pid);
                 (void)read_whole(path);

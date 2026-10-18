@@ -67,6 +67,10 @@ def main():
         WT, "target/x86_64-unknown-none/debug/bzImage"))
     ap.add_argument("--accel", default="kvm",
                     help="kvm (default; falls back to tcg) or tcg")
+    ap.add_argument("--churn-delay-us", default="0",
+                    help="per-spawner pacing in us (0 = pathological rate)")
+    ap.add_argument("--smaps-every", default="7",
+                    help="smaps every Nth pid (1 = every pid)")
     ap.add_argument("--dfx", default="",
                     help="dfx= boot flags (default: none — the watchdog's "
                          "periodic taskdumps are a crash discriminator)")
@@ -81,7 +85,10 @@ def main():
     env = dict(os.environ)
     env.setdefault("REALGCC", "gcc")
     subprocess.run([MUSL_CC, "-static", "-O1", "-Wall",
-                    f"-DPROBE_SECS={args.secs}", "-o", binp, src],
+                    f"-DPROBE_SECS={args.secs}",
+                    f"-DCHURN_DELAY_US={args.churn_delay_us}",
+                    f"-DSMAPS_EVERY={args.smaps_every}",
+                    "-o", binp, src],
                    check=True, env=env)
 
     img = os.path.join(WT, "work", "exitwalk_churn-x86.img")
