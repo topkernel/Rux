@@ -817,6 +817,64 @@ impl MmStruct {
         Ok(())
     }
 
+    /// Teardown of ONE present user leaf at `va`, for callers that already
+    /// hold PTE_MODIFY_LOCK (mremap's page-move copy). Mirrors the per-page
+    /// body of unmap_pages: kernel-only leaves (no U bit) and device
+    /// frames are left untouched; a normal user leaf gets rmap removal,
+    /// refcount drop (last ref frees) and its PTE cleared. Returns true if
+    /// a leaf was torn down.
+    ///
+    /// Used by copy_old_to_new_pages when the mremap destination holds a
+    /// page mapped by a racing same-mm fault between the destination VMA's
+    /// MAP_FIXED install and the PTE copy — Linux's mremap moves PTEs
+    /// atomically under mmap_lock and the move REPLACES whatever sits in
+    /// the destination; skipping the page (the old MREMAP-DST-LIVE guard)
+    /// permanently lost the source data.
+    pub unsafe fn unmap_one_user_leaf_locked(&self, va: usize) -> bool {
+        let Some((ppn_val, pte_bits)) = PageTableWalker::walk(self.pgd, va as u64) else {
+            return false;
+        };
+        if pte_bits & PageTableEntry::U == 0 {
+            return false; // kernel translation overlapped in the walk
+        }
+        // Device frames (virtio-gpu framebuffer) are not RAM pages.
+        {
+            let phys = (ppn_val as u64) << 12;
+            if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
+                if phys >= info.addr && phys < info.addr + info.size as u64 {
+                    self.clear_pte(va as u64);
+                    return true;
+                }
+            }
+        }
+        use crate::mm::page_desc::pfn_to_page_mut;
+        let page = pfn_to_page_mut(ppn_val as usize);
+        if !page.is_null() {
+            // SAFETY: page is non-null (checked) and points to the page
+            // descriptor of the leaf frame mapped at `va`.
+            unsafe {
+                (*page).rmap_alt_remove(
+                    self as *const _ as usize,
+                    va / PAGE_SIZE_USIZE,
+                );
+            }
+            if unsafe { (*page).is_mapped() } {
+                // SAFETY: page descriptor for a page mapped by this address space.
+                unsafe { crate::mm::rmap::page_remove_rmap(&*page) };
+            }
+            // SAFETY: page descriptor for a page mapped by this address space.
+            let new_ref =
+                unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
+            if new_ref == 0 {
+                crate::mm::page_alloc::free_pages((ppn_val as usize) << PAGE_SHIFT, 0);
+            }
+        }
+        // SAFETY: `va` was just verified as a mapped user leaf.
+        unsafe { self.clear_pte(va as u64) };
+        self.sub_rss(1);
+        true
+    }
+
     /// Clear page table entry at specified virtual address (4-level walk)
     unsafe fn clear_pte(&self, virt: u64) {
         let a = VirtAddr::new(virt);

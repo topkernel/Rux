@@ -219,6 +219,49 @@ if [ -f "$ORPHAN_STORM_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; 
     fi
 fi
 
+# Build + install the musl cross-DSO CFI shadow init probe (static glibc +
+# pthreads; replicates ld-musl's exact 2GB PROT_NONE reserve + per-slice
+# mprotect(PROT_READ) + mremap(MREMAP_FIXED) fill sequence — the OH
+# "Permission denied at __cfi_slowpath" SIGSEGV family that kills samgr).
+MUSL_SDK="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
+
+# Build + install the GWP-Asan mprotect/fault churn probe (same musl
+# SDK recipe as cfi_shadow — static glibc SIGILLs on the no-V boot CPU).
+GWP_CHURN_SRC="$PROJECT_ROOT/test/gwp_churn.c"
+if [ -f "$GWP_CHURN_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing gwp_churn to /test/gwp_churn..."
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -static -O2 -pthread -Wall \
+         -nostdinc -isystem "$MUSL_SDK/include" -nostdlib \
+         -o "$STAGING/test/gwp_churn" "$GWP_CHURN_SRC" \
+         "$MUSL_SDK/lib/crt1.o" "$MUSL_SDK/lib/crti.o" "$MUSL_SDK/lib/crtn.o" \
+         -L"$MUSL_SDK/lib" -lc \
+         $(riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -print-libgcc-file-name); then
+        chmod +x "$STAGING/test/gwp_churn"
+    else
+        echo "Warning: gwp_churn failed to compile (skipped)"
+        rm -f "$STAGING/test/gwp_churn"
+    fi
+fi
+
+CFI_SHADOW_SRC="$PROJECT_ROOT/test/cfi_shadow.c"
+if [ -f "$CFI_SHADOW_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing cfi_shadow to /test/cfi_shadow..."
+    # Built against the project's riscv64 musl SDK (libc.a + headers):
+    # Debian's static glibc now ships vectorized memset/memcpy as the
+    # ifunc default, which SIGILLs on the boot CPU (no V extension).
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -static -O2 -pthread -Wall \
+         -nostdinc -isystem "$MUSL_SDK/include" -nostdlib \
+         -o "$STAGING/test/cfi_shadow" "$CFI_SHADOW_SRC" \
+         "$MUSL_SDK/lib/crt1.o" "$MUSL_SDK/lib/crti.o" "$MUSL_SDK/lib/crtn.o" \
+         -L"$MUSL_SDK/lib" -lc \
+         $(riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -print-libgcc-file-name); then
+        chmod +x "$STAGING/test/cfi_shadow"
+    else
+        echo "Warning: cfi_shadow failed to compile (skipped)"
+        rm -f "$STAGING/test/cfi_shadow"
+    fi
+fi
+
 
 # Build + install the E8 megapage-demotion E2E probe (static glibc;
 # fixed-address 4K mmap over the cloned PLIC 2MB megapage — the

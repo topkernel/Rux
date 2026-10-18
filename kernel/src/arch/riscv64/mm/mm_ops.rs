@@ -777,6 +777,64 @@ impl MmStruct {
         Ok(())
     }
 
+    /// Teardown of ONE present user leaf at `va`, for callers that already
+    /// hold PTE_MODIFY_LOCK (mremap's page-move copy). Mirrors the per-page
+    /// body of unmap_pages: kernel-only leaves (no U bit) and device
+    /// frames are left untouched; a normal user leaf gets rmap removal,
+    /// the adjudicated put_page release (last ref frees) and its PTE
+    /// cleared. Returns true if a leaf was torn down.
+    ///
+    /// Used by copy_old_to_new_pages when the mremap destination holds a
+    /// page mapped by a racing same-mm fault between the destination VMA's
+    /// MAP_FIXED install and the PTE copy — Linux's mremap moves PTEs
+    /// atomically under mmap_lock and the move REPLACES whatever sits in
+    /// the destination; skipping the page (the old MREMAP-DST-LIVE guard)
+    /// permanently lost the source data.
+    pub unsafe fn unmap_one_user_leaf_locked(&self, va: usize) -> bool {
+        let Some((ppn_val, pte_bits)) = PageTableWalker::walk(self.pgd, va as u64) else {
+            return false;
+        };
+        if pte_bits & PageTableEntry::U == 0 {
+            return false; // kernel translation overlapped in the walk
+        }
+        // Device frames (virtio-gpu framebuffer) are not RAM pages.
+        {
+            let phys = (ppn_val as u64) << 12;
+            if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
+                if phys >= info.addr && phys < info.addr + info.size as u64 {
+                    self.clear_pte(va as u64);
+                    return true;
+                }
+            }
+        }
+        use crate::mm::page_desc::pfn_to_page_mut;
+        let page = pfn_to_page_mut(ppn_val as usize);
+        if !page.is_null() {
+            // SAFETY: page is non-null (checked) and points to the page
+            // descriptor of the leaf frame mapped at `va`.
+            unsafe {
+                (*page).rmap_alt_remove(
+                    self as *const _ as usize,
+                    va / PAGE_SIZE_USIZE,
+                );
+            }
+            // SIGILL-stamp adjudicated release (same as unmap_pages).
+            // SAFETY: page is non-null and is a leaf frame mapped by this
+            // address space at `va`.
+            unsafe {
+                crate::arch::mm::mmu_init::release_user_leaf(
+                    page,
+                    ppn_val as usize,
+                    va,
+                );
+            }
+        }
+        // SAFETY: `va` was just verified as a mapped user leaf.
+        unsafe { self.clear_pte(va as u64) };
+        self.sub_rss(1);
+        true
+    }
+
     /// Clear page table entry at specified virtual address
     unsafe fn clear_pte(&self, virt: u64) {
         let vpn2 = ((virt >> 30) & 0x1FF) as usize;

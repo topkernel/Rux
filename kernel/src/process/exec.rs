@@ -215,6 +215,25 @@ pub(crate) fn do_execve_elf(
     let virt_start = min_vaddr & !(PAGE_SIZE - 1);
     let virt_end = (max_vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
+    // Linux binfmt_elf load bias: ET_DYN executables (PIE) load at a
+    // NONZERO base — ELF_ET_DYN_BASE = (TASK_SIZE/3*2) page-aligned, plus
+    // ASLR on Linux — never at their raw p_vaddr. We mapped PIEs at bias
+    // 0, so the image started at VA 0 and musl computed app.map =
+    // AT_PHDR - PT_PHDR.p_vaddr + min_vaddr == 0; OH musl's cross-DSO CFI
+    // then treats the main exe as "the dso has no data! map[0]" and skips
+    // filling its shadow slice — every indirect call into exe code read
+    // the still-PROT_NONE CFI shadow page and SIGSEGV'd in
+    // __cfi_slowpath (the samgr/hilogd "Permission denied at ld.so+0x89ac6"
+    // family that killed first pixels). ET_EXEC keeps absolute p_vaddr
+    // (bias 0). The base is clear of the fixed INTERP_BASE (0x3FBF000000
+    // = 17GB) and of MMAP_START (TASK_SIZE-64GB) on both arches.
+    let exec_load_bias: u64 = if ehdr.e_type == crate::fs::elf::ElfType::ET_DYN as u16 {
+        let task_size = crate::arch::mm::user_addr::TASK_SIZE as u64;
+        (task_size / 3 * 2) & !(PAGE_SIZE - 1)
+    } else {
+        0
+    };
+
     // Calculate initial stack size needed
     let argc = argv.len() as u64;
     let argv_count = argv.len();
@@ -280,13 +299,14 @@ pub(crate) fn do_execve_elf(
                PageTableEntry::R | PageTableEntry::W |
                PageTableEntry::A | PageTableEntry::D;
 
-    // SAFETY: user_ppn is a freshly allocated page table root, virt_start..virt_start+total_size
+    // SAFETY: user_ppn is a freshly allocated page table root, image_start..image_start+total_size
     // is a valid range, and flags contains valid PTE bits for user pages.
     // NOTE: with the chunked allocator the image may span MULTIPLE physical
     // blocks — never write through phys_base + vaddr offset; the segment
     // loader below walks the page tables page by page.
+    let image_start = virt_start + exec_load_bias;
     let _image_phys_base = unsafe {
-        alloc_and_map_to_user_table(user_ppn, virt_start, total_size, flags)
+        alloc_and_map_to_user_table(user_ppn, image_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
     // Initial stack at the top of user space (one guard page below
@@ -354,7 +374,7 @@ pub(crate) fn do_execve_elf(
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
 
         if phdr.is_load() {
-            let virt_addr = phdr.p_vaddr;
+            let virt_addr = exec_load_bias + phdr.p_vaddr;
             let file_size = phdr.p_filesz;
             let mem_size = phdr.p_memsz;
             let offset = phdr.p_offset as usize;
@@ -364,8 +384,8 @@ pub(crate) fn do_execve_elf(
             // attacker-controlled) ELF file; slicing or writing past the
             // mapped region without these checks panics or corrupts memory.
             if file_size > mem_size
-                || virt_addr < virt_start
-                || virt_addr.saturating_add(mem_size) > virt_end
+                || virt_addr < image_start
+                || virt_addr.saturating_add(mem_size) > virt_end + exec_load_bias
                 || offset.checked_add(file_size as usize).map_or(true, |end| end > program_data.len())
             {
                 return Err(crate::errno::Errno::ExecFormatError.as_neg_i32());
@@ -402,7 +422,7 @@ pub(crate) fn do_execve_elf(
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
 
         if phdr.is_load() && phdr.p_memsz > 0 {
-            let seg_start = phdr.p_vaddr;
+            let seg_start = exec_load_bias + phdr.p_vaddr;
             let seg_end = (seg_start + phdr.p_memsz + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
 
             // Build per-segment PTE flags
@@ -716,7 +736,9 @@ pub(crate) fn do_execve_elf(
 
         (interp_entry, interp_base)
     } else {
-        (entry, 0)
+        // No interpreter (static or static-PIE): control goes straight to
+        // the executable entry — apply its load bias for ET_DYN.
+        (exec_load_bias + entry, 0)
     };
 
     // Set up stack (Linux reserves 256 bytes of slop below the raw top).
@@ -813,7 +835,7 @@ pub(crate) fn do_execve_elf(
                 // program_data (Wave 1 central check).
                 if let Some(ph) = unsafe { ehdr.get_program_header(program_data, i) } {
                     if ph.p_type == crate::fs::elf::ElfPtType::PT_PHDR as u32 {
-                        found = Some(ph.p_vaddr);
+                        found = Some(exec_load_bias + ph.p_vaddr);
                         break;
                     }
                 }
@@ -926,7 +948,10 @@ pub(crate) fn do_execve_elf(
             (AT_PHNUM, phnum),
             (AT_PAGESZ, PAGE_SIZE as u64),
             (AT_BASE, at_base),
-            (AT_ENTRY, entry),
+            // Linux AT_ENTRY is the main executable's entry (load bias +
+            // e_entry), even when control is first transferred to the
+            // interpreter.
+            (AT_ENTRY, exec_load_bias + entry),
             (AT_UID, at_uid),
             (AT_EUID, at_euid),
             (AT_GID, at_gid),
@@ -1007,9 +1032,10 @@ pub(crate) fn do_execve_elf(
     // through a function pointer at 0x1c29c, a parent-brk heap address).
     // Linux resets start_brk/brk to the page-aligned end of the new
     // image's highest PT_LOAD.
-    new_addr_space.set_start_brk(virt_end as usize);
-    new_addr_space.set_brk_val(virt_end as usize);
-    unsafe { (*task_ptr).set_brk(virt_end); };
+    let image_end = virt_end + exec_load_bias;
+    new_addr_space.set_start_brk(image_end as usize);
+    new_addr_space.set_brk_val(image_end as usize);
+    unsafe { (*task_ptr).set_brk(image_end); };
 
     // Record envp range for /proc/pid/environ
     if !envp.is_empty() {
@@ -1060,7 +1086,7 @@ pub(crate) fn do_execve_elf(
             // SAFETY: i < phdr_count and program_data is a valid ELF file slice.
             if let Some(phdr) = unsafe { ehdr.get_program_header(program_data, i) } {
                 if phdr.is_load() {
-                    let seg_start = phdr.p_vaddr;
+                    let seg_start = exec_load_bias + phdr.p_vaddr;
                     let seg_end = seg_start + phdr.p_memsz;
                     if seg_end <= seg_start {
                         continue;
