@@ -1145,10 +1145,75 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     // x86_64 has no lazy-FPU first-use trap (the FPU is enabled at boot
     // via CR4.OSFXSR in fpu_init and never gated with CR0.TS), so there
     // is no decode-and-retry path — straight to signal delivery.
-    crate::pr_debug!("trap: #UD at rip={:#x}, mode={}",
-        regs.rip, if regs.user_mode() { "user" } else { "kernel" });
-
+    //
+    // b143 (hdcd SIGILL loop, 15+ respawns): Linux routes user #UD
+    // through force_sig_fault(SIGILL) — a process WITH a SIGILL handler
+    // (OH's processdump/CFI crash reporter) gets to run it. Exiting
+    // directly here killed hdcd before its handler could log the fault,
+    // on every respawn. Same handler-first shape as the #GP path below.
     if regs.user_mode() {
+        let pid = crate::process::current_pid();
+        // Forensics before anything can unwind: rip + the first 16
+        // instruction bytes (ud2 = 0f 0b is the compiler CFI/trap
+        // fingerprint; anything else is a wild jump into data).
+        {
+            let comm = crate::sched::current()
+                .map(|t| {
+                    let c = unsafe { (*t).comm() };
+                    let n = c.iter().position(|&b| b == 0).unwrap_or(c.len());
+                    alloc::string::String::from(
+                        core::str::from_utf8(&c[..n]).unwrap_or("?"),
+                    )
+                })
+                .unwrap_or_default();
+            let mut hex = alloc::string::String::new();
+            if let Some(aspace) =
+                crate::sched::current().and_then(|t| t.address_space())
+            {
+                let root = aspace.root_ppn();
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                for i in 0..16usize {
+                    let va = regs.rip + i as u64;
+                    let byte = (|| {
+                        let phys = unsafe {
+                            crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                root,
+                                va & !0xfff,
+                            )?
+                        };
+                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                (phys.0 << 12) | (va & 0xfff),
+                            ),
+                        );
+                        // SAFETY: mapped user page through the linear map.
+                        Some(unsafe {
+                            core::ptr::read_volatile(kv.as_u64() as *const u8)
+                        })
+                    })();
+                    match byte {
+                        Some(b) => {
+                            hex.push(HEX[(b >> 4) as usize] as char);
+                            hex.push(HEX[(b & 0xf) as usize] as char);
+                        }
+                        None => hex.push('?'),
+                    }
+                }
+            }
+            crate::pr_info!(
+                "trap: #UD at rip={:#x} pid {} comm {} bytes {}",
+                regs.rip,
+                pid,
+                comm,
+                hex
+            );
+        }
+        if sigill_has_handler() && !sigsegv_blocked_current() {
+            let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGILL as i32);
+            crate::signal::force_unblock_current(crate::signal::Signal::SIGILL as i32);
+            return;
+        }
+        let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGILL as i32);
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
         // Do NOT advance rip — the task is ZOMBIE and will not resume
     } else {
@@ -1158,6 +1223,15 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         crate::dfx::scribble::crash_report(b"#UD", regs);
         panic!("trap: illegal instruction in kernel mode at rip={:#x}", regs.rip);
     }
+}
+
+/// SIGILL (4) disposition check for the #UD path (processdump/CFI crash
+/// catchers in OH install one).
+fn sigill_has_handler() -> bool {
+    crate::sched::current()
+        .and_then(|t| (*t).signal.as_ref().map(|s| s.get_action(4)))
+        .map(|a| a.is_some_and(|a| a.has_handler()))
+        .unwrap_or(false)
 }
 
 /// Handle #GP: user mode → SIGSEGV (Linux semantics), kernel → bug.

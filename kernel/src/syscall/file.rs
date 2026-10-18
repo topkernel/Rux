@@ -1639,12 +1639,17 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         static MNT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         let n = MNT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if n < 24 {
+        // hmdfs/sharefs are always traced (b143: StorageDaemon's
+        // per-user /mnt/hmdfs/<id>/account mount "fails errno 11" and
+        // the account-ready chain rides on diagnosing it; a handful of
+        // mounts per boot, not per-transaction).
+        let always = fs_type_str == "hmdfs" || fs_type_str == "sharefs";
+        if n < 24 || always {
             let ret = match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
                 Ok(()) => 0,
                 Err(e) => e,
             };
-            if ret != 0 || n < 12 {
+            if ret != 0 || n < 12 || always {
                 crate::pr_info!(
                     "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
                     n,
