@@ -29,6 +29,14 @@ Format:
   race in the completion path (historically bug-dense per CLAUDE.md: "virtio
   completion ordering ... read the R-numbered comments before changing").
   Root-cause candidate for S002 (EIO below).
+- 2026-10-18 adjudication (pciblk-wedge agent): a focused dd/cp/sync churn
+  storm (run/iostorm.py, SMP2) dies after ~10 min with toybox sig=11 SEGVs
+  and then silent stall — the SAME failure shape (same faulting pids/epcs,
+  plus RAW-FREE-OF-LIVE-TABLE page warnings) reproduces on UNMODIFIED main
+  a8ce78a2 under the identical workload (`iostorm.py --kernel <baseline>`).
+  Terminal storm failure = this S001/S002/mm family, NOT a virtio-lock
+  regression. Zero `DEADLOCK: spinlock stuck` markers on either kernel in
+  every storm run (runs/iostorm-{r1,r2,baseline}).
 
 ## BUG-S002  ext4 entry barrier sync returns EIO under load, cascades into user-visible I/O failures
 - Class: CORRUPTION-risk / WEDGE-trigger

@@ -4,7 +4,7 @@
 //!
 //! VirtIO block device driver
 
-use crate::sync::spinlock::Spinlock;
+use crate::sync::spinlock::{Spinlock, SpinlockIrqGuard};
 
 use crate::drivers::blkdev::{GenDisk, Request, BlockDeviceOps};
 
@@ -1019,6 +1019,357 @@ static mut PCI_BLK_QUEUES: [Option<queue::VirtQueue>; MAX_PCI_BLK_DISKS] =
 pub(crate) static PCI_BLK_LOCKS: [Spinlock<()>; MAX_PCI_BLK_DISKS] =
     [const { Spinlock::new(()) }; MAX_PCI_BLK_DISKS];
 
+// ============================================================================
+// PCI_BLK_LOCKS holder forensics (the OH b125 spin-wedge hunt)
+//
+// b125 (KVM q35 SMP2, storage-heavy boot phase) wedged permanently with
+// cpu1 spinning on PCI_BLK_LOCKS[0] ("DEADLOCK: spinlock stuck cpu=1
+// lock=0xffffffff80ba5a94") and NOTHING else on the serial log — no
+// second stuck CPU, no VW reports, no panic. The holder was therefore
+// neither spinning on another lock (it would have printed its own
+// DEADLOCK line) nor progressing; every BLK critical section in the tree
+// is supposed to be short RAM work, but the sync submit paths used to do
+// two potentially-slow things UNDER the irqsave lock: (a) the 64-byte
+// io_buf heap alloc/dealloc (nested heap-lock contention inside an
+// IRQ-off window) and (b) `notify()` — an MMIO write that VM-exits to
+// QEMU under KVM, where six virtio-blk disks make the exit path subject
+// to BQL/iothread convoys. Both are now moved OUTSIDE the lock (see
+// read_block_once / write_block_once / flush_block_once /
+// pci_submit_read_async), Linux-parity style.
+//
+// To make any recurrence self-describing, every acquire goes through
+// `pci_blk_lock()` below, which records holder cpu/pid/acquire-site/
+// acquire-jiffies. A contended acquire that outlives a bounded try-spin
+// prints the CURRENT holder via the console's lock-free putchar (never
+// printk — the holder may be wedged inside printk's own lock), and the
+// per-jiffy timer-softirq watchdog (vw_lag_watchdog) prints any holder
+// older than 5 s.
+// ============================================================================
+
+/// Holder cpu + 1 (0 = free / mid-handoff), per slot.
+static PCI_BLK_HOLDER_CPU: [core::sync::atomic::AtomicUsize; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_PCI_BLK_DISKS];
+/// Holder pid (0 = unknown / early boot).
+static PCI_BLK_HOLDER_PID: [core::sync::atomic::AtomicU32; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; MAX_PCI_BLK_DISKS];
+/// Holder's acquire call site (return address into read/write/flush/
+/// submit/walker). 0 when unavailable.
+static PCI_BLK_HOLDER_RA: [core::sync::atomic::AtomicUsize; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_PCI_BLK_DISKS];
+/// Jiffies when the current holder acquired (0 = free). Saturating reads
+/// are fine: this is diagnostic state, never control flow.
+static PCI_BLK_HOLDER_AT: [core::sync::atomic::AtomicU64; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PCI_BLK_DISKS];
+/// Context tag of the holder: bit 0 = in hardirq, bit 1 = in softirq.
+static PCI_BLK_HOLDER_CTX: [core::sync::atomic::AtomicU32; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; MAX_PCI_BLK_DISKS];
+/// Last jiffy each slot printed a contended-acquire forensics line
+/// (rate limit for the lock-free printer).
+static PCI_BLK_SPIN_PRINT_AT: [core::sync::atomic::AtomicU64; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PCI_BLK_DISKS];
+
+/// Capture the caller's return address (the virtio acquire site) for
+/// holder forensics — same technique as spinlock.rs's
+/// caller_return_address().
+#[inline]
+fn pci_blk_acquire_site() -> usize {
+    let ra: usize;
+    #[cfg(feature = "riscv64")]
+    // SAFETY: pure register read, no memory access or side effects.
+    unsafe {
+        core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
+    }
+    #[cfg(feature = "x86_64")]
+    // SAFETY: frame pointers are forced on, so [rbp+8] is this inlined
+    // helper's caller's return address.
+    unsafe {
+        core::arch::asm!("mov {}, qword ptr [rbp + 8]", out(reg) ra, options(nomem, nostack));
+    }
+    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+    {
+        ra = 0;
+    }
+    ra
+}
+
+/// Lock-free console byte (the holder may be wedged holding printk's
+/// lock — same discipline as RawSpinlock::deadlock_warn).
+#[inline]
+fn wedge_put(b: u8) {
+    // SAFETY: putchar_no_lock is a byte-wise polling UART write usable
+    // from any context, including with interrupts disabled.
+    unsafe { crate::console::putchar_no_lock(b) }
+}
+
+/// Lock-free hex printer (usize, no leading zeros beyond the top nibble
+/// set — keeps forensics lines short).
+fn wedge_hex(mut v: usize) {
+    let mut started = false;
+    let mut shift = (core::mem::size_of::<usize>() * 4) as i32;
+    while shift > 0 {
+        shift -= 4;
+        let nibble = (v >> shift as usize) & 0xF;
+        if nibble != 0 || started || shift == 0 {
+            let c = if nibble < 10 {
+                b'0' + nibble as u8
+            } else {
+                b'a' + (nibble - 10) as u8
+            };
+            wedge_put(c);
+            started = true;
+        }
+    }
+}
+
+/// Lock-free decimal printer (u64).
+fn wedge_dec(mut v: u64) {
+    let mut buf = [0u8; 20];
+    let mut n = 0;
+    if v == 0 {
+        wedge_put(b'0');
+        return;
+    }
+    while v > 0 && n < buf.len() {
+        buf[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+    }
+    while n > 0 {
+        n -= 1;
+        wedge_put(buf[n]);
+    }
+}
+
+/// Print one contended-acquire forensics line through the lock-free
+/// console: who holds `slot`, since when, from which site — plus the
+/// waiter's own site. Rate-limited per slot (>= 2 s apart).
+fn pci_blk_contended_forensics(slot: usize, waiter_site: usize) {
+    let now = crate::drivers::timer::get_jiffies();
+    let last = PCI_BLK_SPIN_PRINT_AT[slot].load(core::sync::atomic::Ordering::Acquire);
+    if last != 0 && now.saturating_sub(last) < 2 {
+        return;
+    }
+    PCI_BLK_SPIN_PRINT_AT[slot].store(now, core::sync::atomic::Ordering::Release);
+
+    for &b in b"PCI-BLK-CONTEND slot=" {
+        wedge_put(b);
+    }
+    wedge_dec(slot as u64);
+    for &b in b" holder_cpu=" {
+        wedge_put(b);
+    }
+    let hcpu = PCI_BLK_HOLDER_CPU[slot].load(core::sync::atomic::Ordering::Acquire);
+    if hcpu == 0 {
+        wedge_put(b'?');
+    } else {
+        wedge_dec((hcpu - 1) as u64);
+    }
+    for &b in b" pid=" {
+        wedge_put(b);
+    }
+    wedge_dec(PCI_BLK_HOLDER_PID[slot].load(core::sync::atomic::Ordering::Acquire) as u64);
+    for &b in b" ra=0x" {
+        wedge_put(b);
+    }
+    wedge_hex(PCI_BLK_HOLDER_RA[slot].load(core::sync::atomic::Ordering::Acquire));
+    for &b in b" ctx=" {
+        wedge_put(b);
+    }
+    wedge_dec(PCI_BLK_HOLDER_CTX[slot].load(core::sync::atomic::Ordering::Acquire) as u64);
+    for &b in b" held_ms=" {
+        wedge_put(b);
+    }
+    let at = PCI_BLK_HOLDER_AT[slot].load(core::sync::atomic::Ordering::Acquire);
+    let held_ms = crate::drivers::timer::jiffies_to_msecs(now.saturating_sub(at).min(0xFFFF));
+    wedge_dec(held_ms);
+    for &b in b" waiter_cpu=" {
+        wedge_put(b);
+    }
+    wedge_dec(crate::arch::smp::cpu_id() as u64);
+    for &b in b" waiter_site=0x" {
+        wedge_put(b);
+    }
+    wedge_hex(waiter_site);
+    // Ring state (all atomics / RAM reads — safe under any wedge).
+    for &b in b" used=" {
+        wedge_put(b);
+    }
+    let used = match get_pci_device_queue_at(slot) {
+        Some(q) => {
+            // SAFETY: same idx read as the walker's fast path.
+            unsafe {
+                core::ptr::read_volatile((q.used_ring_ptr() as usize + 2) as *const u16) as u64
+            }
+        }
+        None => 0,
+    };
+    wedge_dec(used);
+    for &b in b" walked=" {
+        wedge_put(b);
+    }
+    wedge_dec(
+        PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire) as u64,
+    );
+    for &b in b" expected=" {
+        wedge_put(b);
+    }
+    wedge_dec(PCI_BLK_EXPECTED_USED_IDX[slot].load(core::sync::atomic::Ordering::Acquire) as u64);
+    wedge_put(b'\n');
+}
+
+/// RAII guard for a per-slot BLK lock acquire: records holder forensics
+/// on acquire and clears it on release. Behaviorally identical to
+/// `PCI_BLK_LOCKS[slot].lock_irqsave()` (irqsave + preempt disable).
+pub(crate) struct PciBlkGuard {
+    slot: usize,
+    inner: SpinlockIrqGuard<'static, ()>,
+}
+
+impl PciBlkGuard {
+    #[inline]
+    fn arm(slot: usize, inner: SpinlockIrqGuard<'static, ()>, site: usize) -> Self {
+        use core::sync::atomic::Ordering;
+        PCI_BLK_HOLDER_CPU[slot].store(crate::arch::smp::cpu_id() as usize + 1, Ordering::Release);
+        PCI_BLK_HOLDER_PID[slot].store(crate::sched::get_current_pid(), Ordering::Release);
+        PCI_BLK_HOLDER_RA[slot].store(site, Ordering::Release);
+        let mut ctx = 0u32;
+        if crate::interrupt::preempt::in_irq() {
+            ctx |= 1;
+        }
+        if crate::interrupt::preempt::in_softirq() {
+            ctx |= 2;
+        }
+        PCI_BLK_HOLDER_CTX[slot].store(ctx, Ordering::Release);
+        PCI_BLK_HOLDER_AT[slot].store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+        Self { slot, inner }
+    }
+}
+
+impl Drop for PciBlkGuard {
+    #[inline]
+    fn drop(&mut self) {
+        PCI_BLK_HOLDER_CPU[self.slot].store(0, core::sync::atomic::Ordering::Release);
+        // inner drops here: unlock + preempt_enable + irq_restore.
+    }
+}
+
+/// Acquire `PCI_BLK_LOCKS[slot]` with holder forensics.
+///
+/// Uncontended cost is one CAS (identical to lock_irqsave). When
+/// contended, the waiter bounded-spins on try_lock for a moment, prints
+/// one rate-limited forensics line naming the current holder (lock-free
+/// console — printk may be wedged), then falls into the blocking
+/// acquire.
+pub(crate) fn pci_blk_lock(slot: usize) -> PciBlkGuard {
+    // Same order of magnitude as RawSpinlock's DEADLOCK_WARN_ITERS: the
+    // forensics line fires only when the wait has already outlived half
+    // the budget AND the lock is still held — pathological contention,
+    // not the healthy sub-millisecond bursts a storm produces (observed
+    // with a print-at-first-contention version: 50 transient holds in
+    // 3 min of dd/sync churn, all held_ms=0).
+    const CONTEND_SPIN: u32 = 100_000_000;
+    let site = pci_blk_acquire_site();
+    let mut i = 0u32;
+    while i < CONTEND_SPIN {
+        if let Some(g) = PCI_BLK_LOCKS[slot].try_lock_irqsave() {
+            return PciBlkGuard::arm(slot, g, site);
+        }
+        core::hint::spin_loop();
+        i += 1;
+        if i == CONTEND_SPIN / 2 && PCI_BLK_LOCKS[slot].is_locked() {
+            // Half the budget spent and still contended: near-wedge.
+            pci_blk_contended_forensics(slot, site);
+        }
+    }
+    PciBlkGuard::arm(slot, PCI_BLK_LOCKS[slot].lock_irqsave(), site)
+}
+
+/// Bounded-try acquire for contexts that must NOT spin behind
+/// task-context lock holders (the Block softirq walker): returns None
+/// after `tries` failed attempts instead of blocking. Arm the same
+/// holder forensics on success.
+///
+/// Rationale (the OH kvm-r1 observation): under a completion storm the
+/// softirq walker re-acquires the BLK lock pass after pass while task
+/// submitters on the other CPU hammer the same TTAS lock — a waiter can
+/// spin for SECONDS without winning the race (PCI-BLK-CONTEND with
+/// ctx=2 holders, 159 events in one 7-minute boot; the b125 wedge is
+/// the extreme end of that starvation curve). Softirq has no deadline;
+/// submitters' waiters do. A softirq that cannot get the lock in a
+/// bounded microsecond budget defers (re-raises the Block softirq and
+/// returns) — the restart loop / ksoftirqd / the next IRQ each get a
+/// fresh chance while task-context holders always win the race.
+pub(crate) fn pci_blk_lock_defer(slot: usize, tries: u32) -> Option<PciBlkGuard> {
+    let site = pci_blk_acquire_site();
+    let mut i = 0u32;
+    while i < tries {
+        if let Some(g) = PCI_BLK_LOCKS[slot].try_lock_irqsave() {
+            return Some(PciBlkGuard::arm(slot, g, site));
+        }
+        i += 1;
+        if i & 63 == 63 {
+            core::hint::spin_loop();
+        }
+    }
+    None
+}
+
+/// Per-jiffy holder watchdog (called from the Timer softirq via
+/// vw_lag_watchdog): any slot whose BLK lock has been continuously held
+/// for > 5 s is a wedge in progress — print holder identity, rate-limited
+/// to one line per 10 s. printk is safe here (timer-softirq context, not
+/// the wedged context).
+pub fn pci_blk_holder_watchdog(now: u64) {
+    const WEDGE_JIFFIES: u64 = crate::drivers::timer::msecs_to_jiffies(5_000);
+    static LAST_PRINT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    for slot in 0..MAX_PCI_BLK_DISKS {
+        if !PCI_BLK_READY[slot].load(core::sync::atomic::Ordering::Acquire) {
+            continue;
+        }
+        if !PCI_BLK_LOCKS[slot].is_locked() {
+            continue;
+        }
+        let at = PCI_BLK_HOLDER_AT[slot].load(core::sync::atomic::Ordering::Acquire);
+        if at == 0 || now.saturating_sub(at) < WEDGE_JIFFIES {
+            continue;
+        }
+        let last = LAST_PRINT.load(core::sync::atomic::Ordering::Acquire);
+        if last != 0 && now.saturating_sub(last) < 1000 {
+            return; // rate limit 10 s
+        }
+        LAST_PRINT.store(now, core::sync::atomic::Ordering::Release);
+        crate::pr_err!(
+            "PCI-BLK-WEDGE slot={} holder_cpu={} pid={} ra={:#x} ctx={} \
+             held_ms={} used={} walked={} expected={} unkicked={} irqs={} \
+             walks={} defers={}",
+            slot,
+            PCI_BLK_HOLDER_CPU[slot]
+                .load(core::sync::atomic::Ordering::Acquire)
+                .saturating_sub(1),
+            PCI_BLK_HOLDER_PID[slot].load(core::sync::atomic::Ordering::Acquire),
+            PCI_BLK_HOLDER_RA[slot].load(core::sync::atomic::Ordering::Acquire),
+            PCI_BLK_HOLDER_CTX[slot].load(core::sync::atomic::Ordering::Acquire),
+            crate::drivers::timer::jiffies_to_msecs(now.saturating_sub(at)),
+            get_pci_device_queue_at(slot)
+                .map(|q| {
+                    // SAFETY: same idx read as the walker's fast path.
+                    unsafe {
+                        core::ptr::read_volatile(
+                            (q.used_ring_ptr() as usize + 2) as *const u16,
+                        ) as u64
+                    }
+                })
+                .unwrap_or(0),
+            PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire) as u64,
+            PCI_BLK_EXPECTED_USED_IDX[slot].load(core::sync::atomic::Ordering::Acquire) as u64,
+            PCI_BLK_UNKICKED[slot].load(core::sync::atomic::Ordering::Acquire) as u64,
+            VW_IRQS[slot].load(core::sync::atomic::Ordering::Acquire),
+            VW_WALKS.load(core::sync::atomic::Ordering::Acquire),
+            VW_LOCK_DEFERS[slot].load(core::sync::atomic::Ordering::Acquire),
+        );
+    }
+}
+
 /// Per-slot wait queue for PCI VirtIO block I/O completion (interrupt-driven wakeup).
 static PCI_BLK_WAIT_QUEUES: [crate::process::wait::WaitQueueHead; MAX_PCI_BLK_DISKS] =
     [const { crate::process::wait::WaitQueueHead::new() }; MAX_PCI_BLK_DISKS];
@@ -1635,6 +1986,10 @@ unsafe fn pci_submit_read_async(
     // the sync-read fallback storm that followed piled waiters onto the
     // sync wait queue). The steady state never enters the retry path.
     let mut submitted = false;
+    // Safety kick deferred OUT of the BLK critical section: notify() is
+    // an MMIO write (VM exit under KVM) and must never run under the
+    // irqsave lock (the b125 wedge hunt — see PCI_BLK_LOCKS forensics).
+    let mut kick_after_release = false;
     for _attempt in 0..3 {
         let mut lagging = false;
         {
@@ -1643,7 +1998,7 @@ unsafe fn pci_submit_read_async(
             // observe the used-ring advance before the pending entry is
             // published — the lost-completion race documented on the MMIO
             // path.
-            let _guard = PCI_BLK_LOCKS[slot].lock_irqsave();
+            let _guard = pci_blk_lock(slot);
             let _nest = VirtioLockNest::new();
 
             let virt_queue = match get_pci_device_queue_mut_at(slot) {
@@ -1698,7 +2053,8 @@ unsafe fn pci_submit_read_async(
                     // times. The bound below is a safety kick: past it
                     // the virtqueue is nearly exhausted anyway and a
                     // lost waiter must never depend on someone else's
-                    // kick.
+                    // kick. Deferred to after the lock release — the
+                    // MMIO write never runs under the BLK lock.
                     virt_queue.submit_quiet(header_desc_idx);
                     // Keep the submission counter aligned with the used
                     // ring: the walker's positional fast path maps
@@ -1707,7 +2063,7 @@ unsafe fn pci_submit_read_async(
                     let unkicked = PCI_BLK_UNKICKED[slot].fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
                     if unkicked >= 32 {
                         PCI_BLK_UNKICKED[slot].store(0, core::sync::atomic::Ordering::Release);
-                        virt_queue.notify();
+                        kick_after_release = true;
                     }
 
                     // Publish the pending entry at its ordinal slot,
@@ -1734,6 +2090,12 @@ unsafe fn pci_submit_read_async(
         }
 
         if submitted {
+            // Safety kick outside every virtio lock (see above).
+            if kick_after_release {
+                if let Some(q) = get_pci_device_queue_at(slot) {
+                    q.notify();
+                }
+            }
             return Ok(());
         }
         if !lagging {
@@ -1808,6 +2170,13 @@ pub static VW_EXITS: [core::sync::atomic::AtomicU64; 5] =
 /// Jiffy when the walker last exited WITH residual lag (0 = never).
 pub static VW_LAST_LAG_EXIT_AT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+/// Times the softirq-context walker DEFERRED its BLK-lock acquire to
+/// task-context holders (the kvm-r1 starvation mitigation — see
+/// pci_blk_lock_defer). Steady state: zero; a burst during storms is
+/// healthy; monotonic growth with no I/O progress is a lock-pressure
+/// signal.
+pub static VW_LOCK_DEFERS: [core::sync::atomic::AtomicU64; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PCI_BLK_DISKS];
 
 #[inline]
 fn vw_exit(kind: usize, lag: bool) {
@@ -1886,6 +2255,10 @@ pub fn vw_report(tag: &str) {
 /// When a ready disk's used ring runs ahead of the walker for >= 3s,
 /// print the full forensic snapshot (rate-limited to one per 10s).
 pub fn vw_lag_watchdog(now: u64) {
+    // Holder watchdog first: a BLK lock held > 5 s is a wedge in
+    // progress even when the rings look healthy (b125 shape — spinner
+    // on the lock, no lag anywhere).
+    pci_blk_holder_watchdog(now);
     static FIRST_LAG: [core::sync::atomic::AtomicU64; MAX_PCI_BLK_DISKS] =
         [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PCI_BLK_DISKS];
     static LAST_PRINT: core::sync::atomic::AtomicU64 =
@@ -2059,7 +2432,32 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
         let mut unmatched = 0usize;
         let i_end;
         {
-            let _guard = PCI_BLK_LOCKS[slot].lock_irqsave();
+            // SOFTIRQ DEFERRAL (the kvm-r1 starvation observation): a
+            // walker in softirq context takes the lock with a bounded
+            // try budget and defers (re-raise + return) when task-context
+            // submitters hold it — softirq has no deadline, submitters'
+            // waiters do, and the TTAS lock gives an endlessly-reacquiring
+            // softirq the power to starve them for seconds. Process-context
+            // callers (drain/rescue paths — the last-line consumers when
+            // no interrupt will come) keep the blocking acquire.
+            let _guard = if crate::interrupt::preempt::in_softirq() {
+                match pci_blk_lock_defer(slot, 4096) {
+                    Some(g) => g,
+                    None => {
+                        VW_LOCK_DEFERS[slot].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                        // Lossless dispatch preserved: a consumer is
+                        // re-scheduled (the softirq restart loop, ksoftirqd
+                        // via raise_softirq's wakeup, or the next device
+                        // IRQ).
+                        crate::interrupt::softirq::raise_softirq(
+                            crate::interrupt::softirq::SoftirqIndex::Block as usize,
+                        );
+                        return 0;
+                    }
+                }
+            } else {
+                pci_blk_lock(slot)
+            };
             let _nest = VirtioLockNest::new();
             // Re-read under the lock (a submission may have landed since).
             // SAFETY: same field, queue alive.
