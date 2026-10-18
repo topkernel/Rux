@@ -898,6 +898,14 @@ pub const MAX_PAGES: usize = 16 * 1024 * 1024 * 1024 / PAGE_SIZE;
 /// Runtime descriptor count (0 = not yet set by init_vmemmap).
 static NR_DESCS: AtomicUsize = AtomicUsize::new(0);
 
+/// Whether the runtime descriptor count has been published (init_vmemmap
+/// done). The PT walk guards key on this so pre-init boot-time walks are
+/// never vetoed by phys_valid's config-derived fallback (a machine with
+/// more RAM than the config ceiling would otherwise fail walks above it).
+pub fn descs_published() -> bool {
+    NR_DESCS.load(Ordering::Acquire) != 0
+}
+
 /// Publish the per-boot descriptor count (clamped to MAX_PAGES).
 /// Called once from init_vmemmap after the vmemmap mapping succeeds.
 pub fn set_nr_descs(n: usize) {

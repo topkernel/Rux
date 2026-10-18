@@ -1177,6 +1177,30 @@ impl PageTableWalker {
     /// `user_root_ppn` must be a live page-table root.
     pub unsafe fn walk(user_root_ppn: u64, virt: u64) -> Option<(u64, u64)> {
         let a = VirtAddr::new(virt);
+
+        // Root guard: a caller whose mm was freed under it (unpinned
+        // procfs borrow) feeds a garbage root ppn — the very first
+        // get_page_table_virt then dies in phys_to_virt OVERFLOW
+        // (exitwalk probe: generate_smaps -> walk with root phys
+        // 0xf888000000000000). Bail with the same bounded forensic line.
+        {
+            let root_pa = user_root_ppn << PAGE_SHIFT;
+            if crate::mm::page_desc::descs_published()
+                && root_pa != 0
+                && !crate::mm::phys_valid(root_pa as usize)
+            {
+                static ROOT_STALE: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if ROOT_STALE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    crate::pr_err!(
+                        "PT-WALK-STALE: root={:#x} va={:#x} ROOT phys {:#x} off-machine, pid={}",
+                        user_root_ppn, virt, root_pa,
+                        crate::sched::get_current_pid()
+                    );
+                }
+                return None;
+            }
+        }
         let pml4 = get_page_table_virt(user_root_ppn << PAGE_SHIFT);
         let mut table: *mut PageTable = pml4;
 
@@ -1192,6 +1216,31 @@ impl PageTableWalker {
                 let offset = virt & ((1 << shift) - 1);
                 let phys = pte.phys_addr() + offset;
                 return Some((phys >> PAGE_SHIFT, pte.bits()));
+            }
+            // Stale-intermediate guard (exitwalk probe, PT-teardown vs
+            // walkers): a walker that reaches an intermediate entry whose
+            // target is not machine memory is walking a freed/recycled
+            // (or never-table) frame. Feeding it to get_page_table_virt
+            // used to die in phys_to_virt OVERFLOW (bogus phys
+            // 0xf888000000000000, PageTableWalker::walk ->
+            // get_page_table_virt, full-machine panic). Bail out with a
+            // bounded forensic line that names the walk inputs so the
+            // racing walker/lifetime gap is attributable, and return None
+            // like any unmapped address.
+            {
+                let pa = pte.phys_addr();
+                if crate::mm::page_desc::descs_published() && pa != 0 && !crate::mm::phys_valid(pa as usize) {
+                    static WALK_STALE: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if WALK_STALE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                        crate::pr_err!(
+                            "PT-WALK-STALE: root={:#x} va={:#x} lvl={} pte={:#x} -> phys {:#x} off-machine, pid={}",
+                            user_root_ppn, virt, level, pte.bits(), pa,
+                            crate::sched::get_current_pid()
+                        );
+                    }
+                    return None;
+                }
             }
             table = get_page_table_virt(pte.phys_addr());
         }

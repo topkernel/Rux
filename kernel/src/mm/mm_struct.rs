@@ -982,13 +982,21 @@ impl Drop for MmStruct {
             }
 
             // Teardown-context witness (FUT-STALE family): a teardown in a
-            // context that is not the (still-alive) owner names a
+            // context that is not the (still-live) owner names a
             // deferred/wrong-context drop — the shape the PTLEDGER
-            // DOUBLE-FREE ring then attributes. Cheap, bounded print.
+            // DOUBLE-FREE ring then attributes. ZOMBIE owners have already
+            // dropped their mm (they just await reaping) and are NOT
+            // counted. Cheap, bounded print.
             {
                 let owner = self.owner_pid();
                 let cur = crate::sched::get_current_pid() as i32;
-                if owner > 0 && owner != cur && crate::process::find_task_by_pid(owner as u32).is_some() {
+                let owner_live = crate::process::find_task_by_pid(owner as u32)
+                    .map(|t| {
+                        let st = t.state();
+                        !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE)
+                    })
+                    .unwrap_or(false);
+                if owner > 0 && owner != cur && owner_live {
                     static DEFER_REPORTS: AtomicUsize = AtomicUsize::new(0);
                     if DEFER_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
                         crate::pr_warn!(
