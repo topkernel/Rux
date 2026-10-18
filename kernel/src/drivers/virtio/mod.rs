@@ -1284,6 +1284,36 @@ pub(crate) fn pci_blk_lock(slot: usize) -> PciBlkGuard {
     PciBlkGuard::arm(slot, PCI_BLK_LOCKS[slot].lock_irqsave(), site)
 }
 
+/// Bounded-try acquire for contexts that must NOT spin behind
+/// task-context lock holders (the Block softirq walker): returns None
+/// after `tries` failed attempts instead of blocking. Arm the same
+/// holder forensics on success.
+///
+/// Rationale (the OH kvm-r1 observation): under a completion storm the
+/// softirq walker re-acquires the BLK lock pass after pass while task
+/// submitters on the other CPU hammer the same TTAS lock — a waiter can
+/// spin for SECONDS without winning the race (PCI-BLK-CONTEND with
+/// ctx=2 holders, 159 events in one 7-minute boot; the b125 wedge is
+/// the extreme end of that starvation curve). Softirq has no deadline;
+/// submitters' waiters do. A softirq that cannot get the lock in a
+/// bounded microsecond budget defers (re-raises the Block softirq and
+/// returns) — the restart loop / ksoftirqd / the next IRQ each get a
+/// fresh chance while task-context holders always win the race.
+pub(crate) fn pci_blk_lock_defer(slot: usize, tries: u32) -> Option<PciBlkGuard> {
+    let site = pci_blk_acquire_site();
+    let mut i = 0u32;
+    while i < tries {
+        if let Some(g) = PCI_BLK_LOCKS[slot].try_lock_irqsave() {
+            return Some(PciBlkGuard::arm(slot, g, site));
+        }
+        i += 1;
+        if i & 63 == 63 {
+            core::hint::spin_loop();
+        }
+    }
+    None
+}
+
 /// Per-jiffy holder watchdog (called from the Timer softirq via
 /// vw_lag_watchdog): any slot whose BLK lock has been continuously held
 /// for > 5 s is a wedge in progress — print holder identity, rate-limited
@@ -1311,7 +1341,7 @@ pub fn pci_blk_holder_watchdog(now: u64) {
         crate::pr_err!(
             "PCI-BLK-WEDGE slot={} holder_cpu={} pid={} ra={:#x} ctx={} \
              held_ms={} used={} walked={} expected={} unkicked={} irqs={} \
-             walks={}",
+             walks={} defers={}",
             slot,
             PCI_BLK_HOLDER_CPU[slot]
                 .load(core::sync::atomic::Ordering::Acquire)
@@ -1335,6 +1365,7 @@ pub fn pci_blk_holder_watchdog(now: u64) {
             PCI_BLK_UNKICKED[slot].load(core::sync::atomic::Ordering::Acquire) as u64,
             VW_IRQS[slot].load(core::sync::atomic::Ordering::Acquire),
             VW_WALKS.load(core::sync::atomic::Ordering::Acquire),
+            VW_LOCK_DEFERS[slot].load(core::sync::atomic::Ordering::Acquire),
         );
     }
 }
@@ -2139,6 +2170,13 @@ pub static VW_EXITS: [core::sync::atomic::AtomicU64; 5] =
 /// Jiffy when the walker last exited WITH residual lag (0 = never).
 pub static VW_LAST_LAG_EXIT_AT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+/// Times the softirq-context walker DEFERRED its BLK-lock acquire to
+/// task-context holders (the kvm-r1 starvation mitigation — see
+/// pci_blk_lock_defer). Steady state: zero; a burst during storms is
+/// healthy; monotonic growth with no I/O progress is a lock-pressure
+/// signal.
+pub static VW_LOCK_DEFERS: [core::sync::atomic::AtomicU64; MAX_PCI_BLK_DISKS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_PCI_BLK_DISKS];
 
 #[inline]
 fn vw_exit(kind: usize, lag: bool) {
@@ -2394,7 +2432,32 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
         let mut unmatched = 0usize;
         let i_end;
         {
-            let _guard = pci_blk_lock(slot);
+            // SOFTIRQ DEFERRAL (the kvm-r1 starvation observation): a
+            // walker in softirq context takes the lock with a bounded
+            // try budget and defers (re-raise + return) when task-context
+            // submitters hold it — softirq has no deadline, submitters'
+            // waiters do, and the TTAS lock gives an endlessly-reacquiring
+            // softirq the power to starve them for seconds. Process-context
+            // callers (drain/rescue paths — the last-line consumers when
+            // no interrupt will come) keep the blocking acquire.
+            let _guard = if crate::interrupt::preempt::in_softirq() {
+                match pci_blk_lock_defer(slot, 4096) {
+                    Some(g) => g,
+                    None => {
+                        VW_LOCK_DEFERS[slot].fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                        // Lossless dispatch preserved: a consumer is
+                        // re-scheduled (the softirq restart loop, ksoftirqd
+                        // via raise_softirq's wakeup, or the next device
+                        // IRQ).
+                        crate::interrupt::softirq::raise_softirq(
+                            crate::interrupt::softirq::SoftirqIndex::Block as usize,
+                        );
+                        return 0;
+                    }
+                }
+            } else {
+                pci_blk_lock(slot)
+            };
             let _nest = VirtioLockNest::new();
             // Re-read under the lock (a submission may have landed since).
             // SAFETY: same field, queue alive.

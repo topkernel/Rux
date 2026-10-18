@@ -35,17 +35,22 @@ MARKERS = [
 
 # Sequential + random churn, run via `toybox sh /stormN.sh` (mrsh's
 # pasted-multiline parser is unreliable; scripts live in the image).
+# Discipline: every file is removed the same iteration (no accumulation
+# — an earlier version piled up dirty pages until OOM, which derails the
+# probe into the KNOWN S001/S002 EIO cascade instead of exercising the
+# BLK lock path). sync every 8 iterations keeps flush pressure without
+# the every-iteration fsync storm.
 STORM1 = """#!/bin/sh
 cd /tmp || exit 1
 i=0
-while [ $i -lt 100000 ]; do
+while [ $i -lt 1000000 ]; do
   dd if=/dev/zero of=/tmp/s$i bs=4k count=16 2>/dev/null
   head -c 4096 /tmp/s$i > /dev/null 2>&1
   cp /tmp/s$i /tmp/c$i 2>/dev/null
-  sync
   rm -f /tmp/s$i /tmp/c$i
   i=$((i+1))
-  [ $((i % 25)) -eq 0 ] && echo SEQ-$i
+  if [ $((i % 8)) -eq 0 ]; then sync; fi
+  [ $((i % 100)) -eq 0 ] && echo SEQ-$i
 done
 echo SEQ-DONE
 """
@@ -53,14 +58,14 @@ echo SEQ-DONE
 STORM2 = """#!/bin/sh
 cd /tmp || exit 1
 j=0
-while [ $j -lt 100000 ]; do
+while [ $j -lt 1000000 ]; do
   n=$((j % 97 + 1))
   dd if=/dev/zero of=/tmp/z$j bs=512 count=$n 2>/dev/null
   head -c 1024 /tmp/z$j > /dev/null 2>&1
-  sync
   rm -f /tmp/z$j
   j=$((j+1))
-  [ $((j % 25)) -eq 0 ] && echo RAND-$j
+  if [ $((j % 8)) -eq 0 ]; then sync; fi
+  [ $((j % 100)) -eq 0 ] && echo RAND-$j
 done
 echo RAND-DONE
 """
@@ -70,7 +75,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--minutes", type=int, default=30)
     ap.add_argument("--smp", type=int, default=2)
-    ap.add_argument("--mem", default="1G")
+    ap.add_argument("--mem", default="2G")
     ap.add_argument("--arch", default="riscv64", choices=["riscv64", "x86_64"])
     ap.add_argument("--tag", default=None)
     args = ap.parse_args()
