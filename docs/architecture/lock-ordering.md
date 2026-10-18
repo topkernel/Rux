@@ -87,6 +87,25 @@ __schedule():
 
 Source: `kernel/src/sched/sched.rs` `__schedule()` (line 556).
 
+### Path 6: virtio-net device locks
+
+```
+VirtIONetDevice lock order (drivers/net/virtio_net.rs):
+
+    {rx_queue | tx_queue} -> stats          (poll/xmit statistics update)
+    rx_queue -> rx_last_used                (poll RX cursor)
+    rx_queue -> rx_buffers                  (refill_rx_buffers)
+    stats                                   (get_stats — never nested)
+
+**INV-LOCK-6**: stats may nest inside rx_queue/tx_queue, never the
+reverse — nothing may hold stats and then acquire a queue lock. The
+poll() fast path once kept its stats guard alive across
+recycle_rx_buffer() -> refill_rx_buffers() -> rx_queue (stats -> rx),
+an AB-BA against another CPU's rx_queue -> stats; under sustained RX
+(hdc file send) the watchdog flagged rx_queue (VIRTIO_NET+0x68) vs
+stats (VIRTIO_NET+0xE8) spinning on both CPUs. The guard is now
+block-scoped to the two counter updates.
+
 ## Invariants
 
 | ID | Invariant | Enforcement |
@@ -96,6 +115,7 @@ Source: `kernel/src/sched/sched.rs` `__schedule()` (line 556).
 | INV-LOCK-3 | Release order: unlock -> preempt_enable -> irq_restore | Guard Drop order |
 | INV-LOCK-4 | No lock acquisition cycles (deadlock-free) | Hierarchy documented here, verified by SPIN |
 | INV-LOCK-5 | GRQ nests inside bucket lock, never reverse | futex_wake path, verified by SPIN |
+| INV-LOCK-6 | stats nests inside virtio-net queue locks, never reverse | virtio_net poll/xmit (drivers/net) |
 
 ## preempt_count Bitfield
 

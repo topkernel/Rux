@@ -216,10 +216,18 @@ max_cmdline_len = 2048
 fd_setsize = 1024
 
 [sync]
-# Futex waiter pool size
-futex_waiter_pool_size = 256
-# Futex hash table size
-futex_hash_size = 64
+# Futex waiter pool size. 256 was catastrophic on a full OpenHarmony boot:
+# once the pool filled (FFRT worker parks, glibc condvars, binder thread
+# waits — the image runs 1200+ tasks), every new waiter fell into the
+# pool-full backoff loop, re-checking the value once per jiffy: FUTEX_WAKE
+# legitimately returned 0 (nothing was queued), synchronization decayed to
+# polling, and chains of jiffy-rate polls stacked into multi-minute
+# binder stalls (hdf_devmgr 'woken=false' waiters) and 60s AbilityManager
+# timeouts. 8192 slots (~0.5 MB static) cover the observed concurrent
+# waiter population with headroom.
+futex_waiter_pool_size = 8192
+# Futex hash table size (buckets; >= pool/16 to keep chains short)
+futex_hash_size = 512
 
 [graphics]
 # Default framebuffer width

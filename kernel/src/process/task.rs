@@ -389,6 +389,12 @@ pub struct Cred {
 
 /// SECBIT_KEEP_CAPS (bit 4) in the prctl securebits encoding.
 pub const SECBIT_KEEP_CAPS: u32 = 1 << 4;
+/// SECBIT_NO_SETUID_FIXUP (bit 2) and its lock (bit 3) in the prctl
+/// securebits encoding (linux/securebits.h: the prctl argument is
+/// issecure_mask(X) = 1 << X, with SECURE_NOROOT=0, SECURE_NO_SETUID_FIXUP=2,
+/// SECURE_KEEP_CAPS=4 — NOT the raw X values).
+pub const SECBIT_NO_SETUID_FIXUP: u32 = 1 << 2;
+pub const SECBIT_NO_SETUID_FIXUP_LOCKED: u32 = 1 << 3;
 
 impl Cred {
     /// Create credential for init (PID 0) / kernel threads.
@@ -408,6 +414,27 @@ impl Cred {
             keepcaps: false,
             securebits: 0,
         }
+    }
+
+    /// True when the setuid-away-from-root capability fixup is suppressed —
+    /// any of PR_SET_KEEPCAPS, SECBIT_KEEP_CAPS (mirrored into `keepcaps`
+    /// by prctl), or SECBIT_NO_SETUID_FIXUP(+_LOCKED). Linux's
+    /// cap_emulate_setxuid skips the permitted/effective clearing when
+    /// issecure(SECURE_NO_SETUID_FIXUP); OH's init programs exactly that
+    /// bit (KeepCapability → prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP
+    /// | _LOCKED)) on every setuid service before dropping to the service
+    /// uid and then capset()ing the service's configured capability list
+    /// (installs.cfg: DAC_OVERRIDE/CHOWN/FOWNER/SYS_ADMIN). When only
+    /// PR_SET_KEEPCAPS is honored, setuid clears the sets and the capset
+    /// gets EPERM — init kills the child with "failed to set
+    /// capabilities" (exit 255), which crash-looped the `installs`
+    /// bundle-installer SA (SA 511) and left BMS with no installed
+    /// bundles (bm dump / aa start both fail downstream).
+    pub fn keeps_caps_on_setuid(&self) -> bool {
+        self.keepcaps
+            || (self.securebits
+                & (SECBIT_NO_SETUID_FIXUP | SECBIT_NO_SETUID_FIXUP_LOCKED))
+                != 0
     }
 
     /// Create credential with no capabilities (for user processes).

@@ -1276,10 +1276,12 @@ pub fn sys_setuid(args: SyscallArgs) -> i64 {
                 return -(errno::EPERM as i64);
             }
             // Leaving euid 0 drops all capabilities (Linux commit_creds)
-            // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id).
+            // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id),
+            // or SECBIT_NO_SETUID_FIXUP is in effect (OH init's service
+            // path — see Cred::keeps_caps_on_setuid).
             // RETURNING to euid 0 (ruid or suid still 0) restores them from
             // the bounding set — see sys_setresuid for the full rationale.
-            if cred.euid != 0 && !cred.keepcaps {
+            if cred.euid != 0 && !cred.keeps_caps_on_setuid() {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             } else if cred.euid == 0 && (cred.uid == 0 || cred.suid == 0) {
@@ -1375,7 +1377,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
             // the bounding set (LTP creat08: root → setreuid(-1,nobody) →
             // setreuid(-1,0) must regain CAP_FSETID to keep S_ISGID on
             // files created in a setgid directory).
-            if cred.euid != 0 && !cred.keepcaps {
+            if cred.euid != 0 && !cred.keeps_caps_on_setuid() {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             } else if cred.euid == 0 && (new_ruid == 0 || cred.suid == 0) {
@@ -1510,7 +1512,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> i64 {
             //   that setresuid()s to another user and back keeps EMPTY
             //   capability sets and loses CAP_SETUID forever (LTP
             //   setresuid01: setresuid(main,-1,-1) after the round trip).
-            if cred.euid != 0 && !cred.keepcaps {
+            if cred.euid != 0 && !cred.keeps_caps_on_setuid() {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             } else if cred.euid == 0
@@ -3680,6 +3682,15 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
     // 3. new effective must be a subset of new permitted
     let cred = current.cred();
     if !new_permitted.is_subset_of(cred.cap_permitted) {
+        crate::pr_info!(
+            "capset: pid {} uid {} EPERM: new permitted {:#x} not subset of {:#x} (securebits {:#x} keepcaps {})",
+            unsafe { (*current).pid() },
+            cred.euid,
+            new_permitted.bits(),
+            cred.cap_permitted.bits(),
+            cred.securebits,
+            cred.keepcaps
+        );
         return -(errno::EPERM as i64);
     }
     if !new_inheritable.is_subset_of(cred.cap_inheritable) {
