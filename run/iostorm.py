@@ -78,6 +78,8 @@ def main():
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--arch", default="riscv64", choices=["riscv64", "x86_64"])
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--kernel", default=None,
+                    help="override kernel path (baseline comparisons)")
     args = ap.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -105,6 +107,8 @@ def main():
                "-kernel", kernel,
                "-append", "root=/dev/vda rw init=/bin/sh console=ttyS0"]
 
+    if args.kernel:
+        kernel = args.kernel
     if not os.path.exists(kernel):
         print(f"kernel missing: {kernel}", file=sys.stderr)
         return 2
