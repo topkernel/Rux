@@ -1062,6 +1062,44 @@ pub fn unix_send(
             return Err(-32); // EPIPE
         }
 
+        // hilog tap (drm/ui bring-up): OH's userspace log lines exist
+        // ONLY inside hilogd (libEGL's stderr adapter prints '<message
+        // truncated>' markers). The receiving sockets are bound to
+        // .../hilogInput / .../hilogd.server — mirror the first few
+        // hundred payloads' printable bytes to serial so the graphics
+        // failures name themselves on the console.
+        {
+            let is_hilog = target
+                .bound_name
+                .lock()
+                .as_ref()
+                .map(|n| n.ends_with("hilogInput") || n.ends_with("hilogd.server"))
+                .unwrap_or(false);
+            if is_hilog && !data.is_empty() {
+                static HILOG_TAPS: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 400 {
+                    let mut text = [0u8; 120];
+                    let mut k = 0usize;
+                    for &b in data.iter() {
+                        if b >= 0x20 && b < 0x7f {
+                            text[k] = b;
+                            k += 1;
+                            if k == text.len() {
+                                break;
+                            }
+                        }
+                    }
+                    crate::pr_warn!(
+                        "hilog[{}] {}",
+                        n,
+                        core::str::from_utf8(&text[..k]).unwrap_or("")
+                    );
+                }
+            }
+        }
+
         // STREAM + zero-length payload: never enqueue an empty segment.
         // A byte stream has no record boundaries — ancillary data rides the
         // first subsequently queued bytes (Linux association semantics); a
