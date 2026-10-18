@@ -1089,15 +1089,18 @@ pub fn unix_send(
                     }
                 }
                 let s = core::str::from_utf8(&text[..k]).unwrap_or("");
-                const KEYS: [&str; 16] = [
-                    "EGL", "egl", "DRI", "dri", "Mesa", "mesa", "MESA", "gbm", "GBM", "virtio",
-                    "composer", "Composer", "render", "Render", "RENDER", "DISP",
+                // u17 lesson: "dri" matches "driver", "Render" matches
+                // the audio RenderRouters flood, "display" matches
+                // everything — keep the set tight and case-distinct.
+                const KEYS: [&str; 14] = [
+                    "EGL", "egl", "DRI", "Mesa", "mesa", "MESA", "gbm", "GBM", "virtio",
+                    "Composer", "composer", "Rosen", "rosen", "DISP",
                 ];
                 if KEYS.iter().any(|key| s.contains(key)) {
                     static HILOG_TAPS: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 600 {
+                    if n < 800 {
                         crate::pr_warn!("hilog[{}] {}", n, s);
                     }
                 }
