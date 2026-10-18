@@ -3682,6 +3682,15 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
     // 3. new effective must be a subset of new permitted
     let cred = current.cred();
     if !new_permitted.is_subset_of(cred.cap_permitted) {
+        crate::pr_info!(
+            "capset: pid {} uid {} EPERM: new permitted {:#x} not subset of {:#x} (securebits {:#x} keepcaps {})",
+            unsafe { (*current).pid() },
+            cred.euid,
+            new_permitted.bits(),
+            cred.cap_permitted.bits(),
+            cred.securebits,
+            cred.keepcaps
+        );
         return -(errno::EPERM as i64);
     }
     if !new_inheritable.is_subset_of(cred.cap_inheritable) {

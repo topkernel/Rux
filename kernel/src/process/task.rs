@@ -389,10 +389,12 @@ pub struct Cred {
 
 /// SECBIT_KEEP_CAPS (bit 4) in the prctl securebits encoding.
 pub const SECBIT_KEEP_CAPS: u32 = 1 << 4;
-/// SECBIT_NO_SETUID_FIXUP (bit 0) and its lock (bit 1) in the prctl
-/// securebits encoding.
-pub const SECBIT_NO_SETUID_FIXUP: u32 = 1 << 0;
-pub const SECBIT_NO_SETUID_FIXUP_LOCKED: u32 = 1 << 1;
+/// SECBIT_NO_SETUID_FIXUP (bit 2) and its lock (bit 3) in the prctl
+/// securebits encoding (linux/securebits.h: the prctl argument is
+/// issecure_mask(X) = 1 << X, with SECURE_NOROOT=0, SECURE_NO_SETUID_FIXUP=2,
+/// SECURE_KEEP_CAPS=4 — NOT the raw X values).
+pub const SECBIT_NO_SETUID_FIXUP: u32 = 1 << 2;
+pub const SECBIT_NO_SETUID_FIXUP_LOCKED: u32 = 1 << 3;
 
 impl Cred {
     /// Create credential for init (PID 0) / kernel threads.
