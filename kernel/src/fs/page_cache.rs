@@ -328,38 +328,22 @@ impl PageCache {
             return;
         }
         let key = cache_key(fs_id, ino);
-        let mut cache = self.inodes.lock();
 
-        STAT_MISSES.fetch_add(1, Ordering::Relaxed);
-
-        // Eviction headroom for the whole run (soft cap — bounded loop, the
-        // batch may proceed slightly over if everything is pinned).
-        let mut evict_tries = 0u32;
-        while self.total_pages.load(Ordering::Relaxed) as usize + npages > max_cached_pages() {
-            if !Self::evict_one(&mut cache, &self.total_pages) {
-                evict_tries += 1;
-                if evict_tries >= 32 {
-                    break;
-                }
-            }
-        }
-
-        let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
-            pages: BTreeMap::new(),
-        });
-
-        // Allocate frames in order-0 batches (one zone lock per 64 pages),
-        // copy per page (order-0 frames are not contiguous), describe, link
-        // to the LRU in one locked batch, and insert into the inode map
-        // directly. Order-0 deliberately: eviction frees page-cache frames
-        // one page at a time, higher-order buddy chunks failed expensively
-        // (reclaim + compaction slowpaths), and a temp-map `append` proved
-        // 3x slower than direct inserts under the debug build.
+        // R-WRITESTORM-1 (the insert_batch twin): allocate EVERY frame
+        // BEFORE taking the inodes lock. The old loop called
+        // alloc_page_batch(GFP_KERNEL) under the lock; under memory
+        // pressure that enters the page-allocator slowpath →
+        // vmscan::try_to_free_pages → PageCache::shrink → inodes.lock() —
+        // the SAME lock the caller already holds: a spinlock self-deadlock
+        // with one CPU spinning forever (the OH b120/b121 wedge insert()
+        // was fixed for, resurrected here at RAM-scale cache pressure —
+        // every insert batch wedged a CPU, SA .so loads never completed).
+        // Chunked 64 frames at a time: each chunk allocates unlocked, then
+        // one locked section does eviction headroom + inserts for the
+        // chunk.
         const ALLOC_CHUNK: usize = 64;
         let mut phys_buf: [usize; ALLOC_CHUNK] = [0; ALLOC_CHUNK];
-        let mut lru_batch: [*mut Page; ALLOC_CHUNK] = [core::ptr::null_mut(); ALLOC_CHUNK];
-        let mut lru_n: usize = 0;
-        let mut appended: u32 = 0;
+
         let mut done: usize = 0;
         while done < npages {
             let want = core::cmp::min(ALLOC_CHUNK, npages - done);
@@ -369,6 +353,39 @@ impl PageCache {
                 // per-page fallback covers the tail.
                 break;
             }
+
+            let mut cache = self.inodes.lock();
+
+            // Eviction headroom for this chunk (soft cap — bounded loop,
+            // the batch may proceed slightly over if everything is
+            // pinned).
+            let mut evict_tries = 0u32;
+            while self.total_pages.load(Ordering::Relaxed) as usize + got > max_cached_pages() {
+                if !Self::evict_one(&mut cache, &self.total_pages) {
+                    evict_tries += 1;
+                    if evict_tries >= 32 {
+                        break;
+                    }
+                }
+            }
+
+            STAT_MISSES.fetch_add(1, Ordering::Relaxed);
+
+            let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
+                pages: BTreeMap::new(),
+            });
+
+            // Copy per page (order-0 frames are not contiguous), describe,
+            // link to the LRU in one locked batch, and insert into the
+            // inode map directly. Order-0 deliberately: eviction frees
+            // page-cache frames one page at a time, higher-order buddy
+            // chunks failed expensively (reclaim + compaction slowpaths),
+            // and a temp-map `append` proved 3x slower than direct inserts
+            // under the debug build.
+            let mut lru_batch: [*mut Page; ALLOC_CHUNK] =
+                [core::ptr::null_mut(); ALLOC_CHUNK];
+            let mut lru_n: usize = 0;
+            let mut appended: u32 = 0;
             for k in 0..got {
                 let phys = phys_buf[k];
                 let pfn = phys / PAGE_SIZE;
@@ -413,14 +430,12 @@ impl PageCache {
                 );
                 appended += 1;
             }
-            done += got;
             if lru_n > 0 {
                 lru::page_add_file_lru_young_batch(&lru_batch[..lru_n]);
-                lru_n = 0;
             }
+            self.total_pages.fetch_add(appended, Ordering::Relaxed);
+            done += got;
         }
-
-        self.total_pages.fetch_add(appended, Ordering::Relaxed);
     }
 
     /// Pin up to `out.len()` consecutive cached pages starting at
