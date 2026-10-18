@@ -271,13 +271,40 @@ fn selinuxfs_write(_file: &File, buf: &[u8]) -> isize {
     buf.len() as isize
 }
 
+/// Positional read (pread(2) + the mmap demand-fault fill). No shared
+/// file-position swing (R71): libselinux's selinux_status_open() mmaps
+/// `status` MAP_SHARED, and the fault path fills the page through
+/// read_at — without this entry the fill served a zero page (version
+/// byte 0 instead of STATUS_PAGE's 1).
+fn selinuxfs_read_at(file: &File, offset: u64, buf: &mut [u8]) -> isize {
+    let tag = match unsafe { *file.private_data.get() } {
+        Some(p) => p as usize,
+        None => match unsafe { (*file.inode.get()).clone() } {
+            Some(i) => match i.private_data {
+                Some(p) => p as usize,
+                None => return -9,
+            },
+            None => return -9,
+        },
+    };
+    let data: &[u8] = match NODES.get(tag).map(|(_, n)| n) {
+        Some(Node::Const(d)) => d,
+        _ => &[],
+    };
+    let off = offset as usize;
+    let avail = data.len().saturating_sub(off);
+    let n = buf.len().min(avail);
+    buf[..n].copy_from_slice(&data[off..off + n]);
+    n as isize
+}
+
 static SELINUXFS_FILE_OPS: FileOps = FileOps {
     read: Some(selinuxfs_read),
     write: Some(selinuxfs_write),
     lseek: None,
     close: None,
     poll: None,
-    read_at: None,
+    read_at: Some(selinuxfs_read_at),
 };
 
 /// Build the root inode for a selinuxfs mount.
