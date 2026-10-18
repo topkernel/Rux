@@ -167,6 +167,11 @@ pub fn alloc_pid() -> Option<u32> {
     Some(pid)
 }
 
+/// Live allocated-PID count (diagnostics: the clone-EAGAIN report).
+pub fn allocated_count() -> u32 {
+    PID_ALLOCATOR.lock().nr_allocated
+}
+
 /// Free a PID, clearing its bit in the bitmap.
 ///
 /// Reserved PIDs (0..RESERVED_PIDS) and out-of-range PIDs are silently ignored.

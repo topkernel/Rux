@@ -503,7 +503,7 @@ pub fn note_page_free(phys: usize, order: usize) {
 }
 
 /// DRAM-relative page index for the PFN->site table. Physical addresses
-/// are absolute (0x80000000+ on qemu virt); the table indexes from the
+/// are absolute (0x800000000+ on qemu virt); the table indexes from the
 /// DRAM base. usize::MAX = outside tracked DRAM.
 fn tracked_index(phys: usize) -> usize {
     let base = if crate::mm::layout::is_kernel_layout_initialized() {
@@ -519,8 +519,9 @@ fn tracked_index(phys: usize) -> usize {
     // On x86_64 q35 DRAM spans 0x0-0x7ffcd000 + 0x100000000-0x180000000,
     // so a PFN past 2 GiB (high RAM) is outside the tracked range; an
     // unguarded return made note_page_free's `table[first]` load panic
-    // with "index out of bounds: len 524288" the moment a high-RAM page
-    // was freed (dfx=memwatch boots died ~180 log lines in).
+    // ("index out of bounds: len 524288, index 1572173", boot u5) the
+    // moment a high-RAM page was freed (dfx=memwatch boots died ~180
+    // log lines in).
     if idx >= PPAGE_TABLE_ENTRIES {
         return usize::MAX;
     }

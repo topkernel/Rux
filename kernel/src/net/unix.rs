@@ -1062,6 +1062,51 @@ pub fn unix_send(
             return Err(-32); // EPIPE
         }
 
+        // hilog tap (drm/ui bring-up): OH's userspace log lines exist
+        // ONLY inside hilogd (libEGL's stderr adapter prints '<message
+        // truncated>' markers). The receiving sockets are bound to
+        // .../hilogInput / .../hilogd.server — mirror graphics-relevant
+        // payloads to serial (the first boot run showed the whole system
+        // logs through hilog; an unfiltered tap exhausts its budget
+        // before the graphics cohort starts).
+        {
+            let is_hilog = target
+                .bound_name
+                .lock()
+                .as_ref()
+                .map(|n| n.ends_with("hilogInput") || n.ends_with("hilogd.server"))
+                .unwrap_or(false);
+            if is_hilog && !data.is_empty() {
+                let mut text = [0u8; 120];
+                let mut k = 0usize;
+                for &b in data.iter() {
+                    if b >= 0x20 && b < 0x7f {
+                        text[k] = b;
+                        k += 1;
+                        if k == text.len() {
+                            break;
+                        }
+                    }
+                }
+                let s = core::str::from_utf8(&text[..k]).unwrap_or("");
+                // u17 lesson: "dri" matches "driver", "Render" matches
+                // the audio RenderRouters flood, "display" matches
+                // everything — keep the set tight and case-distinct.
+                const KEYS: [&str; 14] = [
+                    "EGL", "egl", "DRI", "Mesa", "mesa", "MESA", "gbm", "GBM", "virtio",
+                    "Composer", "composer", "Rosen", "rosen", "DISP",
+                ];
+                if KEYS.iter().any(|key| s.contains(key)) {
+                    static HILOG_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 800 {
+                        crate::pr_warn!("hilog[{}] {}", n, s);
+                    }
+                }
+            }
+        }
+
         // STREAM + zero-length payload: never enqueue an empty segment.
         // A byte stream has no record boundaries — ancillary data rides the
         // first subsequently queued bytes (Linux association semantics); a
@@ -1096,6 +1141,21 @@ pub fn unix_send(
                             cred = pc;
                         }
                     }
+                }
+                // SO_PASSCRED parity: Linux stamps the sender's
+                // {pid,uid,gid} into every skb at send time (scm.c
+                // __scm_send snapshots the current task unconditionally);
+                // the RECEIVER's recvmsg emits the SCM_CREDENTIALS cmsg
+                // only when the receiving socket has SO_PASSCRED set.
+                // hilogd's stats-query socket rides on this contract: its
+                // RequestStatsQuery derefs the cmsg buffer pointer
+                // unconditionally after a successful recvmsg (compiled
+                // path at libhilog.so+0x17efc reads [rax+0x18] with rax
+                // = msg_control when controllen < 16), so a receive
+                // without the cmsg is a NULL-deref SIGSEGV that kills
+                // the hilogd.server thread — no hilog visibility.
+                if cred.is_none() {
+                    cred = Some(current_unix_cred());
                 }
                 q.push_back(UnixSeg {
                     data: data.to_vec(),

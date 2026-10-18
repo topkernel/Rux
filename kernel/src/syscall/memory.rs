@@ -230,6 +230,25 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     let map_flags = args[3] as u32;
     let mut fd = args[4] as i32;
     let offset = args[5] as u64;
+    // bring-up trace: every MAP_SHARED file mapping with the raw args —
+    // the DRM/dumb-buffer mapping failures need the kernel-side view of
+    // what userspace actually passed.
+    if fd >= 0 && map_flags & map::MAP_ANONYMOUS == 0 && map_flags & map::MAP_TYPE_MASK == map::MAP_SHARED {
+        static SHARED_FILE_MMAPS: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = SHARED_FILE_MMAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 32 {
+            crate::pr_warn!(
+                "mmap[{}] pid {} len={:#x} flags={:#x} fd={} off={:#x}",
+                n,
+                crate::process::current_pid(),
+                length,
+                map_flags,
+                fd,
+                offset
+            );
+        }
+    }
     // MAP_SHARED /dev/zero mapping: the ORIGINAL open file description is
     // captured here (the fd is masked out of the generic attach below) and
     // pinned onto the resulting VMA so mprotect() can enforce the
@@ -707,6 +726,14 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 let Some((phys, len)) =
                                     crate::drivers::drm::gem_mmap_resolve(&file, offset, actual_length)
                                 else {
+                                    crate::pr_warn!(
+                                        "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
+                                        fd,
+                                        offset,
+                                        actual_length,
+                                        crate::drivers::drm::is_prime_file(&file),
+                                        crate::drivers::drm::is_drm_file(&file)
+                                    );
                                     return mmap_error::EINVAL;
                                 };
                                 // ATOMIC RESERVE first (b91 corruption fix —

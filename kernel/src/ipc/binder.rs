@@ -3143,18 +3143,48 @@ fn binder_transaction(
         }
     } // -- WORLD released: user copies below --------------------------------
 
-    let target = target_proc.clone().unwrap();
+    // mud1 panic (Agent B report): a txn racing its target's death — the
+    // target resolves alive under the first WORLD section (buffer
+    // allocated), then the proc closes and its teardown frees the
+    // allocator before this re-lock. Reply DEAD instead of unwrapping a
+    // freed alloc; the cleanup mirrors the copy-fault paths below.
+    let Some(target) = target_proc.clone() else {
+        *err_cmd = BR_DEAD_REPLY;
+        return;
+    };
 
     // fd installs to undo if a later fixup step fails (Linux t->fd_count).
     let mut installed_fds: Vec<(u32, usize)> = Vec::new();
 
     // ---- copy payload from the sender into the target's region ----------
-    let (kvirt, user_base) = {
+    let pair = {
         let w = world_lock();
         // SAFETY: under WORLD.
         unsafe {
-            let a = pm(w.as_ref().unwrap(), &target).im().alloc.as_ref().unwrap();
-            (a.kvirt, a.user_base)
+            let world = w.as_ref().unwrap();
+            let alive = proc_alive(world, &target) && !pm(world, &target).im().is_dead;
+            if alive {
+                pm(world, &target)
+                    .im()
+                    .alloc
+                    .as_ref()
+                    .map(|a| (a.kvirt, a.user_base))
+            } else {
+                None
+            }
+        }
+    };
+    let (kvirt, user_base) = match pair {
+        Some(p) => p,
+        None => {
+            release_block(&target, block_off);
+            unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            *err_cmd = BR_DEAD_REPLY;
+            crate::pr_info!(
+                "binder: target pid {} died before payload copy — BR_DEAD_REPLY",
+                target.pid
+            );
+            return;
         }
     };
     // SAFETY: the block is exclusively owned by this in-flight txn.
