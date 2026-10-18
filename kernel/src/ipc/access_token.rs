@@ -152,7 +152,16 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
     use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user};
 
     let pid = unsafe { crate::process::current_pid() };
-    crate::pr_info!("atid: pid {} ioctl {:#x}", pid, request);
+    // dfx=syscalltrace: the per-ioctl trace. Ungated this is the
+    // highest-rate print of an OH boot — hdf_devmgr polls
+    // GET_PERMISSION/GET_TOKENID in a tight loop from early boot on
+    // (24k+ lines in boot b139), and hilogd.rd_kmsg then copies every
+    // line from /dev/kmsg into /data logs — each batch an ext4 write
+    // under the BIGLOCK, feeding the very contention the poll waits on
+    // (same failure shape as the binder GET_SENDER_INFO trace, b128).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+        crate::pr_info!("atid: pid {} ioctl {:#x}", pid, request);
+    }
 
     match request {
         ACCESS_TOKENID_GET_TOKENID | ACCESS_TOKENID_GET_FTOKENID => {
@@ -191,6 +200,8 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
                 return eperm();
             }
             set_token(pid, request == ACCESS_TOKENID_SET_FTOKENID, v);
+            // SET is a once-per-service event — keep it visible (it is
+            // the bring-up signal that a service cleared the token gate).
             crate::pr_info!("atid: pid {} set token {:#x} (f={})", pid, v, request == ACCESS_TOKENID_SET_FTOKENID);
             0
         }
@@ -285,7 +296,12 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             }
         }
         _ => {
-            crate::pr_info!("access_token_id: unhandled ioctl {:#x}", request);
+            // dfx=syscalltrace: same tight-loop economics as the entry
+            // trace (4k+ of these per boot — hilogd probing TIOCGETD on
+            // the device fd).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+                crate::pr_info!("access_token_id: unhandled ioctl {:#x}", request);
+            }
             enotty()
         }
     }
