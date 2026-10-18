@@ -2899,6 +2899,38 @@ impl Ext4BigLock {
         };
         (locked, owner, depth, queued, woken)
     }
+
+    /// R85 (b148 hunt): one SBI-console census line for the periodic
+    /// taskdump — the b148 wedge was invisible because nothing printed
+    /// the biglock's own state (zero STALL prints while every OH service
+    /// sat D-parked). Try-locks only (taskdump context may be the
+    /// watchdog); busy locks print as '?' fields, never block.
+    pub fn dfx_census_line(&'static self) {
+        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        let (locked, owner, depth, waiters, epoch) = match self.state.try_lock() {
+            Some(st) => (st.locked, st.owner, st.depth, st.waiters, st.handoff_epoch),
+            None => (false, u32::MAX, 0, u32::MAX, u64::MAX),
+        };
+        let (queued, woken) = match self.wait.vw_queue_census_try() {
+            Some(v) => v,
+            None => (usize::MAX, 0),
+        };
+        taskdump_raw_line(b"EXT4-BIGLOCK-CENSUS locked=");
+        taskdump_dec(locked as u64);
+        taskdump_raw_line(b" owner=");
+        taskdump_dec(owner as u64);
+        taskdump_raw_line(b" depth=");
+        taskdump_dec(depth as u64);
+        taskdump_raw_line(b" waiters=");
+        taskdump_dec(waiters as u64);
+        taskdump_raw_line(b" epoch=");
+        taskdump_dec(epoch);
+        taskdump_raw_line(b" queued=");
+        taskdump_dec(queued as u64);
+        taskdump_raw_line(b" wokenflag=");
+        taskdump_dec(woken as u64);
+        taskdump_raw_line(b"\n");
+    }
 }
 
 /// Guard: releases on drop (outermost only).

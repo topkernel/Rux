@@ -590,6 +590,10 @@ pub fn dump_all_tasks(reason: &str) {
     // the periodic path — the watchdog variant may run while the heap lock
     // is the wedged one, and the stats walk takes allocator locks.
     if reason == "periodic" {
+        // R85 (b148 crawl hunt): the ext4 biglock's own state beside the
+        // task snapshot — the b148 shape (whole OH cohort D-parked, lock
+        // apparently free, zero STALL prints) was invisible without it.
+        crate::fs::ext4::EXT4_BIG_LOCK.dfx_census_line();
         crate::dfx::memwatch::dump_mem();
     }
 }
