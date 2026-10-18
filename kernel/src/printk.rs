@@ -450,6 +450,11 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     // Drop lock before persistent log write to avoid deadlock
     drop(rb);
 
+    // Wake /dev/kmsg readers: a blocking kmsg read (Linux semantics)
+    // sleeps until the next record lands. The waitqueue wake is
+    // IRQ-context safe (irqsave discipline inside).
+    KMSG_READ_WQ.wake_up_all();
+
     // Write to persistent log file (if initialized)
     persistent_log::append(level, text, seq, pid, cpu_id, timestamp);
 }
@@ -972,84 +977,156 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
 
 // ==================== /dev/kmsg Character Device ====================
 
+/// Readers blocked in /dev/kmsg read waiting for the next record.
+/// Woken from write_to_ring_buffer after each record lands (printk
+/// context — IRQs may be off; WaitQueueHead takes irqsave locks).
+static KMSG_READ_WQ: crate::process::wait::WaitQueueHead =
+    crate::process::wait::WaitQueueHead::new();
+
 /// Read handler for /dev/kmsg.
 ///
 /// Each read() returns one record in /dev/kmsg format:
 /// `priority,sequence,timestamp_us,-;text\n`
 ///
 /// Uses the file position as the sequence number to track which record to read next.
+///
+/// Linux semantics for the no-records case: a BLOCKING read sleeps until
+/// the next record arrives; O_NONBLOCK returns EAGAIN. The old plain
+/// `return 0` (EOF) made every kmsg consumer spin: hilogd's kmsg parser
+/// thread (`hilogd_kmsg`) read-EOF-looped at 100% CPU on one of two
+/// vCPUs for the whole OH boot.
 fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
-    let mut rb = RING_BUFFER.lock_irqsave();
-    let pos = file.get_pos();
-    let next_seq = rb.next_seq;
+    let nonblock = file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
+    loop {
+        {
+            let mut rb = RING_BUFFER.lock_irqsave();
+            let pos = file.get_pos();
+            let next_seq = rb.next_seq;
 
-    // No new records
-    if pos >= next_seq {
-        return 0;
-    }
+            if pos >= next_seq {
+                drop(rb);
+                if nonblock {
+                    return -(crate::syscall::errno::EAGAIN) as isize;
+                }
+                // Block until a record lands. prepare→re-check→schedule
+                // (lost-wake discipline, same as signalfd_read).
+                let current = match crate::sched::current() {
+                    Some(t) => t,
+                    None => return -(crate::syscall::errno::EAGAIN) as isize,
+                };
+                KMSG_READ_WQ.prepare_to_wait(current, false, true);
+                {
+                    let rb2 = RING_BUFFER.lock_irqsave();
+                    let ready = file.get_pos() < rb2.next_seq;
+                    drop(rb2);
+                    if ready {
+                        KMSG_READ_WQ.finish_wait(current);
+                        // SAFETY: current is the running task; undo a
+                        // racing wake enqueue (NEW-C2 discipline).
+                        unsafe { crate::sched::dequeue_task(&*current); }
+                        continue;
+                    }
+                }
+                crate::arch::cpu::restore_irq(true);
+                crate::sched::schedule();
+                KMSG_READ_WQ.finish_wait(current);
+                continue;
+            }
 
-    // Find oldest available sequence
-    let oldest = if next_seq > RING_BUFFER_CAPACITY as u64 {
-        next_seq - RING_BUFFER_CAPACITY as u64
-    } else {
-        0
-    };
+            // Find oldest available sequence
+            let oldest = if next_seq > RING_BUFFER_CAPACITY as u64 {
+                next_seq - RING_BUFFER_CAPACITY as u64
+            } else {
+                0
+            };
 
-    // If requested position is too old, skip to oldest
-    let seq = if pos < oldest { oldest } else { pos };
+            // If requested position is too old, skip to oldest
+            let seq = if pos < oldest { oldest } else { pos };
 
-    let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
-    let record = &rb.records[idx];
+            let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+            let record = &rb.records[idx];
 
-    // Check if record was overwritten
-    if record.text_len == 0 || record.seq != seq {
-        // Record was overwritten, skip to next available
-        file.set_pos(next_seq);
-        return 0;
-    }
+            // Check if record was overwritten
+            if record.text_len == 0 || record.seq != seq {
+                // Record was overwritten, skip to next available
+                file.set_pos(next_seq);
+                drop(rb);
+                continue;
+            }
 
-    // Format: "level,seq,timestamp_us,-;text\n"
-    let timestamp_us = record.timestamp / 10; // cycles to microseconds (10MHz clock)
+            // Format: "level,seq,timestamp_us,-;text\n"
+            let timestamp_us = record.timestamp / 10; // cycles to microseconds (10MHz clock)
 
-    // Format into a local buffer
-    let mut line_buf = [0u8; 300];
-    let mut pos = 0;
+            // Format into a local buffer
+            let mut line_buf = [0u8; 300];
+            let mut lpos = 0;
 
-    // Write "level,seq,timestamp_us,-;"
-    let header = alloc::format!("{},{},{},-;", record.level, record.seq, timestamp_us);
-    let header_bytes = header.as_bytes();
-    let header_len = header_bytes.len().min(line_buf.len());
-    line_buf[..header_len].copy_from_slice(&header_bytes[..header_len]);
-    pos = header_len;
+            // Write "level,seq,timestamp_us,-;"
+            let header = alloc::format!("{},{},{},-;", record.level, record.seq, timestamp_us);
+            let header_bytes = header.as_bytes();
+            let header_len = header_bytes.len().min(line_buf.len());
+            line_buf[..header_len].copy_from_slice(&header_bytes[..header_len]);
+            lpos = header_len;
 
-    // Write message text
-    let text_bytes = &record.text[..record.text_len as usize];
-    let text_len = text_bytes.len().min(line_buf.len() - pos);
-    line_buf[pos..pos + text_len].copy_from_slice(&text_bytes[..text_len]);
-    pos += text_len;
+            // Write message text
+            let text_bytes = &record.text[..record.text_len as usize];
+            let text_len = text_bytes.len().min(line_buf.len() - lpos);
+            line_buf[lpos..lpos + text_len].copy_from_slice(&text_bytes[..text_len]);
+            lpos += text_len;
 
-    // Ensure newline
-    if pos > 0 && line_buf[pos - 1] != b'\n' {
-        if pos < line_buf.len() {
-            line_buf[pos] = b'\n';
-            pos += 1;
+            // Ensure newline
+            if lpos > 0 && line_buf[lpos - 1] != b'\n' {
+                if lpos < line_buf.len() {
+                    line_buf[lpos] = b'\n';
+                    lpos += 1;
+                }
+            }
+
+            let data = &line_buf[..lpos];
+            let copy_len = data.len().min(buf.len());
+            if copy_len == 0 {
+                drop(rb);
+                return 0;
+            }
+            buf[..copy_len].copy_from_slice(&data[..copy_len]);
+
+            // Advance position to next record
+            file.set_pos(seq + 1);
+
+            // Drop lock before returning
+            drop(rb);
+
+            return copy_len as isize;
         }
     }
+}
 
-    let data = &line_buf[..pos];
-    let copy_len = data.len().min(buf.len());
-    if copy_len == 0 {
-        return 0;
+/// Write handler for /dev/kmsg — userspace passthrough (OH's init and
+/// services log boot markers this way). The line lands in the printk
+/// ring (so /dev/kmsg readers see it) and on the console, exactly like
+/// dev_dbg-style writes on Linux.
+fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
+    crate::pr_info!("[kmsg] {}", core::str::from_utf8(buf).unwrap_or("<binary>"));
+    buf.len() as isize
+}
+
+/// Poll handler for /dev/kmsg: POLLIN iff a record newer than the fd's
+/// position exists; always writable. The old stub returned POLLERR —
+/// epoll treats that as permanently ready, so every kmsg waiter
+/// woke, read EOF, and re-armed in a tight loop.
+fn kmsg_file_poll(file: &crate::fs::file::File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let mut ready = 0u16;
+    if events & POLLIN != 0 {
+        let rb = RING_BUFFER.lock_irqsave();
+        if file.get_pos() < rb.next_seq {
+            ready |= POLLIN | POLLRDNORM;
+        }
     }
-    buf[..copy_len].copy_from_slice(&data[..copy_len]);
-
-    // Advance position to next record
-    file.set_pos(seq + 1);
-
-    // Drop lock before returning
-    drop(rb);
-
-    copy_len as isize
+    if events & POLLOUT != 0 {
+        ready |= POLLOUT | POLLWRNORM;
+    }
+    ready
 }
 
 /// lseek handler for /dev/kmsg.
@@ -1079,12 +1156,12 @@ fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> 
 }
 
 /// FileOps for /dev/kmsg
-static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+pub static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     read: Some(kmsg_file_read),
-    write: None,
+    write: Some(kmsg_file_write),
     lseek: Some(kmsg_file_lseek),
     close: None,
-    poll: None,
+    poll: Some(kmsg_file_poll),
     read_at: None,
 };
 
