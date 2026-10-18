@@ -957,6 +957,18 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
     }
 
+    // /dev/watchdog ioctls (WDIOC_KEEPALIVE/SETTIMEOUT/GETTIMEOUT/... —
+    // OH watchdog_service init_watchdog.c loop): dispatch on the File's
+    // ops identity (evdev/loop pattern). Non-firing softdog.
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) = crate::drivers::watchdog::watchdog_file_ioctl(&file, request, arg) {
+                return ret;
+            }
+        }
+    }
+
     // ashmem ioctls (ASHMEM_SET_NAME/SET_SIZE/PIN/UNPIN/GET_PIN_STATUS/...
     // on /dev/ashmem): dispatch on the File's ops identity (OH libc's
     // buffer management; port plan §6 item 2).
