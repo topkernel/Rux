@@ -256,6 +256,16 @@ static s64 fork_(void)
 
 void _start(void)
 {
+    /* crt0's job, skipped by -nostartfiles: without gp the linker's
+     * gp-relative relaxation addresses static data as gp+offset = garbage
+     * (console_flooder's buf faulted at 0xfffffffffffff813 = -2029+0). */
+    __asm__ volatile(
+        ".option push\n"
+        ".option norelax\n"
+        "la gp, __global_pointer$\n"
+        ".option pop\n"
+        ::: "memory");
+
     puts_("printk_flood: starting\n");
 
     int nchildren = 0;
