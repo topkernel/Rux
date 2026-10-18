@@ -2628,6 +2628,33 @@ impl TcpConnectionManager {
         let src_port = TcpPort::from_be(tcp_hdr.source);
         let dest_port = TcpPort::from_be(tcp_hdr.dest);
 
+        // b143: first 60 inbound segments — the hostfwd→hdcd path died
+        // silently (QEMU accepted host-side, the guest never answered)
+        // and nothing said whether the SYN even reached TCP. Rate-limited
+        // raw trace; delete once the inbound path is trusted.
+        {
+            static SEG_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = SEG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 60 {
+                crate::pr_info!(
+                    "tcp-in[{}]: {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} flags {:#x}",
+                    n,
+                    src_ip & 0xff,
+                    (src_ip >> 8) & 0xff,
+                    (src_ip >> 16) & 0xff,
+                    (src_ip >> 24) & 0xff,
+                    src_port,
+                    dest_ip & 0xff,
+                    (dest_ip >> 8) & 0xff,
+                    (dest_ip >> 16) & 0xff,
+                    (dest_ip >> 24) & 0xff,
+                    dest_port,
+                    tcp_hdr.flags
+                );
+            }
+        }
+
         let is_syn = tcp_hdr.syn() && !tcp_hdr.ack();
         let mut listen_parent: Option<i32> = None;
 
@@ -3415,6 +3442,19 @@ pub fn tcp_send_ready(fd: i32) -> bool {
 /// (Blocking-accept wait condition; mirrors tcp_accept's scan.)
 pub fn tcp_accept_pending(fd: i32) -> bool {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: the guard above is held.
+    unsafe { tcp_listen_has_pending_child_locked(fd) }
+}
+
+/// Caller holds TCP_TABLE_LOCK (socket poll inlines this under its own
+/// guard — the public helper above would re-lock and deadlock).
+pub fn tcp_listen_has_pending_child(fd: i32) -> bool {
+    // SAFETY: caller holds TCP_TABLE_LOCK.
+    unsafe { tcp_listen_has_pending_child_locked(fd) }
+}
+
+/// PRECONDITION: TCP_TABLE_LOCK held.
+unsafe fn tcp_listen_has_pending_child_locked(fd: i32) -> bool {
     // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
     unsafe {
         for i in 0..TCP_SOCKET_TABLE.count {
