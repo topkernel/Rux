@@ -3143,7 +3143,7 @@ fn tcp_find_port_conflict(port: TcpPort, self_fd: i32) -> Option<i32> {
 pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
     let _table_g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
-    unsafe {
+    let ret = unsafe {
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
             match socket.listen(backlog) {
                 Ok(()) => 0,
@@ -3152,7 +3152,21 @@ pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
         } else {
             -5 // EBADF
         }
+    };
+    // b143: one line per successful listen — hdcd's TCP bridge port
+    // comes from persist.hdc.port (or a random ephemeral when unset)
+    // and nothing else names it; same for any service the host wants
+    // to reach through a QEMU hostfwd.
+    if ret == 0 {
+        if let Some(socket) = unsafe { TCP_SOCKET_TABLE.get(fd as usize) } {
+            crate::pr_info!(
+                "tcp-listen: pid {} port {}",
+                crate::process::current_pid(),
+                socket.local_port
+            );
+        }
     }
+    ret
 }
 
 /// Next ephemeral port for auto-bind on connect (review NET-M6).
