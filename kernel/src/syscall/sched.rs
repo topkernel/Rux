@@ -987,7 +987,12 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     // the SA:10 / bootanimation / launcher chain all died on that
     // starvation.
     let online = {
+        // apic::cpu_count is x86_64-only; riscv64 reports via the SMP
+        // online mask the boot code programs.
+        #[cfg(feature = "x86_64")]
         let n = crate::drivers::intc::apic::cpu_count();
+        #[cfg(not(feature = "x86_64"))]
+        let n = crate::config::MAX_CPUS as usize;
         if n == 0 { 1 } else { n }
     };
     let online_mask: u32 = if online >= 32 { u32::MAX } else { (1u32 << online) - 1 };
